@@ -136,6 +136,25 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   4096 selections and P6's pp degrades from 66.7 while P7 holds
   ~80 t/s through 32K. Gate attainment is now **~0.48×**
   (pp ≥ 170.5); the KDA chunked scan is the remaining listed lever.
+- P9 dense Q8_0 WMMA tier (`dense_wmma` extended to a second quant
+  instantiation, `DenseWmmaSupports` ⊇ {Q5_K, Q8_0}): the chunk-256 pp
+  profile showed `GemvRowsQ8<16>` still at decode cost — ~66 µs per
+  call, 12.5 % of a timed chunk pass — because the WMMA tier only
+  covered Q5_K. Q8_0 stores 8×(fp16 scale + 32 signed bytes) per
+  256-K; tier stages one super-block per row at a 276-dword-trick odd
+  stride (kSuper 272, kStride 276) and decodes each 16-element f16
+  fragment from one scale and a contiguous signed-byte run. Offline
+  `gufo bench` A/B (same session, alternating, warm+2):
+  pp2048 90.32/90.54 → **99.18/99.25 (+9.7 %)**; pp16384 83.07 ± 1.27
+  → **90.02 ± 0.03 / 90.69 ± 0.54 (+8.4 %)**; tg1 flat (tier engages
+  only at the `tokens ≥ 16` prefill predicate). Numeric evidence:
+  `glm5_next.rocm_dense_wmma` extended to Q8_0 shapes (scale pinned
+  1.0, decode exact in binary16) NMSE ≤ **3.5e-08** ≤ 1e-4, replay
+  bit-identical; full `glm5_next` ctest 9/9 GPU-exclusive with
+  `rocm_forward` ALL PASS max |dlogit| = 0.0000 vs the retained golden and
+  the greedy 128-token continuation sha `752281d6…` unchanged at
+  pp2048+tg128 (`/tmp/opencode/glm5_{ab_q8t,ab_q8t16k*,fwd_q8,full_q8,sha_q8t}`;
+  the 2048-prefill run executes nine 256-token tier chunks per layer).
 
 ## Rejected / parked
 

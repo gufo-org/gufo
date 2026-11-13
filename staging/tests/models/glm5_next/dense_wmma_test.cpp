@@ -14,13 +14,13 @@
 #include "staging/models/glm5_next/kernels/rocm/gemv.hpp"
 #include "staging/tests/models/glm5_next/hip_test.hpp"
 
-// Quality contract for the WMMA dense tier over Q5_K: against the scalar
-// GemvRows reference (bit-verified against the CPU dequantizer by
+// Quality contract for the WMMA dense tier over Q5_K and Q8_0: against the
+// scalar GemvRows reference (bit-verified against the CPU dequantizer by
 // rocm_gemv_test) the wmma tier must stay inside a tight relative NMSE
 // budget (f16 fragments change the accumulation order, not the decoded
 // values), must reproduce itself bit-for-bit across launches, and may never
-// emit a non-finite output. The block scale and min are pinned to 1.0
-// (fp16 halves at bytes 0..3 of each block) so the decoded factors stay
+// emit a non-finite output. The block scale (and Q5_K min) are pinned to 1.0
+// (fp16 halves at the head of each block) so the decoded factors stay
 // inside binary16: with random d the scalar tier is still finite where the
 // wmma decode is not, and the comparison would measure f16 range, not
 // summation order.
@@ -30,6 +30,7 @@ namespace t = gufo::tests::glm5_next;
 namespace {
 
 constexpr std::size_t kQ5KBytes = 176U;
+constexpr std::size_t kQ8Bytes = 34U;
 
 bool Check(const char* what, double worst, double limit) {
   const bool ok = worst <= limit;
@@ -58,6 +59,24 @@ std::vector<std::uint8_t> MakeQ5K(std::uint32_t rows, std::uint32_t cols,
   return bytes;
 }
 
+/// rows * (cols / 32) random Q8_0 blocks with the fp16 scale pinned to 1.0;
+/// the signed magnitude bytes stay random and decode exactly in binary16.
+std::vector<std::uint8_t> MakeQ8(std::uint32_t rows, std::uint32_t cols,
+                                 std::uint32_t seed) {
+  const std::size_t row_bytes = cols / 32U * kQ8Bytes;
+  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(rows) * row_bytes);
+  std::uint32_t rng = seed;
+  for (std::size_t i = 0; i < bytes.size(); ++i) {
+    bytes[i] = static_cast<std::uint8_t>(t::NextRandom(&rng) & 0xFFU);
+  }
+  for (std::size_t b = 0; b < bytes.size() / kQ8Bytes; ++b) {
+    std::uint8_t* blk = bytes.data() + b * kQ8Bytes;
+    blk[0] = 0x00U;
+    blk[1] = 0x3CU;
+  }
+  return bytes;
+}
+
 double RelNmse(const std::vector<float>& ref, const std::vector<float>& got) {
   double num = 0.0;
   double den = 0.0;
@@ -81,10 +100,16 @@ bool BitsDiffer(const std::vector<float>& a, const std::vector<float>& b) {
   return diff != 0;
 }
 
-/// One shape: dense W[x] tier vs the scalar GemvRows reference.
-bool TestShape(std::uint32_t rows, std::uint32_t cols, std::uint32_t tokens) {
-  std::printf("rows %u cols %u tokens %u\n", rows, cols, tokens);
-  const std::vector<std::uint8_t> w = MakeQ5K(rows, cols, 0x13579BDFU);
+/// One shape and quant: dense W[x] tier vs the scalar GemvRows reference.
+bool TestShape(q::GemvType type, std::uint32_t rows, std::uint32_t cols,
+               std::uint32_t tokens) {
+  const bool q8 = type == q::GemvType::kQ8_0;
+  std::printf("%s rows %u cols %u tokens %u\n", q8 ? "Q8_0" : "Q5_K", rows,
+              cols, tokens);
+  const std::vector<std::uint8_t> w =
+      q8 ? MakeQ8(rows, cols, 0x13579BDFU) : MakeQ5K(rows, cols, 0x13579BDFU);
+  const std::size_t row_bytes = q8 ? cols / 32U * kQ8Bytes
+                                   : cols / 256U * kQ5KBytes;
   const auto x =
       t::MakeValues(static_cast<std::size_t>(tokens) * cols, 0xfeedfaceU, 8.0F);
   t::HipBuffer<std::uint8_t> d_w(w.size());
@@ -95,15 +120,14 @@ bool TestShape(std::uint32_t rows, std::uint32_t cols, std::uint32_t tokens) {
 
   const std::size_t out_size = static_cast<std::size_t>(tokens) * rows;
   t::HipBuffer<float> d_ref(out_size);
-  q::GemvRows(d_w.get(), q::GemvType::kQ5_K, tokens, rows, cols,
-              cols / 256U * kQ5KBytes, d_x.get(), cols, d_ref.get(), rows,
-              nullptr);
+  q::GemvRows(d_w.get(), type, tokens, rows, cols, row_bytes, d_x.get(), cols,
+              d_ref.get(), rows, nullptr);
   t::HipBuffer<float> d_got(out_size);
   t::HipBuffer<float> d_got2(out_size);
-  q::DenseWmma(d_w.get(), q::GemvType::kQ5_K, rows, cols, d_x.get(), cols,
-               d_got.get(), rows, tokens, nullptr);
-  q::DenseWmma(d_w.get(), q::GemvType::kQ5_K, rows, cols, d_x.get(), cols,
-               d_got2.get(), rows, tokens, nullptr);
+  q::DenseWmma(d_w.get(), type, rows, cols, d_x.get(), cols, d_got.get(), rows,
+               tokens, nullptr);
+  q::DenseWmma(d_w.get(), type, rows, cols, d_x.get(), cols, d_got2.get(), rows,
+               tokens, nullptr);
   const auto ref = t::Download(&d_ref, out_size);
   const auto got = t::Download(&d_got, out_size);
   const auto again = t::Download(&d_got2, out_size);
@@ -122,16 +146,22 @@ bool TestShape(std::uint32_t rows, std::uint32_t cols, std::uint32_t tokens) {
 
 int main() {
   bool ok = q::DenseWmmaSupports(q::GemvType::kQ5_K) &&
+            q::DenseWmmaSupports(q::GemvType::kQ8_0) &&
             !q::DenseWmmaSupports(q::GemvType::kIQ1_M);
-  std::printf("Q5_K support: %s\n", ok ? "OK" : "FAIL");
+  std::printf("Q5_K/Q8_0 support: %s\n", ok ? "OK" : "FAIL");
   try {
     hipDeviceProp_t props{};
     t::CheckHip(hipGetDeviceProperties(&props, 0), "device");
     std::printf("device %s\n", props.name);
-    ok &= TestShape(144U, 1024U, 32U);    // one token tile, 128+16 rows
-    ok &= TestShape(144U, 1024U, 40U);    // ragged token tail
-    ok &= TestShape(4096U, 1024U, 128U);  // wide prefill chunk
-    ok &= TestShape(300U, 2048U, 96U);    // 8-block rows, 3 token tiles
+    ok &= TestShape(q::GemvType::kQ5_K, 144U, 1024U, 32U);
+    ok &= TestShape(q::GemvType::kQ5_K, 144U, 1024U, 40U);
+    ok &= TestShape(q::GemvType::kQ5_K, 4096U, 1024U, 128U);
+    ok &= TestShape(q::GemvType::kQ5_K, 300U, 2048U, 96U);
+    ok &= TestShape(q::GemvType::kQ8_0, 144U, 1024U, 32U);
+    ok &= TestShape(q::GemvType::kQ8_0, 144U, 1024U, 40U);
+    ok &= TestShape(q::GemvType::kQ8_0, 4096U, 1024U, 128U);
+    ok &= TestShape(q::GemvType::kQ8_0, 300U, 2048U, 96U);
+    ok &= TestShape(q::GemvType::kQ8_0, 3584U, 512U, 256U);
   } catch (const std::exception& error) {
     std::fprintf(stderr, "exception: %s\n", error.what());
     return 1;
