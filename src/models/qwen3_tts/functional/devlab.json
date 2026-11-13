@@ -76,6 +76,14 @@
       "asset": "tts-design",
       "service": "tts",
       "variant": "design"
+    },
+    "qwen3-tts-custom-npu": {
+      "title": "Qwen3-TTS custom NPU",
+      "category": "tts",
+      "asset": "tts-custom",
+      "service": "tts",
+      "variant": "custom",
+      "npu": true
     }
   },
   "rules": [
@@ -90,7 +98,8 @@
         "tests/functional/tts_service.py"
       ],
       "owners": [
-        "tts"
+        "tts",
+        "qwen3-tts-custom-npu"
       ]
     }
   ]

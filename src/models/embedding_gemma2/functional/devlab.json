@@ -23,6 +23,13 @@
       "category": "embedding",
       "asset": "embedding",
       "service": "embedding"
+    },
+    "embedding-gemma2-npu": {
+      "title": "EmbeddingGemma 2 NPU",
+      "category": "embedding",
+      "asset": "embedding",
+      "service": "embedding",
+      "npu": true
     }
   },
   "rules": [
@@ -39,7 +46,8 @@
         "tests/functional/embedding*"
       ],
       "owners": [
-        "embedding"
+        "embedding",
+        "embedding-gemma2-npu"
       ]
     }
   ]
