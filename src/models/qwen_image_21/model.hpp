@@ -6,7 +6,9 @@
 #include <functional>
 #include <gufo/ext/image.hpp>
 #include <memory>
+#include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,8 +28,16 @@ std::vector<std::uint8_t> EncodePng(const Image& image);
 Image ResizeImage(const Image& image, int width, int height);
 /// Keep edit noise independent of the noise that generated its references.
 /// Supply the canonical resized RGBA references; generation retains its seed.
+/// Image to image additionally binds the start image (already resized to the
+/// output size), so its noise never replays the noise that generated it.
 std::uint64_t InitialNoiseSeed(std::uint64_t seed,
-                               std::span<const Image> images);
+                               std::span<const Image> images,
+                               const Image* init_image = nullptr);
+
+/// The request does not fit into free GPU memory (checked before the
+/// condition caches fill, and per step for large requests). The model stays
+/// usable; the host answers 503.
+using InsufficientMemory = ext::ImageResourceError;
 /// Development observer; tensors are FP32 views of the actual BF16 boundary.
 struct Observer {
   std::function<void(std::string_view, std::span<const float>, int, int)> write;
@@ -40,15 +50,30 @@ struct Observer {
 };
 
 void ValidateRequest(const Request& request);
+/// Guidance scale when a request names a negative prompt but no scale, as
+/// Diffusers' `true_cfg_scale` default.
+inline constexpr float kDefaultGuidanceScale = 4;
+/// True CFG (`negative + scale * (positive - negative)`, Diffusers
+/// `true_cfg_scale`) runs above 1. An omitted scale is 1 without a negative
+/// prompt and kDefaultGuidanceScale with one.
+float ResolveGuidance(const Request& request);
 /// Model prompt for the caller's prompt and background intent. Transparent
 /// requests receive the RGBA framing Qwen-Image-2.1 needs for alpha output;
 /// auto and opaque requests keep the prompt unchanged.
 std::string ConditionPrompt(std::string_view prompt,
                             ext::ImageBackground background);
-/// Qwen-Image-2.1 accepts reference images and transparent backgrounds.
+/// Qwen-Image-2.1 accepts reference images, transparent backgrounds, true
+/// classifier-free guidance and image to image.
 inline constexpr ext::ImageCapabilities kCapabilities{
-    .edits = true, .transparent_background = true};
+    .edits = true,
+    .transparent_background = true,
+    .guidance = true,
+    .image_to_image = true};
 std::vector<float> FlowSigmas(int steps, int image_tokens);
+/// Image to image as Diffusers' img2img `strength`: the tail of a full
+/// schedule that runs its last `steps * strength` steps (at least one).
+/// Strength 1 returns the schedule unchanged.
+std::vector<float> StrengthTail(std::vector<float> sigmas, double strength);
 
 /// Base flow matching or the qualified checkpoint-supplied Turbo schedule.
 struct SamplingConfig {
@@ -57,6 +82,10 @@ struct SamplingConfig {
   int DefaultSteps() const { return IsTurbo() ? 8 : 40; }
   int ResolveSteps(int requested) const;
   std::vector<float> Sigmas(int requested, int image_tokens) const;
+  /// Sigmas() truncated by StrengthTail(), for both the flow and the fixed
+  /// Turbo schedule.
+  std::vector<float> DenoiseSigmas(int requested, double strength,
+                                   int image_tokens) const;
 };
 
 class Model {
@@ -78,6 +107,9 @@ public:
   /// Adapters merged into the transformer weights now (does not wait for
   /// Generate); empty while a switch is in progress or after one failed.
   std::vector<Lora> ActiveLoras() const;
+  /// True after a failed request left the HIP context unusable (a sticky
+  /// launch failure or a failed library call); only a new process recovers.
+  bool DeviceLost() const;
 
 private:
   struct Impl;

@@ -510,7 +510,14 @@ Use `gufo serve image --model SNAPSHOT_DIR` for
 editing accepts multipart PNG/JPEG references. Both return base64 PNG data
 and work through llama-swap's image routes. LoRA adapters registered with
 `--lora NAME=PATH` are selected per request with the `loras` field; see
-[LoRA adapters](../models/qwen-image-2.1.md#lora-adapters).
+[LoRA adapters](../models/qwen-image-2.1.md#lora-adapters). Flat
+`negative_prompt`, `guidance_scale` and `strength` fields (and a base64 `image`
+start image on generations) select classifier-free guidance and image to image
+on both routes. Below full strength, the first image of an edit is the start
+image and further images stay references; a provider that does not declare the `guidance` or
+`image_to_image` capability refuses them with 400, and a request that does not
+fit into free device memory returns 503. See
+[Settings](../models/qwen-image-2.1.md#settings).
 
 Qwen3-TTS serving is enabled with a dedicated model process. All three 12Hz
 1.7B variants are supported; the variant is detected from the checkpoint's

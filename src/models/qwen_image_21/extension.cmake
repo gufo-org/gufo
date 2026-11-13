@@ -43,6 +43,7 @@ if(TARGET gufo_qwen_image_21_hip)
       hip/convolution.hip
       hip/pipeline.cpp
       hip/blas.cpp
+      hip/memory.cpp
   )
   target_compile_definitions(gufo_qwen_image_21_hip PUBLIC ENGINE_ENABLE_HIP=1)
   target_compile_options(gufo_qwen_image_21_hip PRIVATE

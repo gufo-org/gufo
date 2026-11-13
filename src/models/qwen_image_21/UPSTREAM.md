@@ -53,6 +53,31 @@ compare matched block inputs as well as the complete trajectory. Do not change
 weights, remove reference images, reduce precision or skip diffusion steps to
 pass a speed gate.
 
+Guidance and image to image (flat request fields `negative_prompt`,
+`guidance_scale`, `strength` and, for JSON generations, `image`):
+`guidance_scale` above 1 is the pipeline's `true_cfg_scale`: each step also
+runs the negative prompt (same reference images) and combines
+`negative + guidance_scale * (positive - negative)` with BF16 rounding after
+every tensor operation. As in the pipeline, a negative prompt without a scale
+uses 4. Unlike the pipeline, which ignores the scale without a negative
+prompt, an absent negative prompt encodes like an empty prompt, as a ComfyUI
+KSampler with an empty negative conditioning would. `strength` below 1
+follows Diffusers' Qwen-Image `img2img` `get_timesteps` (the pinned revision
+has no Qwen-Image-2.1 image-to-image pipeline): of the `steps` schedule it
+skips `int(steps - steps * strength)` steps and runs the rest, starting from
+`sigma * noise + (1 - sigma) * latent` with the posterior-mean VAE latent of the
+start image resized to the output size (Diffusers samples the posterior). The
+fixed Turbo schedule is truncated the same way. Reference images keep conditioning the run next to a start
+image (on `/v1/images/edits` the first image below full strength). Without a negative prompt or scale and at strength 1 the
+unguided full-schedule path is unchanged. The negative prompt reuses the positive prompt's
+condition K/V for its leading reference images: block-causal rows never see
+later tokens, so rows before the first differing prompt token are identical;
+only its own text rows get a cache. Requests above 6144 condition rows (more
+than one 1 MP reference) fill the condition caches before the first step in
+4096-row chunks; condition rows never attend to target rows and use the
+timestep-zero modulation, so this is the joint first step split by rows (not
+checked for bit identity with the joint step).
+
 Gufo's RNG differs from PyTorch's. Compare shared initial noise, not numeric
 seeds alone. Edit RNG seeds also bind the ordered, resized RGBA references:
 reusing a generation seed must not replay the noise that generated the source.

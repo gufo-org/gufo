@@ -118,6 +118,8 @@ public:
   const ext::ImageLoraInfo& lora_info(std::string_view name) const;
   std::vector<ext::ImageLora> ActiveLoras() const;
   Result Generate(const Request& request, const CancellationCheck& cancelled);
+  /// The model's GPU context failed; the server must restart.
+  bool device_lost() const { return model_ && model_->DeviceLost(); }
 
 private:
   std::string model_id_;

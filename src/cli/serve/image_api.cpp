@@ -9,6 +9,7 @@
 #include <cstring>
 #include <ctime>
 #include <map>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
@@ -36,6 +37,12 @@ json::Value ParseJson(std::string_view text) {
   }
 }
 
+template<typename T>
+std::string Shortest(T value) {
+  char text[32];
+  return {text, std::to_chars(text, text + sizeof(text), value).ptr};
+}
+
 HttpResponse Error(int status, const std::string& message,
                    const std::string& code) {
   auto body = json::Value::object();
@@ -48,6 +55,7 @@ HttpResponse Error(int status, const std::string& message,
   return {.status = status,
           .reason = status == 400   ? "Bad Request"
                     : status == 404 ? "Not Found"
+                    : status == 503 ? "Service Unavailable"
                                     : "Internal Server Error",
           .body = body.dump(),
           .headers = {{"Content-Type", "application/json"}}};
@@ -170,6 +178,17 @@ void ValidateRequest(const ext::ImageRequest& request) {
   if (pixels > core::kMaxImagePixels)
     throw std::invalid_argument(
         "reference images exceed 32 megapixels combined");
+  if (request.negative_prompt.size() > (64U << 10U))
+    throw std::invalid_argument("negative_prompt exceeds 64 KiB");
+  if (request.guidance_scale &&
+      !(*request.guidance_scale >= 0 && *request.guidance_scale <= 100))
+    throw std::invalid_argument("guidance_scale must be from 0 to 100");
+  if (!(request.strength >= 0.01 && request.strength <= 1))
+    throw std::invalid_argument("strength must be from 0.01 to 1");
+  if (request.strength < 1 && !request.init_image)
+    throw std::invalid_argument("strength below 1 requires an input image");
+  if (request.init_image)
+    CheckImage(*request.init_image);
   if (request.loras.size() > 16)
     throw std::invalid_argument("image requests apply at most 16 LoRAs");
   for (std::size_t i = 0; i < request.loras.size(); ++i) {
@@ -224,7 +243,8 @@ Parsed Multipart(const HttpRequest& request) {
           if (data.size() > (64U << 10U))
             throw std::invalid_argument("multipart field too large");
           if (name == "n" || name == "seed" || name == "steps" ||
-              name == "stream" || name == "loras") {
+              name == "stream" || name == "loras" || name == "guidance_scale" ||
+              name == "strength") {
             parsed.fields[name] = ParseJson(data);
           } else {
             parsed.fields[name] = std::string(data);
@@ -251,6 +271,33 @@ Parsed Multipart(const HttpRequest& request) {
   if (parsed.images.empty())
     throw std::invalid_argument("image edit requires an image");
   return parsed;
+}
+
+std::optional<double> Real(const json::Value& fields, const char* name,
+                           double low, double high) {
+  const auto* value = fields.find(name);
+  if (!value)
+    return std::nullopt;
+  if (!value->is_number() || !std::isfinite(value->as_double()) ||
+      value->as_double() < low || value->as_double() > high)
+    throw std::invalid_argument(std::string(name) + " must be a number from " +
+                                Shortest(low) + " to " + Shortest(high));
+  return value->as_double();
+}
+
+/// The `image` member of a JSON generation: base64 or a data URL. URLs are
+/// never fetched.
+ext::ImageBuffer InlineImage(const json::Value& value) {
+  if (value.is_string()) {
+    const auto& text = value.str();
+    if (text.starts_with("data:"))
+      return DecodeImage(core::ReadImageUrl(text));
+    std::vector<std::uint8_t> bytes;
+    if (core::DecodeBase64(text, {.max_decoded = core::kMaxEncodedImageBytes},
+                           bytes) == core::Base64Status::kOk)
+      return DecodeImage(bytes);
+  }
+  throw std::invalid_argument("image must be base64 or a data URL");
 }
 
 std::uint64_t Number(const json::Value& fields, const char* name,
@@ -451,6 +498,15 @@ void ImageService::Validate(const Request& request) const {
   if (!request.images.empty() && !capabilities().edits)
     throw std::invalid_argument("model " + model_id_ +
                                 " does not support image edits");
+  if ((!request.negative_prompt.empty() ||
+       request.guidance_scale.value_or(1) > 1) &&
+      !capabilities().guidance)
+    throw std::invalid_argument(
+        "model " + model_id_ +
+        " does not support negative_prompt or guidance_scale");
+  if (request.strength < 1 && !capabilities().image_to_image)
+    throw std::invalid_argument("model " + model_id_ +
+                                " does not support image to image (strength)");
   if (request.background == ext::ImageBackground::kTransparent &&
       !capabilities().transparent_background)
     throw std::invalid_argument(
@@ -548,9 +604,31 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
     // for the requested background belongs to the provider.
     generation.prompt = String(fields, "prompt", "");
     generation.images = std::move(parsed.images);
+    // Flat extensions, as other OpenAI-compatible image servers name them;
+    // multipart edits send them as plain form fields (SDK `extra_body`).
+    generation.negative_prompt = String(fields, "negative_prompt", "");
+    if (const auto scale = Real(fields, "guidance_scale", 0, 100))
+      generation.guidance_scale = static_cast<float>(*scale);
+    generation.strength = Real(fields, "strength", 0.01, 1).value_or(1);
+    if (const auto* image = fields.find("image"); image && !edit)
+      generation.init_image = InlineImage(*image);
+    if (edit && generation.strength < 1) {
+      // Below full strength, the first uploaded image is the start image;
+      // any further images stay references. Multipart() refuses an edit
+      // without images.
+      generation.init_image = std::move(generation.images.front());
+      generation.images.erase(generation.images.begin());
+    }
     const auto size = String(fields, "size", "auto");
     if (size == "auto") {
-      if (!generation.images.empty()) {
+      if (generation.init_image) {
+        // Keep the start image's canvas, rounded to the 32-pixel grid.
+        const auto grid = [](int v) {
+          return std::max(32, static_cast<int>(std::nearbyint(v / 32.0)) * 32);
+        };
+        generation.width = grid(generation.init_image->width);
+        generation.height = grid(generation.init_image->height);
+      } else if (!generation.images.empty()) {
         const auto& last = generation.images.back();
         const double ratio = static_cast<double>(last.width) / last.height;
         const double w = std::sqrt(1024.0 * 1024 * ratio);
@@ -607,6 +685,15 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
               << 'x' << generation.height
               << " references=" << generation.images.size()
               << " steps=" << result.metrics.steps;
+      if (generation.init_image)
+        details << " init_image=" << generation.init_image->width << 'x'
+                << generation.init_image->height
+                << " strength=" << generation.strength;
+      if (!generation.negative_prompt.empty() || generation.guidance_scale)
+        details << " guidance_scale="
+                << (generation.guidance_scale
+                        ? Shortest(*generation.guidance_scale)
+                        : std::string("default"));
       if (!service.loras().files.empty())
         details << " loras=" << LoraList(generation.loras)
                 << " lora_ms=" << result.metrics.lora_ms;
@@ -626,6 +713,8 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
             .headers = {{"Content-Type", "application/json"}}};
   } catch (const std::invalid_argument& error) {
     return Error(400, error.what(), "invalid_request");
+  } catch (const ext::ImageResourceError& error) {
+    return Error(503, error.what(), "insufficient_gpu_memory");
   } catch (const std::exception& error) {
     return Error(500, error.what(), "image_generation_failed");
   }

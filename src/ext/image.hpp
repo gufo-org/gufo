@@ -67,6 +67,20 @@ struct ImageRequest {
   ImageBackground background{ImageBackground::kAuto};
   // Applied in order; scale 0 entries are ignored.
   std::vector<ImageLora> loras{};
+  /// Classifier-free guidance: text the result should move away from, and
+  /// the scale in [0, 100]. nullopt selects the runner's default for the
+  /// given `negative_prompt`; a scale of at most 1 keeps a single unguided
+  /// pass. Requires `ImageCapabilities::guidance` when `negative_prompt` is
+  /// non-empty or the scale is above 1.
+  std::string negative_prompt{};
+  std::optional<float> guidance_scale{};
+  /// Image to image: the start image and the share of the `steps` schedule
+  /// that denoises it, in [0.01, 1], as Diffusers' img2img `strength` (the
+  /// last `steps * strength` steps run). 1 starts from pure noise (the start
+  /// image only sets the canvas of a size "auto" request). Below 1 requires
+  /// `init_image` and `ImageCapabilities::image_to_image`.
+  std::optional<ImageBuffer> init_image{};
+  double strength{1};
 };
 
 /// Request features a runner accepts beyond text-to-image generation. The
@@ -77,6 +91,19 @@ struct ImageCapabilities {
   bool edits{false};
   /// Accepts `ImageBackground::kTransparent`.
   bool transparent_background{false};
+  /// Accepts `negative_prompt` and `guidance_scale` (classifier-free
+  /// guidance).
+  bool guidance{false};
+  /// Accepts `init_image` with `strength` below 1.
+  bool image_to_image{false};
+};
+
+/// Thrown by `ImageRunner::Generate` when the request does not fit into the
+/// device memory free now; it may fit later or with fewer inputs. The host
+/// answers HTTP 503 and keeps serving.
+class ImageResourceError : public std::runtime_error {
+public:
+  using std::runtime_error::runtime_error;
 };
 
 struct ImageResult {
@@ -122,6 +149,9 @@ public:
   [[nodiscard]] virtual std::vector<ImageLora> ActiveLoras() const {
     return {};
   }
+  /// True after a failed request left the device context unusable; the host
+  /// then reports the device as lost so the process can be restarted.
+  [[nodiscard]] virtual bool DeviceLost() const { return false; }
 };
 
 /// Command whose manifest options reach an image provider. A declaration for
