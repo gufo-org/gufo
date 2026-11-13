@@ -127,7 +127,14 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   archived-row cells; 128K-ctx protocol, control = `gufo_p6` rebuilt
   from 457151058): control pp 66.90 ± 0.09 / 66.51 ± 0.05 vs candidate
   **79.97 ± 0.03 / 79.79 ± 0.08** (**+19.7 %**), tg32 flat
-  (12.34/12.46 vs 12.39/12.49). Gate attainment is now **~0.48×**
+  (12.34/12.46 vs 12.39/12.49). Escalation (same harness family, pp
+  only, `/tmp/opencode/glm5_ab8k_p7.sh` + `glm5_ab32k_p7.sh`): at
+  prompt_n 8184 control 58.77 ± 0.17 vs candidate 79.85 ± 0.17
+  (**+35.9 %**); at prompt_n 32172 control 55.20 vs candidate 76.85
+  (**+39.2 %**, one session per binary, warm + 1 timed, p6 first).
+  The win widens monotonically with depth: `hspan=32` engages past
+  4096 selections and P6's pp degrades from 66.7 while P7 holds
+  ~80 t/s through 32K. Gate attainment is now **~0.48×**
   (pp ≥ 170.5); the KDA chunked scan is the remaining listed lever.
 
 ## Rejected / parked
