@@ -18,8 +18,7 @@ using D = npu::Qwen3Decoder;
 
 namespace {
 
-constexpr int kH = D::kHidden, kI = D::kFfn, kHead = 3072, kQ = 2048,
-              kKv = 1024;
+constexpr int kQ = 2048, kKv = 1024;
 
 std::uint16_t Bf16(float f) {
   std::uint32_t u = std::bit_cast<std::uint32_t>(f);
@@ -99,33 +98,17 @@ double RelErr(const std::vector<float>& a, const std::vector<double>& b) {
   return std::sqrt(num / den);
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-  if (argc < 2) {
-    std::printf("usage: npu_qwen3dec_device_test <qwen3dec dir> [tokens]\n");
-    return 2;
-  }
-  if (npu::ProbeDevices().empty()) {
-    std::printf("SKIP: no NPU\n");
-    return 77;
-  }
-  npu::Device device;
-  try {
-    device = npu::Device::Open();
-  } catch (const npu::Error& e) {
-    std::printf("SKIP: %s\n", e.what());
-    return 77;
-  }
-  const int timed = argc > 2 ? std::atoi(argv[2]) : 20;
-  auto dec = D::Open(device, argv[1]);
+// Random weights for a stack of `layers` x hidden H (FFN I) with `heads`
+// heads of `head_rows`; checks `steps` tokens after P cached positions against
+// a double reference (with the same Q8_0 weights), then times `timed` tokens.
+int CheckStack(D& dec, int H, int I, int layers, int head_rows, int heads,
+               int P, int timed, std::mt19937& rng) {
   dec.SetRopeTheta(1e6);
-  std::mt19937 rng(5);
   struct L {
     Mat q, k, v, o, gate, up, down;
     std::vector<float> n1, n2, qn, kn;
   };
-  std::vector<L> layers;
+  std::vector<L> ws;
   std::uniform_real_distribution<float> norm(0.8f, 1.2f);
   auto vec = [&](int n) {
     std::vector<float> v(static_cast<std::size_t>(n));
@@ -133,32 +116,38 @@ int main(int argc, char** argv) {
       x = norm(rng);
     return v;
   };
-  for (int l = 0; l < D::kLayers; ++l) {
-    L w{Random(rng, kQ, kH, 0.02f),
-        Random(rng, kKv, kH, 0.02f),
-        Random(rng, kKv, kH, 0.02f),
-        Random(rng, kH, kQ, 0.02f),
-        Random(rng, kI, kH, 0.02f),
-        Random(rng, kI, kH, 0.02f),
-        Random(rng, kH, kI, 0.01f),
-        vec(kH),
-        vec(kH),
+  for (int l = 0; l < layers; ++l) {
+    L w{Random(rng, kQ, H, 0.02f),
+        Random(rng, kKv, H, 0.02f),
+        Random(rng, kKv, H, 0.02f),
+        Random(rng, H, kQ, 0.02f),
+        Random(rng, I, H, 0.02f),
+        Random(rng, I, H, 0.02f),
+        Random(rng, H, I, 0.01f),
+        vec(H),
+        vec(H),
         vec(128),
         vec(128)};
     dec.SetLayer(l, {w.q.bf.data(), w.k.bf.data(), w.v.bf.data(), w.o.bf.data(),
                      w.gate.bf.data(), w.up.bf.data(), w.down.bf.data(),
                      w.n1.data(), w.n2.data(), w.qn.data(), w.kn.data()});
-    layers.push_back(std::move(w));
+    ws.push_back(std::move(w));
   }
-  const Mat head = Random(rng, kHead, kH, 0.02f);
-  const std::vector<float> fnorm = vec(kH);
-  dec.SetHead(head.bf.data(), kHead, fnorm.data());
+  std::vector<Mat> hs;
+  const std::vector<float> fnorm = vec(H);
+  for (int i = 0; i < heads; ++i) {
+    hs.push_back(Random(rng, head_rows, H, 0.02f));
+    dec.SetHead(i, hs.back().bf.data(), head_rows,
+                i == 0 ? fnorm.data() : nullptr);
+  }
 
   // A cache of P earlier positions (random, as prefill would have stored).
-  const int P = argc > 3 ? std::atoi(argv[3]) : 37;
   std::normal_distribution<float> nd(0.0f, 1.0f);
-  std::vector<std::vector<std::vector<double>>> K(D::kLayers), V(D::kLayers);
-  for (int l = 0; l < D::kLayers; ++l)
+  std::vector<std::vector<std::vector<double>>> K(
+      static_cast<std::size_t>(layers));
+  std::vector<std::vector<std::vector<double>>> V(
+      static_cast<std::size_t>(layers));
+  for (int l = 0; l < layers; ++l)
     for (int p = 0; p < P; ++p) {
       std::vector<float> k(kKv), v(kKv);
       for (float& x : k)
@@ -172,18 +161,19 @@ int main(int argc, char** argv) {
 
   int failures = 0;
   for (int step = 0; step < 3; ++step) {
-    const int pos = P + step;
-    std::vector<float> row(kH);
+    const int pos = P + step, hi = step % heads;
+    std::vector<float> row(static_cast<std::size_t>(H));
     for (float& x : row)
       x = nd(rng);
+    dec.SelectHead(hi);
     dec.Start(row.data(), pos);
     dec.Wait();
     // Reference.
     std::vector<double> h(row.begin(), row.end());
-    for (int l = 0; l < D::kLayers; ++l) {
-      const L& w = layers[std::size_t(l)];
+    for (int l = 0; l < layers; ++l) {
+      const L& w = ws[std::size_t(l)];
       std::vector<double> x = h;
-      Rms(x, 0, kH, w.n1.data());
+      Rms(x, 0, H, w.n1.data());
       std::vector<double> q = MatVec(w.q, x), k = MatVec(w.k, x),
                           v = MatVec(w.v, x);
       for (int hh = 0; hh < 16; ++hh) {
@@ -225,54 +215,95 @@ int main(int argc, char** argv) {
                 V[std::size_t(l)][std::size_t(t)][std::size_t(kh) * 128 + i];
       }
       const std::vector<double> o = MatVec(w.o, att);
-      for (int i = 0; i < kH; ++i)
+      for (int i = 0; i < H; ++i)
         h[std::size_t(i)] += o[std::size_t(i)];
       x = h;
-      Rms(x, 0, kH, w.n2.data());
+      Rms(x, 0, H, w.n2.data());
       const std::vector<double> g = MatVec(w.gate, x), u = MatVec(w.up, x);
-      std::vector<double> a(static_cast<std::size_t>(kI));
-      for (int i = 0; i < kI; ++i)
+      std::vector<double> a(static_cast<std::size_t>(I));
+      for (int i = 0; i < I; ++i)
         a[std::size_t(i)] = g[std::size_t(i)] /
                             (1 + std::exp(-g[std::size_t(i)])) *
                             u[std::size_t(i)];
       const std::vector<double> dn = MatVec(w.down, a);
-      for (int i = 0; i < kH; ++i)
+      for (int i = 0; i < H; ++i)
         h[std::size_t(i)] += dn[std::size_t(i)];
     }
-    std::vector<float> hidden(kH);
+    std::vector<float> hidden(static_cast<std::size_t>(H));
     dec.Hidden(hidden.data());
     const double he = RelErr(hidden, h);
     std::vector<double> x = h;
-    Rms(x, 0, kH, fnorm.data());
-    const std::vector<double> ref = MatVec(head, x);
+    Rms(x, 0, H, fnorm.data());
+    const std::vector<double> ref = MatVec(hs[std::size_t(hi)], x);
     const auto lg = dec.logits();
     const std::vector<float> got(lg.begin(), lg.end());
     const double le = RelErr(got, ref);
     int arg_n = 0, arg_r = 0;
-    for (int i = 1; i < kHead; ++i) {
+    for (int i = 1; i < head_rows; ++i) {
       if (got[std::size_t(i)] > got[std::size_t(arg_n)])
         arg_n = i;
       if (ref[std::size_t(i)] > ref[std::size_t(arg_r)])
         arg_r = i;
     }
     std::printf(
-        "pos %d: hidden rel err %.2e, logits rel err %.2e, argmax %d/%d\n", pos,
-        he, le, arg_n, arg_r);
+        "%d x %d, head %d, pos %d: hidden rel err %.2e, logits rel err %.2e, "
+        "argmax %d/%d\n",
+        layers, H, hi, pos, he, le, arg_n, arg_r);
     if (!(he < 5e-2 && le < 5e-2))
       ++failures;
   }
   // Timing at growing positions.
-  std::vector<float> row(kH, 0.01f);
+  std::vector<float> row(static_cast<std::size_t>(H), 0.01f);
+  const int capacity = dec.capacity();
   const auto t0 = std::chrono::steady_clock::now();
-  for (int i = 0; i < timed; ++i) {
+  int done = 0;
+  for (int i = 0; i < timed && P + 3 + i < capacity; ++i, ++done) {
     dec.Start(row.data(), P + 3 + i);
     dec.Wait();
   }
   const double s =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
           .count() /
-      timed;
-  std::printf("decode: %.2f ms per token (head %d rows)\n", s * 1e3, kHead);
+      std::max(done, 1);
+  std::printf("%d x %d decode: %.2f ms per token (head %d rows)\n", layers, H,
+              s * 1e3, head_rows);
+  return failures;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  if (argc < 2) {
+    std::printf(
+        "usage: npu_qwen3dec_device_test <qwen3dec dir> [tokens] [cached]\n");
+    return 2;
+  }
+  if (npu::ProbeDevices().empty()) {
+    std::printf("SKIP: no NPU\n");
+    return 77;
+  }
+  npu::Device device;
+  try {
+    device = npu::Device::Open();
+  } catch (const npu::Error& e) {
+    std::printf("SKIP: %s\n", e.what());
+    return 77;
+  }
+  const int timed = argc > 2 ? std::atoi(argv[2]) : 20;
+  const int P = argc > 3 ? std::atoi(argv[3]) : 37;
+  std::mt19937 rng(5);
+  auto talker = D::Open(device, argv[1]);
+  int failures = CheckStack(talker, D::kHidden, D::kFfn, D::kLayers, 3072, 1, P,
+                            timed, rng);
+  // The code predictor on the talker's program: 5 x 1024, 15 heads.
+  auto predictor = D::OpenPredictor(talker, argv[1]);
+  failures += CheckStack(predictor, 1024, 3072, 5, 2048, 15, 2, 10, rng);
+  // The talker again after the predictor ran on the same context.
+  {
+    std::vector<float> row(D::kHidden, 0.01f);
+    talker.Start(row.data(), P + 3 + timed);
+    talker.Wait();
+  }
   std::printf("%s\n", failures ? "FAIL" : "PASS");
   return failures ? 1 : 0;
 }

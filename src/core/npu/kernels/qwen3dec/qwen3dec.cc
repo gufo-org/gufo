@@ -8,6 +8,12 @@
 //
 // A weight record is REC bytes: four rows of 2048 Q8_0 codes in Dot4's tile
 // order, then their bf16 block scales (down records: units of 4-row blocks).
+//
+// The dimensions are dispatch-time values (rtp[3..5]: phases, hidden, FFN), so
+// one program serves the 28 x 2048 stack (FFN 6144) of the Qwen3-ASR decoder
+// and the Qwen3-TTS talker, and the 5 x 1024 stack (FFN 3072) of the TTS code
+// predictor. With hidden 1024 a record holds two 4-row groups (8 rows) of 1024
+// codes each, so the records stay full.
 #include <stdint.h>
 
 #include <aie_api/aie.hpp>
@@ -19,9 +25,13 @@
 #endif
 
 namespace {
-constexpr int kH = 2048, kI = 6144, kQ = 2048, kKV = 1024;
-constexpr int kRec = 4 * kH + 4 * (kH / 32) * 2;  // 8704
-constexpr int kIn = 12 * kH;                      // phase input bytes
+constexpr int kHMax = 2048, kQ = 2048, kKV = 1024;
+constexpr int kInMax = 12 * kHMax;  // the x buffer: phase inputs up to here
+constexpr int kRec = 4 * kHMax + 4 * (kHMax / 32) * 2;  // 8704
+// The token's dimensions (set at its first phase): hidden, FFN, layers, 4-row
+// groups per record, the phase input bytes and the core's 8-row hidden chunks.
+int kH = 2048, kI = 6144, kLayers = 28, kGroups = 1, kIn = 12 * 2048,
+    kChunks = 8;
 constexpr float kEps = 1e-6f;
 
 float SumSquares(const float* v, int n) {
@@ -59,21 +69,24 @@ __attribute__((noinline)) void Quantize(const float* v, int n, int8_t* q,
       amax[j] = aie::reduce_max(aie::max(aie::abs(aie::load_v<16>(x)),
                                          aie::abs(aie::load_v<16>(x + 16))));
     }
-    aie::vector<float, 16> d = aie::mul(aie::load_v<16>(amax),
-                                        aie::broadcast<float, 16>(1.0f / 127.0f))
-                                   .to_vector<float>();
+    aie::vector<float, 16> d =
+        aie::mul(aie::load_v<16>(amax),
+                 aie::broadcast<float, 16>(1.0f / 127.0f))
+            .to_vector<float>();
     aie::accum<accfloat, 16> da;
     da.from_vector(d);
-    aie::vector<bfloat16, 16> db = da.to_vector<bfloat16>();  // the stored scale
+    aie::vector<bfloat16, 16> db =
+        da.to_vector<bfloat16>();  // the stored scale
     aie::store_v(qs + g / 32, db);
     aie::accum<accfloat, 16> dr;
     dr.from_vector(db);
     aie::vector<float, 16> df = dr.to_vector<float>();
     aie::mask<16> zero = aie::le(df, aie::zeros<float, 16>());
     alignas(64) float inv[16];
-    aie::store_v(inv, aie::select(aie::inv(aie::select(
-                                      df, aie::broadcast<float, 16>(1.0f), zero)),
-                                  aie::zeros<float, 16>(), zero));
+    aie::store_v(inv,
+                 aie::select(aie::inv(aie::select(
+                                 df, aie::broadcast<float, 16>(1.0f), zero)),
+                             aie::zeros<float, 16>(), zero));
     for (int j = 0; j < 16; ++j) {
       const float* x = v + g + j * 32;
       aie::vector<float, 16> iv = aie::broadcast<float, 16>(inv[j]);
@@ -101,13 +114,13 @@ void QuantizeBf16(const bfloat16* in, int n, int8_t* q, float* scratch) {
 // tiles t [k][n], column n < 4 holding codes 32 b + 16 t + k of row n and
 // column n >= 4 codes 32 b + 16 t + 8 + k of row n - 4; then bf16 scales
 // [block][row]. xs: x's block scales (32-byte aligned).
-alignas(64) int32_t dot4_sums[kH / 32 * 4 + 16];
+alignas(64) int32_t dot4_sums[kHMax / 32 * 4 + 16];
 inline const bfloat16* Scales(const int8_t* q8, int k) {
   return reinterpret_cast<const bfloat16*>(q8 + k);
 }
 __attribute__((noinline)) void Dot4(const int8_t* x, const bfloat16* xs,
-                                    const int8_t* w, int nb, float* out) {
-  const bfloat16* ws = reinterpret_cast<const bfloat16*>(w + 128 * nb);
+                                    const int8_t* w, const bfloat16* ws, int nb,
+                                    float* out) {
   aie::vector<int32, 16> four = aie::zeros<int32, 16>();
   for (int b = 0; b < nb; b += 2) {
     const aie::vector<int8, 64> a = aie::load_v<64>(x + 32 * b);
@@ -116,7 +129,8 @@ __attribute__((noinline)) void Dot4(const int8_t* x, const bfloat16* xs,
       aie::mmul<8, 8, 8, int8, int8> m0, m1;
       m0.mul(a, aie::load_v<64>(w + 128 * (b + o)));
       m1.mul(a, aie::load_v<64>(w + 128 * (b + o) + 64));
-      const aie::vector<int32, 16> c0 = m0.to_vector<int32>().extract<16>(2 * o);
+      const aie::vector<int32, 16> c0 =
+          m0.to_vector<int32>().extract<16>(2 * o);
       const aie::vector<int32, 16> c1 =
           m1.to_vector<int32>().extract<16>(2 * o + 1);
       four = aie::shuffle_down_fill(
@@ -158,10 +172,11 @@ int acc_n, slice_t, copy_r;
 extern "C" {
 
 // The next record of a phase input: bytes [r * REC, (r + 1) * REC) of x,
-// clipped.
+// clipped to the x buffer (not to the phase's size: attention inputs are
+// three records whatever the hidden size).
 void dec_copy(const int8_t* rec, int8_t* x) {
   const int start = copy_r++ * kRec,
-            n = (kIn - start) < kRec ? kIn - start : kRec;
+            n = (kInMax - start) < kRec ? kInMax - start : kRec;
   for (int i = 0; i < n; i += 64)
     aie::store_v(x + start + i, aie::load_v<64>(rec + i));
 }
@@ -173,14 +188,16 @@ void dec_pre(float* x, int8_t* q8, float* scratch) {
   const float* o = x + kH;
   const bfloat16* wpre = reinterpret_cast<const bfloat16*>(x + 2 * kH) + kH;
   for (int i = 0; i < kH; i += 16)
-    aie::store_v(h + i, aie::add(aie::load_v<16>(h + i), aie::load_v<16>(o + i)));
-  const float sh = RmsScale(SumSquares(h, kH), 1.0f / kH);
+    aie::store_v(h + i,
+                 aie::add(aie::load_v<16>(h + i), aie::load_v<16>(o + i)));
+  const float sh =
+      RmsScale(SumSquares(h, kH), kH == 1024 ? 1.0f / 1024 : 1.0f / 2048);
   bfloat16* qs = reinterpret_cast<bfloat16*>(q8 + kH);
   for (int c = 0; c < kH; c += 512) {
     for (int i = 0; i < 512; i += 16) {
-      aie::vector<float, 16> t = aie::mul(aie::load_v<16>(h + c + i),
-                                          aie::broadcast<float, 16>(sh))
-                                     .to_vector<float>();
+      aie::vector<float, 16> t =
+          aie::mul(aie::load_v<16>(h + c + i), aie::broadcast<float, 16>(sh))
+              .to_vector<float>();
       aie::store_v(scratch + i,
                    aie::mul(t, Bf16ToFloat(wpre + c + i)).to_vector<float>());
     }
@@ -192,8 +209,14 @@ void dec_pre(float* x, int8_t* q8, float* scratch) {
 // The next eight of this core's hidden rows of h.
 void dec_slice(const float* x, float* out, int32_t c, int32_t j) {
   const int t = slice_t++;
-  aie::store_v(out, aie::load_v<8>(x + ((c * 8 + t) * 4 + j) * 8));
+  aie::store_v(out, aie::load_v<8>(x + ((c * kChunks + t) * 4 + j) * 8));
 }
+
+// The records of a group of four rows of H codes: codes, then scales.
+inline const bfloat16* GroupScales(const int8_t* g) {
+  return reinterpret_cast<const bfloat16*>(g + 4 * kH);
+}
+constexpr int kGroupBytes1024 = 4 * 1024 + 4 * 32 * 2;  // 4352
 
 // x: bf16 vector of n values.
 void dec_quant(const bfloat16* x, int8_t* q8, float* scratch, int32_t n) {
@@ -203,15 +226,18 @@ void dec_quant(const bfloat16* x, int8_t* q8, float* scratch, int32_t n) {
 
 // ---- FFN
 
-// Gate rows of two channels, then their up rows.
+// Gate rows of two channels, then their up rows (per 4-row group).
 void dec_gate_up(const int8_t* q8, const int8_t* w) {
-  alignas(16) float r4[4];  // gate a, gate b, up a, up b
-  Dot4(q8, Scales(q8, kH), w, kH / 32, r4);
-  acc_a[acc_n] = r4[0];
-  acc_a[acc_n + 1] = r4[1];
-  acc_b[acc_n] = r4[2];
-  acc_b[acc_n + 1] = r4[3];
-  acc_n += 2;
+  for (int g = 0; g < kGroups; ++g) {
+    alignas(16) float r4[4];  // gate a, gate b, up a, up b
+    const int8_t* p = w + g * kGroupBytes1024;
+    Dot4(q8, Scales(q8, kH), p, GroupScales(p), kH >> 5, r4);
+    acc_a[acc_n] = r4[0];
+    acc_a[acc_n + 1] = r4[1];
+    acc_b[acc_n] = r4[2];
+    acc_b[acc_n + 1] = r4[3];
+    acc_n += 2;
+  }
 }
 
 // SiLU(gate) * up of the last sixteen channels, as bf16:
@@ -233,19 +259,32 @@ void dec_gate_flush(bfloat16* out) {
   acc_n = 0;
 }
 
-// Down projection: a core's 64 rows are 4 sets of 16; a set is four 4-row
-// groups of 192 blocks of I, packed as 768 units of 136 bytes (one block of
-// tile4 codes, then the scales of each 64-unit record) in 12 records. Each
-// record holds 64 blocks of one group.
-int down_u, down_flush;
+// Down projection: a core's rows are sets of 16; a set is four 4-row groups
+// of I / 32 blocks, packed as 4 I / 32 units of 136 bytes (one block of tile4
+// codes; a 64-unit record ends with its units' scales). A record may span two
+// groups.
+// down_g, down_kb: the group and block of the next unit (no division on the
+// cores: they have no divider).
+int down_g, down_kb, down_flush;
 alignas(64) float down_acc[16];
 void dec_row(const int8_t* q8, const int8_t* w) {
-  alignas(16) float r4[4];
-  const int u = down_u, g = u / 192, kb = u - 192 * g;
-  Dot4(q8 + 32 * kb, Scales(q8, kI) + kb, w, 64, r4);
-  for (int r = 0; r < 4; ++r)
-    down_acc[4 * g + r] = (kb ? down_acc[4 * g + r] : 0.0f) + r4[r];
-  down_u = u + 64 == 768 ? 0 : u + 64;
+  const int blocks = kI >> 5;
+  const bfloat16* ws = reinterpret_cast<const bfloat16*>(w + 128 * 64);
+  for (int done = 0; done < 64;) {
+    alignas(16) float r4[4];
+    const int g = down_g, kb = down_kb;
+    const int n = 64 - done < blocks - kb ? 64 - done : blocks - kb;
+    Dot4(q8 + 32 * kb, Scales(q8, kI) + kb, w + 128 * done, ws + 4 * done, n,
+         r4);
+    for (int r = 0; r < 4; ++r)
+      down_acc[4 * g + r] = (kb ? down_acc[4 * g + r] : 0.0f) + r4[r];
+    done += n;
+    down_kb = kb + n;
+    if (down_kb == blocks) {
+      down_kb = 0;
+      down_g = g == 3 ? 0 : g + 1;
+    }
+  }
 }
 // Rows 0..7 of a set after its first 6 records, rows 8..15 after the rest.
 void dec_down_flush(float* out) {
@@ -253,9 +292,19 @@ void dec_down_flush(float* out) {
   down_flush ^= 1;
 }
 
-// Four rows of H codes (q/k/v, output projection, head).
+// Four rows of H codes per group (q/k/v, output projection, head).
 void dec_rows4(const int8_t* q8, const int8_t* w) {
-  Dot4(q8, Scales(q8, kH), w, kH / 32, acc_a + acc_n);
+  for (int g = 0; g < kGroups; ++g) {
+    const int8_t* p = w + g * kGroupBytes1024;
+    Dot4(q8, Scales(q8, kH), p, GroupScales(p), kH >> 5, acc_a + acc_n);
+    acc_n += 4;
+  }
+}
+
+// Four rows of the 2048 attention outputs (output projection: one group).
+void dec_rows4_q(const int8_t* q8, const int8_t* w) {
+  Dot4(q8, Scales(q8, kQ), w, reinterpret_cast<const bfloat16*>(w + 4 * kQ),
+       kQ >> 5, acc_a + acc_n);
   acc_n += 4;
 }
 
@@ -293,7 +342,8 @@ void NormRope(float* x, const bfloat16* w, const float* cs, const float* sn) {
   for (int i = 0; i < kD / 2; i += 16) {
     aie::vector<float, 16> a = aie::load_v<16>(x + i),
                            b = aie::load_v<16>(x + i + kD / 2);
-    aie::vector<float, 16> c = aie::load_v<16>(cs + i), n = aie::load_v<16>(sn + i);
+    aie::vector<float, 16> c = aie::load_v<16>(cs + i),
+                           n = aie::load_v<16>(sn + i);
     aie::accum<accfloat, 16> lo = aie::mul(a, c), hi = aie::mul(b, c);
     lo = aie::msc(lo, b, n);
     hi = aie::mac(hi, a, n);
@@ -304,16 +354,17 @@ void NormRope(float* x, const bfloat16* w, const float* cs, const float* sn) {
 
 aie::vector<float, 16> Exp16(aie::vector<float, 16> x) {
   aie::accum<accfloat, 16> e;
-  e.from_vector(aie::exp2<bfloat16>(
-      aie::mul(x, aie::broadcast<float, 16>(1.4426950409f)).to_vector<float>()));
+  e.from_vector(
+      aie::exp2<bfloat16>(aie::mul(x, aie::broadcast<float, 16>(1.4426950409f))
+                              .to_vector<float>()));
   return e.to_vector<float>();
 }
 
 // Folds sixteen scores (att_s, first `valid` real) and their values.
 void Fold(const bfloat16* const* v, int valid) {
-  aie::vector<float, 16> s =
-      aie::mul(aie::load_v<16>(att_s), aie::broadcast<float, 16>(0.08838834764f))
-          .to_vector<float>();
+  aie::vector<float, 16> s = aie::mul(aie::load_v<16>(att_s),
+                                      aie::broadcast<float, 16>(0.08838834764f))
+                                 .to_vector<float>();
   alignas(64) static const int32_t lane[16] = {0, 1, 2,  3,  4,  5,  6,  7,
                                                8, 9, 10, 11, 12, 13, 14, 15};
   aie::mask<16> real =
@@ -323,7 +374,8 @@ void Fold(const bfloat16* const* v, int valid) {
       aie::max(att_m, aie::broadcast<float, 16>(aie::reduce_max(s)));
   const aie::vector<float, 16> f = Exp16(aie::sub(att_m, m));
   alignas(64) float p[16];
-  aie::store_v(p, aie::select(aie::zeros<float, 16>(), Exp16(aie::sub(s, m)), real));
+  aie::store_v(
+      p, aie::select(aie::zeros<float, 16>(), Exp16(aie::sub(s, m)), real));
   alignas(64) bfloat16 p_hi[16], p_lo[16];
   {
     aie::accum<accfloat, 16> t;
@@ -335,8 +387,9 @@ void Fold(const bfloat16* const* v, int valid) {
     aie::store_v(p_hi, hi);
     aie::store_v(p_lo, t.to_vector<bfloat16>());
   }
-  att_l = aie::add(aie::mul(att_l, f).to_vector<float>(),
-                   aie::broadcast<float, 16>(aie::reduce_add(aie::load_v<16>(p))));
+  att_l =
+      aie::add(aie::mul(att_l, f).to_vector<float>(),
+               aie::broadcast<float, 16>(aie::reduce_add(aie::load_v<16>(p))));
   att_m = m;
   for (int d = 0; d < kD; d += 16) {
     aie::accum<accfloat, 16> a = aie::mul(aie::load_v<16>(att_acc + d), f);
@@ -467,11 +520,20 @@ void dec_kv_store(bfloat16* out) {
 // zeros), as the column's drains expect.
 
 namespace {
-enum Kind : int32_t { kEmbed, kAttn1, kAttn2, kAttn3, kFfn1, kFfn2, kHead, kIdle };
-constexpr int kLayers = 28;
+enum Kind : int32_t {
+  kEmbed,
+  kAttn1,
+  kAttn2,
+  kAttn3,
+  kFfn1,
+  kFfn2,
+  kHead,
+  kIdle
+};
 
 int ph, ph_layer, ph_step, ph_kind, ph_cached, core_c, core_j;
-int rec_i;  // records of the phase so far: a stream's records alternate between its cores
+int rec_i;  // records of the phase so far: a stream's records alternate between
+            // its cores
 alignas(64) float zeros16[16];
 
 struct Counts {
@@ -480,18 +542,28 @@ struct Counts {
 
 // Streams broadcast to both of their cores: weight phases see both cores'
 // records (inner counts doubled, every other one skipped).
+// Counts for hidden H (in = phase-input records, rr = records per 8 output
+// rows, doubled for the stream's two cores). H 2048: 128 q/k/v rows in 32
+// records, 64 output rows in 16, 192 FFN channels in 96, 64 down rows in 48.
 Counts Plan(int kind, int j, const int32_t* rtp) {
   const bool attn_role = j < 2;
+  const int in = kIn > 2 * kRec ? 3 : 2, rr = kGroups == 1 ? 4 : 2;
   switch (kind) {
-    case kEmbed: return {1, 8, 0, 0, 0, kind, 0};
-    case kAttn1: return {3, 8, 16, 4, 0, kind, 0};   // 128 q/k/v rows: 32 records x 4
+    case kEmbed:
+      return {1, kChunks, 0, 0, 0, kind, 0};
+    case kAttn1:
+      return {in, kChunks, 16, rr, 0, kind, 0};
     case kAttn2:
       return attn_role ? Counts{3, 0, 1, rtp[1], 24, kind, rtp[0]}
                        : Counts{0, 0, 1, 0, 24, kIdle, 0};
-    case kAttn3: return {1, 0, 8, 4, 0, kind, 0};    // 64 rows: 16 records x 4
-    case kFfn1: return {3, 8, 12, 16, 0, kind, 0};   // 192 channels: 96 records x 2
-    case kFfn2: return {2, 0, 8, 12, 0, kind, 0};    // 64 rows: 48 records
-    case kHead: return {3, 0, rtp[2], 4, 0, kind, 0};  // 8 rows per chunk
+    case kAttn3:  // rows of the 2048 attention outputs: one group per record
+      return {1, 0, kChunks, 4, 0, kind, 0};
+    case kFfn1:
+      return {in, kChunks, kI >> 9, kGroups == 1 ? 16 : 8, 0, kind, 0};
+    case kFfn2:
+      return {2 * kI > kRec ? 2 : 1, 0, kChunks, kI >> 9, 0, kind, 0};
+    case kHead:
+      return {in, 0, rtp[2], rr, 0, kind, 0};  // 8 rows per chunk
   }
   return {0, 0, 0, 0, 0, kIdle, 0};
 }
@@ -518,11 +590,18 @@ extern "C" {
 // Resets at the end of a token.
 void ROLE(next)(int32_t* counts, const int32_t* rtp, int32_t c, int32_t j) {
   if (ph == 0) {
+    // rtp[3..5]: the token's phases, hidden and FFN sizes.
+    kLayers = rtp[6];
+    kH = rtp[4];
+    kI = rtp[5];
+    kGroups = kH == 1024 ? 2 : 1;
+    kIn = 12 * kH;
+    kChunks = kH >> 8;
     ph_layer = -1;
     ph_step = 0;
     core_c = c;
     core_j = j;
-    down_u = down_flush = 0;
+    down_g = down_kb = down_flush = 0;
   }
   const Counts k = Plan(KindAt(ph_layer, ph_step), j, rtp);
   ph_kind = k.kind;
@@ -549,15 +628,24 @@ void ROLE(begin)(int8_t* x, int8_t* q8, float* scratch) {
     case kEmbed:  // x holds the input row (f32)
       slice_t = 0;
       break;
-    case kAttn1: case kFfn1: case kHead:
+    case kAttn1:
+    case kFfn1:
+    case kHead:
       dec_pre(xf, q8, scratch);
       break;
-    case kAttn3: dec_quant(reinterpret_cast<const bfloat16*>(x), q8, scratch, kQ); break;
-    case kFfn2: dec_quant(reinterpret_cast<const bfloat16*>(x), q8, scratch, kI); break;
+    case kAttn3:
+      dec_quant(reinterpret_cast<const bfloat16*>(x), q8, scratch, kQ);
+      break;
+    case kFfn2:
+      dec_quant(reinterpret_cast<const bfloat16*>(x), q8, scratch, kI);
+      break;
 #ifdef DECODE_ATTN_ROLE
-    case kAttn2: dec_attn_begin(xf, core_c, core_j, ph_cached); break;
+    case kAttn2:
+      dec_attn_begin(xf, core_c, core_j, ph_cached);
+      break;
 #endif
-    default: break;
+    default:
+      break;
   }
   copy_r = 0;
 }
@@ -572,20 +660,39 @@ void ROLE(rec)(const int8_t* q8, const int8_t* w) {
     return;  // the other core's record
   switch (ph_kind) {
 #ifdef DECODE_ATTN_ROLE
-    case kAttn2: dec_attn_rec(w); break;
+    case kAttn2:
+      dec_attn_rec(w);
+      break;
 #endif
-    case kAttn1: case kAttn3: case kHead: dec_rows4(q8, w); break;
-    case kFfn1: dec_gate_up(q8, w); break;
-    case kFfn2: dec_row(q8, w); break;
-    default: break;
+    case kAttn1:
+    case kHead:
+      dec_rows4(q8, w);
+      break;
+    case kAttn3:
+      dec_rows4_q(q8, w);
+      break;
+    case kFfn1:
+      dec_gate_up(q8, w);
+      break;
+    case kFfn2:
+      dec_row(q8, w);
+      break;
+    default:
+      break;
   }
 }
 
 void ROLE(flush)(int8_t* out, int32_t* /*cnt*/) {
   switch (ph_kind) {
-    case kFfn1: dec_gate_flush(reinterpret_cast<bfloat16*>(out)); break;
-    case kFfn2: dec_down_flush(reinterpret_cast<float*>(out)); break;
-    case kAttn1: case kAttn3: case kHead:
+    case kFfn1:
+      dec_gate_flush(reinterpret_cast<bfloat16*>(out));
+      break;
+    case kFfn2:
+      dec_down_flush(reinterpret_cast<float*>(out));
+      break;
+    case kAttn1:
+    case kAttn3:
+    case kHead:
       dec_rows_flush(reinterpret_cast<float*>(out));
       break;
     default:

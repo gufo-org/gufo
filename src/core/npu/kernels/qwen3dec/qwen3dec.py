@@ -9,8 +9,16 @@ the state buffer S. `pos` (the position), the KV stream's four record counts
 and the head's chunk count (rows / 256) are dispatch-time values; layout.py
 lays out S and W, and writes qwen3dec_layout.txt for the host.
 
-Usage: qwen3dec.py <out dir>: writes qwen3dec.xclbin, qwen3dec_dispatch.so
-and qwen3dec_layout.txt (gufo::npu::Qwen3Decoder, src/core/npu/qwen3_decoder.hpp).
+The same program also runs the 5 x 1024 stack of Qwen3-TTS's code predictor
+(FFN 3072, 15 heads of 2048 rows, the head chosen by a dispatch-time offset):
+the cores read the token's phases and dimensions from their runtime
+parameters, so only the runtime sequence differs. Its sequence is the second
+dispatch library, qwen3dec_p_dispatch.so, run on qwen3dec.xclbin's hardware
+context (qwen3dec_p.xclbin is the identical program, kept for checks).
+
+Usage: qwen3dec.py <out dir>: writes qwen3dec{,_p}.xclbin,
+qwen3dec{,_p}_dispatch.so and qwen3dec{,_p}_layout.txt
+(gufo::npu::Qwen3Decoder, src/core/npu/qwen3_decoder.hpp).
 """
 import os
 import shutil
@@ -30,23 +38,21 @@ import layout as L  # noqa: E402
 COLS, ROWS, REC, OUT = L.COLS, L.ROWS, L.REC, 32
 
 
-@iron.jit
-def qwen3dec(S: InOut, W: In, *, pos: DispatchTime[np.int32], recs_a: DispatchTime[np.int32],
-             recs_b: DispatchTime[np.int32], recs_c: DispatchTime[np.int32], recs_d: DispatchTime[np.int32],
-             head_chunks: DispatchTime[np.int32]):
-    lay = L.Layout()
-    in_ty = np.ndarray[(L.BLOCK,), np.dtype[np.int8]]
+def design(model, S, W, scalars):
+    lay = L.Layout(model)
+    in_ty = np.ndarray[(12 * 2048,), np.dtype[np.int8]]  # the largest phase input (hidden 2048)
     rec_ty = np.ndarray[(REC,), np.dtype[np.int8]]
     out_ty = np.ndarray[(OUT,), np.dtype[np.int8]]
     out4_ty = np.ndarray[(ROWS * OUT,), np.dtype[np.int8]]
     q8_ty = np.ndarray[(8192,), np.dtype[np.int8]]
     scratch_ty = np.ndarray[(512,), np.dtype[np.float32]]
     cnt_ty = np.ndarray[(8,), np.dtype[np.int32]]
-    rtp_ty = np.ndarray[(4,), np.dtype[np.int32]]
+    rtp_ty = np.ndarray[(8,), np.dtype[np.int32]]
     src = os.path.join(HERE, "qwen3dec.cc")
     flags = ["-Os"]
     kernels = {}
-    for role, extra in (("ffn", []), ("attn", ["-DDECODE_ATTN_ROLE"])):
+    # The attention role's code is close to the 16 KB program memory: -Oz.
+    for role, extra in (("ffn", []), ("attn", ["-DDECODE_ATTN_ROLE", "-Oz"])):
         obj = f"qwen3dec_{role}.o"
         k = {"next": ExternalFunction(f"{role}_next", source_file=src, arg_types=[cnt_ty, rtp_ty, np.int32, np.int32],
                                       object_file_name=obj, compile_flags=flags + extra)}
@@ -80,7 +86,7 @@ def qwen3dec(S: InOut, W: In, *, pos: DispatchTime[np.int32], recs_a: DispatchTi
              post_out):
         barrier.wait_for_value(1)
         barrier.release_with_value(1)
-        for _ in range_(L.PHASES):
+        for _ in range_(rtp[3]):
             nxt(cnt, rtp, c, j)
             for _ in range_(cnt[0]):
                 w = w_in.acquire(1)
@@ -118,15 +124,24 @@ def qwen3dec(S: InOut, W: In, *, pos: DispatchTime[np.int32], recs_a: DispatchTi
     s_ty = np.ndarray[(lay.s_bytes,), np.dtype[np.int8]]
     w_ty = np.ndarray[(lay.w_bytes,), np.dtype[np.int8]]
 
-    def sequence(S, W, pos, recs_a, recs_b, recs_c, recs_d, head_chunks, wh, yh):
+    def sequence(S, W, *args):
         # A DMA task repeats at most 64 times, so the KV stream is four tasks of
         # recs_a + ... + recs_d records (each at least 1).
-        d = dict(pos=pos, recs=[recs_a, recs_b, recs_c, recs_d], head_chunks=head_chunks)
+        *values, wh, yh = args
+        v = dict(zip(scalars, values))
+        recs = [v["recs_a"], v["recs_b"], v["recs_c"], v["recs_d"]]
+        d = dict(pos=v["pos"], recs=recs, head_chunks=v["head_chunks"])
+        if "head_base" in v:
+            d["head_base"] = v["head_base"]
         for c in range(COLS):
             for j in range(ROWS):
-                rtps[c][j][0] = pos
-                rtps[c][j][1] = recs_a + recs_b + recs_c + recs_d
-                rtps[c][j][2] = head_chunks
+                rtps[c][j][0] = v["pos"]
+                rtps[c][j][1] = recs[0] + recs[1] + recs[2] + recs[3]
+                rtps[c][j][2] = v["head_chunks"]
+                rtps[c][j][3] = lay.PHASES
+                rtps[c][j][4] = lay.H
+                rtps[c][j][5] = lay.I
+                rtps[c][j][6] = lay.LAYERS
                 barriers[c][j].set(1)
         for phase in lay.phases(d):
             # One task group per phase when every shim tile holds at most 8 tasks: the FIFO
@@ -149,18 +164,35 @@ def qwen3dec(S: InOut, W: In, *, pos: DispatchTime[np.int32], recs_a: DispatchTi
                     yh[c].drain(S, tp, wait=True, group=tg)
             tg.finish()
 
-    rt = Runtime(sequence, [s_ty, w_ty, pos, recs_a, recs_b, recs_c, recs_d, head_chunks, [f.prod() for f in w_fifos],
+    rt = Runtime(sequence, [s_ty, w_ty, *[scalars[k] for k in scalars], [f.prod() for f in w_fifos],
                             [f.cons() for f in y_fifos]])
     return Program(from_name("npu2", n_cols=None), rt, workers=workers).resolve_program()
+
+
+@iron.jit
+def qwen3dec(S: InOut, W: In, *, pos: DispatchTime[np.int32], recs_a: DispatchTime[np.int32],
+             recs_b: DispatchTime[np.int32], recs_c: DispatchTime[np.int32], recs_d: DispatchTime[np.int32],
+             head_chunks: DispatchTime[np.int32]):
+    return design("qwen3dec", S, W, dict(pos=pos, recs_a=recs_a, recs_b=recs_b, recs_c=recs_c, recs_d=recs_d,
+                                          head_chunks=head_chunks))
+
+
+@iron.jit
+def qwen3dec_p(S: InOut, W: In, *, pos: DispatchTime[np.int32], recs_a: DispatchTime[np.int32],
+               recs_b: DispatchTime[np.int32], recs_c: DispatchTime[np.int32], recs_d: DispatchTime[np.int32],
+               head_chunks: DispatchTime[np.int32], head_base: DispatchTime[np.int32]):
+    return design("qwen3dec_p", S, W, dict(pos=pos, recs_a=recs_a, recs_b=recs_b, recs_c=recs_c, recs_d=recs_d,
+                                            head_chunks=head_chunks, head_base=head_base))
 
 
 if __name__ == "__main__":
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
     iron.set_current_device(from_name("npu2", n_cols=None))
-    p = qwen3dec.specialize()
-    p.compile(xclbin_path=os.path.join(out, "qwen3dec.xclbin"))
-    shutil.copyfile(p.get_dispatch_lib_path(), os.path.join(out, "qwen3dec_dispatch.so"))
-    with open(os.path.join(out, "qwen3dec_layout.txt"), "w") as f:
-        for k, v in L.Layout().items().items():
-            f.write(f"{k} {v}\n")
+    for name, fn in (("qwen3dec", qwen3dec), ("qwen3dec_p", qwen3dec_p)):
+        p = fn.specialize()
+        p.compile(xclbin_path=os.path.join(out, name + ".xclbin"))
+        shutil.copyfile(p.get_dispatch_lib_path(), os.path.join(out, name + "_dispatch.so"))
+        with open(os.path.join(out, name + "_layout.txt"), "w") as f:
+            for k, v in L.Layout(name).items().items():
+                f.write(f"{k} {v}\n")

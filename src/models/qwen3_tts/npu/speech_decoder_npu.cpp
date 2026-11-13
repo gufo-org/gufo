@@ -1,6 +1,9 @@
 #include "src/models/qwen3_tts/npu/speech_decoder_npu.hpp"
 
 #include <algorithm>
+#if defined(__AVX2__) && defined(__FMA__)
+#include <immintrin.h>
+#endif
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -16,6 +19,7 @@
 #include "gufo/ext/experimental/npu.hpp"
 #include "src/models/qwen3_tts/loader.hpp"
 #include "src/models/qwen3_tts/npu/cpu_conv.hpp"
+#include "src/models/qwen3_tts/npu/npu_conv.hpp"
 #include "src/models/qwen3_tts/tensor.hpp"
 
 namespace gufo::models::qwen3_tts::npu {
@@ -41,6 +45,28 @@ struct Linear {
   std::vector<float> bias;
   std::size_t in{}, out{};
 };
+
+#if defined(__AVX2__) && defined(__FMA__)
+// sin of 8 lanes: reduction by pi (Cody-Waite) and odd/even minimax
+// polynomials on [-pi/2, pi/2] (absolute error ~1e-7 for |x| < 1e5).
+inline __m256 Sin8(__m256 x) {
+  const __m256 k =
+      _mm256_round_ps(_mm256_mul_ps(x, _mm256_set1_ps(0.31830988618379067f)),
+                      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  __m256 r = _mm256_fnmadd_ps(k, _mm256_set1_ps(3.140625f), x);
+  r = _mm256_fnmadd_ps(k, _mm256_set1_ps(9.67502593994140625e-4f), r);
+  r = _mm256_fnmadd_ps(k, _mm256_set1_ps(1.50995799e-7f), r);
+  const __m256 r2 = _mm256_mul_ps(r, r);
+  __m256 p = _mm256_set1_ps(2.7183114939898219e-6f);
+  p = _mm256_fmadd_ps(p, r2, _mm256_set1_ps(-1.9839334836096632e-4f));
+  p = _mm256_fmadd_ps(p, r2, _mm256_set1_ps(8.3333337680149173e-3f));
+  p = _mm256_fmadd_ps(p, r2, _mm256_set1_ps(-1.6666666664721728e-1f));
+  p = _mm256_fmadd_ps(_mm256_mul_ps(p, r2), r, r);
+  // sin(x) = (-1)^k sin(r)
+  const __m256i odd = _mm256_slli_epi32(_mm256_cvtps_epi32(k), 31);
+  return _mm256_xor_ps(p, _mm256_castsi256_ps(odd));
+}
+#endif
 
 struct Snake {
   std::vector<float> alpha_exp, inverse_beta;
@@ -110,6 +136,8 @@ struct SpeechDecoderNpuRuntime::Impl {
   CpuConv output_conv;
   DecoderHistory history;
   std::unique_ptr<DecoderHistory> reference_history;
+  // Every convolution's multiply-accumulates on the NPU (npu_conv.hpp).
+  std::unordered_map<const CpuConv*, NpuConv> npu_convs;
   DecoderHistory* active{nullptr};
   bool profile{std::getenv("GUFO_NPU_PROFILE") != nullptr};
 
@@ -194,7 +222,7 @@ struct SpeechDecoderNpuRuntime::Impl {
           "unsupported Qwen3-TTS speech decoder configuration");
     device = gufo::npu::Device::Open();
     gemm = gufo::npu::BfpGemm::Open(device, gufo::npu::FindDesign("bfpgemm"),
-                                    std::size_t(256) << 20);
+                                    std::size_t(512) << 20);
     semantic_table =
         Codebook("decoder.quantizer.rvq_first.vq.layers.0._codebook.");
     for (std::size_t g = 0; g + 1 < kCodeGroups; ++g)
@@ -264,6 +292,29 @@ struct SpeechDecoderNpuRuntime::Impl {
     }
     output_activation = MakeSnake("decoder.decoder.5");
     output_conv = MakeConv("decoder.decoder.6.conv", 96, 1, 7);
+    auto npu = [&](const CpuConv& c) {
+      npu_convs.emplace(&c, NpuConv::Make(gemm, c));
+    };
+    npu(pre_conv);
+    for (const UpsampleStage& st : upsample_stages)
+      npu(st.upsample);
+    npu(decoder_input);
+    for (const DecoderBlock& block : blocks) {
+      npu(block.upsample);
+      for (const ResidualUnit& r : block.residuals) {
+        npu(r.conv1);
+        npu(r.conv2);
+      }
+    }
+    npu(output_conv);
+  }
+
+  // c.Run on the NPU when it has an NPU form.
+  void RunConv(const CpuConv& c, const float* x, std::size_t length, float* y) {
+    if (auto it = npu_convs.find(&c); it != npu_convs.end())
+      it->second.Run(gemm, x, length, y);
+    else
+      c.Run(x, length, y);
   }
 
   void Gemm(const Linear& l, const float* x, std::size_t rows, float* y) {
@@ -277,12 +328,25 @@ struct SpeechDecoderNpuRuntime::Impl {
   static void SnakeBeta(const Snake& s, const float* x, float* y,
                         std::size_t rows, std::size_t channels) {
     host::ParallelFor(rows, 64, [&](std::size_t b, std::size_t e) {
-      for (std::size_t r = b; r < e; ++r)
-        for (std::size_t c = 0; c < channels; ++c) {
+      for (std::size_t r = b; r < e; ++r) {
+        std::size_t c = 0;
+#if defined(__AVX2__) && defined(__FMA__)
+        for (; c + 8 <= channels; c += 8) {
+          const __m256 v = _mm256_loadu_ps(x + r * channels + c);
+          const __m256 sine =
+              Sin8(_mm256_mul_ps(v, _mm256_loadu_ps(s.alpha_exp.data() + c)));
+          _mm256_storeu_ps(
+              y + r * channels + c,
+              _mm256_fmadd_ps(_mm256_mul_ps(sine, sine),
+                              _mm256_loadu_ps(s.inverse_beta.data() + c), v));
+        }
+#endif
+        for (; c < channels; ++c) {
           const float v = x[r * channels + c];
           const float sine = std::sin(v * s.alpha_exp[c]);
           y[r * channels + c] = v + sine * sine * s.inverse_beta[c];
         }
+      }
     });
   }
 
@@ -292,7 +356,7 @@ struct SpeechDecoderNpuRuntime::Impl {
     const std::size_t keep = c.Keep();
     std::vector<float> y(length * c.stride * c.out);
     if (active == nullptr || keep == 0) {
-      c.Run(x.data(), length, y.data());
+      RunConv(c, x.data(), length, y.data());
       return y;
     }
     ConvHistory& h = active->convolutions[&c];
@@ -303,7 +367,7 @@ struct SpeechDecoderNpuRuntime::Impl {
     h.rows = std::min(keep, rows);
     h.input.assign(joined.end() - std::ptrdiff_t(h.rows * c.in), joined.end());
     std::vector<float> all(rows * c.stride * c.out);
-    c.Run(joined.data(), rows, all.data());
+    RunConv(c, joined.data(), rows, all.data());
     std::copy_n(all.data() + previous * c.stride * c.out, y.size(), y.data());
     return y;
   }

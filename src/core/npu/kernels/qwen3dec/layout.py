@@ -13,20 +13,21 @@ logits and the input row. W holds the weight records: 4 rows of Q8_0 codes and
 their bf16 block scales (8704 bytes), per stream and core.
 """
 
-H, Q, KV, I, D = 2048, 2048, 1024, 6144, 128
-LAYERS = 28
+Q, KV, D = 2048, 1024, 128
 COLS, ROWS = 8, 4
-REC = 4 * H + 4 * (H // 32) * 2   # 8704
-BLOCK = 12 * H                    # [h f32 | o f32 | unused | pre-norm w bf16]
-PHASES = 1 + 5 * LAYERS + 1
+REC = 4 * 2048 + 4 * (2048 // 32) * 2  # 8704: 4 rows of 2048 or 8 rows of 1024 codes
 QKV_ROWS = Q + 2 * KV             # 4096: 128 per core
 QKV_BYTES = 2 * REC               # rows f32, then q-norm and k-norm bf16
-QKV_RECS, OUT_RECS, GU_RECS, DOWN_RECS = 32, 16, 96, 48  # per core
-HEAD_MAX_CHUNKS = 594             # 8 rows per chunk and core: 152064 rows
-ACT_COL = 12 * ROWS * 32          # gate/up output per column (bf16)
 Q_COL = 16 * ROWS * 32            # q/k/v rows per column (f32)
-CTX = 4096                        # KV positions
 KV_TASKS = 4                      # a DMA task repeats at most 64 records
+
+# The stacks one program serves: name -> (hidden, FFN, layers, head max chunks,
+# heads, KV positions). The talker/ASR head is up to 152064 rows; the code
+# predictor keeps 15 heads of 2048 rows (one per step, chosen at dispatch).
+MODELS = {
+    "qwen3dec": (2048, 6144, 28, 594, 1, 4096),
+    "qwen3dec_p": (1024, 3072, 5, 8, 15, 16),
+}
 
 
 def t(total, offset, sizes, strides):
@@ -35,8 +36,23 @@ def t(total, offset, sizes, strides):
 
 
 class Layout:
-    def __init__(self, ctx=CTX):
+    def __init__(self, model="qwen3dec"):
+        H, I, LAYERS, HEAD_MAX_CHUNKS, HEADS, ctx = MODELS[model]
+        self.H, self.I, self.LAYERS, self.HEAD_MAX_CHUNKS, self.HEADS = H, I, LAYERS, HEAD_MAX_CHUNKS, HEADS
+        self.PHASES = 1 + 5 * LAYERS + 1
+        self.BLOCK = 12 * H                   # [h f32 | o f32 | unused | pre-norm w bf16]
+        self.IN_RECS = (self.BLOCK + REC - 1) // REC
+        rows_per_rec = 4 * (2048 // H)
+        self.QKV_RECS = 128 // rows_per_rec                    # per core
+        self.OUT_RECS = (H // 32) // 4                         # rows of the 2048 attention outputs
+        self.GU_RECS = 2 * (I // 32) // rows_per_rec
+        self.DOWN_RECS = (H // 32) * I // 8192
+        self.HEAD_RECS_PER_CHUNK = 8 // rows_per_rec          # 8 rows per chunk and core
+        self.ACT_COL = (I // 512) * ROWS * 32                  # gate/up output per column (bf16)
+        self.ACT_RECS = (2 * I + REC - 1) // REC
+        self.HID_COL = H // 2                                  # hidden rows per column (f32 bytes)
         self.ctx = ctx
+        BLOCK = self.BLOCK
         o = 0
 
         def take(n):
@@ -57,22 +73,26 @@ class Layout:
         o = 0
         self.w = {}
         for l in range(LAYERS):
-            for name, recs in (("qkv", QKV_RECS), ("out", OUT_RECS), ("gate_up", GU_RECS), ("down", DOWN_RECS)):
+            for name, recs in (("qkv", self.QKV_RECS), ("out", self.OUT_RECS), ("gate_up", self.GU_RECS),
+                               ("down", self.DOWN_RECS)):
                 self.w[(l, name)] = take(2 * COLS * 2 * recs * REC)
-        self.w["head"] = take(2 * COLS * 2 * HEAD_MAX_CHUNKS * 2 * REC)
+        self.head_bytes = 2 * COLS * 2 * HEAD_MAX_CHUNKS * self.HEAD_RECS_PER_CHUNK * REC
+        self.w["head"] = take(HEADS * self.head_bytes)
         self.w_bytes = o
         assert self.s_bytes < 2 ** 31 and self.w_bytes < 2 ** 31
 
     def block(self, b):
-        return self.blocks + b * BLOCK
+        return self.blocks + b * self.BLOCK
 
     def items(self):
         """Named offsets for the host (qwen3dec_layout.txt)."""
         out = {"s_bytes": self.s_bytes, "w_bytes": self.w_bytes, "ctx": self.ctx, "rec": REC,
-               "block_bytes": BLOCK, "blocks": self.blocks, "act": self.act, "att": self.att,
+               "block_bytes": self.BLOCK, "blocks": self.blocks, "act": self.act, "att": self.att,
                "rope": self.rope, "logits": self.logits, "input": self.input,
-               "head_max_chunks": HEAD_MAX_CHUNKS, "w.head": self.w["head"]}
-        for l in range(LAYERS):
+               "head_max_chunks": self.HEAD_MAX_CHUNKS, "w.head": self.w["head"], "head_bytes": self.head_bytes,
+               "heads": self.HEADS, "hidden": self.H, "ffn": self.I, "layers": self.LAYERS,
+               "phases": self.PHASES}
+        for l in range(self.LAYERS):
             out[f"qkv.{l}"] = self.qkv[l]
             out[f"kv.{l}"] = self.kv[l]
             for name in ("qkv", "out", "gate_up", "down"):
@@ -90,7 +110,7 @@ class Layout:
         return t(self.w_bytes, base + s * n, [1, 2 * records, REC // 512, 512], [0, REC, 512, 1])
 
     def hidden(self, offset, c):
-        return t(self.s_bytes, offset + c * 1024, [1, 1, 32, 32], [0, 0, 32, 1])
+        return t(self.s_bytes, offset + c * self.HID_COL, [1, 1, self.HID_COL // 32, 32], [0, 0, 32, 1])
 
     @staticmethod
     def kv_tasks(d):
@@ -107,13 +127,14 @@ class Layout:
         yield Phase(heads={s: [("S", t(self.s_bytes, self.input, [1, 1, REC // 512, 512], [0, 0, 512, 1]))]
                            for s in range(16)},
                     drains=lambda c: [self.hidden(self.block(0), c)])
+        H, LAYERS = self.H, self.LAYERS
         for l in range(LAYERS):
             op_in, ffn_in, nxt = self.block(2 * l), self.block(2 * l + 1), self.block(2 * l + 2)
             q, kv = self.qkv[l], self.kv[l]
             # Attn1: h += o; q/k/v rows of rmsnorm(h) * w.
             yield Phase(
-                heads={s: [("S", self.head_records(op_in, 3))] for s in range(16)},
-                stream={s: [("W", self.weights(self.w[(l, "qkv")], s, QKV_RECS))] for s in range(16)},
+                heads={s: [("S", self.head_records(op_in, self.IN_RECS))] for s in range(16)},
+                stream={s: [("W", self.weights(self.w[(l, "qkv")], s, self.QKV_RECS))] for s in range(16)},
                 drains=lambda c, ffn_in=ffn_in, q=q: [
                     self.hidden(ffn_in, c),
                     t(self.s_bytes, q + c * Q_COL, [1, 1, Q_COL // 64, 64], [0, 0, 64, 1])])
@@ -134,25 +155,28 @@ class Layout:
             # Attn3: the output projection into the FFN block's o.
             yield Phase(
                 heads={s: [("S", t(self.s_bytes, self.att, [1, 1, 17, 512], [0, 0, 1024, 1]))] for s in range(16)},
-                stream={s: [("W", self.weights(self.w[(l, "out")], s, OUT_RECS))] for s in range(16)},
+                stream={s: [("W", self.weights(self.w[(l, "out")], s, self.OUT_RECS))] for s in range(16)},
                 drains=lambda c, ffn_in=ffn_in: [self.hidden(ffn_in + 4 * H, c)])
             # Ffn1: h += o; SiLU(gate) * up of rmsnorm(h) * w.
             yield Phase(
-                heads={s: [("S", self.head_records(ffn_in, 3))] for s in range(16)},
-                stream={s: [("W", self.weights(self.w[(l, "gate_up")], s, GU_RECS))] for s in range(16)},
+                heads={s: [("S", self.head_records(ffn_in, self.IN_RECS))] for s in range(16)},
+                stream={s: [("W", self.weights(self.w[(l, "gate_up")], s, self.GU_RECS))] for s in range(16)},
                 drains=lambda c, nxt=nxt: [self.hidden(nxt, c),
-                                           t(self.s_bytes, self.act + c * ACT_COL, [1, 1, ACT_COL // 64, 64], [0, 0, 64, 1])])
+                                           t(self.s_bytes, self.act + c * self.ACT_COL,
+                                             [1, 1, self.ACT_COL // 64, 64], [0, 0, 64, 1])])
             # Ffn2: the down projection into the next block's o.
             yield Phase(
-                heads={s: [("S", self.head_records(self.act, 2))] for s in range(16)},
-                stream={s: [("W", self.weights(self.w[(l, "down")], s, DOWN_RECS))] for s in range(16)},
+                heads={s: [("S", self.head_records(self.act, self.ACT_RECS))] for s in range(16)},
+                stream={s: [("W", self.weights(self.w[(l, "down")], s, self.DOWN_RECS))] for s in range(16)},
                 drains=lambda c, nxt=nxt: [self.hidden(nxt + 4 * H, c)])
         # Head: h += o; rows of rmsnorm(h) * w (the final norm) into the logits.
         chunks = d["head_chunks"]
+        per = 2 * self.HEAD_RECS_PER_CHUNK  # records per chunk and stream (both cores)
+        head = self.w["head"] + d.get("head_base", 0)
         yield Phase(
-            heads={s: [("S", self.head_records(self.block(2 * LAYERS), 3))] for s in range(16)},
-            stream={s: [("W", t(self.w_bytes, self.w["head"] + s * (chunks * 4 * REC),
-                                [1, chunks * 4, REC // 512, 512], [0, REC, 512, 1]))] for s in range(16)},
+            heads={s: [("S", self.head_records(self.block(2 * LAYERS), self.IN_RECS))] for s in range(16)},
+            stream={s: [("W", t(self.w_bytes, head + s * (chunks * per * REC),
+                                [1, chunks * per, REC // 512, 512], [0, REC, 512, 1]))] for s in range(16)},
             drains=lambda c: [t(self.s_bytes, self.logits + c * (chunks * 128), [1, 1, chunks, 128], [0, 0, 128, 1])])
 
 

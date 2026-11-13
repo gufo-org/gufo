@@ -285,6 +285,9 @@ struct TalkerNpuRuntime::Impl {
   // The talker's decode steps on the fused NPU program (one dispatch per
   // token) when its shape fits; CPU products otherwise.
   gufo::npu::Qwen3Decoder fused;
+  // The code predictor on the same program (no context switch per frame);
+  // empty when the design or the model shape does not fit (CPU fallback).
+  gufo::npu::Qwen3Decoder fused_predictor;
   bool skip_talker_decode{};
 
   const Tensor& Find(const std::string& name) const {
@@ -385,6 +388,55 @@ struct TalkerNpuRuntime::Impl {
     fused.SetRopeTheta(tc.rope_theta);
   }
 
+  // The code predictor's 5 layers and 15 heads on the talker's program.
+  template<typename Config>
+  void LoadFusedPredictor(const Config& pc, std::size_t code_groups) {
+    using Fused = gufo::npu::Qwen3Decoder;
+    try {
+      fused_predictor =
+          Fused::OpenPredictor(fused, gufo::npu::FindDesign("qwen3dec"));
+    } catch (const gufo::npu::Error&) {
+      fused_predictor = Fused();
+      return;
+    }
+    if (pc.num_hidden_layers != std::uint32_t(fused_predictor.layers()) ||
+        pc.hidden_size != std::uint32_t(fused_predictor.hidden()) ||
+        pc.num_attention_heads != std::uint32_t(Fused::kHeads) ||
+        pc.num_key_value_heads != std::uint32_t(Fused::kKvHeads) ||
+        pc.head_dim != std::uint32_t(Fused::kHeadDim) ||
+        std::size_t(fused_predictor.capacity()) < code_groups) {
+      fused_predictor = Fused();
+      return;
+    }
+    auto bf = [&](const std::string& n) {
+      return reinterpret_cast<const std::uint16_t*>(Find(n).data);
+    };
+    for (std::uint32_t l = 0; l < pc.num_hidden_layers; ++l) {
+      const std::string p =
+          "talker.code_predictor.model.layers." + std::to_string(l) + ".";
+      const std::vector<float> n1 = Vector(p + "input_layernorm.weight"),
+                               n2 = Vector(p +
+                                           "post_attention_layernorm.weight"),
+                               qn = Vector(p + "self_attn.q_norm.weight"),
+                               kn = Vector(p + "self_attn.k_norm.weight");
+      fused_predictor.SetLayer(
+          int(l),
+          {bf(p + "self_attn.q_proj.weight"), bf(p + "self_attn.k_proj.weight"),
+           bf(p + "self_attn.v_proj.weight"), bf(p + "self_attn.o_proj.weight"),
+           bf(p + "mlp.gate_proj.weight"), bf(p + "mlp.up_proj.weight"),
+           bf(p + "mlp.down_proj.weight"), n1.data(), n2.data(), qn.data(),
+           kn.data()});
+    }
+    const std::vector<float> norm =
+        Vector("talker.code_predictor.model.norm.weight");
+    for (std::size_t g = 0; g + 1 < code_groups; ++g)
+      fused_predictor.SetHead(
+          int(g),
+          bf("talker.code_predictor.lm_head." + std::to_string(g) + ".weight"),
+          int(pc.vocab_size), g == 0 ? norm.data() : nullptr);
+    fused_predictor.SetRopeTheta(pc.rope_theta);
+  }
+
   // The fused program's cache gets the CPU prefill's entries of positions
   // [start, start + rows).
   void HandOff(std::size_t start, std::size_t rows) {
@@ -428,8 +480,10 @@ struct TalkerNpuRuntime::Impl {
     skip_talker_decode = bool(fused);
     LoadStack(&talker, "talker.model.layers.", tc.num_hidden_layers, true);
     skip_talker_decode = false;
-    if (fused)
+    if (fused) {
       LoadFused(tc);
+      LoadFusedPredictor(pc, tc.num_code_groups);
+    }
     predictor.hidden = pc.hidden_size;
     predictor.inner = pc.intermediate_size;
     predictor.heads = pc.num_attention_heads;
@@ -439,8 +493,9 @@ struct TalkerNpuRuntime::Impl {
     predictor.eps = pc.rms_norm_eps;
     predictor.theta = pc.rope_theta;
     predictor.final_norm = Vector("talker.code_predictor.model.norm.weight");
-    LoadStack(&predictor, "talker.code_predictor.model.layers.",
-              pc.num_hidden_layers, false);
+    if (!fused_predictor)
+      LoadStack(&predictor, "talker.code_predictor.model.layers.",
+                pc.num_hidden_layers, false);
     head = MakeCpuQ8(
         Parts({"talker.codec_head.weight",
                "talker.code_predictor.small_to_mtp_projection.weight"}));
@@ -452,9 +507,11 @@ struct TalkerNpuRuntime::Impl {
                          Parts({"talker.text_projection.linear_fc2.weight"}));
     text_fc1_bias = Vector("talker.text_projection.linear_fc1.bias");
     text_fc2_bias = Vector("talker.text_projection.linear_fc2.bias");
-    for (std::uint32_t g = 0; g + 1 < tc.num_code_groups; ++g)
-      predictor_heads.push_back(MakeCpuQ8(Parts(
-          {"talker.code_predictor.lm_head." + std::to_string(g) + ".weight"})));
+    if (!fused_predictor)
+      for (std::uint32_t g = 0; g + 1 < tc.num_code_groups; ++g)
+        predictor_heads.push_back(
+            MakeCpuQ8(Parts({"talker.code_predictor.lm_head." +
+                             std::to_string(g) + ".weight"})));
     text_embedding = reinterpret_cast<const std::uint16_t*>(
         Find("talker.model.text_embedding.weight").data);
     codec_embedding = reinterpret_cast<const std::uint16_t*>(
@@ -628,6 +685,37 @@ struct TalkerNpuRuntime::Impl {
     std::copy_n(projected.data() + std::size_t(first_code) * ph, ph,
                 x.begin() + std::ptrdiff_t(ph));
     std::vector<float> logits(codes);
+    if (fused_predictor) {
+      // One dispatch per position on the NPU: the projected talker hidden at
+      // 0, then each code's projected embedding; head g gives code g + 1.
+      const std::size_t steps = model.config.talker.num_code_groups - 1;
+      fused_predictor.SelectHead(0);
+      fused_predictor.Start(x.data(), 0);
+      fused_predictor.Wait();
+      const float* row = x.data() + ph;
+      for (std::size_t g = 0; g < steps; ++g) {
+        fused_predictor.SelectHead(int(g));
+        fused_predictor.Start(row, int(g) + 1);
+        fused_predictor.Wait();
+        const auto lg = fused_predictor.logits();
+        candidate_scratch.clear();
+        for (std::uint32_t t = 0; t < codes; ++t)
+          candidate_scratch.push_back({t, Bf16(lg[t])});
+        const std::uint32_t code =
+            sampling_rng != nullptr
+                ? SampleCodec(candidate_scratch, predictor_top_k,
+                              predictor_top_p, predictor_temperature,
+                              sampling_rng)
+                : SampleCodec(candidate_scratch, 0, 1.0F, 1.0F, nullptr);
+        frame.push_back(code);
+        if (g + 1 < steps)
+          row = projected.data() + ((g + 1) * codes + code) * ph;
+      }
+      predictor_ms += std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+      return frame;
+    }
     std::size_t rows = 2, position = 0;
     for (std::size_t g = 0; g < predictor_heads.size(); ++g) {
       predictor.Forward(engine, x.data(), rows, position);

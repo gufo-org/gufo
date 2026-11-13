@@ -13,6 +13,7 @@
 #include "src/models/qwen3_tts/loader.hpp"
 #include "src/models/qwen3_tts/npu/cpu_conv.hpp"
 #include "src/models/qwen3_tts/npu/npu_common.hpp"
+#include "src/models/qwen3_tts/npu/npu_conv.hpp"
 
 namespace gufo::models::qwen3_tts::npu {
 namespace {
@@ -51,7 +52,7 @@ struct Conv {
                          std::size_t length) const {
     const std::size_t out_length = (length + conv.step - 1) / conv.step;
     std::vector<float> y(out_length * conv.out);
-    conv.RunGeneral(x.data(), length, y.data(), out_length);
+    EncoderNpu::Get().RunGeneral(conv, x.data(), length, y.data(), out_length);
     RoundAll(y);
     return y;
   }

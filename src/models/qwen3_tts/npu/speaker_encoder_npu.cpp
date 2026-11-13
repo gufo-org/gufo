@@ -11,6 +11,7 @@
 #include "src/models/qwen3_tts/loader.hpp"
 #include "src/models/qwen3_tts/npu/cpu_conv.hpp"
 #include "src/models/qwen3_tts/npu/npu_common.hpp"
+#include "src/models/qwen3_tts/npu/npu_conv.hpp"
 #include "src/models/qwen3_tts/speaker_features.hpp"
 
 namespace gufo::models::qwen3_tts::npu {
@@ -64,7 +65,7 @@ struct SpeakerEncoderNpuRuntime::Impl {
   std::vector<float> Conv(const CpuConv& c, const std::vector<float>& x,
                           std::size_t rows, bool relu) const {
     std::vector<float> y(rows * c.out);
-    c.RunGeneral(x.data(), rows, y.data(), rows);
+    EncoderNpu::Get().RunGeneral(c, x.data(), rows, y.data(), rows);
     for (float& v : y) {
       v = Bf16(v);
       if (relu)

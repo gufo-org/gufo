@@ -9,6 +9,8 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -21,8 +23,10 @@
 namespace gufo::npu {
 namespace {
 
-constexpr int kH = 2048, kI = 6144, kRec = 4 * kH + 4 * (kH / 32) * 2;
-constexpr int kQkvRecs = 32, kOutRecs = 16, kGuRecs = 96, kDownRecs = 48;
+// Records are kRec bytes: with hidden 2048 one group of four rows, with
+// hidden 1024 two groups (kGroupBytes1024 each), so records stay full.
+constexpr int kRec = 4 * 2048 + 4 * (2048 / 32) * 2;
+constexpr int kGroupBytes1024 = 4 * 1024 + 4 * 32 * 2;
 constexpr unsigned kArgS = 3, kArgW = 4;
 
 std::uint16_t ToBf16(float f) {
@@ -82,8 +86,9 @@ void Tile4(const std::uint16_t* const rows[4], int b0, int nb,
 }  // namespace
 
 struct Qwen3Decoder::Impl {
-  Program program;
+  std::shared_ptr<Program> program;  // shared by the talker and its predictor
   DispatchLibrary generate;
+  int hidden{}, ffn{}, layers{}, heads{}, groups{};
   Buffer s, w;
   Instructions ins;
   std::map<std::string, std::size_t> lay;
@@ -141,39 +146,85 @@ struct Qwen3Decoder::Impl {
     return At("blocks") + std::size_t(b) * At("block_bytes");
   }
 
+  int head{};  // the head of the next tokens (predictor steps)
+  int next_head{};
   std::vector<std::uint32_t> Generate(int pos) const {
+    return Generate(pos, head);
+  }
+  std::vector<std::uint32_t> Generate(int pos, int head) const {
     // The KV stream's records in four tasks of 1..64 records each.
     const int recs = std::max(4, (pos + 15) / 16);
     if (recs > 4 * 64)
       throw Error("Qwen3Decoder: position beyond the KV cache");
-    std::int32_t sc[6] = {pos, 0, 0, 0, 0, head_chunks};
+    std::int32_t sc[7] = {pos,
+                          0,
+                          0,
+                          0,
+                          0,
+                          head_chunks,
+                          std::int32_t(std::size_t(head) * At("head_bytes"))};
     for (int i = 0; i < 4; ++i)
       sc[1 + i] = std::int32_t(recs / 4 + (i < recs % 4 ? 1 : 0));
-    const auto words = generate.Generate(sc);
+    const auto words =
+        generate.Generate(std::span<const std::int32_t>(sc, heads > 1 ? 7 : 6));
     return {words.begin(), words.end()};
   }
 };
 
-Qwen3Decoder Qwen3Decoder::Open(Device& device,
-                                const std::filesystem::path& dir) {
-  Qwen3Decoder d;
-  d.impl_ = std::make_unique<Impl>();
-  auto& m = *d.impl_;
-  std::ifstream in(dir / "qwen3dec_layout.txt");
+namespace {
+
+Qwen3Decoder::Impl* LoadImpl(Qwen3Decoder::Impl& m,
+                             const std::filesystem::path& dir,
+                             const std::string& name) {
+  std::ifstream in(dir / (name + "_layout.txt"));
   std::string key;
   std::size_t value;
   while (in >> key >> value)
     m.lay[key] = value;
   if (m.lay.empty())
     throw Error("Qwen3Decoder: no layout in " + dir.string());
-  m.program = Program::Load(device, dir / "qwen3dec.xclbin");
-  m.generate = DispatchLibrary::Open(dir / "qwen3dec_dispatch.so", 6);
-  m.s = m.program.Allocate(m.At("s_bytes"), kArgS);
-  m.w = m.program.Allocate(m.At("w_bytes"), kArgW);
+  m.hidden = int(m.At("hidden"));
+  m.ffn = int(m.At("ffn"));
+  m.layers = int(m.At("layers"));
+  m.heads = int(m.At("heads"));
+  m.groups = 2048 / m.hidden;
+  m.generate =
+      DispatchLibrary::Open(dir / (name + "_dispatch.so"), m.heads > 1 ? 7 : 6);
+  m.s = m.program->Allocate(m.At("s_bytes"), kArgS);
+  m.w = m.program->Allocate(m.At("w_bytes"), kArgW);
   std::memset(m.s.data(), 0, m.s.size());
   m.s.ToDevice();
-  m.ins = m.program.AllocateInstructions(std::size_t(1) << 20);
+  m.ins = m.program->AllocateInstructions(std::size_t(1) << 20);
+  return &m;
+}
+
+}  // namespace
+
+Qwen3Decoder Qwen3Decoder::Open(Device& device,
+                                const std::filesystem::path& dir) {
+  Qwen3Decoder d;
+  d.impl_ = std::make_unique<Impl>();
+  d.impl_->program =
+      std::make_shared<Program>(Program::Load(device, dir / "qwen3dec.xclbin"));
+  LoadImpl(*d.impl_, dir, "qwen3dec");
   return d;
+}
+
+Qwen3Decoder Qwen3Decoder::OpenPredictor(const Qwen3Decoder& talker,
+                                         const std::filesystem::path& dir) {
+  Qwen3Decoder d;
+  d.impl_ = std::make_unique<Impl>();
+  d.impl_->program = talker.impl_->program;
+  LoadImpl(*d.impl_, dir, "qwen3dec_p");
+  return d;
+}
+
+int Qwen3Decoder::hidden() const noexcept {
+  return impl_->hidden;
+}
+
+int Qwen3Decoder::layers() const noexcept {
+  return impl_->layers;
 }
 
 Qwen3Decoder::Qwen3Decoder() = default;
@@ -190,54 +241,87 @@ int Qwen3Decoder::capacity() const noexcept {
 
 void Qwen3Decoder::SetLayer(int l, const Layer& L) {
   auto& m = *impl_;
+  const int H = m.hidden, I = m.ffn, G = m.groups, nb = H / 32;
+  const int chunks = H / 256;  // a core's 8-row hidden chunks
   const std::string p = "w." + std::to_string(l) + ".";
   // q/k/v rows: [q 2048 | k 1024 | v 1024], 128 per core.
   auto qkv_row = [&](int r) -> const std::uint16_t* {
     if (r < 2048)
-      return L.q + std::size_t(r) * kH;
+      return L.q + std::size_t(r) * H;
     if (r < 3072)
-      return L.k + std::size_t(r - 2048) * kH;
-    return L.v + std::size_t(r - 3072) * kH;
+      return L.k + std::size_t(r - 2048) * H;
+    return L.v + std::size_t(r - 3072) * H;
   };
-  m.Pack(m.At(p + "qkv"), kQkvRecs, [&](int c, int j, int r, std::int8_t* rec) {
-    const std::uint16_t* rows[4];
-    for (int i = 0; i < 4; ++i)
-      rows[i] = qkv_row(Row(c, j, 4 * r + i, 16));
-    Tile4(rows, 0, kH / 32, rec);
-  });
-  m.Pack(m.At(p + "out"), kOutRecs, [&](int c, int j, int r, std::int8_t* rec) {
-    const std::uint16_t* rows[4];
-    for (int i = 0; i < 4; ++i)
-      rows[i] = L.o + std::size_t(Row(c, j, 4 * r + i, 8)) * kH;
-    Tile4(rows, 0, kH / 32, rec);
-  });
-  m.Pack(
-      m.At(p + "gate_up"), kGuRecs, [&](int c, int j, int r, std::int8_t* rec) {
-        int ch[2];
-        for (int x = 0; x < 2; ++x) {
-          const int e = 2 * r + x;
-          ch[x] = ((c * 12 + e / 16) * 4 + j) * 16 + e % 16;
-        }
-        const std::uint16_t* rows[4] = {
-            L.gate + std::size_t(ch[0]) * kH, L.gate + std::size_t(ch[1]) * kH,
-            L.up + std::size_t(ch[0]) * kH, L.up + std::size_t(ch[1]) * kH};
-        Tile4(rows, 0, kH / 32, rec);
-      });
-  // Down: per set of 16 rows, four 4-row groups of 192 blocks of I; a record
-  // holds 64 blocks of one group.
-  m.Pack(m.At(p + "down"), kDownRecs,
+  const int rows_per_rec = 4 * G;
+  // Records of 4 G rows given by row(c, j, n): G groups of tile4.
+  auto rows_record = [&](int c, int j, int r, std::int8_t* rec, auto row) {
+    for (int g = 0; g < G; ++g) {
+      const std::uint16_t* rows[4];
+      for (int i = 0; i < 4; ++i)
+        rows[i] = row(c, j, rows_per_rec * r + 4 * g + i);
+      Tile4(rows, 0, nb, rec + g * (G > 1 ? kGroupBytes1024 : 0));
+    }
+  };
+  m.Pack(m.At(p + "qkv"), 128 / rows_per_rec,
          [&](int c, int j, int r, std::int8_t* rec) {
-           const int set = r / 12, u = 64 * (r % 12), g = u / 192, kb = u % 192;
+           rows_record(c, j, r, rec, [&](int c2, int j2, int n) {
+             return qkv_row(Row(c2, j2, n, 16));
+           });
+         });
+  // Output projection rows take the 2048 attention outputs: one group of four
+  // rows per record whatever the hidden size.
+  m.Pack(m.At(p + "out"), (H / 32) / 4,
+         [&](int c, int j, int r, std::int8_t* rec) {
            const std::uint16_t* rows[4];
            for (int i = 0; i < 4; ++i)
-             rows[i] =
-                 L.down + std::size_t(Row(c, j, 16 * set + 4 * g + i, 8)) * kI;
-           Tile4(rows, kb, 64, rec);
+             rows[i] = L.o + std::size_t(Row(c, j, 4 * r + i, chunks)) * 2048;
+           Tile4(rows, 0, 2048 / 32, rec);
+         });
+  // Gate/up: per group, the gate rows of two channels then their up rows.
+  const int sets = I / 512;
+  m.Pack(m.At(p + "gate_up"), 2 * (I / 32) / rows_per_rec,
+         [&](int c, int j, int r, std::int8_t* rec) {
+           for (int g = 0; g < G; ++g) {
+             int ch[2];
+             for (int x = 0; x < 2; ++x) {
+               const int e = 2 * (G * r + g) + x;
+               ch[x] = ((c * sets + e / 16) * 4 + j) * 16 + e % 16;
+             }
+             const std::uint16_t* rows[4] = {L.gate + std::size_t(ch[0]) * H,
+                                             L.gate + std::size_t(ch[1]) * H,
+                                             L.up + std::size_t(ch[0]) * H,
+                                             L.up + std::size_t(ch[1]) * H};
+             Tile4(rows, 0, nb, rec + g * (G > 1 ? kGroupBytes1024 : 0));
+           }
+         });
+  // Down: per set of 16 rows, four 4-row groups of I / 32 blocks in units of
+  // one block; a record holds 64 units (codes, then their scales) and may
+  // span two groups.
+  const int blocks = I / 32, per_set = 4 * blocks / 64;
+  m.Pack(m.At(p + "down"), (H / 32) * I / 8192,
+         [&](int c, int j, int r, std::int8_t* rec) {
+           const int set = r / per_set, u0 = 64 * (r % per_set);
+           std::vector<std::int8_t> tmp(std::size_t(64) * 136);
+           for (int done = 0; done < 64;) {
+             const int u = u0 + done, g = u / blocks, kb = u % blocks;
+             const int n = std::min(64 - done, blocks - kb);
+             const std::uint16_t* rows[4];
+             for (int i = 0; i < 4; ++i)
+               rows[i] =
+                   L.down +
+                   std::size_t(Row(c, j, 16 * set + 4 * g + i, chunks)) * I;
+             Tile4(rows, kb, n, tmp.data());
+             std::memcpy(rec + 128 * done, tmp.data(), std::size_t(128) * n);
+             std::memcpy(rec + 128 * 64 + 8 * done, tmp.data() + 128 * n,
+                         std::size_t(8) * n);
+             done += n;
+           }
          });
   // Norm weights: block 2l (attention input) and 2l + 1 (FFN input) hold
-  // their pre-norm weight at byte 20480; the q/k norms follow the q/k/v rows.
-  m.WriteBf16(m.Block(2 * l) + 20480, L.input_norm, kH);
-  m.WriteBf16(m.Block(2 * l + 1) + 20480, L.post_attention_norm, kH);
+  // their pre-norm weight at byte 10 H; the q/k norms follow the q/k/v rows.
+  m.WriteBf16(m.Block(2 * l) + 10 * std::size_t(H), L.input_norm, H);
+  m.WriteBf16(m.Block(2 * l + 1) + 10 * std::size_t(H), L.post_attention_norm,
+              H);
   const std::size_t q = m.At("qkv." + std::to_string(l)) + 4096 * 4;
   m.WriteBf16(q, L.q_norm, 128);
   m.WriteBf16(q + 256, L.k_norm, 128);
@@ -245,22 +329,42 @@ void Qwen3Decoder::SetLayer(int l, const Layer& L) {
 
 void Qwen3Decoder::SetHead(const std::uint16_t* weights, int rows,
                            const float* norm) {
+  SetHead(0, weights, rows, norm);
+}
+
+void Qwen3Decoder::SetHead(int index, const std::uint16_t* weights, int rows,
+                           const float* norm) {
   auto& m = *impl_;
-  if (rows <= 0 || rows > kMaxHeadRows)
-    throw Error("Qwen3Decoder: unsupported head rows");
+  const int H = m.hidden, G = m.groups;
+  const int max_rows = int(m.At("head_max_chunks")) * 256;
+  if (rows <= 0 || rows > max_rows || index < 0 || index >= m.heads)
+    throw Error("Qwen3Decoder: unsupported head");
+  if (index > 0 && (rows + 255) / 256 != m.head_chunks)
+    throw Error("Qwen3Decoder: the heads differ in size");
   m.head_rows = rows;
   m.head_chunks = (rows + 255) / 256;
-  const int chunks = m.head_chunks, records = chunks * 2;
-  m.Pack(m.At("w.head"), records, [&](int c, int j, int r, std::int8_t* rec) {
-    const std::uint16_t* rs[4];
-    for (int i = 0; i < 4; ++i) {
-      const int row = Row(c, j, 4 * r + i, chunks);
-      rs[i] = row < rows ? weights + std::size_t(row) * kH : nullptr;
-    }
-    Tile4(rs, 0, kH / 32, rec);
-  });
-  m.WriteBf16(m.Block(2 * kLayers) + 20480, norm, kH);
+  const int chunks = m.head_chunks, records = chunks * 2 / G;
+  m.Pack(m.At("w.head") + std::size_t(index) * m.At("head_bytes"), records,
+         [&](int c, int j, int r, std::int8_t* rec) {
+           for (int g = 0; g < G; ++g) {
+             const std::uint16_t* rs[4];
+             for (int i = 0; i < 4; ++i) {
+               const int row = Row(c, j, 4 * (G * r + g) + i, chunks);
+               rs[i] = row < rows ? weights + std::size_t(row) * H : nullptr;
+             }
+             Tile4(rs, 0, H / 32, rec + g * (G > 1 ? kGroupBytes1024 : 0));
+           }
+         });
+  if (norm)
+    m.WriteBf16(m.Block(2 * m.layers) + 10 * std::size_t(H), norm, H);
   m.logits.assign(std::size_t(rows), 0.0f);
+}
+
+void Qwen3Decoder::SelectHead(int index) {
+  auto& m = *impl_;
+  if (index < 0 || index >= m.heads)
+    throw Error("Qwen3Decoder: no such head");
+  m.head = index;
 }
 
 void Qwen3Decoder::SetRopeTheta(double theta) {
@@ -316,20 +420,22 @@ void Qwen3Decoder::Start(const float* row, int pos) {
   if (pos < 0 || pos >= capacity())
     throw Error("Qwen3Decoder: position beyond the KV cache");
   const std::size_t at = m.At("input");
-  std::memcpy(m.S(at), row, std::size_t(kH) * 4);
-  m.s.ToDevice(at, std::size_t(kH) * 4);
-  if (m.next_pos == pos)
+  std::memcpy(m.S(at), row, std::size_t(m.hidden) * 4);
+  m.s.ToDevice(at, std::size_t(m.hidden) * 4);
+  if (m.next_pos == pos && m.next_head == m.head)
     m.ins.Assign(m.next);
   else
     m.ins.Assign(m.Generate(pos));
   const auto t0 = std::chrono::steady_clock::now();
-  m.pending = m.program.Start(m.ins, {&m.s, &m.w});
+  m.pending = m.program->Start(m.ins, {&m.s, &m.w});
   m.started = std::chrono::steady_clock::now();
   m.start_ms +=
       std::chrono::duration<double, std::milli>(m.started - t0).count();
   // The next position's stream, on the host while the NPU runs.
+  // A multi-head stack (the predictor) moves to the next head each step.
   if (pos + 1 < capacity()) {
-    m.next = m.Generate(pos + 1);
+    m.next_head = m.heads > 1 ? std::min(m.head + 1, m.heads - 1) : m.head;
+    m.next = m.Generate(pos + 1, m.next_head);
     m.next_pos = pos + 1;
   }
 }
@@ -364,12 +470,13 @@ std::span<const float> Qwen3Decoder::logits() {
 
 void Qwen3Decoder::Hidden(float* out) {
   auto& m = *impl_;
-  const std::size_t at = m.Block(2 * kLayers);
-  m.s.FromDevice(at, std::size_t(2) * kH * 4);
-  std::vector<float> ho(std::size_t(2) * kH);
+  const int H = m.hidden;
+  const std::size_t at = m.Block(2 * m.layers);
+  m.s.FromDevice(at, std::size_t(2) * H * 4);
+  std::vector<float> ho(std::size_t(2) * H);
   std::memcpy(ho.data(), m.S(at), ho.size() * 4);
-  for (int i = 0; i < kH; ++i)
-    out[i] = ho[std::size_t(i)] + ho[std::size_t(kH) + std::size_t(i)];
+  for (int i = 0; i < H; ++i)
+    out[i] = ho[std::size_t(i)] + ho[std::size_t(H) + std::size_t(i)];
 }
 
 }  // namespace gufo::npu

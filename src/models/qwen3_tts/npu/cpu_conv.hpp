@@ -6,6 +6,7 @@
 // load so the innermost loop runs over output channels.
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -31,6 +32,12 @@ struct CpuConv {
   Pad pad{Pad::kZero};
   std::vector<float> taps;  // [tap][in][out]
   std::vector<float> bias;  // [out] (empty: none)
+  // Identifies the weights (copies share it), for NPU forms cached by it.
+  std::uint64_t serial{NextSerial()};
+  static std::uint64_t NextSerial() {
+    static std::atomic<std::uint64_t> next{1};
+    return next.fetch_add(1);
+  }
 
   /// From a PyTorch Conv1d weight [out][in][k].
   static CpuConv Make(const float* weight, const float* bias, std::size_t in,
