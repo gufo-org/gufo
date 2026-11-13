@@ -36,7 +36,10 @@ repetitions=2): pp2048 **85.11 ± 0.06**, tg32 **11.13 ± 0.07**
 0.0000 vs the golden): pp2048 **90.3 ± 0.1** (tg unchanged). With the
 P9 dense Q8_0 WMMA tier on top (+9.7 %; same sha, forward gate ALL PASS
 0.0000): pp2048 **99.2 ± 0.2**, pp16384 90.0/90.7 vs 83.1 control.
-Serve-protocol gate not yet re-captured for these two steps. Use these
+With the 2048-token prefill chunk (+9.1 % at pp2048, +8.3 % at pp4096,
+n-gen-1 sha identical across chunk widths, full `glm5_next` suite 9/9):
+pp2048 **109.2 ± 0.5**, pp4096 **104.6**.
+Serve-protocol gate not yet re-captured for these steps. Use these
 only as offline scans, not interchangeably with the serve-protocol gate
 cells.
 

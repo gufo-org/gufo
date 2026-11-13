@@ -94,7 +94,7 @@ class Executor {
 
   /// Chunk width of `Prefill`. The multi-row tier walks any width as
   /// power-of-two slices; the bucketed MoE tier covers the wide chunks.
-  static constexpr std::uint32_t kChunk = 256;
+  static constexpr std::uint32_t kChunk = 2048;
 
   /// Chunks of at least this many tokens take the bucketed routed MoE
   /// tier; narrower ones (and every `Step`) stay on the grouped tier.

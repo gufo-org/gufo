@@ -220,6 +220,22 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   `glm5_next.rocm_device_model` 626/626 payload bit-exact, and
   `glm5_next.rocm_forward` ALL PASS with max |dlogit| = 0.0000
   GPU-exclusive against the retained golden (`/tmp/opencode/glm5_*`).
+- `kChunk` 256 -> 2048 (revisit of the same lever after P9): each
+  256-token chunk's 2048 routed slots touch all 288 experts, so pp2048
+  swept the expert stack ~8x (effective ~29 GB/s); at 2048-token chunks
+  the sweep collapses and the bucketed WMMA tier runs fully bucketed.
+  Offline A/B (alternating, warm+2): pp2048 100.07/100.03 ->
+  **109.20/109.13 (p50 +9.1 %)**; pp4096 96.6 -> **104.6 (+8.3 %)**.
+  Bit-identical: n-gen-1 output sha256 `43557e0c…` equal across both
+  binaries and repetitions, full `glm5_next` ctest 9/9 GPU-exclusive
+  (`/tmp/opencode/glm5_gate_c2048.sh`). Profile after the change
+  (`/tmp/opencode/glm5_prof2k_c2048`): MoE RoutedWmma is no longer the
+  wall; per-token sequential launches dominate — KdaFoldSk 3.3 s +
+  KdaUpdateOut 3.3 s (each one launch per KDA layer per token), MLA
+  score/combine/bitonic 4.9 s, HcCoeffs/MoERoute/WeightedSum 3.5 s
+  (~1.4 M launches over two prefills) vs DenseWmma 3.8 s and RoutedWmma
+  5.3 s total. The next lever is processing a chunk's sequential stages
+  in one launch with a per-token loop inside (bit-identical order).
 
 ## Next candidates (measured order from P3d, P3e updated)
 
@@ -232,4 +248,7 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   rejected (P3f); only decode throughput (tensor-core shapes) remains.
 - MLA `GatherScore` rewrite (12.2 %; 45892 calls at ~224 us) and KDA
   per-token sequential scan (8.8 %, ~1 M launches of ~26 us) as the
-  follow-up wave.
+  follow-up wave. After kChunk 2048 the ordering is confirmed: the
+  per-token launch storm (KDA fold/update + MLA gather + route/coeffs)
+  is the dominant cost and the single-launch chunk-scan rewrite is the
+  primary lever.
