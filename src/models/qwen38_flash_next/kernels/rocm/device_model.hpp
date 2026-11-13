@@ -103,8 +103,9 @@ public:
   const Config& config() const noexcept { return config_; }
   const DeviceTensor& token_embd() const noexcept { return token_embd_; }
   const DeviceTensor& output() const noexcept { return output_; }
-  /// The leading output() rows the MTP draft head scores in place (see
-  /// draft_vocab.hpp); empty when the draft projects the full vocabulary.
+  /// The leading output() rows the MTP draft head scores (see
+  /// draft_vocab.hpp): a Q4_K copy of a Q8_0 head, else those rows in
+  /// place; empty when the draft projects the full vocabulary.
   const DeviceTensor& draft_output() const noexcept { return draft_output_; }
   /// Special tokens above the prefix: the first rows of each session's
   /// draft table.
@@ -115,9 +116,10 @@ public:
   std::size_t output_row_bytes() const noexcept {
     return output_.rows == 0 ? 0 : output_bytes_ / output_.rows;
   }
-  /// Drafts score output() rows [0, prefix_rows) in place plus a
-  /// per-session table that starts with `specials`. Draft proposals only
-  /// steer speculation: the target still verifies every token, so greedy
+  /// Drafts score output() rows [0, prefix_rows) plus a per-session table
+  /// that starts with `specials`. The rows of a Q8_0 head are requantized
+  /// to Q4_K once, here; the table keeps the head's format. Draft proposals
+  /// only steer speculation: the target still verifies every token, so greedy
   /// text is unchanged. Sampled text can differ: a smaller head changes
   /// acceptance, and so the later random draws.
   [[nodiscard]] bool SetDraftVocab(std::uint32_t prefix_rows,

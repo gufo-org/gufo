@@ -827,6 +827,8 @@ private:
     float* mtp_res;
     ArgmaxCandidate* mtp_argmax;
     std::int32_t* mtp_token;
+    /// Expert IDs (all zero) of the Q4_K draft head's rows.
+    std::int32_t* draft_head_ids;
     std::uint32_t* mtp_ids;
     std::uint32_t* mtp_scratch_ids;
     float* mtp_scores;

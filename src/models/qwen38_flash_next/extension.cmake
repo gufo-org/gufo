@@ -96,10 +96,14 @@ if(TARGET gufo_qwen38_flash_next_hip)
   gufo_extension_hip_sources(gufo_qwen38_flash_next_hip
     SOURCES
       kernels/rocm/kernels.hip.cpp
+      kernels/rocm/draft_head.hip.cpp
       kernels/rocm/w8a8_wave64.hip
   )
   set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip
     PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
+  # The draft head quantizer keeps ggml's IEEE single-precision rounding.
+  set_source_files_properties(${QFN_ROCM_DIR}/draft_head.hip.cpp
+    PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
   target_compile_definitions(gufo_qwen38_flash_next_hip PRIVATE QFN_ROCM_BUILD=1)
   target_compile_options(gufo_qwen38_flash_next_hip PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O2>

@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "qfn_mmq.h"
 #include "src/core/sampling.hpp"
 #include "src/families/qwen/kernels/ops/token.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -412,8 +413,254 @@ void CheckRemapDraftIds() {
 
 }  // namespace
 
+// ggml quantize_row_q4_K_ref on dequantized Q8_0 values, in plain IEEE
+// single precision (no contraction): the order QuantizeQ8_0ToQ4K keeps on
+// the device.
+int HostNearest(float value) {
+  return static_cast<int>(std::nearbyint(value));
+}
+
+float HostQkx2(const float* x, const float* w, float* the_min) {
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+  float min = x[0], max = x[0], sum_w = w[0], sum_x = sum_w * x[0];
+  for (int i = 1; i < 32; ++i) {
+    min = std::min(min, x[i]);
+    max = std::max(max, x[i]);
+    sum_w += w[i];
+    sum_x += w[i] * x[i];
+  }
+  if (min > 0)
+    min = 0;
+  if (max == min) {
+    *the_min = -min;
+    return 0;
+  }
+  float iscale = 15.0F / (max - min);
+  float scale = 1 / iscale;
+  float best = 0;
+  for (int i = 0; i < 32; ++i) {
+    const int l = std::clamp(HostNearest(iscale * (x[i] - min)), 0, 15);
+    const float diff = scale * static_cast<float>(l) + min - x[i];
+    best += w[i] * (diff * diff);
+  }
+  for (int step = 0; step <= 20; ++step) {
+    iscale = (-1.0F + 0.1F * static_cast<float>(step) + 15.0F) / (max - min);
+    float sum_l = 0, sum_l2 = 0, sum_xl = 0;
+    for (int i = 0; i < 32; ++i) {
+      const float l = static_cast<float>(
+          std::clamp(HostNearest(iscale * (x[i] - min)), 0, 15));
+      sum_l += w[i] * l;
+      sum_l2 += w[i] * l * l;
+      sum_xl += w[i] * l * x[i];
+    }
+    const float det = sum_w * sum_l2 - sum_l * sum_l;
+    if (det <= 0)
+      continue;
+    float this_scale = (sum_w * sum_xl - sum_x * sum_l) / det;
+    float this_min = (sum_l2 * sum_x - sum_l * sum_xl) / det;
+    if (this_min > 0) {
+      this_min = 0;
+      this_scale = sum_xl / sum_l2;
+    }
+    float error = 0;
+    for (int i = 0; i < 32; ++i) {
+      const float l = static_cast<float>(
+          std::clamp(HostNearest(iscale * (x[i] - min)), 0, 15));
+      const float diff = this_scale * l + this_min - x[i];
+      error += w[i] * (diff * diff);
+    }
+    if (error < best) {
+      best = error;
+      scale = this_scale;
+      min = this_min;
+    }
+  }
+  *the_min = -min;
+  return scale;
+}
+
+void HostQ4K(const float* x, std::uint8_t* out) {
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+  float scales[8], mins[8], max_scale = 0, max_min = 0;
+  for (int j = 0; j < 8; ++j) {
+    const float* v = x + 32 * j;
+    float sum_x2 = 0;
+    for (int i = 0; i < 32; ++i)
+      sum_x2 += v[i] * v[i];
+    const float av_x = std::sqrt(sum_x2 / 32);
+    float w[32];
+    for (int i = 0; i < 32; ++i)
+      w[i] = av_x + std::fabs(v[i]);
+    scales[j] = HostQkx2(v, w, &mins[j]);
+    max_scale = std::max(max_scale, scales[j]);
+    max_min = std::max(max_min, mins[j]);
+  }
+  const float inv_scale = max_scale > 0 ? 63.0F / max_scale : 0.0F;
+  const float inv_min = max_min > 0 ? 63.0F / max_min : 0.0F;
+  std::uint8_t* packed = out + 4;
+  std::fill_n(packed, 12, 0);
+  std::uint8_t sc[8], m[8];
+  for (int j = 0; j < 8; ++j) {
+    sc[j] = std::min<std::uint8_t>(
+        63, static_cast<std::uint8_t>(HostNearest(inv_scale * scales[j])));
+    m[j] = std::min<std::uint8_t>(
+        63, static_cast<std::uint8_t>(HostNearest(inv_min * mins[j])));
+    if (j < 4) {
+      packed[j] = sc[j];
+      packed[j + 4] = m[j];
+    } else {
+      packed[j + 4] = (sc[j] & 0xF) | ((m[j] & 0xF) << 4);
+      packed[j - 4] |= (sc[j] >> 4) << 6;
+      packed[j] |= (m[j] >> 4) << 6;
+    }
+  }
+  const auto d = static_cast<_Float16>(max_scale / 63.0F);
+  const auto dmin = static_cast<_Float16>(max_min / 63.0F);
+  std::memcpy(out, &d, 2);
+  std::memcpy(out + 2, &dmin, 2);
+  std::uint8_t codes[256]{};
+  for (int j = 0; j < 8; ++j) {
+    const float scale = static_cast<float>(d) * static_cast<float>(sc[j]);
+    const float shift = static_cast<float>(dmin) * static_cast<float>(m[j]);
+    for (int i = 0; scale != 0 && i < 32; ++i)
+      codes[32 * j + i] = static_cast<std::uint8_t>(
+          std::clamp(HostNearest((x[32 * j + i] + shift) / scale), 0, 15));
+  }
+  for (int byte = 0; byte < 128; ++byte)
+    out[16 + byte] = codes[64 * (byte / 32) + byte % 32] |
+                     (codes[64 * (byte / 32) + 32 + byte % 32] << 4);
+}
+// The draft head's Q4_K copy: device bytes equal the host reference, rows
+// are close to their Q8_0 values, and a row's projection is the same at
+// every batch width.
+void CheckQ4KDraftHead() {
+  constexpr std::uint32_t kRows = 96, kCols = 2560, kBlocks = kCols / 32;
+  std::vector<std::uint8_t> q8(std::size_t{kRows} * kBlocks * 34);
+  std::vector<float> values(std::size_t{kRows} * kCols);
+  std::uint32_t state = 0x1234567U;
+  const auto next = [&] {
+    state = state * 1664525U + 1013904223U;
+    return state >> 8;
+  };
+  for (std::size_t b = 0; b < std::size_t{kRows} * kBlocks; ++b) {
+    // Mixed scales, so some sub-blocks round to a zero 6-bit scale; a few
+    // constant, positive-only, negative-only and zero blocks.
+    const float scale = (b % 7 == 3 ? 1.0e-5F : 1.0e-3F) *
+                        static_cast<float>(1 + next() % 1000);
+    const auto d = static_cast<_Float16>(scale);
+    std::memcpy(&q8[b * 34], &d, 2);
+    for (int i = 0; i < 32; ++i) {
+      int code = static_cast<int>(next() % 255) - 127;
+      if (b % 29 == 5)
+        code = 17;
+      else if (b % 31 == 7)
+        code = std::abs(code);
+      else if (b % 37 == 11)
+        code = -std::abs(code);
+      else if (b % 41 == 13)
+        code = 0;
+      q8[b * 34 + 2 + i] =
+          static_cast<std::uint8_t>(static_cast<std::int8_t>(code));
+      values[b * 32 + i] = static_cast<float>(static_cast<std::int8_t>(code)) *
+                           static_cast<float>(d);
+    }
+  }
+  const std::size_t bytes = std::size_t{kRows} * (kCols / 256) * 144;
+  auto device_q8 = Allocate<std::uint8_t>(q8.size());
+  auto device_q4 = Allocate<std::uint8_t>(bytes);
+  CheckHip(
+      hipMemcpy(device_q8.get(), q8.data(), q8.size(), hipMemcpyHostToDevice),
+      "Q8_0 rows");
+  q::QuantizeQ8_0ToQ4K(device_q8.get(), device_q4.get(), kRows, kCols, nullptr);
+  std::vector<std::uint8_t> actual(bytes);
+  CheckHip(
+      hipMemcpy(actual.data(), device_q4.get(), bytes, hipMemcpyDeviceToHost),
+      "Q4_K rows");
+  std::vector<std::uint8_t> expected(bytes);
+  for (std::size_t sb = 0; sb < bytes / 144; ++sb)
+    HostQ4K(values.data() + sb * 256, expected.data() + sb * 144);
+  for (std::size_t sb = 0; sb < bytes / 144; ++sb) {
+    if (std::memcmp(&actual[sb * 144], &expected[sb * 144], 144) == 0)
+      continue;
+    std::string detail;
+    for (int i = 0; i < 144; ++i)
+      if (actual[sb * 144 + i] != expected[sb * 144 + i])
+        detail += " [" + std::to_string(i) + "] " +
+                  std::to_string(actual[sb * 144 + i]) + "/" +
+                  std::to_string(expected[sb * 144 + i]);
+    throw std::runtime_error(
+        "Q4_K superblock " + std::to_string(sb) +
+        " differs from the reference (device/host):" + detail.substr(0, 400));
+  }
+  // Reconstruction error relative to the Q8_0 values.
+  double error = 0, norm = 0;
+  for (std::size_t sb = 0; sb < bytes / 144; ++sb) {
+    const std::uint8_t* block = actual.data() + sb * 144;
+    _Float16 d, dmin;
+    std::memcpy(&d, block, 2);
+    std::memcpy(&dmin, block + 2, 2);
+    const std::uint8_t* packed = block + 4;
+    for (int j = 0; j < 8; ++j) {
+      const int sc = j < 4
+                         ? packed[j] & 63
+                         : (packed[j + 4] & 0xF) | ((packed[j - 4] >> 6) << 4);
+      const int m = j < 4 ? packed[j + 4] & 63
+                          : (packed[j + 4] >> 4) | ((packed[j] >> 6) << 4);
+      for (int i = 0; i < 32; ++i) {
+        const int byte = 32 * (j / 2) + i;
+        const int code = (block[16 + byte] >> (4 * (j % 2))) & 0xF;
+        const double value = double(d) * sc * code - double(dmin) * m;
+        const double reference = values[sb * 256 + 32 * j + i];
+        error += (value - reference) * (value - reference);
+        norm += reference * reference;
+      }
+    }
+  }
+  if (!(std::sqrt(error / norm) < 0.1))
+    throw std::runtime_error("Q4_K draft head reconstruction error");
+  // One projection of eight rows against eight projections of one row.
+  constexpr int kTokens = 8;
+  std::vector<float> x(std::size_t{kTokens} * kCols);
+  for (auto& v : x)
+    v = static_cast<float>(static_cast<int>(next() % 2001) - 1000) / 997.0F;
+  auto device_x = Allocate<float>(x.size());
+  auto ids = Allocate<std::int32_t>(kTokens);
+  auto batch = Allocate<float>(std::size_t{kTokens} * kRows);
+  auto single = Allocate<float>(std::size_t{kTokens} * kRows);
+  CheckHip(hipMemcpy(device_x.get(), x.data(), x.size() * sizeof(float),
+                     hipMemcpyHostToDevice),
+           "draft head input");
+  CheckHip(hipMemset(ids.get(), 0, kTokens * sizeof(std::int32_t)),
+           "draft head ids");
+  if (qfn_mmq_moe_vec(12, device_q4.get(), device_x.get(), ids.get(),
+                      batch.get(), kRows, kCols, kTokens, 1, 1, nullptr) != 0)
+    throw std::runtime_error("batched Q4_K draft head projection");
+  for (int t = 0; t < kTokens; ++t)
+    if (qfn_mmq_moe_vec(12, device_q4.get(), device_x.get() + t * kCols,
+                        ids.get(), single.get() + t * kRows, kRows, kCols, 1, 1,
+                        1, nullptr) != 0)
+      throw std::runtime_error("single-row Q4_K draft head projection");
+  std::vector<float> batched(std::size_t{kTokens} * kRows);
+  std::vector<float> rows(batched.size());
+  CheckHip(hipMemcpy(batched.data(), batch.get(),
+                     batched.size() * sizeof(float), hipMemcpyDeviceToHost),
+           "batched draft logits");
+  CheckHip(hipMemcpy(rows.data(), single.get(), rows.size() * sizeof(float),
+                     hipMemcpyDeviceToHost),
+           "single-row draft logits");
+  if (std::memcmp(batched.data(), rows.data(), rows.size() * sizeof(float)))
+    throw std::runtime_error("Q4_K draft logits depend on the batch width");
+  std::cout << "Q4_K draft head: reference bytes, reconstruction and "
+               "batch-width invariance passed\n";
+}
+
 int main() {
   try {
+    CheckQ4KDraftHead();
     CheckRemapDraftIds();
     CheckPenaltyArgmax(257);
     CheckPenaltyArgmax(248320);

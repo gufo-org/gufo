@@ -693,6 +693,12 @@ void VerificationCandidates(const float* logits, GreedyPenaltyRows penalties,
                             sampling::LogitCandidate* out, std::uint32_t rows,
                             std::uint32_t vocab, hipStream_t stream);
 
+/// GGML Q4_K bytes for Q8_0 rows (cols a multiple of 256), computed with
+/// ggml's reference quantize_row_q4_K_ref arithmetic on the dequantized
+/// values. One launch; the result depends only on the input bytes.
+void QuantizeQ8_0ToQ4K(const void* q8, void* q4k, std::size_t rows,
+                       std::uint32_t cols, hipStream_t stream);
+
 /// Draft logits of empty table slots (table[i] < 0) become -infinity.
 void MaskDraftLogits(float* logits, const std::int32_t* table, std::uint32_t n,
                      hipStream_t stream);

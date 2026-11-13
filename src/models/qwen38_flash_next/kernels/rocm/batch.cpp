@@ -584,10 +584,18 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
       if (!DenseBatch(full_head, base.mixed, batch_logits_, n, error))
         return false;
       for (std::uint32_t i = 0; i < n; ++i) {
-        if (slot[i] < subset_rows)
-          GatherDraftLogits(logits_of(i), items[i].session->mtp_.draft_ids,
-                            static_cast<std::uint32_t>(prefix),
-                            speculative::kDraftVocabExtraRows, stream_);
+        if (slot[i] >= subset_rows)
+          continue;
+        GatherDraftLogits(logits_of(i), items[i].session->mtp_.draft_ids,
+                          static_cast<std::uint32_t>(prefix),
+                          speculative::kDraftVocabExtraRows, stream_);
+        // A requantized prefix scores its rows as alone; the table rows
+        // above keep the full head's values either way.
+        if (prefix_head.data != full_head.data &&
+            !Dense(prefix_head,
+                   base.mixed + std::size_t{slot[i]} * full_head.cols,
+                   logits_of(i), 1, error))
+          return false;
       }
     } else if (subset_rows != 0) {
       float* staged = batch_logits_ + kBatchSessions * vocab -
