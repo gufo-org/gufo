@@ -18,6 +18,8 @@
 #include "gufo/ext/experimental/npu.hpp"
 #include "src/models/embedding_gemma2/config.hpp"
 #include "src/models/embedding_gemma2/loader.hpp"
+#include "src/models/embedding_gemma2/npu/audio_npu.hpp"
+#include "src/models/embedding_gemma2/npu/vision_npu.hpp"
 #include "src/models/embedding_gemma2/tensor.hpp"
 
 namespace gufo::models::embedding_gemma2::npu {
@@ -35,7 +37,7 @@ constexpr std::size_t kBandRows = 512, kSmallBandRows = 128;
 // rows, each within one band of the 128-row program.
 constexpr std::size_t kSmallSplitRows = 256;
 // Concurrent parts of a batch (BfpGemm has as many staging lanes).
-constexpr std::size_t kParts = 4;
+constexpr std::size_t kParts = 6;
 constexpr std::size_t kGateBlock = 64;  // gate rows per interleaved tile
 
 struct Layer {
@@ -68,7 +70,10 @@ struct Encoder::Impl {
   std::vector<Layer> layers;
   std::mutex mutex;
   bool profile{std::getenv("GUFO_NPU_PROFILE") != nullptr};
-  ModelConfig text_only;
+  ModelConfig text_only;  // the checkpoint's configuration
+  std::string model_root;
+  std::unique_ptr<VisionTower> vision;
+  std::unique_ptr<AudioTower> audio;
 
   const Tensor& Find(const std::string& name) const {
     const Tensor* t = loaded.store->Find(std::string(kTextTensorPrefix) + name);
@@ -117,13 +122,13 @@ struct Encoder::Impl {
       throw std::runtime_error(loaded.error);
     config = &loaded.config.text;
     text_only = loaded.config;
-    text_only.supported_vision = text_only.supported_video =
-        text_only.supported_audio = false;
+    model_root = model_dir;
     device = gufo::npu::Device::Open();
-    gemm = gufo::npu::BfpGemm::Open(device, gufo::npu::FindDesign("bfpgemm"),
-                                    std::size_t(1400) << 20);
+    gemm = gufo::npu::BfpGemm::Open(
+        device, gufo::npu::FindDesign("bfpgemm"),
+        std::size_t(2048) << 20);  // the design's maximum: room for the towers
     for (auto& scratch : scratches)
-      scratch = gemm.NewScratch(std::size_t(288) << 20);
+      scratch = gemm.NewScratch(std::size_t(192) << 20);
     embed = reinterpret_cast<const std::uint16_t*>(
         Find("embed_tokens.weight").data);
     ple_model = Upload({"ple.per_layer_model_projection.weight"});
@@ -160,16 +165,17 @@ struct Encoder::Impl {
   // softmax runs on the CPU. `visible(r, lo, hi, &b, &e)` narrows row r's
   // keys within [lo, hi).
   template<typename Visible>
-  void NpuAttention(gufo::npu::BfpGemm::Scratch& scratch, const float* qkv,
-                    std::size_t row_w, std::size_t heads, std::size_t kv,
-                    std::size_t hd, const std::vector<std::size_t>& starts,
+  void NpuAttention(gufo::npu::BfpGemm::Scratch& scratch,
+                    const std::uint16_t* qkv, std::size_t row_w,
+                    std::size_t heads, std::size_t kv, std::size_t hd,
+                    const std::vector<std::size_t>& starts,
                     const std::vector<char>& long_seq, std::size_t row0,
                     std::size_t row1, std::size_t span_rows,
                     const Visible& visible, std::uint16_t* context16,
                     std::size_t qw) {
     struct Span {
       std::size_t seq, q0, q1, k0, k1;         // absolute rows
-      int keys[kMaxHeads], values[kMaxHeads];  // per query head
+      int keys[kMaxHeads], values[kMaxHeads];  // per KV head
     };
     struct Item {
       const Span* span;
@@ -206,71 +212,37 @@ struct Encoder::Impl {
     auto t = Clock::now();
     double t_upload, t_qk, t_soft;
     scratch.Reset();
-    // Keys, then values, per span and query head in item order, so that the
-    // products of one layer batch into few NPU jobs (BfpGemm batches calls
-    // whose matrices lie at a constant stride). Spans longer than one output
-    // group of keys (full attention over long sequences) share one upload
-    // per KV head instead.
+    // Keys, then values, one matrix per span and KV head, in span order, so
+    // that the calls of one (KV head, query head in its group) pair over the
+    // spans use matrices at a constant stride and batch into one NPU job.
+    // Spans longer than one output group of keys (full attention over long
+    // sequences) with the same keys share one upload.
     const std::size_t group_heads = heads / kv;
-    // Specs in upload order; slot[i] is where spec i's id goes. Long spans
-    // with the same keys reuse the first one's ids (`alias`).
     using Spec = gufo::npu::BfpGemm::Scratch::Spec;
     std::vector<Spec> specs;
     std::vector<int*> slot;
     std::vector<std::pair<int*, int*>> alias;  // (target, source) after upload
     std::map<std::pair<std::size_t, std::size_t>, Span*> shared[2];
-    std::map<std::pair<std::size_t, std::size_t>, std::size_t> first_spec[2];
     for (int pass = 0; pass < 2; ++pass)
       for (Span& sp : spans) {
         const std::size_t n = sp.k1 - sp.k0;
-        const float* base = qkv + sp.k0 * row_w + qw;
+        const std::uint16_t* base = qkv + sp.k0 * row_w + qw;
         int* ids = pass == 0 ? sp.keys : sp.values;
-        const bool long_span = n > 1024;
-        if (long_span) {
+        if (n > 1024) {
           if (auto it = shared[pass].find({sp.k0, sp.k1});
               it != shared[pass].end()) {
             int* src = pass == 0 ? it->second->keys : it->second->values;
-            for (std::size_t h = 0; h < heads; ++h)
+            for (std::size_t h = 0; h < kv; ++h)
               alias.push_back({&ids[h], &src[h]});
             continue;
           }
           shared[pass][{sp.k0, sp.k1}] = &sp;
         }
-        // A short span with the keys of an earlier one copies its encoded
-        // matrices (still one matrix per call, evenly spaced).
-        if (!long_span) {
-          auto [it, fresh] =
-              first_spec[pass].try_emplace({sp.k0, sp.k1}, specs.size());
-          if (!fresh) {
-            for (std::size_t h = 0; h < heads; ++h) {
-              Spec copy = specs[it->second + h];
-              copy.same_as = int(it->second + h);
-              specs.push_back(copy);
-              slot.push_back(&ids[h]);
-            }
-            continue;
-          }
-        }
-        for (std::size_t h = 0; h < heads; ++h) {
-          const std::size_t kh = h / group_heads;
-          if (h % group_heads != 0) {
-            // A query head sharing its KV head: the same matrix, copied so
-            // the calls stay evenly spaced (long spans reuse it).
-            if (long_span) {
-              alias.push_back({&ids[h], &ids[h - 1]});
-            } else {
-              Spec copy = specs.back();
-              copy.same_as = int(specs.size()) - 1;
-              specs.push_back(copy);
-              slot.push_back(&ids[h]);
-            }
-            continue;
-          }
-          if (pass == 0)
-            specs.push_back({int(n), int(hd), base + kh * hd, row_w, 1});
-          else
-            specs.push_back(
-                {int(hd), int(n), base + kv * hd + kh * hd, 1, row_w});
+        for (std::size_t h = 0; h < kv; ++h) {
+          Spec spec = pass == 0 ? Spec{int(n), int(hd), nullptr, row_w, 1}
+                                : Spec{int(hd), int(n), nullptr, 1, row_w};
+          spec.weights16 = base + (pass == 0 ? 0 : kv * hd) + h * hd;
+          specs.push_back(spec);
           slot.push_back(&ids[h]);
         }
       }
@@ -282,8 +254,8 @@ struct Encoder::Impl {
     t_upload = ms(t);
     t = Clock::now();
     std::vector<Item> items;
-    for (const Span& sp : spans)
-      for (std::size_t h = 0; h < heads; ++h)
+    for (std::size_t h = 0; h < heads; ++h)
+      for (const Span& sp : spans)
         items.push_back({&sp, h, {}, {}});
     // Queries and scores stay bf16 (the NPU rounds them to bf16 anyway).
     host::ParallelFor(items.size(), 1, [&](std::size_t b, std::size_t e) {
@@ -292,8 +264,8 @@ struct Encoder::Impl {
         const std::size_t rows = it.span->q1 - it.span->q0;
         it.q.resize(rows * hd);
         for (std::size_t r = 0; r < rows; ++r)
-          host::FloatToBf16(qkv + (it.span->q0 + r) * row_w + it.head * hd,
-                            it.q.data() + r * hd, hd);
+          std::memcpy(it.q.data() + r * hd,
+                      qkv + (it.span->q0 + r) * row_w + it.head * hd, hd * 2);
         it.scores.resize(rows * (it.span->k1 - it.span->k0));
       }
     });
@@ -311,9 +283,9 @@ struct Encoder::Impl {
     }
     std::vector<gufo::npu::BfpGemm::Call> calls;
     for (std::size_t i = 0; i < items.size(); ++i)
-      calls.push_back({items[i].span->keys[items[i].head], nullptr,
-                       int(items[i].span->q1 - items[i].span->q0), nullptr,
-                       items[i].q.data(), &epilogues[i]});
+      calls.push_back({items[i].span->keys[items[i].head / group_heads],
+                       nullptr, int(items[i].span->q1 - items[i].span->q0),
+                       nullptr, items[i].q.data(), &epilogues[i]});
     gemm.Run(calls);
     t_qk = ms(t);
     t = Clock::now();
@@ -365,9 +337,9 @@ struct Encoder::Impl {
           });
     }
     for (std::size_t i = 0; i < items.size(); ++i)
-      calls.push_back({items[i].span->values[items[i].head], nullptr,
-                       int(items[i].span->q1 - items[i].span->q0), nullptr,
-                       items[i].scores.data(), &pv_epilogues[i]});
+      calls.push_back({items[i].span->values[items[i].head / group_heads],
+                       nullptr, int(items[i].span->q1 - items[i].span->q0),
+                       nullptr, items[i].scores.data(), &pv_epilogues[i]});
     gemm.Run(calls);
     if (profile)
       std::fprintf(stderr,
@@ -394,8 +366,15 @@ struct Encoder::Impl {
     std::vector<std::int32_t> positions;
     std::vector<std::size_t> seq_of;
     std::vector<char> long_seq;
-    std::vector<float> state, ple, qkv[2], context, tmp, projected;
-    std::vector<std::uint16_t> normed16, context16, act16;
+    std::vector<float> state, qkv[2], context, projected;
+    std::vector<std::uint16_t> qkv16[2];
+    std::vector<std::uint16_t> normed16, context16, act16, ple16, tmp16;
+    // Image, video and audio soft tokens: rows [row, row + values / 512).
+    struct Media {
+      std::size_t row;
+      std::vector<float> values;
+    };
+    std::vector<Media> media;
   };
   Work work;  // reused by every request (they run one at a time)
 
@@ -439,11 +418,17 @@ struct Encoder::Impl {
           std::max<std::size_t>(max_kv, g.num_key_value_heads * g.head_dim);
     }
     Grow(wk.state, rows * hidden);
-    Grow(wk.ple, rows * layers_n * per_layer);
-    for (auto& q : wk.qkv)
+    Grow(wk.ple16, rows * layers_n * per_layer);
+    for (auto& q : wk.qkv16)
       Grow(q, rows * (max_q + 2 * max_kv));
+    bool any_short = false;
+    for (std::size_t q = 0; q < seqs; ++q)
+      any_short |= !wk.long_seq[q];
+    if (any_short)  // CPU attention reads f32 rows
+      for (auto& q : wk.qkv)
+        Grow(q, rows * (max_q + 2 * max_kv));
     Grow(wk.context, rows * max_q);
-    Grow(wk.tmp, rows * hidden);
+    Grow(wk.tmp16, rows * hidden);
     Grow(wk.projected, rows * c.embedding_dim);
     Grow(wk.normed16, rows * hidden);
     Grow(wk.context16, rows * max_q);
@@ -541,6 +526,48 @@ struct Encoder::Impl {
     return out;
   }
 
+  // Overwrites the media placeholder rows of [r0, r1) with the towers' soft
+  // tokens, before the per-layer inputs are projected (as the GPU path
+  // inserts them into the state and the per-layer-input source).
+  static void SpliceMedia(const Work& wk, std::size_t r0, std::size_t r1,
+                          float* state) {
+    for (const Work::Media& m : wk.media) {
+      const std::size_t count = m.values.size() / 512;
+      const std::size_t lo = std::max(m.row, r0),
+                        hi = std::min(m.row + count, r1);
+      for (std::size_t r = lo; r < hi; ++r)
+        std::memcpy(state + (r - r0) * 512, m.values.data() + (r - m.row) * 512,
+                    512 * sizeof(float));
+    }
+  }
+
+  // The towers' soft tokens of every sequence's images, video frames and
+  // audio clips, loading each tower on first use.
+  void EncodeMedia(const std::vector<EncoderSequence>& sequences,
+                   const std::vector<std::size_t>& starts,
+                   const std::function<bool()>& cancelled) {
+    work.media.clear();
+    for (std::size_t q = 0; q < sequences.size(); ++q) {
+      const EncoderSequence& s = sequences[q];
+      const auto& stop = s.is_cancelled ? s.is_cancelled : cancelled;
+      for (const auto& image : s.images) {
+        if (!vision)
+          vision = std::make_unique<VisionTower>(gemm, model_root);
+        work.media.push_back(
+            {starts[q] + image.offset, vision->Run(image.patches, stop)});
+      }
+      for (const auto& clip : s.audio) {
+        if (!audio)
+          audio = std::make_unique<AudioTower>(gemm, model_root);
+        work.media.push_back(
+            {starts[q] + clip.offset, audio->Run(clip.features, stop)});
+      }
+    }
+    for (const Work::Media& m : work.media)
+      if (m.row + m.values.size() / 512 > starts.back())
+        throw std::runtime_error("media soft tokens past their sequence");
+  }
+
   // The encoder over rows [r0, r1) of `wk`, through the final projection.
   void RunPart(Work& wk, std::size_t r0, std::size_t r1, int lane,
                std::barrier<>* sync, const std::function<bool()>& cancelled,
@@ -554,8 +581,8 @@ struct Encoder::Impl {
     const float eps = c.rms_norm_eps;
     const auto& starts = wk.starts;
     float* state = wk.state.data() + r0 * hidden;
-    float* ple = wk.ple.data() + r0 * layers_n * per_layer;
-    float* tmp = wk.tmp.data() + r0 * hidden;
+    std::uint16_t* ple = wk.ple16.data() + r0 * layers_n * per_layer;
+    std::uint16_t* tmp = wk.tmp16.data() + r0 * hidden;
     std::uint16_t* normed16 = wk.normed16.data() + r0 * hidden;
     std::uint16_t* act16 = wk.act16.data() + r0 * std::max(inner, per_layer);
 
@@ -570,28 +597,60 @@ struct Encoder::Impl {
         std::copy(row.begin(), row.end(), state + r * hidden);
       }
     });
-    gemm.Run(ple_model, state, int(rows), ple);
-    const float ple_scale = 1.0f / std::sqrt(float(hidden));
-    host::ParallelFor(rows * layers_n, 64, [&](std::size_t b, std::size_t e) {
-      for (std::size_t i = b * per_layer; i < e * per_layer; ++i)
-        ple[i] *= ple_scale;
-    });
-    host::RmsNormRows(ple, ple, rows * layers_n, per_layer, ple_norm.data(),
-                      eps);
-
+    SpliceMedia(wk, r0, r1, state);
     using Epilogue = gufo::npu::BfpGemm::Epilogue;
+    // Output tiles copied into bf16 rows of width out_w.
+    auto copy_to = [](std::uint16_t* out, std::size_t out_w) {
+      return Epilogue(
+          [=](int t0, int n_rows, int n0, int w, const std::uint16_t* tile) {
+            for (int i = 0; i < n_rows; ++i)
+              std::memcpy(out + std::size_t(t0 + i) * out_w + std::size_t(n0),
+                          tile + std::size_t(i) * 128, std::size_t(w) * 2);
+          });
+    };
+    // state += rmsnorm(x16) * weight, then * scale, per row.
+    auto add_norm = [&](const std::uint16_t* x16, const std::vector<float>& wt,
+                        float scale) {
+      host::ParallelFor(rows, 16, [&](std::size_t b, std::size_t e) {
+        std::vector<float> buf(hidden);
+        for (std::size_t r = b; r < e; ++r) {
+          host::Bf16ToFloat(x16 + r * hidden, buf.data(), hidden);
+          host::AddNormRows(state + r * hidden, buf.data(), 1, hidden,
+                            wt.data(), eps, scale);
+        }
+      });
+    };
+    {
+      const Epilogue to_ple = copy_to(ple, layers_n * per_layer);
+      gemm.Run(gufo::npu::BfpGemm::Call{ple_model, state, int(rows), nullptr,
+                                        nullptr, &to_ple});
+    }
+    // rmsnorm(x / sqrt(hidden)) = x / sqrt(mean(x^2) + eps * hidden): the
+    // scale folds into eps.
+    host::ParallelFor(rows * layers_n, 64, [&](std::size_t b, std::size_t e) {
+      std::vector<float> buf(per_layer);
+      for (std::size_t i = b; i < e; ++i) {
+        std::uint16_t* slice = ple + i * per_layer;
+        host::Bf16ToFloat(slice, buf.data(), per_layer);
+        host::RmsNormRows(buf.data(), buf.data(), 1, per_layer, ple_norm.data(),
+                          eps * float(hidden));
+        host::FloatToBf16(buf.data(), slice, per_layer);
+      }
+    });
+
     // act(gate) * up of an interleaved [gate 64 | up 64] tile, as bf16 (rows
     // relative to this part).
-    auto gated = [&](std::uint16_t* out, std::size_t out_w, const float* add,
-                     std::size_t add_stride) {
+    auto gated = [&](std::uint16_t* out, std::size_t out_w,
+                     const std::uint16_t* add, std::size_t add_stride) {
       return [=](int t0, int n_rows, int n0, int w, const std::uint16_t* tile) {
-        float buf[128], res[kGateBlock];
+        float buf[128], res[kGateBlock], side[128];
         for (int i = 0; i < n_rows; ++i) {
           const std::size_t r = std::size_t(t0 + i);
           host::Bf16ToFloat(tile + std::size_t(i) * 128, buf, std::size_t(w));
           if (add) {  // ple: act(gate tile) * ple row slice
-            host::GatedRows(buf, 0, add + r * add_stride + std::size_t(n0), 0,
-                            res, 0, 1, std::size_t(w),
+            host::Bf16ToFloat(add + r * add_stride + std::size_t(n0), side,
+                              std::size_t(w));
+            host::GatedRows(buf, 0, side, 0, res, 0, 1, std::size_t(w),
                             host::Activation::kGeluTanh);
             host::FloatToBf16(res, out + r * out_w + std::size_t(n0),
                               std::size_t(w));
@@ -605,6 +664,15 @@ struct Encoder::Impl {
       };
     };
 
+    using Clock = std::chrono::steady_clock;
+    double cat[8] = {};  // qkv, qknorm, attn, o, ffn, ple, norms, other
+    auto mark = Clock::now();
+    auto lap = [&](int i) {
+      const auto now = Clock::now();
+      cat[i] += std::chrono::duration<double, std::milli>(now - mark).count();
+      mark = now;
+    };
+    lap(7);
     for (std::size_t l = 0; l < layers_n; ++l) {
       if ((cancelled && cancelled()) || stop) {
         stop = true;
@@ -616,25 +684,41 @@ struct Encoder::Impl {
       const LayerGeometry& g = c.layers[l];
       const std::size_t hd = g.head_dim, kv = g.num_key_value_heads;
       const std::size_t qw = heads * hd, kw = kv * hd, row_w = qw + 2 * kw;
-      float* qkv_all = wk.qkv[l % 2].data();
-      float* qkv = qkv_all + r0 * row_w;
+      std::uint16_t* qkv16_all = wk.qkv16[l % 2].data();
+      std::uint16_t* qkv16 = qkv16_all + r0 * row_w;
+      float* qkv_all = wk.qkv[l % 2].data();  // short sequences only
+      float* qkv = qkv_all ? qkv_all + r0 * row_w : nullptr;
       float* context = wk.context.data() + r0 * qw;
       std::uint16_t* context16 = wk.context16.data() + r0 * qw;
       host::RmsNormRowsBf16(state, normed16, rows, hidden, w.input_norm.data(),
                             eps);
-      gemm.Run(gufo::npu::BfpGemm::Call{w.qkv, nullptr, int(rows), qkv,
-                                        normed16, nullptr});
+      lap(6);
+      {
+        const Epilogue to_qkv = copy_to(qkv16, row_w);
+        gemm.Run(gufo::npu::BfpGemm::Call{w.qkv, nullptr, int(rows), nullptr,
+                                          normed16, &to_qkv});
+      }
+      lap(0);
+      // Per-head q/k norms (v: unweighted) and rotary embeddings on q and k,
+      // in one pass over the bf16 rows; rows of short sequences (CPU
+      // attention) also land as f32.
       host::ParallelFor(rows, 16, [&](std::size_t b, std::size_t e) {
+        std::vector<float> row(row_w);
         for (std::size_t r = b; r < e; ++r) {
-          float* q = qkv + r * row_w;
+          std::uint16_t* r16 = qkv16 + r * row_w;
+          host::Bf16ToFloat(r16, row.data(), row_w);
+          float* q = row.data();
           host::RmsNormRows(q, q, heads, hd, w.q_norm.data(), eps);
           host::RmsNormRows(q + qw, q + qw, kv, hd, w.k_norm.data(), eps);
           host::RmsNormRows(q + qw + kw, q + qw + kw, kv, hd, nullptr, eps);
+          host::RopeNeox(q, 1, row_w, heads + kv, hd, hd,
+                         wk.positions.data() + r0 + r, g.rope_theta);
+          host::FloatToBf16(q, r16, row_w);
+          if (qkv && !wk.long_seq[wk.seq_of[r0 + r]])
+            std::copy(row.begin(), row.end(), qkv + r * row_w);
         }
       });
-      // Rotary embeddings on q and k: k heads follow q heads in each row.
-      host::RopeNeox(qkv, rows, row_w, heads + kv, hd, hd,
-                     wk.positions.data() + r0, g.rope_theta);
+      lap(1);
       if (sync)
         sync->arrive_and_wait();  // every part's keys and values are ready
       if (stop)
@@ -651,63 +735,75 @@ struct Encoder::Impl {
         *e = hi;
       };
       // Long sequences: QK^T and PV on the NPU, the softmax on the CPU.
-      NpuAttention(scratches[lane], qkv_all, row_w, heads, kv, hd, starts,
+      NpuAttention(scratches[lane], qkv16_all, row_w, heads, kv, hd, starts,
                    wk.long_seq, r0, r1, wk.span, visible, wk.context16.data(),
                    qw);
-      host::Attention(
-          {.q = qkv,
-           .q_stride = row_w,
-           .k = qkv_all + qw,
-           .k_stride = row_w,
-           .v = qkv_all + qw + kw,
-           .v_stride = row_w,
-           .out = context,
-           .out_stride = qw,
-           .rows = rows,
-           .heads = heads,
-           .kv_heads = kv,
-           .dim = hd,
-           .dim_v = hd,
-           .scale = 1.0f},
-          [&](std::size_t r, std::size_t* b, std::size_t* e) {
-            const std::size_t q = wk.seq_of[r0 + r];
-            if (wk.long_seq[q]) {
-              *b = *e = 0;  // done on the NPU; leave its rows
-              return;
-            }
-            visible(r0 + r, starts[q], starts[q + 1], b, e);
-          },
-          /*skip_empty=*/true);
+      if (qkv)
+        host::Attention(
+            {.q = qkv,
+             .q_stride = row_w,
+             .k = qkv_all + qw,
+             .k_stride = row_w,
+             .v = qkv_all + qw + kw,
+             .v_stride = row_w,
+             .out = context,
+             .out_stride = qw,
+             .rows = rows,
+             .heads = heads,
+             .kv_heads = kv,
+             .dim = hd,
+             .dim_v = hd,
+             .scale = 1.0f},
+            [&](std::size_t r, std::size_t* b, std::size_t* e) {
+              const std::size_t q = wk.seq_of[r0 + r];
+              if (wk.long_seq[q]) {
+                *b = *e = 0;  // done on the NPU; leave its rows
+                return;
+              }
+              visible(r0 + r, starts[q], starts[q + 1], b, e);
+            },
+            /*skip_empty=*/true);
       // CPU-attention rows (short sequences) join the bf16 context.
       host::ParallelFor(rows, 64, [&](std::size_t b, std::size_t e) {
         for (std::size_t r = b; r < e; ++r)
           if (!wk.long_seq[wk.seq_of[r0 + r]])
             host::FloatToBf16(context + r * qw, context16 + r * qw, qw);
       });
-      gemm.Run(gufo::npu::BfpGemm::Call{w.o, nullptr, int(rows), tmp, context16,
-                                        nullptr});
-      host::AddNormRows(state, tmp, rows, hidden, w.post_attn_norm.data(), eps,
-                        1.0f);
+      lap(2);
+      const Epilogue to_tmp = copy_to(tmp, hidden);
+      gemm.Run(gufo::npu::BfpGemm::Call{w.o, nullptr, int(rows), nullptr,
+                                        context16, &to_tmp});
+      lap(3);
+      add_norm(tmp, w.post_attn_norm, 1.0f);
 
       host::RmsNormRowsBf16(state, normed16, rows, hidden,
                             w.pre_ffn_norm.data(), eps);
+      lap(6);
       const Epilogue ffn = gated(act16, inner, nullptr, 0);
       gemm.Run(gufo::npu::BfpGemm::Call{w.gate_up, nullptr, int(rows), nullptr,
                                         normed16, &ffn});
-      gemm.Run(gufo::npu::BfpGemm::Call{w.down, nullptr, int(rows), tmp, act16,
-                                        nullptr});
-      host::AddNormRows(state, tmp, rows, hidden, w.post_ffn_norm.data(), eps,
-                        1.0f);
+      gemm.Run(gufo::npu::BfpGemm::Call{w.down, nullptr, int(rows), nullptr,
+                                        act16, &to_tmp});
+      lap(4);
+      add_norm(tmp, w.post_ffn_norm, 1.0f);
+      lap(6);
 
       const Epilogue ple_gate =
           gated(act16, per_layer, ple + l * per_layer, layers_n * per_layer);
       gemm.Run(gufo::npu::BfpGemm::Call{w.ple_gate, state, int(rows), nullptr,
                                         nullptr, &ple_gate});
-      gemm.Run(gufo::npu::BfpGemm::Call{w.ple_proj, nullptr, int(rows), tmp,
-                                        act16, nullptr});
-      host::AddNormRows(state, tmp, rows, hidden, w.ple_norm.data(), eps,
-                        w.scalar);
+      gemm.Run(gufo::npu::BfpGemm::Call{w.ple_proj, nullptr, int(rows), nullptr,
+                                        act16, &to_tmp});
+      lap(5);
+      add_norm(tmp, w.ple_norm, w.scalar);
+      lap(6);
     }
+    if (profile)
+      std::fprintf(
+          stderr,
+          "embedding_gemma2 npu: rows %zu qkv %.0f qknorm+rope %.0f attn "
+          "%.0f o %.0f ffn %.0f ple %.0f norms %.0f pre %.0f ms\n",
+          rows, cat[0], cat[1], cat[2], cat[3], cat[4], cat[5], cat[6], cat[7]);
     host::RmsNormRows(state, state, rows, hidden, final_norm.data(), eps);
     gemm.Run(projection, state, int(rows),
              wk.projected.data() + r0 * c.embedding_dim);
@@ -741,11 +837,6 @@ bool Encoder::EmbedMultimodal(const std::vector<EncoderSequence>& sequences,
   std::vector<std::uint32_t> tokens;
   std::vector<std::size_t> starts{0};
   for (const EncoderSequence& s : sequences) {
-    if (!s.images.empty() || !s.audio.empty()) {
-      if (error)
-        *error = "embedding_gemma2: --npu embeds text only";
-      return false;
-    }
     if (s.tokens.empty()) {
       if (error)
         *error = "embedding_gemma2: empty sequence";
@@ -762,6 +853,7 @@ bool Encoder::EmbedMultimodal(const std::vector<EncoderSequence>& sequences,
   }
   std::lock_guard lock(impl_->mutex);
   try {
+    impl_->EncodeMedia(sequences, starts, is_cancelled);
     auto out = impl_->RunSplit(tokens, starts, is_cancelled);
     if (out.size() != sequences.size()) {
       if (error)

@@ -21,6 +21,12 @@ from embedding_images import cosine, picture
 FIXTURES = Path(__file__).resolve().parents[1] / 'fixtures' / 'embedding_gemma2'
 
 
+
+# Cosine gates: against the reference vectors, and between responses that
+# must agree (batching, truncation, encodings). Backends with lower-precision
+# arithmetic (--npu) pass measured values on the command line.
+THRESHOLDS = {"reference": 0.9999, "consistency": 0.99999}
+
 def source(path):
     return base64.b64encode(path.read_bytes()).decode()
 
@@ -69,7 +75,12 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--smoke', action='store_true')
     parser.add_argument('--server-log', type=Path)
+    parser.add_argument("--reference-cosine", type=float, default=THRESHOLDS["reference"],
+                        help="Minimum cosine against the reference vectors")
+    parser.add_argument("--consistency-cosine", type=float, default=THRESHOLDS["consistency"],
+                        help="Minimum cosine between responses that must agree")
     args = parser.parse_args()
+    THRESHOLDS["reference"], THRESHOLDS["consistency"] = args.reference_cosine, args.consistency_cosine
     if args.output.exists():
         parser.error('output must not exist')
     fixture = json.loads((FIXTURES / 'video_golden.json').read_text())
@@ -100,7 +111,7 @@ def main():
             assert len(vector) == 768 and all(math.isfinite(x) for x in vector)
             assert abs(sum(x*x for x in vector)-1) < 1e-5
             agreement = cosine(vector, case['embedding'])
-            assert agreement >= 0.9999, (case['name'], agreement)
+            assert agreement >= THRESHOLDS["reference"], (case['name'], agreement)
             item['reference_cosine'] = agreement
 
     try:
@@ -136,7 +147,7 @@ def main():
                 assert status == 200, body
                 vec = body['data'][0]['embedding']
                 assert len(vec) == dimensions and abs(sum(v*v for v in vec)-1) < 1e-5
-                assert cosine(vec, cases['short']['embedding'][:dimensions]) >= 0.9999
+                assert cosine(vec, cases['short']['embedding'][:dimensions]) >= THRESHOLDS["reference"]
             # Matryoshka truncation at a non-default video budget.
             budgeted = cases['budget_560']
             for dimensions in (128, 256, 512):
@@ -145,7 +156,7 @@ def main():
                 assert status == 200, body
                 vec = body['data'][0]['embedding']
                 assert len(vec) == dimensions and abs(sum(v*v for v in vec)-1) < 1e-5
-                assert cosine(vec, budgeted['embedding'][:dimensions]) >= 0.9999
+                assert cosine(vec, budgeted['embedding'][:dimensions]) >= THRESHOLDS["reference"]
             with concurrent.futures.ThreadPoolExecutor(2) as pool:
                 replies = list(pool.map(lambda _: post([content(cases['short'])]), range(2)))
             for status, body in replies:

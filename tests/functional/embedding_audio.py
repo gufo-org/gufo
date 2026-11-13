@@ -20,6 +20,13 @@ import urllib.parse
 import wave
 
 
+
+# Cosine gates: against the reference vectors, and between responses that
+# must agree (batching, truncation, encodings). Backends with lower-precision
+# arithmetic (--npu) pass measured values on the command line.
+THRESHOLDS = {"reference": 0.999, "consistency": 0.99999}
+SIMILARITIES = []  # every reference comparison, for the report
+
 def audio(spec, transport="data"):
     if spec["kind"] == "speech":
         data = base64.b64encode((Path(__file__).resolve().parent / "fixtures/audio/clear-english-voice.wav").read_bytes()).decode()
@@ -69,7 +76,8 @@ def check_vector(actual, expected):
     norm = sum(x * x for x in actual)
     assert abs(norm - 1) < 1e-4, norm
     similarity = sum(x * y for x, y in zip(actual, expected)) / math.sqrt(norm * sum(y * y for y in expected))
-    assert similarity > 0.999, similarity
+    SIMILARITIES.append(similarity)
+    assert similarity > THRESHOLDS["reference"], similarity
     return similarity
 
 
@@ -79,7 +87,12 @@ def main():
     parser.add_argument("--model", default="embeddinggemma-2")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--server-log", type=Path, required=True)
+    parser.add_argument("--reference-cosine", type=float, default=THRESHOLDS["reference"],
+                        help="Minimum cosine against the reference vectors")
+    parser.add_argument("--consistency-cosine", type=float, default=THRESHOLDS["consistency"],
+                        help="Minimum cosine between responses that must agree")
     args = parser.parse_args()
+    THRESHOLDS["reference"], THRESHOLDS["consistency"] = args.reference_cosine, args.consistency_cosine
     fixture = json.loads((Path(__file__).resolve().parents[1] / "fixtures/embedding_gemma2/audio_embedding_golden.json").read_text())
     cases = fixture["cases"]
     results = []
@@ -191,6 +204,7 @@ def main():
         check_vector(result["data"][0]["embedding"], cases[2]["embedding"])
         report["status"] = "passed"
     finally:
+        report["reference_similarities"] = SIMILARITIES
         args.output.write_text(json.dumps(report, indent=2))
     print(f"PASS audio embeddings: {len(results)} requests")
 

@@ -1,7 +1,8 @@
 #ifndef GUFO_MODELS_EMBEDDING_GEMMA2_NPU_ENCODER_NPU_HPP_
 #define GUFO_MODELS_EMBEDDING_GEMMA2_NPU_ENCODER_NPU_HPP_
 
-// EmbeddingGemma 2 text embeddings on the XDNA NPU (`serve embedding --npu`):
+// EmbeddingGemma 2 embeddings (text, images, video, audio) on the XDNA NPU
+// (`serve embedding --npu`):
 // every matrix product runs on gufo::npu::BfpGemm, norms, rotary embeddings,
 // attention and pooling on the CPU. The GPU is not used.
 
@@ -26,12 +27,12 @@ public:
   [[nodiscard]] static std::unique_ptr<Encoder> Create(
       const std::string& model_dir, std::string* error = nullptr);
 
-  /// The checkpoint's configuration, with image, video and audio inputs
-  /// marked unsupported.
+  /// The checkpoint's configuration.
   [[nodiscard]] const ModelConfig& config() const;
 
-  /// Pooled, L2-normalized embeddings of text-only sequences, as
-  /// hip::EncoderRuntime::EmbedMultimodal. Images and audio are refused.
+  /// Pooled, L2-normalized embeddings, as hip::EncoderRuntime::
+  /// EmbedMultimodal; images, video frames and audio clips go through the
+  /// NPU towers (vision_npu.hpp, audio_npu.hpp) first.
   [[nodiscard]] bool EmbedMultimodal(
       const std::vector<EncoderSequence>& sequences,
       std::vector<std::vector<float>>* embeddings, std::string* error = nullptr,
