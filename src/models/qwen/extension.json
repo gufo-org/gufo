@@ -32,6 +32,96 @@
       }
     }
   ],
+  "models": [
+    {
+      "id": "qwen27-q4",
+      "provider": "qwen27-q4",
+      "license": "apache-2.0",
+      "description": "Qwen3.8 27B, UD-Q4_K_XL GGUF",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3.8-27B-GGUF",
+            "revision": "ce331efc48d5722b4b8041f72793e530eae18d9b"
+          },
+          "include": [
+            "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+          ]
+        },
+        {
+          "role": "dflash",
+          "option": "--dflash-model",
+          "install": "default",
+          "source": {
+            "hf": "z-lab/Qwen3.8-27B-DFlash2-GGUF",
+            "revision": "2d9571f8ce46e151f61c6499c99dee6079e1d610"
+          },
+          "include": [
+            "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+          ]
+        },
+        {
+          "role": "mmproj",
+          "option": "--mmproj",
+          "install": "default",
+          "source": {
+            "hf": "unsloth/Qwen3.8-27B-GGUF",
+            "revision": "ce331efc48d5722b4b8041f72793e530eae18d9b"
+          },
+          "include": [
+            "mmproj-BF16.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen27-q8",
+      "provider": "qwen27-q4",
+      "license": "apache-2.0",
+      "description": "Qwen3.8 27B, UD-Q8_K_XL GGUF",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3.8-27B-GGUF",
+            "revision": "ce331efc48d5722b4b8041f72793e530eae18d9b"
+          },
+          "include": [
+            "Qwen3.8-27B-UD-Q8_K_XL.gguf"
+          ]
+        },
+        {
+          "role": "dflash",
+          "option": "--dflash-model",
+          "install": "default",
+          "source": {
+            "hf": "z-lab/Qwen3.8-27B-DFlash2-GGUF",
+            "revision": "2d9571f8ce46e151f61c6499c99dee6079e1d610"
+          },
+          "include": [
+            "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+          ]
+        },
+        {
+          "role": "mmproj",
+          "option": "--mmproj",
+          "install": "default",
+          "source": {
+            "hf": "unsloth/Qwen3.8-27B-GGUF",
+            "revision": "ce331efc48d5722b4b8041f72793e530eae18d9b"
+          },
+          "include": [
+            "mmproj-BF16.gguf"
+          ]
+        }
+      ]
+    }
+  ],
   "options": [
     {
       "name": "--dflash-model",
@@ -63,7 +153,8 @@
       "**/*.h",
       "**/*.hpp",
       "**/*.hip",
-      "extension.*"
+      "extension.*",
+      "models.lock.json"
     ],
     "exclude": [
       "tests/",

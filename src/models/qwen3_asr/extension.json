@@ -25,6 +25,26 @@
       "entry": "qwen3_asr_provider_register"
     }
   ],
+  "models": [
+    {
+      "id": "qwen3-asr",
+      "provider": "qwen3-asr",
+      "license": "apache-2.0",
+      "description": "Qwen3-ASR 1.7B, safetensors",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "entry": ".",
+          "source": {
+            "hf": "Qwen/Qwen3-ASR-1.7B",
+            "revision": "7278e1e70fe206f11671096ffdd38061171dd6e5"
+          }
+        }
+      ]
+    }
+  ],
   "targets": {
     "gufo_qwen3_asr": {
       "requires": []
@@ -41,7 +61,8 @@
       "**/*.h",
       "**/*.hpp",
       "**/*.hip",
-      "extension.*"
+      "extension.*",
+      "models.lock.json"
     ],
     "exclude": [
       "tests/",

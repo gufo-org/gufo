@@ -7,9 +7,7 @@ vectors in one shared space, for search, clustering and classification across
 ## Files
 
 ```sh
-hf download google/embeddinggemma-2 \
-  --revision 914f7f89142e33e77833254d9c9b90c3cef7303b \
-  --local-dir models/embeddinggemma-2
+gufo model install embeddinggemma-2
 ```
 
 Only the BF16 safetensors checkpoint is supported, not GGUF or quantized files.
@@ -17,7 +15,7 @@ Only the BF16 safetensors checkpoint is supported, not GGUF or quantized files.
 ## Run
 
 ```sh
-gufo serve embedding --model models/embeddinggemma-2
+gufo serve embedding --model embeddinggemma-2
 curl -sS http://127.0.0.1:8080/v1/embeddings \
   -H 'Content-Type: application/json' \
   -d '{"model":"embeddinggemma-2","input":["task: search result | query: What causes the northern lights?"]}'

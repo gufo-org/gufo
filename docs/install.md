@@ -133,5 +133,28 @@ next to its DLLs and kernel folders. To build it yourself, see
 
 ## Model files
 
-Gufo doesn't download models. Each [model page](models/README.md) lists the
-files and pinned revisions to fetch with `hf download`.
+Each extension pins the weights its models run on: a Hugging Face revision and
+every file's size and SHA-256. `gufo model` downloads them and checks each
+file:
+
+```sh
+gufo model list                   # every model and the extension that offers it
+gufo model install qwen3-asr      # download it
+gufo transcribe --model qwen3-asr --audio speech.wav
+gufo model update                 # move to the files extensions pin now
+gufo model remove qwen3-asr
+```
+
+Pass an installed model's ID to `--model`; a path still works for weights you
+download yourself. `install` also fetches a model's default companions, such as
+an image projector or a draft model, and prints their paths. `--component ROLE`
+adds an optional one.
+
+Downloads run over 16 parallel connections (`--connections`), resume after an
+interruption and reuse files already in the Hugging Face cache. Models live in
+`$GUFO_MODELS_DIR`, else `$XDG_DATA_HOME/gufo/models`; models that share a file
+store it once.
+
+A Hugging Face token is optional. Set `HF_TOKEN`, or run `hf auth login`, for
+gated models and higher rate limits; Gufo sends it only to Hugging Face, never
+to the download servers it redirects to. `HF_ENDPOINT` selects a mirror.

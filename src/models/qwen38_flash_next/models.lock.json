@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "models": {
+    "flash-next-q4": {
+      "weights": {
+        "source": {
+          "hf": "unsloth/Qwen3.8-Flash-Next-GGUF",
+          "revision": "d96201194f103c906994f283f504209dc8d2a10c"
+        },
+        "include": [
+          "UD-Q4_K_XL/*"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+            "size": 10946618,
+            "sha256": "acc44040f74d0e55fb89c3967056cce5dbda1bcc52e909c3ba6fc72b5e9c0858"
+          },
+          {
+            "path": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+            "size": 49720539552,
+            "sha256": "45792ae869072d8229384c51c7c73dd959e191505252b41dd71852d9746f5ce4"
+          },
+          {
+            "path": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+            "size": 32803030176,
+            "sha256": "8c76e79d444b16a663d9c8db54e585ed3b1da13eebd2619c37b0c355da803c82"
+          },
+          {
+            "path": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+            "size": 28800138432,
+            "sha256": "5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36"
+          }
+        ]
+      },
+      "mtp": {
+        "source": {
+          "hf": "unsloth/Qwen3.8-Flash-Next-GGUF",
+          "revision": "d96201194f103c906994f283f504209dc8d2a10c"
+        },
+        "include": [
+          "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+            "size": 2786568256,
+            "sha256": "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6"
+          }
+        ]
+      },
+      "mmproj": {
+        "source": {
+          "hf": "unsloth/Qwen3.8-Flash-Next-GGUF",
+          "revision": "d96201194f103c906994f283f504209dc8d2a10c"
+        },
+        "include": [
+          "mmproj-BF16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "mmproj-BF16.gguf",
+            "size": 907542944,
+            "sha256": "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355"
+          }
+        ]
+      }
+    }
+  }
+}

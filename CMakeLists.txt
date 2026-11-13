@@ -468,7 +468,8 @@ include(cmake/GufoExtensionSdk.cmake)
 gufo_extension_sdk(gufo)
 target_sources(gufo PRIVATE src/cli/extension/modules.cpp
   src/cli/extension/store.cpp src/cli/extension/extension.cpp
-  src/cli/extension/registry.cpp)
+  src/cli/extension/registry.cpp src/cli/model/catalog.cpp
+  src/cli/model/download.cpp src/cli/model/model.cpp src/cli/model/store.cpp)
 set_property(SOURCE src/cli/extension/modules.cpp
   src/cli/extension/store.cpp APPEND PROPERTY
   COMPILE_DEFINITIONS GUFO_EXTENSION_BUILD_ID="${gufo_extension_build_id}"

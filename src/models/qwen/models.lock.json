@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "models": {
+    "qwen27-q4": {
+      "weights": {
+        "source": {
+          "hf": "unsloth/Qwen3.8-27B-GGUF",
+          "revision": "ce331efc48d5722b4b8041f72793e530eae18d9b"
+        },
+        "include": [
+          "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+            "size": 17659407264,
+            "sha256": "2a5f3565f39cf885103da591182c1266da64745737b42b452fd3e675369f1211"
+          }
+        ]
+      },
+      "dflash": {
+        "source": {
+          "hf": "z-lab/Qwen3.8-27B-DFlash2-GGUF",
+          "revision": "2d9571f8ce46e151f61c6499c99dee6079e1d610"
+        },
+        "include": [
+          "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+            "size": 1143006816,
+            "sha256": "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"
+          }
+        ]
+      },
+      "mmproj": {
+        "source": {
+          "hf": "unsloth/Qwen3.8-27B-GGUF",
+          "revision": "ce331efc48d5722b4b8041f72793e530eae18d9b"
+        },
+        "include": [
+          "mmproj-BF16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "mmproj-BF16.gguf",
+            "size": 931146432,
+            "sha256": "83ee4f4f205fa514161778c41df1ea14144faa0f713510893b63c2395f5c2d53"
+          }
+        ]
+      }
+    },
+    "qwen27-q8": {
+      "weights": {
+        "source": {
+          "hf": "unsloth/Qwen3.8-27B-GGUF",
+          "revision": "ce331efc48d5722b4b8041f72793e530eae18d9b"
+        },
+        "include": [
+          "Qwen3.8-27B-UD-Q8_K_XL.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.8-27B-UD-Q8_K_XL.gguf",
+            "size": 31457991680,
+            "sha256": "af36ecb6b5db1407953345b746c14ac93f0657dda413910b4348683a2d990377"
+          }
+        ]
+      },
+      "dflash": {
+        "source": {
+          "hf": "z-lab/Qwen3.8-27B-DFlash2-GGUF",
+          "revision": "2d9571f8ce46e151f61c6499c99dee6079e1d610"
+        },
+        "include": [
+          "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+            "size": 1143006816,
+            "sha256": "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd"
+          }
+        ]
+      },
+      "mmproj": {
+        "source": {
+          "hf": "unsloth/Qwen3.8-27B-GGUF",
+          "revision": "ce331efc48d5722b4b8041f72793e530eae18d9b"
+        },
+        "include": [
+          "mmproj-BF16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "mmproj-BF16.gguf",
+            "size": 931146432,
+            "sha256": "83ee4f4f205fa514161778c41df1ea14144faa0f713510893b63c2395f5c2d53"
+          }
+        ]
+      }
+    }
+  }
+}

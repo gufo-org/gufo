@@ -32,6 +32,53 @@
       }
     }
   ],
+  "models": [
+    {
+      "id": "flash-next-q4",
+      "provider": "flash-next-q4",
+      "license": "qwen-community-1.0",
+      "description": "Qwen3.8 Flash-Next, UD-Q4_K_XL GGUF",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3.8-Flash-Next-GGUF",
+            "revision": "d96201194f103c906994f283f504209dc8d2a10c"
+          },
+          "include": [
+            "UD-Q4_K_XL/*"
+          ],
+          "entry": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
+        },
+        {
+          "role": "mtp",
+          "option": "--mtp-model",
+          "install": "default",
+          "source": {
+            "hf": "unsloth/Qwen3.8-Flash-Next-GGUF",
+            "revision": "d96201194f103c906994f283f504209dc8d2a10c"
+          },
+          "include": [
+            "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+          ]
+        },
+        {
+          "role": "mmproj",
+          "option": "--mmproj",
+          "install": "default",
+          "source": {
+            "hf": "unsloth/Qwen3.8-Flash-Next-GGUF",
+            "revision": "d96201194f103c906994f283f504209dc8d2a10c"
+          },
+          "include": [
+            "mmproj-BF16.gguf"
+          ]
+        }
+      ]
+    }
+  ],
   "options": [
     {
       "name": "--mtp-model",
@@ -63,7 +110,8 @@
       "**/*.h",
       "**/*.hpp",
       "**/*.hip",
-      "extension.*"
+      "extension.*",
+      "models.lock.json"
     ],
     "exclude": [
       "tests/",

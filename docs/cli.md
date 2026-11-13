@@ -19,6 +19,7 @@ you'll reach for most; `gufo <command> --help` lists every option.
 | `gufo eval` | Grades a running server on a fixed set of questions. |
 | `gufo diagnose` | Checks drivers, permissions and memory; see [troubleshooting](troubleshooting.md). |
 | `gufo extension` | Builds and manages [extension modules](extensions.md#modules). |
+| `gufo model` | Downloads and manages the [model weights](install.md#model-files) extensions offer. |
 
 Every command accepts `--help` and `--version`. Unknown options and invalid
 combinations are errors, never silently ignored.
