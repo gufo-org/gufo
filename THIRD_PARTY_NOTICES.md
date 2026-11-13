@@ -27,6 +27,7 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | libjpeg-turbo | Linked; JPEG decoding | `IJG AND BSD-3-Clause AND Zlib` | 3.1.4.1; flake.lock | [libjpeg-turbo](https://github.com/libjpeg-turbo/libjpeg-turbo) |
 | libwebp | Linked; WebP decoding | `BSD-3-Clause` | 1.6.0; flake.lock | [webmproject/libwebp](https://chromium.googlesource.com/webm/libwebp) |
 | libopus | Linked; Ogg Opus audio decoding; [license text](licenses/libopus.txt) | `BSD-3-Clause` | 1.6.1; flake.lock | [xiph/opus](https://github.com/xiph/opus) |
+| mlir-aie (IRON) | Adapted NPU GEMM core kernel (`src/core/npu/kernels/bfpgemm/bfpgemm.cc`) and vendored kernel headers (`src/core/npu/kernels/bfpgemm/vendor/`); its Python toolchain compiles the NPU designs at build time | `Apache-2.0 WITH LLVM-exception AND MIT` | 1.4.5; `.devops/nix/iron` | [Xilinx/mlir-aie](https://github.com/Xilinx/mlir-aie) |
 | httparse (Rust crate) | Statically linked; HTTP request heads | `MIT OR Apache-2.0` | 1.10.1; Cargo.lock | [seanmonstar/httparse](https://github.com/seanmonstar/httparse) |
 | png (Rust crate) | Statically linked; PNG decoding | `MIT OR Apache-2.0` | 0.18.1; Cargo.lock | [image-rs/image-png](https://github.com/image-rs/image-png) |
 | symphonia (Rust crates) | Statically linked, unmodified; audio decoding; [license text and source](licenses/rust.txt) | `MPL-2.0` | 0.6.1; Cargo.lock | [pdeljanov/Symphonia](https://github.com/pdeljanov/Symphonia) |
