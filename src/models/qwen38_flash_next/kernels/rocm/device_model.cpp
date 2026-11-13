@@ -436,9 +436,28 @@ bool DeviceModel::SetDraftVocab(std::uint32_t prefix_rows,
         static_cast<std::uint32_t>(id) >= output_.rows)
       return fail("draft special tokens must lie above the prefix");
   }
-  // The prefix is the head's own leading rows: no copy.
   draft_output_ = output_;
   draft_output_.rows = prefix_rows;
+  if (output_.type == core::GgmlType::kQ8_0 && output_.cols % 256 == 0) {
+    // Drafts read a Q4_K copy of the Q8_0 prefix: the head is the larger
+    // part of each draft step's weight traffic, and its proposals are
+    // verified, so this changes acceptance only. Each row of the copy is
+    // the same at any batch width.
+    const std::size_t bytes =
+        std::size_t{prefix_rows} * (output_.cols / 256) * 144;
+    void* q4k = nullptr;
+    if (hipMalloc(&q4k, bytes + kTailMargin) != hipSuccess)
+      return fail("device allocation failed for the Q4_K draft head");
+    allocations_.push_back(q4k);
+    bytes_ += bytes + kTailMargin;
+    QuantizeQ8_0ToQ4K(output_.data, q4k, prefix_rows, output_.cols, nullptr);
+    if (hipMemsetAsync(static_cast<std::uint8_t*>(q4k) + bytes, 0, kTailMargin,
+                       nullptr) != hipSuccess ||
+        hipStreamSynchronize(nullptr) != hipSuccess)
+      return fail("Q4_K draft head quantization failed");
+    draft_output_.data = q4k;
+    draft_output_.type = core::GgmlType::kQ4_K;
+  }
   draft_specials_ = std::move(specials);
   return true;
 }

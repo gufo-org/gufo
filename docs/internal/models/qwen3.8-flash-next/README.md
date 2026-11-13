@@ -17,7 +17,12 @@ Adaptive MTP is default, with `--draft-tokens` capping 1–7 proposals. Eligible
 requests draft over the first 98,304 token IDs plus a 1,024-row table containing
 special tokens and other tokens already used by the request. The full head
 remains the fallback when the anchor or two of the last 32 committed tokens
-fall outside this vocabulary.
+fall outside this vocabulary. The 98,304 prefix rows are a Q4_K copy of the
+Q8_0 output head (141.6 MiB more device memory), quantized once at load on
+the GPU with ggml's reference `quantize_row_q4_K_ref` arithmetic (about
+20 ms); the table rows and every target head stay Q8_0. A row's draft logits
+are the same alone and in any batch, so seeded sampled requests still replay
+independently of scheduling.
 
 Single-session sampling, including the default thinking-on and thinking-off
 presets, can use this smaller head with the existing acceptance/length

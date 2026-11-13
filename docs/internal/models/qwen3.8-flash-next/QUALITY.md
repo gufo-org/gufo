@@ -1,5 +1,37 @@
 # Qwen3.8 Flash-Next quality
 
+## Q4_K draft head, November 13, 2026
+
+Main `6858788b` against the candidate on the same host and toolchain; the
+draft head's prefix rows become a Q4_K copy of the Q8_0 head. Drafts only
+propose: greedy verification takes the target's argmax and sampled
+verification keeps exact rejection sampling with the proposal's own
+distribution, so the output distribution is unchanged.
+
+- `qwen38_flash_next.mtp_ops`: the device quantizer reproduces a host
+  implementation of ggml's `quantize_row_q4_K_ref` byte for byte on 96 rows
+  with constant, positive-only, negative-only, zero and zero-scale
+  sub-blocks; reconstruction error stays below 10% RMS; eight rows projected
+  together equal eight single-row projections bit for bit. The quantizer
+  builds without fast math: with it, the `__f*_rn` helpers and native square
+  root changed results in the last bits.
+- On the real head the copy reconstructs the Q8_0 rows with 7.465% relative
+  RMS error, against 7.467% for ggml's CPU quantizer (each better in about
+  half of the superblocks over 3,000 rows); the bytes differ in rounding only.
+- Session test (`--batch-only`, `--sampling-only`, `--lookup-only`): C2–C8
+  AR/MTP logits and RNG exact, mixed small/full-head batches exact, sampled
+  schedules and restores exact.
+- HTTP, four sessions at context 65,536: five greedy thinking-off replies of
+  384 tokens are byte-identical to main; four seeded default-sampling
+  requests give the same text alone and concurrently on both builds (their
+  text differs between builds, as any proposal change shifts the draws).
+- Default sampling, C1, six tasks (three thinking, three thinking-off) of
+  596–1,024 tokens, two repetitions per arm in alternating server order:
+  46.44 → 47.64 tok/s (+2.6%), acceptance 0.628 → 0.633. Greedy C1 replies:
+  +3.2% to +5.7% on four prompts, unchanged on the fifth. C4 greedy is
+  neutral (unplanned greedy batches keep the full head), C4 sampled +3.5%.
+  Load time is unchanged (15.5–16.4 s against 15.5–15.6 s).
+
 ## CPU serving paths, November 9, 2026
 
 The issue #716 adaptation preserves the host arithmetic and keeps portable
