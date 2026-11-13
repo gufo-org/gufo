@@ -1,7 +1,7 @@
 # The NPU runtime on XRT (found at the top level). Only the backend sources
 # include XRT; npu.hpp names no XRT type.
 # Which NPUs are present: sysfs on Linux, XRT's enumeration on Windows.
-add_library(gufo_npu STATIC common.cpp xrt.cpp q8_gemm.cpp
+add_library(gufo_npu STATIC common.cpp xrt.cpp q8_gemm.cpp bfp_gemm.cpp host_ops.cpp
   "$<$<NOT:$<PLATFORM_ID:Windows>>:${CMAKE_CURRENT_SOURCE_DIR}/probe.cpp>"
   "$<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/probe_windows.cpp>")
 target_include_directories(gufo_npu PRIVATE ${PROJECT_SOURCE_DIR})
@@ -13,4 +13,10 @@ target_link_libraries(gufo_npu PUBLIC gufo_platform PRIVATE XRT::xrt_coreutil)
 if(WIN32)
   target_link_options(gufo_npu INTERFACE "/DELAYLOAD:xrt_coreutil.dll")
   target_link_libraries(gufo_npu PUBLIC delayimp)
+endif()
+# Host operators: AVX2 + FMA (every Strix Halo and development x86 CPU).
+if(MSVC)
+  set_source_files_properties(host_ops.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+else()
+  set_source_files_properties(host_ops.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-O3")
 endif()

@@ -1497,6 +1497,16 @@ endfunction()
     add_test(NAME npu_device_test COMMAND npu_device_test "${q8gemm_NPU_DIR}")
     set_tests_properties(npu_device_test PROPERTIES LABELS "npu" SKIP_RETURN_CODE 77)
   endif()
+  gufo_npu_design(bfpgemm SCRIPT src/core/npu/kernels/bfpgemm/bfpgemm.py
+    SOURCES src/core/npu/kernels/bfpgemm/bfpgemm.cc)
+  if(GUFO_NPU_DESIGNS_AVAILABLE)
+    add_executable(npu_bfp_device_test tests/core/npu_bfp_device_test.cpp)
+    target_include_directories(npu_bfp_device_test PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(npu_bfp_device_test PRIVATE gufo_npu)
+    add_dependencies(npu_bfp_device_test npu_design_bfpgemm)
+    add_test(NAME npu_bfp_device_test COMMAND npu_bfp_device_test "${bfpgemm_NPU_DIR}")
+    set_tests_properties(npu_bfp_device_test PROPERTIES LABELS "npu" SKIP_RETURN_CODE 77)
+  endif()
 
   # the publish suite drives descriptors through dup2
   if (NOT WIN32)
