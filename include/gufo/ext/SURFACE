@@ -102,6 +102,8 @@ src/core/logging/logging.hpp
 src/core/lora/adapter.hpp
 src/core/mapped_prefetch.hpp
 src/core/model_config.hpp
+src/core/npu/bfp_gemm.hpp
+src/core/npu/host_ops.hpp
 src/core/npu/npu.hpp
 src/core/npu/q8_gemm.hpp
 src/core/platform/fs.hpp
