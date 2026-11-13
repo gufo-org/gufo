@@ -2,6 +2,17 @@ include_guard(GLOBAL)
 include(CMakeParseArguments)
 include(${CMAKE_CURRENT_LIST_DIR}/GufoExtensionVersion.cmake)
 
+# clang-cl (Windows) ignores GCC-style driver options such as -ffast-math,
+# -ffp-contract=off or -fno-slp-vectorize; its only diagnostic is a
+# -Wunknown-argument warning. Prefix such options with ${GUFO_CLANG_OPTION} so
+# they reach clang on both platforms.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+    AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+  set(GUFO_CLANG_OPTION "/clang:")
+else()
+  set(GUFO_CLANG_OPTION "")
+endif()
+
 # Production validation is pure CMake 3.21. Hosted checks additionally apply
 # the complete JSON schema (including packaging/docs/CI-only metadata).
 # Scan JSON escapes before string(JSON): CMake strings cannot represent NUL.

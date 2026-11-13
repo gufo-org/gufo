@@ -76,4 +76,4 @@ set_property(
     ${CMAKE_CURRENT_SOURCE_DIR}/prefill_quant_gemm.hip
     ${CMAKE_CURRENT_SOURCE_DIR}/prefill_quant_wave64.hip
   TARGET_DIRECTORY gufo_qwen_kernels
-  APPEND PROPERTY COMPILE_OPTIONS -fno-slp-vectorize)
+  APPEND PROPERTY COMPILE_OPTIONS ${GUFO_CLANG_OPTION}-fno-slp-vectorize)

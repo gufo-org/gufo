@@ -62,7 +62,7 @@ if (ENGINE_ENABLE_HIP)
   target_compile_definitions(gufo_qwen38_flash_next_mmq PRIVATE
     GGML_HIP_NO_VMM ENGINE_ENABLE_HIP=1)
   target_compile_options(gufo_qwen38_flash_next_mmq PRIVATE
-    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-value;-Wno-unused-command-line-argument>)
+    $<$<COMPILE_LANGUAGE:HIP>:-O3;${GUFO_CLANG_OPTION}-ffast-math;${GUFO_CLANG_OPTION}-fno-finite-math-only;-Wno-unused-value;-Wno-unused-command-line-argument>)
   target_include_directories(gufo_qwen38_flash_next_mmq SYSTEM PUBLIC ${QFN_MMQ_DIR})
   target_link_libraries(gufo_qwen38_flash_next_mmq PUBLIC hip::host roc::hipblas)
 endif()
@@ -103,11 +103,11 @@ if(TARGET gufo_qwen38_flash_next_hip)
     PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
   # The draft head quantizer keeps ggml's IEEE single-precision rounding.
   set_source_files_properties(${QFN_ROCM_DIR}/draft_head.hip.cpp
-    PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
+    PROPERTIES COMPILE_OPTIONS "${GUFO_CLANG_OPTION}-fno-fast-math;${GUFO_CLANG_OPTION}-ffp-contract=off")
   target_compile_definitions(gufo_qwen38_flash_next_hip PRIVATE QFN_ROCM_BUILD=1)
   target_compile_options(gufo_qwen38_flash_next_hip PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O2>
-    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
+    $<$<COMPILE_LANGUAGE:HIP>:-O3;${GUFO_CLANG_OPTION}-ffast-math;${GUFO_CLANG_OPTION}-fno-finite-math-only;-Wno-unused-command-line-argument>)
   target_include_directories(gufo_qwen38_flash_next_hip SYSTEM PUBLIC
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR}

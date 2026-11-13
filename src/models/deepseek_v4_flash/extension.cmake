@@ -28,7 +28,7 @@ if(TARGET gufo_deepseek_v4_flash)
     DS4_ROCM_BUILD=1)
   if (ENGINE_ENABLE_HIP)
     target_compile_options(gufo_deepseek_v4_flash PRIVATE
-      $<$<COMPILE_LANGUAGE:CXX>:-O3;-ffast-math;-fno-finite-math-only>)
+      $<$<COMPILE_LANGUAGE:CXX>:-O3;${GUFO_CLANG_OPTION}-ffast-math;${GUFO_CLANG_OPTION}-fno-finite-math-only>)
   endif()
 endif()
 
@@ -61,7 +61,7 @@ if (ENGINE_ENABLE_HIP)
     GGML_HIP_NO_VMM
     DS4_ROCM_WMMA_MMQ_Y=64)
   target_compile_options(gufo_deepseek_v4_flash_mmq PRIVATE
-    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-value;-Wno-unused-command-line-argument>)
+    $<$<COMPILE_LANGUAGE:HIP>:-O3;${GUFO_CLANG_OPTION}-ffast-math;${GUFO_CLANG_OPTION}-fno-finite-math-only;-Wno-unused-value;-Wno-unused-command-line-argument>)
   target_include_directories(gufo_deepseek_v4_flash_mmq SYSTEM PUBLIC
     ${DEEPSEEK_V4_FLASH_MMQ_DIR})
   target_link_libraries(gufo_deepseek_v4_flash_mmq PUBLIC
@@ -104,8 +104,8 @@ if(TARGET gufo_deepseek_v4_flash_hip)
     _GNU_SOURCE
     DS4_ROCM_BUILD=1)
   target_compile_options(gufo_deepseek_v4_flash_hip PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:-O3;-ffast-math;-fno-finite-math-only>
-    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
+    $<$<COMPILE_LANGUAGE:CXX>:-O3;${GUFO_CLANG_OPTION}-ffast-math;${GUFO_CLANG_OPTION}-fno-finite-math-only>
+    $<$<COMPILE_LANGUAGE:HIP>:-O3;${GUFO_CLANG_OPTION}-ffast-math;${GUFO_CLANG_OPTION}-fno-finite-math-only;-Wno-unused-command-line-argument>)
   target_include_directories(gufo_deepseek_v4_flash_hip PUBLIC
     ${PROJECT_SOURCE_DIR}
     ${GUFO_EXTENSION_BUILD_ROOT}
