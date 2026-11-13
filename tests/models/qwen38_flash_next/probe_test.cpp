@@ -9,8 +9,11 @@
 #include <utility>
 #include <vector>
 
+#include "src/models/qwen38_flash_next/gyro/tq_types.hpp"
+
 namespace {
 
+namespace gyro = gufo::models::qwen38_flash_next::gyro;
 using gufo::core::GgmlType;
 using Tensor = std::pair<std::string, GgmlType>;
 
@@ -22,10 +25,10 @@ void Require(bool condition, const char* message) {
 
 // Independent GGUF fixture: each tensor has one 256-element row and enough
 // payload for every tested storage format. The probe never reads its values.
-bool Probe(const std::vector<Tensor>& tensors,
-           std::optional<std::uint32_t> blocks = 49,
-           std::optional<std::uint32_t> nextn = 1,
-           const std::string& architecture = "qwen4exp") {
+std::vector<std::uint8_t> Fixture(const std::vector<Tensor>& tensors,
+                                  std::optional<std::uint32_t> blocks,
+                                  std::optional<std::uint32_t> nextn,
+                                  const std::string& architecture) {
   std::vector<std::uint8_t> bytes;
   const auto pod = [&]<class T>(T value) {
     const auto offset = bytes.size();
@@ -62,11 +65,33 @@ bool Probe(const std::vector<Tensor>& tensors,
     offset += 2048;
   }
   bytes.resize((bytes.size() + 31) / 32 * 32 + offset);
+  return bytes;
+}
+
+// The text commands open models allowing tensors core cannot size, so both
+// providers see the same bytes: one declines a layout it does not own rather
+// than reading it with the wrong stride.
+bool Probe(const std::vector<Tensor>& tensors,
+           std::optional<std::uint32_t> blocks = 49,
+           std::optional<std::uint32_t> nextn = 1,
+           const std::string& architecture = "qwen4exp") {
+  const auto bytes = Fixture(tensors, blocks, nextn, architecture);
   std::string error;
-  const auto reader =
-      gufo::core::GgufReader::OpenMemory(bytes.data(), bytes.size(), &error);
+  const auto reader = gufo::core::GgufReader::OpenMemory(
+      bytes.data(), bytes.size(), &error, {.allow_unsized_tensors = true});
   Require(reader != nullptr, error.c_str());
   return gufo::models::qwen38_flash_next::ProbeFlashNextGguf(*reader);
+}
+
+bool GyroProbe(const std::vector<Tensor>& tensors,
+               std::optional<std::uint32_t> blocks = 49,
+               std::optional<std::uint32_t> nextn = 1) {
+  const auto bytes = Fixture(tensors, blocks, nextn, "qwen4exp");
+  std::string error;
+  const auto reader = gufo::core::GgufReader::OpenMemory(
+      bytes.data(), bytes.size(), &error, {.allow_unsized_tensors = true});
+  Require(reader != nullptr, error.c_str());
+  return gufo::models::qwen38_flash_next::ProbeFlashNextGyroGguf(*reader);
 }
 
 void CheckExpertFormats() {
@@ -111,6 +136,27 @@ void CheckIgnoredTensors() {
           "absent nextn metadata incorrectly excluded the final trunk layer");
 }
 
+// Gyro-M replaces every trunk expert tensor with TQ2_T trellis rows, a
+// storage type core cannot size. The providers are complements on the trunk
+// experts: a partly trellised file belongs to neither.
+void CheckGyroExperts() {
+  for (const auto* role : {"gate", "up", "down"}) {
+    const auto name = std::string("blk.47.ffn_") + role + "_exps.weight";
+    Require(!Probe({{name, gyro::kTQ2T}}), "trellis expert claimed by q4");
+    Require(GyroProbe({{name, gyro::kTQ2T}}), "trellis expert declined");
+    Require(!GyroProbe({{name, GgmlType::kQ4_K}}),
+            "quantized expert claimed by the trellis provider");
+  }
+  Require(!GyroProbe({{"blk.0.ffn_gate_exps.weight", gyro::kTQ2T},
+                      {"blk.47.ffn_down_exps.weight", GgmlType::kQ4_K}}),
+          "half-trellised trunk claimed");
+  // Appended MTP layers and unrelated tensors follow the trunk, as for q4.
+  Require(GyroProbe({{"blk.0.ffn_gate_exps.weight", gyro::kTQ2T},
+                     {"blk.48.ffn_gate_exps.weight", GgmlType::kQ4_K}}),
+          "appended layer declined the trellis trunk");
+  Require(!GyroProbe({}), "trellis probe claimed a file without experts");
+}
+
 void CheckMetadata() {
   Require(!Probe({}, 49, 1, "qwen3"), "unrelated architecture claimed");
   Require(!Probe({}, std::nullopt), "missing block_count claimed");
@@ -125,6 +171,7 @@ void CheckMetadata() {
 
 int main() {
   CheckExpertFormats();
+  CheckGyroExperts();
   CheckIgnoredTensors();
   CheckMetadata();
   std::cout << "PASS: Flash-Next provider probe\n";

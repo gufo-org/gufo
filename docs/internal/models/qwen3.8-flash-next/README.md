@@ -119,10 +119,46 @@ context and selected rollback depth (about 27.5 KiB per context token with
 MTP, measured on gfx1151); admission reserves the configured capacity before
 creating sessions.
 
+## Gyro-M trellis experts
+
+AgentionAI's **Gyro-M** quantization (`Qwen3.8-Flash-Next-Gyro-M-TQ2_0.gguf`)
+replaces the routed experts with TQ2_T trellis rows, GGUF storage id 144: a
+34-byte block of an F16 scale plus 32 code bytes for 128 weights, decoded from
+a 2,048-point codebook. Gufo core does not name that type, so the artifact
+opens through `GgufOpenOptions::allow_unsized_tensors` and the extension's
+`flash-next-gyro-m` provider owns the layout; `flash-next-q4` declines it, and
+a partly trellised file belongs to neither provider. The trunk (attention,
+hyper-connections, n-gram table) keeps the usual formats, so everything outside
+the expert matrices is unchanged.
+
+The block-Hadamard rotation (`prism.hadamard.*`) stores each listed row as
+`T·w`, `T = H_128 · diag(signs)` over its reduction dimension. `T` is
+orthonormal, so the kernels rotate the activation row once instead of
+un-rotating the weights: `(T·w)·(T·x) = w·x`. `ModelWeights::Bind` validates
+the metadata (version, block size, transform, axis, explicit ±1 signs and the
+exact rotated-tensor list) and refuses a rotated tensor whose format has no
+trellis kernel or whose sign vector does not match its column count.
+
+- **Vector route** (decode and 1-8 row verification): `kernels/rocm/trellis.*`.
+  The codebook sits in LDS and decodes with `v_dot2_f32_f16`; DPP8 recovers the
+  previous code byte; rows routed to the same expert share one weight decode.
+- **WMMA route** (prefill): a TQ2_T variant of `RoutedF16GEMMKernel`. Each wave
+  half decodes one K16 fragment and exchanges the other half with
+  `permlanex16`; the down projection's input rotation is fused after SwiGLU.
+  The paired gate/up kernel and the 128-token down kernel decode only the
+  quantized formats, so a trellis model keeps the narrow tile map even in
+  prefill (`RouteHints`), and the other formats' kernels compile to identical
+  ISA.
+
+`tests/models/qwen38_flash_next/trellis_ops_test.cpp` compares every route with
+the vendored reference decoder (`src/models/qwen38_flash_next/gyro/`,
+Apache 2.0), including the rotation and ragged expert buckets.
+
 ## Images
 
 Use this model's `mmproj-BF16.gguf`, discovered beside the target or selected
-with `--mmproj`. PNG/JPEG CLI and HTTP requests use the
+with `--mmproj`. A directory with only `mmproj-F16.gguf` is accepted too; its
+F16 weights are rounded to BF16 while uploading. PNG/JPEG CLI and HTTP requests use the
 [same image interface](../../../models/qwen3.8-27b.md#images). Image state participates
 in prefill, decoding, verification, multi-turn reuse and disk cache identity.
 The predictor embeds shifted text IDs; visual information comes from target

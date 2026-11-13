@@ -5,6 +5,8 @@ gufo_extension_target(
   SOURCES
     config.cpp
     continuation_layout.cpp
+    gyro/tq_codebook.c
+    gyro/tq_ref.c
     ngram.cpp
     rope_scaling.cpp
     weights.cpp
@@ -67,6 +69,10 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_qwen38_flash_next_mmq PUBLIC hip::host roc::hipblas)
 endif()
 
+# The vendored Gyro decoder keeps its notices with the installed license tree.
+install(FILES "${GUFO_EXTENSION_BUILD_ROOT}/gyro/NOTICE" "${PROJECT_SOURCE_DIR}/licenses/gyro.txt"
+  DESTINATION share/licenses/gufo/third-party)
+
 gufo_extension_target(
   NAME gufo_qwen38_flash_next_hip
   SOURCES
@@ -76,6 +82,7 @@ gufo_extension_target(
     kernels/rocm/executor.cpp
     kernels/rocm/batch.cpp
     engine.cpp
+    gyro_provider.cpp
     runner.cpp
     drivers.cpp
     provider.cpp
@@ -96,6 +103,7 @@ if(TARGET gufo_qwen38_flash_next_hip)
   gufo_extension_hip_sources(gufo_qwen38_flash_next_hip
     SOURCES
       kernels/rocm/kernels.hip.cpp
+      kernels/rocm/trellis.hip.cpp
       kernels/rocm/w8a8_wave64.hip
   )
   set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip

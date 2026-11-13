@@ -5,6 +5,8 @@
 #include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <vector>
 
+#include "src/models/qwen38_flash_next/gyro/tq_types.hpp"
+
 namespace gufo::models::qwen38_flash_next::cpu {
 namespace {
 
@@ -76,6 +78,15 @@ void DequantizeRow(const TensorRef& t, std::uint64_t e, std::uint64_t row,
       break;
     case GgmlType::kQ6_K:
       gufo::quant::DequantizeQ6_K(src, out, k);
+      break;
+    case gyro::kTQ2T:
+      // Gyro stores the block-Hadamard rotated row (T·w). Decoding yields that
+      // rotated weight; undoing T with the tensor's sign vector recovers w, so
+      // a plain dot product with an unrotated input equals w·x.
+      gyro::DequantizeRow(t.type, src, out, k);
+      if (t.hadamard_signs != nullptr) {
+        gyro::UnrotateRow(out, k, t.hadamard_signs);
+      }
       break;
     default:
       std::memset(out, 0, k * sizeof(float));

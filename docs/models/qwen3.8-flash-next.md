@@ -12,6 +12,12 @@ multi-token prediction (MTP) head.
 | `MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf` | MTP |
 | `mmproj-BF16.gguf` | Images |
 
+AgentionAI's Gyro-M trellis quantization,
+`Qwen3.8-Flash-Next-Gyro-M-TQ2_0.gguf`, is a single-file alternative with the
+same trunk and TQ2_T routed experts. Gufo selects it through the
+`flash-next-gyro-m` provider; `mmproj-F16.gguf` is used when a directory has no
+BF16 sidecar.
+
 ```sh
 hf download unsloth/Qwen3.8-Flash-Next-GGUF \
   --revision d96201194f103c906994f283f504209dc8d2a10c \

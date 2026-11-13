@@ -14,7 +14,7 @@ to run the model and what speed to expect.
 | Qwen3-ASR 1.7B | BF16 safetensors; audio to text | [Usage](qwen3-asr.md) |
 | Qwen3-TTS 12Hz 1.7B | BF16 safetensors; text/reference audio to speech | [Voice modes](qwen3-tts.md) |
 | Qwen3.8 27B | Q4/Q8 GGUF; text/images | [Usage and modes](qwen3.8-27b.md) |
-| Qwen3.8 Flash-Next | Sharded Q4 GGUF; text/images | [Usage and modes](qwen3.8-flash-next.md) |
+| Qwen3.8 Flash-Next | Sharded Q4 GGUF or Gyro-M TQ2_T GGUF; text/images | [Usage and modes](qwen3.8-flash-next.md) |
 <!-- END GENERATED MODEL TABLE -->
 
 Gufo doesn't ship weights; download them from Hugging Face as each page shows.

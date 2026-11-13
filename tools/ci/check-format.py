@@ -15,6 +15,7 @@ def main() -> int:
     excluded = (
         "src/models/deepseek_v4_flash/kernels/rocm/",
         "src/models/deepseek_v4_flash/runtime/",
+        "src/models/qwen38_flash_next/gyro/",
         "src/models/qwen38_flash_next/kernels/rocm/mmq/",
     )
     # END GENERATED VENDORED PATHS
