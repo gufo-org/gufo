@@ -20,7 +20,8 @@
 // record is [xn | x | o | pad] bf16 (REC elements); the input goes into x.
 // The attention runs in two passes of 4 KV heads: pass p's query head j is
 // query head 2 (j / 4 + 4 p) + j % 4 for j % 4 < 2 and a zero row otherwise;
-// its gates are zero (sigmoid(0) = 1/2, so o_proj doubles).
+// its gates are zero (sigmoid(0) = 1/2, so o_proj doubles), and o_proj reads
+// pass 1's heads before pass 0's.
 namespace gufo::npu {
 namespace {
 
@@ -254,7 +255,7 @@ void Qwen3Prefill::SetLayer(int l, const Layer& w) {
         const std::uint16_t* row = w.o + std::size_t(n) * H;  // o_proj row n
         for (int ps = 0; ps < 2; ++ps)
           for (int j = 0; j < 16; ++j) {
-            float* d = out + ps * 2048 + j * kHeadDim;
+            float* d = out + (1 - ps) * 2048 + j * kHeadDim;  // pass 1 first
             const int part = j / 4, hl = j % 4;
             if (hl >= 2) {
               std::fill_n(d, kHeadDim, 0.0f);

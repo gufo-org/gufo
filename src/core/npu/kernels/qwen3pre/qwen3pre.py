@@ -289,10 +289,10 @@ def prefill(A: InOut, B: In, C: InOut, *, M: CompileTime[int] = 512):
                                                              [0, 4 * P.PIECE, 512, 1]), group=tg, wait=False)
                     for col in range(COLS):
                         g, b_ = col % 4, 2 * r_ + col // 4
-                        # per core: three junk quarters (into the junk copies, 2 oh apart, so the
-                        # second pass keeps the first pass's output), then O [32 tokens][128]
-                        C_conses[col].drain(c, tap=TAP((c_size,), ph["ao"] + 4 * g * (M * 128) + b_ * 4096 - 6 * oh,
-                                                       [4, 4, 32, 128], [M * 128, 2 * oh, 128, 1]), group=tg, wait=True)
+                        # per core: three junk quarters (into the junk copies below the output), then
+                        # O [32 tokens][128]
+                        C_conses[col].drain(c, tap=TAP((c_size,), ph["ao"] + 4 * g * (M * 128) + b_ * 4096 - 3 * oh,
+                                                       [4, 4, 32, 128], [M * 128, oh, 128, 1]), group=tg, wait=True)
                     tg.finish()
                 continue
             K, N, mode = ph["K"], ph["N"], ph["mode"]

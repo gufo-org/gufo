@@ -34,6 +34,7 @@ class Plan:
     heads 4 p + j are query heads 2 p + j (j < 2) of its kv head p and zero
     rows otherwise (their outputs get zero o_proj weights). The pass's gate
     rows are zero, so sigmoid(0) = 1/2 scales every head: o_proj doubles.
+    o_proj's inputs are pass 1's 16 heads, then pass 0's.
     Norm phases are plain residuals (x += o, then xn = rmsnorm(x)); RMSNorm
     weights fold into the following GEMM.
     """
@@ -47,11 +48,12 @@ class Plan:
         self.oh = 16 * M * 128               # one pass's head-major attention output
         self.ablocks = []          # (c offset, what) for the host to fill
         self.pieces = {}           # (layer, pass) -> c offset of its K/V pieces
-        # Both passes' outputs adjacent ([32 heads][M][128]), reused by every
-        # layer; each pass also drains three junk quarters 2 oh apart below its
-        # output.
-        base = self._c(8 * self.oh)
-        ao = [base + 6 * self.oh, base + 7 * self.oh]
+        # Both passes' outputs adjacent, pass 1 first ([32 heads][M][128]: pass
+        # 1's 16 heads, then pass 0's), reused by every layer. Each pass drains
+        # three junk quarters oh apart below its output: pass 0's land on pass
+        # 1's region before pass 1 writes it, pass 1's below both.
+        base = self._c(5 * self.oh)
+        ao = [base + 4 * self.oh, base + 3 * self.oh]
         self.phases = [self._norm(("embed",))]
         for l in range(LAYERS):
             for p_ in range(PASSES):
@@ -62,7 +64,7 @@ class Plan:
                     dict(kind="attn", piece=piece, ao=ao[p_], mode=0),
                 ]
             self.phases += [
-                self._gemm(2 * H, H, "plain", ("heads", ao[0]), ("o",), (l, "attn_out")),
+                self._gemm(2 * H, H, "plain", ("heads", ao[1]), ("o",), (l, "attn_out")),
                 self._norm((l, "post")),
                 self._gemm(H, 2 * I, "swiglu", ("rec",), ("plain", self.sw, 2 * I), (l, "gate_up")),
                 self._gemm(I, H, "plain", ("half", self.sw, 2 * I), ("o",), (l, "down")),
