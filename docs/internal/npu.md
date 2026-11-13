@@ -9,7 +9,8 @@ changing `src/core/npu` or a model's `npu/` runtime.
 | --- | --- | --- |
 | Runtime | `src/core/npu/npu.hpp` | Devices, programs (one xclbin = one hardware context), buffers, instruction streams, dispatch libraries, `FindDesign` |
 | `Q8Gemm` | `src/core/npu/q8_gemm.*`, `kernels/q8gemm` | Q8_0 weights, int16 rows: few-row products |
-| `BfpGemm` | `src/core/npu/bfp_gemm.*`, `kernels/bfpgemm` | bf16 rows x bfp16ebs8 weights: many-row products (prefill, encoders, embeddings) |
+| `BfpGemm` | `src/core/npu/bfp_gemm.*`, `kernels/bfpgemm` | bfp16 rows x bfp16ebs8 weights: many-row products (prefill, encoders, embeddings); `bfpgemm_s` serves runs of short products in 128-row bands |
+| `Qwen3Decoder` | `src/core/npu/qwen3_decoder.*`, `kernels/qwen3dec` | One dispatch per decode token for the Qwen3 dense block (28 x 2048): Qwen3-ASR's decoder and the Qwen3-TTS talker |
 | Host operators | `src/core/npu/host_ops.*` | CPU norms, rotary embeddings, attention, activations, bf16 conversion on a persistent thread pool |
 
 Designs are IRON (mlir-aie) programs compiled at build time when

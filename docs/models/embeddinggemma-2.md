@@ -113,6 +113,7 @@ A request for another model ID returns 404 `model_not_found`;
 ## Performance
 
 As of October 23, 2026, on Strix Halo, Gufo embeds up to **41.5k tokens/s**
-over HTTP and answers a 404-token request in **13.0 ms**. Loading takes about
-2 seconds. See the [full benchmarks](../internal/models/embeddinggemma-2/BENCHMARKS.md)
-and the [quality report](../internal/models/embeddinggemma-2/QUALITY.md).
+over HTTP and answers a 404-token request in **13.0 ms**; `--npu` embeds text
+on the XDNA NPU with the GPU off, at about 30% of that throughput. See the
+[benchmarks](../internal/models/embeddinggemma-2/BENCHMARKS.md#npu) and the
+[quality report](../internal/models/embeddinggemma-2/QUALITY.md).
