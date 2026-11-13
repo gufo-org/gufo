@@ -139,8 +139,9 @@ def write_json(path, value):
 def execution_coverage(directory, requested):
     """Verify the loaded mode and actual draft work, including after restart."""
     logs = [directory / "server.log"]
-    if (directory / "server-restarted.log").is_file():
-        logs.append(directory / "server-restarted.log")
+    logs += [directory / name for name in (
+        "server-restarted.log", "server-spacing.log", "server-spacing-restarted.log")
+             if (directory / name).is_file()]
     for path in logs:
         modes = [match.group(1) for line in path.read_text().splitlines()
                  if "event=load_completed" in line and "kind=text" in line
@@ -165,7 +166,9 @@ def execution_coverage(directory, requested):
 
 
 def compare_lifecycle(comparison, baseline, candidate):
-    for key in ("startup_ms", "restart_ms"):
+    for key in ("startup_ms", "restart_ms", "spacing_startup_ms", "spacing_restart_ms"):
+        if key.startswith("spacing_") and key not in baseline and key not in candidate:
+            continue
         if key == "restart_ms" and key not in baseline and key not in candidate \
                 and not any(label.endswith("-disk") for report in (baseline, candidate)
                             for label in report.get("suites", {})):
@@ -498,15 +501,10 @@ def main():
                             "--url", base_url, "--model", model, "--prefix-repetitions", "16",
                             "--output", str(output / (label + ".json")), *extra]):
                         ready_to_restore.append(label)
-                # Retain the window; checkpoint IDs identify fixture-owned writes.
-                spacing_offset = (output / "server.log").stat().st_size
-                spacing = run("disk-spacing", "cache_disk_spacing.py", [
-                    "--url", base_url, "--model", model,
-                    "--output", str(output / "disk-spacing.json")])
                 persist = run("cache-persist", "cache_persist.py", [
                     "--url", base_url, "--model", model,
                     "--output", str(output / "cache-persist.json")])
-        if ready_to_restore or spacing or persist:
+        if ready_to_restore or persist:
             startup_started = time.monotonic()
             with server(command, output / "server-restarted.log", args.startup_timeout):
                 report["restart_ms"] = (time.monotonic() - startup_started) * 1000
@@ -520,18 +518,33 @@ def main():
                         "--url", base_url, "--model", model,
                         "--restore", str(output / "cache-persist.json"),
                         "--output", str(output / "cache-persist-disk.json")])
-                if spacing:
+        if "cache" in selected:
+            # Test publication spacing in its own bounded cache. Replaying the
+            # unrelated cancellation fixtures can otherwise evict this history,
+            # and replaying it first can evict theirs. Keep both strict checks.
+            shutil.rmtree(output / "disk", ignore_errors=True)
+            spacing_command = list(command)
+            spacing_command[spacing_command.index("--cache-disk") + 1] = str(output / "spacing-disk")
+            report["spacing_command"] = spacing_command
+            startup_started = time.monotonic()
+            with server(spacing_command, output / "server-spacing.log", args.startup_timeout):
+                report["spacing_startup_ms"] = (time.monotonic() - startup_started) * 1000
+                spacing = run("disk-spacing", "cache_disk_spacing.py", [
+                    "--url", base_url, "--model", model,
+                    "--output", str(output / "disk-spacing.json")])
+            if spacing:
+                startup_started = time.monotonic()
+                with server(spacing_command, output / "server-spacing-restarted.log", args.startup_timeout):
+                    report["spacing_restart_ms"] = (time.monotonic() - startup_started) * 1000
                     spacing = run("disk-spacing-disk", "cache_disk_spacing.py", [
                         "--url", base_url, "--model", model,
                         "--restore", str(output / "disk-spacing.json"),
                         "--output", str(output / "disk-spacing-disk.json")])
         if spacing:
             from cache_disk_spacing import check_disk_spacing
-            with (output / "server.log").open() as log:
-                log.seek(spacing_offset)
-                grown_log = log.read()
             report["disk_spacing"] = check_disk_spacing(
-                grown_log, (output / "server-restarted.log").read_text(),
+                (output / "server-spacing.log").read_text(),
+                (output / "server-spacing-restarted.log").read_text(),
                 json.loads((output / "disk-spacing.json").read_text())[0],
                 json.loads((output / "disk-spacing-disk.json").read_text())[0])
     except Exception as error:
@@ -546,6 +559,7 @@ def main():
         # disk budget, and the restart checks were their only reader.
         if disk_enabled:
             shutil.rmtree(output / "disk", ignore_errors=True)
+            shutil.rmtree(output / "spacing-disk", ignore_errors=True)
     report["status"] = ("passed" if report["suites"] and "error" not in report
                         and all(row["status"] == "passed" for row in report["suites"].values())
                         else "failed")

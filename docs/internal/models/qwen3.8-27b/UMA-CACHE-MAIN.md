@@ -97,6 +97,44 @@ in both final-candidate repeats. Long-context coverage then initializes the
 device pool after short-history pressure and restores all 98,375 tokens with
 zero prefill and no disk restore.
 
+## Linux CI fixture follow-up
+
+The checks for PR head `35055b5c` exposed two test-isolation failures.
+[Follow-up evidence](artifacts/uma-cache-linux-ci-20261113.json) retains both
+reproductions and the unsuccessful order-only experiment. These fixes change
+tests and their runner; the measured production runtime remains `f5e9bad1`.
+
+The CPU restart test withheld every background transfer stream to delay device
+persistence. That also denied streams to frontier capture and idle preservation.
+An isolated Linux reproduction failed the same device-copy/persistence-read
+assertion. The fixture now gates only reads from preserved device backing,
+leaving preservation streams available and keeping all original assertions.
+The complete component test passes 20 consecutive Linux runs (120.99 s total)
+and one Windows run (14.53 s).
+
+The Linux Q4 disk-spacing check restored 3,320 of 6,576 tokens and prefilled
+3,256, above its unchanged 2,560-token bound. A native Windows Q4 reproduction
+also failed. Manifest inventories show its 6,278-token checkpoint survived
+publication and restart, then unrelated restore fixtures evicted it from their
+shared 8 GiB cache. Merely replaying spacing first displaced other fixtures.
+The runner therefore gives spacing its own 8 GiB cache and startup/restart
+pair, releasing the earlier cache first. Capacity, spacing, output and prefill
+assertions are unchanged. A bounded-cache counterexample fails the old runner
+and passes the isolated version.
+
+The fixed runner passes all 14 cache subchecks on Q4/DFlash2 and on the existing
+Q8/DFlash2 and Flash-Next/MTP model/generation presets (42 subchecks). Q4 restores
+6,278 tokens with 298 prefill tokens and the exact output. Additional loader
+time for the isolated pair is 22.891 s, 30.375 s and 53.641 s respectively on
+this Windows host. Separate logs preserve request timing attribution and verify
+the loaded mode in all four processes. Runner tests pass 90/90 on Linux and
+Windows; a deterministic fake clock avoids zero-duration Windows mock startup.
+These are test overhead observations, not a new engine-speed comparison.
+
+Local Linux checks use an isolated Ubuntu 24.04/GCC 13.3 container with the
+actual serving/cache test sources and assertions. Real-model replays use native
+Windows gfx1151; official Linux model CI remains the Linux GPU validation gate.
+
 ## Final qualification
 
 The final binary passes all 12 functional suites (332 named checks):

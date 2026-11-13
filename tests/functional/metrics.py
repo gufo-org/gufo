@@ -681,6 +681,10 @@ def join_server_timings(directory):
     for path in root.glob("*.requests.json"):
         log = root / ("server-restarted.log" if path.name.endswith("-disk.requests.json")
                       else "server.log")
+        spacing_log = {"disk-spacing.requests.json": "server-spacing.log",
+                       "disk-spacing-disk.requests.json": "server-spacing-restarted.log"}.get(path.name)
+        if spacing_log and (root / spacing_log).is_file():
+            log = root / spacing_log
         completed = {}
         for line in log.read_text().splitlines():
             if "event=completed " in line:

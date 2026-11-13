@@ -185,6 +185,10 @@ class DeviceRunner final : public Runner {
 public:
   mutable std::atomic<std::size_t> device_copies{}, persistence_reads{};
   mutable std::atomic<bool> defer_device_reads{};
+  void ResumeDeviceReads() const {
+    defer_device_reads.store(false);
+    defer_device_reads.notify_all();
+  }
   TextRunnerResourceClaim ResourceClaim() const override {
     auto claim = Runner::ResourceClaim();
     claim.retained_device_snapshot_capacity_bytes = 2048 * 16;
@@ -211,16 +215,16 @@ public:
     adapter = owned.get();
     auto resources = server::testing::MakeFakeCacheResources(
         ledger, std::move(owned), {.row_domain = cache::MemoryDomain::kDevice});
-    const auto acquire = resources->stream;
-    resources->stream = [this, acquire,
-                         foreground = std::this_thread::get_id()] {
-      if (defer_device_reads.load() && std::this_thread::get_id() != foreground)
-        return std::unique_ptr<cache::Stream>{};
-      return acquire();
-    };
+    // Read only preserved backing. Blocking a live-row read would pin the
+    // execution slot and prevent the overwrite which releases this gate.
+    resources->copy_observed_rows = {};
     const auto read = resources->copy_device_rows;
     resources->copy_device_rows = [this, read](auto source, auto destination,
                                                cache::Stream& stream) {
+      // Gate this reader, not the shared stream factory: frontier capture and
+      // idle preservation also need streams on their background threads.
+      while (defer_device_reads.load())
+        defer_device_reads.wait(true);
       ++persistence_reads;
       return read(source, destination, stream);
     };
@@ -1806,7 +1810,7 @@ void RestartAndCorruption(bool device = false) {
         DeviceRunner* runner;
         ~ResumeReads() {
           if (runner)
-            runner->defer_device_reads.store(false);
+            runner->ResumeDeviceReads();
         }
       } resume{device_runner};
       if (device_runner)
@@ -1822,7 +1826,8 @@ void RestartAndCorruption(bool device = false) {
         auto overwrite = pool.Acquire(other);
         Prefill(overwrite);
         overwrite.Invalidate();
-        device_runner->defer_device_reads.store(false);
+        assert(device_runner->persistence_reads == 0);
+        device_runner->ResumeDeviceReads();
       }
     }
     if (device) {
