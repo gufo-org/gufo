@@ -170,7 +170,16 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   tg32 flat. Kernel metadata explains the 64 case (every Q-kernel spills,
   scratch 80-596 B/lane at VGPR 192) but not the 32 case (no spills,
   VGPR ≤ 180): more tokens per weight load multiplies the activation read
-  stream per block and thrashes the cache. `kMaxRows` stays 16.
+   stream per block and thrashes the cache. `kMaxRows` stays 16.
+- P3g dense WMMA 64-token tiles (`kTileTokens` 32 → 64 for Q5_K/Q6_K in
+   `DenseWmmaKernel`, weight re-reads halved): correct (unit NMSE ≤ 3.7e-8
+   bit-identical, n-gen-1 sha unchanged) but pp2048 157.9/157.9 vs control
+   178.1/179.0 (-12 %), worse still at 456 B/lane spills in the first
+   float4-staged form (-15 %; staging the f16 halves cut spill to 312 B of
+   the loss but not enough). VGPR 256 is the hard ceiling at 256 threads
+   and the doubled live accumulators (4 `v8f` tiles + 8 staged chunks) do
+   not fit; LDS occupancy was already 1 block/CU so the wider tile buys
+   nothing else. Reverted; `kTileTokens` stays 32.
 
 ## Profiled (rocprofv3, serve workload)
 
