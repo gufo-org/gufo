@@ -18,6 +18,7 @@
 #include "gufo/ext/component_cache_resources.hpp"
 #include "gufo/ext/experimental/admission_query.hpp"
 #include "gufo/ext/gguf_identity.hpp"
+#include "gufo/ext/host.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/families/qwen/text/chat_template.hpp"
@@ -58,9 +59,14 @@ bool EndsTurn(const State& state, const Tokens& tokens, int token) {
   return state.stop_at_eos() && tokens.IsStopToken(token);
 }
 
+// Cache backing diagnostics (transfer resources, backing growth and limits)
+// go to the process log under the cache component, as before the extension
+// migration.
 [[nodiscard]] inline hip::ComponentCacheHooks HipComponentCacheHooks() {
-  return {[] { return ext::HostSnapshotCeilingBytes(); },
-          [](std::string_view) {}, [](std::string_view) {}};
+  return {
+      [] { return ext::HostSnapshotCeilingBytes(); },
+      [](std::string_view message) { server::Logger::Warn("cache", message); },
+      [](std::string_view message) { server::Logger::Info("cache", message); }};
 }
 
 struct QwenImageContext final : TextPromptContext {
