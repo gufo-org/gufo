@@ -23,6 +23,7 @@ void ParallelFor(std::size_t n, std::size_t grain,
 /// Rounds every value to the nearest bf16 in place.
 void RoundBf16(float* x, std::size_t n);
 void Bf16ToFloat(const std::uint16_t* src, float* dst, std::size_t n);
+void FloatToBf16(const float* src, std::uint16_t* dst, std::size_t n);
 
 /// y = x / rms(x) * weight per row of `dim` (weight null: none; `offset`
 /// added to the weight, e.g. 1 for (1 + w) norms). x and y may alias.
@@ -73,6 +74,9 @@ struct AttentionArgs {
 /// `skip_empty` (rows another path computes).
 void Attention(const AttentionArgs& args, const KeyRange& keys,
                bool skip_empty = false);
+
+/// x[i] = exp(x[i] - shift); *sum (when set) gets the total. Vectorized.
+void ExpInPlace(float* x, std::size_t n, float shift, float* sum = nullptr);
 
 /// Dot product and y += a x, vectorized.
 [[nodiscard]] float Dot(const float* a, const float* b, std::size_t n);

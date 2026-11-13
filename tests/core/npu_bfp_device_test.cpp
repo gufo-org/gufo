@@ -73,8 +73,9 @@ int main(int argc, char** argv) {
   struct Shape {
     int n, k, rows;
   };
-  for (const Shape s : {Shape{1024, 512, 512}, Shape{1000, 600, 37},
-                        Shape{3000, 2048, 700}, Shape{512, 6144, 1100}}) {
+  for (const Shape s :
+       {Shape{1024, 512, 512}, Shape{1000, 600, 37}, Shape{3000, 2048, 700},
+        Shape{512, 6144, 1100}, Shape{2048, 512, 2349}}) {
     std::vector<float> w(std::size_t(s.n) * s.k), x(std::size_t(s.rows) * s.k);
     for (float& v : w)
       v = normal(rng) * 0.05f;

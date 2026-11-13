@@ -19,8 +19,9 @@ endif()
 
 # gufo_npu_design(<name> SCRIPT <design.py> [SOURCES <files>...]): runs
 # `<python> <design.py> <dir>` into ${CMAKE_BINARY_DIR}/npu/<name> and adds the
-# target npu_design_<name>. The design writes <name>.xclbin and its dispatch
-# library there. Sets <name>_NPU_DIR in the caller's scope.
+# target npu_design_<name> (built by default). The design writes
+# <name>.xclbin and its dispatch library there; both install to
+# share/gufo/npu/<name>. Sets <name>_NPU_DIR in the caller's scope.
 function(gufo_npu_design name)
   cmake_parse_arguments(ARG "" "SCRIPT" "SOURCES" ${ARGN})
   set(dir "${CMAKE_BINARY_DIR}/npu/${name}")
@@ -30,13 +31,20 @@ function(gufo_npu_design name)
   endif()
   get_filename_component(script "${ARG_SCRIPT}" ABSOLUTE)
   get_filename_component(script_dir "${script}" DIRECTORY)
+  # IRON caches compiled kernel objects under NPU_CACHE_HOME; keep them in
+  # the build tree (sandboxed builds have no writable home).
   add_custom_command(
-    OUTPUT "${dir}/${name}.xclbin"
+    OUTPUT "${dir}/${name}.xclbin" "${dir}/${name}_dispatch.so"
     COMMAND ${CMAKE_COMMAND} -E env "PEANO_INSTALL_DIR=$ENV{PEANO_INSTALL_DIR}"
+            "NPU_CACHE_HOME=${CMAKE_BINARY_DIR}/npu/.cache"
             "${GUFO_IRON_PYTHON}" "${script}" "${dir}"
     WORKING_DIRECTORY "${script_dir}"
     DEPENDS "${script}" ${ARG_SOURCES}
     COMMENT "Compiling NPU design ${name}"
     VERBATIM)
-  add_custom_target(npu_design_${name} DEPENDS "${dir}/${name}.xclbin")
+  add_custom_target(npu_design_${name} ALL DEPENDS "${dir}/${name}.xclbin")
+  if(NOT WIN32)
+    install(FILES "${dir}/${name}.xclbin" "${dir}/${name}_dispatch.so"
+      DESTINATION "share/gufo/npu/${name}")
+  endif()
 endfunction()

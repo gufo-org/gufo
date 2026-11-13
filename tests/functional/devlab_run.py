@@ -23,6 +23,8 @@ def service_args(key, binary, baseline, assets, output):
             '--model', assets[model['asset']], '--output', str(output)]
     if model['category'] == 'tts':
         args += ['--variant', model['variant'], '--asr-binary', str(baseline), '--asr-model', assets['asr']]
+    if model.get('npu'):
+        args += ['--npu']
     return args
 
 

@@ -242,6 +242,28 @@
       "asset": "tts-design",
       "service": "tts",
       "variant": "design"
+    },
+    "embedding-gemma2-npu": {
+      "title": "EmbeddingGemma 2 NPU",
+      "category": "embedding",
+      "asset": "embedding",
+      "service": "embedding",
+      "npu": true
+    },
+    "qwen3-asr-npu": {
+      "title": "Qwen3-ASR NPU",
+      "category": "asr",
+      "asset": "asr",
+      "service": "asr",
+      "npu": true
+    },
+    "qwen3-tts-custom-npu": {
+      "title": "Qwen3-TTS custom NPU",
+      "category": "tts",
+      "asset": "tts-custom",
+      "service": "tts",
+      "variant": "custom",
+      "npu": true
     }
   },
   "rules": [
@@ -323,7 +345,8 @@
         "tests/functional/embedding*"
       ],
       "owners": [
-        "embedding"
+        "embedding",
+        "embedding-gemma2-npu"
       ]
     },
     {
@@ -337,7 +360,8 @@
         "tests/functional/asr_service.py"
       ],
       "owners": [
-        "asr"
+        "asr",
+        "qwen3-asr-npu"
       ]
     },
     {
@@ -351,7 +375,8 @@
         "tests/functional/tts_service.py"
       ],
       "owners": [
-        "tts"
+        "tts",
+        "qwen3-tts-custom-npu"
       ]
     },
     {
@@ -365,7 +390,26 @@
       ],
       "owners": [
         "asr",
-        "tts"
+        "tts",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu"
+      ]
+    },
+    {
+      "id": "npu",
+      "priority": 20,
+      "owners": [
+        "embedding-gemma2-npu",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu"
+      ],
+      "paths": [
+        "src/core/npu/**",
+        "include/gufo/ext/experimental/npu.hpp",
+        "cmake/GufoNpuDesigns.cmake",
+        ".devops/nix/xrt/**",
+        ".devops/nix/iron/**",
+        "tests/core/npu*"
       ]
     },
     {
@@ -379,7 +423,10 @@
       "owners": [
         "embedding",
         "asr",
-        "tts"
+        "tts",
+        "embedding-gemma2-npu",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu"
       ]
     },
     {
@@ -496,7 +543,10 @@
         "llm",
         "embedding",
         "asr",
-        "tts"
+        "tts",
+        "embedding-gemma2-npu",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu"
       ]
     }
   ]

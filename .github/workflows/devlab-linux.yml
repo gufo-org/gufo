@@ -254,6 +254,21 @@ jobs:
             exit 1
           }
           printf -- '- Linux x86-64: verified\n- KFD/render device access: verified\n' >> "$GITHUB_STEP_SUMMARY"
+          # The NPU smoke models (*-npu in devlab.json) need the XDNA accel
+          # node; without it they fail on their own, with this as the cause.
+          npu_access=false
+          for device in /dev/accel/accel*; do
+            if [[ -c "$device" && -r "$device" && -w "$device" ]]; then
+              echo "Accessible NPU device: $device"
+              npu_access=true
+            fi
+          done
+          if [[ "$npu_access" == true ]]; then
+            printf -- '- XDNA NPU access: verified (memlock %s)\n' "$(ulimit -l)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::No accessible XDNA NPU (/dev/accel); NPU smoke models will fail."
+            printf -- '- XDNA NPU access: missing\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Report power profile and exposed limits
         shell: bash

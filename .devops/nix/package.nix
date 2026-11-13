@@ -23,8 +23,8 @@
   # XRT with the amdxdna plugin (.devops/nix/xrt): the NPU runtime. Null
   # only for revisions that predate it (the CI timing baseline).
   xrt ? null,
-  # The IRON toolchain (.devops/nix/iron), passed through for development
-  # images that compile NPU designs; the package itself never uses it.
+  # The IRON toolchain (.devops/nix/iron): compiles the in-tree NPU designs
+  # (src/core/npu/kernels) into share/gufo/npu. Null builds without them.
   iron ? null,
   releaseVersion ? null,
   extensionsFromLock ? false,
@@ -174,6 +174,7 @@ stdenv.mkDerivation {
     "-DGUFO_FFPROBE_EXECUTABLE=${ffmpeg-headless}/bin/ffprobe"
     "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
   ] ++ lib.optional (xrt != null) "-DXRT_DIR=${xrt}/opt/xilinx/xrt/share/cmake/XRT"
+  ++ lib.optional (iron != null) "-DGUFO_IRON_PYTHON=${iron}/bin/python3"
   ++ lib.optional hasExtensionSdk "-DGUFO_SDK_INSTALL_DIR=${placeholder "sdk"}/lib/gufo/sdk"
   ++ lib.optionals (extensions != [ ]) [
     "-DGUFO_EXTENSION_DIRS=${lib.concatMapStringsSep ";" (ext: "${ext}") extensions}"
@@ -184,7 +185,9 @@ stdenv.mkDerivation {
   # C/C++ sources. Keep HIP uncached: Clang emits a bundled preprocessor output
   # whose included headers ccache 4.13.6 does not record. A header-only change
   # can then reuse a stale HIP object, including one from the timing baseline.
-  preConfigure = cargoSetup + ''
+  preConfigure = cargoSetup + lib.optionalString (iron != null) ''
+    export PEANO_INSTALL_DIR=${iron.peano}
+  '' + ''
     ccache_dir=/tmp/gufo-ccache
     if [[ -d "$ccache_dir" && -w "$ccache_dir" ]]; then
       export CCACHE_DIR="$ccache_dir"

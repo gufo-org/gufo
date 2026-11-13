@@ -33,6 +33,8 @@ def main():
     parser.add_argument('--asr-binary', type=Path, help='Explicit pinned evaluator for TTS intelligibility')
     parser.add_argument('--asr-model', type=Path)
     parser.add_argument('--startup-timeout', type=float, default=300)
+    parser.add_argument('--npu', action='store_true',
+                        help='Serve on the XDNA NPU (--npu); embeddings check text only')
     args = parser.parse_args()
     if args.service == 'tts' and not (args.asr_binary and args.asr_model):
         parser.error('TTS requires --asr-binary and --asr-model for intelligibility checks')
@@ -50,6 +52,8 @@ def main():
     public_model = 'functional-' + args.service
     command = [str(args.binary), 'serve', args.service, '--model', str(args.model),
                '--host', '127.0.0.1', '--port', str(port), '--served-model-name', public_model]
+    if args.npu:
+        command += ['--npu']
     voice = args.voice or {'base': 'narrator', 'custom': 'ryan', 'design': 'voice-design'}[args.variant]
     if args.service == 'tts' and args.variant == 'base':
         command += ['--voice', f'{voice}={args.audio_root / "clear-english-voice.wav"}',
@@ -68,6 +72,7 @@ def main():
               'weights': [{'path': str(path), 'bytes': path.stat().st_size,
                            'mtime_ns': path.stat().st_mtime_ns} for path in sorted(args.model.rglob('*.safetensors'))],
               'binary_sha256': sha256(args.binary), 'variant': args.variant if args.service == 'tts' else None,
+              'npu': args.npu,
               'timing_qualification': 'observations only; no matched baseline comparison',
               'service_harness_sha256': {name: sha256(HERE / name) for name in
                   ('model_services.py', 'service_http.py', 'asr_service.py', 'tts_service.py',
@@ -86,6 +91,8 @@ def main():
             if args.service == 'embedding':
                 scripts = ('embedding_video.py',) if args.embedding_suite == 'smoke' else (
                     'embeddings.py', 'embedding_images.py', 'embedding_audio.py', 'embedding_video.py')
+                if args.npu:  # the NPU encoder embeds text only
+                    scripts = ('embeddings.py',)
                 report['embedding_suite'] = args.embedding_suite
                 for script in scripts:
                     with evidence.case(script):

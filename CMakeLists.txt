@@ -298,6 +298,15 @@ endif()
 add_subdirectory(src/core/platform)
 add_subdirectory(src/core/rust)
 add_subdirectory(src/core/npu)
+# The in-tree NPU designs, compiled with IRON when available and installed to
+# share/gufo/npu/<name>, where gufo::npu::FindDesign looks for them.
+include(cmake/GufoNpuDesigns.cmake)
+gufo_npu_design(q8gemm SCRIPT src/core/npu/kernels/q8gemm/q8gemm.py
+  SOURCES src/core/npu/kernels/q8gemm/q8gemm.cc)
+gufo_npu_design(bfpgemm SCRIPT src/core/npu/kernels/bfpgemm/bfpgemm.py
+  SOURCES src/core/npu/kernels/bfpgemm/bfpgemm.cc
+          src/core/npu/kernels/bfpgemm/include/aie_kernel_utils.h
+          src/core/npu/kernels/bfpgemm/include/aie_arch.h)
 
 add_library(gufo_core STATIC
   src/core/base64.cpp
@@ -1484,11 +1493,9 @@ endfunction()
     "$<TARGET_FILE:npu_dispatch_fixture>" "${CMAKE_CURRENT_BINARY_DIR}/tests/core/npu-sysfs")
   set_tests_properties(npu_test PROPERTIES LABELS "cpu;npu")
 
-  # On-device NPU check: the in-tree Q8_0 GEMM design (compiled with IRON when
-  # available) against a double reference; skipped without an NPU.
-  include(cmake/GufoNpuDesigns.cmake)
-  gufo_npu_design(q8gemm SCRIPT src/core/npu/kernels/q8gemm/q8gemm.py
-    SOURCES src/core/npu/kernels/q8gemm/q8gemm.cc)
+  # On-device NPU checks of the in-tree designs (compiled with IRON when
+  # available, see gufo_npu_design above) against double references; skipped
+  # without an NPU.
   if(GUFO_NPU_DESIGNS_AVAILABLE)
     add_executable(npu_device_test tests/core/npu_device_test.cpp)
     target_include_directories(npu_device_test PRIVATE ${PROJECT_SOURCE_DIR})
@@ -1497,8 +1504,6 @@ endfunction()
     add_test(NAME npu_device_test COMMAND npu_device_test "${q8gemm_NPU_DIR}")
     set_tests_properties(npu_device_test PROPERTIES LABELS "npu" SKIP_RETURN_CODE 77)
   endif()
-  gufo_npu_design(bfpgemm SCRIPT src/core/npu/kernels/bfpgemm/bfpgemm.py
-    SOURCES src/core/npu/kernels/bfpgemm/bfpgemm.cc)
   if(GUFO_NPU_DESIGNS_AVAILABLE)
     add_executable(npu_bfp_device_test tests/core/npu_bfp_device_test.cpp)
     target_include_directories(npu_bfp_device_test PRIVATE ${PROJECT_SOURCE_DIR})

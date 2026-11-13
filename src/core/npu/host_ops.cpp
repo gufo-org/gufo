@@ -18,6 +18,57 @@
 namespace gufo::npu::host {
 namespace {
 
+#ifdef GUFO_NPU_HOST_AVX2
+// e^x for 8 lanes: range reduction by ln 2 and a degree-6 polynomial
+// (relative error ~2e-7 over the float range; clamps at +-88).
+inline __m256 Exp8(__m256 x) {
+  x = _mm256_min_ps(_mm256_max_ps(x, _mm256_set1_ps(-87.3f)),
+                    _mm256_set1_ps(88.3f));
+  const __m256 n =
+      _mm256_round_ps(_mm256_mul_ps(x, _mm256_set1_ps(1.44269504088896341f)),
+                      _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  __m256 r = _mm256_fnmadd_ps(n, _mm256_set1_ps(0.693359375f), x);
+  r = _mm256_fnmadd_ps(n, _mm256_set1_ps(-2.12194440e-4f), r);
+  __m256 p = _mm256_set1_ps(1.9875691500e-4f);
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.3981999507e-3f));
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(8.3334519073e-3f));
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(4.1665795894e-2f));
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.6666665459e-1f));
+  p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(5.0000001201e-1f));
+  p = _mm256_fmadd_ps(p, _mm256_mul_ps(r, r),
+                      _mm256_add_ps(r, _mm256_set1_ps(1.0f)));
+  const __m256i e = _mm256_slli_epi32(
+      _mm256_add_epi32(_mm256_cvtps_epi32(n), _mm256_set1_epi32(127)), 23);
+  return _mm256_mul_ps(p, _mm256_castsi256_ps(e));
+}
+
+// act(x) for 8 lanes; erf GELU has no vector form here (returns false).
+inline bool Activate8(Activation a, __m256 x, __m256* out) {
+  const __m256 one = _mm256_set1_ps(1.0f);
+  switch (a) {
+    case Activation::kNone:
+      *out = x;
+      return true;
+    case Activation::kSilu:
+      *out = _mm256_div_ps(
+          x, _mm256_add_ps(one, Exp8(_mm256_sub_ps(_mm256_setzero_ps(), x))));
+      return true;
+    case Activation::kGeluTanh: {
+      // 0.5 x (1 + tanh(u)) = x / (1 + e^(-2u)), u = k (x + 0.044715 x^3)
+      const __m256 x3 = _mm256_mul_ps(_mm256_mul_ps(x, x), x);
+      const __m256 u =
+          _mm256_mul_ps(_mm256_set1_ps(-2.0f * 0.7978845608028654f),
+                        _mm256_fmadd_ps(_mm256_set1_ps(0.044715f), x3, x));
+      *out = _mm256_div_ps(x, _mm256_add_ps(one, Exp8(u)));
+      return true;
+    }
+    case Activation::kGeluErf:
+      return false;
+  }
+  return false;
+}
+#endif
+
 // A fixed pool. Each ParallelFor publishes a job with its own counters;
 // workers take chunks from it and the caller helps until all are done. A
 // worker late for one job only ever sees that job's exhausted counter.
@@ -158,8 +209,67 @@ void RoundBf16(float* x, std::size_t n) {
 }
 
 void Bf16ToFloat(const std::uint16_t* src, float* dst, std::size_t n) {
-  for (std::size_t i = 0; i < n; ++i)
+  std::size_t i = 0;
+#ifdef GUFO_NPU_HOST_AVX2
+  for (; i + 8 <= n; i += 8) {
+    const __m128i h =
+        _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+    _mm256_storeu_ps(dst + i, _mm256_castsi256_ps(_mm256_slli_epi32(
+                                  _mm256_cvtepu16_epi32(h), 16)));
+  }
+#endif
+  for (; i < n; ++i)
     dst[i] = Bf16ToFloat(src[i]);
+}
+
+void FloatToBf16(const float* src, std::uint16_t* dst, std::size_t n) {
+  std::size_t i = 0;
+#ifdef GUFO_NPU_HOST_AVX2
+  // Round to nearest even; finite inputs (activations).
+  const __m256i bias = _mm256_set1_epi32(0x7fff), one = _mm256_set1_epi32(1);
+  for (; i + 16 <= n; i += 16) {
+    __m256i a = _mm256_castps_si256(_mm256_loadu_ps(src + i));
+    __m256i b = _mm256_castps_si256(_mm256_loadu_ps(src + i + 8));
+    a = _mm256_srli_epi32(
+        _mm256_add_epi32(_mm256_add_epi32(a, bias),
+                         _mm256_and_si256(_mm256_srli_epi32(a, 16), one)),
+        16);
+    b = _mm256_srli_epi32(
+        _mm256_add_epi32(_mm256_add_epi32(b, bias),
+                         _mm256_and_si256(_mm256_srli_epi32(b, 16), one)),
+        16);
+    // packus works per 128-bit lane: fix the order with a permute.
+    const __m256i packed =
+        _mm256_permute4x64_epi64(_mm256_packus_epi32(a, b), 0xd8);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), packed);
+  }
+#endif
+  for (; i < n; ++i)
+    dst[i] = FloatToBf16(src[i]);
+}
+
+void ExpInPlace(float* x, std::size_t n, float shift, float* sum) {
+  std::size_t i = 0;
+  float total = 0;
+#ifdef GUFO_NPU_HOST_AVX2
+  const __m256 sh = _mm256_set1_ps(shift);
+  __m256 acc = _mm256_setzero_ps();
+  for (; i + 8 <= n; i += 8) {
+    const __m256 e = Exp8(_mm256_sub_ps(_mm256_loadu_ps(x + i), sh));
+    _mm256_storeu_ps(x + i, e);
+    acc = _mm256_add_ps(acc, e);
+  }
+  alignas(32) float lanes[8];
+  _mm256_store_ps(lanes, acc);
+  for (float l : lanes)
+    total += l;
+#endif
+  for (; i < n; ++i) {
+    x[i] = std::exp(x[i] - shift);
+    total += x[i];
+  }
+  if (sum)
+    *sum = total;
 }
 
 float Dot(const float* a, const float* b, std::size_t n) {
@@ -297,7 +407,19 @@ void ActivateRows(float* x, std::size_t rows, std::size_t dim,
               [&](std::size_t b, std::size_t e) {
                 for (std::size_t r = b; r < e; ++r) {
                   float* p = x + r * dim;
-                  for (std::size_t i = 0; i < dim; ++i)
+                  std::size_t i = 0;
+#ifdef GUFO_NPU_HOST_AVX2
+                  __m256 v;
+                  for (; i + 8 <= dim; i += 8) {
+                    __m256 in = _mm256_loadu_ps(p + i);
+                    if (bias)
+                      in = _mm256_add_ps(in, _mm256_loadu_ps(bias + i));
+                    if (!Activate8(a, in, &v))
+                      break;
+                    _mm256_storeu_ps(p + i, v);
+                  }
+#endif
+                  for (; i < dim; ++i)
                     p[i] = Activate(a, bias ? p[i] + bias[i] : p[i]);
                 }
               });
@@ -306,17 +428,26 @@ void ActivateRows(float* x, std::size_t rows, std::size_t dim,
 void GatedRows(const float* gate, std::size_t gate_stride, const float* up,
                std::size_t up_stride, float* out, std::size_t out_stride,
                std::size_t rows, std::size_t dim, Activation a) {
-  ParallelFor(rows,
-              std::max<std::size_t>(1, 8192 / std::max<std::size_t>(dim, 1)),
-              [&](std::size_t b, std::size_t e) {
-                for (std::size_t r = b; r < e; ++r) {
-                  const float* g = gate + r * gate_stride;
-                  const float* u = up + r * up_stride;
-                  float* o = out + r * out_stride;
-                  for (std::size_t i = 0; i < dim; ++i)
-                    o[i] = Activate(a, g[i]) * u[i];
-                }
-              });
+  ParallelFor(
+      rows, std::max<std::size_t>(1, 8192 / std::max<std::size_t>(dim, 1)),
+      [&](std::size_t b, std::size_t e) {
+        for (std::size_t r = b; r < e; ++r) {
+          const float* g = gate + r * gate_stride;
+          const float* u = up + r * up_stride;
+          float* o = out + r * out_stride;
+          std::size_t i = 0;
+#ifdef GUFO_NPU_HOST_AVX2
+          __m256 v;
+          for (; i + 8 <= dim; i += 8) {
+            if (!Activate8(a, _mm256_loadu_ps(g + i), &v))
+              break;
+            _mm256_storeu_ps(o + i, _mm256_mul_ps(v, _mm256_loadu_ps(u + i)));
+          }
+#endif
+          for (; i < dim; ++i)
+            o[i] = Activate(a, g[i]) * u[i];
+        }
+      });
 }
 
 void Attention(const AttentionArgs& p, const KeyRange& keys, bool skip_empty) {
@@ -351,10 +482,7 @@ void Attention(const AttentionArgs& p, const KeyRange& keys, bool skip_empty) {
           top = std::max(top, s);
         }
         float sum = 0;
-        for (float& s : scores) {
-          s = std::exp(s - top);
-          sum += s;
-        }
+        ExpInPlace(scores.data(), scores.size(), top, &sum);
         const float inv = 1.0f / sum;
         std::fill(acc.begin(), acc.end(), 0.0f);
         for (std::size_t t = kb; t < ke; ++t)

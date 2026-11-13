@@ -9,6 +9,10 @@
 // accumulate in bf16. Each product is within about 1% relative of f32
 // arithmetic. Rows go in bands of 512 and outputs in groups of 1024, so for a
 // few rows Q8Gemm is faster.
+//
+// Run is thread-safe: up to two threads stage their products at once, so one
+// thread's host work (packing, unpacking, its own CPU operators) overlaps the
+// other's NPU work.
 
 #include <cstddef>
 #include <cstdint>
@@ -47,16 +51,30 @@ public:
   /// A matrix of n outputs x k inputs, row-major [n][k] f32. Returns its id.
   /// Throws Error when the arena is full.
   int Upload(int n, int k, std::span<const float> weights);
-  /// As Upload, element (o, i) at weights[o * row_stride + i * col_stride]
-  /// (a transposed or strided view, such as attention keys or values).
-  int Upload(int n, int k, const float* weights, std::size_t row_stride,
-             std::size_t col_stride);
   /// As Upload, from bf16 bit patterns.
   int UploadBf16(int n, int k, std::span<const std::uint16_t> weights);
-  /// The arena state; Release(mark) drops the matrices uploaded after it,
-  /// for per-request operands (attention keys and values).
-  [[nodiscard]] std::size_t Mark() const;
-  void Release(std::size_t mark);
+
+  /// A region of the arena for per-request operands (attention keys and
+  /// values), reserved once. Uploads into it are valid until Reset; ids of
+  /// different scratches never collide. One thread uses a scratch at a time.
+  class Scratch {
+  public:
+    Scratch() = default;
+    /// Element (o, i) at weights[o * row_stride + i * col_stride]: a
+    /// transposed or strided view. Returns an id for Call. Throws Error when
+    /// the region is full.
+    int Upload(int n, int k, const float* weights, std::size_t row_stride,
+               std::size_t col_stride);
+    /// Drops every matrix uploaded since the last Reset.
+    void Reset();
+
+  private:
+    friend class BfpGemm;
+    BfpGemm* owner_{};
+    int index_{-1};
+  };
+  [[nodiscard]] Scratch NewScratch(std::size_t bytes);
+
   /// Runs independent products in as few dispatches as the staging buffers
   /// allow.
   void Run(std::span<const Call> calls);

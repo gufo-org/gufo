@@ -7,8 +7,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <map>
 #include <mutex>
 #include <span>
+#include <thread>
 #include <utility>
 
 #include "gufo/ext/experimental/npu.hpp"
@@ -44,6 +46,8 @@ std::vector<float> ToFloat(const Tensor& t) {
 struct Encoder::Impl {
   gufo::npu::Device device;
   gufo::npu::BfpGemm gemm;
+  // One per concurrent half batch (attention keys and values).
+  gufo::npu::BfpGemm::Scratch scratches[2];
   LoadResult loaded;
   const TextConfig* config{};
   const std::uint16_t* embed{};
@@ -87,7 +91,9 @@ struct Encoder::Impl {
         text_only.supported_audio = false;
     device = gufo::npu::Device::Open();
     gemm = gufo::npu::BfpGemm::Open(device, gufo::npu::FindDesign("bfpgemm"),
-                                    std::size_t(512) << 20);
+                                    std::size_t(768) << 20);
+    for (auto& scratch : scratches)
+      scratch = gemm.NewScratch(std::size_t(192) << 20);
     embed = reinterpret_cast<const std::uint16_t*>(
         Find("embed_tokens.weight").data);
     ple_model = Upload({"ple.per_layer_model_projection.weight"});
@@ -118,122 +124,182 @@ struct Encoder::Impl {
     }
   }
 
-  // Attention of the long sequences: per sequence and head, scores = Q K^T
-  // and out = P V on the NPU, with keys and values uploaded per request.
+  // Attention of the long sequences on the NPU: per sequence, query band of
+  // up to 512 rows and head, scores = Q K^T over the band's key span and
+  // out = P V, with the span's keys and values uploaded per request; the
+  // softmax runs on the CPU. `visible(r, lo, hi, &b, &e)` narrows row r's
+  // keys within [lo, hi).
   template<typename Visible>
-  void NpuAttention(const float* qkv, std::size_t row_w, std::size_t heads,
-                    std::size_t kv, std::size_t hd,
-                    const std::vector<std::size_t>& starts,
+  void NpuAttention(gufo::npu::BfpGemm::Scratch& scratch, const float* qkv,
+                    std::size_t row_w, std::size_t heads, std::size_t kv,
+                    std::size_t hd, const std::vector<std::size_t>& starts,
                     const std::vector<char>& long_seq, const Visible& visible,
                     float* context, std::size_t qw) {
+    constexpr std::size_t kBandRows = 512;
+    struct Span {
+      std::size_t seq, q0, q1, k0, k1;  // absolute rows
+      int keys[4], values[4];           // per kv head
+    };
     struct Item {
-      std::size_t seq, head, len;
+      const Span* span;
+      std::size_t head;
       std::vector<float> q, scores, out;
     };
-    std::vector<Item> items;
-    for (std::size_t s = 0; s + 1 < starts.size(); ++s)
-      if (long_seq[s])
-        for (std::size_t h = 0; h < heads; ++h)
-          items.push_back({s, h, starts[s + 1] - starts[s], {}, {}, {}});
-    if (items.empty())
-      return;
-    using Clock = std::chrono::steady_clock;
-    auto ms = [](Clock::time_point a) {
-      return std::chrono::duration<double, std::milli>(Clock::now() - a)
-          .count();
-    };
-    auto t = Clock::now();
-    const std::size_t mark = gemm.Mark();
-    std::vector<int> keys, values;  // per (sequence, kv head)
+    std::vector<Span> spans;
     for (std::size_t s = 0; s + 1 < starts.size(); ++s) {
       if (!long_seq[s])
         continue;
-      const std::size_t len = starts[s + 1] - starts[s];
-      const float* base = qkv + starts[s] * row_w + qw;
-      for (std::size_t h = 0; h < kv; ++h) {
-        keys.push_back(gemm.Upload(int(len), int(hd), base + h * hd, row_w, 1));
-        values.push_back(
-            gemm.Upload(int(hd), int(len), base + kv * hd + h * hd, 1, row_w));
+      for (std::size_t q0 = starts[s]; q0 < starts[s + 1]; q0 += kBandRows) {
+        const std::size_t q1 = std::min(starts[s + 1], q0 + kBandRows);
+        std::size_t k0 = starts[s + 1], k1 = starts[s];
+        for (std::size_t r : {q0, q1 - 1}) {
+          std::size_t b, e;
+          visible(r, starts[s], starts[s + 1], &b, &e);
+          k0 = std::min(k0, b);
+          k1 = std::max(k1, e);
+        }
+        spans.push_back({s, q0, q1, k0, k1, {}, {}});
       }
     }
+    if (spans.empty())
+      return;
+    if (kv > 4)
+      throw std::runtime_error("NPU attention: more than 4 KV heads");
+    scratch.Reset();
+    // Bands with the same key span (full attention) share its uploads.
+    std::map<std::pair<std::size_t, std::size_t>, const Span*> uploaded;
+    for (Span& sp : spans) {
+      if (auto it = uploaded.find({sp.k0, sp.k1}); it != uploaded.end()) {
+        std::copy(std::begin(it->second->keys), std::end(it->second->keys),
+                  std::begin(sp.keys));
+        std::copy(std::begin(it->second->values), std::end(it->second->values),
+                  std::begin(sp.values));
+        continue;
+      }
+      const std::size_t n = sp.k1 - sp.k0;
+      const float* base = qkv + sp.k0 * row_w + qw;
+      for (std::size_t h = 0; h < kv; ++h) {
+        sp.keys[h] = scratch.Upload(int(n), int(hd), base + h * hd, row_w, 1);
+        sp.values[h] =
+            scratch.Upload(int(hd), int(n), base + kv * hd + h * hd, 1, row_w);
+      }
+      uploaded[{sp.k0, sp.k1}] = &sp;
+    }
+    std::vector<Item> items;
+    for (const Span& sp : spans)
+      for (std::size_t h = 0; h < heads; ++h)
+        items.push_back({&sp, h, {}, {}, {}});
     host::ParallelFor(items.size(), 1, [&](std::size_t b, std::size_t e) {
       for (std::size_t i = b; i < e; ++i) {
         Item& it = items[i];
-        it.q.resize(it.len * hd);
-        for (std::size_t r = 0; r < it.len; ++r)
+        const std::size_t rows = it.span->q1 - it.span->q0;
+        it.q.resize(rows * hd);
+        for (std::size_t r = 0; r < rows; ++r)
           std::memcpy(it.q.data() + r * hd,
-                      qkv + (starts[it.seq] + r) * row_w + it.head * hd,
+                      qkv + (it.span->q0 + r) * row_w + it.head * hd,
                       hd * sizeof(float));
-        it.scores.resize(it.len * it.len);
-        it.out.resize(it.len * hd);
+        it.scores.resize(rows * (it.span->k1 - it.span->k0));
+        it.out.resize(rows * hd);
       }
     });
-    auto pair_index = [&](const Item& it) {
-      std::size_t k = 0;
-      for (std::size_t s = 0; s < it.seq; ++s)
-        k += long_seq[s] ? kv : 0;
-      return k + it.head / (heads / kv);
-    };
-    const double t_upload = ms(t);
-    t = Clock::now();
+    const std::size_t group = heads / kv;
     std::vector<gufo::npu::BfpGemm::Call> calls;
     for (Item& it : items)
-      calls.push_back(
-          {keys[pair_index(it)], it.q.data(), int(it.len), it.scores.data()});
+      calls.push_back({it.span->keys[it.head / group], it.q.data(),
+                       int(it.span->q1 - it.span->q0), it.scores.data()});
     gemm.Run(calls);
-    const double t_qk = ms(t);
-    t = Clock::now();
-    host::ParallelFor(items.size() * 64, 1, [&](std::size_t b, std::size_t e) {
+    host::ParallelFor(items.size() * 16, 1, [&](std::size_t b, std::size_t e) {
       for (std::size_t w = b; w < e; ++w) {
-        Item& it = items[w / 64];
-        const std::size_t part = w % 64;
-        const std::size_t r0 = it.len * part / 64,
-                          r1 = it.len * (part + 1) / 64;
-        for (std::size_t r = r0; r < r1; ++r) {
+        Item& it = items[w / 16];
+        const Span& sp = *it.span;
+        const std::size_t rows = sp.q1 - sp.q0, n = sp.k1 - sp.k0;
+        const std::size_t part = w % 16;
+        for (std::size_t r = rows * part / 16; r < rows * (part + 1) / 16;
+             ++r) {
           std::size_t lo, hi;
-          visible(starts[it.seq] + r, starts[it.seq], starts[it.seq + 1], &lo,
-                  &hi);
-          lo -= starts[it.seq];
-          hi -= starts[it.seq];
-          float* row = it.scores.data() + r * it.len;
+          visible(sp.q0 + r, sp.k0, sp.k1, &lo, &hi);
+          lo -= sp.k0;
+          hi -= sp.k0;
+          float* row = it.scores.data() + r * n;
           float top = -INFINITY;
           for (std::size_t t = lo; t < hi; ++t)
             top = std::max(top, row[t]);
+          std::fill(row, row + lo, 0.0f);
+          std::fill(row + hi, row + n, 0.0f);
           float sum = 0;
-          for (std::size_t t = 0; t < it.len; ++t) {
-            const float p = (t >= lo && t < hi) ? std::exp(row[t] - top) : 0.0f;
-            row[t] = p;
-            sum += p;
-          }
+          host::ExpInPlace(row + lo, hi - lo, top, &sum);
           const float inv = 1.0f / sum;
           for (std::size_t t = lo; t < hi; ++t)
             row[t] *= inv;
         }
       }
     });
-    const double t_soft = ms(t);
-    t = Clock::now();
     calls.clear();
     for (Item& it : items)
-      calls.push_back({values[pair_index(it)], it.scores.data(), int(it.len),
-                       it.out.data()});
+      calls.push_back({it.span->values[it.head / group], it.scores.data(),
+                       int(it.span->q1 - it.span->q0), it.out.data()});
     gemm.Run(calls);
-    gemm.Release(mark);
-    if (profile)
-      std::fprintf(stderr,
-                   "attention: upload %.2f qk %.2f softmax %.2f pv %.2f ms\n",
-                   t_upload, t_qk, t_soft, ms(t));
-    for (const Item& it : items)
-      for (std::size_t r = 0; r < it.len; ++r)
-        std::memcpy(context + (starts[it.seq] + r) * qw + it.head * hd,
-                    it.out.data() + r * hd, hd * sizeof(float));
+    host::ParallelFor(items.size(), 1, [&](std::size_t b, std::size_t e) {
+      for (std::size_t i = b; i < e; ++i) {
+        const Item& it = items[i];
+        for (std::size_t r = it.span->q0; r < it.span->q1; ++r)
+          std::memcpy(context + r * qw + it.head * hd,
+                      it.out.data() + (r - it.span->q0) * hd,
+                      hd * sizeof(float));
+      }
+    });
   }
 
-  // Encodes the packed sequences [starts[i], starts[i + 1]) of `tokens`;
-  // returns the pooled, normalized embeddings.
+  // Splits the sequences into two halves of similar token counts that run on
+  // two threads, so one half's CPU work overlaps the other's NPU work.
+  std::vector<std::vector<float>> RunSplit(
+      const std::vector<std::uint32_t>& tokens,
+      const std::vector<std::size_t>& starts,
+      const std::function<bool()>& cancelled) {
+    const std::size_t seqs = starts.size() - 1, rows = tokens.size();
+    if (seqs < 2 || rows < 256)
+      return Run(tokens, starts, cancelled, 0);
+    std::size_t cut = 1;
+    while (cut + 1 < seqs && starts[cut] * 2 < rows)
+      ++cut;
+    auto part = [&](std::size_t s0, std::size_t s1, int lane) {
+      std::vector<std::uint32_t> t(tokens.begin() + std::ptrdiff_t(starts[s0]),
+                                   tokens.begin() + std::ptrdiff_t(starts[s1]));
+      std::vector<std::size_t> st;
+      for (std::size_t s = s0; s <= s1; ++s)
+        st.push_back(starts[s] - starts[s0]);
+      return Run(t, st, cancelled, lane);
+    };
+    std::vector<std::vector<float>> second;
+    std::exception_ptr failure;
+    std::thread other([&] {
+      try {
+        second = part(cut, seqs, 1);
+      } catch (...) {
+        failure = std::current_exception();
+      }
+    });
+    std::vector<std::vector<float>> first;
+    try {
+      first = part(0, cut, 0);
+    } catch (...) {
+      other.join();
+      throw;
+    }
+    other.join();
+    if (failure)
+      std::rethrow_exception(failure);
+    if (first.empty() || second.empty())
+      return {};
+    for (auto& e : second)
+      first.push_back(std::move(e));
+    return first;
+  }
+
   std::vector<std::vector<float>> Run(const std::vector<std::uint32_t>& tokens,
                                       const std::vector<std::size_t>& starts,
-                                      const std::function<bool()>& cancelled) {
+                                      const std::function<bool()>& cancelled,
+                                      int lane) {
     using Clock = std::chrono::steady_clock;
     const auto t0 = Clock::now();
     double gemm_ms = 0;
@@ -322,8 +388,8 @@ struct Encoder::Impl {
       };
       // Long sequences: QK^T and PV on the NPU, the softmax on the CPU.
       timed([&] {
-        NpuAttention(qkv.data(), row_w, heads, kv, hd, starts, long_seq,
-                     visible, context.data(), qw);
+        NpuAttention(scratches[lane], qkv.data(), row_w, heads, kv, hd, starts,
+                     long_seq, visible, context.data(), qw);
       });
       host::Attention(
           {.q = qkv.data(),
@@ -370,14 +436,9 @@ struct Encoder::Impl {
         state[i] += tmp[i];
 
       timed([&] { gemm.Run(w.ple_gate, state.data(), int(rows), act.data()); });
-      host::ParallelFor(rows, 64, [&](std::size_t b, std::size_t e) {
-        for (std::size_t r = b; r < e; ++r) {
-          float* a = act.data() + r * per_layer;
-          const float* p = ple.data() + (r * layers_n + l) * per_layer;
-          for (std::size_t i = 0; i < per_layer; ++i)
-            a[i] = host::Activate(host::Activation::kGeluTanh, a[i]) * p[i];
-        }
-      });
+      host::GatedRows(act.data(), per_layer, ple.data() + l * per_layer,
+                      layers_n * per_layer, act.data(), per_layer, rows,
+                      per_layer, host::Activation::kGeluTanh);
       timed([&] { gemm.Run(w.ple_proj, act.data(), int(rows), tmp.data()); });
       host::RmsNormRows(tmp.data(), tmp.data(), rows, hidden, w.ple_norm.data(),
                         eps);
@@ -464,7 +525,7 @@ bool Encoder::EmbedMultimodal(const std::vector<EncoderSequence>& sequences,
   }
   std::lock_guard lock(impl_->mutex);
   try {
-    auto out = impl_->Run(tokens, starts, is_cancelled);
+    auto out = impl_->RunSplit(tokens, starts, is_cancelled);
     if (out.size() != sequences.size()) {
       if (error)
         *error = "embedding_gemma2: request cancelled";
@@ -474,6 +535,7 @@ bool Encoder::EmbedMultimodal(const std::vector<EncoderSequence>& sequences,
   } catch (const std::exception& e) {
     if (error)
       *error = std::string("embedding_gemma2 NPU: ") + e.what();
+    std::fprintf(stderr, "embedding_gemma2 NPU: %s\n", e.what());
     return false;
   }
   return true;
