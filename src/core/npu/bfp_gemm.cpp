@@ -858,17 +858,31 @@ std::vector<int> BfpGemm::Scratch::UploadMany(std::span<const Spec> specs) {
   std::vector<std::vector<float>> rows(specs.size());
   std::vector<std::size_t> transposed;
   for (std::size_t i = 0; i < specs.size(); ++i)
-    if (specs[i].col_stride != 1 && specs[i].same_as < 0)
+    if ((specs[i].col_stride != 1 || specs[i].weights16) &&
+        specs[i].same_as < 0)
       transposed.push_back(i);
   host::ParallelFor(transposed.size(), 1, [&](std::size_t lo, std::size_t hi) {
     for (std::size_t t = lo; t < hi; ++t) {
       const Spec& sp = specs[transposed[t]];
       auto& out = rows[transposed[t]];
-      out.resize(std::size_t(sp.n) * std::size_t(sp.k));
-      for (std::size_t i = 0; i < std::size_t(sp.k); ++i)
-        for (std::size_t o = 0; o < std::size_t(sp.n); ++o)
-          out[o * std::size_t(sp.k) + i] =
-              sp.weights[o * sp.row_stride + i * sp.col_stride];
+      const std::size_t n = std::size_t(sp.n), k = std::size_t(sp.k);
+      out.resize(n * k);
+      if (sp.weights16 && sp.col_stride == 1) {
+        for (std::size_t o = 0; o < n; ++o)
+          host::Bf16ToFloat(sp.weights16 + o * sp.row_stride, &out[o * k], k);
+      } else if (sp.weights16) {
+        // Transposed bf16 (values: [key][dim] read as [dim][key]): blocks of
+        // 8 x 64 keep the reads near each other.
+        for (std::size_t i0 = 0; i0 < k; i0 += 8)
+          for (std::size_t o = 0; o < n; ++o)
+            for (std::size_t i = i0; i < std::min(k, i0 + 8); ++i)
+              out[o * k + i] = host::Bf16ToFloat(
+                  sp.weights16[o * sp.row_stride + i * sp.col_stride]);
+      } else {
+        for (std::size_t i = 0; i < k; ++i)
+          for (std::size_t o = 0; o < n; ++o)
+            out[o * k + i] = sp.weights[o * sp.row_stride + i * sp.col_stride];
+      }
     }
   });
   std::vector<std::size_t> start(specs.size() + 1, 0);
@@ -882,7 +896,7 @@ std::vector<int> BfpGemm::Scratch::UploadMany(std::span<const Spec> specs) {
       while (t >= start[i + 1])
         ++i;
       const Spec& sp = specs[i];
-      const bool tr = sp.col_stride != 1;
+      const bool tr = sp.col_stride != 1 || sp.weights16;
       m.EncodeTile(mats[i], tr ? rows[i].data() : sp.weights,
                    tr ? std::size_t(sp.k) : sp.row_stride, t - start[i],
                    tile.data());
