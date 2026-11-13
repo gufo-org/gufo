@@ -22,6 +22,7 @@
 #include "src/models/qwen3_asr/config.hpp"
 #include "src/models/qwen3_asr/hip/audio_encoder_runtime.hpp"
 #include "src/models/qwen3_asr/hip/text_decoder_runtime.hpp"
+#include "src/models/qwen3_asr/npu/runtime.hpp"
 #include "src/models/qwen3_asr/prompt.hpp"
 #include "src/models/qwen3_asr/tokenizer.hpp"
 
@@ -91,7 +92,7 @@ void CheckCancellation(const CancellationCheck& is_cancelled) {
 }  // namespace
 
 struct TranscriptionHipRuntime::Impl {
-  Impl(std::string model_root, std::size_t token_capacity) {
+  Impl(std::string model_root, std::size_t token_capacity, bool use_npu) {
     if (token_capacity < 32U) {
       throw std::invalid_argument(
           "Qwen3-ASR context capacity must be at least 32 tokens");
@@ -105,6 +106,14 @@ struct TranscriptionHipRuntime::Impl {
     config = *loaded_config;
     root = std::move(model_root);
     maximum_context_tokens = token_capacity;
+    if (use_npu) {
+      std::string load_error;
+      if (!Tokenizer::Load(root, &tokenizer, &load_error)) {
+        throw std::runtime_error(load_error);
+      }
+      npu_runtime = npu::Runtime::Create(root, token_capacity);
+      return;
+    }
 
     auto audio_future = std::async(std::launch::async, [model_root = root] {
       std::string error;
@@ -239,9 +248,14 @@ struct TranscriptionHipRuntime::Impl {
           throw std::runtime_error(phase_error);
         const auto encoder_begin = Clock::now();
         AudioEncoderDeviceOutput encoded;
-        if (!audio_encoder->EncodeDevice(features.values, features.frames,
-                                         &encoded, &phase_error,
-                                         is_cancelled)) {
+        std::vector<float> npu_encoded;
+        if (npu_runtime) {
+          encoded.tokens = npu_runtime->Encode(features.values, features.frames,
+                                               &npu_encoded, is_cancelled);
+          encoded.values = npu_encoded.data();
+        } else if (!audio_encoder->EncodeDevice(features.values,
+                                                features.frames, &encoded,
+                                                &phase_error, is_cancelled)) {
           throw std::runtime_error(phase_error);
         }
         result->timings.audio_encoder_ms +=
@@ -270,9 +284,14 @@ struct TranscriptionHipRuntime::Impl {
           return request.on_text(published);
         };
         const auto decoder_begin = Clock::now();
-        if (!text_decoder->GenerateDevice(
-                prompt, encoded.values, encoded.tokens, request.max_new_tokens,
-                &generated, &phase_error, progress, is_cancelled)) {
+        if (npu_runtime) {
+          npu_runtime->Generate(prompt, npu_encoded, encoded.tokens,
+                                request.max_new_tokens, &generated, progress,
+                                is_cancelled);
+        } else if (!text_decoder->GenerateDevice(
+                       prompt, encoded.values, encoded.tokens,
+                       request.max_new_tokens, &generated, &phase_error,
+                       progress, is_cancelled)) {
           throw std::runtime_error(phase_error);
         }
         result->timings.text_decoder_ms +=
@@ -316,6 +335,7 @@ struct TranscriptionHipRuntime::Impl {
   core::CancellableGate gpu_gate;
   std::unique_ptr<AudioEncoderHipRuntime> audio_encoder;
   std::unique_ptr<TextDecoderHipRuntime> text_decoder;
+  std::unique_ptr<npu::Runtime> npu_runtime;
 };
 
 TranscriptionHipRuntime::TranscriptionHipRuntime(std::unique_ptr<Impl> impl)
@@ -325,10 +345,10 @@ TranscriptionHipRuntime::~TranscriptionHipRuntime() = default;
 
 std::unique_ptr<TranscriptionHipRuntime> TranscriptionHipRuntime::Create(
     const std::string& model_root, std::size_t maximum_context_tokens,
-    std::string* error) {
+    std::string* error, bool use_npu) {
   try {
     return std::unique_ptr<TranscriptionHipRuntime>(new TranscriptionHipRuntime(
-        std::make_unique<Impl>(model_root, maximum_context_tokens)));
+        std::make_unique<Impl>(model_root, maximum_context_tokens, use_npu)));
   } catch (const std::exception& exception) {
     SetError(error, exception.what());
     return nullptr;
@@ -356,7 +376,7 @@ TranscriptionHipRuntime::TranscriptionHipRuntime(std::unique_ptr<Impl> impl)
 TranscriptionHipRuntime::~TranscriptionHipRuntime() = default;
 
 std::unique_ptr<TranscriptionHipRuntime> TranscriptionHipRuntime::Create(
-    const std::string&, std::size_t, std::string* error) {
+    const std::string&, std::size_t, std::string* error, bool) {
   if (error != nullptr) {
     *error = "Qwen3-ASR native transcription requires a HIP build";
   }

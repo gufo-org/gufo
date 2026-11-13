@@ -29,6 +29,7 @@ gufo_extension_target(
   NAME gufo_qwen3_asr_hip
   SOURCES
     hip/transcription_runtime.cpp
+    npu/runtime.cpp
     provider.cpp
   LINK_LIBRARIES
     gufo_qwen3_asr

@@ -29,7 +29,7 @@ COLS, ROWS = 8, 4
 OBJ = 1088                      # words per record (4352 bytes)
 OUT = 128                       # words per output record (one core's 8 x 8 tile)
 MAX_A, MAX_C = 8, 32            # A records (4096 bytes kept) and 8 x 8 accumulator tiles per core
-A_WORDS, W_WORDS, C_WORDS = 64 << 20, 256 << 20, 64 << 20
+A_WORDS, W_WORDS, C_WORDS = 64 << 20, 512 << 20, 64 << 20  # W: up to a 2 GiB arena
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 

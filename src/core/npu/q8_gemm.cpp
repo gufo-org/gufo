@@ -1,7 +1,10 @@
 #include "src/core/npu/q8_gemm.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -277,7 +280,14 @@ struct Q8Gemm::Impl {
         c_end = j.c_words + std::size_t(8) * j.g * j.p->nt * 4 * kOutWords;
       }
       a.ToDevice(0, a_end * 4);
+      static const bool profile = std::getenv("GUFO_NPU_PROFILE") != nullptr;
+      const auto t0 = std::chrono::steady_clock::now();
       program.Start(ins, {&a, &arena, &c}).Wait();
+      if (profile)
+        std::fprintf(stderr, "q8gemm: %zu jobs, npu %.1f us\n", jobs.size(),
+                     std::chrono::duration<double, std::micro>(
+                         std::chrono::steady_clock::now() - t0)
+                         .count());
       c.FromDevice(0, c_end * 4);
       // The buffer is uncached: copy it out once, then unpack.
       out.resize(c_end);
