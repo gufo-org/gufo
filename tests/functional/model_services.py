@@ -33,6 +33,8 @@ def main():
     parser.add_argument('--asr-binary', type=Path, help='Explicit pinned evaluator for TTS intelligibility')
     parser.add_argument('--asr-model', type=Path)
     parser.add_argument('--startup-timeout', type=float, default=300)
+    parser.add_argument('--serve-arg', action='append', default=[],
+                        help='Extra argument for gufo serve, such as --npu (repeatable)')
     args = parser.parse_args()
     if args.service == 'tts' and not (args.asr_binary and args.asr_model):
         parser.error('TTS requires --asr-binary and --asr-model for intelligibility checks')
@@ -50,6 +52,7 @@ def main():
     public_model = 'functional-' + args.service
     command = [str(args.binary), 'serve', args.service, '--model', str(args.model),
                '--host', '127.0.0.1', '--port', str(port), '--served-model-name', public_model]
+    command += args.serve_arg
     voice = args.voice or {'base': 'narrator', 'custom': 'ryan', 'design': 'voice-design'}[args.variant]
     if args.service == 'tts' and args.variant == 'base':
         command += ['--voice', f'{voice}={args.audio_root / "clear-english-voice.wav"}',
