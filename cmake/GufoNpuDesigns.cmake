@@ -44,7 +44,9 @@ function(gufo_npu_design name)
     VERBATIM)
   add_custom_target(npu_design_${name} ALL DEPENDS "${dir}/${name}.xclbin")
   if(NOT WIN32)
-    install(FILES "${dir}/${name}.xclbin" "${dir}/${name}_dispatch.so"
-      DESTINATION "share/gufo/npu/${name}")
+    # The xclbin, its dispatch library and any host-side layout files.
+    install(DIRECTORY "${dir}/" DESTINATION "share/gufo/npu/${name}"
+      FILES_MATCHING PATTERN "${name}.xclbin" PATTERN "${name}_dispatch.so"
+      PATTERN "${name}_*.txt" PATTERN "*.prj" EXCLUDE)
   endif()
 endfunction()

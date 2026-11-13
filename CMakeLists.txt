@@ -303,6 +303,9 @@ add_subdirectory(src/core/npu)
 include(cmake/GufoNpuDesigns.cmake)
 gufo_npu_design(q8gemm SCRIPT src/core/npu/kernels/q8gemm/q8gemm.py
   SOURCES src/core/npu/kernels/q8gemm/q8gemm.cc)
+gufo_npu_design(qwen3dec SCRIPT src/core/npu/kernels/qwen3dec/qwen3dec.py
+  SOURCES src/core/npu/kernels/qwen3dec/qwen3dec.cc
+          src/core/npu/kernels/qwen3dec/layout.py)
 gufo_npu_design(bfpgemm SCRIPT src/core/npu/kernels/bfpgemm/bfpgemm.py
   SOURCES src/core/npu/kernels/bfpgemm/bfpgemm.cc
           src/core/npu/kernels/bfpgemm/include/aie_kernel_utils.h
@@ -1509,6 +1512,14 @@ endfunction()
     add_dependencies(npu_device_test npu_design_q8gemm)
     add_test(NAME npu_device_test COMMAND npu_device_test "${q8gemm_NPU_DIR}")
     set_tests_properties(npu_device_test PROPERTIES LABELS "npu" SKIP_RETURN_CODE 77)
+  endif()
+  if(GUFO_NPU_DESIGNS_AVAILABLE)
+    add_executable(npu_qwen3dec_device_test tests/core/npu_qwen3dec_device_test.cpp)
+    target_include_directories(npu_qwen3dec_device_test PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(npu_qwen3dec_device_test PRIVATE gufo_npu)
+    add_dependencies(npu_qwen3dec_device_test npu_design_qwen3dec)
+    add_test(NAME npu_qwen3dec_device_test COMMAND npu_qwen3dec_device_test "${qwen3dec_NPU_DIR}" 5)
+    set_tests_properties(npu_qwen3dec_device_test PROPERTIES LABELS "npu" SKIP_RETURN_CODE 77)
   endif()
   if(GUFO_NPU_DESIGNS_AVAILABLE)
     add_executable(npu_bfp_device_test tests/core/npu_bfp_device_test.cpp)
