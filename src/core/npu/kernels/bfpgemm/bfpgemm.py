@@ -71,7 +71,7 @@ def design(M_T):
         c_l1_ty = np.ndarray[(M_T, N_T), np.dtype[bfloat16]]
         rtp_ty = np.ndarray[(4,), np.dtype[np.int32]]
 
-        inc = os.path.join(HERE, "include")
+        inc = os.path.join(HERE, "vendor")  # aie_kernel_utils.h, aie_arch.h from mlir-aie
         zero = kernels.zero((M_T, N_T), bfloat16)
         matmul = ExternalFunction("matmul_vectorized_different_datatypes", source_file=os.path.join(HERE, "bfpgemm.cc"),
                                   arg_types=[a_l1_ty, b_ty, c_l1_ty], object_file_name=f"bfpgemm_{M_T}.o",
