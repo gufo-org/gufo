@@ -24,6 +24,12 @@ Stage only task-owned paths before Nix builds; flakes include tracked files.
 Measure performance with `result/bin/gufo` or `build/release/gufo`. Preserve
 compiler/dependency versions when comparing results.
 
+For NPU designs, keep repeated runtime work in IRON `range_` loops; Python
+`range` expands the IR and can make verification and generated C++ compilation
+expensive. Time a cold affected-design build as well as cache reuse. Preserve
+verification and compiler optimization; check phase layouts and emitted
+instructions against the original. See [docs/internal/npu.md](docs/internal/npu.md).
+
 ## Focused tests
 
 Formatting and Python repository checks may run on the editing host; they do

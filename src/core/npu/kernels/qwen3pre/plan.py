@@ -74,6 +74,24 @@ class Plan:
         self.b_size = self.b_off
         self.c_size = self.c_off
 
+    def layer_phases(self, layer):
+        """One layer's schedule, with an integer or staged layer index.
+
+        Only weights, norm constants and KV pieces advance between layers;
+        activations and attention outputs reuse the same scratch regions.
+        """
+        count = (len(self.phases) - 1) // LAYERS
+        first = self.phases[1:1 + count]
+        second = self.phases[1 + count:1 + 2 * count]
+        for base, following in zip(first, second):
+            ph = dict(base)
+            for key in ("b", "w", "piece"):
+                if key in base:
+                    ph[key] = base[key] + layer * (following[key] - base[key])
+            if "what" in base:
+                ph["what"] = (layer, *base["what"][1:])
+            yield ph
+
     def write(self, path):
         """The layout gufo::npu::Qwen3Prefill reads (qwen3pre_<M>_plan.txt):
         key-value lines, then one line per GEMM (layer, name, pass, K, N, B

@@ -22,10 +22,24 @@ The Nix package builds them as a derivation of their own
 (`.devops/nix/npu-designs.nix`, from `cmake/npu-designs`) and installs it with
 `GUFO_NPU_PREBUILT_DESIGNS`, so Cachix serves them until a design changes;
 Windows CI keeps the IRON venv and IRON's design cache (`GUFO_NPU_CACHE_HOME`)
-between runs (BUILD-WINDOWS.md). Compiling `qwen3pre` from scratch is slow:
-its runtime sequence is unrolled in Python, and MLIR verification (three passes
-in IRON, more in aiecc) grows faster than linearly with it, so the 1024-row
-program dominates a cold build.
+between runs (BUILD-WINDOWS.md).
+
+`qwen3pre` keeps its 28 repeated layers in an IRON `range_` loop until
+lowering emits the instruction stream. `Plan.layer_phases` advances weights,
+norm constants and KV pieces; activations reuse their scratch regions. Keep
+this loop staged: expanding it in Python makes MLIR verification expensive.
+`npu_prefill_plan_test` checks every phase against the host layout at all
+three row counts without requiring IRON or an NPU (about 1 ms).
+
+On November 14, 2026, a cold Nix build of all three prefill variants took
+18.417 s, including evaluation, configure and install, with mlir-aie 1.4.5
+and the pinned Peano toolchain. The original 256-row and 512-row builds took
+42.774 s and 93.919 s individually in `nix develop`. Both instruction streams
+and host layouts match the packaged loop version byte for byte; all 32 core
+ELFs also match for the 256-row comparison. The 1024-row layout passes the
+phase check and its packaged design builds successfully; a full original
+1024-row build was not repeated. The separate decoder dispatch C++ compilation
+remains expensive. Measurement details: [prefill build evidence](artifacts/npu-prefill-build.json).
 
 ## BfpGemm
 

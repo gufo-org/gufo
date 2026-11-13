@@ -175,6 +175,13 @@ def prefill(A: InOut, B: In, C: InOut, *, M: CompileTime[int] = 512):
     C_ty = np.ndarray[(c_size,), np.dtype[bfloat16]]
     TAP = TensorAccessPattern
 
+    def runtime_phases():
+        # The layer schedule is identical; only weight and scratch offsets
+        # advance. Keep it rolled while IRON builds and verifies the module.
+        yield plan.phases[0]
+        for layer in range_(P.LAYERS):
+            yield from plan.layer_phases(layer)
+
     def sequence(a, b, c, A_prods, B_prods, C_conses):
         size = {"a": a_size, "c": c_size}
         buf = {"a": a, "c": c}
@@ -254,7 +261,7 @@ def prefill(A: InOut, B: In, C: InOut, *, M: CompileTime[int] = 512):
             for i in range(2):
                 fin(i)
 
-        for ph in plan.phases:
+        for ph in runtime_phases():
             if ph["kind"] == "norm":
                 elementwise(
                     [("c", ph["w"])] * ROWS,
