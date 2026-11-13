@@ -4,9 +4,8 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <sstream>
-
 #include <gufo/ext/platform/os_info.hpp>
+#include <sstream>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX

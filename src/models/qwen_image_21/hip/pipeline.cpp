@@ -882,9 +882,6 @@ Result Model::Generate(const Request& request,
                        const Observer& observer) {
   ValidateRequest(request);
   const int steps = sampling().ResolveSteps(request.steps);
-  if (sampling().IsTurbo() && request.strength <= kFullStrength)
-    throw std::invalid_argument(
-        "Qwen-Image-2.1-Turbo supports image to image only at strength 1");
   std::unique_lock lock(impl_->mutex);
   if (DeviceLost())
     throw std::runtime_error("Qwen-Image GPU context lost; restart the server");
@@ -983,8 +980,7 @@ Result Model::Generate(const Request& request,
                            SharedConditionTokens(prompt, *negative)));
       negative.reset();
     }
-    const bool img2img =
-        request.init_image && request.strength <= kFullStrength;
+    const bool img2img = request.init_image && request.strength < 1;
     std::optional<Image> init_image;
     Matrix init_latent;
     if (img2img) {
@@ -1016,6 +1012,8 @@ Result Model::Generate(const Request& request,
         sampling().DenoiseSigmas(steps, request.strength, height * width);
     if (observer.Wants("sigmas"))
       observer.write("sigmas", sigmas, 1, static_cast<int>(sigmas.size()));
+    // Image to image runs the tail of the schedule (Diffusers strength).
+    const int run_steps = static_cast<int>(sigmas.size()) - 1;
     if (img2img) {
       latent = rt.NoiseMix(latent, init_latent, sigmas[0]);
       rt.Observe(observer, "init.latent", latent);
@@ -1027,7 +1025,7 @@ Result Model::Generate(const Request& request,
         Prefill(rt, *negative_context, sigmas[0], cancelled);
       report("prefilled");
     }
-    for (int step = 0; step < steps; ++step) {
+    for (int step = 0; step < run_steps; ++step) {
       if (large)
         GuardMemory(step);
       auto velocity = Denoise(rt, *context, latent, sigmas[step], step,
@@ -1060,7 +1058,7 @@ Result Model::Generate(const Request& request,
     result.metrics.vae_ms = Milliseconds(vae_start);
     result.metrics.total_ms = Milliseconds(total_start);
     result.metrics.resident_weight_bytes = rt.WeightBytes();
-    result.metrics.steps = steps;
+    result.metrics.steps = run_steps;
     return result;
   } catch (const std::exception& error) {
     // All launches on this request's stream must finish before temporary

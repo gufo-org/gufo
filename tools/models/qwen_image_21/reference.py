@@ -45,7 +45,7 @@ def main():
     parser.add_argument("--init-image", type=Path,
                         help="Image to image start image (already at the output size)")
     parser.add_argument("--strength", type=float, default=1.0,
-                        help="ComfyUI KSampler denoise: last steps+1 sigmas of int(steps/strength)")
+                        help="Diffusers img2img strength: run the last steps*strength steps of the schedule")
     args = parser.parse_args()
     width, height = args.width or args.size, args.height or args.size
     cfg = args.guidance_scale > 1 and args.negative_prompt is not None
@@ -237,19 +237,18 @@ def main():
     if cfg:
         kwargs["negative_prompt"] = args.negative_prompt
         kwargs["true_cfg_scale"] = args.guidance_scale
-    schedule_steps = args.steps
     if img2img:
-        # ComfyUI KSampler denoise: schedule int(steps / strength) sigmas and
-        # run the last `steps`; start at sigma * noise + (1 - sigma) * image.
-        schedule_steps = int(args.steps / args.strength)
+        # Diffusers img2img get_timesteps (pipeline_qwenimage_img2img.py):
+        # skip int(steps - steps * strength) steps of the schedule; start at
+        # sigma * noise + (1 - sigma) * image.
         retrieve_timesteps = pipeline_module.retrieve_timesteps
 
         def truncated_timesteps(scheduler, *inputs, **kw):
             timesteps, count = retrieve_timesteps(scheduler, *inputs, **kw)
-            skip = count - args.steps
+            skip = int(max(count - min(count * args.strength, count), 0))
             scheduler.timesteps = scheduler.timesteps[skip:]
             scheduler.sigmas = scheduler.sigmas[skip:]
-            return scheduler.timesteps, args.steps
+            return scheduler.timesteps, count - skip
 
         pipeline_module.retrieve_timesteps = truncated_timesteps
         probe = copy.deepcopy(pipe.scheduler)
@@ -257,8 +256,8 @@ def main():
             target_rows, probe.config.get("base_image_seq_len", 256),
             probe.config.get("max_image_seq_len", 4096),
             probe.config.get("base_shift", 0.5), probe.config.get("max_shift", 1.15))
-        truncated_timesteps(probe, schedule_steps, "cuda",
-                            sigmas=np.linspace(1.0, 1 / schedule_steps, schedule_steps), mu=mu)
+        truncated_timesteps(probe, args.steps, "cuda",
+                            sigmas=np.linspace(1.0, 1 / args.steps, args.steps), mu=mu)
         sigma = probe.sigmas[0].float()
         with Image.open(args.init_image) as source:
             start = source.convert("RGBA")
@@ -274,7 +273,7 @@ def main():
     with torch.inference_mode():
         result = pipe(
             prompt=args.prompt, width=width, height=height,
-            num_inference_steps=schedule_steps, latents=latent,
+            num_inference_steps=args.steps, latents=latent,
             output_type="latent" if args.skip_decode else "pil",
             callback_on_step_end=callback, **kwargs
         )

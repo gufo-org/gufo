@@ -181,8 +181,8 @@ void ValidateRequest(const ext::ImageRequest& request) {
   if (request.negative_prompt.size() > (64U << 10U))
     throw std::invalid_argument("negative_prompt exceeds 64 KiB");
   if (request.guidance_scale &&
-      !(*request.guidance_scale >= 1 && *request.guidance_scale <= 20))
-    throw std::invalid_argument("guidance_scale must be from 1 to 20");
+      !(*request.guidance_scale >= 0 && *request.guidance_scale <= 100))
+    throw std::invalid_argument("guidance_scale must be from 0 to 100");
   if (!(request.strength >= 0.01 && request.strength <= 1))
     throw std::invalid_argument("strength must be from 0.01 to 1");
   if (request.strength < 1 && !request.init_image)
@@ -607,7 +607,7 @@ HttpResponse HandleImageApiRequest(const HttpRequest& request,
     // Flat extensions, as other OpenAI-compatible image servers name them;
     // multipart edits send them as plain form fields (SDK `extra_body`).
     generation.negative_prompt = String(fields, "negative_prompt", "");
-    if (const auto scale = Real(fields, "guidance_scale", 1, 20))
+    if (const auto scale = Real(fields, "guidance_scale", 0, 100))
       generation.guidance_scale = static_cast<float>(*scale);
     generation.strength = Real(fields, "strength", 0.01, 1).value_or(1);
     if (const auto* image = fields.find("image"); image && !edit)

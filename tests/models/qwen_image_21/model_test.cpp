@@ -490,24 +490,22 @@ int main(int argc, char** argv) {
   assert(InitialNoiseSeed(42, {}, &image) != edit_seed);
   assert(InitialNoiseSeed(42, references, &image) !=
          InitialNoiseSeed(42, {}, &image));
-  // ComfyUI denoise: the last steps + 1 sigmas of int(steps / strength).
-  assert(DenoiseSigmas(40, 1.0, 4096) == schedule);
-  const auto full80 = DenoiseSigmas(80, 1.0, 4096);
-  const auto half = DenoiseSigmas(40, 0.5, 4096);
-  assert(half.size() == 41 && half.back() == 0);
-  assert(std::equal(half.begin(), half.end(), full80.end() - 41));
-  assert(DenoiseSigmas(25, 0.6, 1024).size() == 26);
-  assert(DenoiseSigmas(25, 0.6, 1024).front() ==
-         DenoiseSigmas(41, 1.0, 1024)[16]);
-  assert(base.DenoiseSigmas(0, 0.5, 4096) == half);
-  assert(turbo.DenoiseSigmas(0, 1.0, 256) == expected_turbo);
-  bool turbo_rejected = false;
-  try {
-    (void)turbo.DenoiseSigmas(8, 0.5, 256);
-  } catch (const std::invalid_argument&) {
-    turbo_rejected = true;
-  }
-  assert(turbo_rejected);
+  // Diffusers img2img strength: the last int-truncated steps * strength
+  // steps of the requested schedule, at least one.
+  assert(StrengthTail(schedule, 1.0) == schedule);
+  const auto half = base.DenoiseSigmas(40, 0.5, 4096);
+  assert(half.size() == 21 && half.back() == 0);
+  assert(std::equal(half.begin(), half.end(), schedule.end() - 21));
+  assert(StrengthTail(FlowSigmas(20, 1024), 0.6).size() == 13);
+  // 25 * 0.56 is 14.000000000000002 in double; Python's
+  // int(25 - 25 * 0.56) skips 10 steps, so 15 run, as in Diffusers.
+  assert(StrengthTail(FlowSigmas(25, 1024), 0.56).size() == 16);
+  assert(StrengthTail(schedule, 0.01).size() == 2);
+  // The fixed Turbo schedule truncates the same way.
+  const auto turbo_half = turbo.DenoiseSigmas(0, 0.5, 256);
+  assert(turbo_half.size() == 5 &&
+         std::equal(turbo_half.begin(), turbo_half.end(),
+                    expected_turbo.end() - 5));
   // A negative prompt alone guides at the Diffusers default scale.
   assert(ResolveGuidance(Request{.prompt = "", .images = {}}) == 1);
   assert(ResolveGuidance(Request{
@@ -516,8 +514,8 @@ int main(int argc, char** argv) {
   assert(ResolveGuidance(Request{
              .prompt = "", .images = {}, .guidance_scale = 2.5F}) == 2.5F);
   for (const auto& invalid :
-       {Request{.prompt = "", .images = {}, .guidance_scale = 21.0F},
-        Request{.prompt = "", .images = {}, .guidance_scale = 0.5F},
+       {Request{.prompt = "", .images = {}, .guidance_scale = 101.0F},
+        Request{.prompt = "", .images = {}, .guidance_scale = -1.0F},
         Request{.prompt = "", .images = {}, .guidance_scale = NAN},
         Request{.prompt = "", .images = {}, .strength = 0.5},
         Request{.prompt = "", .images = {}, .strength = 0}}) {
@@ -574,8 +572,8 @@ int main(int argc, char** argv) {
   }
   for (const auto* body :
        {R"({"prompt":"a","guidance_scale":"2"})",
-        R"({"prompt":"a","guidance_scale":0.5})",
-        R"({"prompt":"a","guidance_scale":21})",
+        R"({"prompt":"a","guidance_scale":-1})",
+        R"({"prompt":"a","guidance_scale":101})",
         R"({"prompt":"a","negative_prompt":3})",
         R"({"prompt":"a","strength":0.5})", R"({"prompt":"a","strength":0})",
         R"({"prompt":"a","strength":0.5,"image":"https://example.com/x.png"})",
@@ -621,9 +619,8 @@ int main(int argc, char** argv) {
   // Start image and references together: below full strength the first
   // image starts the denoise, the others stay references, and size auto
   // keeps the start image's canvas.
-  http.body = edit_form(3, {{"prompt", "a"},
-                            {"strength", "0.6"},
-                            {"negative_prompt", "blurry"}});
+  http.body = edit_form(
+      3, {{"prompt", "a"}, {"strength", "0.6"}, {"negative_prompt", "blurry"}});
   assert(gufo::server::HandleImageApiRequest(http, guided).status == 200);
   assert(captured.strength == 0.6 && captured.init_image &&
          captured.images.size() == 2 && captured.width == 32 &&

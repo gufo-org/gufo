@@ -34,8 +34,6 @@ std::uint64_t InitialNoiseSeed(std::uint64_t seed,
                                std::span<const Image> images,
                                const Image* init_image = nullptr);
 
-/// ComfyUI KSampler treats denoise above this as a full schedule.
-inline constexpr double kFullStrength = 0.9999;
 /// The request does not fit into free GPU memory (checked before the
 /// condition caches fill, and per step for large requests). The model stays
 /// usable; the host answers 503.
@@ -72,9 +70,10 @@ inline constexpr ext::ImageCapabilities kCapabilities{
     .guidance = true,
     .image_to_image = true};
 std::vector<float> FlowSigmas(int steps, int image_tokens);
-/// `steps` + 1 sigmas: FlowSigmas for full strength, otherwise the last
-/// `steps` + 1 of FlowSigmas(int(steps / strength)) as in ComfyUI KSampler.
-std::vector<float> DenoiseSigmas(int steps, double strength, int image_tokens);
+/// Image to image as Diffusers' img2img `strength`: the tail of a full
+/// schedule that runs its last `steps * strength` steps (at least one).
+/// Strength 1 returns the schedule unchanged.
+std::vector<float> StrengthTail(std::vector<float> sigmas, double strength);
 
 /// Base flow matching or the qualified checkpoint-supplied Turbo schedule.
 struct SamplingConfig {
@@ -83,9 +82,8 @@ struct SamplingConfig {
   int DefaultSteps() const { return IsTurbo() ? 8 : 40; }
   int ResolveSteps(int requested) const;
   std::vector<float> Sigmas(int requested, int image_tokens) const;
-  /// Sigmas for image to image: Sigmas() at full strength, otherwise the
-  /// DenoiseSigmas tail. The Turbo schedule is fixed, so it supports full
-  /// strength only.
+  /// Sigmas() truncated by StrengthTail(), for both the flow and the fixed
+  /// Turbo schedule.
   std::vector<float> DenoiseSigmas(int requested, double strength,
                                    int image_tokens) const;
 };

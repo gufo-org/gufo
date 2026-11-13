@@ -51,16 +51,15 @@ curl --fail-with-body http://127.0.0.1:8080/v1/images/edits \
 | `background` | `auto`, `transparent`, or `opaque` (over white). |
 | References | Up to 10 PNG or JPEG files, 20 MiB and 32 megapixels in total. |
 | `negative_prompt` | Text the image should move away from. Turns on true classifier-free guidance; each step runs twice, so it takes about twice as long. |
-| `guidance_scale` | 1 to 20. 4 when only `negative_prompt` is set, otherwise 1 (off). Above 1 without `negative_prompt`, the negative side is an empty prompt. |
-| `strength` | 0.01 to 1 (the default). Below 1, only the last part of the schedule runs from the start image, as ComfyUI's `denoise`. Turbo supports only 1. With `size` `auto`, the output keeps the start image's size, rounded to multiples of 32. |
+| `guidance_scale` | 0 to 100; guidance runs above 1. 4 when only `negative_prompt` is set, otherwise 1 (off). Above 1 without `negative_prompt`, the negative side is an empty prompt. |
+| `strength` | 0.01 to 1 (the default). Below 1, as Diffusers' image to image, only the last `steps` × `strength` steps run, from the noised start image. With `size` `auto`, the output keeps the start image's size, rounded to multiples of 32. |
 | `image` | Start image of a JSON generation: base64 PNG or JPEG, or a `data:` URL. URLs are not fetched. |
 
 Output is base64 PNG. URL output, separate masks, streaming and
 `input_fidelity` aren't supported. With the OpenAI SDK, pass `seed`, `steps`,
 `negative_prompt`, `guidance_scale` and `strength` through `extra_body` (both
-endpoints). In an edit with `strength` below 1, the first image is the start
-image and any further images stay references, so one request can combine
-both. Unknown fields are ignored.
+endpoints). Below full `strength`, an edit's first image is the start image
+and further images stay references. Unknown fields are ignored.
 
 The upstream project recommends 2048 × 2048; Gufo defaults to 1024 × 1024,
 like the pinned Diffusers version. Set `size` for larger images.

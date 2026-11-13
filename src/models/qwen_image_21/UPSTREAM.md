@@ -62,12 +62,12 @@ every tensor operation. As in the pipeline, a negative prompt without a scale
 uses 4. Unlike the pipeline, which ignores the scale without a negative
 prompt, an absent negative prompt encodes like an empty prompt, as a ComfyUI
 KSampler with an empty negative conditioning would. `strength` below 1
-follows ComfyUI KSampler `denoise` (the pinned Diffusers revision has no
-Qwen-Image-2.1 image-to-image pipeline): `steps` steps over the last
-`steps + 1` sigmas of an `int(steps / strength)` schedule, starting from
+follows Diffusers' Qwen-Image `img2img` `get_timesteps` (the pinned revision
+has no Qwen-Image-2.1 image-to-image pipeline): of the `steps` schedule it
+skips `int(steps - steps * strength)` steps and runs the rest, starting from
 `sigma * noise + (1 - sigma) * latent` with the posterior-mean VAE latent of the
-start image resized to the output size; the fixed Turbo schedule supports
-strength 1 only. Reference images keep conditioning the run next to a start
+start image resized to the output size (Diffusers samples the posterior). The
+fixed Turbo schedule is truncated the same way. Reference images keep conditioning the run next to a start
 image (on `/v1/images/edits` the first image below full strength). Without a negative prompt or scale and at strength 1 the
 unguided full-schedule path is unchanged. The negative prompt reuses the positive prompt's
 condition K/V for its leading reference images: block-causal rows never see

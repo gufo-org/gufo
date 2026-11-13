@@ -285,11 +285,11 @@ void ValidateRequest(const Request& request) {
   if (request.negative_prompt.size() > (64U << 10U))
     throw std::invalid_argument("negative prompt exceeds 64 KiB");
   if (request.guidance_scale &&
-      !(*request.guidance_scale >= 1 && *request.guidance_scale <= 20))
-    throw std::invalid_argument("guidance_scale must be between 1 and 20");
+      !(*request.guidance_scale >= 0 && *request.guidance_scale <= 100))
+    throw std::invalid_argument("guidance_scale must be between 0 and 100");
   if (!(request.strength >= 0.01 && request.strength <= 1))
     throw std::invalid_argument("strength must be between 0.01 and 1");
-  if (request.strength <= kFullStrength && !request.init_image)
+  if (request.strength < 1 && !request.init_image)
     throw std::invalid_argument("strength below 1 requires an input image");
   if (request.init_image)
     CheckImage(*request.init_image);
@@ -335,17 +335,15 @@ std::vector<float> FlowSigmas(int steps, int image_tokens) {
   return Schedule(steps, image_tokens);
 }
 
-std::vector<float> DenoiseSigmas(int steps, double strength, int image_tokens) {
-  if (!(strength >= 0.01 && strength <= 1))
+std::vector<float> StrengthTail(std::vector<float> sigmas, double strength) {
+  if (!(strength > 0 && strength <= 1))
     throw std::invalid_argument("invalid image denoise strength");
-  if (strength > kFullStrength)
-    return FlowSigmas(steps, image_tokens);
-  if (steps < 2 || steps > 100 || image_tokens < 1)
-    throw std::invalid_argument("invalid image flow schedule");
-  // ComfyUI KSampler: int(steps / denoise) steps, keep the last steps + 1.
-  const int total = static_cast<int>(steps / strength);
-  auto sigmas = Schedule(total, image_tokens);
-  sigmas.erase(sigmas.begin(), sigmas.end() - (steps + 1));
+  // Diffusers img2img get_timesteps: run the last steps * strength steps of
+  // the full schedule (at least one), in the same double arithmetic.
+  const auto steps = static_cast<double>(sigmas.size() - 1);
+  const auto start = static_cast<std::ptrdiff_t>(
+      std::max(steps - std::min(steps * strength, steps), 0.0));
+  sigmas.erase(sigmas.begin(), sigmas.begin() + start);
   return sigmas;
 }
 
@@ -371,13 +369,7 @@ std::vector<float> SamplingConfig::Sigmas(int requested,
 
 std::vector<float> SamplingConfig::DenoiseSigmas(int requested, double strength,
                                                  int image_tokens) const {
-  if (strength > kFullStrength)
-    return Sigmas(requested, image_tokens);
-  if (IsTurbo())
-    throw std::invalid_argument(
-        "Qwen-Image-2.1-Turbo supports image to image only at strength 1");
-  return qwen_image_21::DenoiseSigmas(ResolveSteps(requested), strength,
-                                      image_tokens);
+  return StrengthTail(Sigmas(requested, image_tokens), strength);
 }
 
 }  // namespace gufo::models::qwen_image_21

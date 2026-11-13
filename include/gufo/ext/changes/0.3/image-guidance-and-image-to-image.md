@@ -2,10 +2,12 @@
 
 Image (`src/ext/image.hpp`):
 - `ImageRequest::negative_prompt` and `ImageRequest::guidance_scale`
-  (`std::optional<float>`, nullopt selects the runner's default) carry
-  classifier-free guidance; `ImageCapabilities::guidance` declares support.
+  (`std::optional<float>` in [0, 100], nullopt selects the runner's default,
+  at most 1 is unguided) carry classifier-free guidance;
+  `ImageCapabilities::guidance` declares support.
 - `ImageRequest::init_image` (`std::optional<ImageBuffer>`) and
-  `ImageRequest::strength` (default 1) carry image to image;
+  `ImageRequest::strength` (default 1, Diffusers img2img semantics: the last
+  `steps * strength` steps run) carry image to image;
   `ImageCapabilities::image_to_image` declares support for strength below 1.
   `init_image` may come together with reference `images`.
   The host refuses guidance or strength below 1 with HTTP 400 when the runner
