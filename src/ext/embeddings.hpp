@@ -9,6 +9,8 @@
 #include <string_view>
 #include <vector>
 
+#include "gufo/ext/options.hpp"
+
 namespace gufo::ext {
 
 /// Embeddings for one request, in input order. Each vector is the model's
@@ -97,11 +99,23 @@ using EmbeddingArtifactResolver =
 using EmbeddingRunnerFactory = std::unique_ptr<EmbeddingRunner> (*)(
     const std::string& model_root, std::string* error);
 
+/// Model artifacts for an embedding runner.
+struct EmbeddingRunnerOptions {
+  std::string model_root;
+  /// The explicit command-line values of the options the provider declares
+  /// for `serve embedding` (see TextRunnerOptions::provider_options).
+  ParsedOptions provider_options{};
+};
+using EmbeddingRunnerOptionsFactory = std::unique_ptr<EmbeddingRunner> (*)(
+    const EmbeddingRunnerOptions& options, std::string* error);
+
 struct EmbeddingProvider {
   std::string id;
   EmbeddingProbe probe = nullptr;
   EmbeddingArtifactResolver resolve = nullptr;
   EmbeddingRunnerFactory create = nullptr;
+  /// Preferred over create when set; receives the provider options.
+  EmbeddingRunnerOptionsFactory create_with_options = nullptr;
 };
 
 void RegisterEmbeddingProvider(EmbeddingProvider provider);

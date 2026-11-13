@@ -47,8 +47,16 @@ public:
   /// A matrix of n outputs x k inputs, row-major [n][k] f32. Returns its id.
   /// Throws Error when the arena is full.
   int Upload(int n, int k, std::span<const float> weights);
+  /// As Upload, element (o, i) at weights[o * row_stride + i * col_stride]
+  /// (a transposed or strided view, such as attention keys or values).
+  int Upload(int n, int k, const float* weights, std::size_t row_stride,
+             std::size_t col_stride);
   /// As Upload, from bf16 bit patterns.
   int UploadBf16(int n, int k, std::span<const std::uint16_t> weights);
+  /// The arena state; Release(mark) drops the matrices uploaded after it,
+  /// for per-request operands (attention keys and values).
+  [[nodiscard]] std::size_t Mark() const;
+  void Release(std::size_t mark);
   /// Runs independent products in as few dispatches as the staging buffers
   /// allow.
   void Run(std::span<const Call> calls);

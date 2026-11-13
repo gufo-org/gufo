@@ -56,6 +56,17 @@
         "embeddinggemma-2"
       ],
       "help": "Checkpoint prompt for text inputs without prompt_name (default: none)"
+    },
+    {
+      "name": "--npu",
+      "type": "boolean",
+      "commands": [
+        "serve embedding"
+      ],
+      "providers": [
+        "embeddinggemma-2"
+      ],
+      "help": "Embed text on the XDNA NPU instead of the GPU"
     }
   ],
   "targets": {

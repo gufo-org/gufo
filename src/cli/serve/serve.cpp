@@ -663,6 +663,11 @@ void PrintServeHelp(std::string_view program_name,
     AddEmbeddingOptions(parser, &model, &names, &default_prompt_name);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help, false);
+    ext::Registry registry;
+    ext::RegisterBuiltExtensions(registry);
+    ProviderOptions provider_options(registry, "serve embedding",
+                                     ext::Capability::kEmbeddings);
+    provider_options.Register(parser);
     parser.PrintHelp();
     return;
   }
@@ -1153,6 +1158,9 @@ int RunServe(std::span<const char* const> args) {
         "Serve EmbeddingGemma 2 text, image and audio embeddings.");
     AddEmbeddingOptions(parser, &model, &names, &default_prompt_name);
     add_server_options(parser, false);
+    ProviderOptions declared_options(registry, "serve embedding",
+                                     ext::Capability::kEmbeddings);
+    declared_options.Register(parser);
     if (!parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << '\n';
       return 2;
@@ -1160,6 +1168,13 @@ int RunServe(std::span<const char* const> args) {
     if (parser.IsHelpRequested()) {
       PrintServeHelp("gufo", "embedding");
       return 0;
+    }
+    ext::ParsedOptions provider_options;
+    try {
+      provider_options = declared_options.Parse();
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error: " << error.what() << '\n';
+      return 2;
     }
     if (!prepare_server_options())
       return 2;
@@ -1179,6 +1194,7 @@ int RunServe(std::span<const char* const> args) {
       embeddings = std::make_shared<server::EmbeddingService>(
           server::EmbeddingServiceOptions{
               .model_root = model,
+              .provider_options = std::move(provider_options),
               .validate_model = true,
               .model_id = names.empty() ? "embeddinggemma-2" : names.front(),
               .model_aliases = ModelAliases(names),

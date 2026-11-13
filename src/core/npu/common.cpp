@@ -3,13 +3,16 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <string>
 #include <system_error>
 #include <utility>
 
 #include "src/core/npu/npu.hpp"
 #include "src/core/platform/library.hpp"
+#include "src/core/platform/os_info.hpp"
 
 namespace gufo::npu {
 namespace {
@@ -167,6 +170,32 @@ std::span<const std::uint32_t> DispatchLibrary::Generate(
   if (n <= 0 || words == nullptr)
     throw Error("dispatch library generated no instructions");
   return {words, static_cast<std::size_t>(n)};
+}
+
+std::filesystem::path FindDesign(std::string_view name) {
+  const std::string file = std::string(name) + ".xclbin";
+  std::vector<std::filesystem::path> candidates;
+  if (const char* env = std::getenv("GUFO_NPU_DESIGNS"); env && *env)
+    candidates.push_back(std::filesystem::path(env) / name);
+  try {
+    const auto exe = platform::ExecutablePath();
+    candidates.push_back(exe.parent_path().parent_path() / "share" / "gufo" /
+                         "npu" / name);
+    candidates.push_back(exe.parent_path() / "npu" / name);
+  } catch (const std::exception&) {
+  }
+#ifdef GUFO_NPU_BUILD_DESIGNS
+  candidates.push_back(std::filesystem::path(GUFO_NPU_BUILD_DESIGNS) / name);
+#endif
+  std::string tried;
+  for (const auto& dir : candidates) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(dir / file, ec))
+      return dir;
+    tried += (tried.empty() ? "" : ", ") + dir.string();
+  }
+  throw Error("NPU design " + std::string(name) + " not found (tried " + tried +
+              "; set GUFO_NPU_DESIGNS)");
 }
 
 }  // namespace gufo::npu

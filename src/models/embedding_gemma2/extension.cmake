@@ -74,6 +74,7 @@ gufo_extension_target(
   SOURCES
     hip/blas.cpp
     hip/encoder_runtime.cpp
+    npu/encoder_npu.cpp
     provider.cpp
   LINK_LIBRARIES
     gufo_embedding_gemma2

@@ -5,6 +5,7 @@
 #include <bit>
 #include <cmath>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -17,8 +18,9 @@
 namespace gufo::npu::host {
 namespace {
 
-// A fixed pool: the caller publishes a job and a generation, workers take
-// chunks from an atomic cursor, and the caller helps until all are done.
+// A fixed pool. Each ParallelFor publishes a job with its own counters;
+// workers take chunks from it and the caller helps until all are done. A
+// worker late for one job only ever sees that job's exhausted counter.
 class Pool {
 public:
   Pool() {
@@ -40,32 +42,38 @@ public:
 
   void Run(std::size_t chunks, const std::function<void(std::size_t)>& fn) {
     std::lock_guard serial(run_mutex_);
+    auto job = std::make_shared<Job>();
+    job->fn = &fn;
+    job->chunks = chunks;
     {
       std::lock_guard lock(mutex_);
-      fn_ = &fn;
-      chunks_ = chunks;
-      next_.store(0);
-      done_.store(0);
+      job_ = job;
       ++generation_;
     }
     wake_.notify_all();
-    Help();
+    Help(*job);
     std::unique_lock lock(mutex_);
-    finished_.wait(lock, [&] { return done_.load() == chunks_; });
-    fn_ = nullptr;
+    finished_.wait(lock, [&] { return job->done.load() == chunks; });
+    job_.reset();
   }
 
   static thread_local bool inside;
 
 private:
-  void Help() {
+  struct Job {
+    const std::function<void(std::size_t)>* fn{};
+    std::size_t chunks{};
+    std::atomic<std::size_t> next{0}, done{0};
+  };
+
+  void Help(Job& job) {
     inside = true;
     for (;;) {
-      const std::size_t i = next_.fetch_add(1);
-      if (i >= chunks_)
+      const std::size_t i = job.next.fetch_add(1);
+      if (i >= job.chunks)
         break;
-      (*fn_)(i);
-      if (done_.fetch_add(1) + 1 == chunks_) {
+      (*job.fn)(i);
+      if (job.done.fetch_add(1) + 1 == job.chunks) {
         std::lock_guard lock(mutex_);
         finished_.notify_all();
       }
@@ -76,25 +84,24 @@ private:
   void Work() {
     std::uint64_t seen = 0;
     for (;;) {
+      std::shared_ptr<Job> job;
       {
         std::unique_lock lock(mutex_);
         wake_.wait(lock, [&] { return stop_ || generation_ != seen; });
         if (stop_)
           return;
         seen = generation_;
-        if (!fn_)
-          continue;
+        job = job_;
       }
-      Help();
+      if (job)
+        Help(*job);
     }
   }
 
   std::vector<std::thread> workers_;
   std::mutex mutex_, run_mutex_;
   std::condition_variable wake_, finished_;
-  const std::function<void(std::size_t)>* fn_{};
-  std::size_t chunks_{};
-  std::atomic<std::size_t> next_{0}, done_{0};
+  std::shared_ptr<Job> job_;
   std::uint64_t generation_{};
   bool stop_{};
 };
@@ -240,8 +247,8 @@ void LayerNormRows(const float* x, float* y, std::size_t rows, std::size_t dim,
               });
 }
 
-void RopeNeox(float* x, std::size_t rows, std::size_t heads,
-              std::size_t head_dim, std::size_t rotary,
+void RopeNeox(float* x, std::size_t rows, std::size_t row_stride,
+              std::size_t heads, std::size_t head_dim, std::size_t rotary,
               const std::int32_t* positions, float theta) {
   const std::size_t half = rotary / 2;
   std::vector<double> inv(half);
@@ -256,7 +263,7 @@ void RopeNeox(float* x, std::size_t rows, std::size_t heads,
         s[i] = float(std::sin(a));
       }
       for (std::size_t h = 0; h < heads; ++h) {
-        float* p = x + (r * heads + h) * head_dim;
+        float* p = x + r * row_stride + h * head_dim;
         for (std::size_t i = 0; i < half; ++i) {
           const float x0 = p[i], x1 = p[i + half];
           p[i] = x0 * c[i] - x1 * s[i];
@@ -312,7 +319,7 @@ void GatedRows(const float* gate, std::size_t gate_stride, const float* up,
               });
 }
 
-void Attention(const AttentionArgs& p, const KeyRange& keys) {
+void Attention(const AttentionArgs& p, const KeyRange& keys, bool skip_empty) {
   const std::size_t group = p.heads / p.kv_heads;
   // Work items: (head, block of 4 query rows) so a key row serves 4 dots.
   constexpr std::size_t kBlock = 4;
@@ -329,7 +336,8 @@ void Attention(const AttentionArgs& p, const KeyRange& keys) {
         keys(r, &kb, &ke);
         float* o = p.out + r * p.out_stride + h * p.dim_v;
         if (ke <= kb) {
-          std::fill_n(o, p.dim_v, 0.0f);
+          if (!skip_empty)
+            std::fill_n(o, p.dim_v, 0.0f);
           continue;
         }
         const float* q = p.q + r * p.q_stride + h * p.dim;

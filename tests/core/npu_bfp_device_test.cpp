@@ -6,7 +6,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "src/core/npu/bfp_gemm.hpp"
@@ -44,6 +46,27 @@ int main(int argc, char** argv) {
     return 77;
   }
   auto gemm = npu::BfpGemm::Open(device, argv[1], std::size_t(512) << 20);
+  if (argc == 6 && std::string(argv[2]) == "bench") {
+    // bench n k rows: the time of one product shape, nothing else.
+    const int n = std::atoi(argv[3]), k = std::atoi(argv[4]),
+              rows = std::atoi(argv[5]);
+    std::vector<float> w(std::size_t(n) * k, 0.01f),
+        x(std::size_t(rows) * k, 1.0f), y(std::size_t(rows) * n);
+    const int id = gemm.Upload(n, k, w);
+    for (int i = 0; i < 3; ++i)
+      gemm.Run(id, x.data(), rows, y.data());
+    const int reps = 20;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < reps; ++i)
+      gemm.Run(id, x.data(), rows, y.data());
+    const double s =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+            .count() /
+        reps;
+    std::printf("bench n %d k %d rows %d: %.3f ms, %.2f TFLOPS\n", n, k, rows,
+                s * 1e3, 2.0 * n * k * rows / s / 1e12);
+    return 0;
+  }
   std::mt19937 rng(7);
   std::normal_distribution<float> normal(0.0f, 1.0f);
   int failures = 0;
@@ -79,8 +102,10 @@ int main(int argc, char** argv) {
   struct Timed {
     int n, k, rows;
   };
-  for (const Timed t : {Timed{4096, 2048, 512}, Timed{12288, 2048, 512},
-                        Timed{2048, 6144, 512}, Timed{12288, 2048, 2048}}) {
+  for (const Timed t :
+       {Timed{1024, 512, 8}, Timed{4096, 512, 8}, Timed{512, 2048, 8},
+        Timed{4096, 2048, 512}, Timed{12288, 2048, 512}, Timed{2048, 6144, 512},
+        Timed{12288, 2048, 2048}}) {
     std::vector<float> w(std::size_t(t.n) * t.k, 0.01f),
         x(std::size_t(t.rows) * t.k, 1.0f), y(std::size_t(t.rows) * t.n);
     const int id = gemm.Upload(t.n, t.k, w);

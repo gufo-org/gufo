@@ -33,10 +33,10 @@ void LayerNormRows(const float* x, float* y, std::size_t rows, std::size_t dim,
                    const float* weight, const float* bias, float eps);
 
 /// Rotary embedding, rotate-half (NeoX) pairing (i, i + rotary / 2) over the
-/// first `rotary` dims of each head: x [rows][heads][head_dim], position of
-/// row r = positions[r].
-void RopeNeox(float* x, std::size_t rows, std::size_t heads,
-              std::size_t head_dim, std::size_t rotary,
+/// first `rotary` dims of each head: row r holds `heads` heads of `head_dim`
+/// from x + r * row_stride, at position positions[r].
+void RopeNeox(float* x, std::size_t rows, std::size_t row_stride,
+              std::size_t heads, std::size_t head_dim, std::size_t rotary,
               const std::int32_t* positions, float theta);
 
 enum class Activation { kNone, kSilu, kGeluTanh, kGeluErf };
@@ -69,7 +69,10 @@ struct AttentionArgs {
   float scale;
   float softcap = 0.0f;
 };
-void Attention(const AttentionArgs& args, const KeyRange& keys);
+/// Rows whose key range is empty get zeros, or keep their output when
+/// `skip_empty` (rows another path computes).
+void Attention(const AttentionArgs& args, const KeyRange& keys,
+               bool skip_empty = false);
 
 /// Dot product and y += a x, vectorized.
 [[nodiscard]] float Dot(const float* a, const float* b, std::size_t n);

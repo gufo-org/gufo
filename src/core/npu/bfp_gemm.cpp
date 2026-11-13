@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -87,7 +90,9 @@ struct BfpGemm::Impl {
   std::vector<Matrix> matrices;
   std::map<std::vector<std::int32_t>, Instructions> streams;
   std::mutex mutex;
-  std::vector<std::uint16_t> out;
+  // Rows last written at each A band slot (word offset), with its kc: the
+  // rows past a band's end only need zeroing where an earlier band wrote.
+  std::map<std::size_t, std::pair<int, int>> a_rows;
 
   template<typename Get>
   int Upload(int n, int k, Get get) {
@@ -195,7 +200,13 @@ struct BfpGemm::Impl {
   void PackBand(const Band& band, const Matrix& m, const float* x) {
     const int kc = m.kp / kKc;
     auto* base = reinterpret_cast<std::uint16_t*>(a.data()) + band.a_words * 2;
-    host::ParallelFor(kBand, 16, [&](std::size_t b, std::size_t e) {
+    int dirty = kBand;
+    if (auto it = a_rows.find(band.a_words);
+        it != a_rows.end() && it->second.first == kc)
+      dirty = it->second.second;
+    a_rows[band.a_words] = {kc, band.nr};
+    const int end = std::max(band.nr, dirty);
+    host::ParallelFor(std::size_t(end), 16, [&](std::size_t b, std::size_t e) {
       std::vector<std::uint16_t> row(std::size_t(m.kp), 0);
       for (std::size_t i = b; i < e; ++i) {
         const std::size_t r = i / 128, ii = i % 128;
@@ -216,6 +227,7 @@ struct BfpGemm::Impl {
   // Copies one job's output tiles into its call's rows.
   void Unpack(const Job& j, const Band& b, const Call& call,
               const std::uint16_t* out_words) {
+    // The buffer is uncached: each tile's used rows are copied out once.
     const int n = j.m->n;
     host::ParallelFor(
         std::size_t(8) * j.ng, 1, [&](std::size_t lo, std::size_t hi) {
@@ -261,23 +273,32 @@ struct BfpGemm::Impl {
             c_col};
         scalars.insert(scalars.end(), s, s + 10);
       }
+      static const bool profile = std::getenv("GUFO_NPU_PROFILE") != nullptr;
+      using Clock = std::chrono::steady_clock;
+      auto us = [](Clock::time_point t) {
+        return std::chrono::duration<double, std::micro>(Clock::now() - t)
+            .count();
+      };
+      auto t = Clock::now();
       for (const Band& b : d.bands) {
         const Call& call = calls[b.call];
         PackBand(b, matrices[std::size_t(call.id)], call.x);
       }
       const Instructions& ins = Stream(scalars);
       a.ToDevice(0, d.a_end * 4);
+      const double t_pack = us(t);
+      t = Clock::now();
       program.Start(ins, {&a, &arena, &c}).Wait();
+      const double t_npu = us(t);
+      t = Clock::now();
       c.FromDevice(0, d.c_end * 4);
-      // The buffer is uncached: copy it out once, then unpack.
-      out.resize(d.c_end * 2);
-      const auto* src = reinterpret_cast<const std::uint16_t*>(c.data());
-      host::ParallelFor(out.size(), std::size_t(1) << 18,
-                        [&](std::size_t lo, std::size_t hi) {
-                          std::memcpy(out.data() + lo, src + lo, (hi - lo) * 2);
-                        });
       for (const Job& j : d.jobs)
-        Unpack(j, d.bands[j.band], calls[d.bands[j.band].call], out.data());
+        Unpack(j, d.bands[j.band], calls[d.bands[j.band].call],
+               reinterpret_cast<const std::uint16_t*>(c.data()));
+      if (profile)
+        std::fprintf(stderr,
+                     "bfpgemm: %zu jobs, pack %.1f npu %.1f unpack %.1f us\n",
+                     d.jobs.size(), t_pack, t_npu, us(t));
     }
   }
 };
@@ -315,6 +336,28 @@ int BfpGemm::UploadBf16(int n, int k, std::span<const std::uint16_t> weights) {
   return impl_->Upload(n, k, [&](int nn, int kk) {
     return FromBf16(weights[std::size_t(nn) * k + kk]);
   });
+}
+
+int BfpGemm::Upload(int n, int k, const float* weights, std::size_t row_stride,
+                    std::size_t col_stride) {
+  std::lock_guard lock(impl_->mutex);
+  return impl_->Upload(n, k, [&](int nn, int kk) {
+    return weights[std::size_t(nn) * row_stride + std::size_t(kk) * col_stride];
+  });
+}
+
+std::size_t BfpGemm::Mark() const {
+  std::lock_guard lock(impl_->mutex);
+  return impl_->matrices.size();
+}
+
+void BfpGemm::Release(std::size_t mark) {
+  std::lock_guard lock(impl_->mutex);
+  auto& m = impl_->matrices;
+  if (mark >= m.size())
+    return;
+  impl_->arena_used = m[mark].b_words;
+  m.resize(mark);
 }
 
 void BfpGemm::Run(std::span<const Call> calls) {
