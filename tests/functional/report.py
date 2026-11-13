@@ -314,7 +314,7 @@ def render_models(args, plan, summary):
               f"merge `{plan['head'][:7]}` vs main `{plan['base'][:7]}` · "
               f"{len(plan['deferred'])} deferred, {len(plan['release_only'])} for the release run. "
               f"`{STATUS_CONTEXT}` is advisory on PRs; only the automatic release merge waits for it. "
-              'Coverage is limited to the selected representatives; image/video generation and agent replay remain separate.</sub>']
+              'Coverage is limited to the selected representatives; video generation and agent replay remain separate.</sub>']
     return state, description, '\n'.join(lines) + '\n'
 
 

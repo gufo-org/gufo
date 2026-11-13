@@ -74,7 +74,8 @@ class PlanTest(unittest.TestCase):
 
     def test_global_changes_cover_one_representative_per_category(self):
         self.assertEqual(self.models('src/cli/serve/serve.cpp'),
-                         {'flash-next-q4', 'embedding-gemma2', 'qwen3-asr', 'qwen3-tts-base'})
+                         {'flash-next-q4', 'embedding-gemma2', 'qwen3-asr', 'qwen3-tts-base',
+                          'qwen-image-turbo'})
         self.assertEqual(self.models('new-unclassified-file'), self.models('CMakeLists.txt'))
 
     def test_hosted_check_list_selects_no_model(self):
@@ -95,10 +96,11 @@ class PlanTest(unittest.TestCase):
             ('src/models/embedding_gemma2/hip/ops.hip', {'embedding-gemma2'}),
             ('src/cli/serve/audio_asr_api.cpp', {'qwen3-asr'}),
             ('src/models/qwen3_tts/hip/synthesis_runtime.cpp', {'qwen3-tts-base'}),
-            ('tests/functional/fixtures/audio/clear-english-voice.wav', {'qwen3-asr', 'qwen3-tts-base'})]:
+            ('tests/functional/fixtures/audio/clear-english-voice.wav', {'qwen3-asr', 'qwen3-tts-base'}),
+            ('src/models/qwen_image_21/hip/denoise.hip', {'qwen-image-turbo'}),
+            ('src/cli/serve/image_api.cpp', {'qwen-image-turbo'})]:
             self.assertEqual(self.models(path), expected)
         self.assertEqual(self.models('docs/server.md'), set())
-        self.assertEqual(self.models('src/models/qwen_image_21/model.cpp'), set())
         self.assertEqual(self.models('src/models/minimax_h3/runtime.cpp'), set())
 
     def test_embedding_smoke_and_full_coverage(self):
@@ -111,6 +113,11 @@ class PlanTest(unittest.TestCase):
     def test_full_tts_and_optional_ar(self):
         self.assertEqual(self.models('src/models/qwen3_tts/config.cpp', tier='full'),
                          {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design'})
+        self.assertEqual(self.plan('src/models/qwen_image_21/image.cpp')['groups'][0]['suites'], ['image-smoke'])
+        image = self.plan('src/models/qwen_image_21/image.cpp', tier='full')
+        self.assertEqual({model['id'] for model in image['models']}, {'qwen-image-turbo', 'qwen-image'})
+        self.assertEqual({group['suites'][0] for group in image['groups']}, {'image-http'})
+        self.assertIn('*.denoise_ms', image['models'][0]['timing_checks'])
         plan = self.plan('src/models/deepseek_v4_flash/model.cpp', ar=True)
         self.assertEqual({g['profile'] for g in plan['groups']}, {'deepseek4/off', 'deepseek4/dspark'})
         self.assertEqual(self.models('docs/README.md', benchmark=True), {'flash-next-q4'})
@@ -127,6 +134,8 @@ class PlanTest(unittest.TestCase):
                          ['asr', 'tts-base'])
         self.assertEqual(devlab_models.asset_keys(self.plan('src/models/deepseek_v4_flash/model.cpp'), self.data),
                          ['deepseek4', 'dspark'])
+        self.assertEqual(devlab_models.asset_keys(self.plan('src/cli/serve/image_service.cpp'), self.data),
+                         ['image-turbo'])
         self.assertEqual(devlab_models.asset_keys(self.plan('docs/server.md'), self.data), [])
         for asset in self.data['assets'].values():
             self.assertRegex(asset['revision'], r'^[0-9a-f]{40}$')

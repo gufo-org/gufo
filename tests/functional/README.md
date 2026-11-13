@@ -37,7 +37,10 @@ nix develop -c python3 tests/functional/model_services.py image \
   --lora-default clay:0.5 --output artifacts/model-services/image-1
 ```
 
-Image takes the complete Qwen-Image-2.1 or Turbo snapshot. Pass two `--lora`
+Image takes the complete Qwen-Image-2.1 or Turbo snapshot. `--image-suite smoke`
+(Devlab's PR tier) stops after discovery, OpenAI/sdapi parity, seeded replay, one
+`/v1/images/edits` request with a reference image, and error recovery; the default `full` adds guidance, image to image, batches, client
+payloads and API separation. Pass two `--lora`
 adapters and a `--lora-default` to cover adapter selection; without them the
 LoRA case is skipped and recorded as not run, so run it with adapters for
 changes to adapter handling.
@@ -64,7 +67,7 @@ VoiceDesign model (fixed English voice instructions). Neither requires a clone.
 | --- | --- |
 | Embedding | The default three-request smoke check covers text, image, video, mixed video/audio/image input, malformed-video rejection and recovery. `--embedding-suite full` retains the text, image, audio and video HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image/audio formats, multiple clips, audio/text/image interleaving, ignored unknown members, llama.cpp `content`/`embd_normalize`, invalid inputs, cancellation and recovery |
 | ASR | English transcript WER ≤ 0.15, exact greedy replay, JSON/text/verbose formats, complete SSE matching buffered output, concurrent speech/silence, ignored unknown fields, rejected options (including timestamps and logprobs), malformed WAV recovery, stream cancellation and subsequent valid inference |
-| Image | 512 × 512, 8 steps. OpenAI SDK generation equals sdapi `txt2img` pixel for pixel and replays; `cfg_scale` equals `guidance_scale`, and a negative prompt alone stays unguided on both APIs; `lora` defaults, `[]`, two adapters and repeated paths equal their OpenAI `loras`, with unknown and missing paths refused; `img2img` equals `image` + `strength`, including the 0.75 default strength and the init image's size; `batch_size` equals `n`; Open WebUI and SillyTavern request bodies; neither API reads the other's fields; sdapi `{"error"}` and OpenAI error shapes; discovery routes and recovery |
+| Image | 512 × 512, 8 steps. `--image-suite smoke` keeps discovery, parity, replay, one reference edit, errors and recovery. OpenAI SDK generation equals sdapi `txt2img` pixel for pixel and replays; `cfg_scale` equals `guidance_scale`, and a negative prompt alone stays unguided on both APIs; `lora` defaults, `[]`, two adapters and repeated paths equal their OpenAI `loras`, with unknown and missing paths refused; `img2img` equals `image` + `strength`, including the 0.75 default strength and the init image's size; `batch_size` equals `n`; Open WebUI and SillyTavern request bodies; neither API reads the other's fields; sdapi `{"error"}` and OpenAI error shapes; discovery routes and recovery |
 | TTS | Voice discovery, valid non-silent mono PCM16 audio at the sample rate of the server's WAV responses, two fixed texts with ASR WER ≤ 0.25, exact same-seed warm replay, WAV/PCM/SSE equality, different concurrent texts/seeds, ignored unknown fields, rejected inputs, stream cancellation and subsequent valid inference |
 
 Audio cancellation must appear against the cancelled request's ID in the server
@@ -93,7 +96,8 @@ and speaker-similarity scoring remain separate coverage.
 Devlab speed comparisons use a pinned main revision and candidate, matching the
 runner, toolchain, weights, settings and request histories. `service_phases.py`
 uses server-emitted request timings and work counters: ASR `Server-Timing`
-phases, TTS synthesis time and codec/audio work, and embedding request duration
+phases, TTS synthesis time and codec/audio work, image prompt encoding, denoising
+and VAE decoding with the size and step count, and embedding request duration
 and token/input counts. Client latency and first-output observations remain
 separate. Each request and phase retains every paired repeat at the existing
 5% and 3-ms thresholds; mismatched work stays inconclusive.
@@ -310,9 +314,9 @@ Selections from separate paths are combined:
 | Private Qwen27 implementation | Qwen27 Q4/DFlash2 |
 | Private DeepSeek implementation | DeepSeek V4/DSpark |
 | Shared LLM and private DeepSeek code | Flash-Next and DeepSeek |
-| Embedding, ASR or TTS code | That category's representative |
+| Embedding, ASR, TTS or image generation code | That category's representative |
 | Shared infrastructure or unmapped paths | One representative per supported category |
-| Documentation, image generation or H3-only paths | No GPU job in this workflow |
+| Documentation or H3-only paths | No GPU job in this workflow |
 
 Models listed under `disabled` in `devlab.core.json`, with a reason, are left
 out of the plan and named in the report. Remove the entry to restore the model.
@@ -324,7 +328,9 @@ suites still assume Flash-Next checkpoint sizes and Qwen token counts.
 
 The embedding and ASR representatives are EmbeddingGemma 2 and Qwen3-ASR. TTS
 uses Base cloning in the PR tier; the full tier exercises Base, CustomVoice and
-VoiceDesign. Manual `ar` adds the selected LLMs' AR profiles. The existing manual
+VoiceDesign. Image generation uses Qwen-Image-2.1-Turbo in the PR tier; the full
+tier runs the full image suite on both Turbo and Qwen-Image-2.1. All requests use
+512 × 512 and eight steps, without LoRA adapters, so the LoRA case is recorded as not run. Manual `ar` adds the selected LLMs' AR profiles. The existing manual
 `benchmark` option adds Flash-Next and its main/candidate AR depth sweep.
 Qwen27 Q8 remains an explicit manual functional qualification outside this bounded
 CI selection. Numerical and agent-replay obligations outside the selected suites

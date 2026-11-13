@@ -25,6 +25,8 @@ def timing_checks(model, reasons):
         checks = ['*.server_ms', '*.decode_audio_ms', '*.features_ms', '*.audio_encoder_ms', '*.text_decoder_ms']
     elif category == 'tts':
         checks = ['*.server_ms', '*.synthesis_ms']
+    elif category == 'image':
+        checks = ['*.server_ms', '*.prompt_ms', '*.denoise_ms', '*.vae_ms']
     else:
         checks = ['*.server_ms']
     if build or unknown or any(any(part in path for part in ('loader', 'config', 'tensor', 'serve.cpp'))
@@ -68,8 +70,8 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
         for rule in rules:
             for owner in rule['owners']:
                 models = [data['representatives'].get(owner, owner)]
-                if owner == 'tts' and tier == 'full':
-                    models = [key for key, model in data['models'].items() if model['category'] == 'tts']
+                if owner in ('tts', 'image') and tier == 'full':
+                    models = [key for key, model in data['models'].items() if model['category'] == owner]
                 for key in models:
                     selected.setdefault(key, []).append({'path': path, 'rule': rule['id'],
                         'representative': owner in data['representatives']})
@@ -103,7 +105,8 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
         else:
             suites = {'embedding': (['embedding-smoke'] if tier == 'pr' else
                                      ['embedding-text', 'embedding-images', 'embedding-audio', 'embedding-video']),
-                      'asr': ['asr-http'], 'tts': ['tts-http']}[model['category']]
+                      'asr': ['asr-http'], 'tts': ['tts-http'],
+                      'image': ['image-smoke' if tier == 'pr' else 'image-http']}[model['category']]
             result['groups'].append({'profile': key + '/native', 'configuration': 'standard',
                                      'settings': {}, 'suites': suites})
     return result

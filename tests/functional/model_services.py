@@ -24,6 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('service', choices=('embedding', 'asr', 'tts', 'image'))
     parser.add_argument('--embedding-suite', choices=('smoke', 'full'), default='smoke')
+    parser.add_argument('--image-suite', choices=('smoke', 'full'), default='full')
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--model', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
@@ -125,11 +126,16 @@ def main():
                 import image_service
                 report['loras'] = {name: sha256(path) for name, path in loras.items()}
                 default = args.lora_default.split(':') if args.lora_default else None
-                image_service.run(evidence, url, public_model, loras, default)
+                image_service.run(evidence, url, public_model, loras, default,
+                                  smoke=args.image_suite == 'smoke')
                 with evidence.case('server-log-modes'):
                     log = (output / 'server.log').read_text()
-                    for mode in ('generate', 'txt2img', 'img2img'):
+                    modes = ('generate', 'txt2img', 'edit') if args.image_suite == 'smoke' else (
+                        'generate', 'txt2img', 'edit', 'img2img')
+                    for mode in modes:
                         assert f'event=generated mode={mode} ' in log, mode
+                    assert all(' references=1 ' in line for line in log.splitlines()
+                               if 'event=generated mode=edit ' in line), 'edits use one reference'
             elif args.service == 'asr':
                 import asr_service
                 asr_service.run(evidence, url, args.audio_root, public_model)
