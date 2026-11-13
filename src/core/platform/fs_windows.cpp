@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cwchar>
 #include <limits>
+#include <new>
 #include <string>
 #include <utility>
 
@@ -221,7 +222,7 @@ bool Stat(PlatformFile file, FileInfo* out, std::error_code& ec) noexcept {
 }
 
 bool StatAt(const Directory& dir, std::string_view name, bool follow_symlinks,
-            FileInfo* out, std::error_code& ec) noexcept {
+            FileInfo* out, std::error_code& ec) noexcept try {
   ec.clear();
   const auto path = Join(dir, name);
   HANDLE probe = follow_symlinks
@@ -245,6 +246,9 @@ bool StatAt(const Directory& dir, std::string_view name, bool follow_symlinks,
   }
   CloseHandle(probe);
   return true;
+} catch (const std::bad_alloc&) {
+  ec = std::make_error_code(std::errc::not_enough_memory);
+  return false;
 }
 
 RenameResult RenameNoReplace(const Directory& from_dir,

@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <new>
 #include <utility>
 
 #include "src/core/platform/fs.hpp"
@@ -150,7 +151,7 @@ bool Stat(PlatformFile file, FileInfo* out, std::error_code& ec) noexcept {
 }
 
 bool StatAt(const Directory& dir, std::string_view name, bool follow_symlinks,
-            FileInfo* out, std::error_code& ec) noexcept {
+            FileInfo* out, std::error_code& ec) noexcept try {
   ec.clear();
   struct stat st{};
   const int flags = follow_symlinks ? 0 : AT_SYMLINK_NOFOLLOW;
@@ -160,6 +161,9 @@ bool StatAt(const Directory& dir, std::string_view name, bool follow_symlinks,
   }
   *out = FromStat(st);
   return true;
+} catch (const std::bad_alloc&) {
+  ec = std::make_error_code(std::errc::not_enough_memory);
+  return false;
 }
 
 RenameResult RenameNoReplace(const Directory& from_dir,
