@@ -26,6 +26,20 @@ constexpr int kQ5KStride = 180;
 constexpr int kQ8Bytes = 272;
 constexpr int kQ8Stride = 276;
 
+// One stage of Q6_K: a single 210-byte block (128 low nibbles, 64 packed top
+// bits as ((seg & 1) * 32 + lane) + lane/16 sub-block layout, 16 int8 scales
+// every 16 elements and the head fp16 at [208]). The stride pads it to whole
+// dwords with the same odd-dword trick; the two tail bytes are staged
+// byte-wise because the block itself is not dword-multiple.
+constexpr int kQ6KBytes = 210;
+constexpr int kQ6KStride = 212;
+
+enum Kind : int {
+  kQ5Kind = 0,
+  kQ8Kind = 1,
+  kQ6Kind = 2,
+};
+
 __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
 }
@@ -118,11 +132,39 @@ DecodeFragmentHalfQ8(const std::uint8_t* __restrict__ blk, int k0) {
   return frag;
 }
 
+/// The 16 elements [k0, k0 + 16) of the staged Q6_K block `blk` as one f16
+/// wmma fragment operand. The run spans one 16-element sub-block, so a single
+/// int8 scale factors the fragment; the element e = k0 + i reads the low
+/// nibble of ql[(e >> 7) * 64 + ((e >> 5) & 1) * 32 + (e & 31)], the top 2
+/// bits of qh[(e >> 7) * 32 + (e & 31)] at 2 * ((e >> 5) & 3), minus 32
+/// (mirrors the GemvQ6K walk in gemv.hip.cpp).
+__device__ __forceinline__ v16h
+DecodeFragmentHalfQ6K(const std::uint8_t* __restrict__ blk, int k0) {
+  const float d = F16At(blk + 208);
+  const float dm = d * static_cast<float>(static_cast<std::int8_t>(
+                             blk[192 + (k0 >> 4)]));
+  v16h frag;
+  auto* halves = reinterpret_cast<__half*>(&frag);
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    const int e = k0 + i;
+    const int half = e >> 7;
+    const int seg = (e >> 5) & 3;
+    const int lane = e & 31;
+    const std::uint8_t qb = blk[half * 64 + (seg & 1) * 32 + lane];
+    const int nib = (seg < 2) ? (qb & 0xF) : (qb >> 4);
+    const int high = (blk[128 + half * 32 + lane] >> (2 * seg)) & 0x3;
+    const auto quant = static_cast<std::int8_t>((high << 4) | nib) - 32;
+    halves[i] = __float2half(dm * static_cast<float>(quant));
+  }
+  return frag;
+}
+
 /// Dense GEMM over one 32-token tile of a contiguous [rows x cols] Q5_K or
 /// Q8_0 matrix: out[t * out_stride + r] = sum_k W[r][k] * x[t][k]. Rows are
 /// the wmma A operand staged once per block, tokens the F16-converted B
 /// operand; see the routed kernel for the shared staging geometry.
-template<int kSuper, int kStride, bool kQ8>
+template<int kSuper, int kStride, Kind kKind>
 __global__ void __launch_bounds__(kThreads)
     DenseWmmaKernel(const std::uint8_t* __restrict__ w,
                     const float* __restrict__ x, std::uint32_t x_stride,
@@ -133,7 +175,8 @@ __global__ void __launch_bounds__(kThreads)
   constexpr int kChunksPerTok = kStageK / 8;
   constexpr int kActChunks = kTileTokens * kChunksPerTok;
   constexpr int kActPer = (kActChunks + kThreads - 1) / kThreads;
-  constexpr int kWords = (kSuper + 3) / 4;
+  constexpr int kWords = kSuper / 4;
+  constexpr int kTail = kSuper - 4 * kWords;
   constexpr int kWords0 = (kWords + 1) / 2;
   constexpr int kWords1 = kWords - kWords0;
   __shared__
@@ -160,22 +203,50 @@ __global__ void __launch_bounds__(kThreads)
   const bool f_live = f_global < rows;
   const std::size_t f_off = (f_live ? f_global : rows - 1) * row_bytes;
   std::uint32_t f_word[kWords0];
+  std::uint32_t f_tail = 0U;
   const auto fetch_weights = [&](int stage) {
     const std::size_t base = f_part == 0 ? 0U : 4U * kWords0;
+    const int count = f_part == 0 ? kWords0 : kWords1;
     const std::uint8_t* block = w + f_off + stage * kSuper + base;
 #pragma unroll
     for (int i = 0; i < kWords0; ++i) {
-      if (i < kWords1 || f_part == 0) {
+      if (i < count) {
         f_word[i] = U32At(block + i * 4);
+      }
+    }
+    if constexpr (kTail != 0) {
+      if (f_part != 0) {
+        // The two tail bytes of a non-dword-multiple block: staged byte-wise
+        // so the fetch never reads past the row's last super-block.
+        const std::uint8_t* tp =
+            w + f_off + stage * kSuper + 4U * kWords;
+        std::uint32_t v = 0U;
+#pragma unroll
+        for (int b = 0; b < kTail; ++b) {
+          v |= static_cast<std::uint32_t>(tp[b]) << (8 * b);
+        }
+        f_tail = v;
       }
     }
   };
   const auto commit_weights = [&] {
     const std::uint32_t d0 = f_part == 0 ? 0U : kWords0;
+    const int count = f_part == 0 ? kWords0 : kWords1;
     auto* dst = reinterpret_cast<std::uint32_t*>(s_w + f_row * kStride);
 #pragma unroll
-    for (int i = 0; i < kWords1 || (i < kWords0 && f_part == 0); ++i) {
-      dst[d0 + i] = f_word[i];
+    for (int i = 0; i < kWords0; ++i) {
+      if (i < count) {
+        dst[d0 + i] = f_word[i];
+      }
+    }
+    if constexpr (kTail != 0) {
+      if (f_part != 0) {
+        std::uint8_t* tb = reinterpret_cast<std::uint8_t*>(dst) + 4U * kWords;
+#pragma unroll
+        for (int b = 0; b < kTail; ++b) {
+          tb[b] = static_cast<std::uint8_t>(f_tail >> (8 * b));
+        }
+      }
     }
   };
 
@@ -248,9 +319,12 @@ __global__ void __launch_bounds__(kThreads)
       const std::uint8_t* row = s_w + (wave * 16 + sub) * kStride;
       v16h w_lo;
       v16h w_hi;
-      if constexpr (kQ8) {
+      if constexpr (kKind == kQ8Kind) {
         w_lo = DecodeFragmentHalfQ8(row, 32 * s);
         w_hi = DecodeFragmentHalfQ8(row, 32 * s + 16);
+      } else if constexpr (kKind == kQ6Kind) {
+        w_lo = DecodeFragmentHalfQ6K(row, 32 * s);
+        w_hi = DecodeFragmentHalfQ6K(row, 32 * s + 16);
       } else {
         w_lo = DecodeFragmentHalfQ5K(row, 32 * s);
         w_hi = DecodeFragmentHalfQ5K(row, 32 * s + 16);
@@ -291,7 +365,8 @@ __global__ void __launch_bounds__(kThreads)
 }  // namespace
 
 bool DenseWmmaSupports(GemvType type) {
-  return type == GemvType::kQ5_K || type == GemvType::kQ8_0;
+  return type == GemvType::kQ5_K || type == GemvType::kQ8_0 ||
+         type == GemvType::kQ6_K;
 }
 
 void DenseWmma(const void* base, GemvType type, std::uint32_t rows,
@@ -303,12 +378,21 @@ void DenseWmma(const void* base, GemvType type, std::uint32_t rows,
   const dim3 grid((rows + kRowsPerBlock - 1) / kRowsPerBlock,
                   (tokens + kTileTokens - 1) / kTileTokens);
   if (type == GemvType::kQ8_0) {
-    DenseWmmaKernel<kQ8Bytes, kQ8Stride, true><<<grid, kThreads, 0, stream>>>(
+    DenseWmmaKernel<kQ8Bytes, kQ8Stride, kQ8Kind><<<grid, kThreads, 0,
+                                                    stream>>>(
         static_cast<const std::uint8_t*>(base), x, x_stride, rows, tokens, cols,
         out, out_stride);
     return;
   }
-  DenseWmmaKernel<kQ5KBytes, kQ5KStride, false><<<grid, kThreads, 0, stream>>>(
+  if (type == GemvType::kQ6_K) {
+    DenseWmmaKernel<kQ6KBytes, kQ6KStride, kQ6Kind><<<grid, kThreads, 0,
+                                                      stream>>>(
+        static_cast<const std::uint8_t*>(base), x, x_stride, rows, tokens, cols,
+        out, out_stride);
+    return;
+  }
+  DenseWmmaKernel<kQ5KBytes, kQ5KStride, kQ5Kind><<<grid, kThreads, 0,
+                                                    stream>>>(
       static_cast<const std::uint8_t*>(base), x, x_stride, rows, tokens, cols,
       out, out_stride);
 }

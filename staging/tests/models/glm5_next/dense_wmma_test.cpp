@@ -30,6 +30,7 @@ namespace t = gufo::tests::glm5_next;
 namespace {
 
 constexpr std::size_t kQ5KBytes = 176U;
+constexpr std::size_t kQ6KBytes = 210U;
 constexpr std::size_t kQ8Bytes = 34U;
 
 bool Check(const char* what, double worst, double limit) {
@@ -55,6 +56,28 @@ std::vector<std::uint8_t> MakeQ5K(std::uint32_t rows, std::uint32_t cols,
     blk[1] = 0x3CU;
     blk[2] = 0x00U;
     blk[3] = 0x3CU;
+  }
+  return bytes;
+}
+
+/// rows * (cols / 256) random Q6_K blocks with the head fp16 pinned to 1.0
+/// and the int8 sub-block scales masked into [0, 15] so the decoded factors
+/// (scale * (quant - 32), |.| <= 15 * 32) stay exact in binary16.
+std::vector<std::uint8_t> MakeQ6K(std::uint32_t rows, std::uint32_t cols,
+                                  std::uint32_t seed) {
+  const std::size_t row_bytes = cols / 256U * kQ6KBytes;
+  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(rows) * row_bytes);
+  std::uint32_t rng = seed;
+  for (std::size_t i = 0; i < bytes.size(); ++i) {
+    bytes[i] = static_cast<std::uint8_t>(t::NextRandom(&rng) & 0xFFU);
+  }
+  for (std::size_t b = 0; b < bytes.size() / kQ6KBytes; ++b) {
+    std::uint8_t* blk = bytes.data() + b * kQ6KBytes;
+    blk[208] = 0x00U;
+    blk[209] = 0x3CU;
+    for (int j = 0; j < 16; ++j) {
+      blk[192 + j] = static_cast<std::uint8_t>(blk[192 + j] & 0xFU);
+    }
   }
   return bytes;
 }
@@ -103,13 +126,21 @@ bool BitsDiffer(const std::vector<float>& a, const std::vector<float>& b) {
 /// One shape and quant: dense W[x] tier vs the scalar GemvRows reference.
 bool TestShape(q::GemvType type, std::uint32_t rows, std::uint32_t cols,
                std::uint32_t tokens) {
-  const bool q8 = type == q::GemvType::kQ8_0;
-  std::printf("%s rows %u cols %u tokens %u\n", q8 ? "Q8_0" : "Q5_K", rows,
-              cols, tokens);
+  const char* label = type == q::GemvType::kQ8_0
+                          ? "Q8_0"
+                          : type == q::GemvType::kQ6_K ? "Q6_K" : "Q5_K";
+  std::printf("%s rows %u cols %u tokens %u\n", label, rows, cols, tokens);
   const std::vector<std::uint8_t> w =
-      q8 ? MakeQ8(rows, cols, 0x13579BDFU) : MakeQ5K(rows, cols, 0x13579BDFU);
-  const std::size_t row_bytes = q8 ? cols / 32U * kQ8Bytes
-                                   : cols / 256U * kQ5KBytes;
+      type == q::GemvType::kQ8_0
+          ? MakeQ8(rows, cols, 0x13579BDFU)
+          : type == q::GemvType::kQ6_K
+                ? MakeQ6K(rows, cols, 0x13579BDFU)
+                : MakeQ5K(rows, cols, 0x13579BDFU);
+  const std::size_t row_bytes =
+      type == q::GemvType::kQ8_0
+          ? cols / 32U * kQ8Bytes
+          : type == q::GemvType::kQ6_K ? cols / 256U * kQ6KBytes
+                                       : cols / 256U * kQ5KBytes;
   const auto x =
       t::MakeValues(static_cast<std::size_t>(tokens) * cols, 0xfeedfaceU, 8.0F);
   t::HipBuffer<std::uint8_t> d_w(w.size());
@@ -146,9 +177,10 @@ bool TestShape(q::GemvType type, std::uint32_t rows, std::uint32_t cols,
 
 int main() {
   bool ok = q::DenseWmmaSupports(q::GemvType::kQ5_K) &&
+            q::DenseWmmaSupports(q::GemvType::kQ6_K) &&
             q::DenseWmmaSupports(q::GemvType::kQ8_0) &&
             !q::DenseWmmaSupports(q::GemvType::kIQ1_M);
-  std::printf("Q5_K/Q8_0 support: %s\n", ok ? "OK" : "FAIL");
+  std::printf("Q5_K/Q6_K/Q8_0 support: %s\n", ok ? "OK" : "FAIL");
   try {
     hipDeviceProp_t props{};
     t::CheckHip(hipGetDeviceProperties(&props, 0), "device");
@@ -157,6 +189,10 @@ int main() {
     ok &= TestShape(q::GemvType::kQ5_K, 144U, 1024U, 40U);
     ok &= TestShape(q::GemvType::kQ5_K, 4096U, 1024U, 128U);
     ok &= TestShape(q::GemvType::kQ5_K, 300U, 2048U, 96U);
+    ok &= TestShape(q::GemvType::kQ6_K, 144U, 1024U, 32U);
+    ok &= TestShape(q::GemvType::kQ6_K, 144U, 1024U, 40U);
+    ok &= TestShape(q::GemvType::kQ6_K, 4096U, 2048U, 128U);
+    ok &= TestShape(q::GemvType::kQ6_K, 300U, 2048U, 96U);
     ok &= TestShape(q::GemvType::kQ8_0, 144U, 1024U, 32U);
     ok &= TestShape(q::GemvType::kQ8_0, 144U, 1024U, 40U);
     ok &= TestShape(q::GemvType::kQ8_0, 4096U, 1024U, 128U);

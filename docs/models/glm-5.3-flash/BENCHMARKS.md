@@ -47,6 +47,10 @@ With the HC/MoE elementwise loops row-batched into single launches
 (route, coeffs, inputs, write-back, weighted sum; bit-identical —
 n-gen-1 sha and 9/9 with new row-batch parity checks): pp2048
 **164.7 ± 1.7**.
+With the Q6_K WMMA dense tier (`ffn_down_shexp` and the other Q6_K
+projections moved from wide GEMV to the tensor-core tier; bit-identical —
+n-gen-1 sha and 9/9, `rocm_dense_wmma` extended with Q6_K shapes):
+pp2048 **179.0 ± 0.3** (`/tmp/opencode/gufo_bench_q6kab.log`).
 Serve-protocol gate not yet re-captured for these steps. Use these
 only as offline scans, not interchangeably with the serve-protocol gate
 cells.

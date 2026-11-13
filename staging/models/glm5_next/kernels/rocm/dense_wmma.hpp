@@ -10,7 +10,7 @@
 
 namespace gufo::models::glm5_next::rocm {
 
-/// True when `type` has a WMMA dense tier (Q5_K and Q8_0 projections).
+/// True when `type` has a WMMA dense tier (Q5_K, Q6_K and Q8_0 projections).
 bool DenseWmmaSupports(GemvType type);
 
 /// out[t*out_stride + r] = sum_k W[r][k] * W float-conversion tier of the

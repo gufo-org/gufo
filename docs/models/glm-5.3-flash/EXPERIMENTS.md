@@ -259,6 +259,19 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   `glm5_next` ctest 9/9 GPU-exclusive including new `rocm_ops`
   row-batch bit-exact checks for all five ops
   (`/tmp/opencode/glm5_rows_gate.sh`, `/tmp/opencode/gufo_bench_rows1.log`).
+- Q6_K dense WMMA tier (`dense_wmma.hip.cpp`): a third kernel kind
+  decodes Q6_K blocks (`ql`/`qh`/16 nibble-block scales, `kSuper=210`,
+  212-byte padded LDS stride with a two-byte tail fetch so nothing is
+  read past the tensor) into WMMA fragments; `DenseWmmaSupports` and
+  the executor dispatch admit `kQ6_K`, so `ffn_down_shexp`
+  (4096x2048) and the remaining Q6_K projections leave the wide-GEMV
+  path (`GemvRowsQ6K` was 1.23 s per two prefills). Offline A/B
+  (alternating, warm+2): pp2048 165.69/164.69 -> **179.09/178.83
+  (+8.3 %)** with variance down from ±2 to ±0.3; n-gen-1 output sha256
+  `43557e0c…` identical across both binaries and all four runs; full
+  `glm5_next` ctest 9/9 GPU-exclusive; `rocm_dense_wmma` gained
+  `MakeQ6K` plus four shapes (NMSE ≤ 3.7e-8 vs the scalar reference,
+  deterministic replay) (`/tmp/opencode/gufo_bench_q6kab.log`).
 
 ## Next candidates (measured order from P3d, P3e updated)
 
