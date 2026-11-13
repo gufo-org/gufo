@@ -23,6 +23,9 @@
 namespace gufo::server {
 namespace {
 using Clock = std::chrono::steady_clock;
+std::size_t SaturatingAdd(std::size_t a, std::size_t b) {
+  return a + std::min(b, std::numeric_limits<std::size_t>::max() - a);
+}
 class SettledSignal final : public cache::CompletionSignal {
 public:
   bool Ready() const noexcept override { return true; }
@@ -335,20 +338,25 @@ struct ComponentTextCache::Impl {
       entries.push_back(std::move(entry));
     }
     std::size_t automatic_bytes{}, max_bytes{}, slot_pinned_bytes{};
+    std::size_t owned_manifest_bytes{};
     // RAM cache limit for a runner that pins its slots; computed before the
     // branch below so a short host refuses the load before anything commits.
     std::size_t pinned{}, limit{};
     if (ram_enabled && resources->commit_backing) {
       const auto claim = this->runner->ResourceClaim();
-      // The claim measures the host after the slots allocated, so bytes they
-      // pinned are missing from it. Add them back: in full to the ceiling,
-      // and half to the automatic budget, which is half the available RAM.
-      // The ledger charges them on top of the cache's own budget.
+      // This observation is after slots and disk recovery allocated. Pinned
+      // slots sit above the cache budget; recovered manifest vectors are
+      // already inside it. Compare only the budget's remaining obligations
+      // with remaining host headroom. Neither ledger reservations nor its
+      // converted overhead estimates establish materialized storage.
       pinned = resources->pinned_bytes ? resources->pinned_bytes() : 0;
+      owned_manifest_bytes = disk ? disk->OwnedManifestBytes() : 0;
       const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
-      const auto automatic = measured + pinned / 2;
-      const auto ceiling =
-          claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
+      const auto owned = SaturatingAdd(pinned, owned_manifest_bytes);
+      const auto automatic = SaturatingAdd(measured, owned / 2);
+      const auto host_ceiling =
+          claim.retained_snapshot_ceiling_bytes.value_or(measured);
+      const auto ceiling = SaturatingAdd(host_ceiling, owned);
       automatic_bytes =
           std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
       // Staging is pinned host memory too, so the host keeps its reserve
@@ -361,9 +369,24 @@ struct ComponentTextCache::Impl {
         ram = std::min(ram, automatic);
       // Within the host ceiling and the limit the slots allocated under. Other
       // charges above the budget are refused here, as without pins.
-      limit = std::min({ram + pinned, max_bytes, ledger.Limits().ram_bytes});
+      limit = std::min(
+          {SaturatingAdd(ram, pinned), max_bytes, ledger.Limits().ram_bytes});
       const auto charged = ledger.Snapshot().ram_bytes;
       const auto granted = std::min(ram, limit > pinned ? limit - pinned : 0);
+      Logger::Info(
+          "cache",
+          "schema=component-cache-v1 event=ram_admission "
+          "requested_bytes=" +
+              std::to_string(requested) +
+              " host_ceiling_bytes=" + std::to_string(host_ceiling) +
+              " owned_manifest_bytes=" + std::to_string(owned_manifest_bytes) +
+              " slot_pinned_bytes=" + std::to_string(pinned) +
+              " staging_capacity_bytes=" + std::to_string(staging) +
+              " ledger_ram_bytes=" + std::to_string(charged) +
+              " proposed_grant_bytes=" + std::to_string(granted) +
+              " additional_bytes=" +
+              std::to_string(SaturatingAdd(
+                  granted - std::min(granted, owned_manifest_bytes), staging)));
       // The ceiling is measured after the slots allocated. When they leave
       // no RAM for the cache above the host reserve, refuse the load with
       // the remedies instead of serving without the cache the user expects
@@ -557,18 +580,19 @@ struct ComponentTextCache::Impl {
           demotion = std::move(checkpoint);
         }
       });
-    Logger::Info("cache",
-                 "schema=component-cache-v1 event=configured sessions=" +
-                     std::to_string(count) +
-                     " snapshot_entries=128 capacity_bytes=" +
-                     std::to_string(budget) + " staging_capacity_bytes=" +
-                     std::to_string(ledger.Limits().staging_bytes) +
-                     " automatic_bytes=" + std::to_string(automatic_bytes) +
-                     " max_bytes=" + std::to_string(max_bytes) +
-                     " disk_capacity_bytes=" + std::to_string(disk_capacity) +
-                     " slot_pinned_bytes=" + std::to_string(slot_pinned_bytes) +
-                     " ram_cache=" + (ram_enabled ? "on" : "off") +
-                     " disk_backing_bytes=" + std::to_string(disk_backing));
+    Logger::Info(
+        "cache",
+        "schema=component-cache-v1 event=configured sessions=" +
+            std::to_string(count) + " snapshot_entries=128 capacity_bytes=" +
+            std::to_string(budget) + " staging_capacity_bytes=" +
+            std::to_string(ledger.Limits().staging_bytes) +
+            " automatic_bytes=" + std::to_string(automatic_bytes) +
+            " max_bytes=" + std::to_string(max_bytes) +
+            " disk_capacity_bytes=" + std::to_string(disk_capacity) +
+            " slot_pinned_bytes=" + std::to_string(slot_pinned_bytes) +
+            " owned_manifest_bytes=" + std::to_string(owned_manifest_bytes) +
+            " ram_cache=" + (ram_enabled ? "on" : "off") +
+            " disk_backing_bytes=" + std::to_string(disk_backing));
   }
   ~Impl() {
     for (auto& entry : entries)

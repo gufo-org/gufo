@@ -104,6 +104,13 @@ DiskManifest Manifest() {
                           DiskPayload{Id(3), 16, 101}});
   return m;
 }
+std::size_t ManifestStorage(const DiskManifest& m) {
+  auto bytes = m.input.size() + m.tokens.size() * sizeof(Token) +
+               m.components.size() * sizeof(DiskComponent);
+  for (const auto& c : m.components)
+    bytes += c.chunks.size() * sizeof(DiskPayload);
+  return bytes;
+}
 void Write(const fs::path& p, std::span<const std::uint8_t> bytes) {
   std::ofstream f(p, std::ios::binary);
   f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
@@ -307,6 +314,7 @@ void Index() {
   Directory d;
   {
     DiskStore init(ledger, d.path, UINT64_MAX);
+    assert(init.OwnedManifestBytes() == 0);
   }
   auto m = Manifest();
   Payloads(d.path, m);
@@ -325,6 +333,12 @@ void Index() {
     assert(store.Stats().dependency_stats == 3);
     assert(actual_manifest_bytes == encoded_size && actual_payload_bytes == 0);
     assert(store.Stats().managed_bytes == encoded_size + 28);
+    assert(store.OwnedManifestBytes() == ManifestStorage(m));
+    // Logical estimates and pending allocations do not establish owned bytes.
+    const auto pending = ledger.Reserve(ResourceCategory::kMetadata, 8192);
+    const auto estimated =
+        ledger.Reserve(ResourceCategory::kMetadata, 16384).Convert();
+    assert(store.OwnedManifestBytes() == ManifestStorage(m));
   }
   // Sparse files scale declared payload by 1 GiB, without increasing metadata
   // or startup reads. Their contents deliberately fail the declared CRCs.
@@ -343,6 +357,8 @@ void Index() {
   {
     DiskStore store(ledger, d.path, UINT64_MAX);
     assert(store.Entries().empty() && store.Stats().rejected_manifests == 1);
+    // The retained entry-table capacity and its charge are not manifest data.
+    assert(ledger.Snapshot().ram_bytes && store.OwnedManifestBytes() == 0);
   }
   Payloads(d.path, m);
   auto dependency = d.path / "v2/private" / DiskFileName(Id(3));

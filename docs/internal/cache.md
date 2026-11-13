@@ -512,6 +512,15 @@ count under 128; only larger explicit budgets can reach the record limit. The st
 `disk_capacity_bytes` and `slot_pinned_bytes` (host memory the sessions pinned
 at startup, charged on top of `capacity_bytes`).
 
+The post-slot host recheck counts initialized recovered manifest storage once
+inside the total RAM allowance. It credits those bytes when comparing remaining
+allocations with remaining host headroom, and half of them when reconstructing
+the automatic half-available budget. Pinned execution slots remain outside the
+cache allowance; staging remains a separate pending allocation. The grant never
+credits unused vector capacity, ledger reservations or estimated overhead as
+resident storage. `event=ram_admission` reports `owned_manifest_bytes` and the
+remaining `additional_bytes`; this is allocation accounting, not an RSS measure.
+
 Flash-Next prepares a bounded two-segment reserve before readiness and can
 prepare the next segment before a prefill with at least 512 tokens remaining
 or when assigning backing to completed append rows. Private-state and partial-tail copies do not request speculative

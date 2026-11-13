@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <thread>
 
+#include "src/cache/disk.hpp"
 #include "src/cache/retention.hpp"
 #include "src/cli/serve/component_cache_metrics.hpp"
 #include "src/cli/serve/logging.hpp"
@@ -2566,6 +2567,202 @@ void PinnedSlotBytesCountOnce() {
   }
   std::filesystem::remove_all(directory);
 }
+// Recovered manifest vectors are already owned before the host recheck and
+// belong inside the total RAM budget. Only their initialized bytes reduce
+// its remaining obligation; ledger reservations and converted estimates do
+// not establish physical storage. Exercise the actual disk and serving paths.
+void RecoveredManifestStorageCountsOnce() {
+  constexpr std::size_t kBudget = 4 << 20, kPin = 4096, kExtra = 256 << 10;
+  constexpr auto kStaging = cache::kDefaultDiskStagingBytes;
+  struct GrantRunner final : Runner {
+    struct Pin {
+      cache::ResourceCharge charge;
+      std::vector<std::byte> bytes;
+    };
+    struct Owner {
+      std::shared_ptr<void> backing;
+      cache::ResourceLedger* ledger;
+      cache::ResourceReservation pending;
+      cache::ResourceCharge estimate;
+      std::vector<Pin> pins;
+      bool building{true};
+    };
+    enum class Extra { kNone, kPending, kEstimate };
+    std::size_t ceiling{}, automatic{};
+    bool pin{}, fail_commit{};
+    Extra extra{Extra::kNone};
+    mutable std::size_t committed{}, limit{}, observations{};
+    mutable cache::ResourceSnapshot at_recheck;
+    mutable std::weak_ptr<Owner> owner;
+    TextRunnerResourceClaim ResourceClaim() const override {
+      const auto held = owner.lock();
+      assert(held);
+      at_recheck = held->ledger->Snapshot();
+      ++observations;
+      auto claim = Runner::ResourceClaim();
+      claim.retained_snapshot_capacity_bytes = automatic;
+      claim.retained_snapshot_ceiling_bytes = ceiling;
+      return claim;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      auto held = std::make_shared<Owner>();
+      held->backing = std::move(resources->owner);
+      held->ledger = &ledger;
+      if (extra != Extra::kNone) {
+        auto reservation =
+            ledger.Reserve(cache::ResourceCategory::kMetadata, kExtra);
+        if (extra == Extra::kPending)
+          held->pending = std::move(reservation);
+        else
+          held->estimate = reservation.Convert();
+      }
+      owner = held;
+      resources->owner = held;
+      resources->stream = [held, pin = pin,
+                           stream = std::move(resources->stream)] {
+        if (pin && held->building) {
+          auto reserved =
+              held->ledger->Reserve(cache::ResourceCategory::kMetadata, kPin);
+          std::vector<std::byte> bytes(kPin);
+          held->pins.push_back({reserved.Convert(), std::move(bytes)});
+        }
+        return stream();
+      };
+      resources->pinned_bytes = [held] { return held->pins.size() * kPin; };
+      resources->commit_backing = [this, held](std::size_t budget) {
+        held->building = false;
+        committed = budget;
+        limit = held->ledger->Limits().ram_bytes;
+        if (fail_commit)
+          throw std::bad_alloc();
+      };
+      return resources;
+    }
+  };
+  const TemporaryDirectory temp("gufo-component-recovered-grant-test");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path(),
+                                        .capacity_bytes = 1 << 20,
+                                        .min_checkpoint_step_tokens = 1};
+  std::vector<TextRunnerToken> prompt(40);
+  std::iota(prompt.begin(), prompt.end(), 100);
+  std::uint64_t expected{};
+  std::size_t recovered{};
+  const auto stored = [&] {
+    cache::ResourceLedger ledger({8 << 20, 8 << 20, 0, 8 << 20});
+    cache::DiskStore store(ledger, temp.path(), disk.capacity_bytes);
+    // Recovery has read manifests and dependency metadata, not payload bytes.
+    assert(store.Stats().manifest_bytes_read || store.Entries().empty());
+    return store.OwnedManifestBytes();
+  };
+  const auto run = [&](bool pin, std::size_t shortfall,
+                       GrantRunner::Extra extra = GrantRunner::Extra::kNone,
+                       bool automatic = false) {
+    auto runner = std::make_shared<GrantRunner>();
+    runner->pin = pin;
+    runner->extra = extra;
+    const std::size_t pins = pin ? 2 * kPin : 0;
+    // The post-slot observation already excludes the manifest bytes and pins.
+    // Future staging remains a separate obligation. The cache budget itself
+    // includes recovered metadata; pinned execution slots are outside it.
+    runner->ceiling = kBudget + kStaging - recovered - shortfall;
+    runner->automatic = kBudget - recovered / 2 - pins / 2;
+    const auto previous_level = Logger::Level();
+    Logger::SetLevel(LogLevel::kInfo);
+    std::ostringstream output;
+    auto* previous_sink = std::clog.rdbuf(output.rdbuf());
+    {
+      ComponentTextCache cache(runner, 2, automatic ? 2 * kBudget : kBudget,
+                               disk, automatic, 2 * kBudget);
+      const auto granted = kBudget - shortfall;
+      assert(cache.ram_budget() == granted && runner->committed == granted);
+      assert(runner->limit == granted + pins && runner->observations == 1);
+      assert(runner->at_recheck.ram_bytes > recovered + pins);
+      const auto metadata =
+          static_cast<std::size_t>(cache::ResourceCategory::kMetadata);
+      assert(runner->at_recheck.reserved_bytes[metadata] ==
+             (extra == GrantRunner::Extra::kPending ? kExtra : 0));
+      auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+      assert(lease->restored_from_disk() == (recovered != 0));
+      if (recovered) {
+        assert(lease->cached_tokens() == prompt.size());
+        assert(runner->adapter->RecurrentHash(
+                   dynamic_cast<State&>(lease->state()).slot) == expected);
+      }
+      // Catalog/index and staging allocations still happen under the final
+      // limits; they were not included in the pre-grant storage credit.
+      assert(lease->Metrics().ledger.ram_bytes > runner->at_recheck.ram_bytes);
+      lease->Invalidate();
+    }
+    std::clog.rdbuf(previous_sink);
+    Logger::SetLevel(previous_level);
+    assert(runner->owner.expired());
+    assert(output.str().find(" capacity_bytes=" +
+                             std::to_string(kBudget - shortfall)) !=
+           std::string::npos);
+    assert(output.str().find(" staging_capacity_bytes=" +
+                             std::to_string(kStaging)) != std::string::npos);
+    assert(output.str().find(" slot_pinned_bytes=" + std::to_string(pins)) !=
+           std::string::npos);
+    assert(output.str().find(" owned_manifest_bytes=" +
+                             std::to_string(recovered)) != std::string::npos);
+    assert(output.str().find(" additional_bytes=" +
+                             std::to_string(kBudget - shortfall - recovered +
+                                            kStaging)) != std::string::npos);
+    assert(output.str().find(" automatic_bytes=" + std::to_string(kBudget)) !=
+           std::string::npos);
+  };
+  for (const bool populated : {false, true}) {
+    if (populated) {
+      auto runner = std::make_shared<Runner>();
+      ComponentTextCache cache(runner, 1, kBudget, disk);
+      auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+      auto& state = dynamic_cast<State&>(lease->state());
+      runner->adapter->Append(state.slot, prompt, prompt);
+      expected = runner->adapter->RecurrentHash(state.slot);
+      assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(),
+                                       false, SnapshotPurpose::kContinuation,
+                                       {}));
+      assert(lease->PublishSnapshot(prompt, lease->Capture(), false));
+      assert(lease->Metrics().disk_queued_bytes);
+      (void)lease->Commit({}, {}, prompt);
+    }  // Publication drains before reopening the populated directory.
+    recovered = stored();
+    assert((recovered != 0) == populated);
+    for (const bool pin : {false, true}) {
+      run(pin, 0);  // Exact fit of remaining allocations, including staging.
+      run(pin, 1);  // One missing byte still trims the grant by one byte.
+    }
+  }
+  for (const auto extra :
+       {GrantRunner::Extra::kPending, GrantRunner::Extra::kEstimate})
+    run(true, 1, extra);
+  run(true, 0, GrantRunner::Extra::kNone, true);
+  for (const bool allocation_failure : {false, true}) {
+    auto runner = std::make_shared<GrantRunner>();
+    runner->ceiling = allocation_failure ? kBudget + kStaging - recovered : 0;
+    runner->fail_commit = allocation_failure;
+    bool refused = false;
+    try {
+      ComponentTextCache cache(runner, 2, kBudget, disk, false, 2 * kBudget);
+    } catch (const std::bad_alloc&) {
+      assert(allocation_failure);
+      refused = true;
+    } catch (const std::runtime_error& error) {
+      assert(!allocation_failure &&
+             std::string_view(error.what()).find("host reserve") !=
+                 std::string_view::npos);
+      refused = true;
+    }
+    assert(refused && runner->owner.expired());
+    assert((runner->committed != 0) == allocation_failure);
+    // Both insufficient headroom and injected backing failure release all
+    // directory ownership, and neither discards the valid persisted entry.
+    assert(stored() == recovered);
+  }
+  run(false, 0);
+}
 // Without pins the limit ends at the requested budget, whether or not the
 // runner commits backing, and a budget below what is already charged still
 // fails at startup.
@@ -3940,6 +4137,7 @@ int main() {
   StagingIsInternal();
   StagingCountsAgainstRamCeiling();
   PinnedSlotBytesCountOnce();
+  RecoveredManifestStorageCountsOnce();
   UnpinnedRunnersKeepTheirLimit();
   DiskDirectoryHasOneOwner();
   GridDoesNotSuppressFirstDiskPrompt();
