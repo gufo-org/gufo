@@ -1492,6 +1492,11 @@ endfunction()
   add_test(NAME npu_test COMMAND npu_test
     "$<TARGET_FILE:npu_dispatch_fixture>" "${CMAKE_CURRENT_BINARY_DIR}/tests/core/npu-sysfs")
   set_tests_properties(npu_test PROPERTIES LABELS "cpu;npu")
+  add_executable(npu_host_ops_test tests/core/npu_host_ops_test.cpp)
+  target_include_directories(npu_host_ops_test PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(npu_host_ops_test PRIVATE gufo_npu)
+  add_test(NAME npu_host_ops_test COMMAND npu_host_ops_test)
+  set_tests_properties(npu_host_ops_test PROPERTIES LABELS "cpu;npu")
 
   # On-device NPU checks of the in-tree designs (compiled with IRON when
   # available, see gufo_npu_design above) against double references; skipped
