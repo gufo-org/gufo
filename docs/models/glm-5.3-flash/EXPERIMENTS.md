@@ -281,19 +281,37 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   `glm5_next` ctest 9/9 GPU-exclusive; `rocm_dense_wmma` gained
   `MakeQ6K` plus four shapes (NMSE ≤ 3.7e-8 vs the scalar reference,
   deterministic replay) (`/tmp/opencode/gufo_bench_q6kab.log`).
+- Token-batched DSA indexer/MLA launches (`IdxScoreBatch`,
+  `BuildSelBatch`, `MlaGatherScoreBatch`, `MlaGatherCombineBatch`):
+  the per-token gather/indexer launches were 22,528 per pp2048
+  prefill and latency-bound (launch + drain, not DRAM). Each kernel
+  gains the token as an extra grid dimension writing into per-token
+  scratch regions sized for `kChunk`; every block keeps the exact
+  per-token arithmetic, selection counts derive in-kernel from the
+  absolute position (`n_sel == 0` / negative sentinels distinguish the
+  fixed single-token decode call, which now runs the same kernels with
+  n = 1). `TopKDesc` stays a per-token loop. Scratch grows to
+  2048 x (capacity/kPool + 2) pool scores (~268 MB per 131K session)
+  and 2048-token tile-score staging. n-gen-1 output sha256
+  `43557e0c…` identical across both binaries; full `glm5_next` ctest
+  9/9 GPU-exclusive. A/B (alternating, warm+2): pp2048
+  178.32/179.63 -> **184.30/184.81 (+3.0 %)** with variance down to
+  ±0.13; pp16384 noisy control 147.05/141.67 -> stable
+  **146.78/147.19** (no loss at 16K; the win is the 45 % tail at
+  short prompts) (`/tmp/opencode/gufo_bench_mla2ab.log`,
+  `/tmp/opencode/gufo_bench_mla2gate.log`).
 
-## Next candidates (measured order from P3d, P3e updated)
+## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-13)
 
-- Tensor-core / igemm-style IQ1_M routed expert tier (flint `mmq` style)
-  for the 34.4 % MoE stage — the only measured lever at llama.cpp-level
-  pp *and* tg on the IQ1_M experts.
-- Wider/tensor-core shapes for the Q5_K MLA projections (`GemvRows<16u>`,
-  the single largest kernel at 21.9 %): the launch-grain half of that
-  stage is now measured out (P3e) and slice width itself was probed and
-  rejected (P3f); only decode throughput (tensor-core shapes) remains.
-- MLA `GatherScore` rewrite (12.2 %; 45892 calls at ~224 us) and KDA
-  per-token sequential scan (8.8 %, ~1 M launches of ~26 us) as the
-  follow-up wave. After kChunk 2048 the ordering is confirmed: the
-  per-token launch storm (KDA fold/update + MLA gather + route/coeffs)
-  is the dominant cost and the single-launch chunk-scan rewrite is the
-  primary lever.
+The launch storm is closed (steady-state idle 2.2 %,
+`/tmp/opencode/prof_mla2`): routed IQ WMMA 23 %, dense Q5_K WMMA 19 %,
+MLA score+combine 15 %, KDA fold 12 %, `GemvRowsQ8_0` 7 %, bitonic
+indexer sort 6 %, misc ~12 %. The measured-order ladder with per-item
+estimates and quality gates lives in
+[PLAN.md](PLAN.md) Phase 3: exact-default items A1-A6 (toward ~280-310
+t/s, starting with bit-exact indexer-sort batching), then the opt-in
+approximate fast track B7-B10 (W8A8, online-softmax attend, capped
+window, DFlash2/MTP speculation) from which the reference-class 600+
+comes. Earlier items in this list (IQ routed WMMA tier, Q5_K WMMA tier,
+GatherScore rewrite, chunk-scan launch collapse) are all shipped; see
+Retained above.

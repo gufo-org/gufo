@@ -85,58 +85,100 @@ decode-throughput half of the dense stage counts. P5 (routed IQ WMMA,
 +21.4 %) and P6 (dense Q5_K WMMA, +32.6 %, cumulative +59.7 % over
 `gufo_rows16`) took pp2048 to 67.9 t/s — gate attainment 0.40× — and
 both GEMV families at the center of the profile now run on the tensor
-cores. Items below are in measured-share order.
+cores.
 
-1. (Shipped P5 2026-11-12, +21.4 % pp2048 matched) Tensor-core/WMMA tier
-   for the stacked IQ experts (Phase-2 mapping row "Routed MoE" — IQ
-   dequant after LDS read → F16 fragments →
-   `wmma_f32_16x16x16_f16_w32`, flint `mmq` style): the 34 % MoE stage
-   and the measured llama.cpp-level lever for pp *and* tg.
-2. (Shipped P6 2026-11-12, +32.6 % pp2048 matched — `kernels/rocm/
-   dense_wmma`, gated at `GemvN` on Q5_K with `tokens >= 16` and
-   `cols % 256 == 0`; contract `glm5_next.rocm_dense_wmma` NMSE
-   ~3e-08, ctest 9/9) Wider/tensor-core shapes for the Q5_K MLA
-   projections (`GemvRows<16u>`,
-   single largest kernel at 22 % of the capture): launch grain measured
-   out by P3e; decode throughput only. Upstream references
-   (survey 2026-11-12): qwen38 `DenseF16GEMMKernel`
-   (`src/models/qwen38_flash_next/kernels/rocm/kernels.hip.cpp:7680`)
-   decodes Q8 codes to F16 once per LDS stage
-   (`CodesToHalves` :5416) and wmma-accumulates with F16 acts; the
-   mid-width int8 `W8A8BlockedWmmaGEMMKernel` (:5056, `w8a8_wave64.hip`)
-   is the alternative; ds4 adds token-tile `sharedx` staging and a
-   `wmma_4w` tier at n_tok≥256
-   (`src/models/deepseek_v4_flash/kernels/rocm/detail/ds4_rocm_q8.hip.hpp:56,127`)
-   under a per-shape bit policy
-   (`ds4_rocm_matmul.hip.hpp:949-1013`). GLM-5 prefill chunks (128 tok)
-   sit inside ds4's igemm window (n_tok≥32); decode rows 1-8 keep the
-   scalar tier. The glm5 `RoutedWmmaKernel` already carries the
-   proven gfx1151 decode→F16→wmma + C-fragment epilogue machinery.
-3. (Shipped P7 2026-11-13, +19.7 % pp matched — warp-per-key row
-   kernel `MlaGatherScoreKernel` with host head span 16/32 across
-   4096 selections, microbench 2.2-6.9× hot / 26-31× cold, NMSE
-   1.5e-13; golden `llama_reference.json` re-approved by candidate
-   re-capture, revision 457151058) MLA `GatherScore` rewrite (12 %)
-   done; KDA per-token sequential scan
-   (9 %, ~1 M launches of ~26 us) remains. References:
-   ds4 scores 16 heads inside one wave's registers with
-   `permlanex16`/DPP butterfly reduction and 32 keys/block
-   (`ds4_rocm_indexer_score.hip.hpp:49-104`), prefill
-   `indexer_scores_wmma128_kernel` over packed F16 q/k in 128-key tiles
-   (:151); qwen38 compacts selection before scoring (`SelectMarkKernel`
-   `kernels.hip.cpp:2860`, `CompactSelectionKernel` :3058). For KDA,
-   qwen38 `GdnPrefillKernel` (:1984) runs 4-token windows, two rows per
-   wave, eight waves, double-buffered LDS with windows-ahead prefetch —
-   the template for collapsing the 128 sequential Conv/EGate/FoldSk/
-   UpdateOut rounds (`executor.cpp:415-460`). Both rewrites change
-   accumulation order; plan for the P5-style NMSE contract + golden
-   re-approval instead of bit-exact parity.
-4. Retune MMVQ for IQ1_M/I-quant decode rows on gfx1151 (N, nrow, wave
-   count — the upstream 6/5–6 tables are legacy defaults).
-5. lm_head Q4_K GEMV at the 231 GB/s reference shape; output is 154,880
-   rows.
-6. Verify byte-exact logits (temp 0) after each fusion; ABBA + 55 °C
-   cooldown protocol, 16K-first, then 65K/100K confirmation.
+Status 2026-11-13 (evening): pp2048 **184.5 t/s**, pp16384 **147.0**,
+exact default (sha `43557e0c…`, ctest 9/9). A fresh `rocprofv3` capture of
+the shipped tree at pp2048 (`/tmp/opencode/prof_mla2`) shows steady-state
+idle down to **2.2 %** — the launch storm is gone after P8 (KDA
+single-launch scan), row-batched elementwise and the token-batched
+indexer/MLA launches; every remaining ms is kernel throughput. Per-pass
+GPU time (11.7 s total): routed IQ WMMA 2.7 s (23 %), dense Q5_K WMMA
+2.2 s (19 %), `MlaGatherScore`+`Combine` 1.7 s (15 %), KDA
+`KdaFoldUpdateChunk` 1.4 s (12 %), `GemvRowsQ8_0<16>` 0.8 s (7 %,
+11.6 k calls of ~70 us), bitonic indexer sort 0.68 s (6 %, 22.6 k
+single-block launches), `GemvRowsF32` 0.25 s, norm/mhc/grouped-GEMV/
+converts ~0.7 s. The 600+ target with the exact default is out of reach of
+any remaining single lever (even halving every stage lands ~310 t/s), so
+the ladder splits: A = exact-default items toward ~280-310, B = opt-in
+approximate fast track from which 600 is reachable (the reference 634 t/s
+sat on a different quant mix plus W8A8 and a capped selection window — see
+EXPERIMENTS.md notes on `mikealanni/fork-enhancements`).
+
+Shipped since: P7 warp-per-key `MlaGatherScoreKernel` (+19.7 % pp,
+golden re-approved at revision 457151058), single-launch chunked KDA
+(+21.7 %), row-batched HC/MoE elementwise (+9.7 %), Q6_K dense WMMA tier
+(+8.3 %), token-batched indexer/MLA launches (+3.0 %). Remaining
+levers, exact-default ladder (A) then opt-in fast track (B):
+
+**A. Exact-default levers (measured-share order, ladder to ~280-310)**
+
+1. Routed IQ WMMA headroom (2.7 s/pass): `RoutedWmmaKernel<66,68,2>` /
+   `<56,60,2>` runs 41-43 ms at only `blocks=16x791` (half-full waves)
+   while `<98,100,1>` averages 24 ms. Re-tile for gfx1151 wave occupancy
+   (wider C tiles / split-K over the 791 expert-stack dim so both waves
+   of a CU carry work), keep the verified C-fragment layout and the
+   `rocm_routed_wmma` NMSE contract. 64 `GemvRoutedSuper256` calls at
+   136 ms each (0.8 s) sit on the same stage for non-bucket shapes.
+   Target 1.2-1.4x (−0.5…−0.9 s, +5-9 %).
+2. Dense Q5_K WMMA fragment decode (2.2 s/pass): `DenseWmmaKernel<176,
+   180>` averages 5.3 ms/call at `blocks=32x64` and is VALU-bound on the
+   Q5_K block decode (sign-extraction chains), not on tensor-core math.
+   Precompute 4-bit nibble→F16 pair tables or a dword-trick decode per
+   32-K; same accumulator order per fragment keeps bits stable, wider
+   staging changes them → tier NMSE contract re-run. Target 1.3-1.5x
+   (−0.6…−0.9 s, +6-9 %).
+3. KDA fold/update scan (1.4 s/pass): `KdaFoldUpdateChunkKernel` is 136
+   launches of ~20 ms at `blocks=64 wg=128` — one head per block with a
+   long serial dependency chain across the chunk. Split each chunk into
+   sub-chunks with prefix-state composition (the fold is affine per
+   head: state' = a⊙state + b, so a Blelloch-style two-level scan over
+   sub-chunk (a,b) pairs is exact-order-independent if the (a,b) fold
+   keeps the documented float order per element; verify against the
+   per-step reference in `rocm_ops` first). Target 2-3x (−0.7…−0.9 s).
+4. MLA score+combine rewrite (1.7 s/pass): combine averages 40 ms at
+   `blocks=64x2048 wg=512`; score 37 ms at `256x4x2048`. Both are now
+   single launches per layer-chunk but still VALU gathers; WMMA-tiled
+   scoring (ds4 `indexer_scores_wmma128` pattern, packed F16 q/k over
+   64-key tiles) and a wave64 combine over rank-slice splits. Changes
+   accumulation order → P7-style NMSE contract + golden re-approval.
+   Target ~1.5x (−0.55 s).
+5. Indexer bitonic sort batching (0.68 s/pass, 22.6 k launches of one
+   1024-thread block): `TopKDesc` per token stays the last per-token
+   loop; batch tokens per launch (bucket by `k2`, per-token LDS-free
+   multi-row bitonic or one 1024-block per 2-4 tokens with padded k),
+   merging rounds gated per-token. Bit-exact per token by construction.
+   Target −0.4…−0.5 s (+4-5 %).
+6. `GemvRowsQ8_0<16>` (0.8 s/pass at 11.6 k calls) and `GemvRowsF32`
+   (0.25 s, 13.6 k calls): tensors outside the dense-WMMA predicate
+   (`cols % 256`); admit them to the tier (tier change → sha re-capture
+   with recorded diff) or row-batch the call sites (token-batch pattern
+   of P8). Target −0.5 s.
+
+**B. Opt-in approximate fast track (from which 600+ is plausible)**
+
+7. W8A8 blocked-INT8 tier for dense + routed operands (qwen38
+   `W8A8BlockedWmmaGEMMKernel` family): halves weight bytes and ~2x
+   tensor-core rate vs the F16 path; acts quantized per 32-group.
+   Opt-in flag + own quality contract (`tests/functional/`, no default
+   sha change). Expect −3…−4 s/pass across stages 1-2-6.
+8. Online-softmax single-pass attention replacing DSA
+   score→topk→gather→combine (the `mikealanni` WMA-attend shape): one
+   WMMA pass over F16 packed K/V with running softmax; kills stages
+   4+5 (~2.4 s → ~0.4 s) and the selection materialization. Approximate
+   by design (fixed window or score floor for the sparsity decision);
+   opt-in, `pi_agent.py` replay as quality gate.
+9. Capped selection window / k-pool budget at long context (their 634
+   point pinned it): quality tradeoff, opt-in, long-context regressions
+   per the functional-test rules.
+10. DFlash2-style speculative decoding (design at
+    `mikealanni/fork-enhancements` commit `fc9b1a33`; model has native
+    MTP nextn with `index_share_mtp`): TG-side, pp-neutral — pair with
+    the pp ladder, not instead of it.
+
+Order of attack: A5 (bit-exact, cheapest, shrinks the last per-token
+loop) → A3 → A2 → A1 → A6 → A4, then promote B behind one fast-profile
+flag with its own gate row in BENCHMARKS.md.
 
 Gate: pp2048 ≥ 0.9× and tg32 ≥ 1.0× the Phase-0 llama.gl baseline with
 fixtures byte-identical (or the recorded oracle budget re-approved).
