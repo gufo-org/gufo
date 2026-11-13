@@ -18,6 +18,8 @@ parity remain unqualified.
 [November 12 Windows device-cache validation](UMA-CACHE.md) records the
 four-mode coverage, exact replay, publication, restart and baseline-reader
 checks, together with the timing and platform limits.
+The [November 13 follow-up](UMA-CACHE-MAIN.md) validates the merged main,
+lazy device metadata admission and all four complete functional profiles.
 
 ## Draft integration on October 21
 

@@ -1,5 +1,9 @@
 # Windows UMA cache validation, November 12, 2026
 
+For validation after merging main's disk-publication fix, see the
+[November 13 follow-up](UMA-CACHE-MAIN.md). This page retains the original
+baseline and its historical observations.
+
 Qwen27's bounded device checkpoint backing was tested on Windows with an AMD
 Radeon 8060S (`gfx1151`). [Evidence](artifacts/uma-cache-windows-20261112.json)
 retains source and binary hashes, effective settings, every final timing
