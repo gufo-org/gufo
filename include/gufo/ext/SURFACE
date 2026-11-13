@@ -107,6 +107,7 @@ src/core/npu/host_ops.hpp
 src/core/npu/npu.hpp
 src/core/npu/q8_gemm.hpp
 src/core/npu/qwen3_decoder.hpp
+src/core/npu/qwen3_prefill.hpp
 src/core/platform/fs.hpp
 src/core/platform/gpu_budget.hpp
 src/core/platform/library.hpp

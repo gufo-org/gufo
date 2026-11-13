@@ -45,7 +45,7 @@ struct EncoderLayer {
 };
 
 struct DecoderLayer {
-  int qkv_b, o_b, gate_up_b, down_b;                       // BfpGemm (prefill)
+  int qkv_b{-1}, o_b{-1}, gate_up_b{-1}, down_b{-1};       // BfpGemm (prefill)
   std::unique_ptr<SplitQ8> qkv_q, o_q, gate_up_q, down_q;  // decode
   std::vector<float> input_norm, post_norm, q_norm, k_norm;
 };
@@ -77,6 +77,8 @@ struct Runtime::Impl {
   // Decode on the fused NPU program (one dispatch per token) when the
   // decoder's shape fits it; SplitQ8 products otherwise.
   gufo::npu::Qwen3Decoder fused;
+  // The whole decoder prefill in one NPU dispatch (with the fused decoder).
+  gufo::npu::Qwen3Prefill pre;
   std::vector<float> k_cache, v_cache;  // [layer][position][kv dim]
 
   const Tensor& Find(const std::string& name) const {
@@ -182,10 +184,29 @@ struct Runtime::Impl {
     if (fits) {
       try {
         fused = Fused::Open(device, gufo::npu::FindDesign("qwen3dec"));
-        if (std::size_t(fused.capacity()) < capacity)
+        if (std::size_t(fused.capacity()) < capacity) {
+          std::fprintf(stderr,
+                       "qwen3-asr npu: context %zu exceeds the fused decoder's "
+                       "%d positions; decoding on the NPU and the CPU\n",
+                       capacity, int(fused.capacity()));
           fused = Fused();
-      } catch (const gufo::npu::Error&) {
+        }
+      } catch (const gufo::npu::Error& e) {
+        std::fprintf(stderr, "qwen3-asr npu: fused decoder unavailable (%s)\n",
+                     e.what());
         fused = Fused();
+      }
+    }
+    if (fused) {
+      try {
+        pre = gufo::npu::Qwen3Prefill::Open(device,
+                                            gufo::npu::FindDesign("qwen3pre"));
+      } catch (const gufo::npu::Error& e) {
+        std::fprintf(stderr,
+                     "qwen3-asr npu: fused prefill unavailable (%s); prefill "
+                     "products run on BfpGemm\n",
+                     e.what());
+        pre = gufo::npu::Qwen3Prefill();
       }
     }
     if (!fused)
@@ -199,10 +220,14 @@ struct Runtime::Impl {
           p + "self_attn.v_proj.weight"};
       const std::initializer_list<std::string> gu = {p + "mlp.gate_proj.weight",
                                                      p + "mlp.up_proj.weight"};
-      d.qkv_b = UploadBfp(qkv);
-      d.o_b = UploadBfp({p + "self_attn.o_proj.weight"});
-      d.gate_up_b = UploadBfp(gu);
-      d.down_b = UploadBfp({p + "mlp.down_proj.weight"});
+      // The fused prefill holds its own copy; prompts beyond its rows (longer
+      // contexts) prefill on BfpGemm.
+      if (!pre || capacity > std::size_t(pre.max_rows()) + 1) {
+        d.qkv_b = UploadBfp(qkv);
+        d.o_b = UploadBfp({p + "self_attn.o_proj.weight"});
+        d.gate_up_b = UploadBfp(gu);
+        d.down_b = UploadBfp({p + "mlp.down_proj.weight"});
+      }
       if (!fused) {
         d.qkv_q = UploadSplit(qkv);
         d.o_q = UploadSplit({p + "self_attn.o_proj.weight"});
@@ -226,6 +251,16 @@ struct Runtime::Impl {
              bf(p + "mlp.up_proj.weight"), bf(p + "mlp.down_proj.weight"),
              d.input_norm.data(), d.post_norm.data(), d.q_norm.data(),
              d.k_norm.data()});
+        if (pre)
+          pre.SetLayer(
+              int(l),
+              {bf(p + "self_attn.q_proj.weight"),
+               bf(p + "self_attn.k_proj.weight"),
+               bf(p + "self_attn.v_proj.weight"),
+               bf(p + "self_attn.o_proj.weight"),
+               bf(p + "mlp.gate_proj.weight"), bf(p + "mlp.up_proj.weight"),
+               bf(p + "mlp.down_proj.weight"), d.input_norm.data(),
+               d.post_norm.data(), d.q_norm.data(), d.k_norm.data()});
       }
       dec.push_back(std::move(d));
     }
@@ -235,6 +270,8 @@ struct Runtime::Impl {
                         Find("thinker.lm_head.weight").data),
                     int(text->vocab_size), final_norm.data());
       fused.SetRopeTheta(text->rope_theta);
+      if (pre)
+        pre.SetRopeTheta(text->rope_theta);
     } else {
       lm_head = UploadSplit({"thinker.lm_head.weight"});
     }
@@ -723,12 +760,37 @@ struct Runtime::Impl {
     if (fused) {
       // Prefill all but the last prompt row, which the fused program decodes
       // for the first token's logits.
-      if (n > 1)
-        Layers(x.data(), n - 1, 0, true);
       const std::size_t kv = KvDim();
-      for (std::size_t l = 0; l < dec.size(); ++l)
-        fused.WriteKv(int(l), 0, int(n - 1), k_cache.data() + l * capacity * kv,
-                      kv, v_cache.data() + l * capacity * kv, kv);
+      if (n > 1 && pre && int(n - 1) <= pre.max_rows()) {
+        // The whole prefill on the NPU, then its K/V into the decoder.
+        const auto t_run = Clock::now();
+        pre.Run(x.data(), int(n - 1));
+        const double run_ms = Ms(t_run);
+        const auto t_kv = Clock::now();
+        double kv_ms = 0;
+        for (std::size_t l = 0; l < dec.size(); ++l) {
+          const auto t_l = Clock::now();
+          pre.Kv(int(l), int(n - 1), k_cache.data() + l * capacity * kv,
+                 v_cache.data() + l * capacity * kv);
+          kv_ms += Ms(t_l);
+          fused.WriteKv(int(l), 0, int(n - 1),
+                        k_cache.data() + l * capacity * kv, kv,
+                        v_cache.data() + l * capacity * kv, kv);
+        }
+        if (profile)
+          std::fprintf(
+              stderr,
+              "qwen3-asr npu: fused prefill run %.1f ms, read K/V %.1f "
+              "ms, write K/V %.1f ms\n",
+              run_ms, kv_ms, Ms(t_kv) - kv_ms);
+      } else {
+        if (n > 1)
+          Layers(x.data(), n - 1, 0, true);
+        for (std::size_t l = 0; l < dec.size(); ++l)
+          fused.WriteKv(int(l), 0, int(n - 1),
+                        k_cache.data() + l * capacity * kv, kv,
+                        v_cache.data() + l * capacity * kv, kv);
+      }
       fused.Start(x.data() + (n - 1) * hidden, int(n - 1));
       fused.Wait();
       token = Argmax(fused.logits());

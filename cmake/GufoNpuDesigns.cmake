@@ -18,13 +18,14 @@ if(GUFO_IRON_PYTHON)
 endif()
 
 # gufo_npu_design(<name> SCRIPT <design.py> [SOURCES <files>...]
-#                 [PROGRAMS <names>...]): runs `<python> <design.py> <dir>` into
-# ${CMAKE_BINARY_DIR}/npu/<name> and adds the target npu_design_<name> (built
-# by default). The design writes <program>.xclbin and <program>_dispatch.so
-# there for each program (default: just <name>); all install to
+#                 [PROGRAMS <names>...] [OUTPUTS <files>...]): runs
+# `<python> <design.py> <dir>` into ${CMAKE_BINARY_DIR}/npu/<name> and adds
+# the target npu_design_<name> (built by default). The design writes
+# <program>.xclbin and <program>_dispatch.so there for each program (default:
+# just <name>), or the files OUTPUTS names; all install to
 # share/gufo/npu/<name>. Sets <name>_NPU_DIR in the caller's scope.
 function(gufo_npu_design name)
-  cmake_parse_arguments(ARG "" "SCRIPT" "SOURCES;PROGRAMS" ${ARGN})
+  cmake_parse_arguments(ARG "" "SCRIPT" "SOURCES;PROGRAMS;OUTPUTS" ${ARGN})
   if(NOT ARG_PROGRAMS)
     set(ARG_PROGRAMS "${name}")
   endif()
@@ -41,6 +42,9 @@ function(gufo_npu_design name)
   foreach(program IN LISTS ARG_PROGRAMS)
     list(APPEND outputs "${dir}/${program}.xclbin" "${dir}/${program}_dispatch.so")
   endforeach()
+  if(ARG_OUTPUTS)
+    list(TRANSFORM ARG_OUTPUTS PREPEND "${dir}/" OUTPUT_VARIABLE outputs)
+  endif()
   add_custom_command(
     OUTPUT ${outputs}
     COMMAND ${CMAKE_COMMAND} -E env "PEANO_INSTALL_DIR=$ENV{PEANO_INSTALL_DIR}"

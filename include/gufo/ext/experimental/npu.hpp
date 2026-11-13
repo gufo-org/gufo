@@ -5,3 +5,4 @@
 #include "src/core/npu/npu.hpp"
 #include "src/core/npu/q8_gemm.hpp"
 #include "src/core/npu/qwen3_decoder.hpp"
+#include "src/core/npu/qwen3_prefill.hpp"

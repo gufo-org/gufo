@@ -45,7 +45,8 @@ struct DeviceInfo {
     const std::filesystem::path& sysfs_root);
 
 /// The directory of the in-tree NPU design `name` (q8gemm, bfpgemm, ...),
-/// holding `<name>.xclbin`: `$GUFO_NPU_DESIGNS/<name>`, then
+/// holding `<name>.xclbin` (or `<name>_<variant>.xclbin` programs):
+/// `$GUFO_NPU_DESIGNS/<name>`, then
 /// `<prefix>/share/gufo/npu/<name>` beside the executable's `bin`, then the
 /// build tree that compiled Gufo. Throws Error when none has the design.
 [[nodiscard]] std::filesystem::path FindDesign(std::string_view name);

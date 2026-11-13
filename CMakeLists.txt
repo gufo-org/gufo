@@ -306,6 +306,11 @@ gufo_npu_design(q8gemm SCRIPT src/core/npu/kernels/q8gemm/q8gemm.py
 gufo_npu_design(qwen3dec SCRIPT src/core/npu/kernels/qwen3dec/qwen3dec.py
   SOURCES src/core/npu/kernels/qwen3dec/qwen3dec.cc
           src/core/npu/kernels/qwen3dec/layout.py)
+gufo_npu_design(qwen3pre SCRIPT src/core/npu/kernels/qwen3pre/qwen3pre.py
+  SOURCES src/core/npu/kernels/qwen3pre/qwen3pre.cc
+          src/core/npu/kernels/qwen3pre/plan.py
+  OUTPUTS qwen3pre_512.xclbin qwen3pre_512.bin qwen3pre_512_plan.txt
+          qwen3pre_1024.xclbin qwen3pre_1024.bin qwen3pre_1024_plan.txt)
 gufo_npu_design(bfpgemm SCRIPT src/core/npu/kernels/bfpgemm/bfpgemm.py
   SOURCES src/core/npu/kernels/bfpgemm/bfpgemm.cc
           src/core/npu/kernels/bfpgemm/vendor/aie_kernel_utils.h
