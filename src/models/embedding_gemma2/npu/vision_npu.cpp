@@ -1,9 +1,13 @@
 #include "src/models/embedding_gemma2/npu/vision_npu.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <stdexcept>
 #include <utility>
 
@@ -46,9 +50,25 @@ struct VisionTower::Impl {
   std::vector<Layer> layers;
   // Request buffers, kept across requests.
   std::vector<float> pixels, state, normed, qkv, q, k, v, context, tmp, gate_up,
-      act, scores, head_in, head_out, pooled, features;
+      act, pooled, features;
+  std::vector<std::uint16_t> q16, scores16;
 
   explicit Impl(gufo::npu::BfpGemm& g) : gemm(g) {}
+
+  // GUFO_NPU_PROFILE: per-stage milliseconds of the last image.
+  bool profile{std::getenv("GUFO_NPU_PROFILE") != nullptr};
+  double t_gemm{}, t_qk{}, t_soft{}, t_pv{}, t_host{};
+  using Clock = std::chrono::steady_clock;
+  // Process CPU seconds (every thread), for the profile.
+  static double Cpu() {
+    timespec ts{};
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    return double(ts.tv_sec) + double(ts.tv_nsec) * 1e-9;
+  }
+  double c_gemm{}, c_qk{}, c_soft{}, c_pv{};
+  static double Ms(Clock::time_point a) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - a).count();
+  }
 
   void Load(const std::string& model_dir) {
     auto loaded = LoadModelDirectory(model_dir, true, false);
@@ -103,6 +123,51 @@ struct VisionTower::Impl {
     scratch = gemm.NewScratch(kScratchBytes);
   }
 
+  // Axial RoPE: per head, channels [0, 32) rotate by the patch's column and
+  // [32, 64) by its row, NeoX pairs (i, i + 16), inv freq 100^(-i / 16).
+  std::vector<float> cos_x, sin_x, cos_y, sin_y;  // [position][16]
+  void RopeTables(std::size_t rows, std::size_t columns) {
+    auto fill = [](std::vector<float>& c, std::vector<float>& s,
+                   std::size_t positions) {
+      c.resize(positions * 16);
+      s.resize(positions * 16);
+      for (std::size_t p = 0; p < positions; ++p)
+        for (std::size_t i = 0; i < 16; ++i) {
+          const float a = float(p) * std::pow(kRopeTheta, -float(i) / 16.0f);
+          c[p * 16 + i] = std::cos(a);
+          s[p * 16 + i] = std::sin(a);
+        }
+    };
+    fill(cos_x, sin_x, columns);
+    fill(cos_y, sin_y, rows);
+  }
+  void AxialRope(std::size_t n, std::size_t columns) {
+    host::ParallelFor(n, 32, [&](std::size_t b, std::size_t e) {
+      for (std::size_t p = b; p < e; ++p) {
+        const float* cx = &cos_x[(p % columns) * 16];
+        const float* sx = &sin_x[(p % columns) * 16];
+        const float* cy = &cos_y[(p / columns) * 16];
+        const float* sy = &sin_y[(p / columns) * 16];
+        for (float* base : {q.data() + p * kWidth, k.data() + p * kWidth})
+          for (std::size_t h = 0; h < kHeads; ++h)
+            for (std::size_t half = 0; half < 2; ++half) {
+              float* x = base + h * kHeadDim + half * 32;
+              const float* c = half ? cy : cx;
+              const float* sn = half ? sy : sx;
+              for (std::size_t i = 0; i < 16; ++i) {
+                const float x0 = x[i], x1 = x[i + 16];
+                x[i] = x0 * c[i] - x1 * sn[i];
+                x[i + 16] = x1 * c[i] + x0 * sn[i];
+              }
+            }
+      }
+    });
+  }
+
+  static void Grow16(std::vector<std::uint16_t>& v, std::size_t n) {
+    if (v.size() < n)
+      v.resize(n);
+  }
   static void Grow(std::vector<float>& v, std::size_t n) {
     if (v.size() < n)
       v.resize(n);
@@ -120,9 +185,8 @@ struct VisionTower::Impl {
     const std::size_t group =
         std::max<std::size_t>(1, std::min({kHeads, kScoreBudget / per_head,
                                            kScratchBytes / head_bytes}));
-    Grow(scores, group * per_head);
-    Grow(head_in, group * n * kHeadDim);
-    Grow(head_out, group * n * kHeadDim);
+    Grow16(scores16, group * per_head);
+    Grow16(q16, group * n * kHeadDim);
     for (std::size_t h0 = 0; h0 < kHeads; h0 += group) {
       const std::size_t hs = std::min(group, kHeads - h0);
       scratch.Reset();
@@ -133,46 +197,72 @@ struct VisionTower::Impl {
         keys[j] = scratch.Upload(int(n), int(kHeadDim), kh, kWidth, 1);
         values[j] = scratch.Upload(int(kHeadDim), int(n), vh, 1, kWidth);
       }
+      // Queries as bf16 rows per head (already bf16-exact values).
       host::ParallelFor(hs * n, 64, [&](std::size_t b, std::size_t e) {
         for (std::size_t i = b; i < e; ++i) {
           const std::size_t j = i / n, r = i % n;
-          std::memcpy(head_in.data() + (j * n + r) * kHeadDim,
-                      q.data() + r * kWidth + (h0 + j) * kHeadDim,
-                      kHeadDim * sizeof(float));
+          host::FloatToBf16(q.data() + r * kWidth + (h0 + j) * kHeadDim,
+                            q16.data() + (j * n + r) * kHeadDim, kHeadDim);
         }
       });
+      // Scores stay bf16: each output tile lands in its head's rows.
+      std::vector<gufo::npu::BfpGemm::Epilogue> epilogues(hs);
       std::vector<gufo::npu::BfpGemm::Call> calls;
-      for (std::size_t j = 0; j < hs; ++j)
-        calls.push_back({keys[j], head_in.data() + j * n * kHeadDim, int(n),
-                         scores.data() + j * per_head});
+      for (std::size_t j = 0; j < hs; ++j) {
+        std::uint16_t* dst = scores16.data() + j * per_head;
+        epilogues[j] = [dst, n](int r0, int rows, int n0, int w,
+                                const std::uint16_t* t) {
+          for (int i = 0; i < rows; ++i)
+            std::memcpy(dst + std::size_t(r0 + i) * n + std::size_t(n0),
+                        t + std::size_t(i) * 128, std::size_t(w) * 2);
+        };
+        calls.push_back({keys[j], nullptr, int(n), nullptr,
+                         q16.data() + j * n * kHeadDim, &epilogues[j]});
+      }
+      auto t = Clock::now();
+      double c = Cpu();
       gemm.Run(calls);
+      t_qk += Ms(t);
+      c_qk += Cpu() - c;
+      c = Cpu();
+      t = Clock::now();
       host::ParallelFor(hs * n, 16, [&](std::size_t b, std::size_t e) {
+        std::vector<float> row(n);
         for (std::size_t i = b; i < e; ++i) {
-          float* row = scores.data() + i * n;
-          float top = -INFINITY;
-          for (std::size_t t = 0; t < n; ++t)
-            top = std::max(top, row[t]);
+          std::uint16_t* s16 = scores16.data() + i * n;
+          host::Bf16ToFloat(s16, row.data(), n);
+          const float top = *std::max_element(row.begin(), row.end());
           float sum = 0;
-          host::ExpInPlace(row, n, top, &sum);
+          host::ExpInPlace(row.data(), n, top, &sum);
           const float inv = 1.0f / sum;
-          for (std::size_t t = 0; t < n; ++t)
-            row[t] *= inv;
+          for (float& x : row)
+            x *= inv;
+          host::FloatToBf16(row.data(), s16, n);
         }
       });
+      t_soft += Ms(t);
+      c_soft += Cpu() - c;
+      // context = P V, written straight into the context rows as bf16 values.
+      for (std::size_t j = 0; j < hs; ++j) {
+        float* ctx = context.data() + (h0 + j) * kHeadDim;
+        epilogues[j] = [ctx](int r0, int rows, int n0, int w,
+                             const std::uint16_t* t) {
+          for (int i = 0; i < rows; ++i)
+            host::Bf16ToFloat(
+                t + std::size_t(i) * 128,
+                ctx + std::size_t(r0 + i) * kWidth + std::size_t(n0),
+                std::size_t(w));
+        };
+      }
       calls.clear();
       for (std::size_t j = 0; j < hs; ++j)
-        calls.push_back({values[j], scores.data() + j * per_head, int(n),
-                         head_out.data() + j * n * kHeadDim});
+        calls.push_back({values[j], nullptr, int(n), nullptr,
+                         scores16.data() + j * per_head, &epilogues[j]});
+      t = Clock::now();
+      c = Cpu();
       gemm.Run(calls);
-      host::ParallelFor(hs * n, 64, [&](std::size_t b, std::size_t e) {
-        for (std::size_t i = b; i < e; ++i) {
-          const std::size_t j = i / n, r = i % n;
-          float* dst = context.data() + r * kWidth + (h0 + j) * kHeadDim;
-          std::memcpy(dst, head_out.data() + (j * n + r) * kHeadDim,
-                      kHeadDim * sizeof(float));
-          host::RoundBf16(dst, kHeadDim);
-        }
-      });
+      t_pv += Ms(t);
+      c_pv += Cpu() - c;
     }
   }
 
@@ -212,11 +302,11 @@ struct VisionTower::Impl {
           s[c] += host::Bf16ToFloat(tx[c]) + host::Bf16ToFloat(ty[c]);
       }
     });
-    std::vector<std::int32_t> pos_x(n), pos_y(n);
-    for (std::size_t p = 0; p < n; ++p) {
-      pos_x[p] = std::int32_t(p % columns);
-      pos_y[p] = std::int32_t(p / columns);
-    }
+    const auto t0 = Clock::now();
+    t_gemm = t_qk = t_soft = t_pv = 0;
+    c_gemm = c_qk = c_soft = c_pv = 0;
+    const double c0 = Cpu();
+    RopeTables(image.rows, columns);
 
     for (const Layer& l : layers) {
       if (cancelled && cancelled())
@@ -224,7 +314,13 @@ struct VisionTower::Impl {
       host::RmsNormRows(state.data(), normed.data(), n, kWidth,
                         l.input_norm.data(), kEps);
       host::RoundBf16(normed.data(), n * kWidth);
-      gemm.Run(l.qkv, normed.data(), int(n), qkv.data());
+      {
+        auto tg = Clock::now();
+        const double cg = Cpu();
+        gemm.Run(l.qkv, normed.data(), int(n), qkv.data());
+        t_gemm += Ms(tg);
+        c_gemm += Cpu() - cg;
+      }
       // Per-head norms (q, k weighted; v unweighted), then axial RoPE: the
       // first 32 channels of a head rotate by x, the last 32 by y.
       host::ParallelFor(n, 16, [&](std::size_t b, std::size_t e) {
@@ -238,27 +334,40 @@ struct VisionTower::Impl {
                             kHeadDim, nullptr, kEps);
         }
       });
-      for (float* x : {q.data(), k.data()}) {
-        host::RopeNeox(x, n, kWidth, kHeads, kHeadDim, 32, pos_x.data(),
-                       kRopeTheta);
-        host::RopeNeox(x + 32, n, kWidth, kHeads, kHeadDim, 32, pos_y.data(),
-                       kRopeTheta);
-      }
+      AxialRope(n, columns);
       host::RoundBf16(q.data(), n * kWidth);
       host::RoundBf16(k.data(), n * kWidth);
       host::RoundBf16(v.data(), n * kWidth);
       Attention(n);
-      gemm.Run(l.o, context.data(), int(n), tmp.data());
+      {
+        auto tg = Clock::now();
+        const double cg = Cpu();
+        gemm.Run(l.o, context.data(), int(n), tmp.data());
+        t_gemm += Ms(tg);
+        c_gemm += Cpu() - cg;
+      }
       host::AddNormRows(state.data(), tmp.data(), n, kWidth,
                         l.post_attn_norm.data(), kEps, 1.0f);
       host::RmsNormRows(state.data(), normed.data(), n, kWidth,
                         l.pre_ffn_norm.data(), kEps);
       host::RoundBf16(normed.data(), n * kWidth);
-      gemm.Run(l.gate_up, normed.data(), int(n), gate_up.data());
+      {
+        auto tg = Clock::now();
+        const double cg = Cpu();
+        gemm.Run(l.gate_up, normed.data(), int(n), gate_up.data());
+        t_gemm += Ms(tg);
+        c_gemm += Cpu() - cg;
+      }
       host::GatedRows(gate_up.data(), 2 * kFfn, gate_up.data() + kFfn, 2 * kFfn,
                       act.data(), kFfn, n, kFfn, host::Activation::kGeluTanh);
       host::RoundBf16(act.data(), n * kFfn);
-      gemm.Run(l.down, act.data(), int(n), tmp.data());
+      {
+        auto tg = Clock::now();
+        const double cg = Cpu();
+        gemm.Run(l.down, act.data(), int(n), tmp.data());
+        t_gemm += Ms(tg);
+        c_gemm += Cpu() - cg;
+      }
       host::AddNormRows(state.data(), tmp.data(), n, kWidth,
                         l.post_ffn_norm.data(), kEps, 1.0f);
     }
@@ -285,6 +394,16 @@ struct VisionTower::Impl {
     std::vector<float> out(tokens * kText);
     gemm.Run(projection, pooled.data(), int(tokens), out.data());
     host::RoundBf16(out.data(), out.size());
+    if (profile) {
+      const double total = Ms(t0);
+      std::fprintf(stderr,
+                   "embedding_gemma2 npu vision: %zu patches, %.1f ms: gemm "
+                   "%.1f qk %.1f softmax %.1f pv %.1f other %.1f; cpu s: total "
+                   "%.2f gemm %.2f qk %.2f softmax %.2f pv %.2f\n",
+                   n, total, t_gemm, t_qk, t_soft, t_pv,
+                   total - t_gemm - t_qk - t_soft - t_pv, Cpu() - c0, c_gemm,
+                   c_qk, c_soft, c_pv);
+    }
     return out;
   }
 };
