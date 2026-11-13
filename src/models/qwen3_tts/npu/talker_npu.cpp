@@ -353,9 +353,16 @@ struct TalkerNpuRuntime::Impl {
       return;
     try {
       fused = Fused::Open(engine.device, gufo::npu::FindDesign("qwen3dec"));
-      if (std::size_t(fused.capacity()) < maximum_tokens)
+      if (std::size_t(fused.capacity()) < maximum_tokens) {
+        std::fprintf(stderr,
+                     "qwen3-tts npu: %zu tokens exceed the fused talker's %d "
+                     "positions; decoding on the NPU and the CPU\n",
+                     maximum_tokens, int(fused.capacity()));
         fused = Fused();
-    } catch (const gufo::npu::Error&) {
+      }
+    } catch (const gufo::npu::Error& e) {
+      std::fprintf(stderr, "qwen3-tts npu: fused talker unavailable (%s)\n",
+                   e.what());
       fused = Fused();
     }
   }
@@ -395,7 +402,10 @@ struct TalkerNpuRuntime::Impl {
     try {
       fused_predictor =
           Fused::OpenPredictor(fused, gufo::npu::FindDesign("qwen3dec"));
-    } catch (const gufo::npu::Error&) {
+    } catch (const gufo::npu::Error& e) {
+      std::fprintf(stderr,
+                   "qwen3-tts npu: fused code predictor unavailable (%s)\n",
+                   e.what());
       fused_predictor = Fused();
       return;
     }
@@ -405,6 +415,9 @@ struct TalkerNpuRuntime::Impl {
         pc.num_key_value_heads != std::uint32_t(Fused::kKvHeads) ||
         pc.head_dim != std::uint32_t(Fused::kHeadDim) ||
         std::size_t(fused_predictor.capacity()) < code_groups) {
+      std::fprintf(stderr,
+                   "qwen3-tts npu: code predictor does not fit the fused "
+                   "program; decoding it on the NPU and the CPU\n");
       fused_predictor = Fused();
       return;
     }
