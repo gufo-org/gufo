@@ -44,9 +44,12 @@ def main():
         parser.error('--startup-timeout must be positive')
     args.binary, args.model, args.audio_root = (path.resolve() for path in
                                                (args.binary, args.model, args.audio_root))
+    # A snapshot directory with its config, or one model file such as a GGUF.
     config = 'model_index.json' if args.service == 'image' else 'config.json'
-    if not args.binary.is_file() or not (args.model / config).is_file():
-        parser.error(f'binary and model/{config} must exist; missing weights are not a pass')
+    model_file = args.model.is_file()
+    if not args.binary.is_file() or not (model_file or (args.model / config).is_file()):
+        parser.error(f'binary and a model file or model/{config} must exist; '
+                     'missing weights are not a pass')
     loras = dict(item.split('=', 1) for item in args.lora)
     if args.service != 'image' and (loras or args.lora_default):
         parser.error('--lora and --lora-default apply to image only')
@@ -76,6 +79,8 @@ def main():
         path = args.model / name
         if path.is_file():
             identity[name] = sha256(path)
+    # A single file is itself the weights.
+    weights = [args.model] if model_file else sorted(args.model.rglob('*.safetensors'))
     report = {**provenance(), 'schema': 1, 'service': args.service, 'status': 'running',
               'command': command, 'model_configuration_sha256': identity,
               'source_revision': subprocess.check_output(
@@ -83,7 +88,7 @@ def main():
               'model_download_metadata': {str(path.relative_to(args.model)): path.read_text()
                   for path in sorted((args.model / '.cache/huggingface/download').rglob('*.metadata'))},
               'weights': [{'path': str(path), 'bytes': path.stat().st_size,
-                           'mtime_ns': path.stat().st_mtime_ns} for path in sorted(args.model.rglob('*.safetensors'))],
+                           'mtime_ns': path.stat().st_mtime_ns} for path in weights],
               'binary_sha256': sha256(args.binary), 'variant': args.variant if args.service == 'tts' else None,
               'timing_qualification': 'observations only; no matched baseline comparison',
               'service_harness_sha256': {name: sha256(HERE / name) for name in
