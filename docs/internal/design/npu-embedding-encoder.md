@@ -53,3 +53,41 @@ Phases:
 3. Attention products and epilogues.
 4. All 24 layers and pooling in one dispatch; the host path becomes the
    fallback only for shapes the program cannot serve.
+
+## Progress and findings
+
+**Milestone 1a (done, `kernels/embenc`, `test_embenc.py`):** the `addnorm`
+row phase on all 32 cores, standalone. Records `[t | s_hi | s_lo | xn]`;
+column c takes objects of 4 rows (c, c + 8, ...), core q of the column
+computes row q and writes its `[s_hi' | s_lo' | xn']`, and the memtile join
+of the four cores is already in record order, so input fill and drain are
+plain 4-D taps with `n_obj` (objects per column) at dispatch time.
+- Precision against f64: state 2.5e-6 relative, xn 1.66e-3 (the bf16 output
+  rounding floor). It needs `aie::set_rounding(conv_even)` (Peano truncates
+  accumulator-to-bf16 conversions otherwise, which doubles the error), t w
+  split into hi/lo bf16, and per-row scales as hi/lo bf16 pairs.
+- `w_next` folds into the next product's weights (xn' = s' / rms(s')).
+- Cost: f32 vector multiplies and subtractions on vectors are emulated and
+  slow (a Newton step on invsqrt made the kernel 4.6x slower; it was not
+  needed: `aie::invsqrt` is accurate enough). Use bf16 x bf16 into accfloat
+  and accumulator add/sub only. Data movement bound at about 1.3 ms for
+  16,384 rows when the NPU is quiet (stub kernel: 1.5 ms).
+- A join's memtile transfers go one core at a time, so a `to_stream`
+  reorder across the joined cores is rejected: each core must own whole
+  output rows (or the drain needs 5 dimensions).
+
+**Open problem for milestone 2 (GEMM and row phases in one program):** the
+GEMM's FIFOs (A per core row with the 8x8-block forward transforms, B per
+column of 9,216-byte objects, a 32 KB C tile joined per column with the tile
+inverse) use most of a core's 64 KB, so row phases cannot have FIFOs of their
+own and must reuse these:
+- Row inputs through B: 9,216 bytes is exactly 3 rows of `[t | s_hi | s_lo]`
+  (1,536 bf16), not 4, so the "core q owns row q" mapping needs 3-row objects
+  (one core idle) or another record width.
+- Row outputs through C: a core writing whole rows of 4 slots (2,048 bf16 =
+  16 C rows) fills a C object with exactly 8 token rows, which keeps the join
+  in record order. Writing in the C tile's 8x8 layout (LFM3's `TileRow`) makes
+  the drain's tile inverse produce row-major records.
+- Alternatives: a GEMM C tile of 64 rows per core (16 KB, frees room for
+  dedicated row FIFOs, but doubles weight streaming per band), or LFM3's
+  layout in full (records sized so one B object is one record).
