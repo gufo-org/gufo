@@ -13,6 +13,7 @@
 #include "gufo/ext/experimental/npu.hpp"
 #include "src/models/qwen3_asr/config.hpp"
 #include "src/models/qwen3_asr/loader.hpp"
+#include "src/models/qwen3_asr/npu/split_q8.hpp"
 #include "src/models/qwen3_asr/tensor.hpp"
 
 namespace gufo::models::qwen3_asr::npu {
@@ -44,8 +45,8 @@ struct EncoderLayer {
 };
 
 struct DecoderLayer {
-  int qkv_b, o_b, gate_up_b, down_b;  // BfpGemm (prefill)
-  int qkv_q, o_q, gate_up_q, down_q;  // Q8Gemm (decode)
+  int qkv_b, o_b, gate_up_b, down_b;                       // BfpGemm (prefill)
+  std::unique_ptr<SplitQ8> qkv_q, o_q, gate_up_q, down_q;  // decode
   std::vector<float> input_norm, post_norm, q_norm, k_norm;
 };
 
@@ -71,7 +72,8 @@ struct Runtime::Impl {
   const std::uint16_t* embed{};
   std::vector<DecoderLayer> dec;
   std::vector<float> final_norm;
-  int lm_head{};
+  std::unique_ptr<SplitQ8> lm_head;
+  std::unique_ptr<Lane> lane;
   std::vector<float> k_cache, v_cache;  // [layer][position][kv dim]
 
   const Tensor& Find(const std::string& name) const {
@@ -108,32 +110,12 @@ struct Runtime::Impl {
     const auto rows = Rows(names, &n, &k);
     return bfp.UploadBf16(n, k, rows);
   }
-  int UploadQ8(std::initializer_list<std::string> names) {
+  std::unique_ptr<SplitQ8> UploadSplit(
+      std::initializer_list<std::string> names) {
     int n = 0, k = 0;
     const auto rows = Rows(names, &n, &k);
-    if (k % 32)
-      throw std::runtime_error("Qwen3-ASR NPU: Q8_0 needs k % 32 == 0");
-    std::vector<std::int8_t> codes(rows.size());
-    std::vector<float> scales(rows.size() / 32);
-    host::ParallelFor(scales.size(), 1024, [&](std::size_t b, std::size_t e) {
-      for (std::size_t blk = b; blk < e; ++blk) {
-        float amax = 0;
-        float v[32];
-        for (int i = 0; i < 32; ++i) {
-          v[i] = host::Bf16ToFloat(rows[blk * 32 + std::size_t(i)]);
-          amax = std::max(amax, std::fabs(v[i]));
-        }
-        const float d = amax / 127.0f;
-        const float inv = d > 0 ? 1.0f / d : 0.0f;
-        scales[blk] = d;
-        for (int i = 0; i < 32; ++i)
-          codes[blk * 32 + std::size_t(i)] =
-              std::int8_t(std::lround(std::clamp(v[i] * inv, -127.0f, 127.0f)));
-      }
-    });
-    return q8.Upload(n, k, codes, scales);
+    return std::make_unique<SplitQ8>(q8, rows.data(), n, k, NpuRows(n, k));
   }
-
   void Load(const std::string& root, std::size_t capacity_tokens) {
     model = LoadModelDirectory(root);
     if (!model.ok)
@@ -197,10 +179,10 @@ struct Runtime::Impl {
       d.o_b = UploadBfp({p + "self_attn.o_proj.weight"});
       d.gate_up_b = UploadBfp(gu);
       d.down_b = UploadBfp({p + "mlp.down_proj.weight"});
-      d.qkv_q = UploadQ8(qkv);
-      d.o_q = UploadQ8({p + "self_attn.o_proj.weight"});
-      d.gate_up_q = UploadQ8(gu);
-      d.down_q = UploadQ8({p + "mlp.down_proj.weight"});
+      d.qkv_q = UploadSplit(qkv);
+      d.o_q = UploadSplit({p + "self_attn.o_proj.weight"});
+      d.gate_up_q = UploadSplit(gu);
+      d.down_q = UploadSplit({p + "mlp.down_proj.weight"});
       d.input_norm = Vector(p + "input_layernorm.weight");
       d.post_norm = Vector(p + "post_attention_layernorm.weight");
       d.q_norm = Vector(p + "self_attn.q_norm.weight");
@@ -208,7 +190,8 @@ struct Runtime::Impl {
       dec.push_back(std::move(d));
     }
     final_norm = Vector("thinker.model.norm.weight");
-    lm_head = UploadQ8({"thinker.lm_head.weight"});
+    lm_head = UploadSplit({"thinker.lm_head.weight"});
+    lane = std::make_unique<Lane>();
     const std::size_t kv =
         std::size_t(text->num_key_value_heads) * text->head_dim;
     k_cache.assign(std::size_t(text->num_hidden_layers) * capacity * kv, 0.0f);
@@ -577,12 +560,13 @@ struct Runtime::Impl {
     const float eps = text->rms_norm_eps;
     std::vector<float> xn(n * hidden), qkv(n * row), att(n * heads * hd),
         tmp(n * hidden), gu(n * 2 * inner), act(n * inner);
-    auto run = [&](int bid, int qid, const float* in, float* out) {
+    auto run = [&](int bid, const std::unique_ptr<SplitQ8>& q, const float* in,
+                   float* out) {
       const auto t = Clock::now();
       if (prefill)
         bfp.Run(bid, in, int(n), out);
       else
-        q8.Run(qid, in, int(n), out);
+        q->Run(*lane, in, out);
       gemm_ms += Ms(t);
     };
     for (std::size_t l = 0; l < dec.size(); ++l) {
@@ -610,7 +594,7 @@ struct Runtime::Impl {
     host::RmsNormRows(last, xn.data(), 1, hidden, final_norm.data(),
                       text->rms_norm_eps);
     const auto t = Clock::now();
-    q8.Run(lm_head, xn.data(), 1, logits.data());
+    lm_head->Run(*lane, xn.data(), logits.data());
     head_ms += Ms(t);
     std::uint32_t best = text->vocab_size;
     float top = -std::numeric_limits<float>::infinity();
