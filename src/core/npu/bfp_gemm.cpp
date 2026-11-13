@@ -29,6 +29,7 @@ constexpr std::size_t kTileWords = 2304;
 constexpr std::size_t kABytes = std::size_t(64) << 20, kCBytes = std::size_t(64)
                                                                  << 20;
 constexpr unsigned kArgA = 3, kArgW = 4, kArgC = 5;
+constexpr std::size_t kMaxArenaBytes = std::size_t(480) << 22;  // bfpgemm.py W
 constexpr std::size_t kMaxStreams = 512;
 
 std::uint16_t ToBf16(float f) {
@@ -312,6 +313,8 @@ BfpGemm BfpGemm::Open(Device& device, const std::filesystem::path& dir,
   m.generate = DispatchLibrary::Open(dir / "bfpgemm_dispatch.so", 10);
   m.a = m.program.Allocate(kABytes, kArgA);
   m.c = m.program.Allocate(kCBytes, kArgC);
+  if (arena_bytes > kMaxArenaBytes)
+    throw Error("BfpGemm: the weight arena exceeds the design's 1.875 GiB");
   m.arena = m.program.Allocate(arena_bytes, kArgW);
   return g;
 }

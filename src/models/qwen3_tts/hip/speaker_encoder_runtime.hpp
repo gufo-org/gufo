@@ -29,7 +29,17 @@ struct SpeakerEncoderTrace {
   std::vector<float> embedding;  // [2048]
 };
 
-class SpeakerEncoderHipRuntime {
+/// Reference-audio speaker embedding for Base prompts, on the GPU or the NPU.
+class SpeakerEncoderBackend {
+public:
+  virtual ~SpeakerEncoderBackend() = default;
+  [[nodiscard]] virtual bool Encode(const AudioBuffer& audio,
+                                    SpeakerEncoderOutput* output,
+                                    std::string* error = nullptr,
+                                    SpeakerEncoderTrace* trace = nullptr) = 0;
+};
+
+class SpeakerEncoderHipRuntime : public SpeakerEncoderBackend {
 public:
   ~SpeakerEncoderHipRuntime();
 
@@ -44,7 +54,7 @@ public:
   [[nodiscard]] bool Encode(const AudioBuffer& audio,
                             SpeakerEncoderOutput* output,
                             std::string* error = nullptr,
-                            SpeakerEncoderTrace* trace = nullptr);
+                            SpeakerEncoderTrace* trace = nullptr) override;
 
 private:
   struct Impl;

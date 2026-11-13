@@ -1,12 +1,17 @@
 #include "src/models/qwen3_tts/hip/synthesis_runtime.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -15,6 +20,10 @@
 #include "src/models/qwen3_tts/hip/speech_decoder_runtime.hpp"
 #include "src/models/qwen3_tts/hip/speech_encoder_runtime.hpp"
 #include "src/models/qwen3_tts/hip/talker_runtime.hpp"
+#include "src/models/qwen3_tts/npu/speaker_encoder_npu.hpp"
+#include "src/models/qwen3_tts/npu/speech_decoder_npu.hpp"
+#include "src/models/qwen3_tts/npu/speech_encoder_npu.hpp"
+#include "src/models/qwen3_tts/npu/talker_npu.hpp"
 #include "src/models/qwen3_tts/tokenizer.hpp"
 
 namespace gufo::models::qwen3_tts::hip {
@@ -57,9 +66,10 @@ struct SynthesisHipRuntime::Impl {
 
   [[nodiscard]] static std::unique_ptr<Impl> Create(
       const std::string& model_root, std::size_t maximum_context_tokens,
-      ModelVariant variant, std::string* error) {
+      ModelVariant variant, std::string* error, SynthesisDevice device) {
     auto impl =
         std::unique_ptr<Impl>(new Impl(maximum_context_tokens, variant));
+    impl->device_ = device;
     if (!impl->Initialize(model_root, error)) {
       return nullptr;
     }
@@ -86,6 +96,9 @@ struct SynthesisHipRuntime::Impl {
 
     if (request.on_audio) {
       return GenerateStreaming(request, prompt, is_cancelled, result, error);
+    }
+    if (device_ == SynthesisDevice::kNpu) {
+      return GenerateOverlapped(request, prompt, is_cancelled, result, error);
     }
     TalkerGenerationOutput generated;
     if (!GenerateCodecFrames(request, prompt.talker, is_cancelled, &generated,
@@ -154,6 +167,107 @@ private:
     return true;
   }
 
+  /// Buffered synthesis on the NPU: 16-frame chunks decode on a worker
+  /// thread (on the CPU and the NPU) while the talker keeps generating. The
+  /// incremental decoder keeps every convolution and attention history, so
+  /// the samples equal those of one Decode after generation.
+  [[nodiscard]] bool GenerateOverlapped(const SynthesisRequest& request,
+                                        const NativePrompt& prompt,
+                                        const CancellationCheck& is_cancelled,
+                                        SynthesisResult* result,
+                                        std::string* error) {
+    const std::size_t reference_frames =
+        prompt.prepend_reference_audio ? prompt.reference_codes.frames : 0;
+    struct Job {
+      std::vector<std::uint32_t> codes;
+      std::size_t frames;
+    };
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::deque<Job> jobs;
+    bool finished = false;
+    std::atomic<bool> failed{false};
+    std::string decode_error;
+    std::vector<float> samples;
+    std::thread worker([&] {
+      std::size_t decoded = 0;
+      for (;;) {
+        Job job;
+        {
+          std::unique_lock lock(mutex);
+          wake.wait(lock, [&] { return finished || !jobs.empty(); });
+          if (jobs.empty())
+            return;
+          job = std::move(jobs.front());
+          jobs.pop_front();
+        }
+        if (failed.load())
+          continue;
+        SpeechDecoderOutput audio;
+        const bool first_reference = decoded == 0 && reference_frames != 0;
+        std::string job_error;
+        if (!(first_reference
+                  ? decoder_->DecodeAfterReference(job.codes, job.frames,
+                                                   reference_frames, &audio,
+                                                   &job_error)
+                  : decoder_->DecodeIncremental(job.codes, job.frames, decoded,
+                                                &audio, &job_error))) {
+          std::lock_guard lock(mutex);
+          decode_error = job_error;
+          failed.store(true);
+          continue;
+        }
+        decoded = job.frames;
+        samples.insert(samples.end(), audio.samples.begin(),
+                       audio.samples.end());
+      }
+    });
+    std::size_t emitted = 0;
+    const auto emit = [&](const TalkerGenerationOutput& generated, bool flush) {
+      const std::size_t pending = generated.frames - emitted;
+      if (pending != 0 && (flush || pending >= 16)) {
+        Job job;
+        if (reference_frames != 0)
+          job.codes = prompt.reference_codes.codes;
+        job.codes.resize(reference_frames * 16);
+        job.codes.insert(job.codes.end(), generated.codes.begin(),
+                         generated.codes.end());
+        job.frames = reference_frames + generated.frames;
+        {
+          std::lock_guard lock(mutex);
+          jobs.push_back(std::move(job));
+        }
+        wake.notify_one();
+        emitted = generated.frames;
+      }
+      return !failed.load();
+    };
+    TalkerGenerationOutput generated;
+    const bool generated_ok =
+        talker_->Generate(
+            prompt.talker, request.max_new_tokens, request.sampling,
+            is_cancelled, &generated, error,
+            [&](const auto& progress) { return emit(progress, false); }) &&
+        emit(generated, true) && generated.frames != 0;
+    {
+      std::lock_guard lock(mutex);
+      finished = true;
+    }
+    wake.notify_one();
+    worker.join();
+    if (!generated_ok || failed.load()) {
+      if (!decode_error.empty())
+        SetError(error, decode_error);
+      *result = {};
+      return false;
+    }
+    SpeechDecoderOutput audio;
+    audio.samples = std::move(samples);
+    audio.sample_rate = 24000;
+    PopulateResult(generated, std::move(audio), result);
+    return true;
+  }
+
   Impl(std::size_t maximum_context_tokens, ModelVariant variant)
       : maximum_context_tokens_(maximum_context_tokens), variant_(variant) {}
 
@@ -167,12 +281,21 @@ private:
         !Tokenizer::Load(model_root, &tokenizer_, error)) {
       return false;
     }
-    talker_ =
-        TalkerHipRuntime::Create(model_root, maximum_context_tokens_, error);
+    if (device_ == SynthesisDevice::kNpu) {
+      talker_ = npu::TalkerNpuRuntime::Create(model_root,
+                                              maximum_context_tokens_, error);
+    } else {
+      talker_ =
+          TalkerHipRuntime::Create(model_root, maximum_context_tokens_, error);
+    }
     if (talker_ == nullptr) {
       return false;
     }
-    decoder_ = SpeechDecoderHipRuntime::Create(model_root, error);
+    if (device_ == SynthesisDevice::kNpu) {
+      decoder_ = npu::SpeechDecoderNpuRuntime::Create(model_root, error);
+    } else {
+      decoder_ = SpeechDecoderHipRuntime::Create(model_root, error);
+    }
     if (decoder_ == nullptr) {
       return false;
     }
@@ -201,11 +324,18 @@ private:
 
   [[nodiscard]] bool InitializeBaseEncoders(const std::string& model_root,
                                             std::string* error) {
-    speech_encoder_ = SpeechEncoderHipRuntime::Create(model_root, error);
+    if (device_ == SynthesisDevice::kNpu)
+      speech_encoder_ = npu::SpeechEncoderNpuRuntime::Create(model_root, error);
+    else
+      speech_encoder_ = SpeechEncoderHipRuntime::Create(model_root, error);
     if (speech_encoder_ == nullptr) {
       return false;
     }
-    speaker_encoder_ = SpeakerEncoderHipRuntime::Create(model_root, error);
+    if (device_ == SynthesisDevice::kNpu)
+      speaker_encoder_ =
+          npu::SpeakerEncoderNpuRuntime::Create(model_root, error);
+    else
+      speaker_encoder_ = SpeakerEncoderHipRuntime::Create(model_root, error);
     return speaker_encoder_ != nullptr;
   }
 
@@ -421,17 +551,19 @@ private:
   ModelVariant variant_;
   PromptBuilder prompt_builder_{nullptr};
   Tokenizer tokenizer_;
-  std::unique_ptr<TalkerHipRuntime> talker_;
-  std::unique_ptr<SpeechDecoderHipRuntime> decoder_;
-  std::unique_ptr<SpeechEncoderHipRuntime> speech_encoder_;
-  std::unique_ptr<SpeakerEncoderHipRuntime> speaker_encoder_;
+  SynthesisDevice device_{SynthesisDevice::kGpu};
+  std::unique_ptr<TalkerBackend> talker_;
+  std::unique_ptr<SpeechDecoderBackend> decoder_;
+  std::unique_ptr<SpeechEncoderBackend> speech_encoder_;
+  std::unique_ptr<SpeakerEncoderBackend> speaker_encoder_;
   std::unique_ptr<BaseAudioFeatures> base_audio_features_;
 };
 
 std::unique_ptr<SynthesisHipRuntime> SynthesisHipRuntime::Create(
     const std::string& model_root, std::size_t maximum_context_tokens,
-    ModelVariant variant, std::string* error) {
-  auto impl = Impl::Create(model_root, maximum_context_tokens, variant, error);
+    ModelVariant variant, std::string* error, SynthesisDevice device) {
+  auto impl =
+      Impl::Create(model_root, maximum_context_tokens, variant, error, device);
   if (impl == nullptr) {
     return nullptr;
   }

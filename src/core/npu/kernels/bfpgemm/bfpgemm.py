@@ -41,7 +41,7 @@ from ml_dtypes import bfloat16
 
 COLS, ROWS = 8, 4
 M_T, K_T, N_T, MTK = 128, 64, 128, 512
-A_WORDS, W_WORDS, C_WORDS = 64 << 20, 256 << 20, 64 << 20
+A_WORDS, W_WORDS, C_WORDS = 64 << 20, 480 << 20, 64 << 20
 B_TILE_WORDS = K_T * (N_T // 8) * 9 // 4       # one (64, 128) bfp16 tile: 2304 words
 HERE = os.path.dirname(os.path.abspath(__file__))
 

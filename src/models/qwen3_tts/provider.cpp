@@ -44,9 +44,10 @@ private:
   std::vector<std::string> voices_;
 };
 
-std::unique_ptr<ext::TtsRunner> CreateQwen3TtsRunner(
-    const std::string& model_root, std::size_t maximum_context_tokens,
-    std::string* error) {
+std::unique_ptr<ext::TtsRunner> CreateRunner(const std::string& model_root,
+                                             std::size_t maximum_context_tokens,
+                                             hip::SynthesisDevice device,
+                                             std::string* error) {
   const auto config = LoadModelConfigFromPath(model_root);
   if (!config.has_value()) {
     if (error != nullptr) {
@@ -55,7 +56,7 @@ std::unique_ptr<ext::TtsRunner> CreateQwen3TtsRunner(
     return nullptr;
   }
   auto runtime = hip::SynthesisHipRuntime::Create(
-      model_root, maximum_context_tokens, config->variant, error);
+      model_root, maximum_context_tokens, config->variant, error, device);
   if (!runtime) {
     return nullptr;
   }
@@ -73,6 +74,22 @@ std::unique_ptr<ext::TtsRunner> CreateQwen3TtsRunner(
   return std::make_unique<Qwen3TtsRunnerImpl>(std::move(runtime), ext_variant,
                                               std::move(voices));
 }
+
+std::unique_ptr<ext::TtsRunner> CreateQwen3TtsRunner(
+    const std::string& model_root, std::size_t maximum_context_tokens,
+    std::string* error) {
+  return CreateRunner(model_root, maximum_context_tokens,
+                      hip::SynthesisDevice::kGpu, error);
+}
+
+std::unique_ptr<ext::TtsRunner> CreateQwen3TtsRunnerWithOptions(
+    const ext::TtsRunnerOptions& options, std::string* error) {
+  const bool* npu = ext::FindOption<bool>(options.provider_options, "--npu");
+  return CreateRunner(options.model_root, options.maximum_context_tokens,
+                      npu != nullptr && *npu ? hip::SynthesisDevice::kNpu
+                                             : hip::SynthesisDevice::kGpu,
+                      error);
+}
 #endif
 
 }  // namespace gufo::models::qwen3_tts
@@ -87,6 +104,7 @@ void qwen3_tts_provider_register(gufo::ext::Registry& registry) {
       .probe = &ProbeQwen3Tts,
       .resolve = &ResolveQwen3TtsArtifacts,
       .create = &CreateQwen3TtsRunner,
+      .create_with_options = &CreateQwen3TtsRunnerWithOptions,
   });
 #endif
 }
