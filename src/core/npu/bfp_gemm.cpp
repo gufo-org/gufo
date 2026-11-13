@@ -36,7 +36,8 @@ namespace {
 
 constexpr int kBand = 512, kGroup = 1024, kKc = 512, kKb = 64;
 constexpr int kMaxRepeat = 64, kMaxWrap = 1023;  // shim BD limits
-constexpr std::size_t kTileWords = 2304, kStripWords = 128 * kKc / 2;
+// kStripWords: one core row's 128 x 512 chunk of A as bfp16 (9 bytes per 8).
+constexpr std::size_t kTileWords = 2304, kStripWords = 128 * kKc / 8 * 9 / 4;
 constexpr std::size_t kABytes = std::size_t(64) << 20, kCBytes = std::size_t(64)
                                                                  << 20;
 constexpr unsigned kArgA = 3, kArgW = 4, kArgC = 5;
@@ -45,8 +46,11 @@ constexpr int kLanes = 4;
 constexpr std::size_t kMaxArenaBytes = std::size_t(512) << 22;  // bfpgemm.py W
 constexpr int kScratchIds = 1 << 16;  // ids per scratch region
 // Scalars: ng nb kb tiles nb*kc ng*kb b_rep a_base a_row b_base b_col c_base
-// c_col.
-constexpr int kScalars = 13;
+// c_col t1 t2 (t1, t2: the tiles core columns 2-3 and 4-7 compute and drain:
+// all of them, or 1 when those columns have no outputs in the job; they then
+// only pass the other tiles' A and B objects and drain one unused tile, since
+// DMA sizes cannot be 0).
+constexpr int kScalars = 15;
 constexpr int kVar[3] = {7, 9, 11};  // the offsets; the rest is the shape
 
 struct Matrix {
@@ -351,11 +355,17 @@ struct BfpGemm::Impl {
   }
 
   std::vector<std::uint32_t> Generate(const std::int32_t* s) const {
-    const auto w =
-        generate.Generate(std::span<const std::int32_t>(s, kScalars));
-    if (w.size() <= 4)
-      throw Error("BfpGemm: instruction generation failed");
-    return {w.begin(), w.end()};
+    try {
+      const auto w =
+          generate.Generate(std::span<const std::int32_t>(s, kScalars));
+      if (w.size() > 4)
+        return {w.begin(), w.end()};
+    } catch (const Error&) {
+    }
+    std::string list;
+    for (int i = 0; i < kScalars; ++i)
+      list += (i ? " " : "") + std::to_string(s[i]);
+    throw Error("BfpGemm: instruction generation failed for " + list);
   }
 
   // Under `mutex`: the template of one job's shape, checked against a direct
@@ -414,6 +424,10 @@ struct BfpGemm::Impl {
     lane.ins.Assign(txn);
   }
 
+  // Stages the blocks' rows as bfp16 in the order the cores read them: per
+  // core row r (128 rows), band and 512-wide K chunk, 32 sub-tile objects
+  // [k block 8][32-row sub-tile 4] of 2304 bytes, each [row pair 2][column
+  // block 8][half 2][row 8] groups of 8 k values.
   void Pack(Lane& lane, const Dispatch& d, std::span<const Call> calls,
             const std::vector<Matrix>& resolved) {
     struct Item {
@@ -436,9 +450,9 @@ struct BfpGemm::Impl {
       }
       lane.a_rows[b.a_words] = {b.kc, std::move(rows)};
     }
-    auto* a16 = reinterpret_cast<std::uint16_t*>(lane.a.data());
+    auto* a8 = reinterpret_cast<std::uint8_t*>(lane.a.data());
     host::ParallelFor(items.size(), 1, [&](std::size_t lo, std::size_t hi) {
-      std::vector<std::uint16_t> row;
+      std::vector<float> row;
       for (std::size_t t = lo; t < hi; ++t) {
         const Item& it = items[t];
         const Block& b = *it.block;
@@ -446,24 +460,34 @@ struct BfpGemm::Impl {
         const Call& call = calls[src.call];
         const std::size_t k = std::size_t(resolved[src.call].k);
         const std::size_t bands = b.bands.size(), kc = std::size_t(b.kc);
-        row.assign(kc * kKc, 0);
-        std::uint16_t* base = a16 + b.a_words * 2;
+        row.assign(kc * kKc, 0.0f);
         for (int i = it.i0; i < it.i1; ++i) {
-          const std::size_t r = std::size_t(i) / 128, ii = std::size_t(i) % 128;
-          if (i < src.nr && call.x16)
-            std::memcpy(row.data(), call.x16 + std::size_t(src.r0 + i) * k,
-                        k * 2);
-          else if (i < src.nr)
-            host::FloatToBf16(call.x + std::size_t(src.r0 + i) * k, row.data(),
-                              k);
-          else
-            std::fill(row.begin(), row.end(), std::uint16_t(0));
-          for (std::size_t q = 0; q < kc; ++q)
-            std::memcpy(
-                base +
-                    (((r * bands + std::size_t(it.band)) * kc + q) * 128 + ii) *
-                        kKc,
-                row.data() + q * kKc, kKc * 2);
+          if (i < src.nr) {
+            const std::size_t at = std::size_t(src.r0 + i) * k;
+            if (call.x16)
+              host::Bf16ToFloat(call.x16 + at, row.data(), k);
+            else
+              std::copy(call.x + at, call.x + at + k, row.data());
+          } else {
+            std::fill(row.begin(), row.end(), 0.0f);
+          }
+          const std::size_t r = std::size_t(i) / 128, ri = std::size_t(i) % 128;
+          const std::size_t sub = ri / 32, rs = ri % 32;
+          const std::size_t rp = rs / 16, half = (rs % 16) / 8, rr = rs % 8;
+          for (std::size_t q = 0; q < kc; ++q) {
+            std::uint8_t* chunk =
+                a8 +
+                (b.a_words +
+                 ((r * bands + std::size_t(it.band)) * kc + q) * kStripWords) *
+                    4;
+            for (std::size_t kb = 0; kb < 8; ++kb) {
+              std::uint8_t* obj = chunk + (kb * 4 + sub) * 2304;
+              const float* v = row.data() + q * kKc + kb * kKb;
+              for (std::size_t cb = 0; cb < 8; ++cb)
+                host::EncodeBfp16Block(
+                    v + cb * 8, obj + ((rp * 8 + cb) * 2 + half) * 72 + rr * 9);
+            }
+          }
         }
       }
     });
@@ -572,6 +596,15 @@ struct BfpGemm::Impl {
       for (const Job& j : d.jobs) {
         const Block& b = d.blocks[j.block];
         const int kc = j.m.kp / kKc, kb = j.m.kp / kKb;
+        // Columns past the job's widest output range idle (no C drained).
+        int width = 0;
+        for (int t = 0; t < j.nb; ++t)
+          width =
+              std::max(width, resolved[b.bands[std::size_t(j.b0 + t)].call].n);
+        const int cols =
+            j.ng > 1 ? 8
+                     : std::clamp((width - j.g0 * kGroup + 127) / 128, 1, 8);
+        const int tiles = j.ng * j.nb;
         const std::int32_t s[kScalars] = {
             j.ng,
             j.nb,
@@ -588,7 +621,9 @@ struct BfpGemm::Impl {
             std::int32_t(std::size_t(j.m.groups) * std::size_t(kb) *
                          kTileWords),
             std::int32_t(j.c_words),
-            j.ng * j.nb * kBand * 128 / 2};
+            j.ng * j.nb * kBand * 128 / 2,
+            cols > 2 ? tiles : 1,
+            cols > 4 ? tiles : 1};
         scalars.insert(scalars.end(), s, s + kScalars);
       }
       auto t = Clock::now();

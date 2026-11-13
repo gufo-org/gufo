@@ -48,7 +48,7 @@ extern "C" {
 
 static int g_counter = 0;
 
-void matmul_vectorized_different_datatypes(bfloat16 *__restrict pA_in,
+void matmul_vectorized_different_datatypes(bfp16ebs8 *__restrict pA_in,
                                            bfp16ebs8 *__restrict pB_in,
                                            bfloat16 *__restrict pC_curtile) {
   event0();
@@ -57,26 +57,9 @@ void matmul_vectorized_different_datatypes(bfloat16 *__restrict pA_in,
   bfloat16 *__restrict pC_tile = pC_curtile + g_counter * (m_a * n);
   g_counter = (g_counter == rho - 1) ? 0 : g_counter + 1;
 
-  uint8_t converted_A[m_a * k / 8 * 9] __attribute__((aligned(64)));
-
-  OutBufStream<bfp16ebs8, r * s, aie_dm_resource::a> a_out(
-      (bfp16ebs8 *)converted_A);
-  const bfloat16 __aie_dm_resource_d *__restrict pA =
-      (const bfloat16 __aie_dm_resource_d *)pA_in;
-
-  for (int rp = 0; rp < m_a / (2 * r); rp++) {
-    const bfloat16 __aie_dm_resource_d *__restrict q = pA + rp * (2 * r * k);
-    AIE_PREPARE_FOR_POSTPIPELINING
-    for (int cb = 0; cb < k / s; cb++) {
-      aie::vector<bfloat16, r * s> v0 = aie::load_v<r * s>(q);
-      aie::vector<bfloat16, r * s> v1 = aie::load_v<r * s>(q + r * k);
-      a_out.push(
-          aie::accum<accfloat, r * s>(v0).template to_vector<bfp16ebs8>());
-      a_out.push(
-          aie::accum<accfloat, r * s>(v1).template to_vector<bfp16ebs8>());
-      q += r * s;
-    }
-  }
+  // A arrives pre-encoded by the host in the order the MAC loop reads it:
+  // [row pair rp][column block cb][half][row] groups of 8 k values.
+  const uint8_t *converted_A = (const uint8_t *)pA_in;
 
   using AStream = InBufStream<bfp16ebs8, r * s, aie_dm_resource::a>;
   using BStream = InBufStream<bfp16ebs8, s * t, aie_dm_resource::b>;
