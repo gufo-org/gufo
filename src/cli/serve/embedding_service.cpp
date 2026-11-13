@@ -53,6 +53,7 @@ struct EmbeddingService::Impl {
     if (!provider && !options.model_id.empty()) {
       provider = ext::FindEmbeddingProvider(options.model_id);
     }
+#if defined(ENGINE_ENABLE_HIP)
     if (!provider || (!provider->create && !provider->create_with_options)) {
       initialization_error = "embedding provider not available for model: " +
                              options.model_root.string();
@@ -75,6 +76,9 @@ struct EmbeddingService::Impl {
       return;
     }
     ready = true;
+#else
+    initialization_error = "embedding service requires the HIP backend";
+#endif
   }
 
   EmbeddingStatus Run(const std::vector<EmbeddingInput>& inputs,
