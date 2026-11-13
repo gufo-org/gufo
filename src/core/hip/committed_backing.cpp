@@ -14,6 +14,7 @@
 #include "src/core/hip/host_allocations.hpp"
 #include "src/core/platform/page_pin.hpp"
 #include "src/core/platform/pages.hpp"
+#include "src/core/resource_error.hpp"
 
 namespace gufo::hip {
 namespace detail {
@@ -53,6 +54,7 @@ struct BackingState {
   // Fixed capacity; entries below `committed` are published and never move.
   std::unique_ptr<cache::ResourceCharge[]> blocks;
   std::unique_ptr<CommittedPages[]> segments;
+  std::unique_ptr<cache::ResourceCharge[]> segment_charges;
   std::size_t capacity{}, segment_blocks{}, block_bytes{};
   std::atomic<std::size_t> committed{}, next{};
   std::atomic<std::size_t> pinned_bytes{};
@@ -64,6 +66,7 @@ struct BackingState {
   cache::ResourceLedger* ledger{};
   std::function<bool(std::size_t)> admit_segment;
   std::function<bool(std::size_t, std::size_t, std::size_t)> keep_segment;
+  std::function<cache::ResourceReservation(std::size_t)> reserve_segment;
   std::mutex growth;
   std::atomic<bool> growing_ahead{};
   std::byte* Address(std::size_t index) const {
@@ -91,12 +94,17 @@ struct BackingState {
     if (admit_segment && !admit_segment(count * block_bytes))
       return false;
     std::vector<cache::ResourceReservation> reservations;
+    cache::ResourceReservation segment_reservation;
     try {
       reservations.reserve(count);
       for (std::size_t i = 0; i < count; ++i)
         reservations.push_back(ledger->Reserve(
             cache::ResourceCategory::kBackingFree, block_bytes));
+      if (reserve_segment)
+        segment_reservation = reserve_segment(count * block_bytes);
     } catch (const std::bad_alloc&) {
+      return false;
+    } catch (const core::ResourceAdmissionError&) {
       return false;
     }
     std::size_t heap_before = 0, heap_after = 0;
@@ -106,16 +114,18 @@ struct BackingState {
     data = CommitPages(count * block_bytes);
     if (!data)
       return false;
-    if (keep_segment &&
-        !(HeapFree(heap_after) &&
-          keep_segment(count * block_bytes, heap_before, heap_after))) {
-      ReleasePages(data, count * block_bytes);
-      data = {};
-      return false;
-    }
     try {
+      if (keep_segment &&
+          !(HeapFree(heap_after) &&
+            keep_segment(count * block_bytes, heap_before, heap_after))) {
+        ReleasePages(data, count * block_bytes);
+        data = {};
+        return false;
+      }
       for (std::size_t i = 0; i < count; ++i)
         blocks[first + i] = reservations[i].Convert();
+      if (segment_reservation)
+        segment_charges[first / segment_blocks] = segment_reservation.Convert();
     } catch (const std::bad_alloc&) {
       // Free before the converted charges unwind, as at initialization.
       ReleasePages(data, count * block_bytes);
@@ -123,6 +133,14 @@ struct BackingState {
       for (std::size_t i = 0; i < count; ++i)
         blocks[first + i] = {};
       return false;
+    } catch (...) {
+      // A provider callback can fail while checking registered pages. Never
+      // release its admission ticket while leaving an unpublished segment.
+      ReleasePages(data, count * block_bytes);
+      data = {};
+      for (std::size_t i = 0; i < count; ++i)
+        blocks[first + i] = {};
+      throw;
     }
     if (data.pin >= 0)
       pinned_bytes.fetch_add(count * block_bytes, std::memory_order_relaxed);
@@ -240,9 +258,13 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
   state->blocks = std::make_unique<cache::ResourceCharge[]>(count);
   state->segments = std::make_unique<detail::CommittedPages[]>(
       (count + state->segment_blocks - 1) / state->segment_blocks + 1);
+  if (config.reserve_segment)
+    state->segment_charges = std::make_unique<cache::ResourceCharge[]>(
+        (count + state->segment_blocks - 1) / state->segment_blocks + 1);
   state->ledger = &ledger;
   state->admit_segment = std::move(config.admit_segment);
   state->keep_segment = std::move(config.keep_segment);
+  state->reserve_segment = std::move(config.reserve_segment);
   if (!config.segment_bytes && count) {
     std::vector<cache::ResourceReservation> reservations;
     reservations.reserve(count);
@@ -250,12 +272,18 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
       reservations.push_back(ledger.Reserve(
           cache::ResourceCategory::kBackingFree, config.block_bytes));
     auto& data = state->segments[0];
+    cache::ResourceReservation segment_reservation;
     try {
+      if (state->reserve_segment)
+        segment_reservation =
+            state->reserve_segment(count * config.block_bytes);
       data = detail::CommitPages(count * config.block_bytes);
       if (!data)
         throw std::runtime_error("cannot commit pinned cache backing");
       for (std::size_t i = 0; i < count; ++i)
         state->blocks[i] = reservations[i].Convert();
+      if (segment_reservation)
+        state->segment_charges[0] = segment_reservation.Convert();
     } catch (...) {
       // Convert may fail after pages commit. Free before pending reservations
       // or converted charges unwind, preserving physical-byte accounting.

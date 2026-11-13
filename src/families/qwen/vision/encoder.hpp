@@ -48,6 +48,7 @@ public:
   Encoder& operator=(const Encoder&) = delete;
   [[nodiscard]] const std::string& identity() const;
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
+  [[nodiscard]] std::uint32_t OutputWidth() const noexcept;
   /// Upload the weights now instead of in the first Encode. Repeated calls
   /// keep the existing upload.
   void Upload();

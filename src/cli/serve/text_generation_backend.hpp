@@ -36,6 +36,7 @@ enum class TextGenerationErrorCode : std::uint8_t {
   kToolChoiceUnsatisfied,
   kInsufficientMemory,
   kDeviceLost,
+  kResourceExhausted,
 };
 
 /// Client-facing message for a GPU context that can no longer execute work.
@@ -71,6 +72,7 @@ public:
       case TextGenerationErrorCode::kSchedulerStopping:
       case TextGenerationErrorCode::kInsufficientMemory:
       case TextGenerationErrorCode::kDeviceLost:
+      case TextGenerationErrorCode::kResourceExhausted:
         return 503;
       case TextGenerationErrorCode::kToolChoiceUnsatisfied:
         return 502;
@@ -97,6 +99,8 @@ public:
         return "insufficient_memory";
       case TextGenerationErrorCode::kDeviceLost:
         return "device_lost";
+      case TextGenerationErrorCode::kResourceExhausted:
+        return "resource_exhausted";
     }
     return "generation_error";
   }

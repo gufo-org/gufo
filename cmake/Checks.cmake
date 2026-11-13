@@ -2,6 +2,8 @@
 # explicit targets; adding a model oracle must not make every PR expensive.
 set(gufo_pr_targets
   cache_adapter_test
+  cache_backing_admission_test
+  qwen_vision_admission_test
   cache_adapter_lifecycle_test
   cache_ledger_test
   cache_checkpoint_test
@@ -38,12 +40,16 @@ set(gufo_pr_targets
   embedding_gemma2_video_processor_test minimax_h3_runtime_test minimax_h3_sampling_test
   qwen27b_continuation_identity_test qwen27b_continuation_layout_test qwen38_flash_next_config_test
   qwen38_flash_next_continuation_identity_test qwen38_flash_next_continuation_layout_test
-  qwen38_flash_next_mtp_sampling_test qwen38_flash_next_probe_test qwen38_flash_next_rope_scaling_test
-  qwen38_flash_next_runner_options_test qwen3_asr_audio_api_test qwen3_asr_config_test
-  qwen3_tts_audio_api_test qwen3_tts_config_test qwen_chat_template_test qwen_image_21_lora_test
-  qwen_image_21_test qwen_image_21_weights_test qwen_tokenizer_test video_api_test
+  qwen38_flash_next_memory_test qwen38_flash_next_mtp_sampling_test qwen38_flash_next_probe_test
+  qwen38_flash_next_rope_scaling_test qwen38_flash_next_runner_options_test
+  qwen3_asr_audio_api_test qwen3_asr_config_test qwen3_tts_audio_api_test
+  qwen3_tts_config_test qwen_chat_template_test qwen_image_21_lora_test qwen_image_21_test
+  qwen_image_21_weights_test qwen_tokenizer_test video_api_test
   # END GENERATED MODEL PR TARGETS
 )
+if (NOT ENGINE_ENABLE_HIP)
+  list(APPEND gufo_pr_targets qwen_vision_lifecycle_test)
+endif()
 set(gufo_pr_tests ${gufo_pr_targets})
 list(REMOVE_ITEM gufo_pr_tests text_cli_dispatch_test)
 list(APPEND gufo_pr_tests text_cli_dispatch_prompt text_cli_dispatch_chat text_cli_dispatch_bench)
@@ -53,11 +59,12 @@ endif()
 # BEGIN GENERATED MODEL CTEST OVERRIDES
 list(REMOVE_ITEM gufo_pr_tests
   ds4_chat_template_test ds4_cli_test ds4_sampling_test qwen38_flash_next_config_test
-  qwen38_flash_next_continuation_layout_test qwen38_flash_next_mtp_sampling_test
-  qwen38_flash_next_probe_test qwen38_flash_next_rope_scaling_test qwen38_flash_next_runner_options_test)
+  qwen38_flash_next_continuation_layout_test qwen38_flash_next_memory_test
+  qwen38_flash_next_mtp_sampling_test qwen38_flash_next_probe_test qwen38_flash_next_rope_scaling_test
+  qwen38_flash_next_runner_options_test)
 list(APPEND gufo_pr_tests
   "ds4\.template" "ds4\.cli" "ds4\.sampling" "qwen38_flash_next\.config"
-  "qwen38_flash_next\.continuation_layout" "qwen38_flash_next\.mtp_sampling"
+  "qwen38_flash_next\.continuation_layout" "qwen38_flash_next\.memory" "qwen38_flash_next\.mtp_sampling"
   "qwen38_flash_next\.probe" "qwen38_flash_next\.rope_scaling" "qwen38_flash_next\.runner_options")
 # END GENERATED MODEL CTEST OVERRIDES
 list(APPEND gufo_pr_tests

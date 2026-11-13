@@ -91,6 +91,10 @@ public:
   ResourceReservation(const ResourceReservation&) = delete;
   ResourceReservation& operator=(const ResourceReservation&) = delete;
   [[nodiscard]] ResourceCharge Convert();
+  // Release an unused part of a standalone pending allocation. No allocation
+  // or failure injection occurs. Cannot grow, shrink pool assignments or
+  // release storage still in use; zero empties the handle.
+  void Shrink(std::size_t bytes);
   [[nodiscard]] ResourceAllocationInfo Info() const;
   // Queued jobs may pin assigned spill or borrowed-tail backing before its
   // rows materialize. Pending new allocations/private captures cannot be

@@ -75,6 +75,20 @@ Gufo finds `mmproj-BF16.gguf` next to the target; pass `--mmproj PATH` to use
 another location. Images work the same way as for
 [Qwen3.8 27B](qwen3.8-27b.md#images), with AR and MTP.
 
+Serving defaults to conservative admission, including a context-sized image
+allowance for each execution session. With a projector loaded, opt into
+`--vision-memory-policy on-demand` to reserve image memory when a request
+arrives. Text sessions keep their text/MTP state requirements; image processing
+can return a `503 resource_exhausted` response when capacity is insufficient.
+Omit the option or use `--vision-memory-policy conservative` to keep the default.
+
+The on-demand policy also checks host headroom and outstanding reservations for
+image preparation, retained history, optional snapshots and lazy cache growth.
+It preserves ordinary cache sizing and pressure warnings; passing text admission
+does not guarantee a full cache grant or a later image request. Optional wide
+copy verification yields to constrained cache/image capacity, falling back to
+ordinary verification without changing the neural MTP draft limit or context.
+
 ## Performance
 
 As of October 18, 2026, on Strix Halo:

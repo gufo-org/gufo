@@ -745,3 +745,23 @@ Reading them:
   runners without snapshots, without loading a model.
 - `tests/cli/component_text_cache_test.cpp` and `tests/cache/` cover
   retention, admission, eviction and persistence without loading a model.
+
+## Request-time image admission
+
+Flash-Next's opt-in `--vision-memory-policy on-demand` uses the ordinary device
+state gate with text/MTP state and the stable image descriptor. It does not
+promise future image memory or the configured cache maximum at startup.
+
+A shared coordinator reserves image preparation before slot acquisition, then
+covers the complete retained history, encoding and replacement peaks. Prepared
+pixel aliases and device state keep their charges until their last users finish.
+Accepted execution/deferred bounds remain pending until allocation succeeds;
+committed bytes already appear in subsequent free-memory observations. Cache
+segments and optional snapshot copies reserve through the same coordinator.
+Cache sizing, host reserves and lazy backing pressure checks remain in force.
+
+The coordinator serializes internal reservations, but cannot reserve memory
+against other processes. Allocation failures still need cleanup and a resource
+refusal; neither a startup estimate nor CPU accounting tests establishes GPU
+capacity or numerical image correctness. Other providers retain conservative
+admission. This policy does not grow or demand-map the language model's KV state.

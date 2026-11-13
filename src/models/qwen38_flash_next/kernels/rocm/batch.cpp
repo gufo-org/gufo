@@ -129,13 +129,15 @@ void Executor::UseScratch(const Scratch& scratch) const {
 }
 
 bool Executor::AllocateBatch(std::string* error) const {
-  return batch_logits_ != nullptr ||
-         Check(hip::AllocateDevice(
-                   &batch_logits_,
-                   static_cast<std::size_t>(kBatchSessions) *
-                       std::min(kDecodeRows, options_.max_logit_rows) *
-                       config().vocab_size * sizeof(float)),
-               error);
+  if (batch_logits_ != nullptr)
+    return true;
+  const auto bytes = static_cast<std::size_t>(kBatchSessions) *
+                     std::min(kDecodeRows, options_.max_logit_rows) *
+                     config().vocab_size * sizeof(float);
+  if (!Check(hip::AllocateDevice(&batch_logits_, bytes), error))
+    return false;
+  CommitDeferredAdmission(bytes);
+  return true;
 }
 
 bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,

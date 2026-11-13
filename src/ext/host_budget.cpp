@@ -11,8 +11,14 @@
 #include "src/core/platform/os_info.hpp"
 
 namespace gufo::ext {
+namespace {
 
-std::optional<std::uint64_t> MeminfoAvailableBytes(std::string_view meminfo) {
+struct MeminfoMemory {
+  std::uint64_t available_bytes;
+  std::uint64_t cma_free_bytes;
+};
+
+std::optional<MeminfoMemory> ReadMeminfo(std::string_view meminfo) {
   std::optional<std::uint64_t> available_kib;
   std::uint64_t cma_free_kib = 0;
   std::istringstream lines{std::string(meminfo)};
@@ -29,14 +35,18 @@ std::optional<std::uint64_t> MeminfoAvailableBytes(std::string_view meminfo) {
   }
   if (!available_kib)
     return std::nullopt;
-  return (*available_kib > cma_free_kib ? *available_kib - cma_free_kib : 0) *
-         1024;
+  if (*available_kib > std::numeric_limits<std::uint64_t>::max() / 1024)
+    return std::nullopt;
+  return MeminfoMemory{
+      *available_kib * 1024,
+      cma_free_kib > std::numeric_limits<std::uint64_t>::max() / 1024
+          ? std::numeric_limits<std::uint64_t>::max()
+          : cma_free_kib * 1024};
 }
 
-std::uint64_t CgroupAvailableBytes(const std::filesystem::path& root,
-                                   std::string_view membership_text,
-                                   std::uint64_t host_available) {
-  std::uint64_t available = host_available;
+std::optional<std::uint64_t> CgroupHeadroomBytes(
+    const std::filesystem::path& root, std::string_view membership_text) {
+  std::optional<std::uint64_t> available;
   // A cgroup limit can be much smaller than the host's available memory.
   // Walk parents too: a child may say "max" beneath a limited ancestor.
   std::istringstream membership{std::string(membership_text)};
@@ -76,7 +86,8 @@ std::uint64_t CgroupAvailableBytes(const std::filesystem::path& root,
         if (found && valid)
           used -= std::min(
               used, inactive_file - std::min(inactive_file, unreclaimable));
-        available = std::min(available, limit > used ? limit - used : 0);
+        const auto headroom = limit > used ? limit - used : 0;
+        available = available ? std::min(*available, headroom) : headroom;
       }
       if (path == root)
         break;
@@ -86,24 +97,6 @@ std::uint64_t CgroupAvailableBytes(const std::filesystem::path& root,
   return available;
 }
 
-namespace {
-
-/// Host RAM still available, after cgroup limits. Unified-memory device
-/// allocations draw from the same RAM, so HIP's device capacity is not used.
-std::uint64_t HostAvailableBytes() {
-  std::uint64_t available = platform::AvailableMemoryBytes();
-  std::ifstream meminfo("/proc/meminfo");
-  std::ostringstream meminfo_text;
-  meminfo_text << meminfo.rdbuf();
-  if (const auto parsed = MeminfoAvailableBytes(meminfo_text.str()))
-    available = *parsed;
-  std::ifstream membership("/proc/self/cgroup");
-  std::ostringstream membership_text;
-  membership_text << membership.rdbuf();
-  return CgroupAvailableBytes("/sys/fs/cgroup", membership_text.str(),
-                              available);
-}
-
 std::size_t ClampToSize(std::uint64_t bytes) {
   return static_cast<std::size_t>(
       std::min<std::uint64_t>(bytes, std::numeric_limits<std::size_t>::max()));
@@ -111,14 +104,65 @@ std::size_t ClampToSize(std::uint64_t bytes) {
 
 }  // namespace
 
+std::optional<std::uint64_t> MeminfoAvailableBytes(std::string_view meminfo) {
+  const auto parsed = ReadMeminfo(meminfo);
+  if (!parsed)
+    return std::nullopt;
+  return parsed->available_bytes -
+         std::min(parsed->available_bytes, parsed->cma_free_bytes);
+}
+
+std::uint64_t CgroupAvailableBytes(const std::filesystem::path& root,
+                                   std::string_view membership_text,
+                                   std::uint64_t host_available) {
+  const auto headroom = CgroupHeadroomBytes(root, membership_text);
+  return headroom ? std::min(host_available, *headroom) : host_available;
+}
+
+HostSnapshotMemory PlanHostSnapshotMemory(
+    std::uint64_t raw_available_bytes, std::uint64_t cma_free_bytes,
+    std::optional<std::uint64_t> cgroup_headroom_bytes) {
+  HostSnapshotMemory memory;
+  memory.raw_available_bytes = raw_available_bytes;
+  memory.cma_free_bytes = cma_free_bytes;
+  memory.cma_excluded_bytes = std::min(raw_available_bytes, cma_free_bytes);
+  memory.cgroup_headroom_bytes = cgroup_headroom_bytes;
+  memory.available_bytes = raw_available_bytes - memory.cma_excluded_bytes;
+  memory.cgroup_limited =
+      cgroup_headroom_bytes && *cgroup_headroom_bytes < memory.available_bytes;
+  if (memory.cgroup_limited)
+    memory.available_bytes = *cgroup_headroom_bytes;
+  memory.ceiling_bytes =
+      ClampToSize(memory.available_bytes > memory.reserve_bytes
+                      ? memory.available_bytes - memory.reserve_bytes
+                      : 0);
+  memory.automatic_budget_bytes = ClampToSize(memory.available_bytes / 2);
+  return memory;
+}
+
+/// Host RAM still available, after cgroup limits. Unified-memory device
+/// allocations draw from the same RAM, so HIP's device capacity is not used.
+HostSnapshotMemory QueryHostSnapshotMemory() {
+  std::ifstream meminfo("/proc/meminfo");
+  std::ostringstream meminfo_text;
+  meminfo_text << meminfo.rdbuf();
+  const auto parsed = ReadMeminfo(meminfo_text.str());
+  std::ifstream membership("/proc/self/cgroup");
+  std::ostringstream membership_text;
+  membership_text << membership.rdbuf();
+  auto memory = PlanHostSnapshotMemory(
+      parsed ? parsed->available_bytes : platform::AvailableMemoryBytes(),
+      parsed ? parsed->cma_free_bytes : 0,
+      CgroupHeadroomBytes("/sys/fs/cgroup", membership_text.str()));
+  memory.from_meminfo = parsed.has_value();
+  return memory;
+}
+
 std::size_t HostSnapshotBudgetBytes() {
-  return ClampToSize(HostAvailableBytes() / 2);
+  return QueryHostSnapshotMemory().automatic_budget_bytes;
 }
 
 std::size_t HostSnapshotCeilingBytes() {
-  const auto available = HostAvailableBytes();
-  return ClampToSize(available > kHostSnapshotHeadroomBytes
-                         ? available - kHostSnapshotHeadroomBytes
-                         : 0);
+  return QueryHostSnapshotMemory().ceiling_bytes;
 }
 }  // namespace gufo::ext

@@ -9,6 +9,7 @@
 
 #include "src/families/qwen/hip_common/continuation_hooks.hpp"
 #include "src/families/qwen/hip_common/rope.hpp"
+#include "src/families/qwen/vision/admission.hpp"
 #include "src/families/qwen/vision/encoder.hpp"
 #include "src/families/qwen/vision/prompt.hpp"
 
@@ -22,6 +23,9 @@ public:
   ~DeviceInput();
   DeviceInput(const DeviceInput&) = delete;
   DeviceInput& operator=(const DeviceInput&) = delete;
+  /// Set once before installing any request. The descriptor remains part of
+  /// the base session claim; the shared budget covers dynamic image storage.
+  void SetMemoryAdmission(std::shared_ptr<AdmissionBudget> budget);
   void Configure(std::shared_ptr<const Prompt> prompt,
                  std::shared_ptr<Encoder> encoder, hipStream_t stream);
   void SetCancellationCheck(Encoder::CancellationCheck check) {
@@ -52,9 +56,28 @@ public:
   }
 
 private:
+  void ReserveRequest(const Prompt* prompt, const Encoder* encoder,
+                      std::size_t prefix_rows, bool replacement,
+                      bool reuse_embeddings, bool layout_work);
+  [[nodiscard]] std::size_t OnDemandBytes(const Prompt* prompt,
+                                          const Encoder* encoder,
+                                          std::size_t prefix_rows,
+                                          bool reuse_embeddings,
+                                          bool layout_work) const;
+  void SettleRequest();
+  void ApplyLayout(const RopeLayout& layout, hipStream_t stream);
+  void ReleaseImageStorage(hipStream_t stream);
+  static void LaunchRows(float* hidden, const float* embedding,
+                         std::uint32_t rows, std::uint32_t width,
+                         std::uint32_t hc, hipStream_t stream);
   friend class models::qwen::ContinuationAdapter;
   models::qwen::ContinuationHooks* continuation_hooks_{nullptr};
+  std::shared_ptr<AdmissionBudget> admission_budget_;
+  // Declared before prompt/embeddings: owned host and device buffers must die
+  // before the final reservation. Positions are freed in the destructor.
+  AdmissionLease admission_;
   RopeLayout layout_;
+  bool layout_ready_{true};
   std::shared_ptr<const Prompt> prompt_;
   std::shared_ptr<Encoder> encoder_;
   std::vector<std::shared_ptr<const Encoder::Embedding>> embeddings_;

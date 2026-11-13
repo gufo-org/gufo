@@ -5,6 +5,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
@@ -151,6 +152,31 @@ std::span<const std::uint8_t> Prompt::IdentityForPrefix(
       return image->prefix_identity;
   }
   return {};
+}
+
+void Prompt::RetainPixels(std::shared_ptr<const void> reservation,
+                          const std::shared_ptr<AdmissionBudget>& budget) {
+  if (!reservation)
+    throw std::invalid_argument("prepared pixels require a reservation owner");
+  struct Owner {
+    // Originals die before their ticket. The owner never retains Prompt or
+    // the new aliasing pixel pointers, so copies cannot create an ownership
+    // cycle.
+    std::shared_ptr<const void> reservation;
+    std::vector<std::shared_ptr<const core::Image>> originals;
+  };
+  auto owner = std::make_shared<Owner>();
+  owner->reservation = std::move(reservation);
+  owner->originals.reserve(images.size());
+  for (const auto& image : images)
+    if (image.pixels)
+      owner->originals.push_back(image.pixels);
+  // Every allocation above completes before any original pointer is replaced.
+  for (auto& image : images)
+    if (image.pixels)
+      image.pixels =
+          std::shared_ptr<const core::Image>(owner, image.pixels.get());
+  memory_admission = budget;
 }
 
 void RopeLayout::Validate(std::uint32_t max_context) const {

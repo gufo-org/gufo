@@ -9,6 +9,7 @@
 #include <gufo/ext/sampling.hpp>
 
 #include "src/families/qwen/hip_common/rope.hpp"
+#include "src/models/qwen38_flash_next/memory.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 /// Model-private HIP launchers for everything outside the quantized GEMM
@@ -23,15 +24,7 @@ struct RollbackRows {
   float* rows[7]{};
 };
 
-// Recurrent rollback keeps the state after the first token, then exact
-// FP32 keys/decays/betas/errors for later tokens. No inverse or quantization.
-constexpr std::size_t GdnRollbackRowFloats(std::uint32_t row,
-                                           std::uint32_t k_heads,
-                                           std::uint32_t v_heads,
-                                           std::uint32_t dim) {
-  return row == 0 ? std::size_t{v_heads} * dim * dim
-                  : std::size_t{k_heads} * dim + v_heads * (dim + 2);
-}
+using qwen38_flash_next::GdnRollbackRowFloats;
 void RestoreGdnState(float* state, RollbackRows snapshots, std::uint32_t keep,
                      std::uint32_t k_heads, std::uint32_t v_heads,
                      hipStream_t stream);

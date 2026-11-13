@@ -21,24 +21,32 @@
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/logging/logging.hpp"
 #include "src/families/qwen/kernels/ops/gemm.hpp"
+#include "src/families/qwen/vision/admission.hpp"
 #include "src/families/qwen/vision/encoder.hpp"
 
 namespace gufo::models::qwen::vision {
 namespace {
 using Bf16 = hip_bfloat16;
-constexpr unsigned kHidden = 1152;
-constexpr unsigned kHeads = 16;
+static_assert(sizeof(Bf16) == sizeof(std::uint16_t));
+constexpr unsigned kHidden = kEncoderHidden;
+constexpr unsigned kHeads = kEncoderHeads;
 constexpr unsigned kHeadDim = 72;
-constexpr unsigned kFfn = 4304;
+constexpr unsigned kFfn = kEncoderFfn;
 constexpr unsigned kMergeHidden = kHidden * 4;
-constexpr unsigned kPatchDim = 3 * 2 * 16 * 16;
+constexpr unsigned kPatchDim = kEncoderPatchDim;
 constexpr unsigned kThreads = 256;
 
 void Check(hipError_t error) {
+  if (error == hipErrorMemoryAllocation)
+    throw core::ResourceAdmissionError(
+        "vision memory admission refused: reason=allocation_failure");
   if (error != hipSuccess)
     throw std::runtime_error(hipGetErrorString(error));
 }
 void CheckBlas(hipblasStatus_t status) {
+  if (status == HIPBLAS_STATUS_ALLOC_FAILED)
+    throw core::ResourceAdmissionError(
+        "vision memory admission refused: reason=allocation_failure");
   if (status != HIPBLAS_STATUS_SUCCESS) {
     throw std::runtime_error("vision hipBLAS failure: " +
                              std::to_string(status));
@@ -106,7 +114,7 @@ public:
   }
 
 private:
-  static constexpr std::size_t kBytes = 16ULL << 20;
+  static constexpr std::size_t kBytes = kPinnedUploadBytes;
   gufo::hip::HostAllocations allocations_;
   void* data_{nullptr};
   std::size_t capacity_;
@@ -602,6 +610,9 @@ const std::string& Encoder::identity() const {
 std::size_t Encoder::ResidentBytes() const noexcept {
   return impl_->resident_bytes.load();
 }
+std::uint32_t Encoder::OutputWidth() const noexcept {
+  return impl_->output_width;
+}
 void Encoder::Upload() {
   impl_->Upload();
 }
@@ -639,7 +650,7 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
   // Smaller attention tiles reduce scratch traffic for the 4096-patch
   // shape while preserving its BLAS reductions. Ragged tails require
   // their existing GEMM shapes to preserve rounding.
-  const unsigned tile = std::min(count, count == 4096 ? 64U : 128U);
+  const auto tile = static_cast<unsigned>(EncoderTileRows(count));
   Allocation scores(std::size_t{kHeads} * tile * count * sizeof(float));
   Allocation probabilities(std::size_t{kHeads} * tile * count * sizeof(Bf16));
   Allocation output_tile(std::size_t{tile} * kHidden * sizeof(float));
@@ -791,13 +802,12 @@ void PrepareForServing(const std::shared_ptr<Encoder>& encoder) {
   (void)hipMemGetInfo(&heap_free, &heap_total);
   using Milliseconds = std::chrono::duration<double, std::milli>;
   server::Logger::Info(
-      "loader",
-      "event=vision_prepared resident_bytes=" +
-          std::to_string(encoder->ResidentBytes()) + " identity_ms=" +
-          std::to_string(Milliseconds(hashed - started).count()) +
-          " upload_ms=" +
-          std::to_string(Milliseconds(uploaded - hashed).count()) +
-          " device_heap_free_bytes=" + std::to_string(heap_free) + " " +
-          server::Logger::MemoryStatus());
+      "loader", "event=vision_prepared resident_bytes=" +
+                    std::to_string(encoder->ResidentBytes()) + " identity_ms=" +
+                    std::to_string(Milliseconds(hashed - started).count()) +
+                    " upload_ms=" +
+                    std::to_string(Milliseconds(uploaded - hashed).count()) +
+                    " device_heap_free_bytes=" + std::to_string(heap_free) +
+                    " " + server::Logger::MemoryStatus());
 }
 }  // namespace gufo::models::qwen::vision
