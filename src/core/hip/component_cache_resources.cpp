@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -30,10 +31,23 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     hip::TransferPool streams;
     std::unique_ptr<hip::CommittedBackingPool> pool;
     std::unique_ptr<hip::CommittedBackingPool> device_pool;
+    std::function<std::unique_ptr<hip::CommittedBackingPool>()>
+        make_device_pool;
+    std::once_flag device_once;
+    hip::CommittedBackingPool* DevicePool() {
+      try {
+        std::call_once(device_once, [&] { device_pool = make_device_pool(); });
+      } catch (const cache::ResourceExhausted&) {
+        // A device tier also needs host bookkeeping. Keep host fallback
+        // available if its metadata cannot fit; a later call can retry.
+        return nullptr;
+      }
+      return device_pool.get();
+    }
     std::map<std::uint32_t, std::size_t> component_classes;
     cache::Rows device_after_rows{};
     bool UsesDevice(const cache::PayloadRequest& request) const {
-      return device_pool &&
+      return make_device_pool &&
              request.category == cache::ResourceCategory::kBackingAssigned &&
              request.end > device_after_rows;
     }
@@ -170,22 +184,27 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     backing->pool->WaitForGrowth();
     if (ledger.Limits().device_bytes && adapter->SupportsDeviceRows()) {
       const auto device = ledger.Limits().device_bytes;
-      constexpr std::size_t device_block = 512ULL << 10;
-      const auto metadata = (device / device_block + 1) * 1024 + 4096;
-      backing->device_pool = std::make_unique<hip::CommittedBackingPool>(
-          ledger,
-          hip::BackingPoolConfig{
-              device + metadata, device_block, metadata, 128ULL << 20,
-              [hooks](std::size_t bytes) {
-                return hooks.host_ceiling() >= bytes &&
-                       DeviceCacheBudgetBytes() >= bytes;
-              },
-              [hooks](std::size_t bytes, std::size_t, std::size_t after) {
-                return after >= hip::kDispatchReserve &&
-                       hooks.host_ceiling() >= bytes &&
-                       DeviceCacheBudgetBytes() >= bytes;
-              },
-              cache::MemoryDomain::kDevice});
+      // Do not spend host headroom on an unused device tier. In particular,
+      // short histories must retain the same complete checkpoints as host-only
+      // serving. Initialize bookkeeping only when a capture reaches this tier.
+      backing->make_device_pool = [&ledger, hooks, device] {
+        constexpr std::size_t device_block = 512ULL << 10;
+        const auto metadata = (device / device_block + 1) * 1024 + 4096;
+        return std::make_unique<hip::CommittedBackingPool>(
+            ledger,
+            hip::BackingPoolConfig{
+                device + metadata, device_block, metadata, 128ULL << 20,
+                [hooks](std::size_t bytes) {
+                  return hooks.host_ceiling() >= bytes &&
+                         DeviceCacheBudgetBytes() >= bytes;
+                },
+                [hooks](std::size_t bytes, std::size_t, std::size_t after) {
+                  return after >= hip::kDispatchReserve &&
+                         hooks.host_ceiling() >= bytes &&
+                         DeviceCacheBudgetBytes() >= bytes;
+                },
+                cache::MemoryDomain::kDevice});
+      };
       hooks.info(
           "schema=component-cache-v1 event=device_backing_enabled "
           "capacity_bytes=" +
@@ -203,15 +222,15 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     backing->pool->GrowAhead((tokens >= 512 ? 2ULL : 1ULL) << 30);
   };
   result->can_capture = [backing](auto payloads) {
-    if (backing->device_pool &&
+    if (backing->make_device_pool &&
         std::ranges::any_of(payloads, [&](const auto& payload) {
           return backing->UsesDevice(payload);
         })) {
       std::vector<cache::PayloadRequest> host, device;
       for (const auto& payload : payloads)
         (backing->UsesDevice(payload) ? device : host).push_back(payload);
-      return (backing->pool->CanFit(host) &&
-              backing->device_pool->CanFit(device)) ||
+      auto* pool = backing->DevicePool();
+      return (pool && backing->pool->CanFit(host) && pool->CanFit(device)) ||
              backing->pool->CanFit(payloads);
     }
     return backing->pool->CanFit(payloads);
@@ -230,12 +249,14 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
         request.category == cache::ResourceCategory::kBackingAssigned
             ? cache::ResourceCategory::kBackingAssigned
             : request.category;
-    auto* pool = backing->UsesDevice(request) ? backing->device_pool.get()
-                                              : backing->pool.get();
+    auto* pool = backing->pool.get();
+    if (backing->UsesDevice(request))
+      if (auto* device = backing->DevicePool())
+        pool = device;
     auto segments = pool->PageCommitAllocations();
     const auto started = std::chrono::steady_clock::now();
     auto block = pool->TryAcquire(category, request.bytes);
-    if (!block && pool == backing->device_pool.get()) {
+    if (!block && pool != backing->pool.get()) {
       // Device pressure must not reject a capture the host pool can retain.
       pool = backing->pool.get();
       segments = pool->PageCommitAllocations();
@@ -256,7 +277,7 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     // Do not start registration between a capture's allocations and copies.
     // Each prefill chunk prepares its own reserve before GPU work.
     auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
-    if (pool == backing->device_pool.get())
+    if (pool != backing->pool.get())
       return cache::ComponentCaptureBuffer{
           owner->Bytes(),
           [owner] {

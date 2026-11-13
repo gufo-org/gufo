@@ -14,7 +14,7 @@
 #include "tests/cache/fake_adapter.hpp"
 
 namespace {
-void DevicePressureFallsBackToHost() {
+void DevicePressureFallsBackToHost(bool metadata_room = true) {
   using namespace gufo;
   constexpr std::size_t chunk = 512ULL << 10;
   class Adapter final : public cache::testing::FakeAdapter {
@@ -30,19 +30,27 @@ void DevicePressureFallsBackToHost() {
         cache::ComponentDescriptor{
             {1}, 1, cache::ComponentKind::kAppendRows, 1, chunk, 0, 0}};
   };
-  cache::ResourceLedger ledger(
-      {8ULL << 20, 6ULL << 20, 0, 8ULL << 20, 2 * chunk});
+  constexpr std::size_t host_only_bytes = (2ULL << 20) + (64ULL << 10);
+  cache::ResourceLedger ledger({8ULL << 20,
+                                metadata_room ? 6ULL << 20 : host_only_bytes, 0,
+                                8ULL << 20, 2 * chunk});
   {
     auto resources = hip::CreateHipComponentCacheResources(
         std::make_unique<Adapter>(), ledger,
         {[] { return 1ULL << 30; }, [](auto) {}, [](auto) {}, 2});
     resources->commit_backing(4ULL << 20);
+    // Merely advertising device capacity must not take host allocator
+    // headroom from histories which still use only the host pool.
+    assert(ledger.Snapshot().ram_bytes == host_only_bytes);
+    assert(ledger.Snapshot().device_bytes == 0);
     // A short history still uses host backing, even when device capacity is
     // available. The larger frontier below opts into the additional tier.
     auto short_history = resources->allocate(
         {{1}, cache::ResourceCategory::kBackingAssigned, 0, 1, chunk});
     assert(short_history.domain == cache::MemoryDomain::kHost);
     auto short_payload = short_history.finish();
+    assert(ledger.Snapshot().ram_bytes == host_only_bytes);
+    assert(ledger.Snapshot().device_bytes == 0);
     const cache::PayloadRequest request{
         {1}, cache::ResourceCategory::kBackingAssigned, 8, 9, chunk};
     const std::array requests{request, request, request};
@@ -161,4 +169,6 @@ int main() {
   assert(ledger.Snapshot().total_bytes == 0);
   assert(ledger.Snapshot().device_bytes == 0);
   DevicePressureFallsBackToHost();
+  // Failed device metadata admission must still permit host-only capture.
+  DevicePressureFallsBackToHost(false);
 }
