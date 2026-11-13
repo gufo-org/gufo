@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -49,7 +50,32 @@ struct CodePredictorOutput {
 
 /// Native gfx1151 talker prefill used as the first exact HIP parity boundary.
 /// Input embeddings must use row-major [tokens, hidden_size] layout.
-class TalkerHipRuntime {
+/// The talker operations synthesis uses, on the GPU (TalkerHipRuntime) or
+/// the NPU (npu::TalkerNpuRuntime).
+class TalkerBackend {
+public:
+  virtual ~TalkerBackend() = default;
+  [[nodiscard]] virtual bool BuildCustomVoicePrompt(
+      std::span<const std::uint32_t> input_ids,
+      std::span<const std::uint32_t> instruction_ids, std::string_view speaker,
+      std::string_view language, CustomVoicePromptOutput* output,
+      std::string* error = nullptr) = 0;
+  [[nodiscard]] virtual bool BuildVoiceDesignPrompt(
+      std::span<const std::uint32_t> input_ids,
+      std::span<const std::uint32_t> instruction_ids, std::string_view language,
+      TalkerPromptOutput* output, std::string* error = nullptr) = 0;
+  [[nodiscard]] virtual bool BuildVoiceClonePrompt(
+      const VoiceClonePromptInput& input, TalkerPromptOutput* output,
+      std::string* error = nullptr) = 0;
+  [[nodiscard]] virtual bool Generate(
+      const TalkerPromptOutput& prompt, std::size_t maximum_new_tokens,
+      const SamplingOptions& sampling, const CancellationCheck& is_cancelled,
+      TalkerGenerationOutput* output, std::string* error = nullptr,
+      const std::function<bool(const TalkerGenerationOutput&)>& on_codes =
+          {}) = 0;
+};
+
+class TalkerHipRuntime : public TalkerBackend {
 public:
   ~TalkerHipRuntime();
 
@@ -71,7 +97,7 @@ public:
       std::span<const std::uint32_t> input_ids,
       std::span<const std::uint32_t> instruction_ids, std::string_view speaker,
       std::string_view language, CustomVoicePromptOutput* output,
-      std::string* error = nullptr);
+      std::string* error = nullptr) override;
 
   /// Builds the official VoiceDesign prompt. A non-empty instruction is
   /// required by the service even though the low-level builder accepts an
@@ -79,13 +105,13 @@ public:
   [[nodiscard]] bool BuildVoiceDesignPrompt(
       std::span<const std::uint32_t> input_ids,
       std::span<const std::uint32_t> instruction_ids, std::string_view language,
-      TalkerPromptOutput* output, std::string* error = nullptr);
+      TalkerPromptOutput* output, std::string* error = nullptr) override;
 
   /// Builds the Base model voice-clone prompt in full ICL or
   /// speaker-embedding-only mode.
-  [[nodiscard]] bool BuildVoiceClonePrompt(const VoiceClonePromptInput& input,
-                                           TalkerPromptOutput* output,
-                                           std::string* error = nullptr);
+  [[nodiscard]] bool BuildVoiceClonePrompt(
+      const VoiceClonePromptInput& input, TalkerPromptOutput* output,
+      std::string* error = nullptr) override;
 
   /// Greedily expands one first-codebook token into all codec groups.
   [[nodiscard]] bool PredictCodeFrame(std::span<const float> talker_hidden,
@@ -131,7 +157,8 @@ public:
       const TalkerPromptOutput& prompt, std::size_t maximum_new_tokens,
       const SamplingOptions& sampling, const CancellationCheck& is_cancelled,
       TalkerGenerationOutput* output, std::string* error = nullptr,
-      const std::function<bool(const TalkerGenerationOutput&)>& on_codes = {});
+      const std::function<bool(const TalkerGenerationOutput&)>& on_codes = {})
+      override;
 
 private:
   struct Impl;

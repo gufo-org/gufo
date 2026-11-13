@@ -35,7 +35,8 @@ public:
   };
 
   /// Loads `dir`/bfpgemm.xclbin and `dir`/bfpgemm_dispatch.so. The weight
-  /// arena holds `arena_bytes` of packed matrices.
+  /// arena holds `arena_bytes` of packed matrices, at most 2 GiB (the
+  /// design's weight tensor).
   static BfpGemm Open(Device& device, const std::filesystem::path& dir,
                       std::size_t arena_bytes = std::size_t(1) << 30);
 
