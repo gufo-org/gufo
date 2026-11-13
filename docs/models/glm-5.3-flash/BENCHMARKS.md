@@ -3,7 +3,12 @@
 Model: `GLM-5.3-Flash-UD-IQ1_M` (90.87 GiB, `glm5-next` 320B.A18B, 1.75 bpw),
 `--n-gpu-layers 99`, flash-attn on, single UMA device (AMD Radeon 8060S,
 gfx1151), 126976 MiB. All runs go through `tools/bench/gpu_exclusive.sh`
-(bench_bg/bench_wait discipline).
+(bench_bg/bench_wait discipline). Gate and matched-A/B timings use
+`gufo serve` over HTTP with server-reported `timings` to replicate the
+captures below; `gufo bench` (registered for `glm5-next` since 2026-11-13)
+is the fast exact-depth scan tool and reads ~5 % faster on pp because it
+excludes the serve scheduler and HTTP (see
+[staging/models/glm5_next/AGENTS.md](../../../staging/models/glm5_next/AGENTS.md)).
 
 ## Reference (llama.cpp)
 
@@ -23,6 +28,11 @@ prompt_n ≈ 2232), so these cells are not comparable to the archived
 P6-column protocol (67.89 pp / 11.45 tg for P6 on the original session);
 same-session control was 66.7 ± 0.3 pp / 12.4 tg, making P7 **+19.7 %**
 matched. The P6 protocol text below is retained for history.
+
+Offline `gufo bench` reference point (same P7 code, GPU-exclusive,
+repetitions=2): pp2048 **85.11 ± 0.06**, tg32 **11.13 ± 0.07**
+(`/tmp/opencode/glm5_bench2k.log`). Use these only as offline scans, not
+interchangeably with the serve-protocol gate cells.
 
 Gufo column captured 2026-11-12 on `build/gpu-test/gufo` (P6 dense Q5_K
 WMMA tier over the P5 fixed + widened WMMA routed tier) through

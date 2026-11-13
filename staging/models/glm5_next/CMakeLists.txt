@@ -62,9 +62,10 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_glm5_next_executor PUBLIC
     gufo_glm5_next_kernels gufo_glm5_next gufo_core hip::host)
 
-  # Model/Session runtime consumed by the serve seam.
+  # Model/Session runtime consumed by the serve seam and the CLI bench.
   add_library(gufo_glm5_next_engine STATIC
-    engine.cpp)
+    engine.cpp
+    cli_runner.cpp)
   set_target_properties(gufo_glm5_next_engine PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
   target_include_directories(gufo_glm5_next_engine PUBLIC

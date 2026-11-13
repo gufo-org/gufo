@@ -19,6 +19,7 @@
 #include "src/families/qwen/text/chat_template.hpp"
 #include "src/families/qwen/vision/prompt.hpp"
 #include "staging/models/gemma4/cli_runner.hpp"
+#include "staging/models/glm5_next/cli_runner.hpp"
 #include "staging/models/ling3_0/cli_runner.hpp"
 #if defined(ENGINE_ENABLE_HIP)
 #include "staging/models/flint/cli_runner.hpp"
@@ -225,6 +226,10 @@ std::optional<int> StagingRunBenchmark(
   }
   if (models::flint::IsFlint(*reader)) {
     return models::flint::RunFlintBenchmark(opt, reader, model_load_start);
+  }
+  if (models::glm5_next::IsGlm5Next(*reader)) {
+    return models::glm5_next::RunGlm5NextBenchmark(opt, reader,
+                                                   model_load_start);
   }
 #else
   (void)opt;

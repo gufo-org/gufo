@@ -12,3 +12,18 @@ OOM-kills the host when anything else touches memory. At 131072 the KV costs
 server context are a different protocol and must say so.
 
 Results and protocol: [docs/models/glm-5.3-flash/BENCHMARKS.md](../../../docs/models/glm-5.3-flash/BENCHMARKS.md).
+
+## Measurement command
+
+Offline timing scan: `gufo bench --model <GGUF> --n-prompt <N> --n-gen <N>
+--repetitions 2` (registered through `staging/integration/staging_cli.cpp`;
+greedy, C1 only, no speculative path). It sizes the caches to the requested
+depth, loads in ~30 s and prints the standard table.
+
+Gate and matched-A/B numbers must still come from `gufo serve` over HTTP
+with server-reported timings (`tools/gufo/serving_bench.py`) to replicate
+the archived capture protocol; the offline bench reads ~5 % faster on pp
+(~6 t/s at 2048) because it excludes the serve scheduler and HTTP.
+`gufo serve` has no `/tokenize` endpoint; prompt depth is set with
+`serving_bench --prompt-repeat` and the exact depth is read back from
+the server-reported `prompt_n` in the result JSON.
