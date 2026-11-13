@@ -59,12 +59,8 @@ struct VisionTower::Impl {
   bool profile{std::getenv("GUFO_NPU_PROFILE") != nullptr};
   double t_gemm{}, t_qk{}, t_soft{}, t_pv{}, t_host{};
   using Clock = std::chrono::steady_clock;
-  // Process CPU seconds (every thread), for the profile.
-  static double Cpu() {
-    timespec ts{};
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
-    return double(ts.tv_sec) + double(ts.tv_nsec) * 1e-9;
-  }
+  // Process CPU seconds (every thread on Linux), for the profile.
+  static double Cpu() { return double(std::clock()) / CLOCKS_PER_SEC; }
   double c_gemm{}, c_qk{}, c_soft{}, c_pv{};
   static double Ms(Clock::time_point a) {
     return std::chrono::duration<double, std::milli>(Clock::now() - a).count();
