@@ -74,6 +74,9 @@ struct Runtime::Impl {
   std::vector<float> final_norm;
   std::unique_ptr<SplitQ8> lm_head;
   std::unique_ptr<Lane> lane;
+  // Decode on the fused NPU program (one dispatch per token) when the
+  // decoder's shape fits it; SplitQ8 products otherwise.
+  gufo::npu::Qwen3Decoder fused;
   std::vector<float> k_cache, v_cache;  // [layer][position][kv dim]
 
   const Tensor& Find(const std::string& name) const {
@@ -125,8 +128,6 @@ struct Runtime::Impl {
     device = gufo::npu::Device::Open();
     bfp = gufo::npu::BfpGemm::Open(device, gufo::npu::FindDesign("bfpgemm"),
                                    std::size_t(2040) << 20);
-    q8 = gufo::npu::Q8Gemm::Open(device, gufo::npu::FindDesign("q8gemm"),
-                                 std::size_t(2040) << 20);
     const std::string a = "thinker.audio_tower.";
     conv1_w = Vector(a + "conv2d1.weight");
     conv1_b = Vector(a + "conv2d1.bias");
@@ -167,6 +168,29 @@ struct Runtime::Impl {
 
     embed = reinterpret_cast<const std::uint16_t*>(
         Find("thinker.model.embed_tokens.weight").data);
+    using Fused = gufo::npu::Qwen3Decoder;
+    const char* fused_env = std::getenv("GUFO_NPU_FUSED");
+    const bool fits =
+        fused_env && std::string(fused_env) == "1" &&
+        text->num_hidden_layers == std::uint32_t(Fused::kLayers) &&
+        text->hidden_size == std::uint32_t(Fused::kHidden) &&
+        text->num_attention_heads == std::uint32_t(Fused::kHeads) &&
+        text->num_key_value_heads == std::uint32_t(Fused::kKvHeads) &&
+        text->head_dim == std::uint32_t(Fused::kHeadDim) &&
+        text->intermediate_size == std::uint32_t(Fused::kFfn) &&
+        text->vocab_size <= std::uint32_t(Fused::kMaxHeadRows);
+    if (fits) {
+      try {
+        fused = Fused::Open(device, gufo::npu::FindDesign("qwen3dec"));
+        if (std::size_t(fused.capacity()) < capacity)
+          fused = Fused();
+      } catch (const gufo::npu::Error&) {
+        fused = Fused();
+      }
+    }
+    if (!fused)
+      q8 = gufo::npu::Q8Gemm::Open(device, gufo::npu::FindDesign("q8gemm"),
+                                   std::size_t(2040) << 20);
     for (std::uint32_t l = 0; l < text->num_hidden_layers; ++l) {
       const std::string p = "thinker.model.layers." + std::to_string(l) + ".";
       DecoderLayer d;
@@ -179,18 +203,41 @@ struct Runtime::Impl {
       d.o_b = UploadBfp({p + "self_attn.o_proj.weight"});
       d.gate_up_b = UploadBfp(gu);
       d.down_b = UploadBfp({p + "mlp.down_proj.weight"});
-      d.qkv_q = UploadSplit(qkv);
-      d.o_q = UploadSplit({p + "self_attn.o_proj.weight"});
-      d.gate_up_q = UploadSplit(gu);
-      d.down_q = UploadSplit({p + "mlp.down_proj.weight"});
+      if (!fused) {
+        d.qkv_q = UploadSplit(qkv);
+        d.o_q = UploadSplit({p + "self_attn.o_proj.weight"});
+        d.gate_up_q = UploadSplit(gu);
+        d.down_q = UploadSplit({p + "mlp.down_proj.weight"});
+      }
       d.input_norm = Vector(p + "input_layernorm.weight");
       d.post_norm = Vector(p + "post_attention_layernorm.weight");
       d.q_norm = Vector(p + "self_attn.q_norm.weight");
       d.k_norm = Vector(p + "self_attn.k_norm.weight");
+      if (fused) {
+        auto bf = [&](const std::string& n) {
+          return reinterpret_cast<const std::uint16_t*>(Find(n).data);
+        };
+        fused.SetLayer(
+            int(l),
+            {bf(p + "self_attn.q_proj.weight"),
+             bf(p + "self_attn.k_proj.weight"),
+             bf(p + "self_attn.v_proj.weight"),
+             bf(p + "self_attn.o_proj.weight"), bf(p + "mlp.gate_proj.weight"),
+             bf(p + "mlp.up_proj.weight"), bf(p + "mlp.down_proj.weight"),
+             d.input_norm.data(), d.post_norm.data(), d.q_norm.data(),
+             d.k_norm.data()});
+      }
       dec.push_back(std::move(d));
     }
     final_norm = Vector("thinker.model.norm.weight");
-    lm_head = UploadSplit({"thinker.lm_head.weight"});
+    if (fused) {
+      fused.SetHead(reinterpret_cast<const std::uint16_t*>(
+                        Find("thinker.lm_head.weight").data),
+                    int(text->vocab_size), final_norm.data());
+      fused.SetRopeTheta(text->rope_theta);
+    } else {
+      lm_head = UploadSplit({"thinker.lm_head.weight"});
+    }
     lane = std::make_unique<Lane>();
     const std::size_t kv =
         std::size_t(text->num_key_value_heads) * text->head_dim;
@@ -603,6 +650,20 @@ struct Runtime::Impl {
     }
   }
 
+  // The greedy token of bf16-rounded logits (vocab_size when none is finite).
+  std::uint32_t Argmax(std::span<const float> logits) const {
+    std::uint32_t best = text->vocab_size;
+    float top = -std::numeric_limits<float>::infinity();
+    for (std::size_t i = 0; i < text->vocab_size; ++i) {
+      const float v = Round(logits[i]);
+      if (std::isfinite(v) && v > top) {
+        top = v;
+        best = std::uint32_t(i);
+      }
+    }
+    return best;
+  }
+
   std::uint32_t Select(const float* last) {
     const std::size_t hidden = text->hidden_size;
     std::vector<float> xn(hidden), logits(text->vocab_size);
@@ -658,8 +719,23 @@ struct Runtime::Impl {
           "Qwen3-ASR prompt/audio embedding count differs");
     for (std::size_t i = 0; i < audio.size(); ++i)
       x[audio_at * hidden + i] = Round(audio[i]);
-    Layers(x.data(), n, 0, true);
-    std::uint32_t token = Select(x.data() + (n - 1) * hidden);
+    std::uint32_t token;
+    if (fused) {
+      // Prefill all but the last prompt row, which the fused program decodes
+      // for the first token's logits.
+      if (n > 1)
+        Layers(x.data(), n - 1, 0, true);
+      const std::size_t kv = KvDim();
+      for (std::size_t l = 0; l < dec.size(); ++l)
+        fused.WriteKv(int(l), 0, int(n - 1), k_cache.data() + l * capacity * kv,
+                      kv, v_cache.data() + l * capacity * kv, kv);
+      fused.Start(x.data() + (n - 1) * hidden, int(n - 1));
+      fused.Wait();
+      token = Argmax(fused.logits());
+    } else {
+      Layers(x.data(), n, 0, true);
+      token = Select(x.data() + (n - 1) * hidden);
+    }
     const double t_prefill = Ms(t0);
     const auto t1 = Clock::now();
     gemm_ms = head_ms = 0;
@@ -680,8 +756,16 @@ struct Runtime::Impl {
       if (cancelled && cancelled())
         throw std::runtime_error("Qwen3-ASR transcription cancelled");
       Embed(token, h.data());
-      Layers(h.data(), 1, pos++, false);
-      token = Select(h.data());
+      if (fused) {
+        const auto t = Clock::now();
+        fused.Start(h.data(), int(pos++));
+        fused.Wait();
+        gemm_ms += Ms(t);
+        token = Argmax(fused.logits());
+      } else {
+        Layers(h.data(), 1, pos++, false);
+        token = Select(h.data());
+      }
       push(token);
     }
     if (profile)
