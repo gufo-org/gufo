@@ -30,11 +30,16 @@ from pathlib import Path
 
 FIXTURE = (Path(__file__).resolve().parents[1] / "fixtures" /
            "embedding_gemma2" / "embedding_golden.json")
-MINIMUM_COSINE = 0.9999
 MAX_INPUT_TOKENS = 8192
 LONG_SENTENCE = ("The northern lights, or aurora borealis, are produced when "
                  "charged particles collide with gases. ")
 
+
+
+# Cosine gates: against the reference vectors, and between responses that
+# must agree (batching, truncation, encodings). Backends with lower-precision
+# arithmetic (--npu) pass measured values on the command line.
+THRESHOLDS = {"reference": 0.9999, "consistency": 0.99999}
 
 def cosine(a, b):
     dot = sum(x * y for x, y in zip(a, b))
@@ -95,7 +100,7 @@ def check_truncate(openai, client, model):
     prefix = embed(long_text[:low])
     assert prefix.usage.prompt_tokens == MAX_INPUT_TOKENS, prefix.usage
     assert cosine(cut.data[0].embedding,
-                  prefix.data[0].embedding) > 0.99999
+                  prefix.data[0].embedding) > THRESHOLDS["consistency"]
 
     check("truncate: a batch truncates only the over-length input")
     short = embed("hello")
@@ -103,8 +108,8 @@ def check_truncate(openai, client, model):
     assert [item.index for item in batch.data] == [0, 1]
     assert batch.usage.prompt_tokens == (short.usage.prompt_tokens +
                                          MAX_INPUT_TOKENS), batch.usage
-    assert cosine(batch.data[0].embedding, short.data[0].embedding) > 0.99999
-    assert cosine(batch.data[1].embedding, cut.data[0].embedding) > 0.99999
+    assert cosine(batch.data[0].embedding, short.data[0].embedding) > THRESHOLDS["consistency"]
+    assert cosine(batch.data[1].embedding, cut.data[0].embedding) > THRESHOLDS["consistency"]
 
     check("truncate: a non-boolean value is refused")
     expect_error(openai, lambda: embed("hello", truncate="yes"), 400,
@@ -119,14 +124,14 @@ def check_request_members(openai, client, model, texts, single):
         model=model, input=texts[0], encoding_format="float",
         extra_body={"normalize": True, "client_tag": "functional"})
     assert cosine(extra.data[0].embedding,
-                  single.data[0].embedding) > 0.99999
+                  single.data[0].embedding) > THRESHOLDS["consistency"]
 
     check("embd_normalize 2 is accepted and other values are refused")
     euclidean = client.embeddings.create(
         model=model, input=texts[0], encoding_format="float",
         extra_body={"embd_normalize": 2})
     assert cosine(euclidean.data[0].embedding,
-                  single.data[0].embedding) > 0.99999
+                  single.data[0].embedding) > THRESHOLDS["consistency"]
     expect_error(openai, lambda: client.embeddings.create(
         model=model, input=texts[0], extra_body={"embd_normalize": 0}),
         400, "unsupported_embd_normalize", "embd_normalize 0")
@@ -136,7 +141,7 @@ def check_request_members(openai, client, model, texts, single):
                          body={"model": model, "content": texts[0]})
     assert [item["index"] for item in native] == [0], native
     assert cosine(native[0]["embedding"][0],
-                  single.data[0].embedding) > 0.99999
+                  single.data[0].embedding) > THRESHOLDS["consistency"]
 
 
 def check_prompt_names(openai, client, model):
@@ -158,13 +163,13 @@ def check_prompt_names(openai, client, model):
         assert named.usage.prompt_tokens == written.usage.prompt_tokens, (
             named.usage, written.usage)
         assert cosine(named.data[0].embedding,
-                      written.data[0].embedding) > 0.99999
+                      written.data[0].embedding) > THRESHOLDS["consistency"]
 
     check("prompt_name: an empty name applies no prompt")
     plain = embed(text)
     empty = embed(text, prompt_name="")
     assert empty.usage.prompt_tokens == plain.usage.prompt_tokens
-    assert cosine(empty.data[0].embedding, plain.data[0].embedding) > 0.99999
+    assert cosine(empty.data[0].embedding, plain.data[0].embedding) > THRESHOLDS["consistency"]
 
     check("prompt_name: an unknown name is refused")
     expect_error(openai, lambda: embed(text, prompt_name="no-such-prompt"), 400,
@@ -176,7 +181,12 @@ def main():
     parser.add_argument("--base-url", default="http://127.0.0.1:8080/v1")
     parser.add_argument("--model", default="embeddinggemma-2")
     parser.add_argument("--output", type=Path, help="Retain every response and request timing")
+    parser.add_argument("--reference-cosine", type=float, default=THRESHOLDS["reference"],
+                        help="Minimum cosine against the reference vectors")
+    parser.add_argument("--consistency-cosine", type=float, default=THRESHOLDS["consistency"],
+                        help="Minimum cosine between responses that must agree")
     args = parser.parse_args()
+    THRESHOLDS["reference"], THRESHOLDS["consistency"] = args.reference_cosine, args.consistency_cosine
 
     import openai
 
@@ -213,7 +223,7 @@ def main():
     for case, item, expected in zip(cases, response.data, reference):
         assert len(item.embedding) == 768, case["name"]
         score = cosine(item.embedding, expected)
-        assert score >= MINIMUM_COSINE, (case["name"], score)
+        assert score >= THRESHOLDS["reference"], (case["name"], score)
     assert response.usage.prompt_tokens == sum(
         len(case["token_ids"]) for case in cases), response.usage
     assert response.model == args.model, response.model
@@ -221,20 +231,20 @@ def main():
     check("single string input equals the batched result")
     single = client.embeddings.create(model=args.model, input=texts[0])
     assert cosine(single.data[0].embedding,
-                  response.data[0].embedding) >= MINIMUM_COSINE
+                  response.data[0].embedding) >= THRESHOLDS["reference"]
 
     check("float encoding equals base64 encoding")
     as_float = client.embeddings.create(model=args.model, input=texts[:2],
                                         encoding_format="float")
     for floats, decoded in zip(as_float.data, response.data[:2]):
-        assert cosine(floats.embedding, decoded.embedding) > 0.99999
+        assert cosine(floats.embedding, decoded.embedding) > THRESHOLDS["consistency"]
 
     check("raw base64 payload is little-endian float32")
     raw = client.embeddings.with_raw_response.create(
         model=args.model, input=texts[2], encoding_format="base64").http_response
     payload = raw.json()["data"][0]["embedding"]
     values = struct.unpack("<768f", base64.b64decode(payload))
-    assert cosine(values, response.data[2].embedding) > 0.99999
+    assert cosine(values, response.data[2].embedding) > THRESHOLDS["consistency"]
 
     for size in (128, 256, 512):
         check(f"dimensions={size} truncates and renormalizes")
@@ -245,7 +255,7 @@ def main():
             assert math.isclose(sum(x * x for x in item.embedding), 1.0,
                                 rel_tol=1e-4)
             assert cosine(item.embedding, truncated(expected, size)) \
-                >= MINIMUM_COSINE
+                >= THRESHOLDS["reference"]
 
     check("concurrent identical requests agree")
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
@@ -257,7 +267,7 @@ def main():
     worst = min(cosine(item.embedding, expected.embedding)
                 for result in results
                 for item, expected in zip(result.data, response.data))
-    assert worst > MINIMUM_COSINE, worst
+    assert worst > THRESHOLDS["reference"], worst
     check(f"concurrent requests match a lone request, worst cosine {worst:.8f}")
 
     check("model listing names only the embedding model")

@@ -147,6 +147,10 @@ def pack(package, revision, destination):
         shutil.copy2(ffmpeg[0] / 'bin' / name, destination / 'libexec' / name)
         launcher(destination, name, loader, libraries, {})
         environment['GUFO_' + name.upper()] = destination.relative_to(root).as_posix() + '/' + name
+    # The bundled loader is the process image, so Gufo cannot find its NPU
+    # designs beside the executable; point it at the copied share directory.
+    if (destination / 'share/gufo/npu').is_dir():
+        environment['GUFO_NPU_DESIGNS'] = destination.relative_to(root).as_posix() + '/share/gufo/npu'
     launcher(destination, 'gufo', loader, libraries, environment)
     (destination / 'gufo-server').symlink_to('gufo')
     executable = destination / 'libexec/gufo'

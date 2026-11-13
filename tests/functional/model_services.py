@@ -20,6 +20,12 @@ from service_http import Evidence, sha256
 HERE = Path(__file__).resolve().parent
 
 
+
+# Minimum cosine of --npu embeddings against the reference vectors: the NPU
+# path rounds every matrix product to bfp16 (worst measured 0.99894 on the
+# image, video and text fixtures; the GPU gate is 0.9999).
+NPU_REFERENCE_COSINE = 0.998
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('service', choices=('embedding', 'asr', 'tts'))
@@ -34,7 +40,7 @@ def main():
     parser.add_argument('--asr-model', type=Path)
     parser.add_argument('--startup-timeout', type=float, default=300)
     parser.add_argument('--npu', action='store_true',
-                        help='Serve on the XDNA NPU (--npu); embeddings check text only')
+                        help='Serve on the XDNA NPU (--npu); embeddings use the NPU cosine gate')
     args = parser.parse_args()
     if args.service == 'tts' and not (args.asr_binary and args.asr_model):
         parser.error('TTS requires --asr-binary and --asr-model for intelligibility checks')
@@ -91,8 +97,6 @@ def main():
             if args.service == 'embedding':
                 scripts = ('embedding_video.py',) if args.embedding_suite == 'smoke' else (
                     'embeddings.py', 'embedding_images.py', 'embedding_audio.py', 'embedding_video.py')
-                if args.npu:  # the NPU encoder embeds text only
-                    scripts = ('embeddings.py',)
                 report['embedding_suite'] = args.embedding_suite
                 for script in scripts:
                     with evidence.case(script):
@@ -100,6 +104,8 @@ def main():
                                   '--model', public_model, '--output', str(output / (script + '.json'))]
                         if script == 'embedding_video.py' and args.embedding_suite == 'smoke':
                             launch += ['--smoke']
+                        if args.npu:  # bfp16 NPU products: measured worst 0.99894
+                            launch += ['--reference-cosine', str(NPU_REFERENCE_COSINE)]
                         if script in ('embedding_audio.py', 'embedding_video.py'):
                             launch += ['--server-log', str(output / 'server.log')]
                         with (output / (script + '.log')).open('w') as log:

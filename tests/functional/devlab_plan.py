@@ -104,8 +104,6 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
             suites = {'embedding': (['embedding-smoke'] if tier == 'pr' else
                                      ['embedding-text', 'embedding-images', 'embedding-audio', 'embedding-video']),
                       'asr': ['asr-http'], 'tts': ['tts-http']}[model['category']]
-            if model.get('npu') and model['category'] == 'embedding':
-                suites = ['embedding-text']  # the NPU encoder embeds text only
             result['groups'].append({'profile': key + ('/npu' if model.get('npu') else '/native'),
                                      'configuration': 'standard', 'settings': {}, 'suites': suites})
     return result

@@ -119,7 +119,7 @@ class PlanTest(unittest.TestCase):
         self.assertEqual({group['profile'] for group in plan['groups']},
                          {'embedding-gemma2-npu/npu', 'qwen3-asr-npu/npu', 'qwen3-tts-custom-npu/npu'})
         embedding = [g for g in plan['groups'] if g['profile'].startswith('embedding')][0]
-        self.assertEqual(embedding['suites'], ['embedding-text'])
+        self.assertEqual(embedding['suites'], ['embedding-smoke'])
         args = devlab_run.service_args('qwen3-asr-npu', Path('/head'), Path('/base'),
                                        {'asr': '/asr'}, Path('/out'))
         self.assertEqual(args[-1], '--npu')

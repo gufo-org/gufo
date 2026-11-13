@@ -89,6 +89,8 @@ public:
       /// When >= 0: a copy of specs[same_as] (earlier in the list), not
       /// encoded again.
       int same_as = -1;
+      /// When set: the elements as bf16 at the same strides (weights unused).
+      const std::uint16_t* weights16 = nullptr;
     };
     /// Uploads several matrices in one pass, consecutively; returns their ids.
     std::vector<int> UploadMany(std::span<const Spec> specs);
