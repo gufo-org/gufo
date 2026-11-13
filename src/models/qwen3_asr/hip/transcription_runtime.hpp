@@ -21,7 +21,7 @@ public:
 
   [[nodiscard]] static std::unique_ptr<TranscriptionHipRuntime> Create(
       const std::string& model_root, std::size_t maximum_context_tokens = 1024,
-      std::string* error = nullptr);
+      std::string* error = nullptr, bool use_npu = false);
 
   [[nodiscard]] bool Transcribe(const TranscriptionRequest& request,
                                 const CancellationCheck& is_cancelled,

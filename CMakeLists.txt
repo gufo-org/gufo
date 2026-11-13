@@ -808,6 +808,7 @@ endfunction()
   add_executable(transcribe_cli_test
     tests/cli/transcribe_test.cpp
     src/cli/transcribe/transcribe.cpp
+    src/cli/provider_options.cpp
     src/cli/serve/audio_buffer.cpp)
   target_link_libraries(transcribe_cli_test PRIVATE gufo_core gufo_ext_runtime)
   add_test(NAME transcribe_cli_test COMMAND transcribe_cli_test
