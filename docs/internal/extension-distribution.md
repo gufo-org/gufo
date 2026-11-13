@@ -70,6 +70,33 @@ binary's own output, not another `gufo` from `PATH`:
 /path/to/installed/gufo diagnose --section extensions --json
 ```
 
+## Running third-party extensions
+
+An unreviewed extension gets everything the server process gets. Whatever
+service manager or container runtime you use, give that process only what
+inference needs:
+
+- **Network:** none. Gufo binds `127.0.0.1` by default and serves from a network
+  namespace that has only `lo`; forward one socket into it for clients.
+- **Devices:** `/dev/kfd` and the DRM nodes under `/dev/dri`, with the `video`
+  and `render` groups. Both are needed: without the DRM nodes the kernel logs
+  `amdgpu: no gpu node! Cannot create KFD process` and Gufo reports no ROCm
+  device.
+- **Files:** read-only models, binary and extension store. Only `/tmp` and a
+  [`--cache-disk`](../cache.md#disk) directory need to be writable.
+- **Privileges:** no capabilities and no new privileges; an unlimited
+  `memlock` limit, as in [install](../install.md#container).
+
+Install or build the extension in a separate step, with network access but no
+devices or models, and pin an exact commit. Gufo has no authentication, so
+remote clients need a reverse proxy with TLS and access control; see
+[exposure](../server.md#exposure).
+
+> **Warning:** This limits what an extension can reach; it isn't a sandbox. The
+> process still drives the GPU, reads every mounted model and sees every
+> request, and the extension's build scripts run when it is installed or
+> compiled in.
+
 ## Modules
 
 A module is the same extension source built as a loadable library against the
