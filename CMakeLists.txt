@@ -306,7 +306,8 @@ gufo_npu_design(q8gemm SCRIPT src/core/npu/kernels/q8gemm/q8gemm.py
 gufo_npu_design(bfpgemm SCRIPT src/core/npu/kernels/bfpgemm/bfpgemm.py
   SOURCES src/core/npu/kernels/bfpgemm/bfpgemm.cc
           src/core/npu/kernels/bfpgemm/vendor/aie_kernel_utils.h
-          src/core/npu/kernels/bfpgemm/vendor/aie_arch.h)
+          src/core/npu/kernels/bfpgemm/vendor/aie_arch.h
+  PROGRAMS bfpgemm bfpgemm_s)
 
 add_library(gufo_core STATIC
   src/core/base64.cpp

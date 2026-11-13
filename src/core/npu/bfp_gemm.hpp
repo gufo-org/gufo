@@ -3,12 +3,13 @@
 // BF16 x BFP16 matrix products on the NPU for many rows (prefill, encoders,
 // embeddings): y = W x, with the weights resident in one arena buffer as
 // bfp16ebs8 (blocks of 8 values sharing an exponent, 8-bit mantissas). The
-// program is the IRON design in src/core/npu/kernels/bfpgemm.
+// programs are the IRON designs in src/core/npu/kernels/bfpgemm.
 //
-// x is rounded to bf16 and converted to bfp16 on the cores; outputs
-// accumulate in bf16. Each product is within about 1% relative of f32
-// arithmetic. Rows go in bands of 512 and outputs in groups of 1024, so for a
-// few rows Q8Gemm is faster.
+// x is encoded to bfp16 on the host; outputs accumulate in bf16. Each
+// product is within about 1% relative of f32 arithmetic. Outputs go in groups
+// of 1024 and rows in bands of 512, or of 128 (the bfpgemm_s program) once a
+// few consecutive Runs have at most 128 rows: switching programs costs about
+// 2.3 ms. For one or a few rows Q8Gemm is faster.
 //
 // Run is thread-safe: up to four threads stage their products at once, so one
 // thread's host work (packing, unpacking, its own CPU operators) overlaps the

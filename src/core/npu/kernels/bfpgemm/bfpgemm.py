@@ -1,29 +1,36 @@
-"""BF16 x BFP16 GEMM on the whole NPU (8 columns x 4 rows): C = A W^T for
-many rows of A, the prefill-sized counterpart of q8gemm.py.
+"""BFP16 GEMM on the whole NPU (8 columns x 4 rows): C = A W^T for many rows
+of A, the prefill-sized counterpart of q8gemm.py.
 
 The cores are mlir-aie's asymmetric-tile-buffering design
 (programming_examples/ml/block_datatypes/gemm_asymmetric_tile_buffering,
-config1): each core owns a 128 x 128 C tile, A arrives as bf16 and is
-converted to bfp16ebs8 on the core, W is pre-encoded bfp16ebs8 (bfpgemm.cc).
-A group is 512 rows (4 core rows x 128) by 1024 outputs (8 core columns x
-128). Shapes are set at dispatch time, so one xclbin serves every matrix.
+config1, bfpgemm.cc), with A pre-encoded to bfp16ebs8 by the host as config3
+does, so each core's A stream carries 9 bytes per 8 values instead of 16 and
+the cores skip the conversion. W is bfp16ebs8; C accumulates and leaves as
+bf16. Each core owns an M_T x 128 C tile; a group is 1024 outputs (8 core
+columns x 128). Two programs: bfpgemm (M_T = 128, bands of 512 rows) and
+bfpgemm_s (M_T = 32, bands of 128 rows, for short products). Shapes are set at
+dispatch time, so one xclbin serves every matrix.
 
-One job is one band of 512 rows of A against `ng` groups of 1024 outputs, all
-of K; ng <= 64 and ng K / 64 <= 1023 (shim BD limits). Host layouts (bfp_gemm.cpp packs and unpacks them):
-  A   [band][core row r][K / 512][128][512] bf16: each core row's strip is
-      contiguous, so its memtile receives (128, 512) objects.
-  W   [core column c][group][K / 64][64 x 16 bfp16ebs8]: the
-      L1-tiled, 1x2 8x8 block shuffle of mlir-aie's gemm_atb_layout.h.
-  C   [core column c][group][512][128] bf16.
+A job is one band by up to `ng` output groups, or one group by up to `nb`
+bands (the W matrix advancing by b_rep words per band: 0 within one product,
+a matrix stride for a batch of products). Host layouts (bfp_gemm.cpp):
+  A   [core row][band][K / 512][k block 8][32-row sub-tile][row pair 2]
+      [column block 8][half 2][row 8] groups of 8 k values (bfp16ebs8): the
+      order the cores' MAC loop reads, forwarded by the memtiles unchanged.
+  W   [core column c][group][K / 64][64 x 16 bfp16ebs8]: the L1-tiled, 1x2
+      8x8 block shuffle of mlir-aie's gemm_atb_layout.h.
+  C   [core column c][tile][4 M_T][128] bf16.
 
-Dispatch-time values: ng (groups), kb = K / 64 (k blocks per tile), kc =
-K / 512, a_base and a_row (A words of the band and of one core row's strip),
-b_base and b_col (W words of the job and of one column's groups), c_base and
-c_col (C words). Instruction streams of several jobs concatenate into one
-dispatch; the cores restart at every barrier.
-Usage: bfpgemm.py <out dir>: writes bfpgemm.xclbin and bfpgemm_dispatch.so,
-the files gufo::npu::BfpGemm::Open loads (src/core/npu/bfp_gemm.hpp). Needs an
-mlir-aie (IRON) Python with Peano.
+Dispatch-time values: ng, nb, kb = K / 64, tiles = ng nb, nb kc, ng kb, b_rep,
+a_base and a_row (A words of the job and of one core row's strip), b_base and
+b_col (W words of the job and of one column's groups), c_base and c_col (C
+words), t1 and t2 (the tiles core columns 2-3 and 4-7 compute and drain: all,
+or 1 when those columns have no outputs; they then only pass A and B along).
+Instruction streams of several jobs concatenate into one dispatch; the cores
+restart at every barrier.
+Usage: bfpgemm.py <out dir>: writes bfpgemm.xclbin, bfpgemm_s.xclbin and their
+dispatch libraries, the files gufo::npu::BfpGemm::Open loads
+(src/core/npu/bfp_gemm.hpp). Needs an mlir-aie (IRON) Python with Peano.
 """
 import os
 import sys
