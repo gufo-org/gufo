@@ -249,6 +249,16 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   including new `rocm_ops` bit-exact checks of chunk conv and fused
   fold/update against the per-token chains
   (`/tmp/opencode/glm5_kda_gate.sh`, `/tmp/opencode/gufo_bench_kda1.log`).
+- Row-batched HC/MoE elementwise loops (`MoERoute`, `HcCoeffs`,
+  `HcInputs` (+ `pre_stride` for the mean broadcast), `HcWriteback`,
+  `WeightedSumAdd`): one launch per chunk via `blockIdx.y`, row pitches
+  derived from the existing sizes, block-local state per row so the
+  per-row order is untouched. Offline A/B (alternating, warm+2): pp2048
+  132.89/132.93 -> **164.27/165.03 (+23.9 %)**; n-gen-1 output sha256
+  `43557e0c…` identical across both binaries and all four runs; full
+  `glm5_next` ctest 9/9 GPU-exclusive including new `rocm_ops`
+  row-batch bit-exact checks for all five ops
+  (`/tmp/opencode/glm5_rows_gate.sh`, `/tmp/opencode/gufo_bench_rows1.log`).
 
 ## Next candidates (measured order from P3d, P3e updated)
 

@@ -135,8 +135,13 @@ __global__ void HcCoeffsKernel(const float* __restrict__ mixes,
                                const float* __restrict__ scale,
                                const float* __restrict__ base, unsigned iters,
                                float eps, float* __restrict__ pre,
-                               float* __restrict__ post,
-                               float* __restrict__ comb) {
+                                float* __restrict__ post,
+                                float* __restrict__ comb) {
+  const std::size_t row = blockIdx.y;
+  mixes += row * 24;
+  pre += row * 4;
+  post += row * 4;
+  comb += row * 16;
   float a[24];
   for (int i = 0; i < 24; ++i) {
     const int role = i < 4 ? 0 : (i < 8 ? 1 : 2);
@@ -209,8 +214,13 @@ __global__ void HcCoeffsKernel(const float* __restrict__ mixes,
 }
 
 __global__ void HcInputsKernel(const float* __restrict__ streams,
-                               const float* __restrict__ pre, std::uint32_t n,
+                               const float* __restrict__ pre,
+                               std::uint32_t pre_stride, std::uint32_t n,
                                float* __restrict__ dst) {
+  const std::size_t row = blockIdx.y;
+  streams += row * 4 * n;
+  pre += row * pre_stride;
+  dst += row * n;
   const std::size_t i =
       static_cast<std::size_t>(blockIdx.x) * kBlock + threadIdx.x;
   if (i >= static_cast<std::size_t>(n)) {
@@ -232,6 +242,12 @@ __global__ void HcWritebackKernel(const float* __restrict__ y,
                                   const float* __restrict__ post,
                                   const float* __restrict__ comb,
                                   std::uint32_t n, float* __restrict__ out) {
+  const std::size_t row = blockIdx.y;
+  y += row * n;
+  res += row * 4 * n;
+  post += row * 4;
+  comb += row * 16;
+  out += row * 4 * n;
   const std::size_t i =
       static_cast<std::size_t>(blockIdx.x) * kBlock + threadIdx.x;
   if (i >= static_cast<std::size_t>(n)) {
@@ -605,8 +621,12 @@ __global__ void SwigluClampKernel(const float* __restrict__ gate,
 __global__ void WeightedSumAddKernel(float* __restrict__ dst,
                                      const float* __restrict__ src,
                                      const float* __restrict__ weights,
-                                     std::uint32_t rows, std::uint32_t n,
-                                     std::uint32_t stride) {
+                                      std::uint32_t rows, std::uint32_t n,
+                                      std::uint32_t stride) {
+  const std::size_t row = blockIdx.y;
+  dst += row * n;
+  src += row * static_cast<std::size_t>(rows) * stride;
+  weights += weights != nullptr ? row * rows : 0;
   for (std::uint32_t i = blockIdx.x * kBlock + threadIdx.x; i < n;
        i += gridDim.x * kBlock) {
     float acc = 0.0F;
@@ -627,8 +647,12 @@ __global__ void WeightedSumAddKernel(float* __restrict__ dst,
 __global__ void MoERouteKernel(const float* __restrict__ logits,
                                const float* __restrict__ bias, unsigned experts,
                                unsigned top_k, float scale,
-                               float* __restrict__ weights,
-                               std::int32_t* __restrict__ ids) {
+                                float* __restrict__ weights,
+                                std::int32_t* __restrict__ ids) {
+  const std::size_t row = blockIdx.y;
+  logits += row * experts;
+  weights += row * top_k;
+  ids += row * top_k;
   __shared__ float s[1024];   // selection keys (sigmoid + bias)
   __shared__ float p[1024];   // unbiased sigmoid probabilities (weights)
   __shared__ std::uint64_t red[1024 / 32];  // one warp-leader key each
@@ -773,23 +797,28 @@ void LayerNorm(const float* x, const float* w, const float* b, float* dst,
 
 void HcCoeffs(const float* mixes, const float* scale, const float* base,
               std::uint32_t sinkhorn_iters, float eps, float* pre, float* post,
-              float* comb, hipStream_t stream) {
-  HcCoeffsKernel<<<1, 1, 0, stream>>>(mixes, scale, base, sinkhorn_iters, eps,
-                                      pre, post, comb);
+              float* comb, std::uint32_t rows, hipStream_t stream) {
+  HcCoeffsKernel<<<dim3(1, rows), 1, 0, stream>>>(mixes, scale, base,
+                                                  sinkhorn_iters, eps, pre,
+                                                  post, comb);
 }
 
-void HcInputs(const float* streams, const float* pre, std::uint32_t hc_count,
-              std::uint32_t n, float* dst, hipStream_t stream) {
+void HcInputs(const float* streams, const float* pre,
+              std::uint32_t pre_stride, std::uint32_t hc_count,
+              std::uint32_t n, float* dst, std::uint32_t rows,
+              hipStream_t stream) {
   (void)hc_count;  // contract: four streams (config hc_count)
-  HcInputsKernel<<<Grid1D(n), kBlock, 0, stream>>>(streams, pre, n, dst);
+  HcInputsKernel<<<dim3(Grid1D(n), rows), kBlock, 0, stream>>>(streams, pre,
+                                                               pre_stride, n,
+                                                               dst);
 }
 
 void HcWriteback(const float* y, const float* res, const float* post,
                  const float* comb, std::uint32_t hc_count, std::uint32_t n,
-                 float* out, hipStream_t stream) {
+                 float* out, std::uint32_t rows, hipStream_t stream) {
   (void)hc_count;
-  HcWritebackKernel<<<Grid1D(n), kBlock, 0, stream>>>(y, res, post, comb, n,
-                                                      out);
+  HcWritebackKernel<<<dim3(Grid1D(n), rows), kBlock, 0, stream>>>(
+      y, res, post, comb, n, out);
 }
 
 void KdaConvStep(std::uint64_t pos, const float* raw, const float* w,
@@ -958,9 +987,10 @@ void TopKDesc(const float* scores, std::uint32_t n, std::uint32_t k,
 
 void MoERoute(const float* logits, const float* bias, std::uint32_t experts,
               std::uint32_t top_k, float scale, float* weights,
-              std::int32_t* ids, hipStream_t stream) {
-  MoERouteKernel<<<1, 1024, 0, stream>>>(logits, bias, experts, top_k, scale,
-                                         weights, ids);
+              std::int32_t* ids, std::uint32_t rows, hipStream_t stream) {
+  MoERouteKernel<<<dim3(1, rows), 1024, 0, stream>>>(logits, bias, experts,
+                                                     top_k, scale, weights,
+                                                     ids);
 }
 
 void Scale(float* x, std::uint32_t total, float s, hipStream_t stream) {
@@ -1041,9 +1071,9 @@ void SwigluClamp(const float* gate, const float* up, float* dst,
 
 void WeightedSumAdd(float* dst, const float* src, const float* weights,
                     std::uint32_t rows, std::uint32_t n, std::uint32_t stride,
-                    hipStream_t stream) {
-  WeightedSumAddKernel<<<Grid1D(n), kBlock, 0, stream>>>(dst, src, weights,
-                                                         rows, n, stride);
+                    std::uint32_t batch, hipStream_t stream) {
+  WeightedSumAddKernel<<<dim3(Grid1D(n), batch), kBlock, 0, stream>>>(
+      dst, src, weights, rows, n, stride);
 }
 
 }  // namespace gufo::models::glm5_next::rocm

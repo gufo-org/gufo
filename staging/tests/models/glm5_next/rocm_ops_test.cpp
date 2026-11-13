@@ -143,7 +143,7 @@ bool TestHcCoeffs() {
   t::HipBuffer<float> d_post(4);
   t::HipBuffer<float> d_comb(16);
   q::HcCoeffs(d_mixes.get(), d_scale.get(), d_base.get(), kSinkhornIters, 1e-6F,
-              d_pre.get(), d_post.get(), d_comb.get(), nullptr);
+              d_pre.get(), d_post.get(), d_comb.get(), 1U, nullptr);
   const auto got_pre = t::Download(&d_pre, 4);
   const auto got_post = t::Download(&d_post, 4);
   const auto got_comb = t::Download(&d_comb, 16);
@@ -260,7 +260,8 @@ bool TestHcCombine() {
   t::Upload(&d_y, y);
 
   t::HipBuffer<float> d_in(n);
-  q::HcInputs(d_streams.get(), d_pre.get(), 4, n, d_in.get(), nullptr);
+  q::HcInputs(d_streams.get(), d_pre.get(), 4U, 4, n, d_in.get(), 1U,
+              nullptr);
   const auto got_in = t::Download(&d_in, n);
   std::vector<float> ref_in(n);
   for (std::uint32_t i = 0; i < n; ++i) {
@@ -289,7 +290,7 @@ bool TestHcCombine() {
 
   t::HipBuffer<float> d_out(streams.size());
   q::HcWriteback(d_y.get(), d_streams.get(), d_post.get(), d_comb.get(), 4, n,
-                 d_out.get(), nullptr);
+                 d_out.get(), 1U, nullptr);
   const auto got = t::Download(&d_out, streams.size());
   // Same cancellation-floor effect as hc_inputs.
   ok &= Check("hc_writeback", t::WorstRelative(ref, got), 1e-4);
@@ -297,7 +298,7 @@ bool TestHcCombine() {
   t::HipBuffer<float> d_alias(streams.size());
   t::Upload(&d_alias, streams);
   q::HcWriteback(d_y.get(), d_alias.get(), d_post.get(), d_comb.get(), 4, n,
-                 d_alias.get(), nullptr);
+                 d_alias.get(), 1U, nullptr);
   const auto got_alias = t::Download(&d_alias, streams.size());
   ok &= Check("hc_writeback aliased", t::WorstRelative(ref, got_alias), 1e-4);
   return ok;
@@ -542,6 +543,198 @@ bool TestKdaFoldUpdateChunkBitExact() {
   return ok;
 }
 
+bool BitEqual(const std::vector<float>& a, const std::vector<float>& b) {
+  if (a.size() != b.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    if (a[i] != b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Row batching (blockIdx.y) must reproduce the per-row launches exactly,
+// so the executor can run one launch per chunk.
+bool TestRowBatchBitExact() {
+  bool ok = true;
+  {
+    const auto mixes = t::MakeValues(3 * 24, 0x1111AABBU, 4.0F);
+    const auto scale = t::MakeValues(3, 0x5150A5A5U, 0.5F, 1.0F);
+    const auto base = t::MakeValues(24, 0x2468ACE0U, 1.0F);
+    t::HipBuffer<float> d_mixes(mixes.size());
+    t::Upload(&d_mixes, mixes);
+    t::HipBuffer<float> d_scale(scale.size());
+    t::Upload(&d_scale, scale);
+    t::HipBuffer<float> d_base(base.size());
+    t::Upload(&d_base, base);
+    t::HipBuffer<float> d_pre(3 * 4);
+    t::HipBuffer<float> d_post(3 * 4);
+    t::HipBuffer<float> d_comb(3 * 16);
+    for (std::uint32_t r = 0; r < 3; ++r) {
+      q::HcCoeffs(d_mixes.get() + r * 24, d_scale.get(), d_base.get(),
+                  kSinkhornIters, 1e-6F, d_pre.get() + r * 4,
+                  d_post.get() + r * 4, d_comb.get() + r * 16, 1U, nullptr);
+    }
+    const auto pre_seq = t::Download(&d_pre, 3 * 4);
+    const auto post_seq = t::Download(&d_post, 3 * 4);
+    const auto comb_seq = t::Download(&d_comb, 3 * 16);
+    q::HcCoeffs(d_mixes.get(), d_scale.get(), d_base.get(), kSinkhornIters,
+                1e-6F, d_pre.get(), d_post.get(), d_comb.get(), 3U, nullptr);
+    ok &= Check("hc_coeffs rows bit-exact",
+                BitEqual(pre_seq, t::Download(&d_pre, 3 * 4)) &&
+                        BitEqual(post_seq, t::Download(&d_post, 3 * 4)) &&
+                        BitEqual(comb_seq, t::Download(&d_comb, 3 * 16))
+                    ? 0.0
+                    : 1.0,
+                0.0);
+  }
+  const std::uint32_t n = 137;
+  {
+    const auto streams = t::MakeValues(3 * 4 * n, 0x2323B0B0U, 1.0F);
+    const auto pre = t::MakeValues(3 * 4, 0x3434C0C0U, 0.5F, -0.25F);
+    t::HipBuffer<float> d_streams(streams.size());
+    t::Upload(&d_streams, streams);
+    t::HipBuffer<float> d_pre(pre.size());
+    t::Upload(&d_pre, pre);
+    t::HipBuffer<float> d_dst(3 * n);
+    for (std::uint32_t r = 0; r < 3; ++r) {
+      q::HcInputs(d_streams.get() + static_cast<std::size_t>(r) * 4 * n,
+                  d_pre.get() + r * 4, 4U, 4, n, d_dst.get() + r * n, 1U,
+                  nullptr);
+    }
+    const auto in_seq = t::Download(&d_dst, 3 * n);
+    q::HcInputs(d_streams.get(), d_pre.get(), 4U, 4, n, d_dst.get(), 3U,
+                nullptr);
+    ok &= Check("hc_inputs rows bit-exact",
+                BitEqual(in_seq, t::Download(&d_dst, 3 * n)) ? 0.0 : 1.0, 0.0);
+    std::vector<float> bcast(3 * n);
+    for (std::uint32_t r = 0; r < 3; ++r) {
+      q::HcInputs(d_streams.get() + static_cast<std::size_t>(r) * 4 * n,
+                  d_pre.get(), 0U, 4, n, d_dst.get() + r * n, 1U, nullptr);
+      const auto part = t::Download(&d_dst, static_cast<std::size_t>(r + 1) * n);
+      std::copy(part.begin() + static_cast<std::size_t>(r) * n,
+                part.end(), bcast.begin() + static_cast<std::size_t>(r) * n);
+    }
+    q::HcInputs(d_streams.get(), d_pre.get(), 0U, 4, n, d_dst.get(), 3U,
+                nullptr);
+    ok &= Check("hc_inputs broadcast pre rows bit-exact",
+                BitEqual(bcast, t::Download(&d_dst, 3 * n)) ? 0.0 : 1.0, 0.0);
+  }
+  {
+    const auto post = t::MakeValues(3 * 4, 0x4545D0D0U, 0.5F);
+    const std::vector<float> comb_flat = [&] {
+      std::vector<float> v(3 * 16);
+      const auto src = t::MakeValues(3 * 16, 0x5656E0E0U, 0.25F, -0.1F);
+      for (std::uint32_t r = 0; r < 3; ++r) {
+        // Doubly stochastic-ish rows: normalize each [src][dst] row.
+        for (int s = 0; s < 4; ++s) {
+          float sum = 0.0F;
+          for (int d = 0; d < 4; ++d) {
+            sum += src[r * 16 + s * 4 + d] + 1.5F;
+          }
+          for (int d = 0; d < 4; ++d) {
+            v[r * 16 + s * 4 + d] = (src[r * 16 + s * 4 + d] + 1.5F) / sum;
+          }
+        }
+      }
+      return v;
+    }();
+    const auto y = t::MakeValues(3 * n, 0x6767F0F0U, 1.0F);
+    const auto res = t::MakeValues(3 * 4 * n, 0x78781010U, 1.0F);
+    t::HipBuffer<float> d_post(post.size());
+    t::Upload(&d_post, post);
+    t::HipBuffer<float> d_comb(comb_flat.size());
+    t::Upload(&d_comb, comb_flat);
+    t::HipBuffer<float> d_y(y.size());
+    t::Upload(&d_y, y);
+    t::HipBuffer<float> d_res(res.size());
+    t::Upload(&d_res, res);
+    t::HipBuffer<float> d_out(3 * 4 * n);
+    for (std::uint32_t r = 0; r < 3; ++r) {
+      q::HcWriteback(d_y.get() + r * n,
+                     d_res.get() + static_cast<std::size_t>(r) * 4 * n,
+                     d_post.get() + r * 4, d_comb.get() + r * 16, 4, n,
+                     d_out.get() + static_cast<std::size_t>(r) * 4 * n, 1U,
+                     nullptr);
+    }
+    const auto seq = t::Download(&d_out, 3 * 4 * n);
+    q::HcWriteback(d_y.get(), d_res.get(), d_post.get(), d_comb.get(), 4, n,
+                   d_out.get(), 3U, nullptr);
+    ok &= Check("hc_writeback rows bit-exact",
+                BitEqual(seq, t::Download(&d_out, 3 * 4 * n)) ? 0.0 : 1.0, 0.0);
+    q::HcWriteback(d_y.get(), d_res.get(), d_post.get(), d_comb.get(), 4, n,
+                   d_res.get(), 3U, nullptr);
+    ok &= Check("hc_writeback rows aliased bit-exact",
+                BitEqual(seq, t::Download(&d_res, 3 * 4 * n)) ? 0.0 : 1.0, 0.0);
+  }
+  {
+    const std::uint32_t experts = 288;
+    const std::uint32_t top_k = 8;
+    auto logits = t::MakeValues(3 * experts, 0x89892020U, 3.0F, -1.5F);
+    for (std::uint32_t i = 0; i < experts; ++i) {
+      logits[experts + i] = logits[i];  // duplicate row ties the ids
+    }
+    const auto bias = t::MakeValues(experts, 0x9A9A3030U, 0.25F);
+    t::HipBuffer<float> d_logits(logits.size());
+    t::Upload(&d_logits, logits);
+    t::HipBuffer<float> d_bias(bias.size());
+    t::Upload(&d_bias, bias);
+    t::HipBuffer<float> d_w(3 * top_k);
+    t::HipBuffer<std::int32_t> d_ids(3 * top_k);
+    for (std::uint32_t r = 0; r < 3; ++r) {
+      q::MoERoute(d_logits.get() + static_cast<std::size_t>(r) * experts,
+                  d_bias.get(), experts, top_k, 2.5F, d_w.get() + r * top_k,
+                  d_ids.get() + r * top_k, 1U, nullptr);
+    }
+    const auto w_seq = t::Download(&d_w, 3 * top_k);
+    std::vector<std::int32_t> ids_seq(3 * top_k);
+    t::CheckHip(hipMemcpy(ids_seq.data(), d_ids.get(),
+                          3 * top_k * sizeof(std::int32_t),
+                          hipMemcpyDeviceToHost),
+                "download ids");
+    q::MoERoute(d_logits.get(), d_bias.get(), experts, top_k, 2.5F, d_w.get(),
+                d_ids.get(), 3U, nullptr);
+    const auto w_bat = t::Download(&d_w, 3 * top_k);
+    std::vector<std::int32_t> ids_bat(3 * top_k);
+    t::CheckHip(hipMemcpy(ids_bat.data(), d_ids.get(),
+                          3 * top_k * sizeof(std::int32_t),
+                          hipMemcpyDeviceToHost),
+                "download ids");
+    ok &= Check("moe_route rows bit-exact",
+                BitEqual(w_seq, w_bat) && ids_seq == ids_bat ? 0.0 : 1.0, 0.0);
+  }
+  {
+    const std::uint32_t rows = 6;
+    const std::uint32_t m = 257;
+    const std::uint32_t stride = 300;
+    const auto src = t::MakeValues(3 * rows * stride, 0xABAB4040U, 1.0F);
+    const auto weights = t::MakeValues(3 * rows, 0xBCBC5050U, 0.5F, 0.6F);
+    t::HipBuffer<float> d_src(src.size());
+    t::Upload(&d_src, src);
+    t::HipBuffer<float> d_weights(weights.size());
+    t::Upload(&d_weights, weights);
+    t::HipBuffer<float> d_dst(3 * m);
+    t::CheckHip(
+        hipMemset(d_dst.get(), 0, 3 * m * sizeof(float)), "memset");
+    for (std::uint32_t r = 0; r < 3; ++r) {
+      q::WeightedSumAdd(d_dst.get() + r * m,
+                        d_src.get() + static_cast<std::size_t>(r) * rows *
+                                            stride,
+                        d_weights.get() + r * rows, rows, m, stride, 1U,
+                        nullptr);
+    }
+    const auto seq = t::Download(&d_dst, 3 * m);
+    t::CheckHip(hipMemset(d_dst.get(), 0, 3 * m * sizeof(float)), "memset");
+    q::WeightedSumAdd(d_dst.get(), d_src.get(), d_weights.get(), rows, m,
+                      stride, 3U, nullptr);
+    ok &= Check("weighted_sum_add rows bit-exact",
+                BitEqual(seq, t::Download(&d_dst, 3 * m)) ? 0.0 : 1.0, 0.0);
+  }
+  return ok;
+}
+
 bool TestKdaOutGate() {
   const unsigned heads = 64;
   const unsigned d = 128;
@@ -714,7 +907,7 @@ bool TestMoERouteCase(const char* tag, float tie_step) {
   t::HipBuffer<float> d_weights(top_k);
   t::HipBuffer<std::int32_t> d_ids(top_k);
   q::MoERoute(d_logits.get(), d_bias.get(), experts, top_k, scale,
-              d_weights.get(), d_ids.get(), nullptr);
+              d_weights.get(), d_ids.get(), 1U, nullptr);
   const auto got_weights = t::Download(&d_weights, top_k);
   std::vector<std::int32_t> got_ids(top_k);
   t::CheckHip(hipMemcpy(got_ids.data(), d_ids.get(),
@@ -961,7 +1154,7 @@ bool TestWeightedSumAdd() {
     t::Upload(&d_dst, base);
     q::WeightedSumAdd(d_dst.get(), d_src.get(),
                       uses_weights ? d_weights.get() : nullptr, rows, n, stride,
-                      nullptr);
+                      1U, nullptr);
     const auto got = t::Download(&d_dst, n);
     std::vector<float> ref(n);
     for (std::uint32_t i = 0; i < n; ++i) {
@@ -992,6 +1185,7 @@ int main() {
     ok &= TestKdaConvChunkBitExact();
     ok &= TestKdaRecurrent();
     ok &= TestKdaFoldUpdateChunkBitExact();
+    ok &= TestRowBatchBitExact();
     ok &= TestKdaOutGate();
     ok &= TestIdxScore();
     ok &= TestTopKDesc();

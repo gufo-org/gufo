@@ -42,22 +42,27 @@ void LayerNorm(const float* x, const float* w, const float* b, float* dst,
 /// Sinkhorn iterations: row softmax over dst (the row is one src stream),
 /// column +eps normalize, repeated with plain row/col +eps normalization.
 /// comb is stored row-major [src][dst]; the write-back consumes it as
-/// comb[dst ...][src]. Single launch, one block.
+/// comb[dst ...][src]. Row r of a batch reads mixes[r*24], writes
+/// pre[r*4]/post[r*4]/comb[r*16]; scale/base are shared. One block per row.
 void HcCoeffs(const float* mixes, const float* scale, const float* base,
               std::uint32_t sinkhorn_iters, float eps, float* pre, float* post,
-              float* comb, hipStream_t stream);
+              float* comb, std::uint32_t rows, hipStream_t stream);
 
 /// Block input of one sub-layer: dst[i] = sum_src streams[src][i] * pre[src]
-/// (hc_count four-stream mix into a single vector).
-void HcInputs(const float* streams, const float* pre, std::uint32_t hc_count,
-              std::uint32_t n, float* dst, hipStream_t stream);
+/// (hc_count four-stream mix into a single vector). Row r reads
+/// streams[r*(4*n) + ...], pre[r*pre_stride] and writes dst[r*n].
+void HcInputs(const float* streams, const float* pre,
+              std::uint32_t pre_stride, std::uint32_t hc_count,
+              std::uint32_t n, float* dst, std::uint32_t rows,
+              hipStream_t stream);
 
 /// Stream write-back around one sub-layer: out[dst][i] = post[dst] * y[i] +
 /// sum_src res[src][i] * comb[src][dst], with comb as produced by HcCoeffs.
-/// `out` may alias `res` (registers first); it must not alias `y`.
+/// `out` may alias `res` (registers first); it must not alias `y`. Row r
+/// reads y[r*n], res[r*(4*n)], post[r*4], comb[r*16] and writes out[r*(4*n)].
 void HcWriteback(const float* y, const float* res, const float* post,
                  const float* comb, std::uint32_t hc_count, std::uint32_t n,
-                 float* out, hipStream_t stream);
+                 float* out, std::uint32_t rows, hipStream_t stream);
 
 /// Causal short conv for one KDA projection channel set, one token.
 /// `raw[n]` is the uncached projection output for the current position p,
@@ -138,10 +143,11 @@ void TopKDesc(const float* scores, std::uint32_t n, std::uint32_t k,
 /// sigmoid values, renormalized by max(sum, 6.103515625e-5) (the F16
 /// minimum the reference clamps to; no epsilon add) and multiplied by
 /// `scale` (2.5, applied after the division). ids are int32. Requires
-/// experts <= 1024; one block.
+/// experts <= 1024; one block per row: logits[r*experts], weights[r*top_k],
+/// ids[r*top_k], bias shared.
 void MoERoute(const float* logits, const float* bias, std::uint32_t experts,
               std::uint32_t top_k, float scale, float* weights,
-              std::int32_t* ids, hipStream_t stream);
+              std::int32_t* ids, std::uint32_t rows, hipStream_t stream);
 
 /// x[i] *= s for i in [0, total).
 void Scale(float* x, std::uint32_t total, float s, hipStream_t stream);
@@ -187,10 +193,11 @@ void SwigluClamp(const float* gate, const float* up, float* dst,
                  float clamp_gate, float clamp_up, hipStream_t stream);
 
 /// dst[i] += sum_r weights[r] * src[r * stride + i] (accumulating the
-/// weighted expert outputs; null `weights` means all 1).
+/// weighted expert outputs; null `weights` means all 1). Row b of a batch
+/// reads src[b*(rows*stride)] and weights[b*rows], writes dst[b*n].
 void WeightedSumAdd(float* dst, const float* src, const float* weights,
                     std::uint32_t rows, std::uint32_t n, std::uint32_t stride,
-                    hipStream_t stream);
+                    std::uint32_t batch, hipStream_t stream);
 
 }  // namespace gufo::models::glm5_next::rocm
 

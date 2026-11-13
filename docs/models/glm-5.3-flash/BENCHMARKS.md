@@ -43,6 +43,10 @@ With single-launch chunked KDA on top (+21.7 %; chunk conv, fused
 fold/update with the state resident in LDS, flattened E-Gate/Scale/
 Out-Gate grids; n-gen-1 sha identical, full `glm5_next` suite 9/9
 including new bit-exact parity checks): pp2048 **132.9 ± 1.4**.
+With the HC/MoE elementwise loops row-batched into single launches
+(route, coeffs, inputs, write-back, weighted sum; bit-identical —
+n-gen-1 sha and 9/9 with new row-batch parity checks): pp2048
+**164.7 ± 1.7**.
 Serve-protocol gate not yet re-captured for these steps. Use these
 only as offline scans, not interchangeably with the serve-protocol gate
 cells.

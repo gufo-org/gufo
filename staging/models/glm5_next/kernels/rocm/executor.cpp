@@ -629,13 +629,8 @@ void Executor::Ffn(const DeviceLayer& l, std::uint32_t il, const float* x,
 
   const std::uint32_t used = c.num_experts_used;
   GemvN(n, l.router, x, h, router_, c.num_experts);
-  for (std::uint32_t r = 0; r < n; ++r) {
-    MoERoute(router_ + static_cast<std::size_t>(r) * c.num_experts,
-             l.exp_probs_b.f32(), c.num_experts, used,
-             c.expert_weights_scale,
-             moe_w_ + static_cast<std::size_t>(r) * used,
-             ids_ + static_cast<std::size_t>(r) * used, nullptr);
-  }
+  MoERoute(router_, l.exp_probs_b.f32(), c.num_experts, used,
+           c.expert_weights_scale, moe_w_, ids_, n, nullptr);
 
   // One sweep over all N * used expert slots, weight row per tile. Below
   // `kBucketMinRows` the grouped sweep follows the slot order directly;
@@ -740,12 +735,7 @@ void Executor::Ffn(const DeviceLayer& l, std::uint32_t il, const float* x,
               c.shared_expert_ff, c.shared_expert_ff, c.shared_expert_ff,
               sh_clamp, sh_clamp, nullptr);
   GemvN(n, l.shexp_down, f_inter_, c.shared_expert_ff, y, h);
-  for (std::uint32_t r = 0; r < n; ++r) {
-    WeightedSumAdd(y + static_cast<std::size_t>(r) * h,
-                   moe_down_ + static_cast<std::size_t>(r) * used * h,
-                   moe_w_ + static_cast<std::size_t>(r) * used, used, h, h,
-                   nullptr);
-  }
+  WeightedSumAdd(y, moe_down_, moe_w_, used, h, h, n, nullptr);
 
   if (n == 1) {
     Dbg("moe_logits-%u", il, router_, c.num_experts);
@@ -825,16 +815,9 @@ void Executor::RunTokens(Session& session, const std::int32_t* tokens,
       const DeviceTensor& norm = attn ? l.attn_norm : l.ffn_norm;
       RmsNorm(cur, w_, flat, n, flat_n, flat_n, flat_n, c.rms_eps, nullptr);
       GemvN(n, fn, flat, flat_n, mix_a_, fn.rows);
-      for (std::uint32_t r = 0; r < n; ++r) {
-        HcCoeffs(mix_a_ + static_cast<std::size_t>(r) * mix_w, scale.f32(),
-                 base.f32(), c.hc_sinkhorn_iters, c.hc_eps,
-                 pre_a_ + static_cast<std::size_t>(r) * hc,
-                 post_a_ + static_cast<std::size_t>(r) * hc,
-                 comb_a_ + static_cast<std::size_t>(r) * hc * hc, nullptr);
-        HcInputs(cur + static_cast<std::size_t>(r) * sp,
-                 pre_a_ + static_cast<std::size_t>(r) * hc, hc, h,
-                 x_ + static_cast<std::size_t>(r) * h, nullptr);
-      }
+      HcCoeffs(mix_a_, scale.f32(), base.f32(), c.hc_sinkhorn_iters, c.hc_eps,
+               pre_a_, post_a_, comb_a_, n, nullptr);
+      HcInputs(cur, pre_a_, hc, hc, h, x_, n, nullptr);
       RmsNorm(x_, norm.f32(), x_, n, h, h, h, c.rms_eps, nullptr);
       if (attn) {
         if (l.dsa) {
@@ -845,13 +828,7 @@ void Executor::RunTokens(Session& session, const std::int32_t* tokens,
       } else {
         Ffn(l, il, x_, n, y0_);
       }
-      for (std::uint32_t r = 0; r < n; ++r) {
-        HcWriteback(y0_ + static_cast<std::size_t>(r) * h,
-                    cur + static_cast<std::size_t>(r) * sp,
-                    post_a_ + static_cast<std::size_t>(r) * hc,
-                    comb_a_ + static_cast<std::size_t>(r) * hc * hc, hc, h,
-                    next + static_cast<std::size_t>(r) * sp, nullptr);
-      }
+      HcWriteback(y0_, cur, post_a_, comb_a_, hc, h, next, n, nullptr);
       std::swap(cur, next);
       if (n == 1) {
         Dbg(attn ? "hc_mixes_attn-%u" : "hc_mixes_ffn-%u", il, mix_a_,
@@ -866,10 +843,7 @@ void Executor::RunTokens(Session& session, const std::int32_t* tokens,
   }
   dbg_il_ = 0;
 
-  for (std::uint32_t r = 0; r < n; ++r) {
-    HcInputs(cur + static_cast<std::size_t>(r) * sp, mean4_, hc, h,
-             h_ + static_cast<std::size_t>(r) * h, nullptr);
-  }
+  HcInputs(cur, mean4_, 0U, hc, h, h_, n, nullptr);
   RmsNorm(h_, model_->output_norm().f32(), h_, n, h, h, h, c.rms_eps,
           nullptr);
   if (n == 1) {
