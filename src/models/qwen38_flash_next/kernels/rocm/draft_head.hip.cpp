@@ -1,6 +1,7 @@
 // Load-time requantization of the MTP draft head (DeviceModel::SetDraftVocab).
 // Built without fast math or contraction (extension.cmake): every operation
-// rounds as in ggml's single-precision reference quantizer.
+// rounds as in ggml's single-precision reference quantizer. clang-cl ignores
+// those flags on Windows, so the pragma below also turns contraction off.
 #include <hip/hip_fp16.h>
 
 #include <algorithm>
@@ -8,6 +9,8 @@
 #include <cstdint>
 
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+
+#pragma clang fp contract(off)
 
 namespace gufo::models::qwen38_flash_next::rocm {
 namespace {
