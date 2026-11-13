@@ -89,6 +89,9 @@ endif()
 # share/gufo/npu/<name> (Windows: bin/npu/<name>, beside gufo.exe). Sets
 # <name>_NPU_DIR in the caller's scope.
 function(gufo_npu_design name)
+  if(GUFO_NPU_DESIGN AND NOT name STREQUAL GUFO_NPU_DESIGN)
+    return()
+  endif()
   cmake_parse_arguments(ARG "" "" "PROGRAMS;OUTPUTS" ${ARGN})
   if(NOT ARG_PROGRAMS)
     set(ARG_PROGRAMS "${name}")

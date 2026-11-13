@@ -3,6 +3,7 @@
   stdenv,
   cmake,
   ninja,
+  runCommand,
   pkg-config,
   makeWrapper,
   icu,
@@ -84,7 +85,7 @@ let
   # the package build, or have none.
   npuDesigns =
     if iron != null && xrt != null && builtins.pathExists (sourceRoot + "/cmake/npu-designs/CMakeLists.txt") then
-      import ./npu-designs.nix { inherit lib stdenv cmake ninja iron xrt sourceRoot; }
+      import ./npu-designs.nix { inherit lib stdenv cmake ninja iron xrt sourceRoot runCommand; }
     else
       null;
   evalFixture =

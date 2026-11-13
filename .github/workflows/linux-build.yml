@@ -78,24 +78,10 @@ jobs:
           skipPush: ${{ github.event_name == 'pull_request' }}
           pushFilter: '(-source$|\.tar\.gz$)'
 
-      - name: Build and package baseline
-        if: inputs.baseline != ''
-        env:
-          EXPECTED_REVISION: ${{ inputs.baseline }}
-        run: |
-          set -euo pipefail
-          # Both arms use the candidate's pinned compiler and dependencies.
-          nix build --impure --file tools/ci/linux-baseline.nix \
-            --argstr source "$GITHUB_WORKSPACE/baseline-source" \
-            --argstr revision "$EXPECTED_REVISION" \
-            --out-link result-baseline --print-build-logs --cores 4 --max-jobs 1
-          python3 tools/ci/linux_artifact.py pack --package result-baseline \
-            --revision "$EXPECTED_REVISION" --output linux-artifacts/baseline
-
-      # The NPU designs are a derivation of their own (.devops/nix/npu-designs.nix)
-      # that takes many minutes to build. Main pushes it to Cachix; pull
-      # requests do not push, so keep it in this branch's Actions cache, keyed
-      # on its derivation, for later pushes and reruns of a PR that changes it.
+      # Each NPU design has its own derivation (.devops/nix/npu-designs.nix).
+      # Restore the combined closure before either package build. A prefix
+      # match supplies unchanged designs when another design has changed;
+      # PRs cannot push them to Cachix.
       - name: Identify the NPU designs
         id: npu
         run: |
@@ -113,12 +99,26 @@ jobs:
         with:
           path: /tmp/gufo-npu-designs
           key: ${{ steps.npu.outputs.key }}
+          restore-keys: |
+            gufo-npu-designs-v1-
 
       - name: Import NPU designs
-        if: steps.npu-cache.outputs.cache-hit == 'true'
+        if: steps.npu-cache.outputs.cache-matched-key != ''
+        run: nix copy --no-check-sigs --all --from file:///tmp/gufo-npu-designs
+
+      - name: Build and package baseline
+        if: inputs.baseline != ''
         env:
-          NPU_OUT: ${{ steps.npu.outputs.out }}
-        run: nix copy --no-check-sigs --from file:///tmp/gufo-npu-designs "$NPU_OUT"
+          EXPECTED_REVISION: ${{ inputs.baseline }}
+        run: |
+          set -euo pipefail
+          # Both arms use the candidate's pinned compiler and dependencies.
+          nix build --impure --file tools/ci/linux-baseline.nix \
+            --argstr source "$GITHUB_WORKSPACE/baseline-source" \
+            --argstr revision "$EXPECTED_REVISION" \
+            --out-link result-baseline --print-build-logs --cores 4 --max-jobs 1
+          python3 tools/ci/linux_artifact.py pack --package result-baseline \
+            --revision "$EXPECTED_REVISION" --output linux-artifacts/baseline
 
       - name: Build and package candidate
         env:
