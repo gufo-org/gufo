@@ -111,6 +111,7 @@ Payload Payload::Committed(ResourceCharge charge,
     throw std::invalid_argument("committed payload requires owned backing");
   result.bytes_ = info.bytes;
   result.category_ = info.category;
+  result.domain_ = info.domain;
   return result;
 }
 Payload Payload::Borrowed(std::shared_ptr<BorrowedRows> rows) {
@@ -119,6 +120,7 @@ Payload Payload::Borrowed(std::shared_ptr<BorrowedRows> rows) {
   Payload result;
   result.bytes_ = rows->Bytes();
   result.category_ = rows->Category();
+  result.domain_ = rows->BackingDomain();
   result.rows_ = std::move(rows);
   return result;
 }
@@ -155,6 +157,7 @@ Payload& Payload::operator=(Payload&& other) noexcept {
     charge_ = std::move(other.charge_);
     bytes_ = other.bytes_;
     category_ = other.category_;
+    domain_ = other.domain_;
     owner_ = std::move(other.owner_);
     rows_ = std::move(other.rows_);
   }

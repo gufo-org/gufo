@@ -57,9 +57,11 @@ public:
   // preservation has copied them to their backing. With it, a piece still in
   // the slot is read from there under a reader pin held through completion,
   // so a busy or reused slot cannot hold the job (and its pins) back.
+  // Device-backed rows require read_device_backing even with read_live: the
+  // source can move to its backing between pieces. Each transfer keeps its pin.
   PersistenceSource(bool private_file, DiskFileId, std::uint64_t bytes,
                     std::size_t alignment, std::shared_ptr<BorrowedRows>,
-                    CopyRows read_live = {});
+                    CopyRows read_live = {}, CopyRows read_device_backing = {});
   // Discardable live rows, for histories exceeding RAM. Reads pin exactly
   // one staging piece through completion; mutation retires unread sources.
   // Private state/tails remain immutable committed copies. No publication

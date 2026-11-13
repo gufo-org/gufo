@@ -129,6 +129,15 @@ public:
                                                Rows first, Rows end,
                                                std::span<std::byte>,
                                                Stream&) = 0;
+  // Optional backend-native destination. Host metadata/private state never
+  // uses this path. A provider must opt in before allocating device backing.
+  [[nodiscard]] virtual bool SupportsDeviceRows() const { return false; }
+  [[nodiscard]] virtual Completion CopyRowsOutDevice(const Slot&, ComponentId,
+                                                     Rows, Rows,
+                                                     std::span<std::byte>,
+                                                     Stream&) {
+    throw std::logic_error("device row capture is unsupported");
+  }
   // Optional immutable view of a completed append range. Obtain it only
   // during exclusive execution; retain a RowPin for every later transfer.
   // The address must remain stable until the mutation/release guard drains

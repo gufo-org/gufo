@@ -49,6 +49,7 @@ struct LedgerState {
       s.peak_bytes[i] = std::max(s.peak_bytes[i], s.bytes[i]);
     s.peak_total_bytes = std::max(s.peak_total_bytes, s.total_bytes);
     s.peak_ram_bytes = std::max(s.peak_ram_bytes, s.ram_bytes);
+    s.peak_device_bytes = std::max(s.peak_device_bytes, s.device_bytes);
     s.peak_persistence_pinned_bytes =
         std::max(s.peak_persistence_pinned_bytes, s.persistence_pinned_bytes);
   }
@@ -97,15 +98,17 @@ struct Allocation {
   Allocation& operator=(Allocation&&) = delete;
   std::shared_ptr<LedgerState> ledger;
   ResourceCategory category;
+  const MemoryDomain domain;
   const bool backing;
   std::size_t bytes;
   bool admitted{false};
   bool reserved{true};
   std::size_t pins{0};
   Allocation(std::shared_ptr<LedgerState> ledger, ResourceCategory category,
-             std::size_t bytes)
+             std::size_t bytes, MemoryDomain domain)
       : ledger(std::move(ledger)),
         category(category),
+        domain(domain),
         backing(category == Free),
         bytes(bytes) {}
   ~Allocation() {
@@ -118,7 +121,11 @@ struct Allocation {
     if (reserved)
       s.reserved_bytes[Index(category)] -= bytes;
     s.total_bytes -= bytes;
-    if (category != Staging)
+    if (domain == MemoryDomain::kDevice) {
+      s.device_bytes -= bytes;
+      if (category == Free)
+        s.device_free_backing_bytes -= bytes;
+    } else if (category != Staging)
       s.ram_bytes -= bytes;
   }
 };
@@ -151,6 +158,8 @@ struct ChargeToken {
       if (block.reserved)
         s.reserved_bytes[Index(block.category)] -= block.bytes;
       s.bytes[Index(Free)] += block.bytes;
+      if (block.domain == MemoryDomain::kDevice)
+        s.device_free_backing_bytes += block.bytes;
       block.category = Free;
       block.reserved = false;
     });
@@ -189,10 +198,12 @@ void ResourceLedger::ConstrainLimits(ResourceLimits limits) {
   const auto& s = state_->snapshot;
   if (limits.total_bytes > old.total_bytes ||
       limits.ram_bytes > old.ram_bytes ||
+      limits.device_bytes > old.device_bytes ||
       limits.staging_bytes > old.staging_bytes ||
       limits.persistence_pinned_bytes > old.persistence_pinned_bytes)
     throw std::invalid_argument("ledger limits may only decrease");
   if (limits.total_bytes < s.total_bytes || limits.ram_bytes < s.ram_bytes ||
+      limits.device_bytes < s.device_bytes ||
       limits.staging_bytes < s.bytes[Index(Staging)] ||
       limits.persistence_pinned_bytes < s.persistence_pinned_bytes)
     throw ResourceExhausted();
@@ -207,16 +218,20 @@ PersistencePin::PersistencePin(std::shared_ptr<detail::PinToken> token)
     : token_(std::move(token)) {}
 
 ResourceReservation ResourceLedger::Reserve(ResourceCategory category,
-                                            std::size_t bytes) {
+                                            std::size_t bytes,
+                                            MemoryDomain domain) {
   if (Index(category) >= kResourceCategoryCount || category == Spill ||
       category == Chunk || bytes == 0)
     throw std::invalid_argument(
         "ledger reserve requires a nonzero allocation category");
+  if (domain != MemoryDomain::kHost &&
+      (domain != MemoryDomain::kDevice || category != Free))
+    throw std::invalid_argument("device allocation requires backing storage");
   // Host bookkeeping allocation is outside the lock and has strong exception
   // safety. Charge payload sizes must include any owner/index metadata
   // separately.
   auto allocation =
-      std::make_shared<detail::Allocation>(state_, category, bytes);
+      std::make_shared<detail::Allocation>(state_, category, bytes, domain);
   auto token = std::make_shared<detail::ChargeToken>(allocation, false);
   const detail::Lock lock(*state_, LedgerStep::kReserve);
   auto& s = state_->snapshot;
@@ -224,14 +239,19 @@ ResourceReservation ResourceLedger::Reserve(ResourceCategory category,
   state_->Fail(LedgerStep::kReserve);
   // Subtraction comparisons avoid overflow even for SIZE_MAX budgets.
   if (bytes > limits.total_bytes - s.total_bytes ||
-      (category == Staging
+      (domain == MemoryDomain::kDevice
+           ? bytes > limits.device_bytes - s.device_bytes
+       : category == Staging
            ? bytes > limits.staging_bytes - s.bytes[Index(Staging)]
            : bytes > limits.ram_bytes - s.ram_bytes))
     throw ResourceExhausted();
   s.bytes[Index(category)] += bytes;
   s.reserved_bytes[Index(category)] += bytes;
   s.total_bytes += bytes;
-  if (category != Staging)
+  if (domain == MemoryDomain::kDevice) {
+    s.device_bytes += bytes;
+    s.device_free_backing_bytes += bytes;
+  } else if (category != Staging)
     s.ram_bytes += bytes;
   allocation->admitted = true;
   token->active = true;
@@ -252,7 +272,8 @@ ResourceAllocationInfo Info(const std::shared_ptr<detail::ChargeToken>& token) {
     bytes += block.bytes;
     pinned |= block.pins != 0;
   });
-  return {a.category, bytes, a.reserved, a.backing, token->pooled, pinned};
+  return {a.category,    bytes,  a.reserved, a.backing,
+          token->pooled, pinned, a.domain};
 }
 }  // namespace
 ResourceAllocationInfo ResourceReservation::Info() const {
@@ -280,6 +301,8 @@ std::size_t ResourceCharge::FindFreeBacking(
       throw std::logic_error("search requires original pool backing handles");
     if (block->allocation->ledger != ledger)
       throw std::invalid_argument("backing search spans ledgers");
+    if (block->allocation->domain != first->allocation->domain)
+      throw std::invalid_argument("backing search spans memory domains");
     run = block->allocation->category == Free ? run + 1 : 0;
     if (run == count)
       return from_end ? index : index + 1 - count;
@@ -330,6 +353,8 @@ ResourceReservation ResourceCharge::ReserveBacking(
     const auto& allocation = blocks[i].token_->allocation;
     if (allocation->ledger != first->ledger)
       throw std::invalid_argument("backing assignment spans ledgers");
+    if (allocation->domain != first->domain)
+      throw std::invalid_argument("backing assignment spans memory domains");
     for (std::size_t j = 0; j < i; ++j)
       if (allocation == blocks[j].token_->allocation)
         throw std::invalid_argument("duplicate backing block");
@@ -346,6 +371,8 @@ ResourceReservation ResourceCharge::ReserveBacking(
   auto& s = a.ledger->snapshot;
   assignment->Each([&](detail::Allocation& block) {
     s.bytes[Index(Free)] -= block.bytes;
+    if (block.domain == MemoryDomain::kDevice)
+      s.device_free_backing_bytes -= block.bytes;
     s.bytes[Index(category)] += block.bytes;
     s.reserved_bytes[Index(category)] += block.bytes;
     block.category = category;
@@ -411,6 +438,7 @@ ResourceSnapshot ResourceLedger::SnapshotAndResetPeaks() {
   s.peak_bytes = s.bytes;
   s.peak_total_bytes = s.total_bytes;
   s.peak_ram_bytes = s.ram_bytes;
+  s.peak_device_bytes = s.device_bytes;
   s.peak_persistence_pinned_bytes = s.persistence_pinned_bytes;
   return previous;
 }

@@ -23,6 +23,7 @@ struct ComponentCaptureBuffer {
   // Consume assigned backing without copying completed append rows. The
   // source view is backend-native and kept immutable by the slot guard.
   std::function<Payload(SlotLease&, std::span<const std::byte>)> borrow;
+  MemoryDomain domain{MemoryDomain::kHost};
 };
 struct ComponentCacheResources {
   std::shared_ptr<void> owner;
@@ -49,5 +50,8 @@ struct ComponentCacheResources {
   // usable without a pool-capacity contract.
   std::size_t transfer_batch_size{1};
   std::size_t reassignment_batch_size{1};
+  // Device retained payload must be copied through its provider, never read
+  // by the host. The caller retains its immutable owner until completion.
+  PersistenceSource::CopyRows copy_device_rows;
 };
 }  // namespace gufo::cache

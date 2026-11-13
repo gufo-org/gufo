@@ -58,6 +58,12 @@ inline json::Value ComponentCacheJson(const ComponentCacheMetrics& value) {
   // These are contemporaneous global gauges, not request-local attribution.
   result["global_ledger_bytes"] = value.ledger.total_bytes;
   result["global_ram_bytes"] = value.ledger.ram_bytes;
+  if (value.ledger.device_bytes || value.ledger.peak_device_bytes) {
+    result["global_device_bytes"] = value.ledger.device_bytes;
+    result["global_device_free_backing_bytes"] =
+        value.ledger.device_free_backing_bytes;
+    result["global_peak_device_bytes"] = value.ledger.peak_device_bytes;
+  }
   result["global_peak_ledger_bytes"] = value.ledger.peak_total_bytes;
   result["global_peak_ram_bytes"] = value.ledger.peak_ram_bytes;
   result["global_persistence_pinned_bytes"] =

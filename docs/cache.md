@@ -64,7 +64,7 @@ turn still reuses everything up to it.
 
 ## RAM
 
-The cache lives in host RAM. By default it takes half of the RAM available
+The host cache uses system RAM. By default it takes half of the RAM available
 when the model loads, up to 32 GiB, and always leaves 4 GiB for the system.
 
 ```sh
@@ -76,6 +76,20 @@ RAM cache off. When the cache is full, Gufo drops the checkpoints it ranks as
 least useful; the [cache reference](internal/cache.md#what-gets-retained)
 describes the order. More RAM keeps more conversations warm; the startup log
 reports the budget it settled on.
+
+## Device memory
+
+On Windows Strix Halo, Qwen27 can also keep KV chunks in device memory,
+using up to 8 GiB when the GPU and OS budgets permit it. Private state,
+partial tails and metadata stay in host RAM. A complete resident checkpoint
+can serve a retry while its disk copy is still being written.
+Short histories keep host backing. Longer histories use device backing for
+chunks beyond the host row allowance, leaving room for private snapshots.
+Rows can fall back to available host backing when the device pool is full.
+
+The device pool has its own budget and is released when the cache closes.
+`--cache-ram-bytes off` also disables it. Device memory does not survive a
+restart; use the disk cache for that.
 
 ## Disk
 

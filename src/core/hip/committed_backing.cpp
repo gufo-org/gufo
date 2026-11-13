@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -21,12 +22,21 @@ namespace {
 struct CommittedPages {
   void* data{};
   int pin{-1};
+  bool device{};
   explicit operator bool() const { return data != nullptr; }
 };
 
 // Ordinary anonymous pages, then registered with the GPU. The platform leaf
 // commits, opts out of THP and populates; registration stays here.
-CommittedPages CommitPages(std::size_t bytes) {
+CommittedPages CommitPages(std::size_t bytes, cache::MemoryDomain domain) {
+  if (domain == cache::MemoryDomain::kDevice) {
+    void* data = nullptr;
+    if (hipMalloc(&data, bytes) != hipSuccess) {
+      (void)hipGetLastError();
+      return {};
+    }
+    return {data, -1, true};
+  }
   void* data = platform::CommitZeroedPages(bytes);
   if (data == nullptr)
     return {};
@@ -43,6 +53,10 @@ bool HeapFree(std::size_t& free_bytes) {
   return hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess;
 }
 void ReleasePages(CommittedPages pages, std::size_t bytes) {
+  if (pages.device) {
+    (void)hipFree(pages.data);
+    return;
+  }
   (void)hipHostUnregister(pages.data);
   platform::UnpinHostPages(pages.pin);
   platform::ReleaseCommittedPages(pages.data, bytes);
@@ -62,10 +76,22 @@ struct BackingState {
   std::atomic<std::size_t> next_private{
       std::numeric_limits<std::size_t>::max()};
   cache::ResourceLedger* ledger{};
+  cache::MemoryDomain domain{cache::MemoryDomain::kHost};
   std::function<bool(std::size_t)> admit_segment;
   std::function<bool(std::size_t, std::size_t, std::size_t)> keep_segment;
   std::mutex growth;
+  // Device transfers may not cross distinct hipMalloc allocations, even
+  // when their virtual addresses are adjacent. Weak owners avoid a cycle.
+  std::map<std::size_t, std::weak_ptr<const void>> device_owners;
   std::atomic<bool> growing_ahead{};
+  std::size_t FreeBytes() const {
+    const auto snapshot = ledger->Snapshot();
+    return domain == cache::MemoryDomain::kDevice
+               ? snapshot.device_free_backing_bytes
+               : snapshot.bytes[static_cast<std::size_t>(
+                     cache::ResourceCategory::kBackingFree)] -
+                     snapshot.device_free_backing_bytes;
+  }
   std::byte* Address(std::size_t index) const {
     return static_cast<std::byte*>(segments[index / segment_blocks].data) +
            index % segment_blocks * block_bytes;
@@ -95,7 +121,7 @@ struct BackingState {
       reservations.reserve(count);
       for (std::size_t i = 0; i < count; ++i)
         reservations.push_back(ledger->Reserve(
-            cache::ResourceCategory::kBackingFree, block_bytes));
+            cache::ResourceCategory::kBackingFree, block_bytes, domain));
     } catch (const std::bad_alloc&) {
       return false;
     }
@@ -103,7 +129,7 @@ struct BackingState {
     if (keep_segment && !HeapFree(heap_before))
       return false;
     auto& data = segments[first / segment_blocks];
-    data = CommitPages(count * block_bytes);
+    data = CommitPages(count * block_bytes, domain);
     if (!data)
       return false;
     if (keep_segment &&
@@ -181,17 +207,44 @@ std::span<std::byte> BackingBlock::Bytes() const {
     throw std::logic_error("empty backing block");
   return {state_->Address(index_), blocks_ * state_->block_bytes};
 }
+const void* BackingBlock::Allocation() const {
+  if (!state_)
+    throw std::logic_error("empty backing block");
+  return state_->segments[index_ / state_->segment_blocks].data;
+}
 cache::ResourceAllocationInfo BackingBlock::Info() const {
   return reservation_ ? reservation_.Info() : charge_.Info();
 }
 void BackingBlock::Convert() {
   charge_ = reservation_.Convert();
 }
+std::shared_ptr<const void> BackingBlock::Owner() const {
+  const auto bytes = Bytes();
+  if (state_->domain == cache::MemoryDomain::kDevice) {
+    std::shared_ptr<const void> group;
+    {
+      const std::lock_guard lock(state_->growth);
+      auto& weak = state_->device_owners[index_ / state_->segment_blocks];
+      group = weak.lock();
+      if (!group) {
+        group = std::make_shared<std::shared_ptr<detail::BackingState>>(state_);
+        weak = group;
+      }
+    }
+    return std::shared_ptr<const void>(std::move(group), bytes.data());
+  }
+  return std::shared_ptr<const void>(state_, bytes.data());
+}
 cache::Payload BackingBlock::TakePayload() && {
   if (!charge_ || reservation_)
     throw std::logic_error("backing capture has not completed");
-  const auto bytes = Bytes();
-  auto owner = std::shared_ptr<const void>(std::move(state_), bytes.data());
+  if (state_->domain == cache::MemoryDomain::kHost) {
+    const auto bytes = Bytes();
+    auto owner = std::shared_ptr<const void>(std::move(state_), bytes.data());
+    return cache::Payload::Committed(std::move(charge_), std::move(owner));
+  }
+  auto owner = Owner();
+  state_.reset();
   return cache::Payload::Committed(std::move(charge_), std::move(owner));
 }
 std::shared_ptr<cache::BorrowedRows> BackingBlock::Borrow(
@@ -201,7 +254,13 @@ std::shared_ptr<cache::BorrowedRows> BackingBlock::Borrow(
   auto buffer = Bytes();
   if (!reservation_ || payload_bytes > buffer.size())
     throw std::invalid_argument("invalid borrowed backing block");
-  auto owner = std::shared_ptr<const void>(std::move(state_), buffer.data());
+  if (state_->domain == cache::MemoryDomain::kHost) {
+    auto owner = std::shared_ptr<const void>(std::move(state_), buffer.data());
+    return lease.Borrow(component, first, end, std::move(reservation_),
+                        std::move(owner), buffer.first(payload_bytes), source);
+  }
+  auto owner = Owner();
+  state_.reset();
   return lease.Borrow(component, first, end, std::move(reservation_),
                       std::move(owner), buffer.first(payload_bytes), source);
 }
@@ -241,17 +300,19 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
   state->segments = std::make_unique<detail::CommittedPages[]>(
       (count + state->segment_blocks - 1) / state->segment_blocks + 1);
   state->ledger = &ledger;
+  state->domain = config.domain;
   state->admit_segment = std::move(config.admit_segment);
   state->keep_segment = std::move(config.keep_segment);
   if (!config.segment_bytes && count) {
     std::vector<cache::ResourceReservation> reservations;
     reservations.reserve(count);
     for (std::size_t i = 0; i < count; ++i)
-      reservations.push_back(ledger.Reserve(
-          cache::ResourceCategory::kBackingFree, config.block_bytes));
+      reservations.push_back(
+          ledger.Reserve(cache::ResourceCategory::kBackingFree,
+                         config.block_bytes, config.domain));
     auto& data = state->segments[0];
     try {
-      data = detail::CommitPages(count * config.block_bytes);
+      data = detail::CommitPages(count * config.block_bytes, config.domain);
       if (!data)
         throw std::runtime_error("cannot commit pinned cache backing");
       for (std::size_t i = 0; i < count; ++i)
@@ -293,9 +354,7 @@ bool CommittedBackingPool::CanFit(
     return true;
   // Other pools on this ledger can also make this bound optimistic. It must
   // never reject a capture whose physical allocations could fit.
-  const auto free = state_->ledger->Snapshot().bytes[static_cast<std::size_t>(
-                        cache::ResourceCategory::kBackingFree)] /
-                    state_->block_bytes;
+  const auto free = state_->FreeBytes() / state_->block_bytes;
   return needed - uncommitted <= free;
 }
 std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
@@ -319,9 +378,7 @@ std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
     // A growing pool is usually full when a capture misses. The ledger's free
     // backing bounds this pool's, so skip a scan that cannot succeed: it
     // costs one ledger lock per committed block.
-    const auto free_bytes =
-        state_->ledger->Snapshot().bytes[static_cast<std::size_t>(
-            cache::ResourceCategory::kBackingFree)];
+    const auto free_bytes = state_->FreeBytes();
     const bool may_fit = free_bytes >= blocks * state_->block_bytes;
     for (std::size_t tried = 0; may_fit && blocks <= count && tried < count;) {
       // Search one physical segment under one ledger lock instead of locking
@@ -374,9 +431,7 @@ void CommittedBackingPool::GrowAhead(std::size_t reserve_bytes) {
   if (!reserve_bytes || committed == state_->capacity ||
       state_->growing_ahead.load(std::memory_order_acquire))
     return;
-  const auto free_bytes =
-      state_->ledger->Snapshot().bytes[static_cast<std::size_t>(
-          cache::ResourceCategory::kBackingFree)];
+  const auto free_bytes = state_->FreeBytes();
   const auto target_bytes =
       std::min(reserve_bytes, state_->capacity * state_->block_bytes);
   if (free_bytes >= target_bytes)
@@ -390,8 +445,7 @@ void CommittedBackingPool::GrowAhead(std::size_t reserve_bytes) {
     ahead_ = std::jthread([state = state_, committed, target_bytes] {
       try {
         auto seen = committed;
-        while (state->ledger->Snapshot().bytes[static_cast<std::size_t>(
-                   cache::ResourceCategory::kBackingFree)] < target_bytes) {
+        while (state->FreeBytes() < target_bytes) {
           if (!state->Grow(seen))
             break;
           seen = state->committed.load(std::memory_order_acquire);

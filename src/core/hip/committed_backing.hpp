@@ -65,6 +65,7 @@ public:
   BackingBlock(const BackingBlock&) = delete;
   BackingBlock& operator=(const BackingBlock&) = delete;
   [[nodiscard]] std::span<std::byte> Bytes() const;
+  [[nodiscard]] const void* Allocation() const;
   [[nodiscard]] cache::ResourceAllocationInfo Info() const;
   void Convert();
   [[nodiscard]] cache::Payload TakePayload() &&;
@@ -78,6 +79,7 @@ public:
 
 private:
   friend class CommittedBackingPool;
+  [[nodiscard]] std::shared_ptr<const void> Owner() const;
   BackingBlock(std::shared_ptr<detail::BackingState>, std::size_t, std::size_t,
                cache::ResourceReservation);
   std::shared_ptr<detail::BackingState> state_;
@@ -104,6 +106,7 @@ struct BackingPoolConfig {
   // device heap's free bytes before and after; false releases the segment
   // and keeps the pool at its current size. A failed heap query refuses it.
   std::function<bool(std::size_t, std::size_t, std::size_t)> keep_segment;
+  cache::MemoryDomain domain{cache::MemoryDomain::kHost};
 };
 
 class CommittedBackingPool {

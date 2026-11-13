@@ -15,6 +15,8 @@ namespace gufo::cache {
 // trigger policy eviction. Existing bad_alloc callers remain compatible.
 class ResourceExhausted : public std::bad_alloc {};
 
+enum class MemoryDomain : std::uint8_t { kHost, kDevice };
+
 enum class ResourceCategory : std::uint8_t {
   kBackingFree,
   kBackingAssigned,
@@ -34,6 +36,7 @@ struct ResourceLimits {
   std::size_t staging_bytes;
   std::size_t
       persistence_pinned_bytes;  // overlay, not an additional RAM charge
+  std::size_t device_bytes{};
 };
 struct ResourceSnapshot {
   // Includes admission reservations. reserved_bytes is a subset of bytes.
@@ -46,6 +49,9 @@ struct ResourceSnapshot {
   std::size_t peak_total_bytes{};
   std::size_t peak_ram_bytes{};
   std::size_t peak_persistence_pinned_bytes{};
+  std::size_t device_bytes{};
+  std::size_t peak_device_bytes{};
+  std::size_t device_free_backing_bytes{};
   bool operator==(const ResourceSnapshot&) const = default;
 };
 enum class LedgerStep : std::uint8_t {
@@ -75,6 +81,7 @@ struct ResourceAllocationInfo {
   bool assigned_backing;
   // A queued or active disk job holds this storage until its write ends.
   bool persistence_pinned{};
+  MemoryDomain domain{MemoryDomain::kHost};
 };
 class ResourceCharge;
 class PersistencePin;
@@ -172,7 +179,8 @@ public:
   // Admit physical payload allocation at initialization/quiescence, or host
   // metadata/staging capacity. Request-time private capture and borrowed tails
   // use ReserveBacking on existing committed blocks instead of allocating.
-  [[nodiscard]] ResourceReservation Reserve(ResourceCategory, std::size_t);
+  [[nodiscard]] ResourceReservation Reserve(ResourceCategory, std::size_t,
+                                            MemoryDomain = MemoryDomain::kHost);
   [[nodiscard]] ResourceSnapshot Snapshot() const;
   [[nodiscard]] ResourceLimits Limits() const;
   // Initialization only, before workers start: lower limits after execution

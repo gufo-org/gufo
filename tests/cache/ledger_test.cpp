@@ -39,11 +39,60 @@ void Empty(const ResourceLedger& ledger) {
   const auto snapshot = ledger.Snapshot();
   assert(snapshot.total_bytes == 0);
   assert(snapshot.ram_bytes == 0);
+  assert(snapshot.device_bytes == 0);
+  assert(snapshot.device_free_backing_bytes == 0);
   assert(snapshot.persistence_pinned_bytes == 0);
   for (auto bytes : snapshot.bytes)
     assert(bytes == 0);
   for (auto bytes : snapshot.reserved_bytes)
     assert(bytes == 0);
+}
+void DeviceBacking() {
+  ResourceLedger ledger({160, 64, 16, 128, 80});
+  auto host = ledger.Reserve(Free, 64).Convert();
+  auto device = ledger.Reserve(Free, 80, MemoryDomain::kDevice).Convert();
+  auto staging = ledger.Reserve(Staging, 16).Convert();
+  assert(device.Info().domain == MemoryDomain::kDevice);
+  assert(ledger.Snapshot().ram_bytes == 64);
+  assert(ledger.Snapshot().device_bytes == 80);
+  assert(ledger.Snapshot().device_free_backing_bytes == 80);
+  assert(ledger.Snapshot().total_bytes == 160);
+  {
+    auto cancelled = device.ReserveBacking(Spill);
+    assert(ledger.Snapshot().device_free_backing_bytes == 0);
+  }
+  assert(ledger.Snapshot().device_free_backing_bytes == 80);
+  Throws<ResourceExhausted>([&] { (void)ledger.Reserve(Free, 1); });
+  Throws<ResourceExhausted>(
+      [&] { (void)ledger.Reserve(Free, 1, MemoryDomain::kDevice); });
+  Throws<std::invalid_argument>(
+      [&] { (void)ledger.Reserve(Metadata, 1, MemoryDomain::kDevice); });
+  {
+    const std::array mixed{host, device};
+    Throws<std::invalid_argument>(
+        [&] { (void)ResourceCharge::FindFreeBacking(mixed, 2); });
+    Throws<std::invalid_argument>(
+        [&] { (void)ResourceCharge::ReserveBacking(mixed, Spill); });
+  }
+  auto payload = device.ReserveBacking(Spill).Convert();
+  assert(ledger.Snapshot().device_free_backing_bytes == 0);
+  auto pin = payload.PinPersistence();
+  assert(payload.Info().domain == MemoryDomain::kDevice);
+  assert(ledger.Snapshot().persistence_pinned_bytes == 80);
+  payload = {};
+  device = {};
+  assert(ledger.Snapshot().device_bytes == 80);
+  Throws<ResourceExhausted>(
+      [&] { ledger.ConstrainLimits({160, 64, 16, 128, 79}); });
+  pin = {};
+  assert(ledger.Snapshot().device_bytes == 0);
+  auto ending = ledger.SnapshotAndResetPeaks();
+  assert(ending.peak_device_bytes == 80);
+  assert(ledger.Snapshot().peak_device_bytes == 0);
+  ledger.ConstrainLimits({80, 64, 16, 64, 0});
+  host = {};
+  staging = {};
+  Empty(ledger);
 }
 void BackingAndPins() {
   ResourceLedger ledger({128, 128, 32, 64});
@@ -659,6 +708,7 @@ void AdmissionRace() {
 }  // namespace
 
 int main() {
+  DeviceBacking();
   BackingAndPins();
   GroupedBacking();
   FreeBackingSearch();

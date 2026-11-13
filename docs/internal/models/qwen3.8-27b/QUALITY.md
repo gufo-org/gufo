@@ -15,6 +15,12 @@ parity remain unqualified.
 | Target verification, widths 2–8 and ragged cohorts | Full logits/features match scalar | Full logits/features match scalar |
 | Serving and state | Cancellation, continuation, RAM/disk restore and seeded replay pass | Same; also eight 32K continuation forks |
 
+[November 12 Windows device-cache validation](UMA-CACHE.md) records the
+four-mode coverage, exact replay, publication, restart and baseline-reader
+checks, together with the timing and platform limits.
+The [November 13 follow-up](UMA-CACHE-MAIN.md) validates the merged main,
+lazy device metadata admission and all four complete functional profiles.
+
 ## Draft integration on October 21
 
 Rebased onto main `e060aeed` (#699), preserving Flash-Next's requirement for

@@ -782,6 +782,8 @@ public:
         .retained_snapshot_capacity_bytes = snapshot_capacity,
         .retained_snapshot_ceiling_bytes = snapshot_ceiling,
         .requires_device_runtime_lock = true,
+        .retained_device_snapshot_capacity_bytes =
+            hip::DeviceCacheBudgetBytes(),
     };
   }
 

@@ -5,6 +5,7 @@ from copy import deepcopy
 import base64
 import importlib.util
 import io
+import itertools
 import json
 from pathlib import Path
 import socket
@@ -1299,6 +1300,27 @@ class FunctionalRunnerTest(unittest.TestCase):
                 "[loader] event=load_completed kind=text speculative=off\n")
             with self.assertRaisesRegex(ValueError, "server-restarted"):
                 functional.execution_coverage(root, "mtp")
+            (root / "server-restarted.log").unlink()
+            for name in ("server-spacing.log", "server-spacing-restarted.log"):
+                extra = root / name
+                extra.write_text("[loader] event=load_completed kind=text speculative=off\n")
+                with self.assertRaisesRegex(ValueError, name):
+                    functional.execution_coverage(root, "mtp")
+                extra.unlink()
+
+    def test_spacing_timings_use_their_own_server_request_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, duration in (("server.log", 100), ("server-restarted.log", 200),
+                                   ("server-spacing.log", 300), ("server-spacing-restarted.log", 400)):
+                (root / name).write_text(f"request=r1 event=completed duration_ms={duration}\n")
+            for name in ("disk-spacing", "disk-spacing-disk"):
+                (root / (name + ".requests.json")).write_text(json.dumps({"requests": [{
+                    "index": 0, "request_id": "r1", "endpoint": "/v1/chat/completions"}]}))
+            join_server_timings(root)
+            for name, expected in (("disk-spacing", 300), ("disk-spacing-disk", 400)):
+                record = json.loads((root / (name + ".requests.json")).read_text())
+                self.assertEqual(record["requests"][0]["metrics"]["server_duration_ms"], expected)
 
     def test_each_endpoint_timing_location_and_split_usage_chunk(self):
         timing = {"prompt_n": 1, "prompt_ms": 2, "predicted_ms": 3,
@@ -1790,10 +1812,12 @@ p.with_suffix(".requests.json").write_text(json.dumps({{
                         "--suite", "responses"]
                 args += ["--baseline", str(baseline)] if baseline else ["--record-baseline"]
                 args += ["--", sys.executable, "serve", "llm", "--model", "fixture.gguf"]
+                clock = itertools.count(0, .001)  # The fake server has no measurable startup.
                 with patch.object(sys, "argv", args), patch.object(functional, "TESTS", root), \
                      patch.object(functional, "server", return_value=contextlib.nullcontext()), \
                      patch.object(functional, "provenance", return_value={}), \
                      patch.object(functional, "join_server_timings"), \
+                     patch.object(functional.time, "monotonic", side_effect=lambda: next(clock)), \
                      patch.object(functional, "execution_coverage", return_value={}), \
                      contextlib.redirect_stdout(io.StringIO()):
                     code = functional.main()
@@ -1972,6 +1996,63 @@ p.with_suffix(".requests.json").write_text(json.dumps({"version": 1, "requests":
                 self.assertEqual(report["status"], expected)
                 self.assertEqual(status, 0 if expected == "passed" else 1)
 
+    def test_spacing_replay_is_not_displaced_by_other_cache_fixtures(self):
+        # A finite disk cache can evict this fixture's long checkpoint while
+        # unrelated fixtures write. Its bounded-prefill assertion must observe
+        # the checkpoint across restart before any such intervening writes.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = '''
+import json, sys
+from pathlib import Path
+output = Path(sys.argv[sys.argv.index("--output") + 1])
+disk = Path((output.parent / "active-cache").read_text())
+disk.mkdir(exist_ok=True)
+checkpoint = disk / "spacing-checkpoint"
+control = disk / "control-checkpoint"
+if Path(__file__).name == "cache_disk_spacing.py":
+    if "--restore" in sys.argv:
+        assert checkpoint.is_file(), "unrelated cache work evicted the spacing checkpoint"
+    else:
+        if control.exists():
+            control.unlink()
+        checkpoint.write_text("long conversation")
+elif Path(__file__).name == "cache_persist.py":
+    if "--restore" in sys.argv:
+        assert control.is_file(), "spacing work evicted the control checkpoint"
+    else:
+        control.write_text("control conversation")
+    if checkpoint.exists():
+        checkpoint.unlink()
+output.write_text(json.dumps([{"status": "passed", "exact": True}]))
+output.with_suffix(".requests.json").write_text(json.dumps({"version": 1, "requests": [{
+    "status": "complete", "wall_ms": 1, "endpoint": "/v1/chat/completions",
+    "request_sha256": "fixture"}]}))
+'''
+            for script in ("continuation.py", "cache_disk_spacing.py", "cache_persist.py"):
+                (root / script).write_text(child)
+
+            def server(command, log, timeout):
+                log.touch()
+                (log.parent / "active-cache").write_text(functional.option(command, "--cache-disk"))
+                return contextlib.nullcontext()
+
+            args = ["run.py", "--record-baseline", "--output", str(root / "report"),
+                    "--sampling-preset", "qwen38", "--suite", "cache", "--",
+                    sys.executable, "serve", "llm", "--model", "fixture.gguf"]
+            with patch.object(sys, "argv", args), patch.object(functional, "TESTS", root), \
+                 patch.object(functional, "server", side_effect=server), \
+                 patch.object(functional, "provenance", return_value={}), \
+                 patch.object(sys.modules["cache_disk_spacing"], "check_disk_spacing", return_value={}), \
+                 patch.object(functional, "join_server_timings"), \
+                 patch.object(functional, "execution_coverage", return_value={}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                status = functional.main()
+            report = json.loads((root / "report/report.json").read_text())
+            self.assertEqual(report["suites"]["disk-spacing-disk"]["status"], "passed", report)
+            self.assertEqual(report["suites"]["cache-persist-disk"]["status"], "passed", report)
+            self.assertEqual(status, 0)
+
     def test_disk_cache_is_removed_after_restart_checks(self):
         for exit_code, continuation_report, spacing_exact, expected in (
             (0, {"status": "passed", "exact": True}, True, "passed"),
@@ -2030,6 +2111,7 @@ sys.exit({exit_code})
                                  "passed" if not exit_code and spacing_exact else "failed")
                 self.assertIn("--cache-disk", report["command"])
                 self.assertFalse((root / "report/disk").exists())
+                self.assertFalse((root / "report/spacing-disk").exists())
                 self.assertTrue((root / "report/text-cancel.json").is_file())
 
     def test_server_is_reaped_on_startup_timeout_and_test_failure(self):

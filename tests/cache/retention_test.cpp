@@ -349,8 +349,9 @@ struct PressureFixture {
   PrefixIndex index{ledger};
   Log log;
   RetentionPolicy policy;
-  explicit PressureFixture(std::size_t ram = 1ULL << 30)
-      : ledger({ram, ram, 0, ram}), policy(ledger, index, &log) {
+  explicit PressureFixture(std::size_t ram = 1ULL << 30, std::size_t device = 0)
+      : ledger({ram + device, ram, 0, ram + device, device}),
+        policy(ledger, index, &log) {
     index.Register({1}, kPressureComponents);
   }
   // Each conversation executes separately, so no two share chunks. Admission
@@ -665,11 +666,19 @@ void ForkedParentOutlivesItsChildren() {
   assert(f.Cached(parent) == 12);
   assert(f.Reclaim() == fork);
 }
-void ReusedRetryProtectionExpiresAfterOneTurnover() {
+void ReusedRetryProtectionExpiresAfterOneTurnover(std::size_t device = 0,
+                                                  bool commit_device = false) {
   // A restored exact retry stays protected for one RAM-budget turnover of
   // newly admitted bytes, then becomes a disposable retry copy again.
   constexpr std::size_t kRam = 64 * 1024;
-  PressureFixture f(kRam);
+  PressureFixture f(kRam, device);
+  ResourceCharge backing;
+  if (commit_device)
+    backing = f.ledger
+                  .Reserve(ResourceCategory::kBackingFree, device,
+                           MemoryDomain::kDevice)
+                  .Convert();
+  const auto turnover = kRam + (commit_device ? device : 0);
   f.Add({1, 2, 3});
   const std::vector<Token> exact{1, 2, 3, 4};
   RetentionRequest request{exact, {1}, {}, RetentionPurpose::kRetry, 3};
@@ -684,23 +693,23 @@ void ReusedRetryProtectionExpiresAfterOneTurnover() {
   constexpr std::size_t kRequest = 4096 + 16 * 64;
   // Retiring each newer conversation keeps the ledger below its limit, so
   // only the byte clock, not pressure eviction, ages the protection.
-  while (admitted + kRequest < kRam) {
+  while (admitted + kRequest < turnover) {
     assert(f.policy.Rank(retry) == 3);
     f.policy.Remove(f.Add(Conversation(next++, 16)));
     admitted += kRequest;
   }
-  while (admitted < 2 * kRam) {
+  while (admitted < 2 * turnover) {
     f.policy.Remove(f.Add(Conversation(next++, 16)));
     admitted += kRequest;
   }
   assert(f.policy.Rank(retry) == 0);
   assert(f.Cached(exact) == 4);
 }
-void ReuseProtectionLastsOneTurnover() {
+void ReuseProtectionLastsOneTurnover(std::size_t device = 0) {
   // A reused conversation outlives newer one-use requests (cache-pressure UI
   // tasks) for one turnover of the RAM budget, then ages out like any other.
   constexpr std::size_t kRam = 64 * 1024;
-  PressureFixture f(kRam);
+  PressureFixture f(kRam, device);
   auto conversation = Conversation(1, 16);
   f.Add(conversation);
   f.policy.Touch(f.log.events.back().checkpoint);
@@ -1417,7 +1426,11 @@ int main() {
   UnreusedConversationKeepsItsStem();
   ForkedParentOutlivesItsChildren();
   ReusedRetryProtectionExpiresAfterOneTurnover();
+  ReusedRetryProtectionExpiresAfterOneTurnover(8 * 64 * 1024);
+  ReusedRetryProtectionExpiresAfterOneTurnover(64 * 1024, true);
   ReuseProtectionLastsOneTurnover();
+  // Unused device capacity must not prolong host-only reuse protection.
+  ReuseProtectionLastsOneTurnover(8 * 64 * 1024);
   RecordSourceReplacement();
   FullOptionalExactReplacement();
   FailureAndReplay();

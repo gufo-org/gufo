@@ -66,6 +66,9 @@ public:
   [[nodiscard]] std::shared_ptr<const void> Owner() const {
     return rows_ ? rows_->Owner() : owner_;
   }
+  // Owner/PinRows addresses are opaque on a device. Only the owning backend
+  // may read them. A live RowPin's Location still identifies its slot source.
+  [[nodiscard]] MemoryDomain Domain() const noexcept { return domain_; }
   // Removing a checkpoint frees none of this storage while a disk job holds
   // it.
   [[nodiscard]] bool PersistencePinned() const;
@@ -86,6 +89,7 @@ private:
   ResourceCharge charge_;
   std::size_t bytes_{};
   ResourceCategory category_{};
+  MemoryDomain domain_{MemoryDomain::kHost};
   std::shared_ptr<const void> owner_;
   std::shared_ptr<BorrowedRows> rows_;
 };

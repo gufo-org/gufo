@@ -17,6 +17,10 @@ throughput tables retain their dates and do not qualify the new cache wiring.
 Positive gain favors Gufo.
 [Quality and measurement details](QUALITY.md) · [Model identities](artifacts/model-identities.json)
 
+The separately dated [November 12 Windows UMA cache result](UMA-CACHE.md) and
+[November 13 latest-main follow-up](UMA-CACHE-MAIN.md) measure long-history
+replay; they do not refresh the throughput tables below.
+
 ## October 21 focused prefill and sampling comparison
 
 Main `0c03748a` versus `perf/qwen27b-dflash2-speed`, with the same production
