@@ -58,8 +58,8 @@ Guidance and image to image (flat request fields `negative_prompt`,
 `guidance_scale` above 1 is the pipeline's `true_cfg_scale`: each step also
 runs the negative prompt (same reference images) and combines
 `negative + guidance_scale * (positive - negative)` with BF16 rounding after
-every tensor operation. As in the pipeline, a negative prompt without a scale
-uses 4. Unlike the pipeline, which ignores the scale without a negative
+every tensor operation. As in the pipeline (`true_cfg_scale` default 1), a
+negative prompt without a scale is unguided. Unlike the pipeline, which ignores the scale without a negative
 prompt, an absent negative prompt encodes like an empty prompt, as a ComfyUI
 KSampler with an empty negative conditioning would. `strength` below 1
 follows Diffusers' Qwen-Image `img2img` `get_timesteps` (the pinned revision

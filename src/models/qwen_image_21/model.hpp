@@ -50,12 +50,9 @@ struct Observer {
 };
 
 void ValidateRequest(const Request& request);
-/// Guidance scale when a request names a negative prompt but no scale, as
-/// Diffusers' `true_cfg_scale` default.
-inline constexpr float kDefaultGuidanceScale = 4;
 /// True CFG (`negative + scale * (positive - negative)`, Diffusers
-/// `true_cfg_scale`) runs above 1. An omitted scale is 1 without a negative
-/// prompt and kDefaultGuidanceScale with one.
+/// `true_cfg_scale`) runs above 1. An omitted scale is 1 (unguided), as the
+/// Qwen-Image-2.1 pipeline's default: a negative prompt alone has no effect.
 float ResolveGuidance(const Request& request);
 /// Model prompt for the caller's prompt and background intent. Transparent
 /// requests receive the RGBA framing Qwen-Image-2.1 needs for alpha output;

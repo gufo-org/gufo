@@ -14,6 +14,7 @@
 #include "src/cli/serve/embeddings_api.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/image_api.hpp"
+#include "src/cli/serve/sdapi.hpp"
 #include "src/cli/serve/tts_service.hpp"
 
 namespace gufo::test {
