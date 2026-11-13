@@ -1,7 +1,7 @@
 // Load-time requantization of the MTP draft head (DeviceModel::SetDraftVocab).
 // Built without fast math or contraction (extension.cmake): every operation
-// rounds as in ggml's single-precision reference quantizer. clang-cl ignores
-// those flags on Windows, so the pragma below also turns contraction off.
+// rounds as in ggml's single-precision reference quantizer. The pragma below
+// keeps contraction off whatever the build flags.
 #include <hip/hip_fp16.h>
 
 #include <algorithm>

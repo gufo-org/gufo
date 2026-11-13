@@ -89,6 +89,17 @@ set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
 set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
   "FFprobe executable used to validate generated media")
 
+# clang-cl (Windows) ignores GCC-style driver options such as -ffast-math,
+# -ffp-contract=off or -fno-slp-vectorize; its only diagnostic is a
+# -Wunknown-argument warning. Prefix such options with ${GUFO_CLANG_OPTION} so
+# they reach clang on both platforms.
+if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+    AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+  set(GUFO_CLANG_OPTION "/clang:")
+else()
+  set(GUFO_CLANG_OPTION "")
+endif()
+
 # CPU-only builds exist for host checks; production targets gfx1151 only.
 option(ENGINE_ENABLE_HIP "Build the gfx1151 HIP backend" ON)
 include(cmake/GufoExtensionDiscovery.cmake)
