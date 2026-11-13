@@ -2,6 +2,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cerrno>
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <mutex>
 #include <thread>
 
 #include "src/cache/disk.hpp"
@@ -19,6 +21,9 @@ namespace {
 std::atomic<int> fail_sync{-1}, fail_write{-1};
 std::atomic<bool> interrupt_sync{}, short_writes{}, record_io{}, fail_unlink{},
     unlink_effect_error{};
+// Payloads are synchronized concurrently, so their events are recorded under a
+// lock.
+std::mutex events_mutex;
 std::vector<std::string> events;
 std::string FdPath(int fd) {
   char path[4096];
@@ -183,10 +188,13 @@ void IoOrderingAndShortWrites() {
   short_writes = false;
   // Independently observe the actual fsync descriptors. Process abort tests
   // alone cannot model loss of the kernel page cache on a power failure.
+  // Payloads synchronize concurrently, in any order, before the directories.
   std::vector<std::string> expected;
   for (auto id : {Id(1), Id(11), Id(21)})
     expected.push_back("sync:" +
                        (dir.path / "v2/tmp" / DiskFileName(id)).string());
+  std::sort(events.begin(), events.begin() + 3);
+  std::sort(expected.begin(), expected.end());
   for (auto name : {"tmp", "chunks", "private"})
     expected.push_back("sync:" + (dir.path / "v2" / name).string());
   expected.push_back("sync:" +
@@ -496,6 +504,111 @@ void WriterEviction() {
          store.Entries()[0].Manifest().checkpoint.value == 2);
   CheckPublished(store, dir.path);
 }
+// More payloads than one concurrent sync batch.
+struct ManyFixture {
+  static constexpr unsigned kChunks = 300;
+  std::vector<std::vector<std::uint8_t>> chunks;
+  std::vector<std::uint8_t> tail = std::vector<std::uint8_t>(4, 17);
+  std::vector<std::uint8_t> state = std::vector<std::uint8_t>(16, 9);
+  DiskManifest manifest;
+  std::vector<DiskWriteBuffer> buffers;
+  ManyFixture() {
+    const Rows rows = 2 * kChunks + 1;
+    manifest.checkpoint = {1};
+    manifest.lineage = {1};
+    for (Rows i = 0; i < rows; ++i)
+      manifest.tokens.push_back(static_cast<Token>(i + 1));
+    DiskComponent appended{{{1}, 1, ComponentKind::kAppendRows, 4, 2, 0},
+                           {{1}, rows},
+                           {},
+                           DiskPayload{Id(1000), 4, DiskChecksum(tail)},
+                           {}};
+    chunks.reserve(kChunks);
+    for (unsigned i = 0; i < kChunks; ++i) {
+      chunks.emplace_back(8, static_cast<std::uint8_t>(i));
+      chunks.back()[1] = static_cast<std::uint8_t>(i >> 8);
+      appended.chunks.push_back({Id(1 + i), 8, DiskChecksum(chunks.back())});
+      buffers.push_back({false, Id(1 + i), chunks.back()});
+    }
+    manifest.components.push_back(std::move(appended));
+    manifest.components.push_back(
+        {{{2}, 1, ComponentKind::kPrivateState, 0, 0, 16},
+         {{2}, rows},
+         {},
+         {},
+         DiskPayload{Id(1001), 16, DiskChecksum(state)}});
+    buffers.push_back({true, Id(1000), tail});
+    buffers.push_back({true, Id(1001), state});
+  }
+};
+void ManyPayloads() {
+  {
+    Directory dir;
+    DiskStore store(ledger, dir.path, 100000);
+    ManyFixture f;
+    events.clear();
+    record_io = true;
+    store.Publish(Id(2000), f.manifest, f.buffers);
+    record_io = false;
+    CheckPublished(store, dir.path);
+    assert(store.Entries().size() == 1);
+    assert(store.Stats().managed_bytes == Managed(dir.path));
+    assert(fs::is_empty(dir.path / "v2/tmp"));
+    // One sync per payload, all before the dependency directories.
+    const auto payloads = ManyFixture::kChunks + 2;
+    assert(events.size() == payloads + 6);
+    for (std::size_t i = 0; i < payloads; ++i)
+      assert(events[i].starts_with("sync:" + (dir.path / "v2/tmp/").string()));
+    assert(events[payloads] == "sync:" + (dir.path / "v2/tmp").string());
+  }
+  // Crashes and sync failures in a later batch leave only reclaimable orphans,
+  // including payloads an earlier batch already renamed into place.
+  for (auto [step, occurrence] :
+       {std::pair{DiskPublicationStep::kPayloadWritten, 200},
+        std::pair{DiskPublicationStep::kPayloadSynced, 150},
+        std::pair{DiskPublicationStep::kPayloadRenamed, 280}}) {
+    Directory dir;
+    auto pid = fork();
+    assert(pid >= 0);
+    if (!pid) {
+      DiskStore store(ledger, dir.path, 100000);
+      ManyFixture f;
+      int count{};
+      store.SetCrashHook([&](auto s) {
+        if (s == step && count++ == occurrence)
+          raise(SIGABRT);
+      });
+      store.Publish(Id(2000), f.manifest, f.buffers);
+      _exit(0);
+    }
+    int status{};
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+    DiskStore reopened(ledger, dir.path, 100000);
+    assert(reopened.Entries().empty());
+    reopened.ReclaimOrphans();
+    reopened.WaitForReclamation();
+    assert(Managed(dir.path) == 0);
+  }
+  Directory dir;
+  {
+    DiskStore store(ledger, dir.path, 100000);
+    ManyFixture f;
+    fail_sync = 200;
+    Reject([&] { store.Publish(Id(2000), f.manifest, f.buffers); });
+    fail_sync = -1;
+    assert(store.Entries().empty());
+    assert(store.Stats().managed_bytes == Managed(dir.path));
+  }
+  DiskStore store(ledger, dir.path, 100000);
+  assert(store.Entries().empty());
+  store.ReclaimOrphans();
+  store.WaitForReclamation();
+  assert(Managed(dir.path) == 0);
+  ManyFixture f;
+  store.Publish(Id(2000), f.manifest, f.buffers);
+  CheckPublished(store, dir.path);
+}
 void Failures() {
   Fixture f;
   auto total = EncodeManifest(f.manifest).size() + 28;
@@ -548,8 +661,10 @@ extern "C" int __wrap_fsync(int fd) {
     errno = EINTR;
     return -1;
   }
-  if (record_io)
+  if (record_io) {
+    std::lock_guard guard(events_mutex);
     events.push_back("sync:" + FdPath(fd));
+  }
   return __real_fsync(fd);
 }
 extern "C" ssize_t __real_write(int, const void*, size_t);
@@ -568,8 +683,10 @@ extern "C" int __wrap_unlinkat(int fd, const char* name, int flags) {
     errno = EIO;
     return -1;
   }
-  if (record_io)
+  if (record_io) {
+    std::lock_guard guard(events_mutex);
     events.push_back("unlink:" + FdPath(fd) + "/" + name);
+  }
   auto result = __real_unlinkat(fd, name, flags);
   if (unlink_effect_error.exchange(false) && result == 0) {
     errno = EIO;
@@ -584,6 +701,7 @@ int main() {
   SharingAndPins();
   WriterEviction();
   Failures();
+  ManyPayloads();
   RetirementFailure();
   RetirementUnlinkFailure();
   ReclamationSyncFailures();

@@ -24,6 +24,7 @@ include/gufo/ext/experimental/hipblaslt_plan_database.hpp
 include/gufo/ext/experimental/host_allocations.hpp
 include/gufo/ext/experimental/lora_adapter.hpp
 include/gufo/ext/experimental/managed_alloc.hpp
+include/gufo/ext/experimental/npu.hpp
 include/gufo/ext/experimental/snapshot_transfer.hpp
 include/gufo/ext/experimental/weight_upload.hpp
 include/gufo/ext/gguf_identity.hpp
@@ -65,6 +66,7 @@ src/cache/adapter.hpp
 src/cache/checkpoint.hpp
 src/cache/completion.hpp
 src/cache/component_resources.hpp
+src/cache/cost.hpp
 src/cache/disk.hpp
 src/cache/identity.hpp
 src/cache/ledger.hpp
@@ -101,6 +103,8 @@ src/core/logging/logging.hpp
 src/core/lora/adapter.hpp
 src/core/mapped_prefetch.hpp
 src/core/model_config.hpp
+src/core/npu/npu.hpp
+src/core/npu/q8_gemm.hpp
 src/core/platform/fs.hpp
 src/core/platform/gpu_budget.hpp
 src/core/platform/library.hpp

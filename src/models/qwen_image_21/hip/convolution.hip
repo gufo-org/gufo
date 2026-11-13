@@ -48,7 +48,7 @@ __global__ void TiledIm2col(const std::uint16_t* x, std::uint16_t* y,
 // Keep the im2col tile in LDS and consume packed weights with WMMA.
 // Preserve channel/tap order and BF16 product rounding before bias.
 using B = hip_bfloat16;
-using Frag = __attribute__((ext_vector_type(16))) unsigned short;
+using Frag = __attribute__((ext_vector_type(16))) short;
 using Acc = __attribute__((ext_vector_type(8))) float;
 __device__ Frag Load(const unsigned short* p) {
   union {

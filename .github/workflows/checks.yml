@@ -41,12 +41,24 @@ jobs:
           restore-keys: |
             gufo-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-
 
+      - name: Restore Rust compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/gufo-rust-cache
+          key: gufo-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gufo-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-
+            gufo-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'rust-toolchain.toml') }}-
+
       - name: Prepare compiler cache
         shell: bash
         run: |
           mkdir -p /tmp/gufo-ccache
           chmod -R a+rwX /tmp/gufo-ccache
           chmod 1777 /tmp/gufo-ccache
+          mkdir -p /tmp/gufo-rust-cache
+          chmod -R a+rwX /tmp/gufo-rust-cache
+          chmod 1777 /tmp/gufo-rust-cache
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -55,7 +67,7 @@ jobs:
           extra-conf: |
             extra-substituters = https://gufo.cachix.org
             extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
-            extra-sandbox-paths = /tmp/gufo-ccache
+            extra-sandbox-paths = /tmp/gufo-ccache /tmp/gufo-rust-cache
 
       # Pull on every run; push only from main so pull requests do not fill
       # the cache. Fork pull requests receive no token and only pull.

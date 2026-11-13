@@ -135,6 +135,17 @@ jobs:
           .\windows-gufo\gufo.exe diagnose
           if ($LASTEXITCODE -ne 0) { throw 'gufo diagnose failed' }
 
+      # The runner has the AMD NPU driver: a missing NPU is a bundle bug (for
+      # example a bundled xrt_coreutil.dll), which diagnose only warns about.
+      - name: Check the NPU opens
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = (.\windows-gufo\gufo.exe diagnose --section npu --json) -join "`n"
+          if ($LASTEXITCODE -ne 0) { throw 'gufo diagnose --section npu failed' }
+          $npu = ($report | ConvertFrom-Json).checks | Where-Object name -eq 'npu'
+          if (-not $npu -or $npu.status -ne 'PASS') { throw "NPU check: $($npu.status) $($npu.message)" }
+          $npu.message
+
       # Real HIP kernels and allocations without weights, so a stalled SDK or
       # a missing runtime piece shows before any model download.
       - name: Run GPU checks without weights

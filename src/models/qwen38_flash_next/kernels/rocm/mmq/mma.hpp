@@ -948,7 +948,7 @@ namespace ggml_hip_mma {
         const bf16x8_t& b_frag = reinterpret_cast<const bf16x8_t&>(B.x[0]);
         acc_frag = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a_frag, b_frag, acc_frag);
 #elif defined(RDNA3)
-        using bf16x16_t = __attribute__((ext_vector_type(16))) __bf16;
+        using bf16x16_t = __attribute__((ext_vector_type(16))) short;
         using floatx8_t = __attribute__((ext_vector_type(8))) float;
         floatx8_t& acc_frag = reinterpret_cast<floatx8_t&>(D.x[0]);
         const bf16x16_t& a_frag = reinterpret_cast<const bf16x16_t&>(A.x[0]);

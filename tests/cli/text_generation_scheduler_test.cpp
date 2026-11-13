@@ -2273,6 +2273,13 @@ void TestMetricsDuringCacheAdmission() {
     auto next = scheduler->Submit({1, 10, 100, 11}, 1, 0.0F);
     Expect(entered.try_acquire_for(kTestTimeout),
            "continuation admission captures its live checkpoint");
+    // The capture may be the first request's idle frontier task, entered
+    // before the scheduler pops this request; admission then waits for it.
+    const auto admitted_deadline =
+        std::chrono::steady_clock::now() + kTestTimeout;
+    while (metrics::RequestsProcessing().load() != processing_before + 1 &&
+           std::chrono::steady_clock::now() < admitted_deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     Expect(metrics::RequestsProcessing().load() == processing_before + 1 &&
                metrics::RequestsDeferred().load() == deferred_before,
            "cache preparation remains visible as processing");
@@ -2857,9 +2864,12 @@ void TestFirstTokenPrecedesSnapshotAndPreservesBudget() {
     control->multi_token_decode = multi;
     control->preview_first_token = true;
     std::binary_semaphore captured(0), release(0);
+    std::atomic<unsigned> captures{0};
     control->snapshot_callback = [&] {
-      captured.release();
-      release.acquire();
+      if (captures.fetch_add(1) == 0) {
+        captured.release();
+        release.acquire();
+      }
     };
     auto scheduler = MakeScheduler(control, 1);
     auto request = scheduler->Submit({1, 10}, 7, 0.0F, {}, true);

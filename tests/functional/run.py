@@ -369,7 +369,7 @@ def main():
                          "dspark" if option(command, "--dspark-model") else "off")
     base_url = f"http://127.0.0.1:{port}"
     comparison_command = list(command[1:])
-    for flag in ("--port", "--cache-disk"):
+    for flag in ("--port", "--cache-disk", "--trace"):
         if flag in comparison_command:
             comparison_command[comparison_command.index(flag) + 1] = "<runner-owned>"
     report = {**provenance(), "command": command, "comparison_command": comparison_command,

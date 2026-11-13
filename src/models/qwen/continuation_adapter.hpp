@@ -49,6 +49,7 @@ public:
   [[nodiscard]] std::size_t PinnedCaptureBytes() const noexcept {
     return pinned_capture_bytes_.load(std::memory_order_relaxed);
   }
+  [[nodiscard]] std::optional<cache::CostEstimate> Cost() const override;
   [[nodiscard]] cache::Capabilities GetCapabilities() const override;
   [[nodiscard]] std::span<const cache::ComponentDescriptor> Components()
       const override;

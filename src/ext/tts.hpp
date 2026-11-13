@@ -9,6 +9,8 @@
 #include <string_view>
 #include <vector>
 
+#include "gufo/ext/options.hpp"
+
 namespace gufo::ext {
 
 enum class TtsVariant : std::uint8_t {
@@ -170,6 +172,9 @@ struct TtsRunnerOptions {
   std::string model_root;
   std::size_t maximum_context_tokens{4096};
   std::string projector_path;
+  /// The explicit command-line values of the options the provider declares
+  /// for this command (see TextRunnerOptions::provider_options).
+  ParsedOptions provider_options{};
 };
 
 /// `gufo speak`: synthesis (mode "tts"), or an answer to a written or spoken

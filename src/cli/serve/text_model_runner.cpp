@@ -420,6 +420,10 @@ struct TextRunnerPool::Request::Impl {
       }
     }
     snapshot_tokens.reserve(prompt.size());
+    // A runner without prefix reuse captures nothing: an earlier snapshot
+    // target would only end the first prefill pass there.
+    if (!runner->Descriptor().capabilities.prefix_reuse)
+      count = prompt.size();
     snapshot_tokens.assign(prompt.begin(), prompt.begin() + count);
     // A live continuation can already be beyond the desired snapshot point.
     // Keep its existing immutable checkpoint; never snapshot mismatched state.
@@ -432,6 +436,10 @@ struct TextRunnerPool::Request::Impl {
     }
     ngram_baseline = runner->NgramRows(state);
     checkpoints = lease->PlannedCaptures(cache_prefix_tokens);
+    // A runner without prefix reuse keeps no captures: planned checkpoints
+    // would only split prefill passes (and run the tail as decode steps).
+    if (!runner->Descriptor().capabilities.prefix_reuse)
+      checkpoints.clear();
     if (alignment > 1 || context) {
       for (auto& position : checkpoints)
         position = Aligned(position);
@@ -1109,7 +1117,8 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens,
   }
   if (stop < impl_->prefill_offset + max_input_tokens)
     max_input_tokens = stop - impl_->prefill_offset;
-  if (!in_pass_prompt && impl_->prefill_offset < snapshot_position)
+  if (!in_pass_prompt && impl_->prefill_offset < snapshot_position &&
+      impl_->runner->Descriptor().capabilities.prefix_reuse)
     max_input_tokens =
         std::min(max_input_tokens, snapshot_position - impl_->prefill_offset);
 
@@ -1194,7 +1203,7 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens,
     for (const auto point : impl_->checkpoints)
       if (point > frontier)
         lookahead_end = std::min(lookahead_end, point);
-    if (snapshot_position > frontier)
+    if (snapshot_position > frontier && capabilities.prefix_reuse)
       lookahead_end = std::min(lookahead_end, snapshot_position);
   }
   struct ClearLookahead {

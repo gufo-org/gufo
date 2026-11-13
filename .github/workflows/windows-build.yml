@@ -57,6 +57,12 @@ jobs:
       SDK_SHA256: 1293927b06b3b8d4bd7e0265823fb998bc9e0d83c68f33dcfa5d32663b30ce38
       # Forward slashes: CMake reads backslashes in -D values as escapes.
       SDK_ROOT: C:/TheRock/build
+      # Xilinx's Windows XRT SDK: headers and import library for the NPU
+      # runtime. XRT 2.21, the version the AMD NPU driver ships; at run time
+      # Gufo uses the driver's xrt_coreutil.dll.
+      XRT_SDK_URL: https://github.com/Xilinx/XRT/releases/download/2.21.75/xrt_windows_sdk.zip
+      XRT_SDK_SHA256: ccc244c2c423588972ade76142cdc01049477aaa39a35be97e782b97eb7c5295
+      XRT_ROOT: C:/xrt
       GUFO_PACKAGING_ROOT: ${{ github.workspace }}
     steps:
       - name: Check out repository
@@ -227,6 +233,21 @@ jobs:
           New-Item -ItemType Directory -Force build/windows-release | Out-Null
           Copy-Item $runtime build/windows-release
 
+      # Gufo delay-loads xrt_coreutil.dll and uses the NPU driver's copy
+      # (System32): a copy beside gufo.exe cannot find the driver's device
+      # shim. Nothing from the SDK is staged; check_bundle.py rejects it.
+      - name: Install the XRT SDK
+        run: |
+          $archive = "$env:RUNNER_TEMP\xrt_windows_sdk.zip"
+          curl.exe --fail --location --retry 3 --no-progress-meter --output $archive $env:XRT_SDK_URL
+          if ($LASTEXITCODE -ne 0) { throw 'cannot download the XRT SDK' }
+          $sha = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($sha -ne $env:XRT_SDK_SHA256) { throw "XRT SDK has sha256 $sha, expected $env:XRT_SDK_SHA256" }
+          New-Item -ItemType Directory -Force $env:XRT_ROOT | Out-Null
+          tar -xf $archive -C $env:XRT_ROOT
+          if ($LASTEXITCODE -ne 0) { throw 'cannot unpack the XRT SDK' }
+          "XRT_DIR=$env:XRT_ROOT/xrt_sdk/xrt/share/cmake/XRT" >> $env:GITHUB_ENV
+
       - name: Check out external extension
         if: ${{ inputs.extension-repo != '' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -260,7 +281,7 @@ jobs:
           cmake --preset windows-release -DBUILD_TESTING=ON "-DCMAKE_HIP_COMPILER_ROCM_ROOT=$env:SDK_ROOT" `
             -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
             -DOpenMP_CXX_LIB_NAMES=libomp "-DOpenMP_libomp_LIBRARY=$PWD/build/openmp/runtime/src/libomp.lib" `
-            "-DOpenMP_CXX_INCLUDE_DIR=$PWD/build/openmp/runtime/src" @identity
+            "-DOpenMP_CXX_INCLUDE_DIR=$PWD/build/openmp/runtime/src" "-DXRT_DIR=$env:XRT_DIR" @identity
           if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
           "$PWD\build\windows-release\vcpkg_installed\x64-windows-release\bin" >> $env:GITHUB_PATH
           "$PWD\build\windows-release" >> $env:GITHUB_PATH
@@ -320,6 +341,9 @@ jobs:
             Copy-Item $videoTest.FullName $dist
           }
           Copy-Item "$env:GUFO_PACKAGING_ROOT/licenses/llvm-openmp.txt" "$dist/llvm-openmp-LICENSE.txt"
+          Copy-Item "$env:XRT_ROOT/xrt_sdk/xrt/license/LICENSE" "$dist/xrt-LICENSE.txt"
+          "XRT 2.21 Windows SDK headers, source: $env:XRT_SDK_URL (sha256 $env:XRT_SDK_SHA256); Apache-2.0. Gufo is linked against its headers and import library; xrt_coreutil.dll comes from the AMD NPU driver." |
+            Set-Content "$dist/xrt-version.txt" -Encoding ascii
           'LLVM OpenMP 18.1.8, source: https://github.com/llvm/llvm-project/tree/3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff/openmp; Apache-2.0 WITH LLVM-exception; built with OPENMP_MSVC_NAME_SCHEME=ON.' |
             Set-Content "$dist/llvm-openmp-version.txt" -Encoding ascii
           $redist = Get-ChildItem "$env:VCToolsRedistDir\x64" -Directory |
@@ -394,6 +418,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item "$bundle\gufo.exe", "$bundle\*.dll", LICENSE, NOTICE, THIRD_PARTY_NOTICES.md $dist
           Copy-Item "$bundle/llvm-openmp-LICENSE.txt", "$bundle/llvm-openmp-version.txt" $dist
+          Copy-Item "$bundle/xrt-LICENSE.txt", "$bundle/xrt-version.txt" $dist
           if (Test-Path "$bundle/share") { Copy-Item "$bundle/share" $dist -Recurse }
           if (Test-Path "$bundle/gufo-video-libraries.txt") {
             Copy-Item "$bundle/gufo-video-libraries.txt" $dist

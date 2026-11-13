@@ -1,5 +1,8 @@
 #include "src/cache/disk_catalog.hpp"
 
+#include <algorithm>
+#include <array>
+#include <limits>
 #include <map>
 #include <stdexcept>
 
@@ -22,7 +25,12 @@ struct DiskCatalog::Impl {
     ResourceCharge metadata;
     std::shared_ptr<const DiskDescription> description;
     std::uint64_t used{};
+    std::optional<std::uint64_t> reused_at;
     bool invalid{};
+    bool use_dirty{};
+    // Prepaid with the catalog record so eviction can reclaim under a full
+    // ledger without admitting a temporary candidate table.
+    std::array<std::uint64_t, 5> eviction_order{};
   };
   struct Bucket {
     ResourceCharge metadata;
@@ -35,17 +43,33 @@ struct DiskCatalog::Impl {
   std::map<std::uint64_t, Record> records;
   std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> lru;
   std::map<Key, Bucket> reverse;
-  std::uint64_t clock{};
+  std::uint64_t clock{}, admitted_bytes{}, turnover_bytes;
   bool loading{true};
   Impl(ResourceLedger& resources, DiskStore& disk, PrefixIndex& prefixes,
-       ResourceReservation reservation)
+       ResourceReservation reservation, std::uint64_t turnover)
       : ledger(&resources),
         store(&disk),
         index(&prefixes),
-        metadata(reservation.Convert()) {}
+        metadata(reservation.Convert()),
+        turnover_bytes(turnover) {}
   ~Impl() {
+    FlushUses();
     while (!records.empty())
       Erase(records.begin());
+  }
+  void FlushUses() noexcept {
+    for (auto& [id, record] : records) {
+      try {
+        if (record.use_dirty &&
+            store->TryRecordUse(
+                {id},
+                DiskUseHistory{record.used, admitted_bytes, record.reused_at}))
+          record.use_dirty = false;
+      } catch (...) {
+        // Advisory use history must not fail serving or teardown when a
+        // path allocation or host I/O setup fails before the store's write.
+      }
+    }
   }
   std::uint64_t Tick() {
     if (clock == UINT64_MAX)
@@ -94,6 +118,73 @@ struct DiskCatalog::Impl {
       auto node = reverse.extract(bucket);
     }
   }
+  static bool Below(const DiskManifest& a, const DiskManifest& b) {
+    return a.compatibility == b.compatibility &&
+           (a.input == b.input || a.lineage == b.lineage) &&
+           a.tokens.size() < b.tokens.size() &&
+           std::equal(a.tokens.begin(), a.tokens.end(), b.tokens.begin());
+  }
+  std::uint64_t UniqueBytes(const DiskManifest& manifest) const {
+    std::uint64_t bytes = 0;
+    const auto add = [&](bool priv, const DiskPayload& payload) {
+      const auto found = reverse.find({priv, payload.file});
+      if (found != reverse.end() && found->second.checkpoints.size() == 1)
+        bytes += payload.bytes;
+    };
+    for (const auto& component : manifest.components) {
+      for (const auto& chunk : component.chunks)
+        add(false, chunk);
+      for (const auto& payload : {component.tail, component.private_state})
+        if (payload)
+          add(true, *payload);
+    }
+    return bytes;
+  }
+  std::array<std::uint64_t, 5> Order(const Record& record) const {
+    const auto& manifest = record.description->Manifest();
+    auto recency = record.used;
+    bool reused =
+        record.reused_at && admitted_bytes - *record.reused_at < turnover_bytes;
+    bool covered = false, rooted = false,
+         fork = manifest.purpose == CheckpointPurpose::kLearned;
+    std::optional<Token> next;
+    std::size_t newer = 0;
+    for (const auto& [id, peer] : records) {
+      (void)id;
+      if (peer.invalid)
+        continue;
+      const auto& peer_manifest = peer.description->Manifest();
+      if (Below(peer_manifest, manifest))
+        rooted = true;
+      if (!Below(manifest, peer_manifest))
+        continue;
+      covered = true;
+      recency = std::max(recency, peer.used);
+      reused |=
+          peer.reused_at && admitted_bytes - *peer.reused_at < turnover_bytes;
+      const auto token = peer_manifest.tokens[manifest.tokens.size()];
+      fork |= next && *next != token;
+      next = token;
+      newer += peer_manifest.lineage == manifest.lineage &&
+               peer_manifest.purpose == CheckpointPurpose::kGenerated;
+    }
+    const bool superseded = manifest.purpose == CheckpointPurpose::kGenerated &&
+                            !fork && newer >= 3;
+    const bool shared = fork || (covered && !rooted);
+    // Superseded intermediates leave before any conversation's last frontier.
+    // Within each conversation keep its leaves, then learned/shared forks.
+    // Prefer a retirement that actually releases more unique payload when
+    // recency and role tie; shared chunks are never credited twice.
+    return {superseded ? 0U
+            : reused   ? 2U
+                       : 1U,
+            superseded ? 0 : recency,
+            shared    ? 2U
+            : covered ? 0U
+                      : 1U,
+            std::numeric_limits<std::uint64_t>::max() - UniqueBytes(manifest),
+            manifest.checkpoint.value};
+  }
   void Erase(decltype(records)::iterator it) {
     const auto id = it->first;
     Dependencies(it->second.description->Manifest(), [&](bool priv, auto file) {
@@ -105,10 +196,11 @@ struct DiskCatalog::Impl {
   }
 };
 DiskCatalog::DiskCatalog(ResourceLedger& ledger, DiskStore& store,
-                         PrefixIndex& index)
+                         PrefixIndex& index, std::uint64_t turnover_bytes)
     : impl_(std::make_unique<Impl>(
           ledger, store, index,
-          ledger.Reserve(ResourceCategory::kMetadata, sizeof(Impl)))) {
+          ledger.Reserve(ResourceCategory::kMetadata, sizeof(Impl)),
+          turnover_bytes)) {
   for (const auto& entry : store.Entries())
     if (entry.Durable())
       Track(entry.Manifest().checkpoint);
@@ -129,15 +221,22 @@ void DiskCatalog::Track(CheckpointId id) {
             existing->second.description->Quarantined());
     impl_->Erase(existing);
   }
-  const auto used = impl_->loading ? 0 : impl_->Tick();
+  const auto history =
+      impl_->loading ? impl_->store->UseHistory(id) : DiskUseHistory{};
+  const auto used = impl_->loading ? history.last_used : impl_->Tick();
+  impl_->admitted_bytes =
+      std::max(impl_->admitted_bytes, history.admitted_bytes);
+  impl_->clock = std::max(impl_->clock, used);
   auto admission = impl_->ledger->Reserve(
       ResourceCategory::kMetadata,
       sizeof(decltype(impl_->records)::value_type) +
           sizeof(decltype(impl_->lru)::value_type) + 128);
   auto record =
       impl_->records
-          .emplace(id.value,
-                   Impl::Record{{}, std::move(description), used, false})
+          .emplace(
+              id.value,
+              Impl::Record{
+                  {}, std::move(description), used, history.reused_at, false})
           .first;
   try {
     impl_->lru.emplace(std::make_pair(used, id.value), id.value);
@@ -146,6 +245,20 @@ void DiskCatalog::Track(CheckpointId id) {
                    impl_->AddDependency({priv, file}, id.value);
                  });
     record->second.metadata = admission.Convert();
+    if (!impl_->loading) {
+      const auto bytes =
+          impl_->UniqueBytes(record->second.description->Manifest());
+      if (bytes > UINT64_MAX - impl_->admitted_bytes)
+        throw std::overflow_error("disk admission clock exhausted");
+      impl_->admitted_bytes += bytes;
+      // Every surviving record must carry the newest byte clock at flush;
+      // otherwise retiring the newest admission could revive old reuse on
+      // a clean restart.
+      for (auto& [peer_id, peer] : impl_->records) {
+        (void)peer_id;
+        peer.use_dirty = true;
+      }
+    }
   } catch (...) {
     impl_->Erase(record);
     throw;
@@ -167,13 +280,32 @@ void DiskCatalog::Touch(CheckpointId id) {
   auto node = impl_->lru.extract({it->second.used, id.value});
   node.key() = {used, id.value};
   it->second.used = used;
+  it->second.reused_at = impl_->admitted_bytes;
   impl_->lru.insert(std::move(node));
+  it->second.use_dirty = true;
+}
+void DiskCatalog::FlushUses() {
+  impl_->FlushUses();
 }
 bool DiskCatalog::EvictOne() {
   Reconcile();
-  for (auto it = impl_->lru.begin(); it != impl_->lru.end();) {
-    auto record = impl_->records.find(it->second);
-    ++it;
+  for (auto& [id, record] : impl_->records) {
+    (void)id;
+    record.eviction_order = impl_->Order(record);
+  }
+  while (true) {
+    auto record = impl_->records.end();
+    for (auto it = impl_->records.begin(); it != impl_->records.end(); ++it) {
+      if (it->second.eviction_order[0] == UINT64_MAX)
+        continue;
+      if (record == impl_->records.end() ||
+          it->second.eviction_order < record->second.eviction_order)
+        record = it;
+    }
+    if (record == impl_->records.end())
+      return false;
+    // Mark reader-pinned candidates as tried without allocating a side table.
+    record->second.eviction_order.fill(UINT64_MAX);
     const auto& description = *record->second.description;
     auto result = impl_->store->TryRetire(description.Manifest().checkpoint,
                                           description.Epoch());
@@ -186,7 +318,6 @@ bool DiskCatalog::EvictOne() {
     if (result == DiskRetireResult::kRetired)
       return true;
   }
-  return false;
 }
 void DiskCatalog::Invalidate(bool private_file, DiskFileId file) {
   impl_->store->InvalidateDependency(private_file, file);

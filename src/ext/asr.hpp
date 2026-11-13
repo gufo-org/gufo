@@ -10,6 +10,8 @@
 #include <string_view>
 #include <vector>
 
+#include "gufo/ext/options.hpp"
+
 namespace gufo::ext {
 
 struct TranscriptionTimings {
@@ -160,6 +162,9 @@ struct AsrRunnerOptions {
   std::string model_root;
   std::size_t maximum_context_tokens{1024};
   std::string projector_path;
+  /// The explicit command-line values of the options the provider declares
+  /// for this command (see TextRunnerOptions::provider_options).
+  ParsedOptions provider_options{};
 };
 
 using AsrProbe = bool (*)(std::string_view model_root);
