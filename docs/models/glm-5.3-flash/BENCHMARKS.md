@@ -56,6 +56,10 @@ token as a grid dimension over per-token scratch; bit-identical —
 n-gen-1 sha and 9/9): pp2048 **184.5 ± 0.4**, pp16384 **147.0 ± 0.6**
 (`/tmp/opencode/gufo_bench_mla2ab.log`,
 `/tmp/opencode/gufo_bench_mla2gate.log`).
+With the single-list top-k run at its `k2`-sized bitonic network
+(bit-exact — n-gen-1 sha, 9/9, existing single-list contract):
+pp2048 **193.2 ± 2.0**, pp16384 **149.4** parity
+(`/tmp/opencode/gufo_bench_topk1ab.log`).
 Serve-protocol gate not yet re-captured for these steps. Use these
 only as offline scans, not interchangeably with the serve-protocol gate
 cells.

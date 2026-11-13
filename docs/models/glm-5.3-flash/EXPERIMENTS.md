@@ -300,6 +300,21 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   **146.78/147.19** (no loss at 16K; the win is the 45 % tail at
   short prompts) (`/tmp/opencode/gufo_bench_mla2ab.log`,
   `/tmp/opencode/gufo_bench_mla2gate.log`).
+- Single-list top-k shrink (`ops.hip.cpp TopKDesc`): every prefill token
+  below ~4K context took the `lists <= 1` shortcut, which always ran the
+  `BitonicGatherKernel<2048>` network (C = 4096 keys, ~4 sort strided
+  rounds per thread, ~30 us) no matter how few pools the token had —
+  early tokens sorted 4096 keys for 8 real ones. The shortcut now runs
+  the same switch-selected `k2` network with `final = true`; the key
+  order, neutral fills and tie-breaks are identical (bit-exact, the
+  existing `topk …/… single` contract passes untouched). Offline A/B
+  (alternating, warm+2): pp2048 185.32/184.94 -> **193.19/193.27
+  (+4.4 %)**; pp16384 parity 150.0/148.8 vs noisy control 153.3/147.1
+  (beyond ~4K tokens `k2` pins at 512 and multi-list merges dominate
+  again, so the shortcut only serves the shallow prefix there); n-gen-1
+  sha `43557e0c…` identical; `glm5_next` ctest 9/9 GPU-exclusive
+  (`/tmp/opencode/gufo_bench_topk1ab.log`, `_topk1gate.log`,
+  `_topk1ctest.log`).
 
 ## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-13)
 

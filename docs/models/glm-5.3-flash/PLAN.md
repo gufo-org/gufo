@@ -87,7 +87,8 @@ decode-throughput half of the dense stage counts. P5 (routed IQ WMMA,
 both GEMV families at the center of the profile now run on the tensor
 cores.
 
-Status 2026-11-13 (evening): pp2048 **184.5 t/s**, pp16384 **147.0**,
+Status 2026-11-13 (evening): pp2048 **184.5 t/s** (now **193.2** with
+A5 shipped), pp16384 **147.0**,
 exact default (sha `43557e0c…`, ctest 9/9). A fresh `rocprofv3` capture of
 the shipped tree at pp2048 (`/tmp/opencode/prof_mla2`) shows steady-state
 idle down to **2.2 %** — the launch storm is gone after P8 (KDA
@@ -143,12 +144,13 @@ levers, exact-default ladder (A) then opt-in fast track (B):
    64-key tiles) and a wave64 combine over rank-slice splits. Changes
    accumulation order → P7-style NMSE contract + golden re-approval.
    Target ~1.5x (−0.55 s).
-5. Indexer bitonic sort batching (0.68 s/pass, 22.6 k launches of one
-   1024-thread block): `TopKDesc` per token stays the last per-token
-   loop; batch tokens per launch (bucket by `k2`, per-token LDS-free
-   multi-row bitonic or one 1024-block per 2-4 tokens with padded k),
-   merging rounds gated per-token. Bit-exact per token by construction.
-   Target −0.4…−0.5 s (+4-5 %).
+5. (Shipped 2026-11-13, +4.4 % pp2048 — pp2048 193.2, see EXPERIMENTS
+   "Single-list top-k shrink") Indexer bitonic sort batching (0.68
+   s/pass, 22.6 k launches of one 1024-thread block): the single-list
+   case now runs its `k2`-sized network; what remains is batching
+   tokens per launch for the deep-context multi-merge path (bucket by
+   `k2`, merging rounds gated per-token). Bit-exact per token by
+   construction.
 6. `GemvRowsQ8_0<16>` (0.8 s/pass at 11.6 k calls) and `GemvRowsF32`
    (0.25 s, 13.6 k calls): tensors outside the dense-WMMA predicate
    (`cols % 256`); admit them to the tier (tier change → sha re-capture

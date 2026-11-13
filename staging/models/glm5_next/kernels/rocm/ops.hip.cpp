@@ -904,61 +904,63 @@ void KdaOutGate(const float* o, const float* w, const float* g2, float* dst,
        pool, pool_stride, seen0, kpool, key_len, heads, iq, iq_stride, ape, w,
        w_stride, q_scale, scores, scores_stride);
  }
-
 void TopKDesc(const float* scores, std::uint32_t n, std::uint32_t k,
               std::int32_t* out, std::uint64_t* scratch, hipStream_t stream) {
   const std::uint32_t k2 = CeilPow2(k < 2 ? 2 : k);
   const unsigned threads = k2 <= 512 ? 2 * k2 : 1024U;
   std::uint32_t lists = (n + 2 * k2 - 1) / (2 * k2);
-  if (lists <= 1) {
-    BitonicGatherKernel<2048>
-        <<<1, 1024, 0, stream>>>(scores, nullptr, out, n, k, true);
-    return;
+  // Single-list tokens (the common prefill case below 4K context: the
+  // pool count never exceeds CeilPow2's 2*k2 bound) run the gather as the
+  // final stage with the same k2-sized network as the multi-list path;
+  // the order, keys and neutral fills are identical, only C shrinks.
+  const bool single = lists <= 1U;
+  if (single) {
+    lists = 1U;
   }
   switch (k2) {
     case 2:
       BitonicGatherKernel<2>
-          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, false);
+          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, single);
       break;
     case 4:
       BitonicGatherKernel<4>
-          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, false);
+          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, single);
       break;
     case 8:
       BitonicGatherKernel<8>
-          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, false);
+          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, single);
       break;
     case 16:
       BitonicGatherKernel<16>
-          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, false);
+          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, single);
       break;
     case 32:
       BitonicGatherKernel<32>
-          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, false);
+          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, single);
       break;
     case 64:
       BitonicGatherKernel<64>
-          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, false);
+          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, single);
       break;
     case 128:
       BitonicGatherKernel<128>
-          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, false);
+          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, single);
       break;
     case 256:
       BitonicGatherKernel<256>
-          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, false);
+          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, single);
       break;
     case 512:
       BitonicGatherKernel<512>
-          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, false);
+          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, single);
       break;
     case 1024:
       BitonicGatherKernel<1024>
-          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, false);
+          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, single);
       break;
     default:
       BitonicGatherKernel<2048>
-          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, false);
+          <<<lists, threads, 0, stream>>>(scores, scratch, out, n, k, single);
       break;
   }
   // Merge rounds ping-pong inside scratch: buffer B starts after the first
