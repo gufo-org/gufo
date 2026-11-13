@@ -6,7 +6,7 @@
 // output head of up to 152064 rows. The program is the IRON design in
 // src/core/npu/kernels/qwen3dec (a phase interpreter on all 32 cores);
 // weights are Q8_0, activations are quantized to Q8_0 on the cores, the KV
-// cache is bf16 and holds up to 2048 positions.
+// cache is bf16 and holds up to 4096 positions.
 
 #include <cstddef>
 #include <cstdint>
@@ -50,7 +50,7 @@ public:
   void SetHead(const std::uint16_t* weights, int rows, const float* norm);
   /// RoPE frequencies theta^(-2i / 128).
   void SetRopeTheta(double theta);
-  /// Positions the KV cache holds (2048).
+  /// Positions the KV cache holds (4096).
   [[nodiscard]] int capacity() const noexcept;
 
   /// The cache entries of `layer` at positions [pos, pos + count), as prefill

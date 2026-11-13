@@ -25,7 +25,8 @@ QKV_RECS, OUT_RECS, GU_RECS, DOWN_RECS = 32, 16, 96, 48  # per core
 HEAD_MAX_CHUNKS = 594             # 8 rows per chunk and core: 152064 rows
 ACT_COL = 12 * ROWS * 32          # gate/up output per column (bf16)
 Q_COL = 16 * ROWS * 32            # q/k/v rows per column (f32)
-CTX = 2048                        # KV positions
+CTX = 4096                        # KV positions
+KV_TASKS = 4                      # a DMA task repeats at most 64 records
 
 
 def t(total, offset, sizes, strides):
@@ -91,6 +92,15 @@ class Layout:
     def hidden(self, offset, c):
         return t(self.s_bytes, offset + c * 1024, [1, 1, 32, 32], [0, 0, 32, 1])
 
+    @staticmethod
+    def kv_tasks(d):
+        """(first record, records) of the KV stream's tasks."""
+        out, at = [], 0
+        for i in range(KV_TASKS):
+            out.append((at, d["recs"][i]))
+            at = at + d["recs"][i]
+        return out
+
     def phases(self, d):
         """Phases of one token; d holds the dispatch-time scalars."""
         # Embed: the input row (written by the host) becomes block 0's h.
@@ -114,7 +124,7 @@ class Layout:
                        for s in range(0, 16, 2)},
                 stream={s: [("S", t(self.s_bytes, kv + (s // 2) * ROWS * self.ctx * 512 + at * 16 * 512,
                                     [1, n, REC // 512, 512], [0, 16 * 512, 512, 1]))
-                            for at, n in ((0, d["recs_a"]), (d["recs_a"], d["recs_b"]))]
+                            for at, n in self.kv_tasks(d)]
                         for s in range(0, 16, 2)},
                 drains=lambda c, kv=kv: [
                     t(self.s_bytes, self.junk + c * 128, [1, 1, 2, 64], [0, 0, 64, 1]),

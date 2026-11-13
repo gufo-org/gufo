@@ -282,6 +282,10 @@ struct TalkerNpuRuntime::Impl {
   float predictor_top_p{1.0F};
   bool profile{std::getenv("GUFO_NPU_PROFILE") != nullptr};
   double talker_ms{}, predictor_ms{};
+  // The talker's decode steps on the fused NPU program (one dispatch per
+  // token) when its shape fits; CPU products otherwise.
+  gufo::npu::Qwen3Decoder fused;
+  bool skip_talker_decode{};
 
   const Tensor& Find(const std::string& name) const {
     const Tensor* t = model.store->Find(name);
@@ -302,7 +306,8 @@ struct TalkerNpuRuntime::Impl {
   Linear Load(std::initializer_list<std::string> names, bool prefill) {
     const auto parts = Parts(names);
     Linear l;
-    l.decode = MakeCpuQ8(parts);
+    if (!(prefill && skip_talker_decode))
+      l.decode = MakeCpuQ8(parts);
     if (prefill)
       l.bfp = UploadBfp(engine.bfp, parts);
     return l;
@@ -333,6 +338,76 @@ struct TalkerNpuRuntime::Impl {
     s->Prepare();
   }
 
+  template<typename Config>
+  void OpenFused(const Config& tc) {
+    using Fused = gufo::npu::Qwen3Decoder;
+    const char* env = std::getenv("GUFO_NPU_FUSED");
+    if (!(env && std::string(env) == "1"))
+      return;
+    if (tc.num_hidden_layers != std::uint32_t(Fused::kLayers) ||
+        tc.hidden_size != std::uint32_t(Fused::kHidden) ||
+        tc.num_attention_heads != std::uint32_t(Fused::kHeads) ||
+        tc.num_key_value_heads != std::uint32_t(Fused::kKvHeads) ||
+        tc.head_dim != std::uint32_t(Fused::kHeadDim) ||
+        tc.intermediate_size != std::uint32_t(Fused::kFfn))
+      return;
+    try {
+      fused = Fused::Open(engine.device, gufo::npu::FindDesign("qwen3dec"));
+      if (std::size_t(fused.capacity()) < maximum_tokens)
+        fused = Fused();
+    } catch (const gufo::npu::Error&) {
+      fused = Fused();
+    }
+  }
+
+  template<typename Config>
+  void LoadFused(const Config& tc) {
+    auto bf = [&](const std::string& n) {
+      return reinterpret_cast<const std::uint16_t*>(Find(n).data);
+    };
+    for (std::uint32_t l = 0; l < tc.num_hidden_layers; ++l) {
+      const std::string p = "talker.model.layers." + std::to_string(l) + ".";
+      const Stack::Layer& w = talker.layers[l];
+      fused.SetLayer(
+          int(l),
+          {bf(p + "self_attn.q_proj.weight"), bf(p + "self_attn.k_proj.weight"),
+           bf(p + "self_attn.v_proj.weight"), bf(p + "self_attn.o_proj.weight"),
+           bf(p + "mlp.gate_proj.weight"), bf(p + "mlp.up_proj.weight"),
+           bf(p + "mlp.down_proj.weight"), w.input_norm.data(),
+           w.post_norm.data(), w.q_norm.data(), w.k_norm.data()});
+    }
+    // One head for the codec logits and the predictor's input projection.
+    const Tensor& codec = Find("talker.codec_head.weight");
+    const Tensor& proj =
+        Find("talker.code_predictor.small_to_mtp_projection.weight");
+    std::vector<std::uint16_t> rows(codec.byte_count / 2 + proj.byte_count / 2);
+    std::memcpy(rows.data(), codec.data, codec.byte_count);
+    std::memcpy(rows.data() + codec.byte_count / 2, proj.data, proj.byte_count);
+    fused.SetHead(rows.data(), int(rows.size() / tc.hidden_size),
+                  talker.final_norm.data());
+    fused.SetRopeTheta(tc.rope_theta);
+  }
+
+  // The fused program's cache gets the CPU prefill's entries of positions
+  // [start, start + rows).
+  void HandOff(std::size_t start, std::size_t rows) {
+    const std::size_t kvh = talker.kv_heads, hd = talker.head_dim,
+                      cap = talker.capacity, kw = kvh * hd;
+    std::vector<float> k(rows * kw), v(rows * kw);
+    for (std::size_t l = 0; l < talker.layers.size(); ++l) {
+      const float* kc = talker.key_cache.data() + l * kvh * cap * hd;
+      const float* vc = talker.value_cache.data() + l * kvh * cap * hd;
+      for (std::size_t r = 0; r < rows; ++r)
+        for (std::size_t h = 0; h < kvh; ++h) {
+          std::memcpy(k.data() + r * kw + h * hd,
+                      kc + (h * cap + start + r) * hd, hd * 4);
+          std::memcpy(v.data() + r * kw + h * hd,
+                      vc + (h * cap + start + r) * hd, hd * 4);
+        }
+      fused.WriteKv(int(l), int(start), int(rows), k.data(), kw, v.data(), kw);
+    }
+  }
+
   void Load(const std::string& model_root) {
     model = LoadModelDirectory(model_root);
     if (!model.ok)
@@ -352,7 +427,12 @@ struct TalkerNpuRuntime::Impl {
     talker.eps = tc.rms_norm_eps;
     talker.theta = tc.rope_theta;
     talker.final_norm = Vector("talker.model.norm.weight");
+    OpenFused(tc);
+    skip_talker_decode = bool(fused);
     LoadStack(&talker, "talker.model.layers.", tc.num_hidden_layers, true);
+    skip_talker_decode = false;
+    if (fused)
+      LoadFused(tc);
     predictor.hidden = pc.hidden_size;
     predictor.inner = pc.intermediate_size;
     predictor.heads = pc.num_attention_heads;
@@ -494,14 +574,40 @@ struct TalkerNpuRuntime::Impl {
                   std::vector<float>* projected_hidden) {
     const auto t0 = std::chrono::steady_clock::now();
     const std::size_t h = talker.hidden;
-    talker.Forward(engine, x.data(), rows, talker_tokens);
-    talker_tokens += rows;
-    last_hidden->assign(talker.norm.end() - std::ptrdiff_t(h),
-                        talker.norm.end());
     const std::size_t vocab = model.config.talker.vocab_size,
                       ph = predictor.hidden;
     std::vector<float> out(vocab + ph);
-    Gemv(head, last_hidden->data(), 1, out.data());
+    if (fused) {
+      // Prefill all but the last row on BfpGemm (when there are enough rows
+      // for it), then each remaining row on the fused program.
+      std::size_t done = 0;
+      if (rows > 3) {
+        talker.Forward(engine, x.data(), rows - 1, talker_tokens);
+        HandOff(talker_tokens, rows - 1);
+        talker_tokens += rows - 1;
+        done = rows - 1;
+      }
+      for (std::size_t r = done; r < rows; ++r) {
+        fused.Start(x.data() + r * h, int(talker_tokens++));
+        fused.Wait();
+      }
+      std::vector<float> hidden(h);
+      fused.Hidden(hidden.data());
+      last_hidden->resize(h);
+      gufo::npu::host::RmsNormRows(hidden.data(), last_hidden->data(), 1, h,
+                                   talker.final_norm.data(), talker.eps);
+      for (float& v : *last_hidden)
+        v = Bf16(v);
+      const auto lg = fused.logits();
+      std::copy(lg.begin(), lg.begin() + std::ptrdiff_t(vocab + ph),
+                out.begin());
+    } else {
+      talker.Forward(engine, x.data(), rows, talker_tokens);
+      talker_tokens += rows;
+      last_hidden->assign(talker.norm.end() - std::ptrdiff_t(h),
+                          talker.norm.end());
+      Gemv(head, last_hidden->data(), 1, out.data());
+    }
     logits->resize(vocab);
     for (std::size_t i = 0; i < vocab; ++i)
       (*logits)[i] = Bf16(out[i]);

@@ -5,7 +5,7 @@ The cores run a phase interpreter (qwen3dec.cc, *_next): 142 phases per token
 (input row, 28 layers x 5, head). Rows 2-3 (j = 0, 1) also attend: core (c, j)
 holds query head 2c + j over KV head c. The runtime sequence feeds every
 phase's inputs at the head of the weight streams and drains its outputs into
-the state buffer S. `pos` (the position), the KV stream's two record counts
+the state buffer S. `pos` (the position), the KV stream's four record counts
 and the head's chunk count (rows / 256) are dispatch-time values; layout.py
 lays out S and W, and writes qwen3dec_layout.txt for the host.
 
@@ -32,7 +32,8 @@ COLS, ROWS, REC, OUT = L.COLS, L.ROWS, L.REC, 32
 
 @iron.jit
 def qwen3dec(S: InOut, W: In, *, pos: DispatchTime[np.int32], recs_a: DispatchTime[np.int32],
-             recs_b: DispatchTime[np.int32], head_chunks: DispatchTime[np.int32]):
+             recs_b: DispatchTime[np.int32], recs_c: DispatchTime[np.int32], recs_d: DispatchTime[np.int32],
+             head_chunks: DispatchTime[np.int32]):
     lay = L.Layout()
     in_ty = np.ndarray[(L.BLOCK,), np.dtype[np.int8]]
     rec_ty = np.ndarray[(REC,), np.dtype[np.int8]]
@@ -117,14 +118,14 @@ def qwen3dec(S: InOut, W: In, *, pos: DispatchTime[np.int32], recs_a: DispatchTi
     s_ty = np.ndarray[(lay.s_bytes,), np.dtype[np.int8]]
     w_ty = np.ndarray[(lay.w_bytes,), np.dtype[np.int8]]
 
-    def sequence(S, W, pos, recs_a, recs_b, head_chunks, wh, yh):
-        # A DMA task repeats at most 64 times, so the KV stream is two tasks of
-        # recs_a + recs_b records (both at least 1).
-        d = dict(pos=pos, recs_a=recs_a, recs_b=recs_b, head_chunks=head_chunks)
+    def sequence(S, W, pos, recs_a, recs_b, recs_c, recs_d, head_chunks, wh, yh):
+        # A DMA task repeats at most 64 times, so the KV stream is four tasks of
+        # recs_a + ... + recs_d records (each at least 1).
+        d = dict(pos=pos, recs=[recs_a, recs_b, recs_c, recs_d], head_chunks=head_chunks)
         for c in range(COLS):
             for j in range(ROWS):
                 rtps[c][j][0] = pos
-                rtps[c][j][1] = recs_a + recs_b
+                rtps[c][j][1] = recs_a + recs_b + recs_c + recs_d
                 rtps[c][j][2] = head_chunks
                 barriers[c][j].set(1)
         for phase in lay.phases(d):
@@ -148,7 +149,7 @@ def qwen3dec(S: InOut, W: In, *, pos: DispatchTime[np.int32], recs_a: DispatchTi
                     yh[c].drain(S, tp, wait=True, group=tg)
             tg.finish()
 
-    rt = Runtime(sequence, [s_ty, w_ty, pos, recs_a, recs_b, head_chunks, [f.prod() for f in w_fifos],
+    rt = Runtime(sequence, [s_ty, w_ty, pos, recs_a, recs_b, recs_c, recs_d, head_chunks, [f.prod() for f in w_fifos],
                             [f.cons() for f in y_fifos]])
     return Program(from_name("npu2", n_cols=None), rt, workers=workers).resolve_program()
 

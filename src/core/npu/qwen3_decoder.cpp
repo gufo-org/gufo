@@ -134,10 +134,13 @@ struct Qwen3Decoder::Impl {
   }
 
   std::vector<std::uint32_t> Generate(int pos) const {
-    const int recs = std::max(2, (pos + 15) / 16), b = std::max(1, recs - 64);
-    if (recs - b > 64 || b > 64)
+    // The KV stream's records in four tasks of 1..64 records each.
+    const int recs = std::max(4, (pos + 15) / 16);
+    if (recs > 4 * 64)
       throw Error("Qwen3Decoder: position beyond the KV cache");
-    const std::int32_t sc[4] = {pos, recs - b, b, head_chunks};
+    std::int32_t sc[6] = {pos, 0, 0, 0, 0, head_chunks};
+    for (int i = 0; i < 4; ++i)
+      sc[1 + i] = std::int32_t(recs / 4 + (i < recs % 4 ? 1 : 0));
     const auto words = generate.Generate(sc);
     return {words.begin(), words.end()};
   }
@@ -156,7 +159,7 @@ Qwen3Decoder Qwen3Decoder::Open(Device& device,
   if (m.lay.empty())
     throw Error("Qwen3Decoder: no layout in " + dir.string());
   m.program = Program::Load(device, dir / "qwen3dec.xclbin");
-  m.generate = DispatchLibrary::Open(dir / "qwen3dec_dispatch.so", 4);
+  m.generate = DispatchLibrary::Open(dir / "qwen3dec_dispatch.so", 6);
   m.s = m.program.Allocate(m.At("s_bytes"), kArgS);
   m.w = m.program.Allocate(m.At("w_bytes"), kArgW);
   std::memset(m.s.data(), 0, m.s.size());

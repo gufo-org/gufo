@@ -171,7 +171,7 @@ struct Runtime::Impl {
     using Fused = gufo::npu::Qwen3Decoder;
     const char* fused_env = std::getenv("GUFO_NPU_FUSED");
     const bool fits =
-        !(fused_env && std::string(fused_env) == "0") &&
+        fused_env && std::string(fused_env) == "1" &&
         text->num_hidden_layers == std::uint32_t(Fused::kLayers) &&
         text->hidden_size == std::uint32_t(Fused::kHidden) &&
         text->num_attention_heads == std::uint32_t(Fused::kHeads) &&
