@@ -61,14 +61,28 @@ class ServiceContracts(unittest.TestCase):
     def test_audio_rejects_silence_truncation_and_partial_samples(self):
         for data in (b'', bytes(24000), b'x'):
             with self.assertRaises(AssertionError):
-                audio_check(data, wav=False)
+                audio_check(data, wav=False, rate=24000)
         pcm = b'\x00\x10' * 24000
-        decoded, metrics = audio_check(pcm_wav(pcm))
+        decoded, metrics = audio_check(pcm_wav(pcm, 24000))
         self.assertEqual(decoded, pcm)
         self.assertEqual(metrics['duration_seconds'], 1)
         self.assertTrue(math.isfinite(metrics['rms']))
         with self.assertRaises(AssertionError):
-            audio_check(pcm_wav(pcm)[:-2])
+            audio_check(pcm_wav(pcm, 24000)[:-2])
+
+    def test_audio_takes_the_sample_rate_from_the_wav(self):
+        pcm = b'\x00\x10' * 48000
+        decoded, metrics = audio_check(pcm_wav(pcm, 48000))
+        self.assertEqual((decoded, metrics['sample_rate'], metrics['duration_seconds']), (pcm, 48000, 1))
+        # Raw PCM has the rate of the WAV output, which the caller passes on.
+        self.assertEqual(audio_check(pcm, wav=False, rate=48000)[1]['duration_seconds'], 1)
+        with self.assertRaises(ValueError):
+            audio_check(pcm, wav=False)
+        # A WAV whose rate differs from the earlier output, or that no runner
+        # may declare, fails.
+        for wav, rate in ((pcm_wav(pcm, 48000), 24000), (pcm_wav(pcm, 384000), None)):
+            with self.assertRaises(AssertionError):
+                audio_check(wav, rate=rate)
 
 
 if __name__ == '__main__':

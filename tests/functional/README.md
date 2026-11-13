@@ -10,6 +10,7 @@ selected models from pinned revisions.
 and advertised model identity, runs real HTTP inference, and shuts down its owned
 process. These suites are explicit and separate from the text runner's `--suite all`.
 They do not download weights or voice recordings. Missing inputs fail the run.
+`--model` is a snapshot directory or a single model file, such as a GGUF.
 Use `nix develop`, or install `tests/functional/requirements.txt` in a virtualenv.
 Build the production binary with `cmake --preset release` and
 `cmake --build --preset release --parallel 4` inside the pinned development shell.
@@ -64,7 +65,7 @@ VoiceDesign model (fixed English voice instructions). Neither requires a clone.
 | Embedding | The default three-request smoke check covers text, image, video, mixed video/audio/image input, malformed-video rejection and recovery. `--embedding-suite full` retains the text, image, audio and video HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image/audio formats, multiple clips, audio/text/image interleaving, ignored unknown members, llama.cpp `content`/`embd_normalize`, invalid inputs, cancellation and recovery |
 | ASR | English transcript WER ≤ 0.15, exact greedy replay, JSON/text/verbose formats, complete SSE matching buffered output, concurrent speech/silence, ignored unknown fields, rejected options (including timestamps and logprobs), malformed WAV recovery, stream cancellation and subsequent valid inference |
 | Image | 512 × 512, 8 steps. OpenAI SDK generation equals sdapi `txt2img` pixel for pixel and replays; `cfg_scale` equals `guidance_scale`, and a negative prompt alone stays unguided on both APIs; `lora` defaults, `[]`, two adapters and repeated paths equal their OpenAI `loras`, with unknown and missing paths refused; `img2img` equals `image` + `strength`, including the 0.75 default strength and the init image's size; `batch_size` equals `n`; Open WebUI and SillyTavern request bodies; neither API reads the other's fields; sdapi `{"error"}` and OpenAI error shapes; discovery routes and recovery |
-| TTS | Voice discovery, valid non-silent 24-kHz mono PCM16 audio, two fixed texts with ASR WER ≤ 0.25, exact same-seed warm replay, WAV/PCM/SSE equality, different concurrent texts/seeds, ignored unknown fields, rejected inputs, stream cancellation and subsequent valid inference |
+| TTS | Voice discovery, valid non-silent mono PCM16 audio at the sample rate of the server's WAV responses, two fixed texts with ASR WER ≤ 0.25, exact same-seed warm replay, WAV/PCM/SSE equality, different concurrent texts/seeds, ignored unknown fields, rejected inputs, stream cancellation and subsequent valid inference |
 
 Audio cancellation must appear against the cancelled request's ID in the server
 log; a client closing a response alone does not satisfy the assertion. SSE must

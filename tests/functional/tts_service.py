@@ -1,4 +1,4 @@
-"""Real-model Qwen3-TTS audio, cloning, replay and HTTP streaming contracts."""
+"""Real-model TTS audio, cloning, replay and HTTP streaming contracts."""
 
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -25,16 +25,22 @@ def run(evidence, url, model, voice, variant, audio_root, asr_binary, asr_model)
     evidence.report['evaluator'] = {'binary': str(asr_binary), 'binary_sha256': sha256(asr_binary),
                                      'model': str(asr_model)}
 
+    # The runner's rate, from the first WAV; raw PCM and SSE don't state it.
+    sample_rate = None
+
     def synth(label, **options):
+        nonlocal sample_rate
         status, data, row = evidence.call(endpoint, label=label, json={**base, **options})
         assert status == 200, (status, data[:1000])
-        pcm, measures = audio_check(data, wav=options.get('response_format', 'wav') == 'wav')
+        pcm, measures = audio_check(data, wav=options.get('response_format', 'wav') == 'wav',
+                                    rate=sample_rate)
+        sample_rate = measures['sample_rate']
         row['audio'] = measures
         return pcm
 
     def intelligible(pcm, text, label):
         path = evidence.output / (label + '.wav')
-        path.write_bytes(pcm_wav(pcm))
+        path.write_bytes(pcm_wav(pcm, sample_rate))
         command = [str(asr_binary), 'transcribe', '--model', str(asr_model),
                    '--audio', str(path), '--format', 'json']
         started = time.perf_counter()
@@ -72,7 +78,7 @@ def run(evidence, url, model, voice, variant, audio_root, asr_binary, asr_model)
             items = list(events(response, row, path))
             path.write_text(json.dumps(items, indent=2))
             pcm = speech_events(items)
-            audio_check(pcm, wav=False)
+            audio_check(pcm, wav=False, rate=sample_rate)
             assert pcm == first, 'SSE changed PCM'
 
     with evidence.case('concurrent-different-inputs'):
