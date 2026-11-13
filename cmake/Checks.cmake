@@ -3,6 +3,7 @@
 set(gufo_pr_targets
   cache_adapter_test
   cache_adapter_lifecycle_test
+  cache_transfer_pool_test
   cache_ledger_test
   cache_checkpoint_test
   cache_prefix_index_test
