@@ -1595,6 +1595,18 @@ endfunction()
       LABELS "hip;gpu;gfx1151;models;qwen3-tts;talker;voice-design;base;quality;external-model;slow"
       SKIP_RETURN_CODE 77)
 
+    # The NPU Base encoders against the GPU ones (needs both; label npu).
+    add_executable(qwen3_tts_npu_encoders_test
+      tests/models/qwen3_tts/npu_encoders_test.cpp)
+    target_include_directories(qwen3_tts_npu_encoders_test PRIVATE ${PROJECT_SOURCE_DIR})
+    target_link_libraries(qwen3_tts_npu_encoders_test PRIVATE
+      gufo_qwen3_tts gufo_qwen3_tts_hip hip::host)
+    add_test(NAME qwen3_tts_npu_encoders_test
+      COMMAND qwen3_tts_npu_encoders_test
+        ${PROJECT_SOURCE_DIR}/tests/functional/fixtures/audio/clear-english-voice.wav)
+    set_tests_properties(qwen3_tts_npu_encoders_test PROPERTIES
+      LABELS "npu;hip;gpu;models;qwen3-tts;base;external-model"
+      SKIP_RETURN_CODE 77)
     add_executable(qwen3_tts_base_encoders_hip_test
       tests/models/qwen3_tts/base_encoders_hip_test.cpp)
     target_link_libraries(qwen3_tts_base_encoders_hip_test PRIVATE
