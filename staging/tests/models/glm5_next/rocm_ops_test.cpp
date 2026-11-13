@@ -420,6 +420,128 @@ bool TestKdaRecurrent() {
   return ok;
 }
 
+bool TestKdaConvChunkBitExact() {
+  const std::uint32_t n = 8192;
+  const std::uint32_t ntok = 5;
+  const std::uint64_t pos0 = 7;
+  const auto w = t::MakeValues(4 * n, 0xD1C0B0A0U, 0.25F);
+  t::HipBuffer<float> d_w(w.size());
+  t::Upload(&d_w, w);
+  std::vector<float> raw(n * ntok);
+  for (std::uint32_t r = 0; r < ntok; ++r) {
+    const auto row = t::MakeValues(n, 0x5171A000U + r, 2.0F);
+    std::copy(row.begin(), row.end(), raw.begin() + static_cast<std::size_t>(r) * n);
+  }
+  t::HipBuffer<float> d_raw(raw.size());
+  t::Upload(&d_raw, raw);
+  t::HipBuffer<float> d_hist_seq(3 * n);
+  t::HipBuffer<float> d_hist_chunk(3 * n);
+  t::CheckHip(hipMemset(d_hist_seq.get(), 0, 3 * n * sizeof(float)), "memset");
+  t::CheckHip(hipMemset(d_hist_chunk.get(), 0, 3 * n * sizeof(float)),
+              "memset");
+  t::HipBuffer<float> d_dst_seq(raw.size());
+  t::HipBuffer<float> d_dst_chunk(raw.size());
+  for (std::uint32_t r = 0; r < ntok; ++r) {
+    q::KdaConvStep(pos0 + r, d_raw.get() + static_cast<std::size_t>(r) * n,
+                   d_w.get(), d_hist_seq.get(), n,
+                   d_dst_seq.get() + static_cast<std::size_t>(r) * n, nullptr);
+  }
+  q::KdaConvStepChunk(pos0, d_raw.get(), d_w.get(), d_hist_chunk.get(), n,
+                      ntok, d_dst_chunk.get(), nullptr);
+  const auto dst_seq = t::Download(&d_dst_seq, raw.size());
+  const auto dst_chunk = t::Download(&d_dst_chunk, raw.size());
+  const auto hist_seq = t::Download(&d_hist_seq, 3 * n);
+  const auto hist_chunk = t::Download(&d_hist_chunk, 3 * n);
+  bool ok_dst = dst_seq.size() == dst_chunk.size();
+  for (std::size_t i = 0; ok_dst && i < dst_seq.size(); ++i) {
+    ok_dst &= dst_seq[i] == dst_chunk[i];
+  }
+  bool ok_hist = hist_seq.size() == hist_chunk.size();
+  for (std::size_t i = 0; ok_hist && i < hist_seq.size(); ++i) {
+    ok_hist &= hist_seq[i] == hist_chunk[i];
+  }
+  bool ok = Check("kda_conv_chunk dst bit-exact", ok_dst ? 0.0 : 1.0, 0.0);
+  ok &= Check("kda_conv_chunk hist bit-exact", ok_hist ? 0.0 : 1.0, 0.0);
+  return ok;
+}
+
+bool TestKdaFoldUpdateChunkBitExact() {
+  // Reference: per-token KdaFoldSk + KdaUpdateOut chain; candidate: the
+  // fused chunk launch. Both must agree bitwise (o and final state).
+  const unsigned heads = 8;
+  const unsigned d = 128;
+  const std::uint32_t ntok = 4;
+  const std::size_t channels = static_cast<std::size_t>(heads) * d;
+  const auto state0 = t::MakeValues(channels * d, 0x0BADC0DEU, 0.2F);
+  std::vector<float> eg(ntok * channels);
+  std::vector<float> k(ntok * channels);
+  std::vector<float> qv(ntok * channels);
+  std::vector<float> v(ntok * channels);
+  std::vector<float> beta(ntok * heads);
+  for (std::uint32_t r = 0; r < ntok; ++r) {
+    const std::uint32_t s = 0xFADE0001U + r;
+    auto put = [&](std::vector<float>& dst, unsigned seed_xor, float scale,
+                   float off = 0.0F) {
+      const auto row = t::MakeValues(dst.size() / ntok, s ^ seed_xor, scale,
+                                     off);
+      std::copy(row.begin(), row.end(), dst.begin() + r * (dst.size() / ntok));
+    };
+    put(eg, 0x1111U, 0.4F, 0.5F);
+    put(k, 0x2222U, 1.0F);
+    put(qv, 0x3333U, 1.0F);
+    put(v, 0x4444U, 1.0F);
+    put(beta, 0x5555U, 0.5F, 0.5F);
+  }
+  t::HipBuffer<float> d_state_ref(state0.size());
+  t::HipBuffer<float> d_state_chunk(state0.size());
+  t::Upload(&d_state_ref, state0);
+  t::Upload(&d_state_chunk, state0);
+  t::HipBuffer<float> d_eg(eg.size());
+  t::Upload(&d_eg, eg);
+  t::HipBuffer<float> d_k(k.size());
+  t::Upload(&d_k, k);
+  t::HipBuffer<float> d_q(qv.size());
+  t::Upload(&d_q, qv);
+  t::HipBuffer<float> d_v(v.size());
+  t::Upload(&d_v, v);
+  t::HipBuffer<float> d_beta(beta.size());
+  t::Upload(&d_beta, beta);
+  t::HipBuffer<float> d_sk(channels);
+  t::HipBuffer<float> d_o_ref(ntok * channels);
+  t::HipBuffer<float> d_o_chunk(ntok * channels);
+  for (std::uint32_t r = 0; r < ntok; ++r) {
+    q::KdaFoldSk(d_state_ref.get(), d_eg.get() + r * channels,
+                 d_k.get() + r * channels, heads, d, d_sk.get(), nullptr);
+    q::KdaUpdateOut(d_state_ref.get(), d_k.get() + r * channels,
+                    d_q.get() + r * channels, d_v.get() + r * channels,
+                    d_beta.get() + r * heads, d_sk.get(), heads, d,
+                    d_o_ref.get() + r * channels, nullptr);
+  }
+  const bool launched =
+      q::KdaFoldUpdateChunk(d_state_chunk.get(), d_eg.get(), d_k.get(),
+                            d_q.get(), d_v.get(), d_beta.get(), heads, d, ntok,
+                            d_o_chunk.get(), nullptr);
+  if (!launched) {
+    std::printf("kda_fold_update_chunk NOT LAUNCHED (no LDS)\n");
+    return false;
+  }
+  const auto o_ref = t::Download(&d_o_ref, ntok * channels);
+  const auto o_chunk = t::Download(&d_o_chunk, ntok * channels);
+  const auto st_ref = t::Download(&d_state_ref, channels * d);
+  const auto st_chunk = t::Download(&d_state_chunk, channels * d);
+  bool ok_o = o_ref.size() == o_chunk.size();
+  for (std::size_t i = 0; ok_o && i < o_ref.size(); ++i) {
+    ok_o &= o_ref[i] == o_chunk[i];
+  }
+  bool ok_st = st_ref.size() == st_chunk.size();
+  for (std::size_t i = 0; ok_st && i < st_ref.size(); ++i) {
+    ok_st &= st_ref[i] == st_chunk[i];
+  }
+  bool ok = Check("kda_fold_update_chunk o bit-exact", ok_o ? 0.0 : 1.0, 0.0);
+  ok &= Check("kda_fold_update_chunk state bit-exact", ok_st ? 0.0 : 1.0, 0.0);
+  return ok;
+}
+
 bool TestKdaOutGate() {
   const unsigned heads = 64;
   const unsigned d = 128;
@@ -676,7 +798,7 @@ bool TestKdaEGate() {
   t::HipBuffer<float> d_a(a.size());
   t::Upload(&d_a, a);
   t::HipBuffer<float> d_eg(heads * d);
-  q::KdaEGate(d_g1.get(), d_a.get(), heads, d, lower_bound, d_eg.get(),
+  q::KdaEGate(d_g1.get(), d_a.get(), heads, d, lower_bound, d_eg.get(), 1U,
               nullptr);
   const auto got = t::Download(&d_eg, heads * d);
   std::vector<float> ref(heads * d);
@@ -687,7 +809,27 @@ bool TestKdaEGate() {
           static_cast<float>(std::exp(lower_bound * SigmoidD(v)));
     }
   }
-  return Check("kda_e_gate", t::WorstRelative(ref, got), 5e-5);
+  bool ok = Check("kda_e_gate", t::WorstRelative(ref, got), 5e-5);
+  // Multi-row batches keep the same per-head weight (a[(i/d) % heads]).
+  std::vector<float> g3;
+  for (unsigned r = 0; r < 3; ++r) {
+    g3.insert(g3.end(), g1.begin(), g1.end());
+  }
+  t::HipBuffer<float> d_g3(g3.size());
+  t::Upload(&d_g3, g3);
+  std::vector<float> eg3(heads * d);
+  t::HipBuffer<float> d_eg3(3 * heads * d);
+  q::KdaEGate(d_g3.get(), d_a.get(), heads, d, lower_bound, d_eg3.get(), 3U,
+              nullptr);
+  const auto got3 = t::Download(&d_eg3, 3 * heads * d);
+  bool batch_ok = true;
+  for (unsigned r = 0; r < 3; ++r) {
+    for (std::size_t i = 0; i < eg3.size(); ++i) {
+      batch_ok &= got3[r * eg3.size() + i] == got[i];
+    }
+  }
+  ok &= Check("kda_e_gate rows=3 bit-exact", batch_ok ? 0.0 : 1.0, 0.0);
+  return ok;
 }
 
 bool TestL2NormHeadsCase(std::uint32_t heads, std::uint32_t d) {
@@ -847,7 +989,9 @@ int main() {
     ok &= TestHcCoeffs();
     ok &= TestHcCombine();
     ok &= TestKdaConv();
+    ok &= TestKdaConvChunkBitExact();
     ok &= TestKdaRecurrent();
+    ok &= TestKdaFoldUpdateChunkBitExact();
     ok &= TestKdaOutGate();
     ok &= TestIdxScore();
     ok &= TestTopKDesc();

@@ -315,6 +315,80 @@ __global__ void KdaUpdateOutKernel(float* __restrict__ state,
   o[h * d + j] = acc;
 }
 
+// Chunked conv: identical arithmetic and ring updates to running
+// KdaConvStepKernel for each position of the chunk in order.
+__global__ void KdaConvStepChunkKernel(std::uint64_t pos0,
+                                       const float* __restrict__ raw,
+                                       const float* __restrict__ w,
+                                       float* __restrict__ hist,
+                                       std::uint32_t n, std::uint32_t ntok,
+                                       float* __restrict__ dst) {
+  for (std::uint32_t ch = blockIdx.x * kBlock + threadIdx.x; ch < n;
+       ch += gridDim.x * kBlock) {
+    const float w0 = w[ch * 4 + 0];
+    const float w1 = w[ch * 4 + 1];
+    const float w2 = w[ch * 4 + 2];
+    const float w3 = w[ch * 4 + 3];
+    for (std::uint32_t t = 0; t < ntok; ++t) {
+      const std::uint64_t pos = pos0 + t;
+      const std::uint32_t s0 = static_cast<std::uint32_t>(pos % 3);
+      const std::size_t rb = static_cast<std::size_t>(t) * n + ch;
+      const float x3 = hist[s0 * n + ch];
+      const float x2 = hist[((s0 + 1) % 3) * n + ch];
+      const float x1 = hist[((s0 + 2) % 3) * n + ch];
+      const float x0 = raw[rb];
+      const float acc = w0 * x3 + w1 * x2 + w2 * x1 + w3 * x0;
+      dst[rb] = Silu(acc);
+      hist[s0 * n + ch] = x0;
+    }
+  }
+}
+
+// Fused fold+update over a chunk, state resident in dynamic shared memory
+// (a workgroup per head, a thread per output column j). The per-token
+// arithmetic and order match KdaFoldSkKernel + KdaUpdateOutKernel exactly;
+// `sk` never leaves registers.
+__global__ void KdaFoldUpdateChunkKernel(
+    float* __restrict__ state, const float* __restrict__ eg,
+    const float* __restrict__ k, const float* __restrict__ q,
+    const float* __restrict__ v, const float* __restrict__ beta,
+    std::uint32_t heads, std::uint32_t d, std::uint32_t ntok,
+    float* __restrict__ o) {
+  extern __shared__ float st[];  // [d][d]
+  const std::size_t dd = static_cast<std::size_t>(d) * d;
+  float* gst = state + static_cast<std::size_t>(blockIdx.x) * dd;
+  const unsigned j = threadIdx.x;
+  const std::size_t inner = static_cast<std::size_t>(heads) * d;
+  for (std::size_t t = j; t < dd; t += blockDim.x) {
+    st[t] = gst[t];
+  }
+  const std::size_t hcol = static_cast<std::size_t>(blockIdx.x) * d;
+  for (std::uint32_t r = 0; r < ntok; ++r) {
+    const std::size_t base = r * inner + hcol;
+    float sk = 0.0F;
+    for (unsigned i = 0; i < d; ++i) {
+      const std::size_t at = static_cast<std::size_t>(i) * d + j;
+      const float s = st[at] * eg[base + i];
+      st[at] = s;
+      sk = fmaf(k[base + i], s, sk);
+    }
+    const float dj =
+        beta[static_cast<std::size_t>(r) * heads + blockIdx.x] *
+        (v[base + j] - sk);
+    float acc = 0.0F;
+    for (unsigned i = 0; i < d; ++i) {
+      const std::size_t at = static_cast<std::size_t>(i) * d + j;
+      const float s = st[at] + k[base + i] * dj;
+      st[at] = s;
+      acc = fmaf(q[base + i], s, acc);
+    }
+    o[base + j] = acc;
+  }
+  for (std::size_t t = j; t < dd; t += blockDim.x) {
+    gst[t] = st[t];
+  }
+}
+
 __global__ void KdaOutGateKernel(const float* __restrict__ o,
                                  const float* __restrict__ w,
                                  const float* __restrict__ g2,
@@ -633,10 +707,11 @@ __global__ void SigmoidInPlaceKernel(float* __restrict__ x,
 __global__ void KdaEGateKernel(const float* __restrict__ g1,
                                const float* __restrict__ a,
                                float* __restrict__ eg, std::uint32_t total,
-                               std::uint32_t d, float lower_bound) {
+                               std::uint32_t heads, std::uint32_t d,
+                               float lower_bound) {
   for (std::uint32_t i = blockIdx.x * kBlock + threadIdx.x; i < total;
        i += gridDim.x * kBlock) {
-    const float v = -(g1[i] * a[i / d]);
+    const float v = -(g1[i] * a[(i / d) % heads]);
     eg[i] = expf(lower_bound * Sigmoid(v));
   }
 }
@@ -903,11 +978,39 @@ void SigmoidInPlace(float* x, std::uint32_t total, hipStream_t stream) {
 }
 
 void KdaEGate(const float* g1, const float* a, std::uint32_t heads,
-              std::uint32_t d, float lower_bound, float* eg,
+              std::uint32_t d, float lower_bound, float* eg, std::uint32_t rows,
               hipStream_t stream) {
-  const std::uint32_t total = heads * d;  // contract: heads*d <= UINT32_MAX
-  KdaEGateKernel<<<Grid1D(total), kBlock, 0, stream>>>(g1, a, eg, total, d,
-                                                       lower_bound);
+  const std::uint32_t total = rows * heads * d;  // contract: fits uint32
+  KdaEGateKernel<<<Grid1D(total), kBlock, 0, stream>>>(g1, a, eg, total, heads,
+                                                       d, lower_bound);
+}
+
+void KdaConvStepChunk(std::uint64_t pos0, const float* raw, const float* w,
+                      float* hist, std::uint32_t n, std::uint32_t ntok,
+                      float* dst, hipStream_t stream) {
+  if (ntok == 0) {
+    return;
+  }
+  KdaConvStepChunkKernel<<<Grid1D(n), kBlock, 0, stream>>>(pos0, raw, w, hist,
+                                                           n, ntok, dst);
+}
+
+bool KdaFoldUpdateChunk(float* state, const float* eg, const float* k,
+                        const float* q, const float* v, const float* beta,
+                        std::uint32_t heads, std::uint32_t d,
+                        std::uint32_t ntok, float* o, hipStream_t stream) {
+  const std::size_t lds_bytes = sizeof(float) * static_cast<std::size_t>(d) * d;
+  static const bool attr_ok =
+      hipFuncSetAttribute(reinterpret_cast<const void*>(
+                              &KdaFoldUpdateChunkKernel),
+                          hipFuncAttributeMaxDynamicSharedMemorySize,
+                          64 * 1024) == hipSuccess;
+  if (!attr_ok) {
+    return false;
+  }
+  KdaFoldUpdateChunkKernel<<<heads, d, lds_bytes, stream>>>(
+      state, eg, k, q, v, beta, heads, d, ntok, o);
+  return hipGetLastError() == hipSuccess;
 }
 
 void L2NormHeads(float* x, std::uint32_t heads, std::uint32_t d, float eps,

@@ -70,6 +70,13 @@ void HcWriteback(const float* y, const float* res, const float* post,
 void KdaConvStep(std::uint64_t pos, const float* raw, const float* w,
                  float* hist, std::uint32_t n, float* dst, hipStream_t stream);
 
+/// `ntok` consecutive positions of KdaConvStep for one projection: row t
+/// of `raw`/`dst` (`[ntok][n]`) is the position pos0+t input/output, with
+/// the same sequential ring updates; identical values to stepping.
+void KdaConvStepChunk(std::uint64_t pos0, const float* raw, const float* w,
+                      float* hist, std::uint32_t n, std::uint32_t ntok,
+                      float* dst, hipStream_t stream);
+
 /// Per head: fold the decay into the state and reduce the key dot.
 /// sk[h][j] = sum_i k[h][i] * (state[h][i][j] * eg[h][i]) and the state is
 /// updated in place to state * eg (the first two recurrence steps; dims
@@ -83,6 +90,17 @@ void KdaFoldSk(float* state, const float* eg, const float* k,
 void KdaUpdateOut(float* state, const float* k, const float* q, const float* v,
                   const float* beta, const float* sk, std::uint32_t heads,
                   std::uint32_t d, float* o, hipStream_t stream);
+
+/// One launch of KdaFoldSk + KdaUpdateOut over `ntok` consecutive rows of
+/// eg/k/q/v (`[ntok][heads*d]`) and beta (`[ntok][heads]`), writing o rows
+/// (`[ntok][heads*d]`). The state lives in dynamic shared memory
+/// (d*d floats) between tokens; per-token arithmetic and order are exact.
+/// Returns false (nothing launched) if the launch configuration is not
+/// supported, so the caller can fall back to the per-token pair.
+bool KdaFoldUpdateChunk(float* state, const float* eg, const float* k,
+                        const float* q, const float* v, const float* beta,
+                        std::uint32_t heads, std::uint32_t d,
+                        std::uint32_t ntok, float* o, hipStream_t stream);
 
 /// KDA output gate per head: y[h*d + i] = w[i] * o * rsqrt(o^2.mean + eps)
 /// * sigmoid(g2[h*d + i]) (ssm_norm over d plus the forget-gate sigmoid).
@@ -136,10 +154,11 @@ void SigmoidInPlace(float* x, std::uint32_t total, hipStream_t stream);
 /// sigmoid(-(g1[h*d + i] * a[h]))). g1 is the dt-biased ssm_f_b output
 /// (head-minor, channel = h*d + i), a[heads] ssm_a (= -exp(A_log)),
 /// lower_bound the hparams gate lower bound (-5.0). KdaFoldSk consumes
-/// eg directly (the reference's exp is folded here).
+/// eg directly (the reference's exp is folded here). `rows` chunks of
+/// [heads][d] share the same weights (row-major buffer of rows*heads*d).
 void KdaEGate(const float* g1, const float* a, std::uint32_t heads,
               std::uint32_t d, float lower_bound, float* eg,
-              hipStream_t stream);
+              std::uint32_t rows, hipStream_t stream);
 
 /// Per-head FLA l2 norm, in place, of `heads` rows of `d`:
 /// x[h][i] = x[h][i] / sqrt(sum_j x[h][j]^2 + eps) (identical to

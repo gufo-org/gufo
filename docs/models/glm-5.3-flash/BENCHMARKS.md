@@ -39,6 +39,10 @@ P9 dense Q8_0 WMMA tier on top (+9.7 %; same sha, forward gate ALL PASS
 With the 2048-token prefill chunk (+9.1 % at pp2048, +8.3 % at pp4096,
 n-gen-1 sha identical across chunk widths, full `glm5_next` suite 9/9):
 pp2048 **109.2 ± 0.5**, pp4096 **104.6**.
+With single-launch chunked KDA on top (+21.7 %; chunk conv, fused
+fold/update with the state resident in LDS, flattened E-Gate/Scale/
+Out-Gate grids; n-gen-1 sha identical, full `glm5_next` suite 9/9
+including new bit-exact parity checks): pp2048 **132.9 ± 1.4**.
 Serve-protocol gate not yet re-captured for these steps. Use these
 only as offline scans, not interchangeably with the serve-protocol gate
 cells.

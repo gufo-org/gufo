@@ -236,6 +236,19 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   (~1.4 M launches over two prefills) vs DenseWmma 3.8 s and RoutedWmma
   5.3 s total. The next lever is processing a chunk's sequential stages
   in one launch with a per-token loop inside (bit-identical order).
+- Single-launch chunked KDA (`ops.hip.cpp`, executor `KdaLayer`):
+  `KdaConvStepChunk` keeps each channel's ring live across the whole
+  chunk; `KdaFoldUpdateChunk` holds one head's recurrent state in 64 KB
+  dynamic LDS per block (grid = 64 heads) with the exact per-token fma
+  order, keeping `sk` in registers, and E-Gate/L2/Scale/Out-Gate run
+  once per chunk over flattened rows. Launchers fall back to the old
+  per-token pair if 64 KB LDS cannot be opted into. Offline A/B
+  (alternating, warm+2): pp2048 109.22/109.10 -> **132.76/133.05
+  (+21.7 %)**; n-gen-1 output sha256 `43557e0c…` identical across both
+  binaries and all four runs; full `glm5_next` ctest 9/9 GPU-exclusive,
+  including new `rocm_ops` bit-exact checks of chunk conv and fused
+  fold/update against the per-token chains
+  (`/tmp/opencode/glm5_kda_gate.sh`, `/tmp/opencode/gufo_bench_kda1.log`).
 
 ## Next candidates (measured order from P3d, P3e updated)
 

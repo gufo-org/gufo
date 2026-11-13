@@ -417,60 +417,49 @@ void Executor::KdaLayer(const DeviceLayer& l, std::uint32_t slot,
   GemvN(n, l.ssm_f_b, kv_, kv_p, g1_, inner);
   AddBias(g1_, l.ssm_dt.f32(), n * inner, inner, nullptr);
 
-  // Convolutions and the recurrence are strictly sequential over positions;
-  // conv q ends in ko_, conv k in q_, v in vk_ (one row per token).
-  for (std::uint32_t r = 0; r < n; ++r) {
-    const std::uint64_t pos = static_cast<std::uint64_t>(p0) + r;
-    KdaConvStep(pos, vq_ + static_cast<std::size_t>(r) * inner,
-                l.ssm_conv_q.f32(), hist, inner,
-                ko_ + static_cast<std::size_t>(r) * inner, nullptr);
-    KdaConvStep(pos, sk_ + static_cast<std::size_t>(r) * inner,
-                l.ssm_conv_k.f32(), hist + 3 * inner, inner,
-                q_ + static_cast<std::size_t>(r) * inner, nullptr);
-    KdaConvStep(pos, eg_ + static_cast<std::size_t>(r) * inner,
-                l.ssm_conv_v.f32(), hist + 6 * inner, inner,
-                vk_ + static_cast<std::size_t>(r) * inner, nullptr);
-  }
+  // Convolutions and the recurrence are strictly sequential over positions
+  // and run as one launch per stream / stage: conv q ends in ko_, conv k in
+  // q_, v in vk_ (one row per token).
+  KdaConvStepChunk(static_cast<std::uint64_t>(p0), vq_,
+                   l.ssm_conv_q.f32(), hist, inner, n, ko_, nullptr);
+  KdaConvStepChunk(static_cast<std::uint64_t>(p0), sk_, l.ssm_conv_k.f32(),
+                   hist + 3 * inner, inner, n, q_, nullptr);
+  KdaConvStepChunk(static_cast<std::uint64_t>(p0), eg_, l.ssm_conv_v.f32(),
+                   hist + 6 * inner, inner, n, vk_, nullptr);
 
   // Forget gate eg = exp(lb * sigmoid(-(g1 * a))) now that the raw v rows
   // of eg_ have been consumed by the convolutions.
-  for (std::uint32_t r = 0; r < n; ++r) {
-    KdaEGate(g1_ + static_cast<std::size_t>(r) * inner, l.ssm_a.f32(), heads,
-             d, c.kda_gate_lower_bound,
-             eg_ + static_cast<std::size_t>(r) * inner, nullptr);
-  }
+  KdaEGate(g1_, l.ssm_a.f32(), heads, d, c.kda_gate_lower_bound, eg_, n,
+           nullptr);
 
   // FLA l2 norms; the recurrent applies 1/sqrt(d) to the query only
   // (build_delta_net_autoregressive scales q after both norms). Fold and
-  // update run in one token loop: the state is shared, so every position
+  // update run in one chunk launch: the state is shared, so every position
   // must decay and update before the next one folds.
-  for (std::uint32_t r = 0; r < n; ++r) {
-    L2NormHeads(q_ + static_cast<std::size_t>(r) * inner, heads, d, c.ln_eps,
-                nullptr);
-    L2NormHeads(ko_ + static_cast<std::size_t>(r) * inner, heads, d, c.ln_eps,
-                nullptr);
-    Scale(ko_ + static_cast<std::size_t>(r) * inner, inner,
-          1.0F / std::sqrt(static_cast<float>(d)), nullptr);
-    KdaFoldSk(s.kda_state[slot], eg_ + static_cast<std::size_t>(r) * inner,
-              q_ + static_cast<std::size_t>(r) * inner, heads, d,
-              sk_ + static_cast<std::size_t>(r) * inner, nullptr);
-    KdaUpdateOut(s.kda_state[slot], q_ + static_cast<std::size_t>(r) * inner,
-                 ko_ + static_cast<std::size_t>(r) * inner,
-                 vk_ + static_cast<std::size_t>(r) * inner,
-                 beta_ + static_cast<std::size_t>(r) * heads,
-                 sk_ + static_cast<std::size_t>(r) * inner, heads, d,
-                 g2_ + static_cast<std::size_t>(r) * inner, nullptr);
+  L2NormHeads(q_, heads * n, d, c.ln_eps, nullptr);
+  L2NormHeads(ko_, heads * n, d, c.ln_eps, nullptr);
+  Scale(ko_, inner * n, 1.0F / std::sqrt(static_cast<float>(d)), nullptr);
+  if (!KdaFoldUpdateChunk(s.kda_state[slot], eg_, q_, ko_, vk_, beta_, heads,
+                          d, n, g2_, nullptr)) {
+    float* sk_scratch = sk_;  // raw k rows are fully consumed by the convs
+    for (std::uint32_t r = 0; r < n; ++r) {
+      KdaFoldSk(s.kda_state[slot], eg_ + static_cast<std::size_t>(r) * inner,
+                q_ + static_cast<std::size_t>(r) * inner, heads, d,
+                sk_scratch + static_cast<std::size_t>(r) * inner, nullptr);
+      KdaUpdateOut(s.kda_state[slot], q_ + static_cast<std::size_t>(r) * inner,
+                   ko_ + static_cast<std::size_t>(r) * inner,
+                   vk_ + static_cast<std::size_t>(r) * inner,
+                   beta_ + static_cast<std::size_t>(r) * heads,
+                   sk_scratch + static_cast<std::size_t>(r) * inner, heads, d,
+                   g2_ + static_cast<std::size_t>(r) * inner, nullptr);
+    }
   }
 
   // Output gate: rms_norm(o, ssm_norm) * sigmoid(g_b(g_a(x))).
   GemvN(n, l.ssm_g_a, x, c.hidden_size, kv_, kv_p);
   GemvN(n, l.ssm_g_b, kv_, kv_p, g1_, inner);
-  for (std::uint32_t r = 0; r < n; ++r) {
-    KdaOutGate(g2_ + static_cast<std::size_t>(r) * inner, l.ssm_norm.f32(),
-               g1_ + static_cast<std::size_t>(r) * inner,
-               ko_ + static_cast<std::size_t>(r) * inner, heads, d, c.rms_eps,
-               nullptr);
-  }
+  KdaOutGate(g2_, l.ssm_norm.f32(), g1_, ko_, heads * n, d, c.rms_eps,
+             nullptr);
   GemvN(n, l.ssm_out, ko_, inner, y, c.hidden_size);
 
   if (n == 1) {
