@@ -220,7 +220,9 @@ struct Runtime::Impl {
           p + "self_attn.v_proj.weight"};
       const std::initializer_list<std::string> gu = {p + "mlp.gate_proj.weight",
                                                      p + "mlp.up_proj.weight"};
-      if (!pre) {  // the fused prefill holds its own copy
+      // The fused prefill holds its own copy; prompts beyond its rows (longer
+      // contexts) prefill on BfpGemm.
+      if (!pre || capacity > std::size_t(pre.max_rows()) + 1) {
         d.qkv_b = UploadBfp(qkv);
         d.o_b = UploadBfp({p + "self_attn.o_proj.weight"});
         d.gate_up_b = UploadBfp(gu);
@@ -782,9 +784,6 @@ struct Runtime::Impl {
               "ms, write K/V %.1f ms\n",
               run_ms, kv_ms, Ms(t_kv) - kv_ms);
       } else {
-        if (n > 1 && dec.front().qkv_b < 0)
-          throw std::runtime_error(
-              "Qwen3-ASR: the prompt exceeds the fused prefill's rows");
         if (n > 1)
           Layers(x.data(), n - 1, 0, true);
         for (std::size_t l = 0; l < dec.size(); ++l)
