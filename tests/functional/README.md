@@ -97,7 +97,8 @@ Devlab speed comparisons use a pinned main revision and candidate, matching the
 runner, toolchain, weights, settings and request histories. `service_phases.py`
 uses server-emitted request timings and work counters: ASR `Server-Timing`
 phases, TTS synthesis time and codec/audio work, image prompt encoding, denoising
-and VAE decoding with the size and step count, and embedding request duration
+and VAE decoding with the size and step count (a first image, which loads the
+weights, and a warm replay), and embedding request duration
 and token/input counts. Client latency and first-output observations remain
 separate. Each request and phase retains every paired repeat at the existing
 5% and 3-ms thresholds; mismatched work stays inconclusive.

@@ -18,8 +18,8 @@ REQUESTS = {'short': 'Short input', 'second': 'Second input', 'repeat': 'Warm re
 # Eight steps: Turbo accepts no other count, and it bounds the full checkpoint.
 IMAGE_STEPS = 8
 # The server loads image weights on the first request, not at startup.
-IMAGE_REQUESTS = {'short': 'First 512×512 image (loads weights)', 'second': 'Second 512×512 prompt',
-                  'repeat': 'Warm 512×512 replay'}
+# A second prompt at the same size adds no phase the warm replay lacks.
+IMAGE_REQUESTS = {'short': 'First 512×512 image (loads weights)', 'repeat': 'Warm 512×512 replay'}
 
 
 def completed_log(path, request_id, event='completed'):
@@ -49,7 +49,7 @@ def measure_arm(model_id, binary, assets, output, audio_root):
         server.start(600)
         startup = server.startup()
         url = f'http://127.0.0.1:{server.port}/v1'
-        for label in REQUESTS:
+        for label in IMAGE_REQUESTS if model['category'] == 'image' else REQUESTS:
             if model['category'] == 'embedding':
                 text = 'The river flows past the garden.' if label != 'second' else ' '.join(['river stone garden'] * 100)
                 payload = evidence.json(url + '/embeddings', label=label,
@@ -64,11 +64,9 @@ def measure_arm(model_id, binary, assets, output, audio_root):
                 assert payload['text'].strip(), payload
                 work = {'text_sha256': hashlib.sha256(payload['text'].encode()).hexdigest()}
             elif model['category'] == 'image':
-                prompt = ('A small red cottage beside a lake at sunset' if label != 'second'
-                          else 'A bowl of lemons on a blue tablecloth, soft window light')
                 payload = evidence.json(url + '/images/generations', label=label, json={
-                    'model': 'phases', 'prompt': prompt, 'size': '512x512',
-                    'steps': IMAGE_STEPS, 'seed': 7})
+                    'model': 'phases', 'prompt': 'A small red cottage beside a lake at sunset',
+                    'size': '512x512', 'steps': IMAGE_STEPS, 'seed': 7})
                 assert len(payload['data']) == 1 and payload['data'][0]['b64_json'], payload.keys()
                 # Kernel changes may move pixels; the work is the size and step count.
                 work = {}
@@ -125,7 +123,7 @@ def summarize(arms):
     if len(by['base']) != len(by['head']) or len(by['base']) < 2:
         raise ValueError('Missing paired repeats')
     phases, diverged = [], []
-    for label in REQUESTS:
+    for label in by['base'][0]['requests']:
         comparable = all(base['requests'][label]['work'] == head['requests'][label]['work']
                          for base, head in zip(by['base'], by['head']))
         if not comparable:
