@@ -5649,6 +5649,19 @@ void TestResponsesLogprobs() {
   };
   const std::vector<Fixture> fixtures{
       {{"Hel", "lo", ""}, {0, 1}},
+      // Separator-only tokens are hidden; a token spanning the boundary still
+      // supplies the score for its visible answer text.
+      {{"\r", "\n", "answer"}, {2}, Initial::kContentAfterReasoning},
+      {{"\nanswer"}, {0}, Initial::kContentAfterReasoning},
+      {{"\n", call, "\n", "repeat"},
+       {2, 3},
+       Initial::kContentAfterReasoning,
+       true},
+      {{"\r", "\n", "{\"answer\":9}"},
+       {2},
+       Initial::kContentAfterReasoning,
+       false,
+       true},
       {{"only thought", ""}, {}, Initial::kReasoning},
       {{call, "\n"}, {}, Initial::kContent, true},
       {{"repeat" + call + "repeat"}, {0}, Initial::kContent, true},
