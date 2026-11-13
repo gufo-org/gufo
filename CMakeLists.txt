@@ -418,6 +418,8 @@ endif()
 add_library(gufo_http STATIC
   src/cli/serve/audio_buffer.cpp
   src/cli/serve/image_api.cpp
+  src/cli/serve/image_service.cpp
+  src/cli/serve/sdapi.cpp
   src/cli/serve/audio_asr_api.cpp
   src/cli/serve/asr_service.cpp
   src/cli/serve/embeddings_api.cpp
@@ -881,6 +883,12 @@ endfunction()
   target_link_libraries(image_api_test PRIVATE gufo_http gufo_llm_cli)
   add_test(NAME image_api_test COMMAND image_api_test)
   set_tests_properties(image_api_test PROPERTIES LABELS "cpu;server;api;image")
+
+  # The A1111 (sdapi) image API with a recording runner; no sockets.
+  add_executable(sdapi_test tests/cli/sdapi_test.cpp)
+  target_link_libraries(sdapi_test PRIVATE gufo_http gufo_llm_cli)
+  add_test(NAME sdapi_test COMMAND sdapi_test)
+  set_tests_properties(sdapi_test PROPERTIES LABELS "cpu;server;api;image")
 
   # the trace suite simulates RLIMIT_FSIZE
   if (NOT WIN32)

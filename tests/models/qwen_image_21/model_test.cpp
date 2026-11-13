@@ -442,7 +442,7 @@ int main(int argc, char** argv) {
   assert(style.find("active_scale")->is_null() &&
          ink.find("active_scale")->is_null());
   http.method = "POST";
-  assert(gufo::server::HandleImageLorasRequest(http, adapters).status == 400);
+  assert(gufo::server::HandleImageLorasRequest(http, adapters).status == 405);
   // Adapters sharing a file name keep unique selection paths, as in
   // stable-diffusion.cpp, and show their full paths.
   gufo::server::ImageService same_file(
@@ -506,11 +506,11 @@ int main(int argc, char** argv) {
   assert(turbo_half.size() == 5 &&
          std::equal(turbo_half.begin(), turbo_half.end(),
                     expected_turbo.end() - 5));
-  // A negative prompt alone guides at the Diffusers default scale.
+  // An omitted scale is unguided, also with a negative prompt, as the
+  // Qwen-Image-2.1 pipeline's `true_cfg_scale` default of 1.
   assert(ResolveGuidance(Request{.prompt = "", .images = {}}) == 1);
   assert(ResolveGuidance(Request{
-             .prompt = "", .images = {}, .negative_prompt = "blurry"}) ==
-         kDefaultGuidanceScale);
+             .prompt = "", .images = {}, .negative_prompt = "blurry"}) == 1);
   assert(ResolveGuidance(Request{
              .prompt = "", .images = {}, .guidance_scale = 2.5F}) == 2.5F);
   for (const auto& invalid :
@@ -556,8 +556,7 @@ int main(int argc, char** argv) {
          captured.negative_prompt == "blurry");
   http.body = R"({"prompt":"a red cube","negative_prompt":"blurry"})";
   assert(gufo::server::HandleImageApiRequest(http, guided).status == 200);
-  assert(!captured.guidance_scale &&
-         ResolveGuidance(captured) == kDefaultGuidanceScale);
+  assert(!captured.guidance_scale && ResolveGuidance(captured) == 1);
   // A base64 start image on generations; size auto keeps its canvas.
   const auto encoded = gufo::core::EncodeBase64(png);
   for (const auto& source :

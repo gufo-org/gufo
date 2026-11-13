@@ -4,7 +4,7 @@ The runners start isolated local servers and check real HTTP responses. Manual
 suites use production binaries and local weights. Devlab CI downloads only its
 selected models from pinned revisions.
 
-## Embedding, ASR and TTS service checks
+## Embedding, ASR, TTS and image service checks
 
 `model_services.py` starts an isolated loopback production server, checks readiness
 and advertised model identity, runs real HTTP inference, and shuts down its owned
@@ -28,7 +28,18 @@ nix develop -c python3 tests/functional/model_services.py tts \
   --variant base \
   --asr-binary /path/to/pinned/gufo --asr-model models/audio/Qwen3-ASR-1.7B \
   --output artifacts/model-services/tts-base-1
+
+nix develop -c python3 tests/functional/model_services.py image \
+  --binary build/release/gufo --model models/Qwen-Image-2.1 \
+  --lora voxel=models/loras/Qwen-Image-2.1-Voxel-Style-3000.safetensors \
+  --lora clay=models/loras/Qwen-Image-2.1-Clay-Sculpture-Style-3000.safetensors \
+  --lora-default clay:0.5 --output artifacts/model-services/image-1
 ```
+
+Image takes the complete Qwen-Image-2.1 or Turbo snapshot. Pass two `--lora`
+adapters and a `--lora-default` to cover adapter selection; without them the
+LoRA case is skipped and recorded as not run, so run it with adapters for
+changes to adapter handling.
 
 Embedding uses `--embedding-suite smoke` by default, including Devlab's PR tier.
 It retains independent reference-vector checks for all four modalities in one
@@ -52,6 +63,7 @@ VoiceDesign model (fixed English voice instructions). Neither requires a clone.
 | --- | --- |
 | Embedding | The default three-request smoke check covers text, image, video, mixed video/audio/image input, malformed-video rejection and recovery. `--embedding-suite full` retains the text, image, audio and video HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image/audio formats, multiple clips, audio/text/image interleaving, ignored unknown members, llama.cpp `content`/`embd_normalize`, invalid inputs, cancellation and recovery |
 | ASR | English transcript WER ≤ 0.15, exact greedy replay, JSON/text/verbose formats, complete SSE matching buffered output, concurrent speech/silence, ignored unknown fields, rejected options (including timestamps and logprobs), malformed WAV recovery, stream cancellation and subsequent valid inference |
+| Image | 512 × 512, 8 steps. OpenAI SDK generation equals sdapi `txt2img` pixel for pixel and replays; `cfg_scale` equals `guidance_scale`, and a negative prompt alone stays unguided on both APIs; `lora` defaults, `[]`, two adapters and repeated paths equal their OpenAI `loras`, with unknown and missing paths refused; `img2img` equals `image` + `strength`, including the 0.75 default strength and the init image's size; `batch_size` equals `n`; Open WebUI and SillyTavern request bodies; neither API reads the other's fields; sdapi `{"error"}` and OpenAI error shapes; discovery routes and recovery |
 | TTS | Voice discovery, valid non-silent 24-kHz mono PCM16 audio, two fixed texts with ASR WER ≤ 0.25, exact same-seed warm replay, WAV/PCM/SSE equality, different concurrent texts/seeds, ignored unknown fields, rejected inputs, stream cancellation and subsequent valid inference |
 
 Audio cancellation must appear against the cancelled request's ID in the server

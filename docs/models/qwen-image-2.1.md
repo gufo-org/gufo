@@ -50,8 +50,8 @@ curl --fail-with-body http://127.0.0.1:8080/v1/images/edits \
 | `n` | 1 to 10 images, each with its own seed, made one after another. |
 | `background` | `auto`, `transparent`, or `opaque` (over white). |
 | References | Up to 10 PNG or JPEG files, 20 MiB and 32 megapixels in total. |
-| `negative_prompt` | Text the image should move away from. Turns on true classifier-free guidance; each step runs twice, so it takes about twice as long. |
-| `guidance_scale` | 0 to 100; guidance runs above 1. 4 when only `negative_prompt` is set, otherwise 1 (off). Above 1 without `negative_prompt`, the negative side is an empty prompt. |
+| `negative_prompt` | Text the image should move away from, used when `guidance_scale` is above 1. |
+| `guidance_scale` | 0 to 100, default 1 (off). Above 1 turns on true classifier-free guidance; each step runs twice, so it takes about twice as long. Without `negative_prompt`, the negative side is an empty prompt. |
 | `strength` | 0.01 to 1 (the default). Below 1, as Diffusers' image to image, only the last `steps` × `strength` steps run, from the noised start image. With `size` `auto`, the output keeps the start image's size, rounded to multiples of 32. |
 | `image` | Start image of a JSON generation: base64 PNG or JPEG, or a `data:` URL. URLs are not fetched. |
 
@@ -102,9 +102,9 @@ gufo serve image --model "$MODEL"   --lora voxel=/models/loras/Qwen-Image-2.1-Vo
 
 Generation JSON and edit forms accept `"loras": [{"name": "voxel", "scale":
 0.8}]`; omitting it applies the `--lora-default` set and `[]` applies none.
-`GET /sdapi/v1/loras` lists the registered adapters. Supported layouts,
-limits and the merge are described in
-[LoRA adapters](../internal/models/qwen-image-2.1/LORA.md).
+The [A1111 API](../internal/server.md#a1111-image-api) that Open WebUI and
+SillyTavern speak lists them at `GET /sdapi/v1/loras`. Layouts, limits and the
+merge: [LoRA adapters](../internal/models/qwen-image-2.1/LORA.md).
 
 ## Performance
 

@@ -50,6 +50,7 @@ public:
                 .resident_weight_bytes = result.metrics.resident_weight_bytes,
                 .steps = result.metrics.steps,
                 .lora_ms = result.metrics.lora_ms,
+                .guidance_scale = result.metrics.guidance_scale,
             },
     };
   }

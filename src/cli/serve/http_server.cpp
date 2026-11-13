@@ -40,6 +40,7 @@
 #include "src/cli/serve/openai_chat.hpp"
 #include "src/cli/serve/responses_logprobs.hpp"
 #include "src/cli/serve/sampling_request.hpp"
+#include "src/cli/serve/sdapi.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
 #include "src/cli/serve/tts_service.hpp"
@@ -2311,8 +2312,10 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                  "server_error", "image_service_unavailable");
     return HandleImageApiRequest(req, *images_);
   }
-  if (req.path == "/sdapi/v1/loras" && images_ != nullptr)
-    return HandleImageLorasRequest(req, *images_);
+  // An image server answers every A1111 route; a text server keeps the 501
+  // stubs of the route table.
+  if (images_ != nullptr && IsSdapiPath(req.path))
+    return HandleSdapiRequest(req, *images_);
   if (req.path == "/v1/audio/speech/stream") {
     if (!tts_ || !tts_->ready())
       return Err(503, "Service Unavailable", "TTS is not configured",
