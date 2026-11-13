@@ -99,6 +99,14 @@ void Attention(const AttentionArgs& args, const KeyRange& keys,
 /// bfp16ebs8 encoding of 8 values: [shared exponent byte][8 int8 mantissas],
 /// value = mantissa * 2^(exponent - 127) / 64, rounded to nearest even.
 void EncodeBfp16Block(const float* values, std::uint8_t* out);
+/// EncodeBfp16Block of `blocks` groups of 8 values, the i-th read from
+/// values + i * src_stride and written at out + i * stride.
+void EncodeBfp16Blocks(const float* values, std::size_t blocks,
+                       std::uint8_t* out, std::size_t stride,
+                       std::size_t src_stride = 8);
+/// As EncodeBfp16Blocks, from bf16 values.
+void EncodeBfp16BlocksBf16(const std::uint16_t* values, std::size_t blocks,
+                           std::uint8_t* out, std::size_t stride);
 
 /// x[i] = exp(x[i] - shift); *sum (when set) gets the total. Vectorized.
 void ExpInPlace(float* x, std::size_t n, float shift, float* sum = nullptr);

@@ -107,6 +107,19 @@ int main() {
     Check(back[0] == 1.0f, "Bf16ToFloat");
   }
 
+  // bfp16 blocks: the strided batch encoder matches the single-block one.
+  {
+    std::vector<float> x(8 * 40);
+    for (float& v : x)
+      v = normal(rng) * (normal(rng) > 0 ? 1e3f : 1e-3f);
+    std::fill(x.begin(), x.begin() + 8, 0.0f);  // an all-zero block
+    std::vector<std::uint8_t> one(9 * 40), many(9 * 40);
+    for (int i = 0; i < 40; ++i)
+      host::EncodeBfp16Block(x.data() + 8 * i, one.data() + 9 * i);
+    host::EncodeBfp16Blocks(x.data(), 40, many.data(), 9);
+    Check(one == many, "EncodeBfp16Blocks == EncodeBfp16Block");
+  }
+
   // Attention: grouped heads and a sliding window against a naive loop.
   {
     const std::size_t rows = 37, heads = 4, kv = 2, dim = 24, window = 5;

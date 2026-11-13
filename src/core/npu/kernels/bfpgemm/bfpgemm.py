@@ -24,8 +24,9 @@ a matrix stride for a batch of products). Host layouts (bfp_gemm.cpp):
 Dispatch-time values: ng, nb, kb = K / 64, tiles = ng nb, nb kc, ng kb, b_rep,
 a_base and a_row (A words of the job and of one core row's strip), b_base and
 b_col (W words of the job and of one column's groups), c_base and c_col (C
-words), t1 and t2 (the tiles core columns 2-3 and 4-7 compute and drain: all,
-or 1 when those columns have no outputs; they then only pass A and B along).
+words), t1, t2 and t3 (the tiles core columns 2-3, 4-5 and 6-7 compute and
+drain: all, or 1 when those columns have no outputs; they then only pass A
+and B along).
 Instruction streams of several jobs concatenate into one dispatch; the cores
 restart at every barrier.
 Usage: bfpgemm.py <out dir>: writes bfpgemm.xclbin, bfpgemm_s.xclbin and their
@@ -68,7 +69,8 @@ def design(M_T):
                 kb: DispatchTime[np.int32], tiles: DispatchTime[np.int32], nbkc: DispatchTime[np.int32],
                 ngkb: DispatchTime[np.int32], b_rep: DispatchTime[np.int32], a_base: DispatchTime[np.int32], a_row: DispatchTime[np.int32],
                 b_base: DispatchTime[np.int32], b_col: DispatchTime[np.int32], c_base: DispatchTime[np.int32],
-                c_col: DispatchTime[np.int32], t1: DispatchTime[np.int32], t2: DispatchTime[np.int32]):
+                c_col: DispatchTime[np.int32], t1: DispatchTime[np.int32], t2: DispatchTime[np.int32],
+                t3: DispatchTime[np.int32]):
         # A comes pre-encoded as bfp16 sub-tiles in the cores' order ([k block]
         # [32-row sub-tile]), so the memtile forwards it without reordering.
         a_l2_ty = np.ndarray[(M_T, MTK // 8), np.dtype[v8bfp16ebs8]]
@@ -140,9 +142,10 @@ def design(M_T):
         c_ty = np.ndarray[(C_WORDS,), np.dtype[np.int32]]
 
         def sequence(A, W, C, ng, nb, kb, tiles, nbkc, ngkb, b_rep, a_base, a_row, b_base, b_col, c_base, c_col, t1, t2,
-                     ah, bh, ch):
-            # Column classes 0-1 (always active), 2-3 (t1 tiles) and 4-7 (t2).
-            active = [tiles, tiles, t1, t1, t2, t2, t2, t2]
+                     t3, ah, bh, ch):
+            # Column classes 0-1 (always active), 2-3 (t1 tiles), 4-5 (t2) and
+            # 6-7 (t3).
+            active = [tiles, tiles, t1, t1, t2, t2, t3, t3]
             for k in keys:
                 rtps[k][0] = active[k[1]]
                 rtps[k][1] = kb
@@ -163,7 +166,7 @@ def design(M_T):
             tg.finish()
 
         rt = Runtime(sequence, [a_ty, w_ty, c_ty, ng, nb, kb, tiles, nbkc, ngkb, b_rep, a_base, a_row, b_base, b_col, c_base,
-                                c_col, t1, t2,
+                                c_col, t1, t2, t3,
                                 [f.prod() for f in a_fifos], [f.prod() for f in b_fifos], [f.cons() for f in c_fifos]])
         return Program(from_name("npu2", n_cols=None), rt, workers=workers).resolve_program()
 

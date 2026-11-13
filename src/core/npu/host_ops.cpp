@@ -5,6 +5,7 @@
 #include <bit>
 #include <cmath>
 #include <condition_variable>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -294,6 +295,74 @@ void ExpInPlace(float* x, std::size_t n, float shift, float* sum) {
   }
   if (sum)
     *sum = total;
+}
+
+namespace {
+
+#ifdef GUFO_NPU_HOST_AVX2
+// One bfp16ebs8 block from 8 lanes: the shared exponent is the largest, and
+// mantissas round to nearest even. Blocks below 2^-121 encode as zero.
+inline void EncodeBlock8(__m256 x, std::uint8_t* out) {
+  __m256i ex = _mm256_and_si256(_mm256_srli_epi32(_mm256_castps_si256(x), 23),
+                                _mm256_set1_epi32(0xff));
+  ex = _mm256_max_epi32(ex, _mm256_permute2x128_si256(ex, ex, 1));
+  ex = _mm256_max_epi32(ex, _mm256_shuffle_epi32(ex, 0x4e));
+  ex = _mm256_max_epi32(ex, _mm256_shuffle_epi32(ex, 0xb1));
+  const int e = _mm256_cvtsi256_si32(ex);
+  if (e < 6) {
+    std::memset(out, 0, 9);
+    out[0] = std::uint8_t(e);
+    return;
+  }
+  const __m256 inv = _mm256_castsi256_ps(_mm256_set1_epi32((260 - e) << 23));
+  __m256 y = _mm256_round_ps(_mm256_mul_ps(x, inv),
+                             _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+  y = _mm256_min_ps(_mm256_max_ps(y, _mm256_set1_ps(-128.0f)),
+                    _mm256_set1_ps(127.0f));
+  // int32 -> int8: pack to 16 bits, then 8 bits; lane order fixed by the
+  // permute.
+  const __m256i q = _mm256_cvtps_epi32(y);
+  const __m128i lo = _mm256_castsi256_si128(q),
+                hi = _mm256_extracti128_si256(q, 1);
+  const __m128i w = _mm_packs_epi32(lo, hi);
+  const __m128i b = _mm_packs_epi16(w, w);
+  out[0] = std::uint8_t(e);
+  std::uint64_t bytes = std::uint64_t(_mm_cvtsi128_si64(b));
+  std::memcpy(out + 1, &bytes, 8);
+}
+#endif
+
+}  // namespace
+
+void EncodeBfp16Blocks(const float* values, std::size_t blocks,
+                       std::uint8_t* out, std::size_t stride,
+                       std::size_t src_stride) {
+#ifdef GUFO_NPU_HOST_AVX2
+  for (std::size_t i = 0; i < blocks; ++i)
+    EncodeBlock8(_mm256_loadu_ps(values + i * src_stride), out + i * stride);
+#else
+  for (std::size_t i = 0; i < blocks; ++i)
+    EncodeBfp16Block(values + i * src_stride, out + i * stride);
+#endif
+}
+
+void EncodeBfp16BlocksBf16(const std::uint16_t* values, std::size_t blocks,
+                           std::uint8_t* out, std::size_t stride) {
+#ifdef GUFO_NPU_HOST_AVX2
+  for (std::size_t i = 0; i < blocks; ++i) {
+    const __m128i h =
+        _mm_loadu_si128(reinterpret_cast<const __m128i*>(values + 8 * i));
+    EncodeBlock8(
+        _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(h), 16)),
+        out + i * stride);
+  }
+#else
+  float v[8];
+  for (std::size_t i = 0; i < blocks; ++i) {
+    Bf16ToFloat(values + 8 * i, v, 8);
+    EncodeBfp16Block(v, out + i * stride);
+  }
+#endif
 }
 
 void EncodeBfp16Block(const float* values, std::uint8_t* out) {

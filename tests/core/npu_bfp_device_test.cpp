@@ -139,6 +139,43 @@ int main(int argc, char** argv) {
     if (!(worst < 2e-2))
       ++failures;
   }
+  // A batch of narrow products (columns past their outputs idle).
+  {
+    const int k = 256;
+    std::vector<int> ids, ns{300, 512, 490, 256}, rows{490, 300, 512, 77};
+    std::vector<std::vector<float>> ws, xs, ys;
+    for (std::size_t i = 0; i < ns.size(); ++i) {
+      ws.emplace_back(std::size_t(ns[i]) * k);
+      xs.emplace_back(std::size_t(rows[i]) * k);
+      for (float& v : ws.back())
+        v = normal(rng) * 0.05f;
+      for (float& v : xs.back())
+        v = normal(rng);
+      ids.push_back(gemm.Upload(ns[i], k, ws.back()));
+      ys.emplace_back(std::size_t(rows[i]) * ns[i]);
+    }
+    std::vector<npu::BfpGemm::Call> calls;
+    for (std::size_t i = 0; i < ns.size(); ++i)
+      calls.push_back({ids[i], xs[i].data(), rows[i], ys[i].data()});
+    gemm.Run(calls);
+    double worst = 0;
+    for (std::size_t c = 0; c < ns.size(); ++c) {
+      std::vector<double> ref(ys[c].size());
+      for (int r = 0; r < rows[c]; ++r)
+        for (int o = 0; o < ns[c]; ++o) {
+          double acc = 0;
+          for (int i = 0; i < k; ++i)
+            acc += double(xs[c][std::size_t(r) * k + i]) *
+                   ws[c][std::size_t(o) * k + i];
+          ref[std::size_t(r) * ns[c] + o] = acc;
+        }
+      worst = std::max(worst, RelativeError(ys[c], ref));
+    }
+    std::printf("narrow batch of %zu calls: relative error %.2e\n", ns.size(),
+                worst);
+    if (!(worst < 2e-2))
+      ++failures;
+  }
   // Switching programs: 128-row bands for short calls, 512-row bands for
   // long ones, alternately.
   {
