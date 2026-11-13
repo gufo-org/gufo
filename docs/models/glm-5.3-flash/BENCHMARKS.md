@@ -31,8 +31,11 @@ matched. The P6 protocol text below is retained for history.
 
 Offline `gufo bench` reference point (same P7 code, GPU-exclusive,
 repetitions=2): pp2048 **85.11 ± 0.06**, tg32 **11.13 ± 0.07**
-(`/tmp/opencode/glm5_bench2k.log`). Use these only as offline scans, not
-interchangeably with the serve-protocol gate cells.
+(`/tmp/opencode/glm5_bench2k.log`). With the 256-token prefill chunk
+(+6.0 %, bit-identical — greedy sha and `rocm_forward` max |dlogit|
+0.0000 vs the golden): pp2048 **90.3 ± 0.1** (tg unchanged). Serve-protocol
+gate not yet re-captured for this step. Use these only as offline scans,
+not interchangeably with the serve-protocol gate cells.
 
 Gufo column captured 2026-11-12 on `build/gpu-test/gufo` (P6 dense Q5_K
 WMMA tier over the P5 fixed + widened WMMA routed tier) through

@@ -190,6 +190,18 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   (rebuilt gate script after the original was lost; clean A/B is the
   effect measurement, the 41.61 row stays the retained gate).
 
+## Chunk and wave levers (2026-11-13)
+
+- Prefill chunk width `kChunk` 128 -> 256 (`executor.hpp`): doubles
+  routed-expert weight reuse per pass at pp2048. Offline `gufo bench`
+  A/B (same session, warm+2, alternating): 85.27/85.33 -> **90.38/90.21
+  (+6.0 %)**; 512 plateaus (89.33/89.88 vs 89.58/89.63 control —
+  rejected, keeps scratch small). Bit-identical: greedy 128-token
+  continuation sha256 `752281d6…` equal across 128/256 binaries,
+  `glm5_next.rocm_device_model` 626/626 payload bit-exact, and
+  `glm5_next.rocm_forward` ALL PASS with max |dlogit| = 0.0000
+  GPU-exclusive against the retained golden (`/tmp/opencode/glm5_*`).
+
 ## Next candidates (measured order from P3d, P3e updated)
 
 - Tensor-core / igemm-style IQ1_M routed expert tier (flint `mmq` style)
