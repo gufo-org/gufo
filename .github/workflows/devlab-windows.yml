@@ -146,6 +146,30 @@ jobs:
           if (-not $npu -or $npu.status -ne 'PASS') { throw "NPU check: $($npu.status) $($npu.message)" }
           $npu.message
 
+      # The bundled NPU designs against double references, on the NPU (no
+      # weights). Exit 77 means no NPU, which this runner must have.
+      - name: Run NPU design checks
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location windows-gufo
+          $checks = @(
+            @('npu_device_test', 'npu\q8gemm'),
+            @('npu_bfp_device_test', 'npu\bfpgemm'),
+            @('npu_qwen3dec_device_test', 'npu\qwen3dec', '5'))
+          foreach ($check in $checks) {
+            $test, $arguments = $check
+            if (-not (Test-Path ".\$test.exe")) {
+              if (Test-Path 'npu') { throw "the bundle ships NPU designs but not $test.exe" }
+              "skipped: this bundle has no NPU designs"
+              break
+            }
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            & ".\$test.exe" @arguments
+            if ($LASTEXITCODE -ne 0) { throw "$test failed with exit code $LASTEXITCODE" }
+            "{0}: {1:N1} s" -f $test, $watch.Elapsed.TotalSeconds
+          }
+          Pop-Location
+
       # Real HIP kernels and allocations without weights, so a stalled SDK or
       # a missing runtime piece shows before any model download.
       - name: Run GPU checks without weights

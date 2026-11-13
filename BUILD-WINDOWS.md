@@ -15,7 +15,9 @@ from upstream LLVM 18.1.8 source under Apache-2.0 with LLVM exceptions, using
 `llvm-openmp-LICENSE.txt`, with source provenance in `llvm-openmp-version.txt`.
 The NPU runtime uses XRT from AMD's NPU driver, which the bundle does not
 ship; without the driver, `gufo diagnose` warns `No XDNA NPU found` and the
-GPU paths work as before.
+GPU paths work as before. The compiled NPU programs ship in `npu\` beside
+`gufo.exe`, so `--npu` (EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS) needs only
+the driver; keep that folder with the executable.
 
 The v0.24.0 ZIP omitted this DLL ([#801](https://github.com/gufo-org/gufo/issues/801)).
 If it exits silently, including for `--help`, with status `0xC0000135`, the
@@ -86,6 +88,29 @@ release packaging builds the upstream runtime instead.
   GPU only. Elsewhere, pass `-DXRT_DIR=<dir>/xrt_sdk/xrt/share/cmake/XRT`. Do
   not set `XILINX_XRT`: the driver's XRT then looks for its device plugin
   there and finds no NPU.
+- **IRON** (mlir-aie with the Peano AIE compiler) in a Python 3.12 venv at
+  `C:\iron`, where configure finds it. It compiles the in-tree NPU designs
+  (`src\core\npu\kernels`) into `npu\` beside `gufo.exe`, which `--npu`
+  needs. [`tools\windows\iron-requirements.txt`](tools/windows/iron-requirements.txt)
+  pins the wheels with their sha256, the same versions as the Nix build, and
+  CI installs from it:
+
+  ```cmd
+  py -3.12 -m venv C:\iron
+  C:\iron\Scripts\python -m pip install -r tools\windows\iron-requirements.txt
+  ```
+
+  The designs compile on any x86 machine, no NPU needed. Most take seconds to
+  a minute; `qwen3pre`'s 1024-row program takes far longer, because its MLIR
+  verification grows faster than linearly with the program. IRON caches
+  compiled designs in `GUFO_NPU_CACHE_HOME` (default `build\...\npu\.cache`),
+  keyed on their sources, so a rebuild only recompiles a changed design; CI
+  keeps that cache and the venv between runs. Configure takes Peano from the
+  venv and `xclbinutil` from the XRT SDK, so neither goes on `PATH`.
+  Elsewhere, pass `-DGUFO_IRON_PYTHON=<venv>\Scripts\python.exe`.
+  Without IRON the build skips the designs and `--npu` fails with `NPU design
+  ... not found`; `-DGUFO_NPU_DESIGNS_REQUIRED=ON` makes that a configure
+  error instead (CI sets it).
 
 ## 2. Patch the SDK's HIP headers (once, and after every SDK reinstall)
 
@@ -110,7 +135,8 @@ calling script stops after it. The first configure builds the dependencies
 through vcpkg (ICU and OpenSSL take several minutes). The build produces
 `build\windows-release\gufo.exe` and `gufo-server.exe`, with the TheRock
 runtime DLLs and the `rocblas\` and `hipblaslt\` kernel libraries staged
-beside them.
+beside them, and the NPU designs in `build\windows-release\npu\` (found from
+the build tree; `cmake --install` puts them in `bin\npu\`).
 
 For the host test suite, which needs no GPU:
 
@@ -153,7 +179,9 @@ Then `curl http://127.0.0.1:8080/ready` and POST to `/v1/chat/completions`.
 [`.github/workflows/windows-build.yml`](.github/workflows/windows-build.yml) builds this
 recipe on a hosted `windows-latest` runner, with the SDK archive, the vcpkg
 packages and the compiler cache restored from the Actions cache, and runs
-`check-pr`. It also builds the upstream OpenMP runtime, extracts the packaged
+`check-pr`. It installs IRON from `tools\windows\iron-requirements.txt` and
+compiles the NPU designs into the bundle's `npu\` folder (failing if they are
+missing). It also builds the upstream OpenMP runtime, extracts the packaged
 bundle, checks every EXE/DLL's normal and delay imports against the bundle and
 an explicit Windows system DLL list, and runs `--help`, `--version` and platform
 diagnosis with a restricted `PATH`. The import check does not use the builder's
@@ -180,24 +208,20 @@ EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
 - If `gufo diagnose` warns `No XDNA NPU found` on a machine with the NPU
   driver, unset `XILINX_XRT` and remove any `xrt_coreutil.dll` beside
   `gufo.exe`.
+- If `--npu` fails with `NPU design <name> not found`, the build had no IRON:
+  install it (step 1) and reconfigure, or set `GUFO_NPU_DESIGNS` to a folder
+  holding `<name>\`. If aiecc stops with `tool 'xclbinutil' not found`,
+  configure could not find the XRT SDK's `xclbinutil.exe`.
 - After reinstalling or upgrading the SDK, rerun the patch in step 2 and
   rebuild into a fresh build directory so the runtime stages again.
 
 ## NPU device test (developers)
 
-Building and running Gufo needs no Python for the NPU. Only compiling the
-in-tree NPU designs does: they are IRON (mlir-aie) programs, compiled by
-Python packages. Install the Windows wheels of the versions
-[`.devops/nix/iron`](.devops/nix/iron/default.nix) pins, then build and run
-`npu_device_test`; aiecc needs the SDK's `xclbinutil` on `PATH`:
+With IRON installed (step 1), build and run the on-device design checks:
 
 ```cmd
-py -3.12 -m venv C:\src\iron-venv
-C:\src\iron-venv\Scripts\python -m pip install numpy ml-dtypes cloudpickle https://github.com/Xilinx/mlir-aie/releases/download/v1.4.5/mlir_aie-1.4.5-cp312-cp312-win_amd64.whl https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-22.0.0.2026111101%2B81af12b7-py3-none-win_amd64.whl
-set PEANO_INSTALL_DIR=C:\src\iron-venv\Lib\site-packages\llvm-aie
-set PATH=C:\xrt\xrt_sdk\xrt;%PATH%
-tools\windows\vs-env.cmd cmake --preset windows-release -B build\npu-test -DBUILD_TESTING=ON -DGUFO_IRON_PYTHON=C:\src\iron-venv\Scripts\python.exe
-tools\windows\vs-env.cmd cmake --build build\npu-test --target npu_device_test
+tools\windows\vs-env.cmd cmake --preset windows-release -B build\npu-test -DBUILD_TESTING=ON
+tools\windows\vs-env.cmd cmake --build build\npu-test --target npu_device_test npu_bfp_device_test npu_qwen3dec_device_test
 build\npu-test\npu_device_test.exe build\npu-test\npu\q8gemm
 ```
 

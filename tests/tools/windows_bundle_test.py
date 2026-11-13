@@ -134,6 +134,21 @@ class WindowsBundleTest(unittest.TestCase):
                     ["bundle ships xrt_coreutil.dll, which must come from its driver"],
                 )
 
+    def test_npu_dispatch_libraries_import_system_dlls_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gufo.exe").touch()
+            (root / "npu" / "q8gemm").mkdir(parents=True)
+            (root / "npu" / "q8gemm" / "q8gemm_dispatch.so").touch()
+            imports = {"gufo.exe": {"kernel32.dll"}, "q8gemm_dispatch.so": {"kernel32.dll"}}
+            with patch.object(bundle, "imported_dlls", side_effect=lambda p: imports[p.name]):
+                self.assertEqual(bundle.check_bundle(root), [])
+                imports["q8gemm_dispatch.so"].add("vcruntime140.dll")
+                self.assertEqual(
+                    bundle.check_bundle(root),
+                    ["npu/q8gemm/q8gemm_dispatch.so requires non-system vcruntime140.dll"],
+                )
+
     def test_missing_executable_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, "missing gufo.exe"):

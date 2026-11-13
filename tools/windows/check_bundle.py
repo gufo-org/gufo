@@ -76,6 +76,14 @@ def check_bundle(directory):
                     missing.append(f"{name} must delay-load driver library {dependency}")
             elif dependency not in images and not is_system_dll(dependency):
                 missing.append(f"{name} requires unbundled {dependency}")
+
+    # NPU dispatch libraries (DLLs named *_dispatch.so, npu/<design>/) load by
+    # absolute path from their own folder: they may import system DLLs only.
+    for path in sorted(directory.glob("npu/*/*_dispatch.so")):
+        name = path.relative_to(directory).as_posix()
+        for dependency in sorted(imported_dlls(path)):
+            if not is_system_dll(dependency):
+                missing.append(f"{name} requires non-system {dependency}")
     return missing
 
 

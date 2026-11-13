@@ -63,6 +63,12 @@ jobs:
       XRT_SDK_URL: https://github.com/Xilinx/XRT/releases/download/2.21.75/xrt_windows_sdk.zip
       XRT_SDK_SHA256: ccc244c2c423588972ade76142cdc01049477aaa39a35be97e782b97eb7c5295
       XRT_ROOT: C:/xrt
+      # IRON (mlir-aie + Peano) compiles the in-tree NPU designs that ship in
+      # npu\ beside gufo.exe; pins and hashes in iron-requirements.txt. The
+      # venv is cached whole at a fixed path: IRON keys its build cache on its
+      # tools' paths and mtimes, which a fresh pip install would change.
+      IRON_ROOT: C:/iron
+      IRON_PYTHON_VERSION: '3.12.10'
       GUFO_PACKAGING_ROOT: ${{ github.workspace }}
     steps:
       - name: Check out repository
@@ -248,6 +254,56 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'cannot unpack the XRT SDK' }
           "XRT_DIR=$env:XRT_ROOT/xrt_sdk/xrt/share/cmake/XRT" >> $env:GITHUB_ENV
 
+      # The venv runs on this exact interpreter (pyvenv.cfg names its path).
+      - name: Set up Python for IRON
+        id: iron-python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.IRON_PYTHON_VERSION }}
+          update-environment: false
+
+      - name: Identify the IRON pins
+        id: iron
+        run: |
+          $pins = (Get-FileHash "$env:GUFO_PACKAGING_ROOT/tools/windows/iron-requirements.txt").Hash.ToLowerInvariant().Substring(0, 16)
+          "key=$env:IRON_PYTHON_VERSION-$pins" >> $env:GITHUB_OUTPUT
+
+      - name: Restore IRON
+        id: iron-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.IRON_ROOT }}
+          key: gufo-iron-windows-v1-${{ steps.iron.outputs.key }}
+
+      # The NPU designs compile on any x86 host; no NPU is needed here.
+      - name: Install IRON
+        if: steps.iron-cache.outputs.cache-hit != 'true'
+        env:
+          IRON_BASE_PYTHON: ${{ steps.iron-python.outputs.python-path }}
+        run: |
+          & $env:IRON_BASE_PYTHON -m venv $env:IRON_ROOT
+          if ($LASTEXITCODE -ne 0) { throw 'cannot create the IRON venv' }
+          & "$env:IRON_ROOT/Scripts/python.exe" -m pip install --no-input --disable-pip-version-check -r "$env:GUFO_PACKAGING_ROOT/tools/windows/iron-requirements.txt"
+          if ($LASTEXITCODE -ne 0) { throw 'cannot install IRON' }
+
+      - name: Save IRON
+        if: steps.iron-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.IRON_ROOT }}
+          key: gufo-iron-windows-v1-${{ steps.iron.outputs.key }}
+
+      # IRON's own cache of compiled designs, keyed per design on its Python,
+      # kernel sources, flags and tools: unchanged designs are copied, not
+      # recompiled (qwen3pre alone takes many minutes).
+      - name: Restore NPU design cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\npu-cache
+          key: gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-
+
       - name: Check out external extension
         if: ${{ inputs.extension-repo != '' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -281,14 +337,23 @@ jobs:
           cmake --preset windows-release -DBUILD_TESTING=ON "-DCMAKE_HIP_COMPILER_ROCM_ROOT=$env:SDK_ROOT" `
             -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
             -DOpenMP_CXX_LIB_NAMES=libomp "-DOpenMP_libomp_LIBRARY=$PWD/build/openmp/runtime/src/libomp.lib" `
-            "-DOpenMP_CXX_INCLUDE_DIR=$PWD/build/openmp/runtime/src" "-DXRT_DIR=$env:XRT_DIR" @identity
+            "-DOpenMP_CXX_INCLUDE_DIR=$PWD/build/openmp/runtime/src" "-DXRT_DIR=$env:XRT_DIR" `
+            "-DGUFO_IRON_PYTHON=$env:IRON_ROOT/Scripts/python.exe" -DGUFO_NPU_DESIGNS_REQUIRED=ON `
+            "-DGUFO_NPU_CACHE_HOME=$env:RUNNER_TEMP/npu-cache" @identity
           if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
           "$PWD\build\windows-release\vcpkg_installed\x64-windows-release\bin" >> $env:GITHUB_PATH
           "$PWD\build\windows-release" >> $env:GITHUB_PATH
 
       - name: Build application and test binaries
+        id: build
         run: |
-          cmake --build --preset windows-release --parallel $env:NUMBER_OF_PROCESSORS --target gufo gufo-server component_text_cache_test qwen38_flash_next_ngram_test gpu_queues_test bandwidth_test allocation_benchmark_test
+          $targets = @('gufo', 'gufo-server', 'component_text_cache_test', 'qwen38_flash_next_ngram_test', 'gpu_queues_test', 'bandwidth_test', 'allocation_benchmark_test')
+          # Release tags from before the in-tree NPU designs have no such target.
+          if (Select-String -Quiet -Pattern 'npu_designs' -Path cmake/GufoNpuDesigns.cmake -ErrorAction SilentlyContinue) {
+            # The on-device design checks run in Devlab (devlab-windows.yml).
+            $targets += 'npu_designs', 'npu_device_test', 'npu_bfp_device_test', 'npu_qwen3dec_device_test'
+          }
+          cmake --build --preset windows-release --parallel $env:NUMBER_OF_PROCESSORS --target @targets
           if ($LASTEXITCODE -ne 0) { throw 'build failed' }
           ccache --show-stats
 
@@ -334,6 +399,10 @@ jobs:
             if (Test-Path "$build\$dir") { Copy-Item "$build\$dir" $dist -Recurse }
           }
           Copy-Item "$build\vcpkg_installed\x64-windows-release\bin\*.dll" $dist -Force
+          # cmake --install put the NPU designs in bin\npu, now npu\ beside gufo.exe.
+          if ((Test-Path "$build\npu") -and -not (Get-ChildItem "$dist\npu" -Recurse -Filter *.xclbin -ErrorAction SilentlyContinue)) {
+            throw 'NPU designs were built but are missing from the bundle'
+          }
           if (Test-Path "$build\gufo-video-libraries.txt") {
             Copy-Item "$build\gufo-video-libraries.txt" $dist
             $videoTest = Get-ChildItem $build -Recurse -Filter 'embedding_gemma2_video_processor_test.exe' | Select-Object -First 1
@@ -349,7 +418,11 @@ jobs:
           $redist = Get-ChildItem "$env:VCToolsRedistDir\x64" -Directory |
             Where-Object { $_.Name -like 'Microsoft.VC*.CRT' }
           foreach ($dir in $redist) { Copy-Item "$($dir.FullName)\*.dll" $dist -Force }
-          foreach ($test in 'gpu_queues_test', 'bandwidth_test', 'allocation_benchmark_test') {
+          $tests = @('gpu_queues_test', 'bandwidth_test', 'allocation_benchmark_test')
+          if (Test-Path "$build\npu") {
+            $tests += 'npu_device_test', 'npu_bfp_device_test', 'npu_qwen3dec_device_test'
+          }
+          foreach ($test in $tests) {
             $exe = Get-ChildItem $build -Recurse -Filter "$test.exe" | Select-Object -First 1
             if (-not $exe) { throw "$test.exe was not built" }
             Copy-Item $exe.FullName $dist
@@ -425,7 +498,7 @@ jobs:
           }
           Copy-Item licenses "$dist\third-party" -Recurse
           Copy-Item src\models\deepseek_v4_flash\LICENSE.ds4 "$dist\third-party"
-          foreach ($dir in 'rocblas', 'hipblaslt') {
+          foreach ($dir in 'rocblas', 'hipblaslt', 'npu') {
             if (Test-Path "$bundle\$dir") { Copy-Item "$bundle\$dir" $dist -Recurse }
           }
           $archive = "$env:RUNNER_TEMP\gufo-$env:RELEASE_TAG-windows-x86_64.zip"
@@ -511,6 +584,15 @@ jobs:
         with:
           path: ${{ runner.temp }}\ccache
           key: gufo-windows-ccache-v1-${{ env.SDK_TARBALL }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Saved even when the build fails or times out, so a rerun keeps every
+      # design that finished; IRON drops failed compilations itself.
+      - name: Save NPU design cache
+        if: always() && steps.configure.outcome == 'success'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\npu-cache
+          key: gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save vcpkg binary cache
         if: always() && steps.configure.outcome != 'skipped'
