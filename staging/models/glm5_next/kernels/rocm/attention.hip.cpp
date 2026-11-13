@@ -66,26 +66,73 @@ __global__ void MlaQabsKernel(const float* __restrict__ q,
   q_abs[row] = scale * acc;
 }
 
-__global__ void MlaGatherScoreKernel(const float* __restrict__ q_abs,
-                                     const __half* __restrict__ cache,
-                                     const std::int32_t* __restrict__ sel,
-                                     std::uint32_t n_sel, std::uint32_t tile,
-                                     std::uint32_t heads,
-                                     float* __restrict__ scores) {
-  const std::uint32_t tile_i = blockIdx.x;
-  const std::uint32_t head = blockIdx.y;
-  const std::uint32_t j = tile_i * tile + threadIdx.x;
-  if (j >= n_sel) {
+// One warp per selected slot: lanes load the row as two coalesced uint4
+// chunks, unpack their 16 halves into registers, then loop the head slice
+// pairing registers against the float4 q pairs covering the same dims and
+// reduce with shuffles. Head-slice blocks keep small n_sel latency low.
+__global__ __launch_bounds__(256) void MlaGatherScoreKernel(
+    const float* __restrict__ q_abs, const __half* __restrict__ cache,
+    const std::int32_t* __restrict__ sel, std::uint32_t n_sel,
+    std::uint32_t tile, std::uint32_t heads, std::uint32_t hspan,
+    float* __restrict__ scores) {
+  const std::uint32_t lane = threadIdx.x & 31U;
+  const std::uint32_t key = blockIdx.x * 8U + (threadIdx.x >> 5U);
+  if (key >= n_sel) {
     return;
   }
-  const float* qa = q_abs + static_cast<std::size_t>(head) * kMlaKvRank;
-  const __half* row = cache + static_cast<std::size_t>(sel[j]) * kMlaKvRank;
-  float acc = 0.0F;
-  for (std::uint32_t i = 0; i < kMlaKvRank; ++i) {
-    acc += qa[i] * __half2float(row[i]);
+  const uint4* rp = reinterpret_cast<const uint4*>(
+      cache + static_cast<std::size_t>(sel[key]) * kMlaKvRank);
+  const uint4 r0 = rp[lane];
+  const uint4 r1 = rp[lane + 32U];
+  float v[16];
+  const __half2* p0 = reinterpret_cast<const __half2*>(&r0);
+  const __half2* p1 = reinterpret_cast<const __half2*>(&r1);
+#pragma unroll
+  for (std::uint32_t k = 0; k < 4U; ++k) {
+    const float2 f0 = __half22float2(p0[k]);
+    const float2 f1 = __half22float2(p1[k]);
+    v[2U * k] = f0.x;
+    v[2U * k + 1U] = f0.y;
+    v[8U + 2U * k] = f1.x;
+    v[8U + 2U * k + 1U] = f1.y;
   }
-  scores[(static_cast<std::size_t>(tile_i) * heads + head) * tile +
-         threadIdx.x] = acc;
+  const std::uint32_t head0 = blockIdx.y * hspan;
+  for (std::uint32_t h = 0; h < hspan; ++h) {
+    const std::uint32_t head = head0 + h;
+    const float4* qa = reinterpret_cast<const float4*>(
+        q_abs + static_cast<std::size_t>(head) * kMlaKvRank);
+    const float4 c0 = qa[2U * lane];
+    const float4 c1 = qa[2U * lane + 1U];
+    const float4 c2 = qa[kMlaKvRank / 8U + 2U * lane];
+    const float4 c3 = qa[kMlaKvRank / 8U + 2U * lane + 1U];
+    float acc = 0.0F;
+    acc = __fmaf_rn(v[0], c0.x, acc);
+    acc = __fmaf_rn(v[1], c0.y, acc);
+    acc = __fmaf_rn(v[2], c0.z, acc);
+    acc = __fmaf_rn(v[3], c0.w, acc);
+    acc = __fmaf_rn(v[4], c1.x, acc);
+    acc = __fmaf_rn(v[5], c1.y, acc);
+    acc = __fmaf_rn(v[6], c1.z, acc);
+    acc = __fmaf_rn(v[7], c1.w, acc);
+    acc = __fmaf_rn(v[8], c2.x, acc);
+    acc = __fmaf_rn(v[9], c2.y, acc);
+    acc = __fmaf_rn(v[10], c2.z, acc);
+    acc = __fmaf_rn(v[11], c2.w, acc);
+    acc = __fmaf_rn(v[12], c3.x, acc);
+    acc = __fmaf_rn(v[13], c3.y, acc);
+    acc = __fmaf_rn(v[14], c3.z, acc);
+    acc = __fmaf_rn(v[15], c3.w, acc);
+    acc += __shfl_down_sync(0xffffffffULL, acc, 16U);
+    acc += __shfl_down_sync(0xffffffffULL, acc, 8U);
+    acc += __shfl_down_sync(0xffffffffULL, acc, 4U);
+    acc += __shfl_down_sync(0xffffffffULL, acc, 2U);
+    acc += __shfl_down_sync(0xffffffffULL, acc, 1U);
+    if (lane == 0U) {
+      scores[(static_cast<std::size_t>(key) / tile) *
+                 (static_cast<std::size_t>(heads) * tile) +
+             static_cast<std::size_t>(head) * tile + (key % tile)] = acc;
+    }
+  }
 }
 
 __global__ void MlaGatherCombineKernel(const float* __restrict__ scores,
@@ -183,9 +230,10 @@ void MlaGatherScore(const float* q_abs, const __half* cache,
                     const std::int32_t* sel, std::uint32_t n_sel,
                     std::uint32_t tile, std::uint32_t heads, float* scores,
                     hipStream_t stream) {
-  const dim3 grid(MlaGatherTiles(n_sel, tile), heads);
-  MlaGatherScoreKernel<<<grid, tile, 0, stream>>>(q_abs, cache, sel, n_sel,
-                                                  tile, heads, scores);
+  const std::uint32_t hspan = n_sel >= 4096U ? 32U : 16U;
+  const dim3 grid((n_sel + 7U) / 8U, heads / hspan);
+  MlaGatherScoreKernel<<<grid, 256, 0, stream>>>(q_abs, cache, sel, n_sel,
+                                                 tile, heads, hspan, scores);
 }
 
 void MlaGatherCombine(const float* scores, const __half* cache,

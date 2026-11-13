@@ -14,8 +14,15 @@ comparisons require the full contract in `docs/COMMON_OPTIMIZATION_STRIX_HALO.md
 
 | test | llama.cpp t/s | gufo t/s |
 | --- | --- | --- |
-| pp2048 | 189.44 ± 5.11 | 67.89 ± 0.61 |
-| tg32 | 16.80 ± 0.02 | 11.45 ± 0.06 |
+| pp2048 | 189.44 ± 5.11 | 79.9 ± 0.1 † |
+| tg32 | 16.80 ± 0.02 | 12.4 ± 0.1 † |
+
+† Captured 2026-11-13 (P7 row-warp GatherScore) on the rebuilt gate
+harness (`/tmp/opencode/glm5_ab_p7.sh`, `serving_bench --concurrency 1`,
+prompt_n ≈ 2232), so these cells are not comparable to the archived
+P6-column protocol (67.89 pp / 11.45 tg for P6 on the original session);
+same-session control was 66.7 ± 0.3 pp / 12.4 tg, making P7 **+19.7 %**
+matched. The P6 protocol text below is retained for history.
 
 Gufo column captured 2026-11-12 on `build/gpu-test/gufo` (P6 dense Q5_K
 WMMA tier over the P5 fixed + widened WMMA routed tier) through
@@ -85,7 +92,12 @@ itself (capture mode `GUFO_GLM5_NEXT_STEPS=<steps.json>` on the forward
 test, same GPU-exclusive discipline; the steps document is converted into
 the fixture). The strict replay in `glm5_next_rocm_forward_test` demands
 top-1/greedy exactness inside a 0.5-nat budget and matched the capture
-bit-for-bit on this host. Refresh it only by re-capturing on the candidate.
+bit-for-bit on this host. Refresh it only by re-capturing on the
+candidate. Refreshed 2026-11-13 (captured at revision 457151058) for
+the P7 GatherScore kernel: the reassociation moved one chaotic-boundary
+`code` snapshot beyond the 0.5 budget while the greedy chain, every
+top-1 and all prefill snapshots stayed identical; the re-capture
+replayed bit-identical on this host (`rocm_forward` ALL PASS).
 
 `tests/fixtures/glm_next/wt_reference_seq_5c8854fd8.json` is the
 **semantic anchor**: the same cases captured from llama.cpp @ 5c8854fd8

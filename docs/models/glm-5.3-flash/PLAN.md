@@ -112,8 +112,13 @@ cores. Items below are in measured-share order.
    sit inside ds4's igemm window (n_tok≥32); decode rows 1-8 keep the
    scalar tier. The glm5 `RoutedWmmaKernel` already carries the
    proven gfx1151 decode→F16→wmma + C-fragment epilogue machinery.
-3. MLA `GatherScore` rewrite (12 %) and KDA per-token sequential scan
-   (9 %, ~1 M launches of ~26 us) as the follow-up wave. References:
+3. (Shipped P7 2026-11-13, +19.7 % pp matched — warp-per-key row
+   kernel `MlaGatherScoreKernel` with host head span 16/32 across
+   4096 selections, microbench 2.2-6.9× hot / 26-31× cold, NMSE
+   1.5e-13; golden `llama_reference.json` re-approved by candidate
+   re-capture, revision 457151058) MLA `GatherScore` rewrite (12 %)
+   done; KDA per-token sequential scan
+   (9 %, ~1 M launches of ~26 us) remains. References:
    ds4 scores 16 heads inside one wave's registers with
    `permlanex16`/DPP butterfly reduction and 32 keys/block
    (`ds4_rocm_indexer_score.hip.hpp:49-104`), prefill

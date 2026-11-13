@@ -33,8 +33,10 @@ std::uint32_t MlaGatherTiles(std::uint32_t n_sel, std::uint32_t tile);
 // latent rows, `sel` is [n_sel] row indices. `scores` receives a dense
 // [tiles][heads][tile] buffer with entry [t][h][l] = dot for slot
 // t * tile + l (l within the tile); entries of the last tile beyond
-// `n_sel` are never read. Blocks: (tiles, heads) x tile threads, each
-// thread computes its slot's full 512-wide dot sequentially.
+// `n_sel` are never written and never read. Blocks: 256 threads, one warp
+// per slot loading its row as coalesced 16 B chunks, grid
+// (ceil(n_sel/8), heads/hspan); each warp reduces its dot with shuffles,
+// so summation order differs from a sequential scan within fp tolerance.
 void MlaGatherScore(const float* q_abs, const __half* cache,
                     const std::int32_t* sel, std::uint32_t n_sel,
                     std::uint32_t tile, std::uint32_t heads, float* scores,

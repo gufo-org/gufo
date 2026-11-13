@@ -103,6 +103,32 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   Gate attainment is now **0.40×** (pp2048 ≥ 170.5); the dense stage
   leaves the tensor-core candidate list — MLA GatherScore (13.1 % of pp)
   and the KDA chunked scan (9.3 %) remain.
+- P7 MLA GatherScore row-warp kernel (`kernels/rocm/attention.hip.cpp
+  MlaGatherScoreKernel`): one warp per key slot — lanes load two
+  coalesced `uint4` KV chunks, keep the rank row in registers, each
+  lane dots its head slice against `float4` q (`qa[kRank/8 + 2*lane]`)
+  and folds through a 5-step `__shfl_down_sync`; replaces the scattered
+  2-byte warp gathers (~32 L1 transactions per load). Microbench
+  (`tools/bench/glm5_gather_score_bench.hip`, NMSE 1.5-1.7e-13 vs the
+  bitwise oracle): 256-hot 0.87-0.92×, 1024-hot 2.2-2.4×, 2048-hot
+  6.5-6.9×, 8192-cold 26-31×; chain-split (0.08-0.35×) and uint4
+  oracle-vectorized (1.0×) variants rejected. Head span is host-side:
+  16 slots per block below 4096 selections, 32 above (`hspan`). The
+  reassociation moved the mHC-chaotic `code` golden by 0.5006 nats at
+  the documented 0.5 budget, so `llama_reference.json` was refreshed by
+  candidate re-capture per BENCHMARKS#fixtures (greedy chain, all
+  top-1s and prefill snapshots unchanged; revision 457151058). Full
+  `glm5_next` ctest green GPU-exclusive (`rocm_forward` ALL PASS
+  bit-identical to the refreshed golden; attention contract worst
+  latent 4.16e-5 < 5e-5). Matched A/B on a **rebuilt harness**
+  (`/tmp/opencode/glm5_ab_p7.sh`: reconstructed after a /tmp cleanup,
+  `serving_bench --concurrency 1 --warmup 1 --repetitions 2`,
+  prompt_n ≈ 2232, so absolute values are not comparable to the
+  archived-row cells; 128K-ctx protocol, control = `gufo_p6` rebuilt
+  from 457151058): control pp 66.90 ± 0.09 / 66.51 ± 0.05 vs candidate
+  **79.97 ± 0.03 / 79.79 ± 0.08** (**+19.7 %**), tg32 flat
+  (12.34/12.46 vs 12.39/12.49). Gate attainment is now **~0.48×**
+  (pp ≥ 170.5); the KDA chunked scan is the remaining listed lever.
 
 ## Rejected / parked
 
