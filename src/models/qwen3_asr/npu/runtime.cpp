@@ -209,15 +209,27 @@ struct Runtime::Impl {
   static void Residual(float* h, const float* y, const float* bias,
                        std::size_t rows) {
     host::ParallelFor(rows, 8, [&](std::size_t b, std::size_t e) {
-      for (std::size_t r = b; r < e; ++r)
+      float t[kHidden];
+      for (std::size_t r = b; r < e; ++r) {
+        float* hr = h + r * kHidden;
+        const float* yr = y + r * kHidden;
         for (std::size_t i = 0; i < kHidden; ++i)
-          h[r * kHidden + i] =
-              Round(h[r * kHidden + i] + Round(y[r * kHidden + i] + bias[i]));
+          t[i] = yr[i] + bias[i];
+        host::RoundBf16(t, kHidden);
+        for (std::size_t i = 0; i < kHidden; ++i)
+          hr[i] += t[i];
+        host::RoundBf16(hr, kHidden);
+      }
     });
   }
 
-  static float GeluRound(float v) {
-    return Round(host::Activate(host::Activation::kGeluErf, v));
+  // x = bf16(gelu(bf16(x + bias))) in place, vectorized.
+  static void BiasGeluRound(float* x, std::size_t n, float bias) {
+    for (std::size_t i = 0; i < n; ++i)
+      x[i] += bias;
+    host::RoundBf16(x, n);
+    host::ActivateRows(x, 1, n, nullptr, host::Activation::kGeluErf);
+    host::RoundBf16(x, n);
   }
 
   // conv1: 1 -> 480 channels, 3x3 stride 2 pad 1 over [chunk][128][100],
@@ -249,9 +261,10 @@ struct Runtime::Impl {
                 r0[s] * w[0] + r0[s + 1] * w[1] + r0[s + 2] * w[2] +
                 r1[s] * w[3] + r1[s + 1] * w[4] + r1[s + 2] * w[5] +
                 r2[s] * w[6] + r2[s + 1] * w[7] + r2[s + 2] * w[8];
-            o[y * OW + xx] = GeluRound(Round(Round(acc) + conv1_b[ch]));
+            o[y * OW + xx] = Round(acc);
           }
         }
+        BiasGeluRound(o, OH * OW, conv1_b[ch]);
       }
     });
   }
@@ -308,7 +321,9 @@ struct Runtime::Impl {
         float* o = out->data() + i * OH * OW;
         const float* src = conv_y.data() + c * OH * OW * kChannels + ch;
         for (std::size_t sp = 0; sp < OH * OW; ++sp)
-          o[sp] = GeluRound(Round(Round(src[sp * kChannels]) + bias[ch]));
+          o[sp] = src[sp * kChannels];
+        host::RoundBf16(o, OH * OW);
+        BiasGeluRound(o, OH * OW, bias[ch]);
       }
     });
     if (profile)

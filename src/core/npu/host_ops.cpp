@@ -62,8 +62,28 @@ inline bool Activate8(Activation a, __m256 x, __m256* out) {
       *out = _mm256_div_ps(x, _mm256_add_ps(one, Exp8(u)));
       return true;
     }
-    case Activation::kGeluErf:
-      return false;
+    case Activation::kGeluErf: {
+      // 0.5 x (1 + erf(x / sqrt 2)), erf by Abramowitz-Stegun 7.1.26
+      // (absolute error below 1.5e-7).
+      const __m256 z = _mm256_mul_ps(x, _mm256_set1_ps(0.7071067811865476f));
+      const __m256 sign = _mm256_and_ps(z, _mm256_set1_ps(-0.0f));
+      const __m256 a = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), z);
+      const __m256 t = _mm256_div_ps(
+          one, _mm256_fmadd_ps(_mm256_set1_ps(0.3275911f), a, one));
+      __m256 p = _mm256_set1_ps(1.061405429f);
+      p = _mm256_fmadd_ps(p, t, _mm256_set1_ps(-1.453152027f));
+      p = _mm256_fmadd_ps(p, t, _mm256_set1_ps(1.421413741f));
+      p = _mm256_fmadd_ps(p, t, _mm256_set1_ps(-0.284496736f));
+      p = _mm256_fmadd_ps(p, t, _mm256_set1_ps(0.254829592f));
+      p = _mm256_mul_ps(p, t);
+      const __m256 e =
+          Exp8(_mm256_sub_ps(_mm256_setzero_ps(), _mm256_mul_ps(a, a)));
+      const __m256 erf =
+          _mm256_or_ps(_mm256_fnmadd_ps(p, e, one), sign);  // 1 - p e^(-a^2)
+      *out = _mm256_mul_ps(_mm256_mul_ps(_mm256_set1_ps(0.5f), x),
+                           _mm256_add_ps(one, erf));
+      return true;
+    }
   }
   return false;
 }
@@ -204,7 +224,20 @@ std::uint16_t FloatToBf16(float f) {
 }
 
 void RoundBf16(float* x, std::size_t n) {
-  for (std::size_t i = 0; i < n; ++i)
+  std::size_t i = 0;
+#ifdef GUFO_NPU_HOST_AVX2
+  // Round to nearest even; finite inputs (activations).
+  const __m256i bias = _mm256_set1_epi32(0x7fff), one = _mm256_set1_epi32(1),
+                mask = _mm256_set1_epi32(int(0xffff0000u));
+  for (; i + 8 <= n; i += 8) {
+    const __m256i u = _mm256_castps_si256(_mm256_loadu_ps(x + i));
+    const __m256i r =
+        _mm256_add_epi32(_mm256_add_epi32(u, bias),
+                         _mm256_and_si256(_mm256_srli_epi32(u, 16), one));
+    _mm256_storeu_ps(x + i, _mm256_castsi256_ps(_mm256_and_si256(r, mask)));
+  }
+#endif
+  for (; i < n; ++i)
     x[i] = Bf16ToFloat(FloatToBf16(x[i]));
 }
 
