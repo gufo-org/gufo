@@ -1260,11 +1260,14 @@ void TestProviderToolDialectSelection() {
     Expect(!accepts(*disabled, "[[ponder>>\nPlan.<<ponder]]" + answer) &&
                accepts(*disabled, answer),
            "disabled reasoning admits no reasoning phase");
-    const auto content = constrain(
-        DialectRunner("ledger-runner", ponder, Initial::kContent), tools);
-    Expect(!accepts(*content, "[[ponder>>\nPlan.<<ponder]]" + answer) &&
-               accepts(*content, answer),
-           "content output admits no reasoning phase");
+    for (const auto initial :
+         {Initial::kContent, Initial::kContentAfterReasoning}) {
+      const auto content =
+          constrain(DialectRunner("ledger-runner", ponder, initial), tools);
+      Expect(!accepts(*content, "[[ponder>>\nPlan.<<ponder]]" + answer) &&
+                 accepts(*content, answer),
+             "content output admits no reasoning phase");
+    }
   }
   // The default markup builds the same reasoning grammar as before.
   {

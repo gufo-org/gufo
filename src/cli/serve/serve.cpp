@@ -1824,25 +1824,24 @@ int RunServe(std::span<const char* const> args) {
     default_request.reasoning = *reasoning_defaults;
     const auto initial_output = backend->initial_output_state(default_request);
     std::ostringstream sampling_log;
-    sampling_log
-        << "event=defaults thinking="
-        << (initial_output == server::TextGenerationBackend::
-                                  InitialOutputState::kReasoning
-                ? "on"
-            : initial_output ==
-                    server::TextGenerationBackend::InitialOutputState::kContent
-                ? "off"
-                : "auto")
-        << " temperature=" << effective_sampling.temperature
-        << " top_k=" << effective_sampling.top_k
-        << " top_p=" << effective_sampling.top_p
-        << " min_p=" << effective_sampling.min_p
-        << " min_keep=" << effective_sampling.min_keep
-        << " seed=" << effective_sampling.seed
-        << " repeat_penalty=" << effective_sampling.repeat_penalty
-        << " repeat_last_n=" << effective_sampling.repeat_last_n
-        << " frequency_penalty=" << effective_sampling.frequency_penalty
-        << " presence_penalty=" << effective_sampling.presence_penalty;
+    sampling_log << "event=defaults thinking="
+                 << (initial_output == server::TextGenerationBackend::
+                                           InitialOutputState::kReasoning
+                         ? "on"
+                     : server::TextGenerationBackend::IsContent(initial_output)
+                         ? "off"
+                         : "auto")
+                 << " temperature=" << effective_sampling.temperature
+                 << " top_k=" << effective_sampling.top_k
+                 << " top_p=" << effective_sampling.top_p
+                 << " min_p=" << effective_sampling.min_p
+                 << " min_keep=" << effective_sampling.min_keep
+                 << " seed=" << effective_sampling.seed
+                 << " repeat_penalty=" << effective_sampling.repeat_penalty
+                 << " repeat_last_n=" << effective_sampling.repeat_last_n
+                 << " frequency_penalty="
+                 << effective_sampling.frequency_penalty
+                 << " presence_penalty=" << effective_sampling.presence_penalty;
     server::Logger::Info("sampling", sampling_log.str());
     const char* speculation =
         speculative_config.backend == server::TextSpeculativeBackend::kDFlash

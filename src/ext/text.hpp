@@ -328,8 +328,13 @@ enum class InitialOutputState : std::uint8_t {
   kAuto,
   kThought,
   kText,
+  /// The prompt closed reasoning (for example, it ends in "<think></think>"):
+  /// output is text, and the host drops the separator before it as after a
+  /// close the model wrote.
+  kTextAfterThought,
   kReasoning = kThought,
   kContent = kText,
+  kContentAfterReasoning = kTextAfterThought,
 };
 
 enum class ChatRole : std::uint8_t {
