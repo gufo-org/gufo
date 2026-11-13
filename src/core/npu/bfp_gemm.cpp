@@ -34,10 +34,13 @@
 namespace gufo::npu {
 namespace {
 
-constexpr int kBand = 512, kGroup = 1024, kKc = 512, kKb = 64;
+constexpr int kGroup = 1024, kKc = 512, kKb = 64;
+// Rows per band of the two programs: bfpgemm (512) and bfpgemm_s (128).
+constexpr int kBands[2] = {512, 128};
+// Runs whose calls all have at most this many rows use bfpgemm_s.
+constexpr int kSmallRows = 256;
 constexpr int kMaxRepeat = 64, kMaxWrap = 1023;  // shim BD limits
-// kStripWords: one core row's 128 x 512 chunk of A as bfp16 (9 bytes per 8).
-constexpr std::size_t kTileWords = 2304, kStripWords = 128 * kKc / 8 * 9 / 4;
+constexpr std::size_t kTileWords = 2304;
 constexpr std::size_t kABytes = std::size_t(64) << 20, kCBytes = std::size_t(64)
                                                                  << 20;
 constexpr unsigned kArgA = 3, kArgW = 4, kArgC = 5;
@@ -86,7 +89,7 @@ struct Dispatch {
 // Staging buffers of one thread's dispatches.
 struct Lane {
   Buffer a, c;
-  Instructions ins;  // the current dispatch's stream
+  Instructions ins[2];  // the current dispatch's stream, per program
   // Rows last written per band of each staged block slot (word offset), with
   // the block's kc: padding rows only need zeroing where an earlier block
   // wrote.
@@ -118,21 +121,45 @@ void BfpGemm::EncodeBlock(const float* values, std::uint8_t* out) {
 }
 
 struct BfpGemm::Impl {
-  Program program;
-  DispatchLibrary generate;
-  Buffer arena;
-  // Guards the matrix tables, the arena cursor, the regions and templates.
-  std::mutex mutex;
-  std::size_t arena_used{};
-  std::deque<Matrix> matrices;
-  std::deque<Region> regions;
   // Per job shape: the stream at zero offsets and how its words change with
   // the A, W and C offsets (dispatch_generate is linear in them).
   struct Template {
     std::vector<std::uint32_t> words;
     std::vector<Instructions::Patch> patches[3];
   };
-  std::map<std::array<std::int32_t, kScalars - 3>, Template> templates;
+  // One program: bfpgemm (512-row bands) or bfpgemm_s (128-row bands). Both
+  // read the same weight arena and staging buffers.
+  struct Mode {
+    Program program;
+    DispatchLibrary generate;
+    std::map<std::array<std::int32_t, kScalars - 3>, Template> templates;
+    int band{};           // rows per band
+    std::size_t strip{};  // words of one core row's 512-wide K chunk of A
+    bool loaded{};
+  };
+  Mode modes[2];
+  Buffer arena;
+  // Switching programs costs about 2.3 ms, so bfpgemm_s takes over only after
+  // kSmallStreak consecutive short Runs and hands back at the first long one.
+  std::mutex mode_mutex;
+  int current_mode{}, small_streak{};
+  static constexpr int kSmallStreak = 4;
+
+  Mode& Choose(int max_rows) {
+    std::lock_guard lock(mode_mutex);
+    if (!modes[1].loaded || max_rows > kSmallRows) {
+      small_streak = 0;
+      current_mode = 0;
+    } else if (current_mode == 1 || ++small_streak >= kSmallStreak) {
+      current_mode = 1;
+    }
+    return modes[current_mode];
+  }
+  // Guards the matrix tables, the arena cursor, the regions and templates.
+  std::mutex mutex;
+  std::size_t arena_used{};
+  std::deque<Matrix> matrices;
+  std::deque<Region> regions;
   Lane lanes[kLanes];
   std::mutex lane_mutex;
   std::condition_variable lane_free;
@@ -248,16 +275,16 @@ struct BfpGemm::Impl {
 
   // Appends `block` and its jobs to the plan. A job that no longer fits
   // the C buffer starts a new dispatch, which stages the block again.
-  static void Add(std::vector<Dispatch>& plan, const Block& block,
-                  const std::vector<Job>& jobs) {
+  static void Add(const Mode& md, std::vector<Dispatch>& plan,
+                  const Block& block, const std::vector<Job>& jobs) {
     const std::size_t a_words =
-        block.bands.size() * 4 * std::size_t(block.kc) * kStripWords;
+        block.bands.size() * 4 * std::size_t(block.kc) * md.strip;
     if (a_words * 4 > kABytes)
       throw Error("BfpGemm: one block exceeds the staging buffers");
     bool staged = false;
     for (Job j : jobs) {
       const std::size_t words =
-          std::size_t(j.ng) * std::size_t(j.nb) * 8 * std::size_t(kBand) * 64;
+          std::size_t(j.ng) * std::size_t(j.nb) * 8 * std::size_t(md.band) * 64;
       if (words * 4 > kCBytes)
         throw Error("BfpGemm: one job exceeds the staging buffers");
       Dispatch* d = &plan.back();
@@ -284,8 +311,9 @@ struct BfpGemm::Impl {
     }
   }
 
-  std::vector<Dispatch> Plan(std::span<const Call> calls,
+  std::vector<Dispatch> Plan(const Mode& md, std::span<const Call> calls,
                              const std::vector<Matrix>& resolved) const {
+    const int kBand = md.band;
     std::vector<Dispatch> plan(1);
     for (std::size_t i = 0; i < calls.size();) {
       const Matrix& m = resolved[i];
@@ -296,7 +324,7 @@ struct BfpGemm::Impl {
       if (calls[i].rows <= kBand && m.groups == 1) {
         const std::size_t batch_max = std::min<std::size_t>(
             kMaxRepeat,
-            kABytes / (std::size_t(4) * std::size_t(kc) * kStripWords * 4));
+            kABytes / (std::size_t(4) * std::size_t(kc) * md.strip * 4));
         while (end < calls.size() && end - i < batch_max &&
                std::size_t(kc) * (end - i + 1) <= std::size_t(kMaxWrap)) {
           const Matrix& e = resolved[end];
@@ -317,7 +345,7 @@ struct BfpGemm::Impl {
         Job job{
             m, 0, 0, 1, 0, int(end - i), resolved[i + 1].b_words - m.b_words,
             0};
-        Add(plan, block, {job});
+        Add(md, plan, block, {job});
         i = end;
         continue;
       }
@@ -326,7 +354,7 @@ struct BfpGemm::Impl {
       const int bands_max = std::max(
           1, std::min<int>(kMaxRepeat,
                            int(kABytes / (std::size_t(4) * std::size_t(kc) *
-                                          kStripWords * 4))));
+                                          md.strip * 4))));
       for (int bb = 0; bb < bands_total; bb += bands_max) {
         const int bands = std::min(bands_max, bands_total - bb);
         Block block{{}, kc, 0};
@@ -347,17 +375,18 @@ struct BfpGemm::Impl {
           for (int g = 0; g < m.groups; ++g)
             jobs.push_back(Job{m, 0, g, 1, 0, bands, 0, 0});
         }
-        Add(plan, block, jobs);
+        Add(md, plan, block, jobs);
       }
       ++i;
     }
     return plan;
   }
 
-  std::vector<std::uint32_t> Generate(const std::int32_t* s) const {
+  std::vector<std::uint32_t> Generate(const Mode& md,
+                                      const std::int32_t* s) const {
     try {
       const auto w =
-          generate.Generate(std::span<const std::int32_t>(s, kScalars));
+          md.generate.Generate(std::span<const std::int32_t>(s, kScalars));
       if (w.size() > 4)
         return {w.begin(), w.end()};
     } catch (const Error&) {
@@ -370,43 +399,44 @@ struct BfpGemm::Impl {
 
   // Under `mutex`: the template of one job's shape, checked against a direct
   // generation at its first offsets.
-  const Template& TemplateFor(const std::int32_t* s) {
+  const Template& TemplateFor(Mode& md, const std::int32_t* s) {
     std::array<std::int32_t, kScalars - 3> key{};
     for (int i = 0, j = 0; i < kScalars; ++i)
       if (i != kVar[0] && i != kVar[1] && i != kVar[2])
         key[std::size_t(j++)] = s[i];
-    if (auto it = templates.find(key); it != templates.end())
+    if (auto it = md.templates.find(key); it != md.templates.end())
       return it->second;
     std::int32_t z[kScalars];
     std::copy(s, s + kScalars, z);
     for (int v : kVar)
       z[v] = 0;
     Template t;
-    t.words = Generate(z);
+    t.words = Generate(md, z);
     for (int i = 0; i < 3; ++i) {
       std::int32_t one[kScalars];
       std::copy(z, z + kScalars, one);
       one[kVar[i]] = 1;
-      t.patches[i] = DiffInstructions(t.words, Generate(one));
+      t.patches[i] = DiffInstructions(t.words, Generate(md, one));
     }
     std::vector<std::uint32_t> check = t.words;
     for (int i = 0; i < 3; ++i)
       for (const auto& p : t.patches[i])
         check[p.index] += std::uint32_t(s[kVar[i]]) * p.delta;
-    if (check != Generate(s))
+    if (check != Generate(md, s))
       throw Error("BfpGemm: instruction streams are not linear in offsets");
-    return templates.emplace(key, std::move(t)).first->second;
+    return md.templates.emplace(key, std::move(t)).first->second;
   }
 
   // Writes the concatenated stream of a dispatch's jobs into the lane.
-  void Stream(Lane& lane, const std::vector<std::int32_t>& scalars) {
+  void Stream(Mode& md, Instructions& ins,
+              const std::vector<std::int32_t>& scalars) {
     std::vector<std::uint32_t> txn(4, 0);
     std::uint32_t ops = 0;
     {
       std::lock_guard lock(mutex);
       for (std::size_t i = 0; i < scalars.size(); i += kScalars) {
         const std::int32_t* s = scalars.data() + i;
-        const Template& t = TemplateFor(s);
+        const Template& t = TemplateFor(md, s);
         const std::size_t at = txn.size();
         txn.insert(txn.end(), t.words.begin() + 4, t.words.end());
         for (int v = 0; v < 3; ++v)
@@ -419,17 +449,20 @@ struct BfpGemm::Impl {
     }
     txn[2] = ops;
     txn[3] = std::uint32_t(txn.size() * 4);
-    if (txn.size() > lane.ins.capacity())
-      lane.ins = program.AllocateInstructions(txn.size() * 2);
-    lane.ins.Assign(txn);
+    if (txn.size() > ins.capacity())
+      ins = md.program.AllocateInstructions(txn.size() * 2);
+    ins.Assign(txn);
   }
 
   // Stages the blocks' rows as bfp16 in the order the cores read them: per
   // core row r (128 rows), band and 512-wide K chunk, 32 sub-tile objects
   // [k block 8][32-row sub-tile 4] of 2304 bytes, each [row pair 2][column
   // block 8][half 2][row 8] groups of 8 k values.
-  void Pack(Lane& lane, const Dispatch& d, std::span<const Call> calls,
-            const std::vector<Matrix>& resolved) {
+  void Pack(const Mode& md, Lane& lane, const Dispatch& d,
+            std::span<const Call> calls, const std::vector<Matrix>& resolved) {
+    const int kBand = md.band;
+    const std::size_t core_rows = std::size_t(md.band) / 4,
+                      subs = core_rows / 32;
     struct Item {
       const Block* block;
       int band, i0, i1;
@@ -471,17 +504,18 @@ struct BfpGemm::Impl {
           } else {
             std::fill(row.begin(), row.end(), 0.0f);
           }
-          const std::size_t r = std::size_t(i) / 128, ri = std::size_t(i) % 128;
+          const std::size_t r = std::size_t(i) / core_rows,
+                            ri = std::size_t(i) % core_rows;
           const std::size_t sub = ri / 32, rs = ri % 32;
           const std::size_t rp = rs / 16, half = (rs % 16) / 8, rr = rs % 8;
           for (std::size_t q = 0; q < kc; ++q) {
             std::uint8_t* chunk =
                 a8 +
                 (b.a_words +
-                 ((r * bands + std::size_t(it.band)) * kc + q) * kStripWords) *
+                 ((r * bands + std::size_t(it.band)) * kc + q) * md.strip) *
                     4;
             for (std::size_t kb = 0; kb < 8; ++kb) {
-              std::uint8_t* obj = chunk + (kb * 4 + sub) * 2304;
+              std::uint8_t* obj = chunk + (kb * subs + sub) * 2304;
               const float* v = row.data() + q * kKc + kb * kKb;
               for (std::size_t cb = 0; cb < 8; ++cb)
                 host::EncodeBfp16Block(
@@ -496,8 +530,10 @@ struct BfpGemm::Impl {
   // Copies the jobs' output tiles into their calls' rows: one work item per
   // (job, column, tile) and block of 64 rows. The buffer is uncached, so each
   // item copies its rows out once before converting.
-  void Unpack(Lane& lane, const Dispatch& d, std::span<const Call> calls,
+  void Unpack(const Mode& md, Lane& lane, const Dispatch& d,
+              std::span<const Call> calls,
               const std::vector<Matrix>& resolved) {
+    const int kBand = md.band;
     struct Item {
       const Job* job;
       int col, tile, r0, r1;
@@ -560,7 +596,12 @@ struct BfpGemm::Impl {
       for (const Call& call : calls)
         resolved.push_back(Resolve(call.id));
     }
-    const std::vector<Dispatch> plan = Plan(calls, resolved);
+    int max_rows = 0;
+    for (const Call& call : calls)
+      max_rows = std::max(max_rows, call.rows);
+    Mode& md = Choose(max_rows);
+    const int kBand = md.band;
+    const std::vector<Dispatch> plan = Plan(md, calls, resolved);
     Lane* lane;
     {
       std::unique_lock lock(lane_mutex);
@@ -614,8 +655,8 @@ struct BfpGemm::Impl {
             j.ng * kb,
             std::int32_t(j.b_rep),
             std::int32_t(b.a_words +
-                         std::size_t(j.b0) * std::size_t(kc) * kStripWords),
-            std::int32_t(b.bands.size() * std::size_t(kc) * kStripWords),
+                         std::size_t(j.b0) * std::size_t(kc) * md.strip),
+            std::int32_t(b.bands.size() * std::size_t(kc) * md.strip),
             std::int32_t(j.m.b_words +
                          std::size_t(j.g0) * std::size_t(kb) * kTileWords),
             std::int32_t(std::size_t(j.m.groups) * std::size_t(kb) *
@@ -627,20 +668,21 @@ struct BfpGemm::Impl {
         scalars.insert(scalars.end(), s, s + kScalars);
       }
       auto t = Clock::now();
-      Pack(*lane, d, calls, resolved);
-      Stream(*lane, scalars);
+      Pack(md, *lane, d, calls, resolved);
+      Instructions& ins = lane->ins[&md - modes];
+      Stream(md, ins, scalars);
       lane->a.ToDevice(0, d.a_end * 4);
       const double t_pack = us(t);
       t = Clock::now();
       if (profile)
         Begin();
-      program.Start(lane->ins, {&lane->a, &arena, &lane->c}).Wait();
+      md.program.Start(ins, {&lane->a, &arena, &lane->c}).Wait();
       if (profile)
         End();
       const double t_npu = us(t);
       t = Clock::now();
       lane->c.FromDevice(0, d.c_end * 4);
-      Unpack(*lane, d, calls, resolved);
+      Unpack(md, *lane, d, calls, resolved);
       if (profile)
         std::fprintf(stderr,
                      "bfpgemm: %zu jobs, pack %.1f npu %.1f unpack %.1f us\n",
@@ -654,16 +696,30 @@ BfpGemm BfpGemm::Open(Device& device, const std::filesystem::path& dir,
   BfpGemm g;
   g.impl_ = std::make_unique<Impl>();
   auto& m = *g.impl_;
-  m.program = Program::Load(device, dir / "bfpgemm.xclbin");
-  m.generate = DispatchLibrary::Open(dir / "bfpgemm_dispatch.so", kScalars);
+  // bfpgemm_s (128-row bands) is optional: designs built before it only have
+  // bfpgemm.
+  for (int i = 0; i < 2; ++i) {
+    const std::string name = i == 0 ? "bfpgemm" : "bfpgemm_s";
+    if (i == 1 && !std::filesystem::is_regular_file(dir / (name + ".xclbin")))
+      break;
+    Impl::Mode& md = m.modes[i];
+    md.program = Program::Load(device, dir / (name + ".xclbin"));
+    md.generate =
+        DispatchLibrary::Open(dir / (name + "_dispatch.so"), kScalars);
+    md.band = kBands[i];
+    md.strip = std::size_t(kBands[i] / 4) * kKc / 8 * 9 / 4;
+    md.loaded = true;
+  }
   for (Lane& lane : m.lanes) {
-    lane.a = m.program.Allocate(kABytes, kArgA);
-    lane.c = m.program.Allocate(kCBytes, kArgC);
-    lane.ins = m.program.AllocateInstructions(kLaneWords);
+    lane.a = m.modes[0].program.Allocate(kABytes, kArgA);
+    lane.c = m.modes[0].program.Allocate(kCBytes, kArgC);
+    for (int i = 0; i < 2; ++i)
+      if (m.modes[i].loaded)
+        lane.ins[i] = m.modes[i].program.AllocateInstructions(kLaneWords);
   }
   if (arena_bytes > kMaxArenaBytes)
     throw Error("BfpGemm: the weight arena exceeds the design's 2 GiB");
-  m.arena = m.program.Allocate(arena_bytes, kArgW);
+  m.arena = m.modes[0].program.Allocate(arena_bytes, kArgW);
   return g;
 }
 

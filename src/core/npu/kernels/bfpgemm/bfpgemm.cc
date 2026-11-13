@@ -29,8 +29,11 @@ using OutBufStream = aie::block_vector_output_buffer_stream<T, N, R>;
 // Per-core L1 C tile is (m, n); the L1 A sub-tile is (m/rho, k). The kernel
 // is invoked rho times per (A-sub-tile, B-tile) pair and rotates over the
 // rho C stripes (m/rho rows each) via g_counter.
-constexpr int rho = 4;
-constexpr int m = 128;
+#ifndef BFP_ROWS
+#define BFP_ROWS 128  // C tile rows per core: 128 (rho 4) or 32 (rho 1)
+#endif
+constexpr int m = BFP_ROWS;
+constexpr int rho = m / 32;
 constexpr int k = 64;
 constexpr int n = 128;
 constexpr int m_a = m / rho;
@@ -42,7 +45,7 @@ constexpr int r = 8; // MAC rows (A/C)
 constexpr int s = 8; // MAC reduction step (k-columns per MAC)
 constexpr int t = 8; // MAC columns (B/C)
 
-static_assert(m * rho == 512 && k == 64 && n == 128 && rho == 4);
+static_assert(m / rho == 32 && k == 64 && n == 128);
 
 extern "C" {
 
