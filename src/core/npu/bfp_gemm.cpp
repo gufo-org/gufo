@@ -261,7 +261,10 @@ struct BfpGemm::Impl {
       // k, matrices at a constant positive stride.
       std::size_t end = i + 1;
       if (calls[i].rows <= kBand && m.groups == 1) {
-        while (end < calls.size() && end - i < std::size_t(kMaxRepeat) &&
+        const std::size_t batch_max = std::min<std::size_t>(
+            kMaxRepeat,
+            kABytes / (std::size_t(4) * std::size_t(kc) * kStripWords * 4));
+        while (end < calls.size() && end - i < batch_max &&
                std::size_t(kc) * (end - i + 1) <= std::size_t(kMaxWrap)) {
           const Matrix& e = resolved[end];
           if (calls[end].rows > kBand || calls[end].rows <= 0 || e.kp != m.kp ||
@@ -286,8 +289,13 @@ struct BfpGemm::Impl {
         continue;
       }
       const int bands_total = (calls[i].rows + kBand - 1) / kBand;
-      for (int bb = 0; bb < bands_total; bb += kMaxRepeat) {
-        const int bands = std::min(kMaxRepeat, bands_total - bb);
+      // Bands per block: the shim's repeat limit and the A staging buffer.
+      const int bands_max = std::max(
+          1, std::min<int>(kMaxRepeat,
+                           int(kABytes / (std::size_t(4) * std::size_t(kc) *
+                                          kStripWords * 4))));
+      for (int bb = 0; bb < bands_total; bb += bands_max) {
+        const int bands = std::min(bands_max, bands_total - bb);
         Block block{{}, kc, 0};
         for (int b = 0; b < bands; ++b) {
           const int r0 = (bb + b) * kBand;
