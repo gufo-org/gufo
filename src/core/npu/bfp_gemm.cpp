@@ -38,7 +38,7 @@ constexpr int kGroup = 1024, kKc = 512, kKb = 64;
 // Rows per band of the two programs: bfpgemm (512) and bfpgemm_s (128).
 constexpr int kBands[2] = {512, 128};
 // Runs whose calls all have at most this many rows use bfpgemm_s.
-constexpr int kSmallRows = 256;
+constexpr int kSmallRows = 128;
 constexpr int kMaxRepeat = 64, kMaxWrap = 1023;  // shim BD limits
 constexpr std::size_t kTileWords = 2304;
 constexpr std::size_t kABytes = std::size_t(64) << 20, kCBytes = std::size_t(64)

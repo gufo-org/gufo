@@ -28,8 +28,12 @@ namespace {
 // Sequences at least this long run attention products on the NPU.
 constexpr std::size_t kNpuAttentionRows = 128;
 constexpr std::size_t kMaxHeads = 16;
-// Rows per NPU band (BfpGemm), the unit of attention spans and row parts.
-constexpr std::size_t kBandRows = 512;
+// Rows per NPU band (BfpGemm), the unit of attention spans and row parts:
+// 512, or 128 for sequences short enough for BfpGemm's 128-row program.
+constexpr std::size_t kBandRows = 512, kSmallBandRows = 128;
+// A single sequence up to this long splits into two parts of at most 128
+// rows, each within one band of the 128-row program.
+constexpr std::size_t kSmallSplitRows = 256;
 // Concurrent parts of a batch (BfpGemm has as many staging lanes).
 constexpr std::size_t kParts = 4;
 constexpr std::size_t kGateBlock = 64;  // gate rows per interleaved tile
@@ -160,8 +164,9 @@ struct Encoder::Impl {
                     std::size_t row_w, std::size_t heads, std::size_t kv,
                     std::size_t hd, const std::vector<std::size_t>& starts,
                     const std::vector<char>& long_seq, std::size_t row0,
-                    std::size_t row1, const Visible& visible,
-                    std::uint16_t* context16, std::size_t qw) {
+                    std::size_t row1, std::size_t span_rows,
+                    const Visible& visible, std::uint16_t* context16,
+                    std::size_t qw) {
     struct Span {
       std::size_t seq, q0, q1, k0, k1;         // absolute rows
       int keys[kMaxHeads], values[kMaxHeads];  // per query head
@@ -175,10 +180,10 @@ struct Encoder::Impl {
     for (std::size_t s = 0; s + 1 < starts.size(); ++s) {
       if (!long_seq[s])
         continue;
-      for (std::size_t q0 = starts[s]; q0 < starts[s + 1]; q0 += kBandRows) {
+      for (std::size_t q0 = starts[s]; q0 < starts[s + 1]; q0 += span_rows) {
         if (q0 < row0 || q0 >= row1)  // another part's queries
           continue;
-        const std::size_t q1 = std::min(starts[s + 1], q0 + kBandRows);
+        const std::size_t q1 = std::min(starts[s + 1], q0 + span_rows);
         std::size_t k0 = starts[s + 1], k1 = starts[s];
         for (std::size_t r : {q0, q1 - 1}) {
           std::size_t b, e;
@@ -214,6 +219,7 @@ struct Encoder::Impl {
     std::vector<int*> slot;
     std::vector<std::pair<int*, int*>> alias;  // (target, source) after upload
     std::map<std::pair<std::size_t, std::size_t>, Span*> shared[2];
+    std::map<std::pair<std::size_t, std::size_t>, std::size_t> first_spec[2];
     for (int pass = 0; pass < 2; ++pass)
       for (Span& sp : spans) {
         const std::size_t n = sp.k1 - sp.k0;
@@ -229,6 +235,21 @@ struct Encoder::Impl {
             continue;
           }
           shared[pass][{sp.k0, sp.k1}] = &sp;
+        }
+        // A short span with the keys of an earlier one copies its encoded
+        // matrices (still one matrix per call, evenly spaced).
+        if (!long_span) {
+          auto [it, fresh] =
+              first_spec[pass].try_emplace({sp.k0, sp.k1}, specs.size());
+          if (!fresh) {
+            for (std::size_t h = 0; h < heads; ++h) {
+              Spec copy = specs[it->second + h];
+              copy.same_as = int(it->second + h);
+              specs.push_back(copy);
+              slot.push_back(&ids[h]);
+            }
+            continue;
+          }
         }
         for (std::size_t h = 0; h < heads; ++h) {
           const std::size_t kh = h / group_heads;
@@ -368,6 +389,7 @@ struct Encoder::Impl {
   // attends to this one).
   struct Work {
     const std::uint32_t* tokens{};
+    std::size_t span{};  // query rows per NPU attention span
     std::vector<std::size_t> starts;
     std::vector<std::int32_t> positions;
     std::vector<std::size_t> seq_of;
@@ -398,6 +420,7 @@ struct Encoder::Impl {
                       inner = c.intermediate_size;
     Work& wk = work;  // kept across requests: no fresh pages to fault in
     wk.tokens = tokens.data();
+    wk.span = kBandRows;
     wk.starts = starts;
     wk.positions.resize(rows);
     wk.seq_of.resize(rows);
@@ -439,11 +462,19 @@ struct Encoder::Impl {
         if (starts[q] > cuts.back() && starts[q] < rows)
           cuts.push_back(starts[q]);
       }
-    } else if (seqs == 1) {
-      const std::size_t bands = (rows + kBandRows - 1) / kBandRows;
-      const std::size_t parts = std::min<std::size_t>(kParts, bands);
+    } else if (seqs == 1 && (rows <= kSmallSplitRows || rows > 1024)) {
+      // 257-1024 rows stay one part: more parts cost more dispatches than
+      // they overlap.
+      const std::size_t band =
+          rows <= kSmallSplitRows ? kSmallBandRows : kBandRows;
+      wk.span = band;
+      const std::size_t bands = (rows + band - 1) / band;
+      // Short sequences: at most two parts (each part's products are their
+      // own dispatches, which cost more than they save on few rows).
+      const std::size_t parts =
+          std::min<std::size_t>(band == kSmallBandRows ? 2 : kParts, bands);
       for (std::size_t p = 1; p < parts; ++p)
-        cuts.push_back(bands * p / parts * kBandRows);
+        cuts.push_back(bands * p / parts * band);
       coupled = parts > 1;
     }
     cuts.push_back(rows);
@@ -621,7 +652,8 @@ struct Encoder::Impl {
       };
       // Long sequences: QK^T and PV on the NPU, the softmax on the CPU.
       NpuAttention(scratches[lane], qkv_all, row_w, heads, kv, hd, starts,
-                   wk.long_seq, r0, r1, visible, wk.context16.data(), qw);
+                   wk.long_seq, r0, r1, wk.span, visible, wk.context16.data(),
+                   qw);
       host::Attention(
           {.q = qkv,
            .q_stride = row_w,
