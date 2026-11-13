@@ -1,7 +1,7 @@
 // The Base voice-cloning encoders on the NPU against the GPU ones on the same
 // recording: the speaker embedding's cosine and the share of equal speech
 // codes. Skips (77) without the model, the GPU or the NPU.
-// Usage: qwen3_tts_npu_encoders_test <reference wav> [Base model dir]; the
+// Usage: qwen3_tts_npu_encoders_hip_test <reference wav> [Base model dir]; the
 // model defaults to $QWEN3_TTS_BASE_MODEL.
 
 #include <cmath>
@@ -22,7 +22,7 @@ namespace tts = gufo::models::qwen3_tts;
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::printf("usage: qwen3_tts_npu_encoders_test <wav> [model]\n");
+    std::printf("usage: qwen3_tts_npu_encoders_hip_test <wav> [model]\n");
     return 2;
   }
   const char* env = std::getenv("QWEN3_TTS_BASE_MODEL");
