@@ -55,6 +55,14 @@ endif()
 
 set(_gufo_npu_env)
 if(GUFO_NPU_DESIGNS_AVAILABLE AND NOT GUFO_NPU_PREBUILT_DESIGNS)
+  if(WIN32)
+    # IRON otherwise finds MinGW's c++ first on hosted Windows runners,
+    # producing DLLs that require unshipped libgcc/libstdc++ runtimes.
+    # Its MSVC-style driver uses the static CRT for the dispatch bridge.
+    find_program(GUFO_NPU_HOST_CXX NAMES amdclang-cl clang-cl cl
+      HINTS "$ENV{HIP_PATH}/lib/llvm/bin" "$ENV{HIP_PATH}/bin" REQUIRED)
+    list(APPEND _gufo_npu_env "CXX=${GUFO_NPU_HOST_CXX}")
+  endif()
   set(_gufo_peano "$ENV{PEANO_INSTALL_DIR}")
   if(NOT _gufo_peano)
     execute_process(COMMAND "${GUFO_IRON_PYTHON}" -c
@@ -78,21 +86,25 @@ if(GUFO_NPU_DESIGNS_AVAILABLE AND NOT GUFO_NPU_PREBUILT_DESIGNS)
 endif()
 if(GUFO_NPU_DESIGNS_AVAILABLE)
   add_custom_target(npu_designs)
+  set_property(GLOBAL APPEND PROPERTY JOB_POOLS gufo_npu_compile=2)
 endif()
 
-# gufo_npu_design(<name> [PROGRAMS <names>...] [OUTPUTS <files>...]): runs
+# gufo_npu_design(<name> [PROGRAMS ...] [OUTPUTS ...] [EXTRA_OUTPUTS ...]
+#                 [VARIANTS ...]): runs
 # `<python> <kernels>/<name>/<name>.py <dir>` into ${CMAKE_BINARY_DIR}/npu/<name>,
 # rerun when any file in <kernels>/<name> changes, and adds the target
 # npu_design_<name> (built by default, and by npu_designs). The design writes
 # <program>.xclbin and <program>_dispatch.so there for each program (default:
-# just <name>), or the files OUTPUTS names; all install to
+# just <name>), or the files OUTPUTS names, plus EXTRA_OUTPUTS. VARIANTS
+# get separate build rules passing the variant as the second script argument.
+# All declared files install to
 # share/gufo/npu/<name> (Windows: bin/npu/<name>, beside gufo.exe). Sets
 # <name>_NPU_DIR in the caller's scope.
 function(gufo_npu_design name)
   if(GUFO_NPU_DESIGN AND NOT name STREQUAL GUFO_NPU_DESIGN)
     return()
   endif()
-  cmake_parse_arguments(ARG "" "" "PROGRAMS;OUTPUTS" ${ARGN})
+  cmake_parse_arguments(ARG "" "" "PROGRAMS;OUTPUTS;EXTRA_OUTPUTS;VARIANTS" ${ARGN})
   if(NOT ARG_PROGRAMS)
     set(ARG_PROGRAMS "${name}")
   endif()
@@ -107,37 +119,79 @@ function(gufo_npu_design name)
   else()
     set(destination "share/gufo/npu/${name}")
   endif()
+  set(outputs)
+  foreach(program IN LISTS ARG_PROGRAMS)
+    list(APPEND outputs "${program}.xclbin" "${program}_dispatch.so")
+  endforeach()
+  if(ARG_OUTPUTS)
+    set(outputs ${ARG_OUTPUTS})
+  endif()
+  list(APPEND outputs ${ARG_EXTRA_OUTPUTS})
+  foreach(output IN LISTS outputs)
+    set_property(GLOBAL APPEND PROPERTY GUFO_NPU_ARTIFACTS "${name}/${output}")
+  endforeach()
+  list(TRANSFORM outputs PREPEND "${dir}/")
   if(GUFO_NPU_PREBUILT_DESIGNS)
-    if(NOT IS_DIRECTORY "${dir}")
-      message(FATAL_ERROR "GUFO_NPU_PREBUILT_DESIGNS has no ${name}/")
-    endif()
+    foreach(output IN LISTS outputs)
+      if(NOT EXISTS "${output}" OR IS_DIRECTORY "${output}")
+        message(FATAL_ERROR "Missing prebuilt NPU artifact: ${output}")
+      endif()
+      file(SIZE "${output}" size)
+      if(size EQUAL 0)
+        message(FATAL_ERROR "Empty prebuilt NPU artifact: ${output}")
+      endif()
+    endforeach()
     add_custom_target(npu_design_${name})
-    install(DIRECTORY "${dir}/" DESTINATION "${destination}")
+    add_dependencies(npu_designs npu_design_${name})
+    install(FILES ${outputs} DESTINATION "${destination}")
     return()
   endif()
   set(source_dir "${GUFO_NPU_KERNELS}/${name}")
   file(GLOB_RECURSE sources CONFIGURE_DEPENDS
     "${source_dir}/*.py" "${source_dir}/*.cc" "${source_dir}/*.h")
-  set(outputs)
-  foreach(program IN LISTS ARG_PROGRAMS)
-    list(APPEND outputs "${dir}/${program}.xclbin" "${dir}/${program}_dispatch.so")
-  endforeach()
-  if(ARG_OUTPUTS)
-    list(TRANSFORM ARG_OUTPUTS PREPEND "${dir}/" OUTPUT_VARIABLE outputs)
+  if(ARG_VARIANTS)
+    foreach(variant IN LISTS ARG_VARIANTS)
+      set(variant_outputs ${outputs})
+      list(FILTER variant_outputs INCLUDE REGEX "/${name}_${variant}[._]")
+      if(NOT variant_outputs)
+        message(FATAL_ERROR "No declared outputs for ${name} variant ${variant}")
+      endif()
+      add_custom_command(
+        OUTPUT ${variant_outputs}
+        COMMAND ${CMAKE_COMMAND} -E env ${_gufo_npu_env}
+                "${GUFO_IRON_PYTHON}" "${source_dir}/${name}.py" "${dir}" "${variant}"
+        WORKING_DIRECTORY "${source_dir}"
+        DEPENDS ${sources}
+        JOB_POOL gufo_npu_compile
+        COMMENT "Compiling NPU design ${name}_${variant}"
+        VERBATIM)
+    endforeach()
+  elseif(NOT ARG_OUTPUTS)
+    foreach(program IN LISTS ARG_PROGRAMS)
+      set(program_outputs ${outputs})
+      list(FILTER program_outputs INCLUDE REGEX "/${program}([.]|_dispatch[.]so$|_layout[.]txt$)")
+      add_custom_command(
+        OUTPUT ${program_outputs}
+        COMMAND ${CMAKE_COMMAND} -E env ${_gufo_npu_env}
+                "${GUFO_IRON_PYTHON}" "${source_dir}/${name}.py" "${dir}" "${program}"
+        WORKING_DIRECTORY "${source_dir}"
+        DEPENDS ${sources}
+        JOB_POOL gufo_npu_compile
+        COMMENT "Compiling NPU program ${program}"
+        VERBATIM)
+    endforeach()
+  else()
+    add_custom_command(
+      OUTPUT ${outputs}
+      COMMAND ${CMAKE_COMMAND} -E env ${_gufo_npu_env}
+              "${GUFO_IRON_PYTHON}" "${source_dir}/${name}.py" "${dir}"
+      WORKING_DIRECTORY "${source_dir}"
+      DEPENDS ${sources}
+      JOB_POOL gufo_npu_compile
+      COMMENT "Compiling NPU design ${name}"
+      VERBATIM)
   endif()
-  add_custom_command(
-    OUTPUT ${outputs}
-    COMMAND ${CMAKE_COMMAND} -E env ${_gufo_npu_env}
-            "${GUFO_IRON_PYTHON}" "${source_dir}/${name}.py" "${dir}"
-    WORKING_DIRECTORY "${source_dir}"
-    DEPENDS ${sources}
-    COMMENT "Compiling NPU design ${name}"
-    VERBATIM)
   add_custom_target(npu_design_${name} ALL DEPENDS ${outputs})
   add_dependencies(npu_designs npu_design_${name})
-  # Each program's xclbin and dispatch library, and any host-side layout
-  # files (<name>_*.txt).
   install(FILES ${outputs} DESTINATION "${destination}")
-  install(DIRECTORY "${dir}/" DESTINATION "${destination}"
-    FILES_MATCHING PATTERN "${name}_*.txt" PATTERN "*.prj" EXCLUDE)
 endfunction()

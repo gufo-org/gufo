@@ -242,16 +242,24 @@ stdenv.mkDerivation {
     test -f $out/share/licenses/gufo/LICENSE
     test -f $out/share/licenses/gufo/third-party/LICENSE.ds4
   '' + lib.optionalString (npuDesigns != null) ''
-    # Every program a runtime opens; a missing one silently drops to a slower path.
-    for f in q8gemm/q8gemm qwen3dec/qwen3dec qwen3dec/qwen3dec_p bfpgemm/bfpgemm bfpgemm/bfpgemm_s; do
-      test -f $out/share/gufo/npu/$f.xclbin
-      test -f $out/share/gufo/npu/''${f}_dispatch.so
-    done
-    for m in 256 512 1024; do
-      test -f $out/share/gufo/npu/qwen3pre/qwen3pre_$m.xclbin
-      test -f $out/share/gufo/npu/qwen3pre/qwen3pre_$m.bin
-      test -f $out/share/gufo/npu/qwen3pre/qwen3pre_''${m}_plan.txt
-    done
+    # Timing baselines may predate the generated manifest.
+    if test -f npu-artifacts.txt; then
+      while IFS= read -r artifact; do
+        test -s "$out/share/gufo/npu/$artifact"
+      done < npu-artifacts.txt
+      cmp npu-artifacts.txt "$out/share/gufo/npu/npu-artifacts.txt"
+    else
+      # Every program a runtime opens; a missing one silently drops to a slower path.
+      for f in q8gemm/q8gemm qwen3dec/qwen3dec qwen3dec/qwen3dec_p bfpgemm/bfpgemm bfpgemm/bfpgemm_s; do
+        test -f $out/share/gufo/npu/$f.xclbin
+        test -f $out/share/gufo/npu/''${f}_dispatch.so
+      done
+      for m in 256 512 1024; do
+        test -f $out/share/gufo/npu/qwen3pre/qwen3pre_$m.xclbin
+        test -f $out/share/gufo/npu/qwen3pre/qwen3pre_$m.bin
+        test -f $out/share/gufo/npu/qwen3pre/qwen3pre_''${m}_plan.txt
+      done
+    fi
   '' + lib.optionalString hasExtensionSdk ''
     test ! -e $out/lib/gufo/sdk
     test -f $sdk/lib/gufo/sdk/profile.cmake

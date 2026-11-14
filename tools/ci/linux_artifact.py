@@ -9,6 +9,10 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from npu_artifacts import check_artifacts, read_manifest
 
 
 STORE = Path('/nix/store')
@@ -162,6 +166,10 @@ def pack(package, revision, destination):
     script.write_text(script.read_text().replace('set -eu\n', f'# Gufo ELF SHA-256: {digest}\nset -eu\n', 1))
     manifest = {'schema': 2, 'revision': revision, 'version': version, 'sha256': digest,
                 'loader': loader, 'libraries': libraries}
+    npu = destination / 'share/gufo/npu'
+    if (package / 'share/gufo/npu/npu-artifacts.txt').is_file():
+        manifest['npu_artifacts'] = read_manifest(npu / 'npu-artifacts.txt')
+        check_artifacts(npu, manifest['npu_artifacts'])
     (destination / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     print(f'{version}: portable executable and gfx1151 runtime prepared', flush=True)
 
@@ -170,6 +178,11 @@ def verify(source, revision):
     manifest = json.loads((source / 'manifest.json').read_text())
     if manifest['schema'] != 2 or manifest['revision'] != revision:
         raise ValueError('Artifact does not match the authorized revision')
+    if 'npu_artifacts' in manifest:
+        npu = source / 'share/gufo/npu'
+        check_artifacts(npu, manifest['npu_artifacts'])
+        if read_manifest(npu / 'npu-artifacts.txt') != manifest['npu_artifacts']:
+            raise ValueError('Bundled NPU manifest differs from the package')
     with (source / 'libexec/gufo').open('rb') as file:
         if hashlib.file_digest(file, 'sha256').hexdigest() != manifest['sha256']:
             raise ValueError('Linux binary checksum mismatch')

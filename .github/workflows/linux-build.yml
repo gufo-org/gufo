@@ -33,6 +33,7 @@ jobs:
 
       - name: Run artifact contract tests
         run: |
+          python3 -m unittest discover -s tests/tools -p npu_artifacts_test.py
           python3 -m unittest discover -s tests/tools -p linux_artifact_test.py
           python3 -m unittest discover -s tests/tools -p devlab_artifact_test.py
 
@@ -105,6 +106,14 @@ jobs:
       - name: Import NPU designs
         if: steps.npu-cache.outputs.cache-matched-key != ''
         run: nix copy --no-check-sigs --all --from file:///tmp/gufo-npu-designs
+
+      # Build independent designs concurrently, before the memory-heavy Gufo
+      # compile. Each design's Ninja pool bounds program compilation to two.
+      - name: Build NPU designs
+        if: steps.npu.outputs.drv != ''
+        env:
+          NPU_DRV: ${{ steps.npu.outputs.drv }}
+        run: nix build --no-link "$NPU_DRV^*" --print-build-logs --cores 2 --max-jobs 4
 
       - name: Build and package baseline
         if: inputs.baseline != ''

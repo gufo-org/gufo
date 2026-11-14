@@ -190,6 +190,8 @@ if __name__ == "__main__":
     os.makedirs(out, exist_ok=True)
     iron.set_current_device(from_name("npu2", n_cols=None))
     for name, fn in (("qwen3dec", qwen3dec), ("qwen3dec_p", qwen3dec_p)):
+        if len(sys.argv) > 2 and name != sys.argv[2]:
+            continue
         p = fn.specialize()
         p.compile(xclbin_path=os.path.join(out, name + ".xclbin"))
         shutil.copyfile(p.get_dispatch_lib_path(), os.path.join(out, name + "_dispatch.so"))
