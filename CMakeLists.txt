@@ -78,12 +78,42 @@ pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
 # Extension-only libraries come from each selected extension's manifest
 # `packages` (gufo_build_discovered_extensions).
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-# The NPU runtime (src/core/npu): XRT_DIR, XILINX_XRT or /opt/xilinx/xrt; on
-# Windows, Xilinx's XRT SDK unpacked to C:\xrt (BUILD-WINDOWS.md). Do not set
-# XILINX_XRT there: the NPU driver's XRT then looks for its device shim in it.
-find_package(XRT REQUIRED CONFIG
-  HINTS "$ENV{XILINX_XRT}/share/cmake/XRT"
-  PATHS /opt/xilinx/xrt/share/cmake/XRT C:/xrt/xrt_sdk/xrt/share/cmake/XRT)
+# The NPU runtime only needs XRT's coreutil library. Import it directly:
+# XRT's package config validates every exported target, including optional
+# static OpenCL libraries that may not be installed. On Windows, use XRT from
+# C:\xrt; do not set XILINX_XRT there because the NPU driver supplies XRT.
+set(_GUFO_XRT_PREFIXES /opt/xilinx/xrt C:/xrt/xrt_sdk/xrt)
+if(XRT_DIR)
+  get_filename_component(_GUFO_XRT_CONFIG_PREFIX "${XRT_DIR}/../../.." ABSOLUTE)
+  list(PREPEND _GUFO_XRT_PREFIXES "${_GUFO_XRT_CONFIG_PREFIX}")
+endif()
+if(DEFINED ENV{XILINX_XRT} AND NOT "$ENV{XILINX_XRT}" STREQUAL "")
+  list(PREPEND _GUFO_XRT_PREFIXES "$ENV{XILINX_XRT}")
+endif()
+find_path(GUFO_XRT_INCLUDE_DIR NAMES xrt/xrt_bo.h
+  HINTS ${_GUFO_XRT_PREFIXES} PATH_SUFFIXES include REQUIRED)
+if(WIN32)
+  find_library(GUFO_XRT_COREUTIL_LIBRARY NAMES xrt_coreutil
+    HINTS ${_GUFO_XRT_PREFIXES} PATH_SUFFIXES lib lib64 REQUIRED)
+  add_library(XRT::xrt_coreutil UNKNOWN IMPORTED)
+else()
+  # Production XRT is dynamically linked; do not fall back to a static archive.
+  set(_GUFO_SAVED_FIND_LIBRARY_SUFFIXES "${CMAKE_FIND_LIBRARY_SUFFIXES}")
+  set(CMAKE_FIND_LIBRARY_SUFFIXES .so)
+  find_library(GUFO_XRT_COREUTIL_LIBRARY NAMES xrt_coreutil
+    HINTS ${_GUFO_XRT_PREFIXES} PATH_SUFFIXES lib lib64 REQUIRED)
+  set(CMAKE_FIND_LIBRARY_SUFFIXES "${_GUFO_SAVED_FIND_LIBRARY_SUFFIXES}")
+  unset(_GUFO_SAVED_FIND_LIBRARY_SUFFIXES)
+  add_library(XRT::xrt_coreutil SHARED IMPORTED)
+endif()
+set_target_properties(XRT::xrt_coreutil PROPERTIES
+  IMPORTED_LOCATION "${GUFO_XRT_COREUTIL_LIBRARY}"
+  INTERFACE_INCLUDE_DIRECTORIES "${GUFO_XRT_INCLUDE_DIR}")
+if(NOT WIN32)
+  set_property(TARGET XRT::xrt_coreutil PROPERTY INTERFACE_LINK_LIBRARIES uuid)
+endif()
+unset(_GUFO_XRT_PREFIXES)
+unset(_GUFO_XRT_CONFIG_PREFIX)
 set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
   "FFmpeg executable used for generated media")
 set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
