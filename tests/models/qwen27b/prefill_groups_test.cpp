@@ -1,6 +1,7 @@
 // Layer groups spread over a prefill step of several passes
 // (PrefillYieldLayers): ascending yield layers in range, never before the
-// step's first layer, and groups of about equal time.
+// step's first layer, and groups of about equal time. The runner's prefill
+// unit stays the scheduler's.
 
 #include "src/models/qwen/prefill_groups.hpp"
 
@@ -12,6 +13,12 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "src/sched/policy.hpp"
+
+static_assert(gufo::models::qwen::kPrefillUnitTokens ==
+                  gufo::sched::kPrefillUnitTokens,
+              "the Qwen runner's in-pass rules assume the scheduler's unit");
 
 namespace {
 using gufo::models::qwen::PrefillPassTime;

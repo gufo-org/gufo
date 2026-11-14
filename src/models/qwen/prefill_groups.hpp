@@ -10,6 +10,11 @@
 
 namespace gufo::models::qwen {
 
+/// One scheduler prefill unit, `gufo::sched::kPrefillUnitTokens`, which a
+/// model may not include: a step of at most this many rows runs unsplit
+/// beside decoders. qwen27b_prefill_groups_test keeps the two equal.
+inline constexpr std::size_t kPrefillUnitTokens = 512;
+
 /// The estimated time of one prompt pass of a prefill step.
 struct PrefillPassTime {
   /// All its layers, spread evenly over them.
