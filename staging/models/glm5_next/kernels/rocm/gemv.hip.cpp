@@ -707,6 +707,71 @@ __global__ void GemvRowsQ8_0(const Q8_0Block* __restrict__ w,
   }
 }
 
+// Tiled Q8_0 tier: one wave accumulates four weight rows (kRpt) and grid.y
+// enumerates independent 16-token slices, turning the whole chunk into one
+// launch. The activation load stream x[o*xs+i] is identical for every row,
+// so each load feeds kRpt FMAs while every per-row accumulation order and
+// shuffle tree stay exactly as in GemvRowsQ8_0; results are bit-identical.
+// A wave's four rows never straddle a group boundary because group_rows is
+// a multiple of four whenever grouped.
+template<std::uint32_t Rows>
+__global__ void GemvRowsQ8_0Tiled(const Q8_0Block* __restrict__ w,
+                                  const float* __restrict__ x,
+                                  std::uint32_t xs, float* __restrict__ out,
+                                  std::uint32_t os, std::uint32_t rows,
+                                  std::uint32_t cols, std::uint32_t group_rows,
+                                  std::uint32_t group_advance) {
+  constexpr std::uint32_t kRpt = 4U;
+  x += static_cast<std::size_t>(blockIdx.y) * Rows * xs;
+  out += static_cast<std::size_t>(blockIdx.y) * Rows * os;
+  const std::uint32_t r0 = (blockIdx.x * 4U + (threadIdx.x >> 5)) * kRpt;
+  if (r0 >= rows) {
+    return;
+  }
+  if (group_rows != 0U) {
+    x += static_cast<std::size_t>(r0 / group_rows) * group_advance;
+  }
+  const std::uint32_t stride32 = cols / 32U;
+  const Q8_0Block* __restrict__ row[kRpt];
+#pragma unroll
+  for (std::uint32_t u = 0; u < kRpt; ++u) {
+    row[u] = w + static_cast<std::size_t>(r0 + u) * stride32;
+  }
+  const std::uint32_t lane = threadIdx.x & 31U;
+  float acc[kRpt][Rows] = {};
+#pragma unroll 2
+  for (std::uint32_t i = lane; i < cols; i += 32U) {
+    const std::uint32_t blk_idx = i >> 5;
+    float wv[kRpt];
+#pragma unroll
+    for (std::uint32_t u = 0; u < kRpt; ++u) {
+      const Q8_0Block& blk = row[u][blk_idx];
+      wv[u] = __half2float(blk.d) * static_cast<float>(blk.qs[i & 31U]);
+    }
+#pragma unroll
+    for (std::uint32_t o = 0; o < Rows; ++o) {
+      const float xv = x[static_cast<std::size_t>(o) * xs + i];
+#pragma unroll
+      for (std::uint32_t u = 0; u < kRpt; ++u) {
+        acc[u][o] += wv[u] * xv;
+      }
+    }
+  }
+#pragma unroll
+  for (std::uint32_t u = 0; u < kRpt; ++u) {
+#pragma unroll
+    for (std::uint32_t o = 0; o < Rows; ++o) {
+      acc[u][o] = WarpReduceSum(acc[u][o]);
+    }
+    if (lane == 0) {
+#pragma unroll
+      for (std::uint32_t o = 0; o < Rows; ++o) {
+        out[static_cast<std::size_t>(o) * os + r0 + u] = acc[u][o];
+      }
+    }
+  }
+}
+
 template<std::uint32_t Rows>
 __global__ void GemvRowsQ4K(const Q4KBlock* __restrict__ w,
                             const float* __restrict__ x, std::uint32_t xs,
@@ -1336,6 +1401,18 @@ void LaunchRowsSlices(const void* base, GemvType type, std::uint32_t tokens,
   // Any width decomposes into descending power-of-two slices; each slice is
   // an independent contiguous row block, so every per-row dot keeps its
   // exact sequence and only the launch factorization changes.
+  if (type == GemvType::kQ8_0 && tokens >= kMaxRows && rows % 16U == 0U) {
+    // Full 16-token tiles with four tiled rows per wave go out as one
+    // grid.y batched launch; anything shorter falls through to the ladder.
+    const std::uint32_t full = tokens / kMaxRows;
+    GemvRowsQ8_0Tiled<kMaxRows><<<dim3(rows / 16U, full), 128, 0, stream>>>(
+        static_cast<const Q8_0Block*>(base), x, x_stride, out, out_stride,
+        rows, cols, group_rows, group_advance);
+    const std::uint32_t tiled = full * kMaxRows;
+    tokens -= tiled;
+    x += static_cast<std::size_t>(tiled) * x_stride;
+    out += static_cast<std::size_t>(tiled) * out_stride;
+  }
   std::uint32_t done = 0;
   while (done < tokens) {
     const std::uint32_t rem = tokens - done;
