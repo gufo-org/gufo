@@ -83,6 +83,23 @@ catch-up, leaving their previous frontier intact. Qwen's legacy server snapshot
 hooks are removed; standalone native
 snapshots remain available and DeepSeek keeps its legacy serving path.
 
+A prefill step captures its prompt checkpoints in place (`PrefillThrough`). It
+runs the passes that steps ending at each boundary would run, and the consumer
+reads the live slot between them, so captures and outputs keep the arithmetic
+of those passes. One merged pass would not: UD-Q4_K_XL prefills passes of
+1,024 rows or more with FP16 activations and shorter ones with Q8_1. Each
+boundary is a complete frontier, logits included, as for a prompt snapshot
+target. The host's layer groups span the step's passes, so a short pass between
+two boundaries no longer runs unsplit beside decoders. The groups split the
+step's estimated time, not its rows: the runner prices a pass at 120 ms plus
+2.25 ms per row, or 1.80 ms per row on the FP16 route, and DFlash2's draft
+injection at 0.12 ms per row after the pass. As of November 2026 these fit
+passes measured on gfx1151 at depth 2,048; each capture between passes took
+4.0–7.1 ms, which the plan leaves out
+([measurements](artifacts/in-pass-prefill-costs.json)). Each pass pins its own
+entry recurrence: cancelling a later pass keeps the passes before it, as their
+separate steps would.
+
 Qwen restores use the destination executor's stream to avoid the pooled-stream
 wait observed behind another session's cancelled prefill. Cold reassignment
 preserves up to sixteen complete row chunks before waiting for their copies.
@@ -110,7 +127,9 @@ nix develop -c build/gpu-test/tests/models/qwen27b/qwen27b_continuation_adapter_
 ```
 
 `--guard-only`, `--image-only`, `--prefill-cancel` and `--draft "$DRAFT"` select
-focused follow-ups. The cancellation check compares full component bytes and
+focused follow-ups. `qwen27b_in_pass_test "$MODEL" "$DRAFT"` compares in-pass
+checkpoints, a restored one continued in place and a cancelled step with steps
+that end at each boundary, component by component, in AR and DFlash2 modes. The cancellation check compares full component bytes and
 resumed logits against an uninterrupted pass in both KV layouts.
 The draft check restores into another slot and checks component bytes, injected
 position, sampled proposals/RNG and feedback/controller state. The portable
