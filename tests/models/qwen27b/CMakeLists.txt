@@ -28,6 +28,8 @@ add_qwen27b_test(qwen27b_continuation_layout_test continuation_layout_test.cpp
 
 add_qwen27b_test(qwen_mtp_reference_test mtp_reference_test.cpp
   "cpu;mtp;external-model")
+add_qwen27b_test(qwen_dspine_loader_test dspine_loader_test.cpp
+  "cpu;dflash;dspine;correctness")
 if (ENGINE_ENABLE_HIP)
   add_executable(qwen27b_continuation_adapter_test EXCLUDE_FROM_ALL
     continuation_adapter_test.cpp continuation_fault.cpp)
@@ -70,6 +72,10 @@ if (ENGINE_ENABLE_HIP)
   add_qwen27b_test(qwen_dflash_noncausal_attention_ops_test attention_test.cpp
     "gpu;hip;dflash;dflash2;kernels")
   target_link_libraries(qwen_dflash_noncausal_attention_ops_test PRIVATE hip::host)
+  # DSpine kernels against Tencent's reference maths, at the 27B shapes.
+  add_qwen27b_test(qwen_dspine_ops_test dspine_ops_test.cpp
+    "gpu;hip;dflash;dspine;kernels")
+  target_link_libraries(qwen_dspine_ops_test PRIVATE hip::host)
   # The serving tier is one library now (RFC step 6); these tests keep naming
   # the models they drive directly.
   add_executable(inference_backend_gpu_test serving_test.cpp)

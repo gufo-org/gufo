@@ -117,6 +117,10 @@ public:
       const noexcept {
     return weights_.dflash_config;
   }
+  /// A DSpine draft: causal block, code bridge, serial refinement.
+  [[nodiscard]] bool IsDSpine() const noexcept {
+    return weights_.dspine.has_value();
+  }
   [[nodiscard]] const tokenization::QwenTokenizer& GetTokenizer()
       const noexcept {
     return target_model_->GetTokenizer();
@@ -256,6 +260,14 @@ private:
   void RunInjectGemm(const models::QwenTensorRef& weight, const float* input,
                      float* output, std::size_t num_tokens,
                      std::size_t output_size, std::size_t input_size);
+  /// DSpine: the code bridge write after `layer`, on `rows` block rows. The
+  /// last layer writes out of place (d_fused_features_), keeping the
+  /// pre-write rows in d_block_hidden_ for the refinement.
+  void RunDSpineBridge(std::size_t layer, std::uint32_t rows);
+  /// DSpine tail after the output norm: head logits, top-k candidates, the
+  /// last-write refinement, the transition tables and the chain walk.
+  void DraftDSpine(std::uint32_t draft_count, float temperature,
+                   std::span<const float> uniforms, const DFlashTrace& trace);
   /// The draft table as a head of speculative::kDraftVocabExtraRows rows.
   [[nodiscard]] models::QwenTensorRef DraftTable() const noexcept;
 
@@ -300,6 +312,24 @@ private:
   std::int32_t* d_draft_ids_{nullptr};
   float* d_draft_logits_{nullptr};
   std::vector<std::int32_t> draft_upload_;
+  // DSpine scratch, carved from one allocation (null for DFlash-2): per row
+  // rms, codes, [G;P;A] c and the anchor's code; the candidate IDs (row 0 =
+  // anchor); per (proposal, lane) messages, sender codes, [P;A] e, write
+  // deltas, candidate head rows and the transition tables.
+  float* d_dspine_scratch_{nullptr};
+  float* d_dspine_rms_{nullptr};
+  float* d_dspine_codes_{nullptr};
+  float* d_dspine_packed_{nullptr};
+  float* d_dspine_anchor_code_{nullptr};
+  std::uint32_t* d_dspine_ids_{nullptr};
+  float* d_dspine_message_{nullptr};
+  float* d_dspine_senders_{nullptr};
+  float* d_dspine_sender_gates_{nullptr};
+  float* d_dspine_delta_{nullptr};
+  float* d_dspine_heads_{nullptr};
+  float* d_dspine_table_{nullptr};
+  /// Split draft attention scores, [block row x head][history + block].
+  float* d_dspine_scores_{nullptr};
   std::size_t scratch_bytes_{0};
   void* d_batch_scratch_{nullptr};
   std::size_t batch_scratch_bytes_{0};

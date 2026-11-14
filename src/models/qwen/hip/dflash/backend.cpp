@@ -216,9 +216,16 @@ std::unique_ptr<QwenDFlashGpuDraftBackend> QwenDFlashGpuDraftBackend::Create(
     }
     return nullptr;
   }
+  // DSpine drafts fixed blocks of up to block - 1 (16 verification rows for
+  // b16): the adaptive policy's measured costs stop at seven rows. DFlash2
+  // keeps its limit.
+  const bool dspine = model->IsDSpine();
+  if (dspine)
+    config.policy = speculative::DFlashDraftPolicy::kFixed;
   config.max_draft_tokens = std::min(
       {config.max_draft_tokens, model->GetDFlashConfig().block_size - 1U,
-       speculative::DFlashLengthController::kMaxDraftTokens});
+       dspine ? speculative::DFlashLengthController::kMaxFixedDraftTokens
+              : speculative::DFlashLengthController::kMaxDraftTokens});
   auto executor = QwenDFlashGpuExecutor::Create(std::move(model),
                                                 config.max_context, error_msg);
   if (executor == nullptr) {
@@ -352,7 +359,9 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeEach(
 
 std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
     std::span<const speculative::DraftProposalRequest> requests) {
-  if (requests.size() < 2 || requests.size() > 8)
+  // DSpine drafts each session alone: its bridge has no batched path.
+  if (requests.size() < 2 || requests.size() > 8 ||
+      executor_->GetModel().IsDSpine())
     return ProposeEach(requests);
   std::array<QwenDFlashGpuDraftBackend*, 8> backends{};
   for (std::size_t index = 0; index < requests.size(); ++index) {

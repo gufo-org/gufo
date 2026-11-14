@@ -1,5 +1,6 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cstddef>
@@ -209,6 +210,48 @@ models::QwenTensorRef PackBlockMatrix(const models::QwenTensorRef& source,
   };
 }
 
+/// The bridge is small (81 MB at the 27B shape) and its GEMMs keep FP32
+/// activations, so its matrices are BF16, with [G; P; A] stacked into one
+/// 3R x C matrix. The codebook keeps its native type: only rows are read.
+void PackDSpineBridge(speculative::QwenDSpineWeights& bridge,
+                      const core::ModelConfig& cfg,
+                      std::vector<void*>& allocations,
+                      std::size_t& packed_bytes) {
+  const std::size_t code = bridge.code_size;
+  const std::size_t rank = bridge.rank;
+  bridge.codebook = PackBlockMatrix(bridge.codebook, cfg.vocab_size, code,
+                                    allocations, packed_bytes);
+  bridge.gate_bias =
+      CopyVectorF32(bridge.gate_bias, rank, allocations, packed_bytes);
+  std::vector<std::uint16_t> gates(3U * rank * code);
+  std::vector<float> row(code);
+  const std::array parts{&bridge.gates, &bridge.predecessor_gate,
+                         &bridge.value};
+  for (std::size_t part = 0; part < parts.size(); ++part) {
+    for (std::size_t r = 0; r < rank; ++r) {
+      ReadMatrixRow(*parts[part], r, code, row.data());
+      for (std::size_t c = 0; c < code; ++c)
+        gates[((part * rank) + r) * code + c] = FloatToBfloat16Bits(row[c]);
+    }
+  }
+  const std::size_t bytes = gates.size() * sizeof(std::uint16_t);
+  void* device = detail::AllocateDevice(bytes);
+  allocations.push_back(device);
+  CopyToDevice(device, gates.data(), bytes);
+  packed_bytes += bytes;
+  bridge.gates = {.data = device,
+                  .type = core::GgmlType::kBF16,
+                  .num_elements = gates.size()};
+  bridge.predecessor_gate = {};
+  bridge.value = {};
+  for (std::size_t i = 0; i < bridge.read.size(); ++i) {
+    bridge.read[i] = PackMatrixBf16(bridge.read[i], code, cfg.hidden_size,
+                                    allocations, packed_bytes);
+    bridge.write[i] = PackMatrixBf16(bridge.write[i], cfg.hidden_size, rank,
+                                     allocations, packed_bytes);
+  }
+}
+
 void PackDFlashWeights(speculative::QwenDFlashWeights& weights,
                        std::vector<void*>& allocations,
                        std::size_t& packed_bytes) {
@@ -230,16 +273,20 @@ void PackDFlashWeights(speculative::QwenDFlashWeights& weights,
   weights.output_norm =
       CopyVectorF32(weights.output_norm, hidden, allocations, packed_bytes);
 
-  // Candidate selector.
-  weights.selector_predecessor =
-      PackMatrixBf16(weights.selector_predecessor, cfg.vocab_size,
-                     df_cfg.selector_rank, allocations, packed_bytes);
-  weights.selector_successor =
-      PackMatrixBf16(weights.selector_successor, cfg.vocab_size,
-                     df_cfg.selector_rank, allocations, packed_bytes);
-  weights.selector_hidden =
-      PackBlockMatrix(weights.selector_hidden, df_cfg.selector_rank, hidden,
-                      allocations, packed_bytes);
+  if (weights.dspine) {
+    PackDSpineBridge(*weights.dspine, cfg, allocations, packed_bytes);
+  } else {
+    // Candidate selector.
+    weights.selector_predecessor =
+        PackMatrixBf16(weights.selector_predecessor, cfg.vocab_size,
+                       df_cfg.selector_rank, allocations, packed_bytes);
+    weights.selector_successor =
+        PackMatrixBf16(weights.selector_successor, cfg.vocab_size,
+                       df_cfg.selector_rank, allocations, packed_bytes);
+    weights.selector_hidden =
+        PackBlockMatrix(weights.selector_hidden, df_cfg.selector_rank, hidden,
+                        allocations, packed_bytes);
+  }
 
   // Draft Transformer Layers
   for (std::size_t i = 0; i < weights.layers.size(); ++i) {
@@ -271,6 +318,8 @@ void PackDFlashWeights(speculative::QwenDFlashWeights& weights,
     transformer.ffn_down = PackBlockMatrix(
         transformer.ffn_down, hidden, intermediate, allocations, packed_bytes);
 
+    if (weights.dspine)
+      continue;
     const std::size_t groups = hidden / df_cfg.conv_group_size;
     const std::size_t dynamic_size = 2U * df_cfg.conv_kernel_size * groups;
     layer.attention_conv_base = CopyVectorF32(
@@ -303,11 +352,12 @@ QwenDFlashGpuModel::QwenDFlashGpuModel(
   // The draft table copies head rows, so the head must be row-addressable.
   // A vocabulary with more special tokens than table rows drafts over the
   // full head.
+  // DSpine v1 always scores the full head.
   const auto& config = weights_.config;
   const auto& head = weights_.output;
   const std::size_t row_bytes =
       quant::EncodedSizeBytes(head.type, config.hidden_size);
-  if (head.data == nullptr ||
+  if (weights_.dspine || head.data == nullptr ||
       config.vocab_size <= speculative::kDraftVocabPrefix || row_bytes == 0 ||
       row_bytes % sizeof(std::uint32_t) != 0 ||
       quant::EncodedSizeBytes(head.type, head.num_elements) !=
