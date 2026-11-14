@@ -139,6 +139,15 @@ Video generation is asynchronous, as in the OpenAI video API:
 Jobs and finished videos survive a server restart until `--ttl` expires them.
 Request fields and limits are on the [MiniMax H3](models/minimax-h3.md) page.
 
+## Music
+
+`gufo serve music` runs songs as jobs the same way, on `/v1/audio/music`:
+`POST` creates a job, `GET /v1/audio/music/{id}` reports it,
+`.../content` downloads the WAV and `.../score` the ABC score, and `DELETE`
+cancels it. `GET /v1/models` lists what the model accepts under `gufo.music`;
+a field it doesn't take returns 400 `unsupported_parameter`. Request fields are
+on the [YuE2](models/yue2.md) page.
+
 ## Other model services
 
 | Command | Routes | Model page |

@@ -15,6 +15,7 @@ to run the model and what speed to expect.
 | Qwen3-TTS 12Hz 1.7B | BF16 safetensors; text/reference audio to speech | [Voice modes](qwen3-tts.md) |
 | Qwen3.8 27B | Q4/Q8 GGUF; text/images | [Usage and modes](qwen3.8-27b.md) |
 | Qwen3.8 Flash-Next | Sharded Q4 GGUF; text/images | [Usage and modes](qwen3.8-flash-next.md) |
+| YuE2 3B | BF16 safetensors and an FP32 Oobleck decoder; style and lyrics to a 48 kHz stereo song with an ABC score | [Usage](yue2.md) |
 <!-- END GENERATED MODEL TABLE -->
 
 Install a model's weights with `gufo model install <id>`, as each page shows;

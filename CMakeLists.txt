@@ -462,6 +462,9 @@ endif()
 
 add_library(gufo_http STATIC
   src/cli/serve/audio_buffer.cpp
+  src/cli/serve/music_wav.cpp
+  src/cli/serve/media_jobs.cpp
+  src/cli/serve/music_api.cpp
   src/cli/serve/image_api.cpp
   src/cli/serve/image_service.cpp
   src/cli/serve/sdapi.cpp
@@ -494,6 +497,7 @@ add_executable(gufo
   src/cli/speak/speak.cpp
   src/cli/decide/decide.cpp
   src/cli/video/video.cpp
+  src/cli/music/music.cpp
   src/cli/serve/serve.cpp
   src/eval/http_client.cpp
 )

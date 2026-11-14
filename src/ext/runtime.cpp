@@ -6,6 +6,7 @@
 #include "gufo/ext/decision.hpp"
 #include "gufo/ext/host.hpp"
 #include "gufo/ext/image.hpp"
+#include "gufo/ext/music.hpp"
 #include "gufo/ext/registry.hpp"
 #include "gufo/ext/text.hpp"
 #include "gufo/ext/tts.hpp"
@@ -267,6 +268,40 @@ const VideoProvider* ProbeVideoProvider(std::string_view model_root) {
 
 void Registry::AddVideoProvider(VideoProvider provider) {
   RegisterVideoProvider(std::move(provider));
+}
+
+static std::vector<MusicProvider> g_music_providers;
+
+void RegisterMusicProvider(MusicProvider provider) {
+  for (auto& existing : g_music_providers) {
+    if (existing.id == provider.id) {
+      existing = std::move(provider);
+      return;
+    }
+  }
+  g_music_providers.push_back(std::move(provider));
+}
+
+const MusicProvider* FindMusicProvider(std::string_view id) {
+  for (const auto& provider : g_music_providers) {
+    if (provider.id == id) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+const MusicProvider* ProbeMusicProvider(std::string_view model_root) {
+  for (const auto& provider : g_music_providers) {
+    if (provider.probe && provider.probe(model_root)) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+void Registry::AddMusicProvider(MusicProvider provider) {
+  RegisterMusicProvider(std::move(provider));
 }
 
 void Registry::AddTextProvider(TextProvider provider) {

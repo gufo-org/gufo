@@ -44,6 +44,7 @@
 #include <hip/hip_runtime_api.h>
 #endif
 #include "src/cli/serve/audio_buffer.hpp"
+#include "src/cli/serve/music_api.hpp"
 #include "src/cli/serve/trace.hpp"
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/video_jobs.hpp"
@@ -451,6 +452,26 @@ std::string PrimaryModelName(const std::vector<std::string>& names) {
   return names.empty() ? std::string() : names.front();
 }
 
+struct MusicServeOptions {
+  std::filesystem::path model;
+  std::filesystem::path root{"music-jobs"};
+  std::uint64_t ttl_seconds{3600};
+  std::vector<std::string> names;
+};
+
+void AddMusicOptions(ArgParser& parser, MusicServeOptions* options) {
+  parser.AddOption("-m", "--model", "DIR", "Music model directory (YuE2)",
+                   "Model", &options->model);
+  parser.AddOption("", "--root", "DIR",
+                   "Storage root for persistent music jobs (default: "
+                   "music-jobs)",
+                   "Storage", &options->root);
+  parser.AddOption("", "--ttl", "SEC",
+                   "Completed-artifact TTL in seconds (default: 3600)",
+                   "Storage", &options->ttl_seconds);
+  AddServedModelNamesOption(parser, &options->names);
+}
+
 // The accepted aliases after the primary ID.
 std::vector<std::string> ModelAliases(const std::vector<std::string>& names) {
   if (names.size() <= 1)
@@ -667,6 +688,22 @@ void PrintServeHelp(std::string_view program_name,
     ext::RegisterBuiltExtensions(registry);
     ProviderOptions provider_options(registry, "serve embedding",
                                      ext::Capability::kEmbeddings);
+    provider_options.Register(parser);
+    parser.PrintHelp();
+    return;
+  }
+  if (subcommand == "music") {
+    MusicServeOptions options;
+    ArgParser parser(std::string(program_name) + " serve music",
+                     "Serve music generation jobs (/v1/audio/music).");
+    AddMusicOptions(parser, &options);
+    ext::Registry registry;
+    ext::RegisterBuiltExtensions(registry);
+    ServerOptionHelpTargets server_help;
+    AddServerOptionsForHelp(parser, &server_help, false);
+    ProviderOptions provider_options(registry,
+                                     std::string(ext::kMusicServeCommand),
+                                     ext::Capability::kMusicGeneration);
     provider_options.Register(parser);
     parser.PrintHelp();
     return;
@@ -907,6 +944,7 @@ void PrintServeHelp(std::string_view program_name,
          "(/v1/video/generations)\n"
       << "  image     Serve Qwen-Image-2.1 (/v1/images/generations, "
          "/v1/images/edits)\n"
+      << "  music     Serve YuE2 music generation jobs (/v1/audio/music)\n"
       << "  tts       Serve Qwen3-TTS speech synthesis (/v1/audio/speech)\n"
       << "  asr       Serve Qwen3-ASR transcription "
          "(/v1/audio/transcriptions)\n"
@@ -1007,7 +1045,8 @@ int RunServe(std::span<const char* const> args) {
       continue;
     }
     if (arg == "llm" || arg == "video" || (arg == "tts" || arg == "asr") ||
-        arg == "image" || arg == "embedding" || arg == "decision") {
+        arg == "image" || arg == "embedding" || arg == "decision" ||
+        arg == "music") {
       subcommand = arg;
       sub_args.erase(sub_args.begin() + static_cast<std::ptrdiff_t>(i));
     } else if (arg == "--help" || arg == "-h" || arg == "help") {
@@ -1015,7 +1054,7 @@ int RunServe(std::span<const char* const> args) {
           arg == "help" && i + 1 < args.size() ? args[i + 1] : "";
       if (!topic.empty() && topic != "llm" && topic != "video" &&
           topic != "tts" && topic != "asr" && topic != "image" &&
-          topic != "embedding" && topic != "decision") {
+          topic != "embedding" && topic != "decision" && topic != "music") {
         std::cerr << "Error: unknown serve command '" << topic << "'\n";
         return 2;
       }
@@ -1100,6 +1139,7 @@ int RunServe(std::span<const char* const> args) {
   std::shared_ptr<server::ImageService> images;
   std::shared_ptr<server::EmbeddingService> embeddings;
   std::shared_ptr<server::DecisionService> decisions;
+  std::shared_ptr<server::MusicService> music;
 
   if (subcommand == "decision") {
     std::filesystem::path model, mmproj;
@@ -1295,6 +1335,76 @@ int RunServe(std::span<const char* const> args) {
     if (!options.loras.files.empty())
       loaded += " loras=" + std::to_string(options.loras.files.size());
     load_log.Complete(loaded);
+  } else if (subcommand == "music") {
+    MusicServeOptions options;
+    ArgParser parser("gufo serve music",
+                     "Serve music generation jobs (/v1/audio/music).");
+    AddMusicOptions(parser, &options);
+    add_server_options(parser, false);
+    ProviderOptions declared_options(registry,
+                                     std::string(ext::kMusicServeCommand),
+                                     ext::Capability::kMusicGeneration);
+    declared_options.Register(parser);
+    if (!parser.Parse(sub_args, &parse_err)) {
+      std::cerr << "Error: " << parse_err << '\n';
+      return 2;
+    }
+    if (parser.IsHelpRequested()) {
+      PrintServeHelp("gufo", "music");
+      return 0;
+    }
+    if (!prepare_server_options())
+      return 2;
+    if (options.model.empty()) {
+      std::cerr << "Error: --model <DIR> is required for music server\n";
+      return 2;
+    }
+    if (options.ttl_seconds == 0 || options.ttl_seconds > 31536000) {
+      std::cerr << "Error: --ttl must be in [1, 31536000]\n";
+      return 2;
+    }
+    const ext::MusicProvider* provider =
+        ext::ProbeMusicProvider(options.model.string());
+    if (provider == nullptr || provider->create_with_options == nullptr) {
+      std::cerr << "Error: no music model in this build claims "
+                << options.model.string() << '\n';
+      return 2;
+    }
+    ext::MusicRunnerOptions runner_options;
+    runner_options.model_root = options.model.string();
+    try {
+      declared_options.Parse();
+      runner_options.options = declared_options.Select(provider->id);
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error: " << error.what() << '\n';
+      return 2;
+    }
+    ModelLoadLog load_log(provider->id, options.model);
+    std::string error;
+    auto runner = provider->create_with_options(runner_options, &error);
+    if (!runner) {
+      std::cerr << "Error loading music model " << provider->id << ": " << error
+                << '\n';
+      return 1;
+    }
+    music = std::make_shared<server::MusicService>(
+        std::move(runner),
+        server::MusicServiceOptions{
+            .storage_root = options.root,
+            .ttl = std::chrono::seconds(
+                static_cast<std::chrono::seconds::rep>(options.ttl_seconds)),
+            .queue_capacity = 4,
+            .model_id =
+                options.names.empty() ? std::string() : options.names.front(),
+            .model_aliases = ModelAliases(options.names),
+        });
+    if (!music->ready()) {
+      std::cerr << "Error enabling music service: "
+                << music->initialization_error() << '\n';
+      return 1;
+    }
+    load_log.Complete("model=" + music->model_id() + " provider=" +
+                      provider->id + " root=" + options.root.string());
   } else if (subcommand == "video") {
     std::filesystem::path video_model;
     std::filesystem::path video_root = "video-jobs";
@@ -1898,7 +2008,7 @@ int RunServe(std::span<const char* const> args) {
                 ShutdownAfterDeviceLoss();
               },
       },
-      images, embeddings, decisions);
+      images, embeddings, decisions, music);
   std::string err;
   if (!server.start(&err)) {
     std::cerr << "Error starting HTTP server: " << err << "\n";

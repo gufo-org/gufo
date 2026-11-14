@@ -7,7 +7,7 @@ target_compile_features(gufo_logging PUBLIC cxx_std_20)
 target_link_libraries(gufo_logging PUBLIC gufo_platform)
 
 add_library(gufo_ext_runtime STATIC runtime.cpp options.cpp host_budget.cpp
-  device_probe.cpp text.cpp)
+  device_probe.cpp music.cpp text.cpp)
 # Forwarding public headers still use repository-relative includes. Publish
 # only their audited transitive closure, never the repository root.
 set(public_include "${CMAKE_CURRENT_BINARY_DIR}/public-include")

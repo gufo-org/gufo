@@ -29,6 +29,7 @@ gufo_extension_target(
     provider.cpp
   LINK_LIBRARIES
     gufo_qwen_image_21
+    gufo_qwen_eager
     hip::host
     roc::hipblas
     roc::hipblaslt
@@ -38,7 +39,6 @@ if(TARGET gufo_qwen_image_21_hip)
   gufo_extension_hip_sources(gufo_qwen_image_21_hip
     SOURCES
       hip/kernels.hip
-      hip/attention.hip
       hip/dense.hip
       hip/convolution.hip
       hip/pipeline.cpp
@@ -48,9 +48,6 @@ if(TARGET gufo_qwen_image_21_hip)
   target_compile_definitions(gufo_qwen_image_21_hip PUBLIC ENGINE_ENABLE_HIP=1)
   target_compile_options(gufo_qwen_image_21_hip PRIVATE
     $<$<COMPILE_LANGUAGE:HIP>:-O3;${GUFO_CLANG_OPTION}-ffp-contract=off>)
-  set_source_files_properties(${GUFO_EXTENSION_BUILD_ROOT}/hip/attention.hip PROPERTIES
-    COMPILE_OPTIONS
-    "-gline-tables-only;-Xarch_device;-mllvm=-amdgpu-sched-strategy=iterative-ilp")
   target_include_directories(gufo_qwen_image_21_hip PUBLIC
     ${PROJECT_SOURCE_DIR}
     ${GUFO_EXTENSION_BUILD_ROOT}

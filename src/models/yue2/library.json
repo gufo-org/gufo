@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "name": "yue2",
+  "target": "gufo_yue2",
+  "kind": "static",
+  "purpose": "YuE2 music model: tiktoken text, the song protocol and sampler, the AR/NAR backbone and the Oobleck decoder.",
+  "consumers": [],
+  "checks": [
+    "yue2_cpu_test",
+    "yue2_hip_oracle_test"
+  ]
+}

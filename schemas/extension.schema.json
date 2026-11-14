@@ -155,6 +155,7 @@
               "speech_synthesis",
               "image_generation",
               "video_generation",
+              "music_generation",
               "decision"
             ]
           },

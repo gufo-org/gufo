@@ -95,6 +95,7 @@ let
         decision = "decision";
         image_generation = "image";
         video_generation = "video";
+        music_generation = "music";
         speech_synthesis = "tts";
         speech_recognition = "asr";
       };
