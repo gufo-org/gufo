@@ -58,8 +58,9 @@ if(GUFO_NPU_DESIGNS_AVAILABLE AND NOT GUFO_NPU_PREBUILT_DESIGNS)
   if(WIN32)
     # IRON otherwise finds MinGW's c++ first on hosted Windows runners,
     # producing DLLs that require unshipped libgcc/libstdc++ runtimes.
-    # Its MSVC-style driver uses the static CRT for the dispatch bridge.
-    find_program(GUFO_NPU_HOST_CXX NAMES amdclang-cl clang-cl cl
+    # IRON recognizes only the exact clang-cl/cl driver names (not
+    # amdclang-cl). Its MSVC-style driver uses the static CRT for the bridge.
+    find_program(GUFO_NPU_HOST_CXX NAMES clang-cl cl
       HINTS "$ENV{HIP_PATH}/lib/llvm/bin" "$ENV{HIP_PATH}/bin" REQUIRED)
     list(APPEND _gufo_npu_env "CXX=${GUFO_NPU_HOST_CXX}")
   endif()
