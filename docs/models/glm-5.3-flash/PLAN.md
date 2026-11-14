@@ -181,7 +181,8 @@ levers, exact-default ladder (A) then opt-in fast track (B):
 
 Order of attack: A5 (bit-exact, cheapest, shrinks the last per-token
 loop) → A3 → A2 (decode shipped, staging variants rejected) → A1
-(rejected 2026-11-14, compute-bound) → A6 (current) → A4, then promote
+(rejected 2026-11-14, compute-bound) → A6 (Q8_0 row tiling + grid.y
+shipped 2026-11-15; RowsF32 remainder current) → A4, then promote
 B behind one fast-profile flag with its own gate row in BENCHMARKS.md.
 
 Gate: pp2048 ≥ 0.9× and tg32 ≥ 1.0× the Phase-0 llama.gl baseline with

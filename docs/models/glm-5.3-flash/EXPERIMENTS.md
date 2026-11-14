@@ -373,6 +373,31 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   +1.2 % shipped here, so the rest of A2's 1.3-1.5x hypothesis stays
   parked and the weight re-read path keeps its shape (see P3g,
   Rejected).
+- Q8_0 GEMV row tiling + grid.y slice batching (`gemv.hip.cpp
+  GemvRowsQ8_0Tiled`, A6): the Rows tier re-reads the identical 16-token
+  activation slice for every weight row. One wave now accumulates four
+  rows (each load feeds four FMAs) and grid.y enumerates the 256-token
+  chunk's sixteen 16-token slices in a single launch; per-row
+  accumulation order, shuffle tree and grouped x bases (group_rows
+  divides 4) are untouched, so the dots stay bit-identical. Launched
+  only for Q8_0 with rows % 16 == 0 and tokens >= 16; all other widths
+  and types keep the slice ladder. Microbench
+  (`tools/bench/glm5_rows_bench.hip`, exclusive): grid.y alone +3-11 %,
+  LDS-staged activations 3-6x worse (variants rejected), row tiling
+  alone -28-33 %, both together -37 %, matching the ssm/k_b/v_b call
+  shapes exactly (`/tmp/opencode/gufo_bench_rowsbench.log`,
+  `_rowsbench3.log`). Offline A/B (alternating): pp2048
+  218.26/218.65 -> **226.15/226.76 (+3.6 %)**; pp16384 (reps 3,
+  alternating pairs) 164.78/164.93 -> **167.21/167.39 (+1.4-1.5 %)**;
+  tg1/tg128 unchanged (decode path untouched). n-gen-1 sha
+  `43557e0c…` and n-gen-128 sha `752281d6…` identical across both
+  binaries and all runs (`/tmp/opencode/gufo_bench_tileab.log`,
+  `_tilesha.log`, `_tile16kb.log`); `glm5_next` ctest 9/9
+  GPU-exclusive (`/tmp/opencode/gufo_bench_gemvfull.log`). What is
+  left of the tier after this: the F32 router/idx_proj RowsF32 calls
+  (0.50 s per 9.4 s pass) were not tiled (F32 kernel unchanged) and
+  the split-K col-parallel idea stays closed (changes the per-row
+  reduction tree); RPT 8 spills and runs 2x slower, RPT 2 looses to 4.
 
 ## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-13)
 
