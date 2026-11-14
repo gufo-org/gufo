@@ -3966,6 +3966,25 @@ void TestReasoningTokenCount() {
   Expect(count({"\n", "<a>\n", "x", "</a>"}, State::kTextAfterThought) == 0,
          "text after reasoning the prompt closed has no reasoning");
   Expect(count({}, State::kThought) == 0, "no output counts nothing");
+
+  // Counting in emitted text: a runner's pieces may carry markup its raw
+  // tokens do not spell (a package's output reader normalizing a native
+  // channel syntax), with empty pieces for framing tokens.
+  const auto in_text = [&markup](const Pieces& pieces, State initial) {
+    std::string text;
+    std::vector<std::size_t> ends;
+    for (const auto& piece : pieces) {
+      text += piece;
+      ends.push_back(text.size());
+    }
+    return gufo::server::CountReasoningTokens(text, ends, initial, markup);
+  };
+  Expect(in_text({"<a>\nx", "y", "", "</a>z"}, State::kAuto) == 2,
+         "emitted reasoning counts the tokens that carry it");
+  Expect(in_text({"", "", "z"}, State::kAuto) == 0,
+         "emitted text with no reasoning counts nothing");
+  Expect(in_text({"x", "</a>", "z"}, State::kThought) == 1,
+         "emitted reasoning the prompt opened counts to the close");
 }
 
 std::vector<TextRunnerToken> LabeledPrompt(TextRunnerToken label,
