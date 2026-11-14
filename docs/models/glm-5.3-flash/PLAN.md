@@ -87,8 +87,8 @@ decode-throughput half of the dense stage counts. P5 (routed IQ WMMA,
 both GEMV families at the center of the profile now run on the tensor
 cores.
 
-Status 2026-11-13 (evening): pp2048 **184.5 t/s** (now **216.0** with
-A5+A3 shipped), pp16384 **147.0** (**163.5**),
+Status 2026-11-14: pp2048 **184.5 t/s** (now **217.0** with A5+A3+
+A2-decode shipped), pp16384 **147.0** (**165.8**),
 exact default (sha `43557e0c…`, ctest 9/9). A fresh `rocprofv3` capture of
 the shipped tree at pp2048 (`/tmp/opencode/prof_mla2`) shows steady-state
 idle down to **2.2 %** — the launch storm is gone after P8 (KDA
@@ -122,13 +122,13 @@ levers, exact-default ladder (A) then opt-in fast track (B):
    `rocm_routed_wmma` NMSE contract. 64 `GemvRoutedSuper256` calls at
    136 ms each (0.8 s) sit on the same stage for non-bucket shapes.
    Target 1.2-1.4x (−0.5…−0.9 s, +5-9 %).
-2. Dense Q5_K WMMA fragment decode (2.2 s/pass): `DenseWmmaKernel<176,
+2. (Shipped 2026-11-14 in part: the dword-trick decode +1.2-1.7 %
+   pp2048 / +2.8 % pp16384 — see EXPERIMENTS "Q5_K wmma fragment dword
+   decode"; the nibble→F16 pair tables and all wider-staging variants
+   are rejected, decoding instruction count is not the wall) Dense
+   Q5_K WMMA fragment decode (2.2 s/pass): `DenseWmmaKernel<176,
    180>` averages 5.3 ms/call at `blocks=32x64` and is VALU-bound on the
    Q5_K block decode (sign-extraction chains), not on tensor-core math.
-   Precompute 4-bit nibble→F16 pair tables or a dword-trick decode per
-   32-K; same accumulator order per fragment keeps bits stable, wider
-   staging changes them → tier NMSE contract re-run. Target 1.3-1.5x
-   (−0.6…−0.9 s, +6-9 %).
  3. (Shipped 2026-11-14, +11.3 % pp2048, pp16384 +5.8 %..10.6 % —
     pp2048 216.0, see EXPERIMENTS "KDA fold + update chunk") KDA
     fold/update scan: the sub-chunk (a,b)/Blelloch premise below was
@@ -180,7 +180,8 @@ levers, exact-default ladder (A) then opt-in fast track (B):
     the pp ladder, not instead of it.
 
 Order of attack: A5 (bit-exact, cheapest, shrinks the last per-token
-loop) → A3 → A2 → A1 → A6 → A4, then promote B behind one fast-profile
+loop) → A3 → A2 (decode shipped, staging variants rejected) → A1
+(current) → A6 → A4, then promote B behind one fast-profile
 flag with its own gate row in BENCHMARKS.md.
 
 Gate: pp2048 ≥ 0.9× and tg32 ≥ 1.0× the Phase-0 llama.gl baseline with

@@ -180,6 +180,14 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
    and the doubled live accumulators (4 `v8f` tiles + 8 staged chunks) do
    not fit; LDS occupancy was already 1 block/CU so the wider tile buys
    nothing else. Reverted; `kTileTokens` stays 32.
+   Retested 2026-11-14 on the shipped tree with spill fixes (f16-staged
+   fetch, restructured double buffer): pp2048 190.9 (wide + f32 fetch)
+   and 200.6/201.4 (wide + f16 fetch, spills gone) vs alternating
+   control 214.05/213.64 — still -6 %..-11 %. `rocprofv3` split
+   (`/tmp/opencode/prof_kda2` vs `_prof_a2c`): the fetch restructure
+   alone costs +22 % on the geometry-untouched Q8 `<272>` kernel, and
+   the widening adds the rest (`<176>` +23.8 %, `<210>` +93 %). Both
+   experiments reverted in full; only the dword decode survives.
 
 ## Profiled (rocprofv3, serve workload)
 
@@ -330,6 +338,25 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   sha `43557e0c…` identical; `glm5_next` ctest 9/9 GPU-exclusive
   (`/tmp/opencode/gufo_bench_topk1ab.log`, `_topk1gate.log`,
   `_topk1ctest.log`).
+- Q5_K wmma fragment dword decode (`dense_wmma.hip.cpp
+  DecodeFragmentHalfQ5K`, A2): the fragment's 16 nibble bytes and high-bit
+  plane were read from LDS one byte at a time (32 scalar byte loads per
+  fragment); at the 180-byte staged stride both 16-byte windows are
+  dword-aligned, so they now arrive as two `__builtin_memcpy` windows and
+  the nibble/bit extraction shifts registers (`sh = 8 * (i & 3)`; the
+  `0xF` nibble mask is load-bearing — without it the `>> sh + 4` variant
+  leaks the adjacent byte's bits). Bit-exact: `rocm_dense_wmma` and
+  `rocm_routed_wmma` pass untouched. Offline A/B (alternating):
+  pp2048 214.05/213.64 -> **216.48/217.56 (+1.2-1.7 %)**; ship gate
+  pp16384 162.00/160.44 -> **169.49/162.15** (paired +2.9/+1.1 %,
+  means +2.8 %); n-gen-1 sha
+  `43557e0c…` identical across all 8 runs; `glm5_next` ctest 9/9
+  GPU-exclusive (`/tmp/opencode/gufo_bench_a2ab.log`,
+  `_shipgate.log`). Decoding instruction count is not the stage's wall,
+  though: cutting the fragment's LDS byte loads 48 -> 8 bought only the
+  +1.2 % shipped here, so the rest of A2's 1.3-1.5x hypothesis stays
+  parked and the weight re-read path keeps its shape (see P3g,
+  Rejected).
 
 ## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-13)
 

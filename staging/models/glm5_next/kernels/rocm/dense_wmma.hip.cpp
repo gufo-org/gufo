@@ -88,6 +88,9 @@ __device__ __forceinline__ void Q4ScaleMinFromWords(std::uint32_t lo,
 /// f16 wmma fragment operand. All 16 share the sub-block (j = k0 >> 5 spans
 /// 32 elements), so one (scale, min) pair and one qh bit position serve the
 /// fragment; byte and nibble selection mirror the scalar walk element-wise.
+/// The two 16-byte windows are dword-aligned at the staged stride, so they
+/// arrive as two v4b32 loads and the nibble/bit extraction shifts registers
+/// instead of issuing 32 scalar LDS byte loads per fragment.
 __device__ __forceinline__ v16h
 DecodeFragmentHalfQ5K(const std::uint8_t* __restrict__ blk, int k0) {
   const float d = F16At(blk);
@@ -102,13 +105,21 @@ DecodeFragmentHalfQ5K(const std::uint8_t* __restrict__ blk, int k0) {
   const std::uint8_t* qs = blk + offsetof(Q5KBlock, qs);
   const int l0 = k0 & 31;
   const int byte = (j >> 1) * 32 + l0;
+  uint4 qsw, qhw;
+  __builtin_memcpy(&qsw, qs + byte, 16);
+  __builtin_memcpy(&qhw, qh + l0, 16);
+  const std::uint32_t* qsd = reinterpret_cast<const std::uint32_t*>(&qsw);
+  const std::uint32_t* qhd = reinterpret_cast<const std::uint32_t*>(&qhw);
   v16h frag;
   auto* halves = reinterpret_cast<__half*>(&frag);
 #pragma unroll
   for (int i = 0; i < 16; ++i) {
-    const std::uint8_t qb = qs[byte + i];
-    const int quant4 = (j & 1) ? (qb >> 4) : (qb & 0xF);
-    const int quant = quant4 + ((((qh[l0 + i] >> j) & 1) != 0) ? 16 : 0);
+    const int sh = 8 * (i & 3);
+    const std::uint32_t qw = qsd[i >> 2];
+    const std::uint32_t qh = qhd[i >> 2];
+    const int quant4 = static_cast<int>(
+        (j & 1) ? ((qw >> (sh + 4)) & 0xFU) : ((qw >> sh) & 0xFU));
+    const int quant = quant4 + ((((qh >> (sh + j)) & 1U) != 0U) ? 16 : 0);
     halves[i] = __float2half((d * static_cast<float>(scv * quant)) - dmn);
   }
   return frag;

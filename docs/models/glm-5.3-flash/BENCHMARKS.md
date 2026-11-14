@@ -63,7 +63,11 @@ pp2048 **193.2 ± 2.0**, pp16384 **149.4** parity
 With the KDA fold/update chunk keeping each state column in registers
 (bit-exact contract zero margin): pp2048 **215.96 ± 4.6**, pp16384
 **163.5** (alternating controls 153.5), sha and 9/9 unchanged
-(`/tmp/opencode/gufo_bench_kda2.log`, `_kda3gate.log`).
+ (`/tmp/opencode/gufo_bench_kda2.log`, `_kda3gate.log`).
+With the Q5_K wmma fragment decoded through dword-aligned LDS windows
+(bit-exact — wmma contracts untouched): pp2048 **216.5 / 217.6**,
+pp16384 **169.5 / 162.2** (alternating controls 162.0/160.4), sha and
+9/9 unchanged (`/tmp/opencode/gufo_bench_shipgate.log`).
 Serve-protocol gate not yet re-captured for these steps. Use these
 only as offline scans, not interchangeably with the serve-protocol gate
 cells.
