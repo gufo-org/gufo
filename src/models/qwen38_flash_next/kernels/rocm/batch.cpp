@@ -399,10 +399,16 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
     if (compact_tail) {
       tail.mtp_res = base.res;
       tail.ctx = base.qg;
-      tail.inject = base.mtp_h;
+      // Inject rows move down within their own buffer (rows only move to
+      // lower indices, so the in-order copies never overwrite a pending
+      // source). base.mtp_h aliases s_.xn, which the FFN combine writes
+      // while its blocks still read the inject partials.
+      tail.inject = base.inject;
       for (std::size_t i = 0; i < items.size(); ++i) {
         const auto r = final_rows[i];
         const auto copy = [&](float* dst, const float* src, std::size_t width) {
+          if (dst + i * width == src + r * width)
+            return true;  // the row is already in place
           return Check(hipMemcpyAsync(dst + i * width, src + r * width,
                                       width * sizeof(float),
                                       hipMemcpyDeviceToDevice, stream_),
