@@ -105,6 +105,8 @@ def service_command(model_id, binary, assets, audio_root, public_model):
     if model.get('variant') == 'base':
         command += ['--voice', f'narrator={audio_root / "clear-english-voice.wav"}',
                     '--voice-text', f'narrator={audio_root / "clear-english-voice.txt"}']
+    if model.get('npu'):
+        command += ['--npu']
     return command
 
 

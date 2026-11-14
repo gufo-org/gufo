@@ -127,6 +127,12 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(args[-1], '--npu')
         self.assertNotIn('--npu', devlab_run.service_args('qwen3-asr', Path('/head'), Path('/base'),
                                                           {'asr': '/asr'}, Path('/out')))
+        # The speed arms serve the same NPU configuration as the correctness run.
+        assets = {'asr': '/asr'}
+        self.assertEqual(devlab_models.service_command('qwen3-asr-npu', Path('/gufo'), assets,
+                                                       Path('/audio'), 'phases')[-1], '--npu')
+        self.assertNotIn('--npu', devlab_models.service_command('qwen3-asr', Path('/gufo'), assets,
+                                                                Path('/audio'), 'phases'))
 
     def test_embedding_smoke_and_full_coverage(self):
         pr = self.plan('src/models/embedding_gemma2/video_processor.cpp')
@@ -302,6 +308,47 @@ class TimingTest(unittest.TestCase):
         for value in ('nan', '-1', 'inf'):
             with self.assertRaises(ValueError):
                 service_phases.number(value, 'duration_ms')
+
+    def test_npu_fallback_fails_the_timing_arm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'server.log'
+            log.write_text('[INFO] npu: qwen3dec ready\n')
+            self.assertEqual(service_phases.npu_fallbacks(log), [])
+            log.write_text('[WARN] npu: qwen3dec unavailable (busy); decoding on the CPU\n')
+            self.assertEqual(len(service_phases.npu_fallbacks(log)), 1)
+
+    def test_base_without_npu_yields_pr_only_observations(self):
+        reason = 'base binary has no --npu; PR-only NPU timings'
+        arms = [arm if arm['revision'] == 'head' else {'revision': 'base', 'unsupported': reason}
+                for arm in self.arms()]
+        found, diverged = service_phases.summarize(arms)
+        self.assertFalse(diverged)
+        self.assertTrue(found)
+        for phase in found:
+            self.assertEqual(phase['base'], [None, None])
+            self.assertEqual((phase['verdict'], phase['checked'], phase['advisory_reason']),
+                             ('missing', False, reason))
+        short = next(phase for phase in found if phase['key'] == 'short.server_ms')
+        self.assertEqual(short['head'], [120, 120])
+        plan = devlab_plan.select(['src/core/npu/host_ops.cpp'], devlab_models.registry())
+        plan.update(base='a'*40, head='b'*40, models=[m for m in plan['models'] if m['id'] == 'qwen3-asr-npu'],
+                    groups=[g for g in plan['groups'] if g['profile'].startswith('qwen3-asr-npu')])
+        row = {**plan['groups'][0], 'status': 'passed'}
+        summary = {'groups': [row], 'models': [{'id': 'qwen3-asr-npu', 'correctness': 'passed', 'timing': 'passed'}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = {'revisions': {'base': plan['base'], 'head': plan['head']}, 'arms': arms, 'phases': found,
+                    'diverged': diverged, 'settings': {'repeats': 2, 'slowdown': .05, 'noise_ms': 10,
+                    'requests': service_phases.REQUESTS}, 'wall_s': 1}
+            (root/'qwen3-asr-npu.phases.json').write_text(json.dumps(data))
+            args = type('Args', (), {'authorize': 'success', 'smoke': 'success', 'benchmark': False,
+                                    'results': root, 'run_url': 'https://run'})()
+            self.assertEqual(report.timing_state(data), 'observations')
+            state, description, comment = report.render_models(args, plan, summary)
+            self.assertEqual(state, 'success')
+            self.assertIn('timing observations retained', description)
+            self.assertIn(reason, comment)
+            self.assertIn('— → 120 ms', comment)
 
     def test_report_does_not_pass_missing_models_or_speed(self):
         plan = devlab_plan.select(['src/cli/serve/audio_asr_api.cpp'], without_npu(devlab_models.registry()))
