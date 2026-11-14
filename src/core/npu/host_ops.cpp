@@ -118,16 +118,23 @@ public:
     auto job = std::make_shared<Job>();
     job->fn = &fn;
     job->chunks = chunks;
+    // Wake only as many workers as there are chunks besides the caller's:
+    // every woken worker takes the mutex, and a crowd of them delays the
+    // job's end.
+    const std::size_t helpers = std::min(chunks - 1, workers_.size());
     {
       std::lock_guard lock(mutex_);
       job_ = job;
       ++generation_;
+      wanted_ = helpers;
     }
-    wake_.notify_all();
+    for (std::size_t i = 0; i < helpers; ++i)
+      wake_.notify_one();
     Help(*job);
     std::unique_lock lock(mutex_);
     finished_.wait(lock, [&] { return job->done.load() == chunks; });
     job_.reset();
+    wanted_ = 0;
   }
 
   static thread_local bool inside;
@@ -160,14 +167,16 @@ private:
       std::shared_ptr<Job> job;
       {
         std::unique_lock lock(mutex_);
-        wake_.wait(lock, [&] { return stop_ || generation_ != seen; });
+        wake_.wait(lock, [&] {
+          return stop_ || (generation_ != seen && wanted_ > 0);
+        });
         if (stop_)
           return;
         seen = generation_;
+        --wanted_;
         job = job_;
       }
-      if (job)
-        Help(*job);
+      Help(*job);
     }
   }
 
@@ -176,6 +185,7 @@ private:
   std::condition_variable wake_, finished_;
   std::shared_ptr<Job> job_;
   std::uint64_t generation_{};
+  std::size_t wanted_{};  // workers the current job still wakes
   bool stop_{};
 };
 
@@ -215,14 +225,25 @@ std::size_t Threads() {
   return ThePool().size();
 }
 
-void ParallelFor(std::size_t n, std::size_t grain,
-                 const std::function<void(std::size_t, std::size_t)>& fn) {
+namespace {
+
+std::size_t Chunks(const Pool& pool, std::size_t n, std::size_t grain) {
+  grain = std::max<std::size_t>(grain, 1);
+  return std::min((n + grain - 1) / grain, pool.size() * 4);
+}
+
+}  // namespace
+
+bool RunsInline(std::size_t n, std::size_t grain) {
+  return Pool::inside || Chunks(ThePool(), n, grain) <= 1;
+}
+
+void ParallelForPool(std::size_t n, std::size_t grain,
+                     const std::function<void(std::size_t, std::size_t)>& fn) {
   if (n == 0)
     return;
-  grain = std::max<std::size_t>(grain, 1);
   Pool& pool = ThePool();
-  const std::size_t max_chunks = (n + grain - 1) / grain;
-  const std::size_t chunks = std::min(max_chunks, pool.size() * 4);
+  const std::size_t chunks = Chunks(pool, n, grain);
   if (chunks <= 1 || Pool::inside) {
     fn(0, n);
     return;
@@ -328,6 +349,23 @@ void ExpInPlace(float* x, std::size_t n, float shift, float* sum) {
   }
   if (sum)
     *sum = total;
+}
+
+void SoftmaxRowBf16(std::uint16_t* x, std::size_t n, std::size_t lo,
+                    std::size_t hi, float* tmp) {
+  const std::size_t m = hi - lo;
+  Bf16ToFloat(x + lo, tmp, m);
+  float top = -INFINITY;
+  for (std::size_t t = 0; t < m; ++t)
+    top = std::max(top, tmp[t]);
+  float sum = 0;
+  ExpInPlace(tmp, m, top, &sum);
+  const float inv = 1.0f / sum;
+  for (std::size_t t = 0; t < m; ++t)
+    tmp[t] *= inv;
+  std::fill(x, x + lo, std::uint16_t(0));
+  FloatToBf16(tmp, x + lo, m);
+  std::fill(x + hi, x + n, std::uint16_t(0));
 }
 
 namespace {
@@ -572,16 +610,23 @@ void RopeNeox(float* x, std::size_t rows, std::size_t row_stride,
         c[i] = float(std::cos(a));
         s[i] = float(std::sin(a));
       }
-      for (std::size_t h = 0; h < heads; ++h) {
-        float* p = x + r * row_stride + h * head_dim;
-        for (std::size_t i = 0; i < half; ++i) {
-          const float x0 = p[i], x1 = p[i + half];
-          p[i] = x0 * c[i] - x1 * s[i];
-          p[i + half] = x1 * c[i] + x0 * s[i];
-        }
-      }
+      RopeNeoxRow(x + r * row_stride, heads, head_dim, rotary, c.data(),
+                  s.data());
     }
   });
+}
+
+void RopeNeoxRow(float* x, std::size_t heads, std::size_t head_dim,
+                 std::size_t rotary, const float* cos, const float* sin) {
+  const std::size_t half = rotary / 2;
+  for (std::size_t h = 0; h < heads; ++h) {
+    float* p = x + h * head_dim;
+    for (std::size_t i = 0; i < half; ++i) {
+      const float x0 = p[i], x1 = p[i + half];
+      p[i] = x0 * cos[i] - x1 * sin[i];
+      p[i + half] = x1 * cos[i] + x0 * sin[i];
+    }
+  }
 }
 
 float Activate(Activation a, float x) {

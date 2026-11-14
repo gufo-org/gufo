@@ -94,6 +94,26 @@ the matrix multiply runs at the same speed. A 512 x 1024 output tile costs
 about 43 us at K = 512 and 92 us at K = 2048; A reaches each core row on one
 shim stream at about 4.4 GB/s.
 
+## Host work between products
+
+Between NPU products the host packs rows, unpacks tiles and runs row ops,
+so its fixed costs per dispatch matter as much as its arithmetic. Measured
+on Windows (November 2026), where they are larger than on Linux:
+
+- Keep per-request buffers across layers and requests. Windows maps and
+  unmaps each large allocation, so a fresh one faults in every page again
+  (attention scores alone reach hundreds of MB for long inputs).
+- `host::ParallelFor` wakes only as many workers as it has chunks, and calls
+  `fn` directly when it runs inline (nested, or one chunk): calls per row or
+  per tile cost no `std::function` and no wake-up.
+- Encode scratch operands from their bf16 rows (`Spec::weights16`), not
+  through an f32 copy; the parts of one sequence share its full-attention
+  keys and values instead of encoding them each.
+- The NPU wait itself is about 145 us per dispatch there; polling the run
+  or reusing `xrt::run` objects does not shorten it.
+- Only `host_ops.cpp` is built with AVX2 and FMA: keep row loops there, which
+  also keeps results identical across callers.
+
 ## Shim limits that shape the designs
 
 - A buffer descriptor wraps at most 1023 in its inner dimensions and repeats

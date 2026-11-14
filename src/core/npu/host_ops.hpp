@@ -10,11 +10,27 @@
 
 namespace gufo::npu::host {
 
+/// Whether ParallelFor(n, grain, ...) runs on the calling thread: one chunk,
+/// or a nested call.
+bool RunsInline(std::size_t n, std::size_t grain);
+/// ParallelFor's pool path.
+void ParallelForPool(std::size_t n, std::size_t grain,
+                     const std::function<void(std::size_t, std::size_t)>& fn);
+
 /// Calls fn(begin, end) over chunks of [0, n) on the pool's threads and
 /// returns when all are done. Chunks hold at least `grain` items. Nested calls
-/// run inline.
-void ParallelFor(std::size_t n, std::size_t grain,
-                 const std::function<void(std::size_t, std::size_t)>& fn);
+/// run inline, without wrapping `fn` in a std::function (inline calls are
+/// frequent: per row in epilogues and pool tasks).
+template<typename Fn>
+void ParallelFor(std::size_t n, std::size_t grain, Fn&& fn) {
+  if (n == 0)
+    return;
+  if (RunsInline(n, grain)) {
+    fn(std::size_t(0), n);
+    return;
+  }
+  ParallelForPool(n, grain, std::ref(fn));
+}
 /// Within its scope, the calling thread's ParallelFor runs on pool `index`
 /// of `count` pools that share the hardware threads, so `count` threads can
 /// run parallel host work at once without queueing behind each other.
@@ -60,6 +76,10 @@ void LayerNormRows(const float* x, float* y, std::size_t rows, std::size_t dim,
 void RopeNeox(float* x, std::size_t rows, std::size_t row_stride,
               std::size_t heads, std::size_t head_dim, std::size_t rotary,
               const std::int32_t* positions, float theta);
+/// RopeNeox of one row from its position's cos and sin (rotary / 2 each,
+/// float(cos(position * theta^(-2i / rotary))) as RopeNeox computes them).
+void RopeNeoxRow(float* x, std::size_t heads, std::size_t head_dim,
+                 std::size_t rotary, const float* cos, const float* sin);
 
 enum class Activation { kNone, kSilu, kGeluTanh, kGeluErf };
 [[nodiscard]] float Activate(Activation a, float x);
@@ -110,6 +130,10 @@ void EncodeBfp16BlocksBf16(const std::uint16_t* values, std::size_t blocks,
 
 /// x[i] = exp(x[i] - shift); *sum (when set) gets the total. Vectorized.
 void ExpInPlace(float* x, std::size_t n, float shift, float* sum = nullptr);
+/// Softmax of the bf16 row x[lo, hi) in place, the rest of the row's n
+/// values zeroed; `tmp` holds hi - lo floats.
+void SoftmaxRowBf16(std::uint16_t* x, std::size_t n, std::size_t lo,
+                    std::size_t hi, float* tmp);
 
 /// Dot product and y += a x, vectorized.
 [[nodiscard]] float Dot(const float* a, const float* b, std::size_t n);

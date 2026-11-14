@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <map>
 #include <mutex>
@@ -62,6 +63,80 @@ struct Encoder::Impl {
   gufo::npu::BfpGemm gemm;
   // One per concurrent half batch (attention keys and values).
   gufo::npu::BfpGemm::Scratch scratches[kParts];
+  // Per part: attention queries and scores (bf16), kept across layers and
+  // requests: fresh large allocations fault in every page again (Windows
+  // maps and unmaps each one).
+  struct AttentionBuffers {
+    std::vector<std::uint16_t> q, scores;
+  };
+  AttentionBuffers attention_buffers[kParts];
+  // Rotary cos and sin of positions [0, positions) for one (theta, head
+  // size), [position][head size / 2], computed as host::RopeNeox does: once,
+  // not per row and layer.
+  struct RopeTable {
+    float theta{};
+    std::size_t dim{}, positions{};
+    std::vector<float> cos, sin;
+  };
+  std::deque<RopeTable> rope_tables;
+  std::vector<const RopeTable*> layer_rope;  // per layer
+
+  // Grows the layers' tables to `positions` (before the parts start).
+  void PrepareRope(std::size_t positions) {
+    const TextConfig& c = *config;
+    layer_rope.resize(c.num_hidden_layers);
+    for (std::size_t l = 0; l < c.num_hidden_layers; ++l) {
+      const LayerGeometry& g = c.layers[l];
+      RopeTable* t = nullptr;
+      for (RopeTable& r : rope_tables)
+        if (r.theta == g.rope_theta && r.dim == g.head_dim)
+          t = &r;
+      if (!t) {
+        rope_tables.push_back({g.rope_theta, g.head_dim, 0, {}, {}});
+        t = &rope_tables.back();
+      }
+      if (t->positions < positions) {
+        const std::size_t half = t->dim / 2;
+        std::vector<double> inv(half);
+        for (std::size_t i = 0; i < half; ++i)
+          inv[i] = std::pow(double(t->theta), -double(2 * i) / double(t->dim));
+        t->cos.resize(positions * half);
+        t->sin.resize(positions * half);
+        host::ParallelFor(
+            positions - t->positions, 64, [&](std::size_t b, std::size_t e) {
+              for (std::size_t p = t->positions + b; p < t->positions + e; ++p)
+                for (std::size_t i = 0; i < half; ++i) {
+                  const double a = double(p) * inv[i];
+                  t->cos[p * half + i] = float(std::cos(a));
+                  t->sin[p * half + i] = float(std::sin(a));
+                }
+            });
+        t->positions = positions;
+      }
+      layer_rope[l] = t;
+    }
+  }
+
+  // Keys and values of rows [k0, k1) for every KV head, uploaded once for
+  // all the parts of one sequence.
+  struct SharedKv {
+    std::size_t k0{}, k1{};
+    int keys[kMaxHeads]{}, values[kMaxHeads]{};
+  };
+
+  // The upload spec of rows [k0, k1)'s keys (pass 0, [key][dim]) or values
+  // (pass 1, transposed: [dim][key]) of KV head h.
+  static gufo::npu::BfpGemm::Scratch::Spec KvSpec(
+      const std::uint16_t* qkv, std::size_t row_w, std::size_t qw,
+      std::size_t kv, std::size_t hd, std::size_t k0, std::size_t k1, int pass,
+      std::size_t h) {
+    using Spec = gufo::npu::BfpGemm::Scratch::Spec;
+    const std::size_t n = k1 - k0;
+    Spec spec = pass == 0 ? Spec{int(n), int(hd), nullptr, row_w, 1}
+                          : Spec{int(hd), int(n), nullptr, 1, row_w};
+    spec.weights16 = qkv + k0 * row_w + qw + (pass == 0 ? 0 : kv * hd) + h * hd;
+    return spec;
+  }
   LoadResult loaded;
   const TextConfig* config{};
   const std::uint16_t* embed{};
@@ -164,16 +239,18 @@ struct Encoder::Impl {
   // out = P V, with the span's keys and values uploaded per request; the
   // softmax runs on the CPU. `visible(r, lo, hi, &b, &e)` narrows row r's
   // keys within [lo, hi). `qkv` holds every row at stride `row_w`;
-  // `context16` holds rows [row0, row1) at stride `qw`.
+  // `context16` holds rows [row0, row1) at stride `qw`. `reset` drops the
+  // scratch's earlier uploads first (not when it holds `shared_kv`, keys and
+  // values already uploaded for spans of their rows).
   template<typename Visible>
   void NpuAttention(gufo::npu::BfpGemm::Scratch& scratch,
-                    const std::uint16_t* qkv, std::size_t row_w,
-                    std::size_t heads, std::size_t kv, std::size_t hd,
-                    const std::vector<std::size_t>& starts,
+                    AttentionBuffers& buffers, const std::uint16_t* qkv,
+                    std::size_t row_w, std::size_t heads, std::size_t kv,
+                    std::size_t hd, const std::vector<std::size_t>& starts,
                     const std::vector<char>& long_seq, std::size_t row0,
                     std::size_t row1, std::size_t span_rows,
                     const Visible& visible, std::uint16_t* context16,
-                    std::size_t qw) {
+                    std::size_t qw, bool reset, const SharedKv* shared_kv) {
     struct Span {
       std::size_t seq, q0, q1, k0, k1;         // absolute rows
       int keys[kMaxHeads], values[kMaxHeads];  // per KV head
@@ -181,7 +258,7 @@ struct Encoder::Impl {
     struct Item {
       const Span* span;
       std::size_t head;
-      std::vector<std::uint16_t> q, scores;  // bf16
+      std::uint16_t *q, *scores;  // bf16, in `buffers`
     };
     std::vector<Span> spans;
     for (std::size_t s = 0; s + 1 < starts.size(); ++s) {
@@ -212,7 +289,8 @@ struct Encoder::Impl {
     };
     auto t = Clock::now();
     double t_upload, t_qk, t_soft;
-    scratch.Reset();
+    if (reset)
+      scratch.Reset();
     // Keys, then values, one matrix per span and KV head, in span order, so
     // that the calls of one (KV head, query head in its group) pair over the
     // spans use matrices at a constant stride and batch into one NPU job.
@@ -227,8 +305,12 @@ struct Encoder::Impl {
     for (int pass = 0; pass < 2; ++pass)
       for (Span& sp : spans) {
         const std::size_t n = sp.k1 - sp.k0;
-        const std::uint16_t* base = qkv + sp.k0 * row_w + qw;
         int* ids = pass == 0 ? sp.keys : sp.values;
+        if (shared_kv && sp.k0 == shared_kv->k0 && sp.k1 == shared_kv->k1) {
+          const int* src = pass == 0 ? shared_kv->keys : shared_kv->values;
+          std::copy(src, src + kv, ids);
+          continue;
+        }
         if (n > 1024) {
           if (auto it = shared[pass].find({sp.k0, sp.k1});
               it != shared[pass].end()) {
@@ -240,10 +322,8 @@ struct Encoder::Impl {
           shared[pass][{sp.k0, sp.k1}] = &sp;
         }
         for (std::size_t h = 0; h < kv; ++h) {
-          Spec spec = pass == 0 ? Spec{int(n), int(hd), nullptr, row_w, 1}
-                                : Spec{int(hd), int(n), nullptr, 1, row_w};
-          spec.weights16 = base + (pass == 0 ? 0 : kv * hd) + h * hd;
-          specs.push_back(spec);
+          specs.push_back(
+              KvSpec(qkv, row_w, qw, kv, hd, sp.k0, sp.k1, pass, h));
           slot.push_back(&ids[h]);
         }
       }
@@ -255,25 +335,40 @@ struct Encoder::Impl {
     t_upload = ms(t);
     t = Clock::now();
     std::vector<Item> items;
+    std::size_t q_words = 0, s_words = 0;
     for (std::size_t h = 0; h < heads; ++h)
+      for (const Span& sp : spans) {
+        q_words += (sp.q1 - sp.q0) * hd;
+        s_words += (sp.q1 - sp.q0) * (sp.k1 - sp.k0);
+      }
+    Grow(buffers.q, q_words);
+    Grow(buffers.scores, s_words);
+    q_words = s_words = 0;
+    // In the uploads' order (span, then KV head) for each query head of a
+    // KV group: consecutive calls then use consecutive matrices, one batch
+    // per position in the group.
+    for (std::size_t g = 0; g < group_heads; ++g)
       for (const Span& sp : spans)
-        items.push_back({&sp, h, {}, {}});
+        for (std::size_t h = g; h < heads; h += group_heads) {
+          items.push_back({&sp, h, buffers.q.data() + q_words,
+                           buffers.scores.data() + s_words});
+          q_words += (sp.q1 - sp.q0) * hd;
+          s_words += (sp.q1 - sp.q0) * (sp.k1 - sp.k0);
+        }
     // Queries and scores stay bf16 (the NPU rounds them to bf16 anyway).
     host::ParallelFor(items.size(), 1, [&](std::size_t b, std::size_t e) {
       for (std::size_t i = b; i < e; ++i) {
         Item& it = items[i];
         const std::size_t rows = it.span->q1 - it.span->q0;
-        it.q.resize(rows * hd);
         for (std::size_t r = 0; r < rows; ++r)
-          std::memcpy(it.q.data() + r * hd,
+          std::memcpy(it.q + r * hd,
                       qkv + (it.span->q0 + r) * row_w + it.head * hd, hd * 2);
-        it.scores.resize(rows * (it.span->k1 - it.span->k0));
       }
     });
     std::vector<gufo::npu::BfpGemm::Epilogue> epilogues;
     epilogues.reserve(items.size());
     for (Item& it : items) {
-      std::uint16_t* scores = it.scores.data();
+      std::uint16_t* scores = it.scores;
       const std::size_t n = it.span->k1 - it.span->k0;
       epilogues.push_back([scores, n](int r0, int n_rows, int n0, int w,
                                       const std::uint16_t* tile) {
@@ -286,7 +381,7 @@ struct Encoder::Impl {
     for (std::size_t i = 0; i < items.size(); ++i)
       calls.push_back({items[i].span->keys[items[i].head / group_heads],
                        nullptr, int(items[i].span->q1 - items[i].span->q0),
-                       nullptr, items[i].q.data(), &epilogues[i]});
+                       nullptr, items[i].q, &epilogues[i]});
     gemm.Run(calls);
     t_qk = ms(t);
     t = Clock::now();
@@ -304,19 +399,7 @@ struct Encoder::Impl {
           visible(sp.q0 + r, sp.k0, sp.k1, &lo, &hi);
           lo -= sp.k0;
           hi -= sp.k0;
-          std::uint16_t* s16 = it.scores.data() + r * n;
-          host::Bf16ToFloat(s16 + lo, row.data() + lo, hi - lo);
-          float top = -INFINITY;
-          for (std::size_t t = lo; t < hi; ++t)
-            top = std::max(top, row[t]);
-          std::fill(row.begin(), row.begin() + std::ptrdiff_t(lo), 0.0f);
-          std::fill(row.begin() + std::ptrdiff_t(hi), row.end(), 0.0f);
-          float sum = 0;
-          host::ExpInPlace(row.data() + lo, hi - lo, top, &sum);
-          const float inv = 1.0f / sum;
-          for (std::size_t t = lo; t < hi; ++t)
-            row[t] *= inv;
-          host::FloatToBf16(row.data(), s16, n);
+          host::SoftmaxRowBf16(it.scores + r * n, n, lo, hi, row.data());
         }
       }
     });
@@ -340,7 +423,7 @@ struct Encoder::Impl {
     for (std::size_t i = 0; i < items.size(); ++i)
       calls.push_back({items[i].span->values[items[i].head / group_heads],
                        nullptr, int(items[i].span->q1 - items[i].span->q0),
-                       nullptr, items[i].scores.data(), &pv_epilogues[i]});
+                       nullptr, items[i].scores, &pv_epilogues[i]});
     gemm.Run(calls);
     if (profile)
       std::fprintf(stderr,
@@ -371,6 +454,7 @@ struct Encoder::Impl {
     std::vector<std::int32_t> positions;
     std::vector<std::size_t> seq_of;
     std::vector<char> long_seq;
+    SharedKv shared_kv;  // full attention of a sequence split into parts
     std::vector<float> state, qkv[2], context, projected;
     std::vector<std::uint16_t> qkv16[2];
     std::vector<std::uint16_t> normed16, context16, act16, ple16, tmp16;
@@ -440,6 +524,10 @@ struct Encoder::Impl {
     Grow(wk.normed16, rows * hidden);
     Grow(wk.context16, rows * max_q);
     Grow(wk.act16, rows * std::max(inner, per_layer));
+    std::size_t longest = 0;
+    for (std::size_t q = 0; q < seqs; ++q)
+      longest = std::max(longest, starts[q + 1] - starts[q]);
+    PrepareRope(longest);
 
     // Row cuts.
     std::vector<std::size_t> cuts{0};
@@ -707,6 +795,7 @@ struct Encoder::Impl {
                                           normed16, &to_qkv});
       }
       lap(0);
+      const RopeTable& rope = *layer_rope[l];
       // Per-head q/k norms (v: unweighted) and rotary embeddings on q and k,
       // in one pass over the bf16 rows; rows of short sequences (CPU
       // attention) also land as f32.
@@ -719,8 +808,10 @@ struct Encoder::Impl {
           host::RmsNormRows(q, q, heads, hd, w.q_norm.data(), eps);
           host::RmsNormRows(q + qw, q + qw, kv, hd, w.k_norm.data(), eps);
           host::RmsNormRows(q + qw + kw, q + qw + kw, kv, hd, nullptr, eps);
-          host::RopeNeox(q, 1, row_w, heads + kv, hd, hd,
-                         wk.positions.data() + r0 + r, g.rope_theta);
+          const std::size_t pos = std::size_t(wk.positions[r0 + r]);
+          host::RopeNeoxRow(q, heads + kv, hd, hd,
+                            rope.cos.data() + pos * (hd / 2),
+                            rope.sin.data() + pos * (hd / 2));
           host::FloatToBf16(q, r16, row_w);
           if (qkv && !wk.long_seq[wk.seq_of[r0 + r]])
             std::copy(row.begin(), row.end(), qkv + r * stride);
@@ -742,9 +833,36 @@ struct Encoder::Impl {
         *b = lo;
         *e = hi;
       };
+      // A sequence split into parts: its full-attention keys and values are
+      // the same for every part, so part 0 encodes them once on every CPU
+      // thread while the other parts wait.
+      const bool share =
+          sync && !windowed && starts.size() == 2 && wk.long_seq[0];
+      if (share) {
+        if (lane == 0) {
+          const host::SharePool all(0, 1);
+          scratches[0].Reset();
+          SharedKv& skv = wk.shared_kv;
+          skv.k0 = starts[0];
+          skv.k1 = starts[1];
+          std::vector<gufo::npu::BfpGemm::Scratch::Spec> specs;
+          for (int pass = 0; pass < 2; ++pass)
+            for (std::size_t h = 0; h < kv; ++h)
+              specs.push_back(KvSpec(qkv16_all, stride, qw, kv, hd, skv.k0,
+                                     skv.k1, pass, h));
+          const std::vector<int> ids = scratches[0].UploadMany(specs);
+          std::copy(ids.begin(), ids.begin() + std::ptrdiff_t(kv), skv.keys);
+          std::copy(ids.begin() + std::ptrdiff_t(kv), ids.end(), skv.values);
+        }
+        sync->arrive_and_wait();
+        if (stop)
+          return;
+      }
       // Long sequences: QK^T and PV on the NPU, the softmax on the CPU.
-      NpuAttention(scratches[lane], qkv16_all, stride, heads, kv, hd, starts,
-                   wk.long_seq, r0, r1, wk.span, visible, context16, qw);
+      NpuAttention(scratches[lane], attention_buffers[lane], qkv16_all, stride,
+                   heads, kv, hd, starts, wk.long_seq, r0, r1, wk.span, visible,
+                   context16, qw, !(share && lane == 0),
+                   share ? &wk.shared_kv : nullptr);
       if (qkv)
         host::Attention(
             {.q = qkv,

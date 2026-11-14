@@ -108,6 +108,9 @@ struct Lane {
 struct Region {
   std::size_t begin, end, cursor;  // arena words
   std::vector<Matrix> matrices;
+  // UploadMany's f32 rows of gathered views, kept: fresh large allocations
+  // fault in every page again.
+  std::vector<float> staging;
 };
 
 Matrix Shape(int n, int k) {
@@ -190,26 +193,35 @@ struct BfpGemm::Impl {
                      .count();
   }
 
-  // Packs matrix `m` (placed at m.b_words) from row-major f32 rows
-  // w[o * ld + i] into the arena.
-  // Encodes tile t (of 8 groups kb) of matrix `m` from rows w[o * ld + i].
-  void EncodeTile(const Matrix& m, const float* w, std::size_t ld,
-                  std::size_t t, std::uint8_t* tile) {
+  // Where tile t (of 8 groups kb) of matrix `m` lies in the arena, its K
+  // block `lr` and output tile `lc`; null when the tile is all padding (then
+  // zeroed).
+  std::uint8_t* TileAt(const Matrix& m, std::size_t t, int* lr, int* lc) {
     const int kb = m.kp / kKb;
-    const int lr = int(t % std::size_t(kb));
+    *lr = int(t % std::size_t(kb));
     const int cg = int(t / std::size_t(kb));
     const int col = cg / m.groups, g = cg % m.groups;
-    const int lc = 8 * g + col;
+    *lc = 8 * g + col;
     auto* base = reinterpret_cast<std::uint8_t*>(arena.data()) + m.b_words * 4;
     std::uint8_t* out =
         base + ((std::size_t(col) * std::size_t(m.groups) + std::size_t(g)) *
                     std::size_t(kb) +
-                std::size_t(lr)) *
+                std::size_t(*lr)) *
                    kTileWords * 4;
-    if (lc * 128 >= m.n || lr * kKb >= m.k) {  // all padding
+    if (*lc * 128 >= m.n || *lr * kKb >= m.k) {  // all padding
       std::memset(out, 0, kTileWords * 4);
-      return;
+      return nullptr;
     }
+    return out;
+  }
+
+  // Encodes tile t (of 8 groups kb) of matrix `m` from rows w[o * ld + i].
+  void EncodeTile(const Matrix& m, const float* w, std::size_t ld,
+                  std::size_t t, std::uint8_t* tile) {
+    int lr, lc;
+    std::uint8_t* out = TileAt(m, t, &lr, &lc);
+    if (!out)
+      return;
     std::uint8_t* dst = tile;
     float v[8];
     // [superblock 8][block row 8][b 2][c 8]: 8 consecutive k at one n.
@@ -239,6 +251,47 @@ struct BfpGemm::Impl {
               v[r] = (nn < m.n && k0 + r < m.k) ? src[r] : 0.0f;
             EncodeBlock(v, dst);
           }
+      }
+    std::memcpy(out, tile, kTileWords * 4);
+  }
+
+  // As EncodeTile, from bf16 elements w[o * rs + i * cs]: rows (cs = 1) or a
+  // transposed view (rs = 1), encoded without an f32 copy of the matrix.
+  void EncodeTileBf16(const Matrix& m, const std::uint16_t* w, std::size_t rs,
+                      std::size_t cs, std::size_t t, std::uint8_t* tile) {
+    int lr, lc;
+    std::uint8_t* out = TileAt(m, t, &lr, &lc);
+    if (!out)
+      return;
+    std::uint8_t* dst = tile;
+    float v[16][8];  // 16 outputs by 8 inputs: one block row
+    for (int sb = 0; sb < 8; ++sb)
+      for (int br = 0; br < 8; ++br, dst += 16 * 9) {
+        const int k0 = lr * kKb + br * 8;
+        const int nn0 = lc * 128 + sb * 16;
+        const bool full = nn0 + 16 <= m.n && k0 + 8 <= m.k;
+        if (full && cs == 1) {
+          for (int j = 0; j < 16; ++j)
+            host::Bf16ToFloat(w + std::size_t(nn0 + j) * rs + std::size_t(k0),
+                              v[j], 8);
+        } else if (full && rs == 1) {
+          // 8 runs of 16 consecutive outputs, one per input.
+          float run[8][16];
+          for (int i = 0; i < 8; ++i)
+            host::Bf16ToFloat(w + std::size_t(nn0) + std::size_t(k0 + i) * cs,
+                              run[i], 16);
+          for (int j = 0; j < 16; ++j)
+            for (int i = 0; i < 8; ++i)
+              v[j][i] = run[i][j];
+        } else {
+          for (int j = 0; j < 16; ++j)
+            for (int i = 0; i < 8; ++i)
+              v[j][i] = nn0 + j < m.n && k0 + i < m.k
+                            ? host::Bf16ToFloat(w[std::size_t(nn0 + j) * rs +
+                                                  std::size_t(k0 + i) * cs])
+                            : 0.0f;
+        }
+        host::EncodeBfp16Blocks(v[0], 16, dst, 9, 8);
       }
     std::memcpy(out, tile, kTileWords * 4);
   }
@@ -528,7 +581,12 @@ struct BfpGemm::Impl {
               std::uint8_t* out = chunk + (kb * subs + sub) * 2304 +
                                   (rp * 16 + half) * 72 + rr * 9;
               const std::size_t k0 = q * kKc + kb * kKb;
-              if (live && k0 + kKb <= k) {
+              if (!live || k0 >= k) {  // padding: zero blocks
+                for (std::size_t b = 0; b < 8; ++b)
+                  std::memset(out + b * 144, 0, 9);
+                continue;
+              }
+              if (k0 + kKb <= k) {
                 if (call.x16)
                   host::EncodeBfp16BlocksBf16(call.x16 + at + k0, 8, out, 144);
                 else
@@ -833,9 +891,11 @@ std::vector<int> BfpGemm::Scratch::UploadMany(std::span<const Spec> specs) {
   std::vector<Matrix> mats;
   std::vector<int> ids;
   std::size_t first = 0, last = 0;
+  Region* region;
   {
     std::lock_guard lock(m.mutex);
     Region& r = m.regions.at(std::size_t(index_));
+    region = &r;
     first = r.cursor;
     for (const Spec& sp : specs) {
       if (sp.n <= 0 || sp.k <= 0)
@@ -854,35 +914,31 @@ std::vector<int> BfpGemm::Scratch::UploadMany(std::span<const Spec> specs) {
     }
     last = r.cursor;
   }
-  // Transposed views are gathered into rows first.
-  std::vector<std::vector<float>> rows(specs.size());
-  std::vector<std::size_t> transposed;
+  // bf16 views encode straight from their elements; transposed f32 views
+  // are gathered into rows first (into the region's staging, which only this
+  // scratch's thread uses).
+  std::vector<float*> rows(specs.size());
+  std::vector<std::size_t> transposed, at(specs.size());
+  std::size_t staged = 0;
   for (std::size_t i = 0; i < specs.size(); ++i)
-    if ((specs[i].col_stride != 1 || specs[i].weights16) &&
-        specs[i].same_as < 0)
+    if (specs[i].col_stride != 1 && !specs[i].weights16 &&
+        specs[i].same_as < 0) {
       transposed.push_back(i);
+      at[i] = staged;
+      staged += std::size_t(specs[i].n) * std::size_t(specs[i].k);
+    }
+  if (region->staging.size() < staged)
+    region->staging.resize(staged);
+  for (std::size_t i : transposed)
+    rows[i] = region->staging.data() + at[i];
   host::ParallelFor(transposed.size(), 1, [&](std::size_t lo, std::size_t hi) {
     for (std::size_t t = lo; t < hi; ++t) {
       const Spec& sp = specs[transposed[t]];
-      auto& out = rows[transposed[t]];
+      float* out = rows[transposed[t]];
       const std::size_t n = std::size_t(sp.n), k = std::size_t(sp.k);
-      out.resize(n * k);
-      if (sp.weights16 && sp.col_stride == 1) {
+      for (std::size_t i = 0; i < k; ++i)
         for (std::size_t o = 0; o < n; ++o)
-          host::Bf16ToFloat(sp.weights16 + o * sp.row_stride, &out[o * k], k);
-      } else if (sp.weights16) {
-        // Transposed bf16 (values: [key][dim] read as [dim][key]): blocks of
-        // 8 x 64 keep the reads near each other.
-        for (std::size_t i0 = 0; i0 < k; i0 += 8)
-          for (std::size_t o = 0; o < n; ++o)
-            for (std::size_t i = i0; i < std::min(k, i0 + 8); ++i)
-              out[o * k + i] = host::Bf16ToFloat(
-                  sp.weights16[o * sp.row_stride + i * sp.col_stride]);
-      } else {
-        for (std::size_t i = 0; i < k; ++i)
-          for (std::size_t o = 0; o < n; ++o)
-            out[o * k + i] = sp.weights[o * sp.row_stride + i * sp.col_stride];
-      }
+          out[o * k + i] = sp.weights[o * sp.row_stride + i * sp.col_stride];
     }
   });
   std::vector<std::size_t> start(specs.size() + 1, 0);
@@ -896,10 +952,13 @@ std::vector<int> BfpGemm::Scratch::UploadMany(std::span<const Spec> specs) {
       while (t >= start[i + 1])
         ++i;
       const Spec& sp = specs[i];
-      const bool tr = sp.col_stride != 1 || sp.weights16;
-      m.EncodeTile(mats[i], tr ? rows[i].data() : sp.weights,
-                   tr ? std::size_t(sp.k) : sp.row_stride, t - start[i],
-                   tile.data());
+      if (sp.weights16)
+        m.EncodeTileBf16(mats[i], sp.weights16, sp.row_stride, sp.col_stride,
+                         t - start[i], tile.data());
+      else
+        m.EncodeTile(mats[i], rows[i] ? rows[i] : sp.weights,
+                     rows[i] ? std::size_t(sp.k) : sp.row_stride, t - start[i],
+                     tile.data());
     }
   });
   auto* base = reinterpret_cast<std::uint8_t*>(m.arena.data());
