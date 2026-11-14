@@ -125,18 +125,24 @@ def main():
         status, body = post(inputs)
         assert status == 200, body
         check(body, probes)
+        batched = [item['embedding'] for item in body['data']]
         # Image budgets must not change the distinct 140-token video default.
         # Explicit default-image options also preserve the joint multimodal
-        # reference, including both placeholder kinds in one input.
+        # reference, including both placeholder kinds in one input. Each input
+        # alone matches its vector in the batch above.
         for budget in (70, 1120):
             status, body = post([content(cases['short'])],
                                 mm_processor_kwargs={'max_soft_tokens': budget})
             assert status == 200, body
             check(body, [cases['short']])
+            agreement = cosine(body['data'][0]['embedding'], batched[2])
+            assert agreement >= THRESHOLDS["consistency"], ('short alone', agreement)
         status, body = post([content(cases['mixed'])],
                             mm_processor_kwargs={'max_soft_tokens': 280})
         assert status == 200, body
         check(body, [cases['mixed']])
+        agreement = cosine(body['data'][0]['embedding'], batched[3])
+        assert agreement >= THRESHOLDS["consistency"], ('mixed alone', agreement)
         if not args.smoke:
             for case in fixture['cases']:
                 status, body = post([content(case)], video_options=case['options'])

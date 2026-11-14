@@ -38,8 +38,7 @@ FIXTURES = HERE.parent / "fixtures"
 AUDIO = HERE / "fixtures" / "audio"
 MINIMUM_EMBEDDING_COSINE = 0.9999
 # The NPU rounds every matrix product to bfp16 (worst measured 0.99894 on the
-# embedding fixtures; these short texts don't reach NPU attention, so the
-# batching race noted in model_services.py doesn't apply).
+# embedding fixtures).
 MINIMUM_NPU_EMBEDDING_COSINE = 0.998
 MAXIMUM_ASR_WER = 0.15
 MAXIMUM_TTS_WER = 0.25

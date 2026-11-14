@@ -163,7 +163,8 @@ struct Encoder::Impl {
   // up to 512 rows and head, scores = Q K^T over the band's key span and
   // out = P V, with the span's keys and values uploaded per request; the
   // softmax runs on the CPU. `visible(r, lo, hi, &b, &e)` narrows row r's
-  // keys within [lo, hi).
+  // keys within [lo, hi). `qkv` holds every row at stride `row_w`;
+  // `context16` holds rows [row0, row1) at stride `qw`.
   template<typename Visible>
   void NpuAttention(gufo::npu::BfpGemm::Scratch& scratch,
                     const std::uint16_t* qkv, std::size_t row_w,
@@ -326,7 +327,7 @@ struct Encoder::Impl {
     std::vector<gufo::npu::BfpGemm::Epilogue> pv_epilogues;
     pv_epilogues.reserve(items.size());
     for (Item& it : items) {
-      const std::size_t q0 = it.span->q0, col = it.head * hd;
+      const std::size_t q0 = it.span->q0 - row0, col = it.head * hd;
       pv_epilogues.push_back(
           [context16, q0, col, qw](int r0, int n_rows, int n0, int w,
                                    const std::uint16_t* tile) {
@@ -358,10 +359,14 @@ struct Encoder::Impl {
   // One request's state, shared by its parts: each part owns a range of
   // rows and only reads other rows' keys and values (qkv, double-buffered by
   // layer parity so a part can start the next layer while another still
-  // attends to this one).
+  // attends to this one). Row widths differ between layers (full attention
+  // has its own head size), and parts of different sequences run their
+  // layers independently, so per-layer rows keep a fixed place: qkv rows at
+  // stride qkv_stride, a part's context rows from r0 * max_q.
   struct Work {
     const std::uint32_t* tokens{};
-    std::size_t span{};  // query rows per NPU attention span
+    std::size_t span{};                 // query rows per NPU attention span
+    std::size_t max_q{}, qkv_stride{};  // widest q and q/k/v row of a layer
     std::vector<std::size_t> starts;
     std::vector<std::int32_t> positions;
     std::vector<std::size_t> seq_of;
@@ -411,22 +416,24 @@ struct Encoder::Impl {
     wk.long_seq.assign(seqs, 0);
     for (std::size_t q = 0; q < seqs; ++q)
       wk.long_seq[q] = starts[q + 1] - starts[q] >= kNpuAttentionRows;
-    std::size_t max_q = 0, max_kv = 0;
+    std::size_t max_q = 0, max_row = 0;
     for (const auto& g : c.layers) {
       max_q = std::max<std::size_t>(max_q, heads * g.head_dim);
-      max_kv =
-          std::max<std::size_t>(max_kv, g.num_key_value_heads * g.head_dim);
+      max_row = std::max<std::size_t>(
+          max_row, (heads + 2 * g.num_key_value_heads) * g.head_dim);
     }
+    wk.max_q = max_q;
+    wk.qkv_stride = max_row;
     Grow(wk.state, rows * hidden);
     Grow(wk.ple16, rows * layers_n * per_layer);
     for (auto& q : wk.qkv16)
-      Grow(q, rows * (max_q + 2 * max_kv));
+      Grow(q, rows * max_row);
     bool any_short = false;
     for (std::size_t q = 0; q < seqs; ++q)
       any_short |= !wk.long_seq[q];
     if (any_short)  // CPU attention reads f32 rows
       for (auto& q : wk.qkv)
-        Grow(q, rows * (max_q + 2 * max_kv));
+        Grow(q, rows * max_row);
     Grow(wk.context, rows * max_q);
     Grow(wk.tmp16, rows * hidden);
     Grow(wk.projected, rows * c.embedding_dim);
@@ -684,17 +691,18 @@ struct Encoder::Impl {
       const LayerGeometry& g = c.layers[l];
       const std::size_t hd = g.head_dim, kv = g.num_key_value_heads;
       const std::size_t qw = heads * hd, kw = kv * hd, row_w = qw + 2 * kw;
+      const std::size_t stride = wk.qkv_stride;
       std::uint16_t* qkv16_all = wk.qkv16[l % 2].data();
-      std::uint16_t* qkv16 = qkv16_all + r0 * row_w;
+      std::uint16_t* qkv16 = qkv16_all + r0 * stride;
       float* qkv_all = wk.qkv[l % 2].data();  // short sequences only
-      float* qkv = qkv_all ? qkv_all + r0 * row_w : nullptr;
-      float* context = wk.context.data() + r0 * qw;
-      std::uint16_t* context16 = wk.context16.data() + r0 * qw;
+      float* qkv = qkv_all ? qkv_all + r0 * stride : nullptr;
+      float* context = wk.context.data() + r0 * wk.max_q;
+      std::uint16_t* context16 = wk.context16.data() + r0 * wk.max_q;
       host::RmsNormRowsBf16(state, normed16, rows, hidden, w.input_norm.data(),
                             eps);
       lap(6);
       {
-        const Epilogue to_qkv = copy_to(qkv16, row_w);
+        const Epilogue to_qkv = copy_to(qkv16, stride);
         gemm.Run(gufo::npu::BfpGemm::Call{w.qkv, nullptr, int(rows), nullptr,
                                           normed16, &to_qkv});
       }
@@ -705,7 +713,7 @@ struct Encoder::Impl {
       host::ParallelFor(rows, 16, [&](std::size_t b, std::size_t e) {
         std::vector<float> row(row_w);
         for (std::size_t r = b; r < e; ++r) {
-          std::uint16_t* r16 = qkv16 + r * row_w;
+          std::uint16_t* r16 = qkv16 + r * stride;
           host::Bf16ToFloat(r16, row.data(), row_w);
           float* q = row.data();
           host::RmsNormRows(q, q, heads, hd, w.q_norm.data(), eps);
@@ -715,7 +723,7 @@ struct Encoder::Impl {
                          wk.positions.data() + r0 + r, g.rope_theta);
           host::FloatToBf16(q, r16, row_w);
           if (qkv && !wk.long_seq[wk.seq_of[r0 + r]])
-            std::copy(row.begin(), row.end(), qkv + r * row_w);
+            std::copy(row.begin(), row.end(), qkv + r * stride);
         }
       });
       lap(1);
@@ -735,17 +743,16 @@ struct Encoder::Impl {
         *e = hi;
       };
       // Long sequences: QK^T and PV on the NPU, the softmax on the CPU.
-      NpuAttention(scratches[lane], qkv16_all, row_w, heads, kv, hd, starts,
-                   wk.long_seq, r0, r1, wk.span, visible, wk.context16.data(),
-                   qw);
+      NpuAttention(scratches[lane], qkv16_all, stride, heads, kv, hd, starts,
+                   wk.long_seq, r0, r1, wk.span, visible, context16, qw);
       if (qkv)
         host::Attention(
             {.q = qkv,
-             .q_stride = row_w,
+             .q_stride = stride,
              .k = qkv_all + qw,
-             .k_stride = row_w,
+             .k_stride = stride,
              .v = qkv_all + qw + kw,
-             .v_stride = row_w,
+             .v_stride = stride,
              .out = context,
              .out_stride = qw,
              .rows = rows,
