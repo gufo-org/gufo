@@ -186,8 +186,24 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
    control 214.05/213.64 — still -6 %..-11 %. `rocprofv3` split
    (`/tmp/opencode/prof_kda2` vs `_prof_a2c`): the fetch restructure
    alone costs +22 % on the geometry-untouched Q8 `<272>` kernel, and
-   the widening adds the rest (`<176>` +23.8 %, `<210>` +93 %). Both
-   experiments reverted in full; only the dword decode survives.
+    the widening adds the rest (`<176>` +23.8 %, `<210>` +93 %). Both
+    experiments reverted in full; only the dword decode survives.
+- P3h routed WMMA 64-slot down tiles (`kTileTokens` as template `kTok`,
+   `RoutedWmmaKernel<98,100,1,64>` fed by a third 64-row tile height from
+   `BuildRoutedTiles`): the per-element order is unchanged, so the run is
+   bit-exact (contract NMSE + deterministic replay passed, n-gen-1 sha
+   unchanged) and halved the down weight re-reads - expert buckets average
+   ~57 slots, so one 64-tile usually covers a whole bucket. pp2048
+   211.35/211.11 vs alternating control 218.35/219.03 (-3.4 %). Kernel
+   metadata (`/tmp/opencode/asm4`): `kActPer` 4->8 (a_src+a_data +28 VGPR)
+   and 2 extra live `v8f` tiles push the kernel to VGPR 256 with 23 spills
+   (LDS 46592); under `rocprofv3` (`/tmp/opencode/prof_a1d64` vs
+   `prof_kda2`, one prefill pass) `<98,100,1,64>` ran mean 32.45 ms /
+   2531 ms/pass vs 24.74 ms / 1447 ms/pass for `<98,100,1>`: +75 % total
+   time for half the weight bytes. Routed IQ WMMA is compute-bound
+   (decode VALU), not weight-re-read-bound, so the widening class is
+   closed for this tier too; the gate/up stacks have less VGPR headroom
+   still (224 at 32) and were not built. Reverted in full.
 
 ## Profiled (rocprofv3, serve workload)
 

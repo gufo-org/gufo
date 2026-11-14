@@ -114,14 +114,14 @@ levers, exact-default ladder (A) then opt-in fast track (B):
 
 **A. Exact-default levers (measured-share order, ladder to ~280-310)**
 
-1. Routed IQ WMMA headroom (2.7 s/pass): `RoutedWmmaKernel<66,68,2>` /
-   `<56,60,2>` runs 41-43 ms at only `blocks=16x791` (half-full waves)
-   while `<98,100,1>` averages 24 ms. Re-tile for gfx1151 wave occupancy
-   (wider C tiles / split-K over the 791 expert-stack dim so both waves
-   of a CU carry work), keep the verified C-fragment layout and the
-   `rocm_routed_wmma` NMSE contract. 64 `GemvRoutedSuper256` calls at
-   136 ms each (0.8 s) sit on the same stage for non-bucket shapes.
-   Target 1.2-1.4x (−0.5…−0.9 s, +5-9 %).
+1. (Closed 2026-11-14: the token-widening form ran +31 % per dispatch at
+   VGPR 256 with 23 spills - see EXPERIMENTS P3h. Weight re-reads
+   halved while the kernel got 1.75x slower: routed IQ WMMA is
+   compute-bound on the IQ decode VALU - its mix already shows 4.3 k
+   VALU per 64 `v_wmma` - and every tiling form that re-reads fewer
+   weight bytes pays it back in `kActPer`/accumulator VGPRs at the hard
+   256 limit. The split-K occupancy sub-idea inherits the same
+   verdict: no VALU saving.) Routed IQ WMMA headroom (2.7 s/pass).
 2. (Shipped 2026-11-14 in part: the dword-trick decode +1.2-1.7 %
    pp2048 / +2.8 % pp16384 — see EXPERIMENTS "Q5_K wmma fragment dword
    decode"; the nibble→F16 pair tables and all wider-staging variants
@@ -181,8 +181,8 @@ levers, exact-default ladder (A) then opt-in fast track (B):
 
 Order of attack: A5 (bit-exact, cheapest, shrinks the last per-token
 loop) → A3 → A2 (decode shipped, staging variants rejected) → A1
-(current) → A6 → A4, then promote B behind one fast-profile
-flag with its own gate row in BENCHMARKS.md.
+(rejected 2026-11-14, compute-bound) → A6 (current) → A4, then promote
+B behind one fast-profile flag with its own gate row in BENCHMARKS.md.
 
 Gate: pp2048 ≥ 0.9× and tg32 ≥ 1.0× the Phase-0 llama.gl baseline with
 fixtures byte-identical (or the recorded oracle budget re-approved).
