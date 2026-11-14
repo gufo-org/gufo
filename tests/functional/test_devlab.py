@@ -18,6 +18,16 @@ import report
 import phases
 import service_phases
 
+NPU_MODELS = {'embedding-gemma2-npu', 'qwen3-asr-npu', 'qwen3-tts-custom-npu'}
+
+
+def without_npu(data):
+    """The registry without its NPU variants, for checks of generic behavior."""
+    data = {**data, 'models': {key: model for key, model in data['models'].items() if not model.get('npu')}}
+    data['rules'] = [{**rule, 'owners': [owner for owner in rule['owners'] if owner not in NPU_MODELS]}
+                     for rule in data['rules']]
+    return data
+
 
 class PlanTest(unittest.TestCase):
     def setUp(self):
@@ -82,26 +92,47 @@ class PlanTest(unittest.TestCase):
         # cmake/Checks.cmake lists the hosted CPU suite, which CI runs itself.
         self.assertEqual(self.models('cmake/Checks.cmake'), set())
         self.assertEqual(self.models('cmake/Checks.cmake', 'src/models/embedding_gemma2/hip/ops.hip'),
-                         {'embedding-gemma2'})
+                         {'embedding-gemma2', 'embedding-gemma2-npu'})
         self.assertEqual(self.models('cmake/toolchains/windows-therock.cmake'), self.models('CMakeLists.txt'))
         # Its CPU test sources need no model either; the code they test still selects.
         self.assertEqual(self.models('tests/cli/openai_chat_test.cpp', 'tests/cli/http_server_test.cpp'), set())
         self.assertEqual(self.models('tests/cli/openai_chat_test.cpp', 'src/cli/serve/openai_chat.cpp'),
                          {'flash-next-q4'})
-        self.assertEqual(self.models('tests/cli/audio_websocket_test.cpp'), {'qwen3-asr', 'qwen3-tts-base'})
+        self.assertEqual(self.models('tests/cli/audio_websocket_test.cpp'),
+                         {'qwen3-asr', 'qwen3-tts-base', 'qwen3-asr-npu', 'qwen3-tts-custom-npu'})
         self.assertEqual(self.models('tests/cli/unlisted_test.cpp'), self.models('CMakeLists.txt'))
 
     def test_category_and_fixture_ownership(self):
         for path, expected in [
-            ('src/models/embedding_gemma2/hip/ops.hip', {'embedding-gemma2'}),
-            ('src/cli/serve/audio_asr_api.cpp', {'qwen3-asr'}),
-            ('src/models/qwen3_tts/hip/synthesis_runtime.cpp', {'qwen3-tts-base'}),
-            ('tests/functional/fixtures/audio/clear-english-voice.wav', {'qwen3-asr', 'qwen3-tts-base'}),
+            ('src/models/embedding_gemma2/hip/ops.hip', {'embedding-gemma2', 'embedding-gemma2-npu'}),
+            ('src/cli/serve/audio_asr_api.cpp', {'qwen3-asr', 'qwen3-asr-npu'}),
+            ('src/models/qwen3_tts/hip/synthesis_runtime.cpp', {'qwen3-tts-base', 'qwen3-tts-custom-npu'}),
+            ('tests/functional/fixtures/audio/clear-english-voice.wav',
+             {'qwen3-asr', 'qwen3-tts-base', 'qwen3-asr-npu', 'qwen3-tts-custom-npu'}),
+            ('src/core/npu/bfp_gemm.cpp', NPU_MODELS),
             ('src/models/qwen_image_21/hip/denoise.hip', {'qwen-image-turbo'}),
             ('src/cli/serve/image_api.cpp', {'qwen-image-turbo'})]:
             self.assertEqual(self.models(path), expected)
         self.assertEqual(self.models('docs/server.md'), set())
         self.assertEqual(self.models('src/models/minimax_h3/runtime.cpp'), set())
+
+    def test_npu_variants_run_beside_their_models(self):
+        plan = self.plan('src/core/npu/host_ops.cpp')
+        self.assertEqual({group['profile'] for group in plan['groups']},
+                         {'embedding-gemma2-npu/npu', 'qwen3-asr-npu/npu', 'qwen3-tts-custom-npu/npu'})
+        embedding = [g for g in plan['groups'] if g['profile'].startswith('embedding')][0]
+        self.assertEqual(embedding['suites'], ['embedding-smoke'])
+        args = devlab_run.service_args('qwen3-asr-npu', Path('/head'), Path('/base'),
+                                       {'asr': '/asr'}, Path('/out'))
+        self.assertEqual(args[-1], '--npu')
+        self.assertNotIn('--npu', devlab_run.service_args('qwen3-asr', Path('/head'), Path('/base'),
+                                                          {'asr': '/asr'}, Path('/out')))
+        # The speed arms serve the same NPU configuration as the correctness run.
+        assets = {'asr': '/asr'}
+        self.assertEqual(devlab_models.service_command('qwen3-asr-npu', Path('/gufo'), assets,
+                                                       Path('/audio'), 'phases')[-1], '--npu')
+        self.assertNotIn('--npu', devlab_models.service_command('qwen3-asr', Path('/gufo'), assets,
+                                                                Path('/audio'), 'phases'))
 
     def test_embedding_smoke_and_full_coverage(self):
         pr = self.plan('src/models/embedding_gemma2/video_processor.cpp')
@@ -112,7 +143,7 @@ class PlanTest(unittest.TestCase):
 
     def test_full_tts_and_optional_ar(self):
         self.assertEqual(self.models('src/models/qwen3_tts/config.cpp', tier='full'),
-                         {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design'})
+                         {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design', 'qwen3-tts-custom-npu'})
         self.assertEqual(self.plan('src/models/qwen_image_21/image.cpp')['groups'][0]['suites'], ['image-smoke'])
         image = self.plan('src/models/qwen_image_21/image.cpp', tier='full')
         self.assertEqual({model['id'] for model in image['models']}, {'qwen-image-turbo', 'qwen-image'})
@@ -131,7 +162,7 @@ class PlanTest(unittest.TestCase):
 
     def test_dependency_downloads_are_plan_scoped(self):
         self.assertEqual(devlab_models.asset_keys(self.plan('src/cli/serve/audio_tts_api.cpp'), self.data),
-                         ['asr', 'tts-base'])
+                         ['asr', 'tts-base', 'tts-custom'])
         self.assertEqual(devlab_models.asset_keys(self.plan('src/models/deepseek_v4_flash/model.cpp'), self.data),
                          ['deepseek4', 'dspark'])
         self.assertEqual(devlab_models.asset_keys(self.plan('src/cli/serve/image_service.cpp'), self.data),
@@ -187,7 +218,7 @@ class ExecutionTest(unittest.TestCase):
 
     def test_model_failure_does_not_hide_other_models_or_speed(self):
         plan = devlab_plan.select(['src/cli/serve/audio_asr_api.cpp', 'src/cli/serve/audio_tts_api.cpp'],
-                                  devlab_models.registry())
+                                  without_npu(devlab_models.registry()))
         plan.update(base='a'*40, head='b'*40)
         calls = []
         def run(args, **kwargs):
@@ -278,8 +309,49 @@ class TimingTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 service_phases.number(value, 'duration_ms')
 
+    def test_npu_fallback_fails_the_timing_arm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'server.log'
+            log.write_text('[INFO] npu: qwen3dec ready\n')
+            self.assertEqual(service_phases.npu_fallbacks(log), [])
+            log.write_text('[WARN] npu: qwen3dec unavailable (busy); decoding on the CPU\n')
+            self.assertEqual(len(service_phases.npu_fallbacks(log)), 1)
+
+    def test_base_without_npu_yields_pr_only_observations(self):
+        reason = 'base binary has no --npu; PR-only NPU timings'
+        arms = [arm if arm['revision'] == 'head' else {'revision': 'base', 'unsupported': reason}
+                for arm in self.arms()]
+        found, diverged = service_phases.summarize(arms)
+        self.assertFalse(diverged)
+        self.assertTrue(found)
+        for phase in found:
+            self.assertEqual(phase['base'], [None, None])
+            self.assertEqual((phase['verdict'], phase['checked'], phase['advisory_reason']),
+                             ('missing', False, reason))
+        short = next(phase for phase in found if phase['key'] == 'short.server_ms')
+        self.assertEqual(short['head'], [120, 120])
+        plan = devlab_plan.select(['src/core/npu/host_ops.cpp'], devlab_models.registry())
+        plan.update(base='a'*40, head='b'*40, models=[m for m in plan['models'] if m['id'] == 'qwen3-asr-npu'],
+                    groups=[g for g in plan['groups'] if g['profile'].startswith('qwen3-asr-npu')])
+        row = {**plan['groups'][0], 'status': 'passed'}
+        summary = {'groups': [row], 'models': [{'id': 'qwen3-asr-npu', 'correctness': 'passed', 'timing': 'passed'}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = {'revisions': {'base': plan['base'], 'head': plan['head']}, 'arms': arms, 'phases': found,
+                    'diverged': diverged, 'settings': {'repeats': 2, 'slowdown': .05, 'noise_ms': 10,
+                    'requests': service_phases.REQUESTS}, 'wall_s': 1}
+            (root/'qwen3-asr-npu.phases.json').write_text(json.dumps(data))
+            args = type('Args', (), {'authorize': 'success', 'smoke': 'success', 'benchmark': False,
+                                    'results': root, 'run_url': 'https://run'})()
+            self.assertEqual(report.timing_state(data), 'observations')
+            state, description, comment = report.render_models(args, plan, summary)
+            self.assertEqual(state, 'success')
+            self.assertIn('timing observations retained', description)
+            self.assertIn(reason, comment)
+            self.assertIn('— → 120 ms', comment)
+
     def test_report_does_not_pass_missing_models_or_speed(self):
-        plan = devlab_plan.select(['src/cli/serve/audio_asr_api.cpp'], devlab_models.registry())
+        plan = devlab_plan.select(['src/cli/serve/audio_asr_api.cpp'], without_npu(devlab_models.registry()))
         plan.update(base='a'*40, head='b'*40)
         row = {**plan['groups'][0], 'status': 'passed'}
         summary = {'groups': [row], 'models': [{'id': 'qwen3-asr', 'correctness': 'passed', 'timing': 'passed'}]}

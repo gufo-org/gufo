@@ -7,6 +7,10 @@ namespace {
 std::uint32_t words[4];
 }
 
+extern "C" const char* dispatch_abi() {
+  return "int32_t,int32_t";
+}
+
 extern "C" std::int64_t dispatch_generate(std::int32_t token,
                                           std::int32_t position,
                                           std::uint32_t** out) {

@@ -77,6 +77,16 @@ class ArtifactTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'wrong revision'):
                     artifact.verify(root, 'a' * 40)
 
+    def test_missing_npu_program_fails_before_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, manifest = self.fixture(directory)
+            manifest['npu_artifacts'] = ['qwen3pre/qwen3pre_512.bin']
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            with patch.object(artifact, 'output') as execute:
+                with self.assertRaisesRegex(ValueError, 'Missing or empty NPU artifact'):
+                    artifact.verify(root, 'a' * 40)
+                execute.assert_not_called()
+
     def test_share_copy_is_removable(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'store/share'

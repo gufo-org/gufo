@@ -20,6 +20,12 @@ import numpy as np
 from PIL import Image
 
 
+
+# Cosine gates: against the reference vectors, and between responses that
+# must agree (batching, truncation, encodings). Backends with lower-precision
+# arithmetic (--npu) pass measured values on the command line.
+THRESHOLDS = {"reference": 0.9999, "consistency": 0.99999}
+
 def picture(spec, mode="RGB", encoding="PNG"):
     y, x, c = np.indices((spec["height"], spec["width"], 3), dtype=np.int64)
     rgb = ((x * 17 + y * 31 + c * 67 + (x * y + spec["seed"] * 13) % 251) % 256).astype(np.uint8)
@@ -38,7 +44,12 @@ def main():
     parser.add_argument("--base-url", default="http://127.0.0.1:8080/v1")
     parser.add_argument("--model", default="embeddinggemma-2")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--reference-cosine", type=float, default=THRESHOLDS["reference"],
+                        help="Minimum cosine against the reference vectors")
+    parser.add_argument("--consistency-cosine", type=float, default=THRESHOLDS["consistency"],
+                        help="Minimum cosine between responses that must agree")
     args = parser.parse_args()
+    THRESHOLDS["reference"], THRESHOLDS["consistency"] = args.reference_cosine, args.consistency_cosine
     if Path(args.output).exists():
         parser.error("output must not exist")
     fixture = json.loads((Path(__file__).resolve().parents[1] / "fixtures/embedding_gemma2/image_golden.json").read_text())
@@ -66,7 +77,7 @@ def main():
 
     def check_vector(vector, reference, dimensions=768):
         assert len(vector) == dimensions and all(math.isfinite(v) for v in vector)
-        assert cosine(vector, reference[:dimensions]) >= 0.9999
+        assert cosine(vector, reference[:dimensions]) >= THRESHOLDS["reference"]
         assert abs(sum(v*v for v in vector)-1) < 1e-5
 
     inputs = []
@@ -103,7 +114,7 @@ def main():
             assert status == 200, body
             vector = body["data"][0]["embedding"]
             agreement = cosine(vector, case["embedding"])
-            assert len(vector) == 768 and agreement >= 0.9999, (case["name"], agreement)
+            assert len(vector) == 768 and agreement >= THRESHOLDS["reference"], (case["name"], agreement)
             assert body["usage"]["prompt_tokens"] == len(case["token_ids"]), body["usage"]
             check_usage(body, len(case["token_ids"]))
             assert abs(sum(v*v for v in vector)-1) < 1e-5
@@ -165,25 +176,25 @@ def main():
         status, body = post([inputs[1], "hello", inputs[0], {"content": [{"type": "text", "text": "hello"}]}])
         assert status == 200, body
         assert [v["index"] for v in body["data"]] == list(range(4))
-        assert cosine(body["data"][0]["embedding"], fixture["cases"][1]["embedding"]) >= 0.9999
-        assert cosine(body["data"][2]["embedding"], fixture["cases"][0]["embedding"]) >= 0.9999
-        assert cosine(body["data"][1]["embedding"], body["data"][3]["embedding"]) >= 0.99999
+        assert cosine(body["data"][0]["embedding"], fixture["cases"][1]["embedding"]) >= THRESHOLDS["reference"]
+        assert cosine(body["data"][2]["embedding"], fixture["cases"][0]["embedding"]) >= THRESHOLDS["reference"]
+        assert cosine(body["data"][1]["embedding"], body["data"][3]["embedding"]) >= THRESHOLDS["consistency"]
         for dimensions in (128, 256, 512):
             status, body = post([inputs[0]], dimensions=dimensions, encoding_format="base64")
             assert status == 200, body
             values = struct.unpack("<" + "f"*dimensions, base64.b64decode(body["data"][0]["embedding"]))
-            assert cosine(values, fixture["cases"][0]["embedding"][:dimensions]) >= 0.9999
+            assert cosine(values, fixture["cases"][0]["embedding"][:dimensions]) >= THRESHOLDS["reference"]
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             responses = list(pool.map(lambda item: post([item]), [inputs[0], "hello", inputs[3]]))
         assert all(status == 200 for status, _ in responses)
-        assert cosine(responses[0][1]["data"][0]["embedding"], fixture["cases"][0]["embedding"]) >= 0.9999
+        assert cosine(responses[0][1]["data"][0]["embedding"], fixture["cases"][0]["embedding"]) >= THRESHOLDS["reference"]
         # PNG alpha and lossless WebP must decode to the same RGB reference.
         for mode, encoding in [("RGBA", "PNG"), ("RGB", "WEBP")]:
             url = picture(fixture["cases"][0]["images"][0], mode, encoding)
             status, body = post([{"content": [{"type": "image_url", "image_url": {"url": url}}]}])
             assert status == 200, body
             assert len(body["data"][0]["embedding"]) == 768
-            assert cosine(body["data"][0]["embedding"], fixture["cases"][0]["embedding"]) >= 0.9999
+            assert cosine(body["data"][0]["embedding"], fixture["cases"][0]["embedding"]) >= THRESHOLDS["reference"]
         # Compare the HTTP JPEG decoder with an independently Pillow-decoded
         # lossless copy of exactly the same JPEG pixels.
         jpeg_url = picture(fixture["cases"][0]["images"][0], encoding="JPEG")
@@ -194,7 +205,7 @@ def main():
         status, body = post([{"content": [{"type": "image_url", "image_url": {"url": url}}]}
                              for url in (jpeg_url, png_url)])
         assert status == 200, body
-        assert cosine(body["data"][0]["embedding"], body["data"][1]["embedding"]) >= 0.99999
+        assert cosine(body["data"][0]["embedding"], body["data"][1]["embedding"]) >= THRESHOLDS["consistency"]
         for url in ["file:///etc/passwd", "http://127.0.0.1/test.png", "https://127.0.0.1/test.png", "data:image/png;base64,AAAA"]:
             status, body = post([{"content": [{"type": "image_url", "image_url": {"url": url}}]}])
             assert status == 400 and body["error"]["code"] == "invalid_image_input", body

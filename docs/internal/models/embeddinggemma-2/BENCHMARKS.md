@@ -235,3 +235,23 @@ and 1206.7 → 1307.7 ms; video was noisy. These observations remain visibly
 inconclusive in the record. They did not reproduce in the affected-history
 follow-up, which also retains warm mixed replays and two unchanged-main arms.
 No overall speedup is claimed and the initial flags are not discarded.
+
+## NPU
+
+Measured on November 13, 2026 on the same Strix Halo with `gufo serve
+embedding --npu` (XDNA NPU, `HIP_VISIBLE_DEVICES=-1`) against the GPU on the
+same build, with `http_bench.py`. Text only; images, audio and video need the
+GPU. Golden-fixture cosine against float32 is at least 0.99931.
+
+| Concurrency × inputs × words | GPU | NPU | NPU / GPU |
+| --- | ---: | ---: | ---: |
+| 1 × 1 × 16 (40 tokens) | 6.4 ms | 26.8 ms | 24% |
+| 1 × 1 × 128 (404 tokens) | 12.8 ms | 85.6 ms | 15% |
+| 1 × 1 × 512 (1,940 tokens) | 56 ms | 291 ms | 19% |
+| 1 × 1 × 2100 (8,072 tokens) | 322 ms | 1,039 ms | 31% |
+| 1 × 32 × 128 (15,670 tokens) | 377 ms (41.5k tokens/s) | 1,255 ms (12.5k tokens/s) | 30% |
+| 16 × 8 × 128 (3,495 tokens) | 42.2k tokens/s | 12.5k tokens/s | 30% |
+
+Matrix products run on `gufo::npu::BfpGemm`; norms, activations and the
+softmax on the CPU, which limits the NPU path: host memory traffic and about
+190 dependent NPU dispatches per request. See [the NPU notes](../../npu.md).

@@ -1,0 +1,11 @@
+# IRON (mlir-aie with the Peano AIE compiler) for compiling the in-tree NPU
+# designs (src/core/npu/kernels) on Windows, for Python 3.12. The same
+# versions as .devops/nix/iron/default.nix; update both together. pip checks
+# each wheel's sha256. Used by BUILD-WINDOWS.md and windows-build.yml:
+#   py -3.12 -m venv C:\iron
+#   C:\iron\Scripts\python -m pip install -r tools\windows\iron-requirements.txt
+mlir_aie @ https://github.com/Xilinx/mlir-aie/releases/download/v1.4.5/mlir_aie-1.4.5-cp312-cp312-win_amd64.whl#sha256=07dccca5acceda8e731679a220b892e27c0c8b20a5114bc6e71194dbfb746038
+llvm_aie @ https://github.com/Xilinx/llvm-aie/releases/download/nightly/llvm_aie-22.0.0.2026111101%2B81af12b7-py3-none-win_amd64.whl#sha256=158485e29537255107c763914bafa6d95ef3e53e17cd0812fe9028788dd70f96
+numpy==2.5.4
+ml_dtypes==0.6.0
+cloudpickle==3.1.2

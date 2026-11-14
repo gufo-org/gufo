@@ -324,6 +324,9 @@ def generate_devlab_registry(root: Path, manifests: List[Dict[str, Any]]) -> str
         "qwen3-tts-design",
         "qwen-image-turbo",
         "qwen-image",
+        "embedding-gemma2-npu",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu",
     ]
     ordered_models = {}
     for k in MODEL_ORDER:
@@ -349,6 +352,7 @@ def generate_devlab_registry(root: Path, manifests: List[Dict[str, Any]]) -> str
         "tts",
         "image",
         "shared-audio",
+        "npu",
         "service-harness",
         "shared-qwen",
         "shared-text",

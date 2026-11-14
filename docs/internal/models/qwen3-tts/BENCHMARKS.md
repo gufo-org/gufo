@@ -90,3 +90,20 @@ Warm the resident model once; run the profiler separately with
 `tools/prof/prof.py` and `--stages qwen-tts`. Raw profiles and audio stay outside
 Git. Retained and rejected optimizations are listed in
 [experiments](EXPERIMENTS.md).
+
+## NPU
+
+Measured on November 13, 2026 with `gufo serve tts --npu`
+(`HIP_VISIBLE_DEVICES=-1`), buffered WAV, against the GPU on the same build.
+Qwen3-ASR transcribes the NPU audio for CustomVoice and VoiceDesign word for
+word as it does the GPU audio; `tests/functional/model_services.py tts --npu`
+passes for every variant.
+
+| Variant | GPU RTF | NPU RTF | NPU speed / GPU |
+| --- | ---: | ---: | ---: |
+| CustomVoice | 0.396 | 0.72 | 55% |
+
+The talker decodes on the fused Qwen3 decoder (about 31 ms per frame), the
+code predictor on the CPU (about 23 ms per frame), the prompt and the speech
+decoder's linear layers on `BfpGemm`, and the codec convolutions on the CPU,
+overlapped with generation. See [the NPU notes](../../npu.md).

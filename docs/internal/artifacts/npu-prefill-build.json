@@ -1,0 +1,68 @@
+{
+  "date": "2026-11-14",
+  "baseline_revision": "f1e0f057c9fd2ae7991dd07c42457f0827ac91e8",
+  "platform": "Linux x86_64, AMD Strix Halo",
+  "change": "Keep the prefill layer loop staged through IRON generation and verification.",
+  "toolchain": {
+    "mlir_aie": "1.4.5",
+    "peano": "22.0.0.2026111101+81af12b7"
+  },
+  "baseline": {
+    "command": "nix develop -c bash -c 'time \"$GUFO_IRON_PYTHON\" /tmp/gufo-npu-original-src/qwen3pre.py /tmp/gufo-npu-original-<M> <M>'",
+    "256_wall_s": 42.774,
+    "512_wall_s": 93.919,
+    "cache": "Each output directory was new. IRON kernel/PCH/device caches were shared between sequential runs; 256 compiled both kernel objects.",
+    "logs": [
+      "/tmp/gufo-npu-original-256.log",
+      "/tmp/gufo-npu-original-512.log"
+    ]
+  },
+  "candidate": {
+    "command": "nix build --no-link --impure --expr 'let f = builtins.getFlake \"/home/fbozzo/projects/gufo-npu-build\"; in builtins.elemAt f.packages.x86_64-linux.default.npuDesigns.designs 2' -L",
+    "variants": [
+      256,
+      512,
+      1024
+    ],
+    "wall_s": 18.417,
+    "scope": "Includes Nix evaluation, configure, all three variant builds, and install.",
+    "cache": "New derivation, no substitution; empty sandboxed build/npu/.cache. Variants share that cache within the build.",
+    "log": "/tmp/gufo-npu-rolled-nix.log",
+    "output": "/nix/store/1fc7mf9vnxgkrnv1wa70i06qjc5mhd81-gufo-npu-design-qwen3pre-0/share/gufo/npu/qwen3pre"
+  },
+  "checks": {
+    "plan": "Every phase at every layer matches the full host plan for 256/512/1024 rows; 309 phases per variant; CPU unittest 0.001 s.",
+    "256_core_elfs": "All 32 byte-identical to the original standalone build.",
+    "instructions_and_layouts": {
+      "256": {
+        "qwen3pre_256.bin": {
+          "byte_identical": true,
+          "bytes": 2915552,
+          "sha256": "a46e0b66703de975947639ecd797cf8f067735c6020f8851b2865416d8951148"
+        },
+        "qwen3pre_256_plan.txt": {
+          "byte_identical": true,
+          "bytes": 8850,
+          "sha256": "877164a1064d965212eb2336e48d9cf25ed2d72344d5aed4a6be558f087b5e73"
+        }
+      },
+      "512": {
+        "qwen3pre_512.bin": {
+          "byte_identical": true,
+          "bytes": 4568672,
+          "sha256": "151265aab30301bbf2b29adbb629daf5129bdf42784f63f443ecb1caa32bec91"
+        },
+        "qwen3pre_512_plan.txt": {
+          "byte_identical": true,
+          "bytes": 8912,
+          "sha256": "16208599423e73b65ca5041412da7551642d8157652f8caf6f1e8584b1704e42"
+        }
+      }
+    }
+  },
+  "limits": [
+    "Original 1024-row build not repeated; no matched full original Nix build timing.",
+    "No full Gufo package or model inference run; focused design build and instruction/core-payload equivalence checks.",
+    "Decoder dispatch C++ compilation remains expensive."
+  ]
+}

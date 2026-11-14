@@ -32,7 +32,27 @@ struct SpeechDecoderOutput {
 ///
 /// Codec codes are frame-major `[frames, 16]`. Each code frame produces 1,920
 /// mono samples at 24 kHz.
-class SpeechDecoderHipRuntime {
+/// Codec decoding as synthesis uses it, on the GPU (SpeechDecoderHipRuntime)
+/// or the NPU (npu::SpeechDecoderNpuRuntime).
+class SpeechDecoderBackend {
+public:
+  virtual ~SpeechDecoderBackend() = default;
+  [[nodiscard]] virtual bool Decode(std::span<const std::uint32_t> codes,
+                                    std::size_t frames,
+                                    SpeechDecoderOutput* output,
+                                    SpeechDecoderTrace* trace = nullptr,
+                                    std::string* error = nullptr) = 0;
+  [[nodiscard]] virtual bool DecodeIncremental(
+      std::span<const std::uint32_t> codes, std::size_t frames,
+      std::size_t begin_frame, SpeechDecoderOutput* output,
+      std::string* error = nullptr) = 0;
+  [[nodiscard]] virtual bool DecodeAfterReference(
+      std::span<const std::uint32_t> codes, std::size_t frames,
+      std::size_t reference_frames, SpeechDecoderOutput* output,
+      std::string* error = nullptr) = 0;
+};
+
+class SpeechDecoderHipRuntime : public SpeechDecoderBackend {
 public:
   ~SpeechDecoderHipRuntime();
 
@@ -47,7 +67,7 @@ public:
   [[nodiscard]] bool Decode(std::span<const std::uint32_t> codes,
                             std::size_t frames, SpeechDecoderOutput* output,
                             SpeechDecoderTrace* trace = nullptr,
-                            std::string* error = nullptr);
+                            std::string* error = nullptr) override;
 
   /// Decode only the new suffix of a growing codec sequence, retaining causal
   /// convolution histories and attention KV. begin_frame=0 starts a request;
@@ -57,17 +77,16 @@ public:
                                        std::size_t frames,
                                        std::size_t begin_frame,
                                        SpeechDecoderOutput* output,
-                                       std::string* error = nullptr);
+                                       std::string* error = nullptr) override;
 
   /// Start a voice-clone request and emit only audio after reference_frames.
   /// Retains one exact, model-owned reference-prefix state for subsequent
   /// requests. Later streaming calls use DecodeIncremental with the full
   /// reference-plus-generated frame count.
-  [[nodiscard]] bool DecodeAfterReference(std::span<const std::uint32_t> codes,
-                                          std::size_t frames,
-                                          std::size_t reference_frames,
-                                          SpeechDecoderOutput* output,
-                                          std::string* error = nullptr);
+  [[nodiscard]] bool DecodeAfterReference(
+      std::span<const std::uint32_t> codes, std::size_t frames,
+      std::size_t reference_frames, SpeechDecoderOutput* output,
+      std::string* error = nullptr) override;
 
 private:
   struct Impl;

@@ -33,6 +33,7 @@ jobs:
 
       - name: Run artifact contract tests
         run: |
+          python3 -m unittest discover -s tests/tools -p npu_artifacts_test.py
           python3 -m unittest discover -s tests/tools -p linux_artifact_test.py
           python3 -m unittest discover -s tests/tools -p devlab_artifact_test.py
 
@@ -44,10 +45,11 @@ jobs:
           path: baseline-source
           persist-credentials: false
 
-      # A unique save key retains each successful build; restore the newest
-      # compiler cache for this pinned toolchain, including main's warm cache.
+      # A unique save key retains each build, failed ones included, so a rerun
+      # keeps their objects; restore the newest compiler cache for this pinned
+      # toolchain, including main's warm cache.
       - name: Restore compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/gufo-ccache
           key: gufo-package-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -77,6 +79,49 @@ jobs:
           skipPush: ${{ github.event_name == 'pull_request' }}
           pushFilter: '(-source$|\.tar\.gz$)'
 
+      # Each NPU design has its own derivation (.devops/nix/npu-designs.nix).
+      # Restore the combined closure before either package build. A prefix
+      # match supplies unchanged designs when another design has changed;
+      # PRs cannot push them to Cachix.
+      - name: Identify the NPU designs
+        id: npu
+        run: |
+          set -euo pipefail
+          drv=$(nix eval --raw .#default --apply 'p: if p.npuDesigns or null == null then "" else p.npuDesigns.drvPath')
+          out=$(nix eval --raw .#default --apply 'p: if p.npuDesigns or null == null then "" else p.npuDesigns.outPath')
+          echo "drv=$drv" >> "$GITHUB_OUTPUT"
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+          echo "key=gufo-npu-designs-v2-$(basename "${drv:-none}" .drv)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore NPU designs
+        id: npu-cache
+        if: steps.npu.outputs.drv != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/gufo-npu-designs
+          key: ${{ steps.npu.outputs.key }}
+          restore-keys: |
+            gufo-npu-designs-v2-
+
+      - name: Import NPU designs
+        if: steps.npu-cache.outputs.cache-matched-key != ''
+        run: |
+          # Copy the recorded closure root, not --all: file binary caches
+          # enumerate hash-only placeholder names that are not store paths.
+          while IFS= read -r root; do
+            if ! nix copy --no-check-sigs --from file:///tmp/gufo-npu-designs "$root"; then
+              echo "::warning::NPU cache import failed; missing designs will be rebuilt"
+            fi
+          done < /tmp/gufo-npu-designs/roots.txt
+
+      # Build independent designs concurrently, before the memory-heavy Gufo
+      # compile. Each design's Ninja pool bounds program compilation to two.
+      - name: Build NPU designs
+        if: steps.npu.outputs.drv != ''
+        env:
+          NPU_DRV: ${{ steps.npu.outputs.drv }}
+        run: nix build --no-link "$NPU_DRV^*" --print-build-logs --cores 2 --max-jobs 4
+
       - name: Build and package baseline
         if: inputs.baseline != ''
         env:
@@ -99,6 +144,34 @@ jobs:
           nix build .#default --print-build-logs --cores 4 --max-jobs 1
           python3 tools/ci/linux_artifact.py pack --package result \
             --revision "$EXPECTED_REVISION" --output linux-artifacts/candidate
+
+      # After the candidate build, even a failed one: the designs build first.
+      - name: Export NPU designs
+        id: npu-export
+        if: always() && steps.npu.outputs.drv != '' && steps.npu-cache.outputs.cache-hit != 'true'
+        env:
+          NPU_OUT: ${{ steps.npu.outputs.out }}
+        run: |
+          set -euo pipefail
+          if nix path-info "$NPU_OUT" >/dev/null 2>&1; then
+            nix copy --to file:///tmp/gufo-npu-designs "$NPU_OUT"
+            printf '%s\n' "$NPU_OUT" > /tmp/gufo-npu-designs/roots.txt
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save NPU designs
+        if: always() && steps.npu-export.outputs.ready == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/gufo-npu-designs
+          key: ${{ steps.npu.outputs.key }}
+
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/gufo-ccache
+          key: gufo-package-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Verify and archive the portable bundle
         env:

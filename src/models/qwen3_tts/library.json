@@ -11,6 +11,7 @@
     "qwen3_tts_base_encoders_hip_test",
     "qwen3_tts_config_test",
     "qwen3_tts_loader_test",
+    "qwen3_tts_npu_encoders_hip_test",
     "qwen3_tts_prompt_test",
     "qwen3_tts_speech_decoder_hip_test",
     "qwen3_tts_synthesis_hip_test",

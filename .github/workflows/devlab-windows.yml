@@ -146,6 +146,32 @@ jobs:
           if (-not $npu -or $npu.status -ne 'PASS') { throw "NPU check: $($npu.status) $($npu.message)" }
           $npu.message
 
+      # The bundled NPU designs against double references, on the NPU (no
+      # weights). Exit 77 means no NPU, which this runner must have.
+      - name: Run NPU design checks
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location windows-gufo
+          $checks = @(
+            @('npu_device_test', 'npu\q8gemm'),
+            @('npu_bfp_device_test', 'npu\bfpgemm'),
+            @('npu_qwen3dec_device_test', 'npu\qwen3dec', '5'))
+          foreach ($check in $checks) {
+            $test, $arguments = $check
+            # A lone argument is a string, which splatting passes one character at a time.
+            $arguments = @($arguments)
+            if (-not (Test-Path ".\$test.exe")) {
+              if (Test-Path 'npu') { throw "the bundle ships NPU designs but not $test.exe" }
+              "skipped: this bundle has no NPU designs"
+              break
+            }
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            & ".\$test.exe" @arguments
+            if ($LASTEXITCODE -ne 0) { throw "$test failed with exit code $LASTEXITCODE" }
+            "{0}: {1:N1} s" -f $test, $watch.Elapsed.TotalSeconds
+          }
+          Pop-Location
+
       # Real HIP kernels and allocations without weights, so a stalled SDK or
       # a missing runtime piece shows before any model download.
       - name: Run GPU checks without weights
@@ -228,20 +254,31 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $assets = Get-Content "$env:RUNNER_TEMP\functional-assets.json" -Raw | ConvertFrom-Json
           $smoke = 'windows-gufo\tests\functional\family_smoke.py'
-          $common = @('--binary', 'windows-gufo\gufo.exe', '--log-dir', "$env:RUNNER_TEMP\smoke-logs")
+          $common = @('--binary', 'windows-gufo\gufo.exe')
           $checks = [ordered]@{
             embedding = @('embedding', '--model', $assets.embedding)
             asr       = @('asr', '--model', $assets.asr)
             tts       = @('tts', '--model', $assets.'tts-base', '--asr-model', $assets.asr)
+            'embedding-npu' = @('embedding', '--model', $assets.embedding, '--npu')
+            'asr-npu' = @('asr', '--model', $assets.asr, '--npu')
+            'tts-npu' = @('tts', '--model', $assets.'tts-base', '--asr-model', $assets.asr, '--npu')
             qwen27    = @('llm', '--model', (Join-Path $assets.qwen27 'Qwen3.8-27B-UD-Q4_K_XL.gguf'))
           }
           $failed = @()
           foreach ($name in $checks.Keys) {
             "=== $name"
-            python $smoke @($checks[$name]) @common
+            python $smoke @($checks[$name]) @common --log-dir "$env:RUNNER_TEMP\smoke-logs\$name"
             if ($LASTEXITCODE -ne 0) { $failed += $name }
           }
           if ($failed) { throw "smoke checks failed: $($failed -join ', ')" }
+
+      - name: Upload model smoke logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-smoke-logs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/smoke-logs
+          if-no-files-found: ignore
 
       - name: Remove temporary bundle and environments
         if: always()

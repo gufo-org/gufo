@@ -20,6 +20,13 @@ from service_http import Evidence, sha256
 HERE = Path(__file__).resolve().parent
 
 
+
+# Minimum cosine of --npu embeddings against the reference vectors. The NPU
+# path rounds every matrix product to bfp16 (worst measured 0.99894 on the
+# image, video and text fixtures; the GPU gate is 0.9999). Batched requests
+# match the same inputs sent alone.
+NPU_REFERENCE_COSINE = 0.998
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('service', choices=('embedding', 'asr', 'tts', 'image'))
@@ -38,6 +45,8 @@ def main():
     parser.add_argument('--lora-default', metavar='NAME:SCALE',
                         help='Image: --lora-default for requests that omit adapters')
     parser.add_argument('--startup-timeout', type=float, default=300)
+    parser.add_argument('--npu', action='store_true',
+                        help='Serve on the XDNA NPU (--npu); embeddings use the NPU cosine gate')
     args = parser.parse_args()
     if args.service == 'tts' and not (args.asr_binary and args.asr_model):
         parser.error('TTS requires --asr-binary and --asr-model for intelligibility checks')
@@ -66,6 +75,8 @@ def main():
     public_model = 'functional-' + args.service
     command = [str(args.binary), 'serve', args.service, '--model', str(args.model),
                '--host', '127.0.0.1', '--port', str(port), '--served-model-name', public_model]
+    if args.npu:
+        command += ['--npu']
     voice = args.voice or {'base': 'narrator', 'custom': 'ryan', 'design': 'voice-design'}[args.variant]
     for name, path in loras.items():
         command += ['--lora', f'{name}={Path(path).resolve()}']
@@ -91,6 +102,7 @@ def main():
               'weights': [{'path': str(path), 'bytes': path.stat().st_size,
                            'mtime_ns': path.stat().st_mtime_ns} for path in weights],
               'binary_sha256': sha256(args.binary), 'variant': args.variant if args.service == 'tts' else None,
+              'npu': args.npu,
               'timing_qualification': 'observations only; no matched baseline comparison',
               'service_harness_sha256': {name: sha256(HERE / name) for name in
                   ('model_services.py', 'service_http.py', 'asr_service.py', 'tts_service.py',
@@ -117,6 +129,8 @@ def main():
                                   '--model', public_model, '--output', str(output / (script + '.json'))]
                         if script == 'embedding_video.py' and args.embedding_suite == 'smoke':
                             launch += ['--smoke']
+                        if args.npu:  # bfp16 NPU products
+                            launch += ['--reference-cosine', str(NPU_REFERENCE_COSINE)]
                         if script in ('embedding_audio.py', 'embedding_video.py'):
                             launch += ['--server-log', str(output / 'server.log')]
                         with (output / (script + '.log')).open('w') as log:
@@ -152,6 +166,14 @@ def main():
                 assert any(f'request={request_id} ' in line and 'event=completed ' in line
                            and 'error_code=cancelled' in line for line in lines), (
                                'disconnect did not cancel actual server inference', request_id)
+        if args.npu:
+            # A fused NPU program that cannot load (for example one missing
+            # from the package) falls back to a slower path and says so on
+            # stderr; under --npu that is a failure, not a pass.
+            with evidence.case('npu-programs-loaded'):
+                lines = [line for line in (output / 'server.log').read_text().splitlines()
+                         if ' npu: ' in line and ' unavailable ' in line]
+                assert not lines, lines
         report['status'] = 'passed'
     except BaseException:
         report.update(status='failed', error=traceback.format_exc())

@@ -107,8 +107,8 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
                                      ['embedding-text', 'embedding-images', 'embedding-audio', 'embedding-video']),
                       'asr': ['asr-http'], 'tts': ['tts-http'],
                       'image': ['image-smoke' if tier == 'pr' else 'image-http']}[model['category']]
-            result['groups'].append({'profile': key + '/native', 'configuration': 'standard',
-                                     'settings': {}, 'suites': suites})
+            result['groups'].append({'profile': key + ('/npu' if model.get('npu') else '/native'),
+                                     'configuration': 'standard', 'settings': {}, 'suites': suites})
     return result
 
 

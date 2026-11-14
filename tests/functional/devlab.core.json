@@ -46,7 +46,26 @@
       ],
       "owners": [
         "asr",
-        "tts"
+        "tts",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu"
+      ]
+    },
+    {
+      "id": "npu",
+      "priority": 20,
+      "owners": [
+        "embedding-gemma2-npu",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu"
+      ],
+      "paths": [
+        "src/core/npu/**",
+        "include/gufo/ext/experimental/npu.hpp",
+        "cmake/GufoNpuDesigns.cmake",
+        ".devops/nix/xrt/**",
+        ".devops/nix/iron/**",
+        "tests/core/npu*"
       ]
     },
     {
@@ -61,7 +80,10 @@
         "embedding",
         "asr",
         "tts",
-        "image"
+        "image",
+        "embedding-gemma2-npu",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu"
       ]
     },
     {
@@ -180,7 +202,10 @@
         "embedding",
         "asr",
         "tts",
-        "image"
+        "image",
+        "embedding-gemma2-npu",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu"
       ]
     }
   ]

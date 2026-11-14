@@ -101,7 +101,10 @@ and VAE decoding with the size and step count (a first image, which loads the
 weights, and a warm replay), and embedding request duration
 and token/input counts. Client latency and first-output observations remain
 separate. Each request and phase retains every paired repeat at the existing
-5% and 3-ms thresholds; mismatched work stays inconclusive.
+5% and 3-ms thresholds; mismatched work stays inconclusive. NPU models
+(`*-npu` in `devlab.json`) serve both arms with `--npu`, and an arm whose NPU
+programs fall back to a slower path fails. A base without `--npu` runs no arm;
+the candidate's NPU timings are then retained as unchecked observations.
 
 Repeat with fresh output directories to check stability. Preserve failed attempts
 alongside successful runs. CPU checks for metric and incomplete-stream refusal:

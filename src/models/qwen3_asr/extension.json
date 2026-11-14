@@ -25,6 +25,20 @@
       "entry": "qwen3_asr_provider_register"
     }
   ],
+  "options": [
+    {
+      "name": "--npu",
+      "type": "boolean",
+      "commands": [
+        "serve asr",
+        "transcribe"
+      ],
+      "providers": [
+        "qwen3-asr"
+      ],
+      "help": "Transcribe on the XDNA NPU instead of the GPU"
+    }
+  ],
   "models": [
     {
       "id": "qwen3-asr",

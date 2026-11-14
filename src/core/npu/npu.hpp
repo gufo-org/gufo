@@ -44,6 +44,13 @@ struct DeviceInfo {
 [[nodiscard]] std::vector<DeviceInfo> ProbeDevices(
     const std::filesystem::path& sysfs_root);
 
+/// The directory of the in-tree NPU design `name` (q8gemm, bfpgemm, ...),
+/// holding `<name>.xclbin` (or `<name>_<variant>.xclbin` programs):
+/// `$GUFO_NPU_DESIGNS/<name>`, then
+/// `<prefix>/share/gufo/npu/<name>` beside the executable's `bin`, then the
+/// build tree that compiled Gufo. Throws Error when none has the design.
+[[nodiscard]] std::filesystem::path FindDesign(std::string_view name);
+
 /// Where a buffer lives. The NPU reads host memory either way.
 enum class Memory {
   kHostOnly,   ///< weights, activations, state: XRT `host_only`

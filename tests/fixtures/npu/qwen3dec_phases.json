@@ -1,0 +1,269 @@
+{
+  "reference_revision": "e9ae11764c45d51895ad9fc187d168123e698dc7",
+  "cases": [
+    {
+      "model": "qwen3dec",
+      "dispatch": {
+        "pos": 0,
+        "recs": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "head_chunks": 1
+      },
+      "phase_count": 142,
+      "layout_sha256": "fe0a95e86ffb7289867925f9c135f3aecbf5687f67b629988c1229bce03bc631",
+      "phases_sha256": "e89bb788ffad4ebe17e64082ef8024ef904ab4b5b10e7ce0de6543985f4ec8bc"
+    },
+    {
+      "model": "qwen3dec",
+      "dispatch": {
+        "pos": 0,
+        "recs": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "head_chunks": 594
+      },
+      "phase_count": 142,
+      "layout_sha256": "fe0a95e86ffb7289867925f9c135f3aecbf5687f67b629988c1229bce03bc631",
+      "phases_sha256": "208530ce40ba9670fe112298adb26b568b45c2b36308ce1ed0e71c905d65e279"
+    },
+    {
+      "model": "qwen3dec",
+      "dispatch": {
+        "pos": 16,
+        "recs": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "head_chunks": 1
+      },
+      "phase_count": 142,
+      "layout_sha256": "fe0a95e86ffb7289867925f9c135f3aecbf5687f67b629988c1229bce03bc631",
+      "phases_sha256": "bab93ca98a32c7017b5c33e571a9382d92d5a088d59e4b6d96e361ba51f37745"
+    },
+    {
+      "model": "qwen3dec",
+      "dispatch": {
+        "pos": 16,
+        "recs": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "head_chunks": 594
+      },
+      "phase_count": 142,
+      "layout_sha256": "fe0a95e86ffb7289867925f9c135f3aecbf5687f67b629988c1229bce03bc631",
+      "phases_sha256": "d7c4088f74242d8b3a0549083a69aee0ba658d8b06910f6edac2b48800ba50f5"
+    },
+    {
+      "model": "qwen3dec",
+      "dispatch": {
+        "pos": 1023,
+        "recs": [
+          16,
+          16,
+          16,
+          16
+        ],
+        "head_chunks": 1
+      },
+      "phase_count": 142,
+      "layout_sha256": "fe0a95e86ffb7289867925f9c135f3aecbf5687f67b629988c1229bce03bc631",
+      "phases_sha256": "eb935b505c4da4b447bdf04ef85ebd38c4769db4fe705537aa8852280bfd69c1"
+    },
+    {
+      "model": "qwen3dec",
+      "dispatch": {
+        "pos": 1023,
+        "recs": [
+          16,
+          16,
+          16,
+          16
+        ],
+        "head_chunks": 594
+      },
+      "phase_count": 142,
+      "layout_sha256": "fe0a95e86ffb7289867925f9c135f3aecbf5687f67b629988c1229bce03bc631",
+      "phases_sha256": "c4504015936fd6403f68cde5c8134d976313b8400f4f237d2bdce0dea4b3d314"
+    },
+    {
+      "model": "qwen3dec",
+      "dispatch": {
+        "pos": 4095,
+        "recs": [
+          64,
+          64,
+          64,
+          64
+        ],
+        "head_chunks": 1
+      },
+      "phase_count": 142,
+      "layout_sha256": "fe0a95e86ffb7289867925f9c135f3aecbf5687f67b629988c1229bce03bc631",
+      "phases_sha256": "e39ed3dd7bf21d21b74bfca23bf110f69658de7034c8ca1cdedbb0720707ca6f"
+    },
+    {
+      "model": "qwen3dec",
+      "dispatch": {
+        "pos": 4095,
+        "recs": [
+          64,
+          64,
+          64,
+          64
+        ],
+        "head_chunks": 594
+      },
+      "phase_count": 142,
+      "layout_sha256": "fe0a95e86ffb7289867925f9c135f3aecbf5687f67b629988c1229bce03bc631",
+      "phases_sha256": "6a12c92262f14681765bbc4994587eefb004b6d73a571be626295243507866a7"
+    },
+    {
+      "model": "qwen3dec_p",
+      "dispatch": {
+        "pos": 0,
+        "recs": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "head_chunks": 1,
+        "head_base": 0
+      },
+      "phase_count": 27,
+      "layout_sha256": "a69d1426de3bf99fde3896745a7d957aa4d62fbad48ad64ee73c97817e7cfe43",
+      "phases_sha256": "496c3355c3fb9370152464c696f900a1b49b761bf4939d1b42dd3e5d93e3508c"
+    },
+    {
+      "model": "qwen3dec_p",
+      "dispatch": {
+        "pos": 0,
+        "recs": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "head_chunks": 8,
+        "head_base": 0
+      },
+      "phase_count": 27,
+      "layout_sha256": "a69d1426de3bf99fde3896745a7d957aa4d62fbad48ad64ee73c97817e7cfe43",
+      "phases_sha256": "461184f5e47d650da5b732b089f7f111d01a0b1cb10ee1beb14b755244c740e4"
+    },
+    {
+      "model": "qwen3dec_p",
+      "dispatch": {
+        "pos": 1,
+        "recs": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "head_chunks": 1,
+        "head_base": 0
+      },
+      "phase_count": 27,
+      "layout_sha256": "a69d1426de3bf99fde3896745a7d957aa4d62fbad48ad64ee73c97817e7cfe43",
+      "phases_sha256": "5ffdd2ae3d69b5b60c2697e688c3a26fc6bba7a9d7e5154cf81d167dd1868447"
+    },
+    {
+      "model": "qwen3dec_p",
+      "dispatch": {
+        "pos": 1,
+        "recs": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "head_chunks": 8,
+        "head_base": 0
+      },
+      "phase_count": 27,
+      "layout_sha256": "a69d1426de3bf99fde3896745a7d957aa4d62fbad48ad64ee73c97817e7cfe43",
+      "phases_sha256": "c603b1e0d2957fc19deb259591de7ac4edbf30e013aff961ccf4bf446556dfcd"
+    },
+    {
+      "model": "qwen3dec_p",
+      "dispatch": {
+        "pos": 7,
+        "recs": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "head_chunks": 1,
+        "head_base": 0
+      },
+      "phase_count": 27,
+      "layout_sha256": "a69d1426de3bf99fde3896745a7d957aa4d62fbad48ad64ee73c97817e7cfe43",
+      "phases_sha256": "79bb663807b3d41c12571402e7b27892700704347bb6c18a9ada325ae31634a7"
+    },
+    {
+      "model": "qwen3dec_p",
+      "dispatch": {
+        "pos": 7,
+        "recs": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "head_chunks": 8,
+        "head_base": 0
+      },
+      "phase_count": 27,
+      "layout_sha256": "a69d1426de3bf99fde3896745a7d957aa4d62fbad48ad64ee73c97817e7cfe43",
+      "phases_sha256": "999b6ebd5e463ee729b36ac35df7eda4c7dda0fa24345667fc07e6356acd1c04"
+    },
+    {
+      "model": "qwen3dec_p",
+      "dispatch": {
+        "pos": 15,
+        "recs": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "head_chunks": 1,
+        "head_base": 31195136
+      },
+      "phase_count": 27,
+      "layout_sha256": "a69d1426de3bf99fde3896745a7d957aa4d62fbad48ad64ee73c97817e7cfe43",
+      "phases_sha256": "9016b64236a74a484bd4235a4da9c689f6b84477399f7e11a6d9531accf328ce"
+    },
+    {
+      "model": "qwen3dec_p",
+      "dispatch": {
+        "pos": 15,
+        "recs": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "head_chunks": 8,
+        "head_base": 31195136
+      },
+      "phase_count": 27,
+      "layout_sha256": "a69d1426de3bf99fde3896745a7d957aa4d62fbad48ad64ee73c97817e7cfe43",
+      "phases_sha256": "23aa2c28c6f0e8e4b0afd2856082e9a672f47fa9029baea6bafaf450749113c1"
+    }
+  ]
+}

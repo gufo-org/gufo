@@ -7,6 +7,7 @@ import json
 import math
 from pathlib import Path
 import re
+import subprocess
 import time
 
 from devlab_models import HERE, registry, service_command
@@ -34,6 +35,19 @@ def number(value, name):
     if not math.isfinite(result) or result < 0:
         raise ValueError('Invalid server metric: ' + name)
     return result
+
+
+def supports_npu(binary, service):
+    """Whether this build serves the service on the NPU; main before #1216 does not."""
+    result = subprocess.run([str(binary), 'serve', service, '--help'], capture_output=True,
+                            text=True, timeout=60)
+    return '--npu' in result.stdout + result.stderr
+
+
+def npu_fallbacks(log_path):
+    """Server lines reporting an NPU program that fell back to a slower path."""
+    return [line for line in log_path.read_text().splitlines()
+            if ' npu: ' in line and ' unavailable ' in line]
 
 
 def measure_arm(model_id, binary, assets, output, audio_root):
@@ -92,6 +106,11 @@ def measure_arm(model_id, binary, assets, output, audio_root):
     finally:
         server.stop()
         evidence.save()
+    if model.get('npu'):
+        # Timings of a GPU fallback are not NPU timings.
+        fallbacks = npu_fallbacks(output / 'server.log')
+        if fallbacks:
+            raise RuntimeError('NPU programs unavailable: ' + '; '.join(fallbacks))
     for label, row in rows.items():
         log = completed_log(output / 'server.log', row['request_id'])
         row['metrics'] = {'server_ms': number(log['duration_ms'], 'duration_ms')}
@@ -118,31 +137,52 @@ def measure_arm(model_id, binary, assets, output, audio_root):
     return {'startup': startup, 'requests': rows}
 
 
+def head_only(phase, reason):
+    """PR timings without a base to compare: observations, never a verdict."""
+    phase.update(verdict='missing', checked=False, advisory_reason=reason)
+    return phase
+
+
 def summarize(arms):
     by = {side: [arm for arm in arms if arm['revision'] == side] for side in ('base', 'head')}
     if len(by['base']) != len(by['head']) or len(by['base']) < 2:
         raise ValueError('Missing paired repeats')
+    # A base without the feature under test has no comparable arm.
+    unsupported = next((arm['unsupported'] for arm in by['base'] if arm.get('unsupported')), None)
+
+    def value(arm, read):
+        return None if arm.get('unsupported') else read(arm)
+
     phases, diverged = [], []
-    for label in by['base'][0]['requests']:
-        comparable = all(base['requests'][label]['work'] == head['requests'][label]['work']
-                         for base, head in zip(by['base'], by['head']))
-        if not comparable:
+    for label in by['head'][0]['requests']:
+        comparable = unsupported is None and all(
+            base['requests'][label]['work'] == head['requests'][label]['work']
+            for base, head in zip(by['base'], by['head']))
+        if not comparable and unsupported is None:
             diverged.append(label)
-        for metric in by['base'][0]['requests'][label]['metrics']:
-            values = {side: [arm['requests'][label]['metrics'][metric] for arm in by[side]]
-                      for side in by}
-            phases.append({'group': label, 'key': label + '.' + metric, 'label': metric,
-                           **values, 'verdict': verdict(list(zip(values['base'], values['head'])))
+        for metric in by['head'][0]['requests'][label]['metrics']:
+            values = {side: [value(arm, lambda arm: arm['requests'][label]['metrics'][metric])
+                             for arm in by[side]] for side in by}
+            phase = {'group': label, 'key': label + '.' + metric, 'label': metric, **values}
+            if unsupported:
+                phases.append(head_only(phase, unsupported))
+                continue
+            phases.append({**phase, 'verdict': verdict(list(zip(values['base'], values['head'])))
                            if comparable else 'noisy', 'comparable_work': comparable})
     startup = []
     for metric in ('init', 'weights', 'vision', 'structured', 'listen'):
-        values = {side: [arm['startup'][metric] for arm in by[side]] for side in by}
+        values = {side: [value(arm, lambda arm: arm['startup'][metric]) for arm in by[side]]
+                  for side in by}
+        if unsupported:
+            startup.append(head_only({'group': 'startup', 'key': 'startup.' + metric,
+                                      'label': metric, **values}, unsupported))
+            continue
         pairs = list(zip(values['base'], values['head']))
         startup.append({'group': 'startup', 'key': 'startup.' + metric, 'label': metric,
                          **values, 'verdict': verdict(pairs) if all(a is not None and b is not None
                                                                 for a, b in pairs) else 'missing'})
     for phase in startup:
-        if phase['key'] == 'startup.listen':
+        if phase['key'] == 'startup.listen' and not unsupported:
             phase['checked'] = all(arm['startup'].get('listen_source') == 'server' for arm in arms)
             if not phase['checked']:
                 phase['advisory_reason'] = 'server readiness timestamps unavailable'
@@ -162,6 +202,11 @@ def main():
         parser.error('at least two paired repeats are required')
     assets = json.loads(args.assets.read_text())
     args.logs.mkdir(parents=True, exist_ok=False)
+    model = registry()['models'][args.model_id]
+    # Before main gains --npu, the PR's NPU timings have no base to compare with.
+    unsupported = None
+    if model.get('npu') and not supports_npu(args.base_binary, model['service']):
+        unsupported = 'base binary has no --npu; PR-only NPU timings'
     arms = []
     started = time.monotonic()
     idle = gpu_temperature()
@@ -171,6 +216,9 @@ def main():
         idle = gpu_temperature()
     for repeat in range(args.repeats):
         for side in ('base', 'head'):
+            if side == 'base' and unsupported:
+                arms.append({'revision': side, 'repeat': repeat, 'unsupported': unsupported})
+                continue
             temperature = cool_down(idle + 3) if idle is not None else None
             arm = measure_arm(args.model_id, getattr(args, side + '_binary').resolve(), assets,
                               args.logs / f'{side}-{repeat}', args.audio_root.resolve())

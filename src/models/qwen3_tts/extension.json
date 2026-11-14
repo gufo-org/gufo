@@ -28,6 +28,19 @@
       }
     }
   ],
+  "options": [
+    {
+      "name": "--npu",
+      "type": "boolean",
+      "commands": [
+        "serve tts"
+      ],
+      "providers": [
+        "qwen3-tts"
+      ],
+      "help": "Synthesize on the XDNA NPU and the CPU instead of the GPU"
+    }
+  ],
   "targets": {
     "gufo_qwen3_tts": {
       "requires": []

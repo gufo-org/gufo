@@ -15,6 +15,7 @@
 #include "gufo/ext/asr.hpp"
 #include "gufo/ext/registry.hpp"
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/provider_options.hpp"
 #include "src/cli/serve/audio_buffer.hpp"
 #include "src/core/json.hpp"
 
@@ -196,6 +197,11 @@ void PrintTranscribeHelp(std::string_view program_name) {
                    "Output format: text or json (default: text)", "Output",
                    &format);
   parser.CollectPositionals(&positionals);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider_options(registry, "transcribe",
+                                   ext::Capability::kSpeechRecognition);
+  provider_options.Register(parser);
   parser.PrintHelp();
 }
 
@@ -251,6 +257,11 @@ int RunTranscribe(std::span<const char* const> args) {
                    "Output format: text or json (default: text)", "Output",
                    &format);
   parser.CollectPositionals(&positionals);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions declared_options(registry, "transcribe",
+                                   ext::Capability::kSpeechRecognition);
+  declared_options.Register(parser);
 
   std::string error;
   if (!parser.Parse(args, &error)) {
@@ -261,6 +272,13 @@ int RunTranscribe(std::span<const char* const> args) {
   if (parser.IsHelpRequested()) {
     PrintTranscribeHelp("gufo");
     return 0;
+  }
+  ext::ParsedOptions provider_options;
+  try {
+    provider_options = declared_options.Parse();
+  } catch (const std::invalid_argument& parse_error) {
+    std::cerr << "Error: " << parse_error.what() << '\n';
+    return 2;
   }
   if (model.empty()) {
     std::cerr << "Error: --model <DIR> is required\n";
@@ -285,8 +303,6 @@ int RunTranscribe(std::span<const char* const> args) {
     return 1;
   }
 
-  ext::Registry registry;
-  ext::RegisterBuiltExtensions(registry);
   const ext::AsrProvider* provider = ext::ProbeAsrProvider(model.string());
   if (!provider) {
     provider = ext::FindAsrProvider("qwen3-asr");
@@ -301,13 +317,14 @@ int RunTranscribe(std::span<const char* const> args) {
   }
 
   const auto load_begin = std::chrono::steady_clock::now();
-  auto runtime =
-      provider->create_with_options
-          ? provider->create_with_options({.model_root = model.string(),
-                                           .maximum_context_tokens = capacity,
-                                           .projector_path = mmproj.string()},
-                                          &error)
-          : provider->create(model.string(), capacity, &error);
+  auto runtime = provider->create_with_options
+                     ? provider->create_with_options(
+                           {.model_root = model.string(),
+                            .maximum_context_tokens = capacity,
+                            .projector_path = mmproj.string(),
+                            .provider_options = std::move(provider_options)},
+                           &error)
+                     : provider->create(model.string(), capacity, &error);
   const auto load_end = std::chrono::steady_clock::now();
   if (runtime == nullptr) {
     std::cerr << "Error loading ASR model: " << error << '\n';

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <random>
 #include <vector>
 
@@ -49,7 +50,7 @@ double Check(const Matrix& m, const std::vector<float>& x, int rows,
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int Run(int argc, char** argv) {
   if (argc < 2)
     return 2;
   namespace npu = gufo::npu;
@@ -103,4 +104,13 @@ int main(int argc, char** argv) {
     }
   }
   return failures ? 1 : 0;
+}
+
+int main(int argc, char** argv) {
+  try {
+    return Run(argc, argv);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "npu_device_test: %s\n", e.what());
+    return 1;
+  }
 }

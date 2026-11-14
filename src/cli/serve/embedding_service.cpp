@@ -54,7 +54,7 @@ struct EmbeddingService::Impl {
       provider = ext::FindEmbeddingProvider(options.model_id);
     }
 #if defined(ENGINE_ENABLE_HIP)
-    if (!provider || !provider->create) {
+    if (!provider || (!provider->create && !provider->create_with_options)) {
       initialization_error = "embedding provider not available for model: " +
                              options.model_root.string();
       return;
@@ -65,7 +65,12 @@ struct EmbeddingService::Impl {
       return;
     }
     std::string error;
-    runner_ = provider->create(options.model_root.string(), &error);
+    runner_ = provider->create_with_options
+                  ? provider->create_with_options(
+                        {.model_root = options.model_root.string(),
+                         .provider_options = options.provider_options},
+                        &error)
+                  : provider->create(options.model_root.string(), &error);
     if (!runner_) {
       initialization_error = "embedding encoder failed to load: " + error;
       return;

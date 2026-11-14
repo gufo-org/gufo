@@ -63,6 +63,12 @@ jobs:
       XRT_SDK_URL: https://github.com/Xilinx/XRT/releases/download/2.21.75/xrt_windows_sdk.zip
       XRT_SDK_SHA256: ccc244c2c423588972ade76142cdc01049477aaa39a35be97e782b97eb7c5295
       XRT_ROOT: C:/xrt
+      # IRON (mlir-aie + Peano) compiles the in-tree NPU designs that ship in
+      # npu\ beside gufo.exe; pins and hashes in iron-requirements.txt. The
+      # venv is cached whole at a fixed path: IRON keys its build cache on its
+      # tools' paths and mtimes, which a fresh pip install would change.
+      IRON_ROOT: C:/iron
+      IRON_PYTHON_VERSION: '3.12.10'
       GUFO_PACKAGING_ROOT: ${{ github.workspace }}
     steps:
       - name: Check out repository
@@ -159,6 +165,12 @@ jobs:
           choco install ninja ccache -y --no-progress
           if ($LASTEXITCODE -ne 0) { throw 'cannot install ninja and ccache' }
 
+      - name: Test NPU artifact contracts
+        if: hashFiles('tests/tools/npu_artifacts_test.py') != ''
+        run: |
+          python -m unittest discover -s tests/tools -p npu_artifacts_test.py
+          if ($LASTEXITCODE -ne 0) { throw 'NPU artifact contract tests failed' }
+
       # CMakeLists.txt compiles C, CXX and (with clang-cl) HIP through ccache
       # when it is on PATH. The SDK is unpacked fresh each run, so the
       # compiler is identified by its pinned tarball rather than by mtime.
@@ -248,6 +260,172 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'cannot unpack the XRT SDK' }
           "XRT_DIR=$env:XRT_ROOT/xrt_sdk/xrt/share/cmake/XRT" >> $env:GITHUB_ENV
 
+      # Restore finished designs before installing the compiler. When all
+      # four hit, no IRON venv or intermediate cache needs downloading.
+      - name: Identify the IRON pins
+        id: iron
+        run: |
+          $pins = (Get-FileHash "$env:GUFO_PACKAGING_ROOT/tools/windows/iron-requirements.txt").Hash.ToLowerInvariant().Substring(0, 16)
+          "key=$env:IRON_PYTHON_VERSION-$pins" >> $env:GITHUB_OUTPUT
+
+      - name: Restore compiled q8gemm
+        id: npu-q8gemm
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:/gufo-npu/q8gemm
+          key: gufo-npu-output-windows-v1-${{ steps.iron.outputs.key }}-${{ env.XRT_SDK_SHA256 }}-${{ env.SDK_SHA256 }}-q8gemm-${{ hashFiles('cmake/GufoNpuDesigns.cmake', 'cmake/GufoNpuDesignList.cmake', 'cmake/npu-designs/**', 'src/core/npu/kernels/q8gemm/**') }}
+
+      - name: Restore compiled qwen3dec
+        id: npu-qwen3dec
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:/gufo-npu/qwen3dec
+          key: gufo-npu-output-windows-v1-${{ steps.iron.outputs.key }}-${{ env.XRT_SDK_SHA256 }}-${{ env.SDK_SHA256 }}-qwen3dec-${{ hashFiles('cmake/GufoNpuDesigns.cmake', 'cmake/GufoNpuDesignList.cmake', 'cmake/npu-designs/**', 'src/core/npu/kernels/qwen3dec/**') }}
+
+      - name: Restore compiled qwen3pre
+        id: npu-qwen3pre
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:/gufo-npu/qwen3pre
+          key: gufo-npu-output-windows-v1-${{ steps.iron.outputs.key }}-${{ env.XRT_SDK_SHA256 }}-${{ env.SDK_SHA256 }}-qwen3pre-${{ hashFiles('cmake/GufoNpuDesigns.cmake', 'cmake/GufoNpuDesignList.cmake', 'cmake/npu-designs/**', 'src/core/npu/kernels/qwen3pre/**') }}
+
+      - name: Restore compiled bfpgemm
+        id: npu-bfpgemm
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:/gufo-npu/bfpgemm
+          key: gufo-npu-output-windows-v1-${{ steps.iron.outputs.key }}-${{ env.XRT_SDK_SHA256 }}-${{ env.SDK_SHA256 }}-bfpgemm-${{ hashFiles('cmake/GufoNpuDesigns.cmake', 'cmake/GufoNpuDesignList.cmake', 'cmake/npu-designs/**', 'src/core/npu/kernels/bfpgemm/**') }}
+
+      - name: Set up Python for IRON
+        id: iron-python
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != '' && (steps.npu-q8gemm.outputs.cache-hit != 'true' || steps.npu-qwen3dec.outputs.cache-hit != 'true' || steps.npu-qwen3pre.outputs.cache-hit != 'true' || steps.npu-bfpgemm.outputs.cache-hit != 'true')
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.IRON_PYTHON_VERSION }}
+          update-environment: false
+
+      - name: Restore IRON
+        id: iron-cache
+        if: steps.iron-python.outcome == 'success'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.IRON_ROOT }}
+          key: gufo-iron-windows-v1-${{ steps.iron.outputs.key }}
+
+      - name: Install IRON
+        if: steps.iron-python.outcome == 'success' && steps.iron-cache.outputs.cache-hit != 'true'
+        env:
+          IRON_BASE_PYTHON: ${{ steps.iron-python.outputs.python-path }}
+        run: |
+          & $env:IRON_BASE_PYTHON -m venv $env:IRON_ROOT
+          if ($LASTEXITCODE -ne 0) { throw 'cannot create the IRON venv' }
+          & "$env:IRON_ROOT/Scripts/python.exe" -m pip install --no-input --disable-pip-version-check -r "$env:GUFO_PACKAGING_ROOT/tools/windows/iron-requirements.txt"
+          if ($LASTEXITCODE -ne 0) { throw 'cannot install IRON' }
+
+      - name: Save IRON
+        if: steps.iron-python.outcome == 'success' && steps.iron-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.IRON_ROOT }}
+          key: gufo-iron-windows-v1-${{ steps.iron.outputs.key }}
+
+      - name: Restore NPU design cache
+        if: steps.iron-python.outcome == 'success'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\npu-cache
+          key: gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-
+
+      - name: Compile q8gemm on cache miss
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != '' && steps.npu-q8gemm.outputs.cache-hit != 'true'
+        run: |
+          cmake -S cmake/npu-designs -B build/npu-q8gemm -G Ninja `
+            -DGUFO_NPU_DESIGN=q8gemm "-DGUFO_IRON_PYTHON=$env:IRON_ROOT/Scripts/python.exe" `
+            "-DXRT_DIR=$env:XRT_DIR" "-DGUFO_NPU_CACHE_HOME=$env:RUNNER_TEMP/npu-cache"
+          if ($LASTEXITCODE -ne 0) { throw 'q8gemm configure failed' }
+          cmake --build build/npu-q8gemm --target npu_design_q8gemm --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'q8gemm compilation failed' }
+          New-Item -ItemType Directory -Force C:/gufo-npu | Out-Null
+          cmake --install build/npu-q8gemm --prefix build/npu-installed-q8gemm
+          if ($LASTEXITCODE -ne 0) { throw 'q8gemm installation failed' }
+          Copy-Item build/npu-installed-q8gemm/bin/npu/q8gemm C:/gufo-npu/q8gemm -Recurse
+
+      - name: Save compiled q8gemm
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != '' && steps.npu-q8gemm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:/gufo-npu/q8gemm
+          key: gufo-npu-output-windows-v1-${{ steps.iron.outputs.key }}-${{ env.XRT_SDK_SHA256 }}-${{ env.SDK_SHA256 }}-q8gemm-${{ hashFiles('cmake/GufoNpuDesigns.cmake', 'cmake/GufoNpuDesignList.cmake', 'cmake/npu-designs/**', 'src/core/npu/kernels/q8gemm/**') }}
+
+      - name: Compile qwen3dec on cache miss
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != '' && steps.npu-qwen3dec.outputs.cache-hit != 'true'
+        run: |
+          cmake -S cmake/npu-designs -B build/npu-qwen3dec -G Ninja `
+            -DGUFO_NPU_DESIGN=qwen3dec "-DGUFO_IRON_PYTHON=$env:IRON_ROOT/Scripts/python.exe" `
+            "-DXRT_DIR=$env:XRT_DIR" "-DGUFO_NPU_CACHE_HOME=$env:RUNNER_TEMP/npu-cache"
+          if ($LASTEXITCODE -ne 0) { throw 'qwen3dec configure failed' }
+          cmake --build build/npu-qwen3dec --target npu_design_qwen3dec --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'qwen3dec compilation failed' }
+          New-Item -ItemType Directory -Force C:/gufo-npu | Out-Null
+          cmake --install build/npu-qwen3dec --prefix build/npu-installed-qwen3dec
+          if ($LASTEXITCODE -ne 0) { throw 'qwen3dec installation failed' }
+          Copy-Item build/npu-installed-qwen3dec/bin/npu/qwen3dec C:/gufo-npu/qwen3dec -Recurse
+
+      - name: Save compiled qwen3dec
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != '' && steps.npu-qwen3dec.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:/gufo-npu/qwen3dec
+          key: gufo-npu-output-windows-v1-${{ steps.iron.outputs.key }}-${{ env.XRT_SDK_SHA256 }}-${{ env.SDK_SHA256 }}-qwen3dec-${{ hashFiles('cmake/GufoNpuDesigns.cmake', 'cmake/GufoNpuDesignList.cmake', 'cmake/npu-designs/**', 'src/core/npu/kernels/qwen3dec/**') }}
+
+      - name: Compile qwen3pre on cache miss
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != '' && steps.npu-qwen3pre.outputs.cache-hit != 'true'
+        run: |
+          cmake -S cmake/npu-designs -B build/npu-qwen3pre -G Ninja `
+            -DGUFO_NPU_DESIGN=qwen3pre "-DGUFO_IRON_PYTHON=$env:IRON_ROOT/Scripts/python.exe" `
+            "-DXRT_DIR=$env:XRT_DIR" "-DGUFO_NPU_CACHE_HOME=$env:RUNNER_TEMP/npu-cache"
+          if ($LASTEXITCODE -ne 0) { throw 'qwen3pre configure failed' }
+          cmake --build build/npu-qwen3pre --target npu_design_qwen3pre --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'qwen3pre compilation failed' }
+          New-Item -ItemType Directory -Force C:/gufo-npu | Out-Null
+          cmake --install build/npu-qwen3pre --prefix build/npu-installed-qwen3pre
+          if ($LASTEXITCODE -ne 0) { throw 'qwen3pre installation failed' }
+          Copy-Item build/npu-installed-qwen3pre/bin/npu/qwen3pre C:/gufo-npu/qwen3pre -Recurse
+
+      - name: Save compiled qwen3pre
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != '' && steps.npu-qwen3pre.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:/gufo-npu/qwen3pre
+          key: gufo-npu-output-windows-v1-${{ steps.iron.outputs.key }}-${{ env.XRT_SDK_SHA256 }}-${{ env.SDK_SHA256 }}-qwen3pre-${{ hashFiles('cmake/GufoNpuDesigns.cmake', 'cmake/GufoNpuDesignList.cmake', 'cmake/npu-designs/**', 'src/core/npu/kernels/qwen3pre/**') }}
+
+      - name: Compile bfpgemm on cache miss
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != '' && steps.npu-bfpgemm.outputs.cache-hit != 'true'
+        run: |
+          cmake -S cmake/npu-designs -B build/npu-bfpgemm -G Ninja `
+            -DGUFO_NPU_DESIGN=bfpgemm "-DGUFO_IRON_PYTHON=$env:IRON_ROOT/Scripts/python.exe" `
+            "-DXRT_DIR=$env:XRT_DIR" "-DGUFO_NPU_CACHE_HOME=$env:RUNNER_TEMP/npu-cache"
+          if ($LASTEXITCODE -ne 0) { throw 'bfpgemm configure failed' }
+          cmake --build build/npu-bfpgemm --target npu_design_bfpgemm --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'bfpgemm compilation failed' }
+          New-Item -ItemType Directory -Force C:/gufo-npu | Out-Null
+          cmake --install build/npu-bfpgemm --prefix build/npu-installed-bfpgemm
+          if ($LASTEXITCODE -ne 0) { throw 'bfpgemm installation failed' }
+          Copy-Item build/npu-installed-bfpgemm/bin/npu/bfpgemm C:/gufo-npu/bfpgemm -Recurse
+
+      - name: Save compiled bfpgemm
+        if: hashFiles('cmake/npu-designs/CMakeLists.txt') != '' && steps.npu-bfpgemm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:/gufo-npu/bfpgemm
+          key: gufo-npu-output-windows-v1-${{ steps.iron.outputs.key }}-${{ env.XRT_SDK_SHA256 }}-${{ env.SDK_SHA256 }}-bfpgemm-${{ hashFiles('cmake/GufoNpuDesigns.cmake', 'cmake/GufoNpuDesignList.cmake', 'cmake/npu-designs/**', 'src/core/npu/kernels/bfpgemm/**') }}
+
       - name: Check out external extension
         if: ${{ inputs.extension-repo != '' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -269,6 +447,9 @@ jobs:
           if ($env:EXTERNAL_EXTENSION_REPO) {
             $identity += "-DGUFO_EXTENSION_DIRS=$PWD/external-extension"
           }
+          if (Test-Path cmake/npu-designs/CMakeLists.txt) {
+            $identity += '-DGUFO_NPU_PREBUILT_DESIGNS=C:/gufo-npu'
+          }
           $packageArgs = @('--root', "$PWD")
           if ($env:GUFO_RELEASE_VERSION) { $packageArgs += '--from-lock' }
           if ($env:EXTERNAL_EXTENSION_REPO) {
@@ -281,14 +462,23 @@ jobs:
           cmake --preset windows-release -DBUILD_TESTING=ON "-DCMAKE_HIP_COMPILER_ROCM_ROOT=$env:SDK_ROOT" `
             -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
             -DOpenMP_CXX_LIB_NAMES=libomp "-DOpenMP_libomp_LIBRARY=$PWD/build/openmp/runtime/src/libomp.lib" `
-            "-DOpenMP_CXX_INCLUDE_DIR=$PWD/build/openmp/runtime/src" "-DXRT_DIR=$env:XRT_DIR" @identity
+            "-DOpenMP_CXX_INCLUDE_DIR=$PWD/build/openmp/runtime/src" "-DXRT_DIR=$env:XRT_DIR" `
+            "-DGUFO_IRON_PYTHON=$env:IRON_ROOT/Scripts/python.exe" -DGUFO_NPU_DESIGNS_REQUIRED=ON `
+            "-DGUFO_NPU_CACHE_HOME=$env:RUNNER_TEMP/npu-cache" @identity
           if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
           "$PWD\build\windows-release\vcpkg_installed\x64-windows-release\bin" >> $env:GITHUB_PATH
           "$PWD\build\windows-release" >> $env:GITHUB_PATH
 
       - name: Build application and test binaries
+        id: build
         run: |
-          cmake --build --preset windows-release --parallel $env:NUMBER_OF_PROCESSORS --target gufo gufo-server component_text_cache_test qwen38_flash_next_ngram_test gpu_queues_test bandwidth_test allocation_benchmark_test
+          $targets = @('gufo', 'gufo-server', 'component_text_cache_test', 'qwen38_flash_next_ngram_test', 'gpu_queues_test', 'bandwidth_test', 'allocation_benchmark_test')
+          # Release tags from before the in-tree NPU designs have no such target.
+          if (Select-String -Quiet -Pattern 'npu_designs' -Path cmake/GufoNpuDesigns.cmake -ErrorAction SilentlyContinue) {
+            # The on-device design checks run in Devlab (devlab-windows.yml).
+            $targets += 'npu_designs', 'npu_device_test', 'npu_bfp_device_test', 'npu_qwen3dec_device_test'
+          }
+          cmake --build --preset windows-release --parallel $env:NUMBER_OF_PROCESSORS --target @targets
           if ($LASTEXITCODE -ne 0) { throw 'build failed' }
           ccache --show-stats
 
@@ -334,6 +524,11 @@ jobs:
             if (Test-Path "$build\$dir") { Copy-Item "$build\$dir" $dist -Recurse }
           }
           Copy-Item "$build\vcpkg_installed\x64-windows-release\bin\*.dll" $dist -Force
+          # cmake --install put the NPU designs in bin\npu, now npu\ beside gufo.exe.
+          if (Test-Path "$build/npu-artifacts.txt") {
+            python tools/ci/npu_artifacts.py "$dist/npu" --manifest "$build/npu-artifacts.txt"
+            if ($LASTEXITCODE -ne 0) { throw 'incomplete NPU bundle' }
+          }
           if (Test-Path "$build\gufo-video-libraries.txt") {
             Copy-Item "$build\gufo-video-libraries.txt" $dist
             $videoTest = Get-ChildItem $build -Recurse -Filter 'embedding_gemma2_video_processor_test.exe' | Select-Object -First 1
@@ -349,7 +544,11 @@ jobs:
           $redist = Get-ChildItem "$env:VCToolsRedistDir\x64" -Directory |
             Where-Object { $_.Name -like 'Microsoft.VC*.CRT' }
           foreach ($dir in $redist) { Copy-Item "$($dir.FullName)\*.dll" $dist -Force }
-          foreach ($test in 'gpu_queues_test', 'bandwidth_test', 'allocation_benchmark_test') {
+          $tests = @('gpu_queues_test', 'bandwidth_test', 'allocation_benchmark_test')
+          if (Test-Path "$dist/npu") {
+            $tests += 'npu_device_test', 'npu_bfp_device_test', 'npu_qwen3dec_device_test'
+          }
+          foreach ($test in $tests) {
             $exe = Get-ChildItem $build -Recurse -Filter "$test.exe" | Select-Object -First 1
             if (-not $exe) { throw "$test.exe was not built" }
             Copy-Item $exe.FullName $dist
@@ -380,6 +579,10 @@ jobs:
           New-Item -ItemType Directory -Force $extracted | Out-Null
           tar -xf $archive -C $extracted
           if ($LASTEXITCODE -ne 0) { throw 'cannot extract test bundle' }
+          if (Test-Path build/windows-release/npu-artifacts.txt) {
+            python tools/ci/npu_artifacts.py "$extracted/npu" --manifest build/windows-release/npu-artifacts.txt
+            if ($LASTEXITCODE -ne 0) { throw 'extracted archive has incomplete NPU designs' }
+          }
           python "$env:GUFO_PACKAGING_ROOT/tools/windows/check_bundle.py" $extracted
           if ($LASTEXITCODE -ne 0) { throw 'bundle has unshipped DLL dependencies' }
           $env:PATH = "$extracted;$env:SystemRoot/System32;$env:SystemRoot"
@@ -425,7 +628,7 @@ jobs:
           }
           Copy-Item licenses "$dist\third-party" -Recurse
           Copy-Item src\models\deepseek_v4_flash\LICENSE.ds4 "$dist\third-party"
-          foreach ($dir in 'rocblas', 'hipblaslt') {
+          foreach ($dir in 'rocblas', 'hipblaslt', 'npu') {
             if (Test-Path "$bundle\$dir") { Copy-Item "$bundle\$dir" $dist -Recurse }
           }
           $archive = "$env:RUNNER_TEMP\gufo-$env:RELEASE_TAG-windows-x86_64.zip"
@@ -441,6 +644,10 @@ jobs:
           New-Item -ItemType Directory -Force $extracted | Out-Null
           tar -xf $archive -C $extracted
           if ($LASTEXITCODE -ne 0) { throw 'cannot extract Windows release' }
+          if (Test-Path build/windows-release/npu-artifacts.txt) {
+            python tools/ci/npu_artifacts.py "$extracted/npu" --manifest build/windows-release/npu-artifacts.txt
+            if ($LASTEXITCODE -ne 0) { throw 'extracted archive has incomplete NPU designs' }
+          }
           python "$env:GUFO_PACKAGING_ROOT/tools/windows/check_bundle.py" $extracted
           if ($LASTEXITCODE -ne 0) { throw 'release ZIP has unshipped DLL dependencies' }
           # Use an external CPU harness beside the extracted release DLLs.
@@ -511,6 +718,15 @@ jobs:
         with:
           path: ${{ runner.temp }}\ccache
           key: gufo-windows-ccache-v1-${{ env.SDK_TARBALL }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Saved even when the build fails or times out, so a rerun keeps every
+      # design that finished; IRON drops failed compilations itself.
+      - name: Save NPU design cache
+        if: always() && steps.iron-python.outcome == 'success'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\npu-cache
+          key: gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save vcpkg binary cache
         if: always() && steps.configure.outcome != 'skipped'
