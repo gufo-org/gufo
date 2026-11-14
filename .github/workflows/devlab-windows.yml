@@ -158,6 +158,8 @@ jobs:
             @('npu_qwen3dec_device_test', 'npu\qwen3dec', '5'))
           foreach ($check in $checks) {
             $test, $arguments = $check
+            # A lone argument is a string, which splatting passes one character at a time.
+            $arguments = @($arguments)
             if (-not (Test-Path ".\$test.exe")) {
               if (Test-Path 'npu') { throw "the bundle ships NPU designs but not $test.exe" }
               "skipped: this bundle has no NPU designs"
