@@ -41,6 +41,35 @@ phase check and its packaged design builds successfully; a full original
 1024-row build was not repeated. The separate decoder dispatch C++ compilation
 remains expensive. Measurement details: [prefill build evidence](artifacts/npu-prefill-build.json).
 
+## Decoder build time
+
+The decoder keeps its repeated layer schedule in `range_` with an internal
+`DispatchTime[np.int32]` layer count. The C++ host supplies the model's fixed
+depth, and `require` rejects other values. A constant-bound `range_` reduces
+initial MLIR but is unrolled again before C++ emission. The checked dispatch
+bound preserves the loop in the host builder; it adds no user setting.
+
+On November 14, 2026, a cold build of the 28-layer program with GCC 16.2 took
+292.658 s for the expanded schedule and 9.767 s for the retained loop, with
+separate empty IRON caches. Generated C++ shrank from 7.19 MB to 0.84 MB;
+the host compilation phase fell from 277.916 s to 5.355 s.
+
+Clang 24 compiled the same compact builder in 4.322 s with about 217 MiB
+peak RSS. On the expanded source it took 165.119 s but needed about 22 GiB,
+so selecting Clang alone does not solve the build problem. Nix uses the
+existing pinned ROCm Clang for host dispatch libraries; Peano and kernel
+optimization settings stay fixed.
+
+All 32 core ELFs and their probe copies match byte for byte. The decoded
+DMA, RTP and lock traces match for both models, including context/head
+boundaries; the raw instruction streams differ in BD-pool register writes.
+The numerical NPU test passes for the decoder and predictor. Matched
+20-token controls were 29.99/29.98 ms per decoder token and 2.46/2.41 ms per
+predictor token (baseline/candidate), without a material regression. The
+host checks IRON's optional `dispatch_abi` before calling a library, so
+stale scalar signatures fail cleanly. Full measurements, commands, limits
+and retained logs are in [decoder build evidence](artifacts/npu-decoder-build.json).
+
 ## BfpGemm
 
 The cores are mlir-aie's asymmetric-tile-buffering GEMM (`bfpgemm.cc`): each

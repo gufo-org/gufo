@@ -8,6 +8,7 @@
   cmake,
   ninja,
   iron,
+  hostCxx,
   xrt,
   sourceRoot,
   runCommand,
@@ -59,6 +60,7 @@ let
         ];
         cmakeFlags = [
           "-DGUFO_NPU_DESIGN=${name}"
+          "-DGUFO_NPU_HOST_CXX=${hostCxx}/bin/clang++"
           "-DGUFO_IRON_PYTHON=${iron}/bin/python3"
           "-DXRT_DIR=${xrt}/opt/xilinx/xrt/share/cmake/XRT"
         ];

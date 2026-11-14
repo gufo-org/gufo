@@ -85,7 +85,10 @@ let
   # the package build, or have none.
   npuDesigns =
     if iron != null && xrt != null && builtins.pathExists (sourceRoot + "/cmake/npu-designs/CMakeLists.txt") then
-      import ./npu-designs.nix { inherit lib stdenv cmake ninja iron xrt sourceRoot runCommand; }
+      import ./npu-designs.nix {
+        inherit lib stdenv cmake ninja iron xrt sourceRoot runCommand;
+        hostCxx = rocmPackages.llvm.clang;
+      }
     else
       null;
   evalFixture =

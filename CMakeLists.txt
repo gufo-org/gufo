@@ -1018,6 +1018,11 @@ endfunction()
     extension_serving_boundary_gate extension_target_ownership_gate
     PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
 
+  add_test(NAME npu_decoder_plan_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/core/npu_decoder_plan_test.py)
+  set_tests_properties(npu_decoder_plan_test PROPERTIES LABELS "cpu;npu" TIMEOUT 30)
+
   add_test(NAME npu_prefill_plan_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/core/npu_prefill_plan_test.py)

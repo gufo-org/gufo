@@ -27,7 +27,7 @@ import sys
 import aie.iron as iron
 import numpy as np
 from aie.iron import (Buffer, DispatchTime, ExternalFunction, In, InOut, Kernel, ObjectFifo, Program, Runtime, TaskGroup,
-                      Worker, WorkerRuntimeBarrier)
+                      Worker, WorkerRuntimeBarrier, require)
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile, from_name
 
@@ -143,7 +143,15 @@ def design(model, S, W, scalars):
                 rtps[c][j][5] = lay.I
                 rtps[c][j][6] = lay.LAYERS
                 barriers[c][j].set(1)
-        for phase in lay.phases(d):
+        require(v["layers"] == lay.LAYERS, "decoder layer count must match the compiled model")
+
+        def phases():
+            yield from lay.input_phases()
+            for layer in range_(v["layers"]):
+                yield from lay.layer_phases(layer, d)
+            yield from lay.output_phases(d)
+
+        for phase in phases():
             # One task group per phase when every shim tile holds at most 8 tasks: the FIFO
             # already orders a stream's inputs before its weights, so only the drains are
             # waited on. Otherwise the inputs go first in a group of their own.
@@ -172,17 +180,17 @@ def design(model, S, W, scalars):
 @iron.jit
 def qwen3dec(S: InOut, W: In, *, pos: DispatchTime[np.int32], recs_a: DispatchTime[np.int32],
              recs_b: DispatchTime[np.int32], recs_c: DispatchTime[np.int32], recs_d: DispatchTime[np.int32],
-             head_chunks: DispatchTime[np.int32]):
+             head_chunks: DispatchTime[np.int32], layers: DispatchTime[np.int32]):
     return design("qwen3dec", S, W, dict(pos=pos, recs_a=recs_a, recs_b=recs_b, recs_c=recs_c, recs_d=recs_d,
-                                          head_chunks=head_chunks))
+                                          head_chunks=head_chunks, layers=layers))
 
 
 @iron.jit
 def qwen3dec_p(S: InOut, W: In, *, pos: DispatchTime[np.int32], recs_a: DispatchTime[np.int32],
                recs_b: DispatchTime[np.int32], recs_c: DispatchTime[np.int32], recs_d: DispatchTime[np.int32],
-               head_chunks: DispatchTime[np.int32], head_base: DispatchTime[np.int32]):
+               head_chunks: DispatchTime[np.int32], head_base: DispatchTime[np.int32], layers: DispatchTime[np.int32]):
     return design("qwen3dec_p", S, W, dict(pos=pos, recs_a=recs_a, recs_b=recs_b, recs_c=recs_c, recs_d=recs_d,
-                                            head_chunks=head_chunks, head_base=head_base))
+                                            head_chunks=head_chunks, head_base=head_base, layers=layers))
 
 
 if __name__ == "__main__":

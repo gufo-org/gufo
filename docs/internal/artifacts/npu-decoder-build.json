@@ -1,0 +1,631 @@
+{
+  "date": "2026-11-14",
+  "baseline_revision": "b4eb2c891576241eefe3e4615ad1b0a433e7a431",
+  "platform": "Linux x86_64, AMD Strix Halo gfx1151; XDNA NPU",
+  "toolchain": {
+    "mlir_aie": "1.4.5",
+    "peano": "22.0.0.2026111101+81af12b7",
+    "gcc": "16.2.0",
+    "clang": "24.0.0 ROCm therock-10.1 (existing pinned toolchain)"
+  },
+  "cold_build_scope": "One qwen3dec program, generation through xclbin and dispatch library; separate initially empty NPU_CACHE_HOME directories; no overlapping heavy jobs.",
+  "baseline_gcc": {
+    "measurement": {
+      "command": [
+        "/nix/store/phdfv31mzbglfvachyncaf2nijhbm5al-python3-3.13.16-env/bin/python3",
+        "/tmp/gufo-npu-compile-experiments/baseline-src/qwen3dec.py",
+        "/tmp/gufo-npu-compile-experiments/baseline",
+        "qwen3dec"
+      ],
+      "wall_s": 292.6583773559978,
+      "user_s": 297.563902,
+      "system_s": 2.349406,
+      "max_rss_kb": 1821488,
+      "returncode": 0
+    },
+    "kernel_profile": {
+      "wall_s": 3.5115374120068736,
+      "jobs": 2,
+      "kernels": [
+        {
+          "object": "qwen3dec_ffn.o",
+          "symbols": [
+            "ffn_next"
+          ],
+          "seconds": 3.510462745995028,
+          "cached": false
+        },
+        {
+          "object": "qwen3dec_attn.o",
+          "symbols": [
+            "attn_next"
+          ],
+          "seconds": 2.922732722989167,
+          "cached": false
+        }
+      ],
+      "dispatch_bridge_s": 277.9155753780069
+    },
+    "sources": {
+      "aie.mlir": {
+        "bytes": 4274127,
+        "sha256": "2bd86a5adccd76c0d35b7d8dfc3ad3baf20ac8739fe0583218b29dda97f52308"
+      },
+      "dispatch_gen.cpp": {
+        "bytes": 7191105,
+        "sha256": "bea11296a4ebb6853006280ddcc194241d8d5e50b5bd71d4699b917752d8da35"
+      }
+    }
+  },
+  "loop_gcc": {
+    "measurement": {
+      "command": [
+        "/nix/store/phdfv31mzbglfvachyncaf2nijhbm5al-python3-3.13.16-env/bin/python3",
+        "/tmp/gufo-npu-compile-experiments/dynamic-src/qwen3dec.py",
+        "/tmp/gufo-npu-compile-experiments/dynamic",
+        "qwen3dec"
+      ],
+      "wall_s": 9.767199219000759,
+      "user_s": 13.725068,
+      "system_s": 1.447218,
+      "max_rss_kb": 242076,
+      "returncode": 0
+    },
+    "kernel_profile": {
+      "wall_s": 3.402677713005687,
+      "jobs": 2,
+      "kernels": [
+        {
+          "object": "qwen3dec_attn.o",
+          "symbols": [
+            "attn_next"
+          ],
+          "seconds": 2.8252720839955145,
+          "cached": false
+        },
+        {
+          "object": "qwen3dec_ffn.o",
+          "symbols": [
+            "ffn_next"
+          ],
+          "seconds": 3.401610200002324,
+          "cached": false
+        }
+      ],
+      "dispatch_bridge_s": 5.355375707993517
+    },
+    "sources": {
+      "aie.mlir": {
+        "bytes": 602131,
+        "sha256": "86bf588854dcf87d0d62912c620544a2575f759540c845f2743293cd9136867a"
+      },
+      "dispatch_gen.cpp": {
+        "bytes": 844191,
+        "sha256": "6997bfaa70783f32454045e9e97eaa43ba7bb4443e107aceb188cc78bf709793"
+      }
+    }
+  },
+  "original_clang_bridge": {
+    "measurement": {
+      "command": [
+        "/nix/store/phdfv31mzbglfvachyncaf2nijhbm5al-python3-3.13.16-env/bin/python3",
+        "/tmp/gufo-npu-compile-experiments/compile-bridge.py",
+        "/tmp/gufo-npu-compile-experiments/baseline/qwen3dec.prj",
+        "/tmp/gufo-npu-compile-experiments/clang-bridge"
+      ],
+      "wall_s": 165.2810120639915,
+      "user_s": 160.734038,
+      "system_s": 4.190248,
+      "max_rss_kb": 23034152,
+      "returncode": 0
+    },
+    "bridge_profile": {
+      "dispatch_bridge_s": 165.1194962439913
+    }
+  },
+  "loop_clang_bridge": {
+    "measurement": {
+      "command": [
+        "/nix/store/phdfv31mzbglfvachyncaf2nijhbm5al-python3-3.13.16-env/bin/python3",
+        "/tmp/gufo-npu-compile-experiments/compile-bridge.py",
+        "/tmp/gufo-npu-compile-experiments/dynamic/qwen3dec.prj",
+        "/tmp/gufo-npu-compile-experiments/clang-dynamic-bridge",
+        "dynamic"
+      ],
+      "wall_s": 4.473759211003198,
+      "user_s": 4.270319,
+      "system_s": 0.22019799999999998,
+      "max_rss_kb": 222312,
+      "returncode": 0
+    },
+    "bridge_profile": {
+      "dispatch_bridge_s": 4.321569507999811
+    }
+  },
+  "compiler_comparison_scope": "compile_dispatch_bridge on identical dispatch_gen.cpp and npu_lowered.mlir at -O2. GCC timings come from the same bridge helper in each cold build; Clang replays that helper on copies of those files. No AIE compiler or optimization-level change.",
+  "constant_bound_attempt": {
+    "initial_mlir_bytes": 604146,
+    "generated_cpp_bytes": 7134481,
+    "generated_cpp_lines": 159936,
+    "aiecc_wall_ms": 4680,
+    "status": "Stopped during duplicate GCC host compilation; later lowering unrolled the constant-bound loop. Not a completed cold timing result.",
+    "interruption": {
+      "reason": "Stopped duplicate GCC bridge compile after generated C++ showed later loop unrolling (159936 lines, 7134481 bytes). Full candidate will be rebuilt with the winning compiler; this is not a completed timing result.",
+      "compiler_pid": 1164027
+    }
+  },
+  "checks": {
+    "phase_snapshots": "16 full schedules, both models; host-only test 0.1 seconds",
+    "transaction_traces": [
+      {
+        "model": "qwen3dec",
+        "pos": 0,
+        "chunks": 1,
+        "head": 0,
+        "words": [
+          267172,
+          267508
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec",
+        "pos": 0,
+        "chunks": 594,
+        "head": 0,
+        "words": [
+          267172,
+          267508
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec",
+        "pos": 16,
+        "chunks": 1,
+        "head": 0,
+        "words": [
+          267172,
+          267508
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec",
+        "pos": 16,
+        "chunks": 594,
+        "head": 0,
+        "words": [
+          267172,
+          267508
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec",
+        "pos": 1023,
+        "chunks": 1,
+        "head": 0,
+        "words": [
+          267172,
+          267508
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec",
+        "pos": 1023,
+        "chunks": 594,
+        "head": 0,
+        "words": [
+          267172,
+          267508
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec",
+        "pos": 4095,
+        "chunks": 1,
+        "head": 0,
+        "words": [
+          267172,
+          267508
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec",
+        "pos": 4095,
+        "chunks": 594,
+        "head": 0,
+        "words": [
+          267172,
+          267508
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 0,
+        "chunks": 1,
+        "head": 0,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 0,
+        "chunks": 1,
+        "head": 14,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 0,
+        "chunks": 8,
+        "head": 0,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 0,
+        "chunks": 8,
+        "head": 14,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 1,
+        "chunks": 1,
+        "head": 0,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 1,
+        "chunks": 1,
+        "head": 14,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 1,
+        "chunks": 8,
+        "head": 0,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 1,
+        "chunks": 8,
+        "head": 14,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 7,
+        "chunks": 1,
+        "head": 0,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 7,
+        "chunks": 1,
+        "head": 14,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 7,
+        "chunks": 8,
+        "head": 0,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 7,
+        "chunks": 8,
+        "head": 14,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 15,
+        "chunks": 1,
+        "head": 0,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 15,
+        "chunks": 1,
+        "head": 14,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 15,
+        "chunks": 8,
+        "head": 0,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      },
+      {
+        "model": "qwen3dec_p",
+        "pos": 15,
+        "chunks": 8,
+        "head": 14,
+        "words": [
+          50604,
+          50940
+        ],
+        "trace_differences": []
+      }
+    ],
+    "core_elfs": {
+      "baseline_count": 64,
+      "candidate_count": 64,
+      "matched_names": 64,
+      "byte_identical": 64,
+      "changed": [],
+      "baseline": {
+        "probeElfs_main_core_3_3/probeElfs_main_core_3_3.elf": "459a866c4eebccd64112ac2b9da11b596923e3efc6e10105d8bd0bb88c8209da",
+        "probeElfs_main_core_7_2/probeElfs_main_core_7_2.elf": "6583a349d130c678f5f79ed5645639ae661e06bf9e763c5a56e86cd3c0b315c5",
+        "probeElfs_main_core_6_5/probeElfs_main_core_6_5.elf": "c39855f3eca21c08d4b8e2af3da1a1229d4ca4ea9363bab593b2f4c099dadd8e",
+        "probeElfs_main_core_4_4/probeElfs_main_core_4_4.elf": "b9504322c2a940004845fd1a8d48c208f9eb8a11d3e99893cb6a1b4c6f90555e",
+        "probeElfs_main_core_6_2/probeElfs_main_core_6_2.elf": "717ebd0eef4389c640ee19f90284eb4f5ce40d3a6a71641b786c8232fd8201fc",
+        "probeElfs_main_core_3_5/probeElfs_main_core_3_5.elf": "4e744ad319a010b27e01e81034a11c562cc5b44da6376512f605d28c0d9db2fd",
+        "probeElfs_main_core_0_3/probeElfs_main_core_0_3.elf": "86a8c1cb1dfed3a5ab327f5873c6d018f7ef2bd10dffa83cfd23c65a3da47952",
+        "probeElfs_main_core_3_4/probeElfs_main_core_3_4.elf": "02d53dcba93a951b280c57b0c3181f74a75804a0f9079cecf4a2cfb830fcb776",
+        "probeElfs_main_core_4_2/probeElfs_main_core_4_2.elf": "717ce8d54cf498fa00d070413bc04e8929420cdae5a2746b6c05c5d680183621",
+        "probeElfs_main_core_0_5/probeElfs_main_core_0_5.elf": "a3c067a29b3b5372ec80086c409475b07a3d2674b9923475bd5aa2a33f3b80b3",
+        "probeElfs_main_core_3_2/probeElfs_main_core_3_2.elf": "3e9f6bb7f43089e16841988b247b45ce1f5cc245342fc00de516c87b430f0647",
+        "probeElfs_main_core_6_4/probeElfs_main_core_6_4.elf": "c6afe67a193de0631405db71116a29e0462bd901864a34e1915c6320c055e11d",
+        "probeElfs_main_core_1_4/probeElfs_main_core_1_4.elf": "16d1984c1bab2ead0b1c23b796c592308ec56017f4c46f96240180830e89b1c9",
+        "probeElfs_main_core_1_5/probeElfs_main_core_1_5.elf": "52086a88d33a0ffcbef3e8559db99c0479a274a23dbc5799315ccb25ef89ce64",
+        "probeElfs_main_core_4_5/probeElfs_main_core_4_5.elf": "21446267cec67b349a873712e24ce7865c1880598a5a727cdf1f96a3656a7476",
+        "probeElfs_main_core_2_2/probeElfs_main_core_2_2.elf": "8ed1008ecf9313fd1344bbee8bfb673b080047bab0047d180d6d1f2c7c53477b",
+        "probeElfs_main_core_7_4/probeElfs_main_core_7_4.elf": "63fbbe603d6263229ffccac5c08dd3de631c0b84b8f804e96099b58b10d26d6d",
+        "probeElfs_main_core_6_3/probeElfs_main_core_6_3.elf": "274726c886df3ce280bf9f43d5de56b7f6d698b61113d15bd97b990c54ed8a78",
+        "probeElfs_main_core_5_5/probeElfs_main_core_5_5.elf": "c5d1fd6494b90a4b52c02c1a54a1fac162ee16ecac2c4e538da8b74afeb90682",
+        "probeElfs_main_core_4_3/probeElfs_main_core_4_3.elf": "9b1595b4f756e8f869881fa33697410825fd7071a699e8a3fedde81521d7bc5e",
+        "probeElfs_main_core_7_3/probeElfs_main_core_7_3.elf": "c741b3d0b4c763bbab7d39a355599237cf53bd815f39a2ccd796f8cb88b8bf9b",
+        "probeElfs_main_core_5_3/probeElfs_main_core_5_3.elf": "e1a27ae56b4166efb4b346dd8a51c1fa1ceaffa78ac57de0b8dce42af4d05cff",
+        "probeElfs_main_core_5_4/probeElfs_main_core_5_4.elf": "df4d4e8ddd06fc7fa60bb2371092527dc59c332a7ce8d1d49483c8599d6ff628",
+        "probeElfs_main_core_5_2/probeElfs_main_core_5_2.elf": "0fef635348a724e46e882af77a7e6977042dfe07268efe821838a0bd0b71dc16",
+        "probeElfs_main_core_1_2/probeElfs_main_core_1_2.elf": "7c1c4ae0ca72c8d61903a14058fc33fd62f8e8524e43789dfe1c7de2c67cbf34",
+        "probeElfs_main_core_2_4/probeElfs_main_core_2_4.elf": "a5a90706db9b7ec94ddd9529170ce27698e52ad5c5901bc71376c8efe5755c29",
+        "probeElfs_main_core_0_2/probeElfs_main_core_0_2.elf": "4e1f1082135bcc33ce3b80a07ff3f253c549c7de84a064f9fda449141eee80f4",
+        "probeElfs_main_core_2_3/probeElfs_main_core_2_3.elf": "8ba662c5cd262472a13f0b5be4f0f97bcb00e9982cfff75bd7383e8a718b0c9d",
+        "probeElfs_main_core_1_3/probeElfs_main_core_1_3.elf": "32569ebd3a4996e261ed0ee9a50f40111527ca1892e2aff371603a79829ec4cf",
+        "probeElfs_main_core_0_4/probeElfs_main_core_0_4.elf": "3c4266b519a6c699489472adf977a277d3e9b61a48da33b751fe6a11ec912459",
+        "probeElfs_main_core_7_5/probeElfs_main_core_7_5.elf": "295c70ddb1de356e7a1893519e7f7a64900e8aa06e82581033085fd86fe3114d",
+        "probeElfs_main_core_2_5/probeElfs_main_core_2_5.elf": "c1cecc4de9056e1fdff53358b4c888a8943eaa79890935ec4a8f4dd260c37d77",
+        "elfs_main_core_4_5/elfs_main_core_4_5.elf": "d3e361f24b0a1e322d03bbf583c0d0980576b89ef1dd7aa7ccf940946b342bac",
+        "elfs_main_core_1_3/elfs_main_core_1_3.elf": "456ed5f87da506dbb965619991f3c985a31b0403658b74d5d9d8f8742d91a27a",
+        "elfs_main_core_5_4/elfs_main_core_5_4.elf": "116a5144998da1a19b960b509b66d4df579ce19cef05fb940ddf15da0af678e2",
+        "elfs_main_core_1_2/elfs_main_core_1_2.elf": "1871f6e6577a4c2650b33043297d9c5c22dde0ff8ca4ef892143010d90e39087",
+        "elfs_main_core_0_4/elfs_main_core_0_4.elf": "1da17d536f2256da326485859dd0c417307801fdf80526d33d6802670f784b2b",
+        "elfs_main_core_2_5/elfs_main_core_2_5.elf": "9c5a71720557bd2ff4dfc447c04cb08338c5487284e6c553b1c6988bbe364965",
+        "elfs_main_core_3_2/elfs_main_core_3_2.elf": "bf216647ad3b09a7818203b829c71d6908ffa48d8feb778012af63edb930cfed",
+        "elfs_main_core_4_4/elfs_main_core_4_4.elf": "0b77df45368cd87b06c704d535a2844af544c16313b9c5d23f3239da21248112",
+        "elfs_main_core_1_5/elfs_main_core_1_5.elf": "324229176879b0b380ed4216c6bb707be290171db3cc047f7bc8b2ec8dc86cca",
+        "elfs_main_core_0_2/elfs_main_core_0_2.elf": "3dd3d4ddf22c79e5df17d16d8c046dec5463c25b9a7da4989bb4d876618b53c1",
+        "elfs_main_core_6_4/elfs_main_core_6_4.elf": "5dd79acefcdc20a8d72d3abf22c33c0f2e5a4c18e0e3b6dbabeeda0b62a5771d",
+        "elfs_main_core_3_5/elfs_main_core_3_5.elf": "2d2b84d4d5b9cc343ca5e2db1ef58d733f1c4a2b76fa2ced1bec49f535cc3bbd",
+        "elfs_main_core_5_3/elfs_main_core_5_3.elf": "e3bcc25ba58548bd3e08224a3b47f6cc4b95cf75d7993576524e1fd4f65ce7c2",
+        "elfs_main_core_6_5/elfs_main_core_6_5.elf": "6ad9de1406ef5a56c15e4d45d2a4ca6ec2535d9ab7576d8c4ea2ad7f611d1cbb",
+        "elfs_main_core_2_4/elfs_main_core_2_4.elf": "3dc2d4a80cf06a8eefb11e3a7befd7d928e235c93ec98e96c55635ae143310bf",
+        "elfs_main_core_5_5/elfs_main_core_5_5.elf": "10e324756eb6a568cac6b1780ec1016151369b40187c0926dea1693a8cb68fdb",
+        "elfs_main_core_7_2/elfs_main_core_7_2.elf": "eac898605a1ccb81d87d718786e0afdeab4d351168f60fba27fb1a55c21c3897",
+        "elfs_main_core_2_2/elfs_main_core_2_2.elf": "874ef193141baf40a9a4359646579a647d0e1f68de35b3fa70c1f952920a91fc",
+        "elfs_main_core_1_4/elfs_main_core_1_4.elf": "26f44471ce23ebb1849efaf641f30d579cd82bc90277ecebd5da9b0c4999b425",
+        "elfs_main_core_3_3/elfs_main_core_3_3.elf": "bda2e09b3193c6a4b1fb8d910f9079a28c9c39bf0afe7a17710b811c73fbea72",
+        "elfs_main_core_3_4/elfs_main_core_3_4.elf": "7331c6345cca7ebe683132cc766b6a270fff5410a8a7df0eaab935be87e42828",
+        "elfs_main_core_0_5/elfs_main_core_0_5.elf": "58e8309f9d98bf02d4e322a70cdecd422fdecd3a8157281cda7e5864a84afec0",
+        "elfs_main_core_6_2/elfs_main_core_6_2.elf": "892a35da6d19ab4bd961c665f85f9c0f432b584348c81f4be742bc4d2022f998",
+        "elfs_main_core_0_3/elfs_main_core_0_3.elf": "c5208004749de3f283efab50a2cd57b9048160950f0eb064f0ebea0bc05fff50",
+        "elfs_main_core_6_3/elfs_main_core_6_3.elf": "c80e5ab4dd7f22e6b29f6323d61446ceda2ac8f7c5700aa1d5583b8fad1b6e72",
+        "elfs_main_core_4_3/elfs_main_core_4_3.elf": "8fa35bdebb90851b05513f1d68dc1b7426e92024e93b7c0a2c2d396fddbf987d",
+        "elfs_main_core_5_2/elfs_main_core_5_2.elf": "c96a9b71e57ae5928c128c3a0c230377b81b75b18d3cf15d9ecf5068da194faa",
+        "elfs_main_core_7_3/elfs_main_core_7_3.elf": "ccdba4c377d7760bff4ac8de543be05d15f664378ca03f2f2abcac1d7ba99f3a",
+        "elfs_main_core_2_3/elfs_main_core_2_3.elf": "e8bdd5286bea63b1ad5e381734ff973a771a11b3cd9b0d1dd1d0936d83363792",
+        "elfs_main_core_4_2/elfs_main_core_4_2.elf": "0cc93fc9957b30e33308b09b8bf5d6a6132f80cb6b07392e6888e35c8e29d62f",
+        "elfs_main_core_7_4/elfs_main_core_7_4.elf": "adbe2863610a007904db14704c49809df81c37c6f2fdbf6745cec0c2c49461af",
+        "elfs_main_core_7_5/elfs_main_core_7_5.elf": "165284bfc9868f36d71b3f63469ea89b8ce7df2144c083eca12b6a519ea48ca6"
+      },
+      "candidate": {
+        "probeElfs_main_core_5_3/probeElfs_main_core_5_3.elf": "e1a27ae56b4166efb4b346dd8a51c1fa1ceaffa78ac57de0b8dce42af4d05cff",
+        "probeElfs_main_core_4_4/probeElfs_main_core_4_4.elf": "b9504322c2a940004845fd1a8d48c208f9eb8a11d3e99893cb6a1b4c6f90555e",
+        "probeElfs_main_core_1_4/probeElfs_main_core_1_4.elf": "16d1984c1bab2ead0b1c23b796c592308ec56017f4c46f96240180830e89b1c9",
+        "probeElfs_main_core_1_2/probeElfs_main_core_1_2.elf": "7c1c4ae0ca72c8d61903a14058fc33fd62f8e8524e43789dfe1c7de2c67cbf34",
+        "probeElfs_main_core_4_2/probeElfs_main_core_4_2.elf": "717ce8d54cf498fa00d070413bc04e8929420cdae5a2746b6c05c5d680183621",
+        "probeElfs_main_core_5_5/probeElfs_main_core_5_5.elf": "c5d1fd6494b90a4b52c02c1a54a1fac162ee16ecac2c4e538da8b74afeb90682",
+        "probeElfs_main_core_2_4/probeElfs_main_core_2_4.elf": "a5a90706db9b7ec94ddd9529170ce27698e52ad5c5901bc71376c8efe5755c29",
+        "probeElfs_main_core_6_3/probeElfs_main_core_6_3.elf": "274726c886df3ce280bf9f43d5de56b7f6d698b61113d15bd97b990c54ed8a78",
+        "probeElfs_main_core_7_5/probeElfs_main_core_7_5.elf": "295c70ddb1de356e7a1893519e7f7a64900e8aa06e82581033085fd86fe3114d",
+        "probeElfs_main_core_2_2/probeElfs_main_core_2_2.elf": "8ed1008ecf9313fd1344bbee8bfb673b080047bab0047d180d6d1f2c7c53477b",
+        "probeElfs_main_core_6_2/probeElfs_main_core_6_2.elf": "717ebd0eef4389c640ee19f90284eb4f5ce40d3a6a71641b786c8232fd8201fc",
+        "probeElfs_main_core_7_4/probeElfs_main_core_7_4.elf": "63fbbe603d6263229ffccac5c08dd3de631c0b84b8f804e96099b58b10d26d6d",
+        "probeElfs_main_core_1_5/probeElfs_main_core_1_5.elf": "52086a88d33a0ffcbef3e8559db99c0479a274a23dbc5799315ccb25ef89ce64",
+        "probeElfs_main_core_0_4/probeElfs_main_core_0_4.elf": "3c4266b519a6c699489472adf977a277d3e9b61a48da33b751fe6a11ec912459",
+        "probeElfs_main_core_5_2/probeElfs_main_core_5_2.elf": "0fef635348a724e46e882af77a7e6977042dfe07268efe821838a0bd0b71dc16",
+        "probeElfs_main_core_7_3/probeElfs_main_core_7_3.elf": "c741b3d0b4c763bbab7d39a355599237cf53bd815f39a2ccd796f8cb88b8bf9b",
+        "probeElfs_main_core_3_5/probeElfs_main_core_3_5.elf": "4e744ad319a010b27e01e81034a11c562cc5b44da6376512f605d28c0d9db2fd",
+        "probeElfs_main_core_3_3/probeElfs_main_core_3_3.elf": "459a866c4eebccd64112ac2b9da11b596923e3efc6e10105d8bd0bb88c8209da",
+        "probeElfs_main_core_7_2/probeElfs_main_core_7_2.elf": "6583a349d130c678f5f79ed5645639ae661e06bf9e763c5a56e86cd3c0b315c5",
+        "probeElfs_main_core_0_2/probeElfs_main_core_0_2.elf": "4e1f1082135bcc33ce3b80a07ff3f253c549c7de84a064f9fda449141eee80f4",
+        "probeElfs_main_core_4_5/probeElfs_main_core_4_5.elf": "21446267cec67b349a873712e24ce7865c1880598a5a727cdf1f96a3656a7476",
+        "probeElfs_main_core_0_3/probeElfs_main_core_0_3.elf": "86a8c1cb1dfed3a5ab327f5873c6d018f7ef2bd10dffa83cfd23c65a3da47952",
+        "probeElfs_main_core_5_4/probeElfs_main_core_5_4.elf": "df4d4e8ddd06fc7fa60bb2371092527dc59c332a7ce8d1d49483c8599d6ff628",
+        "probeElfs_main_core_4_3/probeElfs_main_core_4_3.elf": "9b1595b4f756e8f869881fa33697410825fd7071a699e8a3fedde81521d7bc5e",
+        "probeElfs_main_core_6_5/probeElfs_main_core_6_5.elf": "c39855f3eca21c08d4b8e2af3da1a1229d4ca4ea9363bab593b2f4c099dadd8e",
+        "probeElfs_main_core_2_3/probeElfs_main_core_2_3.elf": "8ba662c5cd262472a13f0b5be4f0f97bcb00e9982cfff75bd7383e8a718b0c9d",
+        "probeElfs_main_core_3_2/probeElfs_main_core_3_2.elf": "3e9f6bb7f43089e16841988b247b45ce1f5cc245342fc00de516c87b430f0647",
+        "probeElfs_main_core_6_4/probeElfs_main_core_6_4.elf": "c6afe67a193de0631405db71116a29e0462bd901864a34e1915c6320c055e11d",
+        "probeElfs_main_core_3_4/probeElfs_main_core_3_4.elf": "02d53dcba93a951b280c57b0c3181f74a75804a0f9079cecf4a2cfb830fcb776",
+        "probeElfs_main_core_0_5/probeElfs_main_core_0_5.elf": "a3c067a29b3b5372ec80086c409475b07a3d2674b9923475bd5aa2a33f3b80b3",
+        "probeElfs_main_core_1_3/probeElfs_main_core_1_3.elf": "32569ebd3a4996e261ed0ee9a50f40111527ca1892e2aff371603a79829ec4cf",
+        "probeElfs_main_core_2_5/probeElfs_main_core_2_5.elf": "c1cecc4de9056e1fdff53358b4c888a8943eaa79890935ec4a8f4dd260c37d77",
+        "elfs_main_core_0_3/elfs_main_core_0_3.elf": "c5208004749de3f283efab50a2cd57b9048160950f0eb064f0ebea0bc05fff50",
+        "elfs_main_core_1_3/elfs_main_core_1_3.elf": "456ed5f87da506dbb965619991f3c985a31b0403658b74d5d9d8f8742d91a27a",
+        "elfs_main_core_1_4/elfs_main_core_1_4.elf": "26f44471ce23ebb1849efaf641f30d579cd82bc90277ecebd5da9b0c4999b425",
+        "elfs_main_core_1_5/elfs_main_core_1_5.elf": "324229176879b0b380ed4216c6bb707be290171db3cc047f7bc8b2ec8dc86cca",
+        "elfs_main_core_4_2/elfs_main_core_4_2.elf": "0cc93fc9957b30e33308b09b8bf5d6a6132f80cb6b07392e6888e35c8e29d62f",
+        "elfs_main_core_2_5/elfs_main_core_2_5.elf": "9c5a71720557bd2ff4dfc447c04cb08338c5487284e6c553b1c6988bbe364965",
+        "elfs_main_core_2_3/elfs_main_core_2_3.elf": "e8bdd5286bea63b1ad5e381734ff973a771a11b3cd9b0d1dd1d0936d83363792",
+        "elfs_main_core_3_2/elfs_main_core_3_2.elf": "bf216647ad3b09a7818203b829c71d6908ffa48d8feb778012af63edb930cfed",
+        "elfs_main_core_5_4/elfs_main_core_5_4.elf": "116a5144998da1a19b960b509b66d4df579ce19cef05fb940ddf15da0af678e2",
+        "elfs_main_core_3_3/elfs_main_core_3_3.elf": "bda2e09b3193c6a4b1fb8d910f9079a28c9c39bf0afe7a17710b811c73fbea72",
+        "elfs_main_core_3_5/elfs_main_core_3_5.elf": "2d2b84d4d5b9cc343ca5e2db1ef58d733f1c4a2b76fa2ced1bec49f535cc3bbd",
+        "elfs_main_core_5_2/elfs_main_core_5_2.elf": "c96a9b71e57ae5928c128c3a0c230377b81b75b18d3cf15d9ecf5068da194faa",
+        "elfs_main_core_4_4/elfs_main_core_4_4.elf": "0b77df45368cd87b06c704d535a2844af544c16313b9c5d23f3239da21248112",
+        "elfs_main_core_5_5/elfs_main_core_5_5.elf": "10e324756eb6a568cac6b1780ec1016151369b40187c0926dea1693a8cb68fdb",
+        "elfs_main_core_0_4/elfs_main_core_0_4.elf": "1da17d536f2256da326485859dd0c417307801fdf80526d33d6802670f784b2b",
+        "elfs_main_core_2_4/elfs_main_core_2_4.elf": "3dc2d4a80cf06a8eefb11e3a7befd7d928e235c93ec98e96c55635ae143310bf",
+        "elfs_main_core_6_4/elfs_main_core_6_4.elf": "5dd79acefcdc20a8d72d3abf22c33c0f2e5a4c18e0e3b6dbabeeda0b62a5771d",
+        "elfs_main_core_1_2/elfs_main_core_1_2.elf": "1871f6e6577a4c2650b33043297d9c5c22dde0ff8ca4ef892143010d90e39087",
+        "elfs_main_core_0_5/elfs_main_core_0_5.elf": "58e8309f9d98bf02d4e322a70cdecd422fdecd3a8157281cda7e5864a84afec0",
+        "elfs_main_core_7_4/elfs_main_core_7_4.elf": "adbe2863610a007904db14704c49809df81c37c6f2fdbf6745cec0c2c49461af",
+        "elfs_main_core_5_3/elfs_main_core_5_3.elf": "e3bcc25ba58548bd3e08224a3b47f6cc4b95cf75d7993576524e1fd4f65ce7c2",
+        "elfs_main_core_6_5/elfs_main_core_6_5.elf": "6ad9de1406ef5a56c15e4d45d2a4ca6ec2535d9ab7576d8c4ea2ad7f611d1cbb",
+        "elfs_main_core_4_3/elfs_main_core_4_3.elf": "8fa35bdebb90851b05513f1d68dc1b7426e92024e93b7c0a2c2d396fddbf987d",
+        "elfs_main_core_6_3/elfs_main_core_6_3.elf": "c80e5ab4dd7f22e6b29f6323d61446ceda2ac8f7c5700aa1d5583b8fad1b6e72",
+        "elfs_main_core_6_2/elfs_main_core_6_2.elf": "892a35da6d19ab4bd961c665f85f9c0f432b584348c81f4be742bc4d2022f998",
+        "elfs_main_core_7_3/elfs_main_core_7_3.elf": "ccdba4c377d7760bff4ac8de543be05d15f664378ca03f2f2abcac1d7ba99f3a",
+        "elfs_main_core_3_4/elfs_main_core_3_4.elf": "7331c6345cca7ebe683132cc766b6a270fff5410a8a7df0eaab935be87e42828",
+        "elfs_main_core_7_2/elfs_main_core_7_2.elf": "eac898605a1ccb81d87d718786e0afdeab4d351168f60fba27fb1a55c21c3897",
+        "elfs_main_core_4_5/elfs_main_core_4_5.elf": "d3e361f24b0a1e322d03bbf583c0d0980576b89ef1dd7aa7ccf940946b342bac",
+        "elfs_main_core_0_2/elfs_main_core_0_2.elf": "3dd3d4ddf22c79e5df17d16d8c046dec5463c25b9a7da4989bb4d876618b53c1",
+        "elfs_main_core_2_2/elfs_main_core_2_2.elf": "874ef193141baf40a9a4359646579a647d0e1f68de35b3fa70c1f952920a91fc",
+        "elfs_main_core_7_5/elfs_main_core_7_5.elf": "165284bfc9868f36d71b3f63469ea89b8ce7df2144c083eca12b6a519ea48ca6"
+      }
+    },
+    "wrong_layer_count": "Both generated dispatchers return -2; host always supplies their fixed model depth.",
+    "host_abi": "npu_test passes; stale declared scalar count is rejected before invocation.",
+    "device_candidate": [
+      "warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user",
+      "28 x 2048, head 0, pos 37: hidden rel err 4.10e-02, logits rel err 4.06e-02, argmax 102/102",
+      "28 x 2048, head 0, pos 38: hidden rel err 4.47e-02, logits rel err 4.67e-02, argmax 3009/3009",
+      "28 x 2048, head 0, pos 39: hidden rel err 4.63e-02, logits rel err 4.69e-02, argmax 2831/2831",
+      "28 x 2048 decode: 29.97 ms per token (head 3072 rows)",
+      "5 x 1024, head 0, pos 2: hidden rel err 1.78e-02, logits rel err 1.79e-02, argmax 564/564",
+      "5 x 1024, head 1, pos 3: hidden rel err 1.81e-02, logits rel err 1.85e-02, argmax 1411/1411",
+      "5 x 1024, head 2, pos 4: hidden rel err 1.85e-02, logits rel err 1.96e-02, argmax 1497/1497",
+      "5 x 1024 decode: 2.41 ms per token (head 2048 rows)",
+      "PASS"
+    ],
+    "baseline_device_control": [
+      "28 x 2048, head 0, pos 37: hidden rel err 4.10e-02, logits rel err 4.06e-02, argmax 102/102",
+      "28 x 2048, head 0, pos 38: hidden rel err 4.47e-02, logits rel err 4.67e-02, argmax 3009/3009",
+      "28 x 2048, head 0, pos 39: hidden rel err 4.63e-02, logits rel err 4.69e-02, argmax 2831/2831",
+      "28 x 2048 decode: 29.99 ms per token (head 3072 rows)",
+      "5 x 1024, head 0, pos 2: hidden rel err 1.78e-02, logits rel err 1.79e-02, argmax 564/564",
+      "5 x 1024, head 1, pos 3: hidden rel err 1.81e-02, logits rel err 1.85e-02, argmax 1411/1411",
+      "5 x 1024, head 2, pos 4: hidden rel err 1.85e-02, logits rel err 1.96e-02, argmax 1497/1497",
+      "5 x 1024 decode: 2.46 ms per token (head 2048 rows)",
+      "PASS"
+    ],
+    "candidate_device_control": [
+      "28 x 2048, head 0, pos 37: hidden rel err 4.10e-02, logits rel err 4.06e-02, argmax 102/102",
+      "28 x 2048, head 0, pos 38: hidden rel err 4.47e-02, logits rel err 4.67e-02, argmax 3009/3009",
+      "28 x 2048, head 0, pos 39: hidden rel err 4.63e-02, logits rel err 4.69e-02, argmax 2831/2831",
+      "28 x 2048 decode: 29.98 ms per token (head 3072 rows)",
+      "5 x 1024, head 0, pos 2: hidden rel err 1.78e-02, logits rel err 1.79e-02, argmax 564/564",
+      "5 x 1024, head 1, pos 3: hidden rel err 1.81e-02, logits rel err 1.85e-02, argmax 1411/1411",
+      "5 x 1024, head 2, pos 4: hidden rel err 1.85e-02, logits rel err 1.96e-02, argmax 1497/1497",
+      "5 x 1024 decode: 2.41 ms per token (head 2048 rows)",
+      "PASS"
+    ]
+  },
+  "host_generation_s_per_call": {
+    "original_gcc": [
+      0.0004186304450558964,
+      0.00041720410001289566,
+      0.0004168929650040809
+    ],
+    "original_clang": [
+      0.0003092979750363156,
+      0.0003082939849991817,
+      0.0003100670300045749
+    ],
+    "loop_gcc": [
+      0.00024844933999702335,
+      0.0002482835749833612,
+      0.00024828772999171636
+    ],
+    "loop_clang": [
+      0.00017568357994605322,
+      0.00017592728501767852,
+      0.00017540074499265755
+    ]
+  },
+  "production_designs": "/nix/store/4r75hw1bw9ivzmida4fbga4f1qgj2jpg-gufo-npu-designs",
+  "logs_directory": "/tmp/gufo-npu-compile-experiments",
+  "limits": [
+    "Compiler comparisons were measured on Linux; native Windows builds and model checks run in CI.",
+    "Transaction traces are equivalent, not byte-identical: the main stream grows from 267172 to 267508 words due to BD-pool register writes.",
+    "The device control is the existing numerical operator test with 20 timed tokens, not a served-model benchmark.",
+    "Existing aiecc DMA lifetime warnings occur in baseline and candidate; verification and optimization remain enabled."
+  ]
+}

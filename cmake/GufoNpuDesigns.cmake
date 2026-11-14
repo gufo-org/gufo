@@ -62,6 +62,10 @@ if(GUFO_NPU_DESIGNS_AVAILABLE AND NOT GUFO_NPU_PREBUILT_DESIGNS)
     # amdclang-cl). Its MSVC-style driver uses the static CRT for the bridge.
     find_program(GUFO_NPU_HOST_CXX NAMES clang-cl cl
       HINTS "$ENV{HIP_PATH}/lib/llvm/bin" "$ENV{HIP_PATH}/bin" REQUIRED)
+  endif()
+  set(GUFO_NPU_HOST_CXX "${GUFO_NPU_HOST_CXX}" CACHE FILEPATH
+    "Host C++ compiler for IRON dispatch libraries")
+  if(GUFO_NPU_HOST_CXX)
     list(APPEND _gufo_npu_env "CXX=${GUFO_NPU_HOST_CXX}")
   endif()
   set(_gufo_peano "$ENV{PEANO_INSTALL_DIR}")

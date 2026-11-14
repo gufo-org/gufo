@@ -156,7 +156,7 @@ struct Qwen3Decoder::Impl {
     const int recs = std::max(4, (pos + 15) / 16);
     if (recs > 4 * 64)
       throw Error("Qwen3Decoder: position beyond the KV cache");
-    std::int32_t sc[7] = {pos,
+    std::int32_t sc[8] = {pos,
                           0,
                           0,
                           0,
@@ -165,8 +165,10 @@ struct Qwen3Decoder::Impl {
                           std::int32_t(std::size_t(head) * At("head_bytes"))};
     for (int i = 0; i < 4; ++i)
       sc[1 + i] = std::int32_t(recs / 4 + (i < recs % 4 ? 1 : 0));
+    const std::size_t count = heads > 1 ? 8 : 7;
+    sc[count - 1] = layers;
     const auto words =
-        generate.Generate(std::span<const std::int32_t>(sc, heads > 1 ? 7 : 6));
+        generate.Generate(std::span<const std::int32_t>(sc, count));
     return {words.begin(), words.end()};
   }
 };
@@ -189,7 +191,7 @@ Qwen3Decoder::Impl* LoadImpl(Qwen3Decoder::Impl& m,
   m.heads = int(m.At("heads"));
   m.groups = 2048 / m.hidden;
   m.generate =
-      DispatchLibrary::Open(dir / (name + "_dispatch.so"), m.heads > 1 ? 7 : 6);
+      DispatchLibrary::Open(dir / (name + "_dispatch.so"), m.heads > 1 ? 8 : 7);
   m.s = m.program->Allocate(m.At("s_bytes"), kArgS);
   m.w = m.program->Allocate(m.At("w_bytes"), kArgW);
   std::memset(m.s.data(), 0, m.s.size());

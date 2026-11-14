@@ -125,6 +125,29 @@ DispatchLibrary DispatchLibrary::Open(const std::filesystem::path& library,
     // relative paths.
     out.impl_ = std::make_unique<Impl>(std::filesystem::absolute(library));
     out.impl_->symbol = out.impl_->library.Symbol(symbol);
+    if (std::strcmp(symbol, "dispatch_generate") == 0) {
+      // IRON exports the scalar signature. Reject stale designs before a
+      // changed arity can make a scalar get interpreted as the output pointer.
+      void* abi = nullptr;
+      try {
+        abi = out.impl_->library.Symbol("dispatch_abi");
+      } catch (const platform::LibraryError&) {
+        // Custom dispatch libraries predating this optional metadata remain
+        // supported; their caller still owns the scalar signature.
+      }
+      if (abi) {
+        const char* actual = reinterpret_cast<const char* (*)()>(abi)();
+        std::string expected;
+        for (std::size_t i = 0; i < scalars; ++i) {
+          if (i)
+            expected += ',';
+          expected += "int32_t";
+        }
+        if (!actual || expected != actual)
+          throw Error(
+              "dispatch library scalar ABI mismatch; rebuild the NPU designs");
+      }
+    }
   } catch (const std::exception& e) {
     throw Error(library.string() + ": " + e.what());
   }

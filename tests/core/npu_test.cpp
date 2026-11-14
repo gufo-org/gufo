@@ -70,6 +70,8 @@ void ProbeFindsOnlyXdna(const fs::path& root) {
 }
 
 void DispatchAndPatch(const fs::path& library) {
+  Expect(Throws([&] { (void)npu::DispatchLibrary::Open(library, 1); }),
+         "stale dispatch scalar ABI rejected before calling it");
   const auto dispatch = npu::DispatchLibrary::Open(library, 2);
   const std::array<std::int32_t, 2> at0{0, 5}, at1{1, 5}, at9{9, 5};
   const auto s0 = dispatch.Generate(at0);
