@@ -150,7 +150,7 @@ class NpuArtifactsTest(unittest.TestCase):
                     capture_output=True, text=True)
                 self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
             with patch.dict(os.environ, {'PEANO_INSTALL_DIR': str(root), 'PYTHONPATH': str(root)}):
-                configure(f'-DGUFO_IRON_PYTHON={sys.executable}')
+                configure('-DCMAKE_SYSTEM_NAME=Linux', f'-DGUFO_IRON_PYTHON={sys.executable}')
             names = read_manifest(build / 'npu-artifacts.txt')
             self.assertIn('qwen3dec/qwen3dec_p_layout.txt', names)
             self.assertEqual(len(names), 21)

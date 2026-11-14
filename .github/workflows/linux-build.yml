@@ -91,7 +91,7 @@ jobs:
           out=$(nix eval --raw .#default --apply 'p: if p.npuDesigns or null == null then "" else p.npuDesigns.outPath')
           echo "drv=$drv" >> "$GITHUB_OUTPUT"
           echo "out=$out" >> "$GITHUB_OUTPUT"
-          echo "key=gufo-npu-designs-v1-$(basename "${drv:-none}" .drv)" >> "$GITHUB_OUTPUT"
+          echo "key=gufo-npu-designs-v2-$(basename "${drv:-none}" .drv)" >> "$GITHUB_OUTPUT"
 
       - name: Restore NPU designs
         id: npu-cache
@@ -101,11 +101,18 @@ jobs:
           path: /tmp/gufo-npu-designs
           key: ${{ steps.npu.outputs.key }}
           restore-keys: |
-            gufo-npu-designs-v1-
+            gufo-npu-designs-v2-
 
       - name: Import NPU designs
         if: steps.npu-cache.outputs.cache-matched-key != ''
-        run: nix copy --no-check-sigs --all --from file:///tmp/gufo-npu-designs
+        run: |
+          # Copy the recorded closure root, not --all: file binary caches
+          # enumerate hash-only placeholder names that are not store paths.
+          while IFS= read -r root; do
+            if ! nix copy --no-check-sigs --from file:///tmp/gufo-npu-designs "$root"; then
+              echo "::warning::NPU cache import failed; missing designs will be rebuilt"
+            fi
+          done < /tmp/gufo-npu-designs/roots.txt
 
       # Build independent designs concurrently, before the memory-heavy Gufo
       # compile. Each design's Ninja pool bounds program compilation to two.
@@ -148,6 +155,7 @@ jobs:
           set -euo pipefail
           if nix path-info "$NPU_OUT" >/dev/null 2>&1; then
             nix copy --to file:///tmp/gufo-npu-designs "$NPU_OUT"
+            printf '%s\n' "$NPU_OUT" > /tmp/gufo-npu-designs/roots.txt
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
