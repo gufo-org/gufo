@@ -41,14 +41,36 @@ bool DiskCacheEnabled(const TextDiskCacheConfig& config) {
 }  // namespace
 
 std::size_t CountReasoningTokens(
-    std::span<const tokenization::TokenId> tokens,
+    std::string_view text, std::span<const std::size_t> ends,
     TextGenerationBackend::InitialOutputState initial,
-    const ext::ReasoningMarkup& reasoning,
-    const std::function<std::string(tokenization::TokenId)>& decode) {
+    const ext::ReasoningMarkup& reasoning) {
   using State = TextGenerationBackend::InitialOutputState;
   if (TextGenerationBackend::IsContent(initial) || reasoning.close.empty() ||
       (initial == State::kAuto && reasoning.open.empty()))
     return 0;
+  std::size_t begin = 0;
+  if (initial == State::kAuto) {
+    const auto leading = text.find_first_not_of(" \t\r\n");
+    if (leading == std::string_view::npos ||
+        !text.substr(leading).starts_with(reasoning.open))
+      return 0;
+    begin = leading + reasoning.open.size();
+  } else if (text.starts_with(reasoning.open)) {
+    begin = reasoning.open.size();
+  }
+  const auto end = std::min(text.find(reasoning.close, begin), text.size());
+  if (begin >= end)
+    return 0;
+  const auto first = std::ranges::upper_bound(ends, begin);
+  const auto last = std::lower_bound(first, ends.end(), end);
+  return static_cast<std::size_t>(last - first) + 1;
+}
+
+std::size_t CountReasoningTokens(
+    std::span<const tokenization::TokenId> tokens,
+    TextGenerationBackend::InitialOutputState initial,
+    const ext::ReasoningMarkup& reasoning,
+    const std::function<std::string(tokenization::TokenId)>& decode) {
   // The parsers match delimiters in text, and tokens at their edges can merge
   // with neighbouring output, so match in text too and map back to tokens.
   std::string text;
@@ -58,23 +80,7 @@ std::size_t CountReasoningTokens(
     text += decode(token);
     ends.push_back(text.size());
   }
-  const std::string_view view = text;
-  std::size_t begin = 0;
-  if (initial == State::kAuto) {
-    const auto leading = view.find_first_not_of(" \t\r\n");
-    if (leading == std::string_view::npos ||
-        !view.substr(leading).starts_with(reasoning.open))
-      return 0;
-    begin = leading + reasoning.open.size();
-  } else if (view.starts_with(reasoning.open)) {
-    begin = reasoning.open.size();
-  }
-  const auto end = std::min(view.find(reasoning.close, begin), view.size());
-  if (begin >= end)
-    return 0;
-  const auto first = std::ranges::upper_bound(ends, begin);
-  const auto last = std::lower_bound(first, ends.end(), end);
-  return static_cast<std::size_t>(last - first) + 1;
+  return CountReasoningTokens(text, ends, initial, reasoning);
 }
 
 struct InferenceBackend::Impl {
@@ -111,11 +117,19 @@ struct InferenceBackend::Impl {
                 const StartCallback& on_start) override {
       auto result = request_.Wait(on_token, on_progress, on_start);
       const auto& runner = state_->scheduler->runner();
+      // Count in the text the runner emitted when it is exact (it may
+      // normalize markup, as a package's output reader does); otherwise in
+      // decoded tokens.
       result.reasoning_tokens =
-          CountReasoningTokens(result.tokens, initial_, reasoning_,
-                               [&runner](tokenization::TokenId token) {
-                                 return runner.Decode(std::span(&token, 1));
-                               });
+          result.piece_ends.size() == result.tokens.size() &&
+                  !result.tokens.empty()
+              ? CountReasoningTokens(result.text, result.piece_ends, initial_,
+                                     reasoning_)
+              : CountReasoningTokens(result.tokens, initial_, reasoning_,
+                                     [&runner](tokenization::TokenId token) {
+                                       return runner.Decode(
+                                           std::span(&token, 1));
+                                     });
       return result;
     }
 
