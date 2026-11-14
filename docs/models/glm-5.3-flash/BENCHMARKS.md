@@ -60,6 +60,10 @@ With the single-list top-k run at its `k2`-sized bitonic network
 (bit-exact — n-gen-1 sha, 9/9, existing single-list contract):
 pp2048 **193.2 ± 2.0**, pp16384 **149.4** parity
 (`/tmp/opencode/gufo_bench_topk1ab.log`).
+With the KDA fold/update chunk keeping each state column in registers
+(bit-exact contract zero margin): pp2048 **215.96 ± 4.6**, pp16384
+**163.5** (alternating controls 153.5), sha and 9/9 unchanged
+(`/tmp/opencode/gufo_bench_kda2.log`, `_kda3gate.log`).
 Serve-protocol gate not yet re-captured for these steps. Use these
 only as offline scans, not interchangeably with the serve-protocol gate
 cells.

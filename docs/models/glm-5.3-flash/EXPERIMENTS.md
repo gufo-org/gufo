@@ -300,6 +300,21 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   **146.78/147.19** (no loss at 16K; the win is the 45 % tail at
   short prompts) (`/tmp/opencode/gufo_bench_mla2ab.log`,
   `/tmp/opencode/gufo_bench_mla2gate.log`).
+- KDA fold + update chunk with the state **column in registers**
+  (`ops.hip.cpp KdaFoldUpdateChunkRegKernel<128>`): column `j` of the
+  `[d][d]` state evolves independently (`sk[j]` sums only over column
+  `j`), and both per-step reference kernels already scan `i` in order,
+  so one thread per column keeps its whole column in `float sc[128]`
+  (128 VGPR, ISA-checked zero spills, no shared memory) with the exact
+  per-element expression order. The `kda_fold_update_chunk`
+  bit-exactness contract passes with zero margin; the old LDS kernel
+  stays for `d != 128`. The launch drops from ~20 ms (LDS
+  read-modify-write chain) to ~2 ms: alternating pp2048 A/B 193.75/
+  194.43 -> **215.71/216.21 (+11.3 %)** and pp16384 163.49 vs
+  alternating controls 154.48/147.70 (+5.8 %..10.6 %); n-gen-1 sha
+  `43557e0c…` identical; `glm5_next` ctest 9/9 GPU-exclusive
+  (`/tmp/opencode/gufo_bench_kda2.log`, `_kda3gate.log`,
+  `_kda4ct.log`).
 - Single-list top-k shrink (`ops.hip.cpp TopKDesc`): every prefill token
   below ~4K context took the `lists <= 1` shortcut, which always ran the
   `BitonicGatherKernel<2048>` network (C = 4096 keys, ~4 sort strided

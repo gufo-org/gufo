@@ -87,8 +87,8 @@ decode-throughput half of the dense stage counts. P5 (routed IQ WMMA,
 both GEMV families at the center of the profile now run on the tensor
 cores.
 
-Status 2026-11-13 (evening): pp2048 **184.5 t/s** (now **193.2** with
-A5 shipped), pp16384 **147.0**,
+Status 2026-11-13 (evening): pp2048 **184.5 t/s** (now **216.0** with
+A5+A3 shipped), pp16384 **147.0** (**163.5**),
 exact default (sha `43557e0c…`, ctest 9/9). A fresh `rocprofv3` capture of
 the shipped tree at pp2048 (`/tmp/opencode/prof_mla2`) shows steady-state
 idle down to **2.2 %** — the launch storm is gone after P8 (KDA
@@ -129,14 +129,15 @@ levers, exact-default ladder (A) then opt-in fast track (B):
    32-K; same accumulator order per fragment keeps bits stable, wider
    staging changes them → tier NMSE contract re-run. Target 1.3-1.5x
    (−0.6…−0.9 s, +6-9 %).
-3. KDA fold/update scan (1.4 s/pass): `KdaFoldUpdateChunkKernel` is 136
-   launches of ~20 ms at `blocks=64 wg=128` — one head per block with a
-   long serial dependency chain across the chunk. Split each chunk into
-   sub-chunks with prefix-state composition (the fold is affine per
-   head: state' = a⊙state + b, so a Blelloch-style two-level scan over
-   sub-chunk (a,b) pairs is exact-order-independent if the (a,b) fold
-   keeps the documented float order per element; verify against the
-   per-step reference in `rocm_ops` first). Target 2-3x (−0.7…−0.9 s).
+ 3. (Shipped 2026-11-14, +11.3 % pp2048, pp16384 +5.8 %..10.6 % —
+    pp2048 216.0, see EXPERIMENTS "KDA fold + update chunk") KDA
+    fold/update scan: the sub-chunk (a,b)/Blelloch premise below was
+    wrong — `sk[j]` couples every row of a column, so the per-element
+    fold is not scan-composable. The bit-exact win was the other axis:
+    one thread per state column with the column in `float sc[128]`
+    registers (zero spills), ~20 ms -> ~2 ms per launch, zero shared
+    memory. Nothing serial across tokens remains that a scan could fix
+    cheaper.
 4. MLA score+combine rewrite (1.7 s/pass): combine averages 40 ms at
    `blocks=64x2048 wg=512`; score 37 ms at `256x4x2048`. Both are now
    single launches per layer-chunk but still VALU gathers; WMMA-tiled

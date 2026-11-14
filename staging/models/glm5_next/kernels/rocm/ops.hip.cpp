@@ -405,6 +405,51 @@ __global__ void KdaFoldUpdateChunkKernel(
   }
 }
 
+// Register-resident variant of KdaFoldUpdateChunkKernel for d = 128. A
+// state column j evolves independently (sk[j] sums only over column j),
+// and both reference kernels already scan i = 0..d-1 in order, so the
+// whole column lives in registers with the exact expression order of
+// KdaFoldSkKernel + KdaUpdateOutKernel per element. No shared memory.
+template <unsigned D>
+__global__ void __launch_bounds__(D) KdaFoldUpdateChunkRegKernel(
+    float* __restrict__ state, const float* __restrict__ eg,
+    const float* __restrict__ k, const float* __restrict__ q,
+    const float* __restrict__ v, const float* __restrict__ beta,
+    std::uint32_t heads, std::uint32_t ntok, float* __restrict__ o) {
+  const unsigned j = threadIdx.x;
+  float* gst = state + static_cast<std::size_t>(blockIdx.x) * D * D;
+  float sc[D];
+#pragma unroll
+  for (unsigned i = 0; i < D; ++i) {
+    sc[i] = gst[static_cast<std::size_t>(i) * D + j];
+  }
+  const std::size_t hcol = static_cast<std::size_t>(blockIdx.x) * D;
+  for (std::uint32_t r = 0; r < ntok; ++r) {
+    const std::size_t base = static_cast<std::size_t>(r) * heads * D + hcol;
+    float sk = 0.0F;
+#pragma unroll
+    for (unsigned i = 0; i < D; ++i) {
+      const float s = sc[i] * eg[base + i];
+      sc[i] = s;
+      sk = fmaf(k[base + i], s, sk);
+    }
+    const float dj = beta[static_cast<std::size_t>(r) * heads + blockIdx.x] *
+                     (v[base + j] - sk);
+    float acc = 0.0F;
+#pragma unroll
+    for (unsigned i = 0; i < D; ++i) {
+      const float s = sc[i] + k[base + i] * dj;
+      sc[i] = s;
+      acc = fmaf(q[base + i], s, acc);
+    }
+    o[base + j] = acc;
+  }
+#pragma unroll
+  for (unsigned i = 0; i < D; ++i) {
+    gst[static_cast<std::size_t>(i) * D + j] = sc[i];
+  }
+}
+
 __global__ void KdaOutGateKernel(const float* __restrict__ o,
                                  const float* __restrict__ w,
                                  const float* __restrict__ g2,
@@ -1073,6 +1118,11 @@ bool KdaFoldUpdateChunk(float* state, const float* eg, const float* k,
                         const float* q, const float* v, const float* beta,
                         std::uint32_t heads, std::uint32_t d,
                         std::uint32_t ntok, float* o, hipStream_t stream) {
+  if (d == 128U) {
+    KdaFoldUpdateChunkRegKernel<128U><<<heads, d, 0, stream>>>(
+        state, eg, k, q, v, beta, heads, ntok, o);
+    return hipGetLastError() == hipSuccess;
+  }
   const std::size_t lds_bytes = sizeof(float) * static_cast<std::size_t>(d) * d;
   static const bool attr_ok =
       hipFuncSetAttribute(reinterpret_cast<const void*>(
