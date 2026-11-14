@@ -37,6 +37,10 @@ HERE = Path(__file__).resolve().parent
 FIXTURES = HERE.parent / "fixtures"
 AUDIO = HERE / "fixtures" / "audio"
 MINIMUM_EMBEDDING_COSINE = 0.9999
+# The NPU rounds every matrix product to bfp16 (worst measured 0.99894 on the
+# embedding fixtures; these short texts don't reach NPU attention, so the
+# batching race noted in model_services.py doesn't apply).
+MINIMUM_NPU_EMBEDDING_COSINE = 0.998
 MAXIMUM_ASR_WER = 0.15
 MAXIMUM_TTS_WER = 0.25
 TTS_TEXT = "The little brown dog ran across the garden."
@@ -162,7 +166,8 @@ def check_embedding(args):
         similarity = cosine(vector, case["embedding"])
         print(f"  {case['name']}: cosine {similarity:.6f}")
         worst = min(worst, similarity)
-    assert worst >= MINIMUM_EMBEDDING_COSINE, f"worst cosine {worst:.6f} < {MINIMUM_EMBEDDING_COSINE}"
+    minimum = MINIMUM_NPU_EMBEDDING_COSINE if args.npu else MINIMUM_EMBEDDING_COSINE
+    assert worst >= minimum, f"worst cosine {worst:.6f} < {minimum}"
     return f"{len(cases) - 1} golden texts and one audio clip, worst cosine {worst:.6f}"
 
 
