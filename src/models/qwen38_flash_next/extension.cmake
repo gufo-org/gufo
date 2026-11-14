@@ -11,6 +11,9 @@ gufo_extension_target(
     bench_yarn.cpp
     probe.cpp
     continuation_identity.cpp
+    exl3/bind.cpp
+    exl3/pack.cpp
+    exl3/reference.cpp
     extension.cpp
   LINK_LIBRARIES
     gufo_ext_runtime
@@ -96,6 +99,7 @@ if(TARGET gufo_qwen38_flash_next_hip)
   gufo_extension_hip_sources(gufo_qwen38_flash_next_hip
     SOURCES
       kernels/rocm/kernels.hip.cpp
+      kernels/rocm/exl3.hip.cpp
       kernels/rocm/draft_head.hip.cpp
       kernels/rocm/w8a8_wave64.hip
   )

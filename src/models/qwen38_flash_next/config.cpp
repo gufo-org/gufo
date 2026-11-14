@@ -12,6 +12,18 @@ namespace {
 
 constexpr std::string_view kArchitecture = "qwen4exp";
 
+struct Failure {
+  std::string* error;
+  bool ok{true};
+
+  void Fail(std::string message) {
+    if (ok && error != nullptr) {
+      *error = std::move(message);
+    }
+    ok = false;
+  }
+};
+
 struct Reader {
   const core::GgufReader& gguf;
   std::string* error;
@@ -223,7 +235,12 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
   if (!r.ok) {
     return std::nullopt;
   }
+  return Validated(c, require_trunk, error_msg);
+}
 
+std::optional<Config> Config::Validated(Config c, bool require_trunk,
+                                        std::string* error_msg) {
+  Failure r{error_msg};
   // Structural limits of this runtime, not of the format.
   if (c.context_length == 0 || c.context_length > INT32_MAX ||
       !std::isfinite(c.rms_eps) || c.rms_eps <= 0 ||

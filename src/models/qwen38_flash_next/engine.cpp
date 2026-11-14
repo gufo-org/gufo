@@ -12,6 +12,7 @@
 
 #include "src/families/qwen/draft_vocab/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
+#include "src/models/qwen38_flash_next/exl3/pack.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -29,6 +30,11 @@ namespace {
 // it; next-chunk prefetch overlaps that read. Prefill logits do not depend on
 // the chunk size (pre-budget queries always take the dense attention tiles).
 constexpr std::uint32_t kPrefillChunkTokens = 4096;
+// EXL3 checkpoints stream each routed expert's trellis once per pass and row
+// tile, so their prompt passes double: an 8,022-token prompt prefills 4.7%
+// faster in one pass. Their device weights are smaller than the Q4 GGUF's,
+// which leaves room for the larger scratch.
+constexpr std::uint32_t kExl3PrefillChunkTokens = 8192;
 // A prompt ending this close past a chunk finishes in that chunk: a separate
 // tail pass costs about as much as this many more chunk rows.
 constexpr std::uint32_t kPrefillTailTokens = 128;
@@ -91,15 +97,30 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
   m->options_ = options;
-  m->reader_ = core::GgufReader::OpenFile(model_path, error_msg);
-  if (!m->reader_) {
-    return nullptr;
+  if (exl3::IsFlashNextPack(model_path)) {
+    // An EXL3 checkpoint directory: weights, tokenizer and the MTP block
+    // all come from it.
+    m->pack_ = exl3::Pack::Open(model_path, error_msg);
+    if (!m->pack_) {
+      return nullptr;
+    }
+    m->host_ = std::make_unique<HostTensors>();
+    auto weights = ModelWeights::BindExl3(*m->pack_, *m->host_, error_msg);
+    if (!weights) {
+      return nullptr;
+    }
+    m->weights_ = std::make_unique<ModelWeights>(std::move(*weights));
+  } else {
+    m->reader_ = core::GgufReader::OpenFile(model_path, error_msg);
+    if (!m->reader_) {
+      return nullptr;
+    }
+    auto weights = ModelWeights::Bind(*m->reader_, error_msg);
+    if (!weights) {
+      return nullptr;
+    }
+    m->weights_ = std::make_unique<ModelWeights>(std::move(*weights));
   }
-  auto weights = ModelWeights::Bind(*m->reader_, error_msg);
-  if (!weights) {
-    return nullptr;
-  }
-  m->weights_ = std::make_unique<ModelWeights>(std::move(*weights));
   if (options.rope_scaling.has_value()) {
     if (!ValidateRopeScaling(*options.rope_scaling,
                              m->weights_->config.context_length, error_msg)) {
@@ -115,18 +136,38 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
   try {
+    // The projector sidecar is discovered beside the GGUF, or inside the
+    // checkpoint directory.
     m->vision_ = qwen::vision::Encoder::Open(
-        model_path, options.vision_model_path, c.hidden_size);
+        m->pack_ ? std::filesystem::path(model_path) / "config.json"
+                 : std::filesystem::path(model_path),
+        options.vision_model_path, c.hidden_size);
   } catch (const std::exception& e) {
     AssignError(error_msg, e.what());
     return nullptr;
   }
   m->tokenizer_ =
-      tokenization::QwenTokenizer::CreateFromGguf(*m->reader_, error_msg);
+      m->pack_
+          ? tokenization::QwenTokenizer::CreateFromTokenizerJson(
+                m->pack_->ReadText("tokenizer.json"), c.vocab_size, error_msg)
+          : tokenization::QwenTokenizer::CreateFromGguf(*m->reader_, error_msg);
   if (!m->tokenizer_) {
     return nullptr;
   }
-  if (c.ple_layer >= 0) {
+  if (m->pack_ && c.ple_layer >= 0) {
+    const auto& t = *m->weights_->ple_exl3;
+    NgramTrellis trellis;
+    trellis.k = t.k;
+    trellis.head_bias = t.head_bias;
+    trellis.head_offsets.assign(c.ple_head_offsets.begin(),
+                                c.ple_head_offsets.begin() + c.ple_heads);
+    m->ngram_ = NgramTable::OpenTrellis(
+        m->pack_->Regions()[t.file].file_descriptor, t.file_offset, t.rows,
+        c.ple_head_dim, std::move(trellis), error_msg);
+    if (!m->ngram_) {
+      return nullptr;
+    }
+  } else if (c.ple_layer >= 0) {
     const auto& t = m->weights_->ple_table;
     m->ngram_ = NgramTable::Open(
         m->reader_->GetMappedRegions()[t.shard].file_descriptor, t.file_offset,
@@ -135,7 +176,18 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
       return nullptr;
     }
   }
-  if (!options.mtp_model_path.empty()) {
+  if (!options.mtp_model_path.empty() && m->pack_) {
+    // The checkpoint carries its own MTP block; any draft path names it.
+    std::string mtp_error;
+    auto mtp = MtpWeights::BindExl3(*m->pack_, c, *m->host_, &mtp_error);
+    if (!mtp) {
+      AssignError(error_msg, mtp_error.empty()
+                                 ? "the EXL3 checkpoint has no MTP block"
+                                 : mtp_error);
+      return nullptr;
+    }
+    m->mtp_weights_ = std::make_unique<MtpWeights>(std::move(*mtp));
+  } else if (!options.mtp_model_path.empty()) {
     m->mtp_reader_ =
         core::GgufReader::OpenFile(options.mtp_model_path, error_msg);
     if (!m->mtp_reader_) {
@@ -147,12 +199,19 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     }
     m->mtp_weights_ = std::make_unique<MtpWeights>(std::move(*mtp));
   }
-  m->device_ = rocm::DeviceModel::Upload(*m->weights_, *m->reader_,
-                                         m->mtp_weights_.get(),
-                                         m->mtp_reader_.get(), error_msg);
+  m->device_ =
+      m->pack_ ? rocm::DeviceModel::UploadExl3(*m->weights_, *m->pack_,
+                                               m->mtp_weights_.get(), error_msg)
+               : rocm::DeviceModel::Upload(*m->weights_, *m->reader_,
+                                           m->mtp_weights_.get(),
+                                           m->mtp_reader_.get(), error_msg);
   if (!m->device_) {
     return nullptr;
   }
+  // An EXL3 head drafts from its Q8_0 expansion: the draft table copies
+  // head rows, which the trellis format cannot address.
+  if (m->mtp_weights_ && !m->device_->ExpandHeadQ8(error_msg))
+    return nullptr;
   if (m->mtp_weights_ &&
       m->device_->output().rows > speculative::kDraftVocabPrefix) {
     std::vector<std::int32_t> specials;
@@ -243,12 +302,16 @@ std::uint32_t Model::VocabSize() const noexcept {
 }
 
 std::uint32_t Model::PrefillCapacity() const noexcept {
-  return std::min(kPrefillChunkTokens, options_.max_context);
+  return std::min(PrefillChunkTokens(), options_.max_context);
 }
 
 std::uint32_t Model::PrefillThroughCapacity() const noexcept {
-  return std::min(kPrefillChunkTokens + kPrefillTailTokens,
+  return std::min(PrefillChunkTokens() + kPrefillTailTokens,
                   options_.max_context);
+}
+
+std::uint32_t Model::PrefillChunkTokens() const noexcept {
+  return pack_ ? kExl3PrefillChunkTokens : kPrefillChunkTokens;
 }
 
 bool Model::HasMtp() const noexcept {
@@ -271,8 +334,15 @@ bool Model::InDraftSubset(std::int32_t token) const {
 }
 
 std::string Model::ModelName() const {
+  if (!reader_) {
+    return "Qwen3.8 Flash Next";
+  }
   return std::string(reader_->GetMetadataString("general.name")
                          .value_or("Qwen3.8-Flash-Next"));
+}
+
+std::string Model::ArtifactIdentity() const {
+  return pack_ ? pack_->Identity() : std::string();
 }
 
 const Config& Model::config() const noexcept {

@@ -1,8 +1,8 @@
 # Qwen3.8 Flash-Next
 
 Qwen3.8 Flash-Next is a mixture-of-experts model that reads text and images and
-writes text. Gufo runs its Q4 GGUF, optionally sped up with its own
-multi-token prediction (MTP) head.
+writes text. Gufo runs its Q4 GGUF and turboderp's EXL3 checkpoints, optionally
+sped up with the model's own multi-token prediction (MTP) head.
 
 ## Files
 
@@ -74,6 +74,35 @@ reserves the configured capacity when it starts.
 Gufo finds `mmproj-BF16.gguf` next to the target; pass `--mmproj PATH` to use
 another location. Images work the same way as for
 [Qwen3.8 27B](qwen3.8-27b.md#images), with AR and MTP.
+
+## EXL3 checkpoints
+
+Three EXL3 checkpoints trade a little accuracy for memory. Each is a
+directory of safetensors files that already contains the MTP head:
+
+| Model ID | Checkpoint | Download | Next-token loss, Q4 GGUF = 1.417 |
+| --- | --- | --- | --- |
+| `flash-next-exl3-4bpw` | `4.05bpw_h6_ng6` | 108 GB | 1.412 |
+| `flash-next-exl3-3bpw` | `3.05bpw_h5_ng5` | 86 GB | 1.426 |
+| `flash-next-exl3-2bpw` | `2.05bpw_h4_ng4` | 64 GB | 1.439 |
+
+The **n-gram table** (39, 33 and 26 GB of each download) never enters GPU
+memory: Gufo reads the rows each token needs from disk, so keep the
+checkpoint on an SSD.
+
+```sh
+gufo model install flash-next-exl3-4bpw
+gufo serve llm --model flash-next-exl3-4bpw --speculative mtp --context 32768
+```
+
+`--speculative mtp` needs no `--mtp-model`: the checkpoint's head drafts.
+Serve the checkpoints with `gufo serve`; `gufo chat`, `gufo prompt` and
+`gufo bench` take the GGUF.
+
+As of November 2026, the EXL3 checkpoints decode as fast as the Q4 GGUF or
+faster (up to 35 tokens/s without MTP) and prefill about 94% as fast; the
+[implementation notes](../internal/models/qwen3.8-flash-next/EXL3.md) list
+the measurements.
 
 ## Performance
 

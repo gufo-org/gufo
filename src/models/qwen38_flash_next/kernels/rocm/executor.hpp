@@ -25,6 +25,7 @@
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/blaslt.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/exl3.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
@@ -839,6 +840,24 @@ private:
   void UseScratch(const Scratch& scratch) const;
   bool DenseBatch(const DeviceTensor& w, const float* x, float* out,
                   std::uint32_t rows, std::string* error_msg) const;
+  /// EXL3 linears: `rows` rows of `x` (row r reads row r / x_div), each
+  /// through expert ids[r] when `ids` is set.
+  bool Exl3Project(const DeviceTensor& w, const float* x, std::uint32_t x_div,
+                   const std::int32_t* ids, float* out, std::uint32_t rows,
+                   std::string* error_msg) const;
+  /// Shared by every EXL3 linear (exl3.hpp); empty for GGUF models.
+  Exl3Scratch exl3_scratch_{};
+  /// Prompt passes over an EXL3 layer: `*expanded` becomes the layer with
+  /// its dense projections expanded to Q8_0 in the official GGUF layout
+  /// (valid until the next call); null leaves the layer as it is.
+  bool Exl3PromptLayer(const DeviceLayer& l, const DeviceLayer** expanded,
+                       std::string* error_msg) const;
+  mutable DeviceLayer exl3_layer_{};
+  void* exl3_layer_q8_{nullptr};
+  std::size_t exl3_layer_q8_bytes_{0};
+  /// Q8_0 expansion of one dense EXL3 matrix for prompt passes.
+  void* exl3_q8_{nullptr};
+  std::size_t exl3_q8_bytes_{0};
   bool GatedDenseBatch(const DeviceTensor& up, const DeviceTensor& gate,
                        const float* x, float* out, std::uint32_t rows,
                        std::string* error) const;

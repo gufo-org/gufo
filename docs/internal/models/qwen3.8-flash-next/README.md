@@ -1,7 +1,7 @@
 # Qwen3.8 Flash-Next implementation notes
 
 Developer detail behind the [public model page](../../../models/qwen3.8-flash-next.md).
-[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md) · [ROCm](ROCM.md)
+[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md) · [ROCm](ROCM.md) · [EXL3](EXL3.md)
 
 Hybrid recurrent/QSA mixture-of-experts text/image model on gfx1151.
 Supported target: `unsloth/Qwen3.8-Flash-Next-GGUF`, **UD-Q4_K_XL** (four shards),

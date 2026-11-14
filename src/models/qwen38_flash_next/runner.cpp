@@ -19,6 +19,7 @@
 #include "gufo/ext/experimental/admission_query.hpp"
 #include "gufo/ext/gguf_identity.hpp"
 #include "gufo/ext/host_budget.hpp"
+#include "gufo/ext/sha256.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/families/qwen/text/chat_template.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
@@ -28,6 +29,7 @@
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 #include "src/models/qwen38_flash_next/continuation_identity.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/qwen38_flash_next/exl3/pack.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/probe.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
@@ -807,8 +809,11 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
 
 std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     const ext::TextRunnerOptions& options, std::string* error) {
+  // An EXL3 checkpoint directory has no GGUF reader: it carries its own MTP
+  // block, tokenizer and configuration.
+  const bool exl3_pack = exl3::IsFlashNextPack(options.model_path);
   std::shared_ptr<const core::GgufReader> reader = options.reader;
-  if (!reader) {
+  if (!reader && !exl3_pack) {
     std::string load_error;
     auto reader_owner =
         core::GgufReader::OpenFile(options.model_path, &load_error);
@@ -819,15 +824,17 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     }
     reader = std::shared_ptr<const core::GgufReader>(std::move(reader_owner));
   }
-  const auto architecture =
-      reader->GetMetadataString("general.architecture").value_or("");
-  if (architecture != "qwen4exp") {
+  if (!exl3_pack &&
+      reader->GetMetadataString("general.architecture").value_or("") !=
+          "qwen4exp") {
     if (error)
       *error = "Flash-Next requires architecture qwen4exp";
     return nullptr;
   }
   const std::uint32_t qwen4exp_native_context =
-      reader->GetMetadataUint32("qwen4exp.context_length").value_or(0);
+      exl3_pack
+          ? exl3::PackContextLength(options.model_path)
+          : reader->GetMetadataUint32("qwen4exp.context_length").value_or(0);
   std::uint32_t max_context = options.max_context;
   if (max_context == 0) {
     max_context = qwen4exp_native_context;
@@ -852,24 +859,28 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
           "decoding";
     return nullptr;
   }
-  if (use_mtp && options.speculative.draft_model_path.empty()) {
+  if (use_mtp && options.speculative.draft_model_path.empty() && !exl3_pack) {
     if (error)
       *error = "Qwen3.8-Flash-Next MTP HTTP decoding requires --mtp-model";
     return nullptr;
   }
+  // The checkpoint's own MTP block serves its drafts.
+  const std::string mtp_path = !use_mtp ? std::string{}
+                               : exl3_pack
+                                   ? options.model_path
+                                   : options.speculative.draft_model_path;
   std::string load_error;
-  auto model = Model::Load(
-      options.model_path,
-      ModelOptions{
-          .max_context = max_context,
-          .mtp_model_path =
-              use_mtp ? options.speculative.draft_model_path : std::string{},
-          .vision_model_path = options.vision_model_path,
-          .decode_concurrency =
-              DecodeConcurrencyForSessions(options.session_count),
-          .rope_scaling = rope_scaling,
-      },
-      &load_error);
+  auto model =
+      Model::Load(options.model_path,
+                  ModelOptions{
+                      .max_context = max_context,
+                      .mtp_model_path = mtp_path,
+                      .vision_model_path = options.vision_model_path,
+                      .decode_concurrency =
+                          DecodeConcurrencyForSessions(options.session_count),
+                      .rope_scaling = rope_scaling,
+                  },
+                  &load_error);
   if (!model) {
     if (error)
       *error = "Failed to load Flash-Next model: " + load_error;
@@ -901,6 +912,20 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     }
   }
   std::string model_fingerprint = options.disk_cache.model_artifact_fingerprint;
+  if (exl3_pack) {
+    if (model_fingerprint.empty())
+      model_fingerprint = model->ArtifactIdentity();
+    std::string draft = options.disk_cache.draft_model_artifact_fingerprint;
+    if (use_mtp && draft.empty()) {
+      // The draft block is part of the checkpoint: derive its identity.
+      const std::string seed = model->ArtifactIdentity() + ":mtp";
+      draft = crypto::Sha256Hex(
+          {reinterpret_cast<const std::uint8_t*>(seed.data()), seed.size()});
+    }
+    return CreateQwenFlashNextTextRunner(std::move(model), max_context,
+                                         options.speculative, model_fingerprint,
+                                         draft);
+  }
   if (!options.disk_cache.directory.empty() && model_fingerprint.empty()) {
     try {
       model_fingerprint = core::GgufIdentityHex(*reader);

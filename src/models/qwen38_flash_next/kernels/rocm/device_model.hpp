@@ -11,17 +11,28 @@
 
 #include "src/models/qwen38_flash_next/weights.hpp"
 
+namespace gufo::models::qwen38_flash_next::exl3 {
+class Pack;
+}
+
 namespace gufo::models::qwen38_flash_next::rocm {
 
-/// One weight resident in device memory, still in its GGUF encoding.
+/// One weight resident in device memory, still in its GGUF encoding, or an
+/// EXL3 trellis linear: `data` then holds its column-block-major tiles
+/// (exl3.hpp), cols/rows its input/output width and `exl3_k` its bits per
+/// weight; `type` is kI32, which no GGUF kernel accepts.
 struct DeviceTensor {
   void* data{nullptr};
   core::GgmlType type{core::GgmlType::kF32};
   std::uint32_t cols{0};
   std::uint32_t rows{0};
   std::uint32_t experts{1};
+  const void* exl3_suh{nullptr};  ///< [experts][cols] fp16
+  const void* exl3_svh{nullptr};  ///< [experts][rows] fp16
+  int exl3_k{0};
 
   [[nodiscard]] bool empty() const noexcept { return data == nullptr; }
+  [[nodiscard]] bool IsExl3() const noexcept { return exl3_k != 0; }
   [[nodiscard]] const float* f32() const noexcept {
     return static_cast<const float*>(data);
   }
@@ -100,6 +111,13 @@ public:
       const MtpWeights* mtp, const core::GgufReader* mtp_reader,
       std::string* error_msg = nullptr);
 
+  /// Uploads an EXL3 checkpoint bound by ModelWeights::BindExl3 (and its
+  /// MTP block): trellis payloads are read from the checkpoint files and
+  /// repacked on the device, converted tensors are copied from host memory.
+  [[nodiscard]] static std::unique_ptr<DeviceModel> UploadExl3(
+      const ModelWeights& weights, const exl3::Pack& pack,
+      const MtpWeights* mtp, std::string* error_msg = nullptr);
+
   const Config& config() const noexcept { return config_; }
   const DeviceTensor& token_embd() const noexcept { return token_embd_; }
   const DeviceTensor& output() const noexcept { return output_; }
@@ -112,10 +130,20 @@ public:
   std::span<const std::int32_t> draft_specials() const noexcept {
     return draft_specials_;
   }
-  /// Bytes of one output() row.
+  /// The head drafts copy rows from: output(), or its Q8_0 expansion when
+  /// output() is an EXL3 linear (ExpandHeadQ8).
+  const DeviceTensor& draft_source() const noexcept {
+    return head_q8_.empty() ? output_ : head_q8_;
+  }
+  /// Bytes of one draft_source() row.
   std::size_t output_row_bytes() const noexcept {
+    if (!head_q8_.empty())
+      return static_cast<std::size_t>(head_q8_.cols) / 32 * 34;
     return output_.rows == 0 ? 0 : output_bytes_ / output_.rows;
   }
+  /// Expands an EXL3 output head once into the Q8_0 matrix it equals, the
+  /// source of the draft vocabulary (SetDraftVocab) and of draft tables.
+  [[nodiscard]] bool ExpandHeadQ8(std::string* error_msg);
   /// Drafts score output() rows [0, prefix_rows) plus a per-session table
   /// that starts with `specials`. The rows of a Q8_0 head are requantized
   /// to Q4_K once, here; the table keeps the head's format. Draft proposals
@@ -138,6 +166,13 @@ public:
   [[nodiscard]] std::size_t max_q8_cols() const noexcept {
     return max_q8_cols_;
   }
+  /// Widest input and output among the EXL3 linears (0 for GGUF models).
+  [[nodiscard]] std::size_t max_exl3_in() const noexcept {
+    return max_exl3_in_;
+  }
+  [[nodiscard]] std::size_t max_exl3_out() const noexcept {
+    return max_exl3_out_;
+  }
 
 private:
   friend struct DeviceModelTestAccess;  // synthetic models in GPU tests
@@ -148,6 +183,7 @@ private:
   DeviceTensor output_;
   std::size_t output_bytes_{0};
   DeviceTensor draft_output_;
+  DeviceTensor head_q8_;
   std::vector<std::int32_t> draft_specials_;
   DeviceMixer hc_head_;
   std::vector<DeviceLayer> layers_;
@@ -157,6 +193,8 @@ private:
   std::size_t bytes_{0};
   std::size_t max_half_cols_{1};
   std::size_t max_q8_cols_{32};
+  std::size_t max_exl3_in_{0};
+  std::size_t max_exl3_out_{0};
 };
 
 }  // namespace gufo::models::qwen38_flash_next::rocm

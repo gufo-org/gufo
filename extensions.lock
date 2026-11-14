@@ -5,9 +5,12 @@
     "embedding_gemma2",
     "minimax_h3",
     "qwen",
+    "qwen38_flash_next",
+    "qwen38_flash_next_exl3_2bpw",
+    "qwen38_flash_next_exl3_3bpw",
+    "qwen38_flash_next_exl3_4bpw",
     "qwen3_asr",
     "qwen3_tts",
-    "qwen38_flash_next",
     "qwen_image_21"
   ]
 }

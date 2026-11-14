@@ -30,6 +30,10 @@ namespace gufo::models::qwen38_flash_next {
 
 struct ModelWeights;
 struct MtpWeights;
+struct HostTensors;
+namespace exl3 {
+class Pack;
+}
 struct MtpCandidateLogits;
 class ContinuationAdapter;
 class ContinuationHooks;
@@ -86,6 +90,8 @@ public:
   [[nodiscard]] std::uint32_t VocabSize() const noexcept;
   [[nodiscard]] std::uint32_t PrefillCapacity() const noexcept;
   [[nodiscard]] std::uint32_t PrefillThroughCapacity() const noexcept;
+  /// Rows of a full prompt pass: larger for EXL3 checkpoints.
+  [[nodiscard]] std::uint32_t PrefillChunkTokens() const noexcept;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept {
     return options_.max_context;
   }
@@ -98,6 +104,9 @@ public:
     return options_.decode_concurrency;
   }
   [[nodiscard]] std::string ModelName() const;
+  /// Cache identity of an EXL3 checkpoint (exl3::Pack::Identity); empty for
+  /// GGUF artifacts, whose callers hash the reader.
+  [[nodiscard]] std::string ArtifactIdentity() const;
   [[nodiscard]] const Config& config() const noexcept;
   [[nodiscard]] const tokenization::QwenTokenizer& tokenizer() const noexcept {
     return *tokenizer_;
@@ -125,6 +134,10 @@ private:
   ModelOptions options_;
   std::shared_ptr<core::GgufReader> reader_;
   std::shared_ptr<core::GgufReader> mtp_reader_;
+  /// An EXL3 checkpoint replaces both readers; its converted tensors live
+  /// in host_ while the weights reference them.
+  std::unique_ptr<exl3::Pack> pack_;
+  std::unique_ptr<HostTensors> host_;
   std::unique_ptr<ModelWeights> weights_;
   std::unique_ptr<MtpWeights> mtp_weights_;
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer_;

@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "src/models/qwen38_flash_next/exl3/pack.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/exl3.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
@@ -57,6 +59,147 @@ struct Uploader {
   bool ok{true};
   std::uint32_t shard_base{0};
   std::uint64_t requested{0};
+  /// EXL3 uploads: widest linear seen, and a device staging buffer the
+  /// stored payloads land in before the repack (outside the weight heap).
+  std::size_t max_exl3_in{0};
+  std::size_t max_exl3_out{0};
+  void* staging{nullptr};
+  std::size_t staging_bytes{0};
+
+  void ReleaseStaging() noexcept {
+    if (staging != nullptr)
+      (void)hipFree(staging);
+    staging = nullptr;
+    staging_bytes = 0;
+  }
+
+  /// Queues one payload copy from a mapped region or from host memory.
+  bool Source(const TensorRef& t, std::size_t size, void* device) {
+    if (t.shard == kHostShard) {
+      // Converted payloads are small; the stager reads only mapped files.
+      if (hipMemcpy(device, t.data, size, hipMemcpyHostToDevice) == hipSuccess)
+        return true;
+      if (error != nullptr)
+        *error = "host tensor copy failed";
+      return false;
+    }
+    return stager.Copy(shard_base + t.shard, t.file_offset, size, device,
+                       error);
+  }
+
+  DeviceTensor CopyExl3(const TensorRef& t) {
+    DeviceTensor d;
+    const Exl3Ref& ref = *t.exl3;
+    const std::size_t n = ref.parts.size();
+    const std::size_t in = ref.In();
+    const std::size_t out = ref.Out();
+    const std::size_t tile_bytes = ref.DeviceBytes() * n;
+    void* tiles = nullptr;
+    void* suh = nullptr;
+    void* svh = nullptr;
+    if (Allocate(&tiles, tile_bytes + kTailMargin) != hipSuccess ||
+        Allocate(&suh, n * in * 2 + kTailMargin) != hipSuccess ||
+        Allocate(&svh, n * out * 2 + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for " + std::string(t.name));
+      return d;
+    }
+    max_exl3_in = std::max(max_exl3_in, in);
+    max_exl3_out = std::max(max_exl3_out, out);
+    if (Measuring())
+      return d;
+    for (void* p : {tiles, suh, svh})
+      allocations.push_back(p);
+    bytes += tile_bytes + n * (in + out) * 2 + 3 * kTailMargin;
+    // Staging: [n][stored tiles] | [n][src_in] suh | [n][src_out] svh |
+    // offsets | block maps.
+    const std::size_t src = ref.SourceBytes();
+    const std::size_t suh_at = n * src;
+    const std::size_t svh_at = suh_at + n * ref.src_in * 2;
+    const std::size_t meta_at =
+        (svh_at + n * ref.src_out * 2 + 255) / 256 * 256;
+    std::vector<std::uint64_t> meta(3 * n);
+    for (std::size_t e = 0; e < n; ++e) {
+      meta[e] = e * src;
+      meta[n + e] = suh_at + e * ref.src_in * 2;
+      meta[2 * n + e] = svh_at + e * ref.src_out * 2;
+    }
+    const std::size_t blocks_at = meta_at + meta.size() * 8;
+    const std::size_t need =
+        blocks_at + (ref.in_blocks.size() + ref.out_blocks.size()) * 4 + 64;
+    if (need > staging_bytes) {
+      ReleaseStaging();
+      if (hipMalloc(&staging, need) != hipSuccess) {
+        staging = nullptr;
+        Fail("EXL3 staging allocation failed for " + std::string(t.name));
+        return d;
+      }
+      staging_bytes = need;
+    }
+    auto* base = static_cast<std::uint8_t*>(staging);
+    for (std::size_t e = 0; e < n && ok; ++e) {
+      const auto& part = ref.parts[e];
+      const std::uint32_t shard = shard_base + part.file;
+      if (!stager.Copy(shard, part.file_offset, src, base + meta[e], error) ||
+          !stager.Copy(shard, part.suh_offset, ref.src_in * 2,
+                       base + meta[n + e], error) ||
+          !stager.Copy(shard, part.svh_offset, ref.src_out * 2,
+                       base + meta[2 * n + e], error)) {
+        Fail("upload failed for " + std::string(t.name) +
+             (error != nullptr ? ": " + *error : std::string()));
+        return d;
+      }
+    }
+    if (!stager.Finish(error)) {
+      Fail("upload failed for " + std::string(t.name));
+      return d;
+    }
+    std::vector<std::uint32_t> maps(ref.in_blocks);
+    maps.insert(maps.end(), ref.out_blocks.begin(), ref.out_blocks.end());
+    if (hipMemcpy(base + meta_at, meta.data(), meta.size() * 8,
+                  hipMemcpyHostToDevice) != hipSuccess ||
+        (!maps.empty() &&
+         hipMemcpy(base + blocks_at, maps.data(), maps.size() * 4,
+                   hipMemcpyHostToDevice) != hipSuccess)) {
+      Fail("EXL3 staging metadata upload failed");
+      return d;
+    }
+    const auto* offsets =
+        reinterpret_cast<const std::uint64_t*>(base + meta_at);
+    const auto* in_map =
+        ref.in_blocks.empty()
+            ? nullptr
+            : reinterpret_cast<const std::uint32_t*>(base + blocks_at);
+    const auto* out_map =
+        ref.out_blocks.empty()
+            ? nullptr
+            : reinterpret_cast<const std::uint32_t*>(base + blocks_at) +
+                  ref.in_blocks.size();
+    Exl3Repack(base, offsets, static_cast<std::uint32_t*>(tiles), ref.src_in,
+               ref.src_out, static_cast<std::uint32_t>(in),
+               static_cast<std::uint32_t>(out), ref.k,
+               static_cast<std::uint32_t>(n), ref.DeviceBytes() / 4, in_map,
+               out_map, nullptr);
+    Exl3GatherScales(base, offsets + n, static_cast<std::uint32_t>(n),
+                     ref.src_in, in_map, static_cast<std::uint32_t>(in),
+                     static_cast<__half*>(suh), nullptr);
+    Exl3GatherScales(base, offsets + 2 * n, static_cast<std::uint32_t>(n),
+                     ref.src_out, out_map, static_cast<std::uint32_t>(out),
+                     static_cast<__half*>(svh), nullptr);
+    // The staging buffer is reused by the next linear.
+    if (hipDeviceSynchronize() != hipSuccess) {
+      Fail("EXL3 repack failed for " + std::string(t.name));
+      return d;
+    }
+    d.data = tiles;
+    d.type = core::GgmlType::kI32;
+    d.cols = static_cast<std::uint32_t>(in);
+    d.rows = static_cast<std::uint32_t>(out);
+    d.experts = static_cast<std::uint32_t>(n);
+    d.exl3_suh = suh;
+    d.exl3_svh = svh;
+    d.exl3_k = ref.k;
+    return d;
+  }
 
   [[nodiscard]] bool Measuring() const noexcept { return weights == nullptr; }
 
@@ -80,6 +223,9 @@ struct Uploader {
     if (t.empty() || !ok) {
       return d;
     }
+    if (t.exl3 != nullptr) {
+      return CopyExl3(t);
+    }
     const std::size_t size = t.SizeBytes();
     void* ptr = nullptr;
     if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
@@ -92,7 +238,7 @@ struct Uploader {
     }
     allocations.push_back(ptr);
     bytes += size + kTailMargin;
-    if (!stager.Copy(shard_base + t.shard, t.file_offset, size, ptr, error)) {
+    if (!Source(t, size, ptr)) {
       Fail("upload failed for " + std::string(t.name) +
            (error != nullptr ? ": " + *error : std::string()));
       return d;
@@ -259,8 +405,8 @@ struct Uploader {
       bytes += size + kTailMargin;
       std::size_t offset = 0;
       for (const TensorRef* t : parts) {
-        if (!stager.Copy(shard_base + t->shard, t->file_offset, t->SizeBytes(),
-                         static_cast<std::uint8_t*>(ptr) + offset, error)) {
+        if (!Source(*t, t->SizeBytes(),
+                    static_cast<std::uint8_t*>(ptr) + offset)) {
           Fail("upload failed for " + std::string(t->name));
           return d;
         }
@@ -385,6 +531,10 @@ struct Uploader {
     d.nextn_hnorm = Copy(l.nextn_hnorm);
     SplitMtpProjection(l.nextn_eh_proj, d.nextn_fc_embedding,
                        d.nextn_fc_hidden);
+    if (!l.nextn_fc_embedding.empty()) {
+      d.nextn_fc_embedding = Copy(l.nextn_fc_embedding);
+      d.nextn_fc_hidden = Copy(l.nextn_fc_hidden);
+    }
     d.nextn_head = Mixer(l.nextn_head);
     return d;
   }
@@ -419,6 +569,40 @@ DeviceModel::~DeviceModel() {
   }
 }
 
+bool DeviceModel::ExpandHeadQ8(std::string* error_msg) {
+  if (!output_.IsExl3() || !head_q8_.empty())
+    return true;
+  const Exl3Weights w{static_cast<const std::uint32_t*>(output_.data),
+                      static_cast<const __half*>(output_.exl3_suh),
+                      static_cast<const __half*>(output_.exl3_svh),
+                      output_.cols,
+                      output_.rows,
+                      output_.experts,
+                      output_.exl3_k};
+  const std::size_t bytes = Exl3Q8Bytes(w);
+  void* q8 = nullptr;
+  if (hipMalloc(&q8, bytes + kTailMargin) != hipSuccess) {
+    if (error_msg != nullptr)
+      *error_msg = "device allocation failed for the Q8_0 draft head";
+    return false;
+  }
+  allocations_.push_back(q8);
+  bytes_ += bytes + kTailMargin;
+  if (hipMemset(static_cast<std::uint8_t*>(q8) + bytes, 0, kTailMargin) !=
+          hipSuccess ||
+      !Exl3DequantizeQ8(w, 0, q8, nullptr) ||
+      hipDeviceSynchronize() != hipSuccess) {
+    if (error_msg != nullptr)
+      *error_msg = "Q8_0 draft head expansion failed";
+    return false;
+  }
+  head_q8_.data = q8;
+  head_q8_.type = core::GgmlType::kQ8_0;
+  head_q8_.cols = output_.cols;
+  head_q8_.rows = output_.rows;
+  return true;
+}
+
 bool DeviceModel::SetDraftVocab(std::uint32_t prefix_rows,
                                 std::vector<std::int32_t> specials,
                                 std::string* error_msg) {
@@ -427,30 +611,33 @@ bool DeviceModel::SetDraftVocab(std::uint32_t prefix_rows,
       *error_msg = message;
     return false;
   };
-  if (output_.empty() || output_.rows == 0 || output_bytes_ % output_.rows != 0)
+  // An EXL3 head drafts from its Q8_0 expansion.
+  const DeviceTensor& head = draft_source();
+  if (head.empty() || head.rows == 0 ||
+      (head_q8_.empty() && output_bytes_ % head.rows != 0))
     return fail("draft vocabulary needs a row-addressable output head");
-  if (prefix_rows == 0 || prefix_rows >= output_.rows)
+  if (prefix_rows == 0 || prefix_rows >= head.rows)
     return fail("draft vocabulary prefix must leave rows out");
   for (const auto id : specials) {
     if (id < static_cast<std::int32_t>(prefix_rows) ||
-        static_cast<std::uint32_t>(id) >= output_.rows)
+        static_cast<std::uint32_t>(id) >= head.rows)
       return fail("draft special tokens must lie above the prefix");
   }
-  draft_output_ = output_;
+  draft_output_ = head;
   draft_output_.rows = prefix_rows;
-  if (output_.type == core::GgmlType::kQ8_0 && output_.cols % 256 == 0) {
+  if (head.type == core::GgmlType::kQ8_0 && head.cols % 256 == 0) {
     // Drafts read a Q4_K copy of the Q8_0 prefix: the head is the larger
     // part of each draft step's weight traffic, and its proposals are
     // verified, so this changes acceptance only. Each row of the copy is
     // the same at any batch width.
     const std::size_t bytes =
-        std::size_t{prefix_rows} * (output_.cols / 256) * 144;
+        std::size_t{prefix_rows} * (head.cols / 256) * 144;
     void* q4k = nullptr;
     if (hipMalloc(&q4k, bytes + kTailMargin) != hipSuccess)
       return fail("device allocation failed for the Q4_K draft head");
     allocations_.push_back(q4k);
     bytes_ += bytes + kTailMargin;
-    QuantizeQ8_0ToQ4K(output_.data, q4k, prefix_rows, output_.cols, nullptr);
+    QuantizeQ8_0ToQ4K(head.data, q4k, prefix_rows, head.cols, nullptr);
     if (hipMemsetAsync(static_cast<std::uint8_t*>(q4k) + bytes, 0, kTailMargin,
                        nullptr) != hipSuccess ||
         hipStreamSynchronize(nullptr) != hipSuccess)
@@ -543,6 +730,79 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   m->layers_ = std::move(uploaded.layers);
   m->mtp_ = uploaded.mtp;
   m->has_mtp_ = mtp != nullptr;
+  for (const auto& c : conversions) {
+    if (c.expand_q8) {
+      ExpandQ8_0(c.source, static_cast<float*>(c.destination), c.count,
+                 nullptr);
+    } else {
+      NarrowActivations(static_cast<const float*>(c.source), c.destination,
+                        false, c.count, nullptr);
+    }
+  }
+  const auto status = hipDeviceSynchronize();
+  if (status != hipSuccess) {
+    if (error_msg != nullptr) {
+      *error_msg =
+          "weight conversion failed: " + std::string(hipGetErrorString(status));
+    }
+    return nullptr;
+  }
+  for (const auto& c : conversions) {
+    std::erase(m->allocations_, c.source);
+    (void)hipFree(c.source);
+    m->bytes_ -= c.source_bytes + kTailMargin;
+  }
+  return m;
+}
+
+std::unique_ptr<DeviceModel> DeviceModel::UploadExl3(const ModelWeights& w,
+                                                     const exl3::Pack& pack,
+                                                     const MtpWeights* mtp,
+                                                     std::string* error_msg) {
+  std::unique_ptr<DeviceModel> m(new DeviceModel());
+  m->config_ = w.config;
+  const auto regions = pack.Regions();
+  auto stager = hip::WeightUpload::Create(regions, error_msg);
+  if (!stager) {
+    return nullptr;
+  }
+  std::uint64_t measured = 0;
+  {
+    std::vector<Conversion> conversions;
+    std::vector<void*> allocations;
+    std::size_t bytes = 0;
+    std::size_t max_half_cols = 1;
+    std::size_t max_q8_cols = 32;
+    Uploader measure{*stager, nullptr,       conversions, allocations,
+                     bytes,   max_half_cols, max_q8_cols, error_msg};
+    (void)measure.Model(w, mtp, 0);
+    if (!measure.ok) {
+      return nullptr;
+    }
+    measured = measure.requested;
+  }
+  const hip::WeightAllocator weights(measured);
+  std::vector<Conversion> conversions;
+  Uploader up{*stager,   &weights,          conversions,     m->allocations_,
+              m->bytes_, m->max_half_cols_, m->max_q8_cols_, error_msg};
+  // The MTP block reads the same checkpoint files as the trunk.
+  Uploaded uploaded = up.Model(w, mtp, 0);
+  up.ReleaseStaging();
+  if (!up.ok || !stager->Finish(error_msg)) {
+    return nullptr;
+  }
+  assert(up.requested == measured);
+  m->token_embd_ = uploaded.token_embd;
+  m->output_ = uploaded.output;
+  m->output_bytes_ = static_cast<std::size_t>(m->output_.cols) *
+                     m->output_.rows *
+                     static_cast<unsigned>(m->output_.exl3_k) / 8;
+  m->hc_head_ = uploaded.hc_head;
+  m->layers_ = std::move(uploaded.layers);
+  m->mtp_ = uploaded.mtp;
+  m->has_mtp_ = mtp != nullptr;
+  m->max_exl3_in_ = up.max_exl3_in;
+  m->max_exl3_out_ = up.max_exl3_out;
   for (const auto& c : conversions) {
     if (c.expand_q8) {
       ExpandQ8_0(c.source, static_cast<float*>(c.destination), c.count,

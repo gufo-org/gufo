@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <string>
 
+#include "src/models/qwen38_flash_next/exl3/pack.hpp"
+
 namespace gufo::models::qwen38_flash_next {
 
 bool ProbeFlashNextGguf(const core::GgufReader& reader) {
@@ -59,6 +61,19 @@ std::optional<sampling::TextSamplingDefaults> FlashNextSamplingDefaults() {
 std::optional<sampling::TextSamplingDefaults> FlashNextSamplingDefaults(
     const core::GgufReader&) {
   return FlashNextSamplingDefaults();
+}
+
+bool ProbeFlashNextExl3(std::string_view model_root, double min_bits,
+                        double max_bits) {
+  try {
+    const std::filesystem::path root(model_root);
+    if (!exl3::IsFlashNextPack(root))
+      return false;
+    const double bits = exl3::PackBits(root);
+    return bits >= min_bits && bits < max_bits;
+  } catch (...) {
+    return false;
+  }
 }
 
 bool ProbeFlashNext(std::string_view model_root) {

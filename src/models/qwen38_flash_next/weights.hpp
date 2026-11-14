@@ -3,7 +3,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <gufo/ext/gguf_reader.hpp>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -35,9 +37,59 @@ struct MtpTrace {
   }
 };
 
+/// `TensorRef::shard` of a tensor whose payload lives in host memory the
+/// binder prepared (a converted EXL3-checkpoint tensor), not in a mapped
+/// file region.
+inline constexpr std::uint32_t kHostShard = 0xFFFFFFFFU;
+
+/// One EXL3 trellis linear, or a stack of expert linears of one shape, in a
+/// checkpoint. The device stores each matrix's tiles column-block-major;
+/// the optional 128-block maps reorder (or select) input and output blocks
+/// while uploading, which commutes with the block-diagonal Hadamards.
+struct Exl3Ref {
+  struct Part {
+    std::uint32_t file{0};         ///< Checkpoint file of all three.
+    std::uint64_t file_offset{0};  ///< Trellis payload offset in that file.
+    std::uint64_t suh_offset{0};   ///< [src_in] fp16
+    std::uint64_t svh_offset{0};   ///< [src_out] fp16
+    /// Mapped scales; reading them faults the pages in, so uploads read
+    /// the file ranges instead.
+    const std::uint16_t* suh{nullptr};
+    const std::uint16_t* svh{nullptr};
+  };
+  int k{0};                  ///< Bits per weight of every part.
+  std::uint32_t src_in{0};   ///< Stored input width.
+  std::uint32_t src_out{0};  ///< Stored output width.
+  /// Device input block i reads stored block in_blocks[i]; empty keeps all.
+  std::vector<std::uint32_t> in_blocks;
+  /// Device output block j reads stored block out_blocks[j]; empty keeps all.
+  std::vector<std::uint32_t> out_blocks;
+  std::vector<Part> parts;  ///< One per expert; one for a dense matrix.
+
+  [[nodiscard]] std::uint32_t In() const noexcept {
+    return in_blocks.empty()
+               ? src_in
+               : static_cast<std::uint32_t>(in_blocks.size()) * 128;
+  }
+  [[nodiscard]] std::uint32_t Out() const noexcept {
+    return out_blocks.empty()
+               ? src_out
+               : static_cast<std::uint32_t>(out_blocks.size()) * 128;
+  }
+  /// Stored trellis bytes of one part.
+  [[nodiscard]] std::size_t SourceBytes() const noexcept {
+    return static_cast<std::size_t>(src_in) * src_out * k / 8;
+  }
+  /// Device tile bytes of one part.
+  [[nodiscard]] std::size_t DeviceBytes() const noexcept {
+    return static_cast<std::size_t>(In()) * Out() * k / 8;
+  }
+};
+
 /// Non-owning view of one GGUF tensor. `rows` x `cols` follows the GGUF
 /// convention: cols (ne[0]) is the contiguous reduction dimension, rows
 /// (ne[1]) the output dimension, and `experts` (ne[2]) stacks whole matrices.
+/// An EXL3 linear sets `exl3` (cols = in, rows = out); its `type` is unused.
 struct TensorRef {
   const void* data{nullptr};
   core::GgmlType type{core::GgmlType::kF32};
@@ -46,9 +98,12 @@ struct TensorRef {
   std::uint64_t experts{1};
   std::uint64_t file_offset{0};  ///< Byte offset inside the owning shard.
   std::uint32_t shard{0};        ///< Mapped region index in the reader.
-  std::string_view name;
+  std::string_view name{};
+  std::shared_ptr<const Exl3Ref> exl3{};
 
-  [[nodiscard]] bool empty() const noexcept { return data == nullptr; }
+  [[nodiscard]] bool empty() const noexcept {
+    return data == nullptr && exl3 == nullptr;
+  }
   [[nodiscard]] std::uint64_t ElementCount() const noexcept {
     return cols * rows * experts;
   }
@@ -122,7 +177,30 @@ struct LayerWeights {
   TensorRef nextn_enorm;  ///< [hidden]
   TensorRef nextn_hnorm;  ///< [hc_dim], one RMS denominator across all streams
   TensorRef nextn_eh_proj;  ///< GGUF rows: [fc_embedding | fc_hidden]
-  HcMixer nextn_head;       ///< Output mixer of the draft block.
+  /// EXL3 checkpoints store the two halves of nextn_eh_proj separately.
+  TensorRef nextn_fc_embedding;
+  TensorRef nextn_fc_hidden;
+  HcMixer nextn_head;  ///< Output mixer of the draft block.
+};
+
+namespace exl3 {
+class Pack;
+}
+
+/// Host payloads a checkpoint binder converted (folded norms, permuted
+/// rows, Q8_0 projections). TensorRefs with shard kHostShard point here.
+struct HostTensors {
+  std::deque<std::vector<std::uint8_t>> buffers;
+  std::deque<std::string> names;
+};
+
+/// The EXL3 checkpoint's trellis n-gram table, read from disk only.
+struct Exl3NgramRef {
+  std::uint32_t file{0};         ///< Checkpoint file of the table.
+  std::uint64_t file_offset{0};  ///< First row's offset in that file.
+  std::uint64_t rows{0};
+  int k{0};                              ///< Bits per symbol.
+  std::vector<std::uint16_t> head_bias;  ///< [ple_heads][ple_head_dim] fp16
 };
 
 struct ModelWeights {
@@ -131,12 +209,21 @@ struct ModelWeights {
   TensorRef output;      ///< [hidden -> vocab]
   HcMixer hc_head;       ///< Final mixer, doubles as the output norm.
   TensorRef ple_table;   ///< [ple_head_dim, ple_rows], read from disk only.
+  /// The EXL3 checkpoint's n-gram table; ple_table is then empty.
+  std::shared_ptr<const Exl3NgramRef> ple_exl3;
   std::vector<LayerWeights> layers;
 
   /// Binds and validates the trunk artifact. Tensor payloads stay mapped and
   /// untouched; only headers are read.
   [[nodiscard]] static std::optional<ModelWeights> Bind(
       const core::GgufReader& reader, std::string* error_msg = nullptr);
+
+  /// Binds an EXL3 checkpoint. Trellis payloads stay mapped; the small
+  /// tensors whose layout or encoding differs from the GGUF artifact are
+  /// converted into `host`, which must outlive the weights.
+  [[nodiscard]] static std::optional<ModelWeights> BindExl3(
+      const exl3::Pack& pack, HostTensors& host,
+      std::string* error_msg = nullptr);
 };
 
 /// The MTP draft block from the `shared-*` sidecar: one attention layer with
@@ -148,6 +235,11 @@ struct MtpWeights {
 
   [[nodiscard]] static std::optional<MtpWeights> Bind(
       const core::GgufReader& reader, const Config& trunk,
+      std::string* error_msg = nullptr);
+
+  /// The `mtp.*` block of an EXL3 checkpoint, or nullopt when it has none.
+  [[nodiscard]] static std::optional<MtpWeights> BindExl3(
+      const exl3::Pack& pack, const Config& trunk, HostTensors& host,
       std::string* error_msg = nullptr);
 };
 

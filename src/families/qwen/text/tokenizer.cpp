@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/core/json.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
 
 namespace gufo::tokenization {
@@ -328,6 +329,108 @@ std::size_t Qwen35PieceEnd(std::string_view text, std::size_t offset) {
 
 }  // namespace
 
+bool QwenTokenizer::IsSpecialTokenName(std::string_view t) noexcept {
+  return t == kEndOfText || t == kImStart || t == kImEnd ||
+         t == "<tool_call>" || t == "</tool_call>" || t == "<tool_response>" ||
+         t == "</tool_response>" || t == "<think>" || t == "</think>" ||
+         t == "<tts_pad>" || t == "<tts_text_bos>" || t == "<tts_text_eod>" ||
+         t == "<tts_text_bos_single>" || t == kObjectRefStart ||
+         t == kObjectRefEnd || t == kVisionStart || t == kVisionEnd ||
+         t == kImagePad || t == kVideoPad || t == kQuadStart || t == kQuadEnd ||
+         (t.size() >= 4 && t.starts_with("<|") && t.ends_with("|>"));
+}
+
+std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromTokenizerJson(
+    std::string_view text, std::size_t vocab_size, std::string* error_msg) {
+  const auto fail = [&](std::string message) -> std::unique_ptr<QwenTokenizer> {
+    if (error_msg != nullptr) {
+      *error_msg = std::move(message);
+    }
+    return nullptr;
+  };
+  json::Value root;
+  try {
+    root = json::parse(text);
+  } catch (const std::exception& e) {
+    return fail(std::string("invalid tokenizer.json: ") + e.what());
+  }
+  const json::Value* model = root.find("model");
+  if (model == nullptr || model->member_str("type") != "BPE") {
+    return fail("tokenizer.json is not a BPE tokenizer");
+  }
+  const json::Value* vocab = model->find("vocab");
+  const json::Value* merge_list = model->find("merges");
+  if (vocab == nullptr || !vocab->is_object() || merge_list == nullptr ||
+      !merge_list->is_array()) {
+    return fail("tokenizer.json misses its vocabulary or merges");
+  }
+  // GGUF conversions pad unused ids to the model's vocabulary size with
+  // "[PAD<id>]"; the same table keeps ids and decoding identical.
+  std::vector<std::string> tokens;
+  std::vector<bool> present;
+  const auto place = [&](std::size_t id, const std::string& token) {
+    if (id >= tokens.size()) {
+      tokens.resize(id + 1);
+      present.resize(id + 1, false);
+    }
+    tokens[id] = token;
+    present[id] = true;
+  };
+  for (const auto& [token, id] : vocab->members()) {
+    place(id.as_size(), token);
+  }
+  std::unordered_map<std::string, TokenId> special_tokens;
+  if (const json::Value* added = root.find("added_tokens");
+      added != nullptr && added->is_array()) {
+    for (const auto& entry : added->items()) {
+      const std::string content = entry.member_str("content");
+      const std::size_t id = entry.member_size("id");
+      place(id, content);
+      if (IsSpecialTokenName(content)) {
+        special_tokens[content] = static_cast<TokenId>(id);
+      }
+    }
+  }
+  if (tokens.size() < vocab_size) {
+    tokens.resize(vocab_size);
+    present.resize(vocab_size, false);
+  }
+  for (std::size_t i = 0; i < tokens.size(); ++i) {
+    if (!present[i]) {
+      tokens[i] = "[PAD" + std::to_string(i) + "]";
+    }
+  }
+  std::vector<std::string> merges;
+  merges.reserve(merge_list->size());
+  for (const auto& m : merge_list->items()) {
+    if (m.is_string()) {
+      merges.push_back(m.str());
+    } else if (m.is_array() && m.size() == 2) {
+      merges.push_back(m.items()[0].str() + " " + m.items()[1].str());
+    }
+  }
+  auto tokenizer =
+      CreateFromVocabulary(tokens, merges, special_tokens, error_msg);
+  if (tokenizer == nullptr) {
+    return nullptr;
+  }
+  // The Qwen3.5 split pattern groups combining marks with letters; it is
+  // the pre-tokenizer GGUF conversions name "qwen35".
+  const std::string pre = root.find("pre_tokenizer") != nullptr
+                              ? root.find("pre_tokenizer")->dump()
+                              : std::string();
+  if (pre.find("p{L}") != std::string::npos &&
+      pre.find("p{M}") != std::string::npos) {
+    tokenizer->pre_tokenizer_ = PreTokenizer::kQwen35;
+  }
+  // As the official GGUF metadata: <|endoftext|> is both BOS and padding.
+  if (tokenizer->endoftext_token_id_ != kInvalidTokenId) {
+    tokenizer->bos_token_id_ = tokenizer->endoftext_token_id_;
+    tokenizer->pad_token_id_ = tokenizer->endoftext_token_id_;
+  }
+  return tokenizer;
+}
+
 std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
     const core::GgufReader& reader, std::string* error_msg) {
   const auto token_views =
@@ -356,16 +459,8 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
   std::unordered_map<std::string, TokenId> special_tokens;
   // Dynamic lookup of special tokens from GGUF vocabulary table
   for (std::size_t i = 0; i < tokens.size(); ++i) {
-    const auto& t = tokens[i];
-    if (t == kEndOfText || t == kImStart || t == kImEnd || t == "<tool_call>" ||
-        t == "</tool_call>" || t == "<tool_response>" ||
-        t == "</tool_response>" || t == "<think>" || t == "</think>" ||
-        t == "<tts_pad>" || t == "<tts_text_bos>" || t == "<tts_text_eod>" ||
-        t == "<tts_text_bos_single>" || t == kObjectRefStart ||
-        t == kObjectRefEnd || t == kVisionStart || t == kVisionEnd ||
-        t == kImagePad || t == kVideoPad || t == kQuadStart || t == kQuadEnd ||
-        (t.size() >= 4 && t.starts_with("<|") && t.ends_with("|>"))) {
-      special_tokens[t] = static_cast<TokenId>(i);
+    if (IsSpecialTokenName(tokens[i])) {
+      special_tokens[tokens[i]] = static_cast<TokenId>(i);
     }
   }
 

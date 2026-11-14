@@ -1,0 +1,143 @@
+{
+  "schema": 1,
+  "models": {
+    "flash-next-exl3-3bpw": {
+      "weights": {
+        "source": {
+          "hf": "turboderp/Qwen3.8-Flash-Next-exl3",
+          "revision": "69e33439ae950f17bcbe95c98f117d80f759ab6d"
+        },
+        "include": [
+          "*.safetensors",
+          "*.json",
+          "*.jinja",
+          "*.txt",
+          "LICENSE"
+        ],
+        "exclude": [
+          "qbench_prompts.json",
+          "quantization_config.json"
+        ],
+        "files": [
+          {
+            "path": "LICENSE",
+            "size": 3235,
+            "sha256": "a0dc422560841fd68e06d974907f8b4c709bca44a67daad2b528437bdf676c08"
+          },
+          {
+            "path": "chat_template.jinja",
+            "size": 8952,
+            "sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+          },
+          {
+            "path": "config.json",
+            "size": 5081,
+            "sha256": "92ce0839c71b5a39988299fe38206a32fea50586be54378d424fc0eb035a44c0"
+          },
+          {
+            "path": "generation_config.json",
+            "size": 202,
+            "sha256": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e"
+          },
+          {
+            "path": "merges.txt",
+            "size": 3353259,
+            "sha256": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d"
+          },
+          {
+            "path": "model-00001-of-00007.safetensors",
+            "size": 8494539639,
+            "sha256": "248b0490f3a178e051ee8d2608ef151a302940ad36e91685ca47a0d10532d966"
+          },
+          {
+            "path": "model-00002-of-00007.safetensors",
+            "size": 8175800810,
+            "sha256": "b51039a706e5a76fed2a1eb9a6eec91b9e982a24863886097d552e6fbb531680"
+          },
+          {
+            "path": "model-00003-of-00007.safetensors",
+            "size": 8175819368,
+            "sha256": "053f5337aabd57297d0fb65203e2f269cdb1c45b848e7169deb79fadf170ca4f"
+          },
+          {
+            "path": "model-00004-of-00007.safetensors",
+            "size": 8175819368,
+            "sha256": "eb3ee11406c138b09e5208bd26dec57d9d438bb20d30f7c847acd2aea2e2f428"
+          },
+          {
+            "path": "model-00005-of-00007.safetensors",
+            "size": 8175819368,
+            "sha256": "d188dced0538cd85a5780d5778ec94028507274541547ab4e0552721e6a703a3"
+          },
+          {
+            "path": "model-00006-of-00007.safetensors",
+            "size": 8175819368,
+            "sha256": "3792d95808ec804535280578d200f9424ddf26613361330da2f19a11813d751e"
+          },
+          {
+            "path": "model-00007-of-00007.safetensors",
+            "size": 2959581433,
+            "sha256": "ce89387b7c29aab893dfeffa017830c9372458ee64e6e89a3edcb8ab8c11030f"
+          },
+          {
+            "path": "model.safetensors.index.json",
+            "size": 32762977,
+            "sha256": "318339ceddd7a54e422ba48a581823bcd87a455b8fa69baf4a883825106bc8dd"
+          },
+          {
+            "path": "mtp_hyper_connection_mixer_patch.safetensors",
+            "size": 13128048,
+            "sha256": "9b29ae89413854802076ad392809abe4d91a1e61a6bc08193dad8271a7510953"
+          },
+          {
+            "path": "ngram_embedding.safetensors",
+            "size": 32640183408,
+            "sha256": "32006bf33c1e079414be3d3b4099c9425112ca9666b045a3e48924237d1a372e"
+          },
+          {
+            "path": "preprocessor_config.json",
+            "size": 390,
+            "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 12809320,
+            "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+          },
+          {
+            "path": "tokenizer_config.json",
+            "size": 17928,
+            "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27"
+          },
+          {
+            "path": "video_preprocessor_config.json",
+            "size": 385,
+            "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+          },
+          {
+            "path": "vocab.json",
+            "size": 6722759,
+            "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+          }
+        ]
+      },
+      "mmproj": {
+        "source": {
+          "hf": "unsloth/Qwen3.8-Flash-Next-GGUF",
+          "revision": "d96201194f103c906994f283f504209dc8d2a10c"
+        },
+        "include": [
+          "mmproj-BF16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "mmproj-BF16.gguf",
+            "size": 907542944,
+            "sha256": "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355"
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "name": "qwen38_flash_next_exl3_4bpw",
+  "version": "0.1.0",
+  "api_version": ">= 0.3.0",
+  "entry": "qwen38_flash_next_exl3_4bpw_register",
+  "registration_target": "gufo_qwen38_flash_next_exl3_4bpw",
+  "depends": [
+    "qwen38_flash_next"
+  ],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "flash-next-exl3-4bpw",
+      "capability": "text_generation",
+      "keys": [
+        "safetensors:qwen4_exp",
+        "safetensors:Qwen4ExpForConditionalGeneration"
+      ],
+      "model_ids": [
+        "flash-next-exl3-4bpw"
+      ],
+      "speculative": [
+        "mtp"
+      ],
+      "target": "gufo_qwen38_flash_next_exl3_4bpw_hip",
+      "entry": "qwen38_flash_next_exl3_4bpw_provider_register"
+    }
+  ],
+  "models": [
+    {
+      "id": "flash-next-exl3-4bpw",
+      "provider": "flash-next-exl3-4bpw",
+      "license": "qwen-community-1.0",
+      "description": "Qwen3.8 Flash-Next, EXL3 4.05 bpw (turboderp 4.05bpw_h6_ng6)",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "turboderp/Qwen3.8-Flash-Next-exl3",
+            "revision": "55a732e0c4c3d4614bc42b68493bb930d9b02c0a"
+          },
+          "include": [
+            "*.safetensors",
+            "*.json",
+            "*.jinja",
+            "*.txt",
+            "LICENSE"
+          ],
+          "exclude": [
+            "qbench_prompts.json",
+            "quantization_config.json"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "mmproj",
+          "option": "--mmproj",
+          "install": "default",
+          "source": {
+            "hf": "unsloth/Qwen3.8-Flash-Next-GGUF",
+            "revision": "d96201194f103c906994f283f504209dc8d2a10c"
+          },
+          "include": [
+            "mmproj-BF16.gguf"
+          ]
+        }
+      ]
+    }
+  ],
+  "targets": {
+    "gufo_qwen38_flash_next_exl3_4bpw": {
+      "requires": []
+    },
+    "gufo_qwen38_flash_next_exl3_4bpw_hip": {
+      "requires": [
+        "hip"
+      ]
+    }
+  },
+  "production_paths": {
+    "include": [
+      "**/*.cpp",
+      "**/*.h",
+      "**/*.hpp",
+      "extension.*",
+      "models.lock.json"
+    ],
+    "exclude": [
+      "tests/",
+      "functional/",
+      "tools/",
+      "fixtures/"
+    ]
+  },
+  "docs": {
+    "title": "Qwen3.8 Flash-Next EXL3 4.05 bpw",
+    "inputs": "EXL3 checkpoint directory; text/images",
+    "guide": "docs/models/qwen3.8-flash-next.md"
+  },
+  "test_labels": [
+    "qwen38_flash_next_exl3_4bpw"
+  ]
+}

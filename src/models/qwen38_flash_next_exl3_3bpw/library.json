@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "qwen38_flash_next_exl3_3bpw",
+  "target": "gufo_qwen38_flash_next_exl3_3bpw",
+  "kind": "static",
+  "purpose": "Qwen3.8-Flash-Next EXL3 3.05 bpw checkpoint provider over the qwen38_flash_next runtime.",
+  "consumers": []
+}

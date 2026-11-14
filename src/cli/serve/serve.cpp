@@ -1791,7 +1791,7 @@ int RunServe(std::span<const char* const> args) {
             .model_artifact_fingerprint = {},
         },
         vision_model_path, cache_ram, enable_yarn,
-        [&](const ext::TextProvider& provider, const core::GgufReader&,
+        [&](const ext::TextProvider& provider, const core::GgufReader*,
             ext::TextRunnerOptions* options, std::string* error) {
           try {
             options->provider_options = provider_options.Select(provider.id);

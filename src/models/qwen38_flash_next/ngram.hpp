@@ -71,6 +71,14 @@ struct NgramGatherOwner {
   NgramCounters* counters{nullptr};
 };
 
+/// Trellis rows of an EXL3 checkpoint's n-gram table (exl3/format.hpp):
+/// row[i] = mul1(state_i) * scale + head_bias[head][i].
+struct NgramTrellis {
+  int k{0};
+  std::vector<std::uint16_t> head_bias;     ///< [heads][row_dim] fp16
+  std::vector<std::uint32_t> head_offsets;  ///< first row of each head
+};
+
 /// Reads n-gram embedding rows from the GGUF shard with direct I/O and a
 /// bounded cache of compressed rows. The table stays out of the page cache.
 /// Rows are dequantized to F32 and laid out [token][head][ple_head_dim].
@@ -86,6 +94,12 @@ public:
   [[nodiscard]] static std::unique_ptr<NgramTable> Open(
       platform::PlatformFile file, std::uint64_t file_offset,
       std::uint64_t rows, std::uint32_t row_dim, core::GgmlType type,
+      std::string* error_msg = nullptr);
+
+  /// Opens the trellis-coded table of an EXL3 checkpoint.
+  [[nodiscard]] static std::unique_ptr<NgramTable> OpenTrellis(
+      platform::PlatformFile file, std::uint64_t file_offset,
+      std::uint64_t rows, std::uint32_t row_dim, NgramTrellis trellis,
       std::string* error_msg = nullptr);
 
   /// Gathers `rows.size()` rows into `out` (rows.size() * row_dim floats).
@@ -124,7 +138,11 @@ private:
   // Reuse deduplication storage across gathers. Entries index the first
   // occurrence in the current input, so no row-cache state is retained here.
   std::vector<std::size_t> first_rows_;
-  void DecodeRow(const std::uint8_t* src, float* dst) const;
+  void DecodeRow(const std::uint8_t* src, float* dst, std::uint32_t row) const;
+  [[nodiscard]] static std::unique_ptr<NgramTable> OpenRows(
+      platform::PlatformFile file, std::uint64_t file_offset,
+      std::uint64_t rows, std::uint32_t row_dim, std::size_t row_bytes,
+      core::GgmlType type, std::string* error_msg);
   bool ReadCached(std::uint32_t row, float* dst);
   bool ReadOne(std::uint32_t row, float* dst, std::vector<std::uint8_t>& buf,
                NgramCounters* owner);
@@ -146,6 +164,7 @@ private:
   std::uint32_t row_dim_{0};
   std::size_t row_bytes_{0};
   core::GgmlType type_{core::GgmlType::kIQ4_NL};
+  NgramTrellis trellis_;
 
   // A small resident pool keeps decode-time reads from paying thread
   // creation; prefill batches fan out over the same workers.

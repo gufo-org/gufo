@@ -170,6 +170,12 @@
       "ctest": "qwen38_flash_next\\.continuation_layout",
       "check_pr": true,
       "windows_build": true
+    },
+    {
+      "target": "qwen38_flash_next_exl3_format_test",
+      "ctest": "qwen38_flash_next\\.exl3_format",
+      "check_pr": true,
+      "windows_build": true
     }
   ],
   "test_labels": [

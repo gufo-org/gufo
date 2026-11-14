@@ -13,6 +13,10 @@
 
 namespace gufo::models::qwen38_flash_next {
 
+namespace exl3 {
+class Pack;
+}
+
 /// Architecture parameters of a `qwen4exp` GGUF artifact. Every value is read
 /// from the file; the fixed limits below only bound what this runtime was
 /// written and validated for (Qwen3.8-Flash-Next, 48 trunk layers).
@@ -152,6 +156,16 @@ struct Config {
   [[nodiscard]] static std::optional<Config> FromGguf(
       const core::GgufReader& reader, bool require_trunk,
       std::string* error_msg = nullptr);
+
+  /// Reads an EXL3 checkpoint's config.json and n-gram tables. `mtp` reads
+  /// the configuration of its `mtp.*` draft block instead of the trunk.
+  [[nodiscard]] static std::optional<Config> FromExl3(
+      const exl3::Pack& pack, bool mtp, std::string* error_msg = nullptr);
+
+  /// Checks the runtime's structural limits and kernel geometry; shared by
+  /// every artifact format.
+  [[nodiscard]] static std::optional<Config> Validated(
+      Config c, bool require_trunk, std::string* error_msg = nullptr);
 };
 
 }  // namespace gufo::models::qwen38_flash_next
