@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <functional>
 #include <gufo/ext/snapshot_copy.hpp>
 #include <mutex>
 #include <optional>
@@ -127,7 +128,7 @@ public:
   void BeforeExecution() override {
     if (invalidating)
       return;
-    if (!IsValid() || pending)
+    if (!IsValid() || pending || at_boundary)
       throw std::logic_error("Qwen slot is not ready for execution");
   }
   void BeforeWrite(std::uint32_t first, std::uint32_t end) override {
@@ -157,7 +158,7 @@ public:
   void BeforeReset() override {
     if (invalidating)
       return;
-    if (restoring || pending)
+    if (restoring || pending || at_boundary)
       throw std::logic_error("cannot reset a busy Qwen slot");
     GuardAll();
     failed = true;
@@ -243,6 +244,8 @@ public:
   bool prefill_logits{};
   bool logits_valid{}, verification{}, restoring{}, guarding{}, invalidating{},
       native_restoring{}, validating{};
+  /// An in-pass checkpoint consumer reads this frontier.
+  bool at_boundary{};
   std::atomic<bool> failed{false};
   std::atomic<std::size_t> pending{0};
   std::mutex jobs_mutex;
@@ -385,6 +388,31 @@ void ContinuationAdapter::RollbackPrefill(cache::Slot& slot) {
   state.failed = false;
   FinishPrefill(slot);
 }
+void ContinuationAdapter::CaptureAtBoundary(
+    cache::Slot& slot, const std::function<void()>& capture) {
+  auto& state = As(slot);
+  state.Stable();
+  state.BeforeExecution();
+  if (!capture)
+    throw std::invalid_argument("missing Qwen checkpoint consumer");
+  struct BoundaryScope {
+    State& state;
+    explicit BoundaryScope(State& state) : state(state) {
+      state.at_boundary = true;
+    }
+    ~BoundaryScope() {
+      // Even a consumer that failed must not leave a copy reading state the
+      // next pass overwrites.
+      const std::lock_guard lock(state.jobs_mutex);
+      for (const auto& job : state.jobs)
+        (void)job->Wait();
+      state.at_boundary = false;
+    }
+  } scope(state);
+  capture();
+  if (state.pending)
+    throw std::logic_error("Qwen in-pass capture returned with pending copies");
+}
 std::optional<cache::CostEstimate> ContinuationAdapter::Cost() const {
   // Fixed least-squares fit of the retained gfx1151 depth sweep; see this
   // model's BENCHMARKS.md. Restore rates are shared measured hardware controls.
@@ -427,15 +455,30 @@ std::vector<cache::ComponentPosition> ContinuationAdapter::Positions(
   const auto& state = As(slot);
   if (!state.IsValid())
     throw std::logic_error("cannot query an invalid Qwen slot");
-  auto positions = layout_.Positions(state.position);
+  return PositionsAt(state.position);
+}
+std::vector<cache::ComponentPosition> ContinuationAdapter::PositionsAt(
+    Rows position) const {
+  auto positions = layout_.Positions(position);
   for (std::size_t i = positions.size(); i < components_.size(); ++i) {
     const auto& component = components_[i];
     // Private components describe one coherent target checkpoint. Their
     // independent injected frontier is encoded in DraftMetadata, together
     // with pending features, rather than treated as an append-row position.
-    positions.push_back({component.descriptor.id, state.position});
+    positions.push_back({component.descriptor.id, position});
   }
   return positions;
+}
+std::vector<cache::ComponentPosition>
+ContinuationAdapter::PrefillCheckpointPositions(const cache::Slot& slot,
+                                                Rows boundary) const {
+  const auto& state = As(slot);
+  if (!state.IsValid() || state.pending || state.at_boundary)
+    throw std::logic_error("Qwen slot is not ready for checkpoint planning");
+  if (boundary <= state.position || boundary > context_)
+    throw std::invalid_argument("unsupported Qwen in-pass boundary");
+  // A pass ending at the boundary leaves every component there.
+  return PositionsAt(boundary);
 }
 std::vector<Rows> ContinuationAdapter::PlanPrefill(const cache::Slot& slot,
                                                    Rows first, Rows end) const {
@@ -1016,7 +1059,7 @@ bool ContinuationAdapter::Invalidate(cache::Slot& slot) noexcept {
   State* resetting = nullptr;
   try {
     auto& state = As(slot);
-    if (state.pending)
+    if (state.pending || state.at_boundary)
       return false;
     resetting = &state;
     state.BeforeRelease();

@@ -586,6 +586,13 @@ public:
   /// layers have finished; other sessions may decode there on their own
   /// executors. One group, or an empty `yield`, restores unsplit passes.
   void SetPrefillYield(std::size_t groups, std::function<void()> yield);
+  /// Yields before the given ascending `layers` of each following prompt
+  /// pass instead; layer zero yields before the pass's first layer.
+  void SetPrefillYieldLayers(std::vector<std::uint32_t> layers,
+                             std::function<void()> yield);
+  /// Estimated milliseconds of one prompt pass of `rows` rows on gfx1151, for
+  /// spreading layer groups over passes of different widths.
+  [[nodiscard]] double PrefillPassCost(std::size_t rows) const;
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       std::uint32_t valid_context) const;
   void ConfigureVision(
