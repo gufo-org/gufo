@@ -1735,7 +1735,8 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     const sampling::SamplingConfig& sampling_config,
     const CancellationCheck& is_cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse_prompt,
-    std::size_t cache_prefix_tokens, bool stop_at_eos, bool persist) {
+    std::size_t cache_prefix_tokens, bool stop_at_eos, bool persist,
+    bool projection) {
   sampling_config.Validate();
   if (prompt.empty()) {
     throw std::invalid_argument("text runner prompt must not be empty");
@@ -1755,7 +1756,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
   {
     auto lease = impl_->component_cache->Acquire(
         prompt, is_cancelled, context, reuse_prompt, cache_prefix_tokens,
-        stop_at_eos, persist);
+        stop_at_eos, persist, projection);
     if (!lease)
       return {};
     Request request(std::make_unique<Request::Impl>(

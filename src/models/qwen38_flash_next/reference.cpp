@@ -137,7 +137,8 @@ void ReferenceModel::HcMix(const HcMixer& m, std::span<const float> res,
 
 void ReferenceModel::HcCombine(std::span<float> res,
                                std::span<const float> block_out,
-                               std::span<const float> inject) {
+                               std::span<const float> inject,
+                               const float* proj_dir, float proj_scale) {
   // 2*sigmoid centres the scatter weights on 1: zero injection logits make a
   // plain residual add into every stream.
   for (std::uint32_t s = 0; s < c_.hc_count; ++s) {
@@ -145,6 +146,22 @@ void ReferenceModel::HcCombine(std::span<float> res,
     float* dst = res.data() + static_cast<std::size_t>(s) * c_.hidden_size;
     for (std::uint32_t i = 0; i < c_.hidden_size; ++i) {
       dst[i] += block_out[i] * w;
+    }
+  }
+  if (proj_dir == nullptr || proj_scale == 0.0F) {
+    return;
+  }
+  // write -> project -> norm, per stream, double-accumulated like the PLE
+  // dot: the same direction reaches every hyper-connection stream.
+  for (std::uint32_t s = 0; s < c_.hc_count; ++s) {
+    float* dst = res.data() + static_cast<std::size_t>(s) * c_.hidden_size;
+    double dot = 0.0;
+    for (std::uint32_t i = 0; i < c_.hidden_size; ++i) {
+      dot += static_cast<double>(dst[i]) * static_cast<double>(proj_dir[i]);
+    }
+    const float step = static_cast<float>(dot) * proj_scale;
+    for (std::uint32_t i = 0; i < c_.hidden_size; ++i) {
+      dst[i] = std::fma(-step, proj_dir[i], dst[i]);
     }
   }
 }
@@ -596,6 +613,16 @@ bool ReferenceModel::Step(std::int32_t token, std::span<float> logits,
     if (c_.IsPleLayer(il) && !Ple(l, token, res, error_msg)) {
       return false;
     }
+    // The FFN/MoE combine of a steered layer projects the residual after
+    // the write; the attention boundary never does.
+    const float* proj_dir = nullptr;
+    float proj_scale = 0.0F;
+    if (projection_enabled_ && il >= projection_.first_layer &&
+        il <= projection_.last_layer && projection_.scales[il] != 0.0F) {
+      proj_dir =
+          projection_.directions.data() + static_cast<std::size_t>(il) * hidden;
+      proj_scale = projection_.scales[il];
+    }
     HcMix(l.hc_attn, res, mixed, inject);
     if (l.linear) {
       LinearAttention(l, linear_[il], mixed, block_out);
@@ -606,7 +633,7 @@ bool ReferenceModel::Step(std::int32_t token, std::span<float> logits,
 
     HcMix(l.hc_ffn, res, mixed, inject);
     Moe(l, mixed, block_out);
-    HcCombine(res, block_out, inject);
+    HcCombine(res, block_out, inject, proj_dir, proj_scale);
   }
   if (!hc_out.empty()) {
     std::copy(res.begin(), res.end(), hc_out.begin());
