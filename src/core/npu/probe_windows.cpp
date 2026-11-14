@@ -1,5 +1,6 @@
 // The NPUs of this machine, as XRT enumerates them: Windows has no sysfs, and
-// the NPU driver exposes its devices through XRT.
+// the NPU driver exposes its devices through XRT. The XRT backend is linked
+// in, with xrt_coreutil.dll delay-loaded.
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -7,10 +8,8 @@
 #include <windows.h>
 // windows.h first: delayimp.h uses its types.
 #include <delayimp.h>
-#include <xrt/experimental/xrt_system.h>
-#include <xrt/xrt_device.h>
 
-#include <exception>
+#include <string>
 
 #include "src/core/npu/npu.hpp"
 #include "src/core/npu/xrt_load.hpp"
@@ -39,25 +38,36 @@ bool BindXrtImports() {
 
 }  // namespace
 
-bool LoadXrt() {
+const GufoNpuXrt& Xrt() {
   static const bool loaded = BindXrtImports();
-  return loaded;
+  if (!loaded)
+    throw Error(
+        "XRT (xrt_coreutil.dll from the AMD NPU driver) is not installed");
+  return *gufo_npu_xrt();
 }
 
 std::vector<DeviceInfo> ProbeDevices() {
   std::vector<DeviceInfo> out;
-  if (!LoadXrt())
-    return out;  // no NPU driver
+  const GufoNpuXrt* xrt = nullptr;
   try {
-    const unsigned count = xrt::system::enumerate_devices();
-    for (unsigned i = 0; i < count; ++i) {
-      DeviceInfo info;
-      info.node = "xrt" + std::to_string(i);
-      info.driver = xrt::device(i).get_info<xrt::info::device::name>();
-      out.push_back(std::move(info));
-    }
-  } catch (const std::exception&) {
-    // No NPU driver: no devices.
+    xrt = &Xrt();
+  } catch (const Error&) {
+    return out;  // no NPU driver
+  }
+  unsigned count = 0;
+  if (xrt->device_count(&count))
+    return out;  // no NPU driver: no devices
+  for (unsigned i = 0; i < count; ++i) {
+    void* device = nullptr;
+    if (xrt->device_open(i, &device))
+      continue;
+    const char* name = nullptr;
+    DeviceInfo info;
+    info.node = "xrt" + std::to_string(i);
+    if (!xrt->device_name(device, &name) && name)
+      info.driver = name;
+    xrt->device_close(device);
+    out.push_back(std::move(info));
   }
   return out;
 }
