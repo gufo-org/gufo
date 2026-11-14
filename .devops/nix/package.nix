@@ -225,8 +225,9 @@ stdenv.mkDerivation {
   postFixup = ''
     # HIP loads ROCr transitively. Select the patched ABI-compatible runtime
     # without rebuilding the unchanged HIP/BLAS compiler and kernel libraries.
-    # XRT locates its amdxdna plugin beside libxrt_coreutil, which the
-    # executable's RUNPATH finds in the merged XRT package.
+    # XRT locates its amdxdna plugin beside libxrt_coreutil, which the NPU
+    # module's (lib/gufo/libgufo_npu_xrt.so) RUNPATH finds in the merged XRT
+    # package.
     wrapProgram "$out/bin/gufo" \
       --prefix LD_LIBRARY_PATH : "${rocmRuntime}/lib"
   '';

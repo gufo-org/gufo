@@ -93,6 +93,12 @@ def pack(package, revision, destination):
         raise ValueError('Production package does not contain an ELF executable')
     shutil.copy2(executable, destination / 'libexec/gufo')
     copy_share(package / 'share', destination / 'share')
+    # Gufo's own runtime modules (lib/gufo: the XRT module, loaded on first
+    # NPU use). The bundled loader is the process image, so Gufo finds them
+    # by name through its --library-path.
+    modules = package / 'lib/gufo'
+    if modules.is_dir():
+        copy_share(modules, destination / 'lib/gufo')
     for dependency in closure:
         if dependency == package:
             continue
@@ -111,11 +117,15 @@ def pack(package, revision, destination):
     if len(loaders) != 1:
         raise ValueError('Expected one pinned glibc ELF loader')
     loader = runtime_path(loaders[0], root).relative_to(root).as_posix()
-    # Libraries the executable's RUNPATH finds outside a lib/ directory keep
-    # their directory and its precedence. XRT locates its device shim and
-    # driver plugins beside the path libxrt_coreutil was loaded from.
+    # Libraries the executable's and its modules' RUNPATHs find outside a lib/
+    # directory keep their directory and its precedence. XRT locates its
+    # device shim and driver plugins beside the path libxrt_coreutil was loaded
+    # from; only the XRT module links it.
     linked = []
-    for line in output(str(loaders[0]), '--list', str(executable)).splitlines():
+    listed = [executable, *(sorted(modules.glob('*.so')) if modules.is_dir() else [])]
+    lines = [line for path in listed
+             for line in output(str(loaders[0]), '--list', str(path)).splitlines()]
+    for line in lines:
         found = re.search(r'=> (/nix/store/\S+)', line)
         if not found:
             continue
@@ -132,6 +142,8 @@ def pack(package, revision, destination):
                           if path.is_file() and '.so' in path.name
                           and any(path.is_relative_to(runtime_path(dep, root)) for dep in closure)})
     libraries = [preferred] + [path for path in linked if path != preferred]
+    if modules.is_dir():
+        libraries.append(destination.relative_to(root).as_posix() + '/lib/gufo')
     libraries += [path for path in directories if path not in libraries]
     environment = {}
     for dependency in closure:
@@ -195,6 +207,12 @@ def verify(source, revision):
                     '--list', str(source / 'libexec/gufo'))
     if '=> /nix/store/' in linked or 'not found' in linked:
         raise ValueError('Linux binary depends on an unbundled runtime library')
+    for module in sorted((source / 'lib/gufo').glob('*.so')):
+        linked = output(str(root / manifest['loader']), '--library-path',
+                        ':'.join(str(root / path) for path in manifest['libraries']),
+                        '--list', str(module))
+        if '=> /nix/store/' in linked or 'not found' in linked:
+            raise ValueError(f'{module.name} depends on an unbundled runtime library')
     print(version, flush=True)
 
 

@@ -1,13 +1,8 @@
-// The NPU runtime on XRT.
-
-#include <xrt/xrt_bo.h>
-#include <xrt/xrt_device.h>
-#include <xrt/xrt_hw_context.h>
-#include <xrt/xrt_kernel.h>
+// The NPU runtime on XRT, through the backend of xrt_load.hpp.
 
 #include <cstdio>
-#include <cstring>
-#include <exception>
+#include <string>
+#include <vector>
 
 #include "src/core/npu/npu.hpp"
 #include "src/core/npu/xrt_load.hpp"
@@ -21,15 +16,9 @@ constexpr unsigned kOpcode = 3;
 constexpr int kInstructionArgument = 1;
 constexpr unsigned kFirstDataArgument = 3;
 
-template<typename F>
-auto Wrap(const char* what, F&& f) -> decltype(f()) {
-  try {
-    return f();
-  } catch (const Error&) {
-    throw;
-  } catch (const std::exception& e) {
-    throw Error(std::string(what) + ": " + e.what());
-  }
+void Check(const std::string& what, const char* error) {
+  if (error)
+    throw Error(what + ": " + error);
 }
 
 std::size_t FileBytes(const std::filesystem::path& file) {
@@ -53,27 +42,46 @@ void ReadFile(const std::filesystem::path& file, std::byte* dst,
 
 }  // namespace
 
+// Each Impl owns one backend handle. The backend keeps the XRT device open
+// while any program, buffer or run made from it is alive.
 struct Device::Impl {
-  xrt::device device;
+  const GufoNpuXrt* xrt{};
+  void* device{};
+  ~Impl() {
+    if (device)
+      xrt->device_close(device);
+  }
 };
 
 struct Buffer::Impl {
-  std::shared_ptr<Device::Impl> device;  // keeps the device open
-  xrt::bo bo;
+  const GufoNpuXrt* xrt{};
+  void* bo{};
   std::byte* map{};
+  std::size_t size{};
+  ~Impl() {
+    if (bo)
+      xrt->buffer_close(bo);
+  }
 };
 
 struct Run::Impl {
-  std::shared_ptr<Device::Impl> device;
-  xrt::run run;
+  const GufoNpuXrt* xrt{};
+  void* run{};
   bool waited{};
+  ~Impl() {
+    if (run)
+      xrt->run_close(run, waited ? 1 : 0);  // waits for a started run
+  }
 };
 
 struct Program::Impl {
-  std::shared_ptr<Device::Impl> device;
-  xrt::hw_context context;
-  xrt::kernel kernel;
+  const GufoNpuXrt* xrt{};
+  void* program{};
   std::string kernel_name;
+  ~Impl() {
+    if (program)
+      xrt->program_close(program);
+  }
 };
 
 Device::Device() = default;
@@ -82,23 +90,25 @@ Device::Device(Device&&) noexcept = default;
 Device& Device::operator=(Device&&) noexcept = default;
 
 Device Device::Open(unsigned index) {
-  if (!LoadXrt())
-    throw Error(
-        "cannot open the NPU: XRT (xrt_coreutil.dll from the AMD NPU "
-        "driver) is not installed");
-  return Wrap("cannot open the NPU", [&] {
-    Device out;
-    out.impl_ = std::make_shared<Impl>(Impl{xrt::device(index)});
-    return out;
-  });
+  const GufoNpuXrt* xrt = nullptr;
+  try {
+    xrt = &Xrt();
+  } catch (const Error& e) {
+    throw Error(std::string("cannot open the NPU: ") + e.what());
+  }
+  Device out;
+  out.impl_ = std::make_shared<Impl>();
+  out.impl_->xrt = xrt;
+  Check("cannot open the NPU", xrt->device_open(index, &out.impl_->device));
+  return out;
 }
 
 std::string Device::name() const {
   if (!impl_)
     return {};
-  return Wrap("NPU name", [&] {
-    return impl_->device.get_info<xrt::info::device::name>();
-  });
+  const char* name = nullptr;
+  Check("NPU name", impl_->xrt->device_name(impl_->device, &name));
+  return name ? name : "";
 }
 
 Buffer::Buffer() = default;
@@ -107,7 +117,7 @@ Buffer::Buffer(Buffer&&) noexcept = default;
 Buffer& Buffer::operator=(Buffer&&) noexcept = default;
 
 std::size_t Buffer::size() const noexcept {
-  return impl_ ? impl_->bo.size() : 0;
+  return impl_ ? impl_->size : 0;
 }
 std::byte* Buffer::data() const {
   return impl_ ? impl_->map : nullptr;
@@ -115,38 +125,32 @@ std::byte* Buffer::data() const {
 
 namespace {
 
-void Sync(Buffer::Impl* impl, xclBOSyncDirection dir, std::size_t offset,
+void Sync(Buffer::Impl* impl, bool to_device, std::size_t offset,
           std::size_t bytes) {
   if (!impl)
     throw Error("sync of an empty NPU buffer");
-  const std::size_t size = impl->bo.size();
+  const std::size_t size = impl->size;
   if (bytes == Buffer::kWhole)
     bytes = offset <= size ? size - offset : 0;
   if (offset > size || bytes > size - offset)
     throw Error("NPU buffer sync beyond its size");
   if (bytes == 0)
     return;
-  Wrap("NPU buffer sync", [&] { impl->bo.sync(dir, bytes, offset); });
+  Check("NPU buffer sync",
+        impl->xrt->buffer_sync(impl->bo, to_device ? 1 : 0, bytes, offset));
 }
 
 }  // namespace
 
 void Buffer::ToDevice(std::size_t offset, std::size_t bytes) {
-  Sync(impl_.get(), XCL_BO_SYNC_BO_TO_DEVICE, offset, bytes);
+  Sync(impl_.get(), true, offset, bytes);
 }
 void Buffer::FromDevice(std::size_t offset, std::size_t bytes) {
-  Sync(impl_.get(), XCL_BO_SYNC_BO_FROM_DEVICE, offset, bytes);
+  Sync(impl_.get(), false, offset, bytes);
 }
 
 Run::Run() = default;
-Run::~Run() {
-  if (impl_ && !impl_->waited) {
-    try {
-      impl_->run.wait();
-    } catch (...) {
-    }
-  }
-}
+Run::~Run() = default;
 Run::Run(Run&&) noexcept = default;
 Run& Run::operator=(Run&& other) noexcept {
   if (this != &other) {
@@ -160,12 +164,10 @@ void Run::Wait() {
   if (!impl_ || impl_->waited)
     return;
   impl_->waited = true;
-  const ert_cmd_state state =
-      Wrap("NPU run", [&] { return impl_->run.wait(); });
-  if (state != ERT_CMD_STATE_COMPLETED) {
-    throw Error("NPU run ended in state " +
-                std::to_string(static_cast<int>(state)));
-  }
+  int state = 0;
+  Check("NPU run", impl_->xrt->run_wait(impl_->run, &state));
+  if (state != impl_->xrt->completed_state)
+    throw Error("NPU run ended in state " + std::to_string(state));
 }
 
 Program::Program() = default;
@@ -177,24 +179,18 @@ Program Program::Load(Device& device, const std::filesystem::path& xclbin,
                       std::string_view kernel_prefix) {
   if (!device.impl_)
     throw Error("NPU device is not open");
-  return Wrap(("cannot load " + xclbin.string()).c_str(), [&] {
-    xrt::xclbin file(xclbin.string());
-    device.impl_->device.register_xclbin(file);
-    Program out;
-    out.impl_ = std::make_unique<Impl>();
-    out.impl_->device = device.impl_;
-    out.impl_->context = xrt::hw_context(device.impl_->device, file.get_uuid());
-    for (const auto& k : file.get_kernels()) {
-      if (k.get_name().rfind(kernel_prefix, 0) == 0) {
-        out.impl_->kernel_name = k.get_name();
-        out.impl_->kernel =
-            xrt::kernel(out.impl_->context, out.impl_->kernel_name);
-        return out;
-      }
-    }
-    throw Error(xclbin.string() + ": no kernel named " +
-                std::string(kernel_prefix) + "*");
-  });
+  const GufoNpuXrt* xrt = device.impl_->xrt;
+  Program out;
+  out.impl_ = std::make_unique<Impl>();
+  out.impl_->xrt = xrt;
+  const std::string path = xclbin.string();  // as XRT's xclbin(std::string)
+  const char* kernel_name = nullptr;
+  Check("cannot load " + xclbin.string(),
+        xrt->program_load(device.impl_->device, path.c_str(),
+                          std::string(kernel_prefix).c_str(),
+                          &out.impl_->program, &kernel_name));
+  out.impl_->kernel_name = kernel_name ? kernel_name : "";
+  return out;
 }
 
 const std::string& Program::kernel_name() const noexcept {
@@ -208,16 +204,14 @@ Buffer Program::Allocate(std::size_t bytes, unsigned argument,
     throw Error("NPU program is not loaded");
   if (bytes == 0)
     throw Error("NPU buffers need at least one byte");
-  const auto flags = memory == Memory::kCacheable ? xrt::bo::flags::cacheable
-                                                  : xrt::bo::flags::host_only;
   Buffer out;
   out.impl_ = std::make_unique<Buffer::Impl>();
-  out.impl_->device = impl_->device;
-  Wrap("NPU buffer allocation", [&] {
-    out.impl_->bo = xrt::bo(impl_->device->device, bytes, flags,
-                            impl_->kernel.group_id(static_cast<int>(argument)));
-    out.impl_->map = out.impl_->bo.map<std::byte*>();
-  });
+  out.impl_->xrt = impl_->xrt;
+  Check("NPU buffer allocation",
+        impl_->xrt->buffer_allocate(impl_->program, bytes, argument,
+                                    memory == Memory::kCacheable ? 1 : 0,
+                                    &out.impl_->bo, &out.impl_->map));
+  out.impl_->size = bytes;
   return out;
 }
 
@@ -253,26 +247,24 @@ Run Program::Start(const Instructions& instructions,
     throw Error("NPU program is not loaded");
   if (!instructions || instructions.count() == 0)
     throw Error("NPU run without instructions");
+  std::vector<void*> buffers(arguments.size());
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    if (arguments[i] == nullptr)
+      continue;
+    if (!*arguments[i])
+      throw Error("NPU run argument " + std::to_string(kFirstDataArgument + i) +
+                  " is empty");
+    buffers[i] = arguments[i]->impl_->bo;
+  }
   Run out;
   out.impl_ = std::make_unique<Run::Impl>();
-  out.impl_->device = impl_->device;
-  Wrap("NPU run start", [&] {
-    xrt::run run(impl_->kernel);
-    run.set_arg(0, kOpcode);
-    run.set_arg(kInstructionArgument, instructions.buffer().impl_->bo);
-    run.set_arg(2, static_cast<std::uint32_t>(instructions.count()));
-    for (std::size_t i = 0; i < arguments.size(); ++i) {
-      if (arguments[i] == nullptr)
-        continue;
-      if (!*arguments[i])
-        throw Error("NPU run argument " +
-                    std::to_string(kFirstDataArgument + i) + " is empty");
-      run.set_arg(static_cast<int>(kFirstDataArgument + i),
-                  arguments[i]->impl_->bo);
-    }
-    run.start();
-    out.impl_->run = std::move(run);
-  });
+  out.impl_->xrt = impl_->xrt;
+  Check("NPU run start",
+        impl_->xrt->run_start(impl_->program, kOpcode, kInstructionArgument,
+                              instructions.buffer().impl_->bo,
+                              static_cast<std::uint32_t>(instructions.count()),
+                              kFirstDataArgument, buffers.data(),
+                              buffers.size(), &out.impl_->run));
   return out;
 }
 
