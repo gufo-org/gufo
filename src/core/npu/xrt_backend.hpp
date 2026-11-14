@@ -28,8 +28,9 @@ struct GufoNpuXrt {
   const char* (*device_name)(void* device, const char** name);
   void (*device_close)(void* device);
 
-  /// Loads the xclbin at UTF-8 `path` and opens its first kernel whose name
-  /// starts with `prefix`; `kernel_name` stays valid until the program closes.
+  /// Loads the xclbin at `path` (std::filesystem::path::string()) and opens its
+  /// first kernel whose name starts with `prefix`; `kernel_name` stays valid
+  /// until the program closes.
   const char* (*program_load)(void* device, const char* path,
                               const char* prefix, void** program,
                               const char** kernel_name);

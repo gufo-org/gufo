@@ -183,11 +183,10 @@ Program Program::Load(Device& device, const std::filesystem::path& xclbin,
   Program out;
   out.impl_ = std::make_unique<Impl>();
   out.impl_->xrt = xrt;
-  const std::u8string path = xclbin.u8string();
+  const std::string path = xclbin.string();  // as XRT's xclbin(std::string)
   const char* kernel_name = nullptr;
   Check("cannot load " + xclbin.string(),
-        xrt->program_load(device.impl_->device,
-                          reinterpret_cast<const char*>(path.c_str()),
+        xrt->program_load(device.impl_->device, path.c_str(),
                           std::string(kernel_prefix).c_str(),
                           &out.impl_->program, &kernel_name));
   out.impl_->kernel_name = kernel_name ? kernel_name : "";
