@@ -90,7 +90,12 @@ of those passes. One merged pass would not: UD-Q4_K_XL prefills passes of
 1,024 rows or more with FP16 activations and shorter ones with Q8_1. Each
 boundary is a complete frontier, logits included, as for a prompt snapshot
 target. The host's layer groups span the step's passes, so a short pass between
-two boundaries no longer runs unsplit beside decoders. The groups split the
+two boundaries no longer runs unsplit beside decoders. A boundary joins the step
+only when at most one 512-row prefill unit follows it; a boundary further from
+the step's end still ends the step, where the scheduler admits prompts that
+arrived meanwhile. A step of one unit or less takes no boundary in place: the
+scheduler runs it unsplit, so joining its passes would only make decoders wait
+for both. The groups split the
 step's estimated time, not its rows: the runner prices a pass at 120 ms plus
 2.25 ms per row, or 1.80 ms per row on the FP16 route, and DFlash2's draft
 injection at 0.12 ms per row after the pass. As of November 2026 these fit

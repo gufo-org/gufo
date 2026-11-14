@@ -222,18 +222,28 @@ void Check(const std::string& name, const ext::TextModelRunner& runner) {
   const auto complete = Capture(adapter, *reference, pool);
   const auto expected = Greedy(runner, *b, 24);
 
-  // Claims: only inside the step, never at its ends.
-  for (const auto boundary : kBoundaries)
+  // Claims: only inside the step, never at its ends, and only for a boundary
+  // at most one 512-row prefill unit before the step's end. One further from
+  // it ends the step, as without in-pass checkpoints.
+  for (const auto boundary : {kBoundaries[1], kBoundaries[2]})
     Require(runner.PrefillCheckpointBytes(*a, prompt, 0, kBudget, boundary)
                 .has_value(),
             "in-pass boundary refused");
-  for (const std::size_t boundary : {std::size_t{0}, kEnd, kBudget})
+  Require(runner.PrefillCheckpointBytes(*a, prompt, 0, kBudget, kEnd - 512)
+              .has_value(),
+          "boundary one unit before the step's end refused");
+  for (const std::size_t boundary :
+       {std::size_t{0}, kBoundaries[0], kEnd - 513, kEnd, kBudget})
     Require(!runner.PrefillCheckpointBytes(*a, prompt, 0, kBudget, boundary),
-            "claim outside the step");
+            "claim outside the step's tail");
   Require(!runner.PrefillCheckpointBytes(*a, prompt, 0, 2000, 2048),
           "claim beyond the step's budget");
+  // A step of one unit or less runs unsplit and takes no boundary in place.
+  Require(!runner.PrefillCheckpointBytes(*a, first(512), 0, kBudget, 500),
+          "claim in a step of one unit");
 
-  // In place, with the step split into layer groups across its passes.
+  // In place, with the step split into layer groups across its passes. The
+  // step also captures a boundary it would not claim, the five-row pass.
   std::vector<std::vector<cache::ComponentPosition>> predicted;
   for (const auto boundary : kBoundaries)
     predicted.push_back(adapter.PrefillCheckpointPositions(*source, boundary));

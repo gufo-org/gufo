@@ -626,6 +626,13 @@ constexpr std::size_t kMaxPrefillLayerGroups = 16;
 // Cache boundaries one prefill step captures in place: within a 4,096-row
 // pass, its grid checkpoints and both prompt targets.
 constexpr std::size_t kMaxInPassCheckpoints = 4;
+// One scheduler prefill unit. A boundary joins the prefill step only when at
+// most one unit follows it, which would otherwise run as a step of its own,
+// unsplit beside decoders; a boundary with more after it still ends the step,
+// where the scheduler admits prompts that arrived meanwhile. Nor does a step
+// of one unit or less take one: the scheduler runs it unsplit, so joining the
+// passes would only make decoders wait for both.
+constexpr std::size_t kPrefillUnitTokens = 512;
 
 // Shared runner base for the HIP models. Device-loss probing is the runtime's
 // `ext::DeviceProbe` (RFC step 6); the probe holds its buffer and private
@@ -1024,7 +1031,9 @@ public:
       std::size_t boundary) const override {
     const auto& qwen = RequireQwenState(state);
     const auto end = InPassEnd(qwen, prompt, offset, budget);
-    if (!end || boundary <= offset || boundary >= *end)
+    if (!end || boundary <= offset || boundary >= *end ||
+        *end - boundary > kPrefillUnitTokens ||
+        *end - offset <= kPrefillUnitTokens)
       return std::nullopt;
     // The step ends a pass at the boundary and the consumer reads the live
     // slot there, so it needs no checkpoint memory of its own.
