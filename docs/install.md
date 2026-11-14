@@ -22,6 +22,20 @@ lists the kernel parameters and known bad versions. After installing, run
 `gufo diagnose` to check the setup; [troubleshooting](troubleshooting.md)
 explains its findings.
 
+For `--npu`, keep the NPU out of runtime suspend. Otherwise, the first request
+after 5 s idle takes about 110 ms longer. The setting resets at boot:
+
+```sh
+echo on | sudo tee /sys/class/accel/accel0/device/power/control
+```
+
+The NPU power mode (`sudo xrt-smi configure --pmode performance`) is optional.
+As of November 2026 it made no measurable difference to EmbeddingGemma 2.
+
+> **Warning:** Heavy GPU and NPU work at the same time can hang some Strix
+> Halo hosts until power-cycled
+> ([amd/xdna-driver#1605](https://github.com/amd/xdna-driver/issues/1605)).
+
 ## Container
 
 The `gufo-runtime` image holds Gufo and everything it needs. Use `latest` for
