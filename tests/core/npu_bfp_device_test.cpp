@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <random>
 #include <string>
 #include <vector>
@@ -29,7 +30,7 @@ double RelativeError(const std::vector<float>& y,
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int Run(int argc, char** argv) {
   if (argc < 2) {
     std::printf("usage: npu_bfp_device_test <bfpgemm dir>\n");
     return 2;
@@ -226,4 +227,13 @@ int main(int argc, char** argv) {
   }
   std::printf("%s\n", failures ? "FAIL" : "PASS");
   return failures ? 1 : 0;
+}
+
+int main(int argc, char** argv) {
+  try {
+    return Run(argc, argv);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "npu_bfp_device_test: %s\n", e.what());
+    return 1;
+  }
 }

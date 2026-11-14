@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <random>
 #include <vector>
 
@@ -272,7 +273,7 @@ int CheckStack(D& dec, int H, int I, int layers, int head_rows, int heads,
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int Run(int argc, char** argv) {
   if (argc < 2) {
     std::printf(
         "usage: npu_qwen3dec_device_test <qwen3dec dir> [tokens] [cached]\n");
@@ -306,4 +307,13 @@ int main(int argc, char** argv) {
   }
   std::printf("%s\n", failures ? "FAIL" : "PASS");
   return failures ? 1 : 0;
+}
+
+int main(int argc, char** argv) {
+  try {
+    return Run(argc, argv);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "npu_qwen3dec_device_test: %s\n", e.what());
+    return 1;
+  }
 }
