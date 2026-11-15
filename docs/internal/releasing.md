@@ -93,7 +93,8 @@ Toolboxes' `publish_release.yml` handles the dispatch:
 - **Debian package:** builds `gufo_<version>-1_amd64.deb` for Debian 13,
   verifies it in a fresh container, and attaches it with its checksum.
 - **Publication:** once the images are pushed and all four assets are attached,
-  publishes the draft release.
+  publishes the draft release. A Windows-only or Debian-only manual run doesn't
+  publish: publish that draft by hand.
 
 - **Documentation:** the website's `sync-docs.yml` copies the public docs at
   the tag into a new version of [gufo.blog/docs](https://gufo.blog/docs),
