@@ -448,19 +448,47 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   noise (11.56/11.56 vs 11.42/11.64 t/s,
   `/tmp/opencode/gufo_bench_a4tg.log`); `glm5_next` ctest green
   GPU-exclusive on the shipped fixture
-  (`/tmp/opencode/gufo_bench_glm5suite.log`, `_glm5fix.log`).
+   (`/tmp/opencode/gufo_bench_glm5suite.log`, `_glm5fix.log`).
+ - Head-grouped 8-key MLA combine (`MlaGatherCombineKernel`,
+   `kMlaCombineHeadW = 4`, `kMlaCombineKeyW = 8`, C2): the vectorized
+   combine still sat ~2.5x off its bandwidth floor, and sharing gathered
+   rows across 2 or 4 heads alone recaptured nothing (both 1.14x) — ISA
+   showed the kernel load-latency and issue bound (539 instructions, 39
+   `s_waitcnt`, only four independent `uint4` loads in flight), not
+   bandwidth bound. Sharing each gathered latent row across four heads
+   *and* deepening the prefetch window to eight keys took combine from
+   50.6 to **36.6 ms (1.38x** over the A4 vectorize; vec8 1.17x, q2
+   1.15x, q4 1.18x, `/tmp/opencode/gufo_bench_c4probe.log`). Each block
+   owns heads `head0..head0+3`, stores exps LDS-interleaved four per key
+   and issues one `uint4` per selected row into 4x8 accumulators;
+   per-head max/psum fold the same strided-partial + tree order as the
+   one-head kernel, and `__fmaf_rn` pins FMA contraction across the new
+   unroll widths — the result is **bit-exact** to the previous combine
+   (bit-diff 0 at 37 and 2048 tokens, so the golden needed no
+   re-approval). Quality: `glm5_next` ctest 9/9 GPU-exclusive, forward
+   golden ALL PASS unchanged at revision 1022d0191
+   (`/tmp/opencode/gufo_bench_c2tests.log`, `_c2tests2.log`). Alternating offline
+   A/B (same session, baseline `/tmp/opencode/gufo_c2base` = the A4
+   binary, `/tmp/opencode/gufo_bench_c2ab.log`, `_c2tg.log`): pp2048
+   253.35/255.84 -> **262.56/262.09 (+3.0 %)**, pp16384
+   200.99/200.70 -> **209.62/209.33 (+4.3 %)**, tg32 at noise
+   (11.39/11.40 vs 11.54/11.04). LDS grows to 4x(n_sel+33) floats
+   (33 KB at the 2051 cap, still two blocks/CU).
 
 ## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-15)
 
 The launch storm is closed (steady-state idle 2.2 %,
 `/tmp/opencode/prof_post_a6` post-A6 rerun): routed IQ WMMA 29.4 %,
-dense Q5_K WMMA 24.1 %, MLA score+combine 18.2 %, micro-kernel misc
+dense Q5_K WMMA 24.1 %, MLA score+combine 18.2 % (before C2 — the
+head-grouped combine shipped after this capture, ~38 % off the combine
+leg per pass), micro-kernel misc
 (convert/norm/elementwise, 112 k calls) 14.6 %, Rows GEMV 6.0 % (was
 ~23 % before A6), KDA fold 4.7 %, indexer sort ~1 % (was 6 %). The
 measured-order ladder with per-item
 estimates and quality gates lives in
 [PLAN.md](PLAN.md) Phase 3: exact-default items A1-A6 (A1 rejected,
-A2/A3/A4/A5/A6 shipped 2026-11-15 — the exact-default ladder is done),
+A2/A3/A4/A5/A6 shipped 2026-11-15 — the exact-default ladder is done)
+plus C2 (head-grouped 8-key combine, +3.0/+4.3 % pp),
 then the opt-in
 approximate fast track B7-B10 (W8A8, online-softmax attend, capped
 window, DFlash2/MTP speculation) from which the reference-class 600+

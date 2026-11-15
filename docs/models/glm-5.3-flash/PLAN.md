@@ -92,7 +92,9 @@ A2-decode shipped), pp16384 **147.0** (**165.8**),
 exact default (sha `43557e0c…`, ctest 9/9); 2026-11-15 on top of A6,
 split-q WMMA MLA scoring (A4) took pp2048 229.8 → **250.5** and
 pp16384 172.3 → **193.3** with the golden re-approved at revision
-`1022d0191` — the exact-default ladder is complete). A fresh
+`1022d0191`, and the head-grouped 8-key combine (C2, bit-exact) took
+pp2048 254.6 → **262.3** (+3.0 %) and pp16384 200.9 → **209.5**
+(+4.3 %) same-session — the exact-default ladder is complete). A fresh
 `rocprofv3` capture of
 the shipped tree at pp2048 (`/tmp/opencode/prof_mla2`) shows steady-state
 idle down to **2.2 %** — the launch storm is gone after P8 (KDA
@@ -148,8 +150,12 @@ levers, exact-default ladder (A) then opt-in fast track (B):
     over 32-key LDS tiles (single F16 q rejected — worst-rel latent 4e-3
     through softmax), combine vectorized to uint4 8-column slices.
     Micro score 2.98x, combine 1.60x; NMSE 1e-11, golden re-approved
-    (revision 1022d0191) after a 0.5005-vs-0.5 `code` final margin with
-    all argmax chains exact.
+     (revision 1022d0191) after a 0.5005-vs-0.5 `code` final margin with
+     all argmax chains exact. C2 follow-up (2026-11-15): combine is
+     head-grouped (4 heads/block share each gathered latent `uint4`,
+     8-key prefetch, per-head interleaved exps) — **bit-exact**, micro
+     1.38x over the vectorized form (2.20x total vs base), +3.0/+4.3 %
+     pp.
 5. (Shipped 2026-11-13, +4.4 % pp2048 — pp2048 193.2, see EXPERIMENTS
    "Single-list top-k shrink") Indexer bitonic sort batching (0.68
    s/pass, 22.6 k launches of one 1024-thread block): the single-list
@@ -188,7 +194,8 @@ Order of attack: A5 (bit-exact, cheapest, shrinks the last per-token
 loop) → A3 → A2 (decode shipped, staging variants rejected) → A1
 (rejected 2026-11-14, compute-bound) → A6 (Q8_0 + F32 row tiling +
 grid.y shipped 2026-11-15) → A4 (split-q WMMA score + vectorized
-combine shipped 2026-11-15 — ladder done), then promote
+combine shipped 2026-11-15) → C2 (head-grouped 8-key combine shipped
+2026-11-15 — ladder done), then promote
 B behind one fast-profile flag with its own gate row in BENCHMARKS.md.
 
 Gate: pp2048 ≥ 0.9× and tg32 ≥ 1.0× the Phase-0 llama.gl baseline with
