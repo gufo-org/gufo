@@ -105,6 +105,35 @@ tg64 point 14.90 shows the asymptotic direction). Suite `glm5_next` 9/9 on
 the candidate including the strict `rocm_forward` golden replay and the new
 `Add` op parity case (`/tmp/opencode/gufo_bench_glm5suite2.log`).
 
+### B11 — Opt-in W8A8 dense prefill tier (2026-11-16)
+
+`GUFO_GLM5_FAST_PROFILE=w8a8` routes the dense projections of the
+wide-chunk dispatch through the shared Qwen prefill kernels
+(`WKQuantA8BlockedWmmaGEMM`): FP32 activation rows are quantized once per
+chunk into tiled Q8_1 and consumed against the native Q5_K/Q6_K/Q8_0
+weight encodings with per-K32 INT8 scales. Token-1 decode rows keep the
+F16 DenseWmma/scalar tiers; scratch is sized once at load and any
+stride/fit mismatch falls through to the default tier. Staging-only, no
+default-path change, no new CLI flag.
+
+Offline bench A/B (GPU-exclusive, alternating, repetitions 2): pp2048
+(n-gen 32) `260.10 ± 3.12` → **`270.78 ± 1.57`** (**+4.1 %**, disjoint
+error bars), tg32 flat by design (11.87 → 11.90); pp16384 (n-gen 1)
+`209.83 ± 0.23` → `212.94 ± 4.05` (+1.5 %, inside noise)
+(`/tmp/opencode/gufo_bench_w8a8pp2k.log`,
+`/tmp/opencode/gufo_bench_w8a8pp16k.log`). Well below the PLAN estimate:
+the dense operands are only ~2.2 s/pass of a 14 s pp chain, so the
+routed-expert half of B7 remains the real prize.
+
+Quality: greedy tg64 `output_sha256` **bit-identical** (B10 baseline
+`1d79e532…`) between tier-off and tier-on at prompt depths 2048 and 4096
+(`/tmp/opencode/gufo_bench_w8a8sha.log`); new contract
+`glm5_next.rocm_w8a8_dense` — 13 shapes across Q5_K/Q6_K/Q8_0 over both
+launch branches (BN 64/128), relative NMSE vs the scalar `GemvRows`
+reference ≤ 1e-4 (observed worst 1.5e-5), deterministic replay and
+non-finite checks (`/tmp/opencode/gufo_bench_w8a8unit2.log`). Suite
+`glm5_next` **10/10** on the candidate (`/tmp/opencode/gufo_bench_glm5tests2.log`).
+
 Gufo column captured 2026-11-12 on `build/gpu-test/gufo` (P6 dense Q5_K
 WMMA tier over the P5 fixed + widened WMMA routed tier) through
 `gufo serve` over HTTP with server-reported `timings`, greedy (seed 1),

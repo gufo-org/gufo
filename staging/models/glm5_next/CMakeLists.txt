@@ -25,7 +25,8 @@ if (ENGINE_ENABLE_HIP)
     kernels/rocm/ops.hip.cpp
     kernels/rocm/routed_compact.hip.cpp
     kernels/rocm/routed_wmma.hip.cpp
-    kernels/rocm/attention.hip.cpp)
+    kernels/rocm/attention.hip.cpp
+    kernels/rocm/w8a8_dense.hip.cpp)
   set_source_files_properties(kernels/rocm/dense_wmma.hip.cpp
     PROPERTIES LANGUAGE HIP)
   set_source_files_properties(kernels/rocm/gemv.hip.cpp
@@ -38,6 +39,13 @@ if (ENGINE_ENABLE_HIP)
     PROPERTIES LANGUAGE HIP)
   set_source_files_properties(kernels/rocm/attention.hip.cpp
     PROPERTIES LANGUAGE HIP)
+  set_source_files_properties(kernels/rocm/w8a8_dense.hip.cpp
+    PROPERTIES LANGUAGE HIP)
+  # The shared Qwen WK kernel header reaches std::span (C++20, the top-level
+  # standard); this target pins HIP_STANDARD 17 for its own decoders, so the
+  # W8A8 wrapper TU switches back explicitly.
+  set_source_files_properties(kernels/rocm/w8a8_dense.hip.cpp
+    PROPERTIES COMPILE_OPTIONS "-std=c++20")
   set_target_properties(gufo_glm5_next_kernels PROPERTIES
     HIP_STANDARD 17
     HIP_STANDARD_REQUIRED ON
@@ -48,7 +56,8 @@ if (ENGINE_ENABLE_HIP)
   # allocator artifact that spills hot kernels to scratch.
   target_compile_options(gufo_glm5_next_kernels PRIVATE
     $<$<COMPILE_LANGUAGE:HIP>:-O3;-UNDEBUG;-fno-finite-math-only;-Wno-unused-command-line-argument>)
-  target_link_libraries(gufo_glm5_next_kernels PUBLIC gufo_core hip::host)
+  target_link_libraries(gufo_glm5_next_kernels PUBLIC gufo_core hip::host
+    gufo_qwen_kernels)
 
   # Host-side driver layer: streams the artifact (trunk + nextn in one reader)
   # to the GPU in its GGUF encoding and steps one token per call.
