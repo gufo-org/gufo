@@ -4,7 +4,7 @@ The runners start isolated local servers and check real HTTP responses. Manual
 suites use production binaries and local weights. Devlab CI downloads only its
 selected models from pinned revisions.
 
-## Embedding, ASR, TTS and image service checks
+## Embedding, ASR, TTS, image and music service checks
 
 `model_services.py` starts an isolated loopback production server, checks readiness
 and advertised model identity, runs real HTTP inference, and shuts down its owned
@@ -35,7 +35,13 @@ nix develop -c python3 tests/functional/model_services.py image \
   --lora voxel=models/loras/Qwen-Image-2.1-Voxel-Style-3000.safetensors \
   --lora clay=models/loras/Qwen-Image-2.1-Clay-Sculpture-Style-3000.safetensors \
   --lora-default clay:0.5 --output artifacts/model-services/image-1
+
+nix develop -c python3 tests/functional/model_services.py music   --binary build/release/gufo --model models/YuE2-3B   --output artifacts/model-services/music-1
 ```
+
+Music takes the YuE2-3B snapshot with `YuE2-Vae` beside it, and keeps the
+server's jobs under the evidence directory. Songs ask for at most 8 seconds,
+so the suite takes a few minutes.
 
 Image takes the complete Qwen-Image-2.1 or Turbo snapshot. `--image-suite smoke`
 (Devlab's PR tier) stops after discovery, OpenAI/sdapi parity, seeded replay, one
@@ -68,6 +74,7 @@ VoiceDesign model (fixed English voice instructions). Neither requires a clone.
 | Embedding | The default three-request smoke check covers text, image, video, mixed video/audio/image input, malformed-video rejection and recovery. `--embedding-suite full` retains the text, image, audio and video HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image/audio formats, multiple clips, audio/text/image interleaving, ignored unknown members, llama.cpp `content`/`embd_normalize`, invalid inputs, cancellation and recovery |
 | ASR | English transcript WER ≤ 0.15, exact greedy replay, JSON/text/verbose formats, complete SSE matching buffered output, concurrent speech/silence, ignored unknown fields, rejected options (including timestamps and logprobs), malformed WAV recovery, stream cancellation and subsequent valid inference |
 | Image | 512 × 512, 8 steps. `--image-suite smoke` keeps discovery, parity, replay, one reference edit, errors and recovery. OpenAI SDK generation equals sdapi `txt2img` pixel for pixel and replays; `cfg_scale` equals `guidance_scale`, and a negative prompt alone stays unguided on both APIs; `lora` defaults, `[]`, two adapters and repeated paths equal their OpenAI `loras`, with unknown and missing paths refused; `img2img` equals `image` + `strength`, including the 0.75 default strength and the init image's size; `batch_size` equals `n`; Open WebUI and SillyTavern request bodies; neither API reads the other's fields; sdapi `{"error"}` and OpenAI error shapes; discovery routes and recovery |
+| Music | `gufo.music` capabilities in `/v1/models`; 400s for unsupported, unknown and out-of-range fields and a bad provider option, 404s for unknown models and jobs; a plan-only job with a score and no audio; a song from that score as 48 kHz stereo PCM16 within `seconds`, non-silent and unclipped, that echoes the score; byte ranges including 416; exact same-seed replay; deleting a running job stops it in the server log; the next job completes |
 | TTS | Voice discovery, valid non-silent mono PCM16 audio at the sample rate of the server's WAV responses, two fixed texts with ASR WER ≤ 0.25, exact same-seed warm replay, WAV/PCM/SSE equality, different concurrent texts/seeds, ignored unknown fields, rejected inputs, stream cancellation and subsequent valid inference |
 
 Audio cancellation must appear against the cancelled request's ID in the server

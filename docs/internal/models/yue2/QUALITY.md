@@ -14,3 +14,10 @@ frames):
 | Velocity at t = 1 | cosine 0.99994, relative error 1.1% |
 | Latents after 32 midpoint steps | cosine 0.99994, relative error 1.1% |
 | Audio from the upstream latents | relative error 6.4e-7 |
+
+On 2026-11-15, after the NAR GEMMs moved to hipBLASLt, every stage still
+passes its gate (cosine > 0.999, audio relative error < 1e-3).
+
+`tests/functional/model_services.py music` against `gufo serve music` passed
+on 2026-11-15 in about 65 s. The 8-second song from an edited score measured
+RMS 0.16 with no clipped samples, and a same-seed replay was byte-identical.
