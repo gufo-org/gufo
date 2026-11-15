@@ -398,6 +398,21 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   (0.50 s per 9.4 s pass) were not tiled (F32 kernel unchanged) and
   the split-K col-parallel idea stays closed (changes the per-row
   reduction tree); RPT 8 spills and runs 2x slower, RPT 2 looses to 4.
+- F32 GEMV row tiling (same kernel shape, A6b): the RowsF32 router
+  (288x4096) and idx_proj (32x4096) calls keep the gate `type in
+  {Q8_0, F32} && tokens >= 16 && rows % 16 == 0` via
+  `LaunchRowsSlices -> GemvRowsF32Tiled`. Microbench (same tool,
+  exclusive): router 439 -> 121 us, idx_proj 316 -> 28.9 us per
+  16-slice call, bit-exact; grid.y batching alone was already 2.1x /
+  10x of A, and idx_proj (2 x-grids) still wins with tiles, so no
+  row-count floor beyond rows % 16. Offline A/B (alternating):
+  pp2048 218.84/217.41 -> **231.10/230.93 (+5.9 % cumulative over
+  part 1)**; pp16384 169.03/163.33 -> 169.49/**170.70**; tg1/tg128
+  unchanged. n-gen-1/128 shas `43557e0c…` / `752281d6…` re-verified
+  on the shipping binary; `glm5_next` ctest 9/9 GPU-exclusive
+  (`/tmp/opencode/gufo_bench_f32gate.log`, `_f32ab.log`,
+  `_f32ship.log`). The Rows tier is now fully tiled; what remains of
+  its 0.5 s/pass residue is the <16-token ladder tail.
 
 ## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-13)
 
