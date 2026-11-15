@@ -2,7 +2,8 @@
 // the ssm_f_b / attn_k_b / attn_v_b shapes. Compares the shipped per-token
 // slice launches (A), one launch with the slices in grid.y (B), and an
 // LDS-staged-activation variant in both launch forms (C, D). All variants
-// must produce bit-identical output to A.
+// must produce bit-identical output to A. The F32 router/idx_proj shapes
+// rerun the same three launch forms plus the four-row tile (T4, T4y).
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
@@ -186,6 +187,89 @@ __global__ void RowsTile(const Q8_0Block* __restrict__ w,
   }
 }
 
+// F32 mirrors of the Rows-tier kernels (router/idx_proj shapes).
+template <std::uint32_t Rows, bool kY>
+__global__ void RowsCurF32(const float* __restrict__ w,
+                           const float* __restrict__ x, std::uint32_t xs,
+                           float* __restrict__ out, std::uint32_t os,
+                           std::uint32_t rows, std::uint32_t cols) {
+  if (kY) {
+    x += static_cast<std::size_t>(blockIdx.y) * Rows * xs;
+    out += static_cast<std::size_t>(blockIdx.y) * Rows * os;
+  }
+  const std::uint32_t r = blockIdx.x * 4U + (threadIdx.x >> 5);
+  if (r >= rows) {
+    return;
+  }
+  const float* __restrict__ row = w + static_cast<std::size_t>(r) * cols;
+  const std::uint32_t lane = threadIdx.x & 31U;
+  float acc[Rows] = {};
+#pragma unroll 2
+  for (std::uint32_t i = lane; i < cols; i += 32U) {
+    const float b = row[i];
+#pragma unroll
+    for (std::uint32_t o = 0; o < Rows; ++o) {
+      acc[o] += b * x[static_cast<std::size_t>(o) * xs + i];
+    }
+  }
+#pragma unroll
+  for (std::uint32_t o = 0; o < Rows; ++o) {
+    acc[o] = WarpReduceSum(acc[o]);
+  }
+  if (lane == 0) {
+#pragma unroll
+    for (std::uint32_t o = 0; o < Rows; ++o) {
+      out[static_cast<std::size_t>(o) * os + r] = acc[o];
+    }
+  }
+}
+
+template <std::uint32_t Rows, std::uint32_t RPT>
+__global__ void RowsTileF32(const float* __restrict__ w,
+                            const float* __restrict__ x, std::uint32_t xs,
+                            float* __restrict__ out, std::uint32_t os,
+                             std::uint32_t rows, std::uint32_t cols) {
+  x += static_cast<std::size_t>(blockIdx.y) * Rows * xs;
+  out += static_cast<std::size_t>(blockIdx.y) * Rows * os;
+  const std::uint32_t r0 = (blockIdx.x * 4U + (threadIdx.x >> 5)) * RPT;
+  const std::uint32_t lane = threadIdx.x & 31U;
+  const float* row[RPT];
+#pragma unroll
+  for (std::uint32_t u = 0; u < RPT; ++u) {
+    row[u] = w + static_cast<std::size_t>(r0 + u) * cols;
+  }
+  float acc[RPT][Rows] = {};
+#pragma unroll 2
+  for (std::uint32_t i = lane; i < cols; i += 32U) {
+    float wv[RPT];
+#pragma unroll
+    for (std::uint32_t u = 0; u < RPT; ++u) {
+      wv[u] = row[u][i];
+    }
+#pragma unroll
+    for (std::uint32_t o = 0; o < Rows; ++o) {
+      const float xv = x[static_cast<std::size_t>(o) * xs + i];
+#pragma unroll
+      for (std::uint32_t u = 0; u < RPT; ++u) {
+        acc[u][o] += wv[u] * xv;
+      }
+    }
+  }
+#pragma unroll
+  for (std::uint32_t u = 0; u < RPT; ++u) {
+#pragma unroll
+    for (std::uint32_t o = 0; o < Rows; ++o) {
+      acc[u][o] = WarpReduceSum(acc[u][o]);
+    }
+    if (lane == 0) {
+#pragma unroll
+      for (std::uint32_t o = 0; o < Rows; ++o) {
+        out[static_cast<std::size_t>(o) * os + r0 + u] = acc[u][o];
+      }
+    }
+  }
+}
+
 struct Shape {
   const char* name;
   std::uint32_t rows;   // total weight rows
@@ -291,6 +375,141 @@ float RunTile(const Shape& s, const Q8_0Block* w, const float* x, float* out,
   return best;
 }
 
+template <bool kY>
+float RunF32(std::uint32_t rows, std::uint32_t cols, std::uint32_t xs,
+             const float* w, const float* x, float* out,
+             std::uint32_t repeats) {
+  const std::uint32_t grid = (rows + 3U) / 4U;
+  hipEvent_t e0, e1;
+  Check(hipEventCreate(&e0), "event");
+  Check(hipEventCreate(&e1), "event");
+  const auto once = [&] {
+    for (std::uint32_t sl = 0; sl < (kY ? 1U : 16U); ++sl) {
+      RowsCurF32<16U, kY><<<dim3(grid, kY ? 16U : 1U), 128>>>(
+          w, kY ? x : x + sl * 16U * xs, xs,
+          kY ? out : out + static_cast<std::size_t>(sl) * 16U * rows, rows,
+          rows, cols);
+    }
+  };
+  once();
+  once();
+  float best = 1e30F;
+  for (std::uint32_t it = 0; it < repeats; ++it) {
+    Check(hipEventRecord(e0), "rec0");
+    once();
+    Check(hipEventRecord(e1), "rec1");
+    Check(hipEventSynchronize(e1), "sync");
+    float ms = 0;
+    Check(hipEventElapsedTime(&ms, e0, e1), "elapsed");
+    if (ms < best) {
+      best = ms;
+    }
+  }
+  Check(hipEventDestroy(e0), "d0");
+  Check(hipEventDestroy(e1), "d1");
+  return best;
+}
+
+template <std::uint32_t RPT, bool kY>
+float RunTileF32(std::uint32_t rows, std::uint32_t cols, std::uint32_t xs,
+                 const float* w, const float* x, float* out,
+                 std::uint32_t repeats) {
+  const std::uint32_t grid = rows / (4U * RPT);
+  hipEvent_t e0, e1;
+  Check(hipEventCreate(&e0), "event");
+  Check(hipEventCreate(&e1), "event");
+  const auto once = [&] {
+    for (std::uint32_t sl = 0; sl < (kY ? 1U : 16U); ++sl) {
+      RowsTileF32<16U, RPT><<<dim3(grid, kY ? 16U : 1U), 128>>>(
+          w, kY ? x : x + sl * 16U * xs, xs,
+          kY ? out : out + static_cast<std::size_t>(sl) * 16U * rows, rows,
+          rows, cols);
+    }
+  };
+  once();
+  once();
+  float best = 1e30F;
+  for (std::uint32_t it = 0; it < repeats; ++it) {
+    Check(hipEventRecord(e0), "rec0");
+    once();
+    Check(hipEventRecord(e1), "rec1");
+    Check(hipEventSynchronize(e1), "sync");
+    float ms = 0;
+    Check(hipEventElapsedTime(&ms, e0, e1), "elapsed");
+    if (ms < best) {
+      best = ms;
+    }
+  }
+  Check(hipEventDestroy(e0), "d0");
+  Check(hipEventDestroy(e1), "d1");
+  return best;
+}
+
+void BenchF32(const char* name, std::uint32_t rows, std::uint32_t cols,
+              std::uint32_t xs, std::uint32_t repeats) {
+  const std::size_t w_count = static_cast<std::size_t>(rows) * cols;
+  const std::size_t x_count = static_cast<std::size_t>(256U) * xs;
+  const std::size_t o_count = static_cast<std::size_t>(256U) * rows;
+  float* w = nullptr;
+  float* x = nullptr;
+  float* o_ref = nullptr;
+  float* o_new = nullptr;
+  Check(hipMalloc(&w, w_count * sizeof(float)), "fw");
+  Check(hipMalloc(&x, x_count * sizeof(float)), "fx");
+  Check(hipMalloc(&o_ref, o_count * sizeof(float)), "fo");
+  Check(hipMalloc(&o_new, o_count * sizeof(float)), "fn");
+  std::vector<float> hw(w_count);
+  for (auto& v : hw) {
+    v = static_cast<float>(rand() % 1000) * 0.001F;
+  }
+  std::vector<float> hx(x_count);
+  for (auto& v : hx) {
+    v = static_cast<float>(rand() % 1000) * 0.001F;
+  }
+  Check(hipMemcpy(w, hw.data(), w_count * sizeof(float), hipMemcpyHostToDevice),
+        "fcw");
+  Check(hipMemcpy(x, hx.data(), x_count * sizeof(float), hipMemcpyHostToDevice),
+        "fcx");
+  Check(hipMemset(o_ref, 0, o_count * sizeof(float)), "fm0");
+  Check(hipMemset(o_new, 0xFF, o_count * sizeof(float)), "fm1");
+
+  const float t_a = RunF32<false>(rows, cols, xs, w, x, o_ref, repeats);
+  const float t_b = RunF32<true>(rows, cols, xs, w, x, o_new, repeats);
+  Check(hipDeviceSynchronize(), "fs");
+  std::vector<float> href(o_count), hnew(o_count);
+  Check(hipMemcpy(href.data(), o_ref, o_count * sizeof(float),
+                  hipMemcpyDeviceToHost),
+        "fgr");
+  Check(hipMemcpy(hnew.data(), o_new, o_count * sizeof(float),
+                  hipMemcpyDeviceToHost),
+        "fgn");
+  const bool eq_b =
+      std::memcmp(href.data(), hnew.data(), o_count * sizeof(float)) == 0;
+  Check(hipMemset(o_new, 0xFF, o_count * sizeof(float)), "fm2");
+  const float t_t4 = RunTileF32<4, false>(rows, cols, xs, w, x, o_new, repeats);
+  Check(hipMemcpy(hnew.data(), o_new, o_count * sizeof(float),
+                  hipMemcpyDeviceToHost),
+        "fgt4");
+  const bool eq_t4 =
+      std::memcmp(href.data(), hnew.data(), o_count * sizeof(float)) == 0;
+  Check(hipMemset(o_new, 0xFF, o_count * sizeof(float)), "fm3");
+  const float t_t4y = RunTileF32<4, true>(rows, cols, xs, w, x, o_new, repeats);
+  Check(hipMemcpy(hnew.data(), o_new, o_count * sizeof(float),
+                  hipMemcpyDeviceToHost),
+        "fgt4y");
+  const bool eq_t4y =
+      std::memcmp(href.data(), hnew.data(), o_count * sizeof(float)) == 0;
+
+  std::printf("%-18s A=%7.1fus B(y)=%7.1fus T4=%7.1fus T4y=%7.1fus"
+              "  exact B/T4/T4y=%d/%d/%d\n",
+              name, t_a * 1000.0F, t_b * 1000.0F, t_t4 * 1000.0F,
+              t_t4y * 1000.0F, eq_b, eq_t4, eq_t4y);
+  hipFree(w);
+  hipFree(x);
+  hipFree(o_ref);
+  hipFree(o_new);
+}
+
 }  // namespace
 
 int main() {
@@ -384,5 +603,7 @@ int main() {
     hipFree(o_ref);
     hipFree(o_new);
   }
+  BenchF32("router 288x4096", 288U, 4096U, 4096U, 20U);
+  BenchF32("idx_proj 32x4096", 32U, 4096U, 4096U, 20U);
   return 0;
 }
