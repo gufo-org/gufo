@@ -42,7 +42,7 @@ struct Plan {
 struct Gemm::Impl {
   hipblasLtHandle_t handle{};
   std::map<std::tuple<int, int, int, bool, int, std::int64_t, std::int64_t,
-                      std::int64_t>,
+                      std::int64_t, int>,
            std::unique_ptr<Plan>>
       plans;
   Impl() { Check(hipblasLtCreate(&handle)); }
@@ -53,10 +53,11 @@ struct Gemm::Impl {
   }
   Plan& Resolve(int rows, int channels, int inner, bool float_output,
                 int batches = 1, std::int64_t weight_stride = 0,
-                std::int64_t input_stride = 0, std::int64_t output_stride = 0) {
-    const auto key =
-        std::make_tuple(rows, channels, inner, float_output, batches,
-                        weight_stride, input_stride, output_stride);
+                std::int64_t input_stride = 0, std::int64_t output_stride = 0,
+                int requested_rank = -1) {
+    const auto key = std::make_tuple(rows, channels, inner, float_output,
+                                     batches, weight_stride, input_stride,
+                                     output_stride, requested_rank);
     if (const auto found = plans.find(key); found != plans.end())
       return *found->second;
     auto plan = std::make_unique<Plan>();
@@ -99,10 +100,11 @@ struct Gemm::Impl {
     // shapes, and on YuE2's 64-4500-row projections (2048-6144 wide). The
     // default FP32-output choices are 4–6x slower on gfx1151. Keep a
     // deterministic shape policy; requalify after hipBLASLt updates.
-    const int rank = float_output   ? (channels < 256 ? 5 : 4)
-                     : rows <= 512  ? 12
-                     : rows >= 4096 ? 0
-                                    : 1;
+    const int rank = requested_rank >= 0 ? requested_rank
+                     : float_output      ? (channels < 256 ? 5 : 4)
+                     : rows <= 512       ? 12
+                     : rows >= 4096      ? 0
+                                         : 1;
     if (status == HIPBLAS_STATUS_SUCCESS && count > 0) {
       plan->selected = candidates[std::min(rank, count - 1)];
       plan->usable = plan->selected.state == HIPBLAS_STATUS_SUCCESS &&
@@ -121,11 +123,13 @@ Gemm::Gemm() : impl_(std::make_unique<Impl>()) {}
 Gemm::~Gemm() = default;
 
 bool Gemm::Run(const void* weight, const void* input, void* output, int rows,
-               int channels, int inner, bool float_output, hipStream_t stream) {
+               int channels, int inner, bool float_output, hipStream_t stream,
+               int rank) {
   // Small text/time embeddings retain the established vector-sized kernels.
   if (rows < 64)
     return false;
-  auto& plan = impl_->Resolve(rows, channels, inner, float_output);
+  auto& plan =
+      impl_->Resolve(rows, channels, inner, float_output, 1, 0, 0, 0, rank);
   if (!plan.usable)
     return false;
   const float alpha = 1, beta = 0;

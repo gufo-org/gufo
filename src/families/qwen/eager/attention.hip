@@ -80,18 +80,13 @@ __device__ const std::uint16_t* BlockRows(const HeadSegments& h, int row) {
 // a time. Split value staging into two halves to bound LDS usage.
 // Segmented reads keys and values from `segments` (cached condition rows
 // and the new rows) instead of one contiguous head-major copy.
-// MatrixValues rounds the probabilities to BF16, as PyTorch's fused BF16
-// attention does, and runs the value product on matrix instructions too:
-// wave w owns queries [16w, 16w + 16) by all 128 channels.
-template<bool Masked, bool Segmented, int Group, bool MatrixValues = false>
+template<bool Masked, bool Segmented, int Group>
 __device__ __forceinline__ void FusedAttentionBody(
     const std::uint16_t* queries, const std::uint16_t* keys,
     const std::uint16_t* values, hip_bfloat16* output, int heads, int rows,
     int count, int query_start, int query_count, const int* limits,
     const KeySegments& segments) {
-  __shared__ float p[32][129], v[MatrixValues ? 1 : 16][129], stats[128][3];
-  // Transposed BF16 value tile: channel-major, 32 keys plus 16-byte padding.
-  alignas(16) __shared__ std::uint16_t value_tile[MatrixValues ? 128 : 1][40];
+  __shared__ float p[32][129], v[16][129], stats[128][3];
   __shared__ int last_key;
   const int tid = threadIdx.x, lane = tid % 32, wave = tid / 32;
   const int col = blockIdx.x * 128, head = blockIdx.y;
@@ -134,7 +129,6 @@ __device__ __forceinline__ void FusedAttentionBody(
   }
   __syncthreads();
   float accum[8][8]{};
-  [[maybe_unused]] Accumulator matrix_accum[8]{};
   const int visible = Masked ? last_key : count;
   // Keep the next tile in registers while QK, softmax and FP32 PV execute.
   unsigned short prefetch_v[16];
@@ -227,19 +221,9 @@ __device__ __forceinline__ void FusedAttentionBody(
       }
     }
     unsigned short current_v[16];
-    if constexpr (MatrixValues) {
-      // Stage this tile before the next prefetch reuses the registers; the
-      // last barrier of the previous tile freed `value_tile`.
 #pragma unroll
-      for (int z = 0; z < 16; ++z) {
-        const int i = tid + z * 256;
-        value_tile[i % 128][i / 128] = prefetch_v[z];
-      }
-    } else {
-#pragma unroll
-      for (int z = 0; z < 16; z++)
-        current_v[z] = prefetch_v[z];
-    }
+    for (int z = 0; z < 16; z++)
+      current_v[z] = prefetch_v[z];
     if constexpr (Segmented) {
       if (const auto* rows = BlockRows<true>(segs, base + 32)) {
 #pragma unroll
@@ -263,32 +247,6 @@ __device__ __forceinline__ void FusedAttentionBody(
       }
     }
     __syncthreads();
-    if constexpr (MatrixValues) {
-#pragma unroll
-      for (int i = 0; i < 8; ++i) {
-        const float correction = stats[wave * 16 + 2 * i + lane / 16][2];
-#pragma unroll
-        for (int t = 0; t < 8; ++t)
-          matrix_accum[t][i] *= correction;
-      }
-      // The tile loop must unroll (accumulator indices); unrolling this one
-      // too keeps every value fragment live and spills.
-#pragma unroll 1
-      for (int k0 = 0; k0 < 32; k0 += 16) {
-        Fragment probability;
-#pragma unroll
-        for (int j = 0; j < 16; ++j)
-          probability[j] =
-              static_cast<short>(Bf16(p[k0 + j][wave * 16 + lane % 16]).data);
-#pragma unroll
-        for (int t = 0; t < 8; ++t)
-          matrix_accum[t] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(
-              probability, Load(&value_tile[t * 16 + lane % 16][k0]),
-              matrix_accum[t]);
-      }
-      __syncthreads();
-      continue;
-    }
 #pragma unroll
     for (int y = 0; y < 8; y++)
 #pragma unroll
@@ -319,20 +277,6 @@ __device__ __forceinline__ void FusedAttentionBody(
     }
     __syncthreads();
   }
-  if constexpr (MatrixValues) {
-#pragma unroll
-    for (int i = 0; i < 8; ++i) {
-      const int q = wave * 16 + 2 * i + lane / 16;
-      const int query = query_start + col + q;
-      if (query >= query_end)
-        continue;
-#pragma unroll
-      for (int t = 0; t < 8; ++t)
-        output[(static_cast<std::size_t>(query) * heads + head) * 128 + t * 16 +
-               lane % 16] = Bf16(matrix_accum[t][i] / stats[q][1]);
-    }
-    return;
-  }
 #pragma unroll
   for (int y = 0; y < 8; ++y)
 #pragma unroll
@@ -359,11 +303,11 @@ __global__ void FusedAttention(const std::uint16_t* queries,
 
 // The segment selection needs a few more registers; without the bound the
 // masked variant spills under the default 1024-thread budget.
-template<bool Masked, int Group, bool MatrixValues>
+template<bool Masked, int Group>
 __global__ __launch_bounds__(256) void FusedAttentionSegmented(
     const std::uint16_t* queries, KeySegments segments, hip_bfloat16* output,
     int heads, int rows, int query_start, int query_count, const int* limits) {
-  FusedAttentionBody<Masked, true, Group, MatrixValues>(
+  FusedAttentionBody<Masked, true, Group>(
       queries, nullptr, nullptr, output, heads, rows, segments.end[2],
       query_start, query_count, limits, segments);
 }
@@ -398,30 +342,23 @@ void FusedAttention128Segmented(const std::uint16_t* queries,
                                 std::uint16_t* output, int heads, int rows,
                                 int query_start, int query_count,
                                 hipStream_t stream, const int* limits,
-                                int kv_group, bool bfloat16_probabilities) {
+                                int kv_group) {
   const dim3 grid((query_count + 127) / 128, heads);
   auto* out = reinterpret_cast<hip_bfloat16*>(output);
-  const auto launch = [&]<bool Masked, int Group, bool MatrixValues>() {
-    FusedAttentionSegmented<Masked, Group, MatrixValues>
-        <<<grid, 256, 0, stream>>>(queries, segments, out, heads, rows,
-                                   query_start, query_count, limits);
+  const auto launch = [&]<bool Masked, int Group>() {
+    FusedAttentionSegmented<Masked, Group><<<grid, 256, 0, stream>>>(
+        queries, segments, out, heads, rows, query_start, query_count, limits);
   };
-  const auto group = [&]<bool MatrixValues>() {
-    if (kv_group == 2) {
-      if (limits)
-        launch.template operator()<true, 2, MatrixValues>();
-      else
-        launch.template operator()<false, 2, MatrixValues>();
-    } else if (limits) {
-      launch.template operator()<true, 1, MatrixValues>();
-    } else {
-      launch.template operator()<false, 1, MatrixValues>();
-    }
-  };
-  if (bfloat16_probabilities)
-    group.template operator()<true>();
-  else
-    group.template operator()<false>();
+  if (kv_group == 2) {
+    if (limits)
+      launch.template operator()<true, 2>();
+    else
+      launch.template operator()<false, 2>();
+  } else if (limits) {
+    launch.template operator()<true, 1>();
+  } else {
+    launch.template operator()<false, 1>();
+  }
 }
 
 }  // namespace gufo::qwen::eager

@@ -77,17 +77,25 @@ void LaunchBfloat16ResidualAddRMSNormFromBfloat16(
     void* output_bfloat16, std::size_t batch_size, std::size_t dimension,
     float epsilon, hipStream_t stream, RmsScale scale = RmsScale::kFloat);
 
+/// Fills `table` with the BF16 RoPE cosine and sine of every dimension pair
+/// (`[positions][head_dim / 2][2]` floats), as the fused norm kernels round
+/// them.
+void LaunchBfloat16RotaryTable(float* table, std::size_t positions,
+                               std::uint32_t head_dim, float rope_theta,
+                               hipStream_t stream);
+
 /// Per-head q/k RMSNorm, RoPE at `start_position + row` and V rounding, as
 /// `LaunchBfloat16QkNormRoPE`, writing BF16 head-major results instead of
 /// updating the inputs: query row r of head h goes to
 /// `query_out[(h * query_stride + query_row + r) * head_dim]`, key/value rows
 /// to `[(h * cache_stride + cache_row + r) * head_dim]`. Inputs are row-major
-/// `[rows][heads * head_dim]` FP32. `head_dim` must be at most 128 and even.
+/// `[rows][heads * head_dim]` FP32. `head_dim` must be 128. `rotary` is a
+/// `LaunchBfloat16RotaryTable` table covering every position.
 void LaunchBfloat16QkNormRoPEHeadMajor(
     const float* query, const float* key, const float* value,
     const float* query_weight, const float* key_weight, std::size_t rows,
     std::uint32_t num_heads, std::uint32_t num_key_value_heads,
-    std::uint32_t head_dim, std::uint32_t start_position, float rope_theta,
+    std::uint32_t head_dim, std::uint32_t start_position, const float* rotary,
     float epsilon, RmsScale scale, void* query_out, std::size_t query_stride,
     std::size_t query_row, void* key_out, void* value_out,
     std::size_t cache_stride, std::size_t cache_row, hipStream_t stream);
@@ -97,7 +105,7 @@ void LaunchBfloat16QkNormRoPEHeadMajorFromBfloat16(
     const void* query, const void* key, const void* value,
     const float* query_weight, const float* key_weight, std::size_t rows,
     std::uint32_t num_heads, std::uint32_t num_key_value_heads,
-    std::uint32_t head_dim, std::uint32_t start_position, float rope_theta,
+    std::uint32_t head_dim, std::uint32_t start_position, const float* rotary,
     float epsilon, RmsScale scale, void* query_out, std::size_t query_stride,
     std::size_t query_row, void* key_out, void* value_out,
     std::size_t cache_stride, std::size_t cache_row, hipStream_t stream);

@@ -2,12 +2,16 @@
 
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
+#include <hipblaslt/hipblaslt.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <map>
+#include <memory>
 #include <stdexcept>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 #include "src/models/yue2/hip/kernels.hpp"
@@ -104,6 +108,97 @@ struct Block {
   std::array<Residual, 3> residuals;
 };
 
+void RequireLt(hipblasStatus_t status) {
+  if (status != HIPBLAS_STATUS_SUCCESS)
+    throw std::runtime_error("YuE2 VAE hipBLASLt failed: status " +
+                             std::to_string(status));
+}
+
+/// Column-major FP32 `C = A * B + beta * C` through a fixed hipBLASLt plan
+/// per shape. hipBLAS's FP32 GEMM runs these convolution shapes at about
+/// 3 TFLOP/s on gfx1151; hipBLASLt's 29th heuristic candidate (a 112x64
+/// macro tile) runs the 128- to 2048-channel ones 2.6-3.2x faster and the
+/// memory-bound 64-channel ones as fast. No online tuning.
+class Fp32Gemm {
+public:
+  Fp32Gemm() {
+    RequireLt(hipblasLtCreate(&handle_));
+    RequireLt(
+        hipblasLtMatmulDescCreate(&operation_, HIPBLAS_COMPUTE_32F, HIP_R_32F));
+  }
+  ~Fp32Gemm() {
+    plans_.clear();
+    if (operation_ != nullptr)
+      (void)hipblasLtMatmulDescDestroy(operation_);
+    if (handle_ != nullptr)
+      (void)hipblasLtDestroy(handle_);
+  }
+  Fp32Gemm(const Fp32Gemm&) = delete;
+  Fp32Gemm& operator=(const Fp32Gemm&) = delete;
+
+  /// Returns false without launching when hipBLASLt has no plan.
+  bool Run(int m, int n, int k, const float* a, int lda, const float* b,
+           int ldb, float beta, float* c, int ldc, hipStream_t stream) {
+    const Plan& plan = Resolve(m, n, k, lda, ldb, ldc);
+    if (!plan.usable)
+      return false;
+    const float alpha = 1.0F;
+    RequireLt(hipblasLtMatmul(handle_, operation_, &alpha, a, plan.a, b, plan.b,
+                              &beta, c, plan.c, c, plan.c, &plan.algorithm,
+                              nullptr, 0, stream));
+    return true;
+  }
+
+private:
+  struct Plan {
+    hipblasLtMatrixLayout_t a{}, b{}, c{};
+    hipblasLtMatmulAlgo_t algorithm{};
+    bool usable{false};
+    ~Plan() {
+      for (auto layout : {c, b, a})
+        if (layout != nullptr)
+          (void)hipblasLtMatrixLayoutDestroy(layout);
+    }
+  };
+
+  const Plan& Resolve(int m, int n, int k, int lda, int ldb, int ldc) {
+    const auto key = std::make_tuple(m, n, k, lda, ldb, ldc);
+    if (const auto found = plans_.find(key); found != plans_.end())
+      return *found->second;
+    auto plan = std::make_unique<Plan>();
+    RequireLt(hipblasLtMatrixLayoutCreate(&plan->a, HIP_R_32F, m, k, lda));
+    RequireLt(hipblasLtMatrixLayoutCreate(&plan->b, HIP_R_32F, k, n, ldb));
+    RequireLt(hipblasLtMatrixLayoutCreate(&plan->c, HIP_R_32F, m, n, ldc));
+    hipblasLtMatmulPreference_t preference{};
+    RequireLt(hipblasLtMatmulPreferenceCreate(&preference));
+    const std::size_t workspace = 0;
+    RequireLt(hipblasLtMatmulPreferenceSetAttribute(
+        preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace,
+        sizeof(workspace)));
+    std::array<hipblasLtMatmulHeuristicResult_t, 32> candidates{};
+    int count = 0;
+    const auto status = hipblasLtMatmulAlgoGetHeuristic(
+        handle_, operation_, plan->a, plan->b, plan->c, plan->c, preference,
+        static_cast<int>(candidates.size()), candidates.data(), &count);
+    (void)hipblasLtMatmulPreferenceDestroy(preference);
+    constexpr int kRank = 29;
+    if (status == HIPBLAS_STATUS_SUCCESS && count > kRank) {
+      const auto& selected = candidates[kRank];
+      plan->usable = selected.state == HIPBLAS_STATUS_SUCCESS &&
+                     selected.workspaceSize == 0;
+      plan->algorithm = selected.algo;
+    }
+    auto& result = *plan;
+    plans_.emplace(key, std::move(plan));
+    return result;
+  }
+
+  hipblasLtHandle_t handle_{nullptr};
+  hipblasLtMatmulDesc_t operation_{nullptr};
+  std::map<std::tuple<int, int, int, int, int, int>, std::unique_ptr<Plan>>
+      plans_;
+};
+
 }  // namespace
 
 struct VaeDecoder::Impl {
@@ -115,7 +210,22 @@ struct VaeDecoder::Impl {
   Conv output;
   hipStream_t stream{nullptr};
   hipblasHandle_t blas{nullptr};
+  std::unique_ptr<Fp32Gemm> gemm;
   DeviceFloats stream_a, stream_b, work, temp, tile_audio;
+
+  /// `out = x * w + beta * out`: `x` is `[m][k]` column-major (`ldx`), `w`
+  /// `[k][n]`, `out` `[m][n]` (`ldo`).
+  void Sgemm(std::size_t m, std::size_t n, std::size_t k, const float* x,
+             std::size_t ldx, const float* w, std::size_t ldw, float beta,
+             float* out, std::size_t ldo) {
+    const auto i = [](std::size_t value) { return static_cast<int>(value); };
+    if (gemm->Run(i(m), i(n), i(k), x, i(ldx), w, i(ldw), beta, out, i(ldo),
+                  stream))
+      return;
+    const float one = 1.0F;
+    RequireBlas(hipblasSgemm(blas, HIPBLAS_OP_N, HIPBLAS_OP_N, i(m), i(n), i(k),
+                             &one, x, i(ldx), w, i(ldw), &beta, out, i(ldo)));
+  }
 
   ~Impl() {
     if (blas != nullptr)
@@ -241,39 +351,29 @@ struct VaeDecoder::Impl {
   // out[o][t] (+)= sum_k W_k x[t + (k - kernel/2) * dilation].
   void Convolve(const Conv& conv, const float* x, std::size_t length,
                 float* out, bool accumulate) {
-    const float one = 1.0F, zero = 0.0F;
     const std::size_t pitch = length + 2 * kPad;
     const std::ptrdiff_t half = static_cast<std::ptrdiff_t>(conv.kernel / 2);
     for (std::size_t k = 0; k < conv.kernel; ++k) {
       const std::ptrdiff_t shift = (static_cast<std::ptrdiff_t>(k) - half) *
                                    static_cast<std::ptrdiff_t>(conv.dilation);
-      RequireBlas(hipblasSgemm(
-          blas, HIPBLAS_OP_N, HIPBLAS_OP_N, static_cast<int>(length),
-          static_cast<int>(conv.outputs), static_cast<int>(conv.inputs), &one,
-          x + kPad + shift, static_cast<int>(pitch),
-          conv.taps.get() + k * conv.outputs * conv.inputs,
-          static_cast<int>(conv.inputs), accumulate || k > 0 ? &one : &zero,
-          out + kPad, static_cast<int>(pitch)));
+      Sgemm(length, conv.outputs, conv.inputs, x + kPad + shift, pitch,
+            conv.taps.get() + k * conv.outputs * conv.inputs, conv.inputs,
+            accumulate || k > 0 ? 1.0F : 0.0F, out + kPad, pitch);
     }
   }
 
   // Polyphase transposed convolution into `out` (length `out_length`).
   void Upsample(const Transpose& t, const float* x, std::size_t length,
                 float* out, std::size_t out_length) {
-    const float one = 1.0F, zero = 0.0F;
     const std::size_t pitch = length + 2 * kPad;
     const std::size_t phase_length = length + 1;
     for (std::size_t r = 0; r < t.stride; ++r) {
       float* phase = temp.get() + r * t.outputs * phase_length;
-      for (std::size_t m = 0; m < 2; ++m) {
-        RequireBlas(hipblasSgemm(
-            blas, HIPBLAS_OP_N, HIPBLAS_OP_N, static_cast<int>(phase_length),
-            static_cast<int>(t.outputs), static_cast<int>(t.inputs), &one,
-            x + kPad - static_cast<std::ptrdiff_t>(m), static_cast<int>(pitch),
-            t.phases.get() + (r * 2 + m) * t.outputs * t.inputs,
-            static_cast<int>(t.inputs), m > 0 ? &one : &zero, phase,
-            static_cast<int>(phase_length)));
-      }
+      for (std::size_t m = 0; m < 2; ++m)
+        Sgemm(phase_length, t.outputs, t.inputs,
+              x + kPad - static_cast<std::ptrdiff_t>(m), pitch,
+              t.phases.get() + (r * 2 + m) * t.outputs * t.inputs, t.inputs,
+              m > 0 ? 1.0F : 0.0F, phase, phase_length);
     }
     LaunchInterleavePhases(temp.get(), phase_length, t.stride, t.padding,
                            t.outputs, out_length, kPad, t.bias.get(), out,
@@ -365,6 +465,7 @@ std::unique_ptr<VaeDecoder> VaeDecoder::Create(
                "hipStreamCreateWithFlags");
     RequireBlas(hipblasCreate(&impl->blas));
     RequireBlas(hipblasSetStream(impl->blas, impl->stream));
+    impl->gemm = std::make_unique<Fp32Gemm>();
     impl->Load();
     impl->file.reset();
     return std::unique_ptr<VaeDecoder>(new VaeDecoder(std::move(impl)));

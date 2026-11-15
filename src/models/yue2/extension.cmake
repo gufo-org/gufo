@@ -35,6 +35,7 @@ gufo_extension_target(
     gufo_qwen_eager
     hip::host
     roc::hipblas
+    roc::hipblaslt
 )
 
 if(TARGET gufo_yue2_hip)

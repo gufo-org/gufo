@@ -144,12 +144,17 @@ struct Backbone::Impl {
   DeviceArray<float> hidden, q, k, v, o, gate, up, ffn;
   DeviceArray<std::uint16_t> query_heads, attention, scratch;
   DeviceArray<std::uint16_t> nar_keys, nar_values;
+  // Transposed values of the frozen prefix (every layer) and of the latent
+  // rows (the current layer), as the acoustic attention reads them.
+  DeviceArray<std::uint16_t> prefix_values_t, nar_values_t;
   DeviceArray<std::uint32_t> ids;
   DeviceArray<int> limits;
   DeviceArray<float> logits, logits_rounded, decode_scratch;
   DeviceArray<float> state, midpoint, first, second, projected;
   DeviceArray<std::uint16_t> frequencies, time_row;
   DeviceArray<float> time_hidden;
+  // BF16 RoPE cosines and sines of every position, computed once.
+  DeviceArray<float> rotary;
   std::size_t decode_scratch_capacity{0};
 
   ~Impl() {
@@ -188,9 +193,18 @@ struct Backbone::Impl {
   }
 
   void Upload() {
-    // Safetensors headers have arbitrary length; shift the copy so the payload
-    // starts where 16-byte packed loads are legal.
-    const std::size_t shift = (16 - (file->payload_offset() % 16)) % 16;
+    // Only the payload is copied, and tensor offsets inside it are arbitrary
+    // multiples of 8. Shift the copy so the large matrices start on 256-byte
+    // boundaries: the decode GEMV then takes its 16-byte loads (about 10%
+    // faster than 8-byte ones) and hipBLASLt reads aligned tiles.
+    std::array<std::size_t, 256> residues{};
+    for (const auto& [name, tensor] : file->tensors()) {
+      if (tensor.bytes >= (std::uint64_t{1} << 20))
+        ++residues[tensor.offset % 256];
+    }
+    const std::size_t common = static_cast<std::size_t>(
+        std::ranges::max_element(residues) - residues.begin());
+    const std::size_t shift = (256 - common) % 256;
     RequireHip(hipMalloc(&weights_allocation, file->payload_size() + shift),
                "hipMalloc weights");
     auto* device = static_cast<std::uint8_t*>(weights_allocation) + shift;
@@ -291,9 +305,14 @@ struct Backbone::Impl {
   /// 1.5x faster than the FP32 output every consumer rounds anyway.
   void GemmBfloat16(const void* weight, const void* input, void* output,
                     std::size_t rows, std::size_t outputs, std::size_t inputs) {
+    // The 6144-wide gate and up projections run on hipBLASLt's first
+    // candidate (a 128-row macro tile): 1528 instead of 2161 us at 1800 rows
+    // in the acoustic stage on gfx1151, where the shared policy's second
+    // candidate re-reads each weight tile for every 64 rows.
+    const int rank = rows > 512 && outputs >= 4096 ? 0 : -1;
     if (planned.Run(weight, input, output, static_cast<int>(rows),
                     static_cast<int>(outputs), static_cast<int>(inputs),
-                    /*float_output=*/false, stream))
+                    /*float_output=*/false, stream, rank))
       return;
     const float alpha = 1.0F, beta = 0.0F;
     if (hipblasGemmEx(blas, HIPBLAS_OP_T, HIPBLAS_OP_N,
@@ -401,52 +420,51 @@ struct Backbone::Impl {
       if (packed)
         eager::LaunchBfloat16QkNormRoPEHeadMajorFromBfloat16(
             bfloat16(q), bfloat16(k), bfloat16(v), w.q_norm, w.k_norm, rows,
-            heads, kv_heads, head_dim, position, c.rope_theta, c.rms_epsilon,
+            heads, kv_heads, head_dim, position, rotary.get(), c.rms_epsilon,
             eager::RmsScale::kBfloat16, query_heads.get(), rows, 0, keys_out,
             values_out, stride, row, stream);
       else
         eager::LaunchBfloat16QkNormRoPEHeadMajor(
             q.get(), k.get(), v.get(), w.q_norm, w.k_norm, rows, heads,
-            kv_heads, head_dim, position, c.rope_theta, c.rms_epsilon,
+            kv_heads, head_dim, position, rotary.get(), c.rms_epsilon,
             eager::RmsScale::kBfloat16, query_heads.get(), rows, 0, keys_out,
             values_out, stride, row, stream);
-      if (!pass.nar && rows == 1) {
+      if (pass.nar) {
+        const auto kv = static_cast<std::uint32_t>(c.kv_heads);
+        const auto prefix_count = static_cast<std::uint32_t>(pass.prefix);
+        const auto latent_count = static_cast<std::uint32_t>(rows);
+        LaunchTransposeValues(nar_values.get(), latent_count, latent_count, kv,
+                              nar_values_t.get(), stream);
+        const std::uint32_t prefix_pitch = NarValuePitch(prefix_count);
+        const NarSegment prefix{
+            kv_layer(pass.cache_keys, l),
+            prefix_values_t.get() + l * c.kv_heads * c.head_dim * prefix_pitch,
+            prefix_count, static_cast<std::uint32_t>(pass.capacity),
+            prefix_pitch};
+        const NarSegment latent{nar_keys.get(), nar_values_t.get(),
+                                latent_count, latent_count,
+                                NarValuePitch(latent_count)};
+        LaunchNarAttention(query_heads.get(), prefix, latent, attention.get(),
+                           heads, latent_count, heads / kv_heads, stream);
+      } else if (rows == 1) {
         eager::LaunchBfloat16DecodeAttention(
             query_heads.get(), kv_layer(pass.cache_keys, l),
             kv_layer(pass.cache_values, l), pass.capacity, pass.position + 1,
             c.heads, c.kv_heads, decode_scratch.get(), attention.get(), stream);
       } else {
         eager::KeySegments segments;
-        const auto* cache_keys = kv_layer(pass.cache_keys, l);
-        const auto* cache_values = kv_layer(pass.cache_values, l);
-        if (pass.nar) {
-          const int prefix = static_cast<int>(pass.prefix);
-          const int total = prefix + static_cast<int>(rows);
-          segments.keys[0] = cache_keys;
-          segments.values[0] = cache_values;
-          segments.end[0] = prefix;
-          segments.stride[0] = static_cast<int>(pass.capacity);
-          for (int s = 1; s < 3; ++s) {
-            segments.keys[s] = nar_keys.get();
-            segments.values[s] = nar_values.get();
-            segments.end[s] = total;
-            segments.stride[s] = static_cast<int>(rows);
-          }
-        } else {
-          const int total = static_cast<int>(pass.position + rows);
-          for (int s = 0; s < 3; ++s) {
-            segments.keys[s] = cache_keys;
-            segments.values[s] = cache_values;
-            segments.end[s] = total;
-            segments.stride[s] = static_cast<int>(pass.capacity);
-          }
+        const int total = static_cast<int>(pass.position + rows);
+        for (int s = 0; s < 3; ++s) {
+          segments.keys[s] = kv_layer(pass.cache_keys, l);
+          segments.values[s] = kv_layer(pass.cache_values, l);
+          segments.end[s] = total;
+          segments.stride[s] = static_cast<int>(pass.capacity);
         }
         eager::FusedAttention128Segmented(
             query_heads.get(), segments, attention.get(),
             static_cast<int>(c.heads), static_cast<int>(rows), 0,
-            static_cast<int>(rows), stream, pass.nar ? nullptr : limits.get(),
-            static_cast<int>(c.heads / c.kv_heads),
-            /*bfloat16_probabilities=*/pass.nar);
+            static_cast<int>(rows), stream, limits.get(),
+            static_cast<int>(c.heads / c.kv_heads));
       }
       const float* next_norm =
           l + 1 < c.layers ? path(l + 1).input_norm : final_norm;
@@ -623,6 +641,19 @@ struct Backbone::Impl {
     first.Reserve(elements);
     second.Reserve(elements);
     projected.Reserve(rows * c.latent_dim);
+    nar_values_t.Reserve(c.kv_heads * c.head_dim * NarValuePitch(rows));
+    // The prefix is frozen for every velocity evaluation: transpose its
+    // values once.
+    const auto count = static_cast<std::uint32_t>(prefix.length_);
+    const std::size_t pitch = NarValuePitch(count);
+    const std::size_t layer = c.kv_heads * c.head_dim * pitch;
+    prefix_values_t.Reserve(c.layers * layer);
+    for (std::size_t l = 0; l < c.layers; ++l)
+      LaunchTransposeValues(
+          prefix.values_ + l * c.kv_heads * prefix.capacity_ * c.head_dim,
+          static_cast<std::uint32_t>(prefix.capacity_), count,
+          static_cast<std::uint32_t>(c.kv_heads),
+          prefix_values_t.get() + l * layer, stream);
   }
 };
 
@@ -648,6 +679,11 @@ std::unique_ptr<Backbone> Backbone::Create(
     impl->Upload();
     impl->Resolve();
     impl->ReserveRows(kPrefillRows);
+    impl->rotary.Reserve(config.context * config.head_dim);
+    eager::LaunchBfloat16RotaryTable(
+        impl->rotary.get(), config.context,
+        static_cast<std::uint32_t>(config.head_dim), config.rope_theta,
+        impl->stream);
     RequireHip(hipStreamSynchronize(impl->stream), "load");
     return std::unique_ptr<Backbone>(new Backbone(std::move(impl)));
   } catch (const std::exception& exception) {
