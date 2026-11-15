@@ -206,8 +206,10 @@ fixtures byte-identical (or the recorded oracle budget re-approved).
 1. 1M-context objectives: latent KV 13.8 KB/token + indexer pool math in
    [KV-CACHE.md](../../KV-CACHE.md) style; confirm indexer build cost at
    128K/1M against `a·n + b·n²` fits.
-2. MTP nextn (1 layer, shared indexer) wired like Flash-Next adaptive
-   policy; confidence-gated chains only after k=1 greedy acceptance measured.
+2. MTP nextn (1 layer) wired 2026-11-15: adaptive k ≤ 4 chain like
+   Flash-Next's policy, greedy-lossless, +15.6 % serve decode median —
+   results and the open 0.84× vs llama.cpp tg32 note in
+   [BENCHMARKS.md](BENCHMARKS.md).
 3. Vision: `glm5v` projector + 24-layer ViT as a follow-up (qwen-image
    pattern), out of scope for the text gates.
 4. Then add [BENCHMARKS.md](BENCHMARKS.md)/[QUALITY.md](QUALITY.md),
@@ -220,7 +222,10 @@ fixtures byte-identical (or the recorded oracle budget re-approved).
   12th `head_count_kv = 1` flag is the nextn layer, so the trunk is exactly
   34 KDA + 11 DSA (il = 3, 7, …, 43). `attention.indexer.types` is absent →
   all trunk DSA blocks run a full indexer; only nextn shares
-  (`index_share_mtp = true`).
+  (`index_share_mtp = true`) — further resolved with the B10 wiring:
+  llama.cpp `build_dsa_layer` gives the NextN block its own full indexer
+  regardless (sharing applies to trunk layers only), which is what the
+  gufo draft path implements.
 - NoPE MLA: check the llama.cpp branch actually skips rope application;
   a mis-set `rope.dimension_count` would be a silent quality break.
 - `expert_gating_func = 2` and scale 2.5/norm semantics — transcribe from

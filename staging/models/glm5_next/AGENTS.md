@@ -17,7 +17,8 @@ Results and protocol: [docs/models/glm-5.3-flash/BENCHMARKS.md](../../../docs/mo
 
 Offline timing scan: `gufo bench --model <GGUF> --n-prompt <N> --n-gen <N>
 --repetitions 2` (registered through `staging/integration/staging_cli.cpp`;
-greedy, C1 only, no speculative path). It sizes the caches to the requested
+greedy, C1 only, optionally `--speculative mtp --draft-tokens N` for the
+nextn chain). It sizes the caches to the requested
 depth, loads in ~30 s and prints the standard table.
 
 Gate and matched-A/B numbers must still come from `gufo serve` over HTTP

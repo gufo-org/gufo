@@ -24,6 +24,11 @@ namespace gufo::models::glm5_next::rocm {
 void AddBias(float* data, const float* bias, std::uint32_t total,
              std::uint32_t bias_len, hipStream_t stream);
 
+/// dst[i] = a[i] + b[i] for i in [0, total) (the MTP draft-block residual
+/// adds around its attention and FFN; the rows are contiguous).
+void Add(const float* a, const float* b, float* dst, std::uint32_t total,
+         hipStream_t stream);
+
 /// dst[r*n + i] = w[i] * x[r*x_stride + i] * rsqrt(mean(x^2) + eps) for
 /// rows rows of n elements. Fused (sum, scale, write) in one launch per row.
 void RmsNorm(const float* x, const float* w, float* dst, std::uint32_t rows,

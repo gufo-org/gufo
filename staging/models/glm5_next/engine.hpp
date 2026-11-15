@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/sampling.hpp"
 #include "staging/models/glm5_next/config.hpp"
 #include "staging/models/glm5_next/tokenizer.hpp"
 
@@ -57,6 +58,9 @@ class Model final : public std::enable_shared_from_this<Model> {
   [[nodiscard]] std::int32_t EosToken() const noexcept;
   [[nodiscard]] bool IsStopToken(std::int32_t token) const noexcept;
   [[nodiscard]] std::uint32_t VocabSize() const noexcept;
+  /// True when the checkpoint carries the nextn draft block, making MTP
+  /// speculative decoding available.
+  [[nodiscard]] bool HasMtp() const noexcept;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept {
     return options_.max_context;
   }
@@ -107,6 +111,23 @@ class Session final {
                           std::string* error_msg = nullptr);
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
+  struct DecodeResult {
+    std::vector<std::int32_t> tokens;
+    bool stop{false};
+    std::size_t drafted{0};
+    std::size_t accepted{0};
+  };
+  /// Draws the next token, then (with the nextn block enabled) chains up to
+  /// k drafts through the draft block, verifies all k + 1 rows in one
+  /// batched trunk pass and keeps the longest prefix the trunk agrees with;
+  /// a rejection appends the trunk's own correction token. Without MTP it
+  /// samples and evaluates exactly one token. The committed sequence and the
+  /// round statistics land in `result`.
+  [[nodiscard]] bool DecodeStep(std::size_t max_tokens,
+                                sampling::SamplerState& sampler,
+                                DecodeResult* result,
+                                std::string* error_msg = nullptr,
+                                bool stop_at_eos = true);
   [[nodiscard]] std::span<const float> Logits() const noexcept {
     return valid_ ? std::span<const float>(logits_) : std::span<const float>{};
   }
@@ -120,6 +141,16 @@ class Session final {
   }
   void Reset();
   [[nodiscard]] bool IsValid() const noexcept { return valid_; }
+  /// Bounds on the per-round MTP draft count. The session starts at `min`
+  /// drafts and grows by one after two consecutive fully accepted rounds,
+  /// dropping by one on any rejection; `min` == `max` pins the count.
+  void SetDraftLimits(std::uint32_t min_drafts, std::uint32_t max_drafts);
+  /// Enables the nextn draft cache and speculative decoding for this
+  /// session. Must be called before the first Sync: the draft cache is
+  /// filled during prompt processing and cannot be rebuilt lazily. A plain
+  /// (non-speculative) session leaves it off so prefill skips the draft
+  /// block entirely.
+  void SetMtpEnabled(bool enabled);
 
  private:
   friend class Model;
@@ -133,6 +164,15 @@ class Session final {
   std::uint32_t max_context_;
   std::vector<std::int32_t> tokens_;
   std::vector<float> logits_;
+  // Readback scratch for speculative decoding: the draft block's logits and
+  // the k + 1 verify rows, copied once per round.
+  std::vector<float> draft_logits_;
+  std::vector<float> verify_rows_;
+  std::uint32_t draft_min_{1};
+  std::uint32_t draft_max_{4};
+  std::uint32_t draft_k_{4};
+  std::uint32_t draft_streak_{0};
+  bool mtp_enabled_{false};
   bool valid_{true};
 };
 

@@ -59,6 +59,32 @@ bool TestAddBias() {
   return Check("add_bias (exact)", t::WorstRelative(ref, got), 0.0);
 }
 
+bool TestAdd() {
+  const std::uint32_t total = 1000;
+  const auto a = t::MakeValues(total, 0xA1B2C301U, 2.0F);
+  const auto b = t::MakeValues(total, 0x0F1E2D02U, 1.0F);
+  t::HipBuffer<float> d_a(total);
+  t::Upload(&d_a, a);
+  t::HipBuffer<float> d_b(total);
+  t::Upload(&d_b, b);
+  t::HipBuffer<float> d_out(total);
+  q::Add(d_a.get(), d_b.get(), d_out.get(), total, nullptr);
+  std::vector<float> ref(total);
+  for (std::uint32_t i = 0; i < total; ++i) {
+    ref[i] = a[i] + b[i];
+  }
+  bool ok = Check("add (exact)", t::WorstRelative(ref, t::Download(&d_out,
+                                                           total)),
+                  0.0);
+  // The draft residual adds accumulate in place over b (dst aliases b).
+  q::Add(d_a.get(), d_b.get(), d_b.get(), total, nullptr);
+  ok = Check("add inplace (exact)", t::WorstRelative(ref, t::Download(&d_b,
+                                                              total)),
+             0.0) &&
+       ok;
+  return ok;
+}
+
 bool TestRmsNorm() {
   const std::uint32_t rows = 3;
   const std::uint32_t n = 4096;
@@ -1177,6 +1203,7 @@ int main() {
   try {
     bool ok = true;
     ok &= TestAddBias();
+    ok &= TestAdd();
     ok &= TestRmsNorm();
     ok &= TestLayerNorm();
     ok &= TestHcCoeffs();

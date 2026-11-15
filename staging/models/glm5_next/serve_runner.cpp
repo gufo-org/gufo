@@ -73,12 +73,17 @@ std::optional<std::string> RenderEffort(ReasoningEffort effort) {
 class Glm5TextRunnerState final : public TextRunnerState {
  public:
   Glm5TextRunnerState(const std::shared_ptr<Model>& model,
-                      std::uint32_t max_context) {
+                      std::uint32_t max_context, bool use_mtp,
+                      std::uint32_t min_drafts, std::uint32_t max_drafts) {
     std::string error;
     session_ = model->CreateSession(max_context, &error);
     if (session_ == nullptr) {
       throw std::runtime_error("Failed to create GLM-5 session: " + error);
     }
+    // A speculative session must fill the draft cache during prefill, so
+    // enable MTP before the first Sync.
+    session_->SetMtpEnabled(use_mtp);
+    session_->SetDraftLimits(min_drafts, max_drafts);
   }
 
   void Invalidate() noexcept override {
@@ -116,8 +121,14 @@ const Glm5TextRunnerState& RequireGlm5State(const TextRunnerState& state) {
 /// the pool creates exactly one session.
 class Glm5TextRunner final : public TextModelRunner {
  public:
-  Glm5TextRunner(std::shared_ptr<Model> model, std::uint32_t max_context)
-      : model_(std::move(model)), max_context_(max_context) {}
+  Glm5TextRunner(std::shared_ptr<Model> model, std::uint32_t max_context,
+                 bool use_mtp, std::uint32_t min_drafts,
+                 std::uint32_t max_drafts)
+      : model_(std::move(model)),
+        max_context_(max_context),
+        use_mtp_(use_mtp),
+        min_drafts_(min_drafts),
+        max_drafts_(max_drafts) {}
 
   [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
   BuildConstraintVocabulary() const override {
@@ -141,7 +152,7 @@ class Glm5TextRunner final : public TextModelRunner {
                 .fork = false,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
-                .multi_token_decode = false,
+                .multi_token_decode = use_mtp_,
                 .batched_multi_token_decode = false,
                 .batched_multi_token_decode_max_width = 0u,
                 .prefix_reuse = true,
@@ -205,7 +216,9 @@ class Glm5TextRunner final : public TextModelRunner {
   }
 
   [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    return std::make_unique<Glm5TextRunnerState>(model_, max_context_);
+    return std::make_unique<Glm5TextRunnerState>(model_, max_context_,
+                                                 use_mtp_, min_drafts_,
+                                                 max_drafts_);
   }
 
   void PreparePrefixReuse(
@@ -283,9 +296,59 @@ class Glm5TextRunner final : public TextModelRunner {
     return RequireGlm5State(state).position();
   }
 
+  [[nodiscard]] std::optional<server::TextDecodeSelection> PreviewFirstToken(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    return SelectNext(state, sampler);
+  }
+
+  [[nodiscard]] server::TextDecodeStep DecodeStep(
+      TextRunnerState& state, std::size_t max_tokens,
+      sampling::SamplerState& sampler) const override {
+    if (!use_mtp_ || max_tokens == 1) {
+      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+    }
+    if (max_tokens == 0) {
+      throw std::invalid_argument(
+          "GLM-5 MTP decode budget must be at least one token");
+    }
+    auto& runner = RequireGlm5State(state);
+    if (runner.position() >= max_context_) {
+      return {.selections = {}, .stop = true};
+    }
+    Session::DecodeResult decoded;
+    std::string error;
+    if (!runner.session().DecodeStep(max_tokens, sampler, &decoded, &error)) {
+      throw std::runtime_error("GLM-5 MTP decode failed: " + error);
+    }
+    // The round commits the framing token that ends the turn; it is the
+    // stop signal, not content. Dropping it here mirrors the non-MTP
+    // SelectNext path so the stream ends without the raw control text.
+    if (decoded.stop && !decoded.tokens.empty() &&
+        model_->IsStopToken(decoded.tokens.back())) {
+      decoded.tokens.pop_back();
+    }
+    server::TextDecodeStep step;
+    step.stop = decoded.stop;
+    step.selections.reserve(decoded.tokens.size());
+    for (const std::int32_t token : decoded.tokens) {
+      step.selections.push_back({
+          .stop = false,
+          .token = static_cast<TextRunnerToken>(token),
+          .piece = model_->TokenText(token),
+      });
+    }
+    runner.set_position(runner.session().Position());
+    step.draft_tokens = decoded.drafted;
+    step.draft_accepted_tokens = decoded.accepted;
+    return step;
+  }
+
  private:
   std::shared_ptr<Model> model_;
   std::uint32_t max_context_;
+  bool use_mtp_;
+  std::uint32_t min_drafts_;
+  std::uint32_t max_drafts_;
 };
 
 }  // namespace
@@ -295,9 +358,11 @@ std::shared_ptr<Model> LoadServeModel(
     std::uint32_t max_context,
     const server::TextSpeculativeConfig& speculative_config,
     std::string* error) {
-  if (speculative_config.backend != server::TextSpeculativeBackend::kDisabled) {
+  if (speculative_config.backend != server::TextSpeculativeBackend::kDisabled &&
+      speculative_config.backend != server::TextSpeculativeBackend::kMtp) {
     SetError(error,
-             "GLM-5 HTTP models do not support speculative decoding");
+             "GLM-5 HTTP models support only nextn MTP speculative decoding "
+             "(--speculative mtp)");
     return nullptr;
   }
   std::string load_error;
@@ -326,16 +391,28 @@ std::shared_ptr<TextModelRunner> CreateTextRunner(
     SetError(error, "HTTP context exceeds the loaded GLM-5 model context");
     return nullptr;
   }
-  if (speculative_config.backend != server::TextSpeculativeBackend::kDisabled) {
+  if (speculative_config.backend != server::TextSpeculativeBackend::kDisabled &&
+      speculative_config.backend != server::TextSpeculativeBackend::kMtp) {
     SetError(error,
-             "GLM-5 HTTP models do not support speculative decoding");
+             "GLM-5 HTTP models support only nextn MTP speculative decoding "
+             "(--speculative mtp)");
+    return nullptr;
+  }
+  const bool use_mtp =
+      speculative_config.backend == server::TextSpeculativeBackend::kMtp;
+  if (use_mtp && !model->HasMtp()) {
+    SetError(error,
+             "GLM-5 MTP speculative decoding requires a GGUF with a nextn "
+             "block");
     return nullptr;
   }
   if (!disk_cache_config.directory.empty()) {
     SetError(error, "GLM-5 HTTP models do not support the disk cache");
     return nullptr;
   }
-  return std::make_shared<Glm5TextRunner>(std::move(model), max_context);
+  return std::make_shared<Glm5TextRunner>(
+      std::move(model), max_context, use_mtp,
+      speculative_config.min_draft_tokens, speculative_config.max_draft_tokens);
 }
 
 }  // namespace gufo::models::glm5_next

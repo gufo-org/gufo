@@ -136,6 +136,7 @@ Session::~Session() {
 
 void Session::Reset() {
   pos_ = -1;
+  mtp_pos_ = 0;
   for (float* hist : conv_hist) {
     static_cast<void>(hipMemset(hist, 0, conv_bytes));
   }
@@ -163,7 +164,8 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
                     l.ssm_g_b, l.ssm_beta, l.ssm_out, l.ffn_gate, l.ffn_up,
                     l.ffn_down, l.ffn_gate_exps, l.ffn_up_exps,
                     l.ffn_down_exps, l.shexp_gate, l.shexp_up, l.shexp_down,
-                    l.idx_q_b, l.idx_k, l.idx_proj, l.idx_comp_gate});
+                    l.idx_q_b, l.idx_k, l.idx_proj, l.idx_comp_gate,
+                    l.nextn_eh_proj});
   }
   for (const DeviceTensor& t : tensors) {
     if (t.empty()) {
@@ -268,6 +270,38 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     return fail("Executor scratch allocation failed");
   }
 
+  // MTP draft-block scratch and the per-KDA-row verify snapshots. The draft
+  // caches themselves are appended to the session; here we only need the
+  // shared activation rows, the chain hidden, the readback logits and the
+  // verify snapshot store (input state per KDA layer and row).
+  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    if (c.IsDsaLayer(il)) {
+      ++e->mtp_slot_;
+    } else {
+      ++e->kda_layers_;
+    }
+  }
+  e->snap_conv_elems_ = 9ULL * inner;
+  e->snap_state_elems_ =
+      static_cast<std::size_t>(c.kda_heads) * c.kda_head_dim * c.kda_head_dim;
+  if (c.nextn_layers > 0) {
+    if (!f(&e->mtp_cat_, static_cast<std::size_t>(kMtpRows) * 2 * h) ||
+        !f(&e->mtp_x_, static_cast<std::size_t>(kMtpRows) * h) ||
+        !f(&e->mtp_chain_, h + h) ||
+        !f(&e->mtp_logits_, c.vocab_size) ||
+        !f(&e->verify_logits_,
+           static_cast<std::size_t>(kMaxVerifyRows) * c.vocab_size) ||
+        !f(&e->mtp_snap_conv_,
+           static_cast<std::size_t>(e->kda_layers_) * kMaxVerifyRows *
+               e->snap_conv_elems_) ||
+        !f(&e->mtp_snap_state_,
+           static_cast<std::size_t>(e->kda_layers_) * kMaxVerifyRows *
+               e->snap_state_elems_)) {
+      return fail("MTP scratch allocation failed");
+    }
+    e->mtp_prev_ = e->mtp_chain_ + h;  // one shared [H] tail buffer
+  }
+
   std::vector<float> ones(static_cast<std::size_t>(hc) * h, 1.0F);
   std::vector<float> mean(hc, 1.0F / static_cast<float>(hc));
   std::vector<std::int32_t> head_ids(static_cast<std::size_t>(nc) * heads);
@@ -311,7 +345,8 @@ std::size_t Executor::SessionBytes(std::uint32_t capacity) const {
   const std::size_t np_stride = n_pools + 1;
   const std::size_t sel_stride =
       4ULL * c.IndexerTopPools() + c.indexer_kpool;
-  return dsa * capacity * (latent + pool) + kda * (conv + state) +
+  const std::size_t dsa_slots = dsa + (c.nextn_layers > 0 ? 1 : 0);
+  return dsa_slots * capacity * (latent + pool) + kda * (conv + state) +
          kChunk * np_stride * sizeof(float) +
          kChunk * static_cast<std::size_t>(c.IndexerTopPools()) *
              sizeof(std::int32_t) +
@@ -360,6 +395,21 @@ std::unique_ptr<Session> Executor::CreateSession(
       s->conv_hist.push_back(hist);
       s->kda_state.push_back(st);
     }
+  }
+  if (c.nextn_layers > 0) {
+    __half* lat = nullptr;
+    float* rows = nullptr;
+    if (!AllocT(pool, &lat,
+                static_cast<std::size_t>(capacity) * c.kv_lora_rank) ||
+        !AllocT(pool, &rows,
+                static_cast<std::size_t>(capacity) * 2 * c.indexer_key_len)) {
+      if (error_msg != nullptr) {
+        *error_msg = "draft cache allocation failed";
+      }
+      return nullptr;
+    }
+    s->latent_cache.push_back(lat);
+    s->pool_cache.push_back(rows);
   }
   const std::size_t n_pools =
       static_cast<std::size_t>(capacity) / c.indexer_kpool + 1;
@@ -426,38 +476,84 @@ void Executor::KdaLayer(const DeviceLayer& l, std::uint32_t slot,
   // Convolutions and the recurrence are strictly sequential over positions
   // and run as one launch per stream / stage: conv q ends in ko_, conv k in
   // q_, v in vk_ (one row per token).
-  KdaConvStepChunk(static_cast<std::uint64_t>(p0), vq_,
-                   l.ssm_conv_q.f32(), hist, inner, n, ko_, nullptr);
-  KdaConvStepChunk(static_cast<std::uint64_t>(p0), sk_, l.ssm_conv_k.f32(),
-                   hist + 3 * inner, inner, n, q_, nullptr);
-  KdaConvStepChunk(static_cast<std::uint64_t>(p0), eg_, l.ssm_conv_v.f32(),
-                   hist + 6 * inner, inner, n, vk_, nullptr);
-
-  // Forget gate eg = exp(lb * sigmoid(-(g1 * a))) now that the raw v rows
-  // of eg_ have been consumed by the convolutions.
-  KdaEGate(g1_, l.ssm_a.f32(), heads, d, c.kda_gate_lower_bound, eg_, n,
-           nullptr);
-
-  // FLA l2 norms; the recurrent applies 1/sqrt(d) to the query only
-  // (build_delta_net_autoregressive scales q after both norms). Fold and
-  // update run in one chunk launch: the state is shared, so every position
-  // must decay and update before the next one folds.
-  L2NormHeads(q_, heads * n, d, c.ln_eps, nullptr);
-  L2NormHeads(ko_, heads * n, d, c.ln_eps, nullptr);
-  Scale(ko_, inner * n, 1.0F / std::sqrt(static_cast<float>(d)), nullptr);
-  if (!KdaFoldUpdateChunk(s.kda_state[slot], eg_, q_, ko_, vk_, beta_, heads,
-                          d, n, g2_, nullptr)) {
-    float* sk_scratch = sk_;  // raw k rows are fully consumed by the convs
+  if (kda_snap_ && n > 1) {
+    // Verify run: interleave the sequential stages per row and store the
+    // conv ring and recurrent state entering every row, so RollbackVerify()
+    // can restore the exact state after any accepted prefix. Row r's gate
+    // destroys only its own raw v row (already consumed by its conv), and
+    // fold writes only its own sk_ scratch row, so the interleaving below is
+    // alias-safe with the batched projections above.
+    float* snap_c = mtp_snap_conv_ + static_cast<std::size_t>(slot) *
+                                          kMaxVerifyRows * snap_conv_elems_;
+    float* snap_s = mtp_snap_state_ + static_cast<std::size_t>(slot) *
+                                          kMaxVerifyRows * snap_state_elems_;
+    float* sk_scratch = sk_;
+    const float inv_sqrt_d = 1.0F / std::sqrt(static_cast<float>(d));
     for (std::uint32_t r = 0; r < n; ++r) {
-      KdaFoldSk(s.kda_state[slot], eg_ + static_cast<std::size_t>(r) * inner,
-                q_ + static_cast<std::size_t>(r) * inner, heads, d,
-                sk_scratch + static_cast<std::size_t>(r) * inner, nullptr);
-      KdaUpdateOut(s.kda_state[slot], q_ + static_cast<std::size_t>(r) * inner,
-                   ko_ + static_cast<std::size_t>(r) * inner,
-                   vk_ + static_cast<std::size_t>(r) * inner,
+      if (r >= 1) {
+        static_cast<void>(hipMemcpyAsync(
+            snap_c + static_cast<std::size_t>(r) * snap_conv_elems_, hist,
+            snap_conv_elems_ * sizeof(float), hipMemcpyDeviceToDevice,
+            nullptr));
+        static_cast<void>(hipMemcpyAsync(
+            snap_s + static_cast<std::size_t>(r) * snap_state_elems_,
+            s.kda_state[slot], snap_state_elems_ * sizeof(float),
+            hipMemcpyDeviceToDevice, nullptr));
+      }
+      const std::size_t off = static_cast<std::size_t>(r) * inner;
+      const std::uint64_t pos = static_cast<std::uint64_t>(p0) + r;
+      KdaConvStepChunk(pos, vq_ + off, l.ssm_conv_q.f32(), hist, inner, 1,
+                       ko_ + off, nullptr);
+      KdaConvStepChunk(pos, sk_ + off, l.ssm_conv_k.f32(), hist + 3 * inner,
+                       inner, 1, q_ + off, nullptr);
+      KdaConvStepChunk(pos, eg_ + off, l.ssm_conv_v.f32(), hist + 6 * inner,
+                       inner, 1, vk_ + off, nullptr);
+      KdaEGate(g1_ + off, l.ssm_a.f32(), heads, d, c.kda_gate_lower_bound,
+               eg_ + off, 1, nullptr);
+      L2NormHeads(q_ + off, heads, d, c.ln_eps, nullptr);
+      L2NormHeads(ko_ + off, heads, d, c.ln_eps, nullptr);
+      Scale(ko_ + off, inner, inv_sqrt_d, nullptr);
+      KdaFoldSk(s.kda_state[slot], eg_ + off, q_ + off, heads, d,
+                sk_scratch + off, nullptr);
+      KdaUpdateOut(s.kda_state[slot], q_ + off, ko_ + off, vk_ + off,
                    beta_ + static_cast<std::size_t>(r) * heads,
-                   sk_scratch + static_cast<std::size_t>(r) * inner, heads, d,
-                   g2_ + static_cast<std::size_t>(r) * inner, nullptr);
+                   sk_scratch + off, heads, d, g2_ + off, nullptr);
+    }
+  } else {
+    KdaConvStepChunk(static_cast<std::uint64_t>(p0), vq_,
+                     l.ssm_conv_q.f32(), hist, inner, n, ko_, nullptr);
+    KdaConvStepChunk(static_cast<std::uint64_t>(p0), sk_, l.ssm_conv_k.f32(),
+                     hist + 3 * inner, inner, n, q_, nullptr);
+    KdaConvStepChunk(static_cast<std::uint64_t>(p0), eg_, l.ssm_conv_v.f32(),
+                     hist + 6 * inner, inner, n, vk_, nullptr);
+
+    // Forget gate eg = exp(lb * sigmoid(-(g1 * a))) now that the raw v rows
+    // of eg_ have been consumed by the convolutions.
+    KdaEGate(g1_, l.ssm_a.f32(), heads, d, c.kda_gate_lower_bound, eg_, n,
+             nullptr);
+
+    // FLA l2 norms; the recurrent applies 1/sqrt(d) to the query only
+    // (build_delta_net_autoregressive scales q after both norms). Fold and
+    // update run in one chunk launch: the state is shared, so every position
+    // must decay and update before the next one folds.
+    L2NormHeads(q_, heads * n, d, c.ln_eps, nullptr);
+    L2NormHeads(ko_, heads * n, d, c.ln_eps, nullptr);
+    Scale(ko_, inner * n, 1.0F / std::sqrt(static_cast<float>(d)), nullptr);
+    if (!KdaFoldUpdateChunk(s.kda_state[slot], eg_, q_, ko_, vk_, beta_, heads,
+                            d, n, g2_, nullptr)) {
+      float* sk_scratch = sk_;  // raw k rows are fully consumed by the convs
+      for (std::uint32_t r = 0; r < n; ++r) {
+        KdaFoldSk(s.kda_state[slot],
+                  eg_ + static_cast<std::size_t>(r) * inner,
+                  q_ + static_cast<std::size_t>(r) * inner, heads, d,
+                  sk_scratch + static_cast<std::size_t>(r) * inner, nullptr);
+        KdaUpdateOut(s.kda_state[slot], q_ + static_cast<std::size_t>(r) * inner,
+                     ko_ + static_cast<std::size_t>(r) * inner,
+                     vk_ + static_cast<std::size_t>(r) * inner,
+                     beta_ + static_cast<std::size_t>(r) * heads,
+                     sk_scratch + static_cast<std::size_t>(r) * inner, heads, d,
+                     g2_ + static_cast<std::size_t>(r) * inner, nullptr);
+      }
     }
   }
 
@@ -808,8 +904,15 @@ void Executor::Prefill(Session& session, const std::int32_t* tokens,
   // one-token path and preserves per-step semantics.
   const std::size_t step = dbg_dir_.empty() ? kChunk : 1U;
   for (std::size_t done = 0; done < count; done += step) {
-    RunTokens(session, tokens + done,
-              static_cast<std::uint32_t>(std::min(step, count - done)));
+    const std::uint32_t cnt = static_cast<std::uint32_t>(
+        std::min(step, count - done));
+    const std::int64_t p0 = session.pos_ + 1;
+    RunTokens(session, tokens + done, cnt);
+    if (mtp_prefill_) {
+      // Pair every fresh position >= 1 of this chunk with the preceding
+      // trunk hidden row so the draft caches cover the whole prompt.
+      MtpPrefillChunk(session, tokens + done, cnt, p0);
+    }
   }
 }
 
@@ -890,6 +993,9 @@ void Executor::RunTokens(Session& session, const std::int32_t* tokens,
   HcInputs(cur, mean4_, 0U, hc, h, h_, n, nullptr);
   RmsNorm(h_, model_->output_norm().f32(), h_, n, h, h, h, c.rms_eps,
           nullptr);
+  // Expose the run's last row as the trunk hidden for the MTP draft start
+  // (it describes the same position the logits predict from).
+  h_last_ = h_ + static_cast<std::size_t>(n - 1U) * h;
   if (n == 1) {
     Dbg("hc_head-%u", 0U, h_, h);
     Dbg("result_norm-%u", 0U, h_, h);
@@ -904,6 +1010,142 @@ void Executor::RunTokens(Session& session, const std::int32_t* tokens,
     Dbg("result_output-%u", 0U, logits_, model_->output().rows);
   }
   session.pos_ = p0 + static_cast<std::int64_t>(n) - 1;
+}
+
+void Executor::DraftForward(Session& session, const std::int32_t* tok,
+                            const float* h_in, std::uint32_t rows,
+                            std::int64_t p0, bool final_out) {
+  const Config& c = c_;
+  const std::uint32_t h = c.hidden_size;
+  assert(HasMtp());
+  assert(rows >= 1U && rows <= kMtpRows);
+  assert(p0 >= 0 &&
+         p0 + static_cast<std::int64_t>(rows) <=
+             static_cast<std::int64_t>(session.cap_));
+  const DeviceLayer& l = model_->nextn();
+
+  // [enorm(embed) | hnorm(h_in)] side by side in one row of mtp_cat_, then
+  // eh_proj back to a hidden row (mirrors the nextn block's graph: enorm on
+  // the embedding, hnorm on the previous hidden, one projection of the
+  // concatenation).
+  const GemvType emb_type = OfType(model_->token_embd().type);
+  for (std::uint32_t r = 0; r < rows; ++r) {
+    EmbedRow(model_->token_embd().data, emb_type,
+             static_cast<std::uint32_t>(tok[r]), h,
+             mtp_cat_ + static_cast<std::size_t>(r) * 2 * h, nullptr);
+  }
+  RmsNorm(mtp_cat_, l.nextn_enorm.f32(), mtp_cat_, rows, h, 2 * h, 2 * h,
+          c.rms_eps, nullptr);
+  RmsNorm(h_in, l.nextn_hnorm.f32(), mtp_cat_ + h, rows, h, h, 2 * h,
+          c.rms_eps, nullptr);
+  GemvN(rows, l.nextn_eh_proj, mtp_cat_, 2 * h, mtp_x_, h);
+
+  RmsNorm(mtp_x_, l.attn_norm.f32(), x_, rows, h, h, h, c.rms_eps, nullptr);
+  DsaLayer(l, mtp_slot_, x_, rows, p0, session, y0_);
+  Add(y0_, mtp_x_, mtp_x_, rows * h, nullptr);
+  RmsNorm(mtp_x_, l.ffn_norm.f32(), x_, rows, h, h, h, c.rms_eps, nullptr);
+  Ffn(l, c.num_layers, x_, rows, y0_);
+  Add(y0_, mtp_x_, mtp_x_, rows * h, nullptr);
+
+  if (final_out) {
+    // The draft's next input hidden is its unnormalized final residual; the
+    // next round's hnorm consumes it (the block's own double norm).
+    static_cast<void>(hipMemcpyAsync(mtp_chain_, mtp_x_,
+                                     sizeof(float) * h,
+                                     hipMemcpyDeviceToDevice, nullptr));
+    RmsNorm(mtp_x_, l.nextn_shared_head_norm.f32(), x_, 1U, h, h, h,
+            c.rms_eps, nullptr);
+    GemvN(1U, model_->output(), x_, h, mtp_logits_, c.vocab_size);
+  }
+}
+
+void Executor::MtpStep(Session& session, std::int32_t token,
+                       const float* h_in) {
+  DraftForward(session, &token, h_in, 1U, session.mtp_pos_, true);
+  ++session.mtp_pos_;
+}
+
+void Executor::MtpDraft(Session& session, std::int32_t token) {
+  DraftForward(session, &token, mtp_chain_, 1U, session.mtp_pos_, true);
+  ++session.mtp_pos_;
+}
+
+void Executor::MtpAdvance(Session& session, std::int32_t token,
+                          const float* h_in) {
+  DraftForward(session, &token, h_in, 1U, session.mtp_pos_, false);
+  ++session.mtp_pos_;
+}
+
+void Executor::Verify(Session& session, std::int32_t token,
+                      const std::int32_t* drafts, std::uint32_t k) {
+  const Config& c = c_;
+  assert(HasMtp());
+  assert(drafts != nullptr && k >= 1U && k + 1U <= kMaxVerifyRows);
+  std::int32_t seq[kMaxVerifyRows];
+  seq[0] = token;
+  for (std::uint32_t i = 0; i < k; ++i) {
+    seq[i + 1U] = drafts[i];
+  }
+  verify_p0_ = session.pos_ + 1;
+  // Per-row KDA snapshots let RollbackVerify() restore any accepted
+  // prefix; the batched conv/fold path has no per-row boundary to take.
+  kda_snap_ = true;
+  RunTokens(session, seq, k + 1U);
+  kda_snap_ = false;
+  GemvN(k + 1U, model_->output(), h_, c.hidden_size, verify_logits_,
+        c.vocab_size);
+}
+
+void Executor::RollbackVerify(Session& session, std::uint32_t keep) {
+  assert(keep >= 1U && keep < kMaxVerifyRows && verify_p0_ >= 0);
+  // Snapshot row `keep` is the recurrent input before the first dropped
+  // row, i.e. exactly the state after consuming `keep` verify rows.
+  const std::size_t off = static_cast<std::size_t>(keep);
+  for (std::uint32_t slot = 0; slot < kda_layers_; ++slot) {
+    const std::size_t idx = (static_cast<std::size_t>(slot) *
+                                 kMaxVerifyRows +
+                             off);
+    static_cast<void>(hipMemcpyAsync(
+        session.conv_hist[slot],
+        mtp_snap_conv_ + idx * snap_conv_elems_,
+        snap_conv_elems_ * sizeof(float), hipMemcpyDeviceToDevice, nullptr));
+    static_cast<void>(hipMemcpyAsync(
+        session.kda_state[slot],
+        mtp_snap_state_ + idx * snap_state_elems_,
+        snap_state_elems_ * sizeof(float), hipMemcpyDeviceToDevice, nullptr));
+  }
+  const std::int64_t base = verify_p0_ - 1;
+  session.pos_ = base + static_cast<std::int64_t>(keep);
+  session.mtp_pos_ = session.pos_;
+}
+
+void Executor::MtpPrefillChunk(Session& session, const std::int32_t* tok,
+                               std::uint32_t cnt, std::int64_t p0) {
+  assert(HasMtp());
+  if (cnt == 0U) {
+    return;
+  }
+  // Draft row X pairs token position X + 1 with the hidden row of position
+  // X. In this chunk the batch rows are X in [p0, p0 + cnt - 2] (token
+  // tok[1..] with the h_ rows of the trunk chunk just run); X = p0 - 1
+  // pairs this chunk's first token with the previous chunk's last hidden
+  // row (mtp_prev_) and runs alone first, so the batched DSA rows find a
+  // causal cache below them.
+  if (p0 > 0) {
+    DraftForward(session, tok, mtp_prev_, 1U, session.mtp_pos_, false);
+    ++session.mtp_pos_;
+  }
+  std::uint32_t rows = (cnt >= 2U) ? cnt - 1U : 0U;
+  const std::int32_t* t = tok + 1;
+  for (std::uint32_t done = 0; done < rows; done += kMtpRows) {
+    const std::uint32_t sub = std::min(kMtpRows, rows - done);
+    DraftForward(session, t + done, h_, sub, session.mtp_pos_, false);
+    session.mtp_pos_ += sub;
+  }
+  // The next chunk's boundary pair reads position p0 + cnt - 1's hidden.
+  static_cast<void>(hipMemcpyAsync(mtp_prev_, h_last_,
+                                   sizeof(float) * c_.hidden_size,
+                                   hipMemcpyDeviceToDevice, nullptr));
 }
 
 }  // namespace gufo::models::glm5_next::rocm

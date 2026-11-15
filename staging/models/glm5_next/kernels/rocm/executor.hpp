@@ -42,8 +42,15 @@ class Session {
 
   std::int64_t pos_{-1};
   std::uint32_t cap_{0};
+  // Write cursor for the draft block's caches: the rows below it were
+  // written by the draft chain / prefill for the committed prefix, so it
+  // matches pos_ between draft rounds (RollbackVerify rewinds both; rows at
+  // or above the cursor are never read before being overwritten).
+  std::int64_t mtp_pos_{0};
   std::vector<void*> allocations_;
   // One entry per DSA / KDA layer, in `layers()` order filtered by kind.
+  // With a nextn block its own latent/pool caches are appended last, so
+  // the draft layer runs through DsaLayer at slot = DSA layer count.
   std::vector<__half*> latent_cache;  // [cap][512] binary16 latent rows
   std::vector<float*> pool_cache;     // [cap][256] F32 [ik | gate] rows
   std::vector<float*> conv_hist;      // [3 * 3 * inner] conv ring per KDA layer
@@ -121,6 +128,69 @@ class Executor {
   [[nodiscard]] const float* logits() const noexcept { return logits_; }
   [[nodiscard]] const DeviceModel& model() const noexcept { return *model_; }
 
+  // ------------------------------------------------------------- MTP draft
+  /// True when the artifact contains the nextn draft block.
+  [[nodiscard]] bool HasMtp() const noexcept { return c_.nextn_layers > 0U; }
+
+  /// Maximum trunk rows one `Verify` can consume (one accepted token plus
+  /// at most `kMaxVerifyRows - 1` drafts).
+  static constexpr std::uint32_t kMaxVerifyRows = 5;
+
+  /// Runs the nextn draft block on `token` (whose trunk position is
+  /// `session.position() + 1`) with the hidden state `h_in` (the normalized
+  /// output of position `session.position()` after a trunk pass). Writes the
+  /// draft cache row, updates the draft chain hidden (`MtpDraft` inputs) and
+  /// leaves the draft logits in `mtp_logits()`. The first call of a round
+  /// takes the trunk's own hidden row; with the caches aligned this also
+  /// serves as `MtpAdvance`/`MtpDraft` given the right hidden pointer.
+  void MtpStep(Session& session, std::int32_t token, const float* h_in);
+
+  /// Chains the draft block: consumes `token` at the position right after
+  /// the last draft row, conditioning on the previous draft's own normed
+  /// output hidden (not a trunk row).
+  void MtpDraft(Session& session, std::int32_t token);
+
+  /// Advances the draft cache over the last verified draft: `token` at the
+  /// position of the last verify row, with that row's trunk hidden (`row`
+  /// of `verify_hidden()`). Only the cache row matters; its logits are
+  /// superseded by the next round.
+  void MtpAdvance(Session& session, std::int32_t token, const float* h_in);
+
+  /// Runs `k + 1` trunk rows (the sampled token followed by `k` drafts) as
+  /// one batched pass, keeping a per-row snapshot of the recurrent KDA
+  /// state so a partial accept can rewind, and computes every row's logits
+  /// (`verify_logits()`, row-major, k+1 rows). `session.position()` must be
+  /// the position of `token`.
+  void Verify(Session& session, std::int32_t token,
+              const std::int32_t* drafts, std::uint32_t k);
+
+  /// Rewinds the trunk position, the recurrent KDA state (from the row
+  /// snapshots of the matching `Verify`) and the draft write cursor so that
+  /// exactly `keep` (1..k of a matching `Verify`) rows stay consumed; rows
+  /// at or above the rewound cursor are overwritten by the next draft round.
+  void RollbackVerify(Session& session, std::uint32_t keep);
+
+  /// When enabled, `Prefill` also runs the draft block over every chunk
+  /// (positions `>= 1`, paired with the preceding trunk hidden row) so the
+  /// draft caches are pre-filled at decode time. Must be set before the
+  /// prefill that should fill them; no effect without a nextn block.
+  void SetMtpPrefill(bool enabled) { mtp_prefill_ = enabled; }
+
+  [[nodiscard]] const float* mtp_logits() const noexcept {
+    return mtp_logits_;
+  }
+  /// [k+1][vocab] logits of the last `Verify`, row r = position
+  /// `verify_p0 + r`; valid until the next executor call.
+  [[nodiscard]] const float* verify_logits() const noexcept {
+    return verify_logits_;
+  }
+  /// [k+1][hidden] normed trunk hidden rows of the last `Verify` (the
+  /// `MtpAdvance` input takes its row k-1).
+  [[nodiscard]] const float* verify_hidden() const noexcept { return h_; }
+  /// The last trunk run's final-row hidden pointer (normalized output of
+  /// `session.position()`); valid until the next executor call.
+  [[nodiscard]] const float* last_hidden() const noexcept { return h_last_; }
+
   /// When non-empty, Step() downloads and writes every trunk anchor tensor
   /// (hc mixes, block norms, sub-layer outputs, stream write-backs, final
   /// norm, logits) as raw f32 files `<dir>/<anchor>.f32` for parity
@@ -145,6 +215,20 @@ class Executor {
                 std::uint32_t n, std::int64_t p0, Session& s, float* y);
   void Ffn(const DeviceLayer& l, std::uint32_t il, const float* x,
            std::uint32_t n, float* y);
+
+  /// One draft-block forward of `rows` consecutive positions `p0..`: row r
+  /// consumes token `tok[r]` and the hidden row `h_in[r*H..]` (the trunk or
+  /// previous-draft normed hidden of position `p0 + r - 1`).
+  /// [enorm(embed) | hnorm(h_in)] -> eh_proj -> attn_norm -> DsaLayer draft
+  /// cache rows -> residual -> ffn_norm -> MoE + shared FFN -> residual.
+  /// `final_out` (single row) additionally norms the final residual with
+  /// shared_head_norm into `mtp_chain_` and writes `mtp_logits_`; prefill
+  /// rows skip both (only the caches are needed).
+  void DraftForward(Session& session, const std::int32_t* tok,
+                    const float* h_in, std::uint32_t rows, std::int64_t p0,
+                    bool final_out);
+  void MtpPrefillChunk(Session& session, const std::int32_t* tok,
+                       std::uint32_t cnt, std::int64_t p0);
 
   const DeviceModel* model_{nullptr};
   Config c_{};
@@ -221,6 +305,29 @@ class Executor {
   __half* moe_inter_half_{nullptr};  // [kChunk * used][expert_ff]
   float* h_{nullptr};           // [NC][H] collapsed stream
   float* logits_{nullptr};      // [vocab]
+  const float* h_last_{nullptr};  // points at the last row of h_
+
+  // MTP draft-block state (only allocated when the artifact has a nextn
+  // block; the draft caches themselves are the trailing session entries).
+  static constexpr std::uint32_t kMtpRows = 256;  // prefill batch rows
+  std::uint32_t mtp_slot_{0};    // draft entry index in the session caches
+  std::uint32_t kda_layers_{0};  // KDA entry count (snapshot stride math)
+  bool mtp_prefill_{false};
+  bool kda_snap_{false};         // Verify runs KdaLayer per-row + snapshots
+  std::int64_t verify_p0_{-1};   // first position of the last Verify
+  float* mtp_cat_{nullptr};      // [kMtpRows][2H] [enorm(e) | hnorm(h)]
+  float* mtp_x_{nullptr};        // [kMtpRows][H] eh_proj/residual base
+  float* mtp_chain_{nullptr};    // [H] draft chain hidden (normed output)
+  float* mtp_prev_{nullptr};     // [H] last h_ row of the previous chunk
+  float* mtp_logits_{nullptr};   // [vocab] draft-block logits
+  float* verify_logits_{nullptr};  // [kMaxVerifyRows][vocab]
+  // Per-KDA-layer, per-row input snapshots taken by Verify's per-row KDA
+  // path: index [kda slot][row] with row in 1..kMaxVerifyRows-1 (the state
+  // entering that row = the state after accepting exactly `row` drafts).
+  float* mtp_snap_conv_{nullptr};   // [kda_layers][kMaxVerifyRows][9*inner]
+  float* mtp_snap_state_{nullptr};  // [kda_layers][kMaxVerifyRows][heads*d*d]
+  std::size_t snap_conv_elems_{0};
+  std::size_t snap_state_elems_{0};
 };
 
 }  // namespace gufo::models::glm5_next::rocm

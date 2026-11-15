@@ -114,6 +114,10 @@ std::uint32_t Model::VocabSize() const noexcept {
   return weights_->config.vocab_size;
 }
 
+bool Model::HasMtp() const noexcept {
+  return executor_ != nullptr && executor_->HasMtp();
+}
+
 std::string Model::ModelName() const {
   return std::string(reader_->GetMetadataString("general.name")
                          .value_or("GLM-5.3-Flash"));
@@ -136,7 +140,10 @@ Session::Session(std::shared_ptr<Model> model,
                  std::uint32_t max_context)
     : model_(std::move(model)),
       state_(std::move(state)),
-      max_context_(max_context) {}
+      max_context_(max_context) {
+  draft_logits_.resize(model_->VocabSize());
+  verify_rows_.resize(rocm::Executor::kMaxVerifyRows * model_->VocabSize());
+}
 
 Session::~Session() = default;
 
@@ -203,6 +210,209 @@ void Session::Reset() {
   tokens_.clear();
   logits_.clear();
   valid_ = true;
+}
+
+void Session::SetDraftLimits(std::uint32_t min_drafts,
+                             std::uint32_t max_drafts) {
+  const std::uint32_t cap = rocm::Executor::kMaxVerifyRows - 1U;
+  draft_max_ = std::min(max_drafts == 0U ? 1U : max_drafts, cap);
+  draft_min_ = std::min(std::max(min_drafts, 1U), draft_max_);
+  draft_k_ = draft_min_;
+  draft_streak_ = 0U;
+}
+
+void Session::SetMtpEnabled(bool enabled) {
+  mtp_enabled_ = enabled;
+  model_->executor_->SetMtpPrefill(enabled);
+}
+
+bool Session::DecodeStep(std::size_t max_tokens,
+                         sampling::SamplerState& sampler,
+                         DecodeResult* result, std::string* error_msg,
+                         bool stop_at_eos) {
+  if (!valid_) {
+    AssignError(error_msg,
+                "session needs a successful Sync after a failed operation");
+    return false;
+  }
+  if (result == nullptr || max_tokens == 0 || tokens_.empty()) {
+    AssignError(
+        error_msg,
+        "decode needs an output, a positive budget and a synced prompt");
+    return false;
+  }
+  *result = {};
+  const auto is_stop = [&](std::int32_t token) {
+    return stop_at_eos && model_->IsStopToken(token);
+  };
+
+  // Speculative decoding: with the nextn block and an unpenalized sampler,
+  // chain up to k drafts through the draft block, verify all k + 1 rows in
+  // one batched trunk pass, and keep the longest prefix the trunk agrees
+  // with. The verify pass reads the trunk weights once for the whole block,
+  // so a hit costs ~1.2 tokens' time. Greedy samplers take the exact-match
+  // path; temperature sampling uses the standard accept-and-residual rule.
+  std::size_t k = 0;
+  if (model_->HasMtp() && mtp_enabled_ && max_tokens >= 2 &&
+      !sampler.config().penalties_enabled() &&
+      tokens_.size() + 2 <= static_cast<std::size_t>(max_context_)) {
+    k = std::min<std::size_t>(draft_k_, max_tokens - 1);
+    k = std::min<std::size_t>(
+        k, static_cast<std::size_t>(max_context_) - tokens_.size() - 1);
+    k = std::min<std::size_t>(k, rocm::Executor::kMaxVerifyRows - 1U);
+  }
+  if (k == 0) {
+    const auto token = static_cast<std::int32_t>(sampler.Sample(logits_));
+    if (is_stop(token)) {
+      result->stop = true;
+      return true;
+    }
+    valid_ = false;
+    model_->executor_->Step(*state_, token);
+    tokens_.push_back(token);
+    (void)hipMemcpy(logits_.data(), model_->executor_->logits(),
+                    logits_.size() * sizeof(float), hipMemcpyDeviceToHost);
+    sampler.Accept(static_cast<sampling::TokenId>(token));
+    result->tokens.push_back(token);
+    valid_ = true;
+    return true;
+  }
+
+  const std::size_t vocab = draft_logits_.size();
+  const bool sampled = !sampler.config().can_use_unmodified_argmax();
+  const auto token = static_cast<std::int32_t>(sampler.Sample(logits_));
+  if (is_stop(token)) {
+    result->stop = true;
+    return true;
+  }
+
+  // Draft chain: the first draft conditions on the trunk hidden state,
+  // every later one on the previous draft's own output hidden.
+  valid_ = false;
+  model_->executor_->MtpStep(*state_, token, model_->executor_->last_hidden());
+  std::int32_t drafts[rocm::Executor::kMaxVerifyRows - 1U];
+  // Random sampling keeps each draft distribution so the accept step can
+  // weigh the target against it and draw the residual on a rejection.
+  std::vector<std::vector<sampling::TokenId>> draft_ids(k);
+  std::vector<std::vector<float>> draft_probs(k);
+  std::vector<double> draft_p(k, 0.0);
+  for (std::size_t i = 0; i < k; ++i) {
+    if (i > 0) {
+      model_->executor_->MtpDraft(*state_, drafts[i - 1]);
+    }
+    (void)hipMemcpy(draft_logits_.data(), model_->executor_->mtp_logits(),
+                    vocab * sizeof(float), hipMemcpyDeviceToHost);
+    if (!sampled) {
+      drafts[i] = static_cast<std::int32_t>(
+          sampler.SampleGreedy(std::span<const float>(draft_logits_)));
+      continue;
+    }
+    const auto q = sampler.Distribution(std::span<const float>(draft_logits_));
+    draft_ids[i].reserve(q.entries().size());
+    draft_probs[i].reserve(q.entries().size());
+    for (const auto& entry : q.entries()) {
+      draft_ids[i].push_back(entry.token);
+      draft_probs[i].push_back(static_cast<float>(entry.value));
+    }
+    drafts[i] =
+        static_cast<std::int32_t>(q.Sample(sampler.mutable_rng_state()));
+    draft_p[i] = q.probability(static_cast<sampling::TokenId>(drafts[i]));
+  }
+  result->drafted += k;
+  model_->executor_->Verify(*state_, token, drafts,
+                            static_cast<std::uint32_t>(k));
+  (void)hipMemcpy(verify_rows_.data(), model_->executor_->verify_logits(),
+                  (k + 1) * vocab * sizeof(float), hipMemcpyDeviceToHost);
+  const auto row = [&](std::size_t r) {
+    return std::span<const float>(verify_rows_.data() + r * vocab, vocab);
+  };
+
+  // Keep the longest draft prefix the target reproduces. Greedy compares
+  // argmaxes; random sampling accepts draft d with probability min(1,
+  // p(d)/q(d)) and, on the first rejection, replaces d with a draw from
+  // the residual (p - q)+.
+  std::size_t accepted = 0;
+  std::int32_t correction = -1;
+  if (!sampled) {
+    while (accepted < k && static_cast<std::int32_t>(sampler.SampleGreedy(
+                               row(accepted))) == drafts[accepted]) {
+      ++accepted;
+    }
+    if (accepted < k) {
+      correction =
+          static_cast<std::int32_t>(sampler.SampleGreedy(row(accepted)));
+    }
+  } else {
+    for (; accepted < k; ++accepted) {
+      const auto p = sampler.Distribution(row(accepted));
+      if (sampler.Uniform() * draft_p[accepted] <
+          p.probability(static_cast<sampling::TokenId>(drafts[accepted]))) {
+        continue;
+      }
+      correction = static_cast<std::int32_t>(
+          p.SampleResidual(draft_ids[accepted], draft_probs[accepted],
+                           sampler.mutable_rng_state()));
+      break;
+    }
+  }
+  bool stopped = false;
+  for (std::size_t i = 0; i < accepted; ++i) {
+    if (is_stop(drafts[i])) {
+      accepted = i + 1;
+      stopped = true;
+      break;
+    }
+  }
+
+  // Commit. A full accept advances the draft cache over the last draft
+  // against its own target hidden row; a partial one rewinds the trunk and
+  // the draft cache to the committed prefix.
+  std::vector<sampling::TokenId> committed;
+  committed.reserve(k + 2);
+  committed.push_back(static_cast<sampling::TokenId>(token));
+  for (std::size_t i = 0; i < accepted; ++i) {
+    committed.push_back(static_cast<sampling::TokenId>(drafts[i]));
+  }
+  if (accepted == k) {
+    model_->executor_->MtpAdvance(
+        *state_, drafts[k - 1],
+        model_->executor_->verify_hidden() +
+            (k - 1) * model_->config().hidden_size);
+    logits_.assign(row(k).begin(), row(k).end());
+    if (!stopped) {
+      ++draft_streak_;
+      if (draft_streak_ >= 2U) {
+        draft_k_ = std::min(draft_max_, draft_k_ + 1U);
+        draft_streak_ = 0U;
+      }
+    }
+  } else {
+    model_->executor_->RollbackVerify(*state_,
+                                      static_cast<std::uint32_t>(accepted + 1U));
+    draft_k_ = std::max(draft_min_, draft_k_ - 1U);
+    draft_streak_ = 0U;
+  }
+  result->accepted += accepted;
+  for (const auto id : committed) {
+    tokens_.push_back(static_cast<std::int32_t>(id));
+    result->tokens.push_back(static_cast<std::int32_t>(id));
+  }
+  sampler.Accept(std::span<const sampling::TokenId>(committed));
+  if (!stopped && correction >= 0) {
+    // The target's own token at the first rejected row continues the
+    // sequence; feeding it is the round's only extra cost.
+    model_->executor_->Step(*state_, correction);
+    tokens_.push_back(correction);
+    result->tokens.push_back(correction);
+    sampler.Accept(static_cast<sampling::TokenId>(correction));
+    (void)hipMemcpy(logits_.data(), model_->executor_->logits(),
+                    vocab * sizeof(float), hipMemcpyDeviceToHost);
+    result->stop = is_stop(correction);
+  } else if (stopped) {
+    result->stop = true;
+  }
+  valid_ = true;
+  return true;
 }
 
 }  // namespace gufo::models::glm5_next

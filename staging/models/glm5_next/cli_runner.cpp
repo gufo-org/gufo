@@ -91,9 +91,9 @@ int RunGlm5NextBenchmark(const cli::BenchOptions& options,
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  if (!options.speculative_backend.empty()) {
-    std::cerr << "Error: glm5-next bench does not support speculative "
-                 "decoding\n";
+  if (!options.speculative_backend.empty() &&
+      options.speculative_backend != "mtp") {
+    std::cerr << "Error: glm5-next bench supports only --speculative mtp\n";
     return 1;
   }
   if (options.concurrency != std::vector<std::size_t>{1}) {
@@ -137,6 +137,18 @@ int RunGlm5NextBenchmark(const cli::BenchOptions& options,
   if (session == nullptr) {
     std::cerr << "Error creating glm5-next session: " << error << '\n';
     return 1;
+  }
+  const bool use_mtp = options.speculative_backend == "mtp";
+  if (use_mtp) {
+    if (!model->HasMtp()) {
+      std::cerr << "Error: glm5-next model has no nextn block; omit "
+                   "--speculative mtp\n";
+      return 1;
+    }
+    // The draft cache is filled during prefill, so enable before the first
+    // Sync.
+    session->SetMtpEnabled(true);
+    session->SetDraftLimits(options.min_draft_tokens, options.draft_tokens);
   }
 
   std::vector<std::int32_t> tokens;
@@ -229,19 +241,47 @@ int RunGlm5NextBenchmark(const cli::BenchOptions& options,
         }
         std::vector<std::int32_t> generated;
         const auto start = std::chrono::steady_clock::now();
-        while (generated.size() < generation_length) {
-          const auto logits = session->Logits();
-          if (logits.empty()) {
-            std::cerr << "Error running glm5-next decode: no logits\n";
-            return 1;
+        if (use_mtp) {
+          std::vector<sampling::TokenId> history;
+          for (const std::int32_t token : session->Tokens()) {
+            history.push_back(static_cast<sampling::TokenId>(token));
           }
-          const std::int32_t next = static_cast<std::int32_t>(
-              std::max_element(logits.begin(), logits.end()) - logits.begin());
-          if (!session->Evaluate(next, &error)) {
-            std::cerr << "Error running glm5-next decode: " << error << '\n';
-            return 1;
+          sampling::SamplerState sampler(options.sampling, history);
+          std::string decode_error;
+          while (generated.size() < generation_length) {
+            Session::DecodeResult decoded;
+            if (!session->DecodeStep(generation_length - generated.size(),
+                                     sampler, &decoded, &decode_error)) {
+              std::cerr << "Error running glm5-next MTP decode: "
+                        << decode_error << '\n';
+              return 1;
+            }
+            for (const std::int32_t next : decoded.tokens) {
+              if (generated.size() < generation_length) {
+                generated.push_back(next);
+              }
+            }
+            if (decoded.stop) {
+              break;
+            }
           }
-          generated.push_back(next);
+        } else {
+          while (generated.size() < generation_length) {
+            const auto logits = session->Logits();
+            if (logits.empty()) {
+              std::cerr << "Error running glm5-next decode: no logits\n";
+              return 1;
+            }
+            const std::int32_t next =
+                static_cast<std::int32_t>(std::max_element(logits.begin(),
+                                                           logits.end()) -
+                                          logits.begin());
+            if (!session->Evaluate(next, &error)) {
+              std::cerr << "Error running glm5-next decode: " << error << '\n';
+              return 1;
+            }
+            generated.push_back(next);
+          }
         }
         const double seconds = std::chrono::duration<double>(
                                    std::chrono::steady_clock::now() - start)

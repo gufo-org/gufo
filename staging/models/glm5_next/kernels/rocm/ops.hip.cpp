@@ -71,6 +71,15 @@ __global__ void AddBiasKernel(float* data, const float* bias,
   }
 }
 
+__global__ void AddKernel(const float* __restrict__ a,
+                          const float* __restrict__ b,
+                          float* __restrict__ dst, std::uint32_t total) {
+  for (std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < total;
+       i += gridDim.x * blockDim.x) {
+    dst[i] = a[i] + b[i];
+  }
+}
+
 __global__ void RmsNormKernel(const float* __restrict__ x,
                               const float* __restrict__ w,
                               float* __restrict__ dst, std::uint32_t n,
@@ -852,6 +861,11 @@ void AddBias(float* data, const float* bias, std::uint32_t total,
              std::uint32_t bias_len, hipStream_t stream) {
   AddBiasKernel<<<Grid1D(total), kBlock, 0, stream>>>(data, bias, total,
                                                       bias_len);
+}
+
+void Add(const float* a, const float* b, float* dst, std::uint32_t total,
+         hipStream_t stream) {
+  AddKernel<<<Grid1D(total), kBlock, 0, stream>>>(a, b, dst, total);
 }
 
 void RmsNorm(const float* x, const float* w, float* dst, std::uint32_t rows,

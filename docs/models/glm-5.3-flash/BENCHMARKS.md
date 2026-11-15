@@ -72,6 +72,39 @@ Serve-protocol gate not yet re-captured for these steps. Use these
 only as offline scans, not interchangeably with the serve-protocol gate
 cells.
 
+### B10 — MTP nextn speculative decoding (2026-11-15)
+
+Opt-in `--speculative mtp` (serve and bench): the GGUF `nextn` block drafts
+up to k tokens, verified with the correction row in one batched trunk pass.
+`kMaxVerifyRows = 5` bounds k ≤ 4; the engine adapts k in
+[`--min/max-draft-tokens`], growing one after two full accepts and dropping
+one on any mismatch (greedy accept is exact: the longest verified prefix +
+correction token preserves the plain decoding chain).
+
+Offline scan (greedy, `-p 2048` depth, n-gen 64, repetitions 1): tg64
+9.31 → **14.90** (**+60 %**) with `output_sha256` **identical**
+(`1d79e532…`) between plain and MTP — lossless at tg64; pp2048 260.79 →
+241.88 (**−7.3 %**, draft-block prefill of the prompt rows)
+(`/tmp/opencode/gufo_bench_glm5mtp.log`).
+
+Serve-protocol A/B (`gufo serve --context 131072`, `serving_bench` default
+case greedy max-tokens 32, concurrency 1, repetitions 2,
+`/tmp/opencode/glm5_mtp_gate2.sh`): decode median 12.21 → **14.12**
+(**+15.6 %**, max sample 16.21; acceptance **70.5 %**, 44 drafted /
+31 accepted over 32-token completions), prefill median 213.1 → **199.4**
+(−6.4 %) — pp side of the Phase-3 gate still held (199.4 ≥ 0.9×189.44)
+(`/tmp/opencode/gate_cplain.json`, `/tmp/opencode/gate_mtp1.json`).
+Policy scans: fixed k=4 regresses (decode median 11.01, acceptance 42.9 %)
+and grow-after-one regresses (13.09, acceptance 68.6 %); the two-streak
+policy above remains the default (`gate_mtp4/gate_mtp1b` artifacts).
+
+The **absolute tg32 cell (llama.cpp 16.80) is not attained at the 32-token
+decode window**: best matched median 14.12 = **0.84×**. Ramp-up over ~20
+verify steps dominates short generations (max sample 16.21; the offline
+tg64 point 14.90 shows the asymptotic direction). Suite `glm5_next` 9/9 on
+the candidate including the strict `rocm_forward` golden replay and the new
+`Add` op parity case (`/tmp/opencode/gufo_bench_glm5suite2.log`).
+
 Gufo column captured 2026-11-12 on `build/gpu-test/gufo` (P6 dense Q5_K
 WMMA tier over the P5 fixed + widened WMMA routed tier) through
 `gufo serve` over HTTP with server-reported `timings`, greedy (seed 1),
