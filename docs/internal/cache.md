@@ -815,12 +815,14 @@ workspace, orientation replacement and resize intermediates. Complex formats
 can still require large bounds. A cached image retains its pixel charge; cache
 hits reuse that owner, and history copies keep it alive after eviction.
 
-On-demand mode caps copied-token verification at one ordinary eight-row segment
-before session construction. Wider buffers and captured work retain their
-allocation geometry, so momentary startup headroom cannot safely fund a wider
-path for the process lifetime. The neural draft limit is unchanged. This trades
-optional copy acceleration for smaller execution obligations; it does not
-reclaim committed cache pages or promise later image capacity.
+With a projector, copied-token verification keeps its widest width (64 rows)
+only while the configured sessions, their deferred work and one
+maximum-resolution image (4096x4096: encoder scratch, embedding and pixels) fit
+the startup device capacity; otherwise it uses one ordinary eight-row segment.
+The width is fixed before session construction, since wider buffers and
+captured work keep their allocation geometry for the process lifetime. The
+neural draft limit is unchanged. This does not reclaim committed cache pages or
+promise later image capacity.
 
 The coordinator serializes internal reservations, but cannot reserve memory
 against other processes. Allocation failures still need cleanup and a resource

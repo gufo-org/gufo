@@ -25,6 +25,10 @@ thread_local std::barrier<>* before_pixels{};
 thread_local gufo::models::qwen::vision::AdmissionBudget* allocation_budget{};
 thread_local std::array<void*, 4> pixel_allocations{};
 thread_local bool fail_owner{}, owner_failure_triggered{};
+// MSVC's STL over-allocates large vector blocks to align them to 32 bytes.
+bool PixelAllocation(std::size_t bytes) {
+  return bytes >= kTrackedPixelBytes && bytes - kTrackedPixelBytes < 64;
+}
 }  // namespace
 
 // Only the two focused tests below arm these controls. They observe real
@@ -38,14 +42,14 @@ void* operator new(std::size_t bytes) {
     owner_failure_triggered = true;
     throw std::bad_alloc();
   }
-  if (bytes == kTrackedPixelBytes && before_pixels) {
+  if (PixelAllocation(bytes) && before_pixels) {
     auto* rendezvous = std::exchange(before_pixels, nullptr);
     rendezvous->arrive_and_wait();
   }
   void* memory = std::malloc(bytes ? bytes : 1);
   if (!memory)
     throw std::bad_alloc();
-  if (allocation_budget && bytes == kTrackedPixelBytes) {
+  if (allocation_budget && PixelAllocation(bytes)) {
     auto slot = std::ranges::find(pixel_allocations, nullptr);
     assert(slot != pixel_allocations.end());
     *slot = memory;

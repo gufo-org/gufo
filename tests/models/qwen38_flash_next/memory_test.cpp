@@ -134,42 +134,43 @@ void CopyWidthSelection() {
   constexpr std::size_t host_available = 38883639296ULL;
   constexpr std::size_t runtime = 34588672000ULL;
   constexpr std::size_t cache = 4294967296ULL;
-  constexpr std::size_t margin = 536870912ULL;
   Require(host_available - cache == runtime,
           "host ceiling retains its existing OS reserve");
   const auto device_gate = vision::PlanStartupMemory(
       device, wide.deferred_bytes, wide.per_session_bytes, 0, true);
   Require(device_gate.Fits(4), "64 rows fit the text/device gate");
   std::vector<std::uint32_t> evaluated;
-  const auto choose = [&] {
+  const auto choose = [&](std::size_t capacity, std::size_t image) {
     evaluated.clear();
-    return qfn::SelectOnDemandCopyWidth([&](std::uint32_t rows) {
-      evaluated.push_back(rows);
-      return estimate(rows);
-    });
+    return qfn::SelectOnDemandCopyWidth(64, 4, capacity, image,
+                                        [&](std::uint32_t rows) {
+                                          evaluated.push_back(rows);
+                                          return estimate(rows);
+                                        });
   };
-  const auto ordinary = choose();
-  Require(ordinary.rows == 8 && evaluated == std::vector<std::uint32_t>{8} &&
+  const auto room = device - 4 * wide.per_session_bytes - wide.deferred_bytes;
+  const auto widest = choose(device, room);
+  Require(widest.rows == 64 && evaluated == std::vector<std::uint32_t>{64} &&
+              widest.memory.per_session_bytes == wide.per_session_bytes &&
+              widest.memory.deferred_bytes == wide.deferred_bytes,
+          "room for sessions, deferred work and one image keeps wide copies");
+  const auto ordinary = choose(device, device);
+  Require(ordinary.rows == 8 &&
+              evaluated ==
+                  std::vector<std::uint32_t>{64, 56, 48, 40, 32, 24, 16, 8} &&
               ordinary.memory.per_session_bytes == narrow.per_session_bytes &&
               ordinary.memory.deferred_bytes == narrow.deferred_bytes,
-          "on-demand installs and estimates only ordinary verification before "
-          "sessions allocate");
+          "without image room the last estimate installs ordinary verification "
+          "before sessions allocate");
+  Require(choose(device, room + 1).rows < 64,
+          "one byte short of an image narrows the optional width");
+  Require(choose(device, std::numeric_limits<std::size_t>::max()).rows == 8,
+          "overflowing image bounds fall back instead of wrapping");
   Require(
       vision::PlanStartupMemory(device, ordinary.memory.deferred_bytes,
                                 ordinary.memory.per_session_bytes, 0, true)
           .Fits(4),
       "unfunded optional acceleration cannot become a text startup refusal");
-  const auto needed =
-      4 * wide.per_session_bytes + wide.deferred_bytes + cache + margin;
-  Require(needed > runtime && needed <= device,
-          "device admission alone can enable a costly optional width");
-  // Even an observer returning enough startup headroom for every preference
-  // cannot establish an enduring runtime grant for optional wider execution.
-  vision::AdmissionBudget affordable([&] { return needed; });
-  auto startup_capacity = affordable.Reserve(needed);
-  Require(choose().rows == 8 && evaluated == std::vector<std::uint32_t>{8},
-          "affordable startup memory does not re-enable permanent wide work");
-  startup_capacity = {};
   const auto text_short =
       4 * narrow.per_session_bytes + narrow.deferred_bytes - 1;
   Require(ordinary.rows == 8 && !vision::PlanStartupMemory(
@@ -203,7 +204,8 @@ void WarmedCopyWidthAdmission() {
   const auto config = SyntheticConfig();
   const auto wide =
       qfn::PlanDeferredScratchBytes(config, true, 8, 8, 64, true, true, 0, 7);
-  const auto ordinary = qfn::SelectOnDemandCopyWidth([&](std::uint32_t rows) {
+  // No capacity beyond the text gate: the ordinary width is installed.
+  const auto ordinary = qfn::SelectOnDemandCopyWidth(64, 4, 0, 0, [&](std::uint32_t rows) {
     return qfn::CopyWidthMemory{
         qfn::PlanSessionMemory(config, SessionMode::kSpeculative, 262144, 4224,
                                8, rows, 7, 20, 2720)

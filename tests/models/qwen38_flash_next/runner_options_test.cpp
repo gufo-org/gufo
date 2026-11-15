@@ -93,7 +93,7 @@ void LoadedProjectorSelection() {
     const auto selected = qfn::InitializeServingVision(
         model, options.max_context,
         options.speculative.backend == gufo::ext::TextSpeculativeBackend::kMtp,
-        options.session_count, 450, [] { return std::size_t{1000}; });
+        options.session_count, 450, 64, 0, [] { return std::size_t{1000}; });
     Expect(options.provider_options.empty() && selected.has_value(),
            "explicit and discovered loaded projectors need no policy argument");
     Expect(
@@ -125,11 +125,11 @@ void LoadedProjectorSelection() {
     Rejects(
         [&] {
           (void)qfn::InitializeServingVision(model, options.max_context, true,
-                                             options.session_count, 450,
+                                             options.session_count, 450, 64, 0,
                                              [] { return std::size_t{1000}; });
         },
         "already");
-    Expect(model.budget == original_budget && model.width_changes == 1,
+    Expect(model.budget == original_budget && model.width_changes == 8,
            "another runner cannot overwrite the model coordinator");
     selected->budget->ClaimExecutionOwner();
     Rejects([&] { selected->budget->ClaimExecutionOwner(); }, "owner");
@@ -138,7 +138,7 @@ void LoadedProjectorSelection() {
   // No loaded projector means no image-related admission or width cap.
   LoadedModel text;
   const auto unselected = qfn::InitializeServingVision(
-      text, 262144, true, 4, 0, []() -> std::size_t {
+      text, 262144, true, 4, 0, 64, 0, []() -> std::size_t {
         Expect(false, "text-only selection must not observe image headroom");
         return 0;
       });
@@ -153,22 +153,40 @@ void LoadedProjectorSelection() {
 
   LoadedModel autoregressive{.projector = true, .speculative = false};
   const auto ar = qfn::InitializeServingVision(
-      autoregressive, 262144, false, 1, 230, [] { return std::size_t{1000}; });
+      autoregressive, 262144, false, 1, 230, 64, 0,
+      [] { return std::size_t{1000}; });
   Expect(ar && ar->plan.Fits(1) && !ar->copy_width &&
              autoregressive.width_changes == 0 &&
              ar->budget == autoregressive.budget,
          "AR projector installs admission without configuring MTP copy rows");
 
+  // Sessions (4 x 150), wide deferred work (80) and one image (320) fit 1000.
+  LoadedModel roomy{.projector = true};
+  const auto wide = qfn::InitializeServingVision(
+      roomy, 262144, true, 4, 1000, 64, 320, [] { return std::size_t{1000}; });
+  Expect(wide && wide->copy_width && wide->copy_width->rows == 64 &&
+             roomy.copy_rows == 64 && roomy.width_changes == 1 &&
+             wide->plan.per_session_bytes == 150 &&
+             wide->budget->ProtectedBytes() == 680,
+         "image headroom keeps wide copy verification and its obligations");
+  LoadedModel tight{.projector = true};
+  const auto narrow = qfn::InitializeServingVision(
+      tight, 262144, true, 4, 1000, 64, 321, [] { return std::size_t{1000}; });
+  Expect(narrow && narrow->copy_width && narrow->copy_width->rows == 8 &&
+             tight.copy_rows == 8 && narrow->plan.per_session_bytes == 100,
+         "without room for one image the ordinary width is installed");
+
   LoadedModel insufficient{.projector = true};
   const auto short_plan = qfn::InitializeServingVision(
-      insufficient, 262144, true, 4, 419, [] { return std::size_t{1000}; });
+      insufficient, 262144, true, 4, 419, 64, 0,
+      [] { return std::size_t{1000}; });
   Expect(!short_plan->plan.Fits(4),
          "one-byte text insufficiency remains a startup refusal");
   LoadedModel unknown_sessions{.projector = true};
   Rejects(
       [&] {
         (void)qfn::InitializeServingVision(unknown_sessions, 262144, true, 0,
-                                           450,
+                                           450, 64, 0,
                                            [] { return std::size_t{1000}; });
       },
       "session");

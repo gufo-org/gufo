@@ -1069,7 +1069,12 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     }
     auto admission = InitializeServingVision(
         *model, max_context, use_mtp, options.session_count,
-        startup_memory ? startup_memory->device.free_bytes : 0, [] {
+        startup_memory ? startup_memory->device.free_bytes : 0,
+        rocm::Executor::kWideRows,
+        on_demand ? qwen::vision::MaximumImageBytes(
+                        model->VisionEncoder()->OutputWidth())
+                  : 0,
+        [] {
           const auto snapshot = CollectStartupMemory();
           const auto remaining = snapshot.capacity.available_bytes;
           return remaining > kVisionRuntimeMargin
@@ -1084,7 +1089,10 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
         server::Logger::Info(
             "loader",
             "event=copy_width_selection policy=on-demand rows=" +
-                std::to_string(choice.rows) + " reason=ordinary_verification" +
+                std::to_string(choice.rows) +
+                (choice.rows > kCopySegmentRows
+                     ? " reason=image_headroom_fits"
+                     : " reason=ordinary_verification") +
                 " device_capacity_bytes=" +
                 std::to_string(startup_memory->device.free_bytes) +
                 " runtime_capacity_bytes=" +

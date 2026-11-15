@@ -34,6 +34,9 @@ struct ImageDimensions {
 [[nodiscard]] std::size_t ImageScratchBytes(ImageDimensions image);
 [[nodiscard]] std::size_t ImageEmbeddingBytes(ImageDimensions image,
                                               std::uint32_t output_width);
+/// Encoder scratch, embedding and resized RGB pixels of the largest image a
+/// request may carry. Decoding the original upload is admitted separately.
+[[nodiscard]] std::size_t MaximumImageBytes(std::uint32_t output_width);
 /// Reservations sample remaining host/device capacity at arrival. The observer
 /// preserves platform budgets and runtime reserves. Only unmaterialized
 /// obligations are deducted: committed allocations already reduced the

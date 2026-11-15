@@ -34,7 +34,8 @@ struct ServingVisionAdmission {
 template<class Model>
 [[nodiscard]] std::optional<ServingVisionAdmission> InitializeServingVision(
     Model& model, std::uint32_t max_context, bool use_mtp, std::size_t sessions,
-    std::size_t device_capacity,
+    std::size_t device_capacity, std::uint32_t widest_copy_rows,
+    std::size_t image_bytes,
     qwen::vision::AdmissionBudget::RuntimeObserver observe_runtime) {
   RequireUncoordinatedModel(model);
   if (!model.VisionEncoder())
@@ -45,11 +46,13 @@ template<class Model>
                             : core::SessionMode::kAutoregressive;
   std::optional<CopyWidthChoice> copy_width;
   if (use_mtp) {
-    copy_width = SelectOnDemandCopyWidth([&](std::uint32_t rows) {
-      model.LimitCopyRows(rows);
-      return CopyWidthMemory{model.TextSessionBytes(mode, max_context),
-                             model.DeferredScratchBytes()};
-    });
+    copy_width = SelectOnDemandCopyWidth(
+        widest_copy_rows, sessions, device_capacity, image_bytes,
+        [&](std::uint32_t rows) {
+          model.LimitCopyRows(rows);
+          return CopyWidthMemory{model.TextSessionBytes(mode, max_context),
+                                 model.DeferredScratchBytes()};
+        });
   }
   const auto plan = qwen::vision::PlanStartupMemory(
       device_capacity, model.DeferredScratchBytes(),
