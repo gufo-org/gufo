@@ -63,8 +63,13 @@ struct Job {
   [[nodiscard]] std::size_t AWords() const {
     return std::size_t(Copies()) * 2 * g * p->kc * kRecWords;
   }
+  // One row: each output record holds row 0 of 8 tiles.
+  [[nodiscard]] bool Compact() const { return nr == 1; }
+  [[nodiscard]] int Gt() const {  // output records per core and part
+    return Compact() ? (p->nt + 7) / 8 : g * p->nt;
+  }
   [[nodiscard]] std::size_t CWords() const {
-    return std::size_t(8) * g * p->nt * 4 * kOutWords * parts;
+    return std::size_t(8) * Gt() * 4 * kOutWords * parts;
   }
 };
 
@@ -209,12 +214,12 @@ struct Q8Gemm::Impl {
     for (const Job& j : jobs) {
       const Part& p = *j.p;
       const int ga = 2 * j.g * p.kc;
-      const std::int32_t s[15] = {
+      const std::int32_t s[16] = {
           j.g,
           p.kc,
           p.nt,
           ga,
-          j.g * p.nt,
+          j.Gt(),
           2 * p.nt,
           p.Records(),
           std::int32_t(j.a_words),
@@ -222,10 +227,21 @@ struct Q8Gemm::Impl {
           std::int32_t(j.c_words),
           j.parts,
           j.parts * p.Records(),
-          j.parts * j.g * p.nt,
+          j.parts * j.Gt(),
           p.count * p.Records(),
-          j.Copies() == 1 ? 0 : std::int32_t(ga * kRecWords)};
-      const auto words = generate.Generate(s);
+          j.Copies() == 1 ? 0 : std::int32_t(ga * kRecWords),
+          j.Compact() ? 1 : 0};
+      std::span<const std::uint32_t> words;
+      try {
+        words = generate.Generate(s);
+      } catch (const Error& e) {
+        std::string shape;
+        for (const std::int32_t v : s)
+          shape += ' ' + std::to_string(v);
+        throw Error(std::string(e.what()) + " (n " + std::to_string(j.m->n) +
+                    ", k " + std::to_string(j.m->k) + ", rows " +
+                    std::to_string(j.nr) + "; scalars" + shape + ")");
+      }
       if (words.size() <= 4)
         throw Error("Q8Gemm: instruction generation failed");
       if (ops == 0)
@@ -292,7 +308,7 @@ struct Q8Gemm::Impl {
   // and acc mod 2^32). Each slice's partial sums add into y.
   void Unpack(const Job& j, float* y) const {
     const Part& p = *j.p;
-    const std::size_t gt = std::size_t(j.g) * p.nt;
+    const std::size_t gt = std::size_t(j.Gt());
     const int span = p.Span(), n = j.m->n;
     for (int part = j.p0; part < j.p0 + j.parts; ++part)
       for (int col = 0; col < 8; ++col)
@@ -310,6 +326,20 @@ struct Q8Gemm::Impl {
             if (out0 >= n)
               continue;
             const int outs = std::min(8, n - out0);
+            if (j.Compact()) {  // row 0 of tile t: record t / 8, slot t % 8
+              const std::int32_t* w = base +
+                                      (std::size_t(t / 8) * 4 + jj) * kOutWords +
+                                      (t % 8) * 8;
+              const std::int32_t *hi = w, *lo = w + 64;
+              float* dst = y + std::size_t(j.r0) * n + out0;
+              const float rs = rss[0];
+              const float* top = tops + out0;
+              for (int nn = 0; nn < outs; ++nn)
+                dst[nn] +=
+                    (float(hi[nn]) * 16777216.0f + float(lo[nn] & 0xFFFFFF)) *
+                    (rs * top[nn]);
+              continue;
+            }
             for (int gi = 0; gi < j.g; ++gi) {
               const std::int32_t* w =
                   base + (std::size_t(t) * j.g + gi) * 4 * kOutWords +
@@ -372,11 +402,13 @@ struct Q8Gemm::Impl {
 
 Q8Gemm Q8Gemm::Open(Device& device, const std::filesystem::path& dir,
                     std::size_t arena_bytes) {
+  if (arena_bytes > kMaxArenaBytes)
+    throw Error("Q8Gemm: the weight arena holds at most 4 GiB");
   Q8Gemm g;
   g.impl_ = std::make_unique<Impl>();
   auto& m = *g.impl_;
   m.program = Program::Load(device, dir / "q8gemm.xclbin");
-  m.generate = DispatchLibrary::Open(dir / "q8gemm_dispatch.so", 15);
+  m.generate = DispatchLibrary::Open(dir / "q8gemm_dispatch.so", 16);
   m.a = m.program.Allocate(kABytes, kArgA);
   m.c = m.program.Allocate(kCBytes, kArgC);
   m.arena = m.program.Allocate(arena_bytes, kArgW);

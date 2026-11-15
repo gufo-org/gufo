@@ -14,7 +14,8 @@ records per stream of the whole matrix: the stride between streams in W),
 the word offsets a_base, b_base and c_base of the rows in A, the matrix in W
 and the output in C, and a_ss, the stride between the streams' copies of the
 rows in A (0: one shared copy; otherwise each set of streams takes its own K
-slice). W holds [stream][part][record]; C [column][part][record]. Instruction streams of several products concatenate
+slice), and compact (one row: gt counts records of 8 tiles' row 0). W holds
+[stream][part][record]; C [column][part][record]. Instruction streams of several products concatenate
 into one dispatch (the cores restart at every barrier).
 Usage: q8gemm.py <out dir>: writes q8gemm.xclbin and q8gemm_dispatch.so, the
 files gufo::npu::Q8Gemm::Open loads (src/core/npu/q8_gemm.hpp). Needs an
@@ -35,7 +36,7 @@ COLS, ROWS = 8, 4
 OBJ = 1088                      # words per record (4352 bytes)
 OUT = 128                       # words per output record (one core's 8 x 8 tile)
 MAX_A, MAX_C = 8, 32            # A records (4096 bytes kept) and 8 x 8 accumulator tiles per core
-A_WORDS, W_WORDS, C_WORDS = 64 << 20, 512 << 20, 64 << 20  # W: up to a 2 GiB arena
+A_WORDS, W_WORDS, C_WORDS = 64 << 20, 1024 << 20, 64 << 20  # W: up to a 4 GiB arena
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -49,7 +50,8 @@ def q8gemm(A: In, W: In, C: InOut, *, g: DispatchTime[np.int32], kc: DispatchTim
            nt2: DispatchTime[np.int32], kt: DispatchTime[np.int32], a_base: DispatchTime[np.int32],
            b_base: DispatchTime[np.int32], c_base: DispatchTime[np.int32], parts: DispatchTime[np.int32],
            ktp: DispatchTime[np.int32], gtp: DispatchTime[np.int32], kts: DispatchTime[np.int32],
-           a_ss: DispatchTime[np.int32]):
+           a_ss: DispatchTime[np.int32],
+           compact: DispatchTime[np.int32]):
     rec_ty = np.ndarray[(OBJ,), np.dtype[np.int32]]
     out_ty = np.ndarray[(OUT,), np.dtype[np.int32]]
     out4_ty = np.ndarray[(ROWS * OUT,), np.dtype[np.int32]]
@@ -108,9 +110,9 @@ def q8gemm(A: In, W: In, C: InOut, *, g: DispatchTime[np.int32], kc: DispatchTim
     w_ty = np.ndarray[(W_WORDS,), np.dtype[np.int32]]
     c_ty = np.ndarray[(C_WORDS,), np.dtype[np.int32]]
 
-    def sequence(A, W, C, g, kc, nt, ga, gt, nt2, kt, a_base, b_base, c_base, parts, ktp, gtp, kts, a_ss, wh, yh):
+    def sequence(A, W, C, g, kc, nt, ga, gt, nt2, kt, a_base, b_base, c_base, parts, ktp, gtp, kts, a_ss, compact, wh, yh):
         for k in sorted(l1):
-            for i, v in enumerate((g, kc, nt, ga, gt, nt2, parts)):
+            for i, v in enumerate((g, kc, nt, ga, gt, nt2, parts, compact)):
                 rtps[k][i] = v
             barriers[k].set(1)
         tg = TaskGroup()
@@ -122,7 +124,7 @@ def q8gemm(A: In, W: In, C: InOut, *, g: DispatchTime[np.int32], kc: DispatchTim
                         wait=True, group=tg)
         tg.finish()
 
-    rt = Runtime(sequence, [a_ty, w_ty, c_ty, g, kc, nt, ga, gt, nt2, kt, a_base, b_base, c_base, parts, ktp, gtp, kts, a_ss,
+    rt = Runtime(sequence, [a_ty, w_ty, c_ty, g, kc, nt, ga, gt, nt2, kt, a_base, b_base, c_base, parts, ktp, gtp, kts, a_ss, compact,
                             [f.prod() for f in streams],
                             [o.cons() for o in outs]])
     return Program(from_name("npu2", n_cols=None), rt, workers=workers).resolve_program()
