@@ -414,15 +414,18 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   `_f32ship.log`). The Rows tier is now fully tiled; what remains of
   its 0.5 s/pass residue is the <16-token ladder tail.
 
-## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-13)
+## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-15)
 
 The launch storm is closed (steady-state idle 2.2 %,
-`/tmp/opencode/prof_mla2`): routed IQ WMMA 23 %, dense Q5_K WMMA 19 %,
-MLA score+combine 15 %, KDA fold 12 %, `GemvRowsQ8_0` 7 %, bitonic
-indexer sort 6 %, misc ~12 %. The measured-order ladder with per-item
+`/tmp/opencode/prof_post_a6` post-A6 rerun): routed IQ WMMA 29.4 %,
+dense Q5_K WMMA 24.1 %, MLA score+combine 18.2 %, micro-kernel misc
+(convert/norm/elementwise, 112 k calls) 14.6 %, Rows GEMV 6.0 % (was
+~23 % before A6), KDA fold 4.7 %, indexer sort ~1 % (was 6 %). The
+measured-order ladder with per-item
 estimates and quality gates lives in
-[PLAN.md](PLAN.md) Phase 3: exact-default items A1-A6 (toward ~280-310
-t/s, starting with bit-exact indexer-sort batching), then the opt-in
+[PLAN.md](PLAN.md) Phase 3: exact-default items A1-A6 (A1 rejected,
+A2/A3/A5/A6 shipped, A4 MLA score+combine next and the last exact-default
+item standing), then the opt-in
 approximate fast track B7-B10 (W8A8, online-softmax attend, capped
 window, DFlash2/MTP speculation) from which the reference-class 600+
 comes. Earlier items in this list (IQ routed WMMA tier, Q5_K WMMA tier,
