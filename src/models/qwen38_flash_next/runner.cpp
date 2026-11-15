@@ -994,15 +994,6 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
       *error = e.what();
     return nullptr;
   }
-  // Keep the requested cache allowance for reporting, without imposing a
-  // second text startup gate or promising the eventual post-slot grant.
-  const auto cache_reserve =
-      !options.ram_cache.enabled
-          ? (options.disk_cache.directory.empty() ? 0 : std::size_t{512} << 20)
-          : (options.ram_cache.capacity_bytes
-                 ? options.ram_cache.capacity_bytes
-                 : std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes,
-                            HostSnapshotBudgetBytes()));
   // Each eight rows of wide copy verification past the first reserve
   // rollback rows beside the sessions (ResourceClaim). Narrow the width
   // until the configured sessions fit, rather than refusing a session count
@@ -1063,19 +1054,28 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
   }
   try {
     std::optional<StartupMemorySnapshot> startup_memory;
+    std::size_t cache_target = 0;
+    CopyWidthHeadroom headroom{};
     if (on_demand) {
       // Fingerprinting's temporary MTP reader and hash buffers have finished.
       // Final admission uses this collection, not an earlier load phase.
       startup_memory = CollectStartupMemory();
+      cache_target = RequestedVisionCacheBytes(
+          options.ram_cache, !options.disk_cache.directory.empty(),
+          startup_memory->host.automatic_budget_bytes);
+      // Cache resources, recovered manifests and backing are constructed only
+      // after this factory returns: none of that target is materialized yet.
+      headroom = PrepareCopyWidthHeadroom(
+          startup_memory->capacity, kVisionRuntimeMargin, cache_target, 0);
     }
+    const auto image_bytes = on_demand
+                                 ? qwen::vision::MaximumImageBytes(
+                                       model->VisionEncoder()->OutputWidth())
+                                 : 0;
     auto admission = InitializeServingVision(
         *model, max_context, use_mtp, options.session_count,
         startup_memory ? startup_memory->device.free_bytes : 0,
-        rocm::Executor::kWideRows,
-        on_demand ? qwen::vision::MaximumImageBytes(
-                        model->VisionEncoder()->OutputWidth())
-                  : 0,
-        [] {
+        rocm::Executor::kWideRows, image_bytes, headroom, [] {
           const auto snapshot = CollectStartupMemory();
           const auto remaining = snapshot.capacity.available_bytes;
           return remaining > kVisionRuntimeMargin
@@ -1084,7 +1084,7 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
         });
     if (admission) {
       LogVisionAdmission(*startup_memory, admission->plan,
-                         options.session_count, cache_reserve);
+                         options.session_count, cache_target);
       if (admission->copy_width) {
         const auto& choice = *admission->copy_width;
         server::Logger::Info(
@@ -1092,13 +1092,18 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
             "event=copy_width_selection policy=on-demand rows=" +
                 std::to_string(choice.rows) +
                 (choice.rows > kCopySegmentRows
-                     ? " reason=image_headroom_fits"
+                     ? " reason=cache_image_headroom_fits"
                      : " reason=ordinary_verification") +
                 " device_capacity_bytes=" +
                 std::to_string(startup_memory->device.free_bytes) +
                 " runtime_capacity_bytes=" +
                 std::to_string(startup_memory->capacity.available_bytes) +
-                " cache_requested_bytes=" + std::to_string(cache_reserve) +
+                " selection_capacity_bytes=" +
+                std::to_string(headroom.capacity_bytes) +
+                " cache_requested_bytes=" + std::to_string(cache_target) +
+                " cache_growth_preference_bytes=" +
+                std::to_string(headroom.cache_growth_bytes) +
+                " image_preference_bytes=" + std::to_string(image_bytes) +
                 " runtime_margin_bytes=" +
                 std::to_string(kVisionRuntimeMargin) + " base_bytes=" +
                 std::to_string(choice.memory.per_session_bytes) +

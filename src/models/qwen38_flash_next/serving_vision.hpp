@@ -36,7 +36,7 @@ template<class Model>
 [[nodiscard]] std::optional<ServingVisionAdmission> InitializeServingVision(
     Model& model, std::uint32_t max_context, bool use_mtp, std::size_t sessions,
     std::size_t device_capacity, std::uint32_t widest_copy_rows,
-    std::size_t image_bytes,
+    std::size_t image_bytes, CopyWidthHeadroom headroom,
     qwen::vision::AdmissionBudget::RuntimeObserver observe_runtime) {
   RequireUncoordinatedModel(model);
   if (!model.VisionEncoder())
@@ -47,13 +47,13 @@ template<class Model>
                             : core::SessionMode::kAutoregressive;
   std::optional<CopyWidthChoice> copy_width;
   if (use_mtp) {
-    // Images are later admitted against the runtime observation, which can
-    // be limited by host RAM rather than the device.
+    // Use the caller's collected snapshot for selection and diagnostics.
+    // The live observer is only for later allocation admission. Cache growth
+    // is a width preference, never part of the execution owner's obligation.
     copy_width = SelectOnDemandCopyWidth(
         widest_copy_rows, sessions,
-        observe_runtime ? std::min(device_capacity, observe_runtime())
-                        : device_capacity,
-        image_bytes, [&](std::uint32_t rows) {
+        std::min(device_capacity, headroom.capacity_bytes), image_bytes,
+        headroom.cache_growth_bytes, [&](std::uint32_t rows) {
           model.LimitCopyRows(rows);
           return CopyWidthMemory{model.TextSessionBytes(mode, max_context),
                                  model.DeferredScratchBytes()};

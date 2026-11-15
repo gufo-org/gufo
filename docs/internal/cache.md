@@ -816,13 +816,21 @@ can still require large bounds. A cached image retains its pixel charge; cache
 hits reuse that owner, and history copies keep it alive after eviction.
 
 With a projector, copied-token verification keeps its widest width (64 rows)
-only while the configured sessions, their deferred work and one
-maximum-resolution image (4096x4096: encoder scratch, embedding and pixels) fit
-the startup device capacity; otherwise it uses one ordinary eight-row segment.
-The width is fixed before session construction, since wider buffers and
-captured work keep their allocation geometry for the process lifetime. The
-neural draft limit is unchanged. This does not reclaim committed cache pages or
-promise later image capacity.
+when the configured sessions, deferred work, one maximum-resolution image
+(4096x4096: encoder scratch, embedding and pixels) and applicable future cache
+storage fit the collected capacity. Unified-memory GPUs include the requested
+cache allowance, less any already initialized storage within it; device-local
+budgets do not subtract host-only cache growth. Automatic and disk-only cache
+preferences follow serving's existing sizing policy. Retained metadata is
+inside the allowance; bounded staging remains covered by the runtime margin.
+
+The selector tries intermediate eight-row widths before falling back to ordinary
+eight-row verification. This preference neither reserves a cache/image pool nor
+adds a text-startup condition. The width is fixed before session construction,
+since buffers and captured work keep their geometry for the process lifetime.
+Narrowing can reduce copied-token acceleration; the neural draft limit is
+unchanged. Cache grants and lazy growth still use their normal checks. This does
+not reclaim committed pages or promise later image capacity.
 
 The coordinator serializes internal reservations, but cannot reserve memory
 against other processes. Allocation failures still need cleanup and a resource

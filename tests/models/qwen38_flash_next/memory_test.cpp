@@ -11,6 +11,7 @@
 
 #include "src/models/qwen38_flash_next/copy_width_admission.hpp"
 #include "src/models/qwen38_flash_next/execution_admission.hpp"
+#include "src/models/qwen38_flash_next/serving_vision.hpp"
 #include "src/models/qwen38_flash_next/snapshot_admission.hpp"
 
 namespace qfn = gufo::models::qwen38_flash_next;
@@ -142,7 +143,7 @@ void CopyWidthSelection() {
   std::vector<std::uint32_t> evaluated;
   const auto choose = [&](std::size_t capacity, std::size_t image) {
     evaluated.clear();
-    return qfn::SelectOnDemandCopyWidth(64, 4, capacity, image,
+    return qfn::SelectOnDemandCopyWidth(64, 4, capacity, image, 0,
                                         [&](std::uint32_t rows) {
                                           evaluated.push_back(rows);
                                           return estimate(rows);
@@ -206,7 +207,7 @@ void WarmedCopyWidthAdmission() {
       qfn::PlanDeferredScratchBytes(config, true, 8, 8, 64, true, true, 0, 7);
   // No capacity beyond the text gate: the ordinary width is installed.
   const auto ordinary =
-      qfn::SelectOnDemandCopyWidth(64, 4, 0, 0, [&](std::uint32_t rows) {
+      qfn::SelectOnDemandCopyWidth(64, 4, 0, 0, 0, [&](std::uint32_t rows) {
         return qfn::CopyWidthMemory{
             qfn::PlanSessionMemory(config, SessionMode::kSpeculative, 262144,
                                    4224, 8, rows, 7, 20, 2720)
@@ -248,6 +249,243 @@ void WarmedCopyWidthAdmission() {
   auto later = after.Reserve(image_bytes);
   Require(after.Outstanding() == image_bytes,
           "refusal and cancellation leave subsequent image admission healthy");
+}
+
+// Supplies loaded model state at the real serving initialization seam. Width
+// selection and every byte estimate use the same code as the production runner.
+struct CopyWidthModel {
+  qfn::Config config = SyntheticConfig();
+  std::uint32_t copy_rows = 64;
+  const std::uint32_t neural_drafts = 7;
+  std::shared_ptr<vision::AdmissionBudget> budget;
+
+  bool VisionEncoder() const { return true; }
+  bool HasVisionMemoryBudget() const { return bool(budget); }
+  void LimitCopyRows(std::uint32_t rows) { copy_rows = rows; }
+  std::size_t TextSessionBytes(SessionMode mode, std::uint32_t context) const {
+    auto plan = qfn::PlanSessionMemory(config, mode, context, 4224, 8,
+                                       copy_rows, neural_drafts, 20, 2720);
+    plan.vision_descriptor_bytes = 64;
+    return plan.TotalBytes();
+  }
+  std::size_t SessionBytes(SessionMode mode, std::uint32_t context) const {
+    return TextSessionBytes(mode, context) +
+           std::size_t{context} *
+               (config.hidden_size * sizeof(float) + 3 * sizeof(std::int32_t));
+  }
+  std::size_t DeferredScratchBytes() const {
+    return qfn::PlanDeferredScratchBytes(config, true, 8, 8, copy_rows, false,
+                                         false, 0, neural_drafts);
+  }
+  void SetVisionMemoryBudget(std::shared_ptr<vision::AdmissionBudget> value) {
+    budget = std::move(value);
+  }
+};
+
+void CacheCopyWidthPreference() {
+  constexpr std::size_t device = 40354959360ULL;
+  constexpr std::size_t host = 38082940928ULL;
+  constexpr std::size_t margin = 536870912ULL;
+  constexpr std::size_t cache_target = 4294967296ULL;
+  const auto capacity = vision::SelectStartupCapacity(device, host);
+  const auto headroom =
+      qfn::PrepareCopyWidthHeadroom(capacity, margin, cache_target, 0);
+  Require(headroom.capacity_bytes == 37546070016ULL &&
+              headroom.cache_growth_bytes == cache_target,
+          "one startup observation applies margin and future unified cache");
+  const auto image = vision::MaximumImageBytes(2560);
+  Require(image == 2883584000ULL,
+          "width preference retains the production maximum image bound");
+  CopyWidthModel model;
+  const auto estimate = [&](std::uint32_t rows) {
+    model.LimitCopyRows(rows);
+    return qfn::CopyWidthMemory{
+        model.TextSessionBytes(SessionMode::kSpeculative, 262144),
+        model.DeferredScratchBytes()};
+  };
+  const auto choose = [&](std::size_t bytes, std::size_t growth) {
+    return qfn::SelectOnDemandCopyWidth(64, 4, bytes, image, growth, estimate);
+  };
+  const auto old = choose(headroom.capacity_bytes, 0);
+  const auto selected =
+      choose(headroom.capacity_bytes, headroom.cache_growth_bytes);
+  Require(old.rows == 64 && selected.rows == 8,
+          "the recorded startup only keeps wide rows when cache growth is "
+          "omitted; an unfunded maximum-image preference falls back");
+  Require(vision::PlanStartupMemory(device, selected.memory.deferred_bytes,
+                                    selected.memory.per_session_bytes, 0, true)
+              .Fits(4),
+          "unfunded future cache plus maximum image adds no text startup gate");
+
+  const auto wide = estimate(64);
+  const auto exact =
+      4 * wide.per_session_bytes + wide.deferred_bytes + image + cache_target;
+  Require(choose(exact, cache_target).rows == 64 &&
+              choose(exact - 1, cache_target).rows == 56,
+          "wide selection honors exact fit and a one-byte shortfall");
+  const auto middle = estimate(32);
+  const auto intermediate = 4 * middle.per_session_bytes +
+                            middle.deferred_bytes + image + cache_target;
+  Require(choose(intermediate, cache_target).rows == 32 &&
+              choose(intermediate - 1, cache_target).rows == 24,
+          "intermediate widths remain selectable with matching requirements");
+  Require(choose(std::numeric_limits<std::size_t>::max(),
+                 std::numeric_limits<std::size_t>::max())
+                  .rows == 8,
+          "overflowing future cache requirements do not wrap into a fit");
+
+  constexpr std::size_t committed = 2229338112ULL;
+  // The new observation already reflects these physical pages. Subtract only
+  // remaining intended storage, never add the committed bytes back to free.
+  const auto after_commit = qfn::PrepareCopyWidthHeadroom(
+      vision::SelectStartupCapacity(device - committed, host - committed),
+      margin, cache_target, committed);
+  Require(
+      after_commit.capacity_bytes == headroom.capacity_bytes - committed &&
+          after_commit.cache_growth_bytes == cache_target - committed &&
+          choose(after_commit.capacity_bytes, after_commit.cache_growth_bytes)
+                  .rows == selected.rows,
+      "materialized cache is reflected once, not reserved twice");
+  Require(qfn::PrepareCopyWidthHeadroom(capacity, margin, cache_target,
+                                        cache_target + 1)
+                  .cache_growth_bytes == 0,
+          "already owned storage beyond the target cannot underflow growth");
+  const auto separate = qfn::PrepareCopyWidthHeadroom(
+      vision::SelectStartupCapacity(device, host, true), margin, cache_target,
+      0);
+  Require(
+      separate.capacity_bytes == device - margin &&
+          separate.cache_growth_bytes == 0 &&
+          choose(separate.capacity_bytes, separate.cache_growth_bytes).rows ==
+              64,
+      "host-only cache growth does not consume independent device capacity");
+  Require(qfn::PrepareCopyWidthHeadroom(
+              vision::SelectStartupCapacity(margin - 1, margin - 1), margin,
+              cache_target, 0)
+                  .capacity_bytes == 0,
+          "runtime margin saturates without underflow");
+}
+
+void SelectedWidthThroughCacheGrowth() {
+  constexpr std::size_t device = 40354959360ULL;
+  constexpr std::size_t host = 38082940928ULL;
+  constexpr std::size_t margin = 536870912ULL;
+  constexpr std::size_t cache_target = 4294967296ULL;
+  constexpr std::size_t initial_cache = 2229338112ULL;
+  constexpr std::size_t grown_cache = 3278438400ULL;
+  constexpr std::size_t request = 167910499ULL;
+  constexpr std::size_t pending_with_wide = 2140019904ULL;
+  const auto capacity = vision::SelectStartupCapacity(device, host);
+  const auto headroom =
+      qfn::PrepareCopyWidthHeadroom(capacity, margin, cache_target, 0);
+  const auto image_bound = vision::MaximumImageBytes(2560);
+  const auto wide_remaining = qfn::PlanDeferredScratchBytes(
+      SyntheticConfig(), true, 8, 8, 64, true, true, 0, 7);
+  const auto residual = pending_with_wide - wide_remaining;
+  Require(residual == 192, "retain unexplained execution bytes in both arms");
+
+  for (const bool prefer_cache : {false, true}) {
+    CopyWidthModel model;
+    // Initial observation and cache growth use recorded values. The later
+    // 2 GiB pressure is deliberately injected, not inferred from the separate
+    // completion-time host-memory reading. This is an accounting fixture,
+    // not a replay or proof of hardware capacity.
+    auto free = headroom.capacity_bytes;
+    auto preference = headroom;
+    if (!prefer_cache)
+      preference.cache_growth_bytes = 0;
+    const auto serving = qfn::InitializeServingVision(
+        model, 262144, true, 4, device, 64, image_bound, preference,
+        [&] { return free; });
+    Require(serving && serving->copy_width && serving->plan.Fits(4) &&
+                model.copy_rows == (prefer_cache ? 8U : 64U) &&
+                model.neural_drafts == 7,
+            "actual serving initialization installs the chosen width before "
+            "execution without changing context, sessions or neural drafts");
+    const auto budget = serving->budget;
+    Require(budget->Outstanding() == 0,
+            "optional cache preference creates no image pool or reservation");
+    const auto remaining =
+        qfn::PlanDeferredScratchBytes(model.config, true, 8, 8, model.copy_rows,
+                                      true, true, 0, model.neural_drafts) +
+        residual;
+    Require(remaining == (prefer_cache ? 236077248ULL : pending_with_wide),
+            "pending execution tracks selected rows and retains the residual");
+    qfn::ExecutionCommitment execution(budget);
+    const auto committed = budget->ProtectedBytes() - remaining;
+    free -= committed;
+    execution.SetCommitted(committed);
+    Require(
+        budget->ProtectedBytes() == remaining,
+        "physical execution storage leaves only unmaterialized obligations");
+
+    auto initial = budget->ReserveShared(initial_cache);
+    free -= initial_cache;
+    auto initial_owner = initial.Convert();
+    auto growth = budget->ReserveShared(grown_cache - initial_cache);
+    free -= grown_cache - initial_cache;
+    auto growth_owner = growth.Convert();
+    Require(budget->Outstanding() == grown_cache && budget->PendingBytes() == 0,
+            "actual cache growth remains owned but is not deducted twice");
+    constexpr std::size_t injected_pressure = std::size_t{2} << 30;
+    free -= injected_pressure;
+    if (!prefer_cache) {
+      Refused([&] { (void)budget->Reserve(request); },
+              "old startup selection can leave no warmed image headroom");
+      Require(budget->Capacity() == 0 && budget->Outstanding() == grown_cache,
+              "wide refusal keeps existing cache and execution ownership");
+    } else {
+      auto image = budget->Reserve(request);
+      Require(budget->Capacity() == 1593698992ULL &&
+                  budget->PendingBytes() == request &&
+                  budget->Outstanding() == grown_cache + request,
+              "narrower selected obligations admit the representative request");
+      Refused([&] { (void)budget->Reserve(budget->Capacity()); },
+              "genuinely excessive images still fail without overspending");
+      // Hold whichever contender wins until both have tried. Cache and image
+      // work cannot independently spend the same remaining physical headroom.
+      const auto available = budget->Capacity() - request;
+      std::barrier rendezvous(3);
+      std::atomic<unsigned> admitted{}, refused{};
+      const auto contender = [&](bool cache) {
+        rendezvous.arrive_and_wait();
+        gufo::cache::ResourceReservation ticket;
+        try {
+          ticket = cache ? budget->ReserveShared(available)
+                         : budget->Reserve(available);
+          ++admitted;
+        } catch (const gufo::core::ResourceAdmissionError&) {
+          ++refused;
+        }
+        rendezvous.arrive_and_wait();
+      };
+      std::thread cache_work(contender, true);
+      std::thread image_work(contender, false);
+      rendezvous.arrive_and_wait();
+      rendezvous.arrive_and_wait();
+      cache_work.join();
+      image_work.join();
+      Require(
+          admitted == 1 && refused == 1 && budget->PendingBytes() == request,
+          "concurrent cache growth and image reservations share one limit");
+      image = {};
+      auto later_image = budget->Reserve(request);
+      Require(budget->PendingBytes() == request &&
+                  budget->ProtectedBytes() == remaining &&
+                  execution.Bytes() == committed,
+              "cancellation and refusal preserve subsequent requests and all "
+              "accepted text execution");
+    }
+    // Release physical allocations before their shared charge; restore the
+    // execution obligation before freeing reusable execution storage.
+    free += grown_cache;
+    initial_owner = {};
+    growth_owner = {};
+    execution.Release();
+    free += committed;
+    Require(budget->Outstanding() == 0 && budget->PendingBytes() == 0,
+            "shutdown releases cache owners without leaked reservations");
+  }
 }
 
 void SnapshotAdmissionOwnership() {
@@ -476,6 +714,8 @@ int main() {
   ModesAndGrowth();
   CopyWidthSelection();
   WarmedCopyWidthAdmission();
+  CacheCopyWidthPreference();
+  SelectedWidthThroughCacheGrowth();
   SnapshotAdmissionOwnership();
   SnapshotAdmissionFailuresAndModes();
   LazyExecutionMaterialization();
