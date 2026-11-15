@@ -8,6 +8,8 @@
       "include-component-in-tag": false,
       "include-v-in-tag": true,
       "include-commit-authors": true,
+      "draft": true,
+      "force-tag-creation": true,
       "bump-minor-pre-major": true,
       "changelog-sections": [
         {

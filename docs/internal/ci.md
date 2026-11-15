@@ -18,7 +18,7 @@ with a verb; a reusable workflow's jobs appear as `caller / called job`.
 | `devlab-comment.yml` | Functional reporting | Update PR comment | GitHub Ubuntu | When Linux validation starts or ends. Keeps the PR comment current, also for forks, without running PR code. |
 | `pr-title.yml` | PR title | Validate PR title | GitHub Ubuntu | PR opened, edited, reopened or updated. |
 | `docs-website.yml` | Website docs | Request website development docs | GitHub Ubuntu | Pushes to main that change public docs, manual. Sends `gufo-docs` so gufo.blog refreshes its `development` docs. |
-| `release-please.yml` | Release automation | Prepare, merge and publish release | GitHub Ubuntu | Manual. Waits for the required checks, publishes the release and sends the tag to Toolboxes and the website. |
+| `release-please.yml` | Release automation | Prepare, merge and publish release | GitHub Ubuntu | Manual. Waits for the required checks, creates the draft release and sends the tag to Toolboxes and the website. Toolboxes publishes the draft. |
 
 ## Required checks
 
