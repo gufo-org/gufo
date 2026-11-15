@@ -930,6 +930,14 @@ endfunction()
   add_test(NAME image_api_test COMMAND image_api_test)
   set_tests_properties(image_api_test PROPERTIES LABELS "cpu;server;api;image")
 
+  # `gufo serve music` routes and the media job store with a fake runner; no
+  # sockets and no model.
+  add_executable(music_api_test tests/cli/music_api_test.cpp)
+  target_link_libraries(music_api_test PRIVATE gufo_http)
+  add_test(NAME music_api_test COMMAND music_api_test)
+  set_tests_properties(music_api_test PROPERTIES
+    LABELS "cpu;server;api;music;queue;cancellation")
+
   # The A1111 (sdapi) image API with a recording runner; no sockets.
   add_executable(sdapi_test tests/cli/sdapi_test.cpp)
   target_link_libraries(sdapi_test PRIVATE gufo_http gufo_llm_cli)

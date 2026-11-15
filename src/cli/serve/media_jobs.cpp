@@ -238,9 +238,13 @@ struct MediaJobStore::Impl {
       if (!IsJobId(id, options.id_prefix) || entry.is_symlink() ||
           !entry.is_directory())
         continue;
-      std::ifstream input(entry.path() / "job.json", std::ios::binary);
-      const std::string text((std::istreambuf_iterator<char>(input)),
-                             std::istreambuf_iterator<char>());
+      std::string text;
+      {
+        // Closed before any removal below: Windows cannot delete open files.
+        std::ifstream input(entry.path() / "job.json", std::ios::binary);
+        text.assign(std::istreambuf_iterator<char>(input),
+                    std::istreambuf_iterator<char>());
+      }
       bool keep = false;
       auto job = std::make_shared<Job>();
       try {
@@ -281,6 +285,17 @@ struct MediaJobStore::Impl {
         error.clear();
         continue;
       }
+      // A crash between a write and its rename leaves a partial file behind.
+      std::vector<std::filesystem::path> partials;
+      for (const auto& file :
+           std::filesystem::directory_iterator(entry.path(), error)) {
+        if (file.path().filename().string().find(".gufo-partial-") !=
+            std::string::npos)
+          partials.push_back(file.path());
+      }
+      for (const auto& partial : partials)
+        std::filesystem::remove(partial, error);
+      error.clear();
       job->directory = entry.path();
       jobs.emplace(id, std::move(job));
     }

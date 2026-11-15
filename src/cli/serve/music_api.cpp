@@ -257,13 +257,22 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& http,
     if (Given(*gufo, "key"))
       request.key = unknown;
     if (const json::Value* meter = Given(*gufo, "time_signature")) {
-      const std::string text = meter->is_string() ? meter->str() : "";
-      int beats = 0;
+      const std::string_view text =
+          meter->is_string() ? std::string_view(meter->str()) : "";
+      const auto whole = [](std::string_view digits, int* value) {
+        const auto result = std::from_chars(
+            digits.data(), digits.data() + digits.size(), *value);
+        return !digits.empty() && result.ec == std::errc() &&
+               result.ptr == digits.data() + digits.size();
+      };
+      // Beats per bar over a power-of-two note value.
       const auto slash = text.find('/');
-      const auto result =
-          std::from_chars(text.data(), text.data() + slash, beats);
-      if (slash == std::string::npos || result.ec != std::errc() ||
-          result.ptr != text.data() + slash)
+      int beats = 0;
+      int unit = 0;
+      if (slash == std::string_view::npos ||
+          !whole(text.substr(0, slash), &beats) ||
+          !whole(text.substr(slash + 1), &unit) || unit < 1 ||
+          (unit & (unit - 1)) != 0)
         return BadRequest("time_signature must look like \"4/4\"",
                           "time_signature");
       request.beats_per_bar = beats;
