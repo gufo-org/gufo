@@ -37,7 +37,7 @@ struct MusicOptions {
   double seconds{0.0};
   double guidance{-1.0};
   int steps{0};
-  std::uint64_t seed{831001};
+  std::uint64_t seed{ext::kDefaultMusicSeed};
   bool plan_only{false};
   bool float32{false};
 };

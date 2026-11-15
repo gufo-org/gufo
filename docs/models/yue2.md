@@ -87,6 +87,7 @@ Songs take minutes, so the server runs them as jobs, like videos:
 }
 ```
 
+Without `gufo.seed` the server uses 831001, the same default as `gufo music`.
 `response_format` is `wav` (PCM16) or `wav_float`. `gufo.options` also takes
 `abc_sampling` and `semantic_sampling` objects that override `temperature`,
 `top_p`, `top_k`, `repetition_penalty`, `penalty_window`, `min_tokens` and

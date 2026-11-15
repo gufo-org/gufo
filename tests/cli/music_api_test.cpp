@@ -479,6 +479,14 @@ void TestFloatAndTruncation(const std::filesystem::path& root) {
   const json::Value job = WaitFor(*service, id, "completed");
   Check(job.find("gufo")->member_str("finish") == "truncated",
         "truncated: finish");
+  Check(job.find("gufo")->member_double("seed") ==
+            static_cast<double>(gufo::ext::kDefaultMusicSeed),
+        "default seed echoed");
+  {
+    const std::lock_guard<std::mutex> lock(state->mutex);
+    Check(state->latest.seed == gufo::ext::kDefaultMusicSeed,
+          "a request without a seed uses the CLI's default");
+  }
   const HttpResponse content =
       Send(*service, "GET", "/v1/audio/music/" + id + "/content");
   Check(content.status == 200 &&

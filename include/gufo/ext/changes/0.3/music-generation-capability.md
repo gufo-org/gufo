@@ -14,7 +14,8 @@ Publish music generation contracts (`include/gufo/ext/music.hpp`):
   request fields a runner takes, whether it returns or accepts a symbolic
   score, plans without audio, and whether the length is exact, a maximum or
   the model's choice.
-- `MusicRequest`, `MusicResult`, `MusicFinish`, `MusicAudio` (an alias of
+- `MusicRequest` (its seed defaults to `kDefaultMusicSeed`, 831001),
+  `MusicResult`, `MusicFinish`, `MusicAudio` (an alias of
   `TtsAudioBuffer`, frame-interleaved) and `MusicProgress` (phase plus counts;
   a total of zero is unknown).
 - `ValidateMusicRequest`, the capability check the core applies before
