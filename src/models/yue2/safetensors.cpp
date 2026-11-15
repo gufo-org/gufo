@@ -3,9 +3,8 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
-#include <stdexcept>
-
 #include <gufo/ext/json.hpp>
+#include <stdexcept>
 
 namespace gufo::models::yue2 {
 

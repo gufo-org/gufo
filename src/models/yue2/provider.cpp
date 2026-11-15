@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <gufo/ext/json.hpp>
 #include <memory>
 #include <optional>
 #include <string>
@@ -22,7 +23,6 @@
 #include "noise.hpp"
 #include "protocol.hpp"
 #include "sampler.hpp"
-#include <gufo/ext/json.hpp>
 #include "tokenizer.hpp"
 #endif
 

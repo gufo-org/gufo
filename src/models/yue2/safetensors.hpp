@@ -4,14 +4,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <gufo/ext/platform/mapped_file.hpp>
 #include <map>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include <gufo/ext/platform/mapped_file.hpp>
 
 namespace gufo::models::yue2 {
 

@@ -42,7 +42,7 @@ ext::Capability ParseCapability(const std::string& name) {
           {"video_generation", ext::Capability::kVideoGeneration},
           {"music_generation", ext::Capability::kMusicGeneration},
           {"decision", ext::Capability::kDecision},
-  };
+      };
   const auto found = kCapabilities.find(name);
   if (found == kCapabilities.end())
     throw std::runtime_error("unknown capability " + name);

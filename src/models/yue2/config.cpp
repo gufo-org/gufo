@@ -2,12 +2,11 @@
 
 #include <cmath>
 #include <fstream>
+#include <gufo/ext/json.hpp>
 #include <iterator>
 #include <stdexcept>
 #include <system_error>
 #include <vector>
-
-#include <gufo/ext/json.hpp>
 
 namespace gufo::models::yue2 {
 namespace {

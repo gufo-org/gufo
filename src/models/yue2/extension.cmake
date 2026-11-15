@@ -48,23 +48,3 @@ if(TARGET gufo_yue2_hip)
     ${GUFO_EXTENSION_BUILD_ROOT}
   )
 endif()
-
-if(BUILD_TESTING AND TARGET gufo_yue2)
-  add_executable(yue2_cpu_test ${CMAKE_CURRENT_LIST_DIR}/tests/cpu_test.cpp)
-  target_link_libraries(yue2_cpu_test PRIVATE gufo_yue2)
-  add_test(NAME yue2_cpu_test COMMAND yue2_cpu_test)
-  set_tests_properties(yue2_cpu_test PROPERTIES
-    LABELS "cpu;models;yue2;quality")
-endif()
-
-if(BUILD_TESTING AND TARGET gufo_yue2_hip)
-  add_executable(yue2_hip_oracle_test
-    ${CMAKE_CURRENT_LIST_DIR}/tests/hip_oracle_test.cpp)
-  target_link_libraries(yue2_hip_oracle_test PRIVATE gufo_yue2 gufo_yue2_hip
-    hip::host)
-  add_test(NAME yue2_hip_oracle_test COMMAND yue2_hip_oracle_test)
-  set_tests_properties(yue2_hip_oracle_test PROPERTIES
-    LABELS "gpu;models;yue2;quality;external-model;slow"
-    SKIP_RETURN_CODE 77
-    RUN_SERIAL TRUE)
-endif()

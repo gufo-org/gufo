@@ -1366,6 +1366,14 @@ endfunction()
     LABELS "cpu;models;minimax-h3;safetensors;residency;failure-injection")
   endif()
 
+  if (TARGET gufo_yue2)
+  add_executable(yue2_cpu_test tests/models/yue2/cpu_test.cpp)
+  target_link_libraries(yue2_cpu_test PRIVATE gufo_yue2)
+  add_test(NAME yue2_cpu_test COMMAND yue2_cpu_test)
+  set_tests_properties(yue2_cpu_test PROPERTIES
+    LABELS "cpu;models;yue2;quality")
+  endif()
+
   if (TARGET gufo_qwen3_tts)
   add_executable(qwen3_tts_loader_test
     tests/models/qwen3_tts/loader_test.cpp)
@@ -1666,6 +1674,16 @@ endfunction()
     set_tests_properties(qwen3_tts_base_encoders_hip_test PROPERTIES
       LABELS "hip;gpu;gfx1151;models;qwen3-tts;base;speech-encoder;speaker-encoder;quality;external-model;slow"
       SKIP_RETURN_CODE 77)
+    endif()
+
+    if (TARGET gufo_yue2_hip)
+    add_executable(yue2_hip_oracle_test tests/models/yue2/hip_oracle_test.cpp)
+    target_link_libraries(yue2_hip_oracle_test PRIVATE
+      gufo_yue2 gufo_yue2_hip hip::host)
+    add_test(NAME yue2_hip_oracle_test COMMAND yue2_hip_oracle_test)
+    set_tests_properties(yue2_hip_oracle_test PROPERTIES
+      LABELS "hip;gpu;gfx1151;models;yue2;quality;external-model;slow"
+      SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
     endif()
 
     if (TARGET gufo_minimax_h3_hip)

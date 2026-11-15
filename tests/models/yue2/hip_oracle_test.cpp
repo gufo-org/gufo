@@ -1,7 +1,8 @@
-// Stage oracles against the pinned upstream CPU path (reference/run_official.py):
-// tokenizer ids, teacher-forced logits, the acoustic velocity and latents
-// from fixed tokens and noise, and audio from fixed latents. Exact sampling
-// cannot match across runtimes, so each stage starts from upstream inputs.
+// Stage oracles against the pinned upstream CPU path
+// (reference/run_official.py): tokenizer ids, teacher-forced logits, the
+// acoustic velocity and latents from fixed tokens and noise, and audio from
+// fixed latents. Exact sampling cannot match across runtimes, so each stage
+// starts from upstream inputs.
 //
 // YUE2_ORACLE_DIR holds the oracle's .npy/.json outputs; YUE2_MODEL_DIR and
 // YUE2_VAE_DIR the checkpoints. Without them the test skips (77).
@@ -12,13 +13,13 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <gufo/ext/json.hpp>
 #include <iostream>
 #include <iterator>
 #include <numeric>
 #include <string>
 #include <vector>
 
-#include <gufo/ext/json.hpp>
 #include "src/models/yue2/config.hpp"
 #include "src/models/yue2/hip/backbone.hpp"
 #include "src/models/yue2/hip/vae.hpp"
