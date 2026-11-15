@@ -27,6 +27,8 @@ inline constexpr std::size_t kContext = 24576;
 inline constexpr std::size_t kLatentDim = 64;
 inline constexpr double kFrameRate = 25.0;
 inline constexpr std::string_view kProtocolVersion = "yue2-native-v1";
+/// Upstream `SongRequest.seed` default, used when a request names no seed.
+inline constexpr std::uint64_t kDefaultSeed = 831001;
 
 /// Planning mode (upstream `cot`).
 enum class Planning : std::uint8_t {

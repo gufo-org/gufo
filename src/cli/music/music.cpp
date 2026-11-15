@@ -1,12 +1,16 @@
 #include "src/cli/music/music.hpp"
 
+#include <charconv>
 #include <csignal>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "gufo/ext/music.hpp"
@@ -37,7 +41,7 @@ struct MusicOptions {
   double seconds{0.0};
   double guidance{-1.0};
   int steps{0};
-  std::uint64_t seed{ext::kDefaultMusicSeed};
+  std::optional<std::uint64_t> seed;
   bool plan_only{false};
   bool float32{false};
 };
@@ -86,8 +90,20 @@ ArgParser MakeParser(MusicOptions* o) {
   parser.AddOption("", "--steps", "N",
                    "Acoustic solver steps (default: the model's)", "Generation",
                    &o->steps);
-  parser.AddOption("", "--seed", "N", "Seed (default: 831001)", "Generation",
-                   &o->seed);
+  parser.AddCustomOption(
+      "", "--seed", "N", "Seed (default: the model's)", "Generation",
+      [o](std::string_view, std::string_view value, std::string* error) {
+        std::uint64_t seed = 0;
+        const auto result =
+            std::from_chars(value.data(), value.data() + value.size(), seed);
+        if (value.empty() || result.ec != std::errc() ||
+            result.ptr != value.data() + value.size()) {
+          *error = "--seed needs a non-negative integer";
+          return false;
+        }
+        o->seed = seed;
+        return true;
+      });
   parser.AddFlag("", "--plan-only", "Write the score and stop", "Generation",
                  &o->plan_only);
   parser.AddOption("-o", "--output", "WAV", "Output WAV path", "Output",

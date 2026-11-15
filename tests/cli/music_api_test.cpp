@@ -402,7 +402,7 @@ void TestLifecycle(const std::filesystem::path& root) {
     Check(request.lyrics == "[verse]\nla la", "lifecycle: lyrics");
     Check(request.duration_seconds && *request.duration_seconds == 30.0,
           "lifecycle: seconds reached the runner");
-    Check(request.seed == 42, "lifecycle: seed reached the runner");
+    Check(request.seed == 42U, "lifecycle: seed reached the runner");
     Check(request.guidance && *request.guidance == 1.5F, "lifecycle: guidance");
     Check(request.steps && *request.steps == 8, "lifecycle: steps");
     Check(json::parse(request.provider_json).member_str("cot") == "full",
@@ -479,13 +479,12 @@ void TestFloatAndTruncation(const std::filesystem::path& root) {
   const json::Value job = WaitFor(*service, id, "completed");
   Check(job.find("gufo")->member_str("finish") == "truncated",
         "truncated: finish");
-  Check(job.find("gufo")->member_double("seed") ==
-            static_cast<double>(gufo::ext::kDefaultMusicSeed),
-        "default seed echoed");
+  Check(job.find("gufo")->find("seed") == nullptr,
+        "no seed echoed when the request gives none");
   {
     const std::lock_guard<std::mutex> lock(state->mutex);
-    Check(state->latest.seed == gufo::ext::kDefaultMusicSeed,
-          "a request without a seed uses the CLI's default");
+    Check(!state->latest.seed,
+          "a request without a seed leaves the default to the runner");
   }
   const HttpResponse content =
       Send(*service, "GET", "/v1/audio/music/" + id + "/content");

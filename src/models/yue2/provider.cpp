@@ -187,7 +187,7 @@ public:
       *error = "guidance_scale must be in [0, 20]";
       return false;
     }
-    if (request.seed >= (1ULL << 63U)) {
+    if (request.seed && *request.seed >= (1ULL << 63U)) {
       *error = "seed must be below 2^63";
       return false;
     }
@@ -273,6 +273,7 @@ private:
                               error))
       return false;
     const SongPrompt prompt{request.prompt, request.lyrics, options.planning};
+    const std::uint64_t seed = request.seed.value_or(kDefaultSeed);
     const float guidance =
         request.guidance.value_or(DefaultGuidance(options.planning));
     const int steps = request.steps.value_or(defaults_.ode_steps);
@@ -306,7 +307,7 @@ private:
                                  semantic.max_tokens + 1);
       cache = backbone_->NewCache(capacity);
       backbone_->Append(*cache, plan_prefix, PhaseWindow(Phase::kAbc), &logits);
-      if (!Sample(Phase::kAbc, options.abc, request.seed, false, 1.0F, *cache,
+      if (!Sample(Phase::kAbc, options.abc, seed, false, 1.0F, *cache,
                   std::move(logits), nullptr, {}, is_cancelled, progress, &plan,
                   error))
         return false;
@@ -321,8 +322,9 @@ private:
       result->finish = plan.truncated ? ext::MusicFinish::kTruncated
                                       : ext::MusicFinish::kComplete;
       result->total_ms = Milliseconds(start);
-      result->telemetry_json = Telemetry(plan, {}, 0, 0, 0, abc_ids.size(),
-                                         plan_prefix.size(), result->total_ms);
+      result->telemetry_json =
+          Telemetry(plan, {}, 0, 0, 0, abc_ids.size(), plan_prefix.size(), seed,
+                    result->total_ms);
       return true;
     }
 
@@ -352,7 +354,7 @@ private:
       backbone_->Append(*negative, unconditional, window, &negative_logits);
     }
     Stage codes;
-    if (!Sample(Phase::kSemantic, semantic, request.seed,
+    if (!Sample(Phase::kSemantic, semantic, seed,
                 options.planning == Planning::kOff, guidance, *cache,
                 std::move(logits), negative.get(), std::move(negative_logits),
                 is_cancelled, progress, &codes, error))
@@ -366,7 +368,7 @@ private:
     // 3. Acoustic flow matching over every original context chunk.
     const auto acoustic_start = std::chrono::steady_clock::now();
     const std::size_t frames = codes.tokens.size();
-    std::vector<float> noise = TorchRandn(frames * kLatentDim, request.seed);
+    std::vector<float> noise = TorchRandn(frames * kLatentDim, seed);
     // Upstream starts the solver from the BF16 noise.
     for (float& value : noise)
       value = RoundBfloat16(value);
@@ -438,15 +440,17 @@ private:
     result->total_ms = Milliseconds(start);
     result->telemetry_json =
         Telemetry(plan, codes, acoustic_ms, decode_ms, frames, abc_ids.size(),
-                  prefix.size(), result->total_ms);
+                  prefix.size(), seed, result->total_ms);
     return true;
   }
 
   static std::string Telemetry(const Stage& plan, const Stage& codes,
                                double acoustic_ms, double decode_ms,
                                std::size_t frames, std::size_t score_tokens,
-                               std::size_t prefix_tokens, double total_ms) {
+                               std::size_t prefix_tokens, std::uint64_t seed,
+                               double total_ms) {
     json::Value value = json::Value::object();
+    value["seed"] = static_cast<long long>(seed);
     value["plan_ms"] = plan.ms;
     value["plan_tokens"] = static_cast<long long>(plan.tokens.size());
     value["plan_truncated"] = plan.truncated;

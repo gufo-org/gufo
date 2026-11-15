@@ -305,7 +305,8 @@ HttpResponse CreateJob(const HttpRequest& http, MusicService& service) {
   json::Value metadata = json::Value::object();
   metadata["prompt_sha256"] = Sha256(request.prompt);
   metadata["lyrics_sha256"] = Sha256(request.lyrics);
-  metadata["seed"] = static_cast<long long>(request.seed);
+  if (request.seed)
+    metadata["seed"] = static_cast<long long>(*request.seed);
   metadata["plan_only"] = request.plan_only;
   metadata["response_format"] = parsed->float32 ? "wav_float" : "wav";
   ext::MusicRunner* runner = &service.runner();

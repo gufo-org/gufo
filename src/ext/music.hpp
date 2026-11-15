@@ -16,9 +16,6 @@ namespace gufo::ext {
 /// Command whose manifest options reach `MusicRunnerOptions::options`.
 inline constexpr std::string_view kMusicServeCommand = "serve music";
 inline constexpr std::string_view kMusicCommand = "music";
-/// Seed of a request that names none: YuE2's upstream default, shared by
-/// `gufo music` and `gufo serve music` so both play the same song.
-inline constexpr std::uint64_t kDefaultMusicSeed = 831001;
 
 enum class MusicSupport : std::uint8_t {
   kUnsupported,
@@ -82,7 +79,8 @@ struct MusicRequest {
   bool plan_only{false};
   std::optional<float> guidance;
   std::optional<int> steps;
-  std::uint64_t seed{kDefaultMusicSeed};
+  /// Empty means the runner's own default seed.
+  std::optional<std::uint64_t> seed;
   /// JSON object of provider options, validated by the runner.
   std::string provider_json;
 };

@@ -50,7 +50,7 @@ language fields: put them in the prompt or in the score.
 | `--plan-only` | Write the score (`--score-output`) and stop |
 | `--guidance G` | Classifier-free guidance; default 1 (off), 1.01 with `--planning off` |
 | `--steps N` | Acoustic solver steps (default 32) |
-| `--seed N` | Seed (default 831001) |
+| `--seed N` | Seed (default 831001, upstream's) |
 
 To edit a song, run with `--plan-only`, edit the ABC file, then run again with
 `--score`.
@@ -87,7 +87,7 @@ Songs take minutes, so the server runs them as jobs, like videos:
 }
 ```
 
-Without `gufo.seed` the server uses 831001, the same default as `gufo music`.
+Without `gufo.seed` YuE2 uses 831001, as `gufo music` does.
 `response_format` is `wav` (PCM16) or `wav_float`. `gufo.options` also takes
 `abc_sampling` and `semantic_sampling` objects that override `temperature`,
 `top_p`, `top_k`, `repetition_penalty`, `penalty_window`, `min_tokens` and
