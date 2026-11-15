@@ -29,6 +29,28 @@ bool Accepts(const JsonConstraint& grammar, std::string_view text) {
   return grammar.Complete(state);
 }
 
+// A required call in a tagged syntax (Qwen XML) may follow a short gap, not
+// unbounded whitespace: a model that would rather answer in prose must not be
+// able to emit newlines until its token limit.
+void TestRequiredTaggedCallLeadingSpace() {
+  using Format = JsonConstraint::ToolFormat;
+  const auto syntax = JsonConstraint::Syntax(Format::kQwen);
+  const auto schema = parse(R"({"type":"object","properties":{
+    "city":{"type":"string"}},"required":["city"],"additionalProperties":false})");
+  std::vector<JsonConstraint::Tool> tools;
+  tools.emplace_back("get_weather",
+                     JsonConstraint::ToolParameters(schema, false, syntax));
+  const auto required =
+      JsonConstraint::WithTools(nullptr, std::move(tools), true, false, syntax);
+  const std::string call =
+      "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
+      "</parameter>\n</function>\n</tool_call>";
+  for (const auto gap : {"", " ", "\n", "\n\n", "\n  "})
+    assert(Accepts(*required, gap + call));
+  assert(!Accepts(*required, "\n\n\n" + call));
+  assert(!Accepts(*required, std::string(200, '\n') + call));
+}
+
 void TestWideNativeArgumentOrder() {
   using Format = JsonConstraint::ToolFormat;
   for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
@@ -3043,6 +3065,7 @@ int main(int argc, char** argv) {
   TestNativeRequestMaskReuse();
   TestReasoningConstraint();
   TestAutomaticTools();
+  TestRequiredTaggedCallLeadingSpace();
   TestWideNativeArgumentOrder();
   TestNativeTools();
   TestOpenNativeTools();

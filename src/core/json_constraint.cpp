@@ -2533,23 +2533,13 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::BuildTools(
   }
   if (plain_answer && !required)
     alternatives.push_back({prose});
-  else if (syntax && !tagged)
-    // A provider call starts at its marker. Unbounded whitespace would let a
-    // model refuse a required call with spaces until its token limit.
+  else if (syntax)
+    // A provider call starts at its marker, tagged arguments or not.
+    // Unbounded whitespace would let a model refuse a required call with
+    // newlines until its token limit.
     alternatives.push_back({space_rule(), literal(marker), calls});
-  else if (!syntax)
+  else
     alternatives.push_back({literal(marker), calls});
-  else {
-    std::bitset<256> whitespace;
-    for (const unsigned char byte : std::string_view(" \t\r\n"))
-      whitespace.set(byte);
-    const auto terminal =
-        static_cast<std::uint32_t>(kTerminal | grammar->classes_.size());
-    grammar->classes_.push_back(whitespace);
-    const auto ws = static_cast<std::uint32_t>(grammar->rules_.size());
-    grammar->rules_.push_back({{}, {terminal, ws}});
-    alternatives.push_back({ws, literal(marker), calls});
-  }
   check_capacity(1, 0, 0);
   grammar->root_ = grammar->rules_.size();
   grammar->rules_.push_back(std::move(alternatives));
