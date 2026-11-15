@@ -4,6 +4,75 @@ Windows gfx1151 (Strix Halo, 96 GB carve-out), TheRock 10.0.0, `build/rock10`
 release binary. One `gufo music` request, model load excluded:
 `examples/song.json` (style and lyrics, seed 831001).
 
+## 2026-11-15: Linux kernel pass
+
+Linux gfx1151 (Strix Halo, 128 GB), ROCm 10.1 from `nix develop`,
+`build/release` binary. The same fixed-score request: `examples/song.json`
+style and lyrics with the 871-token `city_lights` score passed as `--score`
+(1001-token prefix), seed 831001, one change at a time:
+
+| Change | Semantic | Acoustic | Decode | Total |
+| --- | --- | --- | --- | --- |
+| Before (`b4be1f0b`) | 1803 tokens, 32.39 s | 23.97 s | 1.91 s | 58.54 s |
+| Acoustic attention: Q in registers, K and transposed V tiles in LDS | 32.37 s | 21.10 s | 1.91 s | 55.64 s |
+| Decode attention: 64-key splits, coalesced loads | 1813 tokens, 29.81 s | 20.81 s | 1.92 s | 52.81 s |
+| Gate/up projections on hipBLASLt's first candidate | 29.76 s | 18.65 s | 1.93 s | 50.60 s |
+| RoPE table; register-resident RMSNorm (bit-identical) | 29.56 s | 18.56 s | 1.92 s | 50.31 s |
+| One wave per head for QK norm/RoPE (bit-identical) | 29.53 s | 18.15 s | 1.92 s | 49.86 s |
+| Decode merge over four thread groups | 1816 tokens, 29.36 s | 18.21 s | 1.94 s | 49.76 s |
+| Weights 256-byte aligned on the device | 1801 tokens, 26.20 s | 17.70 s | 1.91 s | 46.06 s |
+| VAE GEMMs on hipBLASLt FP32 | 26.21 s | 17.63 s | 1.40 s | 45.49 s |
+
+A 72.0 s song now takes 45.5 s (0.63x real time); decode went from 17.96 to
+14.55 ms per token. Token counts change where the logits change in the last
+bits, so sampling diverges; the bit-identical rows replay the same song.
+
+- **Weight alignment.** Only the safetensors payload is copied to the device,
+  but the copy was shifted by the header's alignment, leaving every
+  projection at 8 bytes mod 16. The decode GEMV then fell back to 8-byte
+  loads. The shift now puts the large matrices on 256-byte boundaries; the
+  GEMV reads at 239 GB/s in situ (the measured DRAM read ceiling is 235-245
+  GB/s), so decode projections are at the roofline.
+- **Acoustic attention.** The segmented kernel reloaded Q per key tile and
+  staged probabilities through LDS: 4.45 ms per layer and evaluation, about
+  15 TFLOP/s. The new kernel keeps each wave's 16 queries in registers,
+  computes scores transposed so each lane owns one query's softmax, and reads
+  values from a transposed copy (the prefix is transposed once per solve):
+  2.59 ms, about 26 TFLOP/s. It runs at 238 VGPRs and close to the LDS read
+  rate WMMA needs; more queries per wave do not fit in registers.
+- **Decode attention.** 256-key splits gave 40 workgroups at 2000 keys and a
+  serial 256-step value loop: 97 us per layer. 64-key splits with four lanes
+  per key and 16-byte value loads take 36 us (about 216 GB/s of KV).
+- **hipBLASLt candidates.** At 1800 rows the shared policy's second candidate
+  (a 64-row tile) re-reads each weight tile 29 times; the first (128-row)
+  candidate runs the 6144-wide gate/up projections in 1528 us instead of
+  2161 us in situ. Other shapes and ranks measured within noise in situ, and
+  a fused QKV projection saves about 6% of one GEMM in isolation, not enough
+  for 470 MB of duplicated weights.
+- **VAE.** hipBLAS runs the FP32 convolution GEMMs at about 3 TFLOP/s;
+  hipBLASLt's 29th candidate (112x64 tile) is 2.6-3.2x faster on the 128- to
+  2048-channel stages and as fast on the memory-bound 64-channel ones, and is
+  correct for the unaligned tap offsets.
+
+Rejected: several rows per GEMV block (same per-row order, bit-identical)
+was slower in situ, 32.4 s and 34.4 s for two and four rows; one wave per row
+reaches only 90-160 GB/s in isolation. 64-key acoustic tiles with register
+prefetch gained 0.1 s over 32-key tiles.
+
+Oracles (`yue2_hip_oracle_test`); the decode-path check is new and runs the
+teacher-forced rows through one-token appends:
+
+| Stage | Before | After |
+| --- | --- | --- |
+| Teacher-forced logits, worst cosine | 0.9996836 (26/26 argmax) | 0.9998944 (26/26) |
+| Decode-path logits, worst cosine | 0.9998679 (25/26) | 0.9999079 (26/26) |
+| Velocity at t = 1, relative error | 0.011344 | 0.011550 |
+| 32-step latents, relative error | 0.013287 | 0.010156 |
+| VAE audio, relative error | 6.48e-7 | 6.11e-7 |
+
+The argmax misses are one-ulp BF16 ties in the upstream logits (gap 0.125 at
+logits near 18). The functional music suite passes.
+
 ## 2026-11-15: BF16 projection outputs, matrix value product, sampler
 
 The same fixed-score request (1059-token prefix), one change at a time:
