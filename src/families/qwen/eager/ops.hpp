@@ -70,6 +70,13 @@ void LaunchBfloat16ResidualAddRMSNorm(
     void* output_bfloat16, std::size_t batch_size, std::size_t dimension,
     float epsilon, hipStream_t stream, RmsScale scale = RmsScale::kFloat);
 
+/// As `LaunchBfloat16ResidualAddRMSNorm` with a BF16 update (a projection that
+/// wrote its BF16 boundary directly); the results are identical.
+void LaunchBfloat16ResidualAddRMSNormFromBfloat16(
+    float* hidden, const void* update_bfloat16, const float* weight,
+    void* output_bfloat16, std::size_t batch_size, std::size_t dimension,
+    float epsilon, hipStream_t stream, RmsScale scale = RmsScale::kFloat);
+
 /// Per-head q/k RMSNorm, RoPE at `start_position + row` and V rounding, as
 /// `LaunchBfloat16QkNormRoPE`, writing BF16 head-major results instead of
 /// updating the inputs: query row r of head h goes to
@@ -78,6 +85,16 @@ void LaunchBfloat16ResidualAddRMSNorm(
 /// `[rows][heads * head_dim]` FP32. `head_dim` must be at most 128 and even.
 void LaunchBfloat16QkNormRoPEHeadMajor(
     const float* query, const float* key, const float* value,
+    const float* query_weight, const float* key_weight, std::size_t rows,
+    std::uint32_t num_heads, std::uint32_t num_key_value_heads,
+    std::uint32_t head_dim, std::uint32_t start_position, float rope_theta,
+    float epsilon, RmsScale scale, void* query_out, std::size_t query_stride,
+    std::size_t query_row, void* key_out, void* value_out,
+    std::size_t cache_stride, std::size_t cache_row, hipStream_t stream);
+
+/// As `LaunchBfloat16QkNormRoPEHeadMajor` with BF16 query, key and value rows.
+void LaunchBfloat16QkNormRoPEHeadMajorFromBfloat16(
+    const void* query, const void* key, const void* value,
     const float* query_weight, const float* key_weight, std::size_t rows,
     std::uint32_t num_heads, std::uint32_t num_key_value_heads,
     std::uint32_t head_dim, std::uint32_t start_position, float rope_theta,
@@ -114,6 +131,12 @@ void LaunchBfloat16ResidualAdd(const float* residual, const float* update,
 void LaunchBfloat16SwiGlu(const float* gate, const float* up, float* output,
                           void* output_bfloat16, std::size_t count,
                           hipStream_t stream);
+
+/// As `LaunchBfloat16SwiGlu` with BF16 gate and up, writing BF16 only.
+void LaunchBfloat16SwiGluFromBfloat16(const void* gate_bfloat16,
+                                      const void* up_bfloat16,
+                                      void* output_bfloat16, std::size_t count,
+                                      hipStream_t stream);
 
 void LaunchBfloat16BiasSilu(const float* input, const void* bias_bfloat16,
                             float* output, void* output_bfloat16,

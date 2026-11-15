@@ -33,6 +33,13 @@ namespace {
 
 int failures = 0;
 
+// Enough digits to compare runs, not only to pass the thresholds.
+std::string Digits(double value) {
+  char text[32];
+  std::snprintf(text, sizeof(text), "%.7g", value);
+  return text;
+}
+
 void Expect(bool condition, const std::string& message) {
   std::cout << (condition ? "ok   " : "FAIL ") << message << '\n';
   if (!condition)
@@ -186,9 +193,9 @@ int main() {
       argmax_agree += std::max_element(a.begin(), a.end()) - a.begin() ==
                       std::max_element(b.begin(), b.end()) - b.begin();
     }
-    std::cout << "     teacher-forced logits: worst cosine " << worst_cosine
-              << ", argmax agrees on " << argmax_agree << "/" << rows.size()
-              << '\n';
+    std::cout << "     teacher-forced logits: worst cosine "
+              << Digits(worst_cosine) << ", argmax agrees on " << argmax_agree
+              << "/" << rows.size() << '\n';
     Expect(worst_cosine > 0.999, "teacher-forced logits cosine > 0.999");
     Expect(argmax_agree * 10 >= rows.size() * 9,
            "teacher-forced argmax agrees on 90% of rows");
@@ -213,9 +220,9 @@ int main() {
     backbone->Velocity(*cache, noise, 20.0, &velocity);
     const auto expected_velocity = ReadNpy<float>(oracle / "velocity_t1.npy");
     const double velocity_cosine = Cosine(velocity, expected_velocity);
-    std::cout << "     velocity(t=1): cosine " << velocity_cosine
+    std::cout << "     velocity(t=1): cosine " << Digits(velocity_cosine)
               << ", relative error "
-              << RelativeError(velocity, expected_velocity) << '\n';
+              << Digits(RelativeError(velocity, expected_velocity)) << '\n';
     Expect(velocity_cosine > 0.999, "velocity cosine > 0.999");
     std::vector<float> latents;
     Expect(backbone->Synthesize(*cache, noise, defaults.ode_steps, {}, &latents,
@@ -223,8 +230,9 @@ int main() {
            "acoustic solve " + error);
     const auto expected_latents = ReadNpy<float>(oracle / "latent.npy");
     const double latent_cosine = Cosine(latents, expected_latents);
-    std::cout << "     latents: cosine " << latent_cosine << ", relative error "
-              << RelativeError(latents, expected_latents) << '\n';
+    std::cout << "     latents: cosine " << Digits(latent_cosine)
+              << ", relative error "
+              << Digits(RelativeError(latents, expected_latents)) << '\n';
     Expect(latent_cosine > 0.999, "latent cosine > 0.999");
     cache.reset();
     backbone.reset();
@@ -243,7 +251,7 @@ int main() {
         expected_audio[2 * t + c] = channel_major[c * shape[1] + t];
     Expect(audio.size() == 2 * shape[1], "VAE output length");
     const double audio_error = RelativeError(audio, expected_audio);
-    std::cout << "     audio: relative error " << audio_error << '\n';
+    std::cout << "     audio: relative error " << Digits(audio_error) << '\n';
     Expect(audio_error < 1e-3, "VAE audio relative error < 1e-3");
   } catch (const std::exception& exception) {
     std::cout << "FAIL exception: " << exception.what() << '\n';

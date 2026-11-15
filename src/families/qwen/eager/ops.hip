@@ -338,11 +338,20 @@ __launch_bounds__(ThreadsPerBlock) __global__ void Bfloat16QkNormRoPEKernel(
   }
 }
 
+/// A projection output at its BF16 boundary: FP32 results are rounded, BF16
+/// GEMM outputs already sit there.
+__device__ __forceinline__ float RoundedInput(float value) {
+  return static_cast<float>(hip_bfloat16(value));
+}
+__device__ __forceinline__ float RoundedInput(hip_bfloat16 value) {
+  return static_cast<float>(value);
+}
+
 /// Fuses residual addition and RMSNorm while retaining the upstream BF16
 /// boundaries at the addition, normalized value and weighted output.
-template<bool kRoundScale>
+template<bool kRoundScale, typename Input = float>
 __launch_bounds__(256) __global__ void Bfloat16ResidualAddRMSNormKernel(
-    float* __restrict__ hidden, const float* __restrict__ update,
+    float* __restrict__ hidden, const Input* __restrict__ update,
     const float* __restrict__ weight, hip_bfloat16* __restrict__ output,
     std::size_t batch_size, std::size_t dimension, float epsilon) {
   const std::size_t batch = blockIdx.x;
@@ -351,18 +360,17 @@ __launch_bounds__(256) __global__ void Bfloat16ResidualAddRMSNormKernel(
   }
   const std::size_t thread = threadIdx.x;
   float* row = hidden + (batch * dimension);
-  const float* update_row =
+  const Input* update_row =
       update == nullptr ? nullptr : update + (batch * dimension);
   hip_bfloat16* output_row = output + (batch * dimension);
 
   float sum_squared = 0.0F;
   for (std::size_t index = thread; index < dimension; index += blockDim.x) {
     const float left = static_cast<float>(hip_bfloat16(row[index]));
-    const float sum =
-        update_row == nullptr
-            ? left
-            : static_cast<float>(hip_bfloat16(
-                  left + static_cast<float>(hip_bfloat16(update_row[index]))));
+    const float sum = update_row == nullptr
+                          ? left
+                          : static_cast<float>(hip_bfloat16(
+                                left + RoundedInput(update_row[index])));
     row[index] = sum;
     sum_squared += sum * sum;
   }
@@ -409,14 +417,15 @@ __global__ void Bfloat16ResidualAddKernel(const float* residual,
   }
 }
 
-__global__ void Bfloat16SwiGluKernel(const float* gate, const float* up,
+template<typename Input>
+__global__ void Bfloat16SwiGluKernel(const Input* gate, const Input* up,
                                      float* output,
                                      hip_bfloat16* output_bfloat16,
                                      std::size_t count) {
   const std::size_t index = (blockIdx.x * blockDim.x) + threadIdx.x;
   if (index < count) {
-    const float gate_bfloat16 = static_cast<float>(hip_bfloat16(gate[index]));
-    const float up_bfloat16 = static_cast<float>(hip_bfloat16(up[index]));
+    const float gate_bfloat16 = RoundedInput(gate[index]);
+    const float up_bfloat16 = RoundedInput(up[index]);
     const float activated = static_cast<float>(
         hip_bfloat16(gate_bfloat16 / (1.0F + expf(-gate_bfloat16))));
     const hip_bfloat16 result(activated * up_bfloat16);
@@ -638,9 +647,9 @@ __launch_bounds__(kGemvWaves* kGemvWavefront) __global__
   }
 }
 
-template<bool kRoundScale>
+template<bool kRoundScale, typename Input = float>
 __launch_bounds__(128) __global__ void Bfloat16QkNormRoPEHeadMajorKernel(
-    const float* query, const float* key, const float* value,
+    const Input* query, const Input* key, const Input* value,
     const float* query_weight, const float* key_weight, std::uint32_t num_heads,
     std::uint32_t num_key_value_heads, std::uint32_t head_dim,
     std::uint32_t start_position, float rope_theta, float epsilon,
@@ -656,11 +665,11 @@ __launch_bounds__(128) __global__ void Bfloat16QkNormRoPEHeadMajorKernel(
       start_position + static_cast<std::uint32_t>(row);
   // Both branches are uniform across the workgroup, so the barriers inside
   // stay collective.
-  const auto rotate = [&](const float* source, const float* weight,
+  const auto rotate = [&](const Input* source, const float* weight,
                           hip_bfloat16* destination) {
     for (std::uint32_t index = threadIdx.x; index < head_dim;
          index += blockDim.x)
-      rotated[index] = source[index];
+      rotated[index] = static_cast<float>(source[index]);
     __syncthreads();
     NormalizeAndRotateHead<kRoundScale>(rotated, weight, head_dim, epsilon,
                                         position, rope_theta, shared_sum,
@@ -681,7 +690,8 @@ __launch_bounds__(128) __global__ void Bfloat16QkNormRoPEHeadMajorKernel(
     rotate(key + source, key_weight, key_out + target);
     for (std::uint32_t index = threadIdx.x; index < head_dim;
          index += blockDim.x)
-      value_out[target + index] = hip_bfloat16(value[source + index]);
+      value_out[target + index] =
+          hip_bfloat16(RoundedInput(value[source + index]));
   }
 }
 
@@ -933,6 +943,26 @@ void LaunchBfloat16ResidualAddRMSNorm(float* hidden, const float* update,
     launch.template operator()<false>();
 }
 
+void LaunchBfloat16ResidualAddRMSNormFromBfloat16(
+    float* hidden, const void* update_bfloat16, const float* weight,
+    void* output_bfloat16, std::size_t batch_size, std::size_t dimension,
+    float epsilon, hipStream_t stream, RmsScale scale) {
+  if (batch_size == 0 || dimension == 0) {
+    return;
+  }
+  const auto launch = [&]<bool kRoundScale>() {
+    Bfloat16ResidualAddRMSNormKernel<kRoundScale, hip_bfloat16>
+        <<<static_cast<unsigned int>(batch_size), 256, 0, stream>>>(
+            hidden, static_cast<const hip_bfloat16*>(update_bfloat16), weight,
+            static_cast<hip_bfloat16*>(output_bfloat16), batch_size, dimension,
+            epsilon);
+  };
+  if (scale == RmsScale::kBfloat16)
+    launch.template operator()<true>();
+  else
+    launch.template operator()<false>();
+}
+
 void LaunchRoundBfloat16InPlace(float* values, std::size_t count,
                                 hipStream_t stream) {
   if (count == 0) {
@@ -968,6 +998,19 @@ void LaunchBfloat16SwiGlu(const float* gate, const float* up, float* output,
   }
   Bfloat16SwiGluKernel<<<Grid(count), 256, 0, stream>>>(
       gate, up, output, static_cast<hip_bfloat16*>(output_bfloat16), count);
+}
+
+void LaunchBfloat16SwiGluFromBfloat16(const void* gate_bfloat16,
+                                      const void* up_bfloat16,
+                                      void* output_bfloat16, std::size_t count,
+                                      hipStream_t stream) {
+  if (count == 0) {
+    return;
+  }
+  Bfloat16SwiGluKernel<<<Grid(count), 256, 0, stream>>>(
+      static_cast<const hip_bfloat16*>(gate_bfloat16),
+      static_cast<const hip_bfloat16*>(up_bfloat16), nullptr,
+      static_cast<hip_bfloat16*>(output_bfloat16), count);
 }
 
 void LaunchBfloat16BiasSilu(const float* input, const void* bias_bfloat16,
@@ -1156,8 +1199,9 @@ bool LaunchBfloat16GemvGrouped(const Bfloat16GemvGroup* groups,
                     : dispatch_groups.template operator()<uint2>();
 }
 
-void LaunchBfloat16QkNormRoPEHeadMajor(
-    const float* query, const float* key, const float* value,
+template<typename Input>
+void QkNormRoPEHeadMajor(
+    const Input* query, const Input* key, const Input* value,
     const float* query_weight, const float* key_weight, std::size_t rows,
     std::uint32_t num_heads, std::uint32_t num_key_value_heads,
     std::uint32_t head_dim, std::uint32_t start_position, float rope_theta,
@@ -1173,17 +1217,50 @@ void LaunchBfloat16QkNormRoPEHeadMajor(
   const dim3 grid(std::max(num_heads, num_key_value_heads),
                   static_cast<unsigned int>(rows));
   const auto launch = [&]<bool kRoundScale>() {
-    Bfloat16QkNormRoPEHeadMajorKernel<kRoundScale><<<grid, 128, 0, stream>>>(
-        query, key, value, query_weight, key_weight, num_heads,
-        num_key_value_heads, head_dim, start_position, rope_theta, epsilon,
-        static_cast<hip_bfloat16*>(query_out), query_stride, query_row,
-        static_cast<hip_bfloat16*>(key_out),
-        static_cast<hip_bfloat16*>(value_out), cache_stride, cache_row);
+    Bfloat16QkNormRoPEHeadMajorKernel<kRoundScale, Input>
+        <<<grid, 128, 0, stream>>>(
+            query, key, value, query_weight, key_weight, num_heads,
+            num_key_value_heads, head_dim, start_position, rope_theta, epsilon,
+            static_cast<hip_bfloat16*>(query_out), query_stride, query_row,
+            static_cast<hip_bfloat16*>(key_out),
+            static_cast<hip_bfloat16*>(value_out), cache_stride, cache_row);
   };
   if (scale == RmsScale::kBfloat16)
     launch.template operator()<true>();
   else
     launch.template operator()<false>();
+}
+
+void LaunchBfloat16QkNormRoPEHeadMajor(
+    const float* query, const float* key, const float* value,
+    const float* query_weight, const float* key_weight, std::size_t rows,
+    std::uint32_t num_heads, std::uint32_t num_key_value_heads,
+    std::uint32_t head_dim, std::uint32_t start_position, float rope_theta,
+    float epsilon, RmsScale scale, void* query_out, std::size_t query_stride,
+    std::size_t query_row, void* key_out, void* value_out,
+    std::size_t cache_stride, std::size_t cache_row, hipStream_t stream) {
+  QkNormRoPEHeadMajor(query, key, value, query_weight, key_weight, rows,
+                      num_heads, num_key_value_heads, head_dim, start_position,
+                      rope_theta, epsilon, scale, query_out, query_stride,
+                      query_row, key_out, value_out, cache_stride, cache_row,
+                      stream);
+}
+
+void LaunchBfloat16QkNormRoPEHeadMajorFromBfloat16(
+    const void* query, const void* key, const void* value,
+    const float* query_weight, const float* key_weight, std::size_t rows,
+    std::uint32_t num_heads, std::uint32_t num_key_value_heads,
+    std::uint32_t head_dim, std::uint32_t start_position, float rope_theta,
+    float epsilon, RmsScale scale, void* query_out, std::size_t query_stride,
+    std::size_t query_row, void* key_out, void* value_out,
+    std::size_t cache_stride, std::size_t cache_row, hipStream_t stream) {
+  QkNormRoPEHeadMajor(static_cast<const hip_bfloat16*>(query),
+                      static_cast<const hip_bfloat16*>(key),
+                      static_cast<const hip_bfloat16*>(value), query_weight,
+                      key_weight, rows, num_heads, num_key_value_heads,
+                      head_dim, start_position, rope_theta, epsilon, scale,
+                      query_out, query_stride, query_row, key_out, value_out,
+                      cache_stride, cache_row, stream);
 }
 
 std::size_t DecodeAttentionScratch(std::size_t capacity, std::size_t heads) {

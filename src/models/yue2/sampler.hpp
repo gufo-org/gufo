@@ -57,6 +57,7 @@ private:
   std::vector<std::uint32_t> history_;
   std::vector<float> scores_;
   std::vector<Candidate> candidates_;
+  std::vector<float> top_;
   std::mt19937_64 generator_;
 };
 

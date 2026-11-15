@@ -24,7 +24,9 @@ struct KeySegments {
 /// Queries are head-major `[heads][rows][128]`; the output is row-major
 /// `[query][heads][128]`. `limits[q]`, when given, is the number of visible
 /// keys of query q (causal masks). Query head h reads key head
-/// `h / kv_group`; `kv_group` is 1 or 2.
+/// `h / kv_group`; `kv_group` is 1 or 2. With `bfloat16_probabilities` the
+/// segmented form rounds the probabilities to BF16 and runs the value product
+/// on matrix instructions as well, as PyTorch's fused BF16 attention does.
 void FusedAttention128(const std::uint16_t* queries, const std::uint16_t* keys,
                        const std::uint16_t* values, std::uint16_t* output,
                        int heads, int rows, int count, int query_start,
@@ -35,7 +37,8 @@ void FusedAttention128Segmented(const std::uint16_t* queries,
                                 std::uint16_t* output, int heads, int rows,
                                 int query_start, int query_count,
                                 hipStream_t stream, const int* limits,
-                                int kv_group = 1);
+                                int kv_group = 1,
+                                bool bfloat16_probabilities = false);
 
 }  // namespace gufo::qwen::eager
 

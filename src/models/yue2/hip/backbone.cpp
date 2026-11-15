@@ -26,6 +26,8 @@ namespace {
 namespace eager = ::gufo::qwen::eager;
 
 constexpr std::size_t kPrefillRows = 2048;
+// The smallest batch the planned hipBLASLt GEMM takes (eager::Gemm::Run).
+constexpr std::size_t kPackedRows = 64;
 constexpr std::size_t kTimeFrequencies = 256;
 
 void RequireHip(hipError_t status, std::string_view operation) {
@@ -285,6 +287,25 @@ struct Backbone::Impl {
                                      inputs, stream);
   }
 
+  /// A prefill-sized projection that writes its BF16 boundary directly, about
+  /// 1.5x faster than the FP32 output every consumer rounds anyway.
+  void GemmBfloat16(const void* weight, const void* input, void* output,
+                    std::size_t rows, std::size_t outputs, std::size_t inputs) {
+    if (planned.Run(weight, input, output, static_cast<int>(rows),
+                    static_cast<int>(outputs), static_cast<int>(inputs),
+                    /*float_output=*/false, stream))
+      return;
+    const float alpha = 1.0F, beta = 0.0F;
+    if (hipblasGemmEx(blas, HIPBLAS_OP_T, HIPBLAS_OP_N,
+                      static_cast<int>(outputs), static_cast<int>(rows),
+                      static_cast<int>(inputs), &alpha, weight, HIP_R_16BF,
+                      static_cast<int>(inputs), input, HIP_R_16BF,
+                      static_cast<int>(inputs), &beta, output, HIP_R_16BF,
+                      static_cast<int>(outputs), HIPBLAS_COMPUTE_32F,
+                      HIPBLAS_GEMM_DEFAULT) != HIPBLAS_STATUS_SUCCESS)
+      throw std::runtime_error("YuE2 hipblasGemmEx failed");
+  }
+
   void GemmGrouped(std::span<const eager::Bfloat16GemvGroup> groups,
                    const void* input, std::size_t rows, std::size_t inputs) {
     if (eager::LaunchBfloat16GemvGrouped(groups.data(), groups.size(), input,
@@ -298,6 +319,12 @@ struct Backbone::Impl {
   void ResidualNorm(const float* update, const float* weight,
                     std::size_t rows) {
     eager::LaunchBfloat16ResidualAddRMSNorm(
+        hidden.get(), update, weight, scratch.get(), rows, config.hidden,
+        config.rms_epsilon, stream, eager::RmsScale::kBfloat16);
+  }
+  void ResidualNormFromBfloat16(const std::uint16_t* update,
+                                const float* weight, std::size_t rows) {
+    eager::LaunchBfloat16ResidualAddRMSNormFromBfloat16(
         hidden.get(), update, weight, scratch.get(), rows, config.hidden,
         config.rms_epsilon, stream, eager::RmsScale::kBfloat16);
   }
@@ -333,15 +360,27 @@ struct Backbone::Impl {
     }
     if (!pass.nar && rows == 1)
       EnsureDecodeScratch(pass.position + 1);
+    // From planned-GEMM size up, projections write BF16 into the FP32
+    // buffers' storage; the BF16-input kernels then round nothing twice.
+    const bool packed = rows >= kPackedRows;
+    const auto bfloat16 = [](DeviceArray<float>& buffer) {
+      return reinterpret_cast<std::uint16_t*>(buffer.get());
+    };
     ResidualNorm(nullptr, path(0).input_norm, rows);
     for (std::size_t l = 0; l < c.layers; ++l) {
       const Path& w = path(l);
-      const std::array<eager::Bfloat16GemvGroup, 3> qkv{{
-          {w.q, q.get(), qd},
-          {w.k, k.get(), kvd},
-          {w.v, v.get(), kvd},
-      }};
-      GemmGrouped(qkv, scratch.get(), rows, c.hidden);
+      if (packed) {
+        GemmBfloat16(w.q, scratch.get(), bfloat16(q), rows, qd, c.hidden);
+        GemmBfloat16(w.k, scratch.get(), bfloat16(k), rows, kvd, c.hidden);
+        GemmBfloat16(w.v, scratch.get(), bfloat16(v), rows, kvd, c.hidden);
+      } else {
+        const std::array<eager::Bfloat16GemvGroup, 3> qkv{{
+            {w.q, q.get(), qd},
+            {w.k, k.get(), kvd},
+            {w.v, v.get(), kvd},
+        }};
+        GemmGrouped(qkv, scratch.get(), rows, c.hidden);
+      }
       std::uint16_t* keys_out = nullptr;
       std::uint16_t* values_out = nullptr;
       std::size_t stride = 0, row = 0;
@@ -355,14 +394,22 @@ struct Backbone::Impl {
         stride = pass.capacity;
         row = pass.position;
       }
-      eager::LaunchBfloat16QkNormRoPEHeadMajor(
-          q.get(), k.get(), v.get(), w.q_norm, w.k_norm, rows,
-          static_cast<std::uint32_t>(c.heads),
-          static_cast<std::uint32_t>(c.kv_heads),
-          static_cast<std::uint32_t>(c.head_dim),
-          static_cast<std::uint32_t>(pass.position), c.rope_theta,
-          c.rms_epsilon, eager::RmsScale::kBfloat16, query_heads.get(), rows, 0,
-          keys_out, values_out, stride, row, stream);
+      const auto heads = static_cast<std::uint32_t>(c.heads);
+      const auto kv_heads = static_cast<std::uint32_t>(c.kv_heads);
+      const auto head_dim = static_cast<std::uint32_t>(c.head_dim);
+      const auto position = static_cast<std::uint32_t>(pass.position);
+      if (packed)
+        eager::LaunchBfloat16QkNormRoPEHeadMajorFromBfloat16(
+            bfloat16(q), bfloat16(k), bfloat16(v), w.q_norm, w.k_norm, rows,
+            heads, kv_heads, head_dim, position, c.rope_theta, c.rms_epsilon,
+            eager::RmsScale::kBfloat16, query_heads.get(), rows, 0, keys_out,
+            values_out, stride, row, stream);
+      else
+        eager::LaunchBfloat16QkNormRoPEHeadMajor(
+            q.get(), k.get(), v.get(), w.q_norm, w.k_norm, rows, heads,
+            kv_heads, head_dim, position, c.rope_theta, c.rms_epsilon,
+            eager::RmsScale::kBfloat16, query_heads.get(), rows, 0, keys_out,
+            values_out, stride, row, stream);
       if (!pass.nar && rows == 1) {
         eager::LaunchBfloat16DecodeAttention(
             query_heads.get(), kv_layer(pass.cache_keys, l),
@@ -398,7 +445,25 @@ struct Backbone::Impl {
             query_heads.get(), segments, attention.get(),
             static_cast<int>(c.heads), static_cast<int>(rows), 0,
             static_cast<int>(rows), stream, pass.nar ? nullptr : limits.get(),
-            static_cast<int>(c.heads / c.kv_heads));
+            static_cast<int>(c.heads / c.kv_heads),
+            /*bfloat16_probabilities=*/pass.nar);
+      }
+      const float* next_norm =
+          l + 1 < c.layers ? path(l + 1).input_norm : final_norm;
+      if (packed) {
+        GemmBfloat16(w.o, attention.get(), bfloat16(o), rows, c.hidden, qd);
+        ResidualNormFromBfloat16(bfloat16(o), w.post_norm, rows);
+        GemmBfloat16(w.gate, scratch.get(), bfloat16(gate), rows,
+                     c.intermediate, c.hidden);
+        GemmBfloat16(w.up, scratch.get(), bfloat16(up), rows, c.intermediate,
+                     c.hidden);
+        eager::LaunchBfloat16SwiGluFromBfloat16(bfloat16(gate), bfloat16(up),
+                                                scratch.get(),
+                                                rows * c.intermediate, stream);
+        GemmBfloat16(w.down, scratch.get(), bfloat16(ffn), rows, c.hidden,
+                     c.intermediate);
+        ResidualNormFromBfloat16(bfloat16(ffn), next_norm, rows);
+        continue;
       }
       Gemm(w.o, attention.get(), o.get(), rows, c.hidden, qd);
       ResidualNorm(o.get(), w.post_norm, rows);
@@ -410,9 +475,7 @@ struct Backbone::Impl {
       eager::LaunchBfloat16SwiGlu(gate.get(), up.get(), nullptr, scratch.get(),
                                   rows * c.intermediate, stream);
       Gemm(w.down, scratch.get(), ffn.get(), rows, c.hidden, c.intermediate);
-      ResidualNorm(ffn.get(),
-                   l + 1 < c.layers ? path(l + 1).input_norm : final_norm,
-                   rows);
+      ResidualNorm(ffn.get(), next_norm, rows);
     }
   }
 

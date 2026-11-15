@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <unordered_map>
 
@@ -99,26 +100,34 @@ std::uint32_t TokenSampler::Next(std::span<const float> conditional,
       for (float& score : scores_)
         score = narrow(score / sampling_.temperature);
     }
-    // Top-k keeps every score tied with the k-th largest.
+    // Top-k keeps every score tied with the k-th largest. A k-entry min-heap
+    // finds that score in one pass; the codec window has 32k rows and k is
+    // small, so collecting and partitioning every row cost most of a step.
+    const std::size_t k = sampling_.top_k;
+    top_.clear();
+    for (std::uint32_t i = 0; i < n; ++i) {
+      const float score = scores_[i];
+      if (score == kNegativeInfinity)
+        continue;
+      if (top_.size() < k) {
+        top_.push_back(score);
+        std::push_heap(top_.begin(), top_.end(), std::greater<>());
+      } else if (score > top_.front()) {
+        std::pop_heap(top_.begin(), top_.end(), std::greater<>());
+        top_.back() = score;
+        std::push_heap(top_.begin(), top_.end(), std::greater<>());
+      }
+    }
+    const float threshold =
+        top_.size() < k || top_.empty() ? kNegativeInfinity : top_.front();
     candidates_.clear();
     for (std::uint32_t i = 0; i < n; ++i) {
-      if (scores_[i] != kNegativeInfinity)
+      if (scores_[i] != kNegativeInfinity && scores_[i] >= threshold)
         candidates_.push_back({i, scores_[i]});
     }
     const auto descending = [](const Candidate& a, const Candidate& b) {
       return a.score > b.score || (a.score == b.score && a.index < b.index);
     };
-    const std::size_t k =
-        std::min<std::size_t>(sampling_.top_k, candidates_.size());
-    if (k < candidates_.size()) {
-      std::nth_element(candidates_.begin(),
-                       candidates_.begin() + static_cast<std::ptrdiff_t>(k - 1),
-                       candidates_.end(), descending);
-      const float threshold = candidates_[k - 1].score;
-      std::erase_if(candidates_, [threshold](const Candidate& candidate) {
-        return candidate.score < threshold;
-      });
-    }
     std::sort(candidates_.begin(), candidates_.end(), descending);
     const auto probabilities = [&](std::vector<double>* output) {
       const double maximum = candidates_.front().score;

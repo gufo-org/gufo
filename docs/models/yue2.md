@@ -104,3 +104,11 @@ autoregressive half of the model, a 32-step midpoint flow-matching solve on its
 non-autoregressive half, and the FP32 Oobleck decoder. Each stage is checked
 against the upstream CPU reference; see
 [the implementation notes](../internal/models/yue2/README.md).
+
+## Performance
+
+As of November 15, 2026, on Strix Halo, an 80-second song from a supplied
+score takes 66 s: 36 s for the semantic tokens (55 tokens/s), 27 s for the
+acoustic solve and 2 s for the decoder. Planning the score first adds about
+20 s for a 930-token score. See the
+[benchmarks](../internal/models/yue2/BENCHMARKS.md).
