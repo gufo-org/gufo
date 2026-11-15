@@ -70,7 +70,7 @@ public:
                 double raw_t, std::vector<float>* velocity);
 
   /// Solves the 32-step (by default) midpoint ODE from `noise`
-  /// (`[frames][64]`) to the FP32 latents. Fails when cancelled.
+  /// (`[frames][64]`) with upstream's BF16 state. Fails when cancelled.
   [[nodiscard]] bool Synthesize(const KvCache& prefix,
                                 std::span<const float> noise, int steps,
                                 const StepProgress& progress,

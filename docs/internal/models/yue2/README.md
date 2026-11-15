@@ -1,8 +1,9 @@
 # YuE2 implementation notes
 
-Reference: `multimodal-art-projection/YuE` inference release `yue2-v0.1.6`
-(`src/yue2/pipeline.py`, `nar.py`, `sampling.py`, `modeling_yue2.py`,
-`modeling_vae.py`), weights `m-a-p/YuE2-3B` 8f24312f, `m-a-p/YuE2-Vae`
+Reference: `multimodal-art-projection/YuE` `main` at 1116bea, package
+version 0.1.6 (`src/yue2/pipeline.py`, `nar.py`, `sampling.py`,
+`modeling_yue2.py`, `modeling_vae.py`; their numerics match the
+`yue2-v0.1.6` tag), weights `m-a-p/YuE2-3B` 8f24312f, `m-a-p/YuE2-Vae`
 152733a1.
 
 ## Layout
@@ -28,10 +29,11 @@ does; prefill and NAR attention use the fused WMMA kernel with an FP32 value
 product. Logits are computed only for the phase's rows (planning: text plus
 `</abc>`; semantic: `</music>` plus the 32768 codec rows) and rounded to BF16.
 
+The midpoint solver keeps upstream's BF16 state: it starts from the
+BF16-rounded noise and rounds each update to BF16.
+
 Departures from upstream, each at least as accurate:
 
-- The ODE state stays FP32 between steps; upstream keeps it in BF16. The
-  solver starts from the BF16-rounded noise, as upstream.
 - One KV cache serves the planning stage, the semantic stage and the acoustic
   prefix when the song fits one chunk (always, unless the prefix is longer
   than about 12k tokens): upstream re-prefills the same tokens.

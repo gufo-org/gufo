@@ -39,8 +39,9 @@ nix develop -c python3 tests/functional/model_services.py image \
 nix develop -c python3 tests/functional/model_services.py music   --binary build/release/gufo --model models/YuE2-3B   --output artifacts/model-services/music-1
 ```
 
-Music takes the YuE2-3B snapshot with `YuE2-Vae` beside it, and keeps the
-server's jobs under the evidence directory. Songs ask for at most 8 seconds,
+Music takes the YuE2-3B snapshot with `YuE2-Vae` beside it, or the decoder
+snapshot as `--vae-model DIR` (needed for Hugging Face cache snapshots), and
+keeps the server's jobs under the evidence directory. Songs ask for at most 8 seconds,
 so the suite takes a few minutes.
 
 Image takes the complete Qwen-Image-2.1 or Turbo snapshot. `--image-suite smoke`

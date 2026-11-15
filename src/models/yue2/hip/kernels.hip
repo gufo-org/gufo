@@ -69,7 +69,7 @@ __global__ void OdeStepKernel(const float* __restrict__ state,
   const std::size_t index =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index < count)
-    output[index] = fmaf(-scale, velocity[index], state[index]);
+    output[index] = Round(state[index] - Round(scale * velocity[index]));
 }
 
 __global__ void Bfloat16LogitsKernel(const float* __restrict__ input,

@@ -44,12 +44,18 @@ def main():
                         help='Image: register an adapter (repeat for two)')
     parser.add_argument('--lora-default', metavar='NAME:SCALE',
                         help='Image: --lora-default for requests that omit adapters')
+    parser.add_argument('--vae-model', type=Path,
+                        help='Music: decoder directory when it is not the sibling YuE2-Vae')
     parser.add_argument('--startup-timeout', type=float, default=300)
     parser.add_argument('--npu', action='store_true',
                         help='Serve on the XDNA NPU (--npu); embeddings use the NPU cosine gate')
     args = parser.parse_args()
     if args.service == 'tts' and not (args.asr_binary and args.asr_model):
         parser.error('TTS requires --asr-binary and --asr-model for intelligibility checks')
+    if args.vae_model and args.service != 'music':
+        parser.error('--vae-model applies to music only')
+    if args.vae_model and not (args.vae_model / 'config.json').is_file():
+        parser.error('--vae-model must hold config.json; missing weights are not a pass')
     if args.startup_timeout <= 0:
         parser.error('--startup-timeout must be positive')
     args.binary, args.model, args.audio_root = (path.resolve() for path in
@@ -84,6 +90,8 @@ def main():
         command += ['--lora-default', args.lora_default]
     if args.service == 'music':
         command += ['--root', str(output / 'jobs')]
+        if args.vae_model:
+            command += ['--vae-model', str(args.vae_model.resolve())]
     if args.service == 'tts' and args.variant == 'base':
         command += ['--voice', f'{voice}={args.audio_root / "clear-english-voice.wav"}',
                     '--voice-text', f'{voice}={args.audio_root / "clear-english-voice.txt"}']

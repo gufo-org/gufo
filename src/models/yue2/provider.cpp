@@ -172,6 +172,12 @@ public:
       *error = "a score needs planning full or melody";
       return false;
     }
+    // Upstream rejects a score that is only whitespace.
+    if (!request.score.empty() &&
+        request.score.find_first_not_of(" \t\n\r\f\v") == std::string::npos) {
+      *error = "the score is empty";
+      return false;
+    }
     if (request.plan_only && options.planning == Planning::kOff) {
       *error = "plan_only needs planning full or melody";
       return false;

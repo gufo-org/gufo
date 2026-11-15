@@ -5,7 +5,7 @@
 | Logits over the phase's rows only | Retained; masked rows are -inf upstream, so sampling is unchanged; the semantic head reads 32769 of 184704 rows. |
 | One KV cache across plan, semantic and acoustic prefix | Retained; same tokens as upstream's separate prefills; saves two prefills. |
 | BF16 KV cache, split-K decode attention | Retained; upstream stores BF16 K/V; the talker's one-block FP32 kernel cannot hold 24576 keys in LDS. |
-| FP32 ODE state | Retained; upstream keeps BF16 between steps. Latents still match upstream at cosine 0.99994. |
+| FP32 ODE state | Rejected 2026-11-15; upstream keeps BF16 between steps. Against fresh upstream fixtures the FP32 state drifted further from upstream (latent relative error 0.0133) than upstream's BF16 update (0.0112, the single-velocity error 0.0113). |
 | Polyphase transposed convolutions, shifted-view k7 SGEMMs | Retained; no im2col buffers (the last stage would need 3.6 GB per tile); audio matches at 6.4e-7 relative error. |
 | hipBLASLt plan for prefill-sized GEMMs | Retained; the NAR projections ran at about 4 TFLOP/s through `hipblasGemmEx` and 21-37 TFLOP/s with candidate 4; acoustic 117.5 -> 34.8 s on the same score (BENCHMARKS.md). Oracles unchanged. |
 | BF16 outputs for prefill-sized projections | Retained; every consumer rounded the FP32 output to BF16 anyway; acoustic 34.8 -> 29.8 s. Velocity error 0.01105 -> 0.01090. |

@@ -1,8 +1,10 @@
 """Stage oracles for the gufo YuE2 port, from the pinned upstream CPU path.
 
-Run with a venv holding the pinned upstream package (`yue2-infer` 0.1.6,
-torch 2.10 CPU), from outside the upstream clone:
-  python -I run_official.py <stage> --out DIR --model M --vae V --upstream U
+Run with torch, transformers, safetensors, soundfile and tiktoken, and the
+upstream `src` directory on PYTHONPATH. It needs upstream `main` (1116bea was
+used): the `yue2-v0.1.6` tag predates `yue2.protocol.make_request`. Run it
+from outside the upstream clone:
+  PYTHONPATH=U/src python run_official.py <stage> --out DIR --model M --vae V --upstream U
 then point yue2_hip_oracle_test at DIR (YUE2_ORACLE_DIR).
 
 Stages:
