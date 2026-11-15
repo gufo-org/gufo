@@ -290,9 +290,12 @@ void Formats() {
           continue;
         constexpr unsigned width = 9, height = 7;
         const auto rows = RandomRows(format, width, height);
-        const auto image = gufo::core::DecodeImage(
-            WritePng(format, width, height, rows, interlace, trns));
+        const auto png = WritePng(format, width, height, rows, interlace, trns);
+        const auto plan = gufo::core::InspectImage(png);
+        const auto image = gufo::core::DecodeImage(png);
         Require(image.width == width && image.height == height);
+        Require(plan.width == image.width && plan.height == image.height);
+        Require(plan.peak_bytes >= image.pixels.size());
         Bytes expected;
         for (unsigned y = 0; y < height; ++y) {
           for (unsigned x = 0; x < width; ++x) {
@@ -354,6 +357,8 @@ void Framing() {
                         bool accepted) {
     try {
       const auto image = gufo::core::DecodeImage(png);
+      const auto plan = gufo::core::InspectImage(png);
+      Require(plan.width == image.width && plan.height == image.height);
       if (!accepted || image.width != 8 || image.height != 8)
         throw std::runtime_error(std::string(name));
       Bytes expected;
@@ -423,7 +428,14 @@ void Orientation() {
                   Make("eXIf", {'M', 'M',         0,    '*', 0, 0, 0, 8, 0,
                                 1,   1,           0x12, 0,   3, 0, 0, 0, 1,
                                 0,   orientation, 0,    0,   0, 0, 0, 0}));
-    const auto image = gufo::core::DecodeImage(Serialize(chunks));
+    const auto png = Serialize(chunks);
+    const auto plan = gufo::core::InspectImage(png);
+    const auto image = gufo::core::DecodeImage(png);
+    Require(plan.original_width == 3 && plan.original_height == 2);
+    Require(plan.orientation == orientation);
+    Require(plan.width == image.width && plan.height == image.height);
+    Require(plan.peak_bytes >=
+            image.pixels.size() * (orientation == 1 ? 1 : 2));
     Require(image.width == (orientation < 5 ? 3U : 2U));
     Require(image.height == (orientation < 5 ? 2U : 3U));
     Bytes expected;

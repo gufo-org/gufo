@@ -201,6 +201,26 @@ void ResourceLedger::ConstrainLimits(ResourceLimits limits) {
 ResourceReservation::ResourceReservation(
     std::shared_ptr<detail::ChargeToken> token)
     : token_(std::move(token)) {}
+void ResourceReservation::Shrink(std::size_t bytes) {
+  if (!token_)
+    throw std::logic_error("empty ledger reservation");
+  {
+    auto& a = *token_->allocation;
+    const detail::Lock lock(*a.ledger, LedgerStep::kRelease);
+    if (token_->pooled || a.backing || !a.reserved || bytes > a.bytes)
+      throw std::invalid_argument("shrink requires a standalone reservation");
+    const auto released = a.bytes - bytes;
+    auto& s = a.ledger->snapshot;
+    s.bytes[Index(a.category)] -= released;
+    s.reserved_bytes[Index(a.category)] -= released;
+    s.total_bytes -= released;
+    if (a.category != Staging)
+      s.ram_bytes -= released;
+    a.bytes = bytes;
+  }
+  if (!bytes)
+    token_.reset();
+}
 ResourceCharge::ResourceCharge(std::shared_ptr<detail::ChargeToken> token)
     : token_(std::move(token)) {}
 PersistencePin::PersistencePin(std::shared_ptr<detail::PinToken> token)

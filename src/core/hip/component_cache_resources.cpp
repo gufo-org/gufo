@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -17,6 +18,7 @@
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/host_allocations.hpp"
 #include "src/core/hip/transfer_pool.hpp"
+#include "src/core/resource_error.hpp"
 
 namespace gufo::hip {
 
@@ -65,6 +67,14 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
           " bytes is too small for its backing; use a larger "
           "--cache-ram-bytes, or --cache-ram-bytes off");
     const auto& allocation = plan.front();
+    if (allocation.block_bytes &&
+        allocation.blocks >
+            std::numeric_limits<std::size_t>::max() / allocation.block_bytes)
+      throw std::invalid_argument("RAM cache backing plan overflows");
+    const auto payload_bytes = allocation.blocks * allocation.block_bytes;
+    if (allocation.metadata_bytes >
+        std::numeric_limits<std::size_t>::max() - payload_bytes)
+      throw std::invalid_argument("RAM cache backing plan overflows");
     // Pages commit as captures need them. A payload cannot span segments,
     // so segments of about 128 MiB bound registration pauses and stranded
     // edge space, fitting at least two of the largest payloads. Prefill
@@ -98,12 +108,25 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
       limited->refused = std::chrono::steady_clock::now();
       return false;
     };
+    std::function<cache::ResourceReservation(std::size_t)> reserve_segment;
+    if (hooks.reserve_segment) {
+      reserve_segment = [limited, refuse,
+                         reserve = hooks.reserve_segment](std::size_t bytes) {
+        try {
+          return reserve(bytes);
+        } catch (const core::ResourceAdmissionError& error) {
+          const std::lock_guard lock(limited->mutex);
+          refuse("shared_reservation segment_bytes=" + std::to_string(bytes) +
+                 " detail=" + error.what());
+          throw cache::ResourceExhausted();
+        }
+      };
+    }
     backing->pool = std::make_unique<hip::CommittedBackingPool>(
         ledger,
         hip::BackingPoolConfig{
-            allocation.blocks * allocation.block_bytes +
-                allocation.metadata_bytes,
-            allocation.block_bytes, allocation.metadata_bytes, segment,
+            payload_bytes + allocation.metadata_bytes, allocation.block_bytes,
+            allocation.metadata_bytes, segment,
             [limited, refuse, hooks](std::size_t bytes) {
               const std::lock_guard lock(limited->mutex);
               if (limited->active &&
@@ -143,7 +166,8 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
                   "device_heap_reserve segment_bytes=" + std::to_string(bytes) +
                   " device_heap_free_bytes=" + std::to_string(heap_before) +
                   " device_heap_after_bytes=" + std::to_string(heap_after));
-            }});
+            },
+            std::move(reserve_segment)});
     // Prepare a bounded reserve before readiness. The first shared-prefix
     // capture needs more than one segment; preparing 2 GiB avoids moving
     // registration onto that request's capture or decode path.
@@ -152,7 +176,12 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     hooks.info(
         "schema=component-cache-v1 event=backing_prepared committed_bytes=" +
         std::to_string(backing->pool->CommittedBytes()) +
-        " long_term_pinned_bytes=" +
+        " granted_bytes=" + std::to_string(budget) +
+        " planned_payload_bytes=" + std::to_string(payload_bytes) +
+        " planned_metadata_bytes=" + std::to_string(allocation.metadata_bytes) +
+        " block_bytes=" + std::to_string(allocation.block_bytes) +
+        " blocks=" + std::to_string(allocation.blocks) + " segment_bytes=" +
+        std::to_string(segment) + " long_term_pinned_bytes=" +
         std::to_string(backing->pool->LongTermPinnedBytes()));
   };
   result->prepare_prefill = [backing](std::size_t tokens) {

@@ -19,11 +19,16 @@
 #include "src/families/qwen/vision/encoder.hpp"
 #include "src/families/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
+#include "src/models/qwen38_flash_next/memory.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
 
 namespace gufo::core {
 class GgufReader;
+}
+
+namespace gufo::models::qwen::vision {
+class AdmissionBudget;
 }
 
 namespace gufo::models::qwen38_flash_next {
@@ -106,6 +111,18 @@ public:
   /// Worst-case private device state, including the configured rollback cap.
   [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
                                          std::uint32_t context) const noexcept;
+  /// Text state including the stable vision descriptor, without lazy image
+  /// payloads. Only serving with arrival-time vision admission may use
+  /// this for admission; snapshots and other callers retain SessionBytes.
+  [[nodiscard]] std::size_t TextSessionBytes(
+      core::SessionMode mode, std::uint32_t context) const noexcept;
+  [[nodiscard]] SessionMemoryBreakdown TextSessionMemory(
+      core::SessionMode mode, std::uint32_t context) const noexcept;
+  /// Serving initialization only: prepared prompts must carry their host
+  /// preparation reservation; lazy cache growth shares the same coordinator.
+  void SetVisionMemoryBudget(
+      std::shared_ptr<qwen::vision::AdmissionBudget> budget);
+  [[nodiscard]] bool HasVisionMemoryBudget() const noexcept;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
   /// Caps wide copy verification (Executor::LimitCopyRows); call before any
   /// session is created.

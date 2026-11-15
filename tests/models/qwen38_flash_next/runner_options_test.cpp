@@ -1,7 +1,17 @@
+#include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdlib>
+#include <iostream>
 #include <limits>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 
+#include "gufo/ext/generated/qwen38_flash_next_constants.hpp"
+#include "src/models/qwen38_flash_next/cache_admission.hpp"
 #include "src/models/qwen38_flash_next/runner.hpp"
+#include "src/models/qwen38_flash_next/serving_vision.hpp"
 
 namespace qfn = gufo::models::qwen38_flash_next;
 
@@ -14,4 +24,308 @@ static_assert(qfn::DecodeConcurrencyForSessions(9) == 8);
 static_assert(qfn::DecodeConcurrencyForSessions(
                   std::numeric_limits<std::size_t>::max()) == 8);
 
-int main() {}
+namespace {
+void Expect(bool condition, std::string_view message) {
+  if (!condition) {
+    std::cerr << "FAIL: " << message << '\n';
+    std::exit(1);
+  }
+}
+
+template<class Action>
+void Rejects(Action action, std::string_view diagnostic) {
+  bool rejected = false;
+  try {
+    action();
+  } catch (const std::exception& error) {
+    rejected = std::string_view(error.what()).find(diagnostic) !=
+               std::string_view::npos;
+  }
+  Expect(rejected, diagnostic);
+}
+
+// Injection at the same post-load boundary as the serving factory. Projector
+// discovery/loading is supplied, while selection, width configuration, startup
+// planning and reservation ownership execute the production implementation.
+struct LoadedModel {
+  bool projector{};
+  bool speculative = true;
+  std::uint32_t copy_rows = 64;
+  std::uint32_t neural_drafts = 7;
+  int estimates = 0;
+  int width_changes = 0;
+  std::shared_ptr<gufo::models::qwen::vision::AdmissionBudget> budget;
+
+  bool VisionEncoder() const { return projector; }
+  bool HasVisionMemoryBudget() const { return bool(budget); }
+  void LimitCopyRows(std::uint32_t rows) {
+    ++width_changes;
+    copy_rows = rows;
+  }
+  std::size_t TextSessionBytes(gufo::core::SessionMode mode,
+                               std::uint32_t context) {
+    Expect(mode == (speculative ? gufo::core::SessionMode::kSpeculative
+                                : gufo::core::SessionMode::kAutoregressive) &&
+               context == 262144,
+           "serving preserves execution mode and full context");
+    ++estimates;
+    return copy_rows == 8 ? 100 : 150;
+  }
+  std::size_t SessionBytes(gufo::core::SessionMode mode,
+                           std::uint32_t context) {
+    return TextSessionBytes(mode, context) + 300;
+  }
+  std::size_t DeferredScratchBytes() const { return copy_rows == 8 ? 20 : 80; }
+  void SetVisionMemoryBudget(
+      std::shared_ptr<gufo::models::qwen::vision::AdmissionBudget> value) {
+    budget = std::move(value);
+  }
+};
+
+void LoadedProjectorSelection() {
+  for (const std::string path : {"projector.gguf", ""}) {
+    gufo::ext::TextRunnerOptions options;
+    options.vision_model_path = path;
+    options.max_context = 262144;
+    options.session_count = 4;
+    options.speculative.backend = gufo::ext::TextSpeculativeBackend::kMtp;
+    options.speculative.max_draft_tokens = 7;
+    LoadedModel model{.projector = true};
+    const auto selected = qfn::InitializeServingVision(
+        model, options.max_context,
+        options.speculative.backend == gufo::ext::TextSpeculativeBackend::kMtp,
+        options.session_count, 450, 64, 0, {1000, 0},
+        [] { return std::size_t{1000}; });
+    Expect(options.provider_options.empty() && selected.has_value(),
+           "explicit and discovered loaded projectors need no policy argument");
+    Expect(
+        selected->budget == model.budget &&
+            selected->configured_text_bytes == 400 &&
+            selected->plan.per_session_bytes == 100 &&
+            selected->plan.shared_reservation_bytes == 20 &&
+            selected->plan.state_capacity_bytes == 430 &&
+            selected->plan.Fits(4),
+        "loaded projector installs coordination and text-only startup claim");
+    Expect(model.copy_rows == 8 && selected->copy_width.has_value() &&
+               selected->copy_width->rows == 8 && model.neural_drafts == 7 &&
+               options.speculative.max_draft_tokens == 7,
+           "ordinary verification preserves the neural draft limit");
+    Expect(selected->budget->ProtectedBytes() == 420 &&
+               selected->budget->Outstanding() == 0,
+           "execution is pending without an unused startup image pool");
+    {
+      auto image = selected->budget->Reserve(580);
+      Expect(selected->budget->Outstanding() == 580,
+             "images use capacity after accepted execution obligations");
+      Rejects([&] { (void)selected->budget->ReserveShared(1); },
+              "vision memory");
+    }
+    Expect(selected->budget->Outstanding() == 0,
+           "image refusal and release preserve subsequent capacity");
+    auto original_budget = model.budget;
+    Rejects([&] { qfn::RequireUncoordinatedModel(model); }, "already");
+    Rejects(
+        [&] {
+          (void)qfn::InitializeServingVision(
+              model, options.max_context, true, options.session_count, 450, 64,
+              0, {1000, 0}, [] { return std::size_t{1000}; });
+        },
+        "already");
+    Expect(model.budget == original_budget && model.width_changes == 8,
+           "another runner cannot overwrite the model coordinator");
+    selected->budget->ClaimExecutionOwner();
+    Rejects([&] { selected->budget->ClaimExecutionOwner(); }, "owner");
+  }
+
+  // No loaded projector means no image-related admission or width cap.
+  LoadedModel text;
+  const auto unselected = qfn::InitializeServingVision(
+      text, 262144, true, 4, 0, 64, 0, {0, 0}, []() -> std::size_t {
+        Expect(false, "text-only selection must not observe image headroom");
+        return 0;
+      });
+  Expect(
+      !unselected && !text.budget && text.copy_rows == 64 &&
+          text.estimates == 0,
+      "no projector leaves existing text admission and optional width alone");
+  LoadedModel typed{.projector = true};
+  qfn::RequireUncoordinatedModel(typed);
+  Expect(!typed.budget && typed.copy_rows == 64,
+         "typed factory guard does not silently install a serving coordinator");
+
+  LoadedModel autoregressive{.projector = true, .speculative = false};
+  const auto ar =
+      qfn::InitializeServingVision(autoregressive, 262144, false, 1, 230, 64, 0,
+                                   {1000, 0}, [] { return std::size_t{1000}; });
+  Expect(ar && ar->plan.Fits(1) && !ar->copy_width &&
+             autoregressive.width_changes == 0 &&
+             ar->budget == autoregressive.budget,
+         "AR projector installs admission without configuring MTP copy rows");
+
+  // Sessions (4 x 150), wide deferred work (80) and one image (320) fit 1000.
+  LoadedModel roomy{.projector = true};
+  const auto wide =
+      qfn::InitializeServingVision(roomy, 262144, true, 4, 1000, 64, 320,
+                                   {1000, 0}, [] { return std::size_t{1000}; });
+  Expect(wide && wide->copy_width && wide->copy_width->rows == 64 &&
+             roomy.copy_rows == 64 && roomy.width_changes == 1 &&
+             wide->plan.per_session_bytes == 150 &&
+             wide->budget->ProtectedBytes() == 680,
+         "image headroom keeps wide copy verification and its obligations");
+  LoadedModel tight{.projector = true};
+  const auto narrow =
+      qfn::InitializeServingVision(tight, 262144, true, 4, 1000, 64, 321,
+                                   {1000, 0}, [] { return std::size_t{1000}; });
+  Expect(narrow && narrow->copy_width && narrow->copy_width->rows == 8 &&
+             tight.copy_rows == 8 && narrow->plan.per_session_bytes == 100,
+         "without room for one image the ordinary width is installed");
+
+  LoadedModel host_limited{.projector = true};
+  const auto limited =
+      qfn::InitializeServingVision(host_limited, 262144, true, 4, 5000, 64, 320,
+                                   {999, 0}, [] { return std::size_t{999}; });
+  Expect(limited && limited->copy_width && limited->copy_width->rows == 8,
+         "a runtime (host) limit below the device's also narrows the width");
+
+  // Selection consumes the collected snapshot, not a second runtime reading
+  // that could disagree with the diagnostic. The cache term affects width,
+  // not the subsequent ledger's protected execution or available headroom.
+  LoadedModel cache_limited{.projector = true};
+  unsigned observations = 0;
+  const auto cached = qfn::InitializeServingVision(
+      cache_limited, 262144, true, 4, 1000, 64, 320, {1000, 1}, [&] {
+        ++observations;
+        return std::size_t{1000};
+      });
+  Expect(cached && cached->copy_width->rows == 8 && observations == 0 &&
+             cached->budget->ProtectedBytes() == 420 &&
+             cached->budget->Outstanding() == 0 &&
+             cache_limited.neural_drafts == 7 && cached->plan.Fits(4),
+         "cache preference narrows before construction without a startup pool");
+  auto arriving = cached->budget->Reserve(580);
+  Expect(
+      observations == 1 && cached->budget->PendingBytes() == 580,
+      "runtime arrivals use the observer without a permanent cache deduction");
+
+  LoadedModel insufficient{.projector = true};
+  const auto short_plan =
+      qfn::InitializeServingVision(insufficient, 262144, true, 4, 419, 64, 0,
+                                   {1000, 0}, [] { return std::size_t{1000}; });
+  Expect(!short_plan->plan.Fits(4),
+         "one-byte text insufficiency remains a startup refusal");
+  LoadedModel unknown_sessions{.projector = true};
+  Rejects(
+      [&] {
+        (void)qfn::InitializeServingVision(unknown_sessions, 262144, true, 0,
+                                           450, 64, 0, {1000, 0},
+                                           [] { return std::size_t{1000}; });
+      },
+      "session");
+  Expect(!unknown_sessions.budget && unknown_sessions.width_changes == 0,
+         "missing execution ownership cannot guess a session count");
+}
+void CachePreferenceSizing() {
+  using gufo::ext::TextRunnerRamCacheOptions;
+  constexpr std::size_t gib = std::size_t{1} << 30;
+  const TextRunnerRamCacheOptions explicit_ram{4 * gib, true};
+  const TextRunnerRamCacheOptions automatic{};
+  const TextRunnerRamCacheOptions disabled{4 * gib, false};
+  Expect(
+      qfn::RequestedVisionCacheBytes(explicit_ram, false, 9 * gib) == 4 * gib &&
+          qfn::RequestedVisionCacheBytes(explicit_ram, true, gib) == 4 * gib,
+      "explicit cache preference is its total request, not payload pages or a "
+      "grant");
+  Expect(
+      qfn::RequestedVisionCacheBytes(automatic, false, 3 * gib) == 3 * gib &&
+          qfn::RequestedVisionCacheBytes(automatic, true, 40 * gib) ==
+              TextRunnerRamCacheOptions::kAutomaticMaxBytes &&
+          qfn::RequestedVisionCacheBytes(automatic, true, 0) == 0,
+      "automatic preference uses the existing host budget and automatic cap");
+  Expect(qfn::RequestedVisionCacheBytes(disabled, false, 9 * gib) == 0 &&
+             qfn::RequestedVisionCacheBytes(disabled, true, 9 * gib) == gib / 2,
+         "disabled retention has no pool unless disk captures need "
+         "copy-through backing");
+
+  // Existing cache storage is already included in the free observation. Only
+  // initialized storage inside the target can reduce future growth. No ledger
+  // reservation or estimated metadata/headroom is passed as a commitment.
+  const auto unified = gufo::models::qwen::vision::SelectStartupCapacity(
+      10 * gib, 8 * gib, false);
+  const auto future = qfn::PrepareCopyWidthHeadroom(
+      unified, gib / 2, qfn::RequestedVisionCacheBytes(explicit_ram, true, 0),
+      gib);
+  Expect(future.capacity_bytes == 8 * gib - gib / 2 &&
+             future.cache_growth_bytes == 3 * gib,
+         "known included cache commitment only reduces growth; it is not free "
+         "credit");
+  const auto device = qfn::PrepareCopyWidthHeadroom(
+      gufo::models::qwen::vision::SelectStartupCapacity(10 * gib, gib, true),
+      gib / 2, 4 * gib, 0);
+  Expect(
+      device.capacity_bytes == 10 * gib - gib / 2 &&
+          device.cache_growth_bytes == 0,
+      "independent device capacity does not pay for future host cache storage");
+}
+}  // namespace
+
+int main() {
+  // The metadata is generated from the real provider declaration. Simulate
+  // HIP availability without loading the provider or touching a device.
+  gufo::ext::Registry registry;
+  registry.BeginExtension({"qwen38_flash_next", "test", ""});
+  auto provider = gufo::ext::generated::extension_qwen38_flash_next::
+      kProvider_flash_next_q4;
+  provider.available = true;
+  provider.unavailable_reason.clear();
+  Expect(std::ranges::none_of(provider.options,
+                              [](const auto& option) {
+                                return option.name == "--vision-memory-policy";
+                              }),
+         "provider metadata and its generated help omit the removed option");
+  registry.AddProvider(std::move(provider));
+  gufo::ext::ProviderInfo unrelated;
+  unrelated.id = "unrelated-provider";
+  unrelated.options = {{"--unrelated-option",
+                        gufo::ext::OptionType::kString,
+                        {"serve"},
+                        "Independent option"}};
+  registry.AddProvider(std::move(unrelated));
+
+  const auto defaults = gufo::ext::ParseOptions(registry, "serve", {});
+  gufo::ext::ValidateSelectedOptions(
+      registry, "serve", registry.Provider("flash-next-q4"), defaults);
+  Expect(defaults.empty(), "normal no-flag serving construction validates");
+  for (const auto policy : {"conservative", "on-demand", "automatic", ""}) {
+    const std::array<std::string_view, 2> arguments{"--vision-memory-policy",
+                                                    policy};
+    for (const auto command : {"serve", "prompt", "bench"}) {
+      Rejects(
+          [&] { (void)gufo::ext::ParseOptions(registry, command, arguments); },
+          "unknown option: --vision-memory-policy");
+    }
+    gufo::ext::ParsedOptions supplied{
+        {"--vision-memory-policy", std::string(policy)}};
+    Rejects(
+        [&] {
+          gufo::ext::ValidateSelectedOptions(
+              registry, "serve", registry.Provider("flash-next-q4"), supplied);
+        },
+        "does not support --vision-memory-policy");
+  }
+  const std::array<std::string_view, 2> other_arguments{"--unrelated-option",
+                                                        "unchanged"};
+  const auto other =
+      gufo::ext::ParseOptions(registry, "serve", other_arguments);
+  gufo::ext::ValidateSelectedOptions(
+      registry, "serve", registry.Provider("unrelated-provider"), other);
+  Rejects(
+      [&] {
+        gufo::ext::ValidateSelectedOptions(
+            registry, "serve", registry.Provider("flash-next-q4"), other);
+      },
+      "does not support --unrelated-option");
+  LoadedProjectorSelection();
+  CachePreferenceSizing();
+  std::cout
+      << "Flash-Next automatic serving selection and provider options passed\n";
+}

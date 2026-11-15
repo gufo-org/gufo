@@ -3,14 +3,43 @@
 #include <algorithm>
 #include <functional>
 #include <stdexcept>
+#include <utility>
 
+#include "src/families/qwen/vision/admission.hpp"
 #include "src/families/qwen/vision/prompt.hpp"
 
 namespace gufo::models::qwen::vision {
 
+std::shared_ptr<const core::Image> PrepareImage(
+    const std::shared_ptr<const std::vector<std::uint8_t>>& encoded,
+    tokenization::ChatMessage::ImageDetail detail,
+    const std::shared_ptr<AdmissionBudget>& budget) {
+  if (!encoded)
+    throw std::invalid_argument("image input has no encoded bytes");
+  std::shared_ptr<PreparationReservation> admission;
+  if (budget)
+    admission = std::make_shared<PreparationReservation>(
+        budget, PlanImagePreparation(*encoded, detail));
+  auto image = std::make_shared<const core::Image>(
+      ResizeImage(core::DecodeImage(*encoded), detail));
+  if (!admission)
+    return image;
+  admission->Finish(image->pixels.capacity());
+  struct Owner {
+    // Pixels die before their ticket, including after cache eviction and
+    // when a prompt/image copy is the final owner.
+    std::shared_ptr<PreparationReservation> admission;
+    std::shared_ptr<const core::Image> image;
+  };
+  const auto* pixels = image.get();
+  auto owner = std::make_shared<Owner>(std::move(admission), std::move(image));
+  return std::shared_ptr<const core::Image>(std::move(owner), pixels);
+}
+
 std::shared_ptr<const core::Image> ImageCache::Get(
     const std::shared_ptr<const std::vector<std::uint8_t>>& encoded,
-    tokenization::ChatMessage::ImageDetail detail) {
+    tokenization::ChatMessage::ImageDetail detail,
+    const std::shared_ptr<AdmissionBudget>& budget) {
   if (!encoded)
     throw std::invalid_argument("image input has no encoded bytes");
   const std::hash<std::string_view> hash;
@@ -19,6 +48,7 @@ std::shared_ptr<const core::Image> ImageCache::Get(
       hash(kImagePreprocessingVersion);
   const auto matches = [&](const Entry& entry) {
     return entry.key == key && entry.detail == detail &&
+           entry.budget == budget &&
            std::ranges::equal(*entry.encoded, *encoded);
   };
   {
@@ -33,8 +63,7 @@ std::shared_ptr<const core::Image> ImageCache::Get(
   }
   // Decode outside the lock so a new upload cannot block historical hits.
   // A concurrent miss may duplicate work, but only one result is retained.
-  auto image = std::make_shared<const core::Image>(
-      ResizeImage(core::DecodeImage(*encoded), detail));
+  auto image = PrepareImage(encoded, detail, budget);
   const auto pixels = image->pixels.capacity();
   if (pixels > capacity_bytes_ ||
       encoded->capacity() > capacity_bytes_ - pixels)
@@ -52,7 +81,7 @@ std::shared_ptr<const core::Image> ImageCache::Get(
     entries_.pop_back();
     ++stats_.evictions;
   }
-  entries_.push_front({key, detail, encoded, image});
+  entries_.push_front({key, detail, budget, encoded, image});
   stats_.pixel_bytes += pixels;
   stats_.encoded_bytes += encoded->capacity();
   return image;

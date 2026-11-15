@@ -21,6 +21,7 @@
 #include "src/cli/serve/text_generation_scheduler.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
 #include "src/core/gguf_reader.hpp"
+#include "src/core/resource_error.hpp"
 
 namespace gufo::server {
 
@@ -576,7 +577,7 @@ InferenceBackend::Result InferenceBackend::complete(
 InferenceBackend::Result InferenceBackend::chat(
     const ChatRequest& request, std::size_t max_tokens,
     const sampling::SamplingConfig& sampling_config,
-    const CancellationCheck& is_cancelled, const TokenCallback& on_token) {
+    const CancellationCheck& is_cancelled, const TokenCallback& on_token) try {
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
   const auto state = impl_->Snapshot();
@@ -612,6 +613,9 @@ InferenceBackend::Result InferenceBackend::chat(
   (void)on_token;
   return {};
 #endif
+} catch (const core::ResourceAdmissionError& error) {
+  throw TextGenerationError(TextGenerationErrorCode::kResourceExhausted,
+                            error.what());
 }
 
 std::shared_ptr<InferenceBackend::GenerationRequest>
@@ -660,7 +664,7 @@ std::shared_ptr<InferenceBackend::GenerationRequest>
 InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
                              const sampling::SamplingConfig& sampling_config,
                              const CancellationCheck& is_cancelled,
-                             bool stream_output) {
+                             bool stream_output) try {
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
   const auto state = impl_->Snapshot();
@@ -713,6 +717,9 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   return TextGenerationBackend::start_chat(request, max_tokens, sampling_config,
                                            is_cancelled, stream_output);
 #endif
+} catch (const core::ResourceAdmissionError& error) {
+  throw TextGenerationError(TextGenerationErrorCode::kResourceExhausted,
+                            error.what());
 }
 
 InferenceBackend::Result InferenceBackend::chat(
@@ -736,7 +743,7 @@ std::size_t InferenceBackend::count_tokens(std::string_view text) const {
 }
 
 std::optional<std::size_t> InferenceBackend::count_chat_tokens(
-    const ChatRequest& request) const {
+    const ChatRequest& request) const try {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();
   if (state == nullptr) {
@@ -753,6 +760,9 @@ std::optional<std::size_t> InferenceBackend::count_chat_tokens(
   (void)request;
   return std::nullopt;
 #endif
+} catch (const core::ResourceAdmissionError& error) {
+  throw TextGenerationError(TextGenerationErrorCode::kResourceExhausted,
+                            error.what());
 }
 
 std::optional<std::string> InferenceBackend::render_chat_prompt(

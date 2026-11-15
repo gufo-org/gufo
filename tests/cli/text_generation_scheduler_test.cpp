@@ -36,6 +36,7 @@
 #include "src/core/json.hpp"
 #include "src/core/platform/env.hpp"
 #include "src/core/platform/os_info.hpp"
+#include "src/core/resource_error.hpp"
 #include "tests/cache/fake_adapter.hpp"
 #include "tests/cli/fake_cache_resources.hpp"
 
@@ -210,6 +211,7 @@ struct FakeControl {
   std::optional<TextRunnerToken> block_advance_label;
   std::optional<TextRunnerToken> block_prefill_label;
   std::optional<TextRunnerToken> throw_advance_label;
+  std::atomic<bool> refuse_admission_once{false};
   std::atomic<bool> device_usable{true};
   std::atomic<std::size_t> device_probes{0};
   std::atomic<std::size_t> idle_probes{0};
@@ -381,6 +383,15 @@ public:
         .prompt_admission_available_bytes =
             control_->prompt_admission_available_bytes,
     };
+  }
+
+  void SetPromptContext(TextRunnerState& state,
+                        std::shared_ptr<const gufo::ext::TextPromptContext>
+                            context) const override {
+    if (control_->refuse_admission_once.exchange(false))
+      throw gufo::core::ResourceAdmissionError(
+          "vision memory budget exhausted");
+    TextModelRunner::SetPromptContext(state, std::move(context));
   }
 
   [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
@@ -2549,6 +2560,39 @@ void TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement() {
   Expect(control->device_probes == 1, "successful work never probes");
 }
 
+void TestResourceAdmissionRefusalPreservesScheduler() {
+  auto control = std::make_shared<FakeControl>();
+  control->refuse_admission_once = true;
+  auto scheduler = MakeScheduler(control, 1, {},
+                                 {.stream_start_delay = std::chrono::hours(1)});
+  bool started = false;
+  bool failed = false;
+  try {
+    auto request = scheduler->Submit({9, 90}, 2, 0.0F, {}, true);
+    (void)request.Wait({}, {}, [&] {
+      started = true;
+      return true;
+    });
+  } catch (const TextGenerationError& error) {
+    failed = error.code() == TextGenerationErrorCode::kResourceExhausted &&
+             error.http_status() == 503 &&
+             std::string_view(error.stable_code()) == "resource_exhausted" &&
+             std::string_view(error.what()) == "vision memory budget exhausted";
+  }
+  Expect(failed, "resource admission returns an explicit recoverable error");
+  Expect(!started && control->Events().empty(),
+         "immediate refusal precedes streaming and execution");
+  Expect(control->device_probes == 0 && !scheduler->device_lost(),
+         "normal memory refusal does not probe or poison the device");
+  Expect(!scheduler->SessionStates().front().processing,
+         "refusal releases the execution session");
+  Expect(
+      scheduler->Submit({8, 80}, 2, 0.0F).Wait().tokens == ExpectedTokens(8, 2),
+      "a subsequent text request completes after image admission refusal");
+  Expect(control->device_probes == 0,
+         "healthy replacement execution does not probe the device");
+}
+
 void TestIdleDeviceProbe() {
   using Status = TextModelRunner::DeviceProbeStatus;
   auto control = std::make_shared<FakeControl>();
@@ -3979,6 +4023,7 @@ int main() {
   TestQueuedAndPrefillCancellation();
   TestServerMetricsAreLive();
   TestMetricsDuringCacheAdmission();
+  TestResourceAdmissionRefusalPreservesScheduler();
   TestSessionStatesFollowAdmittedRequests();
   TestDecodeCancellationAndStateReclamation();
   TestFourResidentRequestsMakeProgress();

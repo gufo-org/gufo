@@ -31,6 +31,21 @@ target_link_libraries(cache_transfer_pool_test PRIVATE gufo_cache_fake)
 add_test(NAME cache_transfer_pool_test COMMAND cache_transfer_pool_test)
 set_tests_properties(cache_transfer_pool_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
 
+# Production host-side HIP backing, using bounded CPU allocation/copy stubs.
+# The admission coordinator has no decoder dependency; compile it directly so
+# this contract also runs in the supported platform-only configuration.
+add_executable(cache_backing_admission_test backing_admission_test.cpp
+  ${PROJECT_SOURCE_DIR}/src/families/qwen/vision/admission.cpp
+  ${PROJECT_SOURCE_DIR}/src/core/hip/component_cache_resources.cpp
+  ${PROJECT_SOURCE_DIR}/src/core/hip/committed_backing.cpp
+  ${PROJECT_SOURCE_DIR}/src/core/hip/host_allocations.cpp
+  ${PROJECT_SOURCE_DIR}/src/core/hip/transfer_pool.cpp)
+target_include_directories(cache_backing_admission_test BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/fake_hip)
+target_link_libraries(cache_backing_admission_test PRIVATE gufo_cache_fake)
+add_test(NAME cache_backing_admission_test COMMAND cache_backing_admission_test)
+set_tests_properties(cache_backing_admission_test PROPERTIES LABELS "cpu;cache;admission" TIMEOUT 30)
+
 add_executable(cache_adapter_lifecycle_test lifecycle_test.cpp)
 target_link_libraries(cache_adapter_lifecycle_test PRIVATE gufo_cache_fake)
 add_test(NAME cache_adapter_lifecycle_test COMMAND cache_adapter_lifecycle_test)

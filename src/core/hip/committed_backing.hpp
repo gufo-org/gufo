@@ -104,6 +104,11 @@ struct BackingPoolConfig {
   // device heap's free bytes before and after; false releases the segment
   // and keeps the pool at its current size. A failed heap query refuses it.
   std::function<bool(std::size_t, std::size_t, std::size_t)> keep_segment;
+  // Optional shared admission before committing a segment. The reservation
+  // becomes a retained charge only after registration and keep_segment pass;
+  // failures release physical pages before the ticket. Capacity exhaustion
+  // declines growth. The empty callback preserves ordinary cache policy.
+  std::function<cache::ResourceReservation(std::size_t)> reserve_segment{};
 };
 
 class CommittedBackingPool {

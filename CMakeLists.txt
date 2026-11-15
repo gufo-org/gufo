@@ -869,6 +869,11 @@ endfunction()
   add_test(NAME png_decode_test COMMAND png_decode_test)
   set_tests_properties(png_decode_test PROPERTIES LABELS "cpu;image;correctness")
 
+  add_executable(image_memory_test tests/core/image_memory_test.cpp)
+  target_link_libraries(image_memory_test PRIVATE gufo_core JPEG::JPEG PkgConfig::WEBP)
+  add_test(NAME image_memory_test COMMAND image_memory_test)
+  set_tests_properties(image_memory_test PROPERTIES LABELS "cpu;image;correctness")
+
   add_executable(audio_decode_test tests/core/audio_decode_test.cpp)
   target_link_libraries(audio_decode_test PRIVATE gufo_core)
   target_compile_definitions(audio_decode_test PRIVATE
@@ -1115,7 +1120,7 @@ endfunction()
   add_executable(component_text_cache_test
     tests/cli/component_text_cache_test.cpp)
   target_link_libraries(component_text_cache_test PRIVATE gufo_cache_fake
-    gufo_serving)
+    gufo_serving gufo_qwen_vision)
   add_test(NAME component_text_cache_test COMMAND component_text_cache_test)
   # Start the long persistence suite early while other contracts fill the
   # remaining CTest slots. Costs order tests; they do not change timeouts.

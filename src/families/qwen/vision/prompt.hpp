@@ -10,10 +10,12 @@
 
 #include "src/core/image.hpp"
 #include "src/families/qwen/text/chat_template.hpp"
+#include "src/families/qwen/vision/admission.hpp"
 
 namespace gufo::models::qwen::vision {
 
 class ImageCache;
+class AdmissionBudget;
 
 inline constexpr std::uint32_t kImageToken = 248056;
 inline constexpr std::uint32_t kPatchSize = 16;
@@ -57,6 +59,14 @@ struct Prompt {
   /// SHA-256 covers decoded pixels, grid placement, preprocessing version,
   /// and the model-specific encoder identity. Tokens remain a separate key.
   std::vector<std::uint8_t> cache_identity;
+  /// Prepared pixel pointers share ownership with their reservation, including
+  /// when a prompt or individual image is copied. DeviceInput may omit that
+  /// duplicate charge only for this same budget.
+  std::weak_ptr<AdmissionBudget> memory_admission;
+  /// Attach an existing reservation to every pixel pointer. Copies and value
+  /// assignment then preserve accounting independently of the Prompt owner.
+  void RetainPixels(std::shared_ptr<const void> reservation,
+                    const std::shared_ptr<AdmissionBudget>& budget);
   [[nodiscard]] std::span<const std::uint8_t> IdentityForPrefix(
       std::size_t token_count) const;
 };
@@ -66,13 +76,21 @@ struct Prompt {
 /// never exceeds the `kAuto` size. `kAuto` uses the model's full range.
 [[nodiscard]] core::Image ResizeImage(
     const core::Image& image, tokenization::ChatMessage::ImageDetail detail);
+/// Inspect the original image without decoding or allocating image-sized
+/// storage. Includes decoder/orientation, resizing and filter-construction
+/// peaks, plus retained resized RGB pixels. History owners keep their own
+/// admissions alive while the next image is prepared.
+[[nodiscard]] PreparationMemory PlanImagePreparation(
+    std::span<const std::uint8_t> encoded,
+    tokenization::ChatMessage::ImageDetail detail);
 [[nodiscard]] Prompt Prepare(
     const tokenization::QwenTokenizer& tokenizer,
     std::span<const tokenization::ChatMessage> messages,
     std::span<const tokenization::ChatTool> tools,
     const tokenization::ChatTemplateOptions& options,
     std::string_view encoder_identity, std::uint32_t max_context,
-    ImageCache* image_cache = nullptr);
+    ImageCache* image_cache = nullptr,
+    const std::shared_ptr<AdmissionBudget>& budget = {});
 
 }  // namespace gufo::models::qwen::vision
 #endif

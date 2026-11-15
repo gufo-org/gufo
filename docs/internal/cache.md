@@ -793,3 +793,50 @@ Reading them:
   runners without snapshots, without loading a model.
 - `tests/cli/component_text_cache_test.cpp` and `tests/cache/` cover
   retention, admission, eviction and persistence without loading a model.
+
+## Request-time image admission
+
+Flash-Next's serving factory enables request-time admission whenever the loaded
+model has a projector, including automatic discovery. It uses the ordinary device
+state gate with text/MTP state and the stable image descriptor. It does not
+promise future image memory or the configured cache maximum at startup.
+
+A shared coordinator reserves image preparation before slot acquisition, then
+covers the complete retained history, encoding and replacement peaks. Prepared
+pixel aliases and device state keep their charges until their last users finish.
+Accepted execution/deferred bounds remain pending until allocation succeeds;
+committed bytes already appear in subsequent free-memory observations. Cache
+segments and optional snapshot copies reserve through the same coordinator.
+Cache sizing, host reserves and lazy backing pressure checks remain in force.
+
+Preparation inspects bounded encoded headers before allocating decoder or pixel
+storage. Its per-image claim covers the original format and dimensions, decoder
+workspace, orientation replacement and resize intermediates. Complex formats
+can still require large bounds. A cached image retains its pixel charge; cache
+hits reuse that owner, and history copies keep it alive after eviction.
+
+With a projector, copied-token verification keeps its widest width (64 rows)
+when the configured sessions, deferred work, one maximum-resolution image
+(4096x4096: encoder scratch, embedding and pixels) and applicable future cache
+storage fit the collected capacity. Unified-memory GPUs include the requested
+cache allowance, less any already initialized storage within it; device-local
+budgets do not subtract host-only cache growth. Automatic and disk-only cache
+preferences follow serving's existing sizing policy. Retained metadata is
+inside the allowance; bounded staging remains covered by the runtime margin.
+
+The selector tries intermediate eight-row widths before falling back to ordinary
+eight-row verification. This preference neither reserves a cache/image pool nor
+adds a text-startup condition. The width is fixed before session construction,
+since buffers and captured work keep their geometry for the process lifetime.
+Narrowing can reduce copied-token acceleration; the neural draft limit is
+unchanged. Cache grants and lazy growth still use their normal checks. This does
+not reclaim committed pages or promise later image capacity.
+
+The coordinator serializes internal reservations, but cannot reserve memory
+against other processes. Allocation failures still need cleanup and a resource
+refusal; neither a startup estimate nor CPU accounting tests establishes GPU
+capacity or numerical image correctness. Other providers retain conservative
+admission. The model-backed in-process factory retains conservative claims: it
+does not know the serving session count and cannot install a coordinator on an
+already shared model. Text-only serving retains its optional wide-copy selector.
+This policy does not grow or demand-map the language model's KV state.

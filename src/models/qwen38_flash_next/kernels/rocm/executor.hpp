@@ -23,6 +23,7 @@
 #include "src/families/qwen/kernels/ops/token.hpp"
 #include "src/families/qwen/vision/device_input.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
+#include "src/models/qwen38_flash_next/execution_admission.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/blaslt.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -145,7 +146,8 @@ private:
   friend struct ExecutorTestAccess;  // eager/replay checks in GPU tests
   friend struct PrefillCheckpoint;
   friend class gufo::models::qwen38_flash_next::ContinuationAdapter;
-  Session() = default;
+  explicit Session(std::shared_ptr<qwen::vision::AdmissionBudget> budget = {})
+      : execution_commitment_(std::move(budget)) {}
 
   struct LinearState {
     float* conv_state{nullptr};    ///< [kernel-1][channels]
@@ -189,6 +191,8 @@ private:
   mutable bool cancelled_{false};
   std::uint64_t mutation_epoch_{0};
   const Executor* owner_{nullptr};
+  ExecutionCommitment execution_commitment_;
+  void CommitAdmission();
   qwen::vision::DeviceInput vision_input_;
   std::uint32_t max_context_{0};
   bool mtp_enabled_{false};
@@ -294,7 +298,18 @@ public:
   [[nodiscard]] std::size_t SessionBytes(
       core::SessionMode mode, std::uint32_t max_context,
       std::uint32_t rollback_depth) const noexcept;
+  [[nodiscard]] SessionMemoryBreakdown SessionMemory(
+      core::SessionMode mode, std::uint32_t max_context,
+      std::uint32_t rollback_depth) const noexcept;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
+  /// Configure before sessions or snapshots exist. Optional snapshot storage
+  /// competes with image requests and lazy host-cache growth.
+  void SetVisionMemoryBudget(
+      std::shared_ptr<qwen::vision::AdmissionBudget> budget);
+
+  [[nodiscard]] bool HasVisionMemoryBudget() const noexcept {
+    return bool(vision_memory_budget_);
+  }
 
   enum class ForwardMode { kDecode, kVerify, kPrefill };
   /// Commits checkpoint slot 0 on first use. False when the device lacks
@@ -711,6 +726,9 @@ private:
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
   Options options_;
+  std::shared_ptr<qwen::vision::AdmissionBudget> vision_memory_budget_;
+  mutable std::size_t deferred_committed_bytes_{0};
+  void CommitDeferredAdmission(std::size_t bytes) const;
   [[nodiscard]] std::shared_ptr<SnapshotAllocator> GetSnapshotAllocator() const;
   mutable std::once_flag snapshot_allocator_once_;
   mutable std::shared_ptr<SnapshotAllocator> snapshot_allocator_;
