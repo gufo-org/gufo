@@ -412,7 +412,43 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
   on the shipping binary; `glm5_next` ctest 9/9 GPU-exclusive
   (`/tmp/opencode/gufo_bench_f32gate.log`, `_f32ab.log`,
   `_f32ship.log`). The Rows tier is now fully tiled; what remains of
-  its 0.5 s/pass residue is the <16-token ladder tail.
+   its 0.5 s/pass residue is the <16-token ladder tail.
+- Split-q WMMA MLA gather score + vectorized combine (`attention.hip.cpp
+  MlaPackQKernel`/`MlaGatherScoreKernel`/`MlaGatherCombineKernel`, A4):
+  the score now runs on tensor cores — q is packed once per call into hi
+  and lo F16 halves (`[tokens][2][heads][512]`), each 32-key tile stages
+  the gathered latent rows in LDS and scores 64 heads from two
+  `matrix_a` fragments (hi + lo) into one fp32 accumulator. A single
+  F16 q was tried first and rejected: bench NMSE 4.3e-8 looked fine but
+  softmax cancellation put the worst-rel latent error at 4e-3, past the
+  5e-5-era contract; the split recovers it to NMSE 1.03e-11 at 2.98x
+  instead of the single-fragment 3.67x. Combine moved to an uint4
+  8-column slice per thread (64 threads, 4-way j unroll). Microbench
+  (`tools/bench/glm5_mla_bench.hip`, exclusive): score 70.7 -> 23.7 ms
+  (2.98x), combine 80.5 -> 50.4 ms (1.60x) with worst-rel quality
+  reported on both variants
+  (`/tmp/opencode/gufo_bench_mlabench2.log`). Quality: attention test
+  gates latent at 2e-4 (documented F16-split residual on near-zero
+  latent elements; measured 1.21e-4) and out at 1e-3 (measured 7.9e-5).
+  The forward golden needed re-approval: the `code` case final snapshot
+  reached 0.5005 nats against the 0.5 margin while all five 24-token
+  argmax chains stayed exact and every other snapshot sat at 0.02-0.23;
+  re-captured through the STEPS self-capture path (prefill drift
+  <= 0.02, `code` final shift 0.48 nats, verification run ALL PASS,
+  fixture revision 1022d0191). Matched pp A/B (alternating pairs,
+  baseline rebuilt from a clean worktree of `1022d019` — an earlier
+  in-session "baseline" binary that predated A6b and a worktree whose
+  CMake source dir silently stayed `CMAKE_HOME_DIRECTORY` of the main
+  tree both polluted the first two attempts; absolute pp levels also
+  drift ~5 % across days, so only alternating same-session pairs mean
+  anything): pp2048 230.9/228.6 -> **251.2/249.8 (+9.0 %)**, pp16384
+  175.1/169.6 -> **193.7/192.8 (+12.2 %)** — the gain grows with depth
+  as the quadratic share predicts
+  (`/tmp/opencode/gufo_bench_a4true.log`); pp512 +2.9 %, tg1/tg128 at
+  noise (11.56/11.56 vs 11.42/11.64 t/s,
+  `/tmp/opencode/gufo_bench_a4tg.log`); `glm5_next` ctest green
+  GPU-exclusive on the shipped fixture
+  (`/tmp/opencode/gufo_bench_glm5suite.log`, `_glm5fix.log`).
 
 ## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-15)
 
@@ -424,8 +460,8 @@ dense Q5_K WMMA 24.1 %, MLA score+combine 18.2 %, micro-kernel misc
 measured-order ladder with per-item
 estimates and quality gates lives in
 [PLAN.md](PLAN.md) Phase 3: exact-default items A1-A6 (A1 rejected,
-A2/A3/A5/A6 shipped, A4 MLA score+combine next and the last exact-default
-item standing), then the opt-in
+A2/A3/A4/A5/A6 shipped 2026-11-15 — the exact-default ladder is done),
+then the opt-in
 approximate fast track B7-B10 (W8A8, online-softmax attend, capped
 window, DFlash2/MTP speculation) from which the reference-class 600+
 comes. Earlier items in this list (IQ routed WMMA tier, Q5_K WMMA tier,

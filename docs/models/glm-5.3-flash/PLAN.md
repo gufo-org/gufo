@@ -89,7 +89,11 @@ cores.
 
 Status 2026-11-14: pp2048 **184.5 t/s** (now **217.0** with A5+A3+
 A2-decode shipped), pp16384 **147.0** (**165.8**),
-exact default (sha `43557e0c…`, ctest 9/9). A fresh `rocprofv3` capture of
+exact default (sha `43557e0c…`, ctest 9/9); 2026-11-15 on top of A6,
+split-q WMMA MLA scoring (A4) took pp2048 229.8 → **250.5** and
+pp16384 172.3 → **193.3** with the golden re-approved at revision
+`1022d0191` — the exact-default ladder is complete). A fresh
+`rocprofv3` capture of
 the shipped tree at pp2048 (`/tmp/opencode/prof_mla2`) shows steady-state
 idle down to **2.2 %** — the launch storm is gone after P8 (KDA
 single-launch scan), row-batched elementwise and the token-batched
@@ -138,13 +142,14 @@ levers, exact-default ladder (A) then opt-in fast track (B):
     registers (zero spills), ~20 ms -> ~2 ms per launch, zero shared
     memory. Nothing serial across tokens remains that a scan could fix
     cheaper.
-4. MLA score+combine rewrite (1.7 s/pass): combine averages 40 ms at
-   `blocks=64x2048 wg=512`; score 37 ms at `256x4x2048`. Both are now
-   single launches per layer-chunk but still VALU gathers; WMMA-tiled
-   scoring (ds4 `indexer_scores_wmma128` pattern, packed F16 q/k over
-   64-key tiles) and a wave64 combine over rank-slice splits. Changes
-   accumulation order → P7-style NMSE contract + golden re-approval.
-   Target ~1.5x (−0.55 s).
+ 4. (Shipped 2026-11-15, pp2048 +9.0 %, pp16384 +12.2 %, tg unchanged —
+    see EXPERIMENTS "Split-q WMMA MLA gather score") MLA score+combine
+    rewrite: split hi/lo F16 q fragments drive one fp32 WMMA accumulator
+    over 32-key LDS tiles (single F16 q rejected — worst-rel latent 4e-3
+    through softmax), combine vectorized to uint4 8-column slices.
+    Micro score 2.98x, combine 1.60x; NMSE 1e-11, golden re-approved
+    (revision 1022d0191) after a 0.5005-vs-0.5 `code` final margin with
+    all argmax chains exact.
 5. (Shipped 2026-11-13, +4.4 % pp2048 — pp2048 193.2, see EXPERIMENTS
    "Single-list top-k shrink") Indexer bitonic sort batching (0.68
    s/pass, 22.6 k launches of one 1024-thread block): the single-list
@@ -182,7 +187,8 @@ levers, exact-default ladder (A) then opt-in fast track (B):
 Order of attack: A5 (bit-exact, cheapest, shrinks the last per-token
 loop) → A3 → A2 (decode shipped, staging variants rejected) → A1
 (rejected 2026-11-14, compute-bound) → A6 (Q8_0 + F32 row tiling +
-grid.y shipped 2026-11-15) → A4 (current), then promote
+grid.y shipped 2026-11-15) → A4 (split-q WMMA score + vectorized
+combine shipped 2026-11-15 — ladder done), then promote
 B behind one fast-profile flag with its own gate row in BENCHMARKS.md.
 
 Gate: pp2048 ≥ 0.9× and tg32 ≥ 1.0× the Phase-0 llama.gl baseline with
