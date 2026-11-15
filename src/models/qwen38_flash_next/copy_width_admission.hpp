@@ -27,9 +27,11 @@ struct CopyWidthChoice {
 // estimate must install/evaluate the real executor configuration; the last
 // call installs the returned width. Neural MTP draft limits are unchanged.
 template<class Estimate>
-[[nodiscard]] CopyWidthChoice SelectOnDemandCopyWidth(
-    std::uint32_t widest, std::size_t sessions, std::size_t capacity,
-    std::size_t image_bytes, Estimate&& estimate) {
+[[nodiscard]] CopyWidthChoice SelectOnDemandCopyWidth(std::uint32_t widest,
+                                                      std::size_t sessions,
+                                                      std::size_t capacity,
+                                                      std::size_t image_bytes,
+                                                      Estimate&& estimate) {
   constexpr auto kMax = std::numeric_limits<std::size_t>::max();
   for (auto rows = widest; rows > kCopySegmentRows; rows -= kCopySegmentRows) {
     const auto memory = estimate(rows);

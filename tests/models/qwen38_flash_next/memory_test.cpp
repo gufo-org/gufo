@@ -205,14 +205,15 @@ void WarmedCopyWidthAdmission() {
   const auto wide =
       qfn::PlanDeferredScratchBytes(config, true, 8, 8, 64, true, true, 0, 7);
   // No capacity beyond the text gate: the ordinary width is installed.
-  const auto ordinary = qfn::SelectOnDemandCopyWidth(64, 4, 0, 0, [&](std::uint32_t rows) {
-    return qfn::CopyWidthMemory{
-        qfn::PlanSessionMemory(config, SessionMode::kSpeculative, 262144, 4224,
-                               8, rows, 7, 20, 2720)
-            .TotalBytes(),
-        qfn::PlanDeferredScratchBytes(config, true, 8, 8, rows, true, true, 0,
-                                      7)};
-  });
+  const auto ordinary =
+      qfn::SelectOnDemandCopyWidth(64, 4, 0, 0, [&](std::uint32_t rows) {
+        return qfn::CopyWidthMemory{
+            qfn::PlanSessionMemory(config, SessionMode::kSpeculative, 262144,
+                                   4224, 8, rows, 7, 20, 2720)
+                .TotalBytes(),
+            qfn::PlanDeferredScratchBytes(config, true, 8, 8, rows, true, true,
+                                          0, 7)};
+      });
   constexpr std::size_t pending_with_wide = 2140019904ULL;
   const auto other_pending = pending_with_wide - wide;
   Require(other_pending == 192,

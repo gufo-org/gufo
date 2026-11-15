@@ -57,10 +57,9 @@ std::size_t ImageEmbeddingBytes(ImageDimensions image,
 
 std::size_t MaximumImageBytes(std::uint32_t output_width) {
   constexpr ImageDimensions largest{4096, 4096};
-  return CheckedAdd(
-      CheckedAdd(ImageScratchBytes(largest),
-                 ImageEmbeddingBytes(largest, output_width)),
-      std::size_t{largest.width} * largest.height * 3);
+  return CheckedAdd(CheckedAdd(ImageScratchBytes(largest),
+                               ImageEmbeddingBytes(largest, output_width)),
+                    std::size_t{largest.width} * largest.height * 3);
 }
 
 AdmissionBudget::AdmissionBudget(RuntimeObserver observer,

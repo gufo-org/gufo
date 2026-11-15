@@ -152,9 +152,9 @@ void LoadedProjectorSelection() {
          "typed factory guard does not silently install a serving coordinator");
 
   LoadedModel autoregressive{.projector = true, .speculative = false};
-  const auto ar = qfn::InitializeServingVision(
-      autoregressive, 262144, false, 1, 230, 64, 0,
-      [] { return std::size_t{1000}; });
+  const auto ar =
+      qfn::InitializeServingVision(autoregressive, 262144, false, 1, 230, 64, 0,
+                                   [] { return std::size_t{1000}; });
   Expect(ar && ar->plan.Fits(1) && !ar->copy_width &&
              autoregressive.width_changes == 0 &&
              ar->budget == autoregressive.budget,
@@ -177,16 +177,16 @@ void LoadedProjectorSelection() {
          "without room for one image the ordinary width is installed");
 
   LoadedModel host_limited{.projector = true};
-  const auto limited = qfn::InitializeServingVision(
-      host_limited, 262144, true, 4, 5000, 64, 320,
-      [] { return std::size_t{999}; });
+  const auto limited =
+      qfn::InitializeServingVision(host_limited, 262144, true, 4, 5000, 64, 320,
+                                   [] { return std::size_t{999}; });
   Expect(limited && limited->copy_width && limited->copy_width->rows == 8,
          "a runtime (host) limit below the device's also narrows the width");
 
   LoadedModel insufficient{.projector = true};
-  const auto short_plan = qfn::InitializeServingVision(
-      insufficient, 262144, true, 4, 419, 64, 0,
-      [] { return std::size_t{1000}; });
+  const auto short_plan =
+      qfn::InitializeServingVision(insufficient, 262144, true, 4, 419, 64, 0,
+                                   [] { return std::size_t{1000}; });
   Expect(!short_plan->plan.Fits(4),
          "one-byte text insufficiency remains a startup refusal");
   LoadedModel unknown_sessions{.projector = true};

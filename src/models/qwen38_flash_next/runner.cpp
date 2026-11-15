@@ -273,13 +273,13 @@ StartupMemorySnapshot CollectStartupMemory() {
   if (!device)
     throw core::ResourceAdmissionError(
         "vision memory admission refused: reason=memory_query_failed");
-  return {host, *device,
-          qwen::vision::SelectStartupCapacity(device->free_bytes,
-                                              host.ceiling_bytes,
-                                              device->local.has_value()),
-          std::chrono::duration_cast<std::chrono::microseconds>(
-              std::chrono::steady_clock::now() - started)
-              .count()};
+  return {
+      host, *device,
+      qwen::vision::SelectStartupCapacity(
+          device->free_bytes, host.ceiling_bytes, device->local.has_value()),
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - started)
+          .count()};
 }
 
 void LogVisionAdmission(const StartupMemorySnapshot& snapshot,

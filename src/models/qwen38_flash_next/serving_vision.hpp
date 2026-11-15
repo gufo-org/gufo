@@ -53,8 +53,7 @@ template<class Model>
         widest_copy_rows, sessions,
         observe_runtime ? std::min(device_capacity, observe_runtime())
                         : device_capacity,
-        image_bytes,
-        [&](std::uint32_t rows) {
+        image_bytes, [&](std::uint32_t rows) {
           model.LimitCopyRows(rows);
           return CopyWidthMemory{model.TextSessionBytes(mode, max_context),
                                  model.DeferredScratchBytes()};
