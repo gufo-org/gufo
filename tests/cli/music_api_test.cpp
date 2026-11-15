@@ -556,7 +556,13 @@ void TestQueueAndCancellation(const std::filesystem::path& root) {
   auto& s = *service;
   const std::string running = Create(s, R"({"prompt":"one"})");
   state->WaitStarted(1);
-  const json::Value progress = WaitFor(s, running, "in_progress");
+  // The job is in progress before the runner reports its first phase.
+  json::Value progress = WaitFor(s, running, "in_progress");
+  for (int i = 0;
+       i < 2500 && progress.find("gufo")->member_str("phase") != "plan"; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    progress = Body(Send(s, "GET", "/v1/audio/music/" + running));
+  }
   Check(progress.find("gufo")->member_str("phase") == "plan",
         "queue: phase reported");
   Check(progress.find("gufo")->member_double("total") == 0,
