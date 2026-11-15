@@ -25,7 +25,12 @@ void gemm_begin(const int32_t* rtp, int32_t parity) {
   aie::set_rounding(aie::rounding_mode::floor);
   aie::set_saturation(aie::saturation_mode::none);
   g_groups = rtp[0], g_chunks = rtp[1], g_tiles = rtp[2], g_parity = parity;
-  g_a = g_rec = g_t = g_kc = g_out = 0;
+  g_a = 0;
+}
+
+// Before each output part: zero the accumulators (A stays).
+void gemm_reset(const int32_t*) {
+  g_rec = g_t = g_kc = g_out = 0;
   for (int i = 0; i < g_groups * g_tiles * 4; ++i) g_c[i] = aie::zeros<acc64, 16>();
 }
 
