@@ -149,14 +149,19 @@ struct StartupCapacity {
   std::size_t device_admission_bytes;
   std::size_t host_ceiling_bytes;
   std::size_t available_bytes;
+  bool device_budget_only{false};
   [[nodiscard]] const char* LimiterName() const noexcept;
 };
 
 /// Both inputs describe remaining capacity at the same loading phase. Loaded
 /// weights and committed shared buffers are already reflected in these values;
 /// their accounting totals must never be added back to either observation.
+/// A GPU with its own OS memory budget (a Windows carve-out) admits against
+/// the device figure alone: that policy already bounds it by host headroom,
+/// and the host RAM cache must not take device capacity from images.
 [[nodiscard]] StartupCapacity SelectStartupCapacity(
-    std::size_t device_admission_bytes, std::size_t host_ceiling_bytes);
+    std::size_t device_admission_bytes, std::size_t host_ceiling_bytes,
+    bool device_budget_only = false);
 
 struct StartupMemoryPlan {
   std::size_t state_capacity_bytes;

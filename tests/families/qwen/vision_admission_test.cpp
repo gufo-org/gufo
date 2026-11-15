@@ -251,6 +251,10 @@ void StartupCapacitySelection() {
   const auto device = vision::SelectStartupCapacity(100, 120);
   const auto host = vision::SelectStartupCapacity(120, 100);
   const auto equal = vision::SelectStartupCapacity(100, 100);
+  const auto carve_out = vision::SelectStartupCapacity(120, 100, true);
+  Require(carve_out.available_bytes == 120 &&
+              std::string(carve_out.LimiterName()) == "device_budget",
+          "an OS device budget admits without the host RAM ceiling");
   Require(device.available_bytes == 100 &&
               std::string(device.LimiterName()) == "device" &&
               host.available_bytes == 100 &&
