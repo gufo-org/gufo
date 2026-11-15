@@ -51,6 +51,16 @@ def copy_runtime(source, root):
         destination.chmod(source.stat().st_mode & 0o777)
 
 
+def resolved_directories(lines):
+    """Store directories of the libraries in ld.so --list output, in resolution order."""
+    directories = []
+    for line in lines:
+        found = re.search(r'=> (/nix/store/\S+)', line)
+        if found and (directory := Path(found[1]).parent) not in directories:
+            directories.append(directory)
+    return directories
+
+
 def copy_share(source, destination):
     shutil.copytree(source, destination, symlinks=False)
     # Nix store directories are read-only. Persistent self-hosted workspaces
@@ -117,22 +127,19 @@ def pack(package, revision, destination):
     if len(loaders) != 1:
         raise ValueError('Expected one pinned glibc ELF loader')
     loader = runtime_path(loaders[0], root).relative_to(root).as_posix()
-    # Libraries the executable's and its modules' RUNPATHs find outside a lib/
-    # directory keep their directory and its precedence. XRT locates its
-    # device shim and driver plugins beside the path libxrt_coreutil was loaded
-    # from; only the XRT module links it.
-    linked = []
+    # The directories the executable's and its modules' RUNPATHs resolve keep
+    # their precedence over the rest of the closure. XRT locates its device
+    # shim and driver plugins beside the path libxrt_coreutil was loaded from:
+    # the merged XRT package's lib/, not the base XRT's (only the XRT module
+    # links it).
     listed = [executable, *(sorted(modules.glob('*.so')) if modules.is_dir() else [])]
-    lines = [line for path in listed
-             for line in output(str(loaders[0]), '--list', str(path)).splitlines()]
-    for line in lines:
-        found = re.search(r'=> (/nix/store/\S+)', line)
-        if not found:
+    linked = resolved_directories(
+        line for path in listed
+        for line in output(str(loaders[0]), '--list', str(path)).splitlines())
+    for directory in linked:
+        # The closure copy above already holds every <package>/lib directory.
+        if directory.parent.parent == STORE:
             continue
-        directory = Path(found[1]).parent
-        if directory.parent.parent == STORE or directory in linked:
-            continue
-        linked.append(directory)
         for library in directory.iterdir():
             if (library.is_file() or library.is_symlink()) and runtime_file(library):
                 copy_runtime(library, root)

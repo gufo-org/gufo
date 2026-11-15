@@ -87,6 +87,20 @@ class ArtifactTest(unittest.TestCase):
                     artifact.verify(root, 'a' * 40)
                 execute.assert_not_called()
 
+    def test_resolved_xrt_directory_precedes_the_base_xrt(self):
+        # The merged XRT package holds the amdxdna driver plugin beside its
+        # libxrt_coreutil; the base XRT's lib/ sorts first in the closure but
+        # has no plugin, and XRT then finds no device.
+        merged = '/nix/store/f1sq-xrt-amdxdna-2.26/lib'
+        lines = ['\tlinux-vdso.so.1 (0x00007ffd)',
+                 f'\tlibxrt_coreutil.so.2 => {merged}/libxrt_coreutil.so.2 (0x7f00)',
+                 '\tlibuuid.so.1 => /nix/store/zsvi-util-linux/lib/libuuid.so.1 (0x7f01)',
+                 f'\tlibxrt_coreutil.so.2 => {merged}/libxrt_coreutil.so.2 (0x7f00)',
+                 '\tlibc.so.6 => /nix/store/pqyi-glibc/lib/libc.so.6 (0x7f02)']
+        self.assertEqual(artifact.resolved_directories(lines),
+                         [Path(merged), Path('/nix/store/zsvi-util-linux/lib'),
+                          Path('/nix/store/pqyi-glibc/lib')])
+
     def test_share_copy_is_removable(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'store/share'
