@@ -20,8 +20,11 @@
 // independent host double references: query absorption (attn_k_b), the
 // gathered-latent score pass over the selection, the softmax-weighted
 // latent combination and the per-head attn_v_b projection. The references
-// mirror the kernel summation orders (sequential latent dots, softmax with
-// exact max, latent sums in selection order). Synthetic inputs only.
+// mirror the kernel contracts (F32 double-accumulated score dots feeding
+// the chain, softmax with exact max, latent sums in selection order); the
+// WMMA F16 score dots sum in tile order, so the score deviation enters
+// latent/out through the tolerances below, and the exact single-slot case
+// locks the degenerate softmax. Synthetic inputs only.
 namespace {
 
 namespace q = gufo::models::glm5_next::rocm;
@@ -197,6 +200,7 @@ bool RunGatherCase(const char* name, std::uint32_t n_sel, std::uint32_t tile,
   t::HipBuffer<float> d_qabs(q_abs.size()), d_latent(chain.latent_ref.size()),
       d_out(chain.out_ref.size()), d_scores(scores_ref.size()), d_vb(vb.size());
   t::HipBuffer<std::uint16_t> d_cache(cache_bits.size());
+  t::HipBuffer<std::uint16_t> d_qpack(2U * kHeads * q::kMlaKvRank);
   t::HipBuffer<std::int32_t> d_sel(sel.size());
   t::Upload(&d_qabs, q_abs);
   t::Upload(&d_vb, vb);
@@ -209,8 +213,9 @@ bool RunGatherCase(const char* name, std::uint32_t n_sel, std::uint32_t tile,
                         cache_bits.size() * sizeof(std::uint16_t),
                         hipMemcpyHostToDevice),
               "upload cache");
-  q::MlaGatherScore(d_qabs.get(), HalfPtr(&d_cache), d_sel.get(), n_sel, tile,
-                    kHeads, d_scores.get(), nullptr);
+  q::MlaGatherScore(d_qabs.get(),
+                    reinterpret_cast<__half*>(d_qpack.get()), HalfPtr(&d_cache),
+                    d_sel.get(), n_sel, tile, kHeads, d_scores.get(), nullptr);
   q::MlaGatherCombine(d_scores.get(), HalfPtr(&d_cache), d_sel.get(), tile,
                       n_sel, kHeads, d_latent.get(), nullptr);
   q::MlaApplyVb(d_latent.get(), d_vb.get(), kHeads, d_out.get(), nullptr);
@@ -218,8 +223,11 @@ bool RunGatherCase(const char* name, std::uint32_t n_sel, std::uint32_t tile,
   const auto got_latent = t::Download(&d_latent, chain.latent_ref.size());
   const auto got_out = t::Download(&d_out, chain.out_ref.size());
   bool ok = Check((std::string(name) + " latent").c_str(),
-                  t::WorstRelative(chain.latent_ref, got_latent), 5e-5);
-  // The oracle out uses the oracle latent; float latent error (~3e-5)
+                  t::WorstRelative(chain.latent_ref, got_latent), 2e-4);
+  // WMMA split-q score dots leave a ~2^-22-of-q residual that the
+  // softmax amplifies on near-zero latent elements; the head output
+  // through the vb dot stays an order of magnitude below the 1e-3 gate.
+  // The oracle out uses the oracle latent; float latent error (~1e-4)
   // legitimately propagates through the 512-term vb dot.
   ok &= Check((std::string(name) + " out").c_str(),
               t::WorstRelative(chain.out_ref, got_out), 1e-3);
@@ -268,6 +276,7 @@ bool TestGatherSingleExact() {
   t::HipBuffer<float> d_qabs(q_abs.size()), d_scores(scores_host_size),
       d_latent(kHeads * q::kMlaKvRank);
   t::HipBuffer<std::uint16_t> d_cache(cache_bits.size());
+  t::HipBuffer<std::uint16_t> d_qpack(2U * kHeads * q::kMlaKvRank);
   t::HipBuffer<std::int32_t> d_sel(sel.size());
   t::Upload(&d_qabs, q_abs);
   t::CheckHip(
@@ -278,8 +287,9 @@ bool TestGatherSingleExact() {
                         cache_bits.size() * sizeof(std::uint16_t),
                         hipMemcpyHostToDevice),
               "upload cache");
-  q::MlaGatherScore(d_qabs.get(), HalfPtr(&d_cache), d_sel.get(), n_sel, tile,
-                    kHeads, d_scores.get(), nullptr);
+  q::MlaGatherScore(d_qabs.get(),
+                    reinterpret_cast<__half*>(d_qpack.get()), HalfPtr(&d_cache),
+                    d_sel.get(), n_sel, tile, kHeads, d_scores.get(), nullptr);
   q::MlaGatherCombine(d_scores.get(), HalfPtr(&d_cache), d_sel.get(), tile,
                       n_sel, kHeads, d_latent.get(), nullptr);
   t::CheckHip(hipDeviceSynchronize(), "gather single sync");

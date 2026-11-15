@@ -176,6 +176,8 @@ class Executor {
   float* latent_{nullptr};     // [NC][hc*H] flat mHC norm buffer
   float* dsa_latent_{nullptr};  // [NC][MLA v size] gathered context rows
   float* q_abs_{nullptr};    // [NC][heads][kv_lora_rank]
+  __half* q_abs_h_{
+      nullptr};  // [NC][2][heads][kv_lora_rank] F16 hi/lo score scratch
   float* kv_{nullptr};       // [NC][latent]
   float* qr_{nullptr};       // [NC][q_lora]
   float* iq_{nullptr};       // [NC][indexer heads * key]

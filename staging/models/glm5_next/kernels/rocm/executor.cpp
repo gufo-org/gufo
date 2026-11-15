@@ -228,8 +228,10 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       !f(&e->latent_, static_cast<std::size_t>(nc) * hc * h) ||
       !f(&e->dsa_latent_, static_cast<std::size_t>(nc) * heads *
                               c.kv_lora_rank) ||
-      !f(&e->q_abs_, static_cast<std::size_t>(nc) * heads *
-                         c.kv_lora_rank) ||
+       !f(&e->q_abs_, static_cast<std::size_t>(nc) * heads *
+                          c.kv_lora_rank) ||
+       !AllocT(&pool, &e->q_abs_h_, 2ULL * static_cast<std::size_t>(nc) *
+                                       heads * c.kv_lora_rank) ||
       !f(&e->kv_, static_cast<std::size_t>(nc) * c.kv_lora_rank) ||
       !f(&e->qr_, static_cast<std::size_t>(nc) * c.q_lora_rank) ||
       !f(&e->iq_, static_cast<std::size_t>(nc) * iq_n) ||
@@ -578,8 +580,8 @@ void Executor::DsaLayer(const DeviceLayer& l, std::uint32_t slot,
     const std::uint32_t n_tail = c.kpool_select_tail ? tokens % kpool : 0;
     BuildSel(s.pool_sel, k, pos, n_tail, s.sel, nullptr);
     const std::uint32_t n_sel = k * kpool + n_tail;
-    MlaGatherScore(q_abs_, cache, s.sel, n_sel, kSelTile, heads, tile_scores_,
-                   nullptr);
+    MlaGatherScore(q_abs_, q_abs_h_, cache, s.sel, n_sel, kSelTile, heads,
+                   tile_scores_, nullptr);
     MlaGatherCombine(tile_scores_, cache, s.sel, kSelTile, n_sel, heads,
                      dsa_latent_, nullptr);
   } else {
@@ -612,7 +614,7 @@ void Executor::DsaLayer(const DeviceLayer& l, std::uint32_t slot,
     const std::uint32_t n_sel_max =
         std::min(tokens_last / kpool, top_pools) * kpool +
         (c.kpool_select_tail ? tokens_last % kpool : 0U);
-    MlaGatherScoreBatch(q_abs_, qa_stride, cache, s.sel, s.sel_stride,
+    MlaGatherScoreBatch(q_abs_, qa_stride, q_abs_h_, cache, s.sel, s.sel_stride,
                         n_sel_max, static_cast<std::uint32_t>(p0), kpool,
                         top_pools, use_tail, n, kSelTile, heads,
                         tile_scores_, scores_stride, nullptr);

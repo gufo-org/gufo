@@ -29,15 +29,20 @@ void MlaQabs(const float* q, const float* kb, std::uint32_t heads, float scale,
 std::uint32_t MlaGatherTiles(std::uint32_t n_sel, std::uint32_t tile);
 
 // Score pass: score[sel j][head h] for the gathered latent rows.
-// `q_abs` is [heads][512] (already scaled), `cache` is [capacity][512] F16
-// latent rows, `sel` is [n_sel] row indices. `scores` receives a dense
+// `q_abs` is [heads][512] F32 (already scaled), `q_pack` is a
+// [2][heads][512] F16 scratch buffer holding the hi/lo split of q_abs
+// (the dots of both halves accumulate into one fp32 tile, so the score
+// matches the fp32 dot tier), `cache` is [capacity][512] F16 latent
+// rows, `sel` is [n_sel] row indices. `scores` receives a dense
 // [tiles][heads][tile] buffer with entry [t][h][l] = dot for slot
 // t * tile + l (l within the tile); entries of the last tile beyond
-// `n_sel` are never written and never read. Blocks: 256 threads, one warp
-// per slot loading its row as coalesced 16 B chunks, grid
-// (ceil(n_sel/8), heads/hspan); each warp reduces its dot with shuffles,
-// so summation order differs from a sequential scan within fp tolerance.
-void MlaGatherScore(const float* q_abs, const __half* cache,
+// `n_sel` are never written and never read. Blocks: 64 threads per
+// 32-slot tile, latent rows staged in LDS, dots on 16x16x16 F16 WMMA
+// tiles over the packed q (heads % 16 == 0, tile a multiple of 32); the
+// tile summation order differs from the warp scan, covered by the
+// tolerance gate in
+// staging/tests/models/glm5_next/rocm_attention_test.cpp.
+void MlaGatherScore(const float* q_abs, __half* q_pack, const __half* cache,
                     const std::int32_t* sel, std::uint32_t n_sel,
                     std::uint32_t tile, std::uint32_t heads, float* scores,
                     hipStream_t stream);
@@ -45,8 +50,9 @@ void MlaGatherScore(const float* q_abs, const __half* cache,
 // Combine pass: softmax over all n_sel scores of each head and the
 // normalized weighted sum of the gathered latent rows.
 // `scores`/`cache`/`sel` are as in the score pass; `latent` receives
-// [heads][512] F32. Blocks: one per head, threads along the latent
-// columns (`tile` recovers each slot's dense score position).
+// [heads][512] F32. Blocks: one per head, 64 threads holding 8-column
+// slices of the latent as vector loads with j-strided partials (`tile`
+// recovers each slot's dense score position).
 void MlaGatherCombine(const float* scores, const __half* cache,
                       const std::int32_t* sel, std::uint32_t tile,
                       std::uint32_t n_sel, std::uint32_t heads, float* latent,
@@ -55,21 +61,22 @@ void MlaGatherCombine(const float* scores, const __half* cache,
 // Token-batched prefill forms of the two gather passes. Query token t
 // (blockIdx.z / blockIdx.y) reads `sel` at t * sel_stride, writes and reads
 // its score region at t * scores_stride on [tiles][heads][tile], takes its
-// absorbed q at q_abs + t * q_stride and its latent at
-// latent + t * latent_stride. Its selection count is derived from the
-// query position pos_first + t exactly like the host:
+// absorbed q at q_abs + t * q_stride (packed hi/lo to q_pack +
+// t * 2 * heads * 512) and its latent at latent + t * latent_stride. Its
+// selection count is
+// derived from the query position pos_first + t exactly like the host:
 // n_sel(t) = kpool * min(top_pools, (pos + 1) / kpool) +
 //            (use_tail ? (pos + 1) % kpool : 0). `n_sel_max` (the largest
 // of these over the token range) sizes the grids and score regions. Every
 // block runs the per-token block arithmetic unchanged, so results are
 // bit-identical to the single-token calls.
 void MlaGatherScoreBatch(const float* q_abs, std::size_t q_stride,
-                         const __half* cache, const std::int32_t* sel,
-                         std::size_t sel_stride, std::uint32_t n_sel_max,
-                         std::uint32_t pos_first, std::uint32_t kpool,
-                         std::uint32_t top_pools, std::uint32_t use_tail,
-                         std::uint32_t tokens, std::uint32_t tile,
-                         std::uint32_t heads, float* scores,
+                         __half* q_pack, const __half* cache,
+                         const std::int32_t* sel, std::size_t sel_stride,
+                         std::uint32_t n_sel_max, std::uint32_t pos_first,
+                         std::uint32_t kpool, std::uint32_t top_pools,
+                         std::uint32_t use_tail, std::uint32_t tokens,
+                         std::uint32_t tile, std::uint32_t heads, float* scores,
                          std::size_t scores_stride, hipStream_t stream);
 void MlaGatherCombineBatch(const float* scores, std::size_t scores_stride,
                            const __half* cache, const std::int32_t* sel,
