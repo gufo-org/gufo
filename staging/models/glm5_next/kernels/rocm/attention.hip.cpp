@@ -180,6 +180,16 @@ __global__ __launch_bounds__(64) void MlaGatherScoreKernel(
   }
 }
 
+// Head-grouped softmax combine: one 64-thread block computes four heads and
+// loads each selected latent row once, feeding the rows' uint4 column slices
+// into four accumulator sets with eight keys in flight. Exp values live in
+// LDS interleaved per key. The per-(head, column) max/exp/psum/accumulate
+// order matches the previous one-head kernel instruction for instruction
+// (explicit FMAs pin contraction across unroll widths), so the output is
+// bit-identical while gathered-row traffic drops 4x.
+constexpr std::uint32_t kMlaCombineHeadW = 4U;
+constexpr std::uint32_t kMlaCombineKeyW = 8U;
+
 __global__ void MlaGatherCombineKernel(const float* __restrict__ scores,
                                        std::size_t scores_stride,
                                        const __half* __restrict__ cache,
@@ -193,7 +203,7 @@ __global__ void MlaGatherCombineKernel(const float* __restrict__ scores,
                                        std::uint32_t tile, std::uint32_t heads,
                                        float* __restrict__ latent,
                                        std::size_t latent_stride) {
-  extern __shared__ float smem[];  // [n_sel] exponents + blockDim reducers
+  extern __shared__ float smem[];  // [n_sel][kMlaCombineHeadW] + reducers
   const std::uint32_t t = blockIdx.y;
   scores += static_cast<std::size_t>(t) * scores_stride;
   sel += static_cast<std::size_t>(t) * sel_stride;
@@ -202,74 +212,120 @@ __global__ void MlaGatherCombineKernel(const float* __restrict__ scores,
     n_sel = DsaSelCount(pos_first, t, kpool, top_pools, use_tail);
   }
   float* ex = smem;
-  float* red = smem + n_sel;
-  const std::uint32_t head = blockIdx.x;
-  const std::size_t score_row = static_cast<std::size_t>(head) * tile;
+  float* red = smem + n_sel * kMlaCombineHeadW;
+  const std::uint32_t head0 = blockIdx.x * kMlaCombineHeadW;
 
   // Softmax max over all tiles is exact under any reduce order; fold the
-  // per-thread strided partials with a block max.
-  float pm = -FLT_MAX;
+  // per-thread strided partials with a block max per head.
+  float pm[kMlaCombineHeadW];
+#pragma unroll
+  for (std::uint32_t h = 0; h < kMlaCombineHeadW; ++h) {
+    pm[h] = -FLT_MAX;
+  }
   for (std::uint32_t j = threadIdx.x; j < n_sel; j += blockDim.x) {
-    pm = fmaxf(pm, scores[static_cast<std::size_t>(j / tile) * (heads * tile) +
-                          score_row + (j % tile)]);
-  }
-  __syncthreads();
-  pm = BlockReduceMax(pm, red);
-  if (threadIdx.x == 0) {
-    red[0] = pm;
-  }
-  __syncthreads();
-  const float max_s = red[0];
-
-  float psum = 0.0F;
-  for (std::uint32_t j = threadIdx.x; j < n_sel; j += blockDim.x) {
-    ex[j] = expf(scores[static_cast<std::size_t>(j / tile) * (heads * tile) +
-                        score_row + (j % tile)] -
-                 max_s);
-    psum += ex[j];
-  }
-  __syncthreads();
-  // Sum of exponentials: strided partials then a block tree sum.
-  const int lane = threadIdx.x & 31;
-  const int warp = threadIdx.x >> 5;
-  psum = WarpReduceSum(psum);
-  if (lane == 0) {
-    red[threadIdx.x >> 5] = psum;
-  }
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    float s = 0.0F;
-    for (unsigned w = 0; w < blockDim.x / 32; ++w) {
-      s += red[w];
+    const float* srow =
+        scores + static_cast<std::size_t>(j / tile) * (heads * tile) +
+        (j % tile);
+#pragma unroll
+    for (std::uint32_t h = 0; h < kMlaCombineHeadW; ++h) {
+      pm[h] = fmaxf(pm[h], srow[(head0 + h) * tile]);
     }
-    red[0] = s;
   }
   __syncthreads();
-  const float inv = 1.0F / red[0];
+#pragma unroll
+  for (std::uint32_t h = 0; h < kMlaCombineHeadW; ++h) {
+    float m = BlockReduceMax(pm[h], red + h * 33U);
+    if (threadIdx.x == 0) {
+      red[h * 33U] = m;
+    }
+    __syncthreads();
+  }
+  float maxw[kMlaCombineHeadW];
+  float ps[kMlaCombineHeadW];
+#pragma unroll
+  for (std::uint32_t h = 0; h < kMlaCombineHeadW; ++h) {
+    maxw[h] = red[h * 33U];
+    ps[h] = 0.0F;
+  }
+  for (std::uint32_t j = threadIdx.x; j < n_sel; j += blockDim.x) {
+    const float* srow =
+        scores + static_cast<std::size_t>(j / tile) * (heads * tile) +
+        (j % tile);
+#pragma unroll
+    for (std::uint32_t h = 0; h < kMlaCombineHeadW; ++h) {
+      const float e =
+          expf(srow[(head0 + h) * tile] - maxw[h]);
+      ex[static_cast<std::size_t>(j) * kMlaCombineHeadW + h] = e;
+      ps[h] += e;
+    }
+  }
+  __syncthreads();
+  // Sum of exponentials: strided partials then a block tree sum per head.
+  const int lane = threadIdx.x & 31;
+#pragma unroll
+  for (std::uint32_t h = 0; h < kMlaCombineHeadW; ++h) {
+    const float s = WarpReduceSum(ps[h]);
+    if (lane == 0) {
+      red[h * 33U + (threadIdx.x >> 5)] = s;
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+#pragma unroll
+    for (std::uint32_t h = 0; h < kMlaCombineHeadW; ++h) {
+      float s = 0.0F;
+      for (unsigned w = 0; w < blockDim.x / 32; ++w) {
+        s += red[h * 33U + w];
+      }
+      red[h * 33U] = s;
+    }
+  }
+  __syncthreads();
+  float inv[kMlaCombineHeadW];
+#pragma unroll
+  for (std::uint32_t h = 0; h < kMlaCombineHeadW; ++h) {
+    inv[h] = 1.0F / red[h * 33U];
+  }
 
   // Latent columns in selection order; each of the 64 threads owns an
-  // 8-column slice loaded as one uint4 per slot with four j-strided
-  // partial accumulators.
-  float acc[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+  // 8-column slice loaded as one uint4 per selected row and shared by the
+  // four heads, eight rows in flight, accumulated per head and column in
+  // ascending selection order.
+  float acc[kMlaCombineHeadW][8];
+#pragma unroll
+  for (std::uint32_t h = 0; h < kMlaCombineHeadW; ++h) {
+#pragma unroll
+    for (std::uint32_t e = 0; e < 8U; ++e) {
+      acc[h][e] = 0.0F;
+    }
+  }
   const std::size_t col = static_cast<std::size_t>(threadIdx.x) * 8U;
   std::uint32_t j = 0U;
-  for (; j + 3U < n_sel; j += 4U) {
-    uint4 u[4];
-    float w[4];
+  for (; j + (kMlaCombineKeyW - 1U) < n_sel; j += kMlaCombineKeyW) {
+    uint4 u[kMlaCombineKeyW];
+    float ew[kMlaCombineKeyW][kMlaCombineHeadW];
 #pragma unroll
-    for (std::uint32_t p = 0; p < 4U; ++p) {
+    for (std::uint32_t p = 0; p < kMlaCombineKeyW; ++p) {
       u[p] = *reinterpret_cast<const uint4*>(
-          cache + static_cast<std::size_t>(sel[j + p]) * kMlaKvRank + col);
-      w[p] = ex[j + p];
+          cache +
+          static_cast<std::size_t>(sel[j + p]) * kMlaKvRank + col);
+#pragma unroll
+      for (std::uint32_t h = 0; h < kMlaCombineHeadW; ++h) {
+        ew[p][h] = ex[static_cast<std::size_t>(j + p) * kMlaCombineHeadW + h];
+      }
     }
 #pragma unroll
-    for (std::uint32_t p = 0; p < 4U; ++p) {
-      const __half2* h = reinterpret_cast<const __half2*>(&u[p]);
+    for (std::uint32_t e = 0; e < 4U; ++e) {
 #pragma unroll
-      for (std::uint32_t e = 0; e < 4U; ++e) {
-        const float2 f = __half22float2(h[e]);
-        acc[2U * e] += w[p] * f.x;
-        acc[2U * e + 1U] += w[p] * f.y;
+      for (std::uint32_t p = 0; p < kMlaCombineKeyW; ++p) {
+        const float2 f = __half22float2(
+            reinterpret_cast<const __half2*>(&u[p])[e]);
+#pragma unroll
+        for (std::uint32_t h = 0; h < kMlaCombineHeadW; ++h) {
+          acc[h][2U * e] = __fmaf_rn(ew[p][h], f.x, acc[h][2U * e]);
+          acc[h][2U * e + 1U] =
+              __fmaf_rn(ew[p][h], f.y, acc[h][2U * e + 1U]);
+        }
       }
     }
   }
@@ -277,18 +333,25 @@ __global__ void MlaGatherCombineKernel(const float* __restrict__ scores,
     const uint4 u = *reinterpret_cast<const uint4*>(
         cache + static_cast<std::size_t>(sel[j]) * kMlaKvRank + col);
     const __half2* h = reinterpret_cast<const __half2*>(&u);
-    const float w = ex[j];
 #pragma unroll
     for (std::uint32_t e = 0; e < 4U; ++e) {
       const float2 f = __half22float2(h[e]);
-      acc[2U * e] += w * f.x;
-      acc[2U * e + 1U] += w * f.y;
+#pragma unroll
+      for (std::uint32_t hh = 0; hh < kMlaCombineHeadW; ++hh) {
+        const float w = ex[static_cast<std::size_t>(j) * kMlaCombineHeadW + hh];
+        acc[hh][2U * e] = __fmaf_rn(w, f.x, acc[hh][2U * e]);
+        acc[hh][2U * e + 1U] = __fmaf_rn(w, f.y, acc[hh][2U * e + 1U]);
+      }
     }
   }
-  float* out = latent + static_cast<std::size_t>(head) * kMlaKvRank + col;
 #pragma unroll
-  for (std::uint32_t e = 0; e < 8U; ++e) {
-    out[e] = acc[e] * inv;
+  for (std::uint32_t h = 0; h < kMlaCombineHeadW; ++h) {
+    float* out =
+        latent + static_cast<std::size_t>(head0 + h) * kMlaKvRank + col;
+#pragma unroll
+    for (std::uint32_t e = 0; e < 8U; ++e) {
+      out[e] = acc[h][e] * inv[h];
+    }
   }
 }
 
@@ -356,8 +419,10 @@ void MlaGatherCombine(const float* scores, const __half* cache,
                       const std::int32_t* sel, std::uint32_t tile,
                       std::uint32_t n_sel, std::uint32_t heads, float* latent,
                       hipStream_t stream) {
-  const std::size_t smem = (n_sel + 32) * sizeof(float);
-  MlaGatherCombineKernel<<<dim3(heads, 1U), kMlaKvRank / 8U, smem, stream>>>(
+  const std::size_t smem =
+      (n_sel + 33U) * kMlaCombineHeadW * sizeof(float);
+  MlaGatherCombineKernel<<<dim3(heads / kMlaCombineHeadW, 1U), kMlaKvRank / 8U,
+                           smem, stream>>>(
       scores, 0U, cache, sel, 0U, n_sel, 0U, 1U, 0U, 0U, tile, heads, latent,
       0U);
 }
@@ -370,9 +435,10 @@ void MlaGatherCombineBatch(const float* scores, std::size_t scores_stride,
                            std::uint32_t tokens, std::uint32_t tile,
                            std::uint32_t heads, float* latent,
                            std::size_t latent_stride, hipStream_t stream) {
-  const std::size_t smem = (n_sel_max + 32) * sizeof(float);
-  MlaGatherCombineKernel<<<dim3(heads, tokens), kMlaKvRank / 8U, smem,
-                           stream>>>(
+  const std::size_t smem =
+      (n_sel_max + 33U) * kMlaCombineHeadW * sizeof(float);
+  MlaGatherCombineKernel<<<dim3(heads / kMlaCombineHeadW, tokens),
+                           kMlaKvRank / 8U, smem, stream>>>(
       scores, scores_stride, cache, sel, sel_stride, 0U, pos_first, kpool,
       top_pools, use_tail, tile, heads, latent, latent_stride);
 }

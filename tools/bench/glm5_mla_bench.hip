@@ -3,6 +3,8 @@
 // staging/models/glm5_next/kernels/rocm/attention.hip.cpp. A4 variants:
 // S1 = WMMA F16 tiles over packed q with gathered key rows in LDS,
 // C1 = 64-thread rank-slice combine with uint4 loads and 4-way j unroll.
+// C2 = head-grouped combine (width 2/4) sharing each gathered row load across
+// w heads; required bit-exact against C1.
 // Small shapes report NMSE of each variant against the baseline output;
 // the large shape is the pp2048 batched call (tokens=2048, heads=64,
 // rank=512, tile=64, kpool=4, top_pools=512).
@@ -16,8 +18,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <random>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -309,6 +313,7 @@ __global__ __launch_bounds__(64) void ScoreWmmaKernel(
 }
 
 // ------------------------------------------------------------------- C1
+template <unsigned kKeyW>
 __global__ void CombineVecKernel(const float* __restrict__ scores,
                                  std::size_t scores_stride,
                                  const __half* __restrict__ cache,
@@ -370,45 +375,34 @@ __global__ void CombineVecKernel(const float* __restrict__ scores,
   const float inv = 1.0F / red[0];
 
   // Each of 64 threads owns 8 consecutive rank columns as one uint4
-  // (8 halves per selected row) with four j-strided accumulators.
+  // (8 halves per selected row); kKeyW keys are loaded back-to-back to
+  // deepen L2 latency hiding, accumulated per column in ascending j.
   float acc[8] = {0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
   const std::size_t col = static_cast<std::size_t>(threadIdx.x) * 8U;
   unsigned j = 0U;
-  for (; j + 3U < n_sel; j += 4U) {
-    const uint4* r0 = reinterpret_cast<const uint4*>(
-        cache + static_cast<std::size_t>(sel[j + 0U]) * kRank + col);
-    const uint4* r1 = reinterpret_cast<const uint4*>(
-        cache + static_cast<std::size_t>(sel[j + 1U]) * kRank + col);
-    const uint4* r2 = reinterpret_cast<const uint4*>(
-        cache + static_cast<std::size_t>(sel[j + 2U]) * kRank + col);
-    const uint4* r3 = reinterpret_cast<const uint4*>(
-        cache + static_cast<std::size_t>(sel[j + 3U]) * kRank + col);
-    const uint4 u0 = *r0;
-    const uint4 u1 = *r1;
-    const uint4 u2 = *r2;
-    const uint4 u3 = *r3;
-    const float w0 = ex[j + 0U];
-    const float w1 = ex[j + 1U];
-    const float w2 = ex[j + 2U];
-    const float w3 = ex[j + 3U];
-    const __half2* h0 = reinterpret_cast<const __half2*>(&u0);
-    const __half2* h1 = reinterpret_cast<const __half2*>(&u1);
-    const __half2* h2 = reinterpret_cast<const __half2*>(&u2);
-    const __half2* h3 = reinterpret_cast<const __half2*>(&u3);
+  for (; j + (kKeyW - 1U) < n_sel; j += kKeyW) {
+    uint4 u[kKeyW];
+    float w[kKeyW];
+#pragma unroll
+    for (unsigned p = 0; p < kKeyW; ++p) {
+      u[p] = *reinterpret_cast<const uint4*>(
+          cache + static_cast<std::size_t>(sel[j + p]) * kRank + col);
+    }
+#pragma unroll
+    for (unsigned p = 0; p < kKeyW; ++p) {
+      w[p] = ex[j + p];
+    }
 #pragma unroll
     for (unsigned e = 0; e < 4U; ++e) {
-      const float2 f0 = __half22float2(h0[e]);
-      const float2 f1 = __half22float2(h1[e]);
-      const float2 f2 = __half22float2(h2[e]);
-      const float2 f3 = __half22float2(h3[e]);
-      acc[2U * e] += w0 * f0.x;
-      acc[2U * e + 1U] += w0 * f0.y;
-      acc[2U * e] += w1 * f1.x;
-      acc[2U * e + 1U] += w1 * f1.y;
-      acc[2U * e] += w2 * f2.x;
-      acc[2U * e + 1U] += w2 * f2.y;
-      acc[2U * e] += w3 * f3.x;
-      acc[2U * e + 1U] += w3 * f3.y;
+#pragma unroll
+      for (unsigned p = 0; p < kKeyW; ++p) {
+        const float2 f = __half22float2(
+            reinterpret_cast<const __half2*>(&u[p])[e]);
+        // Explicit FMA pins the instruction across unroll widths so any
+        // kKeyW reproduces the kKeyW=4 reference bits exactly.
+        acc[2U * e] = __fmaf_rn(w[p], f.x, acc[2U * e]);
+        acc[2U * e + 1U] = __fmaf_rn(w[p], f.y, acc[2U * e + 1U]);
+      }
     }
   }
   for (; j < n_sel; ++j) {
@@ -419,14 +413,174 @@ __global__ void CombineVecKernel(const float* __restrict__ scores,
 #pragma unroll
     for (unsigned e = 0; e < 4U; ++e) {
       const float2 f = __half22float2(h[e]);
-      acc[2U * e] += w * f.x;
-      acc[2U * e + 1U] += w * f.y;
+      acc[2U * e] = __fmaf_rn(w, f.x, acc[2U * e]);
+      acc[2U * e + 1U] = __fmaf_rn(w, f.y, acc[2U * e + 1U]);
     }
   }
   float* out = latent + static_cast<std::size_t>(head) * kRank + col;
 #pragma unroll
   for (unsigned e = 0; e < 8U; ++e) {
     out[e] = acc[e] * inv;
+  }
+}
+
+// ------------------------------------------------------------------- C2
+// Width-kHeadW head-grouped combine: the 64-thread block computes w heads,
+// loads each selected row's uint4 column slice once and feeds w independent
+// accumulator sets, so row traffic and LSU issue drop by w. Exp values are
+// staged in LDS as w interleaved components (one float4 load serves all w
+// heads per key). Per-(head, column) max/exp/psum/accumulate order is
+// identical to C1, so the result must be bit-exact against the vec kernel.
+template <unsigned kHeadW, unsigned kKeyW = 4U>
+__global__ void CombineQuadKernel(const float* __restrict__ scores,
+                                  std::size_t scores_stride,
+                                  const __half* __restrict__ cache,
+                                  const std::int32_t* __restrict__ sel,
+                                  std::size_t sel_stride, unsigned n_sel,
+                                  unsigned pos_first, unsigned kpool,
+                                  unsigned top_pools, unsigned use_tail,
+                                  unsigned tile, unsigned heads,
+                                  float* __restrict__ latent,
+                                  std::size_t latent_stride) {
+  extern __shared__ float smem[];
+  const unsigned t = blockIdx.y;
+  scores += static_cast<std::size_t>(t) * scores_stride;
+  sel += static_cast<std::size_t>(t) * sel_stride;
+  latent += static_cast<std::size_t>(t) * latent_stride;
+  if (n_sel == 0U) {
+    n_sel = DsaSelCount(pos_first, t, kpool, top_pools, use_tail);
+  }
+  float* ex = smem;  // [n_sel][kHeadW] components
+  float* red = smem + static_cast<std::size_t>(n_sel) * kHeadW;
+  const unsigned head0 = blockIdx.x * kHeadW;
+
+  float pm[kHeadW];
+#pragma unroll
+  for (unsigned h = 0; h < kHeadW; ++h) {
+    pm[h] = -FLT_MAX;
+  }
+  for (unsigned j = threadIdx.x; j < n_sel; j += blockDim.x) {
+    const float* srow =
+        scores + static_cast<std::size_t>(j / tile) * (heads * tile) +
+        (j % tile);
+#pragma unroll
+    for (unsigned h = 0; h < kHeadW; ++h) {
+      pm[h] = fmaxf(pm[h], srow[(head0 + h) * tile]);
+    }
+  }
+  __syncthreads();
+#pragma unroll
+  for (unsigned h = 0; h < kHeadW; ++h) {
+    float m = BlockReduceMax(pm[h], red + h * 33U);
+    if (threadIdx.x == 0) {
+      red[h * 33U] = m;
+    }
+    __syncthreads();
+  }
+  float maxw[kHeadW];
+  float ps[kHeadW];
+#pragma unroll
+  for (unsigned h = 0; h < kHeadW; ++h) {
+    maxw[h] = red[h * 33U];
+    ps[h] = 0.0F;
+  }
+  for (unsigned j = threadIdx.x; j < n_sel; j += blockDim.x) {
+    const float* srow =
+        scores + static_cast<std::size_t>(j / tile) * (heads * tile) +
+        (j % tile);
+    float e[kHeadW];
+#pragma unroll
+    for (unsigned h = 0; h < kHeadW; ++h) {
+      e[h] = expf(srow[(head0 + h) * tile] - maxw[h]);
+      ps[h] += e[h];
+      ex[static_cast<std::size_t>(j) * kHeadW + h] = e[h];
+    }
+  }
+  __syncthreads();
+  const int lane = threadIdx.x & 31;
+#pragma unroll
+  for (unsigned h = 0; h < kHeadW; ++h) {
+    const float s = WarpReduceSum(ps[h]);
+    if (lane == 0) {
+      red[h * 33U + (threadIdx.x >> 5)] = s;
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+#pragma unroll
+    for (unsigned h = 0; h < kHeadW; ++h) {
+      float s = 0.0F;
+      for (unsigned w = 0; w < blockDim.x / 32; ++w) {
+        s += red[h * 33U + w];
+      }
+      red[h * 33U] = s;
+    }
+  }
+  __syncthreads();
+  float inv[kHeadW];
+#pragma unroll
+  for (unsigned h = 0; h < kHeadW; ++h) {
+    inv[h] = 1.0F / red[h * 33U];
+  }
+
+  float acc[kHeadW][8];
+#pragma unroll
+  for (unsigned h = 0; h < kHeadW; ++h) {
+#pragma unroll
+    for (unsigned e = 0; e < 8U; ++e) {
+      acc[h][e] = 0.0F;
+    }
+  }
+  const std::size_t col = static_cast<std::size_t>(threadIdx.x) * 8U;
+  unsigned j = 0U;
+  for (; j + (kKeyW - 1U) < n_sel; j += kKeyW) {
+    uint4 u[kKeyW];
+    float ew[kKeyW][kHeadW];
+#pragma unroll
+    for (unsigned p = 0; p < kKeyW; ++p) {
+      u[p] = *reinterpret_cast<const uint4*>(
+          cache + static_cast<std::size_t>(sel[j + p]) * kRank + col);
+#pragma unroll
+      for (unsigned h = 0; h < kHeadW; ++h) {
+        ew[p][h] = ex[static_cast<std::size_t>(j + p) * kHeadW + h];
+      }
+    }
+#pragma unroll
+    for (unsigned e = 0; e < 4U; ++e) {
+#pragma unroll
+      for (unsigned p = 0; p < kKeyW; ++p) {
+        const float2 f = __half22float2(
+            reinterpret_cast<const __half2*>(&u[p])[e]);
+#pragma unroll
+        for (unsigned h = 0; h < kHeadW; ++h) {
+          acc[h][2U * e] = __fmaf_rn(ew[p][h], f.x, acc[h][2U * e]);
+          acc[h][2U * e + 1U] = __fmaf_rn(ew[p][h], f.y, acc[h][2U * e + 1U]);
+        }
+      }
+    }
+  }
+  for (; j < n_sel; ++j) {
+    const uint4 u = *reinterpret_cast<const uint4*>(
+        cache + static_cast<std::size_t>(sel[j]) * kRank + col);
+    const __half2* hd = reinterpret_cast<const __half2*>(&u);
+#pragma unroll
+    for (unsigned e = 0; e < 4U; ++e) {
+      const float2 f = __half22float2(hd[e]);
+#pragma unroll
+      for (unsigned h = 0; h < kHeadW; ++h) {
+        const float w = ex[static_cast<std::size_t>(j) * kHeadW + h];
+        acc[h][2U * e] = __fmaf_rn(w, f.x, acc[h][2U * e]);
+        acc[h][2U * e + 1U] = __fmaf_rn(w, f.y, acc[h][2U * e + 1U]);
+      }
+    }
+  }
+#pragma unroll
+  for (unsigned h = 0; h < kHeadW; ++h) {
+    float* out = latent + static_cast<std::size_t>(head0 + h) * kRank + col;
+#pragma unroll
+    for (unsigned e = 0; e < 8U; ++e) {
+      out[e] = acc[h][e] * inv[h];
+    }
   }
 }
 
@@ -534,6 +688,7 @@ void RunCase(unsigned tokens, std::uint64_t pos_first_dummy, bool time_large) {
   __half* d_qp;
   float* d_lat_a;
   float* d_lat_b;
+  float* d_lat_c;
   CUDA_CHECK(hipMalloc(&d_q, h_q.size() * sizeof(float)));
   CUDA_CHECK(hipMalloc(&d_cache, h_cache.size() * sizeof(__half)));
   CUDA_CHECK(hipMalloc(&d_sel, h_sel.size() * sizeof(std::int32_t)));
@@ -549,6 +704,8 @@ void RunCase(unsigned tokens, std::uint64_t pos_first_dummy, bool time_large) {
       &d_lat_a, static_cast<std::size_t>(tokens) * q_stride * sizeof(float)));
   CUDA_CHECK(hipMalloc(
       &d_lat_b, static_cast<std::size_t>(tokens) * q_stride * sizeof(float)));
+  CUDA_CHECK(hipMalloc(
+      &d_lat_c, static_cast<std::size_t>(tokens) * q_stride * sizeof(float)));
   CUDA_CHECK(hipMemcpy(d_q, h_q.data(), h_q.size() * sizeof(float),
                        hipMemcpyHostToDevice));
   CUDA_CHECK(hipMemcpy(d_cache, h_cache.data(),
@@ -580,9 +737,33 @@ void RunCase(unsigned tokens, std::uint64_t pos_first_dummy, bool time_large) {
         top_pools, use_tail, kTile, kHeads, d_lat_a, q_stride);
   };
   auto launch_combine_vec = [&]() {
-    CombineVecKernel<<<dim3(kHeads, tokens), 64, smem>>>(
+    CombineVecKernel<4U><<<dim3(kHeads, tokens), 64, smem>>>(
         d_scores_a, scores_stride, d_cache, d_sel, sel_capacity, 0U, 0U, kpool,
         top_pools, use_tail, kTile, kHeads, d_lat_b, q_stride);
+  };
+  auto launch_combine_vec8 = [&]() {
+    CombineVecKernel<8U><<<dim3(kHeads, tokens), 64, smem>>>(
+        d_scores_a, scores_stride, d_cache, d_sel, sel_capacity, 0U, 0U, kpool,
+        top_pools, use_tail, kTile, kHeads, d_lat_c, q_stride);
+  };
+  const std::size_t smem_q2 =
+      (sel_capacity + 32) * 2 * sizeof(float) + 32U * 33U * sizeof(float);
+  const std::size_t smem_q4 =
+      (sel_capacity + 32) * 4 * sizeof(float) + 32U * 33U * sizeof(float);
+  auto launch_combine_q2 = [&]() {
+    CombineQuadKernel<2U><<<dim3(kHeads / 2U, tokens), 64, smem_q2>>>(
+        d_scores_a, scores_stride, d_cache, d_sel, sel_capacity, 0U, 0U, kpool,
+        top_pools, use_tail, kTile, kHeads, d_lat_c, q_stride);
+  };
+  auto launch_combine_q4 = [&]() {
+    CombineQuadKernel<4U><<<dim3(kHeads / 4U, tokens), 64, smem_q4>>>(
+        d_scores_a, scores_stride, d_cache, d_sel, sel_capacity, 0U, 0U, kpool,
+        top_pools, use_tail, kTile, kHeads, d_lat_c, q_stride);
+  };
+  auto launch_combine_q48 = [&]() {
+    CombineQuadKernel<4U, 8U><<<dim3(kHeads / 4U, tokens), 64, smem_q4>>>(
+        d_scores_a, scores_stride, d_cache, d_sel, sel_capacity, 0U, 0U, kpool,
+        top_pools, use_tail, kTile, kHeads, d_lat_c, q_stride);
   };
 
   // Validity mask over the score tile layout for j < n_sel(t).
@@ -595,6 +776,10 @@ void RunCase(unsigned tokens, std::uint64_t pos_first_dummy, bool time_large) {
     const float t_sw = TimeKernel(launch_score_wmma, 2, 10);
     const float t_cb = TimeKernel(launch_combine_base, 2, 10);
     const float t_cv = TimeKernel(launch_combine_vec, 2, 10);
+    const float t_cv8 = TimeKernel(launch_combine_vec8, 2, 10);
+    const float t_c2 = TimeKernel(launch_combine_q2, 2, 10);
+    const float t_c4 = TimeKernel(launch_combine_q4, 2, 10);
+    const float t_c48 = TimeKernel(launch_combine_q48, 2, 10);
     double keys = 0.0;
     for (unsigned t = 0; t < tokens; ++t) {
       keys += DsaSelCount(0U, t, kpool, top_pools, use_tail);
@@ -605,6 +790,12 @@ void RunCase(unsigned tokens, std::uint64_t pos_first_dummy, bool time_large) {
         t_sw, t_sb / t_sw, gflop / (t_sw * 1e-6) );
     std::printf("  combine base %8.1f us  vec %8.1f us (%.2fx)\n", t_cb, t_cv,
                 t_cb / t_cv);
+    std::printf("  combine quad2 %8.1f us (%.2fx vs vec)  quad4 %8.1f us "
+                "(%.2fx vs vec)\n",
+                t_c2, t_cv / t_c2, t_c4, t_cv / t_c4);
+    std::printf("  combine vec8 %8.1f us (%.2fx vs vec)  quad4x8 %8.1f us "
+                "(%.2fx vs vec)\n",
+                t_cv8, t_cv / t_cv8, t_c48, t_cv / t_c48);
   }
 
   // Correctness pass on a small token count with per-token n_sel mask.
@@ -643,6 +834,41 @@ void RunCase(unsigned tokens, std::uint64_t pos_first_dummy, bool time_large) {
   std::printf("  combine NMSE(vec vs base) = %.3e\n",
               Nmse(a_lat, b_lat, v_lat));
 
+  auto bit_diff = [](const std::vector<float>& ref,
+                     const std::vector<float>& got) {
+    std::size_t n = 0;
+    std::size_t first = 0;
+    for (std::size_t i = 0; i < got.size(); ++i) {
+      std::uint32_t rb = 0;
+      std::uint32_t gb = 0;
+      std::memcpy(&rb, &ref[i], sizeof(rb));
+      std::memcpy(&gb, &got[i], sizeof(gb));
+      if (rb != gb) {
+        if (n == 0) {
+          first = i;
+        }
+        ++n;
+      }
+    }
+    return std::pair<std::size_t, std::size_t>(n, first);
+  };
+  std::vector<float> c_lat(a_lat.size(), 0.0F);
+  auto check_quad = [&](const char* name,
+                        const std::function<void()>& launch) {
+    launch();
+    CUDA_CHECK(hipDeviceSynchronize());
+    CUDA_CHECK(hipMemcpy(c_lat.data(), d_lat_c,
+                         c_lat.size() * sizeof(float), hipMemcpyDeviceToHost));
+    const auto d = bit_diff(b_lat, c_lat);
+    std::printf("  combine %s vs vec bit-diff = %zu%s (first idx %zu, t=%zu)\n",
+                name, d.first, d.first == 0 ? " (bit-exact)" : "", d.second,
+                d.second / q_stride);
+  };
+  check_quad("vec8  ", launch_combine_vec8);
+  check_quad("quad2", launch_combine_q2);
+  check_quad("quad4", launch_combine_q4);
+  check_quad("quad4x8", launch_combine_q48);
+
   (void)v_scores;
   hipFree(d_q);
   hipFree(d_cache);
@@ -652,6 +878,7 @@ void RunCase(unsigned tokens, std::uint64_t pos_first_dummy, bool time_large) {
   hipFree(d_qp);
   hipFree(d_lat_a);
   hipFree(d_lat_b);
+  hipFree(d_lat_c);
 }
 
 }  // namespace
