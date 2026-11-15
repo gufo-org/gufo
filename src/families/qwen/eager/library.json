@@ -3,6 +3,6 @@
   "name": "eager",
   "target": "gufo_qwen_eager",
   "kind": "static",
-  "purpose": "Qwen3 BF16 operators that keep PyTorch's eager BF16 rounding boundaries: norms, RoPE, decode GEMV and attention, fused WMMA attention; used by Qwen3-TTS, Qwen-Image-2.1 and YuE2.",
+  "purpose": "Qwen3 BF16 operators that keep PyTorch's eager BF16 rounding boundaries: norms, RoPE, decode GEMV and attention, fused WMMA attention, hipBLASLt GEMM plans; used by Qwen3-TTS, Qwen-Image-2.1 and YuE2.",
   "depends": []
 }

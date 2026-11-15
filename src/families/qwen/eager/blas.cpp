@@ -1,4 +1,4 @@
-#include "src/models/qwen_image_21/hip/blas.hpp"
+#include "src/families/qwen/eager/blas.hpp"
 
 #include <hipblaslt/hipblaslt.h>
 
@@ -9,13 +9,12 @@
 #include <stdexcept>
 #include <tuple>
 
-namespace gufo::models::qwen_image_21::hip {
+namespace gufo::qwen::eager {
 namespace {
 
 void Check(hipblasStatus_t status) {
   if (status != HIPBLAS_STATUS_SUCCESS)
-    throw std::runtime_error("Qwen-Image hipBLASLt failed: " +
-                             std::to_string(status));
+    throw std::runtime_error("hipBLASLt failed: " + std::to_string(status));
 }
 
 struct Plan {
@@ -96,8 +95,9 @@ struct Gemm::Impl {
         plan->preference, candidates.size(), candidates.data(), &count);
     if (status != HIPBLAS_STATUS_NOT_SUPPORTED)
       Check(status);
-    // Measured on this model's 256/1024/4096-row DiT and 1024-row VAE shapes.
-    // The default FP32-output choices are 4–6x slower on gfx1151. Keep a
+    // Measured on Qwen-Image-2.1's 256/1024/4096-row DiT and 1024-row VAE
+    // shapes, and on YuE2's 64-4500-row projections (2048-6144 wide). The
+    // default FP32-output choices are 4–6x slower on gfx1151. Keep a
     // deterministic shape policy; requalify after hipBLASLt updates.
     const int rank = float_output   ? (channels < 256 ? 5 : 4)
                      : rows <= 512  ? 12
@@ -152,4 +152,4 @@ bool Gemm::RunBatched(const void* weight, const void* input, void* output,
   return true;
 }
 
-}  // namespace gufo::models::qwen_image_21::hip
+}  // namespace gufo::qwen::eager

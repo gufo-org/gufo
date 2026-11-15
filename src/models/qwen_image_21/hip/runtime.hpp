@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "src/families/qwen/eager/attention.hpp"
-#include "src/models/qwen_image_21/hip/blas.hpp"
+#include "src/families/qwen/eager/blas.hpp"
 #include "src/models/qwen_image_21/lora.hpp"
 #include "src/models/qwen_image_21/model.hpp"
 #include "src/models/qwen_image_21/weights.hpp"
@@ -49,6 +49,7 @@ void ReorderHeads(const std::uint16_t* input, std::uint16_t* output, int rows,
 // Fused attention is shared with the other Qwen models.
 using qwen::eager::FusedAttention128;
 using qwen::eager::FusedAttention128Segmented;
+using qwen::eager::Gemm;
 using qwen::eager::KeySegments;
 // weight[rows x cols] += scale * up[rows x rank] * down[rank x cols]; FP32,
 // row-major.

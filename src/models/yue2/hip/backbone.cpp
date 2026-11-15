@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "src/families/qwen/eager/attention.hpp"
+#include "src/families/qwen/eager/blas.hpp"
 #include "src/families/qwen/eager/ops.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
 #include "src/models/yue2/hip/kernels.hpp"
@@ -136,6 +137,7 @@ struct Backbone::Impl {
 
   hipStream_t stream{nullptr};
   hipblasHandle_t blas{nullptr};
+  eager::Gemm planned;
   std::size_t rows_reserved{0};
   DeviceArray<float> hidden, q, k, v, o, gate, up, ffn;
   DeviceArray<std::uint16_t> query_heads, attention, scratch;
@@ -270,9 +272,14 @@ struct Backbone::Impl {
 
   void Gemm(const void* weight, const void* input, float* output,
             std::size_t rows, std::size_t outputs, std::size_t inputs) {
-    // Decode streams each weight row; prefill-sized batches use hipBLAS.
+    // Decode streams each weight row; prefill-sized batches use a fixed
+    // hipBLASLt plan, about 6x hipBLAS's default on gfx1151.
     if (eager::LaunchBfloat16Gemv(weight, input, output, rows, outputs, inputs,
                                   stream))
+      return;
+    if (planned.Run(weight, input, output, static_cast<int>(rows),
+                    static_cast<int>(outputs), static_cast<int>(inputs),
+                    /*float_output=*/true, stream))
       return;
     gufo::hip::LaunchHipblasGEMMBF16(blas, weight, input, output, rows, outputs,
                                      inputs, stream);

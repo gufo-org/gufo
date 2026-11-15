@@ -7,4 +7,5 @@
 | BF16 KV cache, split-K decode attention | Retained; upstream stores BF16 K/V; the talker's one-block FP32 kernel cannot hold 24576 keys in LDS. |
 | FP32 ODE state | Retained; upstream keeps BF16 between steps. Latents still match upstream at cosine 0.99994. |
 | Polyphase transposed convolutions, shifted-view k7 SGEMMs | Retained; no im2col buffers (the last stage would need 3.6 GB per tile); audio matches at 6.4e-7 relative error. |
-| Speed work on the acoustic pass | Open: WMMA value product in attention, hipBLASLt for the NAR GEMMs, graph capture of decode. |
+| hipBLASLt plan for prefill-sized GEMMs | Retained; the NAR projections ran at about 4 TFLOP/s through `hipblasGemmEx` and 21-37 TFLOP/s with candidate 4; acoustic 117.5 -> 34.8 s on the same score (BENCHMARKS.md). Oracles unchanged. |
+| More speed work | Open: WMMA value product in the NAR attention, graph capture of AR decode. |

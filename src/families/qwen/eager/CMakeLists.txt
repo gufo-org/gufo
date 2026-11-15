@@ -2,11 +2,12 @@
 # only with the HIP backend.
 add_library(gufo_qwen_eager STATIC
   attention.hip
+  blas.cpp
   ops.hip)
-set_source_files_properties(attention.hip ops.hip PROPERTIES LANGUAGE HIP)
+set_source_files_properties(attention.hip blas.cpp ops.hip PROPERTIES LANGUAGE HIP)
 target_include_directories(gufo_qwen_eager PUBLIC ${PROJECT_SOURCE_DIR})
 target_compile_definitions(gufo_qwen_eager PUBLIC ENGINE_ENABLE_HIP=1)
-target_link_libraries(gufo_qwen_eager PUBLIC hip::host)
+target_link_libraries(gufo_qwen_eager PUBLIC hip::host roc::hipblaslt)
 # The fused attention keeps the options it was tuned with in Qwen-Image-2.1.
 set_source_files_properties(attention.hip
   TARGET_DIRECTORY gufo_qwen_eager
