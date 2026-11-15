@@ -743,8 +743,8 @@ constexpr std::size_t kTile = 64, kBlockRows = 8;
 
 // One step of the online softmax for a query whose scores s[a, z) are set:
 // rescales its sum and accumulator to the new maximum and exponentiates s.
-void SoftmaxStep(float* s, std::size_t a, std::size_t z, float* top,
-                 float* sum, float* o, std::size_t dv) {
+void SoftmaxStep(float* s, std::size_t a, std::size_t z, float* top, float* sum,
+                 float* o, std::size_t dv) {
   float m = -INFINITY;
   for (std::size_t j = a; j < z; ++j)
     m = std::max(m, s[j]);
@@ -795,13 +795,14 @@ void TileScores2(const float* q0, const float* q1, const float* kd,
 
 // o0, o1 [dv] += sum over n keys of w0[t], w1[t] times value row t.
 void TileValues2(const float* w0, const float* w1, const float* v,
-                 std::size_t v_stride, std::size_t n, std::size_t dv,
-                 float* o0, float* o1) {
+                 std::size_t v_stride, std::size_t n, std::size_t dv, float* o0,
+                 float* o1) {
   for (std::size_t db = 0; db < dv; db += 32) {
     __m256 a0 = _mm256_loadu_ps(o0 + db), a1 = _mm256_loadu_ps(o0 + db + 8),
            a2 = _mm256_loadu_ps(o0 + db + 16),
            a3 = _mm256_loadu_ps(o0 + db + 24), b0 = _mm256_loadu_ps(o1 + db),
-           b1 = _mm256_loadu_ps(o1 + db + 8), b2 = _mm256_loadu_ps(o1 + db + 16),
+           b1 = _mm256_loadu_ps(o1 + db + 8),
+           b2 = _mm256_loadu_ps(o1 + db + 16),
            b3 = _mm256_loadu_ps(o1 + db + 24);
     for (std::size_t t = 0; t < n; ++t) {
       const float* vt = v + t * v_stride + db;
@@ -885,8 +886,8 @@ void AttentionTiled(const AttentionArgs& p, const std::size_t* kb,
       std::fill(top.begin(), top.end(), -INFINITY);
       std::fill(sum.begin(), sum.end(), 0.0f);
       if (lo < hi) {
-        for (std::size_t tile = (lo - t0) / kTile;
-             tile * kTile + t0 < hi; ++tile) {
+        for (std::size_t tile = (lo - t0) / kTile; tile * kTile + t0 < hi;
+             ++tile) {
           const std::size_t base = t0 + tile * kTile;
           const float* kd = kt.data() + (kh * tiles + tile) * D * kTile;
           for (std::size_t r = r0; r < r1; ++r) {
@@ -895,8 +896,7 @@ void AttentionTiled(const AttentionArgs& p, const std::size_t* kb,
             if (a >= z)
               continue;
             for (std::size_t g = 0; g < group;) {
-              const std::size_t h = kh * group + g,
-                                qi = (r - r0) * group + g;
+              const std::size_t h = kh * group + g, qi = (r - r0) * group + g;
               const float* q = p.q + r * p.q_stride + h * D;
               float* o = acc.data() + qi * DV;
 #ifdef GUFO_NPU_HOST_AVX2
@@ -914,8 +914,8 @@ void AttentionTiled(const AttentionArgs& p, const std::size_t* kb,
                 }
                 float* o2 = o + DV;
                 SoftmaxStep(s, a - base, z - base, &top[qi], &sum[qi], o, DV);
-                SoftmaxStep(s2, a - base, z - base, &top[qi + 1],
-                            &sum[qi + 1], o2, DV);
+                SoftmaxStep(s2, a - base, z - base, &top[qi + 1], &sum[qi + 1],
+                            o2, DV);
                 TileValues2(s + (a - base), s2 + (a - base),
                             p.v + a * p.v_stride + kh * DV, p.v_stride, z - a,
                             DV, o, o2);

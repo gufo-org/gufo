@@ -34,9 +34,9 @@ constexpr std::size_t kABytes = std::size_t(16) << 20, kCBytes = std::size_t(16)
 constexpr unsigned kArgA = 3, kArgW = 4, kArgC = 5;
 
 struct Part {
-  int k0, k;            // the group's codes
-  int kp, kc, nt, count;  // K slices, chunks per slice, tiles, output parts
-  std::size_t b_words;  // offset in the arena
+  int k0, k;               // the group's codes
+  int kp, kc, nt, count;   // K slices, chunks per slice, tiles, output parts
+  std::size_t b_words;     // offset in the arena
   std::vector<float> top;  // [slice][output]: its largest block scale / 32767
   [[nodiscard]] int Sets() const { return kStreams / kp; }  // streams per slice
   [[nodiscard]] int Span() const { return 2 * Sets() * nt * 8; }  // per part
@@ -125,7 +125,8 @@ struct Q8Gemm::Impl {
       const int span = p.Span();
       for (int slice = 0; slice < p.kp; ++slice) {
         const int s0 = p.k0 + slice * p.kc * 512;
-        const int blocks = std::max(0, std::min(p.kc * 512, k0 + p.k - s0)) / 32;
+        const int blocks =
+            std::max(0, std::min(p.kc * 512, k0 + p.k - s0)) / 32;
         for (int j = 0; j < n; ++j) {
           const float* s = scales.data() + std::size_t(j) * (k / 32) + s0 / 32;
           float top = 0;
@@ -327,9 +328,9 @@ struct Q8Gemm::Impl {
               continue;
             const int outs = std::min(8, n - out0);
             if (j.Compact()) {  // row 0 of tile t: record t / 8, slot t % 8
-              const std::int32_t* w = base +
-                                      (std::size_t(t / 8) * 4 + jj) * kOutWords +
-                                      (t % 8) * 8;
+              const std::int32_t* w =
+                  base + (std::size_t(t / 8) * 4 + jj) * kOutWords +
+                  (t % 8) * 8;
               const std::int32_t *hi = w, *lo = w + 64;
               float* dst = y + std::size_t(j.r0) * n + out0;
               const float rs = rss[0];

@@ -129,12 +129,10 @@ int main() {
       std::size_t rows, past, heads, kv, dim, window;  // window 0: causal
       float softcap;
     };
-    for (const Case cs : {Case{37, 0, 4, 2, 24, 5, 0.0f},
-                          Case{150, 70, 8, 2, 40, 0, 0.0f},
-                          Case{20, 9, 4, 4, 16, 0, 2.0f},
-                          Case{3, 100, 4, 1, 32, 0, 0.0f},
-                          Case{90, 40, 8, 2, 128, 0, 0.0f},
-                          Case{33, 0, 6, 2, 64, 0, 1.5f}}) {
+    for (const Case cs :
+         {Case{37, 0, 4, 2, 24, 5, 0.0f}, Case{150, 70, 8, 2, 40, 0, 0.0f},
+          Case{20, 9, 4, 4, 16, 0, 2.0f}, Case{3, 100, 4, 1, 32, 0, 0.0f},
+          Case{90, 40, 8, 2, 128, 0, 0.0f}, Case{33, 0, 6, 2, 64, 0, 1.5f}}) {
       const std::size_t rows = cs.rows, keys = cs.past + rows, heads = cs.heads,
                         kv = cs.kv, dim = cs.dim, window = cs.window;
       auto range = [&](std::size_t r, std::size_t* b, std::size_t* e) {
