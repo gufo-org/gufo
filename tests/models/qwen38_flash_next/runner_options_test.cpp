@@ -176,6 +176,13 @@ void LoadedProjectorSelection() {
              tight.copy_rows == 8 && narrow->plan.per_session_bytes == 100,
          "without room for one image the ordinary width is installed");
 
+  LoadedModel host_limited{.projector = true};
+  const auto limited = qfn::InitializeServingVision(
+      host_limited, 262144, true, 4, 5000, 64, 320,
+      [] { return std::size_t{999}; });
+  Expect(limited && limited->copy_width && limited->copy_width->rows == 8,
+         "a runtime (host) limit below the device's also narrows the width");
+
   LoadedModel insufficient{.projector = true};
   const auto short_plan = qfn::InitializeServingVision(
       insufficient, 262144, true, 4, 419, 64, 0,

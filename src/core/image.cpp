@@ -480,18 +480,15 @@ ImageDecodePlan InspectImage(std::span<const std::uint8_t> bytes) {
           ((std::uint64_t{width} + 3) / 4) * ((std::uint64_t{height} + 3) / 4);
       const auto groups = std::min<std::uint64_t>(
           65536, std::max(std::min<std::uint64_t>(1000, pixels), cells));
-      // Do not treat libwebp's initial kTableSize allocation as a maximum.
-      // A 15-bit tree with an 8-bit root uses at most 33024 entries. Each
-      // complete second-level subtree of depth d<=7 has >=d+1 leaves, and
-      // 2^d<=16*(d+1). Thus alphabets 2328,256,256,256,40 need at most
-      // min(33024,256+16*A) entries each: 46976 entries per five-tree group.
-      // Invalid trees are rejected before table allocation. Segment growth
-      // leaves at most the next table's size unused; total capacity is
-      // bounded by twice the used entries plus the largest segment. Include
-      // 1024 bytes/group for packed tables, pointers and segment descriptors.
-      constexpr std::uint64_t entries_per_group = 46976;
-      const auto table_entries = 2 * entries_per_group * groups +
-                                 std::max<std::uint64_t>(5004 * groups, 33024);
+      // BuildHuffmanTable sizes each tree in a validation pass and rejects
+      // incomplete codes before writing, so a group's five complete trees fit
+      // kTableSize[color_cache_bits] entries (zlib's enough.c maxima for an
+      // 8-bit root; at most 5004). The tables start as groups * kTableSize;
+      // a group that exactly fills a segment allocates one more segment of
+      // the same size, so twice that bounds the capacity. Include 1024
+      // bytes/group for packed tables, pointers and segment descriptors.
+      constexpr std::uint64_t entries_per_group = 5004;
+      const auto table_entries = 2 * entries_per_group * groups + 128;
       workspace += 24 * pixels + 128 * std::uint64_t{width} +
                    4 * table_entries + 1024 * groups;
     }

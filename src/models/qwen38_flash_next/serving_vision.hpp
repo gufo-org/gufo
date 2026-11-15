@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -46,8 +47,13 @@ template<class Model>
                             : core::SessionMode::kAutoregressive;
   std::optional<CopyWidthChoice> copy_width;
   if (use_mtp) {
+    // Images are later admitted against the runtime observation, which can
+    // be limited by host RAM rather than the device.
     copy_width = SelectOnDemandCopyWidth(
-        widest_copy_rows, sessions, device_capacity, image_bytes,
+        widest_copy_rows, sessions,
+        observe_runtime ? std::min(device_capacity, observe_runtime())
+                        : device_capacity,
+        image_bytes,
         [&](std::uint32_t rows) {
           model.LimitCopyRows(rows);
           return CopyWidthMemory{model.TextSessionBytes(mode, max_context),
