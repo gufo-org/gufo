@@ -17,6 +17,7 @@
 #include <iostream>
 #include <iterator>
 #include <numeric>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -199,6 +200,43 @@ int main() {
     Expect(worst_cosine > 0.999, "teacher-forced logits cosine > 0.999");
     Expect(argmax_agree * 10 >= rows.size() * 9,
            "teacher-forced argmax agrees on 90% of rows");
+
+    // The same rows through the one-token decode path after a prefill of
+    // the tokens before the first row.
+    {
+      auto decode = backbone->NewCache(sequence.size());
+      backbone->Append(*decode, std::span(sequence).first(rows.front()), {},
+                       nullptr);
+      double decode_cosine = 1.0;
+      std::size_t decode_agree = 0, next = 0;
+      std::vector<float> row_logits;
+      for (std::uint32_t position = rows.front(); position <= rows.back();
+           ++position) {
+        const bool wanted = position == rows[next];
+        backbone->Append(
+            *decode, std::span(sequence).subspan(position, 1),
+            wanted ? yue2::VocabularyWindow{0, static_cast<std::uint32_t>(
+                                                   config.vocabulary)}
+                   : yue2::VocabularyWindow{},
+            &row_logits);
+        if (!wanted)
+          continue;
+        const auto begin = static_cast<std::ptrdiff_t>(next * shape[1]);
+        std::vector<float> b(expected_logits.begin() + begin,
+                             expected_logits.begin() + begin + shape[1]);
+        decode_cosine = std::min(decode_cosine, Cosine(row_logits, b));
+        decode_agree += std::max_element(row_logits.begin(), row_logits.end()) -
+                            row_logits.begin() ==
+                        std::max_element(b.begin(), b.end()) - b.begin();
+        ++next;
+      }
+      std::cout << "     decode logits: worst cosine " << Digits(decode_cosine)
+                << ", argmax agrees on " << decode_agree << "/" << rows.size()
+                << '\n';
+      Expect(decode_cosine > 0.999, "decode logits cosine > 0.999");
+      Expect(decode_agree * 10 >= rows.size() * 9,
+             "decode argmax agrees on 90% of rows");
+    }
 
     // Acoustic velocity and latents from the upstream tokens and noise.
     const auto codec = ReadNpy<std::int32_t>(oracle / "semantic.npy");
