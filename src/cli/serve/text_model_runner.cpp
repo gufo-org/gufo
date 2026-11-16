@@ -1272,14 +1272,15 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens,
     impl_->snapshot_bytes = taken.bytes;
     // Checkpoints captured after it in the pass reserved for themselves.
     // Publication admits under the lease's reservation, so restore this
-    // target's continuation purpose first.
+    // target's continuation purpose first. A step whose later pass was
+    // cancelled may stop at the target itself; its capture stays valid.
     const bool reserved =
         taken.snapshot && impl_->lease->TryReserveSnapshot(
                               taken.bytes, taken.position, taken.preserve,
                               SnapshotPurpose::kContinuation,
                               std::span<const TextRunnerToken>(impl_->prompt)
                                   .first(taken.position));
-    if (!reserved || impl_->prefill_offset <= taken.position ||
+    if (!reserved || impl_->prefill_offset < taken.position ||
         taken.snapshot->PayloadBytes() != taken.bytes) {
       if (!taken.refused)
         impl_->lease->SkipSnapshot(
