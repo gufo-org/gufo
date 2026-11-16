@@ -195,16 +195,23 @@ public:
       Invalid("string delimiters must both be set or both be empty");
     if (!values_.whitespace)
       ws_ = Seq({});
-    if (!values_.string_open.empty())
+    if (!values_.string_open.empty() && !values_.keyword_root)
       string_ = StringValue(json::Value::object());
     if (values_.bare_keys)
       key_ = BareKey({});
+    if (values_.keyword_root &&
+        (values_.string_open.size() != 1 ||
+         values_.string_open != values_.string_close))
+      Invalid("keyword arguments quote strings with one byte");
   }
 
   std::shared_ptr<const JsonConstraint> Compile(
       bool object_only, bool ignore_unknown_keys = false) {
     ignore_unknown_keys_ = ignore_unknown_keys && open_objects_;
-    if (object_only) {
+    if (object_only && values_.keyword_root) {
+      grammar_->root_ = Seq({ws_, GenericKeywords(), ws_});
+      grammar_->prompt_ = "Respond with keyword arguments.";
+    } else if (object_only) {
       grammar_->root_ = Seq({ws_, GenericObject(kMaxDepth), ws_});
       grammar_->prompt_ = "Respond with a single valid JSON object.";
     } else {
@@ -876,6 +883,41 @@ private:
     const auto tail = Repeat(Seq({ws_, Byte(','), ws_, value}));
     return Seq({Byte('['), ws_, Optional(Seq({value, tail})), ws_, Byte(']')});
   }
+  // Any keyword arguments: identifiers, `=`, any JSON value.
+  std::uint32_t GenericKeywords() {
+    auto predicate = json::Value::object();
+    predicate["pattern"] = "^[A-Za-z_][A-Za-z0-9_]*$";
+    const auto key = Lexeme(JsonSchemaLexeme::RawString(predicate, "="));
+    const auto member =
+        Seq({key, Byte('='), RootValue(GenericValue(kMaxDepth))});
+    return Optional(Seq({member, Repeat(Seq({ws_, Byte(','), ws_, member}))}));
+  }
+  // A root value in a keyword argument may also be written as Python does.
+  std::uint32_t RootValue(std::uint32_t json_value) {
+    return Alt({json_value, PythonString(json::Value::object()),
+                Literal("True"), Literal("False"), Literal("None")});
+  }
+  // The single-quoted spelling of a root string (the JSON spelling is
+  // admitted beside it): raw text, so it cannot hold its own quote.
+  std::uint32_t PythonString(const json::Value& predicate) {
+    const auto raw =
+        JsonSchemaLexeme::RawString(predicate, values_.string_close);
+    auto text = Lexeme(raw);
+    if (raw->Check("").complete)
+      text = Optional(text);
+    return Seq(
+        {Literal(values_.string_open), text, Literal(values_.string_close)});
+  }
+  static bool IsIdentifier(std::string_view name) {
+    if (name.empty() || std::isdigit(static_cast<unsigned char>(name[0])))
+      return false;
+    return std::ranges::all_of(name, [](unsigned char c) {
+      return std::isalnum(c) || c == '_';
+    });
+  }
+  bool Keywords(std::size_t depth) const {
+    return values_.keyword_root && depth == 0;
+  }
   std::uint32_t GenericObject(std::size_t depth) {
     const auto value = GenericValue(depth - 1);
     const auto member = Seq({key_, ws_, Byte(':'), ws_, value});
@@ -1201,8 +1243,24 @@ private:
     }
     return result;
   }
-  std::uint32_t ValueLiteral(const json::Value& value) {
-    if (value.is_string() && !values_.string_open.empty()) {
+  std::uint32_t ValueLiteral(const json::Value& value, bool root = false) {
+    if (root && values_.keyword_root) {
+      if (value.is_string()) {
+        auto choices = Sequence{Literal(value.dump())};
+        if (value.str().find(values_.string_close) == std::string::npos &&
+            value.str().find('\\') == std::string::npos)
+          choices.push_back(
+              Literal(values_.string_open + value.str() + values_.string_close));
+        return Alt(choices);
+      }
+      if (value.is_bool())
+        return Alt({Literal(value.dump()),
+                    Literal(value.as_bool() ? "True" : "False")});
+      if (value.is_null())
+        return Alt({Literal("null"), Literal("None")});
+    }
+    if (value.is_string() && !values_.string_open.empty() &&
+        !values_.keyword_root) {
       if (value.str().find(values_.string_close) != std::string::npos)
         Invalid("string value cannot be written in this value syntax");
       return Literal(values_.string_open + value.str() + values_.string_close);
@@ -1231,7 +1289,15 @@ private:
     parts.insert(parts.end(), {ws_, Byte(value.is_object() ? '}' : ']')});
     return Seq(std::move(parts));
   }
-  std::uint32_t Primitive(std::string_view type) {
+  std::uint32_t Primitive(std::string_view type, bool root = false) {
+    if (root && values_.keyword_root) {
+      if (type == "string")
+        return Alt({string_, PythonString(json::Value::object())});
+      if (type == "boolean")
+        return Alt({bool_, Literal("True"), Literal("False")});
+      if (type == "null")
+        return Alt({null_, Literal("None")});
+    }
     if (type == "string")
       return string_;
     if (type == "integer")
@@ -1250,9 +1316,13 @@ private:
     return static_cast<std::uint32_t>(symbol);
   }
   // A string satisfying a JSON string predicate, in the value syntax.
-  std::uint32_t StringValue(const json::Value& predicate) {
-    if (values_.string_open.empty())
-      return Lexeme(JsonSchemaLexeme::String(predicate));
+  std::uint32_t StringValue(const json::Value& predicate, bool root = false) {
+    if (values_.string_open.empty() || values_.keyword_root) {
+      const auto json_string = Lexeme(JsonSchemaLexeme::String(predicate));
+      return root && values_.keyword_root
+                 ? Alt({json_string, PythonString(predicate)})
+                 : json_string;
+    }
     const auto raw =
         JsonSchemaLexeme::RawString(predicate, values_.string_close);
     auto text = Lexeme(raw);
@@ -1308,7 +1378,9 @@ private:
     predicate["pattern"] = std::move(pattern);
     return Lexeme(JsonSchemaLexeme::RawString(predicate, ":"));
   }
-  std::uint32_t KeyLiteral(const std::string& name) {
+  std::uint32_t KeyLiteral(const std::string& name, bool keyword = false) {
+    if (values_.keyword_root)
+      return Literal(keyword ? name : json::Value(name).dump());
     if (values_.bare_keys && BareKeyName(name))
       return Literal(name);
     if (values_.string_open.empty())
@@ -1657,7 +1729,7 @@ private:
           continue;
         try {
           if (auto canonical = ValueFor(base, value))
-            choices.push_back(ValueLiteral(*canonical));
+            choices.push_back(ValueLiteral(*canonical, depth == 1));
         } catch (const JsonSchemaEmpty&) {
         }
       }
@@ -1684,11 +1756,12 @@ private:
         else if (name == "string" &&
                  (schema.contains("pattern") || schema.contains("format") ||
                   schema.contains("minLength") || schema.contains("maxLength")))
-          alternatives.push_back(StringValue(StringPredicate(schema)));
+          alternatives.push_back(
+              StringValue(StringPredicate(schema), depth == 1));
         else if (name == "integer")
           alternatives.push_back(Integer(schema));
         else
-          alternatives.push_back(Primitive(name));
+          alternatives.push_back(Primitive(name, depth == 1));
       } catch (const JsonSchemaEmpty&) {
         // An impossible type branch must not discard the other alternatives.
       }
@@ -1717,6 +1790,14 @@ private:
       Invalid("invalid object properties or additionalProperties");
     if (!closed && !open_objects_ && !open_response_objects_)
       Invalid("objects require properties and additionalProperties: false");
+    const bool keywords = Keywords(depth);
+    if (keywords && !closed)
+      Invalid("keyword arguments need a closed parameter object");
+    const char assign = keywords ? '=' : ':';
+    const auto braces = [&](std::uint32_t inner) {
+      return keywords ? Seq({inner})
+                      : Seq({Byte('{'), ws_, inner, ws_, Byte('}')});
+    };
     properties_ += properties->size();
     if (properties_ > 5000)
       Invalid("maximum property count is 5000");
@@ -1772,7 +1853,7 @@ private:
                   !(ignore_unknown_keys_ && AdmitsExtraProperties(schema))
               ? Visit(*additional, depth + 1)
               : GenericValue(kMaxDepth - depth);
-      const auto member = Seq({key, ws_, Byte(':'), ws_, value});
+      const auto member = Seq({key, ws_, Byte(assign), ws_, value});
       const auto tail = Repeat(Seq({ws_, Byte(','), ws_, member}));
       suffix = {Optional(Seq({member, tail})), tail};
     }
@@ -1782,8 +1863,11 @@ private:
       CountStrings(key);
       if (required.contains(key))
         required_at.push_back(members.size());
-      members.push_back(Seq(
-          {KeyLiteral(key), ws_, Byte(':'), ws_, Visit(*value, depth + 1)}));
+      if (keywords && !IsIdentifier(key))
+        Invalid("property name cannot be written as a keyword argument");
+      members.push_back(Seq({KeyLiteral(key, keywords), keywords ? Seq({}) : ws_,
+                             Byte(assign), keywords ? Seq({}) : ws_,
+                             Visit(*value, depth + 1)}));
     }
     // Index 0 starts the object; index 1 follows a member and needs a comma.
     using Next = std::array<std::uint32_t, 2>;
@@ -1813,7 +1897,7 @@ private:
     // never matched twice and the rules stay linear in the member count.
     const std::size_t last = required_at.empty() ? 0 : required_at.back();
     if (required_at.empty() || last + 1 == required_at.size())
-      return Seq({Byte('{'), ws_, after[0][0], ws_, Byte('}')});
+      return braces(after[0][0]);
     std::vector<std::size_t> early;
     for (std::size_t p = 0; p < last; ++p)
       if (!std::ranges::binary_search(required_at, p))
@@ -1859,7 +1943,7 @@ private:
       }
       spine = next;
     }
-    return Seq({Byte('{'), ws_, spine[0], ws_, Byte('}')});
+    return braces(spine[0]);
   }
   std::uint32_t Array(const json::Value& schema, std::size_t depth) {
     // Best effort reads a missing items schema as any value, like `items: {}`:
@@ -2312,8 +2396,6 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     bool required, bool parallel, const ToolSyntax& syntax) {
   if (syntax.open.empty() || syntax.close.empty())
     Invalid("a tool syntax needs open and close literals");
-  if (!syntax.tagged && !syntax.block_close.empty())
-    Invalid("only tagged arguments share a call block");
   return BuildTools(std::move(answer), std::move(tools), required, parallel,
                     &syntax);
 }
@@ -2368,7 +2450,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::BuildTools(
   };
   const bool tagged = syntax && syntax->tagged;
   // Tagged calls in one shared block (DeepSeek's) or one block each (Qwen's).
-  const bool block = tagged && !syntax->block_close.empty();
+  const bool block = syntax && !syntax->block_close.empty();
+  const std::string separator = syntax ? syntax->call_separator : "";
   const std::string_view marker =
       syntax ? std::string_view(syntax->open) : "<tool_call>";
   const auto end =
@@ -2440,7 +2523,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::BuildTools(
   // each other, and no text may follow them. Text after a call is where
   // echoed framing used to leak into content (#383, #438).
   const bool qwen = tagged && !block;
-  const bool ends_output = tagged || !plain_answer;
+  const bool ends_output = tagged || block || !plain_answer;
   auto after = ends_output ? static_cast<std::uint32_t>(grammar->rules_.size())
                : parallel  ? prose
                            : text(UINT32_MAX);
@@ -2450,9 +2533,10 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::BuildTools(
       const auto space = space_rule();
       grammar->rules_[after] = {{space}};
       if (parallel)
-        grammar->rules_[after].push_back({space, literal(marker), calls});
+        grammar->rules_[after].push_back(
+            {space, literal(separator + std::string(marker)), calls});
     } else if (parallel && !block) {
-      const auto begin = literal(marker);
+      const auto begin = literal(separator + std::string(marker));
       grammar->rules_[after].push_back({begin, calls});
     }
   }
@@ -2460,8 +2544,12 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::BuildTools(
     const auto finish = literal(syntax->block_close);
     const auto tail = static_cast<std::uint32_t>(grammar->rules_.size());
     grammar->rules_.push_back({{finish, after}});
-    if (parallel)
-      grammar->rules_[tail].push_back({calls});
+    if (parallel) {
+      if (separator.empty())
+        grammar->rules_[tail].push_back({calls});
+      else
+        grammar->rules_[tail].push_back({literal(separator), calls});
+    }
     after = tail;
   }
   std::map<const JsonConstraint*, std::uint32_t> imported;
@@ -2478,10 +2566,16 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::BuildTools(
     if (syntax &&
         name.find_first_of(syntax->name_delimiters) != std::string::npos)
       Invalid("function name cannot be written in this tool syntax: " + name);
+    const std::string repeated =
+        syntax &&
+                (!syntax->repeat_prefix.empty() || !syntax->repeat_suffix.empty())
+            ? syntax->repeat_prefix + name + syntax->repeat_suffix
+            : std::string();
     const auto begin = literal(
-        syntax ? syntax->name_prefix + name + syntax->name_suffix
+        syntax ? syntax->name_prefix + name + syntax->name_suffix + repeated
                : "{\"name\":" + json::Value(name).dump() + ",\"arguments\":");
-    const auto header_tail = syntax ? name + syntax->name_suffix : name;
+    const auto header_tail =
+        syntax ? name + syntax->name_suffix + repeated : name;
     if (const auto found = imported.find(arguments.get());
         found != imported.end()) {
       grammar->rules_[calls].push_back({begin, found->second, end, after});

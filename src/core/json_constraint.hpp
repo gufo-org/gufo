@@ -46,6 +46,16 @@ public:
     bool whitespace{true};
     // Object members in sorted key order instead of schema order.
     bool sorted_keys{false};
+    // The root parameter object is written as keyword arguments, `k=v, n=3`,
+    // without braces (the call's own name_suffix and close supply the
+    // parentheses), as Python calls spell them. Only the root's values change:
+    // a root string is a JSON string or a single-quoted one (raw text between
+    // the quotes), a root boolean or null is JSON's or Python's (True, False,
+    // None). Containers and what they hold keep JSON's spelling, which is how
+    // Python-call parsers copy them. Property names must be identifiers; a
+    // schema this cannot enforce is std::invalid_argument when strict,
+    // otherwise any keyword arguments are admitted.
+    bool keyword_root{false};
     auto operator<=>(const ValueSyntax&) const = default;
   };
   // Arguments as one tagged parameter per top-level property, in any order:
@@ -68,6 +78,8 @@ public:
   };
   // A native call written as
   //   open name_prefix NAME name_suffix ARGUMENTS close
+  // With a nonempty block_close all calls share one block: `open` once, calls
+  // joined by call_separator, then block_close (a Python-style list of calls).
   // ARGUMENTS is either `tagged` parameters or, without them, the tool's
   // parameter object spelled by `values`.
   //
@@ -84,7 +96,16 @@ public:
     std::string open;
     std::string name_prefix;
     std::string name_suffix;
+    // The call writes its name a second time after name_suffix:
+    //   open name_prefix NAME name_suffix repeat_prefix NAME repeat_suffix ARGUMENTS close
+    // (a call whose header and body both name the function). Both empty: no
+    // second name.
+    std::string repeat_prefix;
+    std::string repeat_suffix;
     std::string close;
+    // Text between one call and the next, in front of the next call's `open`
+    // (or of its name in a shared block).
+    std::string call_separator;
     std::string block_close;
     // Bytes that end a function name for the parser; a tool whose name holds
     // one cannot be constrained (std::invalid_argument).

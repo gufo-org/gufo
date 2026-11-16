@@ -3013,6 +3013,114 @@ void TestObjectMemberOrders() {
   }
 }
 
+// Python-style calls: one shared list of calls, `NAME(k=v, ...)` keyword
+// arguments (root strings single-quoted or JSON, True/False/None or JSON,
+// containers JSON), and a call that names its function twice (a header, then
+// the body) with one message per call.
+void TestProviderCallListAndKeywordSyntax() {
+  const JsonConstraint::ToolSyntax python{
+      .open = "<|call|>[",
+      .name_suffix = "(",
+      .close = ")",
+      .call_separator = ", ",
+      .block_close = "]<|end|>",
+      .name_delimiters = "( ",
+      .values = {.string_open = "'", .string_close = "'", .keyword_root = true},
+  };
+  const auto schema = parse(R"({"type":"object","properties":{
+    "city":{"type":"string"},"units":{"type":"string","enum":["c","f"]},
+    "days":{"type":"integer"},"on":{"type":"boolean"},"nothing":{"type":"null"},
+    "tags":{"type":"array","items":{"type":"string"}}},
+    "required":["city"],"additionalProperties":false})");
+  const auto empty = parse(
+      R"({"type":"object","properties":{},"additionalProperties":false})");
+  const auto build = [&](bool parallel) {
+    std::vector<JsonConstraint::Tool> tools;
+    tools.emplace_back("weather",
+                       JsonConstraint::ToolParameters(schema, false, python));
+    tools.emplace_back("clock",
+                       JsonConstraint::ToolParameters(empty, false, python));
+    return JsonConstraint::WithTools(nullptr, std::move(tools), true, parallel,
+                                     python);
+  };
+  const auto many = build(true);
+  const auto one = build(false);
+  assert(Accepts(*many, "<|call|>[weather(city='Paris')]<|end|>"));
+  assert(Accepts(*many,
+                 "<|call|>[weather(city=\"Paris\", days=3, on=True, "
+                 "nothing=None, tags=[\"a\", \"b\"])]<|end|>"));
+  assert(Accepts(*many, "<|call|>[weather(city='Paris', units='c')]<|end|>"));
+  assert(Accepts(*many,
+                 "<|call|>[weather(city='Paris', on=false, nothing=null)]<|end|>"));
+  assert(Accepts(*many, "<|call|>[clock(), weather(city='A'), clock()]<|end|>"));
+  assert(Accepts(*one, "<|call|>[clock()]<|end|>"));
+  assert(!Accepts(*one, "<|call|>[clock(), clock()]<|end|>"));
+  assert(!Accepts(*many, "<|call|>[weather(city='Paris')"));
+  assert(!Accepts(*many, "<|call|>[weather(city='Paris') clock()]<|end|>"));
+  assert(!Accepts(*many, "<|call|>[weather()]<|end|>"));
+  assert(!Accepts(*many, "<|call|>[weather(city='Paris', units='k')]<|end|>"));
+  assert(!Accepts(*many, "<|call|>[weather(city=1)]<|end|>"));
+  assert(!Accepts(*many, "<|call|>[weather(city='Paris', days=True)]<|end|>"));
+  assert(!Accepts(*many, "<|call|>[weather(city='Paris', tags=['a'])]<|end|>"));
+  assert(!Accepts(*many, "<|call|>[weather(city='Paris', city='X')]<|end|>"));
+  assert(!Accepts(*many, "<|call|>[weather(city='Paris')]<|end|>x"));
+  // A property that is no identifier cannot be a keyword argument.
+  bool rejected = false;
+  try {
+    (void)JsonConstraint::ToolParameters(
+        parse(R"({"type":"object","properties":{"a-b":{"type":"string"}},
+          "required":["a-b"],"additionalProperties":false})"),
+        true, python);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
+  // Without a schema, any keyword arguments.
+  std::vector<JsonConstraint::Tool> loose;
+  loose.emplace_back("f", JsonConstraint::OpenToolParameters(python));
+  const auto any =
+      JsonConstraint::WithTools(nullptr, std::move(loose), true, false, python);
+  assert(Accepts(*any, "<|call|>[f()]<|end|>"));
+  assert(Accepts(*any, "<|call|>[f(x=1, y='z', z={\"k\": [1]}, w=None)]<|end|>"));
+  assert(!Accepts(*any, "<|call|>[f(1)]<|end|>"));
+  assert(!Accepts(*any, "<|call|>[f(x 1)]<|end|>"));
+
+  // The function's name twice and one message per call.
+  const JsonConstraint::ToolSyntax channels{
+      .open = " to=",
+      .name_suffix = "<|msg|>",
+      .repeat_prefix = "<call name=\"",
+      .repeat_suffix = "\">",
+      .close = "</call>",
+      .call_separator = "<|next|>",
+      .name_delimiters = "<\" ",
+      .tagged =
+          JsonConstraint::TaggedArguments{.parameter_open = "<p ",
+                                          .raw_value_open = ">",
+                                          .typed_value_open = ">",
+                                          .value_close = "</p>"},
+  };
+  const auto cschema = parse(
+      R"({"type":"object","properties":{"a":{"type":"string"}},
+    "required":["a"],"additionalProperties":false})");
+  std::vector<JsonConstraint::Tool> ctools;
+  ctools.emplace_back("f",
+                      JsonConstraint::ToolParameters(cschema, false, channels));
+  ctools.emplace_back("g",
+                      JsonConstraint::ToolParameters(cschema, false, channels));
+  const auto calls = JsonConstraint::WithTools(nullptr, std::move(ctools), true,
+                                               true, channels);
+  assert(Accepts(*calls, " to=f<|msg|><call name=\"f\"><p a>x</p></call>"));
+  assert(Accepts(*calls,
+                 " to=f<|msg|><call name=\"f\"><p a>x</p></call><|next|> "
+                 "to=g<|msg|><call name=\"g\"><p a>y</p></call>"));
+  assert(!Accepts(*calls, " to=f<|msg|><call name=\"g\"><p a>x</p></call>"));
+  assert(!Accepts(*calls,
+                  " to=f<|msg|><call name=\"f\"><p a>x</p></call> "
+                  "to=g<|msg|><call name=\"g\"><p a>y</p></call>"));
+  assert(!Accepts(*calls, " to=h<|msg|><call name=\"h\"><p a>x</p></call>"));
+}
+
 int main(int argc, char** argv) {
   // Batch probes for the independent Python JSON Schema validator. This
   // exercises the production byte matcher without requiring model weights.
@@ -3079,6 +3187,7 @@ int main(int argc, char** argv) {
   TestProviderToolSyntax();
   TestProviderReasoningMarkup();
   TestProviderTaggedSyntax();
+  TestProviderCallListAndKeywordSyntax();
   std::cout << "JSON constraints: language, schema, Unicode and sampler checks "
                "passed\n";
 }
