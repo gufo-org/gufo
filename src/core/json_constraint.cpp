@@ -897,8 +897,7 @@ private:
     return Alt({json_value, PythonString(json::Value::object()),
                 Literal("True"), Literal("False"), Literal("None")});
   }
-  // The single-quoted spelling of a root string (the JSON spelling is
-  // admitted beside it): raw text, so it cannot hold its own quote.
+  // A quoted root string as raw text, so it cannot hold its own quote.
   std::uint32_t PythonString(const json::Value& predicate) {
     const auto raw =
         JsonSchemaLexeme::RawString(predicate, values_.string_close);
@@ -1292,7 +1291,7 @@ private:
   std::uint32_t Primitive(std::string_view type, bool root = false) {
     if (root && values_.keyword_root) {
       if (type == "string")
-        return Alt({string_, PythonString(json::Value::object())});
+        return StringValue(json::Value::object(), true);
       if (type == "boolean")
         return Alt({bool_, Literal("True"), Literal("False")});
       if (type == "null")
@@ -2628,9 +2627,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::BuildTools(
   if (plain_answer && !required)
     alternatives.push_back({prose});
   else if (syntax)
-    // A provider call starts at its marker, tagged arguments or not.
-    // Unbounded whitespace would let a model refuse a required call with
-    // newlines until its token limit.
+    // A provider call starts at its marker. Unbounded whitespace would let a
+    // model refuse a required call with newlines until its token limit.
     alternatives.push_back({space_rule(), literal(marker), calls});
   else
     alternatives.push_back({literal(marker), calls});

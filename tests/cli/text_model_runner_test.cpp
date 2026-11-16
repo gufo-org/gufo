@@ -1332,9 +1332,8 @@ void TestProviderToolDialectSelection() {
                (choice == ChatRequest::ToolChoice::kAuto),
            "only automatic tool choice admits a plain answer");
   }
-  // A runner that publishes canonical markup but constrains the model's own
-  // tokens describes their spelling to the grammars (ToolGrammarSyntax,
-  // ReasoningGrammarMarkers): parsing identity and instruction stay canonical.
+  // ToolGrammarSyntax and ReasoningGrammarMarkers select the grammar's
+  // spelling; parsing stays canonical.
   {
     class RawRunner final : public FakeRunner {
     public:

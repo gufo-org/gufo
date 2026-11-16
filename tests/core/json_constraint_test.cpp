@@ -29,9 +29,7 @@ bool Accepts(const JsonConstraint& grammar, std::string_view text) {
   return grammar.Complete(state);
 }
 
-// A required call in a tagged syntax (Qwen XML) may follow a short gap, not
-// unbounded whitespace: a model that would rather answer in prose must not be
-// able to emit newlines until its token limit.
+// A required tagged call may follow a short gap, not unbounded whitespace.
 void TestRequiredTaggedCallLeadingSpace() {
   using Format = JsonConstraint::ToolFormat;
   const auto syntax = JsonConstraint::Syntax(Format::kQwen);
@@ -3013,10 +3011,7 @@ void TestObjectMemberOrders() {
   }
 }
 
-// Python-style calls: one shared list of calls, `NAME(k=v, ...)` keyword
-// arguments (root strings single-quoted or JSON, True/False/None or JSON,
-// containers JSON), and a call that names its function twice (a header, then
-// the body) with one message per call.
+// Call lists with keyword arguments, and calls that repeat their name.
 void TestProviderCallListAndKeywordSyntax() {
   const JsonConstraint::ToolSyntax python{
       .open = "<|call|>[",

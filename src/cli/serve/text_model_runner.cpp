@@ -75,8 +75,6 @@ std::optional<ChatRequest> ConstrainChatRequest(
     std::vector<sampling::JsonConstraint::Tool> tools;
     const bool required =
         request.tool_choice == ChatRequest::ToolChoice::kRequired;
-    // A runner that rewrites the model's calls into the published markup
-    // constrains the model's own spelling (ToolGrammarSyntax).
     const auto native_syntax = runner.ToolGrammarSyntax();
     const auto* syntax = native_syntax ? &*native_syntax
                          : selected.format ? nullptr
