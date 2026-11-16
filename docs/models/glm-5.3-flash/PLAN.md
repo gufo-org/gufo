@@ -163,11 +163,14 @@ levers, exact-default ladder (A) then opt-in fast track (B):
    tokens per launch for the deep-context multi-merge path (bucket by
    `k2`, merging rounds gated per-token). Bit-exact per token by
    construction.
-6. `GemvRowsQ8_0<16>` (0.8 s/pass at 11.6 k calls) and `GemvRowsF32`
-   (0.25 s, 13.6 k calls): tensors outside the dense-WMMA predicate
-   (`cols % 256`); admit them to the tier (tier change → sha re-capture
-   with recorded diff) or row-batch the call sites (token-batch pattern
-   of P8). Target −0.5 s.
+ 6. `GemvRowsQ8_0<16>` (0.8 s/pass at 11.6 k calls) and `GemvRowsF32`
+    (0.25 s, 13.6 k calls): tensors outside the dense-WMMA predicate
+    (`cols % 256`); admit them to the tier (tier change → sha re-capture
+    with recorded diff) or row-batch the call sites (token-batch pattern
+    of P8). Target −0.5 s. Row tiling + grid.y shipped (A6); the W8A8
+    tier-admit follow-up (dense gate `% 256` → `% 32`, KDA `ssm_f_b`/
+    `ssm_g_b` K=128) measured bit-exact and offline-positive but
+    serve-neutral — rejected 2026-11-16, see the EXPERIMENTS row.
 
 **B. Opt-in approximate fast track (from which 600+ is plausible)**
 

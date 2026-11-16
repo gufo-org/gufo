@@ -203,7 +203,21 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
    time for half the weight bytes. Routed IQ WMMA is compute-bound
    (decode VALU), not weight-re-read-bound, so the widening class is
    closed for this tier too; the gate/up stacks have less VGPR headroom
-   still (224 at 32) and were not built. Reverted in full.
+    still (224 at 32) and were not built. Reverted in full.
+- A6 W8A8 narrow widening (`GemvN` dense-tier gate `cols % 256` -> `% 32`
+   so the KDA `ssm_f_b`/`ssm_g_b` Q8_0 K=128 projections, 8192 x 44 layers,
+   join the B12 tier): correct (contract NMSE passed on new 8192x128
+   shapes both `LaunchTuned` paths; tg64 greedy sha unchanged at prompt
+   depths 2048 and 4096) and positive offline (`gufo bench`: pp2048
+   271.42 -> 271.97 +0.2 %, pp4096 253.83 -> 254.93 +0.4 %), but the
+   serve-protocol A/B (same session, 3 alternating rounds, 128K-ctx
+   chunk-2048 protocol, `/tmp/opencode/a6/`) is neutral: pure server
+   prefill 252.48 -> 252.28 (-0.08 %, ranges fully overlapping) with the
+   +0.3 % request-level mean unsupportable, decode parity
+   (11.64 -> 11.81 within overlap). The 966 ms `GemvRowsQ8_0Tiled` pool
+   share estimated for these tensors does not materialise at production
+   chunk size: the W8A8 block kernel at K=128 trades evenly with the
+   tiled GEMV. Reverted in full.
 
 ## Profiled (rocprofv3, serve workload)
 
