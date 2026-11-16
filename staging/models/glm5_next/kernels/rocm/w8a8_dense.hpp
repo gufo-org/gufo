@@ -11,8 +11,7 @@
 namespace gufo::models::glm5_next::rocm {
 
 /// Blocked W8A8 (A8 x native-K-quant weights) tensor-core tier for the dense
-/// projections of the wide-chunk dispatch, gated by the process-wide
-/// `GUFO_GLM5_FAST_PROFILE=w8a8` environment variable and selected in
+/// projections of the wide-chunk dispatch, enabled by default and selected in
 /// `Executor::Create`. It reuses the shared Qwen prefill kernels: the FP32
 /// activation rows are quantized once per chunk into the tiled Q8_1 layout
 /// and consumed natively with the kernel's per-K32 INT8 scales, so the

@@ -7,9 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "staging/models/glm5_next/kernels/rocm/attention.hpp"
@@ -113,10 +111,10 @@ bool AllocT(std::vector<void*>* pool, T** p, std::size_t count) {
 // chunk widths, since each accumulator runs the same j-sequence). Dense
 // Q5_K tiles of 16+ tokens take the WMMA tensor-core tier instead; its
 // accumulation order differs from the scalar dot, so the quality contract
-// lives in the dense_wmma test, not bit-equality. With the opt-in W8A8
-// dense tier enabled (`GUFO_GLM5_FAST_PROFILE=w8a8`, resolved in `Create`)
-// the contiguous, scratch-fitting dense tensors go to the blocked-INT8
-// kernels first; everything else keeps the exact DenseWmma/GemvRows paths.
+// lives in the dense_wmma test, not bit-equality. The default W8A8 dense
+// tier (resolved in `Create`) routes the contiguous, scratch-fitting dense
+// tensors to the blocked-INT8 kernels first; everything else keeps the
+// exact DenseWmma/GemvRows paths.
 void Executor::GemvN(std::uint32_t tokens, const DeviceTensor& t,
                      const float* x, std::uint32_t x_stride, float* out,
                      std::uint32_t out_stride) {
@@ -192,18 +190,12 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     }
   }
 
-  // Opt-in W8A8 dense tier: resolve the fast-profile env here so every
-  // GemvN branch is a plain bool test, and size the activation scratch for
-  // the widest dense-type tensor seen in the artifact.
-  const char* fast_profile = std::getenv("GUFO_GLM5_FAST_PROFILE");
-  const bool w8a8_requested =
-      fast_profile != nullptr && std::string_view(fast_profile) == "w8a8";
+  // Default W8A8 dense tier: size the activation scratch for the widest
+  // dense-type tensor seen in the artifact.
   std::uint32_t w8a8_max_k = 0;
-  if (w8a8_requested) {
-    for (const DeviceTensor& t : tensors) {
-      if (!t.empty() && Glm5W8A8Supported(t.type) && t.cols % 256 == 0U) {
-        w8a8_max_k = std::max(w8a8_max_k, t.cols);
-      }
+  for (const DeviceTensor& t : tensors) {
+    if (!t.empty() && Glm5W8A8Supported(t.type) && t.cols % 256 == 0U) {
+      w8a8_max_k = std::max(w8a8_max_k, t.cols);
     }
   }
 
@@ -349,9 +341,9 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     return fail("Executor constant upload failed");
   }
 
-  // W8A8 dense tier scratch (opt-in). Allocation failure keeps the default
-  // tiers running rather than failing the load.
-  if (w8a8_requested && w8a8_max_k > 0U) {
+  // W8A8 dense tier scratch (default tier). Allocation failure keeps the
+  // exact DenseWmma/GemvRows tiers running rather than failing the load.
+  if (w8a8_max_k > 0U) {
     const std::size_t bytes = Glm5W8A8ScratchBytes(kChunk, w8a8_max_k);
     if (Alloc(&pool, &e->w8a8_act_, bytes)) {
       e->w8a8_bytes_ = bytes;
@@ -359,9 +351,8 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     } else {
       e->w8a8_act_ = nullptr;
       std::fprintf(stderr,
-                   "GUFO_GLM5_FAST_PROFILE=w8a8: activation scratch "
-                   "allocation failed (%zu bytes); using default dense "
-                   "tiers\n",
+                   "GLM-5.3-Flash W8A8 activation scratch allocation "
+                   "failed (%zu bytes); using exact dense tiers\n",
                    bytes);
     }
   }

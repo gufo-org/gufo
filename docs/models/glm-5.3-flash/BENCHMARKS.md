@@ -134,6 +134,31 @@ reference ≤ 1e-4 (observed worst 1.5e-5), deterministic replay and
 non-finite checks (`/tmp/opencode/gufo_bench_w8a8unit2.log`). Suite
 `glm5_next` **10/10** on the candidate (`/tmp/opencode/gufo_bench_glm5tests2.log`).
 
+### B12 — W8A8 dense tier promoted to default (2026-11-16)
+
+`GUFO_GLM5_FAST_PROFILE` removed: `Executor::Create` now always sizes the
+Q8_1 activation scratch and enables the B11 tier; stride/fit mismatch and
+scratch allocation failure still fall through to the exact
+DenseWmma/GemvRows paths. Staging-only, no new CLI flag or env.
+
+Promotion gate, same pre-flip binary, env OFF vs ON over
+`gufo serve --context 131072 --prefill-chunk 2048 --think off`,
+`serving_bench` canonical prompt at `--prompt-repeat 43`
+(server-reported `prompt_tokens` 2063 both sides), greedy max-tokens 32,
+concurrency 1, one warmup + two timed samples, GPU-exclusive:
+prefill `179.83 / 181.55` → **`185.93 / 189.50`** (**+3.9 %**, sample
+ranges disjoint), decode flat (server `decode_tps` 12.0/11.7 →
+12.0/11.8) (`/tmp/opencode/w8a8_gate_off.json`,
+`/tmp/opencode/w8a8_gate_on.json`).
+
+Post-flip on the default build: greedy tg64 `output_sha256`
+**bit-identical** to the B10/B11 baseline (`1d79e532…`) at prompt depths
+2048 and 4096 (offline pp2048 271.42 / pp4096 253.83,
+`/tmp/opencode/gufo_bench_w8a8verify.log`); suite `glm5_next` **10/10**
+on the gpu-test tree including the strict `rocm_forward` golden and the
+`rocm_w8a8_dense` contract (`/tmp/opencode/gufo_bench_w8a8suite.log`).
+B11's longer-depth evidence (pp16384 +1.5 %, noise) carries over.
+
 Gufo column captured 2026-11-12 on `build/gpu-test/gufo` (P6 dense Q5_K
 WMMA tier over the P5 fixed + widened WMMA routed tier) through
 `gufo serve` over HTTP with server-reported `timings`, greedy (seed 1),

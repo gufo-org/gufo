@@ -489,8 +489,9 @@ estimates and quality gates lives in
 [PLAN.md](PLAN.md) Phase 3: exact-default items A1-A6 (A1 rejected,
 A2/A3/A4/A5/A6 shipped 2026-11-15 — the exact-default ladder is done)
 plus C2 (head-grouped 8-key combine, +3.0/+4.3 % pp),
-then the opt-in
-approximate fast track B7-B10 (W8A8, online-softmax attend, capped
+then the approximate
+fast track B7-B10 (W8A8 — dense half default since the 2026-11-16 B12
+promotion, routed half open; online-softmax attend, capped
 window, DFlash2/MTP speculation) from which the reference-class 600+
 comes. Earlier items in this list (IQ routed WMMA tier, Q5_K WMMA tier,
 GatherScore rewrite, chunk-scan launch collapse) are all shipped; see

@@ -311,10 +311,10 @@ class Executor {
   float* logits_{nullptr};      // [vocab]
   const float* h_last_{nullptr};  // points at the last row of h_
 
-  // Blocked W8A8 dense tier (opt-in `GUFO_GLM5_FAST_PROFILE=w8a8`, resolved
-  // in `Create`): tiled Q8_1 activation scratch sized for kChunk rows of the
-  // widest dense tensor (0 => the tier is off for tensors wider than the
-  // scratch). All launches stay on the default stream like every other tier.
+  // Blocked W8A8 dense tier (default, resolved in `Create`): tiled Q8_1
+  // activation scratch sized for kChunk rows of the widest dense tensor
+  // (0 => the tier is off for tensors wider than the scratch). All launches
+  // stay on the default stream like every other tier.
   bool w8a8_{false};
   void* w8a8_act_{nullptr};
   std::size_t w8a8_bytes_{0};

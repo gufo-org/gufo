@@ -174,10 +174,11 @@ levers, exact-default ladder (A) then opt-in fast track (B):
  7. W8A8 blocked-INT8 tier for dense + routed operands (qwen38
     `W8A8BlockedWmmaGEMMKernel` family): halves weight bytes and ~2x
     tensor-core rate vs the F16 path; acts quantized per 32-group.
-    Dense half shipped 2026-11-16 behind `GUFO_GLM5_FAST_PROFILE=w8a8`
-    with its own contract (`glm5_next.rocm_w8a8_dense`, NMSE ≤ 1e-4)
-    and its BENCHMARKS.md B11 row; shipped win pp2048 +4.1 %, pp16384
-    noise-level, tg unchanged — well below the −3…−4 s/pass estimate,
+    Dense half shipped 2026-11-16, promoted to the default the same day
+    (B12) with its own contract (`glm5_next.rocm_w8a8_dense`, NMSE ≤
+    1e-4) and its BENCHMARKS.md gate rows B11/B12; shipped win pp2048
+    +4.1 % offline / +3.9 % serve-gated, pp16384 noise-level, tg
+    unchanged — well below the −3…−4 s/pass estimate,
     so the routed-expert half (where the bytes actually dominate) is
     the lever worth pursuing next.
 8. Online-softmax single-pass attention replacing DSA
@@ -199,9 +200,10 @@ loop) → A3 → A2 (decode shipped, staging variants rejected) → A1
 (rejected 2026-11-14, compute-bound) → A6 (Q8_0 + F32 row tiling +
 grid.y shipped 2026-11-15) → A4 (split-q WMMA score + vectorized
 combine shipped 2026-11-15) → C2 (head-grouped 8-key combine shipped
-2026-11-15 — ladder done), then B7 dense behind `GUFO_GLM5_FAST_PROFILE`
-shipped 2026-11-16 (`w8a8`; each promoted B lever keeps its own gate row
-in BENCHMARKS.md); B8-B10 opt-ins still open.
+2026-11-15 — ladder done), then B7 dense shipped 2026-11-16 as the
+default `w8a8` tier (B11 gate row, B12 promotion row; each promoted B
+lever keeps its own gate row in BENCHMARKS.md); B8-B10 opt-ins still
+open.
 
 Gate: pp2048 ≥ 0.9× and tg32 ≥ 1.0× the Phase-0 llama.gl baseline with
 fixtures byte-identical (or the recorded oracle budget re-approved).
