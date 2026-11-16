@@ -489,6 +489,29 @@ bench_bg/bench_wait GPU-exclusive discipline on `build/gpu-test/gufo`.
    (11.39/11.40 vs 11.54/11.04). LDS grows to 4x(n_sel+33) floats
    (33 KB at the 2051 cap, still two blocks/CU).
 
+## Routed WMMA prefetch depth (2026-11-17): rejected
+
+Production stall counters on the shipped `RoutedWmmaKernel<>` variants
+(`/tmp/opencode/s_RoutedWmmaKernel`, per-wave: WAIT_INST_ANY 247-334 k
+vs WAIT_INST_LDS 0.4-13.6 k, global-load waits and barrier bubbles
+dominate while LDS sits at 426) plus per-launch DRAM rates of
+137-164 GB/s against the 241 GB/s ceiling suggested the global->register
+pipeline had slack a deeper queue could fill. Porting the replica's
+depth lever (`kPfD`) to production — duplicated `f_word`/`a_data`
+register buffers over the same single LDS stage buffer, `sl = stage %
+kPfD`, VGPR max 221 at depth 2 with zero spills, `glm5_next.rocm_routed_wmma`
+NMSE green at both depths (4 stages at `kCols = 1024`)
+(`/tmp/opencode/gufo_bench_pf_d1.log`, `_pf_d2.log`) — regressed
+instead: exclusive two-round pp2048 (`/tmp/opencode/gufo_bench_pfab.log`,
+baseline `/tmp/opencode/t64/gufo_base`) 273.2/271.7 base vs
+271.5/272.2 depth-1 (restructure free) vs **249.3/249.3 depth-2
+(-8.2 %)**, tg32 flat. The replica's pf2/pf3 slowdown (+16-21 %)
+reproduces despite the different occupancy regime (1 block/CU, register
+headroom), so the fetch/commit phase cost of doubling the per-thread
+load set outweighs added memory-level parallelism; the kernel's idle
+wave time is not fetch-depth limited. Reverted; the one-stage pipeline
+stays.
+
 ## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-15)
 
 The launch storm is closed (steady-state idle 2.2 %,
