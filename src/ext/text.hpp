@@ -479,6 +479,27 @@ public:
   /// `close`. `open` must not begin with whitespace, which parsers skip.
   using ReasoningMarkup = ext::ReasoningMarkup;
   [[nodiscard]] virtual ReasoningMarkup ReasoningDelimiters() const;
+  /// The grammar's view of the model's own tokens, for a runner that rewrites
+  /// them into the canonical markup Gufo parses (a Loom package's chat program
+  /// reads the model's native tool calls and reasoning and the runner
+  /// publishes them as ToolDialectId() and ReasoningDelimiters() markup). A
+  /// grammar constrains the tokens the model writes, so it must be written in
+  /// the model's spelling, not the published one. Parsing is unchanged.
+  /// `ToolGrammarSyntax` is the native call syntax tool grammars use instead
+  /// of ToolDialectId()'s (and the host then adds no JSON-call instruction to
+  /// the prompt); `ReasoningGrammarMarkers` the markers the model opens and
+  /// closes reasoning with, which may depend on the request (a response
+  /// format may need the framing that opens the answer channel inside
+  /// `close`). Both default to std::nullopt: grammars follow the published
+  /// dialect and delimiters.
+  [[nodiscard]] virtual std::optional<sampling::JsonConstraint::ToolSyntax>
+  ToolGrammarSyntax() const {
+    return std::nullopt;
+  }
+  [[nodiscard]] virtual std::optional<ReasoningMarkup>
+  ReasoningGrammarMarkers(const ChatRequest&) const {
+    return std::nullopt;
+  }
   [[nodiscard]] virtual std::uint32_t VocabularySize() const { return 0; }
   [[nodiscard]] std::shared_ptr<const sampling::ReasoningBudget>
   BuildReasoningBudget(std::size_t tokens,
