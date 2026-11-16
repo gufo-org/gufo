@@ -1,5 +1,9 @@
 #include "src/cli/prompt/prompt.hpp"
 
+#include <filesystem>
+
+#include "src/cli/runner_cli.hpp"
+
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -399,6 +403,18 @@ int RunPrompt(std::span<const char* const> args) {
   }
 
   const auto model_load_start = std::chrono::steady_clock::now();
+  // A model directory belongs to the provider whose probe claims it.
+  if (const ext::TextProvider* provider = nullptr;
+      ext::ProbeModelDirectory(opt.model_path, &provider)) {
+    if (provider == nullptr) {
+      std::cerr << "Error: no text provider claims model directory '"
+                << opt.model_path << "'\n";
+      return 1;
+    }
+    if (!PrepareForProvider(provider_options, *provider, &opt))
+      return 2;
+    return RunRunnerPrompt(opt, model_load_start);
+  }
   std::string err;
   auto reader_owner = gufo::core::GgufReader::OpenFile(
       opt.model_path, &err, {.allow_unsized_tensors = true});
@@ -417,6 +433,12 @@ int RunPrompt(std::span<const char* const> args) {
               << "': " << reader->UnsizedTensorError() << "\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
+  }
+  if (provider != nullptr && provider->prompt_driver == nullptr &&
+      provider->create != nullptr) {
+    if (!PrepareForProvider(provider_options, *provider, &opt))
+      return 2;
+    return RunRunnerPrompt(opt, model_load_start);
   }
   if (provider == nullptr || provider->prompt_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for prompt\n";
@@ -459,6 +481,18 @@ int RunChat(std::span<const char* const> args) {
   }
 
   const auto model_load_start = std::chrono::steady_clock::now();
+  // A model directory belongs to the provider whose probe claims it.
+  if (const ext::TextProvider* provider = nullptr;
+      ext::ProbeModelDirectory(opt.model_path, &provider)) {
+    if (provider == nullptr) {
+      std::cerr << "Error: no text provider claims model directory '"
+                << opt.model_path << "'\n";
+      return 1;
+    }
+    if (!PrepareForProvider(provider_options, *provider, &opt))
+      return 2;
+    return RunRunnerChat(opt, model_load_start);
+  }
   std::string err;
   auto reader_owner = gufo::core::GgufReader::OpenFile(
       opt.model_path, &err, {.allow_unsized_tensors = true});
@@ -477,6 +511,12 @@ int RunChat(std::span<const char* const> args) {
               << "': " << reader->UnsizedTensorError() << "\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
+  }
+  if (provider != nullptr && provider->chat_driver == nullptr &&
+      provider->create != nullptr) {
+    if (!PrepareForProvider(provider_options, *provider, &opt))
+      return 2;
+    return RunRunnerChat(opt, model_load_start);
   }
   if (provider == nullptr || provider->chat_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for chat\n";

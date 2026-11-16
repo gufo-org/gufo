@@ -987,6 +987,10 @@ struct TextProvider {
 void RegisterTextProvider(TextProvider provider);
 const TextProvider* FindTextProvider(std::string_view id);
 const TextProvider* ProbeTextProvider(std::string_view model_root);
+/// For a directory path: sets `*provider` to the provider with a runner whose
+/// `probe` accepts it (or null) and returns true. False for any other path.
+bool ProbeModelDirectory(const std::string& path,
+                         const TextProvider** provider);
 /// The first provider whose `probe_gguf` accepts `reader`, skipping providers
 /// without `accepts_unsized_tensors` when the file has unsized tensors.
 const TextProvider* ProbeTextProvider(const core::GgufReader& reader);
