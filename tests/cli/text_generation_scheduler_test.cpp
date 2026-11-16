@@ -3723,9 +3723,8 @@ void TestReasoningTokenCount() {
          "text after reasoning the prompt closed has no reasoning");
   Expect(count({}, State::kThought) == 0, "no output counts nothing");
 
-  // Counting in emitted text: a runner's pieces may carry markup its raw
-  // tokens do not spell (a package's output reader normalizing a native
-  // channel syntax), with empty pieces for framing tokens.
+  // Pieces may carry markup the raw tokens do not spell; framing tokens may
+  // have empty pieces.
   const auto in_text = [&markup](const Pieces& pieces, State initial) {
     std::string text;
     std::vector<std::size_t> ends;

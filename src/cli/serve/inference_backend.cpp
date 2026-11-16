@@ -117,12 +117,10 @@ struct InferenceBackend::Impl {
                 const StartCallback& on_start) override {
       auto result = request_.Wait(on_token, on_progress, on_start);
       const auto& runner = state_->scheduler->runner();
-      // Count in the text the runner emitted when it is exact (it may
-      // normalize markup, as a package's output reader does); otherwise in
-      // decoded tokens.
+      // A runner may publish markup its raw tokens never spell, so count in
+      // the emitted text when the scheduler recorded it.
       result.reasoning_tokens =
-          result.piece_ends.size() == result.tokens.size() &&
-                  !result.tokens.empty()
+          !result.piece_ends.empty()
               ? CountReasoningTokens(result.text, result.piece_ends, initial_,
                                      reasoning_)
               : CountReasoningTokens(result.tokens, initial_, reasoning_,
@@ -287,13 +285,8 @@ bool InferenceBackend::load(
     const PrepareRunnerOptions& prepare_runner_options) {
   std::shared_ptr<const core::GgufReader> reader;
   const ext::TextProvider* provider = nullptr;
-  if (ext::ProbeModelDirectory(model_path, &provider)) {
-    // A model directory, such as a package with its own manifest, belongs to
-    // the provider whose `probe` claims it; there is no GGUF to read.
-    if (provider == nullptr) {
-      SetError(error, "No text provider claims model directory " + model_path);
-      return false;
-    }
+  if (std::error_code ec; std::filesystem::is_directory(model_path, ec)) {
+    provider = ext::ProbeTextProvider(std::string_view(model_path));
   } else {
     std::string load_error;
     auto reader_owner = core::GgufReader::OpenFile(

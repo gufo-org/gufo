@@ -479,19 +479,9 @@ public:
   /// `close`. `open` must not begin with whitespace, which parsers skip.
   using ReasoningMarkup = ext::ReasoningMarkup;
   [[nodiscard]] virtual ReasoningMarkup ReasoningDelimiters() const;
-  /// The grammar's view of the model's own tokens, for a runner that rewrites
-  /// them into the canonical markup Gufo parses (a Loom package's chat program
-  /// reads the model's native tool calls and reasoning and the runner
-  /// publishes them as ToolDialectId() and ReasoningDelimiters() markup). A
-  /// grammar constrains the tokens the model writes, so it must be written in
-  /// the model's spelling, not the published one. Parsing is unchanged.
-  /// `ToolGrammarSyntax` is the native call syntax tool grammars use instead
-  /// of ToolDialectId()'s (and the host then adds no JSON-call instruction to
-  /// the prompt); `ReasoningGrammarMarkers` the markers the model opens and
-  /// closes reasoning with, which may depend on the request (a response
-  /// format may need the framing that opens the answer channel inside
-  /// `close`). Both default to std::nullopt: grammars follow the published
-  /// dialect and delimiters.
+  /// For a runner that publishes ToolDialectId() and ReasoningDelimiters()
+  /// markup but whose model writes another spelling: the spelling grammars
+  /// must constrain. std::nullopt (the default) uses the published one.
   [[nodiscard]] virtual std::optional<sampling::JsonConstraint::ToolSyntax>
   ToolGrammarSyntax() const {
     return std::nullopt;
@@ -967,11 +957,6 @@ struct TextProvider {
 void RegisterTextProvider(TextProvider provider);
 const TextProvider* FindTextProvider(std::string_view id);
 const TextProvider* ProbeTextProvider(std::string_view model_root);
-/// For a model path that is a directory (a package with its own manifest):
-/// sets `*provider` to the provider with a runner whose `probe` claims it, or
-/// null when none does, and returns true. Returns false for any other path.
-bool ProbeModelDirectory(const std::string& path,
-                         const TextProvider** provider);
 /// The first provider whose `probe_gguf` accepts `reader`, skipping providers
 /// without `accepts_unsized_tensors` when the file has unsized tensors.
 const TextProvider* ProbeTextProvider(const core::GgufReader& reader);

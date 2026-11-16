@@ -64,7 +64,7 @@ These server options work with every modality:
 **Model and memory**
 
 - `--model`, `-m`: the GGUF file. For sharded files, pass the first shard.
-  An extension can also claim a model directory, such as a Loom package.
+  An extension's provider can also accept a model directory.
 - `--context`, `-c`: tokens per request. The default is the model's native
   context; lower it to fit more sessions in memory.
 - `--sessions`, `-j` (server only): requests that compute at the same time,
