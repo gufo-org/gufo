@@ -192,6 +192,12 @@
       "ctest": "qwen27b_continuation_layout_test",
       "check_pr": true,
       "windows_build": true
+    },
+    {
+      "target": "qwen27b_prefill_groups_test",
+      "ctest": "qwen27b_prefill_groups_test",
+      "check_pr": true,
+      "windows_build": true
     }
   ],
   "test_labels": [

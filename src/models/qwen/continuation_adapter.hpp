@@ -2,6 +2,7 @@
 #define GUFO_MODELS_QWEN_CONTINUATION_ADAPTER_HPP_
 
 #include <atomic>
+#include <functional>
 #include <gufo/ext/adapter.hpp>
 #include <gufo/ext/transfer_pool.hpp>
 
@@ -40,6 +41,11 @@ public:
   void BeginPrefill(cache::Slot&);
   void FinishPrefill(cache::Slot&) noexcept;
   void RollbackPrefill(cache::Slot&);
+  // Runs an in-pass checkpoint consumer on the frontier a completed pass
+  // left. The slot refuses execution and invalidation meanwhile, and every
+  // transfer it started has settled when this returns, because the next pass
+  // overwrites the recurrent state in place.
+  void CaptureAtBoundary(cache::Slot&, const std::function<void()>& capture);
   [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
       std::size_t ram_bytes) const override {
     return layout_.BackingPlan(ram_bytes);
@@ -60,6 +66,8 @@ public:
       const cache::Slot&) const override;
   [[nodiscard]] std::vector<cache::Rows> PlanPrefill(
       const cache::Slot&, cache::Rows first, cache::Rows end) const override;
+  [[nodiscard]] std::vector<cache::ComponentPosition>
+  PrefillCheckpointPositions(const cache::Slot&, cache::Rows) const override;
   void BeginRestore(cache::Slot&,
                     std::span<const cache::ComponentPosition>) override;
   [[nodiscard]] cache::Completion CapturePrivate(const cache::Slot&,
@@ -99,6 +107,9 @@ private:
   [[nodiscard]] const State& As(const cache::Slot&) const;
   [[nodiscard]] const ContinuationComponent& Component(
       cache::ComponentId) const;
+  // The components of a slot whose frontier is at `position`.
+  [[nodiscard]] std::vector<cache::ComponentPosition> PositionsAt(
+      cache::Rows position) const;
   [[nodiscard]] cache::Completion Transfer(
       State&, bool load, cache::Stream&,
       const std::function<void(gufo::hip::TransferStream&)>&);

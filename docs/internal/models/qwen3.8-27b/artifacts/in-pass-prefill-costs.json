@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "purpose": "Pass costs behind the in-pass checkpoint layer-group plan (PrefillPassCost) and the time its captures add",
+  "device": "gfx1151 (Strix Halo), ROCm 10.1, power profile balanced",
+  "source": "upstream main 07e1191f with the in-pass checkpoint change",
+  "models": {
+    "targets": "unsloth/Qwen3.8-27B-GGUF, snapshot 4ca720788d1e01f1bff70c033e0d0028fd02e502: UD-Q4_K_XL and Q8_0",
+    "draft": "z-lab/Qwen3.8-27B-DFlash2-GGUF, snapshot 2d9571f8ce46e151f61c6499c99dee6079e1d610: Q4_K_M"
+  },
+  "pass_cost": {
+    "method": "One QwenGpuExecutor, ForwardPromptBatch of `rows` prompt tokens from position 2,048 with logits, after restoring the same 2,048-token prefix; median of three runs after a warm-up. Run alone on an otherwise idle machine: at most 0.26 cores of other CPU load in 89 samples.",
+    "columns": ["rows", "ms"],
+    "UD-Q4_K_XL": [
+      [5, 119.98], [16, 181.27], [64, 190.63], [128, 340.19], [256, 610.29],
+      [384, 901.55], [505, 1162.78], [640, 1475.72], [768, 1743.27],
+      [1023, 2313.29], [1024, 1850.28], [1536, 2770.64], [2048, 3691.82],
+      [3072, 5558.01], [4096, 7443.90]
+    ],
+    "Q8_0": [
+      [5, 157.05], [16, 181.39], [64, 192.61], [128, 326.48], [256, 572.34],
+      [384, 836.43], [505, 1082.51], [640, 1351.50], [768, 1608.86],
+      [1023, 2140.13], [1024, 2107.74], [1536, 3173.45], [2048, 4234.25],
+      [3072, 6413.77], [4096, 8578.57]
+    ],
+    "model": "120 ms + 2.25 ms per row; 1.80 ms per row where UseQwen27bFp16Prefill selects FP16 activations (UD-Q4_K_XL, 1,024 rows or more)"
+  },
+  "draft_injection": {
+    "method": "Temporary timers in a gufo serve llm build (UD-Q4_K_XL + DFlash2, --sessions 4), around the target pass and InjectTargetContext of each Prime/ExtendPrompt, while three greedy decoders ran beside a 2,558-token prompt.",
+    "columns": ["rows", "target_ms", "draft_ms"],
+    "rows": [
+      [2048, 3900.4, 245.7], [505, 1334.7, 64.1], [5, 127.8, 2.0],
+      [71, 333.7, 10.2], [64, 190.7, 7.7], [62, 197.3, 9.1], [5, 117.5, 1.9]
+    ],
+    "model": "0.12 ms per row after the pass"
+  },
+  "in_pass_capture": {
+    "method": "Same temporary build, AR and DFlash2 runs: wall time of each in-pass consumer call (cache admission, capture and publication of one boundary) on the 27B.",
+    "ms": [5.4, 4.9, 5.0, 4.8, 4.0, 7.0, 6.6, 7.1, 4.7, 5.2],
+    "note": "Not part of the layer-group plan: a group of the 2,558-token prompt beside four sessions lasts about 1.2 s."
+  }
+}

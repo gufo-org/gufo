@@ -1944,6 +1944,87 @@ void InterruptedPrefillRetainsOnlyItsEntryFrontier() {
     resumed.Invalidate();
   }
 }
+// A runner whose later pass is cancelled returns the passes before it, as
+// their separate steps would have (Qwen27). A step that then stops at an
+// in-pass prompt target keeps that capture, as a step ending there does.
+void InPassPromptTargetSurvivesACancelledLaterPass() {
+  class CancelAfterTarget final : public Runner {
+  public:
+    explicit CancelAfterTarget(bool& cancelled) : cancelled_(cancelled) {}
+    TextRunnerDescriptor Descriptor() const override {
+      auto descriptor = Runner::Descriptor();
+      descriptor.capabilities.partial_prefill_retention = true;
+      descriptor.capabilities.prefill_rollback = true;
+      return descriptor;
+    }
+    TextPrefillStep Prefill(TextRunnerState& state,
+                            std::span<const TextRunnerToken> prompt,
+                            std::size_t offset,
+                            std::size_t budget) const override {
+      if (offset == 0 || !armed)
+        return Runner::Prefill(state, prompt, offset, budget);
+      armed = false;
+      cancelled_ = true;
+      return {.interrupted = true};
+    }
+    TextPrefillStep PrefillThrough(
+        TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+        std::size_t offset, std::size_t budget,
+        std::span<const std::size_t> boundaries,
+        const InPassConsumer& consume) const override {
+      if (!armed)
+        return Runner::PrefillThrough(state, prompt, offset, budget, boundaries,
+                                      consume);
+      auto& s = dynamic_cast<State&>(state);
+      const auto head = prompt.subspan(offset, boundaries.front() - offset);
+      s.adapter.Append(s.slot, head, head);
+      consume(0);
+      armed = false;
+      cancelled_ = true;
+      return {.consumed_tokens = boundaries.front() - offset};
+    }
+    mutable bool armed{true};
+
+  private:
+    bool& cancelled_;
+  };
+  std::vector<TextRunnerToken> prompt(40);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto branch = prompt;
+  branch.back() = 999;
+  auto unrelated = prompt;
+  unrelated.front() = 777;
+  // Without in-pass checkpoints the step ends at the target instead.
+  for (const bool in_pass : {false, true}) {
+    bool cancelled = false;
+    auto runner = std::make_shared<CancelAfterTarget>(cancelled);
+    runner->in_pass = in_pass;
+    TextRunnerPool pool(runner, 1);
+    {
+      auto request =
+          pool.Acquire(prompt, {}, [&] { return cancelled; }, {}, true, 35);
+      std::string error;
+      try {
+        Expect(request.Prefill(64).consumed_tokens == 35,
+               "the step keeps the passes before the cancelled one");
+        (void)request.Prefill(64);
+      } catch (const std::runtime_error& failure) {
+        error = failure.what();
+      }
+      Expect(error == "generation cancelled", "the request is cancelled");
+      (void)request.Cancel();
+    }
+    cancelled = false;
+    // Replace the execution slot so only immutable checkpoints can serve.
+    auto replacement = pool.Acquire(unrelated, {}, {}, {}, true, 0);
+    Prefill(replacement);
+    (void)replacement.Commit();
+    auto resend = pool.Acquire(branch, {}, {}, {}, true, 35);
+    Expect(resend.cached_prompt_tokens() == 35,
+           "a cancelled step keeps the prompt target it stopped at");
+    resend.Invalidate();
+  }
+}
 void EditBoundariesSurviveActualBackingPressure() {
   auto runner = std::make_shared<Runner>();
   runner->private_blocks = 4;
@@ -4094,6 +4175,7 @@ int main() {
   FullChatCheckpointRestoresWithoutSuffixPrefill();
   GeneratedFrontierForksBeforeMutation();
   InterruptedPrefillRetainsOnlyItsEntryFrontier();
+  InPassPromptTargetSurvivesACancelledLaterPass();
   PublishedResidentCheckpointKeepsDiskStep();
   CancelledPrefillKeepsCompletedSteps();
   SharedPeerReusesTheCurrentStableCapture();
