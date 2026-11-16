@@ -1033,6 +1033,37 @@ void TestRunnerCanSkipUnusedFinalAdvance() {
          "runner skips the unused frontier computation after the final token");
 }
 
+// A retained frontier covers a capped reply in both decode modes, so the next
+// turn continues the same executed history and prefills only its own tokens.
+void TestRetainedCappedReplyExecutesFinalToken() {
+  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  for (const bool multi : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->final_token_advance_required = false;
+    control->multi_token_decode = multi;
+    control->snapshots = true;
+    auto scheduler = MakeScheduler(control, 1);
+
+    const auto capped = scheduler->Submit({7, 70}, 2, 0.0F).Wait();
+    Expect(capped.tokens == ExpectedTokens(7, 2) &&
+               capped.finish_reason == Finish::kLength,
+           "a capped request emits its complete token budget");
+    std::size_t advances = 0;
+    for (const auto& event : control->Events()) {
+      if (event.kind == EventKind::kAdvance && event.label == 7) {
+        ++advances;
+      }
+    }
+    Expect(advances == 2,
+           "a retained capped request executes each emitted token once");
+
+    const auto next = scheduler->Submit({7, 70, 700, 701, 71}, 1, 0.0F).Wait();
+    Expect(next.cache_hit && next.cached_prompt_tokens == 4 &&
+               next.prefill_tokens == 1,
+           "the next turn reuses the complete capped reply");
+  }
+}
+
 void TestRunnerCanReuseExactIncrementalText() {
   auto control = std::make_shared<FakeControl>();
   control->incremental_text_is_exact = true;
@@ -3930,6 +3961,7 @@ int main() {
   TestRetainedHistoryBeatsSharedPrefixWait();
   TestAwaitedCheckpointSurvivesCachePressure();
   TestRunnerCanSkipUnusedFinalAdvance();
+  TestRetainedCappedReplyExecutesFinalToken();
   TestRunnerCanReuseExactIncrementalText();
   TestGenerationTraceRecordsPromptAndOutput();
   TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();
