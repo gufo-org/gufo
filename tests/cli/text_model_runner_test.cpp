@@ -1332,6 +1332,56 @@ void TestProviderToolDialectSelection() {
                (choice == ChatRequest::ToolChoice::kAuto),
            "only automatic tool choice admits a plain answer");
   }
+  // A runner that publishes canonical markup but constrains the model's own
+  // tokens describes their spelling to the grammars (ToolGrammarSyntax,
+  // ReasoningGrammarMarkers): parsing identity and instruction stay canonical.
+  {
+    class RawRunner final : public FakeRunner {
+    public:
+      RawRunner() : FakeRunner(std::make_shared<FakeStats>()) {}
+      std::shared_ptr<const gufo::sampling::ConstraintVocabulary>
+      BuildConstraintVocabulary() const override {
+        return std::make_shared<gufo::sampling::ConstraintVocabulary>(
+            256, [](std::uint32_t id) {
+              return gufo::sampling::ConstraintVocabulary::Piece{
+                  std::string(1, static_cast<char>(id)), false};
+            });
+      }
+      std::optional<Constraint::ToolSyntax> ToolGrammarSyntax() const override {
+        return syntax_;
+      }
+      std::optional<gufo::ext::ReasoningMarkup> ReasoningGrammarMarkers(
+          const ChatRequest&) const override {
+        return gufo::ext::ReasoningMarkup{"[[raw>>", "<<raw]]"};
+      }
+      Constraint::ToolSyntax syntax_;
+    };
+    RawRunner raw;
+    raw.syntax_ = syntax;
+    ChatRequest request;
+    request.messages.emplace_back(gufo::tokenization::ChatRole::kUser, "go");
+    request.tool_choice = ChatRequest::ToolChoice::kRequired;
+    request.tools = {
+        {.name = "record",
+         .parameters_json =
+             R"({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false})"}};
+    gufo::sampling::SamplingConfig sampling;
+    std::optional<Constraint::ToolFormat> format;
+    std::string dialect;
+    const auto constrained = gufo::server::ConstrainChatRequest(
+        request, raw, &sampling, &format, &dialect);
+    Expect(dialect == "json" && format == Constraint::ToolFormat::kJson,
+           "parsing keeps the published dialect");
+    Expect(constrained && constrained->messages.front().framing_suffix.empty(),
+           "a native grammar syntax adds no JSON-call instruction");
+    const auto& grammar = *sampling.constraint->grammar;
+    Expect(accepts(grammar, call) &&
+               accepts(grammar, "[[raw>>x<<raw]]" + call) &&
+               !accepts(grammar, "<think>x</think>" + call) &&
+               !accepts(grammar,
+                        R"(<tool_call>{"name":"record","arguments":{"text":"hi"}}</tool_call>)"),
+           "the grammar is written in the model's own spelling");
+  }
   // The reasoning phase of the grammar uses the runner's delimiters.
   const auto constrain = [](const DialectRunner& reasoner, bool tools,
                             std::optional<bool> enabled = {}) {
