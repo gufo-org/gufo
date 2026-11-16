@@ -41,6 +41,16 @@ uses:
 | `gufo_ext_cache` | The component cache and, with HIP, its transfer and host-memory helpers | all |
 | `gufo_ext_hip` | The HIP compile definitions and include paths the public HIP headers need | HIP only |
 
+## Model directories
+
+A text model can be a directory of files, such as a package with a manifest,
+programs and parameters, instead of one GGUF. `serve llm`, `prompt`, `chat` and
+`bench` ask each provider's `probe(model_root)` about a `--model` directory,
+before opening any GGUF, and create the claiming provider's runner through
+`create`, with `TextRunnerOptions::model_path` set to the directory and
+`reader` null. A provider with a runner but no drivers of its own gets
+`prompt`, `chat` and `bench` through the server's backend.
+
 ## Continuation
 
 Every text runner supports continuation through the component cache. The cache
