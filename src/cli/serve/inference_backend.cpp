@@ -294,19 +294,30 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       on_progress(progress, message);
   };
   report(0.0, "Opening model");
-  std::string load_error;
-  auto reader_owner = core::GgufReader::OpenFile(
-      model_path, &load_error, {.allow_unsized_tensors = true});
-  if (reader_owner == nullptr) {
-    SetError(error, "Failed to open GGUF: " + load_error);
-    return false;
-  }
-  const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
-  const auto* provider = ext::ProbeTextProvider(*reader);
-  if (provider == nullptr && reader->FirstUnsizedTensor() != nullptr) {
-    // No provider owns this layout: keep the reader's own diagnostic.
-    SetError(error, "Failed to open GGUF: " + reader->UnsizedTensorError());
-    return false;
+  std::shared_ptr<const core::GgufReader> reader;
+  const ext::TextProvider* provider = nullptr;
+  if (ext::ProbeModelDirectory(model_path, &provider)) {
+    // A model directory, such as a package with its own manifest, belongs to
+    // the provider whose `probe` claims it; there is no GGUF to read.
+    if (provider == nullptr) {
+      SetError(error, "No text provider claims model directory " + model_path);
+      return false;
+    }
+  } else {
+    std::string load_error;
+    auto reader_owner = core::GgufReader::OpenFile(
+        model_path, &load_error, {.allow_unsized_tensors = true});
+    if (reader_owner == nullptr) {
+      SetError(error, "Failed to open GGUF: " + load_error);
+      return false;
+    }
+    reader = std::move(reader_owner);
+    provider = ext::ProbeTextProvider(*reader);
+    if (provider == nullptr && reader->FirstUnsizedTensor() != nullptr) {
+      // No provider owns this layout: keep the reader's own diagnostic.
+      SetError(error, "Failed to open GGUF: " + reader->UnsizedTensorError());
+      return false;
+    }
   }
   if (provider == nullptr || provider->create == nullptr) {
     SetError(error, "No text provider found for model architecture");
@@ -324,7 +335,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       .enable_yarn = enable_yarn,
   };
   if (prepare_runner_options &&
-      !prepare_runner_options(*provider, *reader, &options, error)) {
+      !prepare_runner_options(*provider, reader.get(), &options, error)) {
     return false;
   }
   report(0.05, "Loading weights");
