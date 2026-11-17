@@ -161,10 +161,9 @@ void ds4_rocm_graph_destroy(ds4_rocm_graph *graph);
  * mapping. */
 std::shared_ptr<gufo::mem::StateAccount> ds4_rocm_graph_state_account(
     const ds4_rocm_graph *graph);
-/* Page bytes of a session's demand-mapped rows at full context. */
+/* Page bytes of a session's demand-mapped rows (compressed rows and the
+ * indexer score scratch) at full context. */
 uint64_t ds4_rocm_graph_demand_mapped_bytes(int context_size);
-/* Growth of a session's indexer score scratch past its creation size. */
-uint64_t ds4_rocm_graph_scratch_growth_bytes(int context_size);
 bool ds4_rocm_graph_reset(ds4_rocm_graph *graph);
 bool ds4_rocm_graph_prefill(ds4_rocm_graph *graph,
                             ds4_engine *engine,

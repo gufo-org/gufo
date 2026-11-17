@@ -172,7 +172,8 @@ uint64_t ds4_session_payload_bytes(const ds4_session* session);
  * demand mapping. */
 std::shared_ptr<gufo::mem::StateAccount> ds4_session_state_account(
     const ds4_session* session);
-/* Page bytes of a session's demand-mapped rows at full context. */
+/* Page bytes of a session's demand-mapped rows (compressed rows and the
+ * indexer score scratch) at full context. */
 uint64_t ds4_session_demand_mapped_bytes(int context_size);
 /* Whether sessions map their compressed rows on demand on this device. */
 bool ds4_session_demand_mapped(void);
@@ -183,9 +184,6 @@ bool ds4_engine_state_regions(const ds4_engine* engine);
 /* Builds the F16 copies of Q8 weights now rather than at the first prefill. */
 void ds4_engine_build_weight_copies(ds4_engine* engine);
 void ds4_engine_disable_state_regions(ds4_engine* engine);
-/* How far a session's indexer score scratch can grow past its creation
- * size at this context (it grows with depth during prefill). */
-uint64_t ds4_session_scratch_growth_bytes(int context_size);
 /* Device bytes the session allocated whole at creation, including the
  * shared batch workspace when it created that (ds4_session_created_workspace). */
 uint64_t ds4_session_fixed_bytes(const ds4_session* session);

@@ -545,14 +545,12 @@ bool Model::MeasureSessionState(core::SessionMode mode,
                 std::min(ds4_session_fixed_bytes(first->session_),
                          measured_fixed_bytes_)
           : 0;
-  const int context = static_cast<int>(max_context);
   gufo::server::Logger::LogFormatted(
       gufo::server::LogLevel::kInfo, "ds4",
       "event=session_state context=%u fixed_bytes=%zu "
-      "scratch_growth_bytes=%llu demand_mapped_bytes=%zu workspace_bytes=%llu",
-      max_context, measured_fixed_bytes_,
-      (unsigned long long)ds4_session_scratch_growth_bytes(context),
-      DemandMappedBytes(max_context), (unsigned long long)workspace);
+      "demand_mapped_bytes=%zu workspace_bytes=%llu",
+      max_context, measured_fixed_bytes_, DemandMappedBytes(max_context),
+      (unsigned long long)workspace);
   return true;
 }
 
@@ -569,9 +567,8 @@ std::optional<std::size_t> Model::SessionBytes(
   if (measured_context_ != max_context || measured_context_ == 0 ||
       !ds4_engine_state_regions(engine_))
     return std::nullopt;
-  const int context = static_cast<int>(max_context);
-  return ds4_session_demand_mapped_bytes(context) + measured_fixed_bytes_ +
-         ds4_session_scratch_growth_bytes(context);
+  return ds4_session_demand_mapped_bytes(static_cast<int>(max_context)) +
+         measured_fixed_bytes_;
 }
 
 SessionSnapshot::SessionSnapshot(ds4_session_snapshot snapshot)

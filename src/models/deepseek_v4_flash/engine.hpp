@@ -75,13 +75,13 @@ public:
   /// once every session exists, so sessions claim memory first.
   void BuildWeightCopies();
   /// Worst-case device state of one session at `max_context`, measured by
-  /// MeasureSessionState(): its whole allocations, its scratch at its
-  /// largest and its demand-mapped rows at full context. Empty when not
-  /// measured at this context.
+  /// MeasureSessionState(): its whole allocations and its demand-mapped
+  /// rows at full context. Empty when not measured at this context.
   [[nodiscard]] std::optional<std::size_t> SessionBytes(
       std::uint32_t max_context) const;
   /// The part of SessionBytes() a session maps only as it writes it
-  /// (compressed rows); zero without demand mapping.
+  /// (compressed rows and the indexer score scratch); zero without demand
+  /// mapping.
   [[nodiscard]] std::size_t DemandMappedBytes(std::uint32_t max_context) const;
   [[nodiscard]] std::unique_ptr<Session> CreateSession(
       core::SessionMode mode, std::uint32_t max_context,

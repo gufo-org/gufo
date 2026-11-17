@@ -147,10 +147,6 @@ uint64_t ds4_session_demand_mapped_bytes(int context_size) {
   return ds4_rocm_graph_demand_mapped_bytes(context_size);
 }
 
-uint64_t ds4_session_scratch_growth_bytes(int context_size) {
-  return ds4_rocm_graph_scratch_growth_bytes(context_size);
-}
-
 uint64_t ds4_session_fixed_bytes(const ds4_session *session) {
   return session ? session->fixed_bytes : 0;
 }
