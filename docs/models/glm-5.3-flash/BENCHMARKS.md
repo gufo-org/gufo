@@ -244,6 +244,32 @@ the candidate including the strict `rocm_forward` golden replay,
 `rocm_device_model` and the `rocm_w8a8_dense` contract (NMSE ≈ 1.4e-5
 across types, non-multiple m covered).
 
+### B14 — Fused online-softmax MLA attend (2026-11-17)
+
+The batch MLA score+combine pair collapses into one launch
+(`MlaFusedAttendKernel`, `kernels/rocm/attention.hip.cpp`): a block per
+query token (8 waves), wave pairs owning a 16-head group split the
+512-dim scoring dots into latent halves merged through LDS, run a base-2
+online chunk softmax (running max, 16 F32 accumulators) and consume a
+transposed V tile staged in the same LDS union as K. Q stays the hi/lo
+F16 pack; probabilities are F16. Dispatched for prefill chunks with
+`heads % 16 == 0 && heads <= 64` (the model's 64) after the shared q
+pack; the decode trio and the odd-head fallback keep the batch pair. No
+flag, promoted to default.
+
+Offline bench A/B (GPU-exclusive, alternating, repetitions 2): pp2048
+(n-gen 32) `284.83 ± 0.69 / 284.03 ± 0.13` → **`296.06 ± 0.57 / 295.88 ±
+1.11`** (**+4.0 %**, sample ranges disjoint), pp16384
+`224.51 ± 0.29` → **`239.23 ± 0.06`** (**+6.6 %**), tg32 flat
+(`/tmp/opencode/gufo_bench_fusedab.log`). Microbench attention leg at
+pp2048 shapes `59.34 → 36.49 ms` (**1.63×**), sparse 512-of-62K
+`17.13 → 12.98 ms` (**1.23×**).
+
+Quality: the strict `rocm_forward` golden replays greedy-token-exact on
+all five cases with `max |dlogit| = 0.0000` (no fixture refresh); the new
+`rocm_attention` fused contract holds NMSE ≤ 4.0e-8 vs the doubles oracle
+across three token/pool shapes.
+
 ## Fixtures
 
 `tests/fixtures/glm_next/llama_reference.json` is a gufo **self-regression

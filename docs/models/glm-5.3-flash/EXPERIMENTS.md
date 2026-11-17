@@ -547,6 +547,31 @@ tg32 flat; serve-context gate c1 prefill `212.1 / 211.2` →
 including the strict `rocm_forward` golden (`/tmp/opencode/
 gufo_bench_t192g4.log`).
 
+## Fused online-softmax MLA attend (2026-11-17): retained
+
+The B7-B10 ladder's online-softmax attend item: `MlaFusedAttendKernel`
+(`kernels/rocm/attention.hip.cpp`) collapses the batch score+combine pair
+into one launch — a block per query token (8 waves), wave pairs owning
+16-head groups split the 512-dim scoring dots into latent halves merged
+through LDS, run the merged chunk softmax in base 2 with a running max
+and 16 F32 result accumulators, and consume a transposed V tile staged in
+the same LDS union as K. Q stays the hi/lo F16 pack; probabilities are
+F16. Microbench (`tools/bench/glm5_fused_attend.hip`, fp64 oracle): the
+attention leg at pp2048 shapes 59.34 → 36.49 ms (**1.63×**), sparse
+512-of-62K 17.13 → 12.98 ms (**1.23×**); hi-only (2.02×/1.58×) and a
+transposed-shadow-cache fast variant (2.15×) stayed bench-only — the
+champion keeps the NMSE at 1.4-1.8e-9 instead of trading it. Dispatch:
+prefill chunks with `heads % 16 == 0 && heads <= 64` (the model's 64),
+one fused launch after the shared q pack; the decode trio and the
+head-shape fallback keep the old pair. Production gate (B14): exclusive
+alternating offline A/B pp2048 `284.83 / 284.03` → `296.06 / 295.88`
+(**+4.0 %**, sample ranges disjoint), pp16384 `224.51` → `239.23`
+(**+6.6 %**), tg32 flat (`/tmp/opencode/gufo_bench_fusedab.log`). New
+`rocm_attention_test` fused contract: NMSE ≤ 4.0e-8 vs the doubles oracle
+over three token/pool shapes (gate 1e-5); the strict `rocm_forward`
+golden replays greedy-exact on all five cases with `max |dlogit| =
+0.0000` — no fixture refresh (`/tmp/opencode/gufo_bench_fwd3.log`).
+
 ## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-15)
 
 The launch storm is closed (steady-state idle 2.2 %,
@@ -563,7 +588,8 @@ A2/A3/A4/A5/A6 shipped 2026-11-15 — the exact-default ladder is done)
 plus C2 (head-grouped 8-key combine, +3.0/+4.3 % pp),
 then the approximate
 fast track B7-B10 (W8A8 — dense half default since the 2026-11-16 B12
-promotion, routed half rejected 2026-11-17; online-softmax attend, capped
+promotion, routed half rejected 2026-11-17; online-softmax attend shipped
+as B14 2026-11-17; capped
 window, DFlash2/MTP speculation) from which the reference-class 600+
 comes. Earlier items in this list (IQ routed WMMA tier, Q5_K WMMA tier,
 GatherScore rewrite, chunk-scan launch collapse) are all shipped; see

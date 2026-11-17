@@ -737,23 +737,30 @@ void Executor::DsaLayer(const DeviceLayer& l, std::uint32_t slot,
     BuildSelBatch(s.pool_sel, s.pool_sel_stride,
                   static_cast<std::uint32_t>(p0), top_pools, kpool, use_tail,
                   n, sel_capacity, s.sel, s.sel_stride, nullptr);
-    const std::size_t scores_stride =
-        static_cast<std::size_t>((sel_capacity + kSelTile - 1U) / kSelTile) *
-        heads * kSelTile;
     const std::size_t qa_stride = static_cast<std::size_t>(heads) * latent;
-    const std::uint32_t tokens_last = static_cast<std::uint32_t>(p0) + n;
-    const std::uint32_t n_sel_max =
-        std::min(tokens_last / kpool, top_pools) * kpool +
-        (c.kpool_select_tail ? tokens_last % kpool : 0U);
-    MlaGatherScoreBatch(q_abs_, qa_stride, q_abs_h_, cache, s.sel, s.sel_stride,
-                        n_sel_max, static_cast<std::uint32_t>(p0), kpool,
-                        top_pools, use_tail, n, kSelTile, heads,
-                        tile_scores_, scores_stride, nullptr);
-    MlaGatherCombineBatch(tile_scores_, scores_stride, cache, s.sel,
+    if (heads % 16U == 0U && heads <= 64U) {
+      MlaFusedAttend(q_abs_, qa_stride, q_abs_h_, cache, s.sel, s.sel_stride,
+                     static_cast<std::uint32_t>(p0), kpool, top_pools,
+                     use_tail, n, heads, dsa_latent_, qa_stride, nullptr);
+    } else {
+      const std::size_t scores_stride =
+          static_cast<std::size_t>((sel_capacity + kSelTile - 1U) / kSelTile) *
+          heads * kSelTile;
+      const std::uint32_t tokens_last = static_cast<std::uint32_t>(p0) + n;
+      const std::uint32_t n_sel_max =
+          std::min(tokens_last / kpool, top_pools) * kpool +
+          (c.kpool_select_tail ? tokens_last % kpool : 0U);
+      MlaGatherScoreBatch(q_abs_, qa_stride, q_abs_h_, cache, s.sel,
                           s.sel_stride, n_sel_max,
                           static_cast<std::uint32_t>(p0), kpool, top_pools,
-                          use_tail, n, kSelTile, heads, dsa_latent_,
-                          qa_stride, nullptr);
+                          use_tail, n, kSelTile, heads, tile_scores_,
+                          scores_stride, nullptr);
+      MlaGatherCombineBatch(tile_scores_, scores_stride, cache, s.sel,
+                            s.sel_stride, n_sel_max,
+                            static_cast<std::uint32_t>(p0), kpool, top_pools,
+                            use_tail, n, kSelTile, heads, dsa_latent_,
+                            qa_stride, nullptr);
+    }
   }
 
   // Per-head value maps (same head loop shape as the k absorption, same

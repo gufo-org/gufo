@@ -85,7 +85,26 @@ void MlaGatherCombineBatch(const float* scores, std::size_t scores_stride,
                            std::uint32_t top_pools, std::uint32_t use_tail,
                            std::uint32_t tokens, std::uint32_t tile,
                            std::uint32_t heads, float* latent,
-                           std::size_t latent_stride, hipStream_t stream);
+                            std::size_t latent_stride, hipStream_t stream);
+
+// Fused single-pass replacement for the batch score+combine pair of a
+// prefill chunk. Packs q like MlaGatherScoreBatch, then runs one block per
+// query token (heads * 4 threads): wave pairs split the 512-dim scores and
+// the output channels, the online chunk softmax (F32 accumulators, F16
+// probabilities) removes the scores round-trip. `q_abs`, `q_stride`,
+// `q_pack`, `cache`/`sel`/`sel_stride` and the per-token n_sel derivation
+// are as in the batch pair; `latent` receives [tokens][heads][512].
+// Requires heads % 16 == 0 and heads <= 64. The softmax runs in base 2 on
+// the already-scaled q and the probabilities round through F16, so the
+// output differs from the batch pair (NMSE ~1e-9 against the fp64 oracle,
+// gate in staging/tests/models/glm5_next/rocm_attention_test.cpp).
+void MlaFusedAttend(const float* q_abs, std::size_t q_stride, __half* q_pack,
+                    const __half* cache, const std::int32_t* sel,
+                    std::size_t sel_stride, std::uint32_t pos_first,
+                    std::uint32_t kpool, std::uint32_t top_pools,
+                    std::uint32_t use_tail, std::uint32_t tokens,
+                    std::uint32_t heads, float* latent,
+                    std::size_t latent_stride, hipStream_t stream);
 
 // head_out[h][i] = dot(vb[h][i][:512], latent[h][:512]).
 // `vb` is [heads][256][512] (attn_v_b rows), `latent` is [heads][512];

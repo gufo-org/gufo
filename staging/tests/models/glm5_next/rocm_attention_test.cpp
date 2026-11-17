@@ -318,6 +318,114 @@ bool TestGatherSingleExact() {
   return Check("gather single exact row", static_cast<double>(wrong), 0.0);
 }
 
+double Nmse(const std::vector<float>& ref, const std::vector<float>& got) {
+  double num = 0.0;
+  double den = 0.0;
+  for (std::size_t i = 0; i < ref.size(); ++i) {
+    const double d = static_cast<double>(ref[i]) - static_cast<double>(got[i]);
+    num += d * d;
+    den += static_cast<double>(ref[i]) * static_cast<double>(ref[i]);
+  }
+  return num / den;
+}
+
+// Batched fused attention against the doubles oracle: token t of a chunk
+// selects kpool * min(top_pools, (pos+1)/kpool) + (use_tail ? (pos+1) %
+// kpool : 0) distinct cache rows, matching the DsaSelCount contract the
+// batch pair uses. The fused online softmax (base 2, F16 probabilities)
+// reorders the sums, so the gate is NMSE-level, not the batch pair's
+// per-element tolerance.
+bool RunFusedCase(const char* name, std::uint32_t pos_first,
+                  std::uint32_t kpool, std::uint32_t top_pools,
+                  bool use_tail, std::uint32_t tokens, std::uint32_t seed) {
+  const auto cache_f32 = t::MakeValues(
+      static_cast<std::size_t>(kCapacity) * q::kMlaKvRank, seed + 1U, 1.0F);
+  std::vector<std::uint16_t> cache_bits(cache_f32.size());
+  std::vector<float> cache_ref(cache_f32.size());
+  for (std::size_t i = 0; i < cache_f32.size(); ++i) {
+    cache_bits[i] = HalfBits(cache_f32[i]);
+    cache_ref[i] = HalfValue(cache_bits[i]);
+  }
+  const std::size_t qa = static_cast<std::size_t>(kHeads) * q::kMlaKvRank;
+  const auto q_abs = t::MakeValues(tokens * qa, seed + 3U, 0.02F);
+  const auto vb =
+      t::MakeValues(kHeads * kVbOut * q::kMlaKvRank, seed + 4U, 0.05F);
+
+  std::vector<std::uint32_t> n_sel(tokens);
+  std::uint32_t n_max = 0U;
+  for (std::uint32_t r = 0; r < tokens; ++r) {
+    const std::uint32_t seen = pos_first + r + 1U;
+    const std::uint32_t k =
+        std::min(seen / kpool, top_pools);
+    n_sel[r] =
+        k * kpool + (use_tail ? seen % kpool : 0U);
+    n_max = std::max(n_max, n_sel[r]);
+  }
+  std::vector<std::int32_t> sel(static_cast<std::size_t>(tokens) * n_max, -1);
+  std::vector<float> latent_ref(tokens * qa, 0.0F);
+  for (std::uint32_t r = 0; r < tokens; ++r) {
+    const auto rows = MakeSelection(n_sel[r], kCapacity, seed + 10U + r);
+    for (std::uint32_t j = 0; j < n_sel[r]; ++j) {
+      sel[static_cast<std::size_t>(r) * n_max + j] = rows[j];
+    }
+    // Oracle in the [tiles][heads][tile] layout consumed by
+    // ReferenceChain; the fused kernel never materializes scores.
+    const std::uint32_t tiles = q::MlaGatherTiles(n_sel[r], kTile);
+    std::vector<float> scores_ref(static_cast<std::size_t>(tiles) * kHeads *
+                                      kTile,
+                                  0.0F);
+    const float* qa_t = &q_abs[static_cast<std::size_t>(r) * qa];
+    for (std::uint32_t j = 0; j < n_sel[r]; ++j) {
+      for (std::uint32_t head = 0; head < kHeads; ++head) {
+        double acc = 0.0;
+        const float* qh = &qa_t[static_cast<std::size_t>(head) * q::kMlaKvRank];
+        const float* row =
+            &cache_ref[static_cast<std::size_t>(rows[j]) * q::kMlaKvRank];
+        for (std::uint32_t i = 0; i < q::kMlaKvRank; ++i) {
+          acc += static_cast<double>(qh[i]) * static_cast<double>(row[i]);
+        }
+        scores_ref[(static_cast<std::size_t>(j / kTile) * kHeads + head) *
+                       kTile +
+                   (j % kTile)] = static_cast<float>(acc);
+      }
+    }
+    const Chain chain =
+        ReferenceChain(scores_ref, cache_ref, rows, n_sel[r], kTile, vb);
+    std::copy(chain.latent_ref.begin(), chain.latent_ref.end(),
+              latent_ref.begin() + static_cast<std::ptrdiff_t>(r * qa));
+  }
+
+  t::HipBuffer<float> d_qabs(q_abs.size()), d_latent(latent_ref.size());
+  t::HipBuffer<std::uint16_t> d_cache(cache_bits.size());
+  t::HipBuffer<std::uint16_t> d_qpack(2U * tokens * qa);
+  t::HipBuffer<std::int32_t> d_sel(sel.size());
+  t::Upload(&d_qabs, q_abs);
+  t::CheckHip(hipMemcpy(d_sel.get(), sel.data(), sel.size() * sizeof(std::int32_t),
+                        hipMemcpyHostToDevice),
+              "upload fused sel");
+  t::CheckHip(hipMemcpy(d_cache.get(), cache_bits.data(),
+                        cache_bits.size() * sizeof(std::uint16_t),
+                        hipMemcpyHostToDevice),
+              "upload fused cache");
+  q::MlaFusedAttend(d_qabs.get(), qa, reinterpret_cast<__half*>(d_qpack.get()),
+                    HalfPtr(&d_cache), d_sel.get(), n_max, pos_first, kpool,
+                    top_pools, use_tail ? 1U : 0U, tokens, kHeads,
+                    d_latent.get(), qa, nullptr);
+  t::CheckHip(hipDeviceSynchronize(), "fused sync");
+  return Check(name, Nmse(latent_ref, t::Download(&d_latent, latent_ref.size())),
+               1e-5);
+}
+
+bool TestFused() {
+  bool ok = RunFusedCase("fused 5tok/8pools", 0U, 4U, 8U, true, 5U,
+                         0xA5A50001U);
+  ok &= RunFusedCase("fused 3tok/no-tail", 4U, 4U, 3U, false, 3U,
+                     0xA5A50002U);
+  ok &= RunFusedCase("fused 2tok/257sel", 256U, 4U, 64U, true, 2U,
+                     0xA5A50003U);
+  return ok;
+}
+
 bool TestApplyVb() {
   const auto latent = t::MakeValues(kHeads * q::kMlaKvRank, 0x0F0F1234U, 1.0F);
   const auto vb =
@@ -355,6 +463,7 @@ int main() {
     ok &= TestQabs();
     ok &= TestGather();
     ok &= TestGatherSingleExact();
+    ok &= TestFused();
     ok &= TestApplyVb();
     return ok ? 0 : 1;
   } catch (const std::exception& error) {

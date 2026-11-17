@@ -373,6 +373,223 @@ __global__ void MlaApplyVbKernel(const float* __restrict__ latent,
   out[row] = acc;
 }
 
+// Raw RDNA3 WMMA plumbing (fragment = 16 halves lane-contiguous, C[i] at
+// row lane % 16, column 2 * i + lane / 16); the load helper mirrors the
+// proven pattern in src/models/minimax_h3/attention.hip.
+using Fragment = __attribute__((ext_vector_type(16))) unsigned short;
+using Accumulator = __attribute__((ext_vector_type(8))) float;
+
+__device__ Fragment LoadFragment(const std::uint16_t* source) {
+  union {
+    Fragment fragment;
+    uint4 words[2];
+  } value;
+  value.words[0] = *reinterpret_cast<const uint4*>(source);
+  value.words[1] = *reinterpret_cast<const uint4*>(source + 8);
+  return value.fragment;
+}
+
+// Fused single-pass prefill attention over the selected latent rows;
+// replaces the score+combine pair on one launch. One block per query
+// token (256 threads = 8 waves); wave pairs (group = wave >> 1 owns 16
+// heads, half = wave & 1) split the 512-dim scoring dot into latent-dim
+// halves merged through LDS, then both waves replay the merged chunk
+// softmax (base-2 running max/sum) and the P x V WMMA tiles over the
+// group's 512 output channels, split 256 per half. K tiles and
+// transposed V tiles share one staging union; probabilities are F16.
+// Supports heads in {16, 32, 48, 64} (s_part groups of 16).
+__global__ __launch_bounds__(256, 1) void MlaFusedAttendKernel(
+    const __half* __restrict__ q_pack, const __half* __restrict__ cache,
+    const std::int32_t* __restrict__ sel, std::size_t sel_stride,
+    std::uint32_t pos_first, std::uint32_t kpool, std::uint32_t top_pools,
+    std::uint32_t use_tail, std::uint32_t heads, float* __restrict__ latent,
+    std::size_t latent_stride) {
+  constexpr int kKeysTile = 32;
+  constexpr int kRowStride = static_cast<int>(kMlaKvRank) + 8;
+  constexpr int kVtStride = 40;
+  union Stage {
+    __half key[kKeysTile][kRowStride];
+    __half value[kMlaKvRank][kVtStride];
+  };
+  __shared__ Stage st;
+  __shared__ float s_part[4][2][16][34];  // [group][half][head][key]
+  const int tid = threadIdx.x;
+  const int lane = tid & 31;
+  const int wave = tid >> 5;
+  const int group = wave >> 1;
+  const int half = wave & 1;
+  const std::size_t per = static_cast<std::size_t>(heads) * kMlaKvRank;
+  const std::uint32_t t = blockIdx.x;
+  const std::uint32_t n =
+      DsaSelCount(pos_first, t, kpool, top_pools, use_tail);
+  sel += static_cast<std::size_t>(t) * sel_stride;
+  float* out_tok = latent + static_cast<std::size_t>(t) * latent_stride;
+  const int head_row = static_cast<int>(group * 16U + lane % 16U);
+  const std::uint16_t* q_hi = reinterpret_cast<const std::uint16_t*>(
+      q_pack + static_cast<std::size_t>(t) * 2U * per +
+      static_cast<std::size_t>(head_row) * kMlaKvRank);
+  const std::uint16_t* q_lo = q_hi + per;
+
+  Accumulator result[16];
+#pragma unroll
+  for (int d = 0; d < 16; ++d) {
+    result[d] = {};
+  }
+  float maximum = -INFINITY;
+  float sum = 0.0F;
+
+  for (std::uint32_t base = 0; base < n; base += kKeysTile) {
+    // Stage the gathered K rows (zero-filled tails).
+#pragma unroll
+    for (int z = 0; z < 8; ++z) {
+      const int i = tid + z * 256;
+      const int r = i / static_cast<int>(kMlaKvRank / 8U);
+      const int c = i % static_cast<int>(kMlaKvRank / 8U);
+      const std::uint32_t j = base + static_cast<std::uint32_t>(r);
+      const uint4 v = j < n ? *reinterpret_cast<const uint4*>(
+                                  cache + static_cast<std::size_t>(sel[j]) *
+                                              kMlaKvRank +
+                                  static_cast<std::size_t>(c) * 8U)
+                            : make_uint4(0U, 0U, 0U, 0U);
+      *reinterpret_cast<uint4*>(&st.key[r][c * 8]) = v;
+    }
+    __syncthreads();
+
+    // Partial chunk scores over this half of the latent dim.
+    Accumulator scores[2];
+    scores[0] = {};
+    scores[1] = {};
+#pragma unroll
+    for (int d = 0; d < 16; ++d) {
+      const int d0 = half * 256 + d * 16;
+#pragma unroll
+      for (int ct = 0; ct < 2; ++ct) {
+        const Fragment k = LoadFragment(
+            reinterpret_cast<const std::uint16_t*>(&st.key[ct * 16 + lane % 16]
+                                                       [0]) +
+            d0);
+        const Fragment q = LoadFragment(q_hi + d0);
+        scores[ct] =
+            __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(k, q, scores[ct]);
+        const Fragment ql = LoadFragment(q_lo + d0);
+        scores[ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(k, ql,
+                                                                scores[ct]);
+      }
+      __builtin_amdgcn_sched_barrier(0);
+    }
+
+    // Publish the partial dots for the dim-half merge.
+#pragma unroll
+    for (int ct = 0; ct < 2; ++ct) {
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const int key = ct * 16 + 2 * i + lane / 16;
+        s_part[group][half][lane % 16][key] = scores[ct][i];
+      }
+    }
+    __syncthreads();  // K dead below; partial scores visible
+
+    // Stage the transposed V tile (uint4 row reads, scalar LDS writes).
+#pragma unroll
+    for (int z = 0; z < 8; ++z) {
+      const int i = tid + z * 256;
+      const int r = i / static_cast<int>(kMlaKvRank / 8U);
+      const int c = (i % static_cast<int>(kMlaKvRank / 8U)) * 8;
+      const std::uint32_t j = base + static_cast<std::uint32_t>(r);
+      union {
+        uint4 packed;
+        __half h[8];
+      } v;
+      if (j < n) {
+        v.packed = *reinterpret_cast<const uint4*>(
+            cache + static_cast<std::size_t>(sel[j]) * kMlaKvRank + c);
+      } else {
+        v.packed = make_uint4(0U, 0U, 0U, 0U);
+      }
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        st.value[c + e][r] = v.h[e];
+      }
+    }
+    __syncthreads();  // VT ready
+
+    // Merge the dim halves, mask the tail, run the chunk softmax.
+    float s[2][8];
+    float next = maximum;
+#pragma unroll
+    for (int ct = 0; ct < 2; ++ct) {
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const int key = ct * 16 + 2 * i + lane / 16;
+        const std::uint32_t jkey = base + static_cast<std::uint32_t>(key);
+        float v = s_part[group][0][lane % 16][key] +
+                  s_part[group][1][lane % 16][key];
+        if (jkey >= n) {
+          v = -INFINITY;
+        }
+        // log2(e); the softmax scale is already folded into q.
+        s[ct][i] = v * 1.4426950408889634F;
+        next = fmaxf(next, s[ct][i]);
+      }
+    }
+    next = fmaxf(next, __uint_as_float(__builtin_amdgcn_permlanex16(
+                           __float_as_uint(next), __float_as_uint(next),
+                           0x76543210U, 0xfedcba98U, false, false)));
+    const float correction = __builtin_amdgcn_exp2f(maximum - next);
+    float subtotal = 0.0F;
+    Fragment probability[2];
+#pragma unroll
+    for (int ct = 0; ct < 2; ++ct) {
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const float p = __builtin_amdgcn_exp2f(s[ct][i] - next);
+        subtotal += p;
+        const unsigned own = __half_as_ushort(__float2half_rn(p));
+        const unsigned peer = __builtin_amdgcn_permlanex16(
+            own, own, 0x76543210U, 0xfedcba98U, false, false);
+        probability[ct][2 * i] = lane < 16 ? own : peer;
+        probability[ct][2 * i + 1] = lane < 16 ? peer : own;
+      }
+    }
+    subtotal += __uint_as_float(__builtin_amdgcn_permlanex16(
+        __float_as_uint(subtotal), __float_as_uint(subtotal), 0x76543210U,
+        0xfedcba98U, false, false));
+    sum = sum * correction + subtotal;
+    maximum = next;
+#pragma unroll
+    for (int d = 0; d < 16; ++d) {
+      result[d] *= correction;
+    }
+#pragma unroll
+    for (int ct = 0; ct < 2; ++ct) {
+      const Fragment p = probability[ct];
+#pragma unroll
+      for (int d = 0; d < 16; ++d) {
+        const Fragment v = LoadFragment(
+            reinterpret_cast<const std::uint16_t*>(
+                &st.value[half * 256 + d * 16 + lane % 16][0]) +
+            ct * 16);
+        result[d] =
+            __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(v, p, result[d]);
+        if ((d & 1) == 1) {
+          __builtin_amdgcn_sched_barrier(0);
+        }
+      }
+    }
+    __syncthreads();  // VT consumed before the next chunk re-stages K
+  }
+
+  const float reciprocal = __builtin_amdgcn_rcpf(sum);
+#pragma unroll
+  for (int d = 0; d < 16; ++d) {
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      out_tok[static_cast<std::size_t>(head_row) * kMlaKvRank + half * 256 +
+              d * 16 + 2 * i + lane / 16] = result[d][i] * reciprocal;
+    }
+  }
+}
+
 }  // namespace
 
 void MlaQabs(const float* q, const float* kb, std::uint32_t heads, float scale,
@@ -441,6 +658,22 @@ void MlaGatherCombineBatch(const float* scores, std::size_t scores_stride,
                            kMlaKvRank / 8U, smem, stream>>>(
       scores, scores_stride, cache, sel, sel_stride, 0U, pos_first, kpool,
       top_pools, use_tail, tile, heads, latent, latent_stride);
+}
+
+void MlaFusedAttend(const float* q_abs, std::size_t q_stride,
+                    __half* q_pack, const __half* cache,
+                    const std::int32_t* sel, std::size_t sel_stride,
+                    std::uint32_t pos_first, std::uint32_t kpool,
+                    std::uint32_t top_pools, std::uint32_t use_tail,
+                    std::uint32_t tokens, std::uint32_t heads, float* latent,
+                    std::size_t latent_stride, hipStream_t stream) {
+  const std::size_t total =
+      static_cast<std::size_t>(tokens) * heads * kMlaKvRank;
+  MlaPackQKernel<<<static_cast<std::uint32_t>((total + 255U) / 256U), 256, 0U,
+                   stream>>>(q_abs, q_stride, q_pack, heads, total);
+  MlaFusedAttendKernel<<<tokens, heads * 4U, 0U, stream>>>(
+      q_pack, cache, sel, sel_stride, pos_first, kpool, top_pools, use_tail,
+      heads, latent, latent_stride);
 }
 
 void MlaApplyVb(const float* latent, const float* vb, std::uint32_t heads,
