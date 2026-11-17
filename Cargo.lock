@@ -89,6 +89,13 @@ name = "gufo-ffi"
 version = "0.0.0"
 
 [[package]]
+name = "gufo-gguf"
+version = "0.0.0"
+dependencies = [
+ "gufo-ffi",
+]
+
+[[package]]
 name = "gufo-http"
 version = "0.0.0"
 dependencies = [
@@ -114,6 +121,7 @@ version = "0.0.0"
 dependencies = [
  "gufo-audio-decode",
  "gufo-base64",
+ "gufo-gguf",
  "gufo-http",
  "gufo-png-decode",
  "gufo-websocket",
