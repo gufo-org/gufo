@@ -297,6 +297,11 @@ std::size_t Model::SessionBytes(core::SessionMode mode,
          vision;
 }
 
+std::size_t Model::DemandMappedBytes(core::SessionMode mode,
+                                     std::uint32_t context) const {
+  return mem::DemandMapped() ? executor_->DemandMappedBytes(mode, context) : 0;
+}
+
 std::size_t Model::DeferredScratchBytes() const {
   return executor_->DeferredScratchBytes();
 }
@@ -313,6 +318,10 @@ void Model::SetPrefillYield(std::size_t groups,
   }
   executor_->SetLayerHook(executor_->LayerHookBoundaries(groups),
                           std::move(yield));
+}
+
+std::shared_ptr<mem::StateAccount> Session::StateAccount() const {
+  return session_->state_account();
 }
 
 std::size_t Session::AllocatedBytes() const noexcept {

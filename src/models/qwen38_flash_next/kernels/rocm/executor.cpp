@@ -32,6 +32,13 @@ namespace {
 
 using core::GgmlType;
 
+// Rows past the frontier that must be backed now: tile-rounded attention
+// reads and the next steps' writes.
+constexpr std::size_t kKvTileRows = 2048;
+// Rows the pool thread maps further ahead, off the scheduler thread: a
+// prefill pass and more, so a writer normally finds its pages mapped.
+constexpr std::size_t kKvAheadRows = 8192;
+
 void AssignError(std::string* error_msg, const std::string& message) {
   if (error_msg != nullptr) {
     *error_msg = message;
@@ -1419,12 +1426,15 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
   // K/V keeps a fixed address for the whole context, backed by pages as
   // positions are written (EnsureKv). The session still accounts its full
   // size, and the state ledger keeps the unwritten rows promised to it. A
-  // failed reservation leaves a null entry.
+  // failed reservation leaves a null entry. The account charges the pages
+  // to the shared state budget (#715); EnsureKv backs a tile past the
+  // frontier, which its margin covers.
+  s->account_ = std::make_shared<gufo::mem::StateAccount>(kKvTileRows);
   const auto grow =
       [&](std::vector<std::shared_ptr<gufo::mem::Region>>& regions) {
         auto region = gufo::mem::Region::Create(
             {.row_bytes = kv_row * sizeof(__half), .rows = max_context},
-            error_msg);
+            error_msg, s->account_);
         if (!region) {
           a.push_back(nullptr);
           return static_cast<__half*>(nullptr);
@@ -1703,22 +1713,26 @@ bool Executor::EnsureWideSegments(std::uint32_t segments,
 
 bool Executor::EnsureKv(Session& session, std::uint32_t trunk_end,
                         std::uint32_t mtp_end, std::string* error) const {
-  // Rows past the frontier that must be backed now: tile-rounded attention
-  // reads and the next steps' writes.
-  constexpr std::size_t kTileRows = 2048;
-  // Rows the pool thread maps further ahead, off the scheduler thread: a
-  // prefill pass and more, so a writer normally finds its pages mapped.
-  constexpr std::size_t kAheadRows = 8192;
   const auto ensure = [&](const auto& regions, std::size_t end) {
     for (const auto& region : regions) {
-      if (!region->Ensure(end + kTileRows, error))
+      if (!region->Ensure(end + kKvTileRows, error))
         return false;
-      region->MapAhead(end + kAheadRows);
+      region->MapAhead(end + kKvAheadRows);
     }
     return true;
   };
   return ensure(session.kv_regions_, trunk_end) &&
          ensure(session.mtp_kv_regions_, mtp_end);
+}
+
+std::size_t Executor::DemandMappedBytes(
+    core::SessionMode mode, std::uint32_t max_context) const noexcept {
+  const auto& c = config();
+  const std::size_t kv =
+      2 * std::size_t{max_context} * c.AttentionKvDim() * sizeof(__half);
+  const std::size_t buffers = c.num_layers / c.full_attention_interval +
+                              (mode == core::SessionMode::kSpeculative);
+  return buffers * kv;
 }
 
 std::size_t Executor::SessionBytes(

@@ -123,6 +123,11 @@ public:
     return mutation_epoch_;
   }
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
+  /// The account of this session's K/V regions.
+  [[nodiscard]] const std::shared_ptr<gufo::mem::StateAccount>& state_account()
+      const noexcept {
+    return account_;
+  }
   /// PLE rows this session has gathered, including prefetches, since creation.
   [[nodiscard]] NgramTotals NgramRowTotals() const noexcept {
     return ngram_counters_.Load();
@@ -218,6 +223,8 @@ private:
   std::unordered_map<std::uint64_t, hipGraphExec_t> graphs_;
   std::unordered_set<std::uint64_t> warmed_;
   std::vector<void*> allocations_;
+  /// Charges the K/V regions' pages to the shared state budget.
+  std::shared_ptr<gufo::mem::StateAccount> account_;
   /// Trunk and MTP K/V, one region per buffer, backed as rows are written.
   std::vector<std::shared_ptr<gufo::mem::Region>> kv_regions_;
   std::vector<std::shared_ptr<gufo::mem::Region>> mtp_kv_regions_;
@@ -298,6 +305,9 @@ public:
   [[nodiscard]] std::size_t SessionBytes(
       core::SessionMode mode, std::uint32_t max_context,
       std::uint32_t rollback_depth) const noexcept;
+  /// The K/V part of SessionBytes(), in demand-mapped regions.
+  [[nodiscard]] std::size_t DemandMappedBytes(
+      core::SessionMode mode, std::uint32_t max_context) const noexcept;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
   /// Backs the K/V rows of trunk positions below `trunk_end` and MTP
   /// positions below `mtp_end`, plus a tile of rows past each, before they

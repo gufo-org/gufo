@@ -28,25 +28,20 @@ void SetError(std::string* error, const char* message) {
   return *bytes <= kMax - kPageBytes;
 }
 
-// Pages that rows of every segment may cover: the union of the segments'
-// page ranges.
-[[nodiscard]] std::size_t PromisedBytes(const RegionShape& shape,
-                                        std::size_t stride) {
-  const std::size_t run = shape.rows * shape.row_bytes;
-  std::size_t pages = 0, previous_end = 0;
-  for (std::size_t s = 0; s < shape.segments; ++s) {
-    const std::size_t first = std::max(s * stride / kPageBytes, previous_end);
-    const std::size_t end = (s * stride + run + kPageBytes - 1) / kPageBytes;
-    pages += end > first ? end - first : 0;
-    previous_end = std::max(previous_end, end);
-  }
-  return pages * kPageBytes;
-}
-
 }  // namespace
 
-std::shared_ptr<Region> Region::Create(const RegionShape& shape,
-                                       std::string* error) {
+bool DemandMapped() {
+  int device = 0;
+  if (hipGetDevice(&device) != hipSuccess) {
+    (void)hipGetLastError();
+    return false;
+  }
+  return PagePool::ForDevice(device) != nullptr;
+}
+
+std::shared_ptr<Region> Region::Create(
+    const RegionShape& shape, std::string* error,
+    const std::shared_ptr<StateAccount>& account, std::size_t tokens_per_row) {
   std::shared_ptr<Region> region(new Region());
   region->shape_ = shape;
   if (!CheckedShape(shape, &region->stride_, &region->bytes_)) {
@@ -66,11 +61,21 @@ std::shared_ptr<Region> Region::Create(const RegionShape& shape,
         hipSuccess) {
       region->pool_ = std::move(pool);
       region->base_ = static_cast<std::uint8_t*>(base);
-      region->reserved_bytes_ = PromisedBytes(shape, region->stride_);
+      region->reserved_bytes_ = RegionPageBytes(shape, shape.rows);
       region->pages_.resize(reserved / kPageBytes);
       region->mapped_.resize(reserved / kPageBytes);
       StateLedger::Process().AddReserved(region->reserved_bytes_);
       region->pool_->Warm(region->reserved_bytes_);
+      if (account) {
+        region->account_ = account;
+        region->tokens_per_row_ = std::max<std::size_t>(tokens_per_row, 1);
+        account->AddRegion(
+            shape, region->tokens_per_row_,
+            [weak = std::weak_ptr<Region>(region)](std::size_t rows) {
+              if (const auto r = weak.lock())
+                r->TrimTo(rows);
+            });
+      }
       return region;
     }
     (void)hipGetLastError();
@@ -105,16 +110,11 @@ Region::~Region() {
   }
   // Unmapping waits for all in-flight GPU work on the device; regions end
   // with their sessions, at shutdown or between requests, never mid-pass.
-  auto& ledger = StateLedger::Process();
-  for (std::size_t p = 0; p < pages_.size(); ++p) {
-    if (!mapped_[p])
-      continue;
-    (void)hipMemUnmap(base_ + p * kPageBytes, kPageBytes);
-    pool_->Release(pages_[p]);
-    ledger.RemoveMapped(kPageBytes);
-  }
+  for (std::size_t p = 0; p < pages_.size(); ++p)
+    if (mapped_[p])
+      UnmapPage(p);
   (void)hipGetLastError();
-  ledger.RemoveReserved(reserved_bytes_);
+  StateLedger::Process().RemoveReserved(reserved_bytes_);
   (void)hipMemAddressFree(base_, pages_.size() * kPageBytes);
 }
 
@@ -122,6 +122,14 @@ std::size_t Region::CoveredRows(std::size_t pages_end_bytes,
                                 std::size_t segment) const noexcept {
   const std::size_t start = segment * stride_;
   return std::min(shape_.rows, (pages_end_bytes - start) / shape_.row_bytes);
+}
+
+bool Region::EnsureAhead(std::size_t rows) {
+  std::lock_guard lock(mutex_);
+  rows = AheadLimit(rows);
+  if (backed_rows() >= rows)
+    return true;
+  return MapPages(rows, nullptr);
 }
 
 bool Region::Ensure(std::size_t rows, std::string* error) {
@@ -132,6 +140,42 @@ bool Region::Ensure(std::size_t rows, std::string* error) {
   if (backed_rows() >= rows)
     return true;
   return MapPages(rows, error);
+}
+
+void Region::UnmapPage(std::size_t p) {
+  (void)hipMemUnmap(base_ + p * kPageBytes, kPageBytes);
+  pool_->Release(pages_[p]);
+  mapped_[p] = false;
+  StateLedger::Process().RemoveMapped(kPageBytes);
+  mapped_bytes_.fetch_sub(kPageBytes, std::memory_order_relaxed);
+  if (account_)
+    account_->OnUnmap(kPageBytes);
+}
+
+void Region::TrimTo(std::size_t rows) {
+  if (!pool_)
+    return;
+  rows = std::min(rows, shape_.rows);
+  std::lock_guard lock(mutex_);
+  std::vector<bool> keep(pages_.size(), false);
+  for (std::size_t s = 0; s < shape_.segments && rows != 0; ++s) {
+    const std::size_t start = s * stride_;
+    const std::size_t end =
+        (start + rows * shape_.row_bytes + kPageBytes - 1) / kPageBytes;
+    for (std::size_t p = start / kPageBytes; p < end; ++p)
+      keep[p] = true;
+  }
+  bool released = false;
+  for (std::size_t p = 0; p < pages_.size(); ++p)
+    if (mapped_[p] && !keep[p]) {
+      UnmapPage(p);
+      released = true;
+    }
+  if (!released)
+    return;
+  (void)hipGetLastError();
+  requested_rows_ = std::min(requested_rows_, rows);
+  backed_rows_.store(std::min(backed_rows(), rows), std::memory_order_release);
 }
 
 bool Region::MapPages(std::size_t rows, std::string* error) {
@@ -158,9 +202,17 @@ bool Region::MapPages(std::size_t rows, std::string* error) {
     for (std::size_t p = first; p < end; ++p) {
       if (mapped_[p])
         continue;
+      // A session under a capped budget maps only what it may charge.
+      if (account_ && !account_->OnMap(kPageBytes)) {
+        (void)flush();
+        SetError(error, "state memory exhausted");
+        return false;
+      }
       hipMemGenericAllocationHandle_t handle{};
       bool reused = false;
       if (!pool_->Acquire(&handle, &reused)) {
+        if (account_)
+          account_->OnUnmap(kPageBytes);
         (void)flush();
         SetError(error, "state memory exhausted");
         return false;
@@ -169,6 +221,8 @@ bool Region::MapPages(std::size_t rows, std::string* error) {
           hipSuccess) {
         (void)hipGetLastError();
         pool_->Release(handle);
+        if (account_)
+          account_->OnUnmap(kPageBytes);
         (void)flush();
         SetError(error, "state page map failed");
         return false;
@@ -215,8 +269,18 @@ bool Region::MapPages(std::size_t rows, std::string* error) {
   return true;
 }
 
-void Region::MapAhead(std::size_t rows) {
+std::size_t Region::AheadLimit(std::size_t rows) const {
   rows = std::min(rows, shape_.rows);
+  // Only sessions that share their state claim a need; the others map
+  // ahead freely, as without accounts.
+  if (account_ && StateLedger::Process().PromiseCap() != 0)
+    rows = std::min(rows, account_->RowsFor(account_->need_tokens(),
+                                            tokens_per_row_, shape_.rows));
+  return rows;
+}
+
+void Region::MapAhead(std::size_t rows) {
+  rows = AheadLimit(rows);
   if (pool_ && rows > backed_rows())
     pool_->MapAhead(shared_from_this(), rows);
 }

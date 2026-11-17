@@ -10,22 +10,16 @@
 #include <string>
 #include <vector>
 
+#include "src/mem/account.hpp"
+
 namespace gufo::mem {
 
 class PagePool;
 
-/// Rows of state laid out in `segments` equal runs, each starting
-/// `segment_stride` bytes after the previous one: one segment for a K/V
-/// buffer per layer, or one per layer and plane for a layer-major buffer
-/// such as Qwen 27B's [plane][layer][position][width]. Rows grow from the
-/// start of every segment.
-struct RegionShape {
-  std::size_t row_bytes{0};
-  std::size_t rows{0};
-  std::size_t segments{1};
-  /// Zero means rows * row_bytes: segments back to back.
-  std::size_t segment_stride{0};
-};
+/// Whether state regions on the current device take pages as rows are
+/// written, rather than their whole size at creation (false without virtual
+/// memory management, or where device pages are not host RAM).
+[[nodiscard]] bool DemandMapped();
 
 /// One buffer at a fixed address for its whole size, backed by physical
 /// pages from the front of each segment as rows are written. The address
@@ -40,8 +34,12 @@ struct RegionShape {
 /// as before, and Ensure() only checks bounds.
 class Region : public std::enable_shared_from_this<Region> {
 public:
-  [[nodiscard]] static std::shared_ptr<Region> Create(const RegionShape& shape,
-                                                      std::string* error);
+  /// With `account`, the region's pages are charged to that session
+  /// (StateAccount), and its rows are `tokens_per_row` tokens each.
+  [[nodiscard]] static std::shared_ptr<Region> Create(
+      const RegionShape& shape, std::string* error,
+      const std::shared_ptr<StateAccount>& account = nullptr,
+      std::size_t tokens_per_row = 1);
   ~Region();
   Region(const Region&) = delete;
   Region& operator=(const Region&) = delete;
@@ -60,16 +58,33 @@ public:
   /// Backs rows [0, rows) of every segment now. Rows past the shape clamp.
   /// Lock-free when they are already backed.
   [[nodiscard]] bool Ensure(std::size_t rows, std::string* error = nullptr);
-  /// Asks the pool thread to back rows [0, rows). Returns at once.
+  /// Ensure() for map-ahead: backs at most AheadLimit(rows), read under the
+  /// region's lock, so a session trimmed meanwhile (TrimTo lowers the need
+  /// first) is not mapped again.
+  [[nodiscard]] bool EnsureAhead(std::size_t rows);
+  /// Asks the pool thread to back rows [0, rows). Returns at once. While
+  /// sessions share their state, only rows the account's need covers are
+  /// mapped ahead.
   void MapAhead(std::size_t rows);
+  /// `rows` clamped to what map-ahead may back: the session's need, which
+  /// may have fallen since a job was queued (a trimmed session).
+  [[nodiscard]] std::size_t AheadLimit(std::size_t rows) const;
+  /// Unmaps every page that rows [0, rows) of no segment use. Unmapping
+  /// waits for all in-flight GPU work on the device: call it only where
+  /// nothing reads or writes this region. Pages return to the pool.
+  void TrimTo(std::size_t rows);
 
 private:
   Region() = default;
   [[nodiscard]] bool MapPages(std::size_t rows, std::string* error);
+  /// Unmaps page `p`; requires mutex_.
+  void UnmapPage(std::size_t p);
   [[nodiscard]] std::size_t CoveredRows(std::size_t pages_end_bytes,
                                         std::size_t segment) const noexcept;
 
   std::shared_ptr<PagePool> pool_;
+  std::shared_ptr<StateAccount> account_;
+  std::size_t tokens_per_row_{1};
   RegionShape shape_{};
   std::size_t stride_{0};
   std::size_t bytes_{0};

@@ -259,6 +259,9 @@ class QwenGpuArena {
 public:
   /// Rows of one prompt pass, or the context when it is shorter.
   static constexpr std::uint32_t kMaxPromptBatch = 4096;
+  /// K/V rows backed past the frontier: tile-rounded attention reads and
+  /// the next steps' writes.
+  static constexpr std::size_t kKvTileRows = 2048;
 
   explicit QwenGpuArena(
       const core::ModelConfig& config, std::uint32_t max_context = 4096,
@@ -371,6 +374,16 @@ public:
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
   [[nodiscard]] static std::size_t RecurrentStateBytes(
       const core::ModelConfig& config, QwenExecutionPolicy policy);
+  /// Attention K/V bytes at `max_context`: the demand-mapped part of
+  /// EstimateMemoryUsage().
+  [[nodiscard]] static std::size_t KvBytes(const core::ModelConfig& config,
+                                           std::uint32_t max_context,
+                                           QwenExecutionPolicy policy);
+  /// The account of this arena's K/V region (shared session state, #715).
+  [[nodiscard]] const std::shared_ptr<gufo::mem::StateAccount>& state_account()
+      const noexcept {
+    return account_;
+  }
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       std::uint32_t valid_context) const;
@@ -399,6 +412,7 @@ private:
   [[nodiscard]] bool AllocateSsmReplayLog();
 
   core::ModelConfig config_;
+  std::shared_ptr<gufo::mem::StateAccount> account_;
   std::shared_ptr<gufo::mem::Region> kv_region_;
   std::uint32_t max_context_;
   std::uint32_t max_batch_;
@@ -585,6 +599,10 @@ public:
   [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
       const core::ModelConfig& config, std::uint32_t max_context,
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+  [[nodiscard]] const std::shared_ptr<gufo::mem::StateAccount>& state_account()
+      const noexcept {
+    return arena_.state_account();
+  }
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
   void SetCancellationCheck(std::function<bool()> check) {
     cancellation_check_ = std::move(check);

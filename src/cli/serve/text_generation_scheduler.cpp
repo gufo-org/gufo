@@ -27,6 +27,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
+#include "src/mem/ledger.hpp"
 #include "src/sched/policy.hpp"
 
 namespace gufo::server {
@@ -183,6 +184,12 @@ struct ScheduledRequest {
   std::optional<TextGenerationScheduler::Clock::time_point>
       publication_wait_start;
   bool publication_waiting{false};
+  // Shared session state (#715): the reservation admission holds for this
+  // request's tokens until its session claims them, and its wait for them.
+  // Only the scheduler thread touches these.
+  std::optional<TextRunnerPool::StateTicket> state_ticket;
+  bool memory_waiting{false};
+  std::optional<TextGenerationScheduler::Clock::time_point> memory_wait_start;
   /// Set once the prompt-state charge is returned, either when the request
   /// reaches terminal or by the destructor if it never did.
   bool prompt_released{false};
@@ -1241,7 +1248,7 @@ struct TextGenerationScheduler::Impl {
     const auto released =
         std::ranges::find_if(waiting, [](const auto& request) {
           return request->prefix_leader == nullptr &&
-                 !request->publication_waiting;
+                 !request->publication_waiting && !request->memory_waiting;
         });
     if (released == waiting.end())
       return {};
@@ -1250,12 +1257,154 @@ struct TextGenerationScheduler::Impl {
     return request;
   }
 
+  // Shared session state (#715). A decoding request claims more tokens when
+  // fewer than this many remain of its claim: more than a few decode rounds
+  // between two checks.
+  static constexpr std::size_t kStateLeadTokens = 1024;
+
+  /// Reserves the tokens `request` claims at admission, reclaiming idle
+  /// sessions' state when short. False when they do not fit now; throws
+  /// for a request that can never fit.
+  [[nodiscard]] bool ReserveState(
+      const std::shared_ptr<ScheduledRequest>& request) {
+    if (request->state_ticket)
+      return true;
+    const auto tokens = runner_pool->StateClaimTokens(request->prompt.size(),
+                                                      request->token_limit);
+    if (!tokens)
+      throw TextGenerationError(
+          TextGenerationErrorCode::kInsufficientMemoryPermanent,
+          "prompt has " + std::to_string(request->prompt.size()) +
+              " tokens but the shared session state holds at most " +
+              std::to_string(runner_pool->MaxPromptTokens()));
+    auto ticket = runner_pool->ReserveState(*tokens, request->prompt,
+                                            request->prompt_context.get());
+    if (!ticket)
+      return false;
+    request->state_ticket = std::move(*ticket);
+    return true;
+  }
+
+  static void LogStateWait(const ScheduledRequest& request,
+                           std::string_view event) {
+    std::ostringstream line;
+    line << "event=" << event << " request=" << request.id << " prompt_tokens="
+         << (request.runner_request ? request.runner_request.prompt_tokens()
+                                    : request.prompt.size())
+         << " generated_tokens=" << request.result.tokens.size()
+         << " chargeable_bytes="
+         << mem::StateLedger::Process().ChargeableBytes();
+    if (request.memory_wait_start)
+      line << " wait_ms="
+           << std::chrono::duration<double, std::milli>(
+                  Clock::now() - *request.memory_wait_start)
+                  .count();
+    Logger::Info("memory", line.str());
+  }
+
+  /// Gives memory waiters their state in arrival order: a later one never
+  /// passes the oldest, so a long prompt is not starved by short ones. They
+  /// wait as requests wait for a session, until their deadline: state frees
+  /// as running requests end, and a waiter fits once nothing else runs
+  /// (Submit refuses one that never would).
+  void UpdateMemoryWaiters(
+      std::deque<std::shared_ptr<ScheduledRequest>>& waiting) {
+    for (auto it = waiting.begin(); it != waiting.end();) {
+      const auto request = *it;
+      if (!request->memory_waiting || IsTerminal(request)) {
+        ++it;
+        continue;
+      }
+      try {
+        if (ReserveState(request)) {
+          LogStateWait(*request, "state_wait_end");
+          request->memory_waiting = false;
+          ++it;
+          continue;
+        }
+        return;
+      } catch (...) {
+        CompleteFailure(request, std::current_exception());
+        it = waiting.erase(it);
+      }
+    }
+  }
+
+  /// Keeps each decoding request's claim ahead of its position. A request
+  /// whose claim cannot grow, even after reclaiming idle sessions' state,
+  /// pauses in `paused` until state frees; paused requests resume first.
+  void ExtendDecodeState(
+      std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
+      std::deque<std::shared_ptr<ScheduledRequest>>& paused) {
+    const std::size_t context = runner_pool->runner().Descriptor().max_context;
+    const auto extend = [&](const std::shared_ptr<ScheduledRequest>& request) {
+      const auto account = request->runner_request.state_account();
+      if (!account)
+        return true;
+      const std::size_t prompt = request->runner_request.prompt_tokens();
+      const std::size_t position = prompt + request->result.tokens.size();
+      // Where this request ends: its token limit, or the context.
+      const std::size_t end = std::min(context, prompt + request->token_limit);
+      const std::size_t need = account->need_tokens();
+      if (need >= end || need >= position + kStateLeadTokens)
+        return true;
+      return runner_pool->ExtendState(
+          request->runner_request,
+          std::min(end, position + TextRunnerPool::kStateDecodeTokens));
+    };
+    for (auto it = paused.begin(); it != paused.end();) {
+      if (CompleteIfStopped(*it)) {
+        it = paused.erase(it);
+        continue;
+      }
+      if (extend(*it)) {
+        LogStateWait(**it, "state_resumed");
+        (*it)->memory_wait_start.reset();
+        (*it)->decode_due = true;
+        decoding.push_back(std::move(*it));
+        it = paused.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    for (auto it = decoding.begin(); it != decoding.end();) {
+      if (extend(*it)) {
+        ++it;
+        continue;
+      }
+      (*it)->memory_wait_start = Clock::now();
+      state_pauses.fetch_add(1, std::memory_order_relaxed);
+      LogStateWait(**it, "state_paused");
+      paused.push_back(std::move(*it));
+      it = decoding.erase(it);
+    }
+  }
+
+  /// When every running request is paused for state, none can free any:
+  /// stop the most recently admitted one, retryably, so the others continue.
+  void PreemptForState(std::deque<std::shared_ptr<ScheduledRequest>>& paused) {
+    const auto youngest = std::ranges::max_element(
+        paused, {}, [](const auto& request) { return request->id; });
+    auto request = std::move(*youngest);
+    paused.erase(youngest);
+    state_preemptions.fetch_add(1, std::memory_order_relaxed);
+    LogStateWait(*request, "state_preempted");
+    CompleteFailure(request,
+                    std::make_exception_ptr(TextGenerationError(
+                        TextGenerationErrorCode::kMemoryPressure,
+                        "stopped to free shared session state for older "
+                        "requests")));
+  }
+
   void Admit(std::deque<std::shared_ptr<ScheduledRequest>>& prefilling,
              std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
              std::deque<std::shared_ptr<ScheduledRequest>>& capturing,
              std::deque<std::shared_ptr<ScheduledRequest>>& waiting,
              const std::stop_token& stop_token) {
     UpdateWaiting(waiting);
+    const bool shared_state = runner_pool->shared_state();
+    if (shared_state)
+      UpdateMemoryWaiters(waiting);
     const std::array<const std::deque<std::shared_ptr<ScheduledRequest>>*, 2>
         residents{&prefilling, &capturing};
     // Captures retain their runner lease until decoding resumes.
@@ -1301,6 +1450,22 @@ struct TextGenerationScheduler::Impl {
           }
         }
 
+        // Shared session state: reserve the tokens this request may write,
+        // or wait behind earlier waiters until they fit.
+        if (shared_state && !request->state_ticket) {
+          const bool behind = std::ranges::any_of(
+              waiting,
+              [](const auto& waiter) { return waiter->memory_waiting; });
+          if (behind || !ReserveState(request)) {
+            request->memory_waiting = true;
+            request->memory_wait_start = Clock::now();
+            state_waits.fetch_add(1, std::memory_order_relaxed);
+            LogStateWait(*request, "state_wait");
+            waiting.push_back(std::move(request));
+            continue;
+          }
+        }
+
         const std::weak_ptr<ScheduledRequest> weak_request = request;
         request->runner_request = runner_pool->Acquire(
             std::move(request->prompt), request->sampling,
@@ -1312,7 +1477,10 @@ struct TextGenerationScheduler::Impl {
             },
             std::move(request->prompt_context), request->cache_prompt,
             request->cache_prefix_tokens, request->stop_at_eos,
-            request->cache_persist);
+            request->cache_persist,
+            request->state_ticket ? &*request->state_ticket : nullptr);
+        // What the session did not claim returns to the budget.
+        request->state_ticket.reset();
         // Each admission may restore or capture a checkpoint of its own.
         progress.fetch_add(1, std::memory_order_relaxed);
         if (!request->runner_request) {
@@ -2152,8 +2320,12 @@ struct TextGenerationScheduler::Impl {
     std::deque<std::shared_ptr<ScheduledRequest>> prefilling;
     std::deque<std::shared_ptr<ScheduledRequest>> decoding;
     std::deque<std::shared_ptr<ScheduledRequest>> capturing;
-    // Cold requests waiting for a resident prefill of their shared prefix.
+    // Cold requests waiting for a resident prefill of their shared prefix,
+    // and requests waiting for shared session state (#715).
     std::deque<std::shared_ptr<ScheduledRequest>> waiting;
+    // Decoding requests whose shared state cannot grow yet (#715).
+    std::deque<std::shared_ptr<ScheduledRequest>> paused;
+    const bool shared_state = runner_pool->shared_state();
     while (!stop_token.stop_requested()) {
       if (device_lost.load(std::memory_order_acquire))
         break;
@@ -2161,9 +2333,18 @@ struct TextGenerationScheduler::Impl {
       ProcessQueuedCancellations();
 
       ResumeCaptured(capturing, decoding, &prefilling);
+      // Running requests keep their state before new ones take any.
+      if (shared_state)
+        ExtendDecodeState(decoding, paused);
       Admit(prefilling, decoding, capturing, waiting, stop_token);
       if (device_lost.load(std::memory_order_acquire))
         break;
+      if (!paused.empty() && prefilling.empty() && decoding.empty() &&
+          capturing.empty()) {
+        PreemptForState(paused);
+        progress.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
       if (prefilling.empty() && decoding.empty()) {
         std::unique_lock<std::mutex> lock(queue_mutex);
         const auto wake = [&] {
@@ -2260,6 +2441,8 @@ struct TextGenerationScheduler::Impl {
     }
     for (auto& request : capturing)
       decoding.push_back(std::move(request));
+    for (auto& request : paused)
+      decoding.push_back(std::move(request));
     CancelRemaining(prefilling, decoding, waiting);
   }
 
@@ -2304,6 +2487,10 @@ struct TextGenerationScheduler::Impl {
   // completes makes no progress.
   std::atomic<std::uint64_t> progress{0};
   std::atomic<bool> loop_working{false};
+  // Shared session state events (#715), for /metrics.
+  std::atomic<std::uint64_t> state_waits{0};
+  std::atomic<std::uint64_t> state_pauses{0};
+  std::atomic<std::uint64_t> state_preemptions{0};
   std::jthread worker;
   std::jthread stall_monitor;
 };
@@ -2521,6 +2708,23 @@ TextGenerationScheduler::PromptAdmissionBudgetSnapshot() const {
   };
 }
 
+std::optional<TextGenerationBackend::SharedState>
+TextGenerationScheduler::SharedStateSnapshot() const {
+  const auto& pool = *impl_->runner_pool;
+  if (!pool.shared_state())
+    return std::nullopt;
+  const auto& ledger = mem::StateLedger::Process();
+  return TextGenerationBackend::SharedState{
+      .max_prompt_tokens = pool.MaxPromptTokens(),
+      .shared_bytes = ledger.PromiseCap(),
+      .charged_bytes = ledger.ChargedBytes(),
+      .reclaimable_bytes = pool.ReclaimableStateBytes(),
+      .waits = impl_->state_waits.load(std::memory_order_relaxed),
+      .pauses = impl_->state_pauses.load(std::memory_order_relaxed),
+      .preemptions = impl_->state_preemptions.load(std::memory_order_relaxed),
+  };
+}
+
 TextGenerationScheduler::Request TextGenerationScheduler::Submit(
     std::vector<TextRunnerToken> prompt, std::size_t max_tokens,
     const sampling::SamplingConfig& sampling,
@@ -2591,6 +2795,19 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->stop_at_eos = metadata.stop_at_eos;
   request->token_limit =
       max_tokens > 0 ? std::min(max_tokens, available) : available;
+  // Shared session state (#715): a request ends where the shared state ends,
+  // as at the context; one that cannot hold its prompt is refused for good.
+  if (impl_->runner_pool->shared_state()) {
+    const std::size_t max_prompt = impl_->runner_pool->MaxPromptTokens();
+    if (request->prompt.size() > max_prompt)
+      throw TextGenerationError(
+          TextGenerationErrorCode::kInsufficientMemoryPermanent,
+          "prompt has " + std::to_string(request->prompt.size()) +
+              " tokens but the shared session state holds at most " +
+              std::to_string(max_prompt));
+    request->token_limit =
+        std::min(request->token_limit, max_prompt + 1 - request->prompt.size());
+  }
   request->sampling = sampling;
   request->external_cancellation = is_cancelled;
   request->publish_token_pieces = publish_token_pieces;

@@ -400,6 +400,18 @@ std::vector<InferenceBackend::SessionState> InferenceBackend::session_states()
 #endif
 }
 
+std::optional<InferenceBackend::SharedState> InferenceBackend::shared_state()
+    const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr)
+    return std::nullopt;
+  return state->scheduler->SharedStateSnapshot();
+#else
+  return std::nullopt;
+#endif
+}
+
 std::optional<InferenceBackend::PromptAdmissionBudget>
 InferenceBackend::prompt_admission_budget() const {
 #if defined(ENGINE_ENABLE_HIP)

@@ -11,6 +11,7 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -36,6 +37,8 @@
 #include "src/core/json.hpp"
 #include "src/core/platform/env.hpp"
 #include "src/core/platform/os_info.hpp"
+#include "src/mem/account.hpp"
+#include "src/mem/ledger.hpp"
 #include "tests/cache/fake_adapter.hpp"
 #include "tests/cli/fake_cache_resources.hpp"
 
@@ -260,10 +263,44 @@ struct FakeControl {
   // Requests share nothing unless asked; a capture observer implies it.
   bool snapshots{false};
   std::function<void()> snapshot_callback;
+  // Shared session state (#715): with `shared_full_sessions`, sessions keep
+  // demand-mapped state of kFakeStateRowBytes per token in accounts, and
+  // the runner's capacity holds that many sessions at full context beside
+  // `shared_fixed_bytes` of fixed state each.
+  std::optional<std::size_t> shared_full_sessions;
+  std::size_t shared_fixed_bytes{0};
+  std::mutex accounts_mutex;
+  std::map<const void*, std::shared_ptr<gufo::mem::StateAccount>> accounts;
+  std::shared_ptr<gufo::mem::StateAccount> AccountFor(const void* slot);
   [[nodiscard]] bool Retains() const {
     return snapshots || bool(snapshot_callback);
   }
 };
+
+// 1,024 tokens per 2 MiB page.
+constexpr std::size_t kFakeStateRowBytes = gufo::mem::kPageBytes / 1024;
+
+std::shared_ptr<gufo::mem::StateAccount> FakeControl::AccountFor(
+    const void* slot) {
+  if (!shared_full_sessions)
+    return nullptr;
+  const std::lock_guard lock(accounts_mutex);
+  auto& account = accounts[slot];
+  if (!account) {
+    account = std::make_shared<gufo::mem::StateAccount>();
+    const gufo::mem::RegionShape shape{.row_bytes = kFakeStateRowBytes,
+                                       .rows = max_context};
+    // Trimming unmaps what the rows no longer need, as a region does.
+    account->AddRegion(
+        shape, 1, [raw = account.get(), shape](std::size_t rows) {
+          const auto keep = gufo::mem::RegionPageBytes(shape, rows);
+          const auto mapped = raw->mapped_bytes();
+          if (mapped > keep)
+            raw->OnUnmap(mapped - keep);
+        });
+  }
+  return account;
+}
 
 // What a checkpoint restores besides the adapter's rows.
 struct FakeFrontier {
@@ -315,9 +352,24 @@ public:
     (void)adapter.Invalidate(slot);
     static_cast<FakeFrontier&>(*this) = {};
   }
+  [[nodiscard]] std::shared_ptr<gufo::mem::StateAccount> state_account()
+      const override {
+    return account;
+  }
+  // Maps the rows the position reached, as a model's write choke point
+  // does: past what the shared budget allows it fails.
+  void MapRows() const {
+    if (!account)
+      return;
+    const auto target = account->BytesFor(position);
+    const auto mapped = account->mapped_bytes();
+    if (target > mapped && !account->OnMap(target - mapped))
+      throw std::runtime_error("state memory exhausted");
+  }
 
   gufo::cache::testing::FakeAdapter& adapter;
   gufo::cache::Slot& slot;
+  std::shared_ptr<gufo::mem::StateAccount> account;
 };
 
 FakeState& RequireFakeState(TextRunnerState& state) {
@@ -368,6 +420,19 @@ public:
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    if (control_->shared_full_sessions) {
+      const std::size_t demand = control_->max_context * kFakeStateRowBytes;
+      const std::size_t session = demand + control_->shared_fixed_bytes;
+      return {
+          .resident_weights_bytes = 0,
+          .state_capacity_bytes = *control_->shared_full_sessions * session,
+          .per_request_state_bytes = session,
+          .temporary_scratch_bytes = 0,
+          .retained_snapshot_capacity_bytes = 1U << 25,
+          .requires_device_runtime_lock = true,
+          .demand_mapped_state_bytes = demand,
+      };
+    }
     return {
         .resident_weights_bytes = 0,
         .state_capacity_bytes = 8 * 64,
@@ -451,6 +516,7 @@ public:
       gufo::cache::Adapter& adapter, gufo::cache::Slot& slot) const override {
     auto state = std::make_unique<FakeState>(
         dynamic_cast<gufo::cache::testing::FakeAdapter&>(adapter), slot);
+    state->account = control_->AccountFor(&slot);
     Recall(*state);
     return state;
   }
@@ -519,6 +585,7 @@ public:
     const auto rows = prompt.subspan(offset, consumed);
     fake.adapter.Append(fake.slot, rows, rows);
     fake.position += consumed;
+    fake.MapRows();
     const bool ready = fake.position == prompt.size();
     if (ready) {
       fake.frontier = fake.label * 100;
@@ -606,6 +673,7 @@ public:
 
     fake.adapter.Append(fake.slot, {&token, 1}, {&token, 1});
     ++fake.position;
+    fake.MapRows();
     ++fake.decode_count;
     fake.frontier = token + 1;
     Remember(fake);
@@ -3724,6 +3792,102 @@ void TestReasoningTokenCount() {
   Expect(count({}, State::kThought) == 0, "no output counts nothing");
 }
 
+std::vector<TextRunnerToken> LabeledPrompt(TextRunnerToken label,
+                                           std::size_t tokens) {
+  std::vector<TextRunnerToken> prompt(tokens, 7);
+  prompt.front() = label;
+  return prompt;
+}
+
+// Shared session state (#715): four sessions share what two hold at full
+// context. Requests past it wait in arrival order, and run as earlier ones
+// end and their state is reclaimed.
+void TestSharedStateWaitsInOrder() {
+  constexpr std::size_t kPage = gufo::mem::kPageBytes;
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 16384;  // 16 pages at full context
+  control->shared_full_sessions = 2;
+  auto scheduler = MakeScheduler(control, 4);
+  const auto shared = scheduler->SharedStateSnapshot();
+  Expect(shared && shared->shared_bytes == 32 * kPage &&
+             shared->max_prompt_tokens == 16383,
+         "four sessions share two full contexts of state");
+
+  // Hold the scheduler in a small prefill while the others queue.
+  control->block_prefill_label = 1;
+  auto hold = scheduler->Submit({1, 2}, 1, 0.0F);
+  control->WaitForPrefill(1);
+  // 13 pages each: two fit beside the held request, the third waits, and a
+  // small request behind it waits too: none passes the oldest waiter.
+  auto a = scheduler->Submit(LabeledPrompt(10, 13000), 1, 0.0F);
+  auto b = scheduler->Submit(LabeledPrompt(11, 13000), 1, 0.0F);
+  auto c = scheduler->Submit(LabeledPrompt(12, 13000), 1, 0.0F);
+  auto d = scheduler->Submit(LabeledPrompt(13, 100), 1, 0.0F);
+  control->ReleasePrefill();
+  for (auto* request : {&hold, &a, &b, &c, &d}) {
+    const auto result = request->Wait();
+    Expect(!result.cancelled && result.tokens.size() == 1,
+           "every request runs once state frees");
+  }
+  const auto events = control->Events();
+  const auto prefill = [&](TextRunnerToken label) {
+    return EventIndex(events, EventKind::kPrefill, label);
+  };
+  const auto advance = [&](TextRunnerToken label) {
+    return EventIndex(events, EventKind::kAdvance, label);
+  };
+  Expect(prefill(12) > std::min(advance(10), advance(11)),
+         "the third long prompt waits until an earlier one ends");
+  Expect(prefill(13) > prefill(12),
+         "a short prompt does not pass the waiting long one");
+  const auto after = scheduler->SharedStateSnapshot();
+  Expect(after && after->waits >= 2 && after->preemptions == 0,
+         "waits are counted");
+  scheduler.reset();
+  control->accounts.clear();
+  Expect(gufo::mem::StateLedger::Process().ChargedBytes() == 0 &&
+             gufo::mem::StateLedger::Process().PromiseCap() == 0,
+         "sessions return their charges and the cap ends with the pool");
+}
+
+// Two requests that each decode to the end of the context need more than
+// the shared state: one pauses until the other cannot grow either, then the
+// most recently admitted is stopped with memory_pressure and the older one
+// finishes.
+void TestSharedStatePausesThenPreempts() {
+  constexpr std::size_t kPage = gufo::mem::kPageBytes;
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 32768;  // 32 pages at full context
+  control->shared_fixed_bytes = 8 * kPage;
+  control->shared_full_sessions = 2;
+  auto scheduler = MakeScheduler(control, 4);
+  const auto shared = scheduler->SharedStateSnapshot();
+  // Two sessions of 40 pages, less four sessions' fixed 8.
+  Expect(shared && shared->shared_bytes == 48 * kPage,
+         "fixed state of every session comes out of the shared state");
+  control->block_prefill_label = 1;
+  auto hold = scheduler->Submit({1, 2}, 1, 0.0F);
+  control->WaitForPrefill(1);
+  auto older = scheduler->Submit(LabeledPrompt(20, 1000), 0, 0.0F);
+  auto younger = scheduler->Submit(LabeledPrompt(21, 1000), 0, 0.0F);
+  control->ReleasePrefill();
+  (void)hold.Wait();
+  const auto first = older.Wait();
+  Expect(!first.cancelled && first.tokens.size() == 32768 - 1000,
+         "the older request decodes to the end of the context");
+  bool preempted = false;
+  try {
+    (void)younger.Wait();
+  } catch (const TextGenerationError& error) {
+    preempted = error.code() == TextGenerationErrorCode::kMemoryPressure &&
+                error.http_status() == 503 && error.retryable();
+  }
+  Expect(preempted, "the younger request stops retryably with memory_pressure");
+  const auto after = scheduler->SharedStateSnapshot();
+  Expect(after && after->pauses >= 2 && after->preemptions == 1,
+         "both requests paused before one was stopped");
+}
+
 void TestPromptStateAdmissionBudget() {
   auto control = std::make_shared<FakeControl>();
   control->max_context = 256;
@@ -3964,6 +4128,8 @@ int main() {
   TestFinishedCaptureRejoinsYields();
   TestPendingLimitsRejectBeforeStateAdmission();
   TestZeroPendingLimitsAdmitOnlyFreeSessions();
+  TestSharedStateWaitsInOrder();
+  TestSharedStatePausesThenPreempts();
   TestPromptStateAdmissionBudget();
   TestPromptAdmissionTracksLiveHeadroom();
   TestPromptAdmissionRollsBackFailedEnqueue();

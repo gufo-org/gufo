@@ -390,11 +390,12 @@ void PagePool::Run() {
         // region now never waits for the whole window.
         const std::size_t step = std::max<std::size_t>(
             1, 4 * kPageBytes / region->shape().row_bytes);
-        for (std::size_t rows = region->backed_rows(); rows < job.rows;) {
+        for (std::size_t rows = region->backed_rows();
+             rows < region->AheadLimit(job.rows);) {
           // Below the floor, take the cache's borrowed pages before Ensure
           // would create new ones from compaction.
           BorrowBelowFloor(4 * region->shape().segments);
-          if (!region->Ensure(std::min(job.rows, rows + step)))
+          if (!region->EnsureAhead(std::min(job.rows, rows + step)))
             break;
           rows = region->backed_rows();
         }

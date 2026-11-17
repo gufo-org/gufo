@@ -141,5 +141,6 @@ src/ext/text.hpp
 src/ext/text_contracts.hpp
 src/ext/tts.hpp
 src/ext/video.hpp
+src/mem/account.hpp
 src/mem/ledger.hpp
 src/sched/profile.hpp

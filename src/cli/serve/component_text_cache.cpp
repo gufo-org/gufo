@@ -245,7 +245,58 @@ struct ComponentTextCache::Impl {
     bool busy{};
     bool frontier_active{};
     std::thread frontier_worker;
+    // The session's shared-state account, when sessions share their
+    // demand-mapped state (#715).
+    std::shared_ptr<mem::StateAccount> account;
+    // Disk writes that read this session's rows in place (Observe): the
+    // tokens each covers and when it was captured. Until a write finishes,
+    // reclaim keeps those rows mapped and drops the frontier last.
+    struct ObservedWrite {
+      std::weak_ptr<cache::BorrowedRows> rows;
+      std::size_t tokens{};
+      Clock::time_point captured;
+    };
+    std::vector<ObservedWrite> observed;
   };
+  // Disk writes still reading an entry's rows in place: the deepest one's
+  // tokens and when the oldest was captured. Forgets finished and retired
+  // writes. Requires mutex.
+  struct PendingWrites {
+    std::size_t tokens{};
+    std::optional<Clock::time_point> since;
+  };
+  static PendingWrites ObservedWrites(Entry& e) {
+    PendingWrites writes;
+    std::erase_if(e.observed, [&](const Entry::ObservedWrite& write) {
+      const auto rows = write.rows.lock();
+      if (!rows || !rows->IsValid())
+        return true;
+      writes.tokens = std::max(writes.tokens, write.tokens);
+      writes.since = writes.since ? std::min(*writes.since, write.captured)
+                                  : write.captured;
+      return false;
+    });
+    return writes;
+  }
+  // A frontier far beyond every checkpoint of its prompt is the only copy of
+  // that work. Requires mutex.
+  static constexpr std::size_t kUncoveredTokens = 4096;
+  bool Uncovered(const Entry& e) const {
+    if (!e.live || e.live_tokens.size() <= kUncoveredTokens)
+      return false;
+    return !index.HasCheckpoint(
+        {identity, e.live_tokens,
+         cache::InputIdentity(e.live_tokens.size(), e.live_input)},
+        e.live_tokens.size() - kUncoveredTokens);
+  }
+  // Order in which idle slots give up what they hold, cheapest first: no
+  // uncovered frontier, completed preservation, no live frontier, a shallow
+  // one, then the least recently used. Requires mutex.
+  using Rank = std::tuple<bool, bool, bool, bool, std::uint64_t>;
+  Rank ColdRank(const Entry& e) const {
+    return Rank{Uncovered(e), !e.slot->PreservationComplete(), bool(e.live),
+                e.live_tokens.size() >= kUncoveredTokens, e.used};
+  }
   std::shared_ptr<TextModelRunner> runner;
   cache::ResourceLedger ledger;
   std::unique_ptr<ComponentCacheResources> resources;
@@ -361,6 +412,17 @@ struct ComponentTextCache::Impl {
                                  resources->reassignment_batch_size});
       entries.push_back(std::move(entry));
     }
+    // Sessions that share their demand-mapped state (#715): learn each
+    // session's account now, so admission can size and reclaim state before
+    // a slot is chosen. Leasing an unused slot only creates it.
+    if (mem::StateLedger::Process().PromiseCap() != 0)
+      for (auto& entry : entries) {
+        auto lease = entry->slot->Acquire();
+        entry->account =
+            this->runner
+                ->BindComponentState(*resources->adapter, lease.Execution())
+                ->state_account();
+      }
     std::size_t automatic_bytes{}, max_bytes{}, slot_pinned_bytes{};
     std::size_t owned_manifest_bytes{};
     // RAM cache limit for a runner that pins its slots; computed before the
@@ -911,10 +973,14 @@ struct ComponentTextCache::Impl {
   std::size_t Persist(std::shared_ptr<DurableCapture> capture) {
     if (capture->sources.empty())
       return 0;
+    // A refused capture lets go of its sources at once: rows it observes
+    // in place would otherwise read as a pending write.
     if (WithinDiskStep(capture->manifest.tokens, capture->manifest.input) &&
         capture->manifest.purpose != cache::CheckpointPurpose::kLearned &&
-        capture->manifest.purpose != cache::CheckpointPurpose::kGenerated)
+        capture->manifest.purpose != cache::CheckpointPurpose::kGenerated) {
+      capture->sources.clear();
       return 0;
+    }
     auto job = cache::PersistenceJob(
         ledger, File(1, capture->manifest.checkpoint.value), capture->manifest,
         std::move(capture->sources));
@@ -923,8 +989,10 @@ struct ComponentTextCache::Impl {
       const std::lock_guard lock(mutex);
       const auto position =
           std::find(pending_durable.begin(), pending_durable.end(), nullptr);
-      if (position == pending_durable.end())
+      if (position == pending_durable.end()) {
+        capture->sources.clear();
         return 0;
+      }
       pending_slot = position - pending_durable.begin();
       *position = capture;
     }
@@ -962,6 +1030,13 @@ struct ComponentTextCache::Lease::Impl {
   std::vector<std::size_t> reply_starts, reply_ends;
   ContinuationLookup lookup_result;
   ComponentCacheMetrics metrics;
+  // The session's shared-state account; its need returns to the live
+  // frontier (or nothing) when the lease ends.
+  std::shared_ptr<mem::StateAccount> account;
+  ~Impl() {
+    if (active && account)
+      (void)account->SetNeed(0);
+  }
   Impl(ComponentTextCache::Impl* cache, ComponentTextCache::Impl::Entry* entry,
        cache::SlotLease&& slot, std::span<const cache::Token> prompt,
        cache::InputIdentity input, std::size_t stable)
@@ -1081,6 +1156,7 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
   durable->sources.reserve(pieces);
   std::vector<Copy> copies;
   copies.reserve(pieces);
+  std::vector<std::shared_ptr<cache::BorrowedRows>> observed;
   for (const auto& d : descriptors) {
     const auto p =
         std::ranges::find(positions, d.id, &cache::ComponentPosition::id);
@@ -1117,8 +1193,10 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
       if (inherited != completed) {
         auto view = cache->resources->adapter->BorrowRowsView(
             slot.Execution(), d.id, inherited, completed);
-        if (!view.empty())
+        if (!view.empty()) {
           rows = slot.Observe(d.id, inherited, completed, view);
+          observed.push_back(rows);
+        }
       }
       component.chunks.reserve((completed - start) / d.rows_per_chunk);
     }
@@ -1249,6 +1327,13 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
   }
   ++metrics.captures;
   metrics.captured_checkpoint_ids.push_back(durable->manifest.checkpoint.value);
+  if (!observed.empty()) {
+    const std::lock_guard lock(cache->mutex);
+    (void)ComponentTextCache::Impl::ObservedWrites(*entry);
+    for (auto& rows : observed)
+      entry->observed.push_back(
+          {std::move(rows), capture_tokens.size(), Clock::now()});
+  }
   auto snapshot = std::make_unique<ComponentSnapshot>();
   snapshot->bytes = entry->history->NewPayloadBytes(positions);
   snapshot->durable = std::move(durable);
@@ -1274,7 +1359,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     std::span<const ContinuationToken> prompt,
     const std::function<bool()>& cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse,
-    std::size_t stable, bool stop_at_eos, bool persist) {
+    std::size_t stable, bool stop_at_eos, bool persist,
+    std::size_t state_tokens, mem::StateReservation* reservation) {
   if (cancelled && cancelled())
     return {};
   auto input = Inputs(prompt.size(), context.get());
@@ -1318,19 +1404,10 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       // shallow frontier before a deep one, then the least recently used.
       // Faster idle preservation must not make short side requests evict a
       // deep conversation merely because its backing copy finished earlier.
-      constexpr std::size_t kUncoveredTokens = 4096;
-      const auto uncovered = [&](const Impl::Entry& e) {
-        if (!e.live || e.live_tokens.size() <= kUncoveredTokens)
-          return false;
-        return !impl_->index.HasCheckpoint(
-            {impl_->identity, e.live_tokens,
-             cache::InputIdentity(e.live_tokens.size(), e.live_input)},
-            e.live_tokens.size() - kUncoveredTokens);
-      };
-      using Rank = std::tuple<bool, bool, bool, bool, std::uint64_t>;
+      constexpr std::size_t kUncoveredTokens = Impl::kUncoveredTokens;
+      using Rank = Impl::Rank;
       const auto rank = [&](const Impl::Entry& e) {
-        return Rank{uncovered(e), !e.slot->PreservationComplete(), bool(e.live),
-                    e.live_tokens.size() >= kUncoveredTokens, e.used};
+        return impl_->ColdRank(e);
       };
       std::optional<Rank> selected_rank;
       for (auto& candidate : impl_->entries) {
@@ -1426,6 +1503,16 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
         impl_.get(), entry, std::move(slot), prompt, input, stable));
     auto& request = *lease->impl_;
     request.persist = persist;
+    // Claim the request's tokens before a restore or prefill writes them.
+    // An older frontier's need falls to them; its pages past them stay
+    // charged until reclaimed.
+    if (state_tokens != 0)
+      if (auto account = request.state->state_account()) {
+        request.account = account;
+        if (!account->Claim(state_tokens, reservation))
+          throw StateMemoryShort();
+        (void)account->SetNeed(state_tokens);
+      }
     request.state->SetCancellationCheck(cancelled);
     request.state->SetStopAtEos(stop_at_eos);
     impl_->runner->SetPromptContext(*request.state, context);
@@ -2454,6 +2541,9 @@ std::size_t ComponentTextCache::Lease::Commit(
       ends.push_back(live.size());
     }
     impl_->entry->live_tokens = live;
+    // The idle session keeps its frontier's pages.
+    if (impl_->account)
+      (void)impl_->account->SetNeed(live.size());
     impl_->entry->live_input = At(impl_->input, impl_->prompt.size());
     impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
         location, std::move(live), impl_->cache->identity,
@@ -2525,6 +2615,8 @@ void ComponentTextCache::Lease::Invalidate() noexcept {
   try {
     impl_->state->SetCancellationCheck({});
     impl_->slot = {};
+    if (impl_->account)
+      (void)impl_->account->SetNeed(0);
     impl_->entry->history.reset();
     const std::lock_guard lock(impl_->cache->mutex);
     impl_->entry->branch.reset();
@@ -2585,6 +2677,187 @@ ComponentCacheMetrics ComponentTextCache::Lease::Metrics() const {
     report.spill.idle_failures += spill.idle_failures;
   }
   return report;
+}
+
+bool ComponentTextCache::shared_state() const noexcept {
+  return mem::StateLedger::Process().PromiseCap() != 0 &&
+         std::ranges::any_of(impl_->entries,
+                             [](const auto& e) { return bool(e->account); });
+}
+
+std::size_t ComponentTextCache::StateBytesFor(std::size_t tokens) const {
+  if (!shared_state())
+    return 0;
+  for (const auto& entry : impl_->entries)
+    if (entry->account)
+      return entry->account->BytesFor(tokens);
+  return 0;
+}
+
+std::size_t ComponentTextCache::ReclaimableStateBytes() const {
+  if (!shared_state())
+    return 0;
+  const std::lock_guard lock(impl_->mutex);
+  std::size_t bytes = 0;
+  for (const auto& entry : impl_->entries)
+    if (entry->account)
+      bytes += entry->busy ? entry->account->tail_bytes()
+                           : entry->account->charged_bytes();
+  return bytes;
+}
+
+bool ComponentTextCache::ReclaimState(std::size_t bytes,
+                                      std::span<const ContinuationToken> prompt,
+                                      const TextPromptContext* context,
+                                      std::chrono::milliseconds write_wait) {
+  auto& ledger = mem::StateLedger::Process();
+  if (!shared_state() || ledger.ChargeableBytes() >= bytes)
+    return true;
+  const auto start = Clock::now();
+  std::size_t tail_bytes = 0, frontier_bytes = 0, frontiers = 0;
+  // Frontiers kept for a disk write still reading them, and those dropped
+  // with their write after `write_wait`.
+  std::size_t deferred = 0, dropped_writes = 0;
+  // Where the time goes: unmapping waits for the device; reassigning a slot
+  // copies rows checkpoints still borrow from it.
+  double unmap_ms = 0, reassign_ms = 0;
+  const auto since = [](Clock::time_point t) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
+  };
+  const auto log = [&](bool enough) {
+    // Dropping a frontier with its disk write loses that checkpoint.
+    (dropped_writes != 0 ? Logger::Warn : Logger::Info)(
+        "memory",
+        "event=state_reclaimed needed_bytes=" + std::to_string(bytes) +
+            " tail_bytes=" + std::to_string(tail_bytes) +
+            " frontier_bytes=" + std::to_string(frontier_bytes) +
+            " frontiers=" + std::to_string(frontiers) +
+            " deferred_writes=" + std::to_string(deferred) +
+            " dropped_writes=" + std::to_string(dropped_writes) +
+            " reassign_ms=" + std::to_string(reassign_ms) +
+            " unmap_ms=" + std::to_string(unmap_ms) +
+            " chargeable_bytes=" + std::to_string(ledger.ChargeableBytes()) +
+            " enough=" + (enough ? "true" : "false") + " ms=" +
+            std::to_string(
+                std::chrono::duration<double, std::milli>(Clock::now() - start)
+                    .count()));
+  };
+  // 1. Pages mapped past each session's need: ahead mappings and an older,
+  // longer conversation's rows. No state is lost. Busy sessions have no
+  // work in flight here either, and their need covers what they write. A
+  // session without a live frontier may still lend rows past its need to
+  // checkpoints that have not copied them (an uncommitted release keeps
+  // them borrowed): those go through reassignment below, which preserves
+  // them first. A disk write that reads rows in place keeps them mapped
+  // until it finishes: unmapped, its later pieces would read pages mapped
+  // again, zeroed.
+  std::vector<std::pair<Impl::Entry*, std::size_t>> tails;
+  {
+    const std::lock_guard lock(impl_->mutex);
+    for (auto& entry : impl_->entries)
+      if (entry->account && (entry->busy || entry->live))
+        tails.emplace_back(entry.get(), Impl::ObservedWrites(*entry).tokens);
+  }
+  for (const auto& [entry, written] : tails) {
+    if (entry->account->tail_bytes() == 0)
+      continue;
+    const auto trim_start = Clock::now();
+    tail_bytes += entry->account->TrimTo(
+        std::max(entry->account->need_tokens(), written));
+    unmap_ms += since(trim_start);
+    if (ledger.ChargeableBytes() >= bytes) {
+      log(true);
+      return true;
+    }
+  }
+  // 2. Idle sessions' live frontiers, cheapest to lose first (the order
+  // cold admission takes slots in), never the frontier this prompt would
+  // continue. Reassigning the slot preserves checkpoints that borrow its
+  // rows before they go. A frontier a disk write still reads goes last:
+  // reassignment would fail that write, and with it the checkpoint that
+  // lets the conversation come back. Within `write_wait` of its capture it
+  // stays: the caller retries once the write has finished.
+  std::optional<std::size_t> keep;
+  struct Candidate {
+    Impl::Entry* entry;
+    std::optional<Clock::time_point> writing;
+  };
+  std::vector<Candidate> order;
+  {
+    const std::lock_guard lock(impl_->mutex);
+    const auto input = Inputs(prompt.size(), context);
+    const auto found =
+        impl_->index.Lookup({impl_->identity, prompt, input, prompt.size(),
+                             /*reuse=*/true});
+    if (found.selected && found.selected->live)
+      keep = found.selected->live->slot.value - 1;
+    for (std::size_t i = 0; i < impl_->entries.size(); ++i) {
+      auto& entry = *impl_->entries[i];
+      if (entry.busy || !entry.account || (keep && *keep == i) ||
+          entry.account->charged_bytes() == 0)
+        continue;
+      order.push_back({&entry, Impl::ObservedWrites(entry).since});
+    }
+    std::ranges::sort(order, [&](const auto& a, const auto& b) {
+      return std::pair(a.writing.has_value(), impl_->ColdRank(*a.entry)) <
+             std::pair(b.writing.has_value(), impl_->ColdRank(*b.entry));
+    });
+  }
+  const auto now = Clock::now();
+  for (const auto& [entry, writing] : order) {
+    if (writing && now - *writing < write_wait) {
+      ++deferred;
+      continue;
+    }
+    {
+      const std::lock_guard lock(impl_->mutex);
+      if (entry->busy)
+        continue;
+      if (writing && Impl::ObservedWrites(*entry).since)
+        ++dropped_writes;
+      entry->busy = true;
+      if (entry->live) {
+        impl_->index.Erase(*entry->live);
+        entry->live.reset();
+      }
+      entry->live_tokens.clear();
+      entry->reply_starts.clear();
+      entry->reply_ends.clear();
+      entry->branch = std::make_shared<const std::uint8_t>(0);
+      entry->durable.reset();
+    }
+    try {
+      if (entry->frontier_worker.joinable())
+        entry->frontier_worker.join();
+      const std::size_t charged = entry->account->charged_bytes();
+      {
+        const auto reassign_start = Clock::now();
+        auto lease = entry->slot->Acquire();
+        reassign_ms += since(reassign_start);
+        const auto trim_start = Clock::now();
+        entry->account->TrimTo(0);
+        unmap_ms += since(trim_start);
+      }
+      frontier_bytes += charged - entry->account->charged_bytes();
+      ++frontiers;
+    } catch (const std::exception& error) {
+      Logger::Warn("memory", std::string("event=state_reclaim_failed reason=") +
+                                 error.what());
+    }
+    {
+      const std::lock_guard lock(impl_->mutex);
+      entry->busy = false;
+    }
+    impl_->frontier_ready.notify_all();
+    if (ledger.ChargeableBytes() >= bytes) {
+      log(true);
+      return true;
+    }
+  }
+  // Nothing to free is the common case while requests wait: stay quiet.
+  if (tail_bytes != 0 || frontiers != 0)
+    log(false);
+  return false;
 }
 
 }  // namespace gufo::server

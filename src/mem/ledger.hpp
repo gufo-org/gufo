@@ -20,7 +20,8 @@ inline constexpr std::size_t kPageBytes = std::size_t{2} << 20;
 }
 
 struct StateMemoryTotals {
-  /// Bytes promised to state regions at their full size.
+  /// Bytes promised to state regions at their full size, at most the
+  /// promise cap.
   std::size_t reserved_bytes{0};
   /// Bytes of those regions backed by physical pages.
   std::size_t mapped_bytes{0};
@@ -85,9 +86,44 @@ public:
     return lending_.load(std::memory_order_relaxed);
   }
 
+  /// Caps the bytes sessions may charge (StateAccount), and the promise
+  /// every other budget sees, at `bytes`: set when more sessions are
+  /// configured at full context than fit (#715). Zero removes the cap.
+  void SetPromiseCap(std::size_t bytes) noexcept {
+    cap_.store(bytes, std::memory_order_relaxed);
+  }
+  [[nodiscard]] std::size_t PromiseCap() const noexcept {
+    return cap_.load(std::memory_order_relaxed);
+  }
+  /// Charges `bytes` to the sessions' total unless that passes the cap.
+  [[nodiscard]] bool TryCharge(std::size_t bytes) noexcept {
+    const std::size_t cap = cap_.load(std::memory_order_relaxed);
+    std::size_t current = charged_.load(std::memory_order_relaxed);
+    do {
+      if (cap != 0 && (current > cap || bytes > cap - current))
+        return false;
+    } while (!charged_.compare_exchange_weak(current, current + bytes,
+                                             std::memory_order_relaxed));
+    return true;
+  }
+  void Uncharge(std::size_t bytes) noexcept { Sub(charged_, bytes); }
+  [[nodiscard]] std::size_t ChargedBytes() const noexcept {
+    return charged_.load(std::memory_order_relaxed);
+  }
+  /// Bytes sessions may still charge; the maximum without a cap.
+  [[nodiscard]] std::size_t ChargeableBytes() const noexcept {
+    const std::size_t cap = cap_.load(std::memory_order_relaxed);
+    if (cap == 0)
+      return static_cast<std::size_t>(-1);
+    const std::size_t charged = charged_.load(std::memory_order_relaxed);
+    return cap > charged ? cap - charged : 0;
+  }
+
   [[nodiscard]] StateMemoryTotals Totals() const noexcept {
+    const std::size_t cap = cap_.load(std::memory_order_relaxed);
+    const std::size_t reserved = reserved_.load(std::memory_order_relaxed);
     StateMemoryTotals totals{
-        .reserved_bytes = reserved_.load(std::memory_order_relaxed),
+        .reserved_bytes = cap != 0 ? std::min(reserved, cap) : reserved,
         .mapped_bytes = mapped_.load(std::memory_order_relaxed),
         .pooled_bytes = pooled_.load(std::memory_order_relaxed),
         .lendable_bytes = lendable_.load(std::memory_order_relaxed),
@@ -114,7 +150,10 @@ public:
   /// Reserved bytes not mapped yet, pooled or not: what the pool may still
   /// create pages for without committing more than the regions promised.
   [[nodiscard]] std::size_t UnmappedBytes() const noexcept {
-    const std::size_t reserved = reserved_.load(std::memory_order_relaxed);
+    const std::size_t cap = cap_.load(std::memory_order_relaxed);
+    std::size_t reserved = reserved_.load(std::memory_order_relaxed);
+    if (cap != 0)
+      reserved = std::min(reserved, cap);
     const std::size_t mapped = mapped_.load(std::memory_order_relaxed);
     return reserved > mapped ? reserved - mapped : 0;
   }
@@ -131,6 +170,8 @@ private:
   std::atomic<std::size_t> pooled_{0};
   std::atomic<std::size_t> lendable_{0};
   std::atomic<std::size_t> lender_grant_{0};
+  std::atomic<std::size_t> cap_{0};
+  std::atomic<std::size_t> charged_{0};
   std::atomic<bool> lending_{false};
 };
 

@@ -21,6 +21,7 @@
 
 #include "gufo/ext/component_cache_resources.hpp"
 #include "gufo/ext/experimental/admission_query.hpp"
+#include "gufo/ext/experimental/state_memory.hpp"
 #include "gufo/ext/gguf_identity.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "gufo/ext/speculative_verifier.hpp"
@@ -207,6 +208,10 @@ public:
     executor_->SetCancellationCheck(check);
   }
   ~QwenTextRunnerState() override { executor_->SetCancellationCheck({}); }
+  [[nodiscard]] std::shared_ptr<mem::StateAccount> state_account()
+      const override {
+    return executor_->state_account();
+  }
 
   class PrefillScope {
   public:
@@ -803,6 +808,11 @@ public:
         .retained_snapshot_capacity_bytes = snapshot_capacity,
         .retained_snapshot_ceiling_bytes = snapshot_ceiling,
         .requires_device_runtime_lock = true,
+        .demand_mapped_state_bytes =
+            mem::DemandMapped()
+                ? hip::QwenGpuArena::KvBytes(model_->GetConfig(), max_context_,
+                                             execution_policy_)
+                : 0,
     };
   }
 
@@ -1496,17 +1506,33 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
   // Narrow the width until the configured sessions fit, rather than refusing
   // a session count the ordinary verifier width fits.
   const std::size_t sessions = std::max<std::size_t>(options.session_count, 1);
-  for (auto rows = static_cast<std::uint32_t>(
-           hip::QwenGpuExecutor::kMaxWideVerificationRows);
-       speculative; rows /= 2) {
+  const auto fit = [&](std::uint32_t rows) {
     runner->LimitCopyRows(rows);
     const auto claim = runner->ResourceClaim();
-    if (rows <= hip::kSsmReplayCapacity || !claim.state_capacity_bytes ||
-        !claim.per_request_state_bytes || !claim.temporary_scratch_bytes ||
-        sessions * (*claim.per_request_state_bytes +
-                    *claim.temporary_scratch_bytes) <=
-            *claim.state_capacity_bytes)
-      break;
+    if (!claim.state_capacity_bytes || !claim.per_request_state_bytes ||
+        !claim.temporary_scratch_bytes)
+      return mem::SessionFit::Kind::kFits;
+    return mem::FitSessions(
+               sessions,
+               *claim.per_request_state_bytes + *claim.temporary_scratch_bytes,
+               claim.demand_mapped_state_bytes.value_or(0),
+               *claim.state_capacity_bytes)
+        .kind;
+  };
+  if (speculative) {
+    const auto widest = static_cast<std::uint32_t>(
+        hip::QwenGpuExecutor::kMaxWideVerificationRows);
+    auto rows = widest;
+    while (rows > hip::kSsmReplayCapacity &&
+           fit(rows) != mem::SessionFit::Kind::kFits)
+      rows /= 2;
+    // When no width fits every session at full context, the sessions share
+    // their K/V (mem::FitSessions): keep the widest width that allows it.
+    if (fit(rows) != mem::SessionFit::Kind::kFits)
+      for (rows = widest; rows > hip::kSsmReplayCapacity &&
+                          fit(rows) == mem::SessionFit::Kind::kRefused;)
+        rows /= 2;
+    runner->LimitCopyRows(rows);
   }
   return runner;
 }

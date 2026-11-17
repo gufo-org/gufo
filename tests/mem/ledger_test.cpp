@@ -4,6 +4,9 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <vector>
+
+#include "src/mem/account.hpp"
 
 namespace {
 
@@ -127,9 +130,110 @@ void Lending() {
   assert(totals.outstanding_bytes == 0);
 }
 
+void Fit() {
+  using gufo::mem::FitSessions;
+  using Kind = gufo::mem::SessionFit::Kind;
+  // 4 sessions of 10 (8 demand-mapped) in 25: 2 fit at full context;
+  // the 4 share 2 * 10 - 4 * 2 = 12, at least one full session's 8.
+  auto fit = FitSessions(4, 10, 8, 25);
+  assert(fit.kind == Kind::kShared && fit.full_sessions == 2 &&
+         fit.cap_bytes == 12);
+  assert(FitSessions(2, 10, 8, 25).kind == Kind::kFits);
+  // Nothing demand-mapped, or no session at full context: refused.
+  assert(FitSessions(4, 10, 0, 25).kind == Kind::kRefused);
+  assert(FitSessions(4, 10, 8, 9).kind == Kind::kRefused);
+  // Fixed state of 9 sessions (18) leaves 2 of 20 held: less than one
+  // full session's demand-mapped state.
+  assert(FitSessions(9, 10, 8, 25).kind == Kind::kRefused);
+}
+
+void CapAndAccounts() {
+  using gufo::mem::RegionPageBytes;
+  using gufo::mem::RegionShape;
+  using gufo::mem::StateAccount;
+  using gufo::mem::StateReservation;
+  auto& ledger = StateLedger::Process();
+  // Page union of segments: two 1 MiB segments share one page.
+  const RegionShape pair{.row_bytes = 1 << 10, .rows = 1024, .segments = 2};
+  assert(RegionPageBytes(pair, 1024) == kPageBytes);
+  assert(RegionPageBytes(pair, 0) == 0);
+  // One row in each of two 4 MiB segments: the first page of each.
+  const RegionShape wide{.row_bytes = 1 << 12, .rows = 1024, .segments = 2};
+  assert(RegionPageBytes(wide, 1) == 2 * kPageBytes);
+  assert(RegionPageBytes(wide, 1024) == 4 * kPageBytes);
+
+  // Without a cap every charge succeeds, as before accounts existed.
+  const RegionShape kv{.row_bytes = 1 << 10, .rows = 64 * 1024};  // 64 MiB
+  {
+    StateAccount account(/*margin_tokens=*/1024);
+    std::vector<std::size_t> trims;
+    account.AddRegion(kv, 1, [&](std::size_t rows) { trims.push_back(rows); });
+    assert(account.full_bytes() == 32 * kPageBytes);
+    assert(account.BytesFor(0) == 0);
+    // 1 token + 1024 margin rows of 1 KiB: one page.
+    assert(account.BytesFor(1) == kPageBytes);
+    assert(account.Claim(64 * 1024));
+    assert(account.charged_bytes() == 32 * kPageBytes);
+    assert(ledger.ChargedBytes() == 32 * kPageBytes);
+    assert(account.SetNeed(0));
+    assert(ledger.ChargedBytes() == 0);
+    // Mapped pages stay charged past the need until trimmed.
+    assert(account.OnMap(3 * kPageBytes));
+    assert(account.charged_bytes() == 3 * kPageBytes);
+    assert(account.tail_bytes() == 3 * kPageBytes);
+    assert(account.Claim(1));
+    assert(account.tail_bytes() == 2 * kPageBytes);
+    // TrimTo asks each region for its rows: 1 token + margin.
+    account.TrimTo(1);
+    assert(trims.size() == 1 && trims[0] == 1025);
+    account.OnUnmap(2 * kPageBytes);  // what the region would report
+    assert(account.charged_bytes() == kPageBytes);
+  }
+  assert(ledger.ChargedBytes() == 0);
+
+  // With a cap, sessions together never charge more than it.
+  ledger.SetPromiseCap(40 * kPageBytes);
+  ledger.AddReserved(64 * kPageBytes);
+  assert(ledger.Totals().reserved_bytes == 40 * kPageBytes);
+  assert(ledger.UnmappedBytes() == 40 * kPageBytes);
+  {
+    StateAccount a, b;
+    a.AddRegion(kv, 1, {});
+    b.AddRegion(kv, 1, {});
+    assert(a.Claim(64 * 1024));   // 32 pages
+    assert(!b.Claim(32 * 1024));  // 16 more pages: over the cap
+    assert(b.need_tokens() == 0);
+    assert(b.Claim(16 * 1024));  // 8 pages fit
+    assert(ledger.ChargeableBytes() == 0);
+    assert(!b.OnMap(9 * kPageBytes));  // past its need and the cap
+    assert(b.OnMap(8 * kPageBytes));   // within its need: no new charge
+    // A reservation taken ahead of the session: the claim draws on it.
+    assert(a.SetNeed(32 * 1024));
+    assert(ledger.ChargeableBytes() == 16 * kPageBytes);
+    StateReservation reservation(16 * kPageBytes);
+    assert(reservation.ok());
+    assert(ledger.ChargeableBytes() == 0);
+    assert(!StateReservation(kPageBytes).ok());
+    assert(a.Claim(64 * 1024, &reservation));
+    assert(reservation.bytes() == 0);
+    // A failed claim returns what it took.
+    assert(a.SetNeed(48 * 1024));  // releases 8 pages
+    assert(b.Claim(24 * 1024));    // takes 4 of them
+    StateReservation some(2 * kPageBytes);
+    assert(!a.Claim(64 * 1024, &some));  // needs 8: 2 + 2 left
+    assert(some.bytes() == 2 * kPageBytes);
+    assert(a.need_tokens() == 48 * 1024);
+  }
+  assert(ledger.ChargedBytes() == 0);
+  ledger.RemoveReserved(64 * kPageBytes);
+  ledger.SetPromiseCap(0);
+}
+
 }  // namespace
 
 int main() {
+  Fit();
+  CapAndAccounts();
   Lending();
   Buddyinfo();
   Totals();

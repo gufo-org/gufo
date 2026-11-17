@@ -150,6 +150,9 @@ public:
   /// Null when the runner does not publish prompt-state admission inputs.
   [[nodiscard]] std::optional<PromptAdmissionBudget>
   PromptAdmissionBudgetSnapshot() const;
+  /// Null unless sessions share their demand-mapped state (#715).
+  [[nodiscard]] std::optional<TextGenerationBackend::SharedState>
+  SharedStateSnapshot() const;
 
   [[nodiscard]] Request Submit(std::vector<TextRunnerToken> prompt,
                                std::size_t max_tokens,
