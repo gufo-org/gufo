@@ -64,9 +64,16 @@ manifest; release automation owns them. Tags are `vX.Y.Z` and never move.
 3. The workflow waits up to 160 minutes for the title check, repository checks
    and `devlab/functional`. On any failure, error or timeout it leaves the pull
    request open and comments on it.
-4. When everything passes, it squash-merges, creates the tag and the GitHub
-   Release, and sends the tag as a `gufo-release` dispatch to Toolboxes and to
-   the [website](https://github.com/gufo-org/website).
+4. When everything passes, it squash-merges, creates the tag and a draft
+   GitHub Release, and sends the tag as a `gufo-release` dispatch to Toolboxes
+   and to the [website](https://github.com/gufo-org/website).
+5. Toolboxes attaches the artifacts to the draft and then publishes it, so a
+   release is never public without its assets.
+
+The release starts as a draft (`draft` in `release-please-config.json`) because
+an immutable release rejects assets added after publication. GitHub creates a
+draft's tag only on publication, so `force-tag-creation` creates it up front:
+Toolboxes and the website build from that tag.
 
 Nix keeps release and source identity apart. The default package reports
 `gufo version development (<revision>)`; the `release` package, built from a
@@ -85,6 +92,9 @@ Toolboxes' `publish_release.yml` handles the dispatch:
   doesn't run the Windows Devlab GPU checks.
 - **Debian package:** builds `gufo_<version>-1_amd64.deb` for Debian 13,
   verifies it in a fresh container, and attaches it with its checksum.
+- **Publication:** once the images are pushed and all four assets are attached,
+  publishes the draft release. A Windows-only or Debian-only manual run doesn't
+  publish: publish that draft by hand.
 
 - **Documentation:** the website's `sync-docs.yml` copies the public docs at
   the tag into a new version of [gufo.blog/docs](https://gufo.blog/docs),
@@ -96,7 +106,8 @@ Uploading to the Gufo release needs the release GitHub App, installed on Gufo
 with Contents write, through `RELEASE_APP_CLIENT_ID` and
 `RELEASE_APP_PRIVATE_KEY` in Toolboxes. Uploads never overwrite existing
 assets; the workflow's manual inputs rebuild one release, or only its Windows or
-Debian assets, for recovery.
+Debian assets, for recovery. With immutable releases enabled, recovery works
+only while the release is still a draft: a published release's assets are final.
 
 ## Extension API versioning
 
