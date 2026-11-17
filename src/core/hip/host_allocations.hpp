@@ -10,7 +10,8 @@ namespace gufo::hip {
 
 // Owns GPU-visible host buffers and their long-term pins together. Each buffer
 // is anonymous memory, pinned long-term, then registered with HIP (coherent,
-// mapped; the host pointer is the device pointer). hipHostMalloc pages stay
+// mapped). Kernels must use hipHostGetDevicePointer: on Windows the device
+// address differs from the host pointer. hipHostMalloc pages stay
 // candidates for compaction even when pinned: every failed migration
 // invalidates their GPU mapping and evicts all of the process's GPU queues,
 // which froze the GPU for 45-109 s in a probe under memory pressure. Pinned
