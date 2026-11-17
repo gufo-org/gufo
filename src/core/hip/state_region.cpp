@@ -30,6 +30,15 @@ void SetError(std::string* error, const char* message) {
 
 }  // namespace
 
+bool DemandMapped() {
+  int device = 0;
+  if (hipGetDevice(&device) != hipSuccess) {
+    (void)hipGetLastError();
+    return false;
+  }
+  return PagePool::ForDevice(device) != nullptr;
+}
+
 std::shared_ptr<Region> Region::Create(
     const RegionShape& shape, std::string* error,
     const std::shared_ptr<StateAccount>& account, std::size_t tokens_per_row) {

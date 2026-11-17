@@ -94,7 +94,6 @@ src/core/hip/managed_alloc.hpp
 src/core/hip/snapshot_copy.hpp
 src/core/hip/snapshot_transfer.hpp
 src/core/hip/state_memory.hpp
-src/core/hip/state_page_pool.hpp
 src/core/hip/state_region.hpp
 src/core/hip/transfer_pool.hpp
 src/core/hip/weight_upload.hpp

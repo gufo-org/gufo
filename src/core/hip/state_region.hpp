@@ -16,6 +16,11 @@ namespace gufo::mem {
 
 class PagePool;
 
+/// Whether state regions on the current device take pages as rows are
+/// written, rather than their whole size at creation (false without virtual
+/// memory management, or where device pages are not host RAM).
+[[nodiscard]] bool DemandMapped();
+
 /// One buffer at a fixed address for its whole size, backed by physical
 /// pages from the front of each segment as rows are written. The address
 /// never changes, so captured graphs and kernel arguments stay valid, and
