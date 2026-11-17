@@ -87,6 +87,15 @@ ggml authors' notice in [licenses/llama.cpp.txt](licenses/llama.cpp.txt);
 Nathan Wilson's notice is retained in
 [licenses/strix-halo-llamacpp.txt](licenses/strix-halo-llamacpp.txt).
 
+## Design references
+
+The following project informed Gufo's runtime residual projection for
+Qwen3.8-Flash-Next. No code was imported.
+
+- [Niko1221/Strata](https://github.com/Niko1221/Strata) — control-vector design: unit directions with per-layer scales, applied after the FFN write and before the next norm, with a per-request device flag — [MIT license](https://github.com/Niko1221/Strata/blob/146df3c468739147f520ac3816de806f71232571/LICENSE).
+
+The license link pins the notice reviewed for this credit.
+
 ## Build and development only
 
 | Component Name | Relationship | License (SPDX) | Pinned Revision / Version | Upstream Source / Location |

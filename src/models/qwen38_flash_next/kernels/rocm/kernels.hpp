@@ -88,16 +88,33 @@ void HcMixEpilogueVec4F16(const __half* xn, const float* gate,
                           std::uint32_t n_tokens, std::uint32_t hidden,
                           hipStream_t stream);
 
+/// Operands of the optional residual-stream projection a steered FFN/MoE
+/// combine applies between its residual write and the next mixer's grouped
+/// norm: `h <- h - scale * (h . dir) * dir`, per hyper-connection stream.
+/// `dir` is this layer's unit direction ([hidden]); `enable` is a device
+/// word reread at execution so a captured graph switches per forward
+/// (Session::Control::projection); `enable_rows` ([tokens]) is the
+/// multi-session batch alternative, indexed per token. A null `dir`, or a
+/// zero enable, keeps the kernel on exactly today's arithmetic.
+struct ProjectionArgs {
+  const float* dir{nullptr};
+  const std::uint32_t* enable{nullptr};
+  const std::uint32_t* enable_rows{nullptr};
+  float scale{0.0F};
+};
+
 /// res[t][s][i] += block_out[t][i] * 2*sigmoid(inject[t][s] / streams), and
 /// when `gamma` is non-null also the next mixer's grouped RMSNorm of the
 /// updated residual into `xn`.
 /// `inject` is [t][s][inject_parts] partial sums (1 part for a plain GEMM).
 /// Concatenated decode requests retain scalar reduction with `decode=true`.
+/// A non-null `proj.dir` with a nonzero enable projects each updated stream
+/// (`h <- h - scale * (h . dir) * dir`) after the write, before the norm.
 void HcCombine(float* res, const float* block_out, const float* inject,
                std::uint32_t inject_parts, const float* gamma, float* xn,
                std::uint32_t n_tokens, std::uint32_t hidden,
                std::uint32_t streams, float eps, hipStream_t stream,
-               bool decode = false);
+               bool decode = false, const ProjectionArgs& proj = {});
 /// The one-block-per-stream HcCombine that also writes xn's Q8_1 rows (as
 /// qfn_mmq_quantize_q8_1 would) to `xn_q8` for a small-batch mixer down
 /// projection. False, with nothing launched, without `gamma` or unless
@@ -105,7 +122,8 @@ void HcCombine(float* res, const float* block_out, const float* inject,
 bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
                    std::uint32_t inject_parts, const float* gamma, float* xn,
                    void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
-                   std::uint32_t streams, float eps, hipStream_t stream);
+                   std::uint32_t streams, float eps, hipStream_t stream,
+                   const ProjectionArgs& proj = {});
 /// Operands of HcMixQ8Fused: the decode combine HcCombineQ8_1 would run
 /// (res, block_out, inject, gamma, xn, xn_q8), the next mixer's Q8_0
 /// projections with its SiluScaleQ8_1 rows (lo, lo_q8 of `lo_q8_cols`), and
@@ -132,6 +150,8 @@ struct HcFusedMix {
   std::uint32_t rank;
   float eps;
   float scale;  ///< the SiLU input scale, 1 / streams
+  /// The steered combine's optional projection (see ProjectionArgs).
+  ProjectionArgs proj;
 };
 /// Device bytes of HcMixQ8Fused's counters and intermediates. Allocate them
 /// zeroed once; every launch leaves its counters zero again, so captured
@@ -158,7 +178,8 @@ bool HcCombineF16(float* res, const float* block_out, const float* inject,
                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
                   std::uint32_t streams, float eps, hipStream_t stream,
                   float* defer_w = nullptr, float* inject_out = nullptr,
-                  const float* inject_w = nullptr);
+                  const float* inject_w = nullptr,
+                  const ProjectionArgs& proj = {});
 /// Applies the residual update a deferring HcCombineF16 left out (four
 /// streams), with the same arithmetic.
 void HcApplyDeferred(float* res, const float* block_out, const float* w,
@@ -182,7 +203,8 @@ bool HcCombineMoeF16(
     const float* gamma, __half* xn, void* xn_q8, std::uint32_t n_tokens,
     std::uint32_t hidden, std::uint32_t streams, float eps, hipStream_t stream,
     const float* prior_out = nullptr, const float* prior_w = nullptr,
-    float* inject_out = nullptr, const float* inject_w = nullptr);
+    float* inject_out = nullptr, const float* inject_w = nullptr,
+    const ProjectionArgs& proj = {});
 
 /// x[i] = silu(x[i] * scale), in place over `count` floats.
 void SiluScale(float* x, float scale, std::size_t count, hipStream_t stream);
