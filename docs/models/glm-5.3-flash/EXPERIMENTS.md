@@ -532,6 +532,21 @@ same sweep: `v64 192x128 bk2 4x1` beat the shipped 128x128 2x2 tile
 +3.5/+4.0 % at m2048×k4096 batch 2048/8192 — a dense-tier
 production-shape A/B candidate.
 
+## Dense-tier 192x128 wave64 tile (2026-11-17): retained
+
+That Flint lead is now the default: the W8A8 dense `LaunchTuned`
+batch ≥ 96 branch dispatches the wave64
+`WKQuantA8BlockedWmmaGEMMKernel<192, 128, 2, 4, 1>` slab from the new TU
+`kernels/rocm/w8a8_wave64.hip.cpp` (grid `((tokens+127)/128,
+(m+191)/192)`, 256 threads; batch < 96 keeps the wave32 128×64 tile).
+Production gate (B13): exclusive offline A/B pp2048
+`266.66 / 272.00` → `278.00 / 284.37` (**+4.4 %**, ranges disjoint),
+tg32 flat; serve-context gate c1 prefill `212.1 / 211.2` →
+`215.8 / 215.1` (+1.8 %, all pairs up), decode flat; tg64 greedy
+`output_sha256` bit-identical (`1d79e532…`); suite `glm5_next` 10/10
+including the strict `rocm_forward` golden (`/tmp/opencode/
+gufo_bench_t192g4.log`).
+
 ## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-15)
 
 The launch storm is closed (steady-state idle 2.2 %,

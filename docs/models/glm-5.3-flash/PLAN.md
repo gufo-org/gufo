@@ -186,7 +186,8 @@ levers, exact-default ladder (A) then opt-in fast track (B):
     bytes, so a gate+up launch could not beat 121 ms vs 42 ms even at
     DRAM peak — see the ledger. Residual lead: the 192x128 4x1 wave64
     tile beat the shipped 128x128 2x2 by +3.5/+4.0 % at m2048×k4096
-    batch 2048/8192; A/B it on production dense shapes.
+    batch 2048/8192; executed 2026-11-17 and promoted as B13 (pp2048
+    offline +4.4 %, serve-gated +1.8 %, tg64 sha bit-identical).
 8. Online-softmax single-pass attention replacing DSA
    score→topk→gather→combine (the `mikealanni` WMA-attend shape): one
    WMMA pass over F16 packed K/V with running softmax; kills stages

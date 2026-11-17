@@ -26,7 +26,8 @@ if (ENGINE_ENABLE_HIP)
     kernels/rocm/routed_compact.hip.cpp
     kernels/rocm/routed_wmma.hip.cpp
     kernels/rocm/attention.hip.cpp
-    kernels/rocm/w8a8_dense.hip.cpp)
+    kernels/rocm/w8a8_dense.hip.cpp
+    kernels/rocm/w8a8_wave64.hip.cpp)
   set_source_files_properties(kernels/rocm/dense_wmma.hip.cpp
     PROPERTIES LANGUAGE HIP)
   set_source_files_properties(kernels/rocm/gemv.hip.cpp
@@ -41,6 +42,10 @@ if (ENGINE_ENABLE_HIP)
     PROPERTIES LANGUAGE HIP)
   set_source_files_properties(kernels/rocm/w8a8_dense.hip.cpp
     PROPERTIES LANGUAGE HIP)
+  # The wave64 WMMA tier must compile with the native 64-wide wave and the
+  # same SLP/disable choice as the shared qwen prefill GEMM units.
+  set_source_files_properties(kernels/rocm/w8a8_wave64.hip.cpp
+    PROPERTIES LANGUAGE HIP COMPILE_OPTIONS "-std=c++20;-mwavefrontsize64;-fno-slp-vectorize")
   # The shared Qwen WK kernel header reaches std::span (C++20, the top-level
   # standard); this target pins HIP_STANDARD 17 for its own decoders, so the
   # W8A8 wrapper TU switches back explicitly.

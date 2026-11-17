@@ -6,6 +6,7 @@
 
 #include "src/families/qwen/kernels/ops/gemm.hpp"
 #include "src/families/qwen/kernels/prefill_quant_gemm.hpp"
+#include "staging/models/glm5_next/kernels/rocm/w8a8_wave64.hpp"
 
 namespace gufo::models::glm5_next::rocm {
 namespace {
@@ -15,10 +16,7 @@ void LaunchTuned(const void* w, const void* q8_1_x, float* y,
                  std::size_t batch, std::size_t m, std::size_t k,
                  hipStream_t stream) {
   if (batch >= 96) {
-    const dim3 grid(static_cast<unsigned>((batch + 127) / 128),
-                    static_cast<unsigned>((m + 127) / 128));
-    gufo::hip::WKQuantA8BlockedWmmaGEMMKernel<128, 128, 2, 4, 2, WType>
-        <<<grid, 256, 0, stream>>>(w, q8_1_x, y, batch, m, k);
+    Glm5W8A8DenseWave64(WType, w, q8_1_x, y, batch, m, k, stream);
     return;
   }
   const dim3 grid(static_cast<unsigned>((batch + 63) / 64),

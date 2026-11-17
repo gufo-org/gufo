@@ -219,6 +219,31 @@ sleep 2
 tools/bench/bench_wait.sh glm5_base 1200 90
 ```
 
+### B13 — W8A8 dense tier wave64 192×128 tile (2026-11-17)
+
+The B11/B12 dense tier's `LaunchTuned` batch ≥ 96 branch swaps to a
+64-wavefront 192×128 `WKQuantA8BlockedWmmaGEMMKernel<192, 128, 2, 4, 1>`
+slab (new TU `staging/models/glm5_next/kernels/rocm/w8a8_wave64.hip.cpp`,
+`-mwavefrontsize64`, from the Flint `v64 192x128 bk2 4x1` sweep lead);
+batch < 96 keeps the shipped wave32 128×64 tile and all fall-through
+tiers are unchanged. No flag, promoted to default.
+
+Offline bench A/B (GPU-exclusive, alternating, repetitions 2): pp2048
+(n-gen 32) `266.66 / 272.00` → **`278.00 / 284.37`** (**+4.4 %**, sample
+ranges disjoint), tg32 flat (`/tmp/opencode/gufo_bench_t192ab.log`).
+Serve-protocol gate (`gufo serve --context 131072 --prefill-chunk 2048`,
+`serving_bench` canonical case greedy max-tokens 32, concurrency 1,
+two alternating rounds): stage prefill `212.1 / 211.2` →
+**`215.8 / 215.1`** (+1.8 %, candidate ≥ base in all four pairs), decode
+flat 11.6–12.4 (`/tmp/opencode/t192/gate_*.json`,
+`/tmp/opencode/gufo_bench_t192g4.log`).
+
+Quality: greedy tg64 `output_sha256` **bit-identical** to the B10–B12
+archived value (`1d79e532…`) on both arms; suite `glm5_next` **10/10** on
+the candidate including the strict `rocm_forward` golden replay,
+`rocm_device_model` and the `rocm_w8a8_dense` contract (NMSE ≈ 1.4e-5
+across types, non-multiple m covered).
+
 ## Fixtures
 
 `tests/fixtures/glm_next/llama_reference.json` is a gufo **self-regression
