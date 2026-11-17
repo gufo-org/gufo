@@ -121,4 +121,11 @@ std::uint64_t HostFloorBytes() {
   return BackgroundFloorBytes(memory ? memory->total_bytes : 0);
 }
 
+bool HeapCoversHost(std::uint64_t heap_total_bytes,
+                    std::uint64_t host_total_bytes) noexcept {
+  return host_total_bytes != 0 &&
+         heap_total_bytes + BackgroundFloorBytes(host_total_bytes) >=
+             host_total_bytes;
+}
+
 }  // namespace gufo::mem

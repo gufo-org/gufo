@@ -100,7 +100,8 @@ public:
   void Stop();
 
   /// Whether pages can back a CPU view (exported as device-memory files),
-  /// which RAM-cache payloads need.
+  /// which RAM-cache payloads need, and the GPU heap covers host memory
+  /// (mem::HeapCoversHost), so the cache may borrow them.
   [[nodiscard]] bool exportable() const noexcept { return exportable_; }
   /// A new page for a lender, never one of the free pages (the regions'
   /// working set). Made only from free 2 MiB blocks above the free floor,

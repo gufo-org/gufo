@@ -119,6 +119,14 @@ The load log reports `borrowable_bytes` and `own_grant_bytes` on the cache's
 virtual memory management, exportable pages or a CPU reservation of the range
 (Windows today), the cache keeps pinned host pages and does not borrow.
 
+It also does not borrow where the GPU heap is smaller than host memory less
+its background floor (`mem::HeapCoversHost`). State pages are charged to that
+heap (on Linux, the `amdgpu.gttsize` limit) and pinned host pages are not.
+With a 100 GiB limit on a 128 GiB host, borrowing took 2 GiB at load and grew
+the cache until Flash-Next's graph instantiation ran out of heap (18 MB free);
+the same host on main kept 14 GB free. Install's
+[memory settings](../install.md#memory-settings) set the limit to cover RAM.
+
 ## Results
 
 As of November 2026 on gfx1151 (ROCm 10.1), Flash-Next with MTP at 4 × 262,144

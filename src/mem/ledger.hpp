@@ -193,6 +193,16 @@ private:
 /// BackgroundFloorBytes() of this host's physical memory.
 [[nodiscard]] std::uint64_t HostFloorBytes();
 
+/// Whether the GPU heap (`heap_total_bytes`, from hipMemGetInfo; on Linux
+/// the GTT limit) reaches host memory less its background floor. State pages
+/// the RAM cache borrows are charged to this heap; the pinned host pages it
+/// otherwise uses are not. With a GTT limit below host memory the heap runs
+/// out first, and borrowed pages are pages graphs and scratch allocations
+/// cannot get (measured: 100 GiB heap on 128 GiB, Flash-Next graph
+/// instantiation out of memory with 18 MB of heap left).
+[[nodiscard]] bool HeapCoversHost(std::uint64_t heap_total_bytes,
+                                  std::uint64_t host_total_bytes) noexcept;
+
 }  // namespace gufo::mem
 
 #endif  // GUFO_MEM_LEDGER_HPP_

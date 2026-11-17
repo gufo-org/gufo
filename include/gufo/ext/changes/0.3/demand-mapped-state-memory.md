@@ -17,10 +17,12 @@ package (`src/mem`) and its HIP backend (`src/core/hip/state_*`):
   promised, mapped and pooled state bytes and the host floor below which no
   page is created in the background.
 
-`gufo::hip::HostAllocations` keeps its signature. Its buffers are now
-anonymous pages, pinned long-term and registered with HIP (coherent and
-mapped, host pointer equal to the device pointer) instead of `hipHostMalloc`
-memory; `flags` is accepted and ignored.
+`gufo::hip::HostAllocations` keeps its signature. Its buffers are anonymous
+pages, pinned long-term and registered with HIP (coherent and mapped) instead
+of `hipHostMalloc` memory; `flags` applies only where the long-term pin fails
+(a low `RLIMIT_MEMLOCK`, and always on Windows) and the buffer stays
+`hipHostMalloc` memory. Kernels take the device pointer from
+`hipHostGetDevicePointer`.
 
 The host snapshot budget (`HostSnapshotBudgetBytes`,
 `HostSnapshotCeilingBytes`) and `QueryAdmissionMemory` subtract the
@@ -59,3 +61,7 @@ written:
 - `platform::DevicePagesUseHostMemory` is true where device pages are host
   RAM, so outstanding state belongs in host budgets. Windows reports false
   (they come from the dedicated carve-out), and regions there allocate whole.
+- `gufo::mem::HeapCoversHost(heap_total, host_total)`: whether the GPU heap
+  reaches host memory less its background floor. The pool lends only then:
+  borrowed pages are charged to the heap and pinned host pages are not, so
+  with a GTT limit below host memory the cache keeps pinned host pages.

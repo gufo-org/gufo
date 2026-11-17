@@ -124,7 +124,15 @@ PagePool::PagePool(int device, std::function<bool(std::uint64_t)> may_create,
       host_available_(std::move(host_available)),
       floor_bytes_(floor_bytes),
       prop_(DeviceProp(device)) {
-  exportable_ = SupportsExport(prop_);
+  // Lend only where borrowed pages do not compete for a GPU heap smaller
+  // than host memory; otherwise the cache keeps pinned host pages, as
+  // without state memory.
+  std::size_t heap_free = 0, heap_total = 0;
+  const auto memory = platform::QueryHostMemory();
+  if (hipMemGetInfo(&heap_free, &heap_total) != hipSuccess)
+    (void)hipGetLastError();
+  exportable_ = HeapCoversHost(heap_total, memory ? memory->total_bytes : 0) &&
+                SupportsExport(prop_);
   if (exportable_) {
     prop_.requestedHandleType = hipMemHandleTypePosixFileDescriptor;
     StateLedger::Process().EnableLending();

@@ -67,6 +67,17 @@ void Floor() {
   assert(BackgroundFloorBytes(512 * kGiB) == 8 * kGiB);
 }
 
+void HeapCover() {
+  using gufo::mem::HeapCoversHost;
+  // 128 GiB host, 125 GiB visible: GTT at 124 GiB lends, at 100 GiB not.
+  const std::uint64_t host = 125 * kGiB;
+  assert(HeapCoversHost(124 * kGiB, host));
+  assert(HeapCoversHost(118 * kGiB, host));
+  assert(!HeapCoversHost(100 * kGiB, host));
+  assert(!HeapCoversHost(64 * kGiB, host));
+  assert(!HeapCoversHost(124 * kGiB, 0));
+}
+
 void Rounding() {
   assert(RoundUpToPage(0) == 0);
   assert(RoundUpToPage(1) == kPageBytes);
@@ -124,6 +135,7 @@ int main() {
   Totals();
   Meminfo();
   Floor();
+  HeapCover();
   Rounding();
   Outstanding();
   std::puts("mem_ledger_test: ok");
