@@ -26,16 +26,10 @@ greedy, so `temperature` must be 0.
 
 ## Audio input
 
-Gufo reads WAV, FLAC, MP3 (MPEG layers I to III), Ogg Vorbis and Ogg Opus
-files, up to eight channels and 192 kHz, and converts them to 16 kHz mono.
-WAV may hold 8-, 16-, 24- or 32-bit integer, 32- or 64-bit float, A-law,
-mu-law or ADPCM samples. M4A/AAC isn't supported; convert it first, for
-example with `ffmpeg -i in.m4a out.flac`. A recording can be up to 30 minutes
-long; the CLI also caps input at 256 MiB, and the server applies its request
-size limit.
-
-`gufo transcribe --live` still reads only 16-bit PCM or 32-bit float WAV of
-up to 30 seconds, and live audio over a WebSocket is raw PCM (below).
+Gufo reads WAV, FLAC, MP3 and Ogg (Vorbis or Opus) files, up to eight
+channels and 192 kHz, and converts them to 16 kHz mono. M4A/AAC isn't
+supported. A recording can be up to 30 minutes long; the CLI also caps input
+at 256 MiB, and the server applies its request size limit.
 
 Gufo splits long recordings at quiet points, transcribes each piece and joins
 the results. `--context` sets the capacity for one piece, and `--max-tokens`
