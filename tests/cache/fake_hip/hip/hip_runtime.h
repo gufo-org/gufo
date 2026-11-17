@@ -18,6 +18,7 @@ enum hipMemcpyKind { hipMemcpyHostToDevice, hipMemcpyDeviceToHost };
 inline constexpr unsigned hipHostMallocDefault = 0;
 inline constexpr unsigned hipHostMallocCoherent = 1;
 inline constexpr unsigned hipHostRegisterDefault = 0;
+inline constexpr unsigned hipHostRegisterMapped = 2;
 inline constexpr unsigned hipStreamNonBlocking = 0;
 inline constexpr unsigned hipEventDisableTiming = 0;
 inline constexpr unsigned hipEventReleaseToSystem = 0x80000000;
