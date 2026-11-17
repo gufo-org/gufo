@@ -224,7 +224,20 @@ segments each.
 | --- | --- | --- |
 | Qwen3.8 Flash-Next | Trunk and MTP K/V, one region per buffer | `Executor::EnsureKv`: forward, batch, MTP, snapshot and cache restore |
 | Qwen 27B | Attention K/V planes, one region per session | `QwenGpuArena::EnsureKvRows`: decode, batch, prefill chunk, verification commit, snapshot and cache restore |
-| DeepSeek V4 Flash | Compressed attention, mirror and indexer rows (outside the managed-memory policy) | `rocm_graph_reserve_compressed_rows` grows them in place |
+| DeepSeek V4 Flash | Compressed attention, mirror and indexer rows, charged to the session's account | `rocm_graph_reserve_compressed_rows` grows them in place, before every write and restore |
+
+DeepSeek V4 Flash no longer uses its managed-memory KV policy where state is
+demand-mapped: at the default 1M context, regions decode as fast as managed
+memory (1 session, depths 0/33K/99K: 20.91/19.37/18.80 vs 20.87/19.25/18.63
+tokens/s, identical outputs). At load the runner creates and drops two
+sessions to measure what each allocates whole (0.42 GB; 0.52 GB with DSpark);
+the first also creates the shared batch workspace, which stays. The claim is
+those bytes, the compressed rows at full context and the indexer score
+scratch at its largest. A configuration that does not fit even sharing its
+rows (two sessions at 1M on a 128 GB host) loads as before: managed policy,
+nothing claimed, `event=state_unclaimed` warning. The F16 copies of Q8
+weights (6 GB) are built once the last session binds at load, not inside the
+first request, where allocating them took up to 2.2 s.
 
 ## Host buffers
 
