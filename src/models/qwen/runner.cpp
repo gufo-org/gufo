@@ -1512,11 +1512,11 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
     if (!claim.state_capacity_bytes || !claim.per_request_state_bytes ||
         !claim.temporary_scratch_bytes)
       return mem::SessionFit::Kind::kFits;
-    return mem::FitSessions(sessions,
-                            *claim.per_request_state_bytes +
-                                *claim.temporary_scratch_bytes,
-                            claim.demand_mapped_state_bytes.value_or(0),
-                            *claim.state_capacity_bytes)
+    return mem::FitSessions(
+               sessions,
+               *claim.per_request_state_bytes + *claim.temporary_scratch_bytes,
+               claim.demand_mapped_state_bytes.value_or(0),
+               *claim.state_capacity_bytes)
         .kind;
   };
   if (speculative) {
