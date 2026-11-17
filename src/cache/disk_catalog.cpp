@@ -287,7 +287,7 @@ void DiskCatalog::Touch(CheckpointId id) {
 void DiskCatalog::FlushUses() {
   impl_->FlushUses();
 }
-bool DiskCatalog::EvictOne() {
+DiskEviction DiskCatalog::EvictOne() {
   Reconcile();
   for (auto& [id, record] : impl_->records) {
     (void)id;
@@ -303,20 +303,21 @@ bool DiskCatalog::EvictOne() {
         record = it;
     }
     if (record == impl_->records.end())
-      return false;
+      return {};
+    const auto tier = record->second.eviction_order[0];
     // Mark reader-pinned candidates as tried without allocating a side table.
     record->second.eviction_order.fill(UINT64_MAX);
-    const auto& description = *record->second.description;
-    auto result = impl_->store->TryRetire(description.Manifest().checkpoint,
-                                          description.Epoch());
+    auto description = record->second.description;
+    auto result = impl_->store->TryRetire(description->Manifest().checkpoint,
+                                          description->Epoch());
     if (result == DiskRetireResult::kBusy)
-      return false;
+      return {};
     if (result == DiskRetireResult::kPinned)
       continue;
-    impl_->index->RemoveDurable(description);
+    impl_->index->RemoveDurable(*description);
     impl_->Erase(record);
     if (result == DiskRetireResult::kRetired)
-      return true;
+      return {std::move(description), tier == 0, tier == 2};
   }
 }
 void DiskCatalog::Invalidate(bool private_file, DiskFileId file) {
