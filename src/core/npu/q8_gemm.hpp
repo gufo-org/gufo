@@ -30,8 +30,11 @@ public:
     float* y;
   };
 
+  /// The largest weight arena (the design's weight tensor).
+  static constexpr std::size_t kMaxArenaBytes = std::size_t(4) << 30;
+
   /// Loads `dir`/q8gemm.xclbin and `dir`/q8gemm_dispatch.so. The weight
-  /// arena holds `arena_bytes` of packed matrices.
+  /// arena holds `arena_bytes` (at most kMaxArenaBytes) of packed matrices.
   static Q8Gemm Open(Device& device, const std::filesystem::path& dir,
                      std::size_t arena_bytes = std::size_t(1) << 30);
 
