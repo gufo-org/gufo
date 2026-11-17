@@ -910,7 +910,7 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
   // until the configured sessions fit, rather than refusing a session count
   // the ordinary verifier width fits.
   if (std::size_t free_bytes = 0, total_bytes = 0;
-      use_mtp && hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+      use_mtp && mem::MemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
     const std::size_t sessions =
         std::max<std::size_t>(options.session_count, 1);
     for (std::uint32_t rows = rocm::Executor::kWideRows;; rows -= 8) {

@@ -29,6 +29,7 @@ hipError_t hipHostRegister(void*, std::size_t, unsigned);
 hipError_t hipHostUnregister(void*);
 hipError_t hipMemGetInfo(std::size_t*, std::size_t*);
 hipError_t hipStreamCreateWithFlags(hipStream_t*, unsigned);
+hipError_t hipStreamCreateWithPriority(hipStream_t*, unsigned, int);
 hipError_t hipStreamDestroy(hipStream_t);
 hipError_t hipStreamSynchronize(hipStream_t);
 hipError_t hipEventCreateWithFlags(hipEvent_t*, unsigned);

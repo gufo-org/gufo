@@ -16,6 +16,7 @@
 #include "src/cli/serve/component_text_cache.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/core/json.hpp"
+#include "src/mem/ledger.hpp"
 
 namespace gufo::server {
 
@@ -275,10 +276,15 @@ struct TextRunnerPool::Impl {
       : validated(ValidateRunner(std::move(model_runner), state_count)) {
     {
       const auto resources = validated.runner->ResourceClaim();
+      // State sessions were promised but have not written can hold cache
+      // payloads until a session needs the pages back (src/mem/lendable.hpp);
+      // zero unless the backend can lend them.
+      const auto borrowable = mem::StateLedger::Process().BorrowableBytes();
       const auto automatic =
-          resources.retained_snapshot_capacity_bytes.value_or(0);
+          resources.retained_snapshot_capacity_bytes.value_or(0) + borrowable;
       const auto ceiling =
-          resources.retained_snapshot_ceiling_bytes.value_or(automatic);
+          resources.retained_snapshot_ceiling_bytes.value_or(automatic) +
+          borrowable;
       const auto requested =
           ram_cache_options.capacity_bytes
               ? ram_cache_options.capacity_bytes

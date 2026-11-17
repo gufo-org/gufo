@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <gufo/ext/experimental/state_memory.hpp>
 #include <gufo/ext/platform/os_info.hpp>
 #include <sstream>
 
@@ -118,7 +119,7 @@ std::string DeviceMemory::Describe() const {
 DeviceMemory QueryDeviceMemory() {
   DeviceMemory memory;
   std::size_t free = 0, total = 0;
-  if (hipMemGetInfo(&free, &total) == hipSuccess) {
+  if (mem::MemGetInfo(&free, &total) == hipSuccess) {
     memory.hip_valid = true;
     memory.hip_free = free;
     memory.hip_total = total;

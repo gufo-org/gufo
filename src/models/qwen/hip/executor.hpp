@@ -27,6 +27,7 @@
 #include <hipblas/hipblas.h>
 
 #include <gufo/ext/experimental/hip_graph_decode_executor.hpp>
+#include <gufo/ext/experimental/state_memory.hpp>
 
 #include "src/families/qwen/hip_common/execution_policy.hpp"
 #include "src/families/qwen/kernels/ops/gemm.hpp"
@@ -325,6 +326,8 @@ public:
   float* d_ssm_kq_scales{nullptr};
   float* d_ssm_alpha_beta{nullptr};
   float* d_logits{nullptr};
+  // K and V planes of [layer][position][width], one of the two per policy.
+  // Both point into kv_region_, backed as positions are written.
   void* d_attention_kv_f16{nullptr};
   float* d_kv_cache{nullptr};
   // Mirrors of the live recurrent buffers (see BeginRecurrentWrite); reassigned
@@ -349,6 +352,11 @@ public:
   [[nodiscard]] std::uint32_t GetMaxContext() const noexcept {
     return max_context_;
   }
+  /// Backs the K/V rows of positions below `end`, plus a tile of rows past
+  /// it, before they are written or read; maps further ahead on the page
+  /// pool's thread. Every writer calls it first, cache restores included.
+  /// Throws std::bad_alloc when no memory is left.
+  void EnsureKvRows(std::uint32_t end);
   [[nodiscard]] std::size_t GetAttentionKvPlaneElements() const noexcept {
     // Qwen27B reaches 2^32 elements per plane at context 262144.
     return static_cast<std::size_t>(config_.FullAttentionLayerCount()) *
@@ -391,6 +399,7 @@ private:
   [[nodiscard]] bool AllocateSsmReplayLog();
 
   core::ModelConfig config_;
+  std::shared_ptr<gufo::mem::Region> kv_region_;
   std::uint32_t max_context_;
   std::uint32_t max_batch_;
   QwenExecutionPolicy policy_;

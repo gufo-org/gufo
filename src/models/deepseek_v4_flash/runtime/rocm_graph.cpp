@@ -647,6 +647,22 @@ static ds4_gpu_tensor *rocm_graph_alloc_kv_cache_tensor(bool managed, uint64_t b
     return managed ? ds4_gpu_tensor_alloc_managed(bytes) : ds4_gpu_tensor_alloc(bytes);
 }
 
+/* Compressed rows that grow with the context. Outside the managed policy
+ * they keep one address for `max_rows` and map pages as rows are reserved;
+ * otherwise, or without demand mapping, `initial_rows` are allocated whole
+ * and later growth reallocates (rocm_graph_reserve_compressed_rows). */
+static ds4_gpu_tensor *rocm_graph_alloc_comp_rows(bool managed,
+                                                  uint64_t row_bytes,
+                                                  uint64_t max_rows,
+                                                  uint64_t initial_rows) {
+    if (!managed) {
+        if (ds4_gpu_tensor *rows =
+                ds4_gpu_tensor_alloc_rows(row_bytes, max_rows, initial_rows))
+            return rows;
+    }
+    return rocm_graph_alloc_kv_cache_tensor(managed, initial_rows * row_bytes);
+}
+
 static bool rocm_graph_reserve_compressed_rows(ds4_gpu_graph* g, uint32_t il,
                                                uint32_t required) {
   if (required > g->layer_comp_cap[il])
@@ -656,6 +672,16 @@ static bool rocm_graph_reserve_compressed_rows(ds4_gpu_graph* g, uint32_t il,
       ds4_gpu_tensor_bytes(g->layer_attn_comp_cache[il]) / row_bytes;
   if (required <= capacity)
     return true;
+  const bool indexed = ds4_layer_compress_ratio(il) == 4;
+  if (ds4_gpu_tensor_ensure_rows(g->layer_attn_comp_cache[il], required)) {
+    // Demand-mapped rows grow in place: no copy and no free, so neither the
+    // device drain of hipFree nor a second copy of the rows.
+    return !indexed ||
+           (ds4_gpu_tensor_ensure_rows(g->layer_attn_comp_cache_f16[il],
+                                       required) &&
+            ds4_gpu_tensor_ensure_rows(g->layer_index_comp_cache[il],
+                                       required));
+  }
 
   const uint64_t next_capacity = std::min<uint64_t>(
       g->layer_comp_cap[il], std::max<uint64_t>(required, capacity * 2));
@@ -666,7 +692,6 @@ static bool rocm_graph_reserve_compressed_rows(ds4_gpu_graph* g, uint32_t il,
                    ds4_gpu_tensor_free);
   Tensor mirror(nullptr, ds4_gpu_tensor_free);
   Tensor indexer(nullptr, ds4_gpu_tensor_free);
-  const bool indexed = ds4_layer_compress_ratio(il) == 4;
   if (indexed) {
     mirror.reset(rocm_graph_alloc_kv_cache_tensor(
         g->managed_kv_cache,
@@ -955,13 +980,13 @@ static bool rocm_graph_alloc_raw_cap(
           const uint32_t coff = ratio == 4 ? 2u : 1u;
           const uint64_t attn_width = (uint64_t)coff * DS4_N_HEAD_DIM;
           const uint64_t attn_rows = (uint64_t)coff * ratio;
-          g->layer_attn_comp_cache[il] = rocm_graph_alloc_kv_cache_tensor(
-              managed_kv_cache,
-              initial_comp_cap * DS4_N_HEAD_DIM * sizeof(float));
+          g->layer_attn_comp_cache[il] = rocm_graph_alloc_comp_rows(
+              managed_kv_cache, DS4_N_HEAD_DIM * sizeof(float),
+              g->layer_comp_cap[il], initial_comp_cap);
           if (ratio == 4) {
-            g->layer_attn_comp_cache_f16[il] = rocm_graph_alloc_kv_cache_tensor(
-                managed_kv_cache,
-                initial_comp_cap * DS4_N_HEAD_DIM * sizeof(uint16_t));
+            g->layer_attn_comp_cache_f16[il] = rocm_graph_alloc_comp_rows(
+                managed_kv_cache, DS4_N_HEAD_DIM * sizeof(uint16_t),
+                g->layer_comp_cap[il], initial_comp_cap);
           }
             g->layer_attn_state_kv[il] = ds4_gpu_tensor_alloc(attn_width * attn_rows * sizeof(float));
             g->layer_attn_state_score[il] = ds4_gpu_tensor_alloc(attn_width * attn_rows * sizeof(float));
@@ -977,11 +1002,9 @@ static bool rocm_graph_alloc_raw_cap(
             if (ratio == 4) {
                 const uint64_t index_width = (uint64_t)coff * DS4_N_INDEXER_HEAD_DIM;
                 const uint64_t index_rows = (uint64_t)coff * ratio;
-                g->layer_index_comp_cache[il] =
-                    rocm_graph_alloc_kv_cache_tensor(
-                        managed_kv_cache, initial_comp_cap *
-                                              DS4_N_INDEXER_HEAD_DIM *
-                                              sizeof(float));
+                g->layer_index_comp_cache[il] = rocm_graph_alloc_comp_rows(
+                    managed_kv_cache, DS4_N_INDEXER_HEAD_DIM * sizeof(float),
+                    g->layer_comp_cap[il], initial_comp_cap);
                 g->layer_index_state_kv[il] = ds4_gpu_tensor_alloc(index_width * index_rows * sizeof(float));
                 g->layer_index_state_score[il] = ds4_gpu_tensor_alloc(index_width * index_rows * sizeof(float));
                 if (g->layer_index_state_kv[il]) {

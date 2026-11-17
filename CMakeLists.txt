@@ -264,10 +264,17 @@ endif()
 
 add_subdirectory(src/cache)
 add_subdirectory(src/sched)
+add_subdirectory(src/mem)
 
 if (ENGINE_ENABLE_HIP)
+  add_library(gufo_mem_hip STATIC src/core/hip/state_page_pool.cpp
+    src/core/hip/state_lendable_range.cpp src/core/hip/state_region.cpp)
+  target_link_libraries(gufo_mem_hip PUBLIC gufo_mem hip::host Threads::Threads)
+  if (BUILD_TESTING)
+    target_compile_options(gufo_mem_hip PRIVATE -UNDEBUG)
+  endif()
   add_library(gufo_hip_host STATIC src/core/hip/host_allocations.cpp)
-  target_link_libraries(gufo_hip_host PUBLIC hip::host gufo_platform)
+  target_link_libraries(gufo_hip_host PUBLIC hip::host gufo_platform gufo_mem_hip)
   # HIP loads ROCr through libamdhip64's own RUNPATH, so a build tree runs
   # the unpatched runtime unless LD_LIBRARY_PATH names the patched one (the
   # Nix package wraps `gufo` for this). With GUFO_ROCR_LIBRARY_DIR (the Nix
@@ -626,6 +633,7 @@ if (BUILD_TESTING)
 
   add_subdirectory(tests/cache)
   add_subdirectory(tests/sched)
+  add_subdirectory(tests/mem)
   add_subdirectory(tests/extensions)
 
   # Opt-in live process-failure checks, never preloaded into hosted tests or

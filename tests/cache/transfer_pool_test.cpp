@@ -293,8 +293,13 @@ void ComponentTransferFactoryCounts() {
         std::make_unique<Adapter>(), ledger, std::move(hooks));
     // Every native handle already exists at resource construction. No cache
     // payload has committed, and borrowing cannot create a later native cost.
-    assert(live_streams == streams && live_events == leases);
-    assert(system_release_events == (sessions ? leases : 0));
+    // Besides the shared pool: restores (2 streams, 16 leases) and disk
+    // persistence (1 stream, 8 leases), both on shared native streams.
+    constexpr std::size_t kClassStreams = 3, kClassLeases = 24;
+    assert(live_streams == streams + kClassStreams &&
+           live_events == leases + kClassLeases);
+    assert(system_release_events == (sessions ? leases : 0) + kClassLeases);
+    assert(resources->restore_stream && resources->background_stream);
     assert(registered.empty() && registered_bytes == 0);
     std::vector<std::unique_ptr<cache::Stream>> held;
     for (std::size_t i = 0; i < leases; ++i) {
@@ -306,7 +311,7 @@ void ComponentTransferFactoryCounts() {
     assert(live_streams == streams && live_events == leases);
     held.clear();
     assert(!live_streams && !live_events);
-    assert(native_creations == streams + leases);
+    assert(native_creations == streams + leases + kClassStreams + kClassLeases);
   }
 }
 
@@ -660,6 +665,10 @@ hipError_t hipStreamCreateWithFlags(hipStream_t* stream, unsigned) {
   *stream = new NativeStream;
   ++live_streams;
   return hipSuccess;
+}
+hipError_t hipStreamCreateWithPriority(hipStream_t* stream, unsigned flags,
+                                       int) {
+  return hipStreamCreateWithFlags(stream, flags);
 }
 hipError_t hipStreamDestroy(hipStream_t stream) {
   const auto* native = static_cast<NativeStream*>(stream);

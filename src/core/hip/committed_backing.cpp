@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "src/core/hip/host_allocations.hpp"
+#include "src/core/hip/state_memory.hpp"
 #include "src/core/platform/page_pin.hpp"
 #include "src/core/platform/pages.hpp"
 
@@ -40,7 +41,7 @@ CommittedPages CommitPages(std::size_t bytes) {
 }
 bool HeapFree(std::size_t& free_bytes) {
   std::size_t total_bytes = 0;
-  return hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess;
+  return mem::MemGetInfo(&free_bytes, &total_bytes) == hipSuccess;
 }
 void ReleasePages(CommittedPages pages, std::size_t bytes) {
   (void)hipHostUnregister(pages.data);
@@ -66,8 +67,27 @@ struct BackingState {
   std::function<bool(std::size_t, std::size_t, std::size_t)> keep_segment;
   std::mutex growth;
   std::atomic<bool> growing_ahead{};
+  // State pages (see BackingPoolConfig::lendable). A lent page's blocks are
+  // held by a reservation until the page comes back.
+  std::shared_ptr<mem::LendableRange> lendable;
+  std::function<bool(std::size_t)> admit_state_pages;
+  std::function<bool()> shed;
+  std::size_t page_blocks{};
+  std::mutex lend_mutex;
+  std::unique_ptr<cache::ResourceReservation[]> lent;
+  std::atomic<std::size_t> lent_pages{}, lent_total{};
+  // Set once loading ends; from then on new pages come only from free host
+  // memory, never from reclaim.
+  std::atomic<bool> serving{};
+  // A segment of pinned host pages has its own address; one of state pages
+  // lives in the range.
+  std::byte* SegmentData(std::size_t segment) const {
+    return segments[segment].data
+               ? static_cast<std::byte*>(segments[segment].data)
+               : lendable->data() + segment * segment_blocks * block_bytes;
+  }
   std::byte* Address(std::size_t index) const {
-    return static_cast<std::byte*>(segments[index / segment_blocks].data) +
+    return SegmentData(index / segment_blocks) +
            index % segment_blocks * block_bytes;
   }
   std::size_t SegmentBytes(std::size_t segment) const {
@@ -88,7 +108,11 @@ struct BackingState {
     if (first == capacity)
       return false;
     const auto count = std::min(segment_blocks, capacity - first);
-    if (admit_segment && !admit_segment(count * block_bytes))
+    // State pages first, when their own rule admits them; otherwise pinned
+    // host pages under admit_segment, as without state pages.
+    const bool state_pages =
+        lendable && admit_state_pages && admit_state_pages(count * block_bytes);
+    if (!state_pages && admit_segment && !admit_segment(count * block_bytes))
       return false;
     std::vector<cache::ResourceReservation> reservations;
     try {
@@ -98,6 +122,23 @@ struct BackingState {
             cache::ResourceCategory::kBackingFree, block_bytes));
     } catch (const std::bad_alloc&) {
       return false;
+    }
+    if (state_pages) {
+      // Whole pages; segments start on page boundaries. The pages are the
+      // device heap's own, so the rule has already checked its reserve.
+      const auto page = lendable->page_bytes();
+      const auto begin = first * block_bytes / page;
+      const auto end = ((first + count) * block_bytes + page - 1) / page;
+      if (lendable->Commit(begin, end - begin,
+                           !serving.load(std::memory_order_acquire))) {
+        for (std::size_t i = 0; i < count; ++i)
+          blocks[first + i] = reservations[i].Convert();
+        committed.store(first + count, std::memory_order_release);
+        return true;
+      }
+      // Pages a partial commit made stay in the range for a later segment.
+      if (admit_segment && !admit_segment(count * block_bytes))
+        return false;
     }
     std::size_t heap_before = 0, heap_after = 0;
     if (keep_segment && !HeapFree(heap_before))
@@ -129,7 +170,65 @@ struct BackingState {
     committed.store(first + count, std::memory_order_release);
     return true;
   }
+  // Up to `want` committed pages whose blocks are all free, reserved for a
+  // session until Restore(). Evicts one retained checkpoint at a time while
+  // too few are free. Runs on the state pool's thread.
+  std::size_t SelectPages(std::size_t want, std::vector<std::size_t>& out) {
+    // Bounds one pass: a few evictions free whole pages unless payloads
+    // are fragmented, and the pool asks again while it is short.
+    constexpr int kMaxSheds = 16;
+    const auto start = out.size();
+    for (int sheds = 0;; ++sheds) {
+      {
+        const std::lock_guard lock(lend_mutex);
+        const auto pages =
+            committed.load(std::memory_order_acquire) / page_blocks;
+        // From the top: the forward cursor refills low blocks first.
+        for (std::size_t p = pages; p-- > 0 && out.size() - start < want;) {
+          if (lent[p] || segments[p * page_blocks / segment_blocks])
+            continue;  // Lent already, or pinned host pages.
+          const auto range =
+              std::span(blocks.get() + p * page_blocks, page_blocks);
+          if (cache::ResourceCharge::FindFreeBacking(range, page_blocks) != 0)
+            continue;
+          try {
+            lent[p] = cache::ResourceCharge::ReserveBacking(
+                range, cache::ResourceCategory::kBackingAssigned);
+          } catch (const std::bad_alloc&) {
+            continue;  // A capture took one of them meanwhile.
+          }
+          out.push_back(p);
+          lent_pages.fetch_add(1, std::memory_order_relaxed);
+          lent_total.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+      if (out.size() - start >= want || sheds == kMaxSheds || !shed || !shed())
+        break;
+    }
+    return out.size() - start;
+  }
+  void Restore(std::size_t page) {
+    const std::lock_guard lock(lend_mutex);
+    if (lent[page]) {
+      lent[page] = {};
+      lent_pages.fetch_sub(1, std::memory_order_relaxed);
+    }
+  }
   ~BackingState() {
+    if (lendable) {
+      lendable->ClearOwner();
+      // Lent reservations go before the blocks they hold.
+      if (lent)
+        for (std::size_t p = 0; p < (capacity + page_blocks - 1) / page_blocks;
+             ++p)
+          lent[p] = {};
+      // Pinned host segments here; the range frees its own pages when its
+      // last owner goes.
+      for (std::size_t i = 0; i < SegmentCount(); ++i)
+        if (segments[i])
+          ReleasePages(segments[i], SegmentBytes(i));
+      return;
+    }
     // Physical storage is freed before its original committed charges.
     if (segments)
       for (std::size_t i = 0; i < SegmentCount(); ++i)
@@ -243,6 +342,32 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
   state->ledger = &ledger;
   state->admit_segment = std::move(config.admit_segment);
   state->keep_segment = std::move(config.keep_segment);
+  if (config.lendable && config.segment_bytes && count &&
+      config.lendable->page_bytes() % config.block_bytes == 0 &&
+      config.lendable->bytes() >=
+          (count * config.block_bytes + config.lendable->page_bytes() - 1) /
+              config.lendable->page_bytes() * config.lendable->page_bytes()) {
+    const auto page_blocks = config.lendable->page_bytes() / config.block_bytes;
+    // Segments in whole pages, so each starts on a page of its own.
+    state->segment_blocks =
+        (state->segment_blocks + page_blocks - 1) / page_blocks * page_blocks;
+    state->page_blocks = page_blocks;
+    state->lendable = std::move(config.lendable);
+    state->admit_state_pages = std::move(config.admit_state_pages);
+    state->shed = std::move(config.shed);
+    state->lent = std::make_unique<cache::ResourceReservation[]>(
+        (count + page_blocks - 1) / page_blocks);
+    const std::weak_ptr<detail::BackingState> weak = state;
+    state->lendable->SetOwner(
+        [weak](std::size_t pages, std::vector<std::size_t>& out) {
+          const auto owner = weak.lock();
+          return owner ? owner->SelectPages(pages, out) : 0;
+        },
+        [weak](std::size_t page) {
+          if (const auto owner = weak.lock())
+            owner->Restore(page);
+        });
+  }
   if (!config.segment_bytes && count) {
     std::vector<cache::ResourceReservation> reservations;
     reservations.reserve(count);
@@ -420,6 +545,18 @@ std::size_t CommittedBackingPool::PageCommitAllocations() const noexcept {
 }
 std::size_t CommittedBackingPool::LongTermPinnedBytes() const noexcept {
   return state_->pinned_bytes.load(std::memory_order_relaxed);
+}
+void CommittedBackingPool::StartServing() noexcept {
+  state_->serving.store(true, std::memory_order_release);
+}
+bool CommittedBackingPool::Lends() const noexcept {
+  return state_->lendable != nullptr;
+}
+std::size_t CommittedBackingPool::LentPages() const noexcept {
+  return state_->lent_pages.load(std::memory_order_relaxed);
+}
+std::size_t CommittedBackingPool::LentPagesTotal() const noexcept {
+  return state_->lent_total.load(std::memory_order_relaxed);
 }
 
 }  // namespace gufo::hip

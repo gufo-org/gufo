@@ -9,6 +9,7 @@
 #include <string>
 
 #include "src/core/platform/os_info.hpp"
+#include "src/mem/ledger.hpp"
 
 namespace gufo::ext {
 
@@ -100,8 +101,9 @@ std::uint64_t HostAvailableBytes() {
   std::ifstream membership("/proc/self/cgroup");
   std::ostringstream membership_text;
   membership_text << membership.rdbuf();
-  return CgroupAvailableBytes("/sys/fs/cgroup", membership_text.str(),
-                              available);
+  // Less the state sessions may still grow into: it is promised to them.
+  return mem::LessOutstanding(
+      CgroupAvailableBytes("/sys/fs/cgroup", membership_text.str(), available));
 }
 
 std::size_t ClampToSize(std::uint64_t bytes) {

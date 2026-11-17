@@ -13,6 +13,7 @@
 #include <string_view>
 
 #include "src/core/hip/admission_memory.hpp"
+#include "src/core/hip/state_memory.hpp"
 #include "src/core/logging/logging.hpp"
 #include "src/core/platform/gpu_budget.hpp"
 #include "src/core/platform/os_info.hpp"
@@ -21,7 +22,8 @@ namespace gufo::hip {
 
 /// The readings behind one state-capacity check, kept for LogStateCapacity().
 struct AdmissionMemory {
-  /// Free bytes of the device heap, as hipMemGetInfo reports them.
+  /// Free bytes of the device heap, as hipMemGetInfo reports them, less
+  /// state promised to sessions but not mapped yet (mem::MemGetInfo).
   std::uint64_t hip_free_bytes{0};
   /// The OS video-memory budget of this process. Set only on an integrated
   /// GPU whose budget could be read.
@@ -79,14 +81,14 @@ QueryDeviceLocalBudget() {
 [[nodiscard]] inline std::optional<AdmissionMemory> QueryAdmissionMemory() {
   std::size_t free_bytes = 0;
   std::size_t total_bytes = 0;
-  if (hipMemGetInfo(&free_bytes, &total_bytes) != hipSuccess)
+  if (mem::MemGetInfo(&free_bytes, &total_bytes) != hipSuccess)
     return std::nullopt;
   AdmissionMemory memory;
   memory.hip_free_bytes = free_bytes;
   memory.local = detail::QueryDeviceLocalBudget();
   if (memory.local.has_value()) {
     if (const auto host = platform::QueryHostMemory())
-      memory.host_available_bytes = host->available_bytes;
+      memory.host_available_bytes = mem::LessOutstanding(host->available_bytes);
   }
   memory.free_bytes = AdmissionFreeBytes(memory.hip_free_bytes, memory.local,
                                          memory.host_available_bytes,

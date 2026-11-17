@@ -39,6 +39,7 @@
 #include "src/cli/speculative_settings.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
 #include "src/core/platform/shutdown_signal.hpp"
+#include "src/mem/ledger.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
@@ -88,6 +89,14 @@ public:
       out << " gpu_device_used_mib=" << (total - free) / (1024 * 1024)
           << " gpu_device_total_mib=" << total / (1024 * 1024);
     }
+    // State promised to sessions at full context but mapped only as written.
+    if (const auto state = mem::StateLedger::Process().Totals();
+        state.reserved_bytes != 0)
+      out << " state_reserved_mib=" << state.reserved_bytes / (1024 * 1024)
+          << " state_mapped_mib=" << state.mapped_bytes / (1024 * 1024)
+          << " state_pooled_mib=" << state.pooled_bytes / (1024 * 1024)
+          << " state_outstanding_mib="
+          << state.outstanding_bytes / (1024 * 1024);
 #else
     (void)gpu_loaded;
 #endif
