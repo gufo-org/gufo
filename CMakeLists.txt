@@ -687,6 +687,16 @@ function(gufo_qwen3_asr_register_tests)
     LABELS "cpu;models;qwen3-asr;audio;quality;external-model"
     SKIP_RETURN_CODE 77)
 
+  add_executable(qwen3_asr_decode_test
+    ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/decode_test.cpp)
+  target_link_libraries(qwen3_asr_decode_test PRIVATE gufo_qwen3_asr)
+  target_compile_definitions(qwen3_asr_decode_test PRIVATE
+    GUFO_QWEN3_ASR_SPEECH_FIXTURES="${PROJECT_SOURCE_DIR}/tests/functional/fixtures/audio"
+    GUFO_AUDIO_DECODE_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/audio")
+  add_test(NAME qwen3_asr_decode_test COMMAND qwen3_asr_decode_test)
+  set_tests_properties(qwen3_asr_decode_test PROPERTIES
+    LABELS "cpu;models;qwen3-asr;audio;correctness")
+
   add_executable(qwen3_asr_prompt_test
     ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/prompt_test.cpp)
   target_link_libraries(qwen3_asr_prompt_test PRIVATE gufo_qwen3_asr)

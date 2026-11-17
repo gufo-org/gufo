@@ -27,6 +27,9 @@ struct LogMelFeatures {
   std::size_t frames{0};
 };
 
+/// Decodes a recorded file: WAV, FLAC, MP3, Ogg Vorbis or Ogg Opus, at most
+/// 8 channels, 192 kHz and 30 minutes. PCM16/24/32 and float32 WAV are read
+/// exactly as before other formats were accepted.
 [[nodiscard]] bool DecodeWav(std::span<const std::byte> bytes,
                              AudioBuffer* output, std::string* error = nullptr);
 

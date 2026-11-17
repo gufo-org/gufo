@@ -117,7 +117,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
 
   const MultipartPart* file = Find(parts, "file");
   if (file == nullptr || file->body.empty()) {
-    return Error(400, "Bad Request", "a non-empty WAV 'file' is required",
+    return Error(400, "Bad Request", "a non-empty audio 'file' is required",
                  "missing_file");
   }
   const MultipartPart* model = Find(parts, "model");

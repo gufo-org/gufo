@@ -44,7 +44,7 @@ public:
     if (fail) {
       result->invalid_audio = invalid_audio;
       if (error != nullptr)
-        *error = "Qwen3-ASR input must be a RIFF WAV";
+        *error = "Qwen3-ASR audio is truncated";
       return false;
     }
     result->language = "English";
@@ -201,7 +201,7 @@ void TestFailures() {
   Check(malformed.status == 400 &&
             malformed.body.find("\"code\":\"invalid_audio_input\"") !=
                 std::string::npos &&
-            malformed.body.find("RIFF WAV") != std::string::npos,
+            malformed.body.find("audio is truncated") != std::string::npos,
         "undecodable audio is a client error");
   const auto stream = Send(service, Multipart("json", {}, "true"));
   std::string events;
