@@ -60,6 +60,10 @@ for t in "${targets[@]}"; do
     # compiles with SLP disabled (qwen CMakeLists).
     compile+=(-fno-slp-vectorize)
   fi
+  if [[ "$src" -ef tools/bench/glm5_iq1_wmma_bench.hip ]]; then
+    # The HIP body of this guard-selected bench is the whole point.
+    compile+=(-DENGINE_ENABLE_HIP=1)
+  fi
   if [[ "$src" -ef tools/qwen27b/dflash_gemm_bench.hip ]]; then
     # Exact projection comparisons use the production compiler optimization level.
     compile[1]=-O2
@@ -82,8 +86,8 @@ for t in "${targets[@]}"; do
     # TryLaunchQuantPrefillWave64 used as the bench baseline), plus the
     # small-batch wave64 helpers referenced by the included GEMM unit.
     native_sources+=(tools/bench/flint_w8a8_wave64.hip)
-    native_sources+=(src/models/qwen/hip/kernels/small_batch_wave64.hip)
-    native_sources+=(src/models/qwen/hip/kernels/small_batch_quant16_wave64.hip)
+    native_sources+=(src/families/qwen/kernels/small_batch_wave64.hip)
+    native_sources+=(src/families/qwen/kernels/small_batch_quant16_wave64.hip)
     # C9: the mmq k/v fallback baseline (flint_mmq_q8_0_dense).
     extra+=(-Xlinker build/release/staging/models/flint/libgufo_flint_mmq.a)
   fi
