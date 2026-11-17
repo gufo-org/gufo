@@ -1,6 +1,7 @@
 #include "src/core/hip/host_allocations.hpp"
 
 #include "src/core/platform/page_pin.hpp"
+#include "src/core/platform/pages.hpp"
 
 namespace gufo::hip {
 
@@ -13,18 +14,26 @@ hipError_t HostAllocations::Allocate(void** pointer, std::size_t bytes,
   if (!pointer)
     return hipErrorInvalidValue;
   *pointer = nullptr;
-  void* data{};
-  const auto status = hipHostMalloc(&data, bytes, flags);
-  if (status != hipSuccess)
-    return status;
-  if (!data)
+  if (!bytes)
     return hipSuccess;
+  // Anonymous, pinned, then registered: see the class comment.
+  (void)flags;
+  void* data = platform::CommitZeroedPages(bytes);
+  if (!data)
+    return hipErrorOutOfMemory;
   const int pin = platform::PinHostPages(data, bytes);
+  const auto status = hipHostRegister(data, bytes, hipHostRegisterMapped);
+  if (status != hipSuccess) {
+    platform::UnpinHostPages(pin);
+    platform::ReleaseCommittedPages(data, bytes);
+    return status;
+  }
   try {
     allocations_.push_back({data, bytes, pin});
   } catch (const std::bad_alloc&) {
+    (void)hipHostUnregister(data);
     platform::UnpinHostPages(pin);
-    (void)hipHostFree(data);
+    platform::ReleaseCommittedPages(data, bytes);
     return hipErrorOutOfMemory;
   }
   *pointer = data;
@@ -33,8 +42,9 @@ hipError_t HostAllocations::Allocate(void** pointer, std::size_t bytes,
 
 void HostAllocations::Reset() noexcept {
   for (const auto& allocation : allocations_) {
+    (void)hipHostUnregister(allocation.data);
     platform::UnpinHostPages(allocation.pin);
-    (void)hipHostFree(allocation.data);
+    platform::ReleaseCommittedPages(allocation.data, allocation.bytes);
   }
   allocations_.clear();
 }
