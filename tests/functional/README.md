@@ -79,9 +79,8 @@ TTS requests use checkpoint sampling, fixed seeds and a 180-codec-step cap.
 TTS intelligibility requires an explicitly selected ASR evaluator binary. Pin its
 revision and checkpoint independently when changing ASR or TTS runtime behavior;
 using the same candidate as its own evaluator does not qualify those changes.
-The current ASR malformed-WAV path returns `500 transcription_failed` rather than
-400. The suite records this known limitation and checks its exact error and
-subsequent recovery; it does not claim correct client-error classification.
+A malformed ASR WAV must return `400 invalid_audio_input`, and the server must
+recover for the next request.
 
 Every invocation requires a new output directory. `report.json` retains status,
 per-case results, request timings and headers (including available server phase

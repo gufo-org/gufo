@@ -153,6 +153,7 @@ struct TranscriptionHipRuntime::Impl {
     }
     *result = {};
     const Clock::time_point total_begin = Clock::now();
+    bool invalid_audio = false;
     try {
       auto admission = frontend_gate.Acquire(is_cancelled, error);
       if (!admission)
@@ -176,6 +177,7 @@ struct TranscriptionHipRuntime::Impl {
       if (!request.wav.empty()) {
         AudioBuffer decoded_audio;
         if (!DecodeWav(request.wav, &decoded_audio, &phase_error)) {
+          invalid_audio = true;
           throw std::invalid_argument(phase_error);
         }
         decoded_waveform = ResampleMono16k(decoded_audio);
@@ -319,6 +321,7 @@ struct TranscriptionHipRuntime::Impl {
       return true;
     } catch (const std::exception& exception) {
       *result = {};
+      result->invalid_audio = invalid_audio;
       SetError(error, exception.what());
       return false;
     }

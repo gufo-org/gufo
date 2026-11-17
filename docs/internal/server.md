@@ -632,6 +632,9 @@ and supports `json`, `text`, and `verbose_json`. `stream=true` with JSON emits
 OpenAI transcript delta/done events. Long uploads are split within model
 capacity; `max_tokens` applies per chunk. Timestamp (`timestamp_granularities[]`)
 and logprobs (`include[]`) requests are rejected; unknown fields are ignored.
+A `file` the model cannot decode returns 400 `invalid_audio_input` (an
+`invalid_audio_input` error event when streaming); other failures return 500
+`transcription_failed`.
 
 `GET /v1/realtime?intent=transcription` upgrades to OpenAI's manual-commit
 transcription WebSocket interface. [ASR streaming examples](../models/qwen3-asr.md#streaming-a-file)
