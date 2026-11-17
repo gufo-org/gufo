@@ -29,8 +29,11 @@ Rules for a model using regions:
   queue on the device. Regions end with their sessions.
 
 Without virtual memory management (`hipDeviceAttributeVirtualMemoryManagementSupported`),
-a region allocates its full size with `hipMalloc` and `Ensure` only checks
-bounds.
+or where device pages are not host RAM (`platform::DevicePagesUseHostMemory`:
+Windows, whose HIP has virtual memory management but takes pages from the
+dedicated carve-out, so holding outstanding state back from host budgets would
+shrink them for nothing), a region allocates its full size with `hipMalloc`,
+zeroed like new pages, and `Ensure` only checks bounds.
 
 ## Page pool
 

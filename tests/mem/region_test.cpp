@@ -129,7 +129,8 @@ void MapAhead() {
   assert(region->Ensure(40000, &error));
 }
 
-// Pages recycled from a released region come back zeroed, as new ones do.
+// Pages recycled from a released region come back zeroed, as new ones do;
+// so does memory a whole allocation reuses.
 void Recycled() {
   std::string error;
   const std::size_t rows = 8 * kPageBytes / 4096;
@@ -272,13 +273,13 @@ int main() {
   Check(hipSetDevice(0), "device");
   const bool demand = PagePool::ForDevice(0) != nullptr;
   Segments(demand);
+  Recycled();
   if (!demand) {
     std::puts("mem_region_test: no demand mapping; whole-allocation path ok");
     return 0;
   }
   Accounting();
   MapAhead();
-  Recycled();
   GraphAcrossGrowth();
   Lending();
   const auto stats =

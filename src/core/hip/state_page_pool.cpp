@@ -15,6 +15,10 @@ namespace gufo::mem {
 namespace {
 
 bool SupportsDemandMapping(int device, const hipMemAllocationProp& prop) {
+  // The ledger holds outstanding state back from host budgets, which is
+  // only right where device pages are host RAM.
+  if (!platform::DevicePagesUseHostMemory())
+    return false;
   int supported = 0;
   if (hipDeviceGetAttribute(&supported,
                             hipDeviceAttributeVirtualMemoryManagementSupported,

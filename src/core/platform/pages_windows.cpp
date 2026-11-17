@@ -105,6 +105,10 @@ void ReleaseSharedTempMapping(SharedTempMapping& mapping) noexcept {
   mapping = {};
 }
 
+bool DevicePagesUseHostMemory() noexcept {
+  return false;
+}
+
 bool CanMapDeviceFiles() noexcept {
   return false;
 }

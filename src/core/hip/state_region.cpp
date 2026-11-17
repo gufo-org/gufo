@@ -75,11 +75,18 @@ std::shared_ptr<Region> Region::Create(const RegionShape& shape,
     }
     (void)hipGetLastError();
   }
-  // No virtual memory management, or no address range: the whole buffer.
+  // No virtual memory management, or no address range: the whole buffer,
+  // zeroed like the demand-mapped pages and the buffers regions replace.
   void* data = nullptr;
   if (hipMalloc(&data, region->bytes_) != hipSuccess) {
     (void)hipGetLastError();
     SetError(error, "state region allocation failed");
+    return nullptr;
+  }
+  if (hipMemset(data, 0, region->bytes_) != hipSuccess) {
+    (void)hipGetLastError();
+    (void)hipFree(data);
+    SetError(error, "state region clear failed");
     return nullptr;
   }
   region->base_ = static_cast<std::uint8_t*>(data);

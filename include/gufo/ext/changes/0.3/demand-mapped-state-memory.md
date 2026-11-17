@@ -56,3 +56,6 @@ written:
   `UnmapDeviceFileAt` and `CloseDeviceFile` give exported device memory (a
   Linux dma-buf) a CPU view at the address the device runtime reserved for
   it. Windows reports no support.
+- `platform::DevicePagesUseHostMemory` is true where device pages are host
+  RAM, so outstanding state belongs in host budgets. Windows reports false
+  (they come from the dedicated carve-out), and regions there allocate whole.

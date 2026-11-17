@@ -67,6 +67,11 @@ SharedTempMapping CreateSharedTempMapping(std::size_t bytes) noexcept;
 /// Releases a mapping created by CreateSharedTempMapping().
 void ReleaseSharedTempMapping(SharedTempMapping& mapping) noexcept;
 
+/// True when device pages are made from host RAM, so state promised to
+/// sessions but not mapped yet is host memory the host budgets must hold
+/// back. False on Windows, where they come from the dedicated carve-out.
+bool DevicePagesUseHostMemory() noexcept;
+
 /// True when an exported device-memory file (a Linux dma-buf) can be mapped
 /// for the CPU with MapDeviceFileAt().
 bool CanMapDeviceFiles() noexcept;
