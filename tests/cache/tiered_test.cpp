@@ -203,7 +203,10 @@ void SupersededDiskTurnsLeaveBeforeAnotherConversation() {
     active.push_back(checkpoint->Id());
     (void)f.Publish(*checkpoint);
   }
-  assert(f.catalog.EvictOne());
+  // The result names the retired entry and why it was chosen.
+  const auto evicted = f.catalog.EvictOne();
+  assert(evicted && evicted.superseded && !evicted.reused);
+  assert(evicted.description->Manifest().checkpoint == active.front());
   assert(!f.disk.Open(active.front()));
   assert(f.disk.Open(idle->Id()));
   for (std::size_t i = 1; i < active.size(); ++i)
@@ -228,7 +231,9 @@ void PromptAnchorOutlivesCoveredAndLeafGeneratedFrontiers() {
   // Turns 1 and 2 are covered intermediates (rank 0). Turn 2 has a private
   // tail while Turn 1 aligns to a chunk boundary, so Turn 2 releases more
   // unique bytes and leaves first.
-  assert(f.catalog.EvictOne());
+  const auto covered = f.catalog.EvictOne();
+  assert(covered && !covered.superseded && !covered.reused);
+  assert(covered.description->Manifest().checkpoint == active[2]);
   assert(!f.disk.Open(active[2]));
   assert(f.disk.Open(active[1]));
   assert(f.disk.Open(active[3]));

@@ -59,6 +59,24 @@ std::size_t PayloadBytes(const cache::DiskManifest& manifest) {
   }
   return bytes;
 }
+// Disk eviction during admission decides which conversations survive a
+// restart; name every retired entry so retention losses can be traced.
+bool LogDiskEviction(const cache::DiskEviction& eviction) {
+  if (!eviction)
+    return false;
+  const auto& manifest = eviction.description->Manifest();
+  Logger::Info(
+      "cache",
+      "schema=component-cache-v1 event=disk_entry_evicted reason=admission "
+      "tokens=" +
+          std::to_string(manifest.tokens.size()) + " checkpoint_id=" +
+          std::to_string(manifest.checkpoint.value) + " purpose=" +
+          std::to_string(static_cast<unsigned>(manifest.purpose)) +
+          " superseded=" + std::to_string(eviction.superseded) +
+          " reused=" + std::to_string(eviction.reused) +
+          " payload_bytes=" + std::to_string(PayloadBytes(manifest)));
+  return true;
+}
 class FrontierHeadroomRefused final : public std::runtime_error {
 public:
   FrontierHeadroomRefused() : std::runtime_error("frontier capture headroom") {}
@@ -569,7 +587,7 @@ struct ComponentTextCache::Impl {
                                         error.what());
             }
             const std::lock_guard lock(mutex);
-            return catalog->EvictOne();
+            return LogDiskEviction(catalog->EvictOne());
           });
     }
     if (queue && ram_enabled)
