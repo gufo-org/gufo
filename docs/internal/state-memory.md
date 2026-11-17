@@ -156,7 +156,12 @@ long-term and registered with HIP, not `hipHostMalloc` memory. Compaction keeps
 trying to migrate pinned `hipHostMalloc` pages; each failed attempt invalidates
 their GPU mapping and evicts every GPU queue of the process (a probe froze the
 GPU for 45-109 s). Pinned anonymous pages are never isolated for migration.
-Never register, unregister or free pinned host memory while serving under
+The pin is an io_uring buffer registration and counts against
+`RLIMIT_MEMLOCK`: where it fails (systemd's default 8 MiB fails it at every
+size, and Windows has no long-term pin), a buffer stays `hipHostMalloc` memory,
+because unpinned registered pages evict for longer under compaction. Kernels
+take `hipHostGetDevicePointer`: on Windows the device address differs from the
+host pointer. Never register, unregister or free pinned host memory while serving under
 memory pressure: each costs 60-547 ms of queue evictions per 2 GiB.
 
 ## Restore streams
