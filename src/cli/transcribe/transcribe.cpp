@@ -160,8 +160,8 @@ void PrintTranscribeHelp(std::string_view program_name) {
   bool live = false;
   std::vector<std::string> positionals;
   ArgParser parser(
-      std::string(program_name) + " transcribe [OPTIONS] [WAV]",
-      "Transcribe a PCM or float WAV with native HIP speech recognition.");
+      std::string(program_name) + " transcribe [OPTIONS] [AUDIO]",
+      "Transcribe a recording with native HIP speech recognition.");
   parser.AddOption("-m", "--model", "PATH",
                    "Speech recognition model (Qwen3-ASR-1.7B directory, or "
                    "an extension model's artifact)",
@@ -170,7 +170,9 @@ void PrintTranscribeHelp(std::string_view program_name) {
                    "Audio projector sidecar of models that take one (default: "
                    "the model's own lookup)",
                    "Model", &mmproj);
-  parser.AddOption("-f", "--audio", "WAV", "Input WAV path", "Input", &audio);
+  parser.AddOption("-f", "--audio", "PATH",
+                   "Input audio: WAV, FLAC, MP3, Ogg Vorbis or Ogg Opus",
+                   "Input", &audio);
   parser.AddOption("-l", "--language", "NAME",
                    "Optional language name or ISO code; auto-detect by default",
                    "Input", &language);
@@ -220,8 +222,8 @@ int RunTranscribe(std::span<const char* const> args) {
   std::vector<std::string> positionals;
 
   ArgParser parser(
-      "gufo transcribe [OPTIONS] [WAV]",
-      "Transcribe a PCM or float WAV with native HIP speech recognition.");
+      "gufo transcribe [OPTIONS] [AUDIO]",
+      "Transcribe a recording with native HIP speech recognition.");
   parser.AddOption("-m", "--model", "PATH",
                    "Speech recognition model (Qwen3-ASR-1.7B directory, or "
                    "an extension model's artifact)",
@@ -230,7 +232,9 @@ int RunTranscribe(std::span<const char* const> args) {
                    "Audio projector sidecar of models that take one (default: "
                    "the model's own lookup)",
                    "Model", &mmproj);
-  parser.AddOption("-f", "--audio", "WAV", "Input WAV path", "Input", &audio);
+  parser.AddOption("-f", "--audio", "PATH",
+                   "Input audio: WAV, FLAC, MP3, Ogg Vorbis or Ogg Opus",
+                   "Input", &audio);
   parser.AddOption("-l", "--language", "NAME",
                    "Optional language name or ISO code; auto-detect by default",
                    "Input", &language);
@@ -287,7 +291,7 @@ int RunTranscribe(std::span<const char* const> args) {
   if (audio.empty() && positionals.size() == 1U) {
     audio = positionals.front();
   } else if (!positionals.empty()) {
-    std::cerr << "Error: supply exactly one WAV path\n";
+    std::cerr << "Error: supply exactly one audio path\n";
     return 2;
   }
   if (audio.empty() || maximum_tokens == 0U || capacity < 32U ||

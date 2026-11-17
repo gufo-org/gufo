@@ -46,6 +46,13 @@ def run(evidence, url, audio_root, model):
             files={'file': ('speech.wav', item['path'].read_bytes(), 'audio/wav')})
         assert status == 200 and body.decode().strip() == references[0].strip(), body
 
+    with evidence.case('mp3-equals-wav'):
+        # #1257: compressed uploads decode to the same speech as the WAV.
+        mp3 = item['path'].with_suffix('.mp3')
+        result = evidence.json(endpoint, label='mp3', data=fields(item),
+                               files={'file': ('speech.mp3', mp3.read_bytes(), 'audio/mpeg')})
+        assert result['text'] == references[0], result
+
     with evidence.case('streaming-equals-buffered'):
         with evidence.request(endpoint, label='stream', data=fields(item, stream='true'),
                 files={'file': ('speech.wav', item['path'].read_bytes(), 'audio/wav')}) as (response, row, path):

@@ -10,6 +10,7 @@
     "qwen3_asr_audio_encoder_hip_test",
     "qwen3_asr_audio_test",
     "qwen3_asr_config_test",
+    "qwen3_asr_decode_test",
     "qwen3_asr_loader_test",
     "qwen3_asr_prompt_test",
     "qwen3_asr_text_decoder_hip_test",
