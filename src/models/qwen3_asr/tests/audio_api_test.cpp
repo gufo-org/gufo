@@ -209,10 +209,10 @@ void TestFailures() {
     events += part;
     return true;
   });
-  Check(stream.stream_log->error_code == "invalid_audio_input" &&
-            events.find("\"code\":\"invalid_audio_input\"") !=
-                std::string::npos,
-        "streaming reports undecodable audio as invalid input");
+  Check(
+      stream.stream_log->error_code == "invalid_audio_input" &&
+          events.find("\"code\":\"invalid_audio_input\"") != std::string::npos,
+      "streaming reports undecodable audio as invalid input");
   runner.invalid_audio = false;
   const HttpResponse failed = Send(service, Multipart());
   Check(failed.status == 500 &&

@@ -150,8 +150,8 @@ int main() {
   Check(!runtime->Transcribe({.wav = malformed, .max_new_tokens = 128}, {},
                              &rejected, &error) &&
             rejected.invalid_audio &&
-            !runtime->Transcribe({.wav = wav, .max_new_tokens = 0}, {},
-                                 &failed, &error) &&
+            !runtime->Transcribe({.wav = wav, .max_new_tokens = 0}, {}, &failed,
+                                 &error) &&
             !failed.invalid_audio,
         "only undecodable audio is reported as invalid audio");
   const auto concurrent = [&](std::string context) {
