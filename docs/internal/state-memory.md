@@ -127,6 +127,63 @@ the cache until Flash-Next's graph instantiation ran out of heap (18 MB free);
 the same host on main kept 14 GB free. Install's
 [memory settings](../install.md#memory-settings) set the limit to cover RAM.
 
+## Shared session state
+
+When the configured sessions do not all fit at full context, they may share
+the memory of those that do (#715). A runner reports the demand-mapped part
+of a session (`TextRunnerResourceClaim::demand_mapped_state_bytes`), and
+`mem::FitSessions` decides at load:
+
+- every session fits at full context: nothing changes;
+- the fixed state of every session fits, with room for one session at full
+  context: the sessions **share** `full_sessions × session_bytes −
+  sessions × fixed_bytes` of demand-mapped state (the **shared state**);
+- otherwise the load is refused, as before.
+
+The ledger's **promise cap** is set to the shared state, so every other
+budget (the RAM cache grant, snapshots, scratch, copy widths) sees what it
+would see with only the sessions that fit at full context.
+
+Each session has a **state account** (`mem::StateAccount`) that groups its
+regions and charges their pages to the shared state: the larger of its
+**need** (tokens it may write) and its mapped pages. Sessions together never
+charge more than the shared state; a region maps a page only if its account
+can charge it, and map-ahead stops at the need.
+
+The scheduler drives it:
+
+1. **Admission.** A request reserves its prompt plus up to 8,192 generated
+   tokens (`mem::StateReservation`) before it takes a session; the session it
+   lands on claims them from the reservation, before a restore writes rows.
+2. **Reclaim.** When short, `ComponentTextCache::ReclaimState` first unmaps
+   pages past each session's need (map-ahead, an older and longer
+   conversation), then drops idle sessions' live frontiers, cheapest to lose
+   first (cold admission's order) and never the one the request continues.
+   Dropping takes the slot through cold reassignment, which copies rows that
+   RAM checkpoints still borrow before they are unmapped. A session without a
+   live frontier may still lend rows past its need, so only busy sessions and
+   those with a frontier lose tails without reassignment. Unmapping waits for
+   the device, so this runs on the scheduler thread between work units.
+3. **Queue.** A request that still does not fit waits, in arrival order (a
+   later one never passes the oldest), until its deadline; state frees as
+   requests end. The log shows `event=state_wait` and `state_wait_end`.
+4. **Decode.** A decoding request claims 8,192 more tokens when fewer than
+   1,024 of its claim remain, up to its token limit. One that cannot pauses
+   (`state_paused`) and resumes first when state frees (`state_resumed`).
+5. **Preempt.** When every running request is paused, none can free state:
+   the most recently admitted stops with 503 `memory_pressure` (retryable).
+6. **Refuse.** A prompt the shared state never holds is refused at submit
+   with 507 `insufficient_memory_permanent`; `/props` reports
+   `max_prompt_tokens`, and a request's token limit ends where the shared
+   state ends, as at the context.
+
+When a session's request ends, its need falls to the live frontier it keeps.
+`/metrics` publishes `gufo_shared_state_bytes`, `_charged_bytes`,
+`_reclaimable_bytes`, `_max_prompt_tokens`, and the `_waits_total`,
+`_pauses_total` and `_preemptions_total` counters. Where regions are not
+demand-mapped (Windows today), runners report no demand-mapped state and
+the full-context check stands.
+
 ## Results
 
 As of November 2026 on gfx1151 (ROCm 10.1), Flash-Next with MTP at 4 × 262,144

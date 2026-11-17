@@ -106,6 +106,10 @@ public:
   /// Worst-case private device state, including the configured rollback cap.
   [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
                                          std::uint32_t context) const noexcept;
+  /// The part of SessionBytes() a session maps only as it writes it (K/V
+  /// regions); zero without demand mapping.
+  [[nodiscard]] std::size_t DemandMappedBytes(core::SessionMode mode,
+                                              std::uint32_t context) const;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
   /// Caps wide copy verification (Executor::LimitCopyRows); call before any
   /// session is created.
@@ -237,6 +241,8 @@ public:
   void SetCancellationCheck(std::function<bool()> check);
   [[nodiscard]] bool IsValid() const noexcept { return valid_; }
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
+  /// The account of this session's demand-mapped K/V.
+  [[nodiscard]] std::shared_ptr<mem::StateAccount> StateAccount() const;
   void ConfigureVision(std::shared_ptr<const qwen::vision::Prompt> prompt);
   /// A new request reusing cached context starts its own acceptance history.
   void ResetDraftPolicy();

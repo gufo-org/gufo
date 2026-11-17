@@ -5,9 +5,22 @@
 
 #include <cstddef>
 
+#include "src/core/hip/state_page_pool.hpp"
 #include "src/mem/ledger.hpp"
 
 namespace gufo::mem {
+
+/// Whether state regions on the current device take pages as rows are
+/// written, rather than their whole size at creation (no virtual memory
+/// management, or device pages that are not host RAM).
+[[nodiscard]] inline bool DemandMapped() {
+  int device = 0;
+  if (hipGetDevice(&device) != hipSuccess) {
+    (void)hipGetLastError();
+    return false;
+  }
+  return PagePool::ForDevice(device) != nullptr;
+}
 
 /// hipMemGetInfo, less the state sessions were promised but have not
 /// mapped yet. Every capacity decision reads free memory through this, so

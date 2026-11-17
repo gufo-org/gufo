@@ -245,7 +245,29 @@ struct ComponentTextCache::Impl {
     bool busy{};
     bool frontier_active{};
     std::thread frontier_worker;
+    // The session's shared-state account, when sessions share their
+    // demand-mapped state (#715).
+    std::shared_ptr<mem::StateAccount> account;
   };
+  // A frontier far beyond every checkpoint of its prompt is the only copy of
+  // that work. Requires mutex.
+  static constexpr std::size_t kUncoveredTokens = 4096;
+  bool Uncovered(const Entry& e) const {
+    if (!e.live || e.live_tokens.size() <= kUncoveredTokens)
+      return false;
+    return !index.HasCheckpoint(
+        {identity, e.live_tokens,
+         cache::InputIdentity(e.live_tokens.size(), e.live_input)},
+        e.live_tokens.size() - kUncoveredTokens);
+  }
+  // Order in which idle slots give up what they hold, cheapest first: no
+  // uncovered frontier, completed preservation, no live frontier, a shallow
+  // one, then the least recently used. Requires mutex.
+  using Rank = std::tuple<bool, bool, bool, bool, std::uint64_t>;
+  Rank ColdRank(const Entry& e) const {
+    return Rank{Uncovered(e), !e.slot->PreservationComplete(), bool(e.live),
+                e.live_tokens.size() >= kUncoveredTokens, e.used};
+  }
   std::shared_ptr<TextModelRunner> runner;
   cache::ResourceLedger ledger;
   std::unique_ptr<ComponentCacheResources> resources;
@@ -361,6 +383,17 @@ struct ComponentTextCache::Impl {
                                  resources->reassignment_batch_size});
       entries.push_back(std::move(entry));
     }
+    // Sessions that share their demand-mapped state (#715): learn each
+    // session's account now, so admission can size and reclaim state before
+    // a slot is chosen. Leasing an unused slot only creates it.
+    if (mem::StateLedger::Process().PromiseCap() != 0)
+      for (auto& entry : entries) {
+        auto lease = entry->slot->Acquire();
+        entry->account =
+            this->runner
+                ->BindComponentState(*resources->adapter, lease.Execution())
+                ->state_account();
+      }
     std::size_t automatic_bytes{}, max_bytes{}, slot_pinned_bytes{};
     std::size_t owned_manifest_bytes{};
     // RAM cache limit for a runner that pins its slots; computed before the
@@ -962,6 +995,13 @@ struct ComponentTextCache::Lease::Impl {
   std::vector<std::size_t> reply_starts, reply_ends;
   ContinuationLookup lookup_result;
   ComponentCacheMetrics metrics;
+  // The session's shared-state account; its need returns to the live
+  // frontier (or nothing) when the lease ends.
+  std::shared_ptr<mem::StateAccount> account;
+  ~Impl() {
+    if (active && account)
+      (void)account->SetNeed(0);
+  }
   Impl(ComponentTextCache::Impl* cache, ComponentTextCache::Impl::Entry* entry,
        cache::SlotLease&& slot, std::span<const cache::Token> prompt,
        cache::InputIdentity input, std::size_t stable)
@@ -1274,7 +1314,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     std::span<const ContinuationToken> prompt,
     const std::function<bool()>& cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse,
-    std::size_t stable, bool stop_at_eos, bool persist) {
+    std::size_t stable, bool stop_at_eos, bool persist,
+    std::size_t state_tokens, mem::StateReservation* reservation) {
   if (cancelled && cancelled())
     return {};
   auto input = Inputs(prompt.size(), context.get());
@@ -1318,19 +1359,10 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       // shallow frontier before a deep one, then the least recently used.
       // Faster idle preservation must not make short side requests evict a
       // deep conversation merely because its backing copy finished earlier.
-      constexpr std::size_t kUncoveredTokens = 4096;
-      const auto uncovered = [&](const Impl::Entry& e) {
-        if (!e.live || e.live_tokens.size() <= kUncoveredTokens)
-          return false;
-        return !impl_->index.HasCheckpoint(
-            {impl_->identity, e.live_tokens,
-             cache::InputIdentity(e.live_tokens.size(), e.live_input)},
-            e.live_tokens.size() - kUncoveredTokens);
-      };
-      using Rank = std::tuple<bool, bool, bool, bool, std::uint64_t>;
+      constexpr std::size_t kUncoveredTokens = Impl::kUncoveredTokens;
+      using Rank = Impl::Rank;
       const auto rank = [&](const Impl::Entry& e) {
-        return Rank{uncovered(e), !e.slot->PreservationComplete(), bool(e.live),
-                    e.live_tokens.size() >= kUncoveredTokens, e.used};
+        return impl_->ColdRank(e);
       };
       std::optional<Rank> selected_rank;
       for (auto& candidate : impl_->entries) {
@@ -1426,6 +1458,16 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
         impl_.get(), entry, std::move(slot), prompt, input, stable));
     auto& request = *lease->impl_;
     request.persist = persist;
+    // Claim the request's tokens before a restore or prefill writes them.
+    // An older frontier's need falls to them; its pages past them stay
+    // charged until reclaimed.
+    if (state_tokens != 0)
+      if (auto account = request.state->state_account()) {
+        request.account = account;
+        if (!account->Claim(state_tokens, reservation))
+          throw StateMemoryShort();
+        (void)account->SetNeed(state_tokens);
+      }
     request.state->SetCancellationCheck(cancelled);
     request.state->SetStopAtEos(stop_at_eos);
     impl_->runner->SetPromptContext(*request.state, context);
@@ -2454,6 +2496,9 @@ std::size_t ComponentTextCache::Lease::Commit(
       ends.push_back(live.size());
     }
     impl_->entry->live_tokens = live;
+    // The idle session keeps its frontier's pages.
+    if (impl_->account)
+      (void)impl_->account->SetNeed(live.size());
     impl_->entry->live_input = At(impl_->input, impl_->prompt.size());
     impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
         location, std::move(live), impl_->cache->identity,
@@ -2525,6 +2570,8 @@ void ComponentTextCache::Lease::Invalidate() noexcept {
   try {
     impl_->state->SetCancellationCheck({});
     impl_->slot = {};
+    if (impl_->account)
+      (void)impl_->account->SetNeed(0);
     impl_->entry->history.reset();
     const std::lock_guard lock(impl_->cache->mutex);
     impl_->entry->branch.reset();
@@ -2585,6 +2632,162 @@ ComponentCacheMetrics ComponentTextCache::Lease::Metrics() const {
     report.spill.idle_failures += spill.idle_failures;
   }
   return report;
+}
+
+bool ComponentTextCache::shared_state() const noexcept {
+  return mem::StateLedger::Process().PromiseCap() != 0 &&
+         std::ranges::any_of(impl_->entries,
+                             [](const auto& e) { return bool(e->account); });
+}
+
+std::size_t ComponentTextCache::StateBytesFor(std::size_t tokens) const {
+  if (!shared_state())
+    return 0;
+  for (const auto& entry : impl_->entries)
+    if (entry->account)
+      return entry->account->BytesFor(tokens);
+  return 0;
+}
+
+std::size_t ComponentTextCache::ReclaimableStateBytes() const {
+  if (!shared_state())
+    return 0;
+  const std::lock_guard lock(impl_->mutex);
+  std::size_t bytes = 0;
+  for (const auto& entry : impl_->entries)
+    if (entry->account)
+      bytes += entry->busy ? entry->account->tail_bytes()
+                           : entry->account->charged_bytes();
+  return bytes;
+}
+
+bool ComponentTextCache::ReclaimState(std::size_t bytes,
+                                      std::span<const ContinuationToken> prompt,
+                                      const TextPromptContext* context) {
+  auto& ledger = mem::StateLedger::Process();
+  if (!shared_state() || ledger.ChargeableBytes() >= bytes)
+    return true;
+  const auto start = Clock::now();
+  std::size_t tail_bytes = 0, frontier_bytes = 0, frontiers = 0;
+  // Where the time goes: unmapping waits for the device; reassigning a slot
+  // copies rows checkpoints still borrow from it.
+  double unmap_ms = 0, reassign_ms = 0;
+  const auto since = [](Clock::time_point t) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
+  };
+  const auto log = [&](bool enough) {
+    Logger::Info(
+        "memory",
+        "event=state_reclaimed needed_bytes=" + std::to_string(bytes) +
+            " tail_bytes=" + std::to_string(tail_bytes) +
+            " frontier_bytes=" + std::to_string(frontier_bytes) +
+            " frontiers=" + std::to_string(frontiers) +
+            " reassign_ms=" + std::to_string(reassign_ms) +
+            " unmap_ms=" + std::to_string(unmap_ms) +
+            " chargeable_bytes=" + std::to_string(ledger.ChargeableBytes()) +
+            " enough=" + (enough ? "true" : "false") + " ms=" +
+            std::to_string(
+                std::chrono::duration<double, std::milli>(Clock::now() - start)
+                    .count()));
+  };
+  // 1. Pages mapped past each session's need: ahead mappings and an older,
+  // longer conversation's rows. No state is lost. Busy sessions have no
+  // work in flight here either, and their need covers what they write. A
+  // session without a live frontier may still lend rows past its need to
+  // checkpoints that have not copied them (an uncommitted release keeps
+  // them borrowed): those go through reassignment below, which preserves
+  // them first.
+  std::vector<Impl::Entry*> tails;
+  {
+    const std::lock_guard lock(impl_->mutex);
+    for (auto& entry : impl_->entries)
+      if (entry->account && (entry->busy || entry->live))
+        tails.push_back(entry.get());
+  }
+  for (auto* entry : tails) {
+    if (entry->account->tail_bytes() == 0)
+      continue;
+    const auto trim_start = Clock::now();
+    tail_bytes += entry->account->TrimTo(entry->account->need_tokens());
+    unmap_ms += since(trim_start);
+    if (ledger.ChargeableBytes() >= bytes) {
+      log(true);
+      return true;
+    }
+  }
+  // 2. Idle sessions' live frontiers, cheapest to lose first (the order
+  // cold admission takes slots in), never the frontier this prompt would
+  // continue. Reassigning the slot preserves checkpoints that borrow its
+  // rows before they go.
+  std::optional<std::size_t> keep;
+  std::vector<Impl::Entry*> order;
+  {
+    const std::lock_guard lock(impl_->mutex);
+    const auto input = Inputs(prompt.size(), context);
+    const auto found =
+        impl_->index.Lookup({impl_->identity, prompt, input, prompt.size(),
+                             /*reuse=*/true});
+    if (found.selected && found.selected->live)
+      keep = found.selected->live->slot.value - 1;
+    for (std::size_t i = 0; i < impl_->entries.size(); ++i) {
+      auto& entry = *impl_->entries[i];
+      if (entry.busy || !entry.account || (keep && *keep == i) ||
+          entry.account->charged_bytes() == 0)
+        continue;
+      order.push_back(&entry);
+    }
+    std::ranges::sort(order, [&](const auto* a, const auto* b) {
+      return impl_->ColdRank(*a) < impl_->ColdRank(*b);
+    });
+  }
+  for (auto* entry : order) {
+    {
+      const std::lock_guard lock(impl_->mutex);
+      if (entry->busy)
+        continue;
+      entry->busy = true;
+      if (entry->live) {
+        impl_->index.Erase(*entry->live);
+        entry->live.reset();
+      }
+      entry->live_tokens.clear();
+      entry->reply_starts.clear();
+      entry->reply_ends.clear();
+      entry->branch = std::make_shared<const std::uint8_t>(0);
+      entry->durable.reset();
+    }
+    try {
+      if (entry->frontier_worker.joinable())
+        entry->frontier_worker.join();
+      const std::size_t charged = entry->account->charged_bytes();
+      {
+        const auto reassign_start = Clock::now();
+        auto lease = entry->slot->Acquire();
+        reassign_ms += since(reassign_start);
+        const auto trim_start = Clock::now();
+        entry->account->TrimTo(0);
+        unmap_ms += since(trim_start);
+      }
+      frontier_bytes += charged - entry->account->charged_bytes();
+      ++frontiers;
+    } catch (const std::exception& error) {
+      Logger::Warn("memory", std::string("event=state_reclaim_failed reason=") +
+                                 error.what());
+    }
+    {
+      const std::lock_guard lock(impl_->mutex);
+      entry->busy = false;
+    }
+    impl_->frontier_ready.notify_all();
+    if (ledger.ChargeableBytes() >= bytes) {
+      log(true);
+      return true;
+    }
+  }
+  // Nothing to free is the common case while requests wait: stay quiet.
+  if (tail_bytes != 0 || frontiers != 0)
+    log(false);
+  return false;
 }
 
 }  // namespace gufo::server

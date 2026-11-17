@@ -264,6 +264,8 @@ const char* StatusReason(int status) noexcept {
       return "Service Unavailable";
     case 502:
       return "Bad Gateway";
+    case 507:
+      return "Insufficient Storage";
     default:
       return "Internal Server Error";
   }

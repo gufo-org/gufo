@@ -1501,6 +1501,11 @@ HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend& b) {
   if (const auto sessions = b.session_states().size(); sessions > 0) {
     resp["total_slots"] = sessions;
   }
+  // Sessions sharing their state (#715) hold prompts up to this length; a
+  // longer one is refused with 507 insufficient_memory_permanent.
+  if (const auto shared = b.shared_state()) {
+    resp["max_prompt_tokens"] = shared->max_prompt_tokens;
+  }
 
   // What a request without sampling fields gets.
   const auto defaults = b.sampling_defaults();
@@ -1677,6 +1682,39 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
          "tokens over sessions times context; excludes retained cache\n"
       << "# TYPE llamacpp:kv_cache_usage_ratio gauge\n"
       << "llamacpp:kv_cache_usage_ratio " << KvCacheUsageRatio(b) << "\n";
+  if (const auto shared = b.shared_state()) {
+    out << "# HELP gufo_shared_state_bytes Session state the configured "
+           "sessions share when they do not all fit at full context\n"
+        << "# TYPE gufo_shared_state_bytes gauge\n"
+        << "gufo_shared_state_bytes " << shared->shared_bytes << "\n"
+        << "# HELP gufo_shared_state_charged_bytes Shared session state "
+           "charged to sessions\n"
+        << "# TYPE gufo_shared_state_charged_bytes gauge\n"
+        << "gufo_shared_state_charged_bytes " << shared->charged_bytes << "\n"
+        << "# HELP gufo_shared_state_reclaimable_bytes Charged session state "
+           "held by idle sessions or mapped past a session's need\n"
+        << "# TYPE gufo_shared_state_reclaimable_bytes gauge\n"
+        << "gufo_shared_state_reclaimable_bytes " << shared->reclaimable_bytes
+        << "\n"
+        << "# HELP gufo_shared_state_max_prompt_tokens Longest prompt the "
+           "shared session state holds\n"
+        << "# TYPE gufo_shared_state_max_prompt_tokens gauge\n"
+        << "gufo_shared_state_max_prompt_tokens " << shared->max_prompt_tokens
+        << "\n"
+        << "# HELP gufo_shared_state_waits_total Requests that waited for "
+           "shared session state\n"
+        << "# TYPE gufo_shared_state_waits_total counter\n"
+        << "gufo_shared_state_waits_total " << shared->waits << "\n"
+        << "# HELP gufo_shared_state_pauses_total Decoding requests paused "
+           "until shared session state freed\n"
+        << "# TYPE gufo_shared_state_pauses_total counter\n"
+        << "gufo_shared_state_pauses_total " << shared->pauses << "\n"
+        << "# HELP gufo_shared_state_preemptions_total Requests stopped "
+           "with memory_pressure so others could continue\n"
+        << "# TYPE gufo_shared_state_preemptions_total counter\n"
+        << "gufo_shared_state_preemptions_total " << shared->preemptions
+        << "\n";
+  }
   if (const auto budget = b.prompt_admission_budget()) {
     out << "# HELP gufo_prompt_state_budget_bytes Host RAM prompt state may "
            "claim before admission refuses\n"

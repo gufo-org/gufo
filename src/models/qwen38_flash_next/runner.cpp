@@ -187,6 +187,10 @@ public:
     return {.per_request_state_bytes = session_->AllocatedBytes(),
             .temporary_scratch_bytes = 0};
   }
+  [[nodiscard]] std::shared_ptr<mem::StateAccount> state_account()
+      const override {
+    return session_->StateAccount();
+  }
 
   [[nodiscard]] QwenFlashNextSession& session() const { return *session_; }
   [[nodiscard]] models::qwen38_flash_next::ContinuationAdapter& adapter()
@@ -356,10 +360,9 @@ public:
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
-    const auto session_bytes = model_->SessionBytes(
-        use_mtp_ ? gufo::core::SessionMode::kSpeculative
-                 : gufo::core::SessionMode::kAutoregressive,
-        max_context_);
+    const auto mode = use_mtp_ ? gufo::core::SessionMode::kSpeculative
+                               : gufo::core::SessionMode::kAutoregressive;
+    const auto session_bytes = model_->SessionBytes(mode, max_context_);
     std::optional<std::size_t> capacity;
     if (const auto memory = gufo::hip::QueryAdmissionMemory()) {
       const auto deferred = model_->DeferredScratchBytes();
@@ -379,6 +382,8 @@ public:
         .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
         .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
         .requires_device_runtime_lock = true,
+        .demand_mapped_state_bytes =
+            model_->DemandMappedBytes(mode, max_context_),
     };
   }
 
@@ -913,15 +918,27 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
       use_mtp && mem::MemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
     const std::size_t sessions =
         std::max<std::size_t>(options.session_count, 1);
-    for (std::uint32_t rows = rocm::Executor::kWideRows;; rows -= 8) {
+    const auto mode = gufo::core::SessionMode::kSpeculative;
+    const auto fit = [&](std::uint32_t rows) {
       model->LimitCopyRows(rows);
-      if (rows == 8 ||
-          sessions * model->SessionBytes(gufo::core::SessionMode::kSpeculative,
-                                         max_context) +
-                  model->DeferredScratchBytes() <=
-              free_bytes)
-        break;
-    }
+      const std::size_t deferred = model->DeferredScratchBytes();
+      if (free_bytes <= deferred)
+        return mem::SessionFit::Kind::kRefused;
+      return mem::FitSessions(sessions, model->SessionBytes(mode, max_context),
+                              model->DemandMappedBytes(mode, max_context),
+                              free_bytes - deferred)
+          .kind;
+    };
+    std::uint32_t rows = rocm::Executor::kWideRows;
+    while (rows > 8 && fit(rows) != mem::SessionFit::Kind::kFits)
+      rows -= 8;
+    // When no width fits every session at full context, the sessions share
+    // their K/V (mem::FitSessions): keep the widest width that allows it.
+    if (fit(rows) != mem::SessionFit::Kind::kFits)
+      for (rows = rocm::Executor::kWideRows;
+           rows > 8 && fit(rows) == mem::SessionFit::Kind::kRefused;)
+        rows -= 8;
+    model->LimitCopyRows(rows);
   }
   std::string model_fingerprint = options.disk_cache.model_artifact_fingerprint;
   if (!options.disk_cache.directory.empty() && model_fingerprint.empty()) {

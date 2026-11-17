@@ -19,6 +19,7 @@
 #include "src/cli/serve/continuation_types.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_publication_wait.hpp"
+#include "src/mem/account.hpp"
 
 namespace gufo::server {
 
@@ -139,6 +140,8 @@ public:
     [[nodiscard]] bool PreparePromptSnapshot();
     [[nodiscard]] bool SnapshotPending() const;
     void Invalidate() noexcept;
+    /// The session's shared-state account (#715), or null.
+    [[nodiscard]] std::shared_ptr<mem::StateAccount> state_account() const;
 
   private:
     friend class TextRunnerPool;
@@ -170,13 +173,50 @@ public:
       const TextExecutionPlan& plan);
   std::vector<std::exception_ptr> AdvanceBatch(std::span<Request*> requests,
                                                const TextExecutionPlan& plan);
+  /// State a request reserved ahead of its session (ReserveState).
+  struct StateTicket {
+    std::size_t tokens{0};
+    mem::StateReservation reservation;
+  };
+  /// With `state`, the session the request lands on claims its tokens from
+  /// the ticket's reservation.
   [[nodiscard]] Request Acquire(
       std::vector<TextRunnerToken> prompt,
       const sampling::SamplingConfig& sampling,
       const CancellationCheck& is_cancelled = {},
       std::shared_ptr<const TextPromptContext> context = {},
       bool reuse_prompt = true, std::size_t cache_prefix_tokens = 0,
-      bool stop_at_eos = true, bool persist = true);
+      bool stop_at_eos = true, bool persist = true,
+      StateTicket* state = nullptr);
+
+  /// Whether sessions share their demand-mapped state (#715): more sessions
+  /// are configured at full context than fit at once. Each request then
+  /// claims the tokens it may write, and is admitted only when they fit.
+  [[nodiscard]] bool shared_state() const noexcept;
+  /// Generated tokens a request claims ahead, at admission and each time
+  /// decoding nears its claim.
+  static constexpr std::size_t kStateDecodeTokens = 8192;
+  /// Tokens a request of `prompt_tokens` claims at admission: the prompt and
+  /// up to kStateDecodeTokens of `max_new_tokens`, within the context and
+  /// as far as the shared state could ever hold. Empty when not even the
+  /// prompt and one token fit in it: the request can never run.
+  [[nodiscard]] std::optional<std::size_t> StateClaimTokens(
+      std::size_t prompt_tokens, std::size_t max_new_tokens) const;
+  /// The longest prompt the shared state can hold with one generated token,
+  /// at most one token short of the context.
+  [[nodiscard]] std::size_t MaxPromptTokens() const;
+  /// Reserves `tokens` of state for a request about to be admitted, first
+  /// reclaiming idle sessions' state when short (never the frontier `prompt`
+  /// continues). Empty when they do not fit now. Call where no model work is
+  /// in flight.
+  [[nodiscard]] std::optional<StateTicket> ReserveState(
+      std::size_t tokens, std::span<const TextRunnerToken> prompt,
+      const TextPromptContext* context);
+  /// Raises a running request's claim to `tokens`, reclaiming idle
+  /// sessions' state when short. False when it does not fit now.
+  [[nodiscard]] bool ExtendState(Request& request, std::size_t tokens);
+  /// Charged state bytes ReclaimState could free.
+  [[nodiscard]] std::size_t ReclaimableStateBytes() const;
   [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,
                                 const CancellationCheck& is_cancelled = {});
   /// Longest RAM-retained prefix of prompt that Acquire could reuse, without

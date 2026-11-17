@@ -67,7 +67,11 @@ These server options work with every modality:
 - `--context`, `-c`: tokens per request. The default is the model's native
   context; lower it to fit more sessions in memory.
 - `--sessions`, `-j` (server only): requests that compute at the same time,
-  1 by default. Each session reserves memory for a full context.
+  1 by default. Each session reserves memory for a full context. With Qwen3.8
+  Flash-Next and Qwen3.8 27B on Linux, more sessions than fit at full context
+  share the memory of those that do: a request runs when its prompt and the
+  first 8,192 generated tokens fit, and waits otherwise. `/props` reports the
+  longest prompt as `max_prompt_tokens`.
 
 **Sampling**
 

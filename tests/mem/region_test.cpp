@@ -115,6 +115,55 @@ void Accounting() {
   assert(after.mapped_bytes == before.mapped_bytes);
 }
 
+// A session's account charges its regions' pages under a promise cap:
+// writes past it fail, map-ahead stops at the need, trimming unmaps the
+// pages rows no longer use and keeps the rows that remain readable.
+void SharedAccount() {
+  using gufo::mem::StateAccount;
+  auto& ledger = StateLedger::Process();
+  const auto charged_before = ledger.ChargedBytes();
+  std::string error;
+  {
+    auto account = std::make_shared<StateAccount>(/*margin_tokens=*/0);
+    // Two segments of 8 MiB, rows of 2 KiB: 1,024 rows per page.
+    auto region = Region::Create(
+        {.row_bytes = 2048, .rows = 4096, .segments = 2}, &error, account);
+    assert(region && region->demand_mapped());
+    assert(account->full_bytes() == 8 * kPageBytes);
+    ledger.SetPromiseCap(charged_before + 4 * kPageBytes);
+    assert(account->Claim(2048));  // two pages per segment
+    assert(account->charged_bytes() == 4 * kPageBytes);
+    // Map-ahead stops at the need.
+    region->MapAhead(4096);
+    PagePool::ForDevice(0)->Drain();
+    assert(region->backed_rows() == 2048);
+    // A write past the cap fails and maps nothing more.
+    assert(!region->Ensure(3000, &error));
+    assert(region->mapped_bytes() == 4 * kPageBytes);
+    const std::size_t words = 2048 / 4;
+    FillRows<<<dim3(64, 2), 256>>>(static_cast<std::uint32_t*>(region->data()),
+                                   4096 * words, words, 2048, 11);
+    Check(hipDeviceSynchronize(), "fill");
+    // Trim to 1,024 rows: one page per segment returns, the rows stay.
+    assert(account->TrimTo(1024) == 2 * kPageBytes);
+    assert(region->mapped_bytes() == 2 * kPageBytes);
+    assert(region->backed_rows() == 1024);
+    assert(account->charged_bytes() == 2 * kPageBytes);
+    assert(RowsMatch(*region, 1024, 11));
+    // Growing again maps zeroed pages.
+    assert(account->Claim(2048));
+    assert(region->Ensure(2048, &error));
+    std::vector<std::uint32_t> host(1024 * words);
+    Check(hipMemcpy(host.data(),
+                    static_cast<std::uint8_t*>(region->data()) + 1024 * 2048,
+                    host.size() * 4, hipMemcpyDeviceToHost),
+          "read regrown rows");
+    assert(std::ranges::all_of(host, [](std::uint32_t v) { return v == 0; }));
+    ledger.SetPromiseCap(0);
+  }
+  assert(ledger.ChargedBytes() == charged_before);
+}
+
 // The pool thread maps ahead; a writer then finds its rows backed.
 void MapAhead() {
   std::string error;
@@ -279,6 +328,7 @@ int main() {
     return 0;
   }
   Accounting();
+  SharedAccount();
   MapAhead();
   GraphAcrossGrowth();
   Lending();
