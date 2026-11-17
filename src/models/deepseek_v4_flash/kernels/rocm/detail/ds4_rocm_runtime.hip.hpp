@@ -1,9 +1,11 @@
 #include <chrono>
+#include <new>
 #include <map>
 #include <tuple>
 
 #include <gufo/ext/platform/mapped_file.hpp>
 #include <gufo/ext/platform/os_info.hpp>
+#include <gufo/ext/experimental/state_memory.hpp>
 
 static const void *g_model_host_base;
 static uint64_t g_model_registered_size;
@@ -864,6 +866,45 @@ extern "C" ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes) {
     return t;
 }
 
+using Ds4RegionHolder = std::shared_ptr<gufo::mem::Region>;
+
+extern "C" ds4_gpu_tensor *ds4_gpu_tensor_alloc_rows(uint64_t row_bytes,
+                                                     uint64_t max_rows,
+                                                     uint64_t initial_rows) {
+    if (row_bytes == 0 || max_rows == 0) return NULL;
+    std::string error;
+    auto region = gufo::mem::Region::Create(
+        {.row_bytes = (size_t)row_bytes, .rows = (size_t)max_rows}, &error);
+    if (!region || !region->demand_mapped()) return NULL;
+    ds4_gpu_tensor *t = (ds4_gpu_tensor *)calloc(1, sizeof(*t));
+    if (!t) return NULL;
+    t->ptr = region->data();
+    t->owner = 0;
+    t->row_bytes = row_bytes;
+    t->region = new (std::nothrow) Ds4RegionHolder(std::move(region));
+    if (!t->region || !ds4_gpu_tensor_ensure_rows(t, initial_rows ? initial_rows : 1)) {
+        delete static_cast<Ds4RegionHolder *>(t->region);
+        free(t);
+        return NULL;
+    }
+    return t;
+}
+
+extern "C" int ds4_gpu_tensor_ensure_rows(ds4_gpu_tensor *tensor, uint64_t rows) {
+    if (!tensor || !tensor->region) return 0;
+    auto &region = *static_cast<Ds4RegionHolder *>(tensor->region);
+    if (rows > region->shape().rows) return 0;
+    if (!region->Ensure((size_t)rows)) return 0;
+    /* Map a doubling ahead on the page pool's thread, as the reallocation
+     * this replaces would have reserved. */
+    region->MapAhead((size_t)rows * 2);
+    /* Exactly the rows asked for, whatever the pool mapped ahead: callers
+     * read capacity from one tensor of a group and must find every tensor of
+     * the group backed that far. */
+    tensor->bytes = std::max<uint64_t>(tensor->bytes, rows * tensor->row_bytes);
+    return 1;
+}
+
 extern "C" ds4_gpu_tensor *ds4_gpu_tensor_alloc_managed(uint64_t bytes) {
     if (bytes == 0) bytes = 1;
     ds4_gpu_tensor *t = (ds4_gpu_tensor *)calloc(1, sizeof(*t));
@@ -900,7 +941,7 @@ extern "C" int ds4_gpu_should_use_managed_kv_cache(uint64_t kv_cache_bytes, uint
 
     size_t free_b = 0;
     size_t total_b = 0;
-    hipError_t err = hipMemGetInfo(&free_b, &total_b);
+    hipError_t err = gufo::mem::MemGetInfo(&free_b, &total_b);
     if (err != hipSuccess) {
         (void)hipGetLastError();
         return 0;
@@ -926,6 +967,7 @@ extern "C" ds4_gpu_tensor *ds4_gpu_tensor_view(const ds4_gpu_tensor *base, uint6
 extern "C" void ds4_gpu_tensor_free(ds4_gpu_tensor *tensor) {
     if (!tensor) return;
     if (tensor->owner && tensor->ptr) (void)hipFree(tensor->ptr);
+    delete static_cast<Ds4RegionHolder *>(tensor->region);
     free(tensor);
 }
 

@@ -244,6 +244,16 @@ int ds4_gpu_synchronize(void);
 ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes);
 ds4_gpu_tensor *ds4_gpu_tensor_alloc_managed(uint64_t bytes);
 uint64_t ds4_gpu_tensor_bytes(const ds4_gpu_tensor *tensor);
+/// Rows of `row_bytes` at a fixed address for up to `max_rows`, backed by
+/// pages as rows are reserved, starting with `initial_rows`. Growth maps
+/// pages in place: nothing is copied or freed, so no device drain. Null when
+/// the device cannot map memory on demand; callers then allocate whole.
+ds4_gpu_tensor *ds4_gpu_tensor_alloc_rows(uint64_t row_bytes, uint64_t max_rows,
+                                          uint64_t initial_rows);
+/// Backs rows [0, rows) of a tensor from ds4_gpu_tensor_alloc_rows and widens
+/// its byte size to the backed rows. 0 when it is not such a tensor or no
+/// memory is left; rows past its maximum fail.
+int ds4_gpu_tensor_ensure_rows(ds4_gpu_tensor *tensor, uint64_t rows);
 /// Device address for transfers on an independent stream; changes if the owner reallocates.
 void* ds4_gpu_tensor_device_pointer(const ds4_gpu_tensor* tensor);
 int ds4_gpu_tensor_copy(ds4_gpu_tensor *dst, uint64_t dst_offset, const ds4_gpu_tensor *src, uint64_t src_offset, uint64_t bytes);

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <gufo/ext/experimental/host_allocations.hpp>
+#include <gufo/ext/experimental/state_memory.hpp>
 #include <gufo/ext/session_mode.hpp>
 #include <memory>
 #include <mutex>
@@ -217,6 +218,9 @@ private:
   std::unordered_map<std::uint64_t, hipGraphExec_t> graphs_;
   std::unordered_set<std::uint64_t> warmed_;
   std::vector<void*> allocations_;
+  /// Trunk and MTP K/V, one region per buffer, backed as rows are written.
+  std::vector<std::shared_ptr<gufo::mem::Region>> kv_regions_;
+  std::vector<std::shared_ptr<gufo::mem::Region>> mtp_kv_regions_;
   std::size_t allocated_bytes_{0};
   std::size_t rollback_bytes_{0};
   std::function<bool()> is_cancelled_;
@@ -295,6 +299,12 @@ public:
       core::SessionMode mode, std::uint32_t max_context,
       std::uint32_t rollback_depth) const noexcept;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
+  /// Backs the K/V rows of trunk positions below `trunk_end` and MTP
+  /// positions below `mtp_end`, plus a tile of rows past each, before they
+  /// are written or read; asks the page pool to map further ahead. Every
+  /// K/V writer calls it first, cache restores included.
+  [[nodiscard]] bool EnsureKv(Session& session, std::uint32_t trunk_end,
+                              std::uint32_t mtp_end, std::string* error) const;
 
   enum class ForwardMode { kDecode, kVerify, kPrefill };
   /// Commits checkpoint slot 0 on first use. False when the device lacks

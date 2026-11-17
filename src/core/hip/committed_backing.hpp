@@ -15,6 +15,7 @@
 #include "src/cache/ledger.hpp"
 #include "src/cache/slot.hpp"
 #include "src/core/hip/heap_placement.hpp"
+#include "src/mem/lendable.hpp"
 
 namespace gufo::hip {
 
@@ -104,6 +105,17 @@ struct BackingPoolConfig {
   // device heap's free bytes before and after; false releases the segment
   // and keeps the pool at its current size. A failed heap query refuses it.
   std::function<bool(std::size_t, std::size_t, std::size_t)> keep_segment;
+  // State pages to commit segments from (src/mem/lendable.hpp), so sessions
+  // can borrow whole free pages back. Needs on-demand segments and blocks
+  // that divide a page; otherwise ignored. A segment takes state pages when
+  // `admit_state_pages` allows them, else pinned host pages under
+  // admit_segment, as without state pages; only state pages are lent.
+  // `shed` evicts one retained checkpoint when too few pages are free,
+  // false when none can go; it runs on the state pool's thread without any
+  // lock of this pool.
+  std::shared_ptr<mem::LendableRange> lendable;
+  std::function<bool(std::size_t)> admit_state_pages;
+  std::function<bool()> shed;
 };
 
 class CommittedBackingPool {
@@ -135,6 +147,14 @@ public:
   // registration. Zero when io_uring or the caller's memlock limit refuses
   // them; the existing registered-page path remains usable in that case.
   [[nodiscard]] std::size_t LongTermPinnedBytes() const noexcept;
+  // Ends loading: with state pages, later segments take free host pages
+  // only, since a page made by reclaim may compact beside running work.
+  void StartServing() noexcept;
+  // True when segments are state pages that sessions can borrow.
+  [[nodiscard]] bool Lends() const noexcept;
+  // Pages lent to sessions now, and in all.
+  [[nodiscard]] std::size_t LentPages() const noexcept;
+  [[nodiscard]] std::size_t LentPagesTotal() const noexcept;
 
 private:
   std::shared_ptr<detail::BackingState> state_;

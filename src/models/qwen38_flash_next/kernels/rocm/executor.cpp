@@ -12,6 +12,7 @@
 #include <exception>
 #include <gufo/ext/experimental/managed_alloc.hpp>
 #include <gufo/ext/experimental/snapshot_transfer.hpp>
+#include <gufo/ext/experimental/state_memory.hpp>
 #include <gufo/ext/platform/pages.hpp>
 #include <limits>
 #include <memory>
@@ -249,7 +250,7 @@ public:
                           std::uint64_t reserved = 0) const {
     std::size_t free = 0;
     std::size_t total = 0;
-    if (hipMemGetInfo(&free, &total) != hipSuccess)
+    if (mem::MemGetInfo(&free, &total) != hipSuccess)
       return false;
     return free >= bytes && free - bytes + reserved >= reserve_;
   }
@@ -1415,6 +1416,24 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
       static_cast<std::size_t>(c.ssm_conv_kernel - 1) * c.SsmConvChannels();
   const std::size_t state_elems = static_cast<std::size_t>(c.ssm_num_v_heads) *
                                   c.ssm_head_dim * c.ssm_head_dim;
+  // K/V keeps a fixed address for the whole context, backed by pages as
+  // positions are written (EnsureKv). The session still accounts its full
+  // size, and the state ledger keeps the unwritten rows promised to it. A
+  // failed reservation leaves a null entry.
+  const auto grow =
+      [&](std::vector<std::shared_ptr<gufo::mem::Region>>& regions) {
+        auto region = gufo::mem::Region::Create(
+            {.row_bytes = kv_row * sizeof(__half), .rows = max_context},
+            error_msg);
+        if (!region) {
+          a.push_back(nullptr);
+          return static_cast<__half*>(nullptr);
+        }
+        s->allocated_bytes_ += region->bytes();
+        auto* data = static_cast<__half*>(region->data());
+        regions.push_back(std::move(region));
+        return data;
+      };
   for (std::uint32_t il = 0; il < c.num_layers; ++il) {
     if (c.IsLinearLayer(il)) {
       auto& l = s->linear_[il];
@@ -1423,12 +1442,8 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
       l.state = Alloc<float>(a, state_elems, error_msg, &s->allocated_bytes_);
     } else {
       auto& at = s->attention_[il];
-      at.k_cache =
-          Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                        error_msg, &s->allocated_bytes_);
-      at.v_cache =
-          Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                        error_msg, &s->allocated_bytes_);
+      at.k_cache = grow(s->kv_regions_);
+      at.v_cache = grow(s->kv_regions_);
       at.index_k = Alloc<float>(
           a, static_cast<std::size_t>(s->index_capacity_) * c.indexer_head_dim,
           error_msg, &s->allocated_bytes_);
@@ -1453,12 +1468,8 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
                          std::max(options_.max_speculative, max_copy_rows())) *
                          c.HcDim(),
                      error_msg, &s->allocated_bytes_);
-    s->mtp_.k_cache =
-        Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                      error_msg, &s->allocated_bytes_);
-    s->mtp_.v_cache =
-        Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                      error_msg, &s->allocated_bytes_);
+    s->mtp_.k_cache = grow(s->mtp_kv_regions_);
+    s->mtp_.v_cache = grow(s->mtp_kv_regions_);
     s->mtp_.index_k =
         Alloc<float>(a, std::size_t{s->index_capacity_} * c.indexer_head_dim,
                      error_msg, &s->allocated_bytes_);
@@ -1688,6 +1699,26 @@ bool Executor::EnsureWideSegments(std::uint32_t segments,
     wide_segments_.push_back(std::move(seg));
   }
   return true;
+}
+
+bool Executor::EnsureKv(Session& session, std::uint32_t trunk_end,
+                        std::uint32_t mtp_end, std::string* error) const {
+  // Rows past the frontier that must be backed now: tile-rounded attention
+  // reads and the next steps' writes.
+  constexpr std::size_t kTileRows = 2048;
+  // Rows the pool thread maps further ahead, off the scheduler thread: a
+  // prefill pass and more, so a writer normally finds its pages mapped.
+  constexpr std::size_t kAheadRows = 8192;
+  const auto ensure = [&](const auto& regions, std::size_t end) {
+    for (const auto& region : regions) {
+      if (!region->Ensure(end + kTileRows, error))
+        return false;
+      region->MapAhead(end + kAheadRows);
+    }
+    return true;
+  };
+  return ensure(session.kv_regions_, trunk_end) &&
+         ensure(session.mtp_kv_regions_, mtp_end);
 }
 
 std::size_t Executor::SessionBytes(
@@ -3609,6 +3640,10 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
     AssignError(error_msg, "session context is full");
     return false;
   }
+  if (!EnsureKv(session, session.position_ + n,
+                session.mtp_enabled_ ? session.mtp_.position + n : 0,
+                error_msg))
+    return false;
   for (auto t : tokens) {
     if (t < 0 || static_cast<std::uint32_t>(t) >= c.vocab_size) {
       AssignError(error_msg, "token out of range");
@@ -4655,6 +4690,8 @@ bool Executor::RestoreSnapshot(Session& session,
     AssignError(error_msg, "snapshot positions do not fit this session");
     return false;
   }
+  if (!EnsureKv(session, h.position, h.mtp_position, error_msg))
+    return false;
   if (h.position - h.blocks * h.compress_ratio > session.index_capacity_) {
     AssignError(error_msg, "unpooled indexer rows exceed the ring capacity");
     return false;
@@ -5170,6 +5207,8 @@ bool Executor::MtpForward(Session& session,
     AssignError(error_msg, "MTP context is full");
     return false;
   }
+  if (!EnsureKv(session, session.position_, pos + n, error_msg))
+    return false;
   if (session.continuation_hooks_)
     session.continuation_hooks_->BeforeWrite(
         true, pos, pos + n, session.mtp_.blocks,

@@ -28,6 +28,11 @@ struct ComponentCacheResources {
   std::shared_ptr<void> owner;
   std::unique_ptr<Adapter> adapter;
   StreamLease stream;
+  // Optional stream classes; empty ones fall back to `stream`. Foreground
+  // restores never queue behind captures or persistence on a shared FIFO
+  // stream, and disk writes never queue in front of a restore.
+  StreamLease restore_stream;
+  StreamLease background_stream;
   std::function<ComponentCaptureBuffer(const PayloadRequest&)> allocate;
   StagingAllocator staging;
   // Prepare on-demand backing immediately before the next prefill chunk.
@@ -42,6 +47,11 @@ struct ComponentCacheResources {
   // allocated. Serving charges them on top of the cache's budget, and adds
   // them back to the runner's claim, which measures the host after them.
   std::function<std::size_t()> pinned_bytes;
+  // Optional: installs how the provider evicts one retained checkpoint when
+  // sessions need its pages back (nullptr removes it; a call in progress
+  // finishes first). The function returns false when nothing could go. Only
+  // a provider whose backing sessions can borrow sets this.
+  std::function<void(std::function<bool()>)> set_shed;
   PersistenceSource::CopyRows copy_observed_rows;
   // At most this many transfers of one capture/restore are in flight before
   // waiting (16 at most). When the shared pool is momentarily exhausted, the

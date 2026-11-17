@@ -79,6 +79,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   if (batch_size > arena_.GetMaxBatch()) {
     throw std::length_error("prompt chunk exceeds the GPU batch length");
   }
+  arena_.EnsureKvRows(start_pos + static_cast<std::uint32_t>(batch_size));
   models::qwen::ContinuationWrite write(
       continuation_hooks_, start_pos,
       start_pos + static_cast<std::uint32_t>(batch_size));
@@ -730,6 +731,8 @@ void QwenGpuExecutor::CommitVerificationChunk(
   if (start_pos > arena_.GetMaxContext() ||
       committed_tokens.size() > arena_.GetMaxContext() - start_pos)
     throw std::length_error("committed Qwen chunk exceeds context");
+  arena_.EnsureKvRows(start_pos +
+                      static_cast<std::uint32_t>(committed_tokens.size()));
   models::qwen::ContinuationWrite write(
       continuation_hooks_, start_pos,
       start_pos + static_cast<std::uint32_t>(committed_tokens.size()));

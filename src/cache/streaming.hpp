@@ -100,6 +100,9 @@ public:
   ~StreamedStore();
   StreamedStore(const StreamedStore&) = delete;
   StreamedStore& operator=(const StreamedStore&) = delete;
+  // Optional stream classes for disk writes and restores; empty leases keep
+  // the constructor's. Call before the first Write or Restore.
+  void SetStreamClasses(StreamLease write, StreamLease restore);
   void Write(DiskFileId, const DiskManifest&, std::span<PersistenceSource>,
              TransferTiming&, std::stop_token = {},
              const std::function<bool()>& model_idle = {});

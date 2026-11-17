@@ -26,6 +26,7 @@ include/gufo/ext/experimental/lora_adapter.hpp
 include/gufo/ext/experimental/managed_alloc.hpp
 include/gufo/ext/experimental/npu.hpp
 include/gufo/ext/experimental/snapshot_transfer.hpp
+include/gufo/ext/experimental/state_memory.hpp
 include/gufo/ext/experimental/weight_upload.hpp
 include/gufo/ext/gguf_identity.hpp
 include/gufo/ext/gguf_reader.hpp
@@ -92,6 +93,8 @@ src/core/hip/host_allocations.hpp
 src/core/hip/managed_alloc.hpp
 src/core/hip/snapshot_copy.hpp
 src/core/hip/snapshot_transfer.hpp
+src/core/hip/state_memory.hpp
+src/core/hip/state_region.hpp
 src/core/hip/transfer_pool.hpp
 src/core/hip/weight_upload.hpp
 src/core/image.hpp
@@ -138,4 +141,5 @@ src/ext/text.hpp
 src/ext/text_contracts.hpp
 src/ext/tts.hpp
 src/ext/video.hpp
+src/mem/ledger.hpp
 src/sched/profile.hpp

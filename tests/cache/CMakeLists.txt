@@ -27,7 +27,7 @@ add_executable(cache_transfer_pool_test transfer_pool_test.cpp
   ${PROJECT_SOURCE_DIR}/src/core/hip/transfer_pool.cpp)
 target_include_directories(cache_transfer_pool_test BEFORE PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/fake_hip)
-target_link_libraries(cache_transfer_pool_test PRIVATE gufo_cache_fake)
+target_link_libraries(cache_transfer_pool_test PRIVATE gufo_cache_fake gufo_mem)
 add_test(NAME cache_transfer_pool_test COMMAND cache_transfer_pool_test)
 set_tests_properties(cache_transfer_pool_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
 

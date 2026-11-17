@@ -15,6 +15,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
   if (pos >= arena_.GetMaxContext()) {
     throw std::length_error("token position exceeds the GPU context length");
   }
+  arena_.EnsureKvRows(pos + 1);
   models::qwen::ContinuationWrite write(continuation_hooks_, pos, pos + 1);
 
   if (replaying_ssm_state_ && !compute_logits) {

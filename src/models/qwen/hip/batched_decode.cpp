@@ -181,6 +181,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
   }
 
   bool capture_replay = false;
+  for (const auto& item : items)
+    item.executor->arena_.EnsureKvRows(item.position + 1);
   std::array<models::qwen::ContinuationWrite, kMaxDecodeBatch> writes;
   for (std::size_t i = 0; i < items.size(); ++i)
     if (auto* hooks = items[i].executor->continuation_hooks_)
@@ -495,6 +497,9 @@ QwenGpuExecutor::ForwardVerificationBatch(
   for (const auto& item : items)
     if (item.executor->arena_.EnsureSsmReplayCapacity(item.tokens.size()))
       item.executor->graph_executor_.Reset();
+  for (const auto& item : items)
+    item.executor->arena_.EnsureKvRows(
+        item.position + static_cast<std::uint32_t>(item.tokens.size()));
   std::array<models::qwen::ContinuationWrite, kMaxDecodeBatch> writes;
   for (std::size_t i = 0; i < items.size(); ++i)
     if (auto* hooks = items[i].executor->continuation_hooks_)

@@ -526,6 +526,9 @@ void ContinuationAdapter::BeginRestore(
   Check(hipStreamSynchronize(state.executor->arena_.stream));
   if (state.draft)
     Check(hipStreamSynchronize(state.draft->executor_->stream_));
+  // Restores write K/V rows without a forward pass: back them first.
+  state.executor->arena_.EnsureKvRows(
+      static_cast<std::uint32_t>(ordered.front().valid_rows));
   state.expected = std::move(ordered);
   state.coverage = std::move(coverage);
   state.metadata.fill(std::byte{});

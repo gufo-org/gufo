@@ -288,7 +288,7 @@ struct StreamedStore::Impl {
   DiskStore* disk;
   ResourceCharge metadata, staging_charge;
   StagingAllocation staging;
-  StreamLease lease;
+  StreamLease lease, write_lease, restore_lease;
   std::timed_mutex mutex;
   std::uint64_t allocation_ns{};
 
@@ -326,9 +326,13 @@ struct StreamedStore::Impl {
     CheckStop(stop);
     return guard;
   }
-  std::unique_ptr<Stream> Lease(TransferTiming& timing) {
+  std::unique_ptr<Stream> Lease(TransferTiming& timing,
+                                const StreamLease* preferred = nullptr) {
     const auto start = Clock::now();
-    auto stream = lease();
+    // A busy stream class falls back to the shared pool rather than wait.
+    auto stream = preferred && *preferred ? (*preferred)() : nullptr;
+    if (!stream)
+      stream = lease();
     timing.stream_acquire_ns += Elapsed(start);
     if (!stream)
       throw ResourceExhausted();
@@ -342,6 +346,10 @@ StreamedStore::StreamedStore(ResourceLedger& ledger, DiskStore& disk,
           ledger, disk, bytes, std::move(allocator), std::move(lease),
           ledger.Reserve(ResourceCategory::kMetadata, sizeof(Impl)))) {}
 StreamedStore::~StreamedStore() = default;
+void StreamedStore::SetStreamClasses(StreamLease write, StreamLease restore) {
+  impl_->write_lease = std::move(write);
+  impl_->restore_lease = std::move(restore);
+}
 StreamedStore::StreamedStore(ResourceLedger& ledger, DiskStore& disk,
                              StagingAllocator allocator, StreamLease lease)
     : StreamedStore(ledger, disk, kDefaultDiskStagingBytes,
@@ -421,7 +429,7 @@ void StreamedStore::Write(DiskFileId file, const DiskManifest& manifest,
     writes.push_back({source.private_file_, source.file_, source.bytes_,
                       [&, source_ptr = &source](auto offset, auto piece) {
                         CheckStop(stop);
-                        auto stream = impl_->Lease(timing);
+                        auto stream = impl_->Lease(timing, &impl_->write_lease);
                         Settle(
                             source_ptr->copy_(
                                 offset, std::as_writable_bytes(piece), *stream),
@@ -509,7 +517,7 @@ bool StreamedStore::Restore(
         if (!staged)
           return;
         CheckStop(stop);
-        auto stream = impl_->Lease(timing);
+        auto stream = impl_->Lease(timing, &impl_->restore_lease);
         Settle(
             adapter.CopyRowsIn(slot, c.descriptor.id,
                                first - staged / c.descriptor.row_bytes, first,
@@ -544,7 +552,7 @@ bool StreamedStore::Restore(
                 CheckStop(stop);
                 if (collect)
                   return;
-                auto stream = impl_->Lease(timing);
+                auto stream = impl_->Lease(timing, &impl_->restore_lease);
                 auto completion =
                     private_state ? adapter.LoadPrivatePiece(
                                         slot, c.descriptor.id, offset,
