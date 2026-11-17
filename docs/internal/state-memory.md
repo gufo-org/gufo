@@ -164,6 +164,15 @@ The scheduler drives it:
    live frontier may still lend rows past its need, so only busy sessions and
    those with a frontier lose tails without reassignment. Unmapping waits for
    the device, so this runs on the scheduler thread between work units.
+   Disk writes come first: a disk capture the RAM cache could not stage reads
+   the session's rows in place until it is written. Reclaim never trims a
+   session below such a write (a later piece would read pages mapped again,
+   zeroed), and drops a frontier that a write still reads last: dropping it
+   fails the write, and with it the checkpoint that brings the conversation
+   back. Admission keeps that frontier for up to 30 s from its capture
+   (`ComponentTextCache::kStateWriteWait`) and retries once the write has
+   published; a decoding request does not wait for one. `event=state_reclaimed`
+   reports `deferred_writes` and `dropped_writes`.
 3. **Queue.** A request that still does not fit waits, in arrival order (a
    later one never passes the oldest), until its deadline; state frees as
    requests end. The log shows `event=state_wait` and `state_wait_end`.

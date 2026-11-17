@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_COMPONENT_TEXT_CACHE_HPP_
 #define GUFO_SERVER_COMPONENT_TEXT_CACHE_HPP_
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -105,9 +106,21 @@ public:
   // first, never the one `prompt` would continue. Unmapping waits for the
   // device: call it where no model work is in flight (the scheduler, between
   // work units). Returns whether `bytes` can be charged now.
+  //
+  // A frontier that a disk write still reads in place goes last, and stays
+  // while the write is younger than `write_wait`: dropping it would fail
+  // the write. Admission waits for such writes (kStateWriteWait); a running
+  // request's decode does not wait.
   [[nodiscard]] bool ReclaimState(std::size_t bytes,
                                   std::span<const ContinuationToken> prompt,
-                                  const TextPromptContext* context);
+                                  const TextPromptContext* context,
+                                  std::chrono::milliseconds write_wait = {});
+  // How long admission keeps an idle frontier for a disk write that reads
+  // it, from the write's capture. Writes queue one after another and share
+  // the disk with restores: three queued 1.9 GB Flash-Next frontiers beside
+  // five disk restores took 15 s. Losing one costs its whole prefill when
+  // the conversation returns (40 s at 66K tokens).
+  static constexpr std::chrono::milliseconds kStateWriteWait{30000};
   // Charged bytes that ReclaimState could free: tails of all sessions and
   // idle sessions' frontiers.
   [[nodiscard]] std::size_t ReclaimableStateBytes() const;

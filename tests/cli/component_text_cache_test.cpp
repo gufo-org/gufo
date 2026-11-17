@@ -26,6 +26,8 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
 #include "src/core/hip/component_cache_resources.hpp"
+#include "src/mem/account.hpp"
+#include "src/mem/ledger.hpp"
 #include "tests/cache/fake_adapter.hpp"
 #include "tests/cli/fake_cache_resources.hpp"
 #include "tests/support/temporary_directory.hpp"
@@ -38,9 +40,14 @@ namespace {
 struct State final : TextRunnerState {
   FakeAdapter& adapter;
   cache::Slot& slot;
+  // Shared session state (#715), when a test gives sessions accounts.
+  std::shared_ptr<mem::StateAccount> account;
   State(FakeAdapter& adapter, cache::Slot& slot)
       : adapter(adapter), slot(slot) {}
   void Invalidate() noexcept override { (void)adapter.Invalidate(slot); }
+  std::shared_ptr<mem::StateAccount> state_account() const override {
+    return account;
+  }
 };
 class Runner : public TextModelRunner {
 public:
@@ -4157,8 +4164,157 @@ void IndivisibleInputsAreNotSplit() {
     request.Invalidate();
   }
 }
+// Shared session state (#715): reclaiming state never fails a disk write
+// that reads a session's rows in place. Its rows stay mapped below the
+// write, and its frontier is dropped only after the write publishes, so
+// the conversation comes back from disk.
+void SharedStateReclaimWaitsForDiskWrites() {
+  constexpr std::size_t kPage = mem::kPageBytes;
+  struct Gate {
+    std::atomic<bool> entered{false};
+    std::binary_semaphore reading{0}, release{0};
+  };
+  // 1,024 tokens per page, 8 pages at full context.
+  static constexpr mem::RegionShape kShape{.row_bytes = kPage / 1024,
+                                           .rows = 8192};
+  struct SharedRunner final : Runner {
+    std::shared_ptr<Gate> gate = std::make_shared<Gate>();
+    mutable std::mutex mutex;
+    mutable std::map<const cache::Slot*, std::shared_ptr<mem::StateAccount>>
+        accounts;
+    // Rows every trim kept.
+    mutable std::vector<std::size_t> trims;
+    TextRunnerDescriptor Descriptor() const override {
+      auto descriptor = Runner::Descriptor();
+      descriptor.max_context = 8192;
+      return descriptor;
+    }
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->copy_observed_rows =
+          [gate = gate, copy = resources->copy_observed_rows](
+              auto source, auto destination, cache::Stream& stream) {
+            if (!gate->entered.exchange(true)) {
+              gate->reading.release();
+              gate->release.acquire();
+            }
+            return copy(source, destination, stream);
+          };
+      return resources;
+    }
+    std::unique_ptr<TextRunnerState> BindComponentState(
+        cache::Adapter& adapter, cache::Slot& slot) const override {
+      auto state = Runner::BindComponentState(adapter, slot);
+      const std::lock_guard lock(mutex);
+      auto& account = accounts[&slot];
+      if (!account) {
+        account = std::make_shared<mem::StateAccount>();
+        account->AddRegion(
+            kShape, 1, [this, raw = account.get()](std::size_t rows) {
+              trims.push_back(rows);
+              const auto keep = mem::RegionPageBytes(kShape, rows);
+              if (raw->mapped_bytes() > keep)
+                raw->OnUnmap(raw->mapped_bytes() - keep);
+            });
+      }
+      dynamic_cast<State&>(*state).account = account;
+      return state;
+    }
+  };
+  auto& ledger = mem::StateLedger::Process();
+  assert(ledger.ChargedBytes() == 0 && ledger.PromiseCap() == 0);
+  ledger.SetPromiseCap(7 * kPage);
+  const TemporaryDirectory temp("gufo-component-shared-state-test");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .staging_capacity_bytes = 8,
+                                        .min_checkpoint_step_tokens = 1};
+  std::vector<TextRunnerToken> prompt(5001);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  std::vector<TextRunnerToken> other(3000);
+  std::iota(other.begin(), other.end(), 20000);
+  std::uint64_t hash;
+  {
+    auto runner = std::make_shared<SharedRunner>();
+    runner->rows_per_chunk = 64;
+    runner->row_backing_bytes = 64 * sizeof(cache::Token);
+    ComponentTextCache cache(runner, 2, 1 << 24, disk);
+    assert(cache.shared_state());
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true, true,
+                               prompt.size(), nullptr);
+    auto& state = dynamic_cast<State&>(lease->state());
+    const auto account = state.account;
+    assert(account && account->charged_bytes() == 5 * kPage);
+    runner->adapter->Append(state.slot, prompt, prompt);
+    hash = runner->adapter->RecurrentHash(state.slot);
+    // The region maps its five pages and one ahead.
+    assert(account->OnMap(6 * kPage));
+    assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(),
+                                     false, SnapshotPurpose::kContinuation,
+                                     prompt));
+    auto snapshot = lease->Capture();
+    assert(snapshot);
+    assert(lease->PublishSnapshot(prompt, std::move(snapshot), false) == 0);
+    // The disk write reads the slot's rows in place and is held there.
+    assert(runner->gate->reading.try_acquire_for(std::chrono::seconds(5)));
+    const auto pending = cache.PendingPublication(prompt, {});
+    assert(pending && pending->checkpoint_id);
+    (void)lease->Commit(prompt, {}, prompt);
+    lease.reset();
+    // As if a shorter request had since run on the session: its need is
+    // below the rows the write still reads.
+    assert(account->SetNeed(1000));
+    assert(ledger.ChargeableBytes() == kPage);
+
+    // Four pages for another prompt: the page past the write is trimmed,
+    // but not the write's rows, and the frontier the write reads stays.
+    assert(!cache.ReclaimState(4 * kPage, other, nullptr,
+                               ComponentTextCache::kStateWriteWait));
+    {
+      const std::lock_guard lock(runner->mutex);
+      assert(!runner->trims.empty());
+      for (const auto rows : runner->trims)
+        assert(rows >= prompt.size());
+    }
+    assert(account->mapped_bytes() == 5 * kPage);
+    assert(ledger.ChargeableBytes() == 2 * kPage);
+    assert(cache.PendingPublication(prompt, {}, pending->checkpoint_id));
+
+    // Once the write has published, the frontier goes too when the whole
+    // budget is asked for.
+    runner->gate->release.release();
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    bool reclaimed = false;
+    while (!(reclaimed =
+                 cache.ReclaimState(7 * kPage, other, nullptr,
+                                    ComponentTextCache::kStateWriteWait)) &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    assert(reclaimed);
+    assert(!cache.PendingPublication(prompt, {}, pending->checkpoint_id));
+    assert(account->charged_bytes() == 0 && account->mapped_bytes() == 0);
+    assert(ledger.ChargeableBytes() == 7 * kPage);
+  }
+  assert(ledger.ChargedBytes() == 0);
+  ledger.SetPromiseCap(0);
+  {
+    auto runner = std::make_shared<Runner>();
+    runner->rows_per_chunk = 64;
+    runner->row_backing_bytes = 64 * sizeof(cache::Token);
+    ComponentTextCache cache(runner, 1, 1 << 24, disk);
+    auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+    assert(lease->restored_from_disk() &&
+           lease->cached_tokens() == prompt.size());
+    auto& state = dynamic_cast<State&>(lease->state());
+    assert(runner->adapter->RecurrentHash(state.slot) == hash);
+  }
+}
+
 int main() {
   TransferProviderCompatibility();
+  SharedStateReclaimWaitsForDiskWrites();
   ConcurrentBoundedTransfers();
   BoundedTransferDiskProgress();
   RamCacheOffAllowsLargeDiskIndexMetadata();

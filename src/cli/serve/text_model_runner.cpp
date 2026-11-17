@@ -1903,7 +1903,8 @@ std::optional<TextRunnerPool::StateTicket> TextRunnerPool::ReserveState(
     // even everything reclaimable would not cover them.
     const auto& ledger = mem::StateLedger::Process();
     if (ledger.ChargeableBytes() + cache.ReclaimableStateBytes() < bytes ||
-        !cache.ReclaimState(bytes, prompt, context))
+        !cache.ReclaimState(bytes, prompt, context,
+                            ComponentTextCache::kStateWriteWait))
       return std::nullopt;
     ticket.reservation = mem::StateReservation(bytes);
     if (!ticket.reservation.ok())
