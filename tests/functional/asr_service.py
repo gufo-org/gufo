@@ -90,13 +90,8 @@ def run(evidence, url, audio_root, model):
                               ({'include[]': 'logprobs'}, 'unsupported_option')]:
             evidence.reject(endpoint, code, label=code, data=fields(item, **options),
                 files={'file': ('speech.wav', item['path'].read_bytes(), 'audio/wav')})
-        status, body, _ = evidence.call(endpoint, label='malformed-audio', data={'model': model},
-            files={'file': ('broken.wav', b'not a WAV', 'audio/wav')})
-        # Current API maps native WAV decode failures to transcription_failed.
-        # Keep this limitation explicit rather than accepting arbitrary errors.
-        assert status == 500 and json.loads(body)['error']['code'] == 'transcription_failed', (status, body)
-        evidence.report['known_limitations'] = [
-            'Malformed WAV returns HTTP 500 transcription_failed rather than HTTP 400.']
+        evidence.reject(endpoint, 'invalid_audio_input', label='malformed-audio',
+            data={'model': model}, files={'file': ('broken.wav', b'not a WAV', 'audio/wav')})
         assert request(item, 'recovered')['text'] == references[0]
 
     with evidence.case('cancel-stream-and-recover'):
