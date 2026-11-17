@@ -512,6 +512,26 @@ load set outweighs added memory-level parallelism; the kernel's idle
 wave time is not fetch-depth limited. Reverted; the one-stage pipeline
 stays.
 
+## Routed experts on the W8A8 tier (2026-11-17): rejected
+
+Item 7's routed-expert half assumed INT8 halves weight bytes at ~2x
+tensor-core rate. Both walls fail at the routed shape (m2048 k4096,
+topk 8, 2048 tokens, 288 experts) in exclusive microbenches
+(`/tmp/opencode/gufo_bench_r8ab.log`, `_r8iq1.log`;
+`glm5_iq1_wmma_bench` contract green, nmse 4.5e-8): the shared W8A8
+tier runs 25.7–28.0 TF/s (`attn_out` m2048×k4096, batches 512–8192)
+against the IQ1 replica's 21.2–30.8 TF/s eff — INT8 WMMA shares the
+FP16 unit on gfx1151, so the 55.07 TOPS ceiling comment is raw-MMA
+headline, not a compute win end to end. The byte wall is worse:
+`block_q8_0` is 272 B/256 weights vs IQ1_M's 56 B, turning the 6.03 GB
+gate+up launch into 29.3 GB; even at the 241 GB/s DRAM peak that is
+≥121 ms vs the shipped 42 ms (`RoutedWmmaKernel<56,60,2>`), and reuse
+additionally needs a full-expert 4.9x-size repack because IQ1_M has no
+native K-block encoding. Track closed; dense half stays. Lead from the
+same sweep: `v64 192x128 bk2 4x1` beat the shipped 128x128 2x2 tile
++3.5/+4.0 % at m2048×k4096 batch 2048/8192 — a dense-tier
+production-shape A/B candidate.
+
 ## Next candidates (fresh pp2048 profile on the shipped tree, 2026-11-15)
 
 The launch storm is closed (steady-state idle 2.2 %,
@@ -528,7 +548,7 @@ A2/A3/A4/A5/A6 shipped 2026-11-15 — the exact-default ladder is done)
 plus C2 (head-grouped 8-key combine, +3.0/+4.3 % pp),
 then the approximate
 fast track B7-B10 (W8A8 — dense half default since the 2026-11-16 B12
-promotion, routed half open; online-softmax attend, capped
+promotion, routed half rejected 2026-11-17; online-softmax attend, capped
 window, DFlash2/MTP speculation) from which the reference-class 600+
 comes. Earlier items in this list (IQ routed WMMA tier, Q5_K WMMA tier,
 GatherScore rewrite, chunk-scan launch collapse) are all shipped; see

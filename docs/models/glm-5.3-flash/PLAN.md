@@ -174,16 +174,19 @@ levers, exact-default ladder (A) then opt-in fast track (B):
 
 **B. Opt-in approximate fast track (from which 600+ is plausible)**
 
- 7. W8A8 blocked-INT8 tier for dense + routed operands (qwen38
-    `W8A8BlockedWmmaGEMMKernel` family): halves weight bytes and ~2x
-    tensor-core rate vs the F16 path; acts quantized per 32-group.
+ 7. W8A8 blocked-INT8 tier for dense operands (qwen38
+    `W8A8BlockedWmmaGEMMKernel` family): acts quantized per 32-group.
     Dense half shipped 2026-11-16, promoted to the default the same day
     (B12) with its own contract (`glm5_next.rocm_w8a8_dense`, NMSE ≤
     1e-4) and its BENCHMARKS.md gate rows B11/B12; shipped win pp2048
     +4.1 % offline / +3.9 % serve-gated, pp16384 noise-level, tg
-    unchanged — well below the −3…−4 s/pass estimate,
-    so the routed-expert half (where the bytes actually dominate) is
-    the lever worth pursuing next.
+    unchanged. The routed-expert half was measured and rejected
+    2026-11-17: INT8 WMMA runs at the FP16 rate on gfx1151 (no ~2x
+    tensor-core advantage exists), and block_q8_0 is 4.9x the IQ1_M
+    bytes, so a gate+up launch could not beat 121 ms vs 42 ms even at
+    DRAM peak — see the ledger. Residual lead: the 192x128 4x1 wave64
+    tile beat the shipped 128x128 2x2 by +3.5/+4.0 % at m2048×k4096
+    batch 2048/8192; A/B it on production dense shapes.
 8. Online-softmax single-pass attention replacing DSA
    score→topk→gather→combine (the `mikealanni` WMA-attend shape): one
    WMMA pass over F16 packed K/V with running softmax; kills stages
