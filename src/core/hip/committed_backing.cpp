@@ -72,6 +72,7 @@ struct BackingState {
   std::shared_ptr<mem::LendableRange> lendable;
   std::function<bool(std::size_t)> admit_state_pages;
   std::function<bool()> shed;
+  std::function<bool()> may_lend;
   std::size_t page_blocks{};
   std::mutex lend_mutex;
   std::unique_ptr<cache::ResourceReservation[]> lent;
@@ -178,6 +179,8 @@ struct BackingState {
     // are fragmented, and the pool asks again while it is short.
     constexpr int kMaxSheds = 16;
     const auto start = out.size();
+    if (may_lend && !may_lend())
+      return 0;
     for (int sheds = 0;; ++sheds) {
       {
         const std::lock_guard lock(lend_mutex);
@@ -355,6 +358,7 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
     state->lendable = std::move(config.lendable);
     state->admit_state_pages = std::move(config.admit_state_pages);
     state->shed = std::move(config.shed);
+    state->may_lend = std::move(config.may_lend);
     state->lent = std::make_unique<cache::ResourceReservation[]>(
         (count + page_blocks - 1) / page_blocks);
     const std::weak_ptr<detail::BackingState> weak = state;

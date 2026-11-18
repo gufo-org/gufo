@@ -3804,9 +3804,14 @@ void RamCacheOffWithDiskCommitsOnlyStagingBacking() {
                                      prompt));
     auto snapshot = lease->Capture();
     assert(snapshot);
-    // Nothing is retained in RAM; the checkpoint goes to disk alone.
+    // The capture is queued as soon as it is staged, so its backing returns
+    // without waiting for the request to publish it (#1260).
+    const auto queued = lease->Metrics().disk_queued_bytes;
+    assert(queued > 0);
+    // Nothing is retained in RAM; the checkpoint goes to disk alone, and
+    // publication queues it no second time.
     assert(lease->PublishSnapshot(prompt, std::move(snapshot), false) == 0);
-    assert(lease->Metrics().disk_queued_bytes > 0);
+    assert(lease->Metrics().disk_queued_bytes == queued);
     (void)lease->Commit(prompt, {}, prompt);
   }
   auto runner = std::make_shared<CountingRunner>();

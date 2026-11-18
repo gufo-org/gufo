@@ -116,6 +116,10 @@ struct BackingPoolConfig {
   std::shared_ptr<mem::LendableRange> lendable;
   std::function<bool(std::size_t)> admit_state_pages;
   std::function<bool()> shed;
+  // Asked before lending any page; false lends none. Null always lends. A
+  // backing that only stages captures on their way to disk has nothing to
+  // shed, and every page lent away refuses a capture.
+  std::function<bool()> may_lend;
 };
 
 class CommittedBackingPool {

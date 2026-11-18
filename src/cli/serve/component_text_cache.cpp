@@ -25,6 +25,11 @@
 namespace gufo::server {
 namespace {
 using Clock = std::chrono::steady_clock;
+long long MillisecondsSince(Clock::time_point start) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() -
+                                                               start)
+      .count();
+}
 std::size_t SaturatingAdd(std::size_t a, std::size_t b) {
   return a + std::min(b, std::numeric_limits<std::size_t>::max() - a);
 }
@@ -321,6 +326,12 @@ struct ComponentTextCache::Impl {
   // equals the small explicit budget used before off existed, and it retains
   // nothing.
   static constexpr std::size_t kDiskOnlyBackingBytes = std::size_t{512} << 20;
+  // How long a disk-only capture waits for queued writes to release that
+  // backing. Each write releases it within seconds; this bounds a stall.
+  static constexpr std::chrono::seconds kStagingWait{20};
+  // Signalled when a disk write completes, so waiting captures retry.
+  std::mutex staging_mutex;
+  std::condition_variable staging_released;
   // Queue ownership plus transient submissions before superseded callbacks
   // release their serving handles. No callback runs under the serving mutex.
   std::array<std::shared_ptr<const cache::Checkpoint>, 2 * kPersistenceDepth>
@@ -514,6 +525,10 @@ struct ComponentTextCache::Impl {
           resources->pinned_bytes ? resources->pinned_bytes() : 0;
       if (resources->commit_backing) {
         if (ram) {
+          // The staging backing is all the cache's own: no part of it stands
+          // for promised session state, and it lends no pages (#1260).
+          lender_grant = ram;
+          mem::StateLedger::Process().AddLenderGrant(lender_grant);
           resources->commit_backing(ram);
         } else {
           // No pool exists, so a payload allocation must fail, not crash.
@@ -591,6 +606,9 @@ struct ComponentTextCache::Impl {
                 entries, [](const auto& entry) { return entry->busy; });
           },
           [this](cache::CheckpointId id, bool success) {
+            // The job releases its staged backing as it completes; waiting
+            // captures also poll, so this only shortens their wait.
+            staging_released.notify_all();
             const std::lock_guard lock(mutex);
             const bool was_demoted = id == demotion_id;
             if (was_demoted)
@@ -894,6 +912,29 @@ struct ComponentTextCache::Impl {
       return 0;
     }
     return bytes;
+  }
+  // Backing bytes that captures hold. Without the RAM cache only captures on
+  // their way to disk hold any.
+  std::size_t StagedBytes() const {
+    const auto snapshot = ledger.Snapshot();
+    std::size_t held = 0;
+    for (const auto category : {cache::ResourceCategory::kBackingAssigned,
+                                cache::ResourceCategory::kBackingMaterialized,
+                                cache::ResourceCategory::kPrivateState,
+                                cache::ResourceCategory::kPrivateTail})
+      held += snapshot.bytes[static_cast<std::size_t>(category)];
+    return held;
+  }
+  // Waits up to one short poll for a queued write to release staged backing.
+  // False when no capture holds any, or at the deadline.
+  bool AwaitStaging(Clock::time_point deadline) {
+    const auto now = Clock::now();
+    if (now >= deadline || !StagedBytes())
+      return false;
+    std::unique_lock lock(staging_mutex);
+    staging_released.wait_until(
+        lock, std::min(deadline, now + std::chrono::milliseconds(20)));
+    return true;
   }
   void DiscardUnusedFrontierWrites() {
     if (!queue)
@@ -1267,6 +1308,13 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
     protected_checkpoints[protected_count++] = retain.source;
   retain.protected_checkpoints =
       std::span(protected_checkpoints).first(protected_count);
+  // Without the RAM cache the backing retains nothing: it is full only while
+  // other captures wait to be written, and each is queued as it is staged
+  // (below). Wait for those writes rather than drop this checkpoint (#1260).
+  // Exact frontiers stay optional, as in the persistence queue.
+  const bool await_staging = !cache->ram_enabled && !generated_frontier;
+  const auto wait_start = Clock::now();
+  bool waited = false;
   while (!copies.empty()) {
     try {
       if (cache->resources->can_capture &&
@@ -1285,10 +1333,33 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
         reclaimed = cache->retention.Reclaim(retain);
       }
       cache->DrainDemotion();
-      if (!reclaimed)
-        throw;
+      if (reclaimed)
+        continue;
+      if (await_staging &&
+          cache->AwaitStaging(wait_start +
+                              ComponentTextCache::Impl::kStagingWait)) {
+        waited = true;
+        continue;
+      }
+      if (!cache->ram_enabled)
+        Logger::Info(
+            "cache",
+            "schema=component-cache-v1 event=staging_exhausted tokens=" +
+                std::to_string(capture_tokens.size()) +
+                " staged_bytes=" + std::to_string(staged) +
+                " held_bytes=" + std::to_string(cache->StagedBytes()) +
+                " backing_bytes=" + std::to_string(cache->disk_backing) +
+                " waited_ms=" + std::to_string(MillisecondsSince(wait_start)) +
+                " frontier=" + (generated_frontier ? "1" : "0"));
+      throw;
     }
   }
+  if (waited)
+    Logger::Info("cache",
+                 "schema=component-cache-v1 event=staging_waited tokens=" +
+                     std::to_string(capture_tokens.size()) +
+                     " staged_bytes=" + std::to_string(staged) + " waited_ms=" +
+                     std::to_string(MillisecondsSince(wait_start)));
   TransferBatch transfers(cache->resources->transfer_batch_size);
   for (auto& copy : copies) {
     const auto& r = copy.request;
@@ -1333,6 +1404,17 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
     for (auto& rows : observed)
       entry->observed.push_back(
           {std::move(rows), capture_tokens.size(), Clock::now()});
+  }
+  // Without the RAM cache nothing reads this capture but its disk write, and
+  // the request may hold it until it ends. Queue it now, so its staged
+  // backing returns while other captures wait for it. Publication then finds
+  // no sources left to queue.
+  if (!cache->ram_enabled) {
+    const auto started = Clock::now();
+    metrics.disk_queued_bytes += cache->Persist(durable);
+    metrics.disk_enqueue_ms +=
+        std::chrono::duration<double, std::milli>(Clock::now() - started)
+            .count();
   }
   auto snapshot = std::make_unique<ComponentSnapshot>();
   snapshot->bytes = entry->history->NewPayloadBytes(positions);

@@ -414,6 +414,16 @@ can still fail if host memory is exhausted. This does not enable RAM checkpoints
 or enlarge the fixed capture backing and disk staging buffer. Persistence pins
 remain capped at the 512 MiB disk-capture backing capacity.
 
+The disk-capture backing is the cache's own share of state pages: it lends no
+page to sessions, so idle sessions holding long frontiers cannot take it and
+stop later captures. Each disk capture is queued as soon as it is staged,
+before its request publishes it, so the backing returns as each write ends. A
+prompt capture that finds the backing full waits up to 20 s for queued writes
+to release it (`event=staging_waited`); exact-frontier captures stay optional
+and don't wait. A capture that still finds no room logs
+`event=staging_exhausted` with its staged bytes, the bytes other captures hold
+and how long it waited.
+
 When the sessions leave no RAM for the cache above the 4 GiB host reserve,
 the server refuses to load with that reason and the remedies: fewer
 `--sessions`, a smaller `--context`, or `--cache-ram-bytes off`. `off` loads
@@ -724,6 +734,8 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | `schema=component-cache-v1 event=option_ignored option=--cache-disk-staging-bytes` | Flash-Next: the staging option is ignored; disk transfers use the internal buffer |
 | `schema=component-cache-v1 event=disk_evicted reason=budget` | Startup applied lineage and persisted access ordering to fit a lowered `--cache-disk-bytes` |
 | `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
+| `schema=component-cache-v1 event=staging_waited` | `--cache-ram-bytes off`: a disk capture waited `waited_ms` for queued writes to release the capture backing |
+| `schema=component-cache-v1 event=staging_exhausted` | `--cache-ram-bytes off`: a disk capture found no room in the capture backing; reports `staged_bytes`, `held_bytes` by other captures, `backing_bytes`, `waited_ms` and whether it was an exact `frontier` |
 | `schema=component-cache-v1 event=published` | A checkpoint finished disk publication; `checkpoint_id` identifies the capture and `tokens` its boundary |
 | `schema=component-cache-v1 event=persistence_refused reason=min_step` | A captured checkpoint is too close to an existing publication; includes `checkpoint_id` and `tokens` |
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
