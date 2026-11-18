@@ -1088,24 +1088,28 @@ bool PersistenceQueue::TrySubmit(PersistenceJob job) {
                std::min(frontier_budget, impl_->stats.pinned_bytes));
   auto replacement = std::find_if(
       impl_->pending.begin(), impl_->pending.end(), [&](const auto& other) {
-        if (!other || other->manifest_.purpose == CheckpointPurpose::kLearned ||
-            !Extends(job.manifest_, other->manifest_))
+        if (!other || other->manifest_.purpose == CheckpointPurpose::kLearned)
           return false;
+        const bool extended = Extends(job.manifest_, other->manifest_);
         // A generated frontier must not coalesce away the prompt checkpoint
         // that an edit or a retry of this request needs. Likewise preserve
         // two recent generated frontiers before treating them as redundant.
-        if (job.manifest_.purpose == CheckpointPurpose::kGenerated &&
-            other->manifest_.purpose != CheckpointPurpose::kGenerated)
+        if (other->manifest_.purpose != CheckpointPurpose::kGenerated &&
+            (!extended ||
+             job.manifest_.purpose == CheckpointPurpose::kGenerated))
           return false;
         // Each generated frontier is a turn end that an edit or a branch
         // restores, which no descendant covers. Coalesce one only when the
         // queue has no room for this job (#1250), so whether a turn end
-        // reaches disk does not depend on how far behind the writer is.
+        // reaches disk does not depend on how far behind the writer is. Any
+        // conversation's turn end with two newer queued ones qualifies, so
+        // one conversation's backlog cannot crowd out another's newest one.
         if (other->manifest_.purpose == CheckpointPurpose::kGenerated) {
           if (!full)
             return false;
-          std::size_t newer =
+          const bool generated =
               job.manifest_.purpose == CheckpointPurpose::kGenerated;
+          std::size_t newer = extended && generated;
           for (const auto& peer : impl_->pending)
             newer += peer && peer.get() != other.get() &&
                      peer->manifest_.purpose == CheckpointPurpose::kGenerated &&
