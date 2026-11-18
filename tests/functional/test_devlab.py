@@ -66,18 +66,31 @@ class PlanTest(unittest.TestCase):
         self.assertLessEqual({'flash-next-q4', 'deepseek4'}, {row['id'] for row in linux['models']})
 
     def test_curated_suites_apply_at_every_tier(self):
-        suites = set(self.registry['models']['deepseek4']['suites'])
+        suites = set(self.registry['models']['qwen27-q4']['suites'])
         for tier in ('pr', 'full'):
             with self.subTest(tier=tier):
-                plan = self.plan('src/models/deepseek_v4_flash/engine.cpp', tier=tier)
+                plan = self.plan('src/models/qwen/engine.cpp', tier=tier)
                 planned = [suite for group in plan['groups'] for suite in group['suites']]
                 self.assertEqual(sorted(planned), sorted(suites))
                 self.assertFalse(plan['release_only'] or plan['deferred'])
-                self.assertIn('cache-growth', {row['suite'] for row in plan['out_of_scope']})
-        unknown = {**self.data, 'models': {**self.data['models'], 'deepseek4': {
-            **self.data['models']['deepseek4'], 'suites': ['cache', 'no-such-suite']}}}
+                self.assertIn('tool-reasoning', {row['suite'] for row in plan['out_of_scope']})
+        unknown = {**self.data, 'models': {**self.data['models'], 'qwen27-q4': {
+            **self.data['models']['qwen27-q4'], 'suites': ['cache', 'no-such-suite']}}}
         with self.assertRaises(ValueError):
-            devlab_plan.select(['src/models/deepseek_v4_flash/engine.cpp'], unknown)
+            devlab_plan.select(['src/models/qwen/engine.cpp'], unknown)
+
+    def test_deepseek_runs_every_suite_flash_next_runs(self):
+        # DeepSeek V4 Flash has no curated list; it skips only vision and the
+        # Flash-Next-only server configurations its profile does not take.
+        def suites(path, model):
+            return {suite for group in self.plan(path)['groups']
+                    if group['profile'].startswith(model + '/') for suite in group['suites']}
+        self.assertNotIn('suites', self.registry['models']['deepseek4'])
+        deepseek = suites('src/models/deepseek_v4_flash/engine.cpp', 'deepseek4')
+        self.assertTrue({'cache-bridge', 'cache-depth', 'cache-growth', 'cache-edits',
+                         'cache-concurrency', 'cache-shared-prefix', 'tool-reasoning',
+                         'tool-parameter-order'} <= deepseek)
+        self.assertLessEqual(deepseek, suites('src/models/qwen38_flash_next/engine.cpp', 'flash-next-q4'))
 
     def test_model_settings_override_its_configurations(self):
         # DeepSeek checkpoints are too small for the shared 2 GiB bridge budget.

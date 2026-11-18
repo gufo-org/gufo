@@ -337,13 +337,11 @@ platforms whose runners cannot hold it, with the reason; `devlab_plan.py
 V4 (81 GiB) exceed the Windows runners' device memory pool.
 
 A model's `suites` list in its `functional/devlab.json` limits Devlab to those
-suites at every tier; the report counts the others as out of scope. DeepSeek V4
-uses it to run the set that passes on the runner. Qwen27 uses it to run only the
-suites its runtime changes (cache and checkpoints, batching and scheduling,
-DFlash2 with sampling, grammars and stops, vision); Flash-Next covers the shared
-Qwen protocol suites. DeepSeek's other suites still assume Flash-Next
-checkpoint sizes, Qwen token counts, or fixture wording the model copies into
-its answers.
+suites at every tier; the report counts the others as out of scope. Qwen27 uses
+it to run only the suites its runtime changes (cache and checkpoints, batching
+and scheduling, DFlash2 with sampling, grammars and stops, vision); Flash-Next
+covers the shared Qwen protocol suites. Flash-Next and DeepSeek V4 have no list
+and run every suite their profile takes.
 
 A model's `settings` map, keyed by configuration, overrides that
 configuration's server settings for the model. DeepSeek V4 runs `cache-bridge`

@@ -30,8 +30,8 @@ deterministic, independent of each other and cheap enough to run on every PR.
    `python3 tools/ci/generate-infrastructure.py --write`.
 5. Add a unit test with a fake client in `test_runner.py` that pins its
    requests, and a row in the README suite table.
-6. Decide which models run it. Flash-Next and DeepSeek run every suite their
-   `suites` lists allow; Qwen27's list in `src/models/qwen/functional/devlab.json`
+6. Decide which models run it. Flash-Next and DeepSeek have no `suites` list
+   and run every suite; Qwen27's list in `src/models/qwen/functional/devlab.json`
    holds only suites its runtime changes (cache, scheduling, speculative
    decoding with sampling, grammars or stops, vision). Protocol-only suites run
    once per template family.
