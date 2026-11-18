@@ -31,6 +31,11 @@ struct DiskCatalog::Impl {
     // Prepaid with the catalog record so eviction can reclaim under a full
     // ledger without admitting a temporary candidate table.
     std::array<std::uint64_t, 5> eviction_order{};
+    // Valid peers on this record's branch: its prefixes, its descendants and
+    // checkpoints of the same tokens. EvictOne counts them before ranking.
+    std::size_t branch{};
+    // Admission tick; startup discovery uses the persisted last use.
+    std::uint64_t published{};
   };
   struct Bucket {
     ResourceCharge metadata;
@@ -154,8 +159,21 @@ struct DiskCatalog::Impl {
       if (peer.invalid)
         continue;
       const auto& peer_manifest = peer.description->Manifest();
-      if (Below(peer_manifest, manifest))
+      if (Below(peer_manifest, manifest)) {
         rooted = true;
+        // Every checkpoint on this record's branch is also on its prefix's
+        // branch. Equal counts mean no other branch shares the prefix, so it
+        // belongs to this conversation, and the record takes its admission:
+        // a prefix published after its leaf (spacing and write order decide
+        // that) then cannot outlive the leaf, and the role order below
+        // retires the covered prefix first. A restore lends nothing: a
+        // client that resumed at the prefix did not match the leaf. Shared
+        // prefixes and learned branch points lend nothing either, so one
+        // conversation never keeps another's leaves.
+        if (peer_manifest.purpose != CheckpointPurpose::kLearned &&
+            peer.branch == record.branch)
+          recency = std::max(recency, peer.published);
+      }
       if (!Below(manifest, peer_manifest))
         continue;
       covered = true;
@@ -238,6 +256,7 @@ void DiskCatalog::Track(CheckpointId id) {
               Impl::Record{
                   {}, std::move(description), used, history.reused_at, false})
           .first;
+  record->second.published = used;
   try {
     impl_->lru.emplace(std::make_pair(used, id.value), id.value);
     Dependencies(record->second.description->Manifest(),
@@ -289,6 +308,32 @@ void DiskCatalog::FlushUses() {
 }
 DiskEviction DiskCatalog::EvictOne() {
   Reconcile();
+  auto& records = impl_->records;
+  for (auto& [id, record] : records) {
+    (void)id;
+    record.branch = 0;
+  }
+  // Count each valid pair once: prefix and descendant, or the same tokens.
+  for (auto it = records.begin(); it != records.end(); ++it) {
+    if (it->second.invalid)
+      continue;
+    const auto& manifest = it->second.description->Manifest();
+    for (auto peer = records.begin(); peer != it; ++peer) {
+      if (peer->second.invalid)
+        continue;
+      const auto& peer_manifest = peer->second.description->Manifest();
+      const auto size = manifest.tokens.size(),
+                 peer_size = peer_manifest.tokens.size();
+      if (size == peer_size
+              ? peer_manifest.compatibility == manifest.compatibility &&
+                    peer_manifest.tokens == manifest.tokens
+          : size < peer_size ? Impl::Below(manifest, peer_manifest)
+                             : Impl::Below(peer_manifest, manifest)) {
+        ++it->second.branch;
+        ++peer->second.branch;
+      }
+    }
+  }
   for (auto& [id, record] : impl_->records) {
     (void)id;
     record.eviction_order = impl_->Order(record);

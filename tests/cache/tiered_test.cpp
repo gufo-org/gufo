@@ -2,6 +2,7 @@
 #include <fstream>
 #include <future>
 #include <new>
+#include <numeric>
 
 #include "src/cache/retention.hpp"
 #include "tests/cache/tiered_fixture.hpp"
@@ -250,6 +251,99 @@ void PromptAnchorOutlivesCoveredAndLeafGeneratedFrontiers() {
   assert(f.catalog.EvictOne());
   assert(!f.disk.Open(prompt_cp->Id()));
   assert(f.catalog.Size() == 0);
+}
+// Captures `tokens` on a fresh execution of the fixture slot.
+std::shared_ptr<const Checkpoint> CaptureCold(
+    TieredFixture& f, ExecutionHistory& history,
+    const std::vector<Token>& tokens) {
+  f.adapter.Append(*f.slot, tokens, tokens);
+  auto checkpoint = history.Capture(
+      {tokens, InputIdentity(tokens.size()), f.adapter.Positions(*f.slot),
+       CheckpointPurpose::kPrompt, 1},
+      [&](const PayloadRequest& request) {
+        auto pool =
+            f.ledger.Reserve(ResourceCategory::kBackingFree, request.bytes)
+                .Convert();
+        auto bytes = std::make_shared<std::vector<std::byte>>(request.bytes);
+        auto assigned = pool.ReserveBacking(request.category);
+        auto completion =
+            request.category == ResourceCategory::kPrivateState
+                ? f.adapter.CapturePrivate(*f.slot, request.component, *bytes,
+                                           f.stream)
+                : f.adapter.CopyRowsOut(*f.slot, request.component,
+                                        request.first, request.end, *bytes,
+                                        f.stream);
+        assert(completion.Wait() == TransferResult::kSucceeded);
+        return Payload::Committed(assigned.Convert(), bytes);
+      });
+  assert(f.adapter.Invalidate(*f.slot));
+  return checkpoint;
+}
+CheckpointId Evicted(TieredFixture& f) {
+  const auto evicted = f.catalog.EvictOne();
+  assert(evicted);
+  return evicted.description->Manifest().checkpoint;
+}
+// #1254: a prefix published after its leaf must not outlive it. The
+// conversation's covered prefix leaves first, then its leaf, then the root
+// anchor. Restoring the prefix instead means the client did not match the
+// leaf, so the restore keeps the prefix and lends the leaf nothing.
+void LeafOutlivesItsLaterPrefix() {
+  for (const bool restored : {false, true}) {
+    TieredFixture f;
+    f.Append(8, 4);
+    const auto root = f.Capture();
+    f.Append(4, 4);
+    const auto prefix = f.Capture();
+    f.Append(4, 4);
+    const auto leaf = f.Capture();
+    (void)f.Publish(*root);
+    if (restored) {
+      (void)f.Publish(*prefix);
+      (void)f.Publish(*leaf);
+      f.catalog.Touch(prefix->Id());
+      assert(Evicted(f) == leaf->Id());
+      assert(Evicted(f) == prefix->Id());
+    } else {
+      (void)f.Publish(*leaf);
+      (void)f.Publish(*prefix);
+      assert(Evicted(f) == prefix->Id());
+      assert(f.disk.Open(leaf->Id()) && f.disk.Open(root->Id()));
+      assert(Evicted(f) == leaf->Id());
+    }
+    assert(Evicted(f) == root->Id());
+  }
+}
+// A prefix two branches share lends its admission to neither leaf: publishing
+// it after both keeps no older leaf ahead of a newer conversation.
+void SharedPrefixLendsNothingToItsBranches() {
+  TieredFixture f;
+  auto other = ExecutionHistory::Cold(f.ledger, f.adapter.Components(),
+                                      f.adapter.CompatibilityIdentity());
+  std::vector<Token> sibling_tokens(12);
+  std::iota(sibling_tokens.begin(), sibling_tokens.begin() + 8, 7);
+  std::iota(sibling_tokens.begin() + 8, sibling_tokens.end(), 15);
+  sibling_tokens.insert(sibling_tokens.end(), {500, 501, 502, 503});
+  const auto sibling = CaptureCold(f, other, sibling_tokens);
+  auto unrelated_history = ExecutionHistory::Cold(
+      f.ledger, f.adapter.Components(), f.adapter.CompatibilityIdentity());
+  const auto unrelated =
+      CaptureCold(f, unrelated_history, std::vector<Token>(8, 99));
+  f.Append(8, 4);
+  const auto root = f.Capture();
+  f.Append(4, 4);
+  const auto shared = f.Capture();
+  assert(std::equal(f.tokens.begin(), f.tokens.end(), sibling_tokens.begin()));
+  f.Append(4, 4);
+  const auto leaf = f.Capture();
+  for (const auto& checkpoint : {root, leaf, sibling, unrelated, shared})
+    (void)f.Publish(*checkpoint);
+  assert(Evicted(f) == leaf->Id());
+  // Without the leaf, the prefix belongs to the sibling's conversation alone.
+  assert(Evicted(f) == unrelated->Id());
+  assert(Evicted(f) == shared->Id());
+  assert(Evicted(f) == sibling->Id());
+  assert(Evicted(f) == root->Id());
 }
 void DiskUseHistorySurvivesCatalogRestart() {
   TieredFixture f;
@@ -861,6 +955,8 @@ int main() {
   GlobalLRUAndSharedFiles();
   SupersededDiskTurnsLeaveBeforeAnotherConversation();
   PromptAnchorOutlivesCoveredAndLeafGeneratedFrontiers();
+  LeafOutlivesItsLaterPrefix();
+  SharedPrefixLendsNothingToItsBranches();
   DiskUseHistorySurvivesCatalogRestart();
   DiskReuseExpiresAfterAByteTurnoverAndSurvivesRestart();
   AUsedFrontierIsNotAnOptionalVictim();
