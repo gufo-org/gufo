@@ -387,6 +387,18 @@ The authorized controller checkout contains the English voice fixture. TTS uses
 the main Gufo binary and a pinned ASR checkpoint as its intelligibility
 evaluator. Missing downloads or fixtures fail visibly.
 
+`Windows validation` (`devlab-windows.yml`) runs the same plan on the Windows
+Devlab runners, with its own `devlab/functional-windows` status and PR comment.
+Its authorize job pins the same revisions; `windows-build.yml` builds the merge
+commit and its `main` parent as two bundles, each recording its revision in
+`revision.txt`. Both arms use the candidate's workflow pins (HIP SDK, XRT,
+IRON); each revision builds with its own `vcpkg.json`. The shard jobs start
+after both builds finish, then download the shard's weights with
+`devlab_models.py` into `%HF_HOME%\gufo\models` and run `devlab_run.py` as on
+Linux. The harness stops servers with `CTRL_BREAK_EVENT`, reads available RAM
+from `GlobalMemoryStatusEx` and, without hwmon, cools down on the hottest ACPI
+thermal zone. Set `PYTHONUTF8=1` when running the harness on Windows.
+
 The plan's `shards` split the work into GPU jobs, one device each:
 
 - Each LLM is one job, and the embedding, ASR and TTS models (NPU variants

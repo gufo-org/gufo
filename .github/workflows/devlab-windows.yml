@@ -6,14 +6,34 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+    types: [ opened, synchronize, reopened, ready_for_review ]
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR to run the functional checks for (head pinned at authorization); empty builds the selected branch only
+        required: false
+        type: string
+      tier:
+        description: pr smoke-tests one image model; full runs both image models in full (release PRs). Other suites match.
+        type: choice
+        options: [ full, pr ]
+        default: full
+      ar:
+        description: Also run the functional suites in AR (speculative off); selected draft modes always run
+        default: false
+        type: boolean
+      benchmark:
+        description: Also benchmark native AR through 128K on the PR merged into main and on main
+        default: false
+        type: boolean
 
 permissions:
   contents: read
   actions: read
 
+# A new push supersedes the PR's queued or running checks.
 concurrency:
-  group: windows-validation-${{ github.ref }}
+  group: windows-validation-${{ inputs.pr_number || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -77,14 +97,182 @@ jobs:
             --no-tests=error --timeout 60 -R '^(extension_runtime_test|extension_role_test|ext_runtime_neutral_contracts_test)$'
           if ($LASTEXITCODE -ne 0) { throw 'extension fixture tests failed' }
 
+  # Plans the same functional suites and paired main/PR timings as Linux
+  # validation (devlab-linux.yml); results go to devlab/functional-windows.
+  authorize:
+    name: Authorize and select Windows checks
+    if: >-
+      github.repository == 'gufo-org/gufo' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.pr_number != '') ||
+       (github.event_name == 'pull_request' && !github.event.pull_request.draft))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      head: ${{ steps.revision.outputs.head }}
+      merge: ${{ steps.revision.outputs.merge }}
+      pr: ${{ steps.revision.outputs.pr }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+      base: ${{ steps.plan.outputs.base }}
+      tier: ${{ steps.plan.outputs.tier }}
+      shards: ${{ steps.plan.outputs.shards }}
+    permissions:
+      contents: read
+      statuses: write # fork PR tokens stay read-only
+    steps:
+      # Pull requests follow the repository's fork approval policy, like CI.
+      # Dispatches require Maintain or Admin.
+      - name: Authorize manual run
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_ACTOR: ${{ github.actor }}
+          RERUN_ACTOR: ${{ github.triggering_actor }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for actor in "$DISPATCH_ACTOR" "$RERUN_ACTOR"; do
+            role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$actor/permission" \
+              --jq .role_name 2>/dev/null || true)
+            case "$role" in
+              admin|maintain) echo "Authorized $actor" ;;
+              *) echo "::error::Dispatching functional checks requires Maintain or Admin access."; exit 1 ;;
+            esac
+          done
+
+      - name: Pin PR revisions
+        id: revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+          EVENT_MERGE: ${{ github.event_name == 'pull_request' && github.sha || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::Invalid PR number"; exit 1; }
+          # Test the revision that triggered the event; a later push starts its own run.
+          head=${EVENT_HEAD:-$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)}
+          # The PR merged into main, as Linux validation and CI test it.
+          merge=${EVENT_MERGE:-$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.merge_commit_sha // empty')}
+          [[ -n "$merge" ]] || { echo "::error::PR does not merge cleanly into main; rebase it."; exit 1; }
+          {
+            echo "head=$head"
+            echo "merge=$merge"
+            echo "pr=$PR_NUMBER"
+          } >> "$GITHUB_OUTPUT"
+
+      # Advisory only: devlab/functional-windows is not a required check.
+      - name: Publish pending status
+        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.revision.outputs.head }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" -f state=pending \
+            -f context=devlab/functional-windows -f description="Planning Windows functional checks" \
+            -f target_url="$RUN_URL" --silent
+
+      - name: Check out workflow and test harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Run functional harness tests
+        run: |
+          python3 -m unittest discover -s tests/functional -p test_impact.py
+          python3 -m unittest discover -s tests/functional -p test_report.py
+          python3 -m unittest discover -s tests/functional -p test_devlab.py
+
+      - name: Select affected model representatives and suites
+        id: plan
+        env:
+          PR_NUMBER: ${{ steps.revision.outputs.pr }}
+          APPROVED_HEAD: ${{ steps.revision.outputs.head }}
+          APPROVED_MERGE: ${{ steps.revision.outputs.merge }}
+          RUN_BENCHMARK: ${{ inputs.benchmark || false }}
+          RUN_AR: ${{ inputs.ar || false }}
+          DISPATCH_TIER: ${{ inputs.tier }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Release PRs run the complete set; other PRs the pr tier.
+          tier="pr"
+          [[ "$HEAD_REF" == release-please--* ]] && tier=full
+          [[ -n "$DISPATCH_TIER" ]] && tier="$DISPATCH_TIER"
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          modes=()
+          [[ "$RUN_AR" == true ]] && modes+=(--ar)
+          [[ "$RUN_BENCHMARK" == true ]] && modes+=(--benchmark)
+          git fetch https://github.com/gufo-org/gufo.git "refs/pull/$PR_NUMBER/head:refs/ci/pr" "$APPROVED_MERGE"
+          [[ "$(git rev-parse refs/ci/pr)" == "$APPROVED_HEAD" ]] || {
+            echo "::error::PR changed after this run started; the new push starts its own run."
+            exit 1
+          }
+          [[ "$(git rev-parse "$APPROVED_MERGE^2")" == "$APPROVED_HEAD" ]] || {
+            echo "::error::Merge commit $APPROVED_MERGE does not merge the pinned PR head."
+            exit 1
+          }
+          # The merge's main parent is both the timing baseline and the diff base.
+          base=$(git rev-parse "$APPROVED_MERGE^1")
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          python3 tests/functional/devlab_plan.py --repo . --base "$base" --head "$APPROVED_MERGE" \
+            "${modes[@]}" --tier "$tier" --output functional-plan.json
+          python3 - <<'PYPLAN'
+          import json, os
+          plan = json.load(open('functional-plan.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print('has_work=' + str(bool(plan['models'])).lower(), file=output)
+              # One runner job per shard; ids name its artifacts.
+              print('shards=' + json.dumps([row['id'] for row in plan['shards']]), file=output)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('## Changed-file functional plan (Windows)\n\n')
+              summary.write(f"Revisions: `{plan['base']}` → `{plan['head']}`; tier `{plan['tier']}`.\n\n")
+              summary.write('| Shard | Suites | Estimated |\n| --- | --- | --- |\n')
+              for row in plan['shards']:
+                  work = ', '.join(f"{part['model']}: {sum(len(group['suites']) for group in part['groups'])}"
+                                   + (' + timing' if part['timing'] else '') for part in row['parts'])
+                  summary.write(f"| `{row['id']}` | {work} | {row['seconds'] / 60:.1f} min |\n")
+          PYPLAN
+
+      - name: Upload selection plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: functional-plan-${{ github.run_attempt }}
+          path: functional-plan.json
+
   build:
     name: Build
+    # The PR merge commit pinned by authorize; otherwise (pushes, drafts,
+    # branch dispatches) the triggering ref. Planning never blocks this
+    # required build.
+    needs: authorize
+    if: ${{ !cancelled() }}
     uses: ./.github/workflows/windows-build.yml
+    with:
+      revision: ${{ needs.authorize.outputs.merge }}
+
+  build-baseline:
+    name: Build main baseline
+    needs: authorize
+    if: needs.authorize.outputs.has_work == 'true'
+    uses: ./.github/workflows/windows-build.yml
+    with:
+      revision: ${{ needs.authorize.outputs.base }}
+      bundle-name: windows-gufo-baseline
+      checks: false
 
   devlab:
     name: Run Windows model checks
     needs: build
+    # The build's own result: a skipped or failed authorize job (drafts,
+    # branch dispatches) must not skip this required check.
     if: >-
+      !cancelled() && needs.build.result == 'success' &&
       github.repository == 'gufo-org/gufo' &&
       (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
     runs-on: [ windows, strix-halo, devlab-dispatch ]
@@ -284,3 +472,268 @@ jobs:
         if: always()
         run: |
           Remove-Item -Recurse -Force windows-gufo, "$env:RUNNER_TEMP\functional-assets.json", "$env:RUNNER_TEMP\hf-cli", "$env:RUNNER_TEMP\smoke-logs" -ErrorAction SilentlyContinue
+
+  functional:
+    name: Run Windows functional checks (${{ matrix.shard }})
+    needs: [ authorize, build, build-baseline ]
+    if: needs.authorize.outputs.has_work == 'true'
+    runs-on: [ windows, strix-halo, devlab-dispatch ]
+    timeout-minutes: 150
+    # One device per shard, as in Linux validation: a server for a subset of
+    # one model's suites, or one model's paired main/PR timing arms. A failing
+    # shard keeps the others; rerunning failed jobs repeats only those shards.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.authorize.outputs.shards) }}
+    env:
+      SHARD: ${{ matrix.shard }}
+      # Logs, requests and reports are UTF-8; the harness opens files without an encoding.
+      PYTHONUTF8: '1'
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Clean workspace and check disk space
+        run: |
+          $leftovers = 'candidate', 'baseline', 'controller', 'functional-results', 'functional-report',
+            'functional-plan.json', 'functional-assets.json', 'phase-logs'
+          Remove-Item -Recurse -Force $leftovers -ErrorAction SilentlyContinue
+          # Model files and their local_dir metadata survive runner cleanup.
+          $hfHome = if ($env:HF_HOME) { $env:HF_HOME } else { "$env:USERPROFILE\.cache\huggingface" }
+          $cacheRoot = Join-Path $hfHome 'gufo'
+          New-Item -ItemType Directory -Force $cacheRoot | Out-Null
+          "GUFO_CACHE_ROOT=$cacheRoot" >> $env:GITHUB_ENV
+          Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize | Out-String | Write-Output
+
+      # Suites come from the same merge commit as the candidate bundle.
+      - name: Check out workflow and test harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.authorize.outputs.merge }}
+          persist-credentials: false
+          path: controller
+          sparse-checkout: |
+            tests/functional
+            tests/fixtures
+            tools
+
+      - name: Download selection plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          # "Re-run failed jobs" keeps the first attempt's planning job and plan.
+          pattern: functional-plan-*
+          merge-multiple: true
+
+      - name: Download and verify comparison bundles
+        id: binaries
+        timeout-minutes: 40
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_ID: ${{ needs.build.outputs.bundle-id }}
+          BASELINE_ID: ${{ needs.build-baseline.outputs.bundle-id }}
+          APPROVED_MERGE: ${{ needs.authorize.outputs.merge }}
+          APPROVED_BASE: ${{ needs.authorize.outputs.base }}
+        run: |
+          $arms = [ordered]@{
+            candidate = @($env:CANDIDATE_ID, $env:APPROVED_MERGE)
+            baseline  = @($env:BASELINE_ID, $env:APPROVED_BASE)
+          }
+          foreach ($arm in $arms.Keys) {
+            $artifact, $revision = $arms[$arm]
+            $zip = "$env:RUNNER_TEMP\$arm.zip"
+            python controller/tools/ci/devlab_artifact.py fetch --artifact $artifact --output $zip
+            if ($LASTEXITCODE -ne 0) { throw "verified $arm download failed" }
+            New-Item -ItemType Directory -Force -Path $arm | Out-Null
+            tar -xf $zip -C $arm
+            if ($LASTEXITCODE -ne 0) { throw "cannot unpack the $arm bundle" }
+            Remove-Item -Force $zip
+            foreach ($line in Get-Content "$arm\bundle-manifest.txt") {
+              $size, $path = $line -split "`t", 2
+              $file = Get-Item -LiteralPath "$arm\$path" -ErrorAction SilentlyContinue
+              if (-not $file -or $file.Length -ne [int64]$size) { throw "the $arm bundle is incomplete: $path" }
+            }
+            $built = (Get-Content "$arm\revision.txt" -Raw).Trim()
+            if ($built -ne $revision) { throw "the $arm bundle is $built, expected $revision" }
+            & ".\$arm\gufo.exe" --version
+            if ($LASTEXITCODE -ne 0) { throw "$arm gufo --version failed" }
+            & ".\$arm\gufo.exe" diagnose
+            if ($LASTEXITCODE -ne 0) { throw "$arm gufo diagnose failed" }
+          }
+
+      - name: Download model weights
+        id: weights
+        timeout-minutes: 90
+        env:
+          # A mirror may fetch a file it lacks before it answers.
+          HF_HUB_DOWNLOAD_TIMEOUT: '1800'
+          HF_HUB_ETAG_TIMEOUT: '60'
+        run: |
+          # Inherit the runner's Hugging Face mirror, transfer settings and persistent cache.
+          python -m venv "$env:RUNNER_TEMP\gufo-hf-cli"
+          if ($LASTEXITCODE -ne 0) { throw 'cannot create the Hugging Face venv' }
+          & "$env:RUNNER_TEMP\gufo-hf-cli\Scripts\python.exe" -m pip install --quiet 'huggingface_hub[hf_xet]==1.26.0'
+          if ($LASTEXITCODE -ne 0) { throw 'cannot install huggingface_hub' }
+          & "$env:RUNNER_TEMP\gufo-hf-cli\Scripts\python.exe" controller/tests/functional/devlab_models.py `
+            --plan functional-plan.json --shard $env:SHARD --cache "$env:GUFO_CACHE_ROOT\models" `
+            --output functional-assets.json
+          if ($LASTEXITCODE -ne 0) { throw 'model download failed' }
+
+      - name: Install functional client dependencies
+        id: client
+        run: |
+          python -m venv "$env:RUNNER_TEMP\gufo-functional-client"
+          if ($LASTEXITCODE -ne 0) { throw 'cannot create the client venv' }
+          & "$env:RUNNER_TEMP\gufo-functional-client\Scripts\python.exe" -m pip install --quiet `
+            -r controller/tests/functional/requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'cannot install the functional client' }
+          # Fail here, not in every suite: metrics.py imports jsonschema lazily.
+          Push-Location controller/tests/functional
+          & "$env:RUNNER_TEMP\gufo-functional-client\Scripts\python.exe" -c `
+            'import jsonschema, PIL, numpy, httpx, run, openai_sdk, metrics, devlab_run, service_phases'
+          $imports = $LASTEXITCODE
+          Pop-Location
+          if ($imports -ne 0) { throw 'the functional client cannot import the harness' }
+
+      - name: Run correctness and performance checks
+        if: >-
+          !cancelled() && steps.binaries.outcome == 'success' && steps.weights.outcome == 'success' &&
+          steps.client.outcome == 'success'
+        run: |
+          & "$env:RUNNER_TEMP\gufo-functional-client\Scripts\python.exe" controller/tests/functional/devlab_run.py `
+            --plan functional-plan.json --shard $env:SHARD --assets functional-assets.json `
+            --binary candidate\gufo.exe --base-binary baseline\gufo.exe `
+            --output functional-results --report "functional-report\shards\$env:SHARD" --logs phase-logs
+          if ($LASTEXITCODE -ne 0) { throw "functional checks failed with exit code $LASTEXITCODE" }
+
+      - name: Collect report inputs
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force "functional-report\shards\$env:SHARD" | Out-Null
+          if (Test-Path functional-results\summary.json) {
+            Copy-Item functional-results\summary.json "functional-report\shards\$env:SHARD\"
+          }
+
+      - name: Upload report inputs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: functional-report-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: functional-report/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload functional reports and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: model-functional-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: |
+            functional-plan.json
+            functional-assets.json
+            functional-results/
+            functional-report/
+            phase-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Remove temporary bundles and environments
+        if: always()
+        run: |
+          Remove-Item -Recurse -Force candidate, baseline, functional-results, "$env:RUNNER_TEMP\gufo-hf-cli", `
+            "$env:RUNNER_TEMP\gufo-functional-client" -ErrorAction SilentlyContinue
+          Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize | Out-String | Write-Output
+
+  report:
+    name: Publish Windows results
+    needs: [ authorize, functional ]
+    # Hosted job: the PR write token never reaches the GPU host.
+    if: always() && needs.authorize.outputs.head != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Check out report renderer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: tests/functional
+
+      - name: Download selection plan
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: functional-plan-*
+          merge-multiple: true
+          path: report-input
+
+      - name: Download report inputs
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: functional-report-*
+          path: report-input/artifacts
+
+      - name: Render PR comment and status
+        env:
+          AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          SMOKE_RESULT: ${{ needs.functional.result }}
+          RUN_BENCHMARK: ${{ inputs.benchmark || false }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p report-input/results report-input/artifacts
+          # Merge each shard's newest attempt; missing shards fail their model.
+          python3 tests/functional/devlab_merge.py --plan report-input/functional-plan.json \
+            --artifacts report-input/artifacts --output report-input/results
+          benchmark=()
+          [[ "$RUN_BENCHMARK" == true ]] && benchmark=(--benchmark)
+          python3 tests/functional/report.py --platform windows --plan report-input/functional-plan.json \
+            --results report-input/results --authorize "$AUTHORIZE_RESULT" \
+            --smoke "$SMOKE_RESULT" --run-url "$RUN_URL" "${benchmark[@]}" \
+            --comment comment.md --status status.env
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      # A fork PR's token cannot comment or set statuses; devlab-comment.yml
+      # publishes this report from the base repository instead.
+      - name: Upload fork report
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: functional-comment
+          path: |
+            comment.md
+            status.env
+
+      - name: Publish PR comment and advisory status
+        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          state=$(sed -n 's/^state=//p' status.env)
+          description=$(sed -n 's/^description=//p' status.env)
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" -f state="$state" \
+            -f context=devlab/functional-windows -f description="${description:0:140}" \
+            -f target_url="$RUN_URL" --silent
+          # One Windows comment per PR, beside the Linux one.
+          comment_id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and
+                               (.body | startswith("<!-- devlab-functional-windows -->"))) | .id' | head -1)
+          if [[ -n "$comment_id" ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" -F body=@comment.md --silent
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@comment.md --silent
+          fi
