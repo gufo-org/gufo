@@ -343,7 +343,10 @@ struct TextRunnerPool::Impl {
       // metadata still needs a little room, or the load fails before the
       // cache can serve with the RAM cache off.
       // ResourceExhausted is a bad_alloc without a message of its own; name
-      // the budget it refers to instead of a bare "std::bad_alloc".
+      // the budget it refers to instead of a bare "std::bad_alloc". Sample
+      // the host before the slots allocate: the refusal judged that state,
+      // and unwinding frees them before the handler runs.
+      const auto host = ext::SampleHostMemory();
       try {
         component_cache = std::make_unique<ComponentTextCache>(
             validated.runner, state_count, std::min(requested, ceiling),
@@ -351,6 +354,12 @@ struct TextRunnerPool::Impl {
             std::max(ceiling, ComponentTextCache::kOffMetadataBytes),
             ram_cache_options.enabled);
       } catch (const cache::ResourceExhausted&) {
+        Logger::Warn("cache",
+                     "schema=component-cache-v1 event=ram_cache_refused "
+                     "sessions=" +
+                         std::to_string(state_count) + " budget_bytes=" +
+                         std::to_string(std::min(requested, ceiling)) + " " +
+                         ext::DescribeHostMemory(host));
         throw std::runtime_error(
             "the RAM cache budget was exhausted while preparing " +
             std::to_string(state_count) +

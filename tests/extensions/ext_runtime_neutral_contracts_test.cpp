@@ -109,26 +109,31 @@ void CheckHostBudgets() {
   Expect(!gufo::ext::MeminfoAvailableBytes("MemTotal: 4000 kB\n"),
          "missing MemAvailable stays nullopt");
   // The two budget functions each sample live RAM, so they are checked against
-  // the relation their formulas imply -- budget = available / 2 and ceiling =
-  // max(0, available - headroom) -- rather than a ratio between independent
-  // samples. A host or cgroup at or below the headroom legitimately reports a
-  // zero ceiling, which no ratio assertion may treat as a failure; the
-  // allowance covers the drift between the two reads.
+  // the relation their formulas imply -- budget = pinnable / 2 and ceiling =
+  // pinnable + CmaFree - max(CmaFree, headroom), between pinnable - headroom
+  // and pinnable -- rather than a ratio between independent samples. A host
+  // or cgroup at or below the headroom legitimately reports a zero ceiling,
+  // which no ratio assertion may treat as a failure; the allowance covers the
+  // drift between the two reads.
   const auto budget =
       static_cast<std::uint64_t>(gufo::ext::HostSnapshotBudgetBytes());
   const auto ceiling =
       static_cast<std::uint64_t>(gufo::ext::HostSnapshotCeilingBytes());
   constexpr std::uint64_t kDriftBytes = std::uint64_t{256} << 20;
+  Expect(ceiling <= budget * 2 + 2 * kDriftBytes,
+         "the ceiling never exceeds pinnable memory");
   if (ceiling == 0) {
     Expect(budget * 2 <= gufo::ext::kHostSnapshotHeadroomBytes + kDriftBytes,
            "a zero ceiling only appears at or below the headroom");
   } else {
-    const auto implied = ceiling + gufo::ext::kHostSnapshotHeadroomBytes;
-    const auto gap =
-        budget * 2 > implied ? budget * 2 - implied : implied - budget * 2;
-    Expect(gap <= 2 * kDriftBytes,
+    Expect(ceiling + gufo::ext::kHostSnapshotHeadroomBytes + 2 * kDriftBytes >=
+               budget * 2,
            "both budgets come from the same host measurement");
   }
+  const gufo::ext::HostMemorySample sample{.available = 40ULL << 30,
+                                           .cma_free = 8ULL << 30};
+  Expect(gufo::ext::SnapshotCeilingBytes(sample) == 32ULL << 30,
+         "free CMA pages and the headroom overlap");
   Expect(gufo::ext::kHostSnapshotHeadroomBytes == (std::uint64_t{4} << 30),
          "headroom stays 4 GiB");
 }
