@@ -216,6 +216,7 @@ struct FakeControl {
   std::atomic<bool> device_usable{true};
   std::atomic<std::size_t> device_probes{0};
   std::atomic<std::size_t> idle_probes{0};
+  std::atomic<std::size_t> idle_calls{0};
   std::atomic<TextModelRunner::DeviceProbeStatus> idle_probe_status{
       TextModelRunner::DeviceProbeStatus::kUsable};
   TextRunnerToken advance_gate_label{0};
@@ -743,6 +744,11 @@ public:
   [[nodiscard]] std::size_t CheckpointPosition(
       const TextRunnerState& state) const override {
     return RequireFakeState(state).position;
+  }
+
+  void Idle() const override {
+    control_->idle_calls.fetch_add(1, std::memory_order_relaxed);
+    control_->condition.notify_all();
   }
 
   [[nodiscard]] DeviceProbeStatus PollDevice() const override {
@@ -2617,6 +2623,38 @@ void TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement() {
   Expect(control->device_probes == 1, "successful work never probes");
 }
 
+/// Going idle tells the runner once, so it can return memory only active
+/// work holds (Flash-Next's wide pass scratch after a prefill that never
+/// decoded); waiting idle and running work do not call it again.
+void TestIdleNotifiesRunnerOncePerIdlePeriod() {
+  auto control = std::make_shared<FakeControl>();
+  TextSchedulerPolicy policy{.device_probe_interval =
+                                 std::chrono::milliseconds(5)};
+  auto scheduler = MakeScheduler(control, 1, {}, policy);
+  const auto wait_for = [&](auto predicate, const char* message) {
+    std::unique_lock lock(control->mutex);
+    Expect(control->condition.wait_for(lock, kTestTimeout, predicate), message);
+  };
+  wait_for(
+      [&] { return control->idle_calls >= 1 && control->idle_probes >= 3; },
+      "a scheduler that starts idle tells the runner");
+  Expect(control->idle_calls == 1,
+         "idle probes while waiting do not repeat the idle call");
+  control->block_prefill_label = 1;
+  auto request = scheduler->Submit({1, 10, 11}, 2, 0.0F);
+  control->WaitForPrefill(1);
+  Expect(control->idle_calls == 1, "running work is not idle");
+  control->ReleasePrefill();
+  Expect(request.Wait().tokens == ExpectedTokens(1, 2),
+         "the request completes normally");
+  wait_for([&] { return control->idle_calls >= 2; },
+           "the scheduler tells the runner again once the work is done");
+  const auto probes = control->idle_probes.load();
+  wait_for([&] { return control->idle_probes >= probes + 3; },
+           "the scheduler keeps waiting idle");
+  Expect(control->idle_calls == 2, "one idle call per idle period");
+}
+
 void TestIdleDeviceProbe() {
   using Status = TextModelRunner::DeviceProbeStatus;
   auto control = std::make_shared<FakeControl>();
@@ -4151,6 +4189,7 @@ int main() {
   TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement();
   TestDeviceLossIsStickyAndReported();
   TestIdleDeviceProbe();
+  TestIdleNotifiesRunnerOncePerIdlePeriod();
   TestStallMonitor();
   Expect(
       gufo::server::detail::RequestsProcessing().load() == 0 &&

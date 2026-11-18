@@ -2353,6 +2353,16 @@ struct TextGenerationScheduler::Impl {
                   capturing.size() + waiting.size() < runner_pool->capacity());
         };
         if (capturing.empty() && waiting.empty()) {
+          if (!wake()) {
+            // Going idle: the runner returns memory only active work holds.
+            lock.unlock();
+            try {
+              runner_pool->runner().Idle();
+            } catch (...) {
+              // Keeping that memory until the next request is still correct.
+            }
+            lock.lock();
+          }
           // Only the idle wait has a timer. Arrival interrupts it immediately;
           // no clock checks or device polling are added to active work units.
           while (!wake()) {

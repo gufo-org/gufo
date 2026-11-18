@@ -783,6 +783,11 @@ public:
     return RequireQwenFlashNextState(state).position();
   }
 
+  // A prefill that ends without a decode step (cancelled, or one output token
+  // sampled from its logits) keeps the wide pass scratch, since decode steps
+  // release it. Idle, nothing will use it soon: give it back to the host.
+  void Idle() const override { model_->ReleaseWidePasses(); }
+
   [[nodiscard]] TextRunnerNgramRows NgramRows(
       const TextRunnerState& state) const override {
     const auto totals =
