@@ -44,7 +44,8 @@ enum class QueueProfile : std::uint8_t {
   /// at one and at four concurrent requests.
   kText,
   /// serve tts and serve asr: stages run in sequence and each ends in a stream
-  /// synchronise, so extra queues have no independent work to overlap.
+  /// synchronise, so extra queues have no independent work to overlap. A
+  /// provider that overlaps work across streams declares its own cap.
   kAudio,
   /// serve image and serve video: never measured, so the runtime default
   /// stands unless the budget is too tight to hold it.
@@ -76,9 +77,12 @@ struct QueuePlan {
 /// Chooses a cap for this modality, clamped down to what the device has left.
 /// The cap is only ever lowered to fit, never raised to fill free slots, so a
 /// server's throughput does not depend on the order the servers were started.
+/// A nonzero `provider_cap`, declared by the serving provider in its extension
+/// metadata, replaces the modality's preferred cap and is clamped the same way.
 [[nodiscard]] QueuePlan PlanQueues(QueueProfile profile,
                                    const QueueCensus& census,
-                                   const char* operator_value);
+                                   const char* operator_value,
+                                   std::uint32_t provider_cap = 0);
 
 /// Exports GPU_MAX_HW_QUEUES for a plan that asks for a cap. Must run before
 /// the process makes its first HIP dispatch: the runtime reads the variable

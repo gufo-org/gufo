@@ -79,7 +79,7 @@ QueueCensus QueryQueueCensus(const std::filesystem::path& sys_root) {
 }
 
 QueuePlan PlanQueues(QueueProfile profile, const QueueCensus& census,
-                     const char* operator_value) {
+                     const char* operator_value, std::uint32_t provider_cap) {
   QueuePlan plan;
   plan.observed_queues = census.compute_queues;
 
@@ -112,7 +112,8 @@ QueuePlan PlanQueues(QueueProfile profile, const QueueCensus& census,
                                  : 0;
   // A cap of N resolves to at most N + 1 resident queues, so N + 1 has to fit.
   const std::uint32_t fits = room > kMinimumProcessQueues ? room - 1 : 1;
-  const std::uint32_t preferred = PreferredCap(profile);
+  const std::uint32_t preferred =
+      provider_cap != 0 ? provider_cap : PreferredCap(profile);
 
   if (preferred == 0) {
     if (room >= kRuntimeDefaultCap + 1) {

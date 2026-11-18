@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <span>
 #include <string>
 #include <string_view>
@@ -54,6 +55,11 @@ struct ProviderInfo {
   bool available = true;
   std::string unavailable_reason;
   std::string extension;
+  /// Hardware queues the provider asks a server to cap the HIP runtime at,
+  /// from `serving.hardware_queues` in its metadata. Zero keeps the
+  /// modality's default. The server still clamps it to the device budget, and
+  /// an operator's GPU_MAX_HW_QUEUES always wins.
+  std::uint32_t hardware_queues = 0;
 };
 class Registry {
 public:

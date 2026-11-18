@@ -1040,6 +1040,9 @@ int RunServe(std::span<const char* const> args) {
   // `queue_budget` line already obeys `--log-level`. Help output loads nothing
   // and returns before that point.
 
+  // Queue cap a speech provider declares in its metadata; zero keeps the
+  // modality default. Set by the speech branch before prepare_server_options.
+  std::uint32_t provider_hardware_queues = 0;
   const auto prepare_server_options = [&] {
     if (!gufo::server::IsListenAddress(host)) {
       std::cerr << "Error: --host must be an IPv4 or IPv6 address\n";
@@ -1077,9 +1080,9 @@ int RunServe(std::span<const char* const> args) {
                          : (subcommand == "tts" || subcommand == "asr")
                              ? diagnostics::QueueProfile::kAudio
                              : diagnostics::QueueProfile::kUnmeasured;
-    const auto plan =
-        diagnostics::PlanQueues(profile, diagnostics::QueryQueueCensus(),
-                                std::getenv("GPU_MAX_HW_QUEUES"));
+    const auto plan = diagnostics::PlanQueues(
+        profile, diagnostics::QueryQueueCensus(),
+        std::getenv("GPU_MAX_HW_QUEUES"), provider_hardware_queues);
     diagnostics::ApplyQueuePlan(plan);
     server::Logger::Info("gpu",
                          diagnostics::DescribeQueuePlan(subcommand, plan));
@@ -1405,6 +1408,23 @@ int RunServe(std::span<const char* const> args) {
     } catch (const std::invalid_argument& error) {
       std::cerr << "Error: " << error.what() << '\n';
       return 2;
+    }
+    // The queue cap is fixed by the first HIP dispatch, so the provider is
+    // found here from the model files alone, by the probe the service runs to
+    // select it.
+    if (!options.model.empty()) {
+      const std::string model_root = options.model.string();
+      std::string provider_id;
+      if (is_tts) {
+        if (const auto* found = ext::ProbeTtsProvider(model_root))
+          provider_id = found->id;
+      } else if (const auto* found = ext::ProbeAsrProvider(model_root)) {
+        provider_id = found->id;
+      }
+      for (const auto& info : registry.Providers()) {
+        if (!provider_id.empty() && info.id == provider_id)
+          provider_hardware_queues = info.hardware_queues;
+      }
     }
     if (!prepare_server_options())
       return 2;

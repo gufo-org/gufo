@@ -371,6 +371,12 @@ requests, and both audio servers are flat within run-to-run noise. Image,
 video, and embedding are unmeasured, so they keep the runtime default
 unless the device is too busy to hold it.
 
+A speech provider that overlaps work across streams can replace the audio cap
+with `"serving": {"hardware_queues": N}` in its `extension.json`, for example
+a TTS model that decodes audio on a second stream while it generates the next
+patch. The server probes the model's provider before the first HIP dispatch
+and uses that cap in place of 1. Providers that declare nothing keep 1.
+
 The cap is only ever lowered to fit the free slots, never raised to fill them,
 so a server's throughput does not depend on the order the servers started. A
 `GPU_MAX_HW_QUEUES` set by the operator is always left alone, but it is still
