@@ -62,8 +62,13 @@ class CacheWorkloadsTest(unittest.TestCase):
             failures = []
             check_messages_growth(None, "fixture", checks, chat, failures, None)
         self.assertFalse(failures)
-        self.assertEqual(len(controls), 8)
+        # One control per history (thinking on, then off), at its deepest turn,
+        # each with the thinking mode explicit.
+        self.assertEqual(len(controls), 2)
         self.assertTrue(all(b["extra_body"]["cache_prompt"] is False for b in controls))
+        self.assertEqual([b["extra_body"]["thinking"]["type"] for b in controls],
+                         ["enabled", "disabled"])
+        self.assertEqual(len({len(b["messages"]) for b in controls}), 1)
 
     def transforms(self, lost=False):
         calls, checks, seen, seeds, large = [], {}, set(), {}, {}
