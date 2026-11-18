@@ -215,6 +215,17 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
                 return false;
               const std::lock_guard lock(owner->shed_mutex);
               return owner->shed && owner->shed();
+            },
+            // Lend only to a cache that retains checkpoints, and so installs
+            // a shed. With the RAM cache off the backing stages disk
+            // captures only; idle sessions keep the pages they borrow, so
+            // lending it would stop every later capture (#1260).
+            [weak = std::weak_ptr<Backing>(backing)] {
+              const auto owner = weak.lock();
+              if (!owner)
+                return false;
+              const std::lock_guard lock(owner->shed_mutex);
+              return bool(owner->shed);
             }});
     // Prepare a bounded reserve before readiness. The first shared-prefix
     // capture needs more than one segment; preparing 2 GiB avoids moving

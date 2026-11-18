@@ -2,7 +2,7 @@
 // with a mem::LendableRange): segments take state pages or pinned host pages,
 // only state pages are lent to sessions, a lent page's blocks stay reserved
 // until it comes back, and the cache's checkpoints are evicted (shed) to free
-// whole pages.
+// whole pages. A backing that may not lend gives sessions none.
 #include <hip/hip_runtime.h>
 
 #include <cassert>
@@ -58,6 +58,7 @@ int main() {
   // The first segment takes state pages, the second pinned host pages.
   int state_segments = 1;
   int sheds = 0;
+  bool may_lend = false;
   std::vector<std::optional<gufo::hip::BackingBlock>> held;
   auto backing = std::make_unique<gufo::hip::CommittedBackingPool>(
       ledger, gufo::hip::BackingPoolConfig{
@@ -71,7 +72,8 @@ int main() {
                     held.pop_back();
                     ++sheds;
                     return true;
-                  }});
+                  },
+                  [&] { return may_lend; }});
   assert(backing->Lends());
   // Fill both segments with one 2 MiB payload per page, so no page is free
   // and each eviction frees exactly one: the host-page segment's first (they
@@ -96,9 +98,14 @@ int main() {
   assert(std::memcmp(copy.data(), first.data(), kPageBytes) == 0);
   (void)hipFree(device);
 
+  // A backing that may not lend (with the RAM cache off it only stages disk
+  // captures) gives sessions no page and sheds nothing.
+  const std::size_t state_pages = kSegment / kPageBytes;
+  assert(pool->Borrow(state_pages) == 0);
+  assert(backing->LentPages() == 0 && sheds == 0);
+  may_lend = true;
   // Lending sheds held payloads until state pages are free; host-page
   // segments are never lent.
-  const std::size_t state_pages = kSegment / kPageBytes;
   const auto lent = pool->Borrow(state_pages + 4);
   assert(lent == state_pages);
   assert(backing->LentPages() == state_pages);
