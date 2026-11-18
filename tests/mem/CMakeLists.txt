@@ -12,6 +12,13 @@ if (ENGINE_ENABLE_HIP)
   add_test(NAME mem_region_test COMMAND mem_region_test)
   set_tests_properties(mem_region_test PROPERTIES
     LABELS "mem;hip;gpu;gfx1151" TIMEOUT 120)
+  add_executable(mem_scratch_arena_test scratch_arena_test.cpp)
+  set_source_files_properties(scratch_arena_test.cpp PROPERTIES LANGUAGE HIP)
+  target_link_libraries(mem_scratch_arena_test PRIVATE gufo_mem_hip)
+  target_compile_options(mem_scratch_arena_test PRIVATE -UNDEBUG)
+  add_test(NAME mem_scratch_arena_test COMMAND mem_scratch_arena_test)
+  set_tests_properties(mem_scratch_arena_test PROPERTIES
+    LABELS "mem;hip;gpu;gfx1151" TIMEOUT 120)
 endif()
 
 if (NOT WIN32)

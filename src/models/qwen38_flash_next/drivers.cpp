@@ -450,7 +450,7 @@ int RunQwen38FlashNextBenchmarkImpl(
       std::vector<double> runs;
       // A full aligned prefix already warms the same chunk shapes and GEMM
       // plans. Other shapes still need an untimed pass before measurement.
-      const auto chunk = model->PrefillCapacity();
+      const auto chunk = model->PlannedChunk();
       const bool warm_prefix = chunk > 0 && depth >= chunk &&
                                depth % chunk == 0 && prompt_length > 0 &&
                                prompt_length % chunk == 0;
