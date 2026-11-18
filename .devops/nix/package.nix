@@ -35,6 +35,9 @@
   # which keeps the serving, memory and cache assertions and the checked Rust
   # profile that the production configuration compiles out.
   checked ? false,
+  # With `checked`: CTest labels whose test executables the package also
+  # builds and bundles (tools/ci/ctest_bundle.py), for Devlab's GPU runners.
+  ctestLabels ? [ ],
   revision,
   sourceRoot ? ../..,
 }:
@@ -141,6 +144,7 @@ let
   };
 in
 assert lib.versions.majorMinor rocmPackages.clr.version == "10.1";
+assert ctestLabels == [ ] || checked;
 stdenv.mkDerivation ({
   pname = if checked then "gufo-checked" else "gufo";
   version = packageVersion;
@@ -198,7 +202,7 @@ stdenv.mkDerivation ({
   ++ lib.optional hasExtensionSdk "-DGUFO_SDK_INSTALL_DIR=${placeholder "sdk"}/lib/gufo/sdk"
   # Its own build phase keeps Ninja, which nixpkgs selects only for the
   # default one.
-  ++ lib.optional checked "-GNinja"
+  ++ lib.optionals checked [ "-GNinja" "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" ]
   ++ lib.optionals (extensions != [ ]) [
     "-DGUFO_EXTENSION_DIRS=${lib.concatMapStringsSep ";" (ext: "${ext}") extensions}"
     "-DGUFO_EXTENSION_DIR_REVISIONS=${lib.concatMapStringsSep ";" extensionRevision extensions}"
@@ -210,6 +214,10 @@ stdenv.mkDerivation ({
   # can then reuse a stale HIP object, including one from the timing baseline.
   preConfigure = cargoSetup + lib.optionalString (iron != null && npuDesigns == null) ''
     export PEANO_INSTALL_DIR=${iron.peano}
+  '' + lib.optionalString checked ''
+    # Test executables built only from HIP sources link through the HIP
+    # compiler's C driver, which adds no C++ runtime. Production links none.
+    cmakeFlagsArray+=("-DCMAKE_HIP_STANDARD_LIBRARIES=-lstdc++ -lm")
   '' + ''
     ccache_dir=/tmp/gufo-ccache
     if [[ -d "$ccache_dir" && -w "$ccache_dir" ]]; then
@@ -284,7 +292,7 @@ stdenv.mkDerivation ({
   '';
 
   passthru = {
-    inherit releaseVersion revision rocmPackages rocmRuntime extensionsFromLock xrt iron npuDesigns checked;
+    inherit releaseVersion revision rocmPackages rocmRuntime extensionsFromLock xrt iron npuDesigns checked ctestLabels;
     extensionMetadata = import ./extension-metadata.nix {
       inherit lib sourceRoot extensions extensionsFromLock;
     };
@@ -313,12 +321,22 @@ stdenv.mkDerivation ({
     if ninja -t targets all | grep -q '^gufo_npu_xrt:'; then
       targets+=(gufo_npu_xrt)
     fi
+  '' + lib.optionalString (ctestLabels != [ ]) ''
+    tests=$(python3 ../tools/ci/ctest_bundle.py targets --build . \
+      ${lib.concatMapStringsSep " " (label: "--label ${lib.escapeShellArg label}") ctestLabels})
+    targets+=($tests)
+  '' + ''
     ninja -j"$NIX_BUILD_CORES" "''${targets[@]}"
     runHook postBuild
   '';
   installPhase = ''
     runHook preInstall
     cmake --install .
+  '' + lib.optionalString (ctestLabels != [ ]) ''
+    python3 ../tools/ci/ctest_bundle.py collect --build . --source "$(cd .. && pwd)" \
+      ${lib.concatMapStringsSep " " (label: "--label ${lib.escapeShellArg label}") ctestLabels} \
+      --output "$out"
+  '' + ''
     runHook postInstall
   '';
 })

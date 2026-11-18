@@ -32,6 +32,19 @@
       "draft_option": "--dspark-model",
       "mode": "dspark",
       "sampling": "deepseek4",
+      "ctest": {
+        "labels": [
+          "ds4"
+        ],
+        "rules": [
+          "private-deepseek",
+          "gpu-test-bundles"
+        ],
+        "environment": {
+          "GUFO_DEEPSEEK_V4_FLASH_MODEL": "target",
+          "GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL": "draft"
+        }
+      },
       "suites": [
         "logprobs",
         "responses-logprobs",

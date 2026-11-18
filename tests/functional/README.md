@@ -379,6 +379,48 @@ both builds. The job restores the release compiler cache, whose production
 objects it reuses, and keeps its own; its artifact (`linux-devlab-<attempt>-checked`)
 carries only the executable and resolves its libraries from the shared runtime.
 
+The checked build also compiles a model's GPU tests when the plan selects them.
+A model's `devlab.json` fragment names its CTest labels, the rules that select
+them and the environment variables that point them at its pinned weights:
+
+```json
+{"ctest": {"labels": ["ds4"], "rules": ["private-deepseek", "gpu-test-bundles"],
+           "environment": {"GUFO_DEEPSEEK_V4_FLASH_MODEL": "target",
+                           "GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL": "draft"}}}
+```
+
+`target` and `draft` name the model's target and draft files in its pinned
+assets; `asset` names the asset directory.
+
+The plan selects them when a listed rule matches a changed path, and on every
+release (`full`) run. The core `gpu-test-bundles` rule owns the bundling code
+(`tools/ci/ctest_bundle.py`, `tests/support/source_path.hpp`) and lists every
+model with GPU tests; `ctest_labels` in the plan reaches the hosted build
+(`tools/ci/linux-checked.nix`). `tools/ci/ctest_bundle.py` bundles each test of
+those labels whose command is an executable built in the tree, with its
+arguments, labels, timeout, skip code and environment from CTest. Tests that run
+an interpreter from the source tree (`ds4.dataset`) stay with the CPU checks; any
+other CTest property is refused at build time. Fixture files named by the tests'
+compile definitions are copied beside them; tests open them through
+`tests/support/source_path.hpp` (link `gufo_test_source_path`), which maps the
+compiled source root to the bundle's copy. On Devlab, the model's job runs the
+labels after its suites (`devlab_run.py --ctest-bundle`), one test at a time in
+CTest order, and reports each test; a failure fails the model's correctness, and
+skips (exit code 77) are listed. DeepSeek V4 Flash runs `ds4`: 22 tests, about
+29 minutes on gfx1151 with 128 GB, where `ds4.dspark` also runs its C8 x 16384
+replay (`ds4.layered_prefill` 9.3 min, `ds4.target` and `ds4.dspark` 6.4 min
+each). Its `ctest_s` in `devlab_costs.json` gives it a device of its own. Reproduce the Devlab step from a clean checkout (the
+bundle never reads the source tree it was built from):
+
+```sh
+nix build --impure --file tools/ci/linux-checked.nix --argstr labels ds4 -o result-checked
+python3 tools/ci/linux_artifact.py pack --package result-checked \
+  --revision "$(git rev-parse HEAD)" --output bundle/checked
+python3 tools/ci/ctest_bundle.py run --bundle bundle/checked --label ds4 --output ds4-results \
+  --env GUFO_DEEPSEEK_V4_FLASH_MODEL=/models/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf \
+  --env GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL=/models/DeepSeek-V4-Flash-DSpark-support-0731.gguf
+```
+
 The large Linux runtime is archived separately and cached under
 `$HF_HOME/gufo/runtimes` by SHA-256. Cache hits are hash-checked and unpacked
 locally; changed toolchains get a new content hash. Ordinary builds transfer

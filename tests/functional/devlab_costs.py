@@ -29,14 +29,14 @@ def owner(label):
 
 
 def observe(results):
-    """{model: {'load_s': [...], 'suites': {suite: [...]}, 'timing_s': [...]}} from one results tree."""
+    """{model: {'load_s': [...], 'suites': {suite: [...]}, 'timing_s': [...], 'ctest_s': [...]}} from one results tree."""
     observed = {}
     for report in sorted(results.rglob('report.json')):
         data = json.loads(report.read_text())
         if 'suites' not in data or 'startup_ms' not in data:
             continue
         model = report.parent.parent.name
-        row = observed.setdefault(model, {'load_s': [], 'suites': {}, 'timing_s': []})
+        row = observed.setdefault(model, {'load_s': [], 'suites': {}, 'timing_s': [], 'ctest_s': []})
         row['load_s'].append(data['startup_ms'] / 1000)
         seconds = {}
         for label, suite in data['suites'].items():
@@ -49,9 +49,11 @@ def observe(results):
     for summary in sorted(results.rglob('summary.json')):
         data = json.loads(summary.read_text())
         for item in data.get('models', []) if isinstance(data, dict) else []:
-            row = observed.setdefault(item['id'], {'load_s': [], 'suites': {}, 'timing_s': []})
+            row = observed.setdefault(item['id'], {'load_s': [], 'suites': {}, 'timing_s': [], 'ctest_s': []})
             if item.get('timing') == 'passed' and isinstance(item.get('timing_s'), (int, float)):
                 row['timing_s'].append(item['timing_s'])
+            if item.get('ctest', {}).get('status') == 'passed' and isinstance(item.get('ctest_s'), (int, float)):
+                row['ctest_s'].append(item['ctest_s'])
             # Service models run as one command; their suites share its time.
             if item.get('correctness') == 'passed' and not row['load_s'] and item.get('correctness_s'):
                 groups = [group for group in data.get('groups', [])
@@ -72,6 +74,8 @@ def update(table, observed):
             entry['warm_load_s'] = round(min(row['load_s']))
         if row['timing_s']:
             entry['timing_s'] = round(statistics.median(row['timing_s']))
+        if row.get('ctest_s'):
+            entry['ctest_s'] = round(statistics.median(row['ctest_s']))
         suites = entry.setdefault('suites', {})
         for suite, values in row['suites'].items():
             suites[suite] = round(statistics.median(values), 1)

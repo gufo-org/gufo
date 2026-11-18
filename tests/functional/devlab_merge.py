@@ -49,7 +49,7 @@ def merge(plan, results, output):
         if summary is None:
             for part in row['parts']:
                 models.setdefault(part['model'], {'parts': []})['parts'].append(
-                    {'correctness': 'error' if part['groups'] else 'skipped',
+                    {'correctness': 'error' if part['groups'] or part.get('ctest') else 'skipped',
                      'timing': 'error' if part['timing'] else 'skipped',
                      'error': f"Shard {row['id']} produced no summary"})
                 for group in part['groups']:
@@ -85,6 +85,13 @@ def merge(plan, results, output):
             text = '\n'.join(part[field] for part in parts if part.get(field))
             if text:
                 item[field] = text
+        ctest = [part['ctest'] for part in parts if part.get('ctest')]
+        if ctest:
+            item['ctest'] = ctest[0]
+        elif selection.get('ctest'):
+            item['ctest'] = {'labels': selection['ctest']['labels'], 'status': 'error', 'tests': [],
+                             'error': 'GPU test results are missing'}
+            item['correctness'] = 'error' if item['correctness'] == 'passed' else item['correctness']
         limitations = [text for part in parts for text in part.get('known_limitations', [])]
         if limitations:
             item['known_limitations'] = list(dict.fromkeys(limitations))

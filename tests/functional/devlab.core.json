@@ -188,6 +188,17 @@
       ]
     },
     {
+      "id": "gpu-test-bundles",
+      "priority": 30,
+      "paths": [
+        "tools/ci/ctest_bundle.py",
+        "tests/support/source_path.hpp"
+      ],
+      "owners": [
+        "deepseek4"
+      ]
+    },
+    {
       "id": "devlab-orchestration",
       "priority": 30,
       "paths": [
@@ -195,7 +206,8 @@
         "tests/functional/service_phases.py",
         "tests/functional/requirements.txt",
         "tools/ci/linux_artifact.py",
-        "tools/ci/devlab_artifact.py"
+        "tools/ci/devlab_artifact.py",
+        "tools/ci/linux-checked.nix"
       ],
       "owners": [
         "llm",

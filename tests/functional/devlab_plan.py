@@ -101,6 +101,11 @@ def select(paths, data, tier='pr', ar=False, benchmark=False, platform='linux'):
         model = data['models'][key]
         result['models'].append({'id': key, 'category': model['category'], 'reasons': reasons,
                                  'timing_checks': timing_checks(model, reasons)})
+        # The model's CTest labels (GPU tests from the checked package) run when
+        # its private paths change, and on release runs.
+        config = model.get('ctest')
+        if config and (tier == 'full' or any(reason['rule'] in config['rules'] for reason in reasons)):
+            result['models'][-1]['ctest'] = {'labels': config['labels'], 'environment': config['environment']}
         if model['category'] == 'llm':
             modes = [model['mode']] + (['off'] if ar else [])
             profiles = [key + '/' + mode for mode in modes]
@@ -161,6 +166,11 @@ def units(plan, table, budget, isolated):
         key = selection['id']
         model_costs = table['models'].get(key, {})
         timing = model_costs.get('timing_s', table['default_timing_s'])
+        if selection.get('ctest'):
+            # GPU tests run in-process, after the suites, on a device that has the weights.
+            rows.append({'label': key + '-ctest', 'pool': key if selection['category'] == 'llm' else 'services',
+                         'seconds': model_costs.get('ctest_s', table.get('default_ctest_s', 900)),
+                         'part': {'model': key, 'groups': [], 'timing': False, 'ctest': True}})
         groups = [group for group in plan['groups'] if group['profile'].split('/')[0] == key]
         if selection['category'] != 'llm':
             # One service command runs every suite; its timing arms follow on the same device.
@@ -227,6 +237,7 @@ def shard(plan, table=None, budget=SHARD_BUDGET_S):
                 else:
                     part['groups'] += row['part']['groups']
                     part['timing'] = part['timing'] or row['part']['timing']
+                    part['ctest'] = part.get('ctest', False) or row['part'].get('ctest', False)
             shards.append({'id': name, 'parts': parts, 'seconds': job['seconds']})
     ids = [row['id'] for row in shards]
     if len(ids) != len(set(ids)):
@@ -253,7 +264,10 @@ def main():
     else:
         paths = args.paths
     planned = select(paths, registry(), args.tier, args.ar, args.benchmark, args.platform)
-    planned.update(base=args.base, head=args.head, shards=shard(planned))
+    planned.update(base=args.base, head=args.head, shards=shard(planned),
+                   # The hosted checked build bundles these labels' test executables.
+                   ctest_labels=sorted({label for model in planned['models']
+                                        for label in model.get('ctest', {}).get('labels', [])}))
     # Suites run in a per-revision order: an order dependence surfaces as a
     # failure that reproduces from the seed in the plan and each report.
     planned['order_seed'] = int(args.head[:8], 16) if args.head and all(

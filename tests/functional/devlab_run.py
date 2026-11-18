@@ -33,15 +33,33 @@ BENCH_DEPTHS = '0,4096,8192,12288,16384,32768,65536,131072'
 
 
 def jobs(plan, shard_id=None):
-    """(selection, correctness groups, run timing) per model; a shard runs only its part."""
+    """(selection, correctness groups, run timing, run GPU tests) per model; a shard runs only its part."""
     if shard_id is None:
         return [(selection, [group for group in plan['groups'] if group['profile'].split('/')[0] == selection['id']],
-                 True) for selection in plan['models']]
+                 True, bool(selection.get('ctest'))) for selection in plan['models']]
     shard = next((row for row in plan.get('shards', []) if row['id'] == shard_id), None)
     if shard is None:
         raise ValueError('Unknown shard: ' + shard_id)
     selections = {row['id']: row for row in plan['models']}
-    return [(selections[part['model']], part['groups'], part['timing']) for part in shard['parts']]
+    return [(selections[part['model']], part['groups'], part['timing'], part.get('ctest', False))
+            for part in shard['parts']]
+
+
+CTEST = HERE.parents[1] / 'tools/ci/ctest_bundle.py'
+
+
+def ctest_args(selection, bundle, assets, output):
+    """ctest_bundle.py run for the model's labels; model paths come from its pinned assets."""
+    model = registry()['models'][selection['id']]
+    paths = {'target': lambda: Path(assets[model['asset']]) / model['target'],
+             'draft': lambda: Path(assets[model['draft_asset']]) / model['draft'],
+             'asset': lambda: Path(assets[model['asset']])}
+    args = [sys.executable, str(CTEST), 'run', '--bundle', str(bundle), '--output', str(output)]
+    for label in selection['ctest']['labels']:
+        args += ['--label', label]
+    for key, value in selection['ctest']['environment'].items():
+        args += ['--env', f'{key}={paths[value]()}']
+    return args
 
 
 def benchmark(binary, baseline, assets, report):
@@ -56,7 +74,8 @@ def benchmark(binary, baseline, assets, report):
                             '--repetitions', '1'], stdout=out, stderr=err, timeout=3600)
 
 
-def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=None, check_binary=None):
+def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=None, check_binary=None,
+            ctest_bundle=None):
     """Correctness runs on check_binary (assertions on) when given; timing compares release builds."""
     checked = check_binary or binary
     assets = json.loads(assets_path.read_text())
@@ -74,10 +93,10 @@ def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=
         write(report / 'summary.json', summary)
 
     save()
-    for selection, groups, timing in jobs(plan, shard_id):
+    for selection, groups, timing, ctest in jobs(plan, shard_id):
         key = selection['id']
         model = data['models'][key]
-        item = {'id': key, 'correctness': 'running' if groups else 'skipped',
+        item = {'id': key, 'correctness': 'running' if groups or ctest else 'skipped',
                 'timing': 'pending' if timing else 'skipped', 'reasons': selection['reasons']}
         summary['models'].append(item)
         save()
@@ -115,6 +134,34 @@ def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=
             item.update(correctness='error', error=traceback.format_exc())
         item['correctness_s'] = round(time.perf_counter() - started, 1)
         save()
+        if ctest:
+            # The model's GPU tests (the checked package's CTest labels) count as correctness.
+            started = time.monotonic()
+            try:
+                if ctest_bundle is None:
+                    raise ValueError('The plan selects GPU tests but no --ctest-bundle was given')
+                destination = output / (key + '.ctest')
+                args = ctest_args(selection, ctest_bundle, assets, destination)
+                with (output / (key + '.ctest.log')).open('w') as log:
+                    subprocess.run(args, stdout=log, stderr=subprocess.STDOUT, timeout=3 * 3600)
+                path = destination / 'results.json'
+                observed = json.loads(path.read_text()) if path.exists() else {
+                    'status': 'error', 'tests': [], 'error': cluster.tail(output / (key + '.ctest.log'))}
+                item['ctest'] = {'labels': selection['ctest']['labels'], 'status': observed['status'],
+                                 'tests': [{field: row[field] for field in ('name', 'status', 'seconds', 'log_tail')
+                                            if field in row} for row in observed['tests']]}
+                if observed.get('error'):
+                    item['ctest']['error'] = observed['error']
+                write(report / (key + '.ctest.json'), observed)
+            except Exception:
+                item['ctest'] = {'labels': selection['ctest']['labels'], 'status': 'error',
+                                 'tests': [], 'error': traceback.format_exc()}
+            item['ctest_s'] = round(time.monotonic() - started, 1)
+            if item['ctest']['status'] != 'passed':
+                item['correctness'] = 'failed' if item['ctest']['status'] == 'failed' else 'error'
+            elif item['correctness'] == 'running':
+                item['correctness'] = 'passed'
+            save()
         if not timing:
             continue
         # Correctness failure must not hide the speed controls or other models.
@@ -164,10 +211,13 @@ def main():
     parser.add_argument('--shard', help="Run only this entry of the plan's shards")
     parser.add_argument('--check-binary', type=Path,
                         help='Assertion-enabled candidate for correctness; --binary then only times')
+    parser.add_argument('--ctest-bundle', type=Path,
+                        help="The checked package's portable bundle, for models whose plan selects GPU tests")
     args = parser.parse_args()
     return execute(json.loads(args.plan.read_text()), args.binary.resolve(), args.base_binary.resolve(),
                    args.assets.resolve(), args.output.resolve(), args.report.resolve(), args.logs.resolve(),
-                   args.shard, args.check_binary.resolve() if args.check_binary else None)
+                   args.shard, args.check_binary.resolve() if args.check_binary else None,
+                   args.ctest_bundle.resolve() if args.ctest_bundle else None)
 
 
 if __name__ == '__main__':

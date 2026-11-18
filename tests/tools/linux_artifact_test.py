@@ -55,6 +55,34 @@ class ArtifactTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'unbundled runtime'):
                     artifact.verify(root, 'a' * 40)
 
+    def test_bundled_test_executables_are_checked_and_linked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, manifest = self.fixture(directory)
+            (root / 'tests/libexec').mkdir(parents=True)
+            (root / 'tests/libexec/ds4_quality_test').write_bytes(b'test ELF')
+            manifest['tests'] = {'ds4_quality_test': hashlib.sha256(b'test ELF').hexdigest()}
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            with patch.object(artifact, 'output', side_effect=[manifest['version'], 'libc.so.6 => runtime',
+                    'libcrypto.so.3 => /nix/store/host-openssl/lib/libcrypto.so.3']) as execute:
+                with self.assertRaisesRegex(ValueError, 'ds4_quality_test depends on an unbundled'):
+                    artifact.verify(root, 'a' * 40)
+                self.assertEqual(execute.call_args.args[-1], str(root / 'tests/libexec/ds4_quality_test'))
+            (root / 'tests/libexec/ds4_quality_test').write_bytes(b'tampered')
+            with patch.object(artifact, 'output', side_effect=[manifest['version'], 'libc.so.6 => runtime']):
+                with self.assertRaisesRegex(ValueError, 'ds4_quality_test checksum mismatch'):
+                    artifact.verify(root, 'a' * 40)
+
+    def test_test_launchers_find_the_bundle_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tests = Path(directory) / 'candidate/tests'
+            tests.mkdir(parents=True)
+            artifact.launcher(tests, 'ds4_quality_test', 'runtime/ld.so', ['runtime/lib'],
+                              {'ROCBLAS_TENSILE_LIBPATH': 'runtime/rocblas'}, depth=2)
+            text = (tests / 'ds4_quality_test').read_text()
+        self.assertIn('root=$(CDPATH= cd -- "$here/../.." && pwd -P)', text)
+        self.assertIn('exec "$root/runtime/ld.so" --library-path "$root/runtime/lib" '
+                      '"$here/libexec/ds4_quality_test" "$@"', text)
+
     def test_missing_library_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root, manifest = self.fixture(directory)

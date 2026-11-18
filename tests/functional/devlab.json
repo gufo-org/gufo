@@ -253,6 +253,19 @@
       "draft_option": "--dspark-model",
       "mode": "dspark",
       "sampling": "deepseek4",
+      "ctest": {
+        "labels": [
+          "ds4"
+        ],
+        "rules": [
+          "private-deepseek",
+          "gpu-test-bundles"
+        ],
+        "environment": {
+          "GUFO_DEEPSEEK_V4_FLASH_MODEL": "target",
+          "GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL": "draft"
+        }
+      },
       "suites": [
         "logprobs",
         "responses-logprobs",
@@ -627,7 +640,8 @@
         "tests/functional/service_phases.py",
         "tests/functional/requirements.txt",
         "tools/ci/linux_artifact.py",
-        "tools/ci/devlab_artifact.py"
+        "tools/ci/devlab_artifact.py",
+        "tools/ci/linux-checked.nix"
       ],
       "owners": [
         "llm",
@@ -638,6 +652,17 @@
         "embedding-gemma2-npu",
         "qwen3-asr-npu",
         "qwen3-tts-custom-npu"
+      ]
+    },
+    {
+      "id": "gpu-test-bundles",
+      "priority": 30,
+      "paths": [
+        "tools/ci/ctest_bundle.py",
+        "tests/support/source_path.hpp"
+      ],
+      "owners": [
+        "deepseek4"
       ]
     }
   ]

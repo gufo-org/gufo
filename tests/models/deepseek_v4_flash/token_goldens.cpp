@@ -3,6 +3,7 @@
 
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "tests/models/chat_template_golden_helpers.hpp"
+#include "tests/support/source_path.hpp"
 namespace gufo::testing::ds4 {
 namespace ds4 = gufo::models::deepseek_v4_flash;
 using namespace gufo::testing::chat_goldens;
@@ -25,7 +26,8 @@ void CheckDeepSeekCase(const json::Value& fixture, std::string_view case_name,
 }
 
 void CheckTokenGoldens(const ds4::Model& model) {
-  std::ifstream input(GUFO_CHAT_TEMPLATE_HF_GOLDENS, std::ios::binary);
+  std::ifstream input(gufo::testing::SourcePath(GUFO_CHAT_TEMPLATE_HF_GOLDENS),
+                      std::ios::binary);
   Expect(input.good(), "Hugging Face golden fixture opens");
   const std::string text{std::istreambuf_iterator<char>(input), {}};
   const auto fixture = json::parse(text);

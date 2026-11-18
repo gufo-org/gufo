@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from npu_artifacts import check_artifacts, read_manifest
+import ctest_bundle
 
 
 STORE = Path('/nix/store')
@@ -70,14 +71,15 @@ def copy_share(source, destination):
             directory.chmod(directory.stat().st_mode | 0o700)
 
 
-def launcher(directory, name, loader, libraries, environment):
+def launcher(directory, name, loader, libraries, environment, depth=1):
+    """A script in directory that runs libexec/name; depth is directory's distance from the bundle root."""
     script = directory / name
     # Use shell builtins only before invoking the bundled ELF loader. The
     # loader's --library-path applies to Gufo and dlopen, without leaking a
     # newer libc through LD_LIBRARY_PATH into host programs spawned by Gufo.
     text = '#!/bin/sh\nset -eu\n'
     text += 'here=$(CDPATH= cd -- "${0%/*}" && pwd -P)\n'
-    text += 'root=$(CDPATH= cd -- "$here/.." && pwd -P)\n'
+    text += f'root=$(CDPATH= cd -- "$here/{"/".join([".."] * depth)}" && pwd -P)\n'
     text += 'unset LD_LIBRARY_PATH\n'
     for key, value in environment.items():
         text += f'export {key}="$root/{value}"\n'
@@ -132,7 +134,9 @@ def pack(package, revision, destination):
     # shim and driver plugins beside the path libxrt_coreutil was loaded from:
     # the merged XRT package's lib/, not the base XRT's (only the XRT module
     # links it).
-    listed = [executable, *(sorted(modules.glob('*.so')) if modules.is_dir() else [])]
+    # GPU test executables of the checked package (tools/ci/ctest_bundle.py).
+    tests = sorted((package / ctest_bundle.EXECUTABLES).glob('*'))
+    listed = [executable, *(sorted(modules.glob('*.so')) if modules.is_dir() else []), *tests]
     linked = resolved_directories(
         line for path in listed
         for line in output(str(loaders[0]), '--list', str(path)).splitlines())
@@ -176,6 +180,15 @@ def pack(package, revision, destination):
         environment['GUFO_NPU_DESIGNS'] = destination.relative_to(root).as_posix() + '/share/gufo/npu'
     launcher(destination, 'gufo', loader, libraries, environment)
     (destination / 'gufo-server').symlink_to('gufo')
+    checksums = {}
+    if tests:
+        # tests/<name> runs tests/libexec/<name> with Gufo's runtime environment.
+        (destination / 'tests/libexec').mkdir(parents=True)
+        for test in tests:
+            shutil.copy2(test, destination / 'tests/libexec' / test.name)
+            launcher(destination / 'tests', test.name, loader, libraries, environment, depth=2)
+            with test.open('rb') as file:
+                checksums[test.name] = hashlib.file_digest(file, 'sha256').hexdigest()
     executable = destination / 'libexec/gufo'
     with executable.open('rb') as file:
         digest = hashlib.file_digest(file, 'sha256').hexdigest()
@@ -185,6 +198,8 @@ def pack(package, revision, destination):
     script.write_text(script.read_text().replace('set -eu\n', f'# Gufo ELF SHA-256: {digest}\nset -eu\n', 1))
     manifest = {'schema': 2, 'revision': revision, 'version': version, 'sha256': digest,
                 'loader': loader, 'libraries': libraries}
+    if checksums:
+        manifest['tests'] = checksums
     npu = destination / 'share/gufo/npu'
     if (package / 'share/gufo/npu/npu-artifacts.txt').is_file():
         manifest['npu_artifacts'] = read_manifest(npu / 'npu-artifacts.txt')
@@ -214,7 +229,12 @@ def verify(source, revision):
                     '--list', str(source / 'libexec/gufo'))
     if '=> /nix/store/' in linked or 'not found' in linked:
         raise ValueError('Linux binary depends on an unbundled runtime library')
-    for module in sorted((source / 'lib/gufo').glob('*.so')):
+    for name, expected in manifest.get('tests', {}).items():
+        with (source / 'tests/libexec' / name).open('rb') as file:
+            if hashlib.file_digest(file, 'sha256').hexdigest() != expected:
+                raise ValueError(f'Test executable {name} checksum mismatch')
+    tests = [source / 'tests/libexec' / name for name in sorted(manifest.get('tests', {}))]
+    for module in [*sorted((source / 'lib/gufo').glob('*.so')), *tests]:
         linked = output(str(root / manifest['loader']), '--library-path',
                         ':'.join(str(root / path) for path in manifest['libraries']),
                         '--list', str(module))

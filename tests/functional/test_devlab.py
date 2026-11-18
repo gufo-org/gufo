@@ -401,8 +401,9 @@ class ShardTest(unittest.TestCase):
         plan['shards'] = devlab_plan.shard(plan, self.TABLE, budget=400)
         for row in plan['shards']:
             observed = devlab_run.jobs(plan, row['id'])
-            self.assertEqual([(selection['id'], groups, timing) for selection, groups, timing in observed],
-                             [(part['model'], part['groups'], part['timing']) for part in row['parts']])
+            self.assertEqual([(selection['id'], groups, timing, ctest) for selection, groups, timing, ctest in observed],
+                             [(part['model'], part['groups'], part['timing'], part.get('ctest', False))
+                              for part in row['parts']])
         with self.assertRaises(ValueError):
             devlab_run.jobs(plan, 'no-such-shard')
 
@@ -470,6 +471,102 @@ class ShardTest(unittest.TestCase):
             merged = devlab_merge.merge(plan, root / 'results', root / 'out')
         self.assertEqual(merged['status'], 'passed')
         self.assertEqual(set(merged['shards'].values()), {'passed'})
+
+
+class GpuTestsTest(unittest.TestCase):
+    """A model's CTest labels run from the checked bundle when its private paths change."""
+    DEEPSEEK = 'src/models/deepseek_v4_flash/engine.cpp'
+
+    def plan(self, *paths, tier='pr'):
+        plan = devlab_plan.select(paths, devlab_models.registry(), tier)
+        plan.update(base='a' * 40, head='b' * 40)
+        return plan
+
+    def test_private_paths_and_release_runs_select_the_label(self):
+        plan = self.plan(self.DEEPSEEK)
+        deepseek = next(model for model in plan['models'] if model['id'] == 'deepseek4')
+        self.assertEqual(deepseek['ctest']['labels'], ['ds4'])
+        self.assertEqual(set(deepseek['ctest']['environment']),
+                         {'GUFO_DEEPSEEK_V4_FLASH_MODEL', 'GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL'})
+        # A shared change selects DeepSeek's suites, not its GPU tests, outside release runs.
+        shared = self.plan('src/cli/serve/text_model_runner.cpp')
+        self.assertTrue(any(model['id'] == 'deepseek4' for model in shared['models']))
+        self.assertFalse(any(model.get('ctest') for model in shared['models']))
+        release = self.plan('src/cli/serve/text_model_runner.cpp', tier='full')
+        self.assertTrue(any(model.get('ctest') for model in release['models'] if model['id'] == 'deepseek4'))
+
+    def test_one_shard_runs_the_tests_where_the_weights_are(self):
+        plan = self.plan(self.DEEPSEEK)
+        parts = [part for row in devlab_plan.shard(plan) for part in row['parts'] if part.get('ctest')]
+        self.assertEqual([part['model'] for part in parts], ['deepseek4'])
+
+    def run_shard(self, status):
+        plan = self.plan(self.DEEPSEEK)
+        plan['shards'] = devlab_plan.shard(plan)
+        row = next(row for row in plan['shards'] if any(part.get('ctest') for part in row['parts']))
+        calls = []
+        def run(args, **kwargs):
+            calls.append(args)
+            output = Path(args[args.index('--output') + 1])
+            if args[1].endswith('ctest_bundle.py'):
+                output.mkdir(parents=True)
+                (output / 'results.json').write_text(json.dumps({'status': status, 'tests': [
+                    {'name': 'ds4.target', 'status': status, 'seconds': 1.0, 'log_tail': 'boom'},
+                    {'name': 'ds4.dspark', 'status': 'skipped', 'seconds': 1.0}]}))
+            elif args[1].endswith('phases.py'):
+                output.write_text('{}')
+            return subprocess.CompletedProcess(args, 0)
+        def execute(subplan, binary, baseline, output, assets):
+            output.mkdir(parents=True)
+            (output / 'summary.json').write_text(json.dumps({'groups': [
+                {**group, 'status': 'passed'} for group in subplan['groups']]}))
+            return 0
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = {key: '/weights/' + key for key in devlab_models.registry()['assets']}
+            (root / 'assets.json').write_text(json.dumps(assets))
+            with patch('devlab_run.subprocess.run', side_effect=run), \
+                    patch('devlab_run.cluster.execute', side_effect=execute):
+                devlab_run.execute(plan, Path('/head'), Path('/base'), root / 'assets.json', root / 'results',
+                                   root / 'report', root / 'logs', row['id'], Path('/checked/gufo'),
+                                   Path('/checked'))
+            summary = json.loads((root / 'report/summary.json').read_text())
+        ctest = next(args for args in calls if args[1].endswith('ctest_bundle.py'))
+        return plan, summary, ctest
+
+    def test_the_tests_run_from_the_bundle_with_pinned_model_paths(self):
+        plan, summary, args = self.run_shard('passed')
+        self.assertEqual(args[args.index('--bundle') + 1], '/checked')
+        self.assertEqual(args[args.index('--label') + 1], 'ds4')
+        environment = [args[index + 1] for index, arg in enumerate(args) if arg == '--env']
+        model = devlab_models.registry()['models']['deepseek4']
+        self.assertIn(f"GUFO_DEEPSEEK_V4_FLASH_MODEL=/weights/deepseek4/{model['target']}", environment)
+        self.assertIn(f"GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL=/weights/dspark/{model['draft']}", environment)
+        item = summary['models'][0]
+        self.assertEqual((item['correctness'], item['ctest']['status']), ('passed', 'passed'))
+
+    def test_a_failed_test_fails_correctness_and_is_reported(self):
+        plan, summary, _ = self.run_shard('failed')
+        item = summary['models'][0]
+        self.assertEqual(item['correctness'], 'failed')
+        selection = next(model for model in plan['models'] if model['id'] == 'deepseek4')
+        text = '\n'.join(report.ctest_section(item, selection))
+        self.assertIn('`ds4.target` failed', text)
+        self.assertIn('boom', text)
+        self.assertIn('1 skipped (`ds4.dspark`)', text)
+
+    def test_missing_results_never_pass(self):
+        import devlab_merge
+        plan = self.plan(self.DEEPSEEK)
+        plan['shards'] = devlab_plan.shard(plan)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for row in plan['shards']:
+                ShardTest().write_shard(root / 'in', row)
+            merged = devlab_merge.merge(plan, root / 'in', root / 'out')
+        item = merged['models'][0]
+        self.assertEqual((item['correctness'], item['ctest']['status']), ('error', 'error'))
+        self.assertEqual(merged['status'], 'failed')
 
 
 class TimingTest(unittest.TestCase):

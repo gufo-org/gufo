@@ -17,6 +17,11 @@ on:
       checked:
         default: false
         type: boolean
+      # Comma-separated CTest labels whose test executables the checked
+      # package bundles (tools/ci/ctest_bundle.py).
+      ctest-labels:
+        default: ''
+        type: string
     secrets:
       CACHIX_AUTH_TOKEN:
         required: false
@@ -52,6 +57,7 @@ jobs:
           python3 -m unittest discover -s tests/tools -p npu_artifacts_test.py
           python3 -m unittest discover -s tests/tools -p linux_artifact_test.py
           python3 -m unittest discover -s tests/tools -p devlab_artifact_test.py
+          python3 -m unittest discover -s tests/tools -p ctest_bundle_test.py
 
       - name: Check out baseline source
         if: inputs.baseline != '' && matrix.variant == 'release'
@@ -169,9 +175,12 @@ jobs:
         if: matrix.variant == 'checked'
         env:
           EXPECTED_REVISION: ${{ inputs.revision }}
+          CTEST_LABELS: ${{ inputs.ctest-labels }}
         run: |
           set -euo pipefail
-          nix build .#checked --out-link result-checked --print-build-logs --cores 4 --max-jobs 1
+          # .#checked plus the selected labels' GPU test executables.
+          nix build --impure --file tools/ci/linux-checked.nix --argstr labels "$CTEST_LABELS" \
+            --out-link result-checked --print-build-logs --cores 4 --max-jobs 1
           python3 tools/ci/linux_artifact.py pack --package result-checked \
             --revision "$EXPECTED_REVISION" --output linux-artifacts/checked
 

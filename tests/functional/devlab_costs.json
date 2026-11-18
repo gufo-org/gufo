@@ -5,6 +5,7 @@
   "default_timing_s": 600,
   "models": {
     "deepseek4": {
+      "ctest_s": 1740,
       "load_s": 79,
       "suites": {
         "batch": 34.2,
