@@ -45,6 +45,11 @@ struct Layout {
    * width keeps a fixed table shape across builds with fewer experts; the
    * entries past `experts` are null. */
   uint32_t table_experts = 0;
+  /* Readable bytes kernels may touch past the end of an expert's last
+   * piece (a kernel that reads whole k-iterations over-reads the last row).
+   * Every cache chunk and stage buffer keeps this much beyond its last
+   * expert; the values read there must not affect results. */
+  uint32_t read_margin_bytes = 0;
   std::vector<std::vector<Piece>> layers;  // [layer][piece]
 };
 
@@ -158,15 +163,22 @@ public:
 
   /* Routes are device [n_tokens][top_k]; -1 marks a dropped row. On success
    * tables[0..pieces) hold the layer's device tables, valid until the next
-   * call. Calls are serialized. With routes_ready, an event recorded on the
-   * null stream once the routes are written, the routes are read without
-   * waiting for work queued after it; that work must not touch the expert
-   * stage, slots or tables. */
+   * call. Calls are serialized.
+   *
+   * `stream` is the caller's: Prepare reads the routes once the work queued
+   * on it before the call has run (so that work may still read the previous
+   * call's tables and stage), and queues every copy the tables and the
+   * experts they name depend on there, so kernels queued on it afterwards
+   * see them. The null stream (the default) keeps the legacy default-stream
+   * ordering. With routes_ready, an event recorded on `stream` once the
+   * routes are written, the routes are read without waiting for work queued
+   * after it; that work must not touch the expert stage, slots or tables.
+   * An overlap callback queues its work on `stream` too. */
   bool Prepare(uint32_t layer, const int32_t* routes, uint32_t n_tokens,
                const void** tables,
                bool (*overlap)(void*, const Overlap*) = nullptr,
                void* overlap_context = nullptr,
-               hipEvent_t routes_ready = nullptr);
+               hipEvent_t routes_ready = nullptr, hipStream_t stream = nullptr);
 
   /* Queue a background read of the given uncached experts of `layer` into
    * the stage set the layer's next Prepare consumes, without displacing

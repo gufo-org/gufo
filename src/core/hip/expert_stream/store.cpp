@@ -611,6 +611,7 @@ struct Store::Impl {
    * batch's misses): allocated on demand, one expert each, kept. */
   std::vector<uint8_t*> emergency_rows;
   uint64_t emergency_row_bytes = 0;
+  uint64_t read_margin = 0;            // Layout::read_margin_bytes
   std::vector<uint64_t> grow_failure;  // tick, per class
   /* Eviction candidates, one list per size class: the kVictims lowest
    * keep values at build time of the occupied slots an expert of that
@@ -713,7 +714,8 @@ struct Store::Impl {
       return false;
     const uint64_t bytes = count * slot_bytes;
     void* allocation = nullptr;
-    if (gufo::hip::AllocateManaged(&allocation, bytes) != hipSuccess)
+    if (gufo::hip::AllocateManaged(&allocation, bytes + read_margin) !=
+        hipSuccess)
       return false;
     chunks.push_back(allocation);
     chunk_first.push_back(static_cast<uint32_t>(slots.size()));
@@ -964,6 +966,7 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
   store->table_entries = uint64_t{n_layer} * layout.experts;
   store->table_stride =
       layout.table_experts ? layout.table_experts : layout.experts;
+  store->read_margin = layout.read_margin_bytes;
   for (auto* v : {&store->counts, &store->recent, &store->stage_row})
     v->assign(layout.experts, 0);
   for (auto* v : {&store->missing, &store->admit, &store->hits, &store->demand,
@@ -1025,8 +1028,8 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
   for (uint32_t p = 0; p < store->n_pieces && ok; ++p)
     ok = hipMalloc(&store->stage[0][p],
                    max_bytes[p] *
-                       std::min(store->n_expert, policy.demand_stage_rows)) ==
-         hipSuccess;
+                           std::min(store->n_expert, policy.demand_stage_rows) +
+                       store->read_margin) == hipSuccess;
   for (uint32_t p = 0; p < store->n_pieces; ++p)
     store->emergency_row_bytes += max_bytes[p];
   /* The second stage set (prefetch) is allocated lazily, after the startup
@@ -1226,7 +1229,7 @@ namespace {
 bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
              uint32_t n_tokens, const void** tables,
              bool (*overlap)(void*, const Overlap*), void* overlap_context,
-             hipEvent_t routes_ready);
+             hipEvent_t routes_ready, hipStream_t stream);
 bool prefetch(Store::Impl* store, uint32_t layer, const int32_t* experts,
               uint32_t count, bool wide);
 
@@ -1309,7 +1312,7 @@ bool Store::Seed(std::vector<Ranked> ranked, const char* source) {
                    hipMemcpyHostToDevice) == hipSuccess &&
          prepare(store, l, device_ids,
                  static_cast<uint32_t>(routes.size() / top_k), tables, nullptr,
-                 nullptr, nullptr);
+                 nullptr, nullptr, nullptr);
   }
   store->seeding = false;
   (void)hipFree(device_ids);
@@ -1448,7 +1451,8 @@ bool ensure_stage_pairs(Store::Impl* store, uint64_t* allocated = nullptr) {
   store->stage_stride = bytes;
   for (uint32_t p = 0; p < store->n_pieces; ++p)
     if (hipMalloc(&store->stage[1][p],
-                  bytes[p] * store->policy.prefetch_stage_rows) != hipSuccess) {
+                  bytes[p] * store->policy.prefetch_stage_rows +
+                      store->read_margin) != hipSuccess) {
       for (uint32_t q = 0; q <= p; ++q) {
         if (store->stage[1][q])
           (void)hipFree(store->stage[1][q]);
@@ -1459,7 +1463,8 @@ bool ensure_stage_pairs(Store::Impl* store, uint64_t* allocated = nullptr) {
   store->stage_pairs = true;
   if (allocated)
     for (uint32_t p = 0; p < store->n_pieces; ++p)
-      *allocated += bytes[p] * store->policy.prefetch_stage_rows;
+      *allocated +=
+          bytes[p] * store->policy.prefetch_stage_rows + store->read_margin;
   return true;
 }
 
@@ -1608,7 +1613,7 @@ void trace_snapshot(Store::Impl* store) {
 bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
              uint32_t n_tokens, const void** tables,
              bool (*overlap)(void*, const Overlap*), void* overlap_context,
-             hipEvent_t routes_ready) {
+             hipEvent_t routes_ready, hipStream_t stream) {
   const uint32_t n_expert = store->n_expert;
   const uint32_t n_pieces = store->n_pieces;
   const uint32_t top_k = store->top_k;
@@ -1648,6 +1653,13 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
         hipStreamSynchronize(store->routes_stream) != hipSuccess)
       return false;
     std::copy_n(store->routes_host, n_routes, ids.begin());
+  } else if (stream) {
+    // Synchronizing the caller's stream also finishes its earlier kernels,
+    // which may still read the previous tables and stage rows.
+    if (hipMemcpyAsync(ids.data(), routes, n_routes * sizeof(int32_t),
+                       hipMemcpyDeviceToHost, stream) != hipSuccess ||
+        hipStreamSynchronize(stream) != hipSuccess)
+      return false;
   } else if (hipMemcpy(ids.data(), routes, n_routes * sizeof(int32_t),
                        hipMemcpyDeviceToHost) != hipSuccess) {
     return false;
@@ -1788,7 +1800,8 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
     }
     if (emergency_used == store->emergency_rows.size()) {
       void* row = nullptr;
-      if (hipMalloc(&row, store->emergency_row_bytes) != hipSuccess) {
+      if (hipMalloc(&row, store->emergency_row_bytes + store->read_margin) !=
+          hipSuccess) {
         fprintf(stderr, "%s: unable to stage a missed expert\n", tag);
         return false;
       }
@@ -1833,7 +1846,7 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
     if (changed[p] &&
         hipMemcpyAsync(device_table[p], mirror[p],
                        store->n_expert * sizeof(uint8_t*),
-                       hipMemcpyHostToDevice, nullptr) != hipSuccess)
+                       hipMemcpyHostToDevice, stream) != hipSuccess)
       return false;
   /* The hit and miss rows keep their route positions, each array holding -1
    * for the other's experts, so one launch over either array leaves exactly
@@ -1864,7 +1877,7 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
       info.miss_ids = store->split + n_routes;
       if (hipMemcpyAsync(store->split, store->split_host,
                          2 * n_routes * sizeof(int32_t), hipMemcpyHostToDevice,
-                         nullptr) != hipSuccess)
+                         stream) != hipSuccess)
         return false;
     }
   }
@@ -1920,7 +1933,7 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
     uint8_t* dst = slot.data;
     for (uint32_t p = 0; p < n_pieces; ++p) {
       if (hipMemcpyAsync(dst, mirror[p][e], src[p].bytes,
-                         hipMemcpyDeviceToDevice, nullptr) != hipSuccess) {
+                         hipMemcpyDeviceToDevice, stream) != hipSuccess) {
         store->release(slot_id);
         return false;
       }
@@ -2020,9 +2033,10 @@ bool prefetch(Store::Impl* store, uint32_t layer, const int32_t* experts,
 
 bool Store::Prepare(uint32_t layer, const int32_t* routes, uint32_t n_tokens,
                     const void** tables, bool (*overlap)(void*, const Overlap*),
-                    void* overlap_context, hipEvent_t routes_ready) {
+                    void* overlap_context, hipEvent_t routes_ready,
+                    hipStream_t stream) {
   return prepare(impl_.get(), layer, routes, n_tokens, tables, overlap,
-                 overlap_context, routes_ready);
+                 overlap_context, routes_ready, stream);
 }
 
 bool Store::Prefetch(uint32_t layer, const int32_t* experts, uint32_t count,

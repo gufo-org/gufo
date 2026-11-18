@@ -118,18 +118,45 @@ struct Runner {
   Store& store;
   int32_t* routes = nullptr;
   const void* tables[gufo::expert_stream::kMaxPieces] = {};
+  hipStream_t stream = nullptr;
 
   bool Run(uint32_t layer, const std::vector<int32_t>& ids,
            bool (*overlap)(void*, const Overlap*) = nullptr,
            void* context = nullptr) {
     if (ids.empty() || ids.size() % m.layout.top_k ||
-        hipMemcpy(routes, ids.data(), ids.size() * sizeof(int32_t),
-                  hipMemcpyHostToDevice) != hipSuccess)
+        hipMemcpyAsync(routes, ids.data(), ids.size() * sizeof(int32_t),
+                       hipMemcpyHostToDevice, stream) != hipSuccess ||
+        !store.Prepare(layer, routes,
+                       static_cast<uint32_t>(ids.size() / m.layout.top_k),
+                       tables, overlap, context, nullptr, stream))
       return false;
-    return store.Prepare(layer, routes,
-                         static_cast<uint32_t>(ids.size() / m.layout.top_k),
-                         tables, overlap, context) &&
-           CheckTables(m, layer, ids, tables);
+    if (!stream)
+      return CheckTables(m, layer, ids, tables);
+    // Read the tables back on the caller's stream, ordered after Prepare's
+    // copies, and through the margin past every routed expert.
+    for (uint32_t p = 0; p < m.layout.pieces; ++p) {
+      std::vector<const uint8_t*> rows(m.layout.experts);
+      if (hipMemcpyAsync(rows.data(), tables[p], rows.size() * sizeof(rows[0]),
+                         hipMemcpyDeviceToHost, stream) != hipSuccess ||
+          hipStreamSynchronize(stream) != hipSuccess)
+        return false;
+      std::vector<uint8_t> bytes(m.sizes[layer][p] +
+                                 m.layout.read_margin_bytes);
+      for (int32_t e : ids) {
+        if (e < 0)
+          continue;
+        const uint64_t size =
+            p + 1 == m.layout.pieces ? bytes.size() : m.sizes[layer][p];
+        if (hipMemcpyAsync(bytes.data(), rows[e], size, hipMemcpyDeviceToHost,
+                           stream) != hipSuccess ||
+            hipStreamSynchronize(stream) != hipSuccess)
+          return false;
+        for (uint64_t i = 0; i < m.sizes[layer][p]; ++i)
+          if (bytes[i] != Byte(layer, p, static_cast<uint32_t>(e), i))
+            return false;
+      }
+    }
+    return true;
   }
 };
 
@@ -256,6 +283,46 @@ void OnePieceLayout(int32_t* routes) {
         "one-piece fit bounds growth");
 }
 
+void CallerStream(int32_t* routes) {
+  // Two pieces, a read margin, and every call on a non-blocking stream: each
+  // miss is staged and admitted through copies on that stream.
+  Model m(16, 2, {{1000, 700}, {1200, 500}});
+  m.layout.read_margin_bytes = 4096;
+  Check(m.ok, "caller-stream fixture");
+  if (!m.ok)
+    return;
+  Policy policy;
+  policy.cache_limit_bytes = 6 * m.Slot(0);
+  policy.log_tag = "expert_stream_test";
+  auto store = Store::Create(m.layout, policy);
+  Check(store != nullptr, "caller-stream create");
+  if (!store)
+    return;
+  Runner run{m, *store, routes};
+  Check(
+      hipStreamCreateWithFlags(&run.stream, hipStreamNonBlocking) == hipSuccess,
+      "caller-stream stream");
+  for (uint32_t step = 0; step < 24; ++step) {
+    // Mostly two experts per layer, the cache holds them; every fourth step
+    // a cold one.
+    const int32_t a = static_cast<int32_t>(step % 2);
+    const int32_t b = step % 4 == 3 ? static_cast<int32_t>(4 + step % 12) : 1;
+    Check(run.Run(step % 2, {a, b, b, a == b ? -1 : a}),
+          "caller-stream bytes and margin");
+  }
+  const auto stats = store->GetStats();
+  Check(stats.bytes_read > 0 && stats.hits > 0 && stats.hits < stats.uses,
+        "caller-stream hits and misses");
+  // The prefetch stage: each piece's widest layer, plus its margin.
+  const uint64_t stage = uint64_t{1200 + 700} * policy.prefetch_stage_rows +
+                         2 * uint64_t{m.layout.read_margin_bytes};
+  Check(store->Fit(stage + 2 * m.Slot(0)), "caller-stream fit");
+  Check(store->GetStats().cache_bytes <= 2 * m.Slot(0),
+        "caller-stream fit counts the margin");
+  Check(run.Run(1, {3, 4}), "caller-stream after fit");
+  (void)hipStreamDestroy(run.stream);
+}
+
 void InvalidLayouts() {
   Policy policy;
   policy.log_tag = "expert_stream_test";
@@ -286,6 +353,7 @@ int main() {
     return 1;
   FusedLayout(routes);
   OnePieceLayout(routes);
+  CallerStream(routes);
   InvalidLayouts();
   (void)hipFree(routes);
   return ok ? 0 : 1;
