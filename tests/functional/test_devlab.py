@@ -55,6 +55,16 @@ class PlanTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 devlab_models.registry()
 
+    def test_windows_plans_leave_out_models_its_runners_cannot_hold(self):
+        windows = devlab_plan.select(['CMakeLists.txt'], self.data, platform='windows')
+        left_out = {row['id']: row['reason'] for row in windows['disabled']}
+        self.assertEqual(set(left_out), {'flash-next-q4', 'deepseek4'})
+        self.assertTrue(all('Windows' in reason for reason in left_out.values()))
+        self.assertFalse({'flash-next-q4', 'deepseek4'} & {row['id'] for row in windows['models']})
+        self.assertIn('qwen27-q4', {row['id'] for row in windows['models']})
+        linux = devlab_plan.select(['CMakeLists.txt'], self.data)
+        self.assertLessEqual({'flash-next-q4', 'deepseek4'}, {row['id'] for row in linux['models']})
+
     def test_curated_suites_apply_at_every_tier(self):
         suites = self.registry['models']['deepseek4']['suites']
         for tier in ('pr', 'full'):

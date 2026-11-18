@@ -221,7 +221,7 @@ jobs:
           base=$(git rev-parse "$APPROVED_MERGE^1")
           echo "base=$base" >> "$GITHUB_OUTPUT"
           python3 tests/functional/devlab_plan.py --repo . --base "$base" --head "$APPROVED_MERGE" \
-            "${modes[@]}" --tier "$tier" --output functional-plan.json
+            "${modes[@]}" --tier "$tier" --platform windows --output functional-plan.json
           python3 - <<'PYPLAN'
           import json, os
           plan = json.load(open('functional-plan.json'))

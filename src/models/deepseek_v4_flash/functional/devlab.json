@@ -49,7 +49,10 @@
         "batch",
         "state-edges",
         "cache"
-      ]
+      ],
+      "unsupported_platforms": {
+        "windows": "its 81 GiB of weights exceed the Windows runners' device memory pool"
+      }
     }
   },
   "rules": [

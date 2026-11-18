@@ -331,6 +331,10 @@ Selections from separate paths are combined:
 
 Models listed under `disabled` in `devlab.core.json`, with a reason, are left
 out of the plan and named in the report. Remove the entry to restore the model.
+A model's `unsupported_platforms` in its `functional/devlab.json` names the
+platforms whose runners cannot hold it, with the reason; `devlab_plan.py
+--platform windows` leaves it out the same way. Flash-Next (107 GiB) and DeepSeek
+V4 (81 GiB) exceed the Windows runners' device memory pool.
 
 A model's `suites` list in its `functional/devlab.json` limits Devlab to those
 suites at every tier; the report counts the others as out of scope. DeepSeek V4
