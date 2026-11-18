@@ -1,6 +1,6 @@
 name: Functional reporting
 
-# Keeps the single Devlab functional PR comment in step with its run: a
+# Keeps each platform's Devlab functional PR comment in step with its run: a
 # placeholder with a cancel link while the run is in progress, and the
 # rendered report of a fork PR once it completes (a fork run only has a
 # read-only token). Same-repository runs post their own report.
@@ -10,14 +10,16 @@ name: Functional reporting
 # PR is resolved from the triggering run, not from the artifact.
 on:
   workflow_run:
-    workflows: [ Linux validation ]
+    workflows: [ Linux validation, Windows validation ]
     types: [ in_progress, completed ]
 
 permissions: {}
 
-# Serialize updates per PR branch so a placeholder never lands after a report.
+# Serialize updates per workflow and PR branch so a placeholder never lands
+# after a report. One group per workflow: a group keeps a single pending run,
+# so another workflow's events must not displace this one's report.
 concurrency:
-  group: devlab-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  group: devlab-comment-${{ github.event.workflow_run.name }}-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:
@@ -56,11 +58,25 @@ jobs:
           HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
           HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW: ${{ github.event.workflow_run.name }}
         shell: bash
         run: |
           set -euo pipefail
-          marker='<!-- devlab-functional -->'
-          running='<!-- devlab-functional:running -->'
+          # Each platform keeps its own comment (marker) and advisory status.
+          case "$WORKFLOW" in
+            "Linux validation")
+              platform=functional title='Devlab functional checks' where='Strix Halo'
+              policy='is advisory on PRs; only the automatic release merge waits for it.' ;;
+            "Windows validation")
+              platform=functional-windows title='Devlab functional checks · Windows' where='Windows Strix Halo'
+              policy='is advisory on PRs.' ;;
+            *) echo "::error::Unexpected workflow: $WORKFLOW"; exit 1 ;;
+          esac
+          context="devlab/$platform"
+          export MARKER="<!-- devlab-$platform -->"
+          export RUNNING="<!-- devlab-$platform:running -->"
+          marker=$MARKER
+          running=$RUNNING
 
           # Fork runs carry no pull_requests; match the open PR by head. A run
           # for an older head is superseded and must not touch the comment.
@@ -79,8 +95,8 @@ jobs:
           read -r comment_id comment_running comment_this_run < <(gh api --paginate \
             "repos/$GITHUB_REPOSITORY/issues/$pr_number/comments" \
             --jq '.[] | select(.user.login == "github-actions[bot]" and
-                               (.body | startswith("<!-- devlab-functional -->"))) |
-                  [.id, (.body | contains("<!-- devlab-functional:running -->")),
+                               (.body | startswith(env.MARKER))) |
+                  [.id, (.body | contains(env.RUNNING)),
                    (.body | contains("/actions/runs/" + env.RUN_ID + ")"))] | join(" ")' |
             head -1) || true
           publish() {
@@ -92,7 +108,7 @@ jobs:
           }
           set_status() {
             gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" -f state="$1" \
-              -f context=devlab/functional -f description="${2:0:140}" \
+              -f context="$context" -f description="${2:0:140}" \
               -f target_url="$RUN_URL" --silent
           }
           fork=false
@@ -109,13 +125,13 @@ jobs:
             cat > placeholder.md <<EOF
           $marker
           $running
-          ### ⏳ Devlab functional checks running
+          ### ⏳ $title running
 
-          Building \`${HEAD_SHA:0:7}\` and running the affected functional suites on Strix Halo. This comment updates with the results when the run finishes.
+          Building \`${HEAD_SHA:0:7}\` and running the affected functional suites on $where. This comment updates with the results when the run finishes.
 
           [![Cancel run](https://img.shields.io/badge/%E2%8F%B9%20Cancel%20run-cf222e?style=for-the-badge)]($RUN_URL)
 
-          <sub>The button opens the [workflow run]($RUN_URL); choose **Cancel workflow** there (requires write access). \`devlab/functional\` is advisory on PRs; only the automatic release merge waits for it.</sub>
+          <sub>The button opens the [workflow run]($RUN_URL); choose **Cancel workflow** there (requires write access). \`$context\` $policy</sub>
           EOF
             publish placeholder.md
             # Same-repository runs set their own pending status.
@@ -131,7 +147,7 @@ jobs:
               *) echo "::error::Unexpected status state"; exit 1 ;;
             esac
             [[ "$(head -c ${#marker} report/comment.md)" == "$marker" ]] || {
-              echo "::error::Report lacks the devlab-functional marker"; exit 1
+              echo "::error::Report lacks the devlab-$platform marker"; exit 1
             }
             set_status "$state" "$description"
             publish report/comment.md
@@ -139,7 +155,7 @@ jobs:
             # No report replaced the placeholder; do not leave it claiming a run.
             cat > ended.md <<EOF
           $marker
-          ### ⚠️ Devlab functional checks ended without a report
+          ### ⚠️ $title ended without a report
 
           The run stopped before rendering results. See the [workflow run]($RUN_URL).
           EOF
