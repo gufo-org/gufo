@@ -863,31 +863,48 @@ struct Encoder::Impl {
                    heads, kv, hd, starts, wk.long_seq, r0, r1, wk.span, visible,
                    context16, qw, !(share && lane == 0),
                    share ? &wk.shared_kv : nullptr);
-      if (qkv)
-        host::Attention(
-            {.q = qkv,
-             .q_stride = stride,
-             .k = qkv_all + qw,
-             .k_stride = stride,
-             .v = qkv_all + qw + kw,
-             .v_stride = stride,
-             .out = context,
-             .out_stride = qw,
-             .rows = rows,
-             .heads = heads,
-             .kv_heads = kv,
-             .dim = hd,
-             .dim_v = hd,
-             .scale = 1.0f},
-            [&](std::size_t r, std::size_t* b, std::size_t* e) {
-              const std::size_t q = wk.seq_of[r0 + r];
-              if (wk.long_seq[q]) {
-                *b = *e = 0;  // done on the NPU; leave its rows
-                return;
-              }
-              visible(r0 + r, starts[q], starts[q + 1], b, e);
-            },
-            /*skip_empty=*/true);
+      // Short sequences attend on the CPU each from its own first row: the
+      // host path and its key tiles then depend only on the sequence, so it
+      // embeds the same alone and in any batch. Several of them share the
+      // threads one sequence per task (the nested call runs inline); a lone one
+      // spreads its heads over the threads. Either way gives the same values.
+      if (qkv) {
+        std::vector<std::size_t> short_seqs;
+        for (std::size_t q = wk.seq_of[r0];
+             q + 1 < starts.size() && starts[q] < r1; ++q)
+          if (!wk.long_seq[q])  // long ones attend on the NPU
+            short_seqs.push_back(q);
+        auto attend = [&](std::size_t q) {
+          const std::size_t s0 = starts[q], s1 = starts[q + 1];
+          host::Attention({.q = qkv + (s0 - r0) * stride,
+                           .q_stride = stride,
+                           .k = qkv_all + s0 * stride + qw,
+                           .k_stride = stride,
+                           .v = qkv_all + s0 * stride + qw + kw,
+                           .v_stride = stride,
+                           .out = context + (s0 - r0) * qw,
+                           .out_stride = qw,
+                           .rows = s1 - s0,
+                           .heads = heads,
+                           .kv_heads = kv,
+                           .dim = hd,
+                           .dim_v = hd,
+                           .scale = 1.0f},
+                          [&](std::size_t r, std::size_t* b, std::size_t* e) {
+                            visible(s0 + r, s0, s1, b, e);
+                            *b -= s0;
+                            *e -= s0;
+                          });
+        };
+        if (short_seqs.size() == 1)
+          attend(short_seqs[0]);
+        else
+          host::ParallelFor(short_seqs.size(), 1,
+                            [&](std::size_t b, std::size_t e) {
+                              for (std::size_t i = b; i < e; ++i)
+                                attend(short_seqs[i]);
+                            });
+      }
       // CPU-attention rows (short sequences) join the bf16 context.
       host::ParallelFor(rows, 64, [&](std::size_t b, std::size_t e) {
         for (std::size_t r = b; r < e; ++r)
