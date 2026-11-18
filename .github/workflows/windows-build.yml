@@ -527,6 +527,10 @@ jobs:
       # the weight-free GPU tests and the model smoke checks with their
       # references (Devlab checks out only the download tools).
       - name: Package GPU validation bundle
+        env:
+          # A baseline bundle (checks off) only runs timing: it needs the
+          # server and its runtime, not the test executables.
+          WITH_TESTS: ${{ inputs.checks }}
         run: |
           $dist = "$env:RUNNER_TEMP\windows-gufo"
           $build = 'build\windows-release'
@@ -548,9 +552,11 @@ jobs:
           }
           if (Test-Path "$build\gufo-video-libraries.txt") {
             Copy-Item "$build\gufo-video-libraries.txt" $dist
-            $videoTest = Get-ChildItem $build -Recurse -Filter 'embedding_gemma2_video_processor_test.exe' | Select-Object -First 1
-            if (-not $videoTest) { throw 'video decoder CPU test was not built' }
-            Copy-Item $videoTest.FullName $dist
+            if ($env:WITH_TESTS -eq 'true') {
+              $videoTest = Get-ChildItem $build -Recurse -Filter 'embedding_gemma2_video_processor_test.exe' | Select-Object -First 1
+              if (-not $videoTest) { throw 'video decoder CPU test was not built' }
+              Copy-Item $videoTest.FullName $dist
+            }
           }
           Copy-Item "$env:GUFO_PACKAGING_ROOT/licenses/llvm-openmp.txt" "$dist/llvm-openmp-LICENSE.txt"
           Copy-Item "$env:XRT_ROOT/xrt_sdk/xrt/license/LICENSE" "$dist/xrt-LICENSE.txt"
@@ -562,7 +568,8 @@ jobs:
             Where-Object { $_.Name -like 'Microsoft.VC*.CRT' }
           foreach ($dir in $redist) { Copy-Item "$($dir.FullName)\*.dll" $dist -Force }
           $tests = @('gpu_queues_test', 'bandwidth_test', 'allocation_benchmark_test')
-          if (Test-Path "$dist/npu") {
+          if ($env:WITH_TESTS -ne 'true') { $tests = @() }
+          elseif (Test-Path "$dist/npu") {
             $tests += 'npu_device_test', 'npu_bfp_device_test', 'npu_qwen3dec_device_test'
           }
           foreach ($test in $tests) {
