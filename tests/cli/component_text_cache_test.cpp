@@ -737,6 +737,63 @@ void GridCheckpointsCaptureInPass() {
   assert(Generate(restored) == expected);
   restored.Invalidate();
 }
+// A second question about a long document diverges inside the first
+// question, below its persisted prompt checkpoint. The deepest grid far enough
+// below that checkpoint is persisted too, so the document prefix survives a
+// restart; a grid within the question's reach stays in RAM only.
+void PersistedGridServesAnotherQuestionAfterRestart() {
+  const auto run = [](std::size_t length, std::size_t diverge) {
+    const TemporaryDirectory temp("gufo-component-grid-disk-test");
+    const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                          .capacity_bytes = 1 << 30,
+                                          .min_checkpoint_step_tokens = 1};
+    std::vector<TextRunnerToken> prompt(length);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto question = prompt;
+    question[diverge] = 999;
+    auto runner = std::make_shared<Runner>();
+    runner->in_pass = true;
+    runner->max_in_pass_tail = std::numeric_limits<std::size_t>::max();
+    TextRunnerToken expected{};
+    {
+      TextRunnerPool cold(runner, 1);
+      auto reference =
+          cold.Acquire(question, sampling::SamplingConfig{}, {}, {}, false);
+      Prefill(reference);
+      expected = Generate(reference);
+      reference.Invalidate();
+    }
+    runner->in_pass_points.clear();
+    {
+      TextRunnerPool pool(runner, 1, disk);
+      auto first = pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {},
+                                true, length - 10);
+      (void)first.Prefill(8192);
+      assert(first.prefill_complete());
+      assert(std::ranges::find(runner->in_pass_points, 2048) !=
+             runner->in_pass_points.end());
+      (void)Generate(first);
+      (void)first.Commit();
+    }
+    TextRunnerPool restarted(runner, 1, disk);
+    auto second = restarted.Acquire(question, sampling::SamplingConfig{}, {},
+                                    {}, true, length - 10);
+    const auto cached = second.cached_prompt_tokens();
+    const bool disk_hit = second.cache_disk_hit();
+    Prefill(second);
+    assert(Generate(second) == expected);
+    second.Invalidate();
+    return std::pair{cached, disk_hit};
+  };
+  // Prompt checkpoint 3990: the 2048 grid is 1942 tokens below it.
+  const auto far = run(4000, 3000);
+  // A persisted grid restores the shared document after a restart.
+  assert(far.first == 2048 && far.second);
+  // Prompt checkpoint 2190: the 2048 grid is within an eighth of it.
+  const auto near = run(2200, 2100);
+  // A grid near the prompt checkpoint stays in RAM only.
+  assert(near.first == 0 && !near.second);
+}
 // A prompt target captured in a pass before a grid checkpoint of the same
 // pass is admitted as a continuation boundary, not as the grid checkpoint
 // whose reservation the lease held last.
@@ -4348,6 +4405,7 @@ int main() {
   UnalignedRawPromptKeepsAnAlignedContinuation();
   DisabledCacheDoesNotPrepareARawPromptCheckpoint();
   GridCheckpointsCaptureInPass();
+  PersistedGridServesAnotherQuestionAfterRestart();
   PromptTargetBeforeGridKeepsItsPurpose();
   ColdAcquireResetsOnce();
   ColdAssignmentAvoidsDrainingCancelledSlot();

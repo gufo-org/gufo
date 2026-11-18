@@ -502,6 +502,7 @@ struct TextRunnerPool::Request::Impl {
       checkpoints.erase(std::ranges::unique(checkpoints).begin(),
                         checkpoints.end());
     }
+    lease->PersistGrid(checkpoints, snapshot_tokens.size());
   }
 
   /// The prompt context's stop for `position`. A hook moving the wrong way
