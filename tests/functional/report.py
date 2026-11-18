@@ -14,6 +14,9 @@ from metrics import NOISE_MS, SLOWDOWN
 
 MARKER = "<!-- devlab-functional -->"
 STATUS_CONTEXT = "devlab/functional"
+# Each platform's workflow keeps its own PR comment and commit status.
+PLATFORMS = {"linux": (MARKER, STATUS_CONTEXT, ""),
+             "windows": ("<!-- devlab-functional-windows -->", "devlab/functional-windows", " · Windows")}
 ERROR_CHARS = 300
 LOG_CHARS = 3000
 ICONS = {"success": "✅", "failure": "❌", "error": "⚠️"}
@@ -273,9 +276,10 @@ def render_models(args, plan, summary):
     timing_warning = state == 'success' and any(speed == 'inconclusive' for speed in speeds.values())
     if timing_warning:
         description = 'Correctness passed; timing warning: inconclusive comparisons retained'
+    marker, context, platform = PLATFORMS[getattr(args, 'platform', 'linux')]
     tier = ' · PR tier' if plan['tier'] == 'pr' else ''
     icon = "⚠️" if timing_warning else ICONS[state]
-    lines = [MARKER, f'### {icon} Devlab functional checks{tier}: {description}', '',
+    lines = [marker, f'### {icon} Devlab functional checks{platform}{tier}: {description}', '',
              '| Model | Correctness | Speed · main → PR |', '| --- | --- | --- |']
     for selection in plan['models']:
         key = selection['id']
@@ -315,7 +319,8 @@ def render_models(args, plan, summary):
     lines += ['', f"<sub>[Workflow run and evidence]({args.run_url}) · "
               f"merge `{plan['head'][:7]}` vs main `{plan['base'][:7]}` · "
               f"{len(plan['deferred'])} deferred, {len(plan['release_only'])} for the release run. "
-              f"`{STATUS_CONTEXT}` is advisory on PRs; only the automatic release merge waits for it. "
+              f"`{context}` is advisory on PRs" + ("; only the automatic release merge waits for it. "
+                                                    if context == STATUS_CONTEXT else ". ") +
               'Coverage is limited to the selected representatives; video generation and agent replay remain separate.</sub>']
     return state, description, '\n'.join(lines) + '\n'
 
@@ -325,12 +330,13 @@ def render(args):
     summary = load_json(args.results / "summary.json")
     if plan is not None and plan.get('schema') == 2:
         return render_models(args, plan, summary)
+    marker, context, platform = PLATFORMS[getattr(args, 'platform', 'linux')]
     state, description = verdict(args.authorize, args.smoke, plan, summary, args.benchmark)
     rows = summary["groups"] if summary is not None else []
     model = group_name(rows[0])[1] if rows else "flash-next-q4"
     tier = plan.get("tier", "full") if plan is not None else "full"
-    title = "Devlab functional checks" + (" · PR tier" if tier == "pr" else "")
-    lines = [MARKER, f"### {ICONS[state]} {title}: {description}", ""]
+    title = "Devlab functional checks" + platform + (" · PR tier" if tier == "pr" else "")
+    lines = [marker, f"### {ICONS[state]} {title}: {description}", ""]
     if rows:
         lines += group_table(rows) + failure_details(rows)
     if args.benchmark:
@@ -347,7 +353,8 @@ def render(args):
                       + (f"{release_only} for the release run, " if release_only else "")
                       + f"{len(plan['out_of_scope'])} out of scope")
     lines += ["", "<sub>" + " · ".join(footer) + "<br>"
-              f"`{STATUS_CONTEXT}` is advisory on PRs; only the automatic release merge waits for it. "
+              f"`{context}` is advisory on PRs" + ("; only the automatic release merge waits for it. "
+                                                   if context == STATUS_CONTEXT else ". ") +
               "Candidate correctness only; other-model, numerical, agent replay and timing "
               "qualification remain separate.</sub>"]
     return state, description, "\n".join(lines) + "\n"
@@ -361,6 +368,8 @@ def main():
     parser.add_argument("--authorize", required=True, help="Result of the authorize job")
     parser.add_argument("--smoke", required=True, help="Result of the cluster job")
     parser.add_argument("--benchmark", action="store_true")
+    parser.add_argument("--platform", choices=sorted(PLATFORMS), default="linux",
+                        help="Workflow platform: selects the comment marker and status context")
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--comment", type=Path, required=True)
     parser.add_argument("--status", type=Path, required=True,
