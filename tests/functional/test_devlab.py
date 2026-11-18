@@ -185,7 +185,7 @@ class PlanTest(unittest.TestCase):
                                     ('deepseek4', '--dspark-model', 'deepseek4')]:
             plan = self.plan('src/models/qwen/engine.cpp' if key.startswith('qwen') else
                              'src/models/deepseek_v4_flash/model.cpp')
-            args = cluster.command(plan['groups'][0], Path('/gufo'), None, Path('/out'), 'pr', assets)
+            args = cluster.command(plan['groups'][0], Path('/gufo'), None, Path('/out'), assets)
             self.assertIn(draft, args)
             self.assertEqual(args[args.index('--sampling-preset')+1], preset)
             self.assertEqual('--mmproj' in args, key.startswith('qwen'))
@@ -310,11 +310,11 @@ class ShardTest(unittest.TestCase):
     def test_order_seed_reaches_the_runner(self):
         plan = self.plan('src/models/qwen38_flash_next/engine.cpp')
         assets = {key: '/weights/' + key for key in devlab_models.registry()['assets']}
-        args = cluster.command(plan['groups'][0], Path('/gufo'), None, Path('/out'), 'full', assets, 1234)
+        args = cluster.command(plan['groups'][0], Path('/gufo'), None, Path('/out'), assets, 1234)
         self.assertEqual(args[args.index('--order-seed') + 1], '1234')
         self.assertLess(args.index('--order-seed'), args.index('--'))
         self.assertNotIn('--order-seed', cluster.command(plan['groups'][0], Path('/gufo'), None,
-                                                         Path('/out'), 'full', assets))
+                                                         Path('/out'), assets))
 
     def test_shard_runs_only_its_part(self):
         plan = self.plan('src/models/qwen38_flash_next/engine.cpp', 'src/models/qwen3_asr/model.cpp',

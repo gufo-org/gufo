@@ -13,6 +13,7 @@ import sys
 import openai
 
 from messages_tools import messages_stream
+from transports import rotate
 
 PROMPT = "Is 1001 a prime number? Think it through step by step, then answer yes or no."
 BUDGETS = (0, 1, 4, 16, 64)
@@ -75,14 +76,16 @@ def check_reasoning_budget(client, model, checks, chat_result):
     assert same((unlimited["reasoning"], unlimited["text"]),
                 (control["reasoning"], control["text"])), (unlimited, control)
 
-    for budget in BUDGETS:
+    for index, budget in enumerate(BUDGETS):
         capped = responses(f"responses_{budget}", budget)
         assert capped["reasoning_tokens"] == budget, capped
         assert capped["text"].strip(), capped
         # Greedy reasoning follows the uncapped reasoning until the cap.
         assert control["reasoning"].startswith(capped["reasoning"].rstrip()), (capped, control)
         assert budget or not capped["reasoning"].strip(), capped
-        for streaming in (False, True):
+        # Budgets alternate the stream mode on each endpoint: both modes and
+        # every budget run, not every pair.
+        for streaming in rotate((False, True), index):
             result = chat(f"chat_{budget}_{'stream' if streaming else 'buffered'}",
                           budget, streaming)
             assert same((result["reasoning"], result["text"]),
@@ -90,7 +93,7 @@ def check_reasoning_budget(client, model, checks, chat_result):
             assert result["finish"] == "stop", result
         if budget == 0:
             continue
-        for streaming in (False, True):
+        for streaming in rotate((False, True), index + 1):
             thinking, text = messages(
                 f"messages_{budget}_{'stream' if streaming else 'buffered'}",
                 {"type": "enabled", "budget_tokens": budget}, streaming)

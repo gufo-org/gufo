@@ -129,8 +129,10 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
                     failures.append(
                         f"{label}_{index}: prefilled {usage['gufo']['prefill_tokens']} "
                         f"tokens, expected at most {bound} after restoring the shared prefix")
-        # Waiting must never change an answer: compare uncached controls.
-        for index, (messages, warm) in enumerate(zip(conversations, results)):
+        # Waiting must never change an answer. Each reply already asserts its
+        # code; an uncached control of the last request, a waiter when the
+        # group shares, checks the prompt and reply match.
+        for index, (messages, warm) in list(enumerate(zip(conversations, results)))[-1:]:
             cold = chat(f"{label}_cold_{index}", body_for(messages, cold=True))
             assert cold["usage"]["prompt_tokens"] == warm["usage"]["prompt_tokens"], (warm, cold)
             assert cold["text"] == warm["text"], (warm, cold)

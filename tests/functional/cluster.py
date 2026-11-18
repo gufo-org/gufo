@@ -58,7 +58,7 @@ def remove_disk_caches(group_output):
             shutil.rmtree(path, ignore_errors=True)
 
 
-def command(group, binary, weights, output, tier="full", assets=None, order_seed=None):
+def command(group, binary, weights, output, assets=None, order_seed=None):
     profile = group["profile"]
     if assets is None and profile not in ("flash-next-q4/off", "flash-next-q4/mtp"):
         raise ValueError("Cluster executor only supports Flash-Next: " + profile)
@@ -70,7 +70,7 @@ def command(group, binary, weights, output, tier="full", assets=None, order_seed
         args = [sys.executable, str(HERE / 'run.py'), '--output', str(output),
                 '--sampling-preset', model['sampling'], '--expected-input-modalities',
                 'text,image' if model.get('projector') else 'text',
-                '--startup-timeout', '600', '--record-baseline', '--tier', tier]
+                '--startup-timeout', '600', '--record-baseline']
         for suite in group['suites']:
             args += ['--suite', suite]
         if order_seed is not None:
@@ -83,7 +83,7 @@ def command(group, binary, weights, output, tier="full", assets=None, order_seed
     settings = group["settings"]
     args = [sys.executable, str(HERE / "run.py"), "--output", str(output),
             "--sampling-preset", "qwen38", "--expected-input-modalities", "text,image",
-            "--startup-timeout", "600", "--record-baseline", "--tier", tier]
+            "--startup-timeout", "600", "--record-baseline"]
     for suite in group["suites"]:
         args += ["--suite", suite]
     args += ["--", str(binary), "serve", "llm", "--model",
@@ -104,8 +104,7 @@ def execute(plan, binary, weights, output, assets=None):
         name = group["profile"].replace("/", "-") + "-" + group["configuration"]
         if group.get("server"):
             name += "-" + str(group["server"])
-        args = command(group, binary, weights, output / name, plan.get("suite_tier", plan.get("tier", "full")), assets,
-                       plan.get("order_seed"))
+        args = command(group, binary, weights, output / name, assets, plan.get("order_seed"))
         print("Running", name, ":", ", ".join(group["suites"]), flush=True)
         log_path = output / (name + ".log")
         with log_path.open("w") as log:

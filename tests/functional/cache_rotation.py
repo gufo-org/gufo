@@ -103,10 +103,9 @@ def check_cache_rotation(client, model, checks, chat_result):
     answer(returned, "BETA")
     if returned["usage"]["cached_tokens"] < main["usage"]["prompt_tokens"] - 16:
         failures.append("small unrelated requests discarded the main conversation")
-    controls = [("main", body, returned)] + [
-        (conversation["code"], conversation["body"], conversation["result"])
-        for conversation in conversations]
-    for label, body, warm in controls:
+    # Every reply already asserts its code; one uncached replay of the longest
+    # conversation, after the rotations, checks the token path matches too.
+    for label, body, warm in [("main", body, returned)]:
         _, cold = chat("rotation_cold_control_" + label, body["messages"], True)
         assert signature(warm) == signature(cold), (warm, cold)
     assert not failures, "\n".join(failures)

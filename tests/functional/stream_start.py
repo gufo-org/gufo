@@ -9,8 +9,10 @@ ENDPOINTS = ("chat", "completions", "responses")
 
 
 def cold_prompt(label, context):
-    # About a third of one session, so prefill clearly precedes the first token.
-    facts = " ".join(f"Entry {i} keeps value {i * 7 % 101}." for i in range(context // 30))
+    # About 5.6K tokens (at most a third of one session): over a second of
+    # prefill even at 5,000 tokens/s, so prefill clearly precedes the first
+    # token; the check asserts at least 0.5 s.
+    facts = " ".join(f"Entry {i} keeps value {i * 7 % 101}." for i in range(min(512, context // 30)))
     return f"{label}: {facts}\nWhich value does entry 3 keep? Answer with the number."
 
 

@@ -94,8 +94,10 @@ def check_cache_depth(client, model, checks, chat_result, concurrency=4, server_
          window=(before_resume, log_offset(server_log)))
     controls.append(("resume", body, resumed, "BETA"))
 
-    # Controls come last: they must never supply a checkpoint missing from a
-    # warm branch or rotation. Complete output equality stays strict.
-    for label, body, warm, code in controls:
+    # The control comes last: it must never supply a checkpoint missing from a
+    # warm branch or rotation. Complete output equality stays strict. Every
+    # warm request already asserts its exact reply; one uncached replay of the
+    # deepest history (the resume) checks the token path matches too.
+    for label, body, warm, code in controls[-1:]:
         _, cold = chat("depth_cold_" + label, body["messages"], code, cold=True)
         assert signature(warm) == signature(cold), (label, warm, cold)

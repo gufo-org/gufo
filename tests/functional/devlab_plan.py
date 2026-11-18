@@ -117,8 +117,9 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
 
 
 COSTS = HERE / 'devlab_costs.json'
-# Target wall time of one runner job's suites, excluding package and weight setup.
-SHARD_BUDGET_S = 12 * 60
+# Wall time one runner job may take, excluding package and weight setup. Jobs
+# split by model first; a model splits further only past this budget.
+SHARD_BUDGET_S = 30 * 60
 
 
 def costs():
@@ -207,8 +208,7 @@ def shard(plan, table=None, budget=SHARD_BUDGET_S):
             job['rows'].append(row)
             job['seconds'] += row['seconds']
         for index, job in enumerate(jobs, 1):
-            labels = {row['label'] for row in job['rows']}
-            name = labels.pop() if len(labels) == 1 and len(jobs) == 1 else f'{pool}-{index}'
+            name = pool if len(jobs) == 1 else f'{pool}-{index}'
             parts = []
             # A model's parts merge into one, so it loads its assets and runs its timing once.
             for row in job['rows']:

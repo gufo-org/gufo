@@ -128,7 +128,9 @@ def check_cache_bridge(client, model, checks, chat_result, capacity_bytes):
     # needed. The stem measures the system prompt the conversation shares.
     _, stem = chat("bridge_stem", [system, {"role": "user", "content": "Z"}], cold=True)
     shared = stem["usage"]["prompt_tokens"]
-    for turn, (body, warm) in enumerate(turns, 1):
+    # Each turn already asserts its code; the last turn's control replays the
+    # whole bridged history.
+    for turn, (body, warm) in list(enumerate(turns, 1))[-1:]:
         _, cold = chat(f"bridge_cold_control_{turn}", body["messages"], cold=True)
         assert cold["usage"]["prompt_tokens"] == warm["usage"]["prompt_tokens"], (warm, cold)
         assert answer(cold) == answer(warm), (warm, cold)

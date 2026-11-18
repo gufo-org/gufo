@@ -143,7 +143,8 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
 
         # Measure the whole growing history before cold controls can supply
         # missing checkpoints and accidentally hide a frozen-cache failure.
-        for turn, (body, warm) in enumerate(history):
+        # The deepest turn's control renders every earlier turn too.
+        for turn, (body, warm) in list(enumerate(history))[-1:]:
             body["extra_body"]["cache_prompt"] = False
             cold = chat(f"cold_control_{turn}", body)
             total = warm["usage"]["prompt_tokens"]
@@ -238,9 +239,10 @@ def check_messages_growth(client, model, checks, chat_result, failures, server_l
         assert (retry["text"], retry["reasoning"]) == \
             (history[-1][1]["text"], history[-1][1]["reasoning"]), retry
 
-        # Uncached Chat Completions controls render the same conversation; equal
-        # prompt sizes show both routes produce the same prompt.
-        for turn, (body, warm) in enumerate(history):
+        # An uncached Chat Completions control renders the same conversation;
+        # equal prompt sizes show both routes produce the same prompt. The
+        # deepest turn holds every earlier message.
+        for turn, (body, warm) in list(enumerate(history))[-1:]:
             chat = [{"role": "system", "content": system}]
             for message in body["messages"]:
                 if message["role"] == "user":

@@ -630,10 +630,15 @@ class FunctionalRunnerTest(unittest.TestCase):
 
     def test_cache_depth_replays_branches_before_cold_controls(self):
         requests, checks = self.run_cache_depth()
-        self.assertEqual(len(checks), 16)
-        self.assertEqual(len(requests), 15)
-        self.assertTrue(all(body.get("extra_body", {}).get("cache_prompt") is False
-                            for body in requests[-6:]))
+        self.assertEqual(len(checks), 11)
+        self.assertEqual(len(requests), 10)
+        self.assertIs(requests[-1]["extra_body"]["cache_prompt"], False)
+        self.assertTrue(all(body.get("extra_body", {}).get("cache_prompt") is not False
+                            for body in requests[1:-1]))
+        # Only the deepest history, the resume, gets an uncached control.
+        self.assertIn("depth_cold_resume", checks)
+        self.assertEqual([name for name in checks if name.startswith("depth_cold_")],
+                         ["depth_cold_resume"])
         # The first turn is uncached already; no control repeats it.
         self.assertNotIn("depth_cold_turn_0", checks)
         for code in ("RED", "GREEN", "BLUE"):
@@ -690,14 +695,20 @@ class FunctionalRunnerTest(unittest.TestCase):
 
     def test_cache_rotation_delays_controls_and_replays_actual_answers(self):
         requests, checks = self.run_cache_rotation()
-        self.assertEqual(len(checks), 27)
+        self.assertEqual(len(checks), 23)
+        self.assertEqual(len(requests), 23)
         self.assertEqual([body["messages"][0]["content"].splitlines()[0]
                           for body in requests[:4]],
                          ["cache_rotation_" + code for code in ("RED", "GREEN", "BLUE", "GOLD")])
-        self.assertTrue(all(body.get("extra_body", {}).get("cache_prompt") is False
-                            for body in requests[-5:]))
-        for warm, cold in zip([requests[21], *requests[8:12]], requests[-5:]):
-            self.assertEqual(warm["messages"], cold["messages"])
+        # Only the main conversation is replayed uncached, after every rotation.
+        self.assertIs(requests[-1]["extra_body"]["cache_prompt"], False)
+        self.assertTrue(all(body.get("extra_body", {}).get("cache_prompt") is not False
+                            for body in requests[13:-1]))
+        self.assertEqual(requests[21]["messages"], requests[-1]["messages"])
+        self.assertEqual([name for name in checks if "_cold_" in name],
+                         ["rotation_cold_control_main"])
+        for code in ("RED", "GREEN", "BLUE", "GOLD"):
+            self.assertNotIn("rotation_cold_control_" + code, checks)
         for body in requests[4:12]:
             code = body["messages"][0]["content"].splitlines()[0].rsplit("_", 1)[-1]
             self.assertTrue(all(message["content"] == code for message in body["messages"]
@@ -765,21 +776,28 @@ class FunctionalRunnerTest(unittest.TestCase):
 
     def test_cache_growth_uses_real_replay_shapes_and_delays_cold_controls(self):
         requests, checks = self.run_cache_growth()
-        self.assertEqual(len(checks), 54)
+        self.assertEqual(len(checks), 36)
         for offset, replay in enumerate(("drop_reasoning", "keep_reasoning",
                                         "discard_reasoning", "thinking_off")):
-            history = requests[offset * 9:(offset + 1) * 9]
+            history = requests[offset * 6:(offset + 1) * 6]
             self.assertEqual([len(body["messages"]) for body in history[:4]], [2, 4, 6, 8])
             self.assertIs(history[0]["extra_body"]["cache_prompt"], False)
             self.assertTrue(all("cache_prompt" not in body["extra_body"]
                                 for body in history[1:5]))
-            self.assertTrue(all(body["extra_body"]["cache_prompt"] is False
-                                for body in history[5:]))
+            # Only the deepest turn gets a cold control, after the whole history.
+            self.assertEqual(len(history[5:]), 1)
+            self.assertIs(history[5]["extra_body"]["cache_prompt"], False)
             self.assertEqual(history[4]["messages"], history[3]["messages"])
             self.assertIs(history[0]["extra_body"]["chat_template_kwargs"]["preserve_thinking"],
                           replay != "discard_reasoning")
-            for warm, cold in zip(history[:4], history[5:]):
-                self.assertEqual(warm["messages"], cold["messages"])
+            self.assertEqual(history[3]["messages"], history[5]["messages"])
+            self.assertIn(f"cache_growth_{replay}_cold_control_3", checks)
+            for turn in range(3):
+                self.assertNotIn(f"cache_growth_{replay}_cold_control_{turn}", checks)
+        for replay in ("keep_thinking", "thinking_off"):
+            self.assertIn(f"cache_growth_messages_{replay}_cold_control_3", checks)
+            for turn in range(3):
+                self.assertNotIn(f"cache_growth_messages_{replay}_cold_control_{turn}", checks)
             for message in history[3]["messages"]:
                 if message["role"] == "assistant":
                     self.assertEqual("reasoning_content" in message,
@@ -851,7 +869,9 @@ class FunctionalRunnerTest(unittest.TestCase):
         requests, checks = self.run_cache_concurrency()
         for group in ("identical", "fanout", "long_tasks", "short_shared", "unrelated"):
             self.assertTrue(all(f"{group}_{index}" in checks for index in range(4)))
-            self.assertTrue(all(f"{group}_cold_{index}" in checks for index in range(4)))
+            # Only the last conversation of each group gets an uncached control.
+            self.assertIn(f"{group}_cold_3", checks)
+            self.assertTrue(all(f"{group}_cold_{index}" not in checks for index in range(3)))
         self.assertIn("history_turn_1_0", checks)
         self.assertEqual(sum(name.startswith("cancelled_leader_") for name in checks), 3)
         cold = [body for body in requests
@@ -912,9 +932,19 @@ class FunctionalRunnerTest(unittest.TestCase):
         requests, checks = self.run_cache_shared_prefix()
         for group in ("long_tasks", "short_tasks"):
             self.assertTrue(all(f"{group}_{index}" in checks for index in range(4)))
-            self.assertTrue(all(f"{group}_cold_{index}" in checks for index in range(4)))
+            # Only the last conversation of each group gets an uncached control.
+            self.assertIn(f"{group}_cold_3", checks)
+            self.assertTrue(all(f"{group}_cold_{index}" not in checks for index in range(3)))
         warm = [body for body in requests if "extra_body" not in body]
         self.assertEqual(len(warm), 8)
+        # Per group: four warm conversations, then the stem probe and one control.
+        self.assertEqual(len(requests), 12)
+        for start in (0, 6):
+            group = requests[start:start + 6]
+            self.assertTrue(all("extra_body" not in body for body in group[:4]))
+            self.assertTrue(all(body["extra_body"]["cache_prompt"] is False
+                                for body in group[4:]))
+            self.assertEqual(group[5]["messages"], group[3]["messages"])
 
     def test_cache_shared_prefix_rejects_grid_only_reuse(self):
         with self.assertRaisesRegex(AssertionError, "of the shared system prompt"):
@@ -1052,11 +1082,13 @@ class FunctionalRunnerTest(unittest.TestCase):
             self.assertEqual(len(copies), index - 1)
         controls = [body for body in requests
                     if body.get("extra_body", {}).get("cache_prompt") is False]
-        self.assertEqual(len(controls), 7)
-        self.assertEqual(requests[-7:], controls)
+        # The stem probe plus one control of the last, fully bridged turn.
+        self.assertEqual(len(controls), 2)
+        self.assertEqual(requests[-2:], controls)
         self.assertEqual(controls[0]["messages"][-1]["content"], "Z")
-        self.assertEqual([body["messages"] for body in controls[1:]],
-                         [body["messages"] for body in turns])
+        self.assertEqual(controls[1]["messages"], turns[-1]["messages"])
+        self.assertIn("bridge_cold_control_6", checks)
+        self.assertTrue(all(f"bridge_cold_control_{turn}" not in checks for turn in range(1, 6)))
         self.assertEqual([row["floor"] for row in checks["bridge_evidence"]["turns"]],
                          [4712, 4782, 4852, 4922])
 

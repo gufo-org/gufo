@@ -41,7 +41,7 @@ SAMPLING = {
     "--repeat-penalty": ("repeat_penalty", float),
     "--repeat-last-n": ("repeat_last_n", int),
 }
-COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides", "request_timeout", "tier",
+COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides", "request_timeout",
                      "vision", "speculative", "environment", "harness_sha256", "build_inputs_sha256",
                      "expected_input_modalities")
 
@@ -174,9 +174,7 @@ def compare_runs(baseline_dir, candidate_dir):
         if report.get("functional_status", report["status"]) != "passed":
             raise ValueError("functional checks did not pass")
     for key in (*COMPARISON_FIELDS, "through_case"):
-        # Reports from before tiers always ran the full matrix.
-        default = "full" if key == "tier" else None
-        if baseline.get(key, default) != candidate.get(key, default):
+        if baseline.get(key) != candidate.get(key):
             raise ValueError(f"unmatched baseline {key}")
     if list(baseline["suites"]) != list(candidate["suites"]):
         raise ValueError("unmatched baseline suites")
@@ -263,8 +261,6 @@ def main():
                         help="Repeat to select affected suites; use all for an explicit full run")
     parser.add_argument("--expected-input-modalities", choices=("text", "text,image"),
                         help="Expected loaded inputs for the discovery suite")
-    parser.add_argument("--tier", choices=("pr", "full"), default="full",
-                        help="pr trims each suite's transport matrix; full runs every combination")
     parser.add_argument("--startup-timeout", type=float, default=240)
     parser.add_argument("--suite-timeout", type=float, default=900)
     parser.add_argument("--request-timeout", type=float, default=120,
@@ -338,8 +334,6 @@ def main():
     except (ValueError, OSError) as error:
         parser.error(str(error))
     output = args.output.resolve()
-    # Every suite process inherits the tier; see tier.py.
-    os.environ["GUFO_FUNCTIONAL_TIER"] = args.tier
     with socket.socket() as reserve:
         reserve.bind(("127.0.0.1", 0))
         port = reserve.getsockname()[1]
@@ -367,7 +361,7 @@ def main():
               "binary": str(Path(command[0]).resolve()),
               "mode": "baseline" if args.record_baseline else "qualification",
               "sampling_preset": args.sampling_preset, "sampling_overrides": overrides,
-              "request_timeout": args.request_timeout, "tier": args.tier,
+              "request_timeout": args.request_timeout,
               "vision": vision, "speculative": speculative,
               "suites": {}, "through_case": args.through_case, "order_seed": args.order_seed,
               "order": selected,

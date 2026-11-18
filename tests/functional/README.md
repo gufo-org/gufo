@@ -293,11 +293,11 @@ coverage. Suite metadata must cover every name in `suites.py`; dependencies are
 deliberately conservative, so even narrow source rules can select many suites.
 
 Suites marked `"tier": "release"` are left out of `impact.py --tier pr` plans
-unless a changed path matches their `escalate` patterns, and `run.py --tier pr`
-trims transport matrices a case does not depend on (`tool-reasoning` keeps the
-streamed mode; `tool-native-schemas` rotates endpoint, stream and tool choice).
-Devlab does not use either trim: every PR runs the full suite set, sharded
-across devices (below). `--tier full` is the default for manual runs.
+unless a changed path matches their `escalate` patterns; Devlab plans every
+suite. Cases that vary a transport (endpoint, stream, tool choice) cover every
+option, not every combination: `transports.py` rotates one option per case, and
+parse checks use the streamed mode, which must end in the same final parse a
+buffered reply returns.
 
 The literal-closer cases from #786 (a lone `</invoke>` and a closer before or
 between calls) use the deterministic HTTP fixtures in
@@ -334,7 +334,10 @@ out of the plan and named in the report. Remove the entry to restore the model.
 
 A model's `suites` list in its `functional/devlab.json` limits Devlab to those
 suites at every tier; the report counts the others as out of scope. DeepSeek V4
-uses it to run the PR-tier set that passes on the runner. Its other full-tier
+uses it to run the set that passes on the runner. Qwen27 uses it to run only the
+suites its runtime changes (cache and checkpoints, batching and scheduling,
+DFlash2 with sampling, grammars and stops, vision); Flash-Next covers the shared
+Qwen protocol suites. Its other full-tier
 suites still assume Flash-Next checkpoint sizes and Qwen token counts.
 
 Embedding runs its text, image, audio and video suites; TTS covers Base,
@@ -384,17 +387,16 @@ The authorized controller checkout contains the English voice fixture. TTS uses
 the main Gufo binary and a pinned ASR checkpoint as its intelligibility
 evaluator. Missing downloads or fixtures fail visibly.
 
-The plan's `shards` split the work into GPU jobs, one device each, so the wall
-time follows the largest shard rather than the sum of the models:
+The plan's `shards` split the work into GPU jobs, one device each:
 
-- `devlab_plan.py` packs each LLM configuration group's suites into servers that
-  fit a 12-minute budget, using per-suite seconds from `devlab_costs.json`.
+- Each LLM is one job, and the embedding, ASR and TTS models (NPU variants
+  included) share one. A model splits further only when its measured suite
+  seconds in `devlab_costs.json` exceed the 30-minute job budget; its servers
+  and paired timing arms then pack into jobs up to the budget.
 - Suites marked `"isolation": "server"` in `impact.core.json` get a server of
   their own. They read server-wide cache state (RAM budget, disk turnover,
   shared-prefix leaders) that earlier suites change.
-- One LLM's servers and its paired timing arms share a job up to the budget;
-  short service models (embedding, ASR, TTS and their NPU variants) share theirs.
-  Each model's timing arms run once, on one device.
+- Each model's timing arms run once, on one device.
 - The workflow runs one `smoke` matrix job per shard (`devlab_run.py --shard`,
   `devlab_models.py --shard`). The report job merges each shard's newest attempt
   with `devlab_merge.py`; a shard without a summary fails its model. *Re-run

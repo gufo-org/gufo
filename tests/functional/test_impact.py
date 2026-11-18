@@ -144,7 +144,7 @@ class ImpactTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             impact.validate(broken, impact.suite_names(HERE / "suites.py"))
 
-    def test_executor_passes_the_plan_tier(self):
+    def test_executor_reports_the_plan_tier(self):
         plan = impact.plan(self.manifest, ["src/cli/serve/openai_chat.cpp"],
                            ["flash-next-q4/mtp"], "pr")
         with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {}, clear=True):
@@ -155,8 +155,8 @@ class ImpactTest(unittest.TestCase):
             report = json.loads((output / "summary.json").read_text())
         self.assertEqual(report["tier"], "pr")
         self.assertTrue(report["release_only"])
-        args = report["groups"][0]["command"]
-        self.assertEqual(args[args.index("--tier") + 1], "pr")
+        # Every tier runs the same transport rotation; the runner takes no tier.
+        self.assertNotIn("--tier", report["groups"][0]["command"])
 
     def test_executor_retains_failed_groups_and_runs_both_modes(self):
         plan = impact.plan(self.manifest, ["src/models/qwen38_flash_next/engine.cpp"], ["flash-next-q4"])
