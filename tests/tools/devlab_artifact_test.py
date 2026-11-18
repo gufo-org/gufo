@@ -97,6 +97,21 @@ class DownloadTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'superseded'):
             cdn.wait_artifact(github, 123, 2, 'linux-devlab-2')
 
+    def test_failed_build_job_stops_waiting_for_its_package_only(self):
+        github = Mock()
+        github.artifacts.return_value = []
+        jobs = {'jobs': [{'name': 'Build / Linux checked package', 'conclusion': 'failure'},
+                         {'name': 'Build / Linux package', 'conclusion': None}]}
+        github.api.side_effect = lambda path: (
+            jobs if '/jobs' in path else {'run_attempt': 2, 'status': 'in_progress'})
+        with self.assertRaisesRegex(RuntimeError, 'Linux checked package failed'):
+            cdn.wait_artifact(github, 123, 2, 'linux-devlab-2-checked', cdn.BUILD_JOBS['checked'])
+        jobs['jobs'][1]['conclusion'] = 'failure'
+        jobs['jobs'][0]['conclusion'] = None
+        with patch.object(cdn.time, 'sleep', side_effect=TimeoutError('waited')):
+            with self.assertRaisesRegex(TimeoutError, 'waited'):
+                cdn.wait_artifact(github, 123, 2, 'linux-devlab-2-checked', cdn.BUILD_JOBS['checked'])
+
     def test_runtime_cache_is_reused_and_tampering_is_repaired(self):
         import io
         import tarfile

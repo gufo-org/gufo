@@ -70,6 +70,10 @@ def merge(plan, results, output):
     merged = {'schema': 2, 'groups': [], 'models': [], 'status': 'passed',
               'shards': {row['id']: 'missing' if found[row['id']] is None else found[row['id']]['status']
                          for row in shards}}
+    # Which candidate build the correctness checks ran on (assertions or release).
+    builds = {summary.get('correctness_binary', 'release') for summary in found.values() if summary}
+    if builds:
+        merged['correctness_binary'] = 'checked' if builds == {'checked'} else 'release'
     for selection in plan['models']:
         key = selection['id']
         parts = models.get(key, {'parts': []})['parts']

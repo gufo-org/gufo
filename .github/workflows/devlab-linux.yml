@@ -200,6 +200,7 @@ jobs:
       revision: ${{ needs.authorize.outputs.merge }}
       baseline: ${{ needs.authorize.outputs.base }}
       artifact-name: linux-devlab-${{ github.run_attempt }}
+      checked: true
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
@@ -229,7 +230,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          leftovers=(candidate baseline controller linux-artifacts linux-artifacts.tar.gz functional-results functional-report functional-plan.json functional-assets.json phase-logs)
+          leftovers=(candidate baseline controller linux-artifacts linux-artifacts.tar.gz linux-checked.tar.gz functional-results functional-report functional-plan.json functional-assets.json phase-logs)
           # Earlier packages kept the Nix store's read-only directories.
           for path in "${leftovers[@]}"; do
             if [[ -d $path && ! -L $path ]]; then chmod -R u+w -- "$path"; fi
@@ -422,8 +423,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          set -euo pipefail
           python3 controller/tools/ci/devlab_artifact.py linux \
             --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --output linux-artifacts.tar.gz
+          # Correctness runs on the assertion-enabled candidate, built in parallel.
+          python3 controller/tools/ci/devlab_artifact.py linux --variant checked \
+            --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --output linux-checked.tar.gz
 
       - name: Validate comparison packages
         id: binaries
@@ -435,6 +440,7 @@ jobs:
         run: |
           set -euo pipefail
           tar -xzf linux-artifacts.tar.gz
+          tar -xzf linux-checked.tar.gz
           python3 controller/tools/ci/devlab_artifact.py runtime \
             --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
             --manifest linux-artifacts/runtime.json --cache "$GUFO_CACHE_ROOT/runtimes" \
@@ -443,7 +449,10 @@ jobs:
             --source linux-artifacts/candidate --revision "$APPROVED_MERGE"
           python3 controller/tools/ci/linux_artifact.py verify \
             --source linux-artifacts/baseline --revision "$APPROVED_BASE"
+          python3 controller/tools/ci/linux_artifact.py verify \
+            --source linux-artifacts/checked --revision "$APPROVED_MERGE"
           linux-artifacts/candidate/gufo diagnose
+          linux-artifacts/checked/gufo diagnose
           linux-artifacts/baseline/gufo diagnose
 
       - name: Wait for model weight downloads
@@ -474,6 +483,8 @@ jobs:
           "$RUNNER_TEMP/gufo-functional-client/bin/python" -c \
             'import jsonschema, PIL, numpy, httpx, run, openai_sdk, metrics, devlab_run, service_phases'
 
+      # Correctness uses the assertion-enabled build (--check-binary); paired
+      # timing compares the release builds of the PR and main.
       - name: Run correctness and performance checks
         if: >-
           !cancelled() && steps.binaries.outcome == 'success' && steps.weights.outcome == 'success' &&
@@ -483,6 +494,7 @@ jobs:
           "$RUNNER_TEMP/gufo-functional-client/bin/python" controller/tests/functional/devlab_run.py \
             --plan functional-plan.json --shard "$SHARD" --assets functional-assets.json \
             --binary linux-artifacts/candidate/gufo --base-binary linux-artifacts/baseline/gufo \
+            --check-binary linux-artifacts/checked/gufo \
             --output functional-results --report "functional-report/shards/$SHARD" --logs phase-logs
 
       - name: Collect report inputs

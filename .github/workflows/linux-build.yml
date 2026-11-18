@@ -12,6 +12,11 @@ on:
       artifact-name:
         required: true
         type: string
+      # Also build the gpu-test configuration of the candidate (assertions
+      # on), in a parallel job; Devlab runs correctness against it.
+      checked:
+        default: false
+        type: boolean
     secrets:
       CACHIX_AUTH_TOKEN:
         required: false
@@ -21,9 +26,20 @@ permissions:
 
 jobs:
   build:
-    name: Linux package
+    # The release leg keeps its historical job name; devlab_artifact.py
+    # watches both names for failures.
+    name: ${{ matrix.variant == 'checked' && 'Linux checked package' || 'Linux package' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      # A failed leg must not cancel the other: Devlab reports each separately.
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(inputs.checked && '["release", "checked"]' || '["release"]') }}
+    env:
+      # Release builds share one compiler cache. The checked build also
+      # restores it: its production libraries keep NDEBUG and hit it.
+      CCACHE_PREFIX: ${{ matrix.variant == 'checked' && 'gufo-checked-ccache-v1' || 'gufo-package-ccache-v1' }}
     steps:
       - name: Check out candidate source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,7 +54,7 @@ jobs:
           python3 -m unittest discover -s tests/tools -p devlab_artifact_test.py
 
       - name: Check out baseline source
-        if: inputs.baseline != ''
+        if: inputs.baseline != '' && matrix.variant == 'release'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.baseline }}
@@ -52,8 +68,9 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/gufo-ccache
-          key: gufo-package-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ env.CCACHE_PREFIX }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            ${{ env.CCACHE_PREFIX }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-
             gufo-package-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-
 
       - name: Prepare compiler cache
@@ -123,7 +140,7 @@ jobs:
         run: nix build --no-link "$NPU_DRV^*" --print-build-logs --cores 2 --max-jobs 4
 
       - name: Build and package baseline
-        if: inputs.baseline != ''
+        if: inputs.baseline != '' && matrix.variant == 'release'
         env:
           EXPECTED_REVISION: ${{ inputs.baseline }}
         run: |
@@ -137,6 +154,7 @@ jobs:
             --revision "$EXPECTED_REVISION" --output linux-artifacts/baseline
 
       - name: Build and package candidate
+        if: matrix.variant == 'release'
         env:
           EXPECTED_REVISION: ${{ inputs.revision }}
         run: |
@@ -145,10 +163,23 @@ jobs:
           python3 tools/ci/linux_artifact.py pack --package result \
             --revision "$EXPECTED_REVISION" --output linux-artifacts/candidate
 
+      # The same NPU designs and dependencies; BUILD_TESTING=ON keeps the
+      # assertions that production compiles out (.devops/nix/package.nix).
+      - name: Build and package the checked candidate
+        if: matrix.variant == 'checked'
+        env:
+          EXPECTED_REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          nix build .#checked --out-link result-checked --print-build-logs --cores 4 --max-jobs 1
+          python3 tools/ci/linux_artifact.py pack --package result-checked \
+            --revision "$EXPECTED_REVISION" --output linux-artifacts/checked
+
       # After the candidate build, even a failed one: the designs build first.
+      # The release leg alone saves them, under one key.
       - name: Export NPU designs
         id: npu-export
-        if: always() && steps.npu.outputs.drv != '' && steps.npu-cache.outputs.cache-hit != 'true'
+        if: always() && matrix.variant == 'release' && steps.npu.outputs.drv != '' && steps.npu-cache.outputs.cache-hit != 'true'
         env:
           NPU_OUT: ${{ steps.npu.outputs.out }}
         run: |
@@ -171,9 +202,10 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/gufo-ccache
-          key: gufo-package-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ env.CCACHE_PREFIX }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Verify and archive the portable bundle
+        if: matrix.variant == 'release'
         env:
           EXPECTED_REVISION: ${{ inputs.revision }}
           EXPECTED_BASELINE: ${{ inputs.baseline }}
@@ -198,7 +230,31 @@ jobs:
           tar --exclude=linux-artifacts/runtime -I 'gzip -1' -cf linux-artifacts.tar.gz linux-artifacts
           du -h linux-artifacts.tar.gz linux-runtime.tar.gz
 
+      # The checked bundle's libraries resolve from the shared runtime that
+      # the release leg uploads (same pinned closure); verify runs against
+      # that runtime on Devlab.
+      - name: Verify and archive the checked bundle
+        if: matrix.variant == 'checked'
+        env:
+          EXPECTED_REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          python3 tools/ci/linux_artifact.py verify --source linux-artifacts/checked --revision "$EXPECTED_REVISION"
+          tar -I 'gzip -1' -cf linux-checked.tar.gz linux-artifacts/checked
+          du -h linux-checked.tar.gz
+
+      - name: Upload checked candidate
+        if: matrix.variant == 'checked'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.artifact-name }}-checked
+          path: linux-checked.tar.gz
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+
       - name: Upload shared Linux runtime
+        if: matrix.variant == 'release'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ inputs.artifact-name }}-runtime
@@ -207,6 +263,7 @@ jobs:
           retention-days: 3
 
       - name: Upload comparison packages
+        if: matrix.variant == 'release'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ inputs.artifact-name }}

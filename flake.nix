@@ -741,6 +741,9 @@
           # Official artifacts select this output from a tagged source. The
           # default package remains visibly developmental on moving branches.
           release = base.override { inherit releaseVersion; extensionsFromLock = true; };
+          # The gpu-test configuration with its assertions, which Devlab's
+          # functional correctness runs against (docs: tests/functional/README.md).
+          checked = base.override { checked = true; };
           # gufo with its extension SDK, for `gufo extension install`.
           sdk = gufoPackages.${system}.extensionModules.withSdk base;
           release-sdk = gufoPackages.${system}.extensionModules.withSdk

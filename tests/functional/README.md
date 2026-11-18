@@ -368,6 +368,17 @@ Only the binary transfer uses the proxy; runner control and model mirror traffic
 keep their existing routes. Temporary credentials and the loopback proxy are
 removed after transfer. The original Actions artifact SHA-256 is mandatory.
 No release relay or privileged publishing workflow is needed.
+
+A second hosted job, in parallel, builds the candidate's checked package
+(`nix build .#checked`): the `gpu-test` configuration (`BUILD_TESTING=ON`,
+RelWithDebInfo), which keeps the serving, memory and cache assertions and the
+checked Rust profile that the production package compiles out with `NDEBUG`. A
+broken runner or cache invariant then aborts the server, which the functional
+harness reports, instead of passing silently. Model libraries keep `NDEBUG` in
+both builds. The job restores the release compiler cache, whose production
+objects it reuses, and keeps its own; its artifact (`linux-devlab-<attempt>-checked`)
+carries only the executable and resolves its libraries from the shared runtime.
+
 The large Linux runtime is archived separately and cached under
 `$HF_HOME/gufo/runtimes` by SHA-256. Cache hits are hash-checked and unpacked
 locally; changed toolchains get a new content hash. Ordinary builds transfer
@@ -429,7 +440,9 @@ python3 tests/functional/devlab_costs.py path/to/functional-results
 ```
 
 Within a job, LLM servers use fresh server/cache histories; service suites use
-`model_services.py`. Correctness runs on the candidate only. A model failure does not hide other
+`model_services.py`. Correctness runs on the checked candidate only
+(`devlab_run.py --check-binary`); paired timing compares the release builds of
+the candidate and main, and the TTS evaluator stays main's release build. A model failure does not hide other
 models or their speed observations. Each LLM's `phases.py` arms exercise startup,
 short, long and follow-up requests; `service_phases.py` measures bounded service
 histories. Both alternate main/candidate servers for two paired repeats,

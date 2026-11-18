@@ -319,6 +319,8 @@ def render_models(args, plan, summary):
     lines += ['', f"<sub>[Workflow run and evidence]({args.run_url}) · "
               f"merge `{plan['head'][:7]}` vs main `{plan['base'][:7]}` · "
               f"{len(plan['deferred'])} deferred, {len(plan['release_only'])} for the release run. "
+              + ('Correctness ran on the assertion-enabled `gpu-test` build; speed compares release builds. '
+                 if (summary or {}).get('correctness_binary') == 'checked' else '') +
               f"`{context}` is advisory on PRs" + ("; only the automatic release merge waits for it. "
                                                     if context == STATUS_CONTEXT else ". ") +
               'Coverage is limited to the selected representatives; video generation and agent replay remain separate.</sub>']

@@ -56,13 +56,16 @@ def benchmark(binary, baseline, assets, report):
                             '--repetitions', '1'], stdout=out, stderr=err, timeout=3600)
 
 
-def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=None):
+def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=None, check_binary=None):
+    """Correctness runs on check_binary (assertions on) when given; timing compares release builds."""
+    checked = check_binary or binary
     assets = json.loads(assets_path.read_text())
     data = registry()
     output.mkdir(parents=True, exist_ok=False)
     report.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
-    summary = {'schema': 2, 'groups': [], 'models': [], 'status': 'running'}
+    summary = {'schema': 2, 'groups': [], 'models': [], 'status': 'running',
+               'correctness_binary': 'checked' if check_binary else 'release'}
     if shard_id is not None:
         summary['shard'] = shard_id
 
@@ -84,11 +87,11 @@ def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=
                 pass
             elif model['category'] == 'llm':
                 subplan = {**plan, 'groups': groups}
-                cluster.execute(subplan, binary, None, output / key, assets)
+                cluster.execute(subplan, checked, None, output / key, assets)
                 rows = json.loads((output / key / 'summary.json').read_text())['groups']
             else:
                 destination = output / key
-                command = service_args(key, binary, baseline, assets, destination)
+                command = service_args(key, checked, baseline, assets, destination)
                 if model['category'] == 'embedding':
                     command += ['--embedding-suite', 'smoke' if 'embedding-smoke' in groups[0]['suites'] else 'full']
                 if model['category'] == 'image':
@@ -159,10 +162,12 @@ def main():
     for name in ('plan', 'binary', 'base-binary', 'assets', 'output', 'report', 'logs'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--shard', help="Run only this entry of the plan's shards")
+    parser.add_argument('--check-binary', type=Path,
+                        help='Assertion-enabled candidate for correctness; --binary then only times')
     args = parser.parse_args()
     return execute(json.loads(args.plan.read_text()), args.binary.resolve(), args.base_binary.resolve(),
                    args.assets.resolve(), args.output.resolve(), args.report.resolve(), args.logs.resolve(),
-                   args.shard)
+                   args.shard, args.check_binary.resolve() if args.check_binary else None)
 
 
 if __name__ == '__main__':

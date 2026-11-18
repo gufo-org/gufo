@@ -271,6 +271,44 @@ class ExecutionTest(unittest.TestCase):
         self.assertTrue(all(item['timing'] == 'passed' for item in observed['models']))
         self.assertEqual(len(observed['groups']), 2)
 
+    def test_correctness_uses_the_checked_binary_and_timing_the_release_builds(self):
+        plan = devlab_plan.select(['src/models/qwen38_flash_next/engine.cpp', 'src/models/qwen3_asr/model.cpp'],
+                                  without_npu(devlab_models.registry()))
+        plan.update(base='a'*40, head='b'*40)
+        calls, servers = [], []
+        def run(args, **kwargs):
+            calls.append(args)
+            output = Path(args[args.index('--output')+1])
+            if args[1].endswith('model_services.py'):
+                output.mkdir()
+                (output/'report.json').write_text(json.dumps({'status': 'passed'}))
+            return subprocess.CompletedProcess(args, 0)
+        def execute(subplan, binary, *rest):
+            servers.append(binary)
+            output = rest[1]
+            output.mkdir(parents=True)
+            (output/'summary.json').write_text(json.dumps({'groups': []}))
+            return 0
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = root/'assets.json'
+            assets.write_text(json.dumps({key: '/' + key for key in devlab_models.registry()['assets']}))
+            with patch('devlab_run.subprocess.run', side_effect=run), \
+                    patch('devlab_run.cluster.execute', side_effect=execute):
+                devlab_run.execute(plan, Path('/head'), Path('/base'), assets, root/'results', root/'report',
+                                   root/'logs', check_binary=Path('/checked'))
+            summary = json.loads((root/'report/summary.json').read_text())
+        self.assertEqual(summary['correctness_binary'], 'checked')
+        self.assertEqual(servers, [Path('/checked')])
+        service = next(args for args in calls if args[1].endswith('model_services.py'))
+        self.assertEqual(service[service.index('--binary')+1], '/checked')
+        # Paired timing compares the release builds of the PR and main.
+        phases = [args for args in calls if args[1].endswith(('phases.py', 'service_phases.py'))]
+        self.assertEqual(len(phases), 2)
+        for args in phases:
+            self.assertEqual(args[args.index('--head-binary')+1], '/head')
+            self.assertEqual(args[args.index('--base-binary')+1], '/base')
+
 
 class ShardTest(unittest.TestCase):
     TABLE = {'schema': 1, 'default_suite_s': 60, 'default_load_s': 30, 'default_timing_s': 300,
