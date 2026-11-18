@@ -1614,6 +1614,10 @@ const TextModelRunner& TextRunnerPool::runner() const noexcept {
   return *impl_->validated.runner;
 }
 
+void TextRunnerPool::Idle() const {
+  impl_->validated.runner->Idle();
+}
+
 const TextRunnerResourceClaim& TextRunnerPool::resource_claim() const noexcept {
   return impl_->validated.resources;
 }

@@ -664,10 +664,10 @@ public:
   [[nodiscard]] virtual std::size_t CheckpointPosition(
       const TextRunnerState& state) const = 0;
   virtual void PrepareCancellation(TextRunnerState&) const {}
-  /// Called on the scheduler thread each time it goes idle: no request runs,
-  /// is queued or waits. Release memory held only while work runs, such as
-  /// scratch a prefill kept for the next one. It may come again before more
-  /// work runs, so it must be cheap when nothing is held.
+  /// Called on the scheduler thread when it goes idle (no request runs, is
+  /// queued or waits) and about once a second while it stays idle. Release
+  /// memory held only while work runs, such as scratch a prefill kept for
+  /// the next one. It must be cheap when nothing is held.
   virtual void Idle() const {}
   using DeviceProbeStatus = ext::DeviceProbeStatus;
   [[nodiscard]] virtual DeviceProbeStatus PollDevice() const {
