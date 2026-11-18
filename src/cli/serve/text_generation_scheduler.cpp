@@ -2390,27 +2390,52 @@ struct TextGenerationScheduler::Impl {
                   capturing.size() + waiting.size() < runner_pool->capacity());
         };
         if (capturing.empty() && waiting.empty()) {
+          // Idle: the pool returns memory only running work holds, on going
+          // idle and about once a second while idle, since another process
+          // may need memory at any time. The device is probed every
+          // device_probe_interval.
+          const auto idle = [&] {
+            lock.unlock();
+            try {
+              runner_pool->Idle();
+            } catch (...) {
+              // Keeping that memory until the next request is still correct.
+            }
+            lock.lock();
+          };
+          const auto tick = std::min<std::chrono::milliseconds>(
+              scheduler_policy.device_probe_interval,
+              scheduler_policy.idle_interval);
+          auto next_probe = std::chrono::steady_clock::now() +
+                            scheduler_policy.device_probe_interval;
+          if (!wake())
+            idle();
           // Only the idle wait has a timer. Arrival interrupts it immediately;
           // no clock checks or device polling are added to active work units.
           while (!wake()) {
             loop_working.store(false, std::memory_order_relaxed);
-            const bool woken = queue_condition.wait_for(
-                lock, scheduler_policy.device_probe_interval, wake);
+            const bool woken = queue_condition.wait_for(lock, tick, wake);
             progress.fetch_add(1, std::memory_order_relaxed);
             loop_working.store(true, std::memory_order_relaxed);
             if (woken)
               break;
-            lock.unlock();
-            try {
-              if (runner_pool->runner().PollDevice() ==
-                  TextModelRunner::DeviceProbeStatus::kLost)
-                MarkDeviceLost("idle device probe failed");
-            } catch (...) {
-              // An inconclusive probe must not kill a usable model.
+            if (std::chrono::steady_clock::now() >= next_probe) {
+              lock.unlock();
+              try {
+                if (runner_pool->runner().PollDevice() ==
+                    TextModelRunner::DeviceProbeStatus::kLost)
+                  MarkDeviceLost("idle device probe failed");
+              } catch (...) {
+                // An inconclusive probe must not kill a usable model.
+              }
+              lock.lock();
+              next_probe = std::chrono::steady_clock::now() +
+                           scheduler_policy.device_probe_interval;
+              if (device_lost.load(std::memory_order_acquire))
+                break;
             }
-            lock.lock();
-            if (device_lost.load(std::memory_order_acquire))
-              break;
+            if (!wake())
+              idle();
           }
         } else
           queue_condition.wait_for(lock, std::chrono::milliseconds(1), wake);

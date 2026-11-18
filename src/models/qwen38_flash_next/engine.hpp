@@ -105,7 +105,8 @@ public:
   [[nodiscard]] std::size_t PassChunk() const noexcept;
   /// The widest single pass at the current pass width.
   [[nodiscard]] std::size_t PassThrough() const noexcept;
-  /// Frees the wide pass scratch; decode steps call it.
+  /// Frees the wide pass scratch; decode steps and the idle scheduler call
+  /// it.
   void ReleaseWidePasses() const;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept {
     return options_.max_context;

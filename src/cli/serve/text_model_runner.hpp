@@ -169,6 +169,10 @@ public:
   TextRunnerPool& operator=(TextRunnerPool&&) = delete;
 
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
+  /// The scheduler is idle: nothing runs, is queued or waits. Called on its
+  /// thread when it goes idle and about once a second while it stays idle,
+  /// to return memory only running work holds (TextModelRunner::Idle()).
+  void Idle() const;
   [[nodiscard]] std::size_t capacity() const noexcept;
   /// Validated resource claim, including host prompt-state admission inputs.
   [[nodiscard]] const TextRunnerResourceClaim& resource_claim() const noexcept;

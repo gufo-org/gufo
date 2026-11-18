@@ -54,6 +54,10 @@ struct TextSchedulerPolicy {
   /// Internal prompt granularity of the scheduling policy
   /// (sched::kPrefillUnitTokens); tests shrink it to keep prompts small.
   std::size_t prefill_unit_tokens{sched::kPrefillUnitTokens};
+  /// How often an idle scheduler lets the pool return memory only running
+  /// work holds (TextRunnerPool::Idle): a /proc/meminfo read when nothing is
+  /// held.
+  std::chrono::milliseconds idle_interval{std::chrono::seconds(1)};
 };
 
 /// Single-owner scheduler for opaque text-model runner states.
