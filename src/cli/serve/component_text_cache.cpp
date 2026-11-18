@@ -125,19 +125,14 @@ bool Published(const cache::PrefixCandidate& candidate) {
          std::ranges::all_of(candidate.availability->components,
                              &cache::ComponentAvailability::durable);
 }
+// Only prompt checkpoints space later disk writes on the same prefix.
+bool Spaced(cache::CheckpointPurpose purpose) {
+  return purpose == cache::CheckpointPurpose::kPrompt;
+}
 bool SpacedCheckpoint(const cache::PrefixCandidate& candidate) {
-  if (candidate.checkpoint &&
-      (candidate.checkpoint->Purpose() ==
-           cache::CheckpointPurpose::kGenerated ||
-       candidate.checkpoint->Purpose() == cache::CheckpointPurpose::kLearned ||
-       candidate.checkpoint->Purpose() == cache::CheckpointPurpose::kGrid))
+  if (candidate.checkpoint && !Spaced(candidate.checkpoint->Purpose()))
     return false;
-  if (candidate.durable && (candidate.durable->Manifest().purpose ==
-                                cache::CheckpointPurpose::kGenerated ||
-                            candidate.durable->Manifest().purpose ==
-                                cache::CheckpointPurpose::kLearned ||
-                            candidate.durable->Manifest().purpose ==
-                                cache::CheckpointPurpose::kGrid))
+  if (candidate.durable && !Spaced(candidate.durable->Manifest().purpose))
     return false;
   return true;
 }
@@ -763,11 +758,13 @@ struct ComponentTextCache::Impl {
     return file;
   }
   std::size_t Persist(std::shared_ptr<const cache::Checkpoint> checkpoint,
-                      bool demoting = false) {
+                      bool demoting = false, bool grid = false) {
     // Grid captures support RAM edits during prefill. Persist semantic prompt
-    // and learned boundaries: an early grid must not consume the spacing
-    // allowance of the first complete turn.
-    if (!queue || checkpoint->Purpose() == cache::CheckpointPurpose::kGrid)
+    // and learned boundaries, plus the one grid a lease selects to keep a
+    // long document's prefix on disk (Lease::PersistGrid). Grids never count
+    // as spacing priors, so they cannot consume the allowance of a turn.
+    if (!queue ||
+        (checkpoint->Purpose() == cache::CheckpointPurpose::kGrid && !grid))
       return 0;
     {
       const std::lock_guard lock(mutex);
@@ -790,17 +787,14 @@ struct ComponentTextCache::Impl {
                 std::max(prior, static_cast<std::size_t>(candidate.boundary));
         for (const auto& queued : pending)
           if (queued && compatible_prefix(queued->Tokens(), queued->Input()) &&
-              queued->Purpose() != cache::CheckpointPurpose::kGenerated &&
-              queued->Purpose() != cache::CheckpointPurpose::kLearned)
+              Spaced(queued->Purpose()))
             prior =
                 std::max(prior, static_cast<std::size_t>(queued->Boundary()));
         for (const auto& queued : pending_durable)
           if (queued &&
               compatible_prefix(queued->manifest.tokens,
                                 queued->manifest.input) &&
-              queued->manifest.purpose !=
-                  cache::CheckpointPurpose::kGenerated &&
-              queued->manifest.purpose != cache::CheckpointPurpose::kLearned)
+              Spaced(queued->manifest.purpose))
             prior = std::max(prior, queued->manifest.tokens.size());
         if (prior && checkpoint->Boundary() - prior < disk_step) {
           Logger::Info(
@@ -958,15 +952,13 @@ struct ComponentTextCache::Impl {
     };
     for (const auto& checkpoint : pending)
       if (checkpoint && compatible(checkpoint->Tokens(), checkpoint->Input()) &&
-          checkpoint->Purpose() != cache::CheckpointPurpose::kGenerated &&
-          checkpoint->Purpose() != cache::CheckpointPurpose::kLearned)
+          Spaced(checkpoint->Purpose()))
         prior =
             std::max(prior, static_cast<std::size_t>(checkpoint->Boundary()));
     for (const auto& capture : pending_durable)
       if (capture &&
           compatible(capture->manifest.tokens, capture->manifest.input) &&
-          capture->manifest.purpose != cache::CheckpointPurpose::kGenerated &&
-          capture->manifest.purpose != cache::CheckpointPurpose::kLearned)
+          Spaced(capture->manifest.purpose))
         prior = std::max(prior, capture->manifest.tokens.size());
     return prior && tokens.size() - prior < disk_step;
   }
@@ -1014,6 +1006,8 @@ struct ComponentTextCache::Lease::Impl {
   cache::InputIdentity input;
   std::vector<cache::Token> prompt;
   std::size_t cached{}, restored{}, stable{}, capture_boundary{};
+  // The planned grid boundary this lease also persists (0: none).
+  std::size_t disk_grid{};
   double restore_time{};
   bool disk_hit{}, active{true}, preserve_source{};
   // False keeps every checkpoint this lease captures in RAM only.
@@ -1078,13 +1072,17 @@ struct ComponentTextCache::Lease::Impl {
         .persistable = persist,
         .optional_frontier = generated_frontier};
   }
+  [[nodiscard]] bool DiskGrid(std::size_t boundary) const noexcept {
+    return disk_grid && boundary == disk_grid;
+  }
   std::unique_ptr<ContinuationSnapshot> CaptureDurable();
 };
 
 std::unique_ptr<ContinuationSnapshot>
 ComponentTextCache::Lease::Impl::CaptureDurable() {
+  const bool grid = purpose == SnapshotPurpose::kHistory;
   if (!persist || !cache->queue || !cache->resources->copy_observed_rows ||
-      purpose == SnapshotPurpose::kHistory)
+      (grid && !DiskGrid(capture_tokens.size())))
     throw cache::ResourceExhausted();
   const auto capture_input =
       At(input, std::min(capture_tokens.size(), prompt.size()));
@@ -1151,7 +1149,8 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
   manifest.purpose = generated_frontier ? cache::CheckpointPurpose::kGenerated
                      : purpose == SnapshotPurpose::kBranchPoint
                          ? cache::CheckpointPurpose::kLearned
-                         : cache::CheckpointPurpose::kPrompt;
+                     : grid ? cache::CheckpointPurpose::kGrid
+                            : cache::CheckpointPurpose::kPrompt;
   manifest.components.reserve(descriptors.size());
   durable->sources.reserve(pieces);
   std::vector<Copy> copies;
@@ -2155,12 +2154,13 @@ bool ComponentTextCache::Lease::HasSnapshotFor(
 bool ComponentTextCache::Lease::TryReserveSnapshot(
     std::size_t bytes, std::size_t boundary, bool preserve,
     SnapshotPurpose purpose, std::span<const ContinuationToken> tokens) {
-  if (!impl_->cache->ram_enabled &&
-      (!impl_->cache->queue || purpose == SnapshotPurpose::kHistory))
+  // Grids stay in RAM, except the one this lease persists.
+  const bool ram_only =
+      purpose == SnapshotPurpose::kHistory && !impl_->DiskGrid(boundary);
+  if (!impl_->cache->ram_enabled && (!impl_->cache->queue || ram_only))
     return false;
   if (!boundary || boundary > impl_->prompt.size() ||
-      (bytes > impl_->cache->budget &&
-       (!impl_->cache->queue || purpose == SnapshotPurpose::kHistory)))
+      (bytes > impl_->cache->budget && (!impl_->cache->queue || ram_only)))
     return false;
   if (tokens.empty())
     tokens = std::span<const cache::Token>(impl_->prompt).first(boundary);
@@ -2389,7 +2389,8 @@ std::unique_ptr<ContinuationSnapshot> ComponentTextCache::Lease::Capture() {
       return {};
     } catch (const cache::ResourceExhausted&) {
       if (!reclaim()) {
-        if (cache.queue && request.purpose != SnapshotPurpose::kHistory) {
+        if (cache.queue && (request.purpose != SnapshotPurpose::kHistory ||
+                            request.DiskGrid(request.capture_tokens.size()))) {
           try {
             if (auto durable = request.CaptureDurable())
               return durable;
@@ -2457,8 +2458,9 @@ std::size_t ComponentTextCache::Lease::PublishSnapshot(
     return component->bytes;
   try {
     const auto started = Clock::now();
-    impl_->metrics.disk_queued_bytes +=
-        impl_->cache->Persist(component->checkpoint);
+    impl_->metrics.disk_queued_bytes += impl_->cache->Persist(
+        component->checkpoint, false,
+        impl_->DiskGrid(component->checkpoint->Boundary()));
     impl_->metrics.disk_enqueue_ms +=
         std::chrono::duration<double, std::milli>(Clock::now() - started)
             .count();
@@ -2659,6 +2661,22 @@ std::vector<std::size_t> ComponentTextCache::Lease::PlannedCaptures(
                             .first(capture.boundary)))
       boundaries.push_back(capture.boundary);
   return boundaries;
+}
+void ComponentTextCache::Lease::PersistGrid(
+    std::span<const std::size_t> planned, std::size_t boundary) {
+  // A later question about the same long document diverges inside the
+  // prompt this lease persists at `boundary`, so that checkpoint cannot
+  // serve it. Persist the deepest planned grid clear of the question too.
+  // The gap leaves the next prompt checkpoint its disk step above the grid
+  // even when that question is up to an eighth of the prompt long.
+  impl_->disk_grid = 0;
+  if (!impl_->persist || !impl_->cache->queue)
+    return;
+  const auto step = impl_->cache->disk_step;
+  const auto gap = std::max(step, boundary / 8) + step;
+  for (const auto position : planned)
+    if (position < boundary && boundary - position >= gap)
+      impl_->disk_grid = std::max(impl_->disk_grid, position);
 }
 ComponentCacheMetrics ComponentTextCache::Lease::Metrics() const {
   auto report = impl_->metrics;

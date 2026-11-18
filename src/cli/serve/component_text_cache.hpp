@@ -65,6 +65,11 @@ public:
     [[nodiscard]] ComponentCacheMetrics Metrics() const;
     [[nodiscard]] std::vector<std::size_t> PlannedCaptures(
         std::size_t stable) const;
+    /// Also persists one of the `planned` grid captures: the deepest far
+    /// enough below the prompt checkpoint at `boundary` to serve another
+    /// question about the same prefix after RAM has lost it.
+    void PersistGrid(std::span<const std::size_t> planned,
+                     std::size_t boundary);
 
   private:
     friend class ComponentTextCache;
