@@ -61,11 +61,12 @@ The **state ledger** (`mem::StateLedger`) counts bytes **promised** to regions
 at their full size, bytes **mapped**, and pages **pooled**. The **outstanding**
 bytes are promised minus mapped minus pooled. Every capacity decision that reads
 free memory subtracts them: `mem::MemGetInfo` replaces `hipMemGetInfo`, and the
-host snapshot budget and admission queries use `mem::LessOutstanding`. Budgets
-therefore see the memory they saw when sessions allocated their whole context
-at creation: the RAM cache grant, admission, snapshot slots and copy widths are
-unchanged, the unwritten rows stay free for the kernel, and no other owner can
-take memory a session may still grow into.
+host snapshot budget (`ext::HostMemorySample::outstanding`) and admission
+queries (`mem::LessOutstanding`) leave them out. Budgets therefore see the
+memory they saw when sessions allocated their whole context at creation: the
+RAM cache grant, admission, snapshot slots and copy widths are unchanged, the
+unwritten rows stay free for the kernel, and no other owner can take memory a
+session may still grow into.
 
 Logging the device's raw usage keeps `hipMemGetInfo`. The load log reports the
 ledger as `state_reserved_mib`, `state_mapped_mib`, `state_pooled_mib` and
