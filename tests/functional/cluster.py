@@ -58,7 +58,7 @@ def remove_disk_caches(group_output):
             shutil.rmtree(path, ignore_errors=True)
 
 
-def command(group, binary, weights, output, tier="full", assets=None):
+def command(group, binary, weights, output, tier="full", assets=None, order_seed=None):
     profile = group["profile"]
     if assets is None and profile not in ("flash-next-q4/off", "flash-next-q4/mtp"):
         raise ValueError("Cluster executor only supports Flash-Next: " + profile)
@@ -73,6 +73,8 @@ def command(group, binary, weights, output, tier="full", assets=None):
                 '--startup-timeout', '600', '--record-baseline', '--tier', tier]
         for suite in group['suites']:
             args += ['--suite', suite]
+        if order_seed is not None:
+            args += ['--order-seed', str(order_seed)]
         args += ['--'] + llm_command(key, binary, assets, mode=mode,
                                     context=settings['context'], sessions=settings['sessions'])
         if 'cache_ram_bytes' in settings:
@@ -100,7 +102,10 @@ def execute(plan, binary, weights, output, assets=None):
     rows = []
     for group in plan["groups"]:
         name = group["profile"].replace("/", "-") + "-" + group["configuration"]
-        args = command(group, binary, weights, output / name, plan.get("tier", "full"), assets)
+        if group.get("server"):
+            name += "-" + str(group["server"])
+        args = command(group, binary, weights, output / name, plan.get("suite_tier", plan.get("tier", "full")), assets,
+                       plan.get("order_seed"))
         print("Running", name, ":", ", ".join(group["suites"]), flush=True)
         log_path = output / (name + ".log")
         with log_path.open("w") as log:

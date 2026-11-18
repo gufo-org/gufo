@@ -289,22 +289,15 @@ python3 tests/functional/impact.py --model flash-next-q4 \
 `--repo PATH --base SHA --head SHA` reads a Git diff instead. Renames retain both
 old and new ownership. Rules with the highest explicit priority apply; equal
 priority rules contribute a union. Unknown paths expand to all compatible
-coverage. Suite metadata must cover every name in `run.py`; dependencies are
+coverage. Suite metadata must cover every name in `suites.py`; dependencies are
 deliberately conservative, so even narrow source rules can select many suites.
 
-`--tier pr` plans the per-PR set: one or two suites per behavior (`discovery`,
-`state-edges`, `messages-count-tokens`, `responses`, `stops`, `conversation`,
-`image-inputs`, `structured`, `tools`, `tool-streaming`, `sampling-defaults`,
-`batch` and `cache`). Every other suite is marked `"tier": "release"` and moves
-to `release_only`; the deep cache histories, `cache-stalls`, `long-context` and
-`reasoning-budget` still run on a PR when a changed path matches their
-`escalate` patterns: cache code, the suite's own module, or Flash-Next model
-code for depth checks. `run.py
---tier pr` also trims transport matrices that a case does not depend on:
-`tool-reasoning` keeps the streamed mode, whose partial parses end in the same
-final parse a buffered reply uses, and `tool-native-schemas` rotates endpoint,
-stream and tool choice across cases. `--tier full` (the default for manual runs)
-keeps every suite and combination.
+Suites marked `"tier": "release"` are left out of `impact.py --tier pr` plans
+unless a changed path matches their `escalate` patterns, and `run.py --tier pr`
+trims transport matrices a case does not depend on (`tool-reasoning` keeps the
+streamed mode; `tool-native-schemas` rotates endpoint, stream and tool choice).
+Devlab does not use either trim: every PR runs the full suite set, sharded
+across devices (below). `--tier full` is the default for manual runs.
 
 The literal-closer cases from #786 (a lone `</invoke>` and a closer before or
 between calls) use the deterministic HTTP fixtures in
@@ -314,13 +307,14 @@ checks must not depend on a model following a request to copy tool markup.
 
 `Linux validation` runs on every push to a non-draft PR, like `Repository checks`
 (`pull_request`), with the repository's fork approval policy. A newer push cancels
-the PR's earlier run. PRs use the `pr` tier; release-please PRs and dispatches
-(unless they choose `tier: pr`) use `full`. Maintain/Admin users can dispatch a
-PR number. Authorization pins its head and GitHub's merge of it into main. Like
-`CI`, the GPU job builds and tests that merge commit with the suites it contains,
-so tests added on main never run against a PR binary that predates them. The
-merge's main parent is the diff base and the timing baseline. The GPU controller
-recreates the hosted plan from the merge commit.
+the PR's earlier run. PRs and release-please PRs run the same suites; the `pr`
+tier only keeps image generation to one smoke-tested representative, and
+release PRs and dispatches (unless they choose `tier: pr`) use `full`.
+Maintain/Admin users can dispatch a PR number. Authorization pins its head and
+GitHub's merge of it into main. Like `CI`, the GPU jobs build and test that merge
+commit with the suites it contains, so tests added on main never run against a
+PR binary that predates them. The merge's main parent is the diff base and the
+timing baseline.
 
 `devlab_plan.py` selects owners per path using reviewed priority rules in
 `devlab.json`, then uses `impact.py` for each selected LLM's affected suites.
@@ -328,12 +322,11 @@ Selections from separate paths are combined:
 
 | Changes | Automatic model coverage |
 | --- | --- |
-| Shared LLM behavior, cache, sampling or Qwen framing/vision | Flash-Next Q4/MTP |
-| Private Qwen27 implementation | Qwen27 Q4/DFlash2 |
-| Private DeepSeek implementation | DeepSeek V4/DSpark |
-| Shared LLM and private DeepSeek code | Flash-Next and DeepSeek |
-| Embedding, ASR, TTS or image generation code | That category's representative |
-| Shared infrastructure or unmapped paths | One representative per supported category |
+| Shared LLM behavior, cache, sampling or Qwen framing/vision | Every LLM: Flash-Next Q4/MTP, Qwen27 Q4/DFlash2, DeepSeek V4/DSpark |
+| Private Qwen27, Flash-Next or DeepSeek implementation | That model |
+| Embedding, ASR or TTS code | Every model in the category, NPU variants included |
+| Image generation code | Qwen-Image-2.1-Turbo smoke; both image models in the full tier |
+| Shared infrastructure or unmapped paths | Every model above |
 | Documentation or H3-only paths | No GPU job in this workflow |
 
 Models listed under `disabled` in `devlab.core.json`, with a reason, are left
@@ -344,12 +337,13 @@ suites at every tier; the report counts the others as out of scope. DeepSeek V4
 uses it to run the PR-tier set that passes on the runner. Its other full-tier
 suites still assume Flash-Next checkpoint sizes and Qwen token counts.
 
-The embedding and ASR representatives are EmbeddingGemma 2 and Qwen3-ASR. TTS
-uses Base cloning in the PR tier; the full tier exercises Base, CustomVoice and
-VoiceDesign. Image generation uses Qwen-Image-2.1-Turbo in the PR tier; the full
-tier runs the full image suite on both Turbo and Qwen-Image-2.1. All requests use
-512 × 512 and eight steps, without LoRA adapters, so the LoRA case is recorded as not run. Manual `ar` adds the selected LLMs' AR profiles. The existing manual
-`benchmark` option adds Flash-Next and its main/candidate AR depth sweep.
+Embedding runs its text, image, audio and video suites; TTS covers Base,
+CustomVoice and VoiceDesign. Image generation uses Qwen-Image-2.1-Turbo with the
+smoke suite on PRs; the full tier runs the full image suite on both Turbo and
+Qwen-Image-2.1. All image requests use 512 × 512 and eight steps, without LoRA
+adapters, so the LoRA case is recorded as not run. Manual `ar` adds the selected
+LLMs' AR profiles. The manual `benchmark` option adds Flash-Next and its
+main/candidate AR depth sweep.
 Qwen27 Q8 remains an explicit manual functional qualification outside this bounded
 CI selection. Numerical and agent-replay obligations outside the selected suites
 remain separate; representative coverage is not all-model qualification.
@@ -390,9 +384,34 @@ The authorized controller checkout contains the English voice fixture. TTS uses
 the main Gufo binary and a pinned ASR checkpoint as its intelligibility
 evaluator. Missing downloads or fixtures fail visibly.
 
-`devlab_run.py` executes models sequentially on the same GPU. LLM configuration
-groups use fresh server/cache histories; service suites use `model_services.py`.
-Correctness runs on the candidate only. A model failure does not hide other
+The plan's `shards` split the work into GPU jobs, one device each, so the wall
+time follows the largest shard rather than the sum of the models:
+
+- `devlab_plan.py` packs each LLM configuration group's suites into servers that
+  fit a 12-minute budget, using per-suite seconds from `devlab_costs.json`.
+- Suites marked `"isolation": "server"` in `impact.core.json` get a server of
+  their own. They read server-wide cache state (RAM budget, disk turnover,
+  shared-prefix leaders) that earlier suites change.
+- One LLM's servers and its paired timing arms share a job up to the budget;
+  short service models (embedding, ASR, TTS and their NPU variants) share theirs.
+  Each model's timing arms run once, on one device.
+- The workflow runs one `smoke` matrix job per shard (`devlab_run.py --shard`,
+  `devlab_models.py --shard`). The report job merges each shard's newest attempt
+  with `devlab_merge.py`; a shard without a summary fails its model. *Re-run
+  failed jobs* repeats only the failed shards.
+- Suites run in a per-revision order: the plan's `order_seed`, taken from the
+  merge commit, reaches `run.py --order-seed`, and each `report.json` records the
+  seed and order. A failure that depends on suite order reproduces from them.
+
+Refresh the cost table from a run's `model-functional-*` artifacts or local
+results when suites change:
+
+```sh
+python3 tests/functional/devlab_costs.py path/to/functional-results
+```
+
+Within a job, LLM servers use fresh server/cache histories; service suites use
+`model_services.py`. Correctness runs on the candidate only. A model failure does not hide other
 models or their speed observations. Each LLM's `phases.py` arms exercise startup,
 short, long and follow-up requests; `service_phases.py` measures bounded service
 histories. Both alternate main/candidate servers for two paired repeats,

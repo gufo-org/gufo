@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 import traceback
 
 import cluster
@@ -28,28 +29,45 @@ def service_args(key, binary, baseline, assets, output):
     return args
 
 
-def execute(plan, binary, baseline, assets_path, output, report, logs):
+def jobs(plan, shard_id=None):
+    """(selection, correctness groups, run timing) per model; a shard runs only its part."""
+    if shard_id is None:
+        return [(selection, [group for group in plan['groups'] if group['profile'].split('/')[0] == selection['id']],
+                 True) for selection in plan['models']]
+    shard = next((row for row in plan.get('shards', []) if row['id'] == shard_id), None)
+    if shard is None:
+        raise ValueError('Unknown shard: ' + shard_id)
+    selections = {row['id']: row for row in plan['models']}
+    return [(selections[part['model']], part['groups'], part['timing']) for part in shard['parts']]
+
+
+def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=None):
     assets = json.loads(assets_path.read_text())
     data = registry()
     output.mkdir(parents=True, exist_ok=False)
     report.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
     summary = {'schema': 2, 'groups': [], 'models': [], 'status': 'running'}
+    if shard_id is not None:
+        summary['shard'] = shard_id
 
     def save():
         write(output / 'summary.json', summary)
         write(report / 'summary.json', summary)
 
     save()
-    for selection in plan['models']:
+    for selection, groups, timing in jobs(plan, shard_id):
         key = selection['id']
         model = data['models'][key]
-        groups = [group for group in plan['groups'] if group['profile'].split('/')[0] == key]
-        item = {'id': key, 'correctness': 'running', 'timing': 'pending', 'reasons': selection['reasons']}
+        item = {'id': key, 'correctness': 'running' if groups else 'skipped',
+                'timing': 'pending' if timing else 'skipped', 'reasons': selection['reasons']}
         summary['models'].append(item)
         save()
+        started = time.monotonic()
         try:
-            if model['category'] == 'llm':
+            if not groups:
+                pass
+            elif model['category'] == 'llm':
                 subplan = {**plan, 'groups': groups}
                 cluster.execute(subplan, binary, None, output / key, assets)
                 rows = json.loads((output / key / 'summary.json').read_text())['groups']
@@ -57,9 +75,9 @@ def execute(plan, binary, baseline, assets_path, output, report, logs):
                 destination = output / key
                 command = service_args(key, binary, baseline, assets, destination)
                 if model['category'] == 'embedding':
-                    command += ['--embedding-suite', 'smoke' if plan['tier'] == 'pr' else 'full']
+                    command += ['--embedding-suite', 'smoke' if 'embedding-smoke' in groups[0]['suites'] else 'full']
                 if model['category'] == 'image':
-                    command += ['--image-suite', 'smoke' if plan['tier'] == 'pr' else 'full']
+                    command += ['--image-suite', 'smoke' if 'image-smoke' in groups[0]['suites'] else 'full']
                 with (output / (key + '.log')).open('w') as log:
                     result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=900)
                 path = destination / 'report.json'
@@ -72,12 +90,17 @@ def execute(plan, binary, baseline, assets_path, output, report, logs):
                                log_tail=cluster.tail(output / (key + '.log')))
                 item['known_limitations'] = observed.get('known_limitations', [])
                 rows = [row]
-            summary['groups'].extend(rows)
-            item['correctness'] = 'passed' if all(row['status'] == 'passed' for row in rows) else 'failed'
+            if groups:
+                summary['groups'].extend(rows)
+                item['correctness'] = 'passed' if all(row['status'] == 'passed' for row in rows) else 'failed'
         except Exception:
             item.update(correctness='error', error=traceback.format_exc())
+        item['correctness_s'] = round(time.monotonic() - started, 1)
         save()
+        if not timing:
+            continue
         # Correctness failure must not hide the speed controls or other models.
+        started = time.monotonic()
         try:
             script = 'phases.py' if model['category'] == 'llm' else 'service_phases.py'
             destination = report / (key + '.phases.json')
@@ -104,8 +127,10 @@ def execute(plan, binary, baseline, assets_path, output, report, logs):
                 item['timing_error'] = cluster.tail(output / (key + '.phases.log'))
         except Exception:
             item.update(timing='error', timing_error=traceback.format_exc())
+        item['timing_s'] = round(time.monotonic() - started, 1)
         save()
-    failed = any(item['correctness'] != 'passed' or item['timing'] != 'passed' for item in summary['models'])
+    failed = any(item[field] not in ('passed', 'skipped') for item in summary['models']
+                 for field in ('correctness', 'timing'))
     summary['status'] = 'failed' if failed else 'passed'
     save()
     return int(failed)
@@ -115,9 +140,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('plan', 'binary', 'base-binary', 'assets', 'output', 'report', 'logs'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--shard', help="Run only this entry of the plan's shards")
     args = parser.parse_args()
     return execute(json.loads(args.plan.read_text()), args.binary.resolve(), args.base_binary.resolve(),
-                   args.assets.resolve(), args.output.resolve(), args.report.resolve(), args.logs.resolve())
+                   args.assets.resolve(), args.output.resolve(), args.report.resolve(), args.logs.resolve(),
+                   args.shard)
 
 
 if __name__ == '__main__':

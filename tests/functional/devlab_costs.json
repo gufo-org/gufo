@@ -1,0 +1,201 @@
+{
+  "schema": 1,
+  "default_suite_s": 60,
+  "default_load_s": 60,
+  "default_timing_s": 600,
+  "models": {
+    "deepseek4": {
+      "load_s": 79,
+      "suites": {
+        "batch": 33.7,
+        "cache": 90.3,
+        "conversation": 20.2,
+        "discovery": 0.5,
+        "logprobs": 48.3,
+        "messages-count-tokens": 12.9,
+        "openai-count-tokens": 16.7,
+        "responses": 3.6,
+        "responses-logprobs": 26.6,
+        "sampling-defaults": 81.6,
+        "sampling-ranges": 9.6,
+        "state-edges": 16.2,
+        "stops": 31.5,
+        "structured": 42.4,
+        "tool-streaming": 88.6,
+        "tools": 82.6
+      },
+      "timing_s": 345
+    },
+    "embedding-gemma2": {
+      "suites": {
+        "embedding-text": 91.4,
+        "embedding-images": 91.4,
+        "embedding-audio": 91.4,
+        "embedding-video": 91.4
+      },
+      "timing_s": 53
+    },
+    "embedding-gemma2-npu": {
+      "suites": {
+        "embedding-text": 91.4,
+        "embedding-images": 91.4,
+        "embedding-audio": 91.4,
+        "embedding-video": 91.4
+      },
+      "timing_s": 53
+    },
+    "flash-next-q4": {
+      "load_s": 94,
+      "suites": {
+        "batch": 12.5,
+        "cache": 53.9,
+        "cache-bridge": 42.9,
+        "cache-depth": 86.0,
+        "cache-edits": 16.6,
+        "cache-growth": 84.7,
+        "cache-rotation": 30.7,
+        "cache-shared-prefix": 65.7,
+        "cache-stalls": 108.1,
+        "conversation": 13.0,
+        "discovery": 0.6,
+        "image-count": 15.2,
+        "image-detail": 3.6,
+        "image-inputs": 7.1,
+        "logprobs": 21.4,
+        "long-context": 32.8,
+        "messages-count-tokens": 4.6,
+        "messages-image-counts": 3.8,
+        "messages-tools": 2.9,
+        "metrics": 8.2,
+        "openai-count-tokens": 8.1,
+        "prefill-scheduling": 8.3,
+        "progress": 6.2,
+        "reasoning-budget": 128.4,
+        "reasoning-separator": 10.7,
+        "responses": 2.0,
+        "responses-logprobs": 5.7,
+        "sampling-defaults": 35.3,
+        "sampling-ranges": 5.7,
+        "state-edges": 7.9,
+        "stops": 10.1,
+        "stream-start": 29.5,
+        "structured": 23.5,
+        "structured-limits": 9.5,
+        "system-injection": 13.2,
+        "tool-agent": 10.5,
+        "tool-agent-loop": 4.6,
+        "tool-choice-cache": 8.0,
+        "tool-edges": 16.2,
+        "tool-history": 5.0,
+        "tool-images": 14.1,
+        "tool-mixed": 22.7,
+        "tool-native-schemas": 103.3,
+        "tool-parameter-order": 10.9,
+        "tool-reasoning": 75.5,
+        "tool-schema-edges": 12.0,
+        "tool-streaming": 43.9,
+        "tool-type-unions": 4.5,
+        "tool-untyped": 17.1,
+        "tools": 33.6
+      },
+      "timing_s": 201
+    },
+    "qwen-image-turbo": {
+      "suites": {
+        "image-smoke": 90
+      },
+      "timing_s": 54
+    },
+    "qwen27-q4": {
+      "load_s": 10,
+      "suites": {
+        "cache": 70.6,
+        "cache-bridge": 132.5,
+        "cache-concurrency": 201.4,
+        "cache-depth": 246.4,
+        "cache-edits": 49.0,
+        "cache-growth": 216.2,
+        "cache-rotation": 93.0,
+        "cache-shared-prefix": 210.1,
+        "conversation": 27.1,
+        "discovery": 0.6,
+        "image-count": 32.9,
+        "image-detail": 5.5,
+        "image-inputs": 11.2,
+        "logprobs": 38.9,
+        "long-context": 52.5,
+        "messages-count-tokens": 8.7,
+        "messages-image-counts": 5.8,
+        "messages-tools": 6.0,
+        "metrics": 19.8,
+        "openai-count-tokens": 13.6,
+        "prefill-scheduling": 23.7,
+        "progress": 13.8,
+        "reasoning-budget": 145.6,
+        "reasoning-separator": 21.8,
+        "responses": 3.2,
+        "responses-logprobs": 12.5,
+        "sampling-defaults": 63.2,
+        "sampling-ranges": 7.6,
+        "state-edges": 13.4,
+        "stops": 22.1,
+        "stream-start": 74.3,
+        "structured": 37.6,
+        "structured-limits": 16.9,
+        "system-injection": 40.1,
+        "tool-agent": 20.3,
+        "tool-agent-loop": 8.3,
+        "tool-choice-cache": 15.8,
+        "tool-edges": 25.4,
+        "tool-history": 10.3,
+        "tool-images": 25.1,
+        "tool-mixed": 41.1,
+        "tool-native-schemas": 207.5,
+        "tool-parameter-order": 20.0,
+        "tool-reasoning": 156.9,
+        "tool-schema-edges": 20.1,
+        "tool-streaming": 54.4,
+        "tool-type-unions": 6.9,
+        "tool-untyped": 33.2,
+        "tools": 68.2
+      },
+      "timing_s": 200
+    },
+    "qwen3-asr": {
+      "suites": {
+        "asr-http": 7.5
+      },
+      "timing_s": 55
+    },
+    "qwen3-asr-npu": {
+      "suites": {
+        "asr-http": 15.8
+      },
+      "timing_s": 55
+    },
+    "qwen3-tts-base": {
+      "suites": {
+        "tts-http": 19.5
+      },
+      "timing_s": 68
+    },
+    "qwen3-tts-custom": {
+      "suites": {
+        "tts-http": 17.3
+      },
+      "timing_s": 66
+    },
+    "qwen3-tts-custom-npu": {
+      "suites": {
+        "tts-http": 38.2
+      },
+      "timing_s": 88
+    },
+    "qwen3-tts-design": {
+      "suites": {
+        "tts-http": 14.8
+      },
+      "timing_s": 62
+    }
+  }
+}

@@ -50,6 +50,8 @@ def validate(manifest, names):
             raise ValueError("Unknown suite status: " + name)
         if suite.get("tier", "pr") not in ("pr", "release"):
             raise ValueError("Unknown suite tier: " + name)
+        if suite.get("isolation", "shared") not in ("shared", "server"):
+            raise ValueError("Unknown suite isolation: " + name)
         if "escalate" in suite and (suite.get("tier") != "release" or not suite["escalate"]):
             raise ValueError("Only release suites escalate, by path: " + name)
     if not set(manifest["baseline_suites"]) <= set(names):
@@ -155,7 +157,7 @@ def main():
     args = parser.parse_args()
     try:
         manifest = json.loads(args.manifest.read_text())
-        validate(manifest, suite_names(HERE / "run.py"))
+        validate(manifest, suite_names(HERE / "suites.py"))
         if any((args.repo, args.base, args.head)):
             if not all((args.repo, args.base, args.head)) or args.paths:
                 raise ValueError("Use either paths or --repo/--base/--head together")

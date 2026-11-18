@@ -115,10 +115,16 @@ def main():
     parser.add_argument('--plan', type=Path, required=True)
     parser.add_argument('--cache', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--shard', help="Fetch only this shard's model assets")
     args = parser.parse_args()
+    plan = json.loads(args.plan.read_text())
+    if args.shard:
+        shard = next(row for row in plan['shards'] if row['id'] == args.shard)
+        models = {part['model'] for part in shard['parts']}
+        plan = {**plan, 'models': [row for row in plan['models'] if row['id'] in models]}
     route = allow_large_http_downloads()
     try:
-        paths = download(json.loads(args.plan.read_text()), args.cache.resolve(), registry())
+        paths = download(plan, args.cache.resolve(), registry())
     except Exception:
         # The workflow shows only the log's tail; repeat the route after the traceback.
         traceback.print_exc()

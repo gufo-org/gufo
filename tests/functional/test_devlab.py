@@ -3,6 +3,7 @@
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,11 +42,11 @@ class PlanTest(unittest.TestCase):
     def test_disabled_models_are_named_and_not_planned(self):
         data = {**self.registry, 'disabled': {'deepseek4': 'reason'}}
         plan = devlab_plan.select(['src/models/deepseek_v4_flash/model.cpp', 'src/core/sampling.cpp'], data)
-        self.assertEqual({item['id'] for item in plan['models']}, {'flash-next-q4'})
+        self.assertEqual({item['id'] for item in plan['models']}, {'flash-next-q4', 'qwen27-q4'})
         self.assertNotIn('deepseek4', {group['profile'].split('/')[0] for group in plan['groups']})
         self.assertEqual([row['id'] for row in plan['disabled']], ['deepseek4'])
         self.assertTrue(plan['disabled'][0]['reason'])
-        self.assertEqual(devlab_models.asset_keys(plan, data), ['flash-next'])
+        self.assertEqual(devlab_models.asset_keys(plan, data), ['dflash2', 'flash-next', 'qwen27'])
         broken = {**self.registry, 'disabled': {'deepseek-typo': 'reason'}}
         with patch('devlab_models.json.loads', return_value=broken):
             with self.assertRaises(ValueError):
@@ -68,24 +69,25 @@ class PlanTest(unittest.TestCase):
     def models(self, *paths, **kwargs):
         return {item['id'] for item in self.plan(*paths, **kwargs)['models']}
 
-    def test_shared_llm_uses_only_flash_next(self):
+    def test_shared_llm_covers_every_llm(self):
         for path in ('src/core/sampling.cpp', 'src/cache/cache.cpp',
                      'src/families/qwen/text/tokenizer.cpp', 'src/families/qwen/vision/encoder.hip',
                      'src/cli/serve/text_model_runner.cpp'):
             with self.subTest(path=path):
-                self.assertEqual(self.models(path), {'flash-next-q4'})
+                self.assertEqual(self.models(path), {'flash-next-q4', 'qwen27-q4', 'deepseek4'})
 
     def test_private_model_and_mixed_paths_preserve_both(self):
         private = 'src/models/deepseek_v4_flash/model.cpp'
         self.assertEqual(self.models(private), {'deepseek4'})
-        self.assertEqual(self.models(private, 'src/core/sampling.cpp'), {'deepseek4', 'flash-next-q4'})
+        self.assertEqual(self.models(private, 'src/core/sampling.cpp'), {'flash-next-q4', 'qwen27-q4', 'deepseek4'})
         self.assertEqual(self.models('src/models/qwen/hip/attention.hip'), {'qwen27-q4'})
         self.assertEqual(self.models('src/models/qwen38_flash_next/engine.cpp'), {'flash-next-q4'})
 
-    def test_global_changes_cover_one_representative_per_category(self):
+    def test_global_changes_cover_every_model_but_one_image_representative(self):
         self.assertEqual(self.models('src/cli/serve/serve.cpp'),
-                         {'flash-next-q4', 'embedding-gemma2', 'qwen3-asr', 'qwen3-tts-base',
-                          'qwen-image-turbo'})
+                         {'flash-next-q4', 'qwen27-q4', 'deepseek4'} | {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design', 'qwen3-tts-custom-npu'} | NPU_MODELS |
+                         {'embedding-gemma2', 'qwen3-asr', 'qwen-image-turbo'})
+        self.assertIn('qwen-image', self.models('src/cli/serve/serve.cpp', tier='full'))
         self.assertEqual(self.models('new-unclassified-file'), self.models('CMakeLists.txt'))
 
     def test_hosted_check_list_selects_no_model(self):
@@ -97,18 +99,18 @@ class PlanTest(unittest.TestCase):
         # Its CPU test sources need no model either; the code they test still selects.
         self.assertEqual(self.models('tests/cli/openai_chat_test.cpp', 'tests/cli/http_server_test.cpp'), set())
         self.assertEqual(self.models('tests/cli/openai_chat_test.cpp', 'src/cli/serve/openai_chat.cpp'),
-                         {'flash-next-q4'})
+                         {'flash-next-q4', 'qwen27-q4', 'deepseek4'})
         self.assertEqual(self.models('tests/cli/audio_websocket_test.cpp'),
-                         {'qwen3-asr', 'qwen3-tts-base', 'qwen3-asr-npu', 'qwen3-tts-custom-npu'})
+                         {'qwen3-asr', 'qwen3-asr-npu'} | {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design', 'qwen3-tts-custom-npu'})
         self.assertEqual(self.models('tests/cli/unlisted_test.cpp'), self.models('CMakeLists.txt'))
 
     def test_category_and_fixture_ownership(self):
         for path, expected in [
             ('src/models/embedding_gemma2/hip/ops.hip', {'embedding-gemma2', 'embedding-gemma2-npu'}),
             ('src/cli/serve/audio_asr_api.cpp', {'qwen3-asr', 'qwen3-asr-npu'}),
-            ('src/models/qwen3_tts/hip/synthesis_runtime.cpp', {'qwen3-tts-base', 'qwen3-tts-custom-npu'}),
+            ('src/models/qwen3_tts/hip/synthesis_runtime.cpp', {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design', 'qwen3-tts-custom-npu'}),
             ('tests/functional/fixtures/audio/clear-english-voice.wav',
-             {'qwen3-asr', 'qwen3-tts-base', 'qwen3-asr-npu', 'qwen3-tts-custom-npu'}),
+             {'qwen3-asr', 'qwen3-asr-npu'} | {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design', 'qwen3-tts-custom-npu'}),
             ('src/core/npu/bfp_gemm.cpp', NPU_MODELS),
             ('src/models/qwen_image_21/hip/denoise.hip', {'qwen-image-turbo'}),
             ('src/cli/serve/image_api.cpp', {'qwen-image-turbo'})]:
@@ -121,7 +123,8 @@ class PlanTest(unittest.TestCase):
         self.assertEqual({group['profile'] for group in plan['groups']},
                          {'embedding-gemma2-npu/npu', 'qwen3-asr-npu/npu', 'qwen3-tts-custom-npu/npu'})
         embedding = [g for g in plan['groups'] if g['profile'].startswith('embedding')][0]
-        self.assertEqual(embedding['suites'], ['embedding-smoke'])
+        self.assertEqual(embedding['suites'], ['embedding-text', 'embedding-images', 'embedding-audio',
+                                               'embedding-video'])
         args = devlab_run.service_args('qwen3-asr-npu', Path('/head'), Path('/base'),
                                        {'asr': '/asr'}, Path('/out'))
         self.assertEqual(args[-1], '--npu')
@@ -134,12 +137,17 @@ class PlanTest(unittest.TestCase):
         self.assertNotIn('--npu', devlab_models.service_command('qwen3-asr', Path('/gufo'), assets,
                                                                 Path('/audio'), 'phases'))
 
-    def test_embedding_smoke_and_full_coverage(self):
-        pr = self.plan('src/models/embedding_gemma2/video_processor.cpp')
-        self.assertEqual(pr['groups'][0]['suites'], ['embedding-smoke'])
-        full = self.plan('src/models/embedding_gemma2/video_processor.cpp', tier='full')
-        self.assertEqual(full['groups'][0]['suites'],
-                         ['embedding-text', 'embedding-images', 'embedding-audio', 'embedding-video'])
+    def test_prs_run_the_release_suite_set(self):
+        for tier in ('pr', 'full'):
+            plan = self.plan('src/models/embedding_gemma2/video_processor.cpp', 'src/core/sampling.cpp', tier=tier)
+            embedding = next(group for group in plan['groups'] if group['profile'].startswith('embedding'))
+            self.assertEqual(embedding['suites'],
+                             ['embedding-text', 'embedding-images', 'embedding-audio', 'embedding-video'])
+            self.assertFalse(plan['release_only'])
+            self.assertEqual(plan['suite_tier'], 'full')
+            self.assertIn('reasoning-budget', {suite for group in plan['groups'] for suite in group['suites']})
+        # Image generation alone keeps a PR smoke representative.
+        self.assertEqual(self.plan('src/models/qwen_image_21/image.cpp')['groups'][0]['suites'], ['image-smoke'])
 
     def test_full_tts_and_optional_ar(self):
         self.assertEqual(self.models('src/models/qwen3_tts/config.cpp', tier='full'),
@@ -162,7 +170,7 @@ class PlanTest(unittest.TestCase):
 
     def test_dependency_downloads_are_plan_scoped(self):
         self.assertEqual(devlab_models.asset_keys(self.plan('src/cli/serve/audio_tts_api.cpp'), self.data),
-                         ['asr', 'tts-base', 'tts-custom'])
+                         ['asr', 'tts-base', 'tts-custom', 'tts-design'])
         self.assertEqual(devlab_models.asset_keys(self.plan('src/models/deepseek_v4_flash/model.cpp'), self.data),
                          ['deepseek4', 'dspark'])
         self.assertEqual(devlab_models.asset_keys(self.plan('src/cli/serve/image_service.cpp'), self.data),
@@ -217,7 +225,7 @@ class ExecutionTest(unittest.TestCase):
                     devlab_models.download(plan, Path(directory), data)
 
     def test_model_failure_does_not_hide_other_models_or_speed(self):
-        plan = devlab_plan.select(['src/cli/serve/audio_asr_api.cpp', 'src/cli/serve/audio_tts_api.cpp'],
+        plan = devlab_plan.select(['src/cli/serve/audio_asr_api.cpp', 'src/models/embedding_gemma2/model.cpp'],
                                   without_npu(devlab_models.registry()))
         plan.update(base='a'*40, head='b'*40)
         calls = []
@@ -236,7 +244,7 @@ class ExecutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             assets = root/'assets.json'
-            assets.write_text(json.dumps({'asr': '/asr', 'tts-base': '/tts'}))
+            assets.write_text(json.dumps({'asr': '/asr', 'embedding': '/embedding'}))
             with patch('devlab_run.subprocess.run', side_effect=run):
                 code = devlab_run.execute(plan, Path('/head'), Path('/base'), assets,
                                           root/'results', root/'report', root/'logs')
@@ -246,10 +254,143 @@ class ExecutionTest(unittest.TestCase):
             self.assertFalse(timing['phases'][1]['checked'])
         self.assertEqual(code, 1)
         self.assertEqual(len(calls), 4)
-        self.assertEqual([item['correctness'] for item in observed['models']], ['failed', 'passed'])
+        self.assertEqual([item['correctness'] for item in observed['models']], ['passed', 'failed'])
         self.assertTrue(all(item['timing'] == 'passed' for item in observed['models']))
         self.assertEqual(len(observed['groups']), 2)
 
+
+class ShardTest(unittest.TestCase):
+    TABLE = {'schema': 1, 'default_suite_s': 60, 'default_load_s': 30, 'default_timing_s': 300,
+             'models': {'flash-next-q4': {'load_s': 20, 'timing_s': 200,
+                                          'suites': {'cache': 300, 'tools': 200, 'discovery': 1}},
+                        'qwen3-asr': {'timing_s': 100, 'suites': {'asr-http': 60}},
+                        'embedding-gemma2': {'timing_s': 100, 'suites': {'embedding-smoke': 30}}}}
+
+    def plan(self, *paths, tier='full'):
+        plan = devlab_plan.select(paths, without_npu(devlab_models.registry()), tier)
+        plan.update(base='a' * 40, head='b' * 40)
+        return plan
+
+    @staticmethod
+    def parts(shards, model):
+        return [part for row in shards for part in row['parts'] if part['model'] == model]
+
+    def test_every_suite_runs_once_within_budget(self):
+        plan = self.plan('src/models/qwen38_flash_next/engine.cpp', 'src/models/qwen3_asr/model.cpp',
+                         'src/models/embedding_gemma2/model.cpp', tier='pr')
+        shards = devlab_plan.shard(plan, self.TABLE, budget=720)
+        for group in plan['groups']:
+            planned = [suite for row in shards for part in row['parts'] for server in part['groups']
+                       if (server['profile'], server['configuration']) == (group['profile'], group['configuration'])
+                       for suite in server['suites']]
+            self.assertEqual(sorted(planned), sorted(group['suites']))
+        # Each model times once, on one device; a shard names each model once.
+        for model in ('flash-next-q4', 'qwen3-asr', 'embedding-gemma2'):
+            self.assertEqual(sum(part['timing'] for part in self.parts(shards, model)), 1)
+        for row in shards:
+            self.assertEqual(len(row['parts']), len({part['model'] for part in row['parts']}))
+            # A suite costlier than the budget still runs, alone.
+            self.assertTrue(row['seconds'] <= 720 or sum(len(server['suites']) for part in row['parts']
+                                                         for server in part['groups']) == 1)
+        # Short service models share a device; an LLM never shares with another model.
+        services = [row for row in shards if {'qwen3-asr', 'embedding-gemma2'} & {p['model'] for p in row['parts']}]
+        self.assertEqual(len(services), 1)
+        self.assertEqual({p['model'] for p in services[0]['parts']}, {'qwen3-asr', 'embedding-gemma2'})
+        llm = [row for row in shards if any(part['model'] == 'flash-next-q4' for part in row['parts'])]
+        self.assertTrue(all(len(row['parts']) == 1 for row in llm))
+        self.assertGreater(len(llm), 1)
+        # Suites that read server-wide cache state get a server of their own.
+        servers = [server for part in self.parts(shards, 'flash-next-q4') for server in part['groups']]
+        for suite in ('cache', 'batch'):
+            self.assertIn([suite], [server['suites'] for server in servers])
+        names = [(server['configuration'], server.get('server')) for server in servers]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(len({row['id'] for row in shards}), len(shards))
+
+    def test_order_seed_reaches_the_runner(self):
+        plan = self.plan('src/models/qwen38_flash_next/engine.cpp')
+        assets = {key: '/weights/' + key for key in devlab_models.registry()['assets']}
+        args = cluster.command(plan['groups'][0], Path('/gufo'), None, Path('/out'), 'full', assets, 1234)
+        self.assertEqual(args[args.index('--order-seed') + 1], '1234')
+        self.assertLess(args.index('--order-seed'), args.index('--'))
+        self.assertNotIn('--order-seed', cluster.command(plan['groups'][0], Path('/gufo'), None,
+                                                         Path('/out'), 'full', assets))
+
+    def test_shard_runs_only_its_part(self):
+        plan = self.plan('src/models/qwen38_flash_next/engine.cpp', 'src/models/qwen3_asr/model.cpp',
+                         'src/models/embedding_gemma2/model.cpp', tier='pr')
+        plan['shards'] = devlab_plan.shard(plan, self.TABLE, budget=400)
+        for row in plan['shards']:
+            observed = devlab_run.jobs(plan, row['id'])
+            self.assertEqual([(selection['id'], groups, timing) for selection, groups, timing in observed],
+                             [(part['model'], part['groups'], part['timing']) for part in row['parts']])
+        with self.assertRaises(ValueError):
+            devlab_run.jobs(plan, 'no-such-shard')
+
+    def write_shard(self, root, row, status='passed', phases=True):
+        directory = root / 'shards' / row['id']
+        directory.mkdir(parents=True)
+        groups, items = [], []
+        for part in row['parts']:
+            groups += [{**group, 'status': status, 'exit_code': int(status != 'passed'), 'command': ['run'],
+                        **({'failures': {group['suites'][0]: 'broken'}, 'log_tail': 'tail'}
+                           if status != 'passed' else {})} for group in part['groups']]
+            items.append({'id': part['model'], 'reasons': [],
+                          'correctness': status if part['groups'] else 'skipped',
+                          'timing': 'passed' if part['timing'] else 'skipped'})
+            if part['timing'] and phases:
+                (directory / (part['model'] + '.phases.json')).write_text('{"phases": []}')
+        (directory / 'summary.json').write_text(json.dumps({'schema': 2, 'shard': row['id'], 'groups': groups,
+                                                            'models': items, 'status': status}))
+
+    def test_merge_recombines_groups_and_flags_missing_shards(self):
+        import devlab_merge
+        plan = self.plan('src/models/qwen38_flash_next/engine.cpp', 'src/models/qwen3_asr/model.cpp')
+        plan['shards'] = devlab_plan.shard(plan, self.TABLE, budget=400)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for row in plan['shards']:
+                self.write_shard(root / 'in', row)
+            merged = devlab_merge.merge(plan, root / 'in', root / 'out')
+            self.assertEqual(merged['status'], 'passed')
+            self.assertEqual([(row['profile'], row['configuration'], row['suites']) for row in merged['groups']],
+                             [(row['profile'], row['configuration'], row['suites']) for row in plan['groups']])
+            self.assertTrue((root / 'out' / 'flash-next-q4.phases.json').is_file())
+            self.assertEqual([(item['correctness'], item['timing']) for item in merged['models']],
+                             [('passed', 'passed')] * 2)
+            # One failed and one missing correctness shard; the ASR shard (with its timing) missing.
+            llm = [row for row in plan['shards'] if row['parts'][0]['model'] == 'flash-next-q4'
+                   and not any(part['timing'] for part in row['parts'])]
+            asr = next(row for row in plan['shards'] if row['parts'][0]['model'] == 'qwen3-asr')
+            for row in (llm[0], llm[1], asr):
+                shutil.rmtree(root / 'in' / 'shards' / row['id'])
+            self.write_shard(root / 'in', llm[0], status='failed')
+            merged = devlab_merge.merge(plan, root / 'in', root / 'out2')
+        flash, asr_item = merged['models']
+        self.assertEqual((flash['correctness'], flash['timing']), ('error', 'passed'))
+        self.assertIn(llm[1]['id'], flash['error'])
+        self.assertEqual((asr_item['correctness'], asr_item['timing']), ('error', 'error'))
+        failed = [row for row in merged['groups'] if row['status'] != 'passed']
+        self.assertTrue(any('broken' in row['failures'].values() for row in failed))
+        self.assertTrue(any('Missing suites' in (row['error'] or '') or 'no summary' in (row['error'] or '')
+                            for row in failed))
+        self.assertEqual(merged['status'], 'failed')
+
+    def test_rerun_attempts_replace_only_their_shards(self):
+        import devlab_merge
+        plan = self.plan('src/models/qwen38_flash_next/engine.cpp', tier='pr')
+        plan['shards'] = devlab_plan.shard(plan, self.TABLE, budget=400)
+        first, second = plan['shards'][:2]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for row in plan['shards']:
+                attempts = ((1, 'failed'), (2, 'passed')) if row is second else ((1, 'passed'),)
+                for attempt, status in attempts:
+                    self.write_shard(root / 'artifacts' / f"functional-report-{row['id']}-{attempt}", row, status)
+            devlab_merge.collect(plan, root / 'artifacts', root / 'results')
+            merged = devlab_merge.merge(plan, root / 'results', root / 'out')
+        self.assertEqual(merged['status'], 'passed')
+        self.assertEqual(set(merged['shards'].values()), {'passed'})
 
 
 class TimingTest(unittest.TestCase):

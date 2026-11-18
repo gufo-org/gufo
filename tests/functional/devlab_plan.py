@@ -52,7 +52,7 @@ def curated(planned, suites):
 
 def select(paths, data, tier='pr', ar=False, benchmark=False):
     manifest = json.loads((HERE / 'impact.json').read_text())
-    names = impact.suite_names(HERE / 'run.py')
+    names = impact.suite_names(HERE / 'suites.py')
     impact.validate(manifest, names)
     for key, model in data['models'].items():
         if not set(model.get('suites', names)) <= set(names):
@@ -70,7 +70,10 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
         for rule in rules:
             for owner in rule['owners']:
                 models = [data['representatives'].get(owner, owner)]
-                if owner in ('tts', 'image') and tier == 'full':
+                # A category owner covers every model in it, including NPU and
+                # speculative variants; runner shards keep the wall time flat.
+                # Image generation keeps one representative outside the full tier.
+                if owner in data['representatives'] and (owner != 'image' or tier == 'full'):
                     models = [key for key, model in data['models'].items() if model['category'] == owner]
                 for key in models:
                     selected.setdefault(key, []).append({'path': path, 'rule': rule['id'],
@@ -82,7 +85,9 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
     # with the reason so the report shows the gap.
     disabled = [{'id': key, 'reason': data.get('disabled', {})[key], 'reasons': selected.pop(key)}
                 for key in sorted(selected) if key in data.get('disabled', {})]
-    result = {'schema': 2, 'tier': tier, 'paths': resolutions, 'models': [], 'groups': [],
+    # Every PR runs the release suite set, sharded across devices; the tier
+    # only keeps image generation to one smoke-tested representative on PRs.
+    result = {'schema': 2, 'tier': tier, 'suite_tier': 'full', 'paths': resolutions, 'models': [], 'groups': [],
               'deferred': [], 'release_only': [], 'out_of_scope': [], 'obligations': [],
               'disabled': disabled, 'scope': sorted(selected), 'benchmark': benchmark,
               'timing_qualification': 'paired main/candidate server phases; no averaging across requests'}
@@ -97,19 +102,127 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
             # Benchmark-only dispatches still receive a bounded correctness plan.
             if not affected:
                 affected = ['src/models/qwen38_flash_next/engine.cpp']
-            planned = impact.plan(manifest, affected, profiles, tier)
+            planned = impact.plan(manifest, affected, profiles, result['suite_tier'])
             if 'suites' in model:
                 planned = curated(planned, set(model['suites']))
             for field in ('groups', 'deferred', 'release_only', 'out_of_scope', 'obligations'):
                 result[field].extend(planned[field])
         else:
-            suites = {'embedding': (['embedding-smoke'] if tier == 'pr' else
-                                     ['embedding-text', 'embedding-images', 'embedding-audio', 'embedding-video']),
+            suites = {'embedding': ['embedding-text', 'embedding-images', 'embedding-audio', 'embedding-video'],
                       'asr': ['asr-http'], 'tts': ['tts-http'],
                       'image': ['image-smoke' if tier == 'pr' else 'image-http']}[model['category']]
             result['groups'].append({'profile': key + ('/npu' if model.get('npu') else '/native'),
                                      'configuration': 'standard', 'settings': {}, 'suites': suites})
     return result
+
+
+COSTS = HERE / 'devlab_costs.json'
+# Target wall time of one runner job's suites, excluding package and weight setup.
+SHARD_BUDGET_S = 12 * 60
+
+
+def costs():
+    data = json.loads(COSTS.read_text())
+    assert data['schema'] == 1
+    return data
+
+
+def suite_cost(table, model, suite):
+    model_costs = table['models'].get(model, {})
+    return model_costs.get('suites', {}).get(suite, table['default_suite_s'])
+
+
+def pack(suites, cost, capacity):
+    """First-fit decreasing; each bin keeps the plan's suite order."""
+    bins = []
+    for suite in sorted(suites, key=lambda name: -cost(name)):
+        target = next((row for row in bins if row['seconds'] + cost(suite) <= capacity), None)
+        if target is None:
+            target = {'suites': [], 'seconds': 0}
+            bins.append(target)
+        target['suites'].append(suite)
+        target['seconds'] += cost(suite)
+    for row in bins:
+        row['suites'].sort(key=suites.index)
+    return bins
+
+
+def units(plan, table, budget, isolated):
+    """Indivisible pieces of work: one model's servers for one job, or its timing arms."""
+    rows = []
+    for selection in plan['models']:
+        key = selection['id']
+        model_costs = table['models'].get(key, {})
+        timing = model_costs.get('timing_s', table['default_timing_s'])
+        groups = [group for group in plan['groups'] if group['profile'].split('/')[0] == key]
+        if selection['category'] != 'llm':
+            # One service command runs every suite; its timing arms follow on the same device.
+            seconds = sum(suite_cost(table, key, suite) for group in groups for suite in group['suites'])
+            rows.append({'label': key, 'pool': 'services', 'seconds': seconds + timing,
+                         'part': {'model': key, 'groups': groups, 'timing': True}})
+            continue
+        load = model_costs.get('load_s', table['default_load_s'])
+        cost = lambda suite: suite_cost(table, key, suite)  # noqa: E731
+        for group in groups:
+            mode = group['profile'].split('/')[1]
+            shared = [suite for suite in group['suites'] if suite not in isolated]
+            servers = pack(shared, cost, max(budget - load, 1)) + [
+                {'suites': [suite], 'seconds': cost(suite)} for suite in group['suites'] if suite in isolated]
+            for number, server in enumerate(servers, 1):
+                server['seconds'] += load
+                rows.append({'label': f"{key}-{mode}-{group['configuration']}", 'pool': key,
+                             'seconds': server['seconds'],
+                             'part': {'model': key, 'timing': False, 'groups': [
+                                 {**group, 'suites': server['suites'],
+                                  **({'server': number} if len(servers) > 1 else {})}]}})
+        rows.append({'label': key + '-timing', 'pool': key, 'seconds': timing,
+                     'part': {'model': key, 'groups': [], 'timing': True}})
+    return rows
+
+
+def shard(plan, table=None, budget=SHARD_BUDGET_S):
+    """Split a plan into independent runner jobs, one device each.
+
+    LLM groups become servers whose suites fit the budget; suites that read
+    server-wide cache state get a server of their own. Each LLM's paired
+    timing arms stay together on one device. Work then packs into jobs up to
+    the budget: one LLM's pieces share a job, and service models share theirs.
+    """
+    table = table or costs()
+    manifest = json.loads((HERE / 'impact.json').read_text())
+    # These suites read server-wide cache state (RAM budget, disk turnover,
+    # shared-prefix leaders) that earlier suites change; each gets a new server.
+    isolated = {name for name, suite in manifest['suites'].items() if suite.get('isolation') == 'server'}
+    pools = {}
+    for row in units(plan, table, budget, isolated):
+        pools.setdefault(row['pool'], []).append(row)
+    shards = []
+    for pool, rows in pools.items():
+        jobs = []
+        for row in sorted(rows, key=lambda row: -row['seconds']):
+            job = next((job for job in jobs if job['seconds'] + row['seconds'] <= budget), None)
+            if job is None:
+                job = {'rows': [], 'seconds': 0}
+                jobs.append(job)
+            job['rows'].append(row)
+            job['seconds'] += row['seconds']
+        for index, job in enumerate(jobs, 1):
+            labels = {row['label'] for row in job['rows']}
+            name = labels.pop() if len(labels) == 1 and len(jobs) == 1 else f'{pool}-{index}'
+            parts = []
+            # A model's parts merge into one, so it loads its assets and runs its timing once.
+            for row in job['rows']:
+                part = next((part for part in parts if part['model'] == row['part']['model']), None)
+                if part is None:
+                    parts.append({**row['part'], 'groups': list(row['part']['groups'])})
+                else:
+                    part['groups'] += row['part']['groups']
+                    part['timing'] = part['timing'] or row['part']['timing']
+            shards.append({'id': name, 'parts': parts, 'seconds': job['seconds']})
+    ids = [row['id'] for row in shards]
+    if len(ids) != len(set(ids)):
+        raise ValueError('Duplicate shard ids: ' + ', '.join(ids))
+    return shards
 
 
 def main():
@@ -130,7 +243,11 @@ def main():
     else:
         paths = args.paths
     planned = select(paths, registry(), args.tier, args.ar, args.benchmark)
-    planned.update(base=args.base, head=args.head)
+    planned.update(base=args.base, head=args.head, shards=shard(planned))
+    # Suites run in a per-revision order: an order dependence surfaces as a
+    # failure that reproduces from the seed in the plan and each report.
+    planned['order_seed'] = int(args.head[:8], 16) if args.head and all(
+        char in '0123456789abcdef' for char in args.head[:8]) else None
     args.output.write_text(json.dumps(planned, indent=2) + '\n')
 
 
