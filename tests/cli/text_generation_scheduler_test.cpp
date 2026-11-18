@@ -3637,6 +3637,40 @@ void TestPromptProgressCancellation() {
   }
 }
 
+// A client cancels a stream, then replays its answer as text in the next
+// prompt (#1154, #1213). The replay must continue the cancelled frontier even
+// when it arrives while that stream is still decoding: otherwise the same
+// request samples from a different tokenization once the frontier is free.
+void TestRetryDuringCancelledStreamAlignsToItsFrontier() {
+  for (const std::size_t capacity : {1U, 2U}) {
+    auto control = std::make_shared<FakeControl>();
+    control->snapshots = true;
+    control->incremental_text_is_exact = true;
+    control->block_advance_label = 1;
+    auto scheduler = MakeScheduler(control, capacity);
+    std::atomic<bool> disconnected{false};
+    auto stream = scheduler->Submit(
+        {1, 10}, 8, 0.0F, [&] { return disconnected.load(); }, true);
+    // The stream is decoding its first token, 100, when its client
+    // disconnects and sends the retry.
+    control->WaitForAdvance(1);
+    disconnected = true;
+    // Pieces "10" and "0" replay the text of the sampled token 100.
+    auto retry = scheduler->Submit({1, 10, 10, 0, 7}, 1, 0.0F);
+    control->ReleaseAdvance();
+    const auto cancelled = stream.Wait();
+    const auto resumed = retry.Wait();
+    Expect(cancelled.cancelled && cancelled.tokens == ExpectedTokens(1, 1),
+           "the stream is cancelled after its first token");
+    Expect(resumed.prompt_tokens == 4 && resumed.cached_prompt_tokens == 3,
+           "a retry submitted during the cancelled stream continues its "
+           "frontier at capacity " +
+               std::to_string(capacity) + " (prompt " +
+               std::to_string(resumed.prompt_tokens) + ", cached " +
+               std::to_string(resumed.cached_prompt_tokens) + ")");
+  }
+}
+
 void TestIgnoreEosIsRequestScoped() {
   auto control = std::make_shared<FakeControl>();
   control->eos_after = 0;
@@ -4069,6 +4103,7 @@ int main() {
   TestBackendPreservesModelSamplingPreset();
   TestBackendRejectsInvalidSamplingDefaults();
 #endif
+  TestRetryDuringCancelledStreamAlignsToItsFrontier();
   TestTokenLogprobs();
   TestReasoningTokenCount();
   TestPublicationWaitUsesRecentSubstantialPrefill();
