@@ -1187,6 +1187,56 @@ void TurnEndBacklogLeavesRoomForOtherConversations() {
   assert(!disk.Open({2}));
   assert(ledger.Snapshot().persistence_pinned_bytes == 0);
 }
+// Under pressure a larger, newer turn end may need more than one covered turn
+// end to coalesce before it fits the generated half of the pinned budget.
+// Coalescing only one would skip the newest turn end, the one the next request
+// continues from, while older ones stay queued.
+void NewestTurnEndCoalescesEnoughToFit() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 24, 1 << 23, 64, 1 << 16}};
+  DiskStore disk(ledger, dir.path, 1 << 22);
+  StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+  std::vector<std::unique_ptr<Fixture>> turns;
+  for (unsigned i = 0; i < 9; ++i) {
+    turns.push_back(
+        std::make_unique<Fixture>(ledger, i + 1, 100 * (i + 1), 40 + 8 * i));
+    turns.back()->manifest.purpose = CheckpointPurpose::kGenerated;
+  }
+  std::atomic<bool> idle{}, started{};
+  std::vector<CheckpointId> superseded;
+  PersistenceQueue queue(
+      ledger, streams, 8, 8192,
+      [&] {
+        started = true;
+        return idle.load();
+      },
+      [&](CheckpointId id, bool succeeded) {
+        if (!succeeded)
+          superseded.push_back(id);
+      },
+      {}, std::chrono::hours(1));
+  for (auto& turn : turns) {
+    assert(queue.TrySubmit(
+        PersistenceJob(ledger, Id(5000 + turn->manifest.checkpoint.value),
+                       turn->manifest, turn->Sources())));
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!started && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    assert(started);
+  }
+  // Turn 8 fits after coalescing turn 2; turn 9 needs turns 3 and 4.
+  const auto stats = queue.Stats();
+  assert(stats.skipped == 0 && stats.coalesced == 3 && stats.pending == 6);
+  idle = true;
+  queue.Drain();
+  assert(
+      (superseded == std::vector<CheckpointId>{CheckpointId{2}, CheckpointId{3},
+                                               CheckpointId{4}}));
+  for (unsigned i = 1; i <= 9; ++i)
+    assert(bool(disk.Open({i})) == (i == 1 || i > 4));
+  assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+}
 void AdmissionFailures() {
   Directory dir;
   ResourceLedger ledger{{1 << 22, 1 << 21, 16, 4096}};
@@ -1480,6 +1530,7 @@ int main() {
   FirstPendingAnchorSurvivesCoalescing();
   TurnEndsSurviveWhileQueueHasRoom();
   TurnEndBacklogLeavesRoomForOtherConversations();
+  NewestTurnEndCoalescesEnoughToFit();
   GeneratedJobsYieldToPromptAnchors();
   CoalescingKeepsFrontierHeadroom();
   DiscardPendingReleasesPinsAndDrainWaitsForItsCallback();
