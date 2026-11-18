@@ -594,3 +594,42 @@ window, DFlash2/MTP speculation) from which the reference-class 600+
 comes. Earlier items in this list (IQ routed WMMA tier, Q5_K WMMA tier,
 GatherScore rewrite, chunk-scan launch collapse) are all shipped; see
 Retained above.
+
+## MTP levers from the llama.cpp draft-mtp reference (2026-11-17)
+
+The llama.cpp `draft-mtp` capture (BENCHMARKS.md, Reference with native MTP:
+16.4 plain → **21.7 t/s** at n-max 2, 57.9 % acceptance, pp flat) pins the
+two structurally expensive points in the gufo B10 loop, in ladder order:
+
+1. **Base decode row** — 11.4 vs 16.4 t/s is most of the 0.68× absolute
+   decode gap (gufo's multiplier is already larger: 1.60× vs 1.32×); this is
+   the existing routed-expert/row ladder, now with a matched MTP-visible
+   reference.
+2. **Correction row** — every partial round feeds the target's own token
+   through a full serial `Step()` trunk pass (`engine.cpp` commit stage).
+   llama.cpp instead defers the correction token into the **next verify
+   round as row 0** and drafts off held-back verify hidden
+   (`pending_h`; `verify_hidden()` rows already exist in gufo at
+   `executor.cpp` MtpAdvance). Removing the extra row targets the majority
+   of rounds.
+3. **Draft-side prompt prefill** — the −6.4…−7.3 % pp penalty comes from
+   priming the separate draft DSA/KDA cache over all prompt rows; llama.cpp
+   shares the target context (`ctx_other`) with masked nextn embeddings and
+   pays zero pp.
+
+Ordering note: levers 2-3 are pure MTP-loop changes (lossless-gateable via
+the greedy `output_sha256` anchor); they compose with the row ladder
+rather than waiting for it.
+
+**Update (same day) — best n resolved, k=1 promoted (BENCHMARKS.md B15).**
+Offline scan on the HEAD binary: k=1 16.54 > streak 15.65 > k2 14.57 > k3
+12.90 > k4 10.36 (plain 11.83); serve A/B 12.10 → **13.76** (+13.7 %,
+acceptance 87.5 %). k=1 is the shipped default (`SetDraftLimits` maps the
+open-ended CLI defaults to k=1; explicit 2..4 keeps the ladder). Two
+consequences for the ladder: (a) lever 2's payoff estimate changes — at
+k=1 every partial round still pays the serial correction row, so deferring
+it into the next verify round (llama.cpp `pending_h`) is now the single
+largest remaining MTP-loop win; after that, revisit k∈{1,2} since extra
+verify rows get cheaper; (b) the lossless gate anchor moved with B14's
+fused attend and is now `ddae62cf…` at `-d 2048 -n 64` (verified
+plain==MTP on the B15 candidate; do not chase `1d79e532…`).

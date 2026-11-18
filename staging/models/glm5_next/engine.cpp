@@ -215,6 +215,15 @@ void Session::Reset() {
 void Session::SetDraftLimits(std::uint32_t min_drafts,
                              std::uint32_t max_drafts) {
   const std::uint32_t cap = rocm::Executor::kMaxVerifyRows - 1U;
+  // The shared CLI defaults (min 1, max >= the verify-row cap) mean "no user
+  // preference". Measured optima for this nextn block on gfx1151 are a single
+  // draft: k=1 emits seed + (draft or correction) every round and served
+  // greedy decode at 13.8 t/s with 87.5 % acceptance, versus 12.1 t/s for the
+  // open-ended streak ladder (docs/models/glm-5.3-flash/BENCHMARKS.md).
+  // Explicit max in (1, cap) still opts into the ramp.
+  if (min_drafts <= 1U && (max_drafts == 0U || max_drafts >= cap)) {
+    max_drafts = 1U;
+  }
   draft_max_ = std::min(max_drafts == 0U ? 1U : max_drafts, cap);
   draft_min_ = std::min(std::max(min_drafts, 1U), draft_max_);
   draft_k_ = draft_min_;

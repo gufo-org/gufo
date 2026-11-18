@@ -169,8 +169,8 @@ class Session final {
   std::vector<float> draft_logits_;
   std::vector<float> verify_rows_;
   std::uint32_t draft_min_{1};
-  std::uint32_t draft_max_{4};
-  std::uint32_t draft_k_{4};
+  std::uint32_t draft_max_{1};
+  std::uint32_t draft_k_{1};
   std::uint32_t draft_streak_{0};
   bool mtp_enabled_{false};
   bool valid_{true};

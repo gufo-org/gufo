@@ -29,6 +29,37 @@ P6-column protocol (67.89 pp / 11.45 tg for P6 on the original session);
 same-session control was 66.7 ± 0.3 pp / 12.4 tg, making P7 **+19.7 %**
 matched. The P6 protocol text below is retained for history.
 
+### Reference with native MTP (`draft-mtp`, 2026-11-17)
+
+Same revision/build and GGUF with `--spec-type draft-mtp` (MTP draft context
+against the target model, no separate draft file; `nextn_predict_layers = 1`).
+Protocol: GPU-exclusive (`/tmp/opencode/glm5_llama_mtp.sh`), `llama-cli`
+one-shot chat-template run (`[gMASK]<sop>…<|assistant|><think>`), canonical
+`serving_bench` prompt × 44 (**prompt_n 2037** read back from the verbose
+stats), greedy seed 42, `-n 64`, `-fa on`, `-ngl 99`, `-c 4096`, single
+capture per arm (`/tmp/opencode/llama_mtp_<arm>.log`, verbose acceptance run
+`llama_mtp_n2_verbose.log`):
+
+| arm | gen t/s | draft accepted |
+| --- | --- | --- |
+| plain | 16.4 | — |
+| `draft-mtp` n-max 2 | **21.7** (verbose rerun 21.8) | 33/57 = 57.9 %, mean len 2.14 |
+| `draft-mtp` n-max 3 | 21.1 | — |
+| `draft-mtp` n-max 4 | 19.5 | — |
+
+Prefill is flat across arms (178.7–180.1 t/s): llama.cpp pays **no MTP pp
+penalty** — the MTP draft context is created against the target context
+(`ctx_other = ctx_tgt`, shared KV + masked nextn embeddings) and its first
+draft after a partial accept reuses held-back verify hidden (`pending_h`)
+while feeding the correction token as the **next round's row 0** instead of a
+separate trunk pass. Gufo's B10 MTP by contrast keeps a separate draft cache
+(prefilled over the prompt, −6.4…−7.3 % pp) and pays a full serial
+`Step(correction)` row on every partial round. Gufo's MTP multiplier on its
+own base is currently larger (1.60× at tg64 vs 1.32× here) because acceptance
+is higher (70.5 % vs 57.9 %), yet absolute decode is **0.68×** (14.90 vs 21.7)
+— the gap composes of the plain-row gap (11.4 vs 16.4) plus the two structural
+costs above; both are retained as MTP levers in EXPERIMENTS.md.
+
 Offline `gufo bench` reference point (same P7 code, GPU-exclusive,
 repetitions=2): pp2048 **85.11 ± 0.06**, tg32 **11.13 ± 0.07**
 (`/tmp/opencode/glm5_bench2k.log`). With the 256-token prefill chunk
@@ -269,6 +300,49 @@ Quality: the strict `rocm_forward` golden replays greedy-token-exact on
 all five cases with `max |dlogit| = 0.0000` (no fixture refresh); the new
 `rocm_attention` fused contract holds NMSE ≤ 4.0e-8 vs the doubles oracle
 across three token/pool shapes.
+
+### B15 — Single-draft serving optimum promoted to default (2026-11-17)
+
+Offline draft-count scan on this HEAD binary (GPU-exclusive, greedy
+`gufo bench --n-prompt 2048 --n-gen 64 -r 1`,
+`/tmp/opencode/glm5_ksweep_<arm>.log`): plain **11.83**, default streak
+**15.65**, fixed k=1 **16.54**, k=2 14.57, k=3 12.90, k=4 10.36 — the
+ordering declines monotonically from k=1, mirroring llama.cpp's n2 > n3 >
+n4 shape under `draft-mtp` where its best is one below ours.
+
+Serve-protocol A/B (`gufo serve --context 131072`, `serving_bench`
+canonical prompt `--prompt-repeat 44` → server `prompt_tokens` 2107–2109,
+greedy max-tokens 32, concurrency 1, two samples, GPU-exclusive,
+`/tmp/opencode/glm5_servek_{adapt,k1}.json`): decode median **12.10 →
+13.76** (**+13.7 %**), acceptance 54.5 %/81 % (streak ramp) → **87.5 %**,
+worst inter-token 298 ms → 217 ms; rep-1 completion sha identical across
+arms. k=1 emits seed + (draft or correction) = 2 tokens every round, so
+extra correction rows stay rare while the verify row count stays at 2.
+
+Promoted without a switch: `Session::SetDraftLimits`
+(`staging/models/glm5_next/engine.cpp`) maps the shared CLI defaults
+(min ≤ 1, max ≥ the kMaxVerifyRows−1 cap) to k = 1; explicit
+`--draft-tokens 2..4` still opts into the streak ladder. Member defaults
+`draft_min_{1}/draft_max_{1}/draft_k_{1}`.
+
+Verification on the candidate binary (all GPU-exclusive): offline
+`-v` arms plain **12.12** / default **16.28** / explicit k2 **14.81** with
+`output_sha256` **bit-identical** `f985b939…` across all three (depth 0);
+at `-d 2048 -n 64` plain vs default **bit-identical** `ddae62cf…`;
+suite `glm5_next` **10/10** including the strict `rocm_forward` golden
+(77.7 s), `rocm_device_model` and `rocm_w8a8_dense`
+(`/tmp/opencode/gufo_bench_glm5ctest.log`,
+`/tmp/opencode/gufo_bench_glm5ctest2.log`).
+
+**Anchor note:** the B13-era tg64 value `1d79e532…` no longer reproduces
+on this HEAD's plain arm at `-d 2048` (now `ddae62cf…`). B14 gated the
+quality of the fused online-softmax attend through the strict
+`rocm_forward` golden and the attention contract without re-anchoring the
+tg64 scan sha, so the near-margin greedy tie moved at B14, not here —
+this session's diff touches only the speculative draft limits and cannot
+alter plain decode. New anchors: `ddae62cf…` (`-d 2048 -n 64`),
+`f985b939…` (`--n-prompt 2048 -n 64` depth 0), re-verified on the
+candidate with `-v`.
 
 ## Fixtures
 
