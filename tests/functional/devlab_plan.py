@@ -57,6 +57,8 @@ def select(paths, data, tier='pr', ar=False, benchmark=False, platform='linux'):
     for key, model in data['models'].items():
         if not set(model.get('suites', names)) <= set(names):
             raise ValueError('Unknown Devlab suite for ' + key)
+        if not set(model.get('settings', {})) <= set(manifest['configurations']):
+            raise ValueError('Unknown Devlab configuration for ' + key)
     selected, resolutions = {}, []
     for path in sorted(set(paths)):
         if PurePosixPath(path).is_absolute() or '..' in PurePosixPath(path).parts:
@@ -116,6 +118,13 @@ def select(paths, data, tier='pr', ar=False, benchmark=False, platform='linux'):
             planned = impact.plan(manifest, affected, profiles, result['suite_tier'])
             if 'suites' in model:
                 planned = curated(planned, set(model['suites']))
+            # A model overrides a configuration's server settings where the
+            # shared value does not create the condition a suite tests, such
+            # as a RAM budget sized for another model's checkpoints.
+            overrides = model.get('settings', {})
+            planned['groups'] = [{**group, 'settings': {**group['settings'],
+                                                        **overrides.get(group['configuration'], {})}}
+                                 for group in planned['groups']]
             for field in ('groups', 'deferred', 'release_only', 'out_of_scope', 'obligations'):
                 result[field].extend(planned[field])
         else:

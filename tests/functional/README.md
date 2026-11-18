@@ -345,6 +345,11 @@ Qwen protocol suites. DeepSeek's other suites still assume Flash-Next
 checkpoint sizes, Qwen token counts, or fixture wording the model copies into
 its answers.
 
+A model's `settings` map, keyed by configuration, overrides that
+configuration's server settings for the model. DeepSeek V4 runs `cache-bridge`
+with a 1 GiB `cache_ram_bytes`: its checkpoints are under 1/16 of the shared
+2 GiB budget, so that budget leaves the suite unqualified.
+
 Embedding runs its text, image, audio and video suites; TTS covers Base,
 CustomVoice and VoiceDesign. Image generation uses Qwen-Image-2.1-Turbo with the
 smoke suite on PRs; the full tier runs the full image suite on both Turbo and

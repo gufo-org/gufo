@@ -11,8 +11,9 @@ turns back, less one learning step, and answer as an uncached control does.
 
 Run this suite in its own invocation with a RAM budget that holds at most
 SNAPSHOT_RATIO conversation checkpoints, such as `--cache-ram-bytes 2147483648`
-for Qwen3.8-Flash-Next at the default context; a larger budget fails as
-unqualified rather than passing without pressure.
+for Qwen3.8-Flash-Next or 1073741824 for DeepSeek V4 Flash at the default
+context; a larger budget fails as unqualified rather than passing without
+pressure.
 """
 
 from copy import deepcopy

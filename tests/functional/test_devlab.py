@@ -79,6 +79,18 @@ class PlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             devlab_plan.select(['src/models/deepseek_v4_flash/engine.cpp'], unknown)
 
+    def test_model_settings_override_its_configurations(self):
+        # DeepSeek checkpoints are too small for the shared 2 GiB bridge budget.
+        groups = {(group['profile'], group['configuration']): group['settings']
+                  for group in self.plan('src/core/sampling.cpp')['groups']}
+        self.assertEqual(groups[('deepseek4/dspark', 'cache-pressure')]['cache_ram_bytes'], 1 << 30)
+        self.assertEqual(groups[('flash-next-q4/mtp', 'cache-pressure')]['cache_ram_bytes'], 2 << 30)
+        self.assertNotIn('cache_ram_bytes', groups[('deepseek4/dspark', 'standard')])
+        unknown = {**self.data, 'models': {**self.data['models'], 'deepseek4': {
+            **self.data['models']['deepseek4'], 'settings': {'no-such-configuration': {}}}}}
+        with self.assertRaises(ValueError):
+            devlab_plan.select(['src/models/deepseek_v4_flash/engine.cpp'], unknown)
+
     def models(self, *paths, **kwargs):
         return {item['id'] for item in self.plan(*paths, **kwargs)['models']}
 
