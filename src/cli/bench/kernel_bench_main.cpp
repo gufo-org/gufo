@@ -1043,7 +1043,7 @@ int Run(std::span<const char* const> args) {
   report.engine_revision = GUFO_REVISION;
   report.device_name = properties.name;
   report.gpu_architecture = properties.gcnArchName;
-  report.compute_units = properties.multiProcessorCount;
+  report.compute_units = inventory.gpu.compute_units;
   report.total_memory_bytes = properties.totalGlobalMem;
   report.options = {
       .warmup = options.warmup,

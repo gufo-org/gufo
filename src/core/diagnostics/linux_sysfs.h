@@ -6,6 +6,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace gufo::diagnostics {
@@ -42,6 +43,10 @@ struct SysfsGpuDevice {
   std::string vendor_id;
   std::string device_id;
   std::string power_mode;
+  /// Compute units from the matching KFD topology node, as `rocminfo` and
+  /// ROCr report them (`simd_count / simd_per_cu`); 0 when no node matches.
+  /// HIP's `multiProcessorCount` halves this in WGP mode, the RDNA default.
+  std::uint32_t compute_units{0};
   std::map<std::string, std::string> hwmon_sensors;
 };
 
@@ -54,6 +59,11 @@ public:
   [[nodiscard]] std::optional<HostCpuInfo> QueryCpuInfo() const;
   [[nodiscard]] std::optional<HostMemInfo> QueryMemInfo() const;
   [[nodiscard]] std::vector<SysfsGpuDevice> QueryDrmGpuDevices() const;
+
+  /// Compute units of the KFD topology node at PCI slot `pci_slot`
+  /// (`DDDD:BB:DD.F`), or nullopt when KFD exposes no matching GPU node.
+  [[nodiscard]] std::optional<std::uint32_t> QueryKfdComputeUnits(
+      std::string_view pci_slot) const;
 
   [[nodiscard]] std::optional<std::string> ReadFile(
       const std::filesystem::path& relative_or_absolute_path) const;

@@ -1,6 +1,7 @@
 #include "src/core/diagnostics/linux_sysfs.h"
 
 #include <charconv>
+#include <cstdio>
 #include <fstream>
 #include <set>
 #include <sstream>
@@ -146,6 +147,46 @@ std::optional<HostMemInfo> LinuxSysfs::QueryMemInfo() const {
   return mem_info;
 }
 
+std::optional<std::uint32_t> LinuxSysfs::QueryKfdComputeUnits(
+    std::string_view pci_slot) const {
+  // KFD encodes the PCI address as domain plus location_id = bus << 8 |
+  // device << 3 | function, the layout ROCr decodes for its BDF id.
+  unsigned domain = 0, bus = 0, device = 0, function = 0;
+  const std::string slot(pci_slot);
+  if (std::sscanf(slot.c_str(), "%x:%x:%x.%x", &domain, &bus, &device,
+                  &function) != 4) {
+    return std::nullopt;
+  }
+  const std::uint64_t location = (bus << 8) | (device << 3) | function;
+
+  const auto nodes = sys_root_ / "class" / "kfd" / "kfd" / "topology" / "nodes";
+  std::error_code ec;
+  for (const auto& node : std::filesystem::directory_iterator(nodes, ec)) {
+    const auto properties = ReadFile(node.path() / "properties");
+    if (!properties) {
+      continue;
+    }
+    std::map<std::string, std::uint64_t> values;
+    std::istringstream stream(*properties);
+    std::string key;
+    std::uint64_t value = 0;
+    while (stream >> key >> value) {
+      values[key] = value;
+    }
+    const auto field = [&](const char* name) {
+      const auto it = values.find(name);
+      return it == values.end() ? std::uint64_t{0} : it->second;
+    };
+    if (field("simd_count") == 0 || field("simd_per_cu") == 0 ||
+        field("location_id") != location || field("domain") != domain) {
+      continue;
+    }
+    return static_cast<std::uint32_t>(field("simd_count") /
+                                      field("simd_per_cu"));
+  }
+  return std::nullopt;
+}
+
 std::vector<SysfsGpuDevice> LinuxSysfs::QueryDrmGpuDevices() const {
   std::vector<SysfsGpuDevice> devices;
   const auto drm_path = sys_root_ / "class" / "drm";
@@ -190,6 +231,7 @@ std::vector<SysfsGpuDevice> LinuxSysfs::QueryDrmGpuDevices() const {
       }
     }
 
+    gpu.compute_units = QueryKfdComputeUnits(gpu.pci_slot).value_or(0);
     gpu.power_mode = ReadFile(dev_dir / "power_dpm_force_performance_level")
                          .value_or("unavailable (unreadable or not exposed)");
 
