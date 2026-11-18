@@ -59,5 +59,12 @@ struct ComponentCacheResources {
   // usable without a pool-capacity contract.
   std::size_t transfer_batch_size{1};
   std::size_t reassignment_batch_size{1};
+  // Optional: gives up to about the bytes asked for of committed backing
+  // whose payloads are all gone back to the host, and returns the bytes it
+  // released; nothing is evicted. The serving layer calls it only while no
+  // work runs, since releasing device-mapped pages waits for the device.
+  // Released backing comes back as captures need it, under the provider's
+  // usual growth rules.
+  std::function<std::size_t(std::size_t)> release_host;
 };
 }  // namespace gufo::cache

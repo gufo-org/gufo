@@ -124,6 +124,9 @@ public:
   /// it returns there instead of to the free pages.
   void SetHome(hipMemGenericAllocationHandle_t handle,
                const std::shared_ptr<PageLender>& lender);
+  /// Forgets the lender of a page about to be released to the driver, so a
+  /// later page with the same handle value never goes there.
+  void ClearHome(hipMemGenericAllocationHandle_t handle);
 
   [[nodiscard]] const hipMemAllocationProp& prop() const noexcept {
     return prop_;

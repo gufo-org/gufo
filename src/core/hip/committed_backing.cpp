@@ -7,6 +7,7 @@
 #include <atomic>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -80,6 +81,13 @@ struct BackingState {
   // Set once loading ends; from then on new pages come only from free host
   // memory, never from reclaim.
   std::atomic<bool> serving{};
+  // Units given back to the host under memory pressure (Surrender): state
+  // pages and pinned segments, under `growth`. Their blocks stay reserved,
+  // for pages in `lent`, until Grow() commits them again. Retired pages
+  // (a decommit that could not unmap) stay reserved for good.
+  std::vector<std::size_t> surrendered_pages;
+  std::unique_ptr<cache::ResourceReservation[]> surrendered_segments;
+  std::atomic<std::size_t> surrendered_bytes{};
   // A segment of pinned host pages has its own address; one of state pages
   // lives in the range.
   std::byte* SegmentData(std::size_t segment) const {
@@ -106,6 +114,10 @@ struct BackingState {
     const auto first = committed.load(std::memory_order_acquire);
     if (first != seen)
       return true;
+    // Units given back under pressure come back first, under the same rules
+    // as new ones.
+    if (const auto again = Recommit())
+      return *again;
     if (first == capacity)
       return false;
     const auto count = std::min(segment_blocks, capacity - first);
@@ -171,6 +183,132 @@ struct BackingState {
     committed.store(first + count, std::memory_order_release);
     return true;
   }
+  // Commits one surrendered unit again. Nullopt when none can come back
+  // under its own rule; false when the host refuses a pinned segment. A
+  // refused state page (free pages below the floor, as page cache leaves them
+  // while serving) leaves pinned segments and new growth to their own rules,
+  // as without state pages. Call with `growth` held.
+  std::optional<bool> Recommit() {
+    if (!surrendered_pages.empty()) {
+      const auto page = lendable->page_bytes();
+      const auto p = surrendered_pages.back();
+      if (admit_state_pages && admit_state_pages(page) &&
+          lendable->Commit(p, 1, !serving.load(std::memory_order_acquire))) {
+        surrendered_pages.pop_back();
+        surrendered_bytes.fetch_sub(page, std::memory_order_relaxed);
+        const std::lock_guard lock(lend_mutex);
+        lent[p] = {};
+        return true;
+      }
+    }
+    if (!surrendered_segments)
+      return std::nullopt;
+    const auto count = SegmentCount();
+    for (std::size_t i = count; i-- > 0;) {
+      if (!surrendered_segments[i])
+        continue;
+      const auto bytes = SegmentBytes(i);
+      if (admit_segment && !admit_segment(bytes))
+        return false;
+      std::size_t heap_before = 0, heap_after = 0;
+      if (keep_segment && !HeapFree(heap_before))
+        return false;
+      auto data = CommitPages(bytes);
+      if (!data)
+        return false;
+      if (keep_segment && !(HeapFree(heap_after) &&
+                            keep_segment(bytes, heap_before, heap_after))) {
+        ReleasePages(data, bytes);
+        return false;
+      }
+      segments[i] = data;
+      if (data.pin >= 0)
+        pinned_bytes.fetch_add(bytes, std::memory_order_relaxed);
+      surrendered_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+      surrendered_segments[i] = {};
+      return true;
+    }
+    return std::nullopt;
+  }
+  // Gives up to about `want` bytes of committed backing whose blocks are all
+  // free back to the host: whole state pages, then whole pinned segments,
+  // from the top. Nothing is evicted here. The caller makes sure no GPU work
+  // is in flight: unmapping a state page waits for the device.
+  std::size_t Surrender(std::size_t want) {
+    const std::lock_guard grow(growth);
+    std::size_t released = 0;
+    const auto count = committed.load(std::memory_order_acquire);
+    if (lendable && page_blocks) {
+      const auto page = lendable->page_bytes();
+      std::vector<std::size_t> chosen;
+      {
+        const std::lock_guard lock(lend_mutex);
+        for (std::size_t p = count / page_blocks;
+             p-- > 0 && chosen.size() * page < want;) {
+          if (lent[p] || segments[p * page_blocks / segment_blocks])
+            continue;  // Lent, surrendered, or pinned host pages.
+          const auto range =
+              std::span(blocks.get() + p * page_blocks, page_blocks);
+          if (cache::ResourceCharge::FindFreeBacking(range, page_blocks) != 0)
+            continue;
+          try {
+            lent[p] = cache::ResourceCharge::ReserveBacking(
+                range, cache::ResourceCategory::kBackingAssigned);
+          } catch (const std::bad_alloc&) {
+            continue;  // A capture took one of them meanwhile.
+          }
+          chosen.push_back(p);
+        }
+      }
+      if (!chosen.empty()) {
+        const auto result = lendable->Decommit(chosen);
+        std::vector<bool> kept(chosen.size(), true);
+        const auto mark = [&](std::size_t p) {
+          kept[std::ranges::find(chosen, p) - chosen.begin()] = false;
+        };
+        for (const auto p : result.released) {
+          mark(p);
+          surrendered_pages.push_back(p);
+          released += page;
+        }
+        for (const auto p : result.retired)
+          mark(p);
+        surrendered_bytes.fetch_add(result.released.size() * page,
+                                    std::memory_order_relaxed);
+        const std::lock_guard lock(lend_mutex);
+        for (std::size_t i = 0; i < chosen.size(); ++i)
+          if (kept[i])
+            lent[chosen[i]] = {};
+      }
+    }
+    for (std::size_t i = (count + segment_blocks - 1) / segment_blocks;
+         i-- > 0 && released < want;) {
+      if (!segments[i])
+        continue;
+      const auto first = i * segment_blocks;
+      const auto range = std::span(blocks.get() + first,
+                                   std::min(segment_blocks, count - first));
+      if (cache::ResourceCharge::FindFreeBacking(range, range.size()) != 0)
+        continue;
+      if (!surrendered_segments)
+        surrendered_segments = std::make_unique<cache::ResourceReservation[]>(
+            (capacity + segment_blocks - 1) / segment_blocks + 1);
+      try {
+        surrendered_segments[i] = cache::ResourceCharge::ReserveBacking(
+            range, cache::ResourceCategory::kBackingAssigned);
+      } catch (const std::bad_alloc&) {
+        continue;
+      }
+      const auto bytes = SegmentBytes(i);
+      if (segments[i].pin >= 0)
+        pinned_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+      ReleasePages(segments[i], bytes);
+      segments[i] = {};
+      released += bytes;
+      surrendered_bytes.fetch_add(bytes, std::memory_order_relaxed);
+    }
+    return released;
+  }
   // Up to `want` committed pages whose blocks are all free, reserved for a
   // session until Restore(). Evicts one retained checkpoint at a time while
   // too few are free. Runs on the state pool's thread.
@@ -235,7 +373,8 @@ struct BackingState {
     // Physical storage is freed before its original committed charges.
     if (segments)
       for (std::size_t i = 0; i < SegmentCount(); ++i)
-        ReleasePages(segments[i], SegmentBytes(i));
+        if (segments[i])  // Surrendered segments have no pages.
+          ReleasePages(segments[i], SegmentBytes(i));
   }
 };
 }  // namespace detail
@@ -561,6 +700,12 @@ std::size_t CommittedBackingPool::LentPages() const noexcept {
 }
 std::size_t CommittedBackingPool::LentPagesTotal() const noexcept {
   return state_->lent_total.load(std::memory_order_relaxed);
+}
+std::size_t CommittedBackingPool::Surrender(std::size_t bytes) {
+  return bytes ? state_->Surrender(bytes) : 0;
+}
+std::size_t CommittedBackingPool::SurrenderedBytes() const noexcept {
+  return state_->surrendered_bytes.load(std::memory_order_relaxed);
 }
 
 }  // namespace gufo::hip

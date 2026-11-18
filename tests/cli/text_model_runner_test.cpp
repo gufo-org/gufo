@@ -761,6 +761,31 @@ void TestSnapshotCeilingOverlapsCmaWithReserve() {
   Expect(SnapshotCeilingBytes(promised) == 0 && PinnableBytes(promised) == 0,
          "outstanding state beyond available saturates at zero");
 
+  // The shortfall below the reserve (#932): memory in use, not promises.
+  using gufo::ext::HostReserveShortfallBytes;
+  Expect(HostReserveShortfallBytes(none) == 0 &&
+             HostReserveShortfallBytes(kho) == 0,
+         "a host above its reserve has no shortfall");
+  HostMemorySample pressed{.available = 3 * gib};
+  Expect(HostReserveShortfallBytes(pressed) == reserve - 3 * gib,
+         "a host below its reserve is short by the difference");
+  pressed.cma_free = 2 * gib;
+  Expect(HostReserveShortfallBytes(pressed) == reserve - 3 * gib,
+         "free CMA within the reserve does not deepen it");
+  HostMemorySample kho_full{.available = 9 * gib, .cma_free = 8 * gib};
+  Expect(HostReserveShortfallBytes(kho_full) == 0,
+         "a full cache on a KHO host leaves its reserve in CMA pages");
+  kho_full.available = 7 * gib;
+  Expect(HostReserveShortfallBytes(kho_full) == 1 * gib,
+         "free CMA larger than the reserve is the reserve");
+  HostMemorySample owed{.available = 10 * gib, .outstanding = 30 * gib};
+  Expect(HostReserveShortfallBytes(owed) == 0,
+         "state promised to sessions is not memory in use");
+  HostMemorySample contained = kho;
+  contained.cgroup_available = 0;
+  Expect(HostReserveShortfallBytes(contained) == 0,
+         "a cgroup limit does not make a shortfall: state pages ignore it");
+
   // The refusal log names each figure and the ceiling.
   const auto text = gufo::ext::DescribeHostMemory(kho);
   Expect(text.find("host_available_bytes=" + std::to_string(40 * gib)) !=

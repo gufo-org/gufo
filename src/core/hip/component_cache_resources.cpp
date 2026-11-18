@@ -259,6 +259,9 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
         " backing=" + (backing->pool->Lends() ? "state_pages" : "host_pages") +
         " prepare_ms=" + std::to_string(prepare_ms));
   };
+  result->release_host = [backing](std::size_t bytes) -> std::size_t {
+    return backing->pool ? backing->pool->Surrender(bytes) : 0;
+  };
   result->set_shed = [backing](std::function<bool()> shed) {
     const std::lock_guard lock(backing->shed_mutex);
     backing->shed = std::move(shed);
