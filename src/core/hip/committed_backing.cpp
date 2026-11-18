@@ -68,6 +68,9 @@ struct BackingState {
   std::function<bool(std::size_t, std::size_t, std::size_t)> keep_segment;
   std::mutex growth;
   std::atomic<bool> growing_ahead{};
+  // Free bytes the ahead thread grows to; a later, larger reserve raises it
+  // while the thread runs.
+  std::atomic<std::size_t> ahead_target{};
   // State pages (see BackingPoolConfig::lendable). A lent page's blocks are
   // held by a reservation until the page comes back.
   std::shared_ptr<mem::LendableRange> lendable;
@@ -638,35 +641,54 @@ std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
   }
 }
 void CommittedBackingPool::GrowAhead(std::size_t reserve_bytes) {
-  const auto committed = state_->committed.load(std::memory_order_acquire);
-  if (!reserve_bytes || committed == state_->capacity ||
-      state_->growing_ahead.load(std::memory_order_acquire))
+  if (!reserve_bytes ||
+      state_->committed.load(std::memory_order_acquire) == state_->capacity)
     return;
-  const auto free_bytes =
-      state_->ledger->Snapshot().bytes[static_cast<std::size_t>(
-          cache::ResourceCategory::kBackingFree)];
+  const auto free_bytes = [](const detail::BackingState& state) {
+    return state.ledger->Snapshot()
+        .bytes[static_cast<std::size_t>(cache::ResourceCategory::kBackingFree)];
+  };
   const auto target_bytes =
       std::min(reserve_bytes, state_->capacity * state_->block_bytes);
-  if (free_bytes >= target_bytes)
-    return;
   const std::lock_guard lock(ahead_mutex_);
-  if (state_->growing_ahead.exchange(true))
+  if (state_->growing_ahead.load()) {
+    // A running thread follows the largest reserve asked of it. It rechecks
+    // the target after clearing its flag, so either it sees this raise or
+    // the flag reads clear here and a new thread starts.
+    auto current = state_->ahead_target.load();
+    while (current < target_bytes &&
+           !state_->ahead_target.compare_exchange_weak(current, target_bytes)) {
+    }
+    if (state_->growing_ahead.load())
+      return;
+  }
+  if (free_bytes(*state_) >= target_bytes)
     return;
+  state_->ahead_target.store(target_bytes);
+  state_->growing_ahead.store(true);
   if (ahead_.joinable())
     ahead_.join();
   try {
-    ahead_ = std::jthread([state = state_, committed, target_bytes] {
-      try {
-        auto seen = committed;
-        while (state->ledger->Snapshot().bytes[static_cast<std::size_t>(
-                   cache::ResourceCategory::kBackingFree)] < target_bytes) {
-          if (!state->Grow(seen))
-            break;
-          seen = state->committed.load(std::memory_order_acquire);
+    ahead_ = std::jthread([state = state_, free_bytes] {
+      for (;;) {
+        bool exhausted = false;
+        try {
+          auto seen = state->committed.load(std::memory_order_acquire);
+          while (free_bytes(*state) < state->ahead_target.load()) {
+            if (!state->Grow(seen)) {
+              exhausted = true;
+              break;
+            }
+            seen = state->committed.load(std::memory_order_acquire);
+          }
+        } catch (...) {
+          exhausted = true;
         }
-      } catch (...) {
+        state->growing_ahead.store(false);
+        if (exhausted || free_bytes(*state) >= state->ahead_target.load() ||
+            state->growing_ahead.exchange(true))
+          return;
       }
-      state->growing_ahead.store(false);
     });
   } catch (...) {
     state_->growing_ahead.store(false);

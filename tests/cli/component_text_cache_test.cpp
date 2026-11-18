@@ -1410,6 +1410,50 @@ void BackingPreparationFollowsCaptures() {
   }
 }
 
+void DiskRestorePreparesCaptureBacking() {
+  // A disk-restored history shares no RAM chunks, so the capture after the
+  // restore needs backing for the whole checkpoint. The cache asks for it
+  // before the restore starts, so the provider can commit it off the
+  // serving thread.
+  class CaptureRunner final : public Runner {
+  public:
+    mutable std::vector<std::size_t> prepared;
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t ram) const override {
+      auto resources = Runner::CreateComponentCacheResources(ledger, ram);
+      resources->prepare_capture = [this](std::size_t bytes) {
+        prepared.push_back(bytes);
+      };
+      return resources;
+    }
+  };
+  const TemporaryDirectory temp("gufo-component-prepare-capture-test");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .staging_capacity_bytes = 1 << 12,
+                                        .min_checkpoint_step_tokens = 0};
+  auto runner = std::make_shared<CaptureRunner>();
+  std::vector<TextRunnerToken> prompt(96);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  {
+    TextRunnerPool pool(runner, 1, disk);
+    auto request = pool.Acquire(prompt);
+    while (!request.Prefill(64).decode_ready) {
+    }
+    (void)request.Commit();
+    auto cached = pool.Acquire(prompt);
+    assert(!cached.cache_disk_hit());
+    cached.Invalidate();
+    assert(runner->prepared.empty());
+  }
+  TextRunnerPool restarted(runner, 1, disk);
+  auto restored = restarted.Acquire(prompt);
+  assert(restored.cache_disk_hit() && restored.cached_prompt_tokens() > 0);
+  assert(runner->prepared.size() == 1 && runner->prepared.front() != 0 &&
+         runner->prepared.front() == restored.cache_restore_bytes());
+  restored.Invalidate();
+}
+
 void PartialFrontierDoesNotServeAnEqualPrompt() {
   // A prefill cancelled between steps keeps a frontier with no next token. A
   // prompt ending exactly there must recompute its tail instead of decoding
@@ -4546,6 +4590,7 @@ int main() {
   ShortSharedSystemPromptIsLearned();
   SharedPeerReusesTheCurrentStableCapture();
   BackingPreparationFollowsCaptures();
+  DiskRestorePreparesCaptureBacking();
   PrefillLookaheadReachesTheNextFrontier();
   PrefillStepsSeeTheWholePromptEnd();
   PartialFrontierDoesNotServeAnEqualPrompt();

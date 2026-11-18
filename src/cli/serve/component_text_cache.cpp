@@ -548,6 +548,7 @@ struct ComponentTextCache::Impl {
         } else {
           // No pool exists, so a payload allocation must fail, not crash.
           resources->prepare_prefill = nullptr;
+          resources->prepare_capture = nullptr;
           resources->can_capture = nullptr;
           resources->allocate =
               [](const cache::PayloadRequest&) -> ComponentCaptureBuffer {
@@ -1797,6 +1798,12 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           clean = false;
           cache::TransferTiming timing;
           const auto id = candidate.durable->Manifest().checkpoint;
+          // The restored history shares no RAM chunks, so its next capture
+          // needs backing for the whole checkpoint: commit it off this
+          // thread while the restore reads.
+          if (impl_->resources->prepare_capture)
+            impl_->resources->prepare_capture(
+                PayloadBytes(candidate.durable->Manifest()));
           restored = impl_->streaming->Restore(
               id, impl_->digest, *impl_->resources->adapter,
               request.slot.Execution(), timing, {}, {},
@@ -2013,6 +2020,10 @@ std::shared_ptr<const std::atomic<bool>> ComponentTextCache::WarmDisk(
                      " floor_bytes=" + std::to_string(floor));
     return nullptr;
   }
+  // The restore after this read is captured in full: commit its backing
+  // while the request waits, not in its capture beside running decodes.
+  if (impl_->resources->prepare_capture)
+    impl_->resources->prepare_capture(bytes);
   auto warmup = std::make_unique<Impl::Warmup>();
   warmup->id = id;
   warmup->bytes = bytes;
