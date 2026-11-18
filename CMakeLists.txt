@@ -335,6 +335,14 @@ if (ENGINE_ENABLE_HIP)
     add_executable(cache_streaming_bench tests/cache/streaming_bench.cpp)
     target_link_libraries(cache_streaming_bench PRIVATE gufo_cache_hip)
   endif()
+  # Experimental: streams mixture-of-experts weights from files into a bounded
+  # device cache for extensions (include/gufo/ext/experimental/expert_stream.hpp).
+  add_library(gufo_expert_stream_hip STATIC
+    src/core/hip/expert_stream/store.cpp)
+  target_compile_definitions(gufo_expert_stream_hip PRIVATE _GNU_SOURCE
+    ENGINE_ENABLE_HIP=1)
+  target_link_libraries(gufo_expert_stream_hip PUBLIC gufo_hip_host
+    gufo_platform gufo_logging hip::host Threads::Threads)
 endif()
 
 # json::parse (src/core/json.hpp), which builds its values from the events of
@@ -457,7 +465,7 @@ if (ENGINE_ENABLE_HIP)
     ${ROCPRIM_INCLUDE_DIR})
   # `hip_utils.hpp` in the public surface includes hipBLAS.
   target_link_libraries(gufo_ext_hip INTERFACE $<LINK_ONLY:gufo_hip_host>
-    hip::host roc::hipblas)
+    $<LINK_ONLY:gufo_expert_stream_hip> hip::host roc::hipblas)
 else()
   target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache>)
 endif()
@@ -1927,6 +1935,12 @@ endfunction()
     target_link_libraries(hip_weight_upload_test PRIVATE gufo_core)
     add_test(NAME hip_weight_upload_test COMMAND hip_weight_upload_test)
     set_tests_properties(hip_weight_upload_test PROPERTIES LABELS "hip;gpu;gfx1151")
+
+    add_executable(expert_stream_test tests/core/expert_stream_test.cpp)
+    target_link_libraries(expert_stream_test PRIVATE gufo_expert_stream_hip)
+    add_test(NAME expert_stream_test COMMAND expert_stream_test)
+    set_tests_properties(expert_stream_test PROPERTIES
+      LABELS "hip;gpu;gfx1151" SKIP_RETURN_CODE 77)
 
     add_executable(hipblaslt_runtime_cache_test
       tests/kernels/hipblaslt_runtime_cache_test.cpp)

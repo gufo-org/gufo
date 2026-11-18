@@ -1,0 +1,218 @@
+#pragma once
+
+/* Streams a mixture-of-experts model's routed experts from files into a
+ * bounded device cache. It knows nothing about the model: the caller
+ * describes where each expert's pieces are on disk (Layout) and how the
+ * cache should behave (Policy), routes each MoE layer with Prepare, and
+ * passes the returned per-piece tables to its kernels. Model-specific
+ * knowledge (rankings, memory headroom, file discovery) stays with the
+ * caller. */
+
+#include <hip/hip_runtime_api.h>
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace gufo::expert_stream {
+
+/* Most pieces per expert: gate/up/down are three, a fused gate_up two, and a
+ * format storing several tensors per expert back to back may use one. */
+inline constexpr uint32_t kMaxPieces = 16;
+
+/* One piece of every expert of a layer: expert e's bytes are
+ * [offset + e * bytes, offset + (e + 1) * bytes) of fd, as for a GGUF expert
+ * tensor whose expert dimension is outermost. The store opens its own
+ * O_DIRECT descriptor through /proc/self/fd and never closes fd. */
+struct Piece {
+  int fd = -1;
+  uint64_t offset = 0;
+  uint64_t bytes = 0;  // one expert
+};
+
+/* The streamed experts. Layers are numbered in evaluation order: the
+ * prediction window advances from a layer to the next and wraps to 0. A cache
+ * slot holds an expert's pieces back to back in piece order. */
+struct Layout {
+  uint32_t experts = 0;  // routed experts per layer
+  uint32_t top_k = 0;    // route rows per token
+  uint32_t pieces = 0;   // pieces per expert, at most kMaxPieces
+  /* Most tokens one Prepare call routes: batches up to this size split their
+   * hit and miss rows (Overlap). */
+  uint32_t max_batch_tokens = 0;
+  /* Entries in each layer's table (Prepare): 0 for `experts`. A larger
+   * width keeps a fixed table shape across builds with fewer experts; the
+   * entries past `experts` are null. */
+  uint32_t table_experts = 0;
+  std::vector<std::vector<Piece>> layers;  // [layer][piece]
+};
+
+/* How the cache sizes itself and evicts. The defaults are the values
+ * measured on DeepSeek V4.1 Flash (the deepseek41 extension). */
+struct Policy {
+  /* Bounds the cache when nonzero; zero sizes it from available memory. */
+  uint64_t cache_limit_bytes = 0;
+  /* Free memory the cache leaves for allocations made after it, until
+   * SetReserve replaces it. */
+  uint64_t reserve_bytes = 4ull << 30;
+  /* Free memory below which the cache stops growing once SetReserve ran. */
+  uint64_t live_floor_bytes = 1ull << 30;
+  /* Uses decay with this half-life, in tokens of the layer's clock; a
+   * Prepare counts at most use_cap uses per expert and advances the clock by
+   * at most clock_rows tokens. The victim is the slot with the largest
+   * age / 2^class, class = floor(log2(uses)) up to max_class. */
+  double use_half_life = 2048.0;
+  uint32_t use_cap = 4;
+  double max_class = 7.0;
+  uint32_t clock_rows = 16;
+  /* Seeded experts start with seed_uses * min(8, log2(1 + count)) uses. */
+  double seed_uses = 0.5;
+  /* Once full, a batch larger than recent_rows tokens admits only the
+   * experts its last recent_rows tokens route and those it routes at least
+   * max(4, tokens / 32) times. */
+  uint32_t recent_rows = 16;
+  /* Batches of at least sweep_tokens adopt a prefill-scale prefetch. */
+  uint32_t sweep_tokens = 1024;
+  uint32_t demand_stage_rows = 64;    // expert rows the demand stage holds
+  uint32_t prefetch_stage_rows = 96;  // rows of the two prefetch halves
+  /* A binary routing trace (see Store::Tracing) when nonempty. */
+  std::string trace_path;
+  /* Prefix of log lines and errors. */
+  std::string log_tag = "experts";
+};
+
+struct Stats {
+  uint64_t uses = 0;
+  uint64_t hits = 0;
+  uint64_t bytes_read = 0;
+  uint64_t tokens = 0;
+  uint64_t stall_ns = 0;
+  uint64_t route_wait_ns = 0;  // part of stall_ns: waiting for the routes
+  uint64_t read_wait_ns = 0;   // part of stall_ns: waiting for demand reads
+  uint64_t cache_bytes = 0;
+  uint64_t prefetch_bytes = 0;          // staged by background prefetch jobs
+  uint64_t prefetch_dropped_bytes = 0;  // prefetched bytes no prepare consumed
+};
+
+/* What Prepare stages for the layer, for work overlapped with the reads. The
+ * id rows keep their route positions: hit_ids holds the resident experts
+ * with misses as -1, miss_ids the read experts with hits as -1, so a launch
+ * over one array zeroes exactly the rows the other launch fills. table[p]
+ * is the layer's device [experts] array of piece p's weight bases (a cache
+ * slot or the stage row a read just filled), so kernels read cached experts
+ * without a staging copy. */
+struct Overlap {
+  uint32_t layer = 0;
+  uint32_t rows = 0;                  // n_tokens * top_k route rows
+  uint32_t miss_rows = 0;             // rows served by reads this call
+  const int32_t* hit_ids = nullptr;   // device rows; null unless the batch both
+                                      // hits and misses within the split size
+  const int32_t* miss_ids = nullptr;  // as hit_ids
+  const void* const* table = nullptr;  // [pieces] device tables
+};
+
+/* An expert to seed, most wanted first; count weighs its starting uses. */
+struct Ranked {
+  uint32_t layer;
+  uint32_t expert;
+  uint64_t count;
+};
+
+/* Available unified host memory, including reclaimable file cache, without
+ * free CMA and within the process's cgroup limits. */
+uint64_t AvailableMemory();
+
+class Store {
+public:
+  struct Impl;
+
+  /* Null (with a message) when the layout is invalid or a buffer, thread or
+   * stream cannot be created. */
+  static std::unique_ptr<Store> Create(const Layout& layout,
+                                       const Policy& policy);
+  ~Store();
+  Store(const Store&) = delete;
+  Store& operator=(const Store&) = delete;
+
+  /* Splits every piece read between its file and a tails file holding the
+   * end of each piece, normally on a second drive, so both read at once. Call
+   * before seeding. The file must match the layout's pieces byte for byte;
+   * false (with a message) leaves reads unchanged. */
+  bool AttachTails(const char* path);
+
+  /* Re-sizes the cache from the memory free now, leaving reserve_bytes that
+   * it never grows into, after allocating the prefetch stage: frees its
+   * newest chunks, keeping the experts eviction ranks highest, when it is
+   * over the new limit. Call at startup once everything else long-lived is
+   * allocated, then seed again to fill any room left. A nonzero
+   * cache_limit_bytes still bounds the pool. False when the stage or the
+   * shrink failed. */
+  bool SetReserve(uint64_t reserve_bytes);
+
+  /* Primes the cache: `ranked` first, then every expert it leaves out,
+   * interleaved across layers, as far as the budget reaches. `source` names
+   * the ranking in the log. Startup work: it does not count as inference in
+   * the statistics. */
+  bool Seed(std::vector<Ranked> ranked, const char* source);
+
+  /* Routes are device [n_tokens][top_k]; -1 marks a dropped row. On success
+   * tables[0..pieces) hold the layer's device tables, valid until the next
+   * call. Calls are serialized. With routes_ready, an event recorded on the
+   * null stream once the routes are written, the routes are read without
+   * waiting for work queued after it; that work must not touch the expert
+   * stage, slots or tables. */
+  bool Prepare(uint32_t layer, const int32_t* routes, uint32_t n_tokens,
+               const void** tables,
+               bool (*overlap)(void*, const Overlap*) = nullptr,
+               void* overlap_context = nullptr,
+               hipEvent_t routes_ready = nullptr);
+
+  /* Queue a background read of the given uncached experts of `layer` into
+   * the stage set the layer's next Prepare consumes, without displacing
+   * anything. The reads run only while no demand phase does; the next
+   * Prepare for the layer adopts what is still pending, and any other drops
+   * it. `wide` marks a prefill-scale expert set, which only a batch of at
+   * least sweep_tokens adopts. Best effort: false when the layer is not the
+   * next Prepare's target, has no uncached listed experts, or the job was
+   * refused. */
+  bool Prefetch(uint32_t layer, const int32_t* experts, uint32_t count,
+                bool wide = false);
+
+  /* Records a router prediction whose ids `done` signals in caller-owned
+   * pinned memory; a store thread submits the prefetch when the event lands.
+   * False when the record was refused (best effort by design). */
+  bool Predict(uint32_t layer, hipEvent_t done, const int32_t* ids,
+               uint32_t count, bool wide);
+
+  /* Reopens the prediction window at `layer`, the next Prepare's target, when
+   * an evaluation starts somewhere other than after the last prepared layer.
+   * Every kernel of the previous evaluation's layers must be ordered before
+   * that Prepare's route read. */
+  void Expect(uint32_t layer);
+
+  /* Waits until every recorded prediction has been submitted, so the ids and
+   * event may be released. */
+  void PredictFlush();
+
+  /* Policy::trace_path writes a binary routing trace (the seeded cache, then
+   * each Prepare's routes, hits and timing) for offline replay, such as the
+   * deepseek41 extension's tools/ds41/prefetch_sim.py.
+   * Callers add router predictions for later layers with TracePrediction
+   * once the target layer's Prepare returned. Tracing is a measurement mode:
+   * callers should not predict while it runs. */
+  bool Tracing() const;
+  void TracePrediction(uint32_t layer, uint32_t lead, const int32_t* ids,
+                       uint32_t n_tokens, uint32_t k);
+
+  /* True when no background prefetch work is queued or running. */
+  bool PrefetchIdle() const;
+  Stats GetStats() const;
+  void Log() const;
+
+private:
+  explicit Store(std::unique_ptr<Impl> impl);
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace gufo::expert_stream
