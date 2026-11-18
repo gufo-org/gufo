@@ -98,7 +98,7 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
             return (result["text"], result["tools"], result["finish"],
                     bool(result["reasoning"].strip()))
 
-        history = []
+        history, astray = [], []
         previous_total = previous_reused = 0
         for turn in range(4):
             messages.append({"role": "user", "content": f"Turn {turn}.\n" +
@@ -110,9 +110,13 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
             before_last = log_offset(server_log)
             result = chat(f"turn_{turn}", body)
             total, reused, prefilled = work(result)
-            assert result["text"].strip() == "BETA" and not result["tools"] \
-                and result["finish"] == "stop", result
+            assert not result["tools"] and result["finish"] == "stop", result
             assert bool(result["reasoning"].strip()) == thinking, result
+            # DeepSeek can miss the answer uncached too (third drop_reasoning
+            # turn: "responseBETA" in unclosed reasoning, #670). Such a turn
+            # gets its own cold control and must match it.
+            if result["text"].strip() != "BETA":
+                astray.append(turn)
             if turn == 0:
                 assert total >= 2048 and reused == 0 and prefilled == total, result
             else:
@@ -144,7 +148,9 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
         # Measure the whole growing history before cold controls can supply
         # missing checkpoints and accidentally hide a frozen-cache failure.
         # The deepest turn's control renders every earlier turn too.
-        for turn, (body, warm) in list(enumerate(history))[-1:]:
+        for turn, (body, warm) in enumerate(history):
+            if turn not in astray and turn != len(history) - 1:
+                continue
             body["extra_body"]["cache_prompt"] = False
             cold = chat(f"cold_control_{turn}", body)
             total = warm["usage"]["prompt_tokens"]

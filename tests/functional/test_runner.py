@@ -744,7 +744,7 @@ class FunctionalRunnerTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.run_cache_rotation(contaminated=True)
 
-    def run_cache_growth(self, pinned=False, missing_reasoning=False):
+    def run_cache_growth(self, pinned=False, missing_reasoning=False, astray=None):
         requests, checks, previous = [], {}, {}
 
         def chat_result(client, body):
@@ -763,7 +763,11 @@ class FunctionalRunnerTest(unittest.TestCase):
             thinking = body["extra_body"].get("thinking", {}).get("type")
             enabled = (thinking == "enabled" if thinking is not None else
                        body.get("reasoning_effort", "low") != "none")
-            return {"text": "BETA", "reasoning": "The code word is BETA."
+            # astray(turn, cold) gives the text of a turn that misses the answer.
+            turn = (len(body["messages"]) - 2) // 2
+            cold = body["extra_body"].get("cache_prompt") is False
+            text = astray(turn, cold) if astray and "drop_reasoning" in label else "BETA"
+            return {"text": text, "reasoning": "The code word is BETA."
                     if enabled and not missing_reasoning else "",
                     "tools": [], "finish": "stop", "usage": {
                         "prompt_tokens": total, "cached_tokens": cached,
@@ -824,6 +828,19 @@ class FunctionalRunnerTest(unittest.TestCase):
                 if message["role"] == "assistant":
                     self.assertEqual("reasoning_content" in message,
                                      replay in ("keep_reasoning", "discard_reasoning"))
+
+    def test_cache_growth_judges_a_turn_that_misses_the_answer_by_its_cold_control(self):
+        # DeepSeek answers its third drop_reasoning turn uncached the same way (#670).
+        requests, checks = self.run_cache_growth(
+            astray=lambda turn, cold: "" if turn == 2 else "BETA")
+        controls = [name for name in checks if name.startswith("cache_growth_drop_reasoning_cold")]
+        self.assertEqual(controls, ["cache_growth_drop_reasoning_cold_control_2",
+                                    "cache_growth_drop_reasoning_cold_control_3"])
+        # Only the deepest turn of the other scenarios gets a control.
+        self.assertEqual([name for name in checks if "keep_reasoning_cold" in name],
+                         ["cache_growth_keep_reasoning_cold_control_3"])
+        with self.assertRaises(AssertionError):
+            self.run_cache_growth(astray=lambda turn, cold: "BETA" if cold or turn != 2 else "")
 
     def test_cache_growth_rejects_a_frozen_checkpoint(self):
         with self.assertRaisesRegex(AssertionError, "cache did not advance"):
