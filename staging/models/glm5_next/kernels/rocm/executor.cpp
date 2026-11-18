@@ -827,19 +827,22 @@ void Executor::Ffn(const DeviceLayer& l, std::uint32_t il, const float* x,
                         IsRoutedTier(OfType(l.ffn_gate_exps.type)) &&
                         IsRoutedTier(OfType(l.ffn_up_exps.type)) &&
                         IsRoutedTier(OfType(l.ffn_down_exps.type));
-  // Over low-bit IQ stacks the wide chunk additionally takes the WMMA
+  // Over low-bit stacks the wide chunk additionally takes the WMMA
   // tensor-core tier: one launch dots the 32-slot expert tiles against an
-  // F16 copy of the activations. IQ1_M/IQ2_XXS gate/up replace both gate/up
-  // GEMVs and the clamp pass (fused swiglu); IQ3_XXS down replaces the down
-  // GEMV on the F16 copy of moe_inter. Tensor-core accumulation order
-  // differs from the scalar dot, so tier quality is held by the routed_wmma
-  // contract, not bit-equality.
+  // F16 copy of the activations. IQ1_M/IQ2_XXS/Q2_K gate/up replace both
+  // gate/up GEMVs and the clamp pass (fused swiglu); IQ3_XXS/Q3_K down
+  // replaces the down GEMV on the F16 copy of moe_inter (the last block and
+  // the nextn draft layer are the Q2_K/Q3_K stack in the UD artifacts).
+  // Tensor-core accumulation order differs from the scalar dot, so tier
+  // quality is held by the routed_wmma contract, not bit-equality.
   const GemvType gu_type = OfType(l.ffn_gate_exps.type);
   const bool gu_wmma =
       bucketed && gu_type == OfType(l.ffn_up_exps.type) &&
-      (gu_type == GemvType::kIQ1_M || gu_type == GemvType::kIQ2_XXS);
+      (gu_type == GemvType::kIQ1_M || gu_type == GemvType::kIQ2_XXS ||
+       gu_type == GemvType::kQ2_K);
   const bool down_wmma =
-      bucketed && OfType(l.ffn_down_exps.type) == GemvType::kIQ3_XXS;
+      bucketed && (OfType(l.ffn_down_exps.type) == GemvType::kIQ3_XXS ||
+                   OfType(l.ffn_down_exps.type) == GemvType::kQ3_K);
   const bool tier_wide = gu_wmma || down_wmma;
   const float clamp = c.SwigluClampExp(il);
   if (bucketed) {

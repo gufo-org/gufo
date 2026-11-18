@@ -653,3 +653,24 @@ serve, tails 204/221 vs ~140 ms → **k=1 stays default**; deferral ships as
 the tail/row-count win, not a median lever. Remaining from the list: lever
 3 (draft-side pp penalty via a shared target context) and the base-row
 ladder.
+
+**Update (2026-11-18) — lever 3 done, and its premise was wrong
+(BENCHMARKS.md B17).** Stream-synced per-call probes decomposed the draft
+prefill: the draft **DSA runs at target parity (90.8 vs 90.5 µs/row)** —
+priming the draft caches over all prompt rows was never the penalty — while
+the draft **FFN cost 210.5 µs/row against the target's 39.4**: the UD
+artifact quantizes the last block and the nextn stack inside it as
+Q2_K gate/up + Q3_K down, types the WMMA tier did not enumerate, so every
+draft row fell through to the scalar bucketed GEMV. Extending the tier
+(Q2_K/Q3_K `DecodeFragmentHalf` specialisations, contract-covered at NMSE
+1.3e-5/3.4e-8) took the draft FFN to 25.6 µs/row (**8.2×**) and the paired
+penalty −7.8 % → **−3.9 %** at pp2048 @ d4096 and −8.3 % → **−1.5 %** at
+pp8192 @ d16384, with the `f985b939…`/`ddae62cf…` greedy anchors
+bit-identical. A `kMtpRows = kChunk` batch was tried and dropped: the
+probes showed FFN/DSA cost scales with rows, not weight passes, so
+fewer-but-wider draft calls measured neutral. What remains of the penalty
+(mtp still 1.5–3.9 % behind plain, growing with depth) is the draft's
+inherent extra embedding/projection rows plus its share of DSA priming —
+a shared target context (llama.cpp `ctx_other`) would need a lossy
+architecture change and is now worth ≲ 2 %, not 8. Remaining lever: the
+base-row ladder.

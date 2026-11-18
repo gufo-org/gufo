@@ -27,6 +27,10 @@ constexpr int kIq2XxsBytes = 66;
 constexpr int kIq2XxsStride = 68;
 constexpr int kIq3XxsBytes = 98;
 constexpr int kIq3XxsStride = 100;
+constexpr int kQ2KBytes = 84;
+constexpr int kQ2KStride = 84;
+constexpr int kQ3KBytes = 110;
+constexpr int kQ3KStride = 116;
 
 __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
@@ -193,6 +197,61 @@ __device__ __forceinline__ v16h DecodeFragmentHalf<kIq3XxsBytes>(
           __float2half(db * static_cast<float>((g2 >> (8 * j)) & 0xFFU) *
                        IqSign(signs, j + 4));
     }
+  }
+  return frag;
+}
+
+// Q2_K: scales[16], qs[64], d at 80, dmin at 82 (core DequantizeQ2_K). The
+// 16-element sub-block of a fragment is exactly one scale byte: the code
+// shift is 2 * ((sb & 7) >> 1) (the 3-bit sub-block within the 128-element
+// half), the code bytes sit at (k0 >= 128 ? 32 : 0) + 16 * (sb & 1) + l.
+template <>
+__device__ __forceinline__ v16h DecodeFragmentHalf<kQ2KBytes>(
+    const std::uint8_t* __restrict__ blk, int k0) {
+  const float d = F16At(blk + 80);
+  const float dmin = F16At(blk + 82);
+  const int sb = k0 / 16;  // one 16-element sub-block per fragment
+  const std::uint8_t packed = blk[sb];
+  const float dl = d * static_cast<float>(packed & 0x0FU);
+  const float ml = dmin * static_cast<float>(packed >> 4);
+  const int qbase = 16 + ((k0 >= 128 ? 32 : 0) | ((sb & 1) << 4));
+  const int shift = 2 * ((sb & 7) >> 1);
+  v16h frag;
+  auto* halves = reinterpret_cast<__half*>(&frag);
+#pragma unroll
+  for (int j = 0; j < 16; ++j) {
+    const int qv = (blk[qbase + j] >> shift) & 3;
+    halves[j] = __float2half(dl * static_cast<float>(qv) - ml);
+  }
+  return frag;
+}
+
+// Q3_K: hmask[32], qs[64], scales[12], d at 108 (core Q3Value and
+// UnpackQ3Scales). Every 16-element fragment sits inside one scale_pair of
+// one half, so its 7-bit scale (packed pair t) is constant across the row.
+template <>
+__device__ __forceinline__ v16h DecodeFragmentHalf<kQ3KBytes>(
+    const std::uint8_t* __restrict__ blk, int k0) {
+  const float d = F16At(blk + 108);
+  const std::uint8_t* s = blk + 96;
+  const int half = k0 >= 128 ? 1 : 0;
+  const int within = k0 % 128;
+  const int scale_pair = within / 32;
+  const int t = half * 8 + scale_pair * 2 + ((within % 32) / 16);
+  const int low = t < 8 ? (s[t] & 0x0F) : ((s[t - 8] >> 4) & 0x0F);
+  const int high = (s[8 + (t % 4)] >> (2 * (t / 4))) & 0x03;
+  const float scale = static_cast<float>((low | (high << 4)) - 32);
+  const int mask = 1 << ((half * 4) + scale_pair);
+  const std::uint8_t* qs = blk + 32 + half * 32;
+  const int shift = 2 * scale_pair;
+  v16h frag;
+  auto* halves = reinterpret_cast<__half*>(&frag);
+#pragma unroll
+  for (int j = 0; j < 16; ++j) {
+    const int lane = (k0 + j) % 32;
+    const int lowbits = (qs[lane] >> shift) & 3;
+    const int quant = lowbits - ((blk[lane] & mask) != 0 ? 0 : 4);
+    halves[j] = __float2half(d * scale * static_cast<float>(quant));
   }
   return frag;
 }
@@ -441,6 +500,11 @@ void RoutedGateUpWmma(GemvType type, const void* gate, const void* up,
           g, u, expert_stride, stack_bytes, x, x_stride, tiles, pad_bounds,
           rows_slot, slots_per_row, rows, cols, clamp, out);
       return;
+    case GemvType::kQ2_K:
+      RoutedWmmaKernel<kQ2KBytes, kQ2KStride, 2><<<grid, kThreads, 0, stream>>>(
+          g, u, expert_stride, stack_bytes, x, x_stride, tiles, pad_bounds,
+          rows_slot, slots_per_row, rows, cols, clamp, out);
+      return;
     default:
       break;
   }
@@ -458,6 +522,12 @@ void RoutedDownWmma(GemvType type, const void* down, std::size_t expert_stride,
   if (type == GemvType::kIQ3_XXS) {
     RoutedWmmaKernel<kIq3XxsBytes, kIq3XxsStride, 1><<<grid, kThreads, 0,
                                                        stream>>>(
+        d, nullptr, expert_stride, stack_bytes, x, x_stride, tiles, pad_bounds,
+        rows_slot, 1U, rows, cols, 0.0F, out);
+    return;
+  }
+  if (type == GemvType::kQ3_K) {
+    RoutedWmmaKernel<kQ3KBytes, kQ3KStride, 1><<<grid, kThreads, 0, stream>>>(
         d, nullptr, expert_stride, stack_bytes, x, x_stride, tiles, pad_bounds,
         rows_slot, 1U, rows, cols, 0.0F, out);
     return;

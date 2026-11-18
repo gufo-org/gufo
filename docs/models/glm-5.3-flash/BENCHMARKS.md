@@ -377,6 +377,45 @@ on this candidate (serve, fixed, 3 samples each): k=2 12.97 t/s / max gap
 204 ms, k=3 12.23 / 221 ms — **k=1 remains the shipped default**
 (`/tmp/opencode/glm5_pendsweep_k{2,3}.json`).
 
+### B17 — WMMA tier extended to the Q2_K/Q3_K draft stack (2026-11-18)
+
+Lever 3 (EXPERIMENTS.md "MTP levers", item 3): matched-depth pp showed
+the MTP arm −7.8 % behind plain at pp2048 @ d4096 and −8.3 % at pp8192 @
+d16384. Per-call stream-synced probes split the draft's prefill cost:
+the draft DSA sits at 90.8 µs/row (target 90.5 — priming was never the
+penalty), but the draft FFN ran **210.5 µs/row against the target's 39.4
+µs/row bucketed WMMA calls**. Cause: the UD artifact quantizes the last
+block and the nextn stack inside it as Q2_K gate/up + Q3_K down
+(blocks 3–44 are IQ1_M/IQ2_XXS + IQ3_XXS), and the WMMA tier enumerated
+only the three IQ types — the draft FFN fell through to the scalar
+bucketed GEMV every row.
+
+Fix (default, no switch): `DecodeFragmentHalf` specialisations for the
+Q2_K (84 B: one scale byte per 16-element fragment, dl/ml nibbles, code
+shift inside the sub-block index) and Q3_K (110 B: 7-bit scale per
+scale-pair, hmask bit per element) blocks in
+`staging/models/glm5_next/kernels/rocm/routed_wmma.hip.cpp`, dispatched
+from `RoutedGateUpWmma`/`RoutedDownWmma`; the `Ffn` tier gates accept
+Q2_K gate/up and Q3_K down. Probes and the `kMtpRows = kChunk` batch
+experiment (weight-pass cost measured per-row, not per-call: neutral)
+shipped neither.
+
+Quality: the routed_wmma contract now replays Q2_K gate/up and Q3_K
+down against the scalar bucketed reference — NMSE **1.3e-5 / 3.4e-8**
+(limit 1e-4), bit-deterministic replay, all finite; suite `glm5_next`
+**10/10** on the candidate GPU-exclusive (strict `rocm_forward` golden
+89.5 s). Greedy anchors re-verified with `-v`: `f985b939…` (depth 0) and
+`ddae62cf…` (`-d 2048`) reproduced **bit-identical**, plain == MTP on
+both depths (`/tmp/opencode/gufo_bench_anchor17.log`).
+
+Offline paired A/B (GPU-exclusive, greedy `-r 1`, same-depth arms):
+pp2048 @ d4096 mtp **233.01 → 243.67** (+4.6 %), paired plain 253.47 →
+penalty **−7.8 % → −3.9 %**; pp8192 @ d16384 mtp **177.11 → 182.77**,
+paired plain 185.46 → penalty **−8.3 % → −1.5 %**
+(`/tmp/opencode/gufo_bench_pp3r.log`, `..._pp3s.log`). Draft FFN
+25.6 µs/row (8.2×); serve k1 spot check at 15.9 t/s decode, acceptance
+94 %, worst inter-token 136 ms (`/tmp/opencode/gufo_bench_glmcheck.log`).
+
 ## Fixtures
 
 `tests/fixtures/glm_next/llama_reference.json` is a gufo **self-regression

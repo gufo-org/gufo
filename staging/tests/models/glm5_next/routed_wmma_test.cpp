@@ -21,11 +21,10 @@
 // must stay inside a tight relative NMSE budget (f16 fragments change the
 // accumulation order, not the decoded values), must reproduce itself
 // bit-for-bit across launches, and may never emit a non-finite activation.
-// The block scales are pinned to 1.0 (top nibbles of the IQ1_M scale words,
-// fp16 d at bytes 0..1 of IQ2/IQ3 blocks) so the decoded factors stay inside
-// binary16: with random d the scalar tier is still finite where the wmma
-// decode is not, and the comparison would measure f16 range, not summation
-// order.
+// The block scales are pinned to 1.0 at each codec's scale offsets (see
+// MakeRows) so the decoded factors stay inside binary16: with random d the
+// scalar tier is still finite where the wmma decode is not, and the
+// comparison would measure f16 range, not summation order.
 namespace q = gufo::models::glm5_next::rocm;
 namespace t = gufo::tests::glm5_next;
 
@@ -40,6 +39,8 @@ constexpr float kClamp = 7.0F;
 constexpr std::size_t kIq1MBytes = 56U;
 constexpr std::size_t kIq2XxsBytes = 66U;
 constexpr std::size_t kIq3XxsBytes = 98U;
+constexpr std::size_t kQ2KBytes = 84U;
+constexpr std::size_t kQ3KBytes = 110U;
 
 bool Check(const char* what, double worst, double limit) {
   const bool ok = worst <= limit;
@@ -49,10 +50,11 @@ bool Check(const char* what, double worst, double limit) {
 }
 
 /// rows * row_bytes of random codes over 256-element blocks with the block
-/// scale pinned to d = 1.0: IQ1_M fixes the four top nibbles of the scale
+/// scale pinned to 1.0: IQ1_M fixes the four top nibbles of the scale
 /// words (bytes 49/51/53/55) to the F16 pattern 0x3C00; IQ2_XXS/IQ3_XXS
-/// store d as fp16 at bytes 0..1 of each block. The remaining bytes stay
-/// random codes / per-group scale bits.
+/// store d as fp16 at bytes 0..1 of each block; Q2_K stores d/dmin as fp16
+/// at bytes 80..81/82..83; Q3_K stores d as fp16 at bytes 108..109. The
+/// remaining bytes stay random codes / per-group scale bits.
 std::vector<std::uint8_t> MakeRows(std::uint32_t rows, std::size_t block_bytes,
                                     std::uint32_t seed) {
   const std::size_t row_bytes = (kCols / 256U) * block_bytes;
@@ -70,6 +72,14 @@ std::vector<std::uint8_t> MakeRows(std::uint32_t rows, std::size_t block_bytes,
         blk[51] &= 0x0FU;
         blk[53] = static_cast<std::uint8_t>((blk[53] & 0x0FU) | 0xC0U);
         blk[55] = static_cast<std::uint8_t>((blk[55] & 0x0FU) | 0x30U);
+      } else if (block_bytes == kQ2KBytes) {
+        blk[80] = 0x00U;
+        blk[81] = 0x3CU;
+        blk[82] = 0x00U;
+        blk[83] = 0x3CU;
+      } else if (block_bytes == kQ3KBytes) {
+        blk[108] = 0x00U;
+        blk[109] = 0x3CU;
       } else {
         blk[0] = 0x00U;
         blk[1] = 0x3CU;
@@ -102,8 +112,8 @@ bool BitsDiffer(const std::vector<float>& a, const std::vector<float>& b) {
   return diff != 0;
 }
 
-/// Fused gate/up + swiglu over IQ1_M or IQ2_XXS stacks against two scalar
-/// GemvRoutedTiles + the clamp pass (the Ffn fallback).
+/// Fused gate/up + swiglu over IQ1_M, IQ2_XXS or Q2_K stacks against two
+/// scalar GemvRoutedTiles + the clamp pass (the Ffn fallback).
 bool TestFusedGateUp(const char* label, q::GemvType type,
                      std::size_t block_bytes) {
   std::printf("gate/up %s\n", label);
@@ -203,13 +213,14 @@ bool TestFusedGateUp(const char* label, q::GemvType type,
   return ok;
 }
 
-/// Down projection over IQ3_XXS stacks against the scalar bucketed down
-/// GEMV (slots_per_row = 1: every slot carries its own activation row).
-bool TestRoutedDown() {
-  std::printf("down IQ3_XXS\n");
+/// Down projection over IQ3_XXS/Q3_K stacks against the scalar bucketed
+/// down GEMV (slots_per_row = 1: every slot carries its own activation row).
+bool TestRoutedDown(const char* label, q::GemvType type,
+                    std::size_t block_bytes) {
+  std::printf("down %s\n", label);
   const std::uint32_t slots = kTokens * kUsed;
   const std::vector<std::uint8_t> down =
-      MakeRows(kExperts * kRows, kIq3XxsBytes, 0x5eed1234U);
+      MakeRows(kExperts * kRows, block_bytes, 0x5eed1234U);
   std::vector<std::int32_t> ids(slots);
   std::uint32_t rng = 0x9e3779b9U;
   for (std::int32_t& id : ids) {
@@ -260,21 +271,20 @@ bool TestRoutedDown() {
 
   const std::size_t out_rows = static_cast<std::size_t>(slots) * kRows;
   t::HipBuffer<float> d_ref(out_rows);
-  q::GemvRoutedTiles(d_down.get(), q::GemvType::kIQ3_XXS,
-                     down.size() / kExperts, d_tiles.get(), cap, d_pad.get(),
-                     d_slot.get(), 1U, kRows, kCols, dx.get(), kCols,
-                     d_ref.get(), nullptr);
+  q::GemvRoutedTiles(d_down.get(), type, down.size() / kExperts,
+                     d_tiles.get(), cap, d_pad.get(), d_slot.get(), 1U, kRows,
+                     kCols, dx.get(), kCols, d_ref.get(), nullptr);
 
   t::HipBuffer<float> d_act(out_rows);
   t::HipBuffer<float> d_act2(out_rows);
-  q::RoutedDownWmma(q::GemvType::kIQ3_XXS, d_down.get(),
-                    down.size() / kExperts, down.size(), d_xh.get(), kCols,
-                    d_tiles32.get(), wide_cap, d_pad.get(), d_slot.get(), kRows,
-                    kCols, d_act.get(), nullptr);
-  q::RoutedDownWmma(q::GemvType::kIQ3_XXS, d_down.get(),
-                    down.size() / kExperts, down.size(), d_xh.get(), kCols,
-                    d_tiles32.get(), wide_cap, d_pad.get(), d_slot.get(), kRows,
-                    kCols, d_act2.get(), nullptr);
+  q::RoutedDownWmma(type, d_down.get(), down.size() / kExperts,
+                    down.size(), d_xh.get(), kCols, d_tiles32.get(), wide_cap,
+                    d_pad.get(), d_slot.get(), kRows, kCols, d_act.get(),
+                    nullptr);
+  q::RoutedDownWmma(type, d_down.get(), down.size() / kExperts,
+                    down.size(), d_xh.get(), kCols, d_tiles32.get(), wide_cap,
+                    d_pad.get(), d_slot.get(), kRows, kCols, d_act2.get(),
+                    nullptr);
   const auto ref = t::Download(&d_ref, out_rows);
   const auto got = t::Download(&d_act, out_rows);
   const auto again = t::Download(&d_act2, out_rows);
@@ -300,7 +310,9 @@ int main() {
     std::printf("device %s\n", props.name);
     ok &= TestFusedGateUp("IQ1_M", q::GemvType::kIQ1_M, kIq1MBytes);
     ok &= TestFusedGateUp("IQ2_XXS", q::GemvType::kIQ2_XXS, kIq2XxsBytes);
-    ok &= TestRoutedDown();
+    ok &= TestFusedGateUp("Q2_K", q::GemvType::kQ2_K, kQ2KBytes);
+    ok &= TestRoutedDown("IQ3_XXS", q::GemvType::kIQ3_XXS, kIq3XxsBytes);
+    ok &= TestRoutedDown("Q3_K", q::GemvType::kQ3_K, kQ3KBytes);
   } catch (const std::exception& error) {
     std::fprintf(stderr, "exception: %s\n", error.what());
     return 1;
