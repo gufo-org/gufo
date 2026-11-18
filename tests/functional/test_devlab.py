@@ -66,12 +66,12 @@ class PlanTest(unittest.TestCase):
         self.assertLessEqual({'flash-next-q4', 'deepseek4'}, {row['id'] for row in linux['models']})
 
     def test_curated_suites_apply_at_every_tier(self):
-        suites = self.registry['models']['deepseek4']['suites']
+        suites = set(self.registry['models']['deepseek4']['suites'])
         for tier in ('pr', 'full'):
             with self.subTest(tier=tier):
                 plan = self.plan('src/models/deepseek_v4_flash/engine.cpp', tier=tier)
                 planned = [suite for group in plan['groups'] for suite in group['suites']]
-                self.assertEqual(planned, suites)
+                self.assertEqual(sorted(planned), sorted(suites))
                 self.assertFalse(plan['release_only'] or plan['deferred'])
                 self.assertIn('cache-growth', {row['suite'] for row in plan['out_of_scope']})
         unknown = {**self.data, 'models': {**self.data['models'], 'deepseek4': {

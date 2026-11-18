@@ -341,8 +341,9 @@ suites at every tier; the report counts the others as out of scope. DeepSeek V4
 uses it to run the set that passes on the runner. Qwen27 uses it to run only the
 suites its runtime changes (cache and checkpoints, batching and scheduling,
 DFlash2 with sampling, grammars and stops, vision); Flash-Next covers the shared
-Qwen protocol suites. Its other full-tier
-suites still assume Flash-Next checkpoint sizes and Qwen token counts.
+Qwen protocol suites. DeepSeek's other suites still assume Flash-Next
+checkpoint sizes, Qwen token counts, or fixture wording the model copies into
+its answers.
 
 Embedding runs its text, image, audio and video suites; TTS covers Base,
 CustomVoice and VoiceDesign. Image generation uses Qwen-Image-2.1-Turbo with the
