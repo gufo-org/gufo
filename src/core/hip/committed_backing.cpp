@@ -641,8 +641,10 @@ std::optional<BackingBlock> CommittedBackingPool::TryAcquire(
   }
 }
 void CommittedBackingPool::GrowAhead(std::size_t reserve_bytes) {
+  // Units surrendered under host pressure can come back below capacity.
   if (!reserve_bytes ||
-      state_->committed.load(std::memory_order_acquire) == state_->capacity)
+      (state_->committed.load(std::memory_order_acquire) == state_->capacity &&
+       !state_->surrendered_bytes.load(std::memory_order_relaxed)))
     return;
   const auto free_bytes = [](const detail::BackingState& state) {
     return state.ledger->Snapshot()

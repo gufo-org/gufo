@@ -2022,8 +2022,9 @@ std::shared_ptr<const std::atomic<bool>> ComponentTextCache::WarmDisk(
   }
   // The restore after this read is captured in full: commit its backing
   // while the request waits, not in its capture beside running decodes.
+  // Restores still reading are captured too, so ask for all of them.
   if (impl_->resources->prepare_capture)
-    impl_->resources->prepare_capture(bytes);
+    impl_->resources->prepare_capture(reading + bytes);
   auto warmup = std::make_unique<Impl::Warmup>();
   warmup->id = id;
   warmup->bytes = bytes;
