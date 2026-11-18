@@ -29,6 +29,9 @@ def service_args(key, binary, baseline, assets, output):
     return args
 
 
+BENCH_DEPTHS = '0,4096,8192,12288,16384,32768,65536,131072'
+
+
 def jobs(plan, shard_id=None):
     """(selection, correctness groups, run timing) per model; a shard runs only its part."""
     if shard_id is None:
@@ -39,6 +42,18 @@ def jobs(plan, shard_id=None):
         raise ValueError('Unknown shard: ' + shard_id)
     selections = {row['id']: row for row in plan['models']}
     return [(selections[part['model']], part['groups'], part['timing']) for part in shard['parts']]
+
+
+def benchmark(binary, baseline, assets, report):
+    """Main first, then the PR, on the same device: native AR through 128K depth."""
+    model = registry()['models']['flash-next-q4']
+    weights = Path(assets[model['asset']]) / model['target']
+    for revision, executable in (('base', baseline), ('head', binary)):
+        with (report / f'bench-{revision}.md').open('w') as out, \
+                (report / f'bench-{revision}.stderr').open('w') as err:
+            subprocess.run([str(executable), 'bench', '--model', str(weights), '--speculative', 'off',
+                            '--n-prompt', '2048', '--n-gen', '128', '--n-depth', BENCH_DEPTHS,
+                            '--repetitions', '1'], stdout=out, stderr=err, timeout=3600)
 
 
 def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=None):
@@ -129,6 +144,9 @@ def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=
             item.update(timing='error', timing_error=traceback.format_exc())
         item['timing_s'] = round(time.monotonic() - started, 1)
         save()
+        # The manual AR depth benchmark runs on the device that timed Flash-Next.
+        if plan.get('benchmark') and key == 'flash-next-q4':
+            benchmark(binary, baseline, assets, report)
     failed = any(item[field] not in ('passed', 'skipped') for item in summary['models']
                  for field in ('correctness', 'timing'))
     summary['status'] = 'failed' if failed else 'passed'

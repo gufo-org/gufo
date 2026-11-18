@@ -316,6 +316,34 @@ class ShardTest(unittest.TestCase):
         self.assertNotIn('--order-seed', cluster.command(plan['groups'][0], Path('/gufo'), None,
                                                          Path('/out'), assets))
 
+    def test_benchmark_runs_only_where_flash_next_is_timed(self):
+        plan = self.plan('src/models/qwen38_flash_next/engine.cpp', 'src/models/qwen3_asr/model.cpp', tier='pr')
+        plan['benchmark'] = True
+        plan['shards'] = devlab_plan.shard(plan, self.TABLE, budget=400)
+        assets = {key: '/weights/' + key for key in devlab_models.registry()['assets']}
+        for row in plan['shards']:
+            calls = []
+            def run(args, **kwargs):
+                calls.append(args)
+                if '--output' in args:
+                    output = Path(args[args.index('--output') + 1])
+                    if args[1].endswith(('phases.py', 'service_phases.py')):
+                        output.write_text('{}')
+                return subprocess.CompletedProcess(args, 0)
+            with tempfile.TemporaryDirectory() as directory, \
+                    patch('devlab_run.subprocess.run', side_effect=run), \
+                    patch('devlab_run.cluster.execute', return_value=0):
+                root = Path(directory)
+                (root / 'assets.json').write_text(json.dumps(assets))
+                try:
+                    devlab_run.execute(plan, Path('/head'), Path('/base'), root / 'assets.json',
+                                       root / 'results', root / 'report', root / 'logs', row['id'])
+                except (OSError, KeyError, ValueError):
+                    pass
+            bench = [args[0] for args in calls if len(args) > 1 and args[1] == 'bench']
+            timed = any(part['model'] == 'flash-next-q4' and part['timing'] for part in row['parts'])
+            self.assertEqual(bench, ['/base', '/head'] if timed else [], row['id'])
+
     def test_shard_runs_only_its_part(self):
         plan = self.plan('src/models/qwen38_flash_next/engine.cpp', 'src/models/qwen3_asr/model.cpp',
                          'src/models/embedding_gemma2/model.cpp', tier='pr')

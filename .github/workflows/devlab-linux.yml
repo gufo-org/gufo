@@ -485,34 +485,6 @@ jobs:
             --binary linux-artifacts/candidate/gufo --base-binary linux-artifacts/baseline/gufo \
             --output functional-results --report "functional-report/shards/$SHARD" --logs phase-logs
 
-      # Suite failures must not hide benchmark observations.
-      - name: Benchmark Flash-Next AR through 128K depth on base and PR
-        if: >-
-          !cancelled() && inputs.benchmark &&
-          steps.binaries.outcome == 'success' &&
-          steps.weights.outcome == 'success'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The shard that times Flash-Next also benchmarks it.
-          python3 -c 'import json, os, sys; shard = next(row for row in json.load(open("functional-plan.json"))["shards"] if row["id"] == os.environ["SHARD"]); sys.exit(not any(part["model"] == "flash-next-q4" and part["timing"] for part in shard["parts"]))' || exit 0
-          mkdir -p "functional-report/shards/$SHARD"
-          model_dir=$(python3 -c 'import json; print(json.load(open("functional-assets.json"))["flash-next"])')
-          # Same runner and weights; main runs first.
-          for revision in base head; do
-            binary=linux-artifacts/candidate/gufo
-            [[ "$revision" == base ]] && binary=linux-artifacts/baseline/gufo
-            printf '\n### Benchmark: %s\n\n' "$revision" >> "$GITHUB_STEP_SUMMARY"
-            "$binary" bench \
-              --model "$model_dir/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf" \
-              --speculative off --n-prompt 2048 --n-gen 128 \
-              --n-depth 0,4096,8192,12288,16384,32768,65536,131072 \
-              --repetitions 1 \
-              2> >(tee "functional-report/shards/$SHARD/bench-$revision.stderr" >&2) \
-              | tee "functional-report/shards/$SHARD/bench-$revision.md"
-            cat "functional-report/shards/$SHARD/bench-$revision.md" >> "$GITHUB_STEP_SUMMARY"
-          done
-
       - name: Collect report inputs
         if: always()
         shell: bash
