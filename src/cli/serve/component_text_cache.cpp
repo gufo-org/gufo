@@ -491,9 +491,15 @@ struct ComponentTextCache::Impl {
       // (#1053). An explicit budget below the other charges is the
       // operator's setting, not the host's state.
       const bool host_bound = automatic_ram || ram < requested;
-      if (max_bytes < charged || !granted || (limit < charged && host_bound))
+      if (max_bytes < charged || !granted || (limit < charged && host_bound)) {
+        Logger::Warn("cache",
+                     "schema=component-cache-v1 event=ram_cache_refused "
+                     "sessions=" +
+                         std::to_string(count) + " " +
+                         ext::DescribeHostMemory(ext::SampleHostMemory()));
         throw std::runtime_error(HostReserveMessage(
             count, requested, max_bytes > pinned ? max_bytes - pinned : 0));
+      }
       if (limit < charged)
         throw std::runtime_error(
             "--cache-ram-bytes " + std::to_string(requested) +

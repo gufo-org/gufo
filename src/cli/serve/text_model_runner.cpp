@@ -351,6 +351,11 @@ struct TextRunnerPool::Impl {
             std::max(ceiling, ComponentTextCache::kOffMetadataBytes),
             ram_cache_options.enabled);
       } catch (const cache::ResourceExhausted&) {
+        Logger::Warn("cache",
+                     "schema=component-cache-v1 event=ram_cache_refused "
+                     "sessions=" +
+                         std::to_string(state_count) + " " +
+                         ext::DescribeHostMemory(ext::SampleHostMemory()));
         throw std::runtime_error(
             "the RAM cache budget was exhausted while preparing " +
             std::to_string(state_count) +

@@ -209,9 +209,11 @@ at 32 GiB and half the available host RAM after model/state allocation, respecti
 container limits. Available RAM is `MemAvailable` minus `CmaFree`: free CMA
 pages, such as the kernel's KHO scratch area on Ubuntu 26.04, only hold
 movable pages, not GPU allocations. 27B also checks HIP free memory. A
-positive value sets a byte cap that may exceed the automatic budget, up to the
-available host RAM minus 4 GiB; the startup line reports both as
-`automatic_bytes` and `max_bytes`.
+positive value sets a byte cap that may exceed the automatic budget, up to
+`MemAvailable` minus the larger of `CmaFree` and a 4 GiB host reserve (within
+a container, its limit minus 4 GiB). The OS keeps its reserve in the free CMA
+pages, which the cache cannot pin, so the two are not subtracted together. The
+startup line reports both as `automatic_bytes` and `max_bytes`.
 The pinned disk staging buffer comes out of that ceiling, and `max_bytes`
 excludes it.
 The 128 checkpoint records are independent of `--sessions`; more than one can
