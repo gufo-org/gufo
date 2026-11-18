@@ -341,9 +341,9 @@ std::vector<Rows> ContinuationAdapter::PlanPrefill(const cache::Slot& slot,
   std::vector<Rows> result;
   while (first < end) {
     const auto remaining = end - first;
-    const auto capacity = remaining <= model_->PrefillThroughCapacity()
-                              ? model_->PrefillThroughCapacity()
-                              : model_->PrefillCapacity();
+    const auto capacity = remaining <= model_->PlannedThrough()
+                              ? model_->PlannedThrough()
+                              : model_->PlannedChunk();
     first += std::min<Rows>(remaining, capacity);
     result.push_back(first);
   }

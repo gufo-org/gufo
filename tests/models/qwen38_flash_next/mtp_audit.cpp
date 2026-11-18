@@ -381,7 +381,7 @@ void AuditMtp(q::rocm::Executor& exec, const q::rocm::DeviceModel& device,
   // 96-row tail tile, a two-tile tail, and aligned/ragged large chunks.
   std::vector<unsigned> counts{224U, 257U, 2047U, 2048U};
   for (auto& count : counts)
-    count = std::min(exec.max_batch(), count);
+    count = std::min(exec.pass_rows(), count);
   counts.erase(std::unique(counts.begin(), counts.end()), counts.end());
   for (const unsigned count : counts) {
     Require(count > 32, "catch-up audit requires --batch greater than 32");
@@ -487,7 +487,7 @@ void AuditMtpCosts(q::rocm::Executor& exec,
     Require(base != nullptr, error);
     for (std::size_t offset = 0; offset < prefix.size();) {
       const auto n =
-          std::min<std::size_t>(exec.max_batch(), prefix.size() - offset);
+          std::min<std::size_t>(exec.pass_rows(), prefix.size() - offset);
       Require(
           exec.Forward(*base, std::span(prefix).subspan(offset, n), 0, nullptr,
                        q::rocm::Executor::ForwardMode::kPrefill, &error),

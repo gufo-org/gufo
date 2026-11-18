@@ -86,6 +86,27 @@ public:
   [[nodiscard]] std::uint32_t VocabSize() const noexcept;
   [[nodiscard]] std::uint32_t PrefillCapacity() const noexcept;
   [[nodiscard]] std::uint32_t PrefillThroughCapacity() const noexcept;
+  /// Rows the next prompt step over `remaining` tokens may take under a
+  /// scheduler budget of `budget`: a wide pass when the budget allows more
+  /// than a narrow one (no session decodes beside it) and the executor can
+  /// map the wide scratch now; otherwise the narrow capacities above.
+  [[nodiscard]] std::size_t StepCapacity(std::size_t remaining,
+                                         std::size_t budget) const;
+  /// The through capacity of that step: the widest single pass it may
+  /// take.
+  [[nodiscard]] std::size_t StepThrough(std::size_t remaining,
+                                        std::size_t budget) const;
+  /// The pass widths the cache plans prompt captures around: the widest
+  /// passes, which a prompt alone takes when the host has the memory.
+  [[nodiscard]] std::size_t PlannedThrough() const noexcept;
+  [[nodiscard]] std::size_t PlannedChunk() const noexcept;
+  /// The chunk a pass that does not finish its prompt takes at the current
+  /// pass width.
+  [[nodiscard]] std::size_t PassChunk() const noexcept;
+  /// The widest single pass at the current pass width.
+  [[nodiscard]] std::size_t PassThrough() const noexcept;
+  /// Frees the wide pass scratch; decode steps call it.
+  void ReleaseWidePasses() const;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept {
     return options_.max_context;
   }
