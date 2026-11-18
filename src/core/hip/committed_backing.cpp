@@ -371,7 +371,8 @@ struct BackingState {
     // Physical storage is freed before its original committed charges.
     if (segments)
       for (std::size_t i = 0; i < SegmentCount(); ++i)
-        ReleasePages(segments[i], SegmentBytes(i));
+        if (segments[i])  // Surrendered segments have no pages.
+          ReleasePages(segments[i], SegmentBytes(i));
   }
 };
 }  // namespace detail
