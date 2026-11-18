@@ -1407,11 +1407,16 @@ void TestMultiResidentPrefillUsesBoundedWorkUnits() {
       if (event.kind == EventKind::kPrefill && event.label == 7)
         chunks.push_back(event.count);
     }
-    Expect(chunks == std::vector<std::size_t>({3, 3, 1}),
-           "idle prefill uses model geometry regardless of spare slots");
-    Expect(
-        result.prefill_chunks == 3 && result.active_decode_prefill_chunks == 0,
-        "model-sized work units still yield for admission and cancellation");
+    // Alone, the runner's own geometry; while a spare session could admit an
+    // arrival, the profile's pass (two tokens here), which it waits for.
+    const auto expected = capacity == 1
+                              ? std::vector<std::size_t>({3, 3, 1})
+                              : std::vector<std::size_t>({2, 2, 2, 1});
+    Expect(chunks == expected,
+           "idle prefill keeps model geometry unless a spare slot could admit");
+    Expect(result.prefill_chunks == expected.size() &&
+               result.active_decode_prefill_chunks == 0,
+           "model-sized work units still yield for admission and cancellation");
   }
 }
 
@@ -1757,17 +1762,22 @@ void TestLayeredPrefillTimeExcludesYieldRounds() {
 }
 
 void TestLayeredPrefillAloneRunsUnsplit() {
-  auto control = std::make_shared<FakeControl>();
-  control->scheduling =
-      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
-  auto scheduler = MakeScheduler(control, 2, 2);
-  const auto result =
-      scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F).Wait();
-  Expect(result.tokens == ExpectedTokens(2, 2) && result.prefill_chunks == 1 &&
-             result.max_prefill_layer_groups == 1,
-         "a lone prompt keeps one unsplit pass");
-  for (const auto& event : control->Events())
-    Expect(event.kind != EventKind::kYield, "a lone prompt never yields");
+  // With one session nobody can join: one pass. With a spare session, passes
+  // of the profile's width, so an arrival waits for one. Neither yields.
+  for (const auto capacity : {1U, 2U}) {
+    auto control = std::make_shared<FakeControl>();
+    control->scheduling = gufo::ext::TextSchedulingProfile{
+        .pass_tokens = 4, .max_layer_groups = 3};
+    auto scheduler = MakeScheduler(control, capacity, 2);
+    const auto result =
+        scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F).Wait();
+    Expect(result.tokens == ExpectedTokens(2, 2) &&
+               result.prefill_chunks == capacity &&
+               result.max_prefill_layer_groups == 1,
+           "a lone prompt keeps unsplit passes");
+    for (const auto& event : control->Events())
+      Expect(event.kind != EventKind::kYield, "a lone prompt never yields");
+  }
 }
 
 void TestDecoderFinishesInsideYield() {
@@ -3180,8 +3190,10 @@ void TestCapturedPrefillResumesBeforeRepeatedPeerPrefill() {
         release.acquire();
       }
     };
-    // Keep the production prompt unit and model profile. The peer is longer
-    // than that unit, so it has another turn after the held prefill.
+    // Keep the production prompt unit and a model pass wider than it, which
+    // a lone prompt keeps while a session is free. The peer is longer than
+    // that unit, so it has another turn after the held prefill.
+    control->scheduling = gufo::ext::TextSchedulingProfile{.pass_tokens = 4096};
     auto scheduler = MakeScheduler(control, older_waiter ? 3 : 2);
     auto first =
         scheduler->Submit(std::vector<TextRunnerToken>(2200, 1), 3, 0.0F);

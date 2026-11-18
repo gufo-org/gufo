@@ -101,15 +101,20 @@ Work Policy::Next(const WorkQueues& queues, const PrefillRate& rate) const {
   }
 
   // Bound work for short waiting prefills and captures as well as decoders.
-  // Long prefills alone retain the model's efficient chunk size.
+  // A long prefill alone keeps the profile's pass width while a free session
+  // could admit an arrival, which then waits for one such pass, not a wider
+  // one the runner takes when nobody can join (#470). Otherwise it retains
+  // the runner's own widest pass.
   const bool peer_waiting =
       queues.capturing ||
       std::any_of(queues.prefilling.begin() + 1, queues.prefilling.end(),
                   [&](const auto& peer) { return Short(peer); });
-  return PrefillWork{.peer_waiting = peer_waiting,
-                     .max_tokens = options_.incremental_prefill && peer_waiting
-                                       ? std::optional(options_.unit_tokens)
-                                       : std::nullopt};
+  std::optional<std::size_t> max_tokens;
+  if (options_.incremental_prefill && peer_waiting)
+    max_tokens = options_.unit_tokens;
+  else if (options_.incremental_prefill && queues.admission_open)
+    max_tokens = options_.profile.pass_tokens;
+  return PrefillWork{.peer_waiting = peer_waiting, .max_tokens = max_tokens};
 }
 
 }  // namespace gufo::sched

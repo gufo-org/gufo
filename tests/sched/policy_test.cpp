@@ -48,6 +48,33 @@ void LonePromptKeepsFullPasses() {
   assert(!work.beside_decoders && !work.peer_waiting && !work.max_tokens);
 }
 
+void FreeSessionBoundsLonePasses() {
+  // While another session could admit an arrival, a lone prompt keeps the
+  // profile's pass width, so the arrival waits for one such pass (#470).
+  const Policy policy({.profile = TextSchedulingProfile{.pass_tokens = 4096,
+                                                        .max_layer_groups = 8},
+                       .incremental_prefill = true});
+  const std::vector<PrefillingRequest> prefilling{{.remaining_tokens = 12000}};
+  auto work =
+      Prefill(policy.Next({.prefilling = prefilling, .admission_open = true}));
+  assert(!work.beside_decoders && !work.peer_waiting &&
+         work.max_tokens == 4096u && work.layer_groups == 1);
+  // Every session taken: nobody can join, so the runner's widest pass.
+  work = Prefill(policy.Next({.prefilling = prefilling}));
+  assert(!work.max_tokens);
+  // A waiting short peer still bounds it to one unit.
+  const std::vector<PrefillingRequest> short_peer{{.remaining_tokens = 12000},
+                                                  {.remaining_tokens = 25}};
+  work =
+      Prefill(policy.Next({.prefilling = short_peer, .admission_open = true}));
+  assert(work.peer_waiting && work.max_tokens == kPrefillUnitTokens);
+  // A runner that prefills whole prompts is not bounded.
+  const Policy whole({.profile = TextSchedulingProfile{.pass_tokens = 4096}});
+  work =
+      Prefill(whole.Next({.prefilling = prefilling, .admission_open = true}));
+  assert(!work.max_tokens);
+}
+
 void WaitingPeersBoundPrefill() {
   // A short prompt behind a long one bounds the long one's unit.
   const std::vector<PrefillingRequest> short_peer{{.remaining_tokens = 9000},
@@ -304,6 +331,7 @@ void InvalidProfiles() {
 int main() {
   Preconditions();
   LonePromptKeepsFullPasses();
+  FreeSessionBoundsLonePasses();
   WaitingPeersBoundPrefill();
   DecodersBoundPrefillUntilDue();
   DecodersWithoutPrefill();
