@@ -590,8 +590,17 @@ class FunctionalRunnerTest(unittest.TestCase):
                 check_disk_spacing(bad, restored, report, restored_report)
 
     def run_cache_depth(self, lost=False, retry_work=False, contaminated=False,
-                        recorder=None, concurrency=4):
+                        recorder=None, concurrency=4, record_tokens=14):
         owner = threading.get_ident()
+        counts = []
+
+        class Client:
+            # count-tokens: a fixed cost per background record plus the user turn.
+            def post(inner, path, cast_to, body):
+                self.assertEqual(path, "/chat/completions/input_tokens")
+                records = body["messages"][0]["content"].count("Background record:")
+                counts.append(records)
+                return {"input_tokens": records * record_tokens + 700}
 
         class Checks(dict):
             def __setitem__(inner, label, value):
@@ -625,8 +634,21 @@ class FunctionalRunnerTest(unittest.TestCase):
                               "gufo": {"prefill_tokens": total - cached}}}
 
         with contextlib.redirect_stderr(io.StringIO()):
-            check_cache_depth(None, "fixture", checks, chat_result, concurrency)
+            check_cache_depth(Client(), "fixture", checks, chat_result, concurrency)
+        self.counts = counts
         return requests, checks
+
+    def test_cache_depth_sizes_its_first_turn_from_count_tokens(self):
+        requests, _ = self.run_cache_depth()
+        self.assertEqual(self.counts, [1200])
+        self.assertEqual(requests[0]["messages"][0]["content"].count("Background record:"), 1200)
+        # A tokenizer that spends fewer tokens per record gets more records,
+        # just enough to reach the depth the suite asserts.
+        requests, _ = self.run_cache_depth(record_tokens=13)
+        records = requests[0]["messages"][0]["content"].count("Background record:")
+        self.assertEqual(self.counts, [1200, 1300])
+        self.assertGreaterEqual(records * 13 + 700, 16384)
+        self.assertLess((records - 1) * 13 + 700, 16384)
 
     def test_cache_depth_replays_branches_before_cold_controls(self):
         requests, checks = self.run_cache_depth()
