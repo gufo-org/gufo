@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_COMPONENT_TEXT_CACHE_HPP_
 #define GUFO_SERVER_COMPONENT_TEXT_CACHE_HPP_
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -136,6 +137,13 @@ public:
   [[nodiscard]] std::optional<TextPendingPublication> PendingPublication(
       std::span<const ContinuationToken> prompt,
       const TextPromptContext* context, std::uint64_t checkpoint_id = 0) const;
+  // When the checkpoint Acquire would select for `prompt` is only on disk,
+  // starts reading its files into the page cache on a worker and returns a
+  // flag set when that finishes. Null when there is nothing to read, or when
+  // the read would take free pages the host keeps (mem::HostFreeFloorBytes).
+  [[nodiscard]] std::shared_ptr<const std::atomic<bool>> WarmDisk(
+      std::span<const ContinuationToken> prompt,
+      const TextPromptContext* context, std::size_t stable);
   [[nodiscard]] std::size_t CachedPrefixTokens(
       std::span<const ContinuationToken>, const TextPromptContext*,
       bool common = false) const;

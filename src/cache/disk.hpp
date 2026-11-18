@@ -254,12 +254,28 @@ public:
   // bytes or identity; ReadPayload must still validate the actual read.
   void PrefetchPayload(const DiskSnapshot&, bool private_file,
                        const DiskPayload&, std::uint64_t bytes) const;
+  // Reads an owned dependency through `buffer` so a later ReadPayload finds
+  // it in the page cache, without validating it. A hint like PrefetchPayload,
+  // but complete on return. Returns the bytes read; stops early on a short
+  // file or when `stop` is requested.
+  std::uint64_t WarmPayload(const DiskSnapshot&, bool private_file,
+                            const DiskPayload&, std::span<std::uint8_t> buffer,
+                            std::stop_token stop = {}) const;
   // Reads one dependency, invokes consume only with complete pieces, and
   // checks its CRC and stable file identity before returning. Consumers must
   // keep their destination non-executable until every dependency has passed.
   [[nodiscard]] DiskReadStats ReadPayload(
       const DiskSnapshot&, bool private_file, const DiskPayload&,
       std::span<std::uint8_t> staging,
+      const std::function<void(std::uint64_t, std::span<const std::uint8_t>)>&
+          consume,
+      DiskReadStats* observation = nullptr);
+  // The same, reading each piece into `buffer(offset)`, which may differ per
+  // piece: a reader can fill one staging piece while another is copied out.
+  [[nodiscard]] DiskReadStats ReadPayload(
+      const DiskSnapshot&, bool private_file, const DiskPayload&,
+      const std::function<std::span<std::uint8_t>(std::uint64_t offset)>&
+          buffer,
       const std::function<void(std::uint64_t, std::span<const std::uint8_t>)>&
           consume,
       DiskReadStats* observation = nullptr);

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <barrier>
 #include <cassert>
 #include <cstring>
@@ -9,6 +10,7 @@
 #include <fstream>
 #include <future>
 #include <numeric>
+#include <optional>
 #include <thread>
 
 #include "src/cache/prefetch_cursor.hpp"
@@ -221,6 +223,127 @@ void RestoreGroupsAdjacentFilesWithinStaging() {
   const auto positions = fixture.adapter.Positions(*destination);
   assert(
       std::ranges::all_of(positions, [](auto p) { return p.valid_rows == 0; }));
+}
+// Readers fill eight 35-byte pieces in parallel. The copies, their grouping
+// and the restored state equal those of one 35-byte piece; a corrupt file
+// fails the whole restore after every copy settles, and a stop cancels it.
+void RestoreReadsGroupsInParallel() {
+  constexpr std::size_t kPiece = 35;
+  constexpr std::size_t kStaging = 9 * kPiece;
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, kStaging, 4096}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  std::stop_source stop;
+  std::atomic<unsigned> leases{};
+  std::atomic<unsigned> stop_at{0};
+  StreamedStore streams(
+      ledger, disk, kStaging, Allocate,
+      [&] {
+        if (++leases == stop_at.load())
+          stop.request_stop();
+        return Lease();
+      },
+      kPiece);
+  Fixture fixture(ledger, 1, 0, 43);
+  auto sources = fixture.Sources();
+  TransferTiming written;
+  streams.Write(Id(100), fixture.manifest, sources, written);
+  assert(written.pieces != 0);
+  for (int round = 0; round < 20; ++round) {
+    auto destination = fixture.adapter.CreateSlot(fixture.guard);
+    TransferTiming restored;
+    assert(streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                           *destination, restored));
+    assert(restored.pieces == 12 && restored.bytes == 360);
+    assert(fixture.adapter.RecurrentHash(*destination) == fixture.hash);
+  }
+  {
+    auto destination = fixture.adapter.CreateSlot(fixture.guard);
+    TransferTiming restored;
+    assert(streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                           *destination, restored));
+    const std::array<Token, 2> next{88, 91};
+    fixture.adapter.Append(*destination, next, next);
+    fixture.adapter.Append(*fixture.source, next, next);
+    assert(fixture.adapter.RecurrentHash(*destination) ==
+           fixture.adapter.RecurrentHash(*fixture.source));
+  }
+  assert(ledger.Snapshot().peak_bytes[static_cast<std::size_t>(
+             ResourceCategory::kTransferStaging)] == kStaging);
+  // Stopped after its third copy: nothing restored, no fallback.
+  {
+    leases = 0;
+    stop_at = 3;
+    auto destination = fixture.adapter.CreateSlot(fixture.guard);
+    TransferTiming cancelled;
+    bool fallback{};
+    assert(!streams.Restore({1}, fixture.manifest.compatibility,
+                            fixture.adapter, *destination, cancelled,
+                            stop.get_token(), [&] { fallback = true; }));
+    assert(!fallback && destination->IsValid());
+    for (auto position : fixture.adapter.Positions(*destination))
+      assert(position.valid_rows == 0);
+    stop_at = 0;
+  }
+  // A corrupt file in a later group fails after earlier groups were copied.
+  const auto file = fixture.manifest.components[0].chunks[7].file;
+  {
+    std::fstream corrupt(dir.path / "v2/chunks" / DiskFileName(file),
+                         std::ios::in | std::ios::out | std::ios::binary);
+    corrupt.put('\xff');
+  }
+  auto destination = fixture.adapter.CreateSlot(fixture.guard);
+  TransferTiming failed;
+  std::optional<std::pair<bool, DiskFileId>> reported;
+  assert(!streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                          *destination, failed, {}, {},
+                          [&](bool private_file, DiskFileId id) {
+                            reported.emplace(private_file, id);
+                          }));
+  assert(reported && !reported->first && reported->second == file);
+  const auto positions = fixture.adapter.Positions(*destination);
+  assert(
+      std::ranges::all_of(positions, [](auto p) { return p.valid_rows == 0; }));
+}
+// Pieces smaller than a file: readers read every chunk and the private state
+// piece by piece into successive pieces, which the restoring thread copies.
+void RestoreReadsLargeFilesInPieces() {
+  constexpr std::size_t kPiece = 8;
+  constexpr std::size_t kStaging = 8 * kPiece;
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, kStaging, 4096}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, kStaging, Allocate, Lease, kPiece);
+  Fixture fixture(ledger, 1, 0, 43);
+  auto sources = fixture.Sources();
+  TransferTiming written;
+  streams.Write(Id(100), fixture.manifest, sources, written);
+  for (int round = 0; round < 20; ++round) {
+    auto destination = fixture.adapter.CreateSlot(fixture.guard);
+    TransferTiming restored;
+    assert(streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                           *destination, restored));
+    assert(restored.bytes == 360 && restored.pieces > 12);
+    assert(fixture.adapter.RecurrentHash(*destination) == fixture.hash);
+  }
+  const auto file = fixture.manifest.components[0].chunks[5].file;
+  {
+    std::fstream corrupt(dir.path / "v2/chunks" / DiskFileName(file),
+                         std::ios::in | std::ios::out | std::ios::binary);
+    corrupt.seekp(9);
+    corrupt.put('\xff');
+  }
+  auto destination = fixture.adapter.CreateSlot(fixture.guard);
+  TransferTiming failed;
+  std::optional<std::pair<bool, DiskFileId>> reported;
+  assert(!streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                          *destination, failed, {}, {},
+                          [&](bool private_file, DiskFileId id) {
+                            reported.emplace(private_file, id);
+                          }));
+  assert(reported && !reported->first && reported->second == file);
+  for (auto position : fixture.adapter.Positions(*destination))
+    assert(position.valid_rows == 0);
 }
 void RoundTripAndFailures() {
   Directory dir;
@@ -1245,6 +1368,8 @@ int main() {
   MinimumStagingHoldsWidestRow();
   PrefetchDoesNotValidateOrAdmitPayload();
   RestoreGroupsAdjacentFilesWithinStaging();
+  RestoreReadsGroupsInParallel();
+  RestoreReadsLargeFilesInPieces();
   LiveRowsStreamWithoutWholeHistoryBacking();
   BorrowedSourcesWaitWithoutBlockingForeground();
   LiveBorrowedSourcesPublishFromSlot();

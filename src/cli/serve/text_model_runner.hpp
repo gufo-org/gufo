@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 #define GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -224,6 +225,11 @@ public:
   [[nodiscard]] std::size_t CachedPrefixTokens(
       std::span<const TextRunnerToken> prompt,
       const TextPromptContext* context) const;
+  /// Starts reading the disk-only checkpoint prompt would restore into the
+  /// page cache; see ComponentTextCache::WarmDisk.
+  [[nodiscard]] std::shared_ptr<const std::atomic<bool>> WarmDisk(
+      std::span<const TextRunnerToken> prompt, const TextPromptContext* context,
+      std::size_t stable) const;
   /// A disk job is still writing a prefix of prompt much deeper than any
   /// restorable checkpoint; admission may wait for it instead of prefilling.
   [[nodiscard]] std::optional<TextPendingPublication> PendingPublication(
