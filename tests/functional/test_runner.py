@@ -1058,7 +1058,7 @@ class FunctionalRunnerTest(unittest.TestCase):
         self.assertEqual([body["messages"] for body in controls[1:]],
                          [body["messages"] for body in turns])
         self.assertEqual([row["floor"] for row in checks["bridge_evidence"]["turns"]],
-                         [4392, 4462, 4532, 4602])
+                         [4712, 4782, 4852, 4922])
 
     def test_cache_bridge_rejects_a_lost_divergence_point(self):
         with self.assertRaisesRegex(AssertionError, "restored 0 tokens"):
