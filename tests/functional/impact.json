@@ -917,6 +917,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "server",
       "vision_required": false,
       "tier": "release"
     },
