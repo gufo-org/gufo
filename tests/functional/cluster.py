@@ -52,7 +52,7 @@ def failure_report(log, group_output):
 
 
 def remove_disk_caches(group_output):
-    # Each group's disk cache can reach 8 GiB; reports and logs stay.
+    # Each group's disk cache can reach its model's budget; reports and logs stay.
     for path in sorted(group_output.rglob("disk"), reverse=True):
         if path.is_dir() and not path.is_symlink():
             shutil.rmtree(path, ignore_errors=True)
@@ -75,6 +75,8 @@ def command(group, binary, weights, output, assets=None, order_seed=None):
             args += ['--suite', suite]
         if order_seed is not None:
             args += ['--order-seed', str(order_seed)]
+        if 'cache_disk_bytes' in model:
+            args += ['--cache-disk-bytes', str(model['cache_disk_bytes'])]
         args += ['--'] + llm_command(key, binary, assets, mode=mode,
                                     context=settings['context'], sessions=settings['sessions'])
         if 'cache_ram_bytes' in settings:

@@ -203,6 +203,10 @@ class PlanTest(unittest.TestCase):
             self.assertEqual(args[args.index('--sampling-preset')+1], preset)
             self.assertEqual('--mmproj' in args, key.startswith('qwen'))
             self.assertIn('--record-baseline', args)
+            # Qwen27's ~650 MB checkpoints need a larger cache restart budget.
+            runner = args[:args.index('--')]
+            self.assertEqual('--cache-disk-bytes' in runner, key.startswith('qwen'))
+            self.assertNotIn('--cache-disk-bytes', args[args.index('--'):])
 
     def test_tts_evaluator_is_merge_base_and_fixture_is_packaged(self):
         assets = {key: '/weights/' + key for key in self.data['assets']}

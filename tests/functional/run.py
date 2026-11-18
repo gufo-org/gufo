@@ -276,11 +276,16 @@ def main():
                         help="Shuffle the selected suites with this seed; suites must not depend on order")
     parser.add_argument("--allow-missing-progress", action="store_true",
                         help="Baseline only: older revisions without progress events")
+    parser.add_argument("--cache-disk-bytes", type=int, default=8 * 1024**3,
+                        help="Disk budget for the cache restart checks; size it so one "
+                             "cache run's checkpoints fit (see README)")
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="-- ./result/bin/gufo serve llm --model PATH [server options]")
     args = parser.parse_args()
     if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
         parser.error("--request-timeout must be finite and positive")
+    if args.cache_disk_bytes <= 0:
+        parser.error("--cache-disk-bytes must be positive")
     if set(args.suite) & {"discovery", "openai-count-tokens", "messages-image-counts", "all"} and args.expected_input_modalities is None:
         parser.error("discovery, openai-count-tokens and messages-image-counts require --expected-input-modalities text or text,image")
     if args.allow_missing_progress and not args.record_baseline:
@@ -346,7 +351,7 @@ def main():
             command += [flag, default]
     if disk_enabled:
         command += ["--cache-disk", str(output / "disk"),
-                    "--cache-disk-bytes", str(8 * 1024**3),
+                    "--cache-disk-bytes", str(args.cache_disk_bytes),
                     "--cache-disk-staging-bytes", str(1024**3)]
     model = option(command, "--served-model-name")
     vision = option(command, "--mmproj") is not None

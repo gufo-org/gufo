@@ -715,8 +715,14 @@ unchanged retries expect full reuse.
 
 Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`
-uses its own 8 GiB disk budget and 1 GiB staging area inside the output directory;
-the runner removes that disk cache when the run ends, keeping reports and logs.
+uses its own disk budget (`--cache-disk-bytes`, 8 GiB by default) and 1 GiB staging
+area inside the output directory; the runner removes that disk cache when the run
+ends, keeping reports and logs. Its restart checks replay every case after the
+whole suite, and disk retention evicts checkpoints unused for a budget of newer
+writes, so the budget must hold what the suite publishes before the restart:
+about 6 GiB of 130–300 MB checkpoints on Flash-Next, but 15 GiB of 256–676 MB
+checkpoints on Qwen27. A model whose checkpoints are that large sets
+`cache_disk_bytes` in its `devlab.json` entry; Qwen27 uses 24 GiB.
 Flash-Next allocates that staging as pinned host memory at startup, beyond its
 RAM budget, although its default 1 MiB transfer buffer suffices. The runner
 keeps 1 GiB so results stay comparable with retained runs and other models.
