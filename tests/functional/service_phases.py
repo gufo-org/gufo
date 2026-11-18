@@ -208,7 +208,7 @@ def main():
     if model.get('npu') and not supports_npu(args.base_binary, model['service']):
         unsupported = 'base binary has no --npu; PR-only NPU timings'
     arms = []
-    started = time.monotonic()
+    started = time.perf_counter()
     idle = gpu_temperature()
     # Same thermal control as Flash-Next, with every reading retained.
     if idle is not None:
@@ -231,7 +231,7 @@ def main():
               'revisions': {'base': args.base_revision, 'head': args.head_revision},
               'settings': {'repeats': args.repeats, 'slowdown': SLOWDOWN, 'noise_ms': NOISE_MS,
                            'requests': IMAGE_REQUESTS if image else REQUESTS, 'idle_temp_c': idle},
-              'wall_s': time.monotonic() - started, 'arms': arms,
+              'wall_s': time.perf_counter() - started, 'arms': arms,
               'phases': phases, 'diverged': diverged}
     args.output.write_text(json.dumps(result, indent=2) + '\n')
 

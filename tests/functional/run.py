@@ -211,8 +211,8 @@ def server(command, log_path, startup_timeout, environment=None):
                                  for signum in stop_signals}
             process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                        env=environment, **SERVER_POPEN)
-            deadline = time.monotonic() + startup_timeout
-            while time.monotonic() < deadline:
+            deadline = time.perf_counter() + startup_timeout
+            while time.perf_counter() < deadline:
                 if process.poll() is not None:
                     raise RuntimeError(f"server exited {process.returncode}; see {log_path}")
                 connection = http.client.HTTPConnection(
@@ -372,7 +372,7 @@ def main():
     write_json(report_path, report)
 
     def run(label, script, arguments):
-        started = time.monotonic()
+        started = time.perf_counter()
         row = {"status": "running", "report": label + ".json"}
         report["suites"][label] = row
         write_json(report_path, report)
@@ -407,7 +407,7 @@ def main():
             row["status"] = "passed"
         except Exception as error:
             row.update(status="failed", error=str(error), traceback=traceback.format_exc())
-        row["seconds"] = round(time.monotonic() - started, 3)
+        row["seconds"] = round(time.perf_counter() - started, 3)
         write_json(report_path, report)
         print(f"{label}: {row['status']} ({row['seconds']}s)", flush=True)
         return row["status"] == "passed"
@@ -435,9 +435,9 @@ def main():
         if "cache-rotation" in selected:
             from cache_rotation import check_snapshot_budget, host_available_memory
             available_before_load = host_available_memory()
-        startup_started = time.monotonic()
+        startup_started = time.perf_counter()
         with server(command, output / "server.log", args.startup_timeout):
-            report["startup_ms"] = (time.monotonic() - startup_started) * 1000
+            report["startup_ms"] = (time.perf_counter() - startup_started) * 1000
             if "cache-rotation" in selected:
                 report["snapshot_budget"] = check_snapshot_budget(
                     (output / "server.log").read_text(), available_before_load,
@@ -497,9 +497,9 @@ def main():
                     "--url", base_url, "--model", model,
                     "--output", str(output / "disk-spacing.json")])
         if ready_to_restore or spacing or persist:
-            startup_started = time.monotonic()
+            startup_started = time.perf_counter()
             with server(command, output / "server-restarted.log", args.startup_timeout):
-                report["restart_ms"] = (time.monotonic() - startup_started) * 1000
+                report["restart_ms"] = (time.perf_counter() - startup_started) * 1000
                 for label in ready_to_restore:
                     run(label + "-disk", "continuation.py", [
                         "--url", base_url, "--model", model,

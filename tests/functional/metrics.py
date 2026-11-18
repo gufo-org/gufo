@@ -475,19 +475,19 @@ class Measurement:
     def __init__(self, recorder, row, body):
         self.recorder, self.row = recorder, row
         self.body = body
-        self.started = time.monotonic()
+        self.started = time.perf_counter()
         self.parts = []
         self.ended = False
         self.finished = False
 
     def feed(self, data):
-        self.parts.append(((time.monotonic() - self.started) * 1000, data))
+        self.parts.append(((time.perf_counter() - self.started) * 1000, data))
 
     def finish(self):
         if self.finished:
             return
         self.finished = True
-        elapsed = (time.monotonic() - self.started) * 1000
+        elapsed = (time.perf_counter() - self.started) * 1000
         with self.recorder.lock:
             self.row.update(status="complete" if self.ended else "disconnected",
                             wall_ms=elapsed)

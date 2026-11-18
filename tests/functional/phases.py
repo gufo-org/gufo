@@ -111,9 +111,9 @@ def gpu_temperature():
 
 def cool_down(target):
     """Wait until the GPU is back near its idle temperature; return the reading."""
-    deadline = time.monotonic() + COOL_TIMEOUT_S
+    deadline = time.perf_counter() + COOL_TIMEOUT_S
     temperature = gpu_temperature()
-    while temperature is not None and temperature > target and time.monotonic() < deadline:
+    while temperature is not None and temperature > target and time.perf_counter() < deadline:
         time.sleep(5)
         temperature = gpu_temperature()
     return temperature
@@ -142,7 +142,7 @@ class Server:
 
     def _read(self, stream, log):
         for line in stream:
-            stamp = time.monotonic()
+            stamp = time.perf_counter()
             log.write(line)
             if "[loader]" in line or "event=listening " in line:
                 self.events.append((stamp, line))
@@ -152,20 +152,20 @@ class Server:
 
     def start(self, timeout):
         self.log = self.log_path.open("w", encoding="utf-8")
-        self.spawned = time.monotonic()
+        self.spawned = time.perf_counter()
         self.process = subprocess.Popen(self.command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                         text=True, encoding="utf-8", errors="replace", **SERVER_POPEN)
         self.reader = threading.Thread(target=self._read, args=(self.process.stdout, self.log))
         self.reader.start()
         deadline = self.spawned + timeout
-        while time.monotonic() < deadline:
+        while time.perf_counter() < deadline:
             if self.process.poll() is not None:
                 raise RuntimeError(f"server exited {self.process.returncode}; see {self.log_path}")
             connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=1)
             try:
                 connection.request("GET", "/health")
                 if connection.getresponse().status == 200:
-                    self.ready = time.monotonic()
+                    self.ready = time.perf_counter()
                     # Let the log reader retain readiness even if the health response wins the race.
                     if not self.listener_recorded.wait(1):
                         raise RuntimeError("listener marker missing; see " + str(self.log_path))
@@ -351,17 +351,17 @@ def main():
         time.sleep(30)
         idle = gpu_temperature()
     target = None if idle is None else idle + 3
-    started = time.monotonic()
+    started = time.perf_counter()
     arms = []
     for repeat in range(args.repeats):
         for revision in ("base", "head"):
             temperature = cool_down(target) if target is not None else None
             print(f"Arm {revision} #{repeat + 1}: GPU {temperature} °C", flush=True)
-            arm_started = time.monotonic()
+            arm_started = time.perf_counter()
             arm = run_arm(revision, binaries[revision], weights, args.logs, repeat,
                           args.startup_timeout, args.model_id, assets)
             arms.append({"revision": revision, "repeat": repeat, "gpu_temp_c": temperature,
-                         "wall_s": time.monotonic() - arm_started, **arm})
+                         "wall_s": time.perf_counter() - arm_started, **arm})
     phases, diverged = summarize(arms)
     from devlab_models import registry
     mode = registry()['models'][args.model_id]['mode'] if args.model_id else 'mtp'
@@ -389,7 +389,7 @@ def main():
                      "speculative": mode, "generated_tokens": GENERATED_TOKENS,
                      "slowdown": SLOWDOWN, "noise_ms": NOISE_MS,
                      "idle_temp_c": idle, "requests": {key: label for key, label, *_ in REQUESTS}},
-        "wall_s": time.monotonic() - started,
+        "wall_s": time.perf_counter() - started,
         "arms": arms, "phases": phases, "diverged": diverged,
     }
     args.output.write_text(json.dumps(result, indent=2) + "\n")

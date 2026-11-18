@@ -128,8 +128,8 @@ def main():
                        output / f"request-{request_number:02d}.json")
 
     def wait_for_publication(process, seed):
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline:
+        deadline = time.perf_counter() + 60
+        while time.perf_counter() < deadline:
             if process.poll() is not None:
                 raise RuntimeError("disk seed server exited before publication")
             log = (output / "disk-seed.log").read_text()

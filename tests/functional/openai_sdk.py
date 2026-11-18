@@ -3021,7 +3021,7 @@ def main():
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])
         for name in selected:
-            started = time.monotonic()
+            started = time.perf_counter()
             try:
                 suites[name]()
                 report["suites"][name] = {"status": "passed"}
@@ -3035,7 +3035,7 @@ def main():
                 report["status"] = "interrupted"
                 checks.save()
                 raise
-            report["suites"][name]["seconds"] = round(time.monotonic() - started, 3)
+            report["suites"][name]["seconds"] = round(time.perf_counter() - started, 3)
             checks.save()
             if args.through_case and args.through_case in checks:
                 break

@@ -1464,7 +1464,7 @@ class FunctionalRunnerTest(unittest.TestCase):
             for label, before, after, expected in cases:
                 with self.subTest(change=label):
                     for root, payload in ((baseline, before), (candidate, after)):
-                        with patch("metrics.time.monotonic", return_value=1):
+                        with patch("metrics.time.perf_counter", return_value=1):
                             recorder = Recorder(root / "messages.requests.json")
                             step = recorder.begin("/v1/messages", request)
                             step.row["http_status"] = 200

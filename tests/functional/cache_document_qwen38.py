@@ -43,7 +43,7 @@ def request(port, text, max_tokens, artifact):
         "temperature": 0, "max_tokens": max_tokens, "stream": False,
         "chat_template_kwargs": {"enable_thinking": False}}).encode()
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1800)
-    started = time.monotonic()
+    started = time.perf_counter()
     try:
         connection.request("POST", "/v1/chat/completions", body,
                            {"Content-Type": "application/json"})
@@ -51,7 +51,7 @@ def request(port, text, max_tokens, artifact):
         payload = json.loads(response.read())
     finally:
         connection.close()
-    elapsed = time.monotonic() - started
+    elapsed = time.perf_counter() - started
     write_json(artifact, {"response": payload, "status": response.status,
                           "elapsed_s": elapsed})
     if response.status != 200:
@@ -103,9 +103,9 @@ def main():
 
     def drained(label, process):
         # Publication is asynchronous: wait until the disk queue settles.
-        deadline = time.monotonic() + 300
+        deadline = time.perf_counter() + 300
         count = -1
-        while time.monotonic() < deadline:
+        while time.perf_counter() < deadline:
             if process.poll() is not None:
                 raise RuntimeError(f"{label} server exited before publication")
             now = len(re.findall(r"event=published ",

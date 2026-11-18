@@ -64,7 +64,7 @@ def download(plan, cache, data):
         print('Download', key, asset['revision'], 'to', destination, flush=True)
         existing = sum((destination / name).is_file() for name in asset['required'])
         print(f'{key}: {existing}/{len(asset["required"])} required files already present', flush=True)
-        started = time.monotonic()
+        started = time.perf_counter()
         for attempt in range(3):
             try:
                 snapshot_download(repo_id=asset['repo'], revision=asset['revision'],
@@ -80,7 +80,7 @@ def download(plan, cache, data):
             if not path.is_file() or not path.stat().st_size:
                 raise FileNotFoundError(path)
         paths[key] = str(destination.resolve())
-        print(f'{key}: ready in {time.monotonic() - started:.1f} s', flush=True)
+        print(f'{key}: ready in {time.perf_counter() - started:.1f} s', flush=True)
     return paths
 
 

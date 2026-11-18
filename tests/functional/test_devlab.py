@@ -601,7 +601,7 @@ class WindowsPortabilityTest(unittest.TestCase):
             with patch.object(phases, 'SERVER_POPEN', {'creationflags': 512}), \
                     patch.object(phases.subprocess, 'Popen', return_value=process) as popen, \
                     patch.object(phases, 'interrupt_server') as interrupt, \
-                    patch.object(phases.time, 'monotonic', side_effect=[0, 0, 10]):
+                    patch.object(phases.time, 'perf_counter', side_effect=[0, 0, 10]):
                 with self.assertRaises(TimeoutError):
                     server.start(1)
                 server.stop()

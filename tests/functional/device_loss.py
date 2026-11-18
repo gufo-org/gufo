@@ -33,7 +33,7 @@ def require(condition, message):
 
 
 def request(port, method, path, body=None):
-    start = time.monotonic()
+    start = time.perf_counter()
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
     try:
         connection.request(
@@ -45,17 +45,17 @@ def request(port, method, path, body=None):
             "status": response.status,
             "headers": dict(response.getheaders()),
             "body": response.read().decode(),
-            "wall_s": time.monotonic() - start,
+            "wall_s": time.perf_counter() - start,
         }
     finally:
         connection.close()
 
 
 def await_condition(process, predicate, timeout, message):
-    deadline = time.monotonic() + timeout
+    deadline = time.perf_counter() + timeout
     while not predicate():
         require(process.poll() is None, f"server exited {process.returncode}: {message}")
-        if time.monotonic() >= deadline:
+        if time.perf_counter() >= deadline:
             raise TimeoutError(message)
         time.sleep(0.02)
 
@@ -122,12 +122,12 @@ def run_case(args, name):
             record["request"] = {"path": path, "body": body}
             if name.startswith("idle-"):
                 (output / "probe_only").touch()
-                started = time.monotonic()
+                started = time.perf_counter()
                 (output / "armed").touch()
                 if name == "idle-loss":
                     # No inference, health traffic or disconnect initiates exit.
                     record["exit_code"] = process.wait(timeout=13)
-                    record["exit_after_arm_s"] = time.monotonic() - started
+                    record["exit_after_arm_s"] = time.perf_counter() - started
                     require(record["exit_after_arm_s"] <= 12,
                             "idle loss detection missed its bound")
                 else:
@@ -164,7 +164,7 @@ def run_case(args, name):
                         delta = event.get("choices", [{}])[0].get("delta", {})
                         if delta.get("content") or delta.get("reasoning_content"):
                             break
-                started = time.monotonic()
+                started = time.perf_counter()
                 (output / "armed").touch()
                 pieces.append(response.read().decode())
                 connection.close()
@@ -186,14 +186,14 @@ def run_case(args, name):
                 # or client disconnect can initiate the shutdown.
                 await_condition(process, lambda: (output / "writer_blocked").exists(),
                                 15, "SSE writer never blocked")
-                started = time.monotonic()
+                started = time.perf_counter()
                 (output / "armed").touch()
                 record["exit_code"] = process.wait(timeout=13)
-                record["exit_after_arm_s"] = time.monotonic() - started
+                record["exit_after_arm_s"] = time.perf_counter() - started
                 require(9 <= record["exit_after_arm_s"] <= 13,
                         "forced exit did not exercise the ten-second watchdog")
             else:
-                started = time.monotonic()
+                started = time.perf_counter()
                 (output / "armed").touch()
                 record["failure"] = request(port, "POST", path, body)
                 response = record["failure"]
@@ -211,8 +211,8 @@ def run_case(args, name):
                                 "missing stable error code")
                     require(not any(key.lower() == "retry-after" for key in response["headers"]),
                             "permanent loss advertised a retry")
-                    record["exit_code"] = process.wait(timeout=max(0.1, 13 - (time.monotonic() - started)))
-                    record["exit_after_arm_s"] = time.monotonic() - started
+                    record["exit_code"] = process.wait(timeout=max(0.1, 13 - (time.perf_counter() - started)))
+                    record["exit_after_arm_s"] = time.perf_counter() - started
                 else:
                     require(response["status"] == 500, "recoverable failure changed status")
                     for health in ("/health", "/ready"):

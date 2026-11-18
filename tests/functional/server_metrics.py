@@ -205,12 +205,12 @@ class ServerMetrics:
         return values
 
     def wait(self, predicate, description, timeout=15):
-        deadline = time.monotonic() + timeout
+        deadline = time.perf_counter() + timeout
         while True:
             values = self.read()
             if predicate(values):
                 return values
-            if time.monotonic() >= deadline:
+            if time.perf_counter() >= deadline:
                 raise AssertionError(f"metrics never reached {description}: {values}")
             time.sleep(.05)
 

@@ -49,16 +49,16 @@ def is_output(endpoint, event):
 
 def stream_timing(client, model, endpoint, prompt, max_tokens, opened_event=None, stop=None):
     """Seconds to response headers and to the first generated output."""
-    started = time.monotonic()
+    started = time.perf_counter()
     stream = open_stream(client, model, endpoint, prompt, max_tokens)
-    opened = time.monotonic() - started
+    opened = time.perf_counter() - started
     if opened_event is not None:
         opened_event.set()
     first, usage = None, None
     with stream:
         for event in stream:
             if first is None and is_output(endpoint, event):
-                first = time.monotonic() - started
+                first = time.perf_counter() - started
             if getattr(event, "usage", None):
                 usage = event.usage.to_dict()
             if stop is not None and first is not None and stop(first):
@@ -105,13 +105,13 @@ def check_stream_start(client, model, checks, width, context):
 
         def wait_queued():
             queued.update(stream_timing(client, model, "chat", "Name a color.", 4, opened))
-        submitted = time.monotonic()
+        submitted = time.perf_counter()
         waiter = threading.Thread(target=wait_queued)
         waiter.start()
         # A deferred-only server opens after the peers finish; bound the wait.
         # Keep the queue occupied past the bound even if headers came first.
         opened.wait(QUEUE_START_S + 10)
-        time.sleep(max(0, submitted + QUEUE_START_S + 1 - time.monotonic()))
+        time.sleep(max(0, submitted + QUEUE_START_S + 1 - time.perf_counter()))
     finally:
         release.set()
         for thread in threads:

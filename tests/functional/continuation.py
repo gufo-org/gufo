@@ -34,7 +34,7 @@ def call(url, body, stop_field=None):
     target = urlsplit(url)
     cls = http.client.HTTPSConnection if target.scheme == "https" else http.client.HTTPConnection
     connection = cls(target.hostname, target.port, timeout=180)
-    started = time.monotonic()
+    started = time.perf_counter()
     measurement = TRACE.begin("/v1/chat/completions", body)
     connection.request("POST", target.path.rstrip("/") + "/v1/chat/completions",
                        json.dumps(body), {"Content-Type": "application/json"})
@@ -77,7 +77,7 @@ def call(url, body, stop_field=None):
             response.close()
             connection.close()
             measurement.finish()
-            return message, time.monotonic() - started
+            return message, time.perf_counter() - started
     connection.close()
     measurement.ended = True
     # The model finished before the fixture could cancel it. Say so even when

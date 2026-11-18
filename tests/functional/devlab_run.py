@@ -78,7 +78,7 @@ def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=
                 'timing': 'pending' if timing else 'skipped', 'reasons': selection['reasons']}
         summary['models'].append(item)
         save()
-        started = time.monotonic()
+        started = time.perf_counter()
         try:
             if not groups:
                 pass
@@ -110,12 +110,12 @@ def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=
                 item['correctness'] = 'passed' if all(row['status'] == 'passed' for row in rows) else 'failed'
         except Exception:
             item.update(correctness='error', error=traceback.format_exc())
-        item['correctness_s'] = round(time.monotonic() - started, 1)
+        item['correctness_s'] = round(time.perf_counter() - started, 1)
         save()
         if not timing:
             continue
         # Correctness failure must not hide the speed controls or other models.
-        started = time.monotonic()
+        started = time.perf_counter()
         try:
             script = 'phases.py' if model['category'] == 'llm' else 'service_phases.py'
             destination = report / (key + '.phases.json')
@@ -142,7 +142,7 @@ def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=
                 item['timing_error'] = cluster.tail(output / (key + '.phases.log'))
         except Exception:
             item.update(timing='error', timing_error=traceback.format_exc())
-        item['timing_s'] = round(time.monotonic() - started, 1)
+        item['timing_s'] = round(time.perf_counter() - started, 1)
         save()
         # The manual AR depth benchmark runs on the device that timed Flash-Next.
         if plan.get('benchmark') and key == 'flash-next-q4':
