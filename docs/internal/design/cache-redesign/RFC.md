@@ -152,7 +152,8 @@ within a rank; admission may refuse a checkpoint under byte pressure.
 
 In the research baseline, the stable boundary excludes the generation suffix;
 up to four intermediate grid captures are selected. Learned divergence points
-require at least a 512-token improvement over already reusable history. Removal
+require at least a 192-token improvement over already reusable history; a
+request waits for a peer's shared checkpoint only for a 512-token gain. Removal
 ranks are retry 0, history 1, covered continuation 2, and branch point/last
 copy 3. The record limit does not grant permission to exceed the byte budget.
 

@@ -29,8 +29,8 @@ MAX_FILL_REQUESTS = 64
 # automatic budget on a 128 GiB host. Smaller ratios do not reproduce pressure.
 SNAPSHOT_RATIO = 16
 # Below this gain the server keeps the nearest existing checkpoint instead of
-# learning a new divergence point (TextRunnerPool::Request::kSharedPrefixMinTokens).
-LEARN_MIN_TOKENS = 512
+# learning a new divergence point (TextRunnerPool::Request::kSharedBranchMinTokens).
+LEARN_MIN_TOKENS = 192
 # Template framing and tokenizer merges where a user message starts, plus the
 # probe's one-word user turn and generation prompt.
 BOUNDARY_ALLOWANCE = 96
