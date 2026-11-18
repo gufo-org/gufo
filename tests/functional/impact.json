@@ -306,6 +306,7 @@
         "flash-next-q4/mtp"
       ],
       "configuration": "standard",
+      "isolation": "server",
       "vision_required": true,
       "tier": "release"
     },
@@ -915,6 +916,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "server",
       "vision_required": false,
       "tier": "release"
     },
@@ -1092,7 +1094,6 @@
       ],
       "status": "active",
       "configuration": "standard",
-      "isolation": "server",
       "vision_required": false,
       "tier": "release",
       "escalate": [

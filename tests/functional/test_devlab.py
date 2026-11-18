@@ -301,7 +301,7 @@ class ShardTest(unittest.TestCase):
         self.assertGreater(len(llm), 1)
         # Suites that read server-wide cache state get a server of their own.
         servers = [server for part in self.parts(shards, 'flash-next-q4') for server in part['groups']]
-        for suite in ('cache', 'batch'):
+        for suite in ('cache', 'batch', 'tool-images', 'prefill-scheduling'):
             self.assertIn([suite], [server['suites'] for server in servers])
         names = [(server['configuration'], server.get('server')) for server in servers]
         self.assertEqual(len(names), len(set(names)))
