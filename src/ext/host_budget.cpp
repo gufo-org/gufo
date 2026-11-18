@@ -162,6 +162,10 @@ std::uint64_t SnapshotCeilingBytes(const HostMemorySample& sample) {
   return SaturatingSubtract(std::min(host, cgroup), sample.outstanding);
 }
 
+std::uint64_t HostAvailableBytes() {
+  return PinnableBytes(SampleHostMemory());
+}
+
 std::uint64_t HostReserveShortfallBytes(const HostMemorySample& sample) {
   return SaturatingSubtract(
       std::max(sample.cma_free, kHostSnapshotHeadroomBytes), sample.available);

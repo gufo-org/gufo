@@ -53,10 +53,10 @@ struct Layout {
 struct Policy {
   /* Bounds the cache when nonzero; zero sizes it from available memory. */
   uint64_t cache_limit_bytes = 0;
-  /* Free memory the cache leaves for allocations made after it, until
-   * SetReserve replaces it. */
+  /* Free memory the cache leaves for allocations made after it, until the
+   * host grants it a size (Fit). */
   uint64_t reserve_bytes = 4ull << 30;
-  /* Free memory below which the cache stops growing once SetReserve ran. */
+  /* Free memory below which the cache stops growing once Fit ran. */
   uint64_t live_floor_bytes = 1ull << 30;
   /* Uses decay with this half-life, in tokens of the layer's clock; a
    * Prepare counts at most use_cap uses per expert and advances the clock by
@@ -119,10 +119,6 @@ struct Ranked {
   uint64_t count;
 };
 
-/* Available unified host memory, including reclaimable file cache, without
- * free CMA and within the process's cgroup limits. */
-uint64_t AvailableMemory();
-
 class Store {
 public:
   struct Impl;
@@ -141,18 +137,22 @@ public:
    * false (with a message) leaves reads unchanged. */
   bool AttachTails(const char* path);
 
-  /* Re-sizes the cache from the memory free now, leaving reserve_bytes that
-   * it never grows into, after allocating the prefetch stage: frees its
-   * newest chunks, keeping the experts eviction ranks highest, when it is
-   * over the new limit. Call at startup once everything else long-lived is
-   * allocated, then seed again to fill any room left. A nonzero
-   * cache_limit_bytes still bounds the pool. False when the stage or the
-   * shrink failed. */
-  bool SetReserve(uint64_t reserve_bytes);
+  /* Sizes the cache to the host's grant: the cache and its prefetch stage
+   * take at most grant_bytes. Allocates the stage (bought on the first
+   * prompt otherwise), frees the newest chunks, keeping the experts eviction
+   * ranks highest, when the cache is over the grant, and seeds the room left
+   * with the last ranking given to Seed. From then on the cache grows only
+   * up to the grant, while more than live_floor_bytes stay available. Serving
+   * calls it once the sessions and the prompt cache's backing exist (see
+   * TextRunnerExpertCacheClaim); a nonzero cache_limit_bytes still bounds the
+   * cache. False when the stage, the shrink or the seed failed. */
+  bool Fit(uint64_t grant_bytes);
 
   /* Primes the cache: `ranked` first, then every expert it leaves out,
-   * interleaved across layers, as far as the budget reaches. `source` names
-   * the ranking in the log. Startup work: it does not count as inference in
+   * interleaved across layers, as far as the budget reaches. Before Fit the
+   * budget is 15/16 of the provisional size, leaving room for the sessions;
+   * Fit seeds again with the same ranking. `source` names the ranking in the
+   * log. Startup work: it does not count as inference in
    * the statistics. */
   bool Seed(std::vector<Ranked> ranked, const char* source);
 

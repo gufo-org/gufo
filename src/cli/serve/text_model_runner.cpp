@@ -329,7 +329,7 @@ struct TextRunnerPool::Impl {
       // zero unless the backend can lend them.
       const auto borrowable = mem::StateLedger::Process().BorrowableBytes();
       const auto automatic =
-          resources.retained_snapshot_capacity_bytes.value_or(0) + borrowable;
+          AutomaticRetainedBytes(resources, state_count) + borrowable;
       const auto ceiling =
           resources.retained_snapshot_ceiling_bytes.value_or(automatic) +
           borrowable;

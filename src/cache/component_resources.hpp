@@ -12,6 +12,10 @@
 
 namespace gufo::cache {
 
+// Backing ComponentCacheResources::commit_backing commits before readiness, at
+// most: the budget beyond it commits as captures need it.
+inline constexpr std::size_t kPreparedBackingBytes = std::size_t{2} << 30;
+
 // Neutral provider contract for one component-cache capture. The model supplies
 // physical storage and binds its ordinary execution facade to adapter-owned
 // slots; queueing, retention and admission policy stay in the serving layer.
@@ -77,8 +81,13 @@ struct ComponentCacheResources {
   // the ordinary reclamation path; true still requires every allocation.
   std::function<bool(std::span<const PayloadRequest>)> can_capture;
   // Optional initialization step after slots allocate. The provider leaves
-  // payload backing uncommitted until serving selects the post-slot budget.
+  // payload backing uncommitted until serving selects the post-slot budget,
+  // then commits up to kPreparedBackingBytes of it before returning.
   std::function<void(std::size_t)> commit_backing;
+  // Optional: the payload backing committed so far, in bytes. Growth beyond
+  // it can be refused (host or device-heap reserves), so serving logs it
+  // beside the budget.
+  std::function<std::size_t()> committed_backing_bytes;
   // Optional host bytes the slots pinned and charged to the ledger as they
   // allocated. Serving charges them on top of the cache's budget, and adds
   // them back to the runner's claim, which measures the host after them.

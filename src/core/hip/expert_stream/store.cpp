@@ -37,11 +37,17 @@
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/logging/logging.hpp"
 #include "src/core/platform/os_info.hpp"
+#include "src/ext/host_budget.hpp"
 
 namespace gufo::expert_stream {
 namespace {
 
 constexpr uint64_t kGiB = 1ull << 30;
+
+/* Host memory available now, as the rest of Gufo measures it. */
+uint64_t AvailableMemory() {
+  return gufo::ext::HostAvailableBytes();
+}
 /* Each slot size class grows by its own chunks, so a smaller chunk bounds
  * the capacity a class can strand in a part-used chunk. */
 constexpr uint64_t kChunkBytes = 128ull << 20;
@@ -498,60 +504,6 @@ private:
 
 }  // namespace
 
-uint64_t AvailableMemory() {
-  uint64_t available = gufo::platform::AvailableMemoryBytes();
-  std::ifstream meminfo("/proc/meminfo");
-  std::string line;
-  uint64_t cma_free = 0;
-  while (std::getline(meminfo, line)) {
-    unsigned long long kib = 0;
-    if (sscanf(line.c_str(), "MemAvailable: %llu kB", &kib) == 1)
-      available = kib * 1024;
-    if (sscanf(line.c_str(), "CmaFree: %llu kB", &kib) == 1)
-      cma_free = kib * 1024;
-  }
-  available = available > cma_free ? available - cma_free : 0;
-  // Respect cgroup limits as well as physical RAM. Inactive clean file cache
-  // can be reclaimed under pressure, just as it can on the host.
-  std::ifstream membership("/proc/self/cgroup");
-  while (std::getline(membership, line)) {
-    if (!line.starts_with("0::/"))
-      continue;
-    const std::filesystem::path root = "/sys/fs/cgroup";
-    const std::filesystem::path relative = line.substr(4);
-    bool valid = true;
-    for (const auto& part : relative)
-      if (part == "..")
-        valid = false;
-    if (!valid)
-      break;
-    for (auto path = root / relative;; path = path.parent_path()) {
-      std::ifstream limit_file(path / "memory.max"),
-          used_file(path / "memory.current");
-      uint64_t limit = 0, used = 0;
-      if ((limit_file >> limit) && (used_file >> used)) {
-        std::ifstream stat_file(path / "memory.stat");
-        uint64_t inactive = 0, dirty = 0, value = 0;
-        bool found = false;
-        for (std::string key; stat_file >> key >> value;) {
-          if (key == "inactive_file") {
-            inactive = value;
-            found = true;
-          } else if (key == "file_dirty" || key == "file_writeback")
-            dirty += value;
-        }
-        if (found)
-          used -= std::min(used, inactive - std::min(inactive, dirty));
-        available = std::min(available, limit > used ? limit - used : 0);
-      }
-      if (path == root)
-        break;
-    }
-    break;
-  }
-  return available;
-}
-
 struct Store::Impl {
   Policy policy;
   uint32_t n_layer = 0;
@@ -681,8 +633,11 @@ struct Store::Impl {
   std::unique_ptr<ReadPool> readers;
   uint64_t cache_limit = 0;
   uint64_t requested_limit = 0;  // Policy::cache_limit_bytes; 0: from memory
-  uint64_t reserve = 0;          // free memory the cache never grows into
-  bool sized_after_sessions = false;  // set_reserve ran: seed the whole budget
+  uint64_t reserve = 0;  // free memory the cache never grows into before Fit
+  bool granted = false;  // Fit ran: the host sized the cache
+  /* The last ranking given to Seed, which Fit seeds again. */
+  std::vector<Ranked> seed_ranking;
+  std::string seed_source;
   uint64_t tick = 0;
   uint64_t logged_tokens = 0;
   /* Policy::trace_path: binary routing trace (Store::Tracing), opened at
@@ -740,8 +695,7 @@ struct Store::Impl {
 
   // Free memory the cache never grows into at this moment.
   uint64_t live_floor() const {
-    return sized_after_sessions ? std::min(reserve, policy.live_floor_bytes)
-                                : reserve;
+    return granted ? policy.live_floor_bytes : reserve;
   }
 
   bool grow(uint32_t size_class) {
@@ -1295,6 +1249,8 @@ bool Store::Seed(std::vector<Ranked> ranked, const char* source) {
       return false;
     seen = 1;
   }
+  store->seed_ranking = ranked;
+  store->seed_source = source ? source : "";
   for (uint32_t e = 0; e < store->n_expert; ++e)
     for (uint32_t l = 0; l < n_layer; ++l)
       if (!ranked_set[uint64_t{l} * store->n_expert + e])
@@ -1309,7 +1265,7 @@ bool Store::Seed(std::vector<Ranked> ranked, const char* source) {
   // seed after the sessions keeps the experts already resident).
   uint64_t budget =
       std::min(store->cache_limit, store->stats.cache_bytes + free_budget);
-  if (!store->sized_after_sessions)
+  if (!store->granted)
     budget = budget / 16 * 15;
   size_t target = 0;
   for (uint64_t used = 0; target < ranked.size(); ++target) {
@@ -1478,8 +1434,11 @@ std::vector<ReadTask> build_read_tasks(const Store::Impl* store, uint32_t layer,
 }
 
 /* The compact prefetch stage is bought when prefetch first starts, or by
- * SetReserve before a server seeds the cache. */
-bool ensure_stage_pairs(Store::Impl* store) {
+ * Fit before a server seeds the cache. `allocated`, when given, receives the
+ * bytes this call allocated. */
+bool ensure_stage_pairs(Store::Impl* store, uint64_t* allocated = nullptr) {
+  if (allocated)
+    *allocated = 0;
   if (store->stage_pairs)
     return true;
   std::array<uint64_t, kMaxPieces> bytes{};
@@ -1498,6 +1457,9 @@ bool ensure_stage_pairs(Store::Impl* store) {
       return false;
     }
   store->stage_pairs = true;
+  if (allocated)
+    for (uint32_t p = 0; p < store->n_pieces; ++p)
+      *allocated += bytes[p] * store->policy.prefetch_stage_rows;
   return true;
 }
 
@@ -2150,23 +2112,23 @@ void Store::Log() const {
       static_cast<unsigned long long>(store->readers->buffered_reads()));
 }
 
-bool Store::SetReserve(uint64_t reserve_bytes) {
+bool Store::Fit(uint64_t grant_bytes) {
   Impl* store = impl_.get();
   /* The prefetch stage is bought on the first prompt anyway; buying it now
-   * puts it in the measurement instead of under the cache. */
-  const bool staged = ensure_stage_pairs(store);
-  store->reserve = reserve_bytes;
-  store->sized_after_sessions = true;
-  const uint64_t available = AvailableMemory();
-  const uint64_t cached = store->stats.cache_bytes;
-  const uint64_t keep = reserve_bytes;
-  uint64_t limit = available > keep
-                       ? cached + (available - keep)
-                       : cached - std::min(cached, keep - available);
+   * takes it from the grant instead of from under the cache. */
+  uint64_t stage_bytes = 0;
+  const bool staged = ensure_stage_pairs(store, &stage_bytes);
+  store->granted = true;
+  uint64_t limit = grant_bytes > stage_bytes ? grant_bytes - stage_bytes : 0;
   if (store->requested_limit)
     limit = std::min(limit, store->requested_limit);
   store->cache_limit = limit;
-  return store->shrink_to(limit) && staged;
+  const bool shrunk = store->shrink_to(limit);
+  // Seed takes the ranking by value and records it again.
+  const std::string source = store->seed_source;
+  const bool seeded =
+      store->seed_ranking.empty() || Seed(store->seed_ranking, source.c_str());
+  return staged && shrunk && seeded;
 }
 
 }  // namespace gufo::expert_stream

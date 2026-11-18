@@ -23,6 +23,9 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/platform/os_info.hpp"
 #include "src/mem/ledger.hpp"
+#if defined(ENGINE_ENABLE_HIP)
+#include "src/core/hip/expert_stream/store.hpp"
+#endif
 
 namespace gufo::server {
 namespace {
@@ -375,6 +378,52 @@ struct ComponentTextCache::Impl {
   bool host_pressure_reported{};
   cache::ResourceCharge metadata;
 
+  // Sizes a streamed model's expert cache once the sessions exist and the
+  // prompt cache committed its prepared backing: what the cache holds plus
+  // the host memory available now, less the runner's headroom and the
+  // prompt-cache budget still to commit (`backing_bytes` beyond what
+  // commit_backing prepares). The backing may hold less than it prepares:
+  // the log reports what it committed.
+  void FitExpertCache(std::size_t backing_bytes) const {
+    const auto claim = runner->ResourceClaim().expert_cache;
+    if (!claim.store)
+      return;
+#if defined(ENGINE_ENABLE_HIP)
+    const std::size_t prepared =
+        resources->commit_backing
+            ? std::min(backing_bytes, cache::kPreparedBackingBytes)
+            : 0;
+    const std::uint64_t pending = backing_bytes - prepared;
+    const std::uint64_t committed = resources->committed_backing_bytes
+                                        ? resources->committed_backing_bytes()
+                                        : prepared;
+    const std::uint64_t cached = claim.store->GetStats().cache_bytes;
+    const std::uint64_t available = ext::HostAvailableBytes();
+    const std::uint64_t keep = claim.headroom_bytes + pending;
+    const std::uint64_t grant =
+        available > keep ? cached + (available - keep)
+                         : cached - std::min(cached, keep - available);
+    Logger::Info(
+        "cache",
+        "schema=component-cache-v1 event=expert_cache_grant "
+        "cached_bytes=" +
+            std::to_string(cached) +
+            " available_bytes=" + std::to_string(available) +
+            " headroom_bytes=" + std::to_string(claim.headroom_bytes) +
+            " prompt_cache_budget_bytes=" + std::to_string(budget) +
+            " prompt_cache_committed_bytes=" + std::to_string(committed) +
+            " prompt_cache_pending_bytes=" + std::to_string(pending) +
+            " grant_bytes=" + std::to_string(grant));
+    if (!claim.store->Fit(grant))
+      Logger::Warn("cache",
+                   "schema=component-cache-v1 event=expert_cache_fit_failed "
+                   "grant_bytes=" +
+                       std::to_string(grant));
+#else
+    (void)backing_bytes;
+#endif
+  }
+
   Impl(std::shared_ptr<TextModelRunner> runner, std::size_t count,
        std::size_t ram, std::size_t slot_ceiling,
        const std::optional<TextRunnerDiskCacheOptions>& options,
@@ -470,7 +519,7 @@ struct ComponentTextCache::Impl {
       // converted overhead estimates establish materialized storage.
       pinned = resources->pinned_bytes ? resources->pinned_bytes() : 0;
       owned_manifest_bytes = disk ? disk->OwnedManifestBytes() : 0;
-      const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
+      const auto measured = AutomaticRetainedBytes(claim, count);
       const auto owned = SaturatingAdd(pinned, owned_manifest_bytes);
       // Promised but unwritten session state the cache may borrow; its
       // pages go back to the sessions on demand. Zero without lending.
@@ -588,6 +637,7 @@ struct ComponentTextCache::Impl {
       ledger.ConstrainLimits({ram + staging, ram, staging, ram});
     }
     budget = ram_enabled ? ram : 0;
+    FitExpertCache(ram);
     if (options) {
       catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index,
                                                      options->capacity_bytes);

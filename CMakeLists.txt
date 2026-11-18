@@ -342,7 +342,8 @@ if (ENGINE_ENABLE_HIP)
   target_compile_definitions(gufo_expert_stream_hip PRIVATE _GNU_SOURCE
     ENGINE_ENABLE_HIP=1)
   target_link_libraries(gufo_expert_stream_hip PUBLIC gufo_hip_host
-    gufo_platform gufo_logging hip::host Threads::Threads)
+    gufo_platform gufo_logging hip::host Threads::Threads
+    PRIVATE gufo_ext_runtime)
 endif()
 
 # json::parse (src/core/json.hpp), which builds its values from the events of
@@ -516,7 +517,8 @@ if (BUILD_TESTING)
   endif()
 endif()
 if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo_serving PUBLIC gufo_cache_hip hip::host)
+  target_link_libraries(gufo_serving PUBLIC gufo_cache_hip
+    gufo_expert_stream_hip hip::host)
 endif()
 
 add_library(gufo_http STATIC

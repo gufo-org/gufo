@@ -244,6 +244,16 @@ void OnePieceLayout(int32_t* routes) {
   Check(run.Run(1, {5, 5}) && store->GetStats().hits == 2,
         "one-piece seeded hit");
   Check(run.Run(2, {9, 3}), "one-piece bytes");
+  // A grant takes the prefetch stage first, bounds the cache, and seeds the
+  // room left with the last ranking.
+  const uint64_t stage = uint64_t{3000} * policy.prefetch_stage_rows;
+  Check(store->Fit(stage + 4 * m.Slot(0)), "one-piece fit");
+  Check(store->GetStats().cache_bytes <= 4 * m.Slot(0), "one-piece fit bound");
+  const auto fitted = store->GetStats();
+  Check(run.Run(1, {5, 5}) && store->GetStats().hits == fitted.hits + 2,
+        "one-piece fit reseeds the ranking");
+  Check(store->GetStats().cache_bytes <= 4 * m.Slot(0),
+        "one-piece fit bounds growth");
 }
 
 void InvalidLayouts() {
