@@ -1947,6 +1947,14 @@ std::optional<TextPendingPublication> TextRunnerPool::PendingPublication(
                                                     checkpoint_id);
 }
 
+std::shared_ptr<const std::atomic<bool>> TextRunnerPool::WarmDisk(
+    std::span<const TextRunnerToken> prompt, const TextPromptContext* context,
+    std::size_t stable) const {
+  return impl_->component_cache
+             ? impl_->component_cache->WarmDisk(prompt, context, stable)
+             : nullptr;
+}
+
 std::size_t TextRunnerPool::CachedPrefixTokens(
     std::span<const TextRunnerToken> prompt,
     const TextPromptContext* context) const {

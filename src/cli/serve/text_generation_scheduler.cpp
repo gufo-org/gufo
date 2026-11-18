@@ -184,6 +184,12 @@ struct ScheduledRequest {
   std::optional<TextGenerationScheduler::Clock::time_point>
       publication_wait_start;
   bool publication_waiting{false};
+  // A disk restore runs on the scheduler thread and stops every resident
+  // request while it reads. While others run, a request whose checkpoint is
+  // only on disk waits, once, until a worker has read it into the page cache.
+  std::shared_ptr<const std::atomic<bool>> disk_warm;
+  std::optional<TextGenerationScheduler::Clock::time_point> disk_warm_start;
+  bool disk_warming{false};
   // Shared session state (#715): the reservation admission holds for this
   // request's tokens until its session claims them, and its wait for them.
   // Only the scheduler thread touches these.
@@ -1186,7 +1192,8 @@ struct TextGenerationScheduler::Impl {
 
   /// Drops stopped parked requests and releases settled ones in arrival
   /// order. Released requests are admitted before newer queued ones.
-  void UpdateWaiting(std::deque<std::shared_ptr<ScheduledRequest>>& waiting) {
+  void UpdateWaiting(std::deque<std::shared_ptr<ScheduledRequest>>& waiting,
+                     bool busy) {
     for (auto it = waiting.begin(); it != waiting.end();) {
       const auto& request = *it;
       if (CompleteIfStopped(request)) {
@@ -1207,6 +1214,21 @@ struct TextGenerationScheduler::Impl {
           Logger::Debug("cache", line.str());
         }
         request->prefix_leader.reset();
+      }
+      // Read, or nothing left to wait for: restoring now stops no one.
+      if (request->disk_warming &&
+          (!busy || request->disk_warm->load(std::memory_order_acquire))) {
+        request->disk_warming = false;
+        if (Logger::Enabled(LogLevel::kInfo)) {
+          std::ostringstream line;
+          line << "event=disk_warm_wait request=" << request->id
+               << " read=" << request->disk_warm->load() << " wait_ms="
+               << std::chrono::duration<double, std::milli>(
+                      Clock::now() - *request->disk_warm_start)
+                      .count();
+          Logger::Info("cache", line.str());
+        }
+        request->disk_warm.reset();
       }
       if (request->publication_waiting) {
         const auto pending = runner_pool->PendingPublication(
@@ -1248,7 +1270,8 @@ struct TextGenerationScheduler::Impl {
     const auto released =
         std::ranges::find_if(waiting, [](const auto& request) {
           return request->prefix_leader == nullptr &&
-                 !request->publication_waiting && !request->memory_waiting;
+                 !request->publication_waiting && !request->memory_waiting &&
+                 !request->disk_warming;
         });
     if (released == waiting.end())
       return {};
@@ -1401,7 +1424,8 @@ struct TextGenerationScheduler::Impl {
              std::deque<std::shared_ptr<ScheduledRequest>>& capturing,
              std::deque<std::shared_ptr<ScheduledRequest>>& waiting,
              const std::stop_token& stop_token) {
-    UpdateWaiting(waiting);
+    UpdateWaiting(waiting, !prefilling.empty() || !decoding.empty() ||
+                               !capturing.empty());
     const bool shared_state = runner_pool->shared_state();
     if (shared_state)
       UpdateMemoryWaiters(waiting);
@@ -1447,6 +1471,19 @@ struct TextGenerationScheduler::Impl {
               continue;
             }
             LogPublicationWait(request, "skip", "no_estimate");
+          }
+        }
+        if (request->cache_prompt && !request->disk_warm_start &&
+            (!prefilling.empty() || !decoding.empty() || !capturing.empty())) {
+          request->disk_warm_start = Clock::now();
+          if (auto warm = runner_pool->WarmDisk(request->prompt,
+                                                request->prompt_context.get(),
+                                                request->cache_prefix_tokens);
+              warm && !warm->load(std::memory_order_acquire)) {
+            request->disk_warm = std::move(warm);
+            request->disk_warming = true;
+            waiting.push_back(std::move(request));
+            continue;
           }
         }
 

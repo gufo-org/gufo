@@ -185,6 +185,12 @@ bool SyncAncestors(const Directory& dir, std::error_code& ec) noexcept;
 enum class AdviseHint { kWillNeed, kDontNeed };
 void Advise(PlatformFile file, AdviseHint hint, std::uint64_t offset,
             std::uint64_t length) noexcept;
+/// False where Advise makes no OS call, so hint-only work can be skipped.
+#if defined(_WIN32)
+inline constexpr bool kAdviseReachesOs = false;
+#else
+inline constexpr bool kAdviseReachesOs = true;
+#endif
 
 /// Calls `visit(name, info)` for every entry of `dir` except "." and "..".
 /// `info` describes the entry without following symlinks. Returns false and

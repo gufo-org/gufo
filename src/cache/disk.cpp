@@ -1832,14 +1832,52 @@ void DiskStore::PrefetchPayload(const DiskSnapshot& snapshot, bool private_file,
       platform::Stat(file.Get(), &status, ec) && Regular(status))
     platform::Advise(file.Get(), platform::AdviseHint::kWillNeed, 0, bytes);
 }
+std::uint64_t DiskStore::WarmPayload(const DiskSnapshot& snapshot,
+                                     bool private_file,
+                                     const DiskPayload& payload,
+                                     std::span<std::uint8_t> buffer,
+                                     std::stop_token stop) const {
+  if (snapshot.store_ != impl_.get() || !snapshot.pin_ || buffer.empty() ||
+      !Contains(snapshot.manifest_, private_file, payload))
+    throw std::invalid_argument("invalid disk warm-up dependency");
+  const auto& directory = private_file ? impl_->private_files : impl_->chunks;
+  std::error_code ec;
+  Fd file(platform::OpenAt(directory, DiskFileName(payload.file),
+                           platform::FileMode::kRead, ec));
+  if (!platform::FileValid(file.Get()))
+    return 0;
+  std::uint64_t read{};
+  while (read < payload.bytes && !stop.stop_requested()) {
+    const auto n = platform::Read(
+        file.Get(), buffer.data(),
+        std::min<std::uint64_t>(buffer.size(), payload.bytes - read), ec);
+    if (n == 0 && ec == std::errc::interrupted)
+      continue;
+    if (n == 0)
+      break;
+    read += n;
+  }
+  return read;
+}
 DiskReadStats DiskStore::ReadPayload(
     const DiskSnapshot& snapshot, bool private_file, const DiskPayload& payload,
     std::span<std::uint8_t> staging,
     const std::function<void(std::uint64_t, std::span<const std::uint8_t>)>&
         consume,
     DiskReadStats* observation) {
-  if (snapshot.store_ != impl_.get() || !snapshot.pin_ || staging.empty() ||
-      !consume)
+  if (staging.empty())
+    throw std::invalid_argument("invalid disk read lease or staging");
+  return ReadPayload(
+      snapshot, private_file, payload,
+      [staging](std::uint64_t) { return staging; }, consume, observation);
+}
+DiskReadStats DiskStore::ReadPayload(
+    const DiskSnapshot& snapshot, bool private_file, const DiskPayload& payload,
+    const std::function<std::span<std::uint8_t>(std::uint64_t)>& buffer,
+    const std::function<void(std::uint64_t, std::span<const std::uint8_t>)>&
+        consume,
+    DiskReadStats* observation) {
+  if (snapshot.store_ != impl_.get() || !snapshot.pin_ || !buffer || !consume)
     throw std::invalid_argument("invalid disk read lease or staging");
   if (!Contains(snapshot.manifest_, private_file, payload))
     throw std::invalid_argument("payload outside disk snapshot");
@@ -1870,6 +1908,9 @@ DiskReadStats DiskStore::ReadPayload(
   stats.verification_cached = impl_->VerificationCached(key, identity);
   std::uint64_t offset{}, checksum{};
   while (offset < payload.bytes) {
+    const auto staging = buffer(offset);
+    if (staging.empty())
+      throw std::invalid_argument("invalid disk read staging");
     auto piece = staging.first(
         std::min<std::uint64_t>(staging.size(), payload.bytes - offset));
     begin = Clock::now();

@@ -83,9 +83,13 @@ public:
                              .max_in_pass_checkpoints = 64U}};
   }
   TextRunnerResourceClaim ResourceClaim() const override {
+    // A 4 MiB budget; the ceiling also holds disk staging beyond its first
+    // MiB, so a disk cache keeps 3 MiB of RAM as with one staging piece.
     return {.state_capacity_bytes = 1ULL << 30,
             .per_request_state_bytes = 256,
-            .retained_snapshot_capacity_bytes = 1ULL << 22};
+            .retained_snapshot_capacity_bytes = 1ULL << 22,
+            .retained_snapshot_ceiling_bytes =
+                (1ULL << 22) + cache::kDefaultDiskStagingBytes - (1ULL << 20)};
   }
   std::vector<TextExecutionPlan> SupportedPlans() const override {
     return {{TextExecutionPlanKind::kSerial, 1},
@@ -2617,6 +2621,42 @@ void OrphansLeaveBeforeCheckpoints() {
   }
   std::filesystem::remove_all(directory);
 }
+void WarmDiskReadsOnlyDiskCheckpoints() {
+  const TemporaryDirectory temp("gufo-component-warm-test");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                        .capacity_bytes = 1 << 20};
+  const std::vector<TextRunnerToken> prompt{10, 11, 12, 13, 14, 15, 16, 17, 18};
+  const std::vector<TextRunnerToken> other{40, 41, 42, 43, 44, 45, 46, 47};
+  TextRunnerToken token;
+  {
+    TextRunnerPool pool(std::make_shared<Runner>(), 1, disk);
+    assert(!pool.WarmDisk(prompt, nullptr, 0));
+    auto first = pool.Acquire(prompt);
+    Prefill(first);
+    token = Generate(first);
+    (void)first.Commit();
+    // Live or in RAM: a restore reads nothing from disk.
+    assert(!pool.WarmDisk(prompt, nullptr, 0));
+  }
+  TextRunnerPool pool(std::make_shared<Runner>(), 1, disk);
+  assert(!pool.WarmDisk(other, nullptr, 0));
+  // Null too when the host lacks the free pages it keeps.
+  if (const auto warm = pool.WarmDisk(prompt, nullptr, 0)) {
+    // One read per checkpoint.
+    const auto again = pool.WarmDisk(prompt, nullptr, 0);
+    assert(!again || again == warm || again->load());
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (!warm->load() && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    assert(warm->load());
+  }
+  auto restored = pool.Acquire(prompt);
+  assert(restored.cache_disk_hit() &&
+         restored.cached_prompt_tokens() == prompt.size());
+  assert(Generate(restored) == token);
+  (void)restored.Commit();
+}
 void StagingIsInternal() {
   const TemporaryDirectory temp("gufo-component-staging-test");
   const std::filesystem::path directory = temp.path();
@@ -2648,7 +2688,8 @@ void StagingCountsAgainstRamCeiling() {
     TextRunnerResourceClaim ResourceClaim() const override {
       auto claim = Runner::ResourceClaim();
       claim.retained_snapshot_capacity_bytes = 2 << 20;
-      claim.retained_snapshot_ceiling_bytes = 4 << 20;
+      claim.retained_snapshot_ceiling_bytes =
+          cache::kDefaultDiskStagingBytes + (3 << 20);
       return claim;
     }
     std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
@@ -2663,7 +2704,8 @@ void StagingCountsAgainstRamCeiling() {
   const TemporaryDirectory temp("gufo-component-ceiling-test");
   const std::filesystem::path directory = temp.path();
   // Pinned staging and RAM share the ceiling: an explicit 4 MiB beside the
-  // internal 1 MiB of staging commits 3 MiB, whatever the ignored option says.
+  // internal staging commits the 3 MiB the ceiling leaves, whatever the
+  // ignored option says.
   for (const std::size_t option : {std::size_t{0}, std::size_t{4} << 20}) {
     TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                     .capacity_bytes = 1 << 20,
@@ -2682,13 +2724,16 @@ void PinnedSlotBytesCountOnce() {
   class PinningRunner final : public Runner {
   public:
     mutable std::size_t committed{}, limit{};
+    // Host ceiling beyond the 4 MiB the budgets below assume.
+    std::size_t extra_ceiling{};
     mutable std::vector<cache::ResourceCharge> pins;
     TextRunnerResourceClaim ResourceClaim() const override {
       auto claim = Runner::ResourceClaim();
       // Automatic is half the available RAM; the ceiling is all of it.
       claim.retained_snapshot_capacity_bytes =
           (2 << 20) - pins.size() * kPin / 2;
-      claim.retained_snapshot_ceiling_bytes = (4 << 20) - pins.size() * kPin;
+      claim.retained_snapshot_ceiling_bytes =
+          (4 << 20) + extra_ceiling - pins.size() * kPin;
       return claim;
     }
     std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
@@ -2732,13 +2777,15 @@ void PinnedSlotBytesCountOnce() {
     refused = true;
   }
   assert(refused);
-  // Staging shares the ceiling: the limit is 4 MiB less 1 MiB of staging.
+  // Staging shares the ceiling: with 1 MiB more than staging above the
+  // 4 MiB, the limit is 3 MiB.
   const TemporaryDirectory temp("gufo-component-pinned-test");
   const std::filesystem::path directory = temp.path();
   {
     const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
                                           .capacity_bytes = 1 << 20};
     auto runner = std::make_shared<PinningRunner>();
+    runner->extra_ceiling = cache::kDefaultDiskStagingBytes - (1 << 20);
     TextRunnerPool pool(runner, 2, disk, {.capacity_bytes = 8 << 20});
     assert(runner->limit == 3 << 20);
     assert(runner->committed == 2 << 20);
@@ -4470,6 +4517,7 @@ int main() {
   UnpersistedOverRamCaptureIsRefused();
   OrphansLeaveBeforeCheckpoints();
   StagingIsInternal();
+  WarmDiskReadsOnlyDiskCheckpoints();
   StagingCountsAgainstRamCeiling();
   PinnedSlotBytesCountOnce();
   RecoveredManifestStorageCountsOnce();

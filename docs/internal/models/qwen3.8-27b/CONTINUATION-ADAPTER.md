@@ -73,7 +73,7 @@ Legacy snapshots retain their existing caller responsibility to supply the
 matching image input; their payload format is unchanged.
 
 Serving uses committed host backing in equal segments of about 128 MiB, admitted
-above both host and device heap reserves, and fixed 1 MiB disk staging. Each
+above both host and device heap reserves, and fixed 8 MiB disk staging. Each
 prefill pass pins its entry recurrent buffer; writes use the existing rollback
 pair. Cancellation can stop between layers and restore that pointer, preserving
 completed prompt work without copying another checkpoint. The second recurrent

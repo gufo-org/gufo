@@ -316,6 +316,16 @@ struct ComponentTextCache::Impl {
   std::unique_ptr<cache::DiskCatalog> catalog;
   std::unique_ptr<cache::StreamedStore> streaming;
   std::unique_ptr<cache::PersistenceQueue> queue;
+  // Disk checkpoints read into the page cache ahead of their restore
+  // (WarmDisk). Stopped and joined first on teardown.
+  struct Warmup {
+    cache::CheckpointId id;
+    std::uint64_t bytes{};
+    std::shared_ptr<std::atomic<bool>> done;
+    std::jthread thread;
+  };
+  std::mutex warm_mutex;
+  std::vector<std::unique_ptr<Warmup>> warmups;
   static constexpr std::size_t kPersistenceDepth = 8;
   // Backing that disk captures copy through when the RAM cache is off. It
   // equals the small explicit budget used before off existed, and it retains
@@ -355,9 +365,9 @@ struct ComponentTextCache::Impl {
        const std::optional<TextRunnerDiskCacheOptions>& options,
        bool automatic_ram, bool ram_on)
       : runner(std::move(runner)),
-        // Disk transfers lease one fixed pinned staging buffer. Its size does
-        // not change restore or write speed (#562), and a larger one only
-        // takes pinned RAM and device heap from the cache and the sessions.
+        // Disk transfers lease one fixed pinned staging buffer: one piece for
+        // writes, whose speed a larger piece does not change (#562), and
+        // kDiskRestoreReaders pieces that restores read in parallel.
         // Off disables checkpoint retention, not metadata accounting. Disk
         // recovery and publication must admit their bookkeeping from startup.
         // Persistence pins remain bounded by the disk-capture backing pool.
@@ -386,10 +396,12 @@ struct ComponentTextCache::Impl {
     if (options) {
       const auto row_bytes =
           cache::MinimumStagingBytes(resources->adapter->Components());
-      if (ledger.Limits().staging_bytes < row_bytes)
+      // Writes move one staging piece at a time, whole rows per piece.
+      if (std::min(ledger.Limits().staging_bytes,
+                   cache::kDiskStagingPieceBytes) < row_bytes)
         throw std::logic_error("a " + std::to_string(row_bytes) +
                                "-byte cache row exceeds the disk staging "
-                               "buffer");
+                               "piece");
       if (options->staging_capacity_bytes)
         Logger::Warn("cache",
                      "schema=component-cache-v1 event=option_ignored "
@@ -736,6 +748,13 @@ struct ComponentTextCache::Impl {
       });
   }
   ~Impl() {
+    {
+      decltype(warmups) stopped;
+      {
+        const std::lock_guard lock(warm_mutex);
+        stopped.swap(warmups);
+      }
+    }
     if (resources->set_shed) {
       resources->set_shed(nullptr);
       Logger::Info("cache",
@@ -1931,6 +1950,111 @@ std::optional<TextPendingPublication> ComponentTextCache::PendingPublication(
       selected = candidate;
   }
   return selected;
+}
+
+std::shared_ptr<const std::atomic<bool>> ComponentTextCache::WarmDisk(
+    std::span<const ContinuationToken> prompt, const TextPromptContext* context,
+    std::size_t stable) {
+  if (!impl_->disk || !impl_->streaming)
+    return nullptr;
+  const auto input = Inputs(prompt.size(), context);
+  cache::CheckpointId id{};
+  std::size_t boundary{};
+  std::uint64_t bytes{};
+  {
+    const std::lock_guard lock(impl_->mutex);
+    const auto found =
+        impl_->index.Lookup({impl_->identity, prompt, input, stable, true});
+    const auto& selected = found.selected;
+    if (!selected || selected->live || selected->checkpoint ||
+        !selected->durable)
+      return nullptr;
+    const auto& manifest = selected->durable->Manifest();
+    id = manifest.checkpoint;
+    boundary = selected->boundary;
+    for (const auto& c : manifest.components) {
+      for (const auto& chunk : c.chunks)
+        bytes += chunk.bytes;
+      if (c.tail)
+        bytes += c.tail->bytes;
+      if (c.private_state)
+        bytes += c.private_state->bytes;
+    }
+  }
+  const std::lock_guard lock(impl_->warm_mutex);
+  std::erase_if(impl_->warmups, [](const auto& warmup) {
+    return warmup->done->load(std::memory_order_acquire);
+  });
+  std::uint64_t reading{};
+  for (const auto& warmup : impl_->warmups) {
+    if (warmup->id == id)
+      return warmup->done;
+    reading += warmup->bytes;
+  }
+  // Page cache read into the free pages the host keeps would make the kernel
+  // reclaim and compact beside running work (RFC §4.4).
+  const auto free = mem::HostFreeBytes();
+  const auto floor = mem::HostFreeFloorBytes();
+  if (free < floor || free - floor < reading + bytes) {
+    Logger::Info("cache",
+                 "schema=component-cache-v1 event=disk_warm "
+                 "skipped=floor tokens=" +
+                     std::to_string(boundary) +
+                     " bytes=" + std::to_string(bytes) +
+                     " free_bytes=" + std::to_string(free) +
+                     " floor_bytes=" + std::to_string(floor));
+    return nullptr;
+  }
+  auto warmup = std::make_unique<Impl::Warmup>();
+  warmup->id = id;
+  warmup->bytes = bytes;
+  warmup->done = std::make_shared<std::atomic<bool>>(false);
+  warmup->thread = std::jthread([disk = impl_->disk.get(), id, boundary,
+                                 done = warmup->done](std::stop_token stop) {
+    const auto start = Clock::now();
+    std::atomic<std::uint64_t> read{};
+    try {
+      if (const auto snapshot = disk->Open(id)) {
+        std::vector<std::pair<bool, const cache::DiskPayload*>> files;
+        for (const auto& c : snapshot->Manifest().components) {
+          for (const auto& chunk : c.chunks)
+            files.emplace_back(false, &chunk);
+          if (c.tail)
+            files.emplace_back(true, &*c.tail);
+          if (c.private_state)
+            files.emplace_back(true, &*c.private_state);
+        }
+        std::atomic<std::size_t> next{};
+        std::vector<std::jthread> readers;
+        for (std::size_t i = 0;
+             i < std::min(cache::kDiskReadsInFlight, files.size()); ++i)
+          readers.emplace_back([&] {
+            std::vector<std::uint8_t> buffer(cache::kDiskStagingPieceBytes);
+            for (std::size_t f; !stop.stop_requested() &&
+                                (f = next.fetch_add(1)) < files.size();) {
+              try {
+                read += disk->WarmPayload(*snapshot, files[f].first,
+                                          *files[f].second, buffer, stop);
+              } catch (...) {
+                // A hint only; the restore validates every file it reads.
+              }
+            }
+          });
+      }
+    } catch (...) {
+    }
+    Logger::Info("cache",
+                 "schema=component-cache-v1 event=disk_warm tokens=" +
+                     std::to_string(boundary) +
+                     " bytes=" + std::to_string(read.load()) + " ms=" +
+                     std::to_string(std::chrono::duration<double, std::milli>(
+                                        Clock::now() - start)
+                                        .count()));
+    done->store(true, std::memory_order_release);
+  });
+  auto done = warmup->done;
+  impl_->warmups.push_back(std::move(warmup));
+  return done;
 }
 
 std::size_t ComponentTextCache::CachedPrefixTokens(
