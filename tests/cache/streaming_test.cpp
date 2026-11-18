@@ -1090,6 +1090,56 @@ void FirstPendingAnchorSurvivesCoalescing() {
                          *destination, timing));
   assert(latest.adapter.RecurrentHash(*destination) == latest.hash);
 }
+// #1250: a slow writer must not decide which turn ends reach disk. Each
+// generated frontier is a branch point; it coalesces into newer turn ends only
+// when the queue has no room for the next one.
+void TurnEndsSurviveWhileQueueHasRoom() {
+  for (const bool full : {false, true}) {
+    Directory dir;
+    ResourceLedger ledger{{1 << 22, 1 << 21, 16, 8192}};
+    DiskStore disk(ledger, dir.path, 1 << 20);
+    StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+    Fixture active(ledger), first(ledger, 2, 100, 48),
+        second(ledger, 3, 200, 56), third(ledger, 4, 300, 64);
+    for (auto* fixture : {&active, &first, &second, &third})
+      fixture->manifest.purpose = CheckpointPurpose::kGenerated;
+    std::atomic<bool> idle{}, started{};
+    std::vector<CheckpointId> superseded;
+    PersistenceQueue queue(
+        ledger, streams, full ? 3 : 4, 8192,
+        [&] {
+          started = true;
+          return idle.load();
+        },
+        [&](CheckpointId id, bool succeeded) {
+          if (!succeeded)
+            superseded.push_back(id);
+        },
+        {}, std::chrono::hours(1));
+    assert(queue.TrySubmit(
+        PersistenceJob(ledger, Id(1000), active.manifest, active.Sources())));
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!started && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    assert(started);
+    for (auto* fixture : {&first, &second, &third})
+      assert(queue.TrySubmit(
+          PersistenceJob(ledger, Id(1000 + fixture->manifest.checkpoint.value),
+                         fixture->manifest, fixture->Sources())));
+    const auto stats = queue.Stats();
+    assert(stats.superseded == full && stats.coalesced == full);
+    assert(stats.pending == (full ? 3U : 4U));
+    idle = true;
+    queue.Drain();
+    assert(superseded.size() == full);
+    if (full)
+      assert(superseded.front() == CheckpointId{2});
+    assert(disk.Open({1}) && disk.Open({3}) && disk.Open({4}));
+    assert(bool(disk.Open({2})) == !full);
+    assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+  }
+}
 void AdmissionFailures() {
   Directory dir;
   ResourceLedger ledger{{1 << 22, 1 << 21, 16, 4096}};
@@ -1381,6 +1431,7 @@ int main() {
   BusyModelYieldIsBounded();
   NewestPendingFrontierSurvives();
   FirstPendingAnchorSurvivesCoalescing();
+  TurnEndsSurviveWhileQueueHasRoom();
   GeneratedJobsYieldToPromptAnchors();
   CoalescingKeepsFrontierHeadroom();
   DiscardPendingReleasesPinsAndDrainWaitsForItsCallback();

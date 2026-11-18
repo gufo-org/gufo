@@ -164,7 +164,8 @@ struct PersistenceQueueStats {
 // device-source locks. A job yields for at most yield_limit after its write
 // starts, so continuous load cannot hold its pins indefinitely.
 // Keep the first pending boundary and coalesce later pending ancestors into
-// their newest descendant. Under pressure, recent jobs
+// their newest descendant. Generated frontiers coalesce only when the queue has
+// no room, keeping two newer ones. Under pressure, recent jobs
 // may replace the oldest pending non-learned job; active writes are untouched.
 // Completion reports false for superseded work, outside the queue lock.
 class PersistenceQueue {

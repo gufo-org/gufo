@@ -1075,6 +1075,17 @@ bool PersistenceQueue::TrySubmit(PersistenceJob job) {
   }
   auto slot = std::find_if(impl_->pending.begin(), impl_->pending.end(),
                            [](auto& item) { return !item; });
+  // Exact frontiers are optional write-through work. They must not displace
+  // an unrelated conversation's pending prompt anchor when the queue is full,
+  // nor may they consume more than half of the queue's pinned byte budget.
+  const std::size_t frontier_budget = impl_->max_bytes / 2;
+  const bool full =
+      impl_->stats.pending == impl_->pending.size() ||
+      job.pinned_bytes_ > impl_->max_bytes - impl_->stats.pinned_bytes ||
+      (job.manifest_.purpose == CheckpointPurpose::kGenerated &&
+       job.pinned_bytes_ >
+           frontier_budget -
+               std::min(frontier_budget, impl_->stats.pinned_bytes));
   auto replacement = std::find_if(
       impl_->pending.begin(), impl_->pending.end(), [&](const auto& other) {
         if (!other || other->manifest_.purpose == CheckpointPurpose::kLearned ||
@@ -1086,7 +1097,13 @@ bool PersistenceQueue::TrySubmit(PersistenceJob job) {
         if (job.manifest_.purpose == CheckpointPurpose::kGenerated &&
             other->manifest_.purpose != CheckpointPurpose::kGenerated)
           return false;
+        // Each generated frontier is a turn end that an edit or a branch
+        // restores, which no descendant covers. Coalesce one only when the
+        // queue has no room for this job (#1250), so whether a turn end
+        // reaches disk does not depend on how far behind the writer is.
         if (other->manifest_.purpose == CheckpointPurpose::kGenerated) {
+          if (!full)
+            return false;
           std::size_t newer =
               job.manifest_.purpose == CheckpointPurpose::kGenerated;
           for (const auto& peer : impl_->pending)
@@ -1113,17 +1130,6 @@ bool PersistenceQueue::TrySubmit(PersistenceJob job) {
                            });
       });
   const bool redundant = replacement != impl_->pending.end();
-  // Exact frontiers are optional write-through work. They must not displace
-  // an unrelated conversation's pending prompt anchor when the queue is full,
-  // nor may they consume more than half of the queue's pinned byte budget.
-  const std::size_t frontier_budget = impl_->max_bytes / 2;
-  const bool full =
-      impl_->stats.pending == impl_->pending.size() ||
-      job.pinned_bytes_ > impl_->max_bytes - impl_->stats.pinned_bytes ||
-      (job.manifest_.purpose == CheckpointPurpose::kGenerated &&
-       job.pinned_bytes_ >
-           frontier_budget -
-               std::min(frontier_budget, impl_->stats.pinned_bytes));
   if (!redundant && full &&
       job.manifest_.purpose == CheckpointPurpose::kGenerated) {
     ++impl_->stats.skipped;
