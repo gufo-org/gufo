@@ -48,9 +48,9 @@ def check_cache_shared_prefix(client, model, checks, chat_result):
     def group(label, tail_lines, slack):
         system = system_prompt(f"cache_shared_prefix_{label}", 220)
         conversations = [[{"role": "system", "content": system},
-                          {"role": "user", "content": background(code, tail_lines) +
+                          {"role": "user", "content": background(f"task-{index + 1}", tail_lines) +
                            f"Reply with only the code {code}."}]
-                         for code in CODES]
+                         for index, code in enumerate(CODES)]
         results = []
         for index, (messages, code) in enumerate(zip(conversations, CODES)):
             result = chat(f"{label}_{index}", messages)
