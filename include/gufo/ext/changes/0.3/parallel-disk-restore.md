@@ -15,6 +15,8 @@ Additive, through the forwarded cache headers:
   instead of one staging span.
 - `DiskStore::WarmPayload` reads an owned dependency into the page cache
   without validating it, so a later `ReadPayload` finds it there.
+- `platform::kAdviseReachesOs` is false where `platform::Advise` makes no OS
+  call (Windows); restores then start no read-ahead hint helpers.
 
 Restores still call adapters and wait for completions on the restoring thread
 only; `Completion` gains no cross-thread requirement.

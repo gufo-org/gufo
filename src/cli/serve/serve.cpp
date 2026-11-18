@@ -885,7 +885,7 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption(
         "", "--cache-disk-staging-bytes", "N",
         "Flash-Next: pinned disk transfer buffer allocated at startup within "
-        "the RAM ceiling, not a checkpoint size limit (default: 0 = 1 MiB). "
+        "the RAM ceiling, not a checkpoint size limit (default: 0 = 8 MiB). "
         "Other models: RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
@@ -1666,7 +1666,7 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption(
         "", "--cache-disk-staging-bytes", "N",
         "Flash-Next: pinned disk transfer buffer allocated at startup within "
-        "the RAM ceiling, not a checkpoint size limit (default: 0 = 1 MiB). "
+        "the RAM ceiling, not a checkpoint size limit (default: 0 = 8 MiB). "
         "Other models: RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);

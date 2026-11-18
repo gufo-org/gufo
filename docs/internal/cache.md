@@ -40,7 +40,8 @@ sampled frontier and pending output tokens. DFlash2 adds private ring KV with
 its own injected frontier, pending target features and draft controller state.
 Borrowed target KV rows are preserved before mutation or rollback; private
 frontiers are captured into committed host backing. Disk transfers use fixed
-1 MiB staging regardless of checkpoint size.
+8 MiB staging regardless of checkpoint size: writes move one 1 MiB piece at a
+time, restores read eight pieces in parallel.
 
 DeepSeek shares its compressed attention and indexer rows, which are final once
 emitted, one row per `ratio` tokens. Each layer's sliding window and compressor
@@ -499,7 +500,7 @@ Qwen27B and Flash-Next use the same options with these meanings:
 | --- | --- |
 | `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in equal steps of about 1 GiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
 | `--cache-disk-bytes` | Counts referenced, temporary, orphaned and access-history files. A lower budget at startup removes temporaries and orphans, then applies the same lineage-aware eviction order as runtime, using persisted access history when available. |
-| `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 1 MiB pinned buffer; checkpoints of any size stream through it. Its size did not change restore or write speed, and a larger value only took pinned RAM and device heap. |
+| `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 8 MiB pinned buffer; checkpoints of any size stream through it. Writes move one 1 MiB piece at a time, whose size did not change write speed; restores read and check eight pieces in parallel while copying others out. |
 | `--cache-disk DIR` | Owned by one server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory.  model's server sharing it. |
 
 The 128-record limit stays internal. The following measured sizes and timings
@@ -725,6 +726,9 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | `schema=component-cache-v1 event=disk_evicted reason=budget` | Startup applied lineage and persisted access ordering to fit a lowered `--cache-disk-bytes` |
 | `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
 | `schema=component-cache-v1 event=published` | A checkpoint finished disk publication; `checkpoint_id` identifies the capture and `tokens` its boundary |
+| `schema=component-cache-v1 event=disk_restore` | A checkpoint was restored from disk: `tokens`, `bytes`, `pieces` and timings. `filesystem_ms` and `checksum_ms` add up the parallel readers' time, so they can exceed the restore's wall time; `stream_wait_ms` is the restoring thread's wait for copies |
+| `schema=component-cache-v1 event=disk_warm` | A request admitted while others ran found its checkpoint only on disk; a worker read its `bytes` into the page cache in `ms`. `skipped=floor` when free pages would drop below the host floor |
+| `event=disk_warm_wait` | The request waited `wait_ms` for that read (`read=1`) or for the scheduler to go idle (`read=0`) before restoring |
 | `schema=component-cache-v1 event=persistence_refused reason=min_step` | A captured checkpoint is too close to an existing publication; includes `checkpoint_id` and `tokens` |
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
 | `event=snapshot action=skipped reason=entry_capacity` | no checkpoint record could be replaced safely for this capture |

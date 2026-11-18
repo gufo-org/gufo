@@ -385,10 +385,12 @@ struct ComponentTextCache::Impl {
     if (options) {
       const auto row_bytes =
           cache::MinimumStagingBytes(resources->adapter->Components());
-      if (ledger.Limits().staging_bytes < row_bytes)
+      // Writes move one staging piece at a time, whole rows per piece.
+      if (std::min(ledger.Limits().staging_bytes,
+                   cache::kDiskStagingPieceBytes) < row_bytes)
         throw std::logic_error("a " + std::to_string(row_bytes) +
                                "-byte cache row exceeds the disk staging "
-                               "buffer");
+                               "piece");
       if (options->staging_capacity_bytes)
         Logger::Warn("cache",
                      "schema=component-cache-v1 event=option_ignored "

@@ -18,6 +18,7 @@
 
 #include "src/cache/prefetch_cursor.hpp"
 #include "src/cache/slot.hpp"
+#include "src/core/platform/fs.hpp"
 
 namespace gufo::cache {
 namespace {
@@ -116,8 +117,10 @@ public:
     offsets_.push_back(0);
     for (const auto& item : items_)
       offsets_.push_back(offsets_.back() + item.payload->bytes);
-    for (auto& thread : threads_)
-      thread = std::jthread([this](std::stop_token stop) { Run(stop); });
+    // Without an OS hint (Windows), helpers would only open and stat files.
+    if constexpr (platform::kAdviseReachesOs)
+      for (auto& thread : threads_)
+        thread = std::jthread([this](std::stop_token stop) { Run(stop); });
   }
   // The reader is about to read item `index`.
   void Reading(std::size_t index) {
