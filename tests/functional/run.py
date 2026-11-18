@@ -433,8 +433,8 @@ def main():
     persist = False
     try:
         if "cache-rotation" in selected:
-            from cache_rotation import check_snapshot_budget, host_available_bytes
-            available_before_load = host_available_bytes(Path("/proc/meminfo").read_text())
+            from cache_rotation import check_snapshot_budget, host_available_memory
+            available_before_load = host_available_memory()
         startup_started = time.monotonic()
         with server(command, output / "server.log", args.startup_timeout):
             report["startup_ms"] = (time.monotonic() - startup_started) * 1000

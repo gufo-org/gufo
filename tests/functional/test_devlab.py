@@ -9,14 +9,17 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
+import cache_rotation
 import cluster
 import devlab_models
 import devlab_plan
 import devlab_run
 import report
 import phases
+import run as run_module
 import service_phases
 
 NPU_MODELS = {'embedding-gemma2-npu', 'qwen3-asr-npu', 'qwen3-tts-custom-npu'}
@@ -564,6 +567,69 @@ class TimingTest(unittest.TestCase):
             (root/'qwen3-asr.phases.json').write_text(json.dumps(data))
             self.assertEqual(report.render_models(args, plan, summary)[0], 'error')
             self.assertEqual(report.render_models(args, plan, {'groups': [], 'models': []})[0], 'error')
+
+
+class WindowsPortabilityTest(unittest.TestCase):
+    """The harness pieces that differ on the Windows Devlab runners, mocked on any host."""
+
+    def test_servers_stop_with_ctrl_break_on_windows_and_sigint_elsewhere(self):
+        process = SimpleNamespace(send_signal=unittest.mock.Mock())
+        with patch.object(run_module.os, 'name', 'nt'), \
+                patch.object(run_module.signal, 'CTRL_BREAK_EVENT', 1, create=True):
+            run_module.interrupt_server(process)
+        process.send_signal.assert_called_once_with(1)
+        process.send_signal.reset_mock()
+        with patch.object(run_module.os, 'name', 'posix'):
+            run_module.interrupt_server(process)
+        process.send_signal.assert_called_once_with(run_module.signal.SIGINT)
+
+    def test_phase_server_uses_the_portable_start_and_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server = phases.Server(Path('/gufo'), None, Path(directory) / 'server.log', ['/gufo'])
+            process = SimpleNamespace(stdout=iter(()), returncode=None, poll=lambda: None,
+                                      wait=unittest.mock.Mock(), kill=unittest.mock.Mock())
+            with patch.object(phases, 'SERVER_POPEN', {'creationflags': 512}), \
+                    patch.object(phases.subprocess, 'Popen', return_value=process) as popen, \
+                    patch.object(phases, 'interrupt_server') as interrupt, \
+                    patch.object(phases.time, 'monotonic', side_effect=[0, 0, 10]):
+                with self.assertRaises(TimeoutError):
+                    server.start(1)
+                server.stop()
+            self.assertEqual(popen.call_args.kwargs['creationflags'], 512)
+            self.assertEqual(popen.call_args.kwargs['encoding'], 'utf-8')
+            interrupt.assert_called_once_with(process)
+
+    def test_windows_temperature_reads_the_hottest_acpi_thermal_zone(self):
+        def reading(stdout, returncode=0):
+            return SimpleNamespace(stdout=stdout, returncode=returncode)
+
+        with patch.object(phases.os, 'name', 'nt'), patch.object(phases.subprocess, 'run') as probe:
+            probe.return_value = reading('3132 313\r\n0 320\r\n\r\n')
+            self.assertEqual(phases.gpu_temperature(), 46.9)
+            self.assertEqual(probe.call_args.args[0][0], 'powershell')
+            probe.return_value = reading(' \r\n0 0\r\n')
+            self.assertIsNone(phases.gpu_temperature())
+            probe.return_value = reading('3132 313\n', returncode=1)
+            self.assertIsNone(phases.gpu_temperature())
+            probe.side_effect = FileNotFoundError('powershell')
+            self.assertIsNone(phases.gpu_temperature())
+
+    def test_cache_budget_reads_windows_available_physical_memory(self):
+        import ctypes  # Before os.name is mocked: ctypes selects its platform on import.
+        def status(pointer):
+            pointer._obj.ullAvailPhys = available
+            return 1
+
+        kernel32 = SimpleNamespace(GlobalMemoryStatusEx=status)
+        with patch.object(cache_rotation.os, 'name', 'nt'), \
+                patch.object(ctypes, 'windll', SimpleNamespace(kernel32=kernel32), create=True):
+            available = 96 << 30
+            self.assertEqual(cache_rotation.host_available_memory(), 96 << 30)
+            available = 0
+            with self.assertRaises(ValueError):
+                cache_rotation.host_available_memory()
+        if Path('/proc/meminfo').is_file():
+            self.assertGreater(cache_rotation.host_available_memory(), 0)
 
 
 if __name__ == '__main__':

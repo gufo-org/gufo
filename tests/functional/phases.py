@@ -28,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from metrics import NOISE_MS, SLOWDOWN  # noqa: E402
+from run import SERVER_POPEN, interrupt_server  # noqa: E402
 
 GENERATED_TOKENS = 128
 CONTEXT = 32768
@@ -69,8 +70,32 @@ def prompt(*parts):
     return " ".join(words)
 
 
+# Windows has no unprivileged GPU sensor interface; the APU's ACPI thermal
+# zones (tenths of a kelvin, or kelvin) stand in for the amdgpu hwmon reading.
+THERMAL_ZONES = ("Get-CimInstance Win32_PerfFormattedData_Counters_ThermalZoneInformation | "
+                 "ForEach-Object { \"$($_.HighPrecisionTemperature) $($_.Temperature)\" }")
+
+
+def thermal_zone_temperature():
+    """Return the hottest Windows ACPI thermal zone in °C, or None."""
+    try:
+        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", THERMAL_ZONES],
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    readings = []
+    for line in result.stdout.splitlines() if result.returncode == 0 else []:
+        fields = [int(field) for field in line.split() if field.isdigit()] + [0, 0]
+        precise, kelvin = fields[:2]
+        if precise or kelvin:
+            readings.append(round(precise / 10 - 273.15 if precise else kelvin - 273.15, 1))
+    return max(readings) if readings else None
+
+
 def gpu_temperature():
     """Return the hottest amdgpu hwmon reading in °C, or None."""
+    if os.name == "nt":
+        return thermal_zone_temperature()
     readings = []
     for device in Path("/sys/class/drm").glob("card*/device"):
         try:
@@ -126,10 +151,10 @@ class Server:
                     self.listener_recorded.set()
 
     def start(self, timeout):
-        self.log = self.log_path.open("w")
+        self.log = self.log_path.open("w", encoding="utf-8")
         self.spawned = time.monotonic()
-        self.process = subprocess.Popen(self.command, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True, errors="replace")
+        self.process = subprocess.Popen(self.command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        text=True, encoding="utf-8", errors="replace", **SERVER_POPEN)
         self.reader = threading.Thread(target=self._read, args=(self.process.stdout, self.log))
         self.reader.start()
         deadline = self.spawned + timeout
@@ -154,7 +179,7 @@ class Server:
 
     def stop(self):
         if self.process.poll() is None:
-            self.process.send_signal(2)
+            interrupt_server(self.process)
             try:
                 self.process.wait(timeout=60)
             except subprocess.TimeoutExpired:

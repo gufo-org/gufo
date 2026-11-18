@@ -1,6 +1,8 @@
 """Check that switching conversations does not discard their useful history."""
 
 from copy import deepcopy
+import os
+from pathlib import Path
 import re
 import sys
 
@@ -10,6 +12,25 @@ def host_available_bytes(meminfo):
     if not match or int(match[1]) == 0:
         raise ValueError("missing/invalid MemAvailable for cache budget check")
     return int(match[1]) * 1024
+
+
+def host_available_memory():
+    """Available host RAM in bytes, from the figure Gufo sizes its cache with."""
+    if os.name != "nt":
+        return host_available_bytes(Path("/proc/meminfo").read_text())
+    # Windows: GlobalMemoryStatusEx's ullAvailPhys, as src/core/platform/os_info.cpp reads it.
+    import ctypes
+
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong)] + [
+            (name, ctypes.c_ulonglong) for name in (
+                "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile", "ullAvailPageFile",
+                "ullTotalVirtual", "ullAvailVirtual", "ullAvailExtendedVirtual")]
+
+    status = MemoryStatus(dwLength=ctypes.sizeof(MemoryStatus))
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)) or not status.ullAvailPhys:
+        raise ValueError("missing/invalid available memory for cache budget check")
+    return status.ullAvailPhys
 
 
 def check_snapshot_budget(log, available_before_load, requested_bytes, sessions):
