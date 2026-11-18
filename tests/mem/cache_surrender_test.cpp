@@ -3,7 +3,8 @@
 // are all free go (whole state pages, whole pinned segments), the payloads
 // that stay keep their bytes for the CPU and the GPU, the released blocks stay
 // reserved, and growth commits them again before new segments, under the same
-// admission rules.
+// admission rules. Tearing the pool down after a surrender leaves no HIP
+// error.
 #include <hip/hip_runtime.h>
 
 #include <cassert>
@@ -81,13 +82,14 @@ int main() {
   int state_segments = 1;
   bool filled = false;
   bool host_has_room = true;
+  bool state_pages_free = true;  // Free 2 MiB blocks above the free floor.
   std::vector<std::optional<gufo::hip::BackingBlock>> held;
   auto backing = std::make_unique<gufo::hip::CommittedBackingPool>(
       ledger, gufo::hip::BackingPoolConfig{
                   capacity + metadata, kBlock, metadata, kSegment,
                   [&](std::size_t) { return host_has_room; }, nullptr, range,
                   [&](std::size_t) {
-                    if (!host_has_room)
+                    if (!host_has_room || !state_pages_free)
                       return false;
                     return filled || state_segments-- > 0;
                   },
@@ -137,10 +139,25 @@ int main() {
   assert(!backing->TryAcquire(ResourceCategory::kBackingAssigned, kPageBytes));
   assert(backing->SurrenderedBytes() == released);
 
+  // While state pages are refused but pinned host pages are not (free pages
+  // below the floor, as page cache leaves them while serving), the released
+  // host segment still comes back; the released state pages wait.
+  host_has_room = true;
+  state_pages_free = false;
+  std::vector<std::optional<gufo::hip::BackingBlock>> again;
+  for (std::size_t i = 0; i < kSegment / kPageBytes; ++i) {
+    auto block =
+        backing->TryAcquire(ResourceCategory::kBackingAssigned, kPageBytes);
+    assert(block);
+    again.emplace_back(std::move(block));
+  }
+  assert(backing->SurrenderedBytes() == state_pages / 2 * kPageBytes);
+  assert(!backing->TryAcquire(ResourceCategory::kBackingAssigned, kPageBytes));
+  again.clear();
+
   // With room again, growth commits the released units first, and their
   // pages work for the CPU and the GPU.
-  host_has_room = true;
-  std::vector<std::optional<gufo::hip::BackingBlock>> again;
+  state_pages_free = true;
   for (std::size_t i = 0; i < state_pages / 2 + kSegment / kPageBytes; ++i) {
     auto block =
         backing->TryAcquire(ResourceCategory::kBackingAssigned, kPageBytes);
@@ -155,10 +172,33 @@ int main() {
   for (std::size_t i = 1; i < state_pages; i += 2)
     assert(Holds(*held[i], std::byte{0x5a}));
 
+  // Teardown after a surrender: released units hold no pages and leave no
+  // HIP error behind.
   again.clear();
   held.clear();
+  (void)hipGetLastError();
+  assert(backing->Surrender(capacity) == capacity);
   backing.reset();
   range.reset();
+  assert(hipGetLastError() == hipSuccess);
+
+  // The same with pinned host segments only, as without state pages.
+  {
+    gufo::cache::ResourceLedger host_ledger({capacity + metadata + (1 << 20),
+                                             capacity + metadata, 1 << 20,
+                                             capacity + metadata});
+    auto host = std::make_unique<gufo::hip::CommittedBackingPool>(
+        host_ledger, gufo::hip::BackingPoolConfig{
+                         capacity + metadata, kBlock, metadata, kSegment,
+                         [](std::size_t) { return true; }, nullptr});
+    auto block =
+        host->TryAcquire(ResourceCategory::kBackingAssigned, kPageBytes);
+    assert(block);
+    block.reset();
+    assert(host->Surrender(capacity) == kSegment);
+    host.reset();
+    assert(hipGetLastError() == hipSuccess);
+  }
   std::printf("mem_cache_surrender_test: ok (released %zu MiB)\n",
               released >> 20);
   return 0;

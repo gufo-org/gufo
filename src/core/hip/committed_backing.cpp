@@ -183,21 +183,23 @@ struct BackingState {
     committed.store(first + count, std::memory_order_release);
     return true;
   }
-  // Commits one surrendered unit again. Nullopt when there is none; false
-  // when the host refuses it. Call with `growth` held.
+  // Commits one surrendered unit again. Nullopt when none can come back
+  // under its own rule; false when the host refuses a pinned segment. A
+  // refused state page (free pages below the floor, as page cache leaves them
+  // while serving) leaves pinned segments and new growth to their own rules,
+  // as without state pages. Call with `growth` held.
   std::optional<bool> Recommit() {
     if (!surrendered_pages.empty()) {
       const auto page = lendable->page_bytes();
-      if (!admit_state_pages || !admit_state_pages(page))
-        return false;
       const auto p = surrendered_pages.back();
-      if (!lendable->Commit(p, 1, !serving.load(std::memory_order_acquire)))
-        return false;
-      surrendered_pages.pop_back();
-      surrendered_bytes.fetch_sub(page, std::memory_order_relaxed);
-      const std::lock_guard lock(lend_mutex);
-      lent[p] = {};
-      return true;
+      if (admit_state_pages && admit_state_pages(page) &&
+          lendable->Commit(p, 1, !serving.load(std::memory_order_acquire))) {
+        surrendered_pages.pop_back();
+        surrendered_bytes.fetch_sub(page, std::memory_order_relaxed);
+        const std::lock_guard lock(lend_mutex);
+        lent[p] = {};
+        return true;
+      }
     }
     if (!surrendered_segments)
       return std::nullopt;
