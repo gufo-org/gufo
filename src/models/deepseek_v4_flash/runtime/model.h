@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 struct ds4_tokens {
   int* v;
@@ -17,6 +18,9 @@ struct ds4_dspark_request_state;
 namespace gufo::models::deepseek_v4_flash {
 class ContinuationHooks;
 }
+namespace gufo::mem {
+class StateAccount;
+}  // namespace gufo::mem
 
 using ds4_session_cancel_fn = bool (*)(void* user_data);
 
@@ -164,6 +168,26 @@ void ds4_session_set_prefill_yield(ds4_session* session, uint32_t groups,
                                    void (*yield)(void* user_data),
                                    void* user_data);
 uint64_t ds4_session_payload_bytes(const ds4_session* session);
+/* The account charging the session's demand-mapped rows; null without
+ * demand mapping. */
+std::shared_ptr<gufo::mem::StateAccount> ds4_session_state_account(
+    const ds4_session* session);
+/* Page bytes of a session's demand-mapped rows (compressed rows and the
+ * indexer score scratch) at full context. */
+uint64_t ds4_session_demand_mapped_bytes(int context_size);
+/* Whether sessions map their compressed rows on demand on this device. */
+bool ds4_session_demand_mapped(void);
+/* Whether `engine`'s new sessions keep compressed rows in regions charged to
+ * their state account (the default where demand mapping exists); off, they
+ * follow the managed-memory policy and claim nothing. */
+bool ds4_engine_state_regions(const ds4_engine* engine);
+/* Builds the F16 copies of Q8 weights now rather than at the first prefill. */
+void ds4_engine_build_weight_copies(ds4_engine* engine);
+void ds4_engine_disable_state_regions(ds4_engine* engine);
+/* Device bytes the session allocated whole at creation, including the
+ * shared batch workspace when it created that (ds4_session_created_workspace). */
+uint64_t ds4_session_fixed_bytes(const ds4_session* session);
+bool ds4_session_created_workspace(const ds4_session* session);
 
 /* Continuation components. A session with hooks is owned by the cache adapter,
  * which reads its state directly instead of through a serialized snapshot.

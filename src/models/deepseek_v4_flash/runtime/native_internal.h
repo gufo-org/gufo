@@ -3,8 +3,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 #include "model.h"
+
+namespace gufo::mem {
+class StateAccount;
+}  // namespace gufo::mem
 
 struct ds4_dspark_model;
 struct ds4_dspark_request_state;
@@ -81,6 +86,10 @@ struct ds4_engine {
     ds4_weights *weights;
     ds4_dspark_model *dspark;
     ds4_rocm_graph* batch_workspace;
+    /* Set: new sessions follow the managed-memory policy instead of keeping
+     * compressed rows in regions charged to their state account. Zero (the
+     * engine is calloc'ed) keeps the regions. */
+    bool state_regions_off;
     /* Every session graph, and the small batch workspace their decodes use
      * while a layered prefill pass of one of them yields. */
     ds4_rocm_graph* graphs;
@@ -148,6 +157,13 @@ ds4_rocm_graph *ds4_rocm_graph_create(ds4_engine *engine,
                                       int context_size,
                                       uint32_t prefill_capacity);
 void ds4_rocm_graph_destroy(ds4_rocm_graph *graph);
+/* The account charging the graph's demand-mapped rows; null without demand
+ * mapping. */
+std::shared_ptr<gufo::mem::StateAccount> ds4_rocm_graph_state_account(
+    const ds4_rocm_graph *graph);
+/* Page bytes of a session's demand-mapped rows (compressed rows and the
+ * indexer score scratch) at full context. */
+uint64_t ds4_rocm_graph_demand_mapped_bytes(int context_size);
 bool ds4_rocm_graph_reset(ds4_rocm_graph *graph);
 bool ds4_rocm_graph_prefill(ds4_rocm_graph *graph,
                             ds4_engine *engine,

@@ -517,6 +517,10 @@ static void hip_q8_f16_cache_build(void) {
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
 }
 
+extern "C" void ds4_gpu_build_q8_f16_weights(void) {
+    if (g_q8_f16_pending) hip_q8_f16_cache_build();
+}
+
 static const __half *hip_q8_f16_ptr(
         const void *model_map,
         uint64_t offset,
@@ -853,6 +857,12 @@ extern "C" void ds4_gpu_cleanup(void) {
 
 __global__ static void fill_f32_kernel(float *x, uint64_t n, float v);
 
+/* While set, whole allocations add their bytes here: a session's fixed
+ * state, measured as its graph is created (ds4_gpu_tally_allocations). */
+static thread_local uint64_t *g_alloc_tally;
+
+void ds4_gpu_tally_allocations(uint64_t *bytes) { g_alloc_tally = bytes; }
+
 extern "C" ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes) {
     if (bytes == 0) bytes = 1;
     ds4_gpu_tensor *t = (ds4_gpu_tensor *)calloc(1, sizeof(*t));
@@ -863,18 +873,21 @@ extern "C" ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes) {
     }
     t->bytes = bytes;
     t->owner = 1;
+    if (g_alloc_tally) *g_alloc_tally += bytes;
     return t;
 }
 
 using Ds4RegionHolder = std::shared_ptr<gufo::mem::Region>;
 
-extern "C" ds4_gpu_tensor *ds4_gpu_tensor_alloc_rows(uint64_t row_bytes,
-                                                     uint64_t max_rows,
-                                                     uint64_t initial_rows) {
+ds4_gpu_tensor *ds4_gpu_tensor_alloc_rows(
+        uint64_t row_bytes, uint64_t max_rows, uint64_t initial_rows,
+        const std::shared_ptr<gufo::mem::StateAccount> &account,
+        uint64_t tokens_per_row) {
     if (row_bytes == 0 || max_rows == 0) return NULL;
     std::string error;
     auto region = gufo::mem::Region::Create(
-        {.row_bytes = (size_t)row_bytes, .rows = (size_t)max_rows}, &error);
+        {.row_bytes = (size_t)row_bytes, .rows = (size_t)max_rows}, &error,
+        account, (size_t)(tokens_per_row ? tokens_per_row : 1));
     if (!region || !region->demand_mapped()) return NULL;
     ds4_gpu_tensor *t = (ds4_gpu_tensor *)calloc(1, sizeof(*t));
     if (!t) return NULL;
@@ -890,6 +903,20 @@ extern "C" ds4_gpu_tensor *ds4_gpu_tensor_alloc_rows(uint64_t row_bytes,
     return t;
 }
 
+std::shared_ptr<gufo::mem::StateAccount> ds4_gpu_state_account_create(
+        uint64_t margin_tokens) {
+    if (!gufo::mem::DemandMapped()) return nullptr;
+    return std::make_shared<gufo::mem::StateAccount>((size_t)margin_tokens);
+}
+
+extern "C" int ds4_gpu_demand_mapped(void) {
+    return gufo::mem::DemandMapped() ? 1 : 0;
+}
+
+extern "C" int ds4_gpu_tensor_demand_mapped(const ds4_gpu_tensor *tensor) {
+    return tensor && tensor->region ? 1 : 0;
+}
+
 extern "C" int ds4_gpu_tensor_ensure_rows(ds4_gpu_tensor *tensor, uint64_t rows) {
     if (!tensor || !tensor->region) return 0;
     auto &region = *static_cast<Ds4RegionHolder *>(tensor->region);
@@ -897,7 +924,7 @@ extern "C" int ds4_gpu_tensor_ensure_rows(ds4_gpu_tensor *tensor, uint64_t rows)
     if (!region->Ensure((size_t)rows)) return 0;
     /* Map a doubling ahead on the page pool's thread, as the reallocation
      * this replaces would have reserved. */
-    region->MapAhead((size_t)rows * 2);
+    if (rows * 2 > region->backed_rows()) region->MapAhead((size_t)rows * 2);
     /* Exactly the rows asked for, whatever the pool mapped ahead: callers
      * read capacity from one tensor of a group and must find every tensor of
      * the group backed that far. */
@@ -927,8 +954,12 @@ static uint64_t hip_managed_kv_reserve_bytes(uint64_t total_bytes) {
     return reserve;
 }
 
-extern "C" int ds4_gpu_should_use_managed_kv_cache(uint64_t kv_cache_bytes, uint64_t context_bytes) {
+extern "C" int ds4_gpu_should_use_managed_kv_cache(uint64_t kv_cache_bytes, uint64_t context_bytes, int regions) {
     if (kv_cache_bytes == 0) return 0;
+    /* Demand-mapped regions take pages only as rows are written, which is
+     * what managed memory was for, at device-memory speed and charged to the
+     * session's state account. */
+    if (regions && gufo::mem::DemandMapped()) return 0;
 
     /* Very large KV caches are where device-only hipMalloc() can make a
      * unified-memory machine unresponsive.  Managed memory restores the old

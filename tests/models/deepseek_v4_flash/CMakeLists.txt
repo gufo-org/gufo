@@ -142,6 +142,18 @@ if(ENGINE_ENABLE_HIP)
     TIMEOUT 1800
     SKIP_RETURN_CODE 77)
 
+  # Compressed rows released by a shared-state reclaim, then backed again.
+  add_executable(ds4_state_trim_test state_trim_test.cpp)
+  target_link_libraries(ds4_state_trim_test PRIVATE
+    gufo_deepseek_v4_flash_hip)
+  add_test(NAME ds4.state_trim COMMAND ds4_state_trim_test)
+  set_tests_properties(ds4.state_trim PROPERTIES
+    LABELS "gpu;hip;ds4;external-model;slow"
+    RESOURCE_LOCK ds4_model
+    RUN_SERIAL TRUE
+    TIMEOUT 900
+    SKIP_RETURN_CODE 77)
+
   add_executable(ds4_serving_test serving_test.cpp)
   # gufo_serving still reaches the Qwen 27B model and vision stack through
   # inference_backend.cpp; step 10 removes that interim edge.
