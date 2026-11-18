@@ -24,7 +24,8 @@
         "tool-streaming": 93.2,
         "tools": 81.8
       },
-      "timing_s": 328
+      "timing_s": 328,
+      "warm_load_s": 27
     },
     "embedding-gemma2": {
       "suites": {
@@ -99,7 +100,8 @@
         "tool-untyped": 16.8,
         "tools": 34.3
       },
-      "timing_s": 246
+      "timing_s": 246,
+      "warm_load_s": 26
     },
     "qwen-image-turbo": {
       "suites": {
@@ -161,7 +163,8 @@
         "tool-untyped": 33.2,
         "tools": 67.6
       },
-      "timing_s": 204
+      "timing_s": 204,
+      "warm_load_s": 4
     },
     "qwen3-asr": {
       "suites": {

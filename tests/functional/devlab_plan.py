@@ -162,7 +162,8 @@ def units(plan, table, budget, isolated):
             rows.append({'label': key, 'pool': 'services', 'seconds': seconds + timing,
                          'part': {'model': key, 'groups': groups, 'timing': True}})
             continue
-        load = model_costs.get('load_s', table['default_load_s'])
+        # A job's first server reads cold weights; the rest load from the page cache.
+        load = model_costs.get('warm_load_s', model_costs.get('load_s', table['default_load_s']))
         cost = lambda suite: suite_cost(table, key, suite)  # noqa: E731
         for group in groups:
             mode = group['profile'].split('/')[1]
@@ -172,6 +173,7 @@ def units(plan, table, budget, isolated):
             for number, server in enumerate(servers, 1):
                 server['seconds'] += load
                 rows.append({'label': f"{key}-{mode}-{group['configuration']}", 'pool': key,
+                             'cold': model_costs.get('load_s', table['default_load_s']) - load,
                              'seconds': server['seconds'],
                              'part': {'model': key, 'timing': False, 'groups': [
                                  {**group, 'suites': server['suites'],
@@ -203,7 +205,8 @@ def shard(plan, table=None, budget=SHARD_BUDGET_S):
         for row in sorted(rows, key=lambda row: -row['seconds']):
             job = next((job for job in jobs if job['seconds'] + row['seconds'] <= budget), None)
             if job is None:
-                job = {'rows': [], 'seconds': 0}
+                # The job's first server pays the cold load once.
+                job = {'rows': [], 'seconds': max((r.get('cold', 0) for r in rows), default=0)}
                 jobs.append(job)
             job['rows'].append(row)
             job['seconds'] += row['seconds']

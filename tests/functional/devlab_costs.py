@@ -69,6 +69,7 @@ def update(table, observed):
             # A fresh device reads cold weights; a warm local rerun loads faster,
             # so keep the slowest load seen.
             entry['load_s'] = round(max(row['load_s'] + [entry.get('load_s', 0)]))
+            entry['warm_load_s'] = round(min(row['load_s']))
         if row['timing_s']:
             entry['timing_s'] = round(statistics.median(row['timing_s']))
         suites = entry.setdefault('suites', {})
