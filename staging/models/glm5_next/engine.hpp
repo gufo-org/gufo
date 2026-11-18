@@ -120,16 +120,22 @@ class Session final {
   /// Draws the next token, then (with the nextn block enabled) chains up to
   /// k drafts through the draft block, verifies all k + 1 rows in one
   /// batched trunk pass and keeps the longest prefix the trunk agrees with;
-  /// a rejection appends the trunk's own correction token. Without MTP it
-  /// samples and evaluates exactly one token. The committed sequence and the
-  /// round statistics land in `result`.
+  /// a rejection commits the trunk's own correction token but defers its
+  /// trunk row into the next round, where it verifies as row 0 at the cost
+  /// of one batched row instead of a serial row-pass. Without MTP it samples
+  /// and evaluates exactly one token. The committed sequence and the round
+  /// statistics land in `result`. While a deferred correction is pending,
+  /// `Logits()` is empty (the next-token distribution is not on the host
+  /// yet); `Position()`/`ContextSize()` already count the pending token.
   [[nodiscard]] bool DecodeStep(std::size_t max_tokens,
                                 sampling::SamplerState& sampler,
                                 DecodeResult* result,
                                 std::string* error_msg = nullptr,
                                 bool stop_at_eos = true);
   [[nodiscard]] std::span<const float> Logits() const noexcept {
-    return valid_ ? std::span<const float>(logits_) : std::span<const float>{};
+    return valid_ && pending_token_ < 0
+               ? std::span<const float>(logits_)
+               : std::span<const float>{};
   }
   [[nodiscard]] std::uint32_t Position() const noexcept;
   [[nodiscard]] std::uint32_t ContextSize() const noexcept {
@@ -158,6 +164,10 @@ class Session final {
           std::uint32_t max_context);
 
   void SyncLogits();
+  // Runs a deferred correction token through the trunk (emitting nothing;
+  // it was committed when the round deferred it) so cache state and token
+  // history realign. No-op without a pending token.
+  void FlushPending();
 
   std::shared_ptr<Model> model_;
   std::unique_ptr<rocm::Session> state_;
@@ -172,6 +182,13 @@ class Session final {
   std::uint32_t draft_max_{1};
   std::uint32_t draft_k_{1};
   std::uint32_t draft_streak_{0};
+  // Deferred correction token: already committed to the history, sampler
+  // and stream but not yet consumed by the trunk; the next speculative
+  // round verifies it as row 0. `pending_h_row_` is the accepted row of
+  // the deferring round's `verify_hidden()`, i.e. the trunk output at the
+  // position preceding the pending token. -1 means none.
+  std::int32_t pending_token_{-1};
+  std::uint32_t pending_h_row_{0};
   bool mtp_enabled_{false};
   bool valid_{true};
 };

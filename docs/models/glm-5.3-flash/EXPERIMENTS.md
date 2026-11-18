@@ -633,3 +633,23 @@ largest remaining MTP-loop win; after that, revisit k∈{1,2} since extra
 verify rows get cheaper; (b) the lossless gate anchor moved with B14's
 fused attend and is now `ddae62cf…` at `-d 2048 -n 64` (verified
 plain==MTP on the B15 candidate; do not chase `1d79e532…`).
+
+**Update (2026-11-18) — lever 2 done, correction row deferred (BENCHMARKS.md
+B16).** The rejected-row correction token is now parked as the next round's
+seed (`pending_token_`/`pending_h_row_` in `engine.cpp`): the round's first
+executor row is `MtpStep` on `verify_hidden()[accepted]` plus `Verify` with
+the deferred token at row 0, so partial rounds drop 3 rows → 2 and no
+verification round ever pays a serial trunk pass. `FlushPending()` drains
+the parked row before the target's own `Step` on sync-tail continuation,
+`Evaluate` and the k==0 path; a dropped cache (sync mismatch, reset or plain
+prompt re-seed) discards the pending token because replay re-covers that
+position. Greedy anchors stay bit-identical (`f985b939…`, `ddae62cf…`); the
+sampling path intentionally shifts the RNG stream (the deferred round seeds
+from the pending token instead of `sampler.Sample`). Measured: median serve
+decode unchanged (+0.6 %, acceptance ≈88 % makes partial rounds the minor-
+ity) but the worst inter-token gap halves — 217 → 138–146 ms. The promised
+k∈{1,2} revisit with defer on: fixed k2 12.97 / k3 12.23 vs k1 13.84 t/s
+serve, tails 204/221 vs ~140 ms → **k=1 stays default**; deferral ships as
+the tail/row-count win, not a median lever. Remaining from the list: lever
+3 (draft-side pp penalty via a shared target context) and the base-row
+ladder.

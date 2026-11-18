@@ -344,6 +344,39 @@ alter plain decode. New anchors: `ddae62cf…` (`-d 2048 -n 64`),
 `f985b939…` (`--n-prompt 2048 -n 64` depth 0), re-verified on the
 candidate with `-v`.
 
+### B16 — Correction row deferred into the next verify round (2026-11-18)
+
+The rejected-row correction token no longer costs a serial `Step()` trunk
+pass: it is parked as the next round's seed (`pending_token_`,
+`pending_h_row_`; `staging/models/glm5_next/engine.{hpp,cpp}`) and the next
+round begins with `MtpStep` on `verify_hidden()[accepted]` and `Verify`
+over row 0 = the deferred token — partial rounds go 3 rows → 2, and no
+verification round serialises. `FlushPending()` drains the parked row
+before the target's own `Step` on sync-tail continuation, `Evaluate` and
+the k==0 path; a dropped cache or reset discards it (replay re-covers the
+position). `Logits()` blocks while pending and `Position()` counts the
+parked token, so the serve bookkeeping in `serve_runner.cpp` stays exact;
+the serve decode step now always runs through the engine when MTP is on
+(also covers `max_tokens == 1` via the k==0 flush). Sampling mode skips
+`sampler.Sample` in a deferred round by design (greedy is unaffected).
+
+Quality (GPU-exclusive, `-v`): depth-0 `--n-prompt 2048 --n-gen 64` plain
+== deferred MTP **bit-identical** `f985b939…` (11.06 / 15.67 t/s);
+`-d 2048 -n 64` plain == defer **bit-identical** `ddae62cf…` (11.33 /
+15.05); tg256 defer `f42f26ca…` at 15.77
+(`/tmp/opencode/gufo_bench_pendgate.log`). Suite `glm5_next` **10/10** on
+the candidate including the strict `rocm_forward` golden (69.3 s) and
+`rocm_device_model` (`/tmp/opencode/gufo_bench_pendctest.log`).
+
+Serve-protocol A/B vs B15 (same prompt/metrics): pooled 6 samples median
+inter-token **72.24 ms → 13.84 t/s** (B15 k=1: 13.76, +0.6 % — acceptance
+87–94 % keeps partial rounds rare), but the **worst inter-token gap drops
+217 → 138–146 ms** (−35 %): the correction row is gone from every tail
+round (`/tmp/opencode/glm5_servek_pending{,2}.json`). Re-swept draft counts
+on this candidate (serve, fixed, 3 samples each): k=2 12.97 t/s / max gap
+204 ms, k=3 12.23 / 221 ms — **k=1 remains the shipped default**
+(`/tmp/opencode/glm5_pendsweep_k{2,3}.json`).
+
 ## Fixtures
 
 `tests/fixtures/glm_next/llama_reference.json` is a gufo **self-regression

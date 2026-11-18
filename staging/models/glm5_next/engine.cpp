@@ -156,6 +156,14 @@ void Session::SyncLogits() {
   }
 }
 
+void Session::FlushPending() {
+  if (pending_token_ < 0) {
+    return;
+  }
+  model_->executor_->Step(*state_, pending_token_);
+  pending_token_ = -1;
+}
+
 bool Session::Sync(std::span<const std::int32_t> prompt,
                    std::string* error_msg) {
   if (prompt.size() > max_context_) {
@@ -170,6 +178,8 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
   const auto common = std::mismatch(tokens_.begin(), tokens_.end(),
                                     prompt.begin(), prompt.end());
   if (common.first != tokens_.end()) {
+    // Full replay covers the pending token (it is inside `tokens_`).
+    pending_token_ = -1;
     state_->Reset();
     tokens_.clear();
     model_->executor_->Prefill(*state_, prompt.data(), prompt.size());
@@ -182,6 +192,7 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
           static_cast<std::ptrdiff_t>(common.first - tokens_.begin()),
       prompt.end());
   if (!tail.empty()) {
+    FlushPending();
     model_->executor_->Prefill(*state_, tail.data(), tail.size());
     tokens_.insert(tokens_.end(), tail.begin(), tail.end());
     SyncLogits();
@@ -194,6 +205,7 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
     AssignError(error_msg, "session context is full");
     return false;
   }
+  FlushPending();
   model_->executor_->Step(*state_, token);
   tokens_.push_back(token);
   SyncLogits();
@@ -201,14 +213,18 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
 }
 
 std::uint32_t Session::Position() const noexcept {
+  // With a pending correction the trunk has not consumed it yet, but it is
+  // already part of the history, so the logical position is one ahead of
+  // the cache cursor.
   return static_cast<std::uint32_t>(std::max<std::int64_t>(
-      state_->position() + 1, 0));
+      state_->position() + 1 + (pending_token_ >= 0 ? 1 : 0), 0));
 }
 
 void Session::Reset() {
   state_->Reset();
   tokens_.clear();
   logits_.clear();
+  pending_token_ = -1;
   valid_ = true;
 }
 
@@ -270,7 +286,18 @@ bool Session::DecodeStep(std::size_t max_tokens,
         k, static_cast<std::size_t>(max_context_) - tokens_.size() - 1);
     k = std::min<std::size_t>(k, rocm::Executor::kMaxVerifyRows - 1U);
   }
+  // A correction deferred by the previous round is already committed to the
+  // history, sampler and stream; it replaces this round's sampled seed.
+  const std::int32_t pending_token = pending_token_;
+  pending_token_ = -1;
   if (k == 0) {
+    if (pending_token >= 0) {
+      // The deferred row is due now: let it through first, then sample and
+      // commit one token from its logits as the plain path below does.
+      model_->executor_->Step(*state_, pending_token);
+      (void)hipMemcpy(logits_.data(), model_->executor_->logits(),
+                      logits_.size() * sizeof(float), hipMemcpyDeviceToHost);
+    }
     const auto token = static_cast<std::int32_t>(sampler.Sample(logits_));
     if (is_stop(token)) {
       result->stop = true;
@@ -289,16 +316,31 @@ bool Session::DecodeStep(std::size_t max_tokens,
 
   const std::size_t vocab = draft_logits_.size();
   const bool sampled = !sampler.config().can_use_unmodified_argmax();
-  const auto token = static_cast<std::int32_t>(sampler.Sample(logits_));
+  const std::int32_t token =
+      pending_token >= 0
+          ? pending_token
+          : static_cast<std::int32_t>(sampler.Sample(logits_));
   if (is_stop(token)) {
     result->stop = true;
     return true;
   }
 
   // Draft chain: the first draft conditions on the trunk hidden state,
-  // every later one on the previous draft's own output hidden.
+  // every later one on the previous draft's own output hidden. For a
+  // deferred seed that state is the deferring round's output at the
+  // position preceding the pending token (its accepted `verify_hidden()`
+  // row), the same input the serial correction row used to leave behind.
   valid_ = false;
-  model_->executor_->MtpStep(*state_, token, model_->executor_->last_hidden());
+  if (pending_token >= 0) {
+    model_->executor_->MtpStep(
+        *state_, pending_token,
+        model_->executor_->verify_hidden() +
+            static_cast<std::size_t>(pending_h_row_) *
+                model_->config().hidden_size);
+  } else {
+    model_->executor_->MtpStep(*state_, token,
+                               model_->executor_->last_hidden());
+  }
   std::int32_t drafts[rocm::Executor::kMaxVerifyRows - 1U];
   // Random sampling keeps each draft distribution so the accept step can
   // weigh the target against it and draw the residual on a rejection.
@@ -378,7 +420,9 @@ bool Session::DecodeStep(std::size_t max_tokens,
   // the draft cache to the committed prefix.
   std::vector<sampling::TokenId> committed;
   committed.reserve(k + 2);
-  committed.push_back(static_cast<sampling::TokenId>(token));
+  if (pending_token < 0) {
+    committed.push_back(static_cast<sampling::TokenId>(token));
+  }
   for (std::size_t i = 0; i < accepted; ++i) {
     committed.push_back(static_cast<sampling::TokenId>(drafts[i]));
   }
@@ -409,13 +453,14 @@ bool Session::DecodeStep(std::size_t max_tokens,
   sampler.Accept(std::span<const sampling::TokenId>(committed));
   if (!stopped && correction >= 0) {
     // The target's own token at the first rejected row continues the
-    // sequence; feeding it is the round's only extra cost.
-    model_->executor_->Step(*state_, correction);
+    // sequence. Commit it now but keep it out of the trunk: the next round
+    // verifies it as row 0, so a rejection costs one extra batched row
+    // inside that round instead of a serial row-pass of its own.
+    pending_token_ = correction;
+    pending_h_row_ = static_cast<std::uint32_t>(accepted);
     tokens_.push_back(correction);
     result->tokens.push_back(correction);
     sampler.Accept(static_cast<sampling::TokenId>(correction));
-    (void)hipMemcpy(logits_.data(), model_->executor_->logits(),
-                    vocab * sizeof(float), hipMemcpyDeviceToHost);
     result->stop = is_stop(correction);
   } else if (stopped) {
     result->stop = true;

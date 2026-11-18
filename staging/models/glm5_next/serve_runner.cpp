@@ -304,7 +304,10 @@ class Glm5TextRunner final : public TextModelRunner {
   [[nodiscard]] server::TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
-    if (!use_mtp_ || max_tokens == 1) {
+    // Route even a one-token budget through the engine: a round can end
+    // with a correction deferred into the next round, whose token must
+    // reach the trunk before any logits are sampled.
+    if (!use_mtp_) {
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
     if (max_tokens == 0) {
