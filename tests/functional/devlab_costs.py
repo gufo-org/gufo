@@ -66,8 +66,9 @@ def update(table, observed):
     for model, row in observed.items():
         entry = table['models'].setdefault(model, {})
         if row['load_s']:
-            # The first load reads cold weights; later servers hit the page cache.
-            entry['load_s'] = round(max(row['load_s']))
+            # A fresh device reads cold weights; a warm local rerun loads faster,
+            # so keep the slowest load seen.
+            entry['load_s'] = round(max(row['load_s'] + [entry.get('load_s', 0)]))
         if row['timing_s']:
             entry['timing_s'] = round(statistics.median(row['timing_s']))
         suites = entry.setdefault('suites', {})

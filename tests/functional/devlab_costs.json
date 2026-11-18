@@ -7,98 +7,99 @@
     "deepseek4": {
       "load_s": 79,
       "suites": {
-        "batch": 33.7,
-        "cache": 90.3,
-        "conversation": 20.2,
+        "batch": 34.2,
+        "cache": 89.7,
+        "conversation": 20.6,
         "discovery": 0.5,
         "logprobs": 48.3,
-        "messages-count-tokens": 12.9,
-        "openai-count-tokens": 16.7,
-        "responses": 3.6,
-        "responses-logprobs": 26.6,
-        "sampling-defaults": 81.6,
+        "messages-count-tokens": 12.8,
+        "openai-count-tokens": 18.0,
+        "responses": 3.8,
+        "responses-logprobs": 26.2,
+        "sampling-defaults": 81.4,
         "sampling-ranges": 9.6,
-        "state-edges": 16.2,
-        "stops": 31.5,
-        "structured": 42.4,
-        "tool-streaming": 88.6,
-        "tools": 82.6
+        "state-edges": 17.1,
+        "stops": 31.6,
+        "structured": 41.7,
+        "tool-streaming": 93.2,
+        "tools": 81.8
       },
-      "timing_s": 345
+      "timing_s": 328
     },
     "embedding-gemma2": {
       "suites": {
-        "embedding-text": 91.4,
-        "embedding-images": 91.4,
-        "embedding-audio": 91.4,
-        "embedding-video": 91.4
+        "embedding-audio": 71.3,
+        "embedding-images": 71.3,
+        "embedding-text": 71.3,
+        "embedding-video": 71.3
       },
       "timing_s": 53
     },
     "embedding-gemma2-npu": {
       "suites": {
-        "embedding-text": 91.4,
-        "embedding-images": 91.4,
         "embedding-audio": 91.4,
+        "embedding-images": 91.4,
+        "embedding-text": 91.4,
         "embedding-video": 91.4
       },
-      "timing_s": 53
+      "timing_s": 36
     },
     "flash-next-q4": {
       "load_s": 94,
       "suites": {
-        "batch": 12.5,
-        "cache": 53.9,
-        "cache-bridge": 42.9,
-        "cache-depth": 86.0,
-        "cache-edits": 16.6,
-        "cache-growth": 84.7,
-        "cache-rotation": 30.7,
-        "cache-shared-prefix": 65.7,
-        "cache-stalls": 108.1,
-        "conversation": 13.0,
-        "discovery": 0.6,
-        "image-count": 15.2,
-        "image-detail": 3.6,
-        "image-inputs": 7.1,
+        "batch": 17.6,
+        "cache": 54.0,
+        "cache-bridge": 24.3,
+        "cache-concurrency": 49.9,
+        "cache-depth": 22.8,
+        "cache-edits": 16.0,
+        "cache-growth": 41.9,
+        "cache-rotation": 22.9,
+        "cache-shared-prefix": 37.3,
+        "cache-stalls": 99.8,
+        "conversation": 12.7,
+        "discovery": 0.5,
+        "image-count": 14.8,
+        "image-detail": 3.8,
+        "image-inputs": 8.3,
         "logprobs": 21.4,
-        "long-context": 32.8,
-        "messages-count-tokens": 4.6,
-        "messages-image-counts": 3.8,
-        "messages-tools": 2.9,
-        "metrics": 8.2,
-        "openai-count-tokens": 8.1,
+        "long-context": 21.7,
+        "messages-count-tokens": 4.9,
+        "messages-image-counts": 3.5,
+        "messages-tools": 2.7,
+        "metrics": 7.6,
+        "openai-count-tokens": 8.4,
         "prefill-scheduling": 8.3,
-        "progress": 6.2,
-        "reasoning-budget": 128.4,
-        "reasoning-separator": 10.7,
+        "progress": 5.8,
+        "reasoning-budget": 94.3,
+        "reasoning-separator": 9.7,
         "responses": 2.0,
-        "responses-logprobs": 5.7,
-        "sampling-defaults": 35.3,
-        "sampling-ranges": 5.7,
-        "state-edges": 7.9,
-        "stops": 10.1,
-        "stream-start": 29.5,
-        "structured": 23.5,
-        "structured-limits": 9.5,
-        "system-injection": 13.2,
-        "tool-agent": 10.5,
-        "tool-agent-loop": 4.6,
-        "tool-choice-cache": 8.0,
-        "tool-edges": 16.2,
+        "responses-logprobs": 5.5,
+        "sampling-defaults": 35.1,
+        "sampling-ranges": 5.5,
+        "state-edges": 7.4,
+        "stops": 9.8,
+        "stream-start": 16.8,
+        "structured": 21.2,
+        "structured-limits": 8.2,
+        "system-injection": 12.5,
+        "tool-agent": 10.0,
+        "tool-agent-loop": 4.7,
+        "tool-choice-cache": 8.5,
+        "tool-edges": 15.6,
         "tool-history": 5.0,
-        "tool-images": 14.1,
-        "tool-mixed": 22.7,
-        "tool-native-schemas": 103.3,
-        "tool-parameter-order": 10.9,
-        "tool-reasoning": 75.5,
-        "tool-schema-edges": 12.0,
-        "tool-streaming": 43.9,
-        "tool-type-unions": 4.5,
-        "tool-untyped": 17.1,
-        "tools": 33.6
+        "tool-images": 14.9,
+        "tool-mixed": 22.9,
+        "tool-native-schemas": 86.8,
+        "tool-parameter-order": 10.6,
+        "tool-reasoning": 49.7,
+        "tool-schema-edges": 11.4,
+        "tool-streaming": 42.8,
+        "tool-type-unions": 4.3,
+        "tool-untyped": 16.8,
+        "tools": 34.3
       },
-      "timing_s": 201
+      "timing_s": 246
     },
     "qwen-image-turbo": {
       "suites": {
@@ -109,19 +110,20 @@
     "qwen27-q4": {
       "load_s": 10,
       "suites": {
-        "cache": 70.6,
-        "cache-bridge": 132.5,
-        "cache-concurrency": 201.4,
-        "cache-depth": 246.4,
-        "cache-edits": 49.0,
-        "cache-growth": 216.2,
-        "cache-rotation": 93.0,
-        "cache-shared-prefix": 210.1,
-        "conversation": 27.1,
-        "discovery": 0.6,
+        "batch": 21.7,
+        "cache": 70.8,
+        "cache-bridge": 72.7,
+        "cache-concurrency": 154.0,
+        "cache-depth": 74.7,
+        "cache-edits": 47.9,
+        "cache-growth": 100.6,
+        "cache-rotation": 68.4,
+        "cache-shared-prefix": 117.5,
+        "conversation": 26.3,
+        "discovery": 0.5,
         "image-count": 32.9,
         "image-detail": 5.5,
-        "image-inputs": 11.2,
+        "image-inputs": 13.2,
         "logprobs": 38.9,
         "long-context": 52.5,
         "messages-count-tokens": 8.7,
@@ -129,15 +131,15 @@
         "messages-tools": 6.0,
         "metrics": 19.8,
         "openai-count-tokens": 13.6,
-        "prefill-scheduling": 23.7,
+        "prefill-scheduling": 11.8,
         "progress": 13.8,
         "reasoning-budget": 145.6,
         "reasoning-separator": 21.8,
         "responses": 3.2,
         "responses-logprobs": 12.5,
-        "sampling-defaults": 63.2,
+        "sampling-defaults": 61.6,
         "sampling-ranges": 7.6,
-        "state-edges": 13.4,
+        "state-edges": 12.8,
         "stops": 22.1,
         "stream-start": 74.3,
         "structured": 37.6,
@@ -154,46 +156,46 @@
         "tool-parameter-order": 20.0,
         "tool-reasoning": 156.9,
         "tool-schema-edges": 20.1,
-        "tool-streaming": 54.4,
+        "tool-streaming": 54.7,
         "tool-type-unions": 6.9,
         "tool-untyped": 33.2,
-        "tools": 68.2
+        "tools": 67.6
       },
-      "timing_s": 200
+      "timing_s": 204
     },
     "qwen3-asr": {
       "suites": {
-        "asr-http": 7.5
+        "asr-http": 7.0
       },
       "timing_s": 55
     },
     "qwen3-asr-npu": {
       "suites": {
-        "asr-http": 15.8
+        "asr-http": 20.4
       },
-      "timing_s": 55
+      "timing_s": 56
     },
     "qwen3-tts-base": {
       "suites": {
-        "tts-http": 19.5
+        "tts-http": 18.9
       },
       "timing_s": 68
     },
     "qwen3-tts-custom": {
       "suites": {
-        "tts-http": 17.3
+        "tts-http": 17.0
       },
       "timing_s": 66
     },
     "qwen3-tts-custom-npu": {
       "suites": {
-        "tts-http": 38.2
+        "tts-http": 44.1
       },
-      "timing_s": 88
+      "timing_s": 94
     },
     "qwen3-tts-design": {
       "suites": {
-        "tts-http": 14.8
+        "tts-http": 15.0
       },
       "timing_s": 62
     }
