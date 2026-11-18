@@ -28,6 +28,7 @@ constexpr int kWaves = 8;
 constexpr int kBlockThreads = kWaves * 32;
 /// LDS words of staged transformed input per block (32 KiB).
 constexpr int kStageWords = 8192;
+constexpr int kNarrowRing = 4;
 
 __device__ __forceinline__ float RoundH(float v) {
   return __half2float(__float2half(v));
@@ -75,6 +76,81 @@ __device__ __forceinline__ void Wht128(float v[4]) {
   WhtStage<4>(v, lane);
   WhtStage<8>(v, lane);
   WhtStage<16>(v, lane);
+}
+
+/// Wht128 up to a per-lane sign: returns SignOfLane() * Wht128(v), with
+/// identical rounding. Each butterfly is own + sign * peer, one fma whose
+/// peer operand the compiler takes straight from the DPP lane move, where
+/// Wht128's sign * own + peer needs the move as a separate instruction.
+/// Lane l's sign flips at each stage whose bit l has, so callers fold
+/// SignOfLane() into the scale they apply next.
+/// XorLane for a DPP move the compiler can fold into its user: with
+/// bound_ctrl no lane keeps an old value (row_xmask reads none out of
+/// range anyway).
+template<int M>
+__device__ __forceinline__ float PeerLane(float v) {
+  const int x = __float_as_int(v);
+  if constexpr (M == 16) {
+    return __int_as_float(__builtin_amdgcn_permlanex16(
+        x, x, 0x76543210U, 0xFEDCBA98U, false, false));
+  } else {
+    return __int_as_float(
+        __builtin_amdgcn_update_dpp(0, x, 0x160 + M, 0xF, 0xF, true));
+  }
+}
+
+template<int M>
+__device__ __forceinline__ void WhtStageSigned(float v[4], int lane) {
+  const float sign = (lane & M) ? -1.0F : 1.0F;
+  if constexpr (M == 16) {
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      v[i] = __builtin_fmaf(PeerLane<M>(v[i]), sign, v[i]);
+  } else {
+    // v = peer(v) * sign + v, as DPP fmacs: the compiler does not fold the
+    // DPP move itself.
+    asm volatile(
+        "v_fmac_f32_dpp %0, %0, %4 row_xmask:%5 row_mask:0xf bank_mask:0xf\n"
+        "v_fmac_f32_dpp %1, %1, %4 row_xmask:%5 row_mask:0xf bank_mask:0xf\n"
+        "v_fmac_f32_dpp %2, %2, %4 row_xmask:%5 row_mask:0xf bank_mask:0xf\n"
+        "v_fmac_f32_dpp %3, %3, %4 row_xmask:%5 row_mask:0xf bank_mask:0xf"
+        : "+v"(v[0]), "+v"(v[1]), "+v"(v[2]), "+v"(v[3])
+        : "v"(sign), "i"(M));
+  }
+}
+
+__device__ __forceinline__ void Wht128Signed(float v[4]) {
+  const int lane = threadIdx.x & 31;
+  const float a0 = v[0] + v[1];
+  const float a1 = v[0] - v[1];
+  const float a2 = v[2] + v[3];
+  const float a3 = v[2] - v[3];
+  v[0] = a0 + a2;
+  v[1] = a1 + a3;
+  v[2] = a0 - a2;
+  v[3] = a1 - a3;
+  WhtStageSigned<1>(v, lane);
+  WhtStageSigned<2>(v, lane);
+  WhtStageSigned<4>(v, lane);
+  WhtStageSigned<8>(v, lane);
+  WhtStageSigned<16>(v, lane);
+}
+
+/// half2(a * scale, b * scale) as bits, each rounded once from the exact
+/// product. The +0 addend turns the -0 a folded lane sign leaves on a zero
+/// into +0, as the unsigned transform gives: the matrix cores' sums depend
+/// on the sign of zero inputs.
+__device__ __forceinline__ std::uint32_t HalfPairScaled(float a, float b,
+                                                        float scale) {
+  std::uint32_t h;
+  asm("v_fma_mixlo_f16 %0, %1, %2, 0" : "=v"(h) : "v"(a), "v"(scale));
+  asm("v_fma_mixhi_f16 %0, %1, %2, 0" : "+v"(h) : "v"(b), "v"(scale));
+  return h;
+}
+
+/// The sign Wht128Signed leaves on this lane's values.
+__device__ __forceinline__ float SignOfLane() {
+  return (__builtin_popcount(threadIdx.x & 31) & 1) != 0 ? -1.0F : 1.0F;
 }
 
 /// state * 0x83DCD12D mod 2^32 for the 16-bit state in the low half of x
@@ -169,6 +245,7 @@ struct LinearArgs {
   float* partial;
   int splits;
   unsigned* done;  // per (row block, column group) split arrival counters
+  const float* gate{nullptr};  // inputs are silu(gate) * x, gate laid out as x
 };
 
 __device__ __forceinline__ std::uint32_t ExpertOf(const LinearArgs& a,
@@ -221,39 +298,55 @@ __global__ void __launch_bounds__(kBlockThreads) Exl3InputKernel(LinearArgs a) {
 
 /// Block (column group, split, row group): 8 waves, one 16-column block
 /// each, over the split's tile range; R rows share the decoded weights.
-template<int K, int R>
-__device__ __forceinline__ void GemvBody(const LinearArgs& a,
-                                         const unsigned zb) {
-  __shared__ std::uint32_t xs[kStageWords];
-  __shared__ unsigned last_split;
+/// Block (group, split s, row group zb) of `groups` column groups; xs is the
+/// kernel's kStageWords-word stage. Ring tiles per wave are in flight: one
+/// front chunk run (4) suits dense matrices, 8 the small expert matrices.
+template<int K, int R, int Ring>
+__device__ __forceinline__ void GemvBody(
+    const LinearArgs& a, const unsigned group_index, const unsigned split,
+    const unsigned zb, const unsigned groups, std::uint32_t* xs,
+    unsigned& last_split) {
   constexpr int T = fmt::TileDwords(K);
   const int lane = threadIdx.x & 31;
   const int wave = __builtin_amdgcn_readfirstlane(threadIdx.x >> 5);
   const int A = static_cast<int>(a.w.in >> 4);
   const int span = A / a.splits;
-  const int s = static_cast<int>(blockIdx.y);
+  const int s = static_cast<int>(split);
   const int a0 = s * span;
   const std::uint32_t row0 = zb * R;
   const int nrows = static_cast<int>(min(a.rows - row0, std::uint32_t{R}));
-  const int b = static_cast<int>(blockIdx.x) * kWaves + wave;
+  const int b = static_cast<int>(group_index) * kWaves + wave;
   const fmt::LaneWindow<K> win(lane);
   const int q = lane & 3;
   const std::uint32_t expert = ExpertOf(a, row0);
   // The wave's tile stream as a buffer resource: per-lane offsets are fixed,
   // the tile offset is scalar, and the prefetch past the span reads zeros.
-  const __amdgpu_buffer_rsrc_t rs =
-      StreamRsrc(a.w.tiles + expert * a.w.ExpertWords() +
-                     (static_cast<std::size_t>(b) * A + a0) * T,
-                 static_cast<std::uint32_t>(span * T * 4));
+  // Front order: chunk (q, s * groups + g) holds the block's 8 column
+  // blocks by row tiles 4q..4q+3 of its split, so concurrent blocks at the
+  // same step read neighbouring memory.
+  const int items = a.splits * static_cast<int>(groups);
+  // (Launches check that a.splits is the layout's split.)
+  const bool front = a.w.front != 0;
+  const std::size_t first =
+      front ? (static_cast<std::size_t>(s) * groups + group_index) * 32 +
+                  static_cast<std::size_t>(wave) * 4
+            : static_cast<std::size_t>(b) * A + a0;
+  const __amdgpu_buffer_rsrc_t rs = StreamRsrc(
+      a.w.tiles + expert * a.w.ExpertWords() + first * T,
+      front
+          ? static_cast<std::uint32_t>(
+                (static_cast<std::size_t>(A) * (a.w.out / 16) - first) * T * 4)
+          : static_cast<std::uint32_t>(span * T * 4));
   const int v0 = 4 * win.d0;
   const int v1 = 4 * ((win.d0 + 1) % T);
   const int v2 = 4 * ((win.d0 + 2) % T);
-  // Eight tiles in flight: slot f holds tile t0 + f. Spans are multiples
+  // Ring tiles in flight: slot f holds tile t0 + f. Spans are multiples
   // of eight (Splits), so the slots need no bounds checks.
-  constexpr int kRing = 8;
+  constexpr int kRing = Ring;
+  static_assert(8 % kRing == 0);
   std::uint32_t ring[kRing][3];
   const auto load = [&](int t, std::uint32_t (&w)[3]) {
-    const int so = t * T * 4;
+    const int so = (front ? ((t >> 2) * items * 32 + (t & 3)) : t) * T * 4;
     w[0] = __builtin_amdgcn_raw_buffer_load_b32(rs, v0, so, 0);
     w[1] = __builtin_amdgcn_raw_buffer_load_b32(rs, v1, so, 0);
     w[2] = __builtin_amdgcn_raw_buffer_load_b32(rs, v2, so, 0);
@@ -285,13 +378,26 @@ __device__ __forceinline__ void GemvBody(const LinearArgs& a,
         float v[4] = {0.0F, 0.0F, 0.0F, 0.0F};
         if (r < nrows) {
           const std::uint32_t row = row0 + r;
-          const float* src =
-              a.x + static_cast<std::size_t>(row / a.x_div) * a.ldx + c;
+          const std::size_t at =
+              static_cast<std::size_t>(row / a.x_div) * a.ldx + c;
+          const float* src = a.x + at;
           const __half* suh =
               a.w.suh + static_cast<std::size_t>(ExpertOf(a, row)) * a.w.in + c;
+          float in[4];
 #pragma unroll
           for (int i = 0; i < 4; ++i)
-            v[i] = RoundH(RoundH(src[i]) * __half2float(suh[i]));
+            in[i] = src[i];
+          if (a.gate != nullptr) {
+            // SwigluKernel's product, formed while staging.
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+              const float g = a.gate[at + i];
+              in[i] = g * (1.0F / (1.0F + __expf(-g))) * in[i];
+            }
+          }
+#pragma unroll
+          for (int i = 0; i < 4; ++i)
+            v[i] = RoundH(RoundH(in[i]) * __half2float(suh[i]));
         }
         Wht128(v);
         __half* dst = xsh + r * chunk * 16 + blk * 128 + lane * 4;
@@ -338,7 +444,7 @@ __device__ __forceinline__ void GemvBody(const LinearArgs& a,
   }
   // The block covers one 128-column group: its 8 waves' 16 columns.
   const int col = 16 * wave + lane / 4;
-  const int group = static_cast<int>(blockIdx.x);
+  const int group = static_cast<int>(group_index);
   float* sums = reinterpret_cast<float*>(xs);  // [R][128]
   if (a.splits == 1) {
     __syncthreads();  // every wave is done with the staged inputs
@@ -367,7 +473,7 @@ __device__ __forceinline__ void GemvBody(const LinearArgs& a,
     // The last split to arrive reduces every split in a fixed order.
     __threadfence();
     __syncthreads();
-    unsigned* counter = a.done + zb * gridDim.x + blockIdx.x;
+    unsigned* counter = a.done + zb * groups + group_index;
     if (threadIdx.x == 0)
       last_split =
           atomicAdd(counter, 1U) == static_cast<unsigned>(a.splits - 1);
@@ -412,9 +518,12 @@ __device__ __forceinline__ void GemvBody(const LinearArgs& a,
   }
 }
 
-template<int K, int R>
+template<int K, int R, int Ring>
 __global__ void __launch_bounds__(kBlockThreads) Exl3GemvKernel(LinearArgs a) {
-  GemvBody<K, R>(a, blockIdx.z);
+  __shared__ std::uint32_t xs[kStageWords];
+  __shared__ unsigned last_split;
+  GemvBody<K, R, Ring>(a, blockIdx.x, blockIdx.y, blockIdx.z, gridDim.x, xs,
+                       last_split);
 }
 
 /// Two matrices of one shape over the same rows in one launch (gate and up
@@ -422,10 +531,67 @@ __global__ void __launch_bounds__(kBlockThreads) Exl3GemvKernel(LinearArgs a) {
 template<int K, int R>
 __global__ void __launch_bounds__(kBlockThreads)
     Exl3GemvPairKernel(LinearArgs a, LinearArgs b, unsigned zsplit) {
+  __shared__ std::uint32_t xs[kStageWords];
+  __shared__ unsigned last_split;
   if (blockIdx.z < zsplit)
-    GemvBody<K, R>(a, blockIdx.z);
+    GemvBody<K, R, 8>(a, blockIdx.x, blockIdx.y, blockIdx.z, gridDim.x, xs,
+                      last_split);
   else
-    GemvBody<K, R>(b, blockIdx.z - zsplit);
+    GemvBody<K, R, 8>(b, blockIdx.x, blockIdx.y, blockIdx.z - zsplit, gridDim.x,
+                      xs, last_split);
+}
+
+/// Linears of a grouped one-row launch: job j owns blocks [start[j],
+/// start[j + 1]), ordered as Exl3GemvKernel's grid (group, split, row).
+struct GroupArgs {
+  LinearArgs job[kExl3GroupJobs];
+  unsigned start[kExl3GroupJobs + 1];
+  unsigned groups[kExl3GroupJobs];
+  int k[kExl3GroupJobs];
+  int count;
+};
+
+/// Dense jobs share each decoded tile across R rows; expert jobs take one
+/// row per block.
+template<int R>
+__global__ void __launch_bounds__(kBlockThreads)
+    Exl3GemvGroupKernel(GroupArgs g) {
+  __shared__ std::uint32_t xs[kStageWords];
+  __shared__ unsigned last_split;
+  int j = 0;
+  while (j + 1 < g.count && blockIdx.x >= g.start[j + 1])
+    ++j;
+  const LinearArgs& a = g.job[j];
+  const unsigned groups = g.groups[j];
+  unsigned local = blockIdx.x - g.start[j];
+  const unsigned group = local % groups;
+  local /= groups;
+  const unsigned split = local % static_cast<unsigned>(a.splits);
+  const unsigned zb = local / static_cast<unsigned>(a.splits);
+  const auto body = [&]<int K>() {
+    if (a.ids != nullptr)
+      GemvBody<K, 1, 8>(a, group, split, zb, groups, xs, last_split);
+    else
+      GemvBody<K, R, R == 1 ? 4 : kNarrowRing>(a, group, split, zb, groups, xs,
+                                               last_split);
+  };
+  switch (g.k[j]) {
+    case 2:
+      body.template operator()<2>();
+      break;
+    case 3:
+      body.template operator()<3>();
+      break;
+    case 4:
+      body.template operator()<4>();
+      break;
+    case 5:
+      body.template operator()<5>();
+      break;
+    default:
+      body.template operator()<6>();
+      break;
+  }
 }
 
 template<int K>
@@ -435,13 +601,23 @@ void LaunchGemv(const LinearArgs& a, int rows_per_block, hipStream_t stream) {
       (a.rows + rows_per_block - 1) / rows_per_block;
   const dim3 grid(groups, static_cast<unsigned>(a.splits), row_blocks);
   if (rows_per_block == 1) {
-    hipLaunchKernelGGL((Exl3GemvKernel<K, 1>), grid, dim3(kBlockThreads), 0,
-                       stream, a);
+    if (a.ids != nullptr)
+      hipLaunchKernelGGL((Exl3GemvKernel<K, 1, 8>), grid, dim3(kBlockThreads),
+                         0, stream, a);
+    else
+      hipLaunchKernelGGL((Exl3GemvKernel<K, 1, 4>), grid, dim3(kBlockThreads),
+                         0, stream, a);
   } else if (rows_per_block == kExl3GemvWideRows) {
-    hipLaunchKernelGGL((Exl3GemvKernel<K, kExl3GemvWideRows>), grid,
+    hipLaunchKernelGGL((Exl3GemvKernel<K, kExl3GemvWideRows, 8>), grid,
+                       dim3(kBlockThreads), 0, stream, a);
+  } else if (rows_per_block == 2) {
+    hipLaunchKernelGGL((Exl3GemvKernel<K, 2, kNarrowRing>), grid,
+                       dim3(kBlockThreads), 0, stream, a);
+  } else if (rows_per_block == 4) {
+    hipLaunchKernelGGL((Exl3GemvKernel<K, 4, kNarrowRing>), grid,
                        dim3(kBlockThreads), 0, stream, a);
   } else {
-    hipLaunchKernelGGL((Exl3GemvKernel<K, kExl3GemvRows>), grid,
+    hipLaunchKernelGGL((Exl3GemvKernel<K, kExl3GemvRows, kNarrowRing>), grid,
                        dim3(kBlockThreads), 0, stream, a);
   }
 }
@@ -488,9 +664,11 @@ using v8f = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 constexpr int kGemmWaves = 8;    // 16-column blocks: 128 output columns
 constexpr int kFusedWaves = 20;  // fused-input GEMM: 640 output columns
 constexpr int kGemmTiles = 8;    // fused: 16-row token tiles, 128 rows
-// Transformed-input and scratch GEMMs: one column block per wave and 256
-// rows, so most experts of a prompt pass take one tile.
-constexpr int kTransformedTiles = 16;
+// Transformed-input and scratch GEMMs: 128 rows. Transformed-input blocks
+// (down) give each wave two column blocks, so each LDS B fragment feeds two
+// WMMAs: one block per wave at 256 rows waits on its B fragments.
+constexpr int kTransformedTiles = 8;
+constexpr int kDownBlocks = 2;
 static_assert(kExl3GemmRows == kGemmTiles * 16 &&
               kExl3TransformedGemmRows == kTransformedTiles * 16);
 
@@ -540,6 +718,15 @@ __device__ __forceinline__ void DecodeAHalf(const std::uint32_t (&w)[8],
     const __half2 h = Mul1Pair(Mul1ProductHi(a), Mul1Product(a >> (16 - K)));
     own[q] = __builtin_bit_cast(std::uint32_t, h);
   }
+}
+
+/// Workgroup barrier that orders LDS only. __syncthreads() also waits for
+/// every outstanding global load (vmcnt(0)), which would drain the weight
+/// tiles kept in flight across the barrier.
+__device__ __forceinline__ void LdsBarrier() {
+  __builtin_amdgcn_fence(__ATOMIC_RELEASE, "workgroup", "local");
+  __builtin_amdgcn_s_barrier();
+  __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup", "local");
 }
 
 /// Block (256-column group, row tile). Per 64-input step the block stages
@@ -592,18 +779,31 @@ __global__ void __launch_bounds__(W * 32) Exl3GemmKernel(GemmArgs g) {
   }
   if (begin >= end)
     return;
-  const int live = (end - begin + 15) / 16;
+  // Wave-uniform in a scalar register, so tile checks are scalar branches.
+  const int live = __builtin_amdgcn_readfirstlane((end - begin + 15) / 16);
   const auto x_row = [&](int p) -> int {
     return g.route.x_rows != nullptr ? g.route.x_rows[p] : p;
   };
   // Each column block's tile stream as a buffer resource: fixed per-lane
   // offsets, a scalar tile offset, and zeros past the stream.
+  // In front order a column block's row tiles come in runs of four; the
+  // offset of row tile a from the block's first tile is the same for every
+  // column block.
+  const int front = g.w.front;
+  const int front_span = front != 0 ? A / front : 1;
+  const int front_items = front * (B / 8);
   __amdgpu_buffer_rsrc_t rs[kBlocks];
 #pragma unroll
-  for (int u = 0; u < kBlocks; ++u)
-    rs[u] = StreamRsrc(g.w.tiles + expert * g.w.ExpertWords() +
-                           static_cast<std::size_t>(has[u] ? cb[u] : 0) * A * T,
-                       has[u] ? static_cast<std::uint32_t>(A * T * 4) : 0U);
+  for (int u = 0; u < kBlocks; ++u) {
+    const std::size_t first =
+        front != 0 ? Exl3FrontTile(has[u] ? cb[u] : 0, 0, A, B, front)
+                   : static_cast<std::size_t>(has[u] ? cb[u] : 0) * A;
+    const std::size_t words =
+        front != 0 ? (static_cast<std::size_t>(A) * B - first) * T
+                   : static_cast<std::size_t>(A) * T;
+    rs[u] = StreamRsrc(g.w.tiles + expert * g.w.ExpertWords() + first * T,
+                       has[u] ? static_cast<std::uint32_t>(words * 4) : 0U);
+  }
   // A gfx1151 WMMA reads row r of its A operand from one lane only: lane r
   // for even rows, lane r + 16 for odd ones. The reading lane decodes
   // inputs 0..7 of its row and its partner inputs 8..15, so after one
@@ -630,7 +830,13 @@ __global__ void __launch_bounds__(W * 32) Exl3GemmKernel(GemmArgs g) {
   constexpr int kStageLoads = RT * 16 * kParts / (W * 32);
   std::uint32_t ring[kBlocks][kAhead][8];
   const auto load_tile = [&](int u, int a, std::uint32_t (&w)[8]) {
-    const int so = a * T * 4;
+    int tile = a;
+    if (front != 0) {
+      const int sp = a / front_span;
+      const int a2 = a - sp * front_span;
+      tile = ((a2 >> 2) * front_items + sp * (B / 8)) * 32 + (a2 & 3);
+    }
+    const int so = tile * T * 4;
 #pragma unroll
     for (int i = 0; i < 8; ++i)
       w[i] = __builtin_amdgcn_raw_buffer_load_b32(rs[u], voff[i], so, 0);
@@ -647,6 +853,14 @@ __global__ void __launch_bounds__(W * 32) Exl3GemmKernel(GemmArgs g) {
     const int r = (n * W * 32 + static_cast<int>(threadIdx.x)) / kParts;
     const int p = begin + r;
     stage_row[n] = r < live * 16 && p < end ? x_row(p) : -1;
+  }
+  // Output rows of the tile for the epilogue (-1: none), visible after the
+  // first barrier.
+  __shared__ int rows_y[RT * 16];
+  for (int t = static_cast<int>(threadIdx.x); t < RT * 16; t += W * 32) {
+    const int p = begin + t;
+    rows_y[t] =
+        p < end ? (g.route.y_rows != nullptr ? g.route.y_rows[p] : p) : -1;
   }
   // The next step's staged inputs are loaded while this step computes.
   uint4 staged[kStageLoads];
@@ -689,6 +903,8 @@ __global__ void __launch_bounds__(W * 32) Exl3GemmKernel(GemmArgs g) {
     }
     raw_suh = *reinterpret_cast<const uint2*>(suh + k + lane * 4);
   };
+  // Wht128Signed's lane sign, folded into the normalization (exact).
+  const float norm_sign = fmt::kHadamardNorm * SignOfLane();
   if constexpr (Fused)
     load_fused(0);
   else
@@ -716,14 +932,11 @@ __global__ void __launch_bounds__(W * 32) Exl3GemmKernel(GemmArgs g) {
         const float2 hi2 = __half22float2(
             __hmul2(*reinterpret_cast<const __half2*>(&raw[n].y), s23));
         float v[4] = {lo.x, lo.y, hi2.x, hi2.y};
-        Wht128(v);
-        const __half2 h[2] = {__floats2half2_rn(v[0] * fmt::kHadamardNorm,
-                                                v[1] * fmt::kHadamardNorm),
-                              __floats2half2_rn(v[2] * fmt::kHadamardNorm,
-                                                v[3] * fmt::kHadamardNorm)};
+        Wht128Signed(v);
         *reinterpret_cast<uint2*>(stage + (n * W + wave) * kStepPitch +
                                   lane * 4) =
-            *reinterpret_cast<const uint2*>(h);
+            uint2{HalfPairScaled(v[0], v[1], norm_sign),
+                  HalfPairScaled(v[2], v[3], norm_sign)};
       }
     } else {
 #pragma unroll
@@ -764,11 +977,13 @@ __global__ void __launch_bounds__(W * 32) Exl3GemmKernel(GemmArgs g) {
           v16h bf;
           __builtin_memcpy(
               &bf, stage + (j * 16 + (lane & 15)) * kStepPitch + kk * 16, 32);
+          // A column block past the output reads an empty stream; its
+          // products only reach 128-column groups the epilogue skips, so
+          // they need no branch.
 #pragma unroll
           for (int u = 0; u < kBlocks; ++u)
-            if (has[u])  // wave-uniform: a 640-wide output fills 2.5 groups
-              acc[u][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(af[u], bf,
-                                                                     acc[u][j]);
+            acc[u][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(af[u], bf,
+                                                                   acc[u][j]);
         }
       }
     }
@@ -779,12 +994,44 @@ __global__ void __launch_bounds__(W * 32) Exl3GemmKernel(GemmArgs g) {
   static_assert(sizeof(stage) >= 16 * kOutPitch * sizeof(float));
   float* out = reinterpret_cast<float*>(stage);
   const __half* svh = g.w.svh + static_cast<std::size_t>(expert) * g.w.out;
+  const __half* next_suh =
+      g.out.next_suh != nullptr
+          ? g.out.next_suh + static_cast<std::size_t>(expert) * g.w.out
+          : nullptr;
   constexpr int kGroups = kCols / 128;
+  constexpr int kTasks = (16 * kGroups + W - 1) / W;
   const int col0 = static_cast<int>(blockIdx.x) * kCols;
+  // A wave's tasks keep their column group across row tiles, so their
+  // scales are loaded once; each tile then issues every task's loads before
+  // any transform, rather than one dependent chain per task.
+  float sv[kTasks][4];
+  uint2 ns[kTasks];
+#pragma unroll
+  for (int n = 0; n < kTasks; ++n) {
+    const int task = wave + n * W;
+    const int grp = task % kGroups;
+    const int c = col0 + grp * 128 + lane * 4;
+    ns[n] = uint2{0U, 0U};
+    if (task >= 16 * kGroups || col0 + grp * 128 >= static_cast<int>(g.w.out))
+      continue;
+    const uint2 v = *reinterpret_cast<const uint2*>(svh + c);
+    const float2 s01 = __half22float2(*reinterpret_cast<const __half2*>(&v.x));
+    const float2 s23 = __half22float2(*reinterpret_cast<const __half2*>(&v.y));
+    // Outputs of non-fused GEMMs (down's F16 rows for the F32 combine, the
+    // head's logits) never reach the matrix cores, so their transform may
+    // leave -0 for +0 and takes Wht128Signed, its sign folded into svh.
+    const float out_sign = SignOfLane();
+    sv[n][0] = s01.x * fmt::kHadamardNorm * out_sign;
+    sv[n][1] = s01.y * fmt::kHadamardNorm * out_sign;
+    sv[n][2] = s23.x * fmt::kHadamardNorm * out_sign;
+    sv[n][3] = s23.y * fmt::kHadamardNorm * out_sign;
+    if (next_suh != nullptr)
+      ns[n] = *reinterpret_cast<const uint2*>(next_suh + c);
+  }
   for (int j = 0; j < RT; ++j) {
     if (j >= live)
       break;
-    __syncthreads();
+    LdsBarrier();
 #pragma unroll
     for (int t = 0; t < RT; ++t) {
       if (t != j)
@@ -798,45 +1045,51 @@ __global__ void __launch_bounds__(W * 32) Exl3GemmKernel(GemmArgs g) {
         }
       }
     }
-    __syncthreads();
-    for (int task = wave; task < 16 * kGroups; task += W) {
+    LdsBarrier();
+    int row[kTasks];
+    float4 o[kTasks];
+    float4 gv[kTasks];
+#pragma unroll
+    for (int n = 0; n < kTasks; ++n) {
+      const int task = wave + n * W;
       const int r = task / kGroups;
       const int grp = task % kGroups;
-      const int p = begin + j * 16 + r;
+      row[n] = -1;
+      if (task >= 16 * kGroups || col0 + grp * 128 >= static_cast<int>(g.w.out))
+        continue;
+      row[n] = rows_y[j * 16 + r];
+      if (row[n] < 0)
+        continue;
+      o[n] = *reinterpret_cast<const float4*>(out + r * kOutPitch + grp * 128 +
+                                              lane * 4);
+      if (g.out.gate != nullptr)
+        gv[n] = *reinterpret_cast<const float4*>(
+            g.out.gate + static_cast<std::size_t>(row[n]) * g.ldy + col0 +
+            grp * 128 + lane * 4);
+    }
+#pragma unroll
+    for (int n = 0; n < kTasks; ++n) {
+      if (row[n] < 0)
+        continue;
+      const int grp = (wave + n * W) % kGroups;
       const int c = col0 + grp * 128 + lane * 4;
-      if (p >= end || col0 + grp * 128 >= static_cast<int>(g.w.out))
-        continue;
-      const int row = g.route.y_rows != nullptr ? g.route.y_rows[p] : p;
-      if (row < 0)
-        continue;
-      const float4 o = *reinterpret_cast<const float4*>(out + r * kOutPitch +
-                                                        grp * 128 + lane * 4);
-      float v[4] = {o.x, o.y, o.z, o.w};
-      Wht128(v);
-      const uint2 sv = *reinterpret_cast<const uint2*>(svh + c);
-      const float2 s01 =
-          __half22float2(*reinterpret_cast<const __half2*>(&sv.x));
-      const float2 s23 =
-          __half22float2(*reinterpret_cast<const __half2*>(&sv.y));
-      const float scale[4] = {s01.x, s01.y, s23.x, s23.y};
+      float v[4] = {o[n].x, o[n].y, o[n].z, o[n].w};
+      Wht128Signed(v);
 #pragma unroll
       for (int i = 0; i < 4; ++i)
-        v[i] *= fmt::kHadamardNorm * scale[i];
-      const std::size_t at = static_cast<std::size_t>(row) * g.ldy + c;
+        v[i] *= sv[n][i];
+      const std::size_t at = static_cast<std::size_t>(row[n]) * g.ldy + c;
       if (g.out.gate != nullptr) {
         // SwiGLU into the next projection's F16 inputs.
-        const float4 gv = *reinterpret_cast<const float4*>(g.out.gate + at);
-        const float gs[4] = {gv.x, gv.y, gv.z, gv.w};
+        const float gs[4] = {gv[n].x, gv[n].y, gv[n].z, gv[n].w};
 #pragma unroll
         for (int i = 0; i < 4; ++i)
           v[i] *= gs[i] / (1.0F + __expf(-gs[i]));
       }
-      if (g.out.next_suh != nullptr) {
+      if (next_suh != nullptr) {
         // The next linear's input transform, as Exl3InputKernel.
-        const uint2 sh = *reinterpret_cast<const uint2*>(
-            g.out.next_suh + static_cast<std::size_t>(expert) * g.w.out + c);
-        const __half2 n01 = *reinterpret_cast<const __half2*>(&sh.x);
-        const __half2 n23 = *reinterpret_cast<const __half2*>(&sh.y);
+        const __half2 n01 = *reinterpret_cast<const __half2*>(&ns[n].x);
+        const __half2 n23 = *reinterpret_cast<const __half2*>(&ns[n].y);
         const float2 a01 =
             __half22float2(__hmul2(__floats2half2_rn(v[0], v[1]), n01));
         const float2 a23 =
@@ -845,10 +1098,17 @@ __global__ void __launch_bounds__(W * 32) Exl3GemmKernel(GemmArgs g) {
         v[1] = a01.y;
         v[2] = a23.x;
         v[3] = a23.y;
-        Wht128(v);
+        Wht128Signed(v);
+        // The next GEMM's matrix-core inputs: the normalized F32 values
+        // rounded to F16, with +0 for zeros as in staging.
 #pragma unroll
-        for (int i = 0; i < 4; ++i)
-          v[i] *= fmt::kHadamardNorm;
+        for (int i = 0; i < 4; ++i) {
+          v[i] *= norm_sign;
+          asm volatile("" : "+v"(v[i]));
+        }
+        *reinterpret_cast<uint2*>(g.out.y_half + at) = uint2{
+            HalfPairScaled(v[0], v[1], 1.0F), HalfPairScaled(v[2], v[3], 1.0F)};
+        continue;
       }
       if (g.out.y_half != nullptr) {
         const __half2 h[2] = {__floats2half2_rn(v[0], v[1]),
@@ -867,8 +1127,13 @@ __global__ void __launch_bounds__(W * 32) Exl3GemmKernel(GemmArgs g) {
 /// every column and the output Hadamard to every row, scale by suh and svh,
 /// and write the Q8_0 blocks of the 128 output rows (ggml's reference
 /// quantize_row_q8_0 arithmetic).
+/// Waves of a Q8_0 expansion block: its LDS holds the whole 128x128 block,
+/// so two blocks share a WGP, and more waves hide the LDS round trips.
+constexpr int kDequantWaves = 16;
+constexpr int kDequantThreads = kDequantWaves * 32;
+
 template<int K>
-__global__ void __launch_bounds__(kBlockThreads)
+__global__ void __launch_bounds__(kDequantThreads)
     Exl3DequantQ8Kernel(Exl3Weights w, std::uint32_t expert,
                         std::uint8_t* dst) {
   __shared__ float m[128 * 128];
@@ -885,62 +1150,105 @@ __global__ void __launch_bounds__(kBlockThreads)
   const fmt::LaneWindow<K> win(lane);
   const int r0 = 2 * (lane & 3);
   const int c0 = lane >> 2;
-  // All of the wave's tile loads are issued before the first decode.
-  constexpr int kWaveTiles = 64 / kWaves;
-  std::uint32_t tw[kWaveTiles][3];
+  // Waves 0..7 each decode one column block (16 outputs, all 128 inputs)
+  // and apply the input transform in registers. Lane l holds inputs
+  // a = 16 t + 8 h + 2 (l & 3) + e of tile t for outputs c0 and c0 + 8, so
+  // the butterflies over a's bits 0..6 (e, lane bits 0 and 1, h, t) run in
+  // Wht128's order with its rounding; the lane stages leave Wht128Signed's
+  // sign, (-1)^popcount(l & 3), folded into the normalization.
+  if (wave < 8) {
+    std::uint32_t tw[8][3];
 #pragma unroll
-  for (int n = 0; n < kWaveTiles; ++n) {
-    const int t = n * kWaves + wave;
-    const std::uint32_t* tile =
-        tiles +
-        (static_cast<std::size_t>(g * 8 + t / 8) * A + ib * 8 + t % 8) * T;
-    tw[n][0] = tile[win.d0];
-    tw[n][1] = tile[(win.d0 + 1) % T];
-    tw[n][2] = tile[(win.d0 + 2) % T];
-  }
+    for (int t = 0; t < 8; ++t) {
+      const std::size_t cbk = static_cast<std::size_t>(g) * 8 + wave;
+      const std::size_t ak = static_cast<std::size_t>(ib) * 8 + t;
+      const std::uint32_t* tile =
+          tiles + (w.front != 0 ? Exl3FrontTile(cbk, ak, A, w.out / 16, w.front)
+                                : cbk * A + ak) *
+                      T;
+      tw[t][0] = tile[win.d0];
+      tw[t][1] = tile[(win.d0 + 1) % T];
+      tw[t][2] = tile[(win.d0 + 2) % T];
+    }
+    // v[t][c * 4 + h * 2 + e]
+    float v[8][8];
 #pragma unroll
-  for (int n = 0; n < kWaveTiles; ++n) {
-    const int t = n * kWaves + wave;
-    __half2 P[4];
-    DecodeLane<K>(tw[n][0], tw[n][1], tw[n][2], win.shift, P);
-    const int a = (t % 8) * 16;
-    const int b = (t / 8) * 16;
-    const float2 p0 = __half22float2(P[0]);
-    const float2 p1 = __half22float2(P[1]);
-    const float2 p2 = __half22float2(P[2]);
-    const float2 p3 = __half22float2(P[3]);
-    m[cell(a + r0, b + c0)] = p0.x;
-    m[cell(a + r0 + 1, b + c0)] = p0.y;
-    m[cell(a + r0 + 8, b + c0)] = p1.x;
-    m[cell(a + r0 + 9, b + c0)] = p1.y;
-    m[cell(a + r0, b + c0 + 8)] = p2.x;
-    m[cell(a + r0 + 1, b + c0 + 8)] = p2.y;
-    m[cell(a + r0 + 8, b + c0 + 8)] = p3.x;
-    m[cell(a + r0 + 9, b + c0 + 8)] = p3.y;
+    for (int t = 0; t < 8; ++t) {
+      __half2 P[4];
+      DecodeLane<K>(tw[t][0], tw[t][1], tw[t][2], win.shift, P);
+      const float2 p0 = __half22float2(P[0]);
+      const float2 p1 = __half22float2(P[1]);
+      const float2 p2 = __half22float2(P[2]);
+      const float2 p3 = __half22float2(P[3]);
+      v[t][0] = p0.x;
+      v[t][1] = p0.y;
+      v[t][2] = p1.x;
+      v[t][3] = p1.y;
+      v[t][4] = p2.x;
+      v[t][5] = p2.y;
+      v[t][6] = p3.x;
+      v[t][7] = p3.y;
+    }
+    const auto pair = [&](float& lo, float& hi) {
+      const float x = lo;
+      lo = x + hi;
+      hi = x - hi;
+    };
+#pragma unroll
+    for (int t = 0; t < 8; ++t)
+#pragma unroll
+      for (int i = 0; i < 8; i += 2)
+        pair(v[t][i], v[t][i + 1]);  // bit 0: e
+#pragma unroll
+    for (int t = 0; t < 8; ++t) {
+      WhtStageSigned<1>(&v[t][0], lane);  // bit 1: lane bit 0
+      WhtStageSigned<1>(&v[t][4], lane);
+    }
+#pragma unroll
+    for (int t = 0; t < 8; ++t) {
+      WhtStageSigned<2>(&v[t][0], lane);  // bit 2: lane bit 1
+      WhtStageSigned<2>(&v[t][4], lane);
+    }
+#pragma unroll
+    for (int t = 0; t < 8; ++t)
+#pragma unroll
+      for (int c = 0; c < 8; c += 4) {
+        pair(v[t][c], v[t][c + 2]);  // bit 3: h
+        pair(v[t][c + 1], v[t][c + 3]);
+      }
+#pragma unroll
+    for (int m4 = 1; m4 < 8; m4 *= 2)  // bits 4..6: t
+#pragma unroll
+      for (int t = 0; t < 8; ++t)
+        if ((t & m4) == 0)
+#pragma unroll
+          for (int i = 0; i < 8; ++i)
+            pair(v[t][i], v[t + m4][i]);
+    const float norm_sign =
+        fmt::kHadamardNorm *
+        ((__builtin_popcount(lane & 3) & 1) != 0 ? -1.0F : 1.0F);
+#pragma unroll
+    for (int t = 0; t < 8; ++t)
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const int a = 16 * t + 8 * ((i >> 1) & 1) + r0 + (i & 1);
+        const int b = 16 * wave + c0 + 8 * (i >> 2);
+        m[cell(a, b)] = v[t][i] * norm_sign;
+      }
   }
   __syncthreads();
-  // Input transform of every output column: H over the inputs.
-  for (int b = wave; b < 128; b += kWaves) {
-    float v[4];
-#pragma unroll
-    for (int i = 0; i < 4; ++i)
-      v[i] = m[cell(lane * 4 + i, b)];
-    Wht128(v);
-#pragma unroll
-    for (int i = 0; i < 4; ++i)
-      m[cell(lane * 4 + i, b)] = v[i] * fmt::kHadamardNorm;
-  }
-  __syncthreads();
+  // Wht128Signed's lane sign, folded into the normalization (exact).
+  const float norm_sign = fmt::kHadamardNorm * SignOfLane();
   // Output transform of every input row: H over the outputs.
-  for (int a = wave; a < 128; a += kWaves) {
+  for (int a = wave; a < 128; a += kDequantWaves) {
     float v[4];
 #pragma unroll
     for (int i = 0; i < 4; ++i)
       v[i] = m[cell(a, lane * 4 + i)];
-    Wht128(v);
+    Wht128Signed(v);
 #pragma unroll
     for (int i = 0; i < 4; ++i)
-      m[cell(a, lane * 4 + i)] = v[i] * fmt::kHadamardNorm;
+      m[cell(a, lane * 4 + i)] = v[i] * norm_sign;
   }
   __syncthreads();
   // Q8_0 blocks: output row b, inputs [32 q, 32 q + 32) of this block,
@@ -949,11 +1257,11 @@ __global__ void __launch_bounds__(kBlockThreads)
   const __half* suh = w.suh + static_cast<std::size_t>(expert) * w.in;
   const __half* svh = w.svh + static_cast<std::size_t>(expert) * w.out;
   const std::size_t row_bytes = static_cast<std::size_t>(w.in / 32) * 34;
-  constexpr int kTasks = 128 * 4 / kBlockThreads;
+  constexpr int kTasks = 128 * 4 / kDequantThreads;
   std::uint16_t packed[kTasks][17];
 #pragma unroll
   for (int n = 0; n < kTasks; ++n) {
-    const int task = n * kBlockThreads + static_cast<int>(threadIdx.x);
+    const int task = n * kDequantThreads + static_cast<int>(threadIdx.x);
     const int b = task >> 2;
     const int q = task & 3;
     const int o = g * 128 + b;
@@ -982,7 +1290,7 @@ __global__ void __launch_bounds__(kBlockThreads)
   auto* bytes = reinterpret_cast<std::uint16_t*>(m);  // [128][68] halves
 #pragma unroll
   for (int n = 0; n < kTasks; ++n) {
-    const int task = n * kBlockThreads + static_cast<int>(threadIdx.x);
+    const int task = n * kDequantThreads + static_cast<int>(threadIdx.x);
     const int b = task >> 2;
     const int q = task & 3;
 #pragma unroll
@@ -994,7 +1302,7 @@ __global__ void __launch_bounds__(kBlockThreads)
   // (Exl3DequantizeQ8 requires in % 128 == 0).
   const auto* words = reinterpret_cast<const std::uint32_t*>(m);
   for (int i = static_cast<int>(threadIdx.x); i < 128 * 34;
-       i += kBlockThreads) {
+       i += kDequantThreads) {
     const int b = i / 34;
     const int wd = i % 34;
     auto* row = reinterpret_cast<std::uint32_t*>(
@@ -1009,7 +1317,7 @@ __global__ void Exl3RepackKernel(const std::uint8_t* base,
                                  std::uint32_t in, std::uint32_t out, int k,
                                  std::uint32_t experts, std::size_t dst_stride,
                                  const std::uint32_t* in_blocks,
-                                 const std::uint32_t* out_blocks) {
+                                 const std::uint32_t* out_blocks, int front) {
   const std::size_t T = 8 * static_cast<std::size_t>(k);
   const std::size_t A = in / 16;
   const std::size_t B = out / 16;
@@ -1033,8 +1341,12 @@ __global__ void Exl3RepackKernel(const std::uint8_t* base,
     const auto* s =
         reinterpret_cast<const std::uint16_t*>(base + src_offsets[e]) +
         2 * ((sa * src_B + sb) * T + w);
-    dst[e * dst_stride + r] = static_cast<std::uint32_t>(s[0]) |
-                              (static_cast<std::uint32_t>(s[1]) << 16);
+    const std::size_t at =
+        front != 0
+            ? Exl3FrontTile(b, a, A, B, static_cast<std::size_t>(front)) * T + w
+            : r;
+    dst[e * dst_stride + at] = static_cast<std::uint32_t>(s[0]) |
+                               (static_cast<std::uint32_t>(s[1]) << 16);
   }
 }
 
@@ -1069,7 +1381,7 @@ bool Exl3Linear(const Exl3Weights& w, const float* x, std::uint32_t ldx,
       w.k < fmt::kMinTileK || w.k > fmt::kMaxTileK || x_div == 0)
     return false;
   const bool experts = ids != nullptr;
-  const int splits = Splits(w, experts);
+  const int splits = w.front != 0 ? w.front : Splits(w, experts);
   const std::uint32_t groups = w.out / 128;
   if (splits > 1 && (scratch.done == nullptr || scratch.done_elems < groups))
     return false;
@@ -1103,7 +1415,11 @@ bool Exl3Linear(const Exl3Weights& w, const float* x, std::uint32_t ldx,
                  splits,
                  scratch.done};
     // Wide verification shares each decoded tile across 64 rows.
+    // Verification rows share each decoded tile: the narrowest row group
+    // that holds them, or 64 rows for wide passes.
     const int rows_per_block = experts || n == 1 ? 1
+                               : n <= 2          ? 2
+                               : n <= 4          ? 4
                                : n > static_cast<std::uint32_t>(kExl3GemvRows)
                                    ? static_cast<int>(kExl3GemvWideRows)
                                    : static_cast<int>(kExl3GemvRows);
@@ -1136,7 +1452,9 @@ bool Exl3LinearPair(const Exl3Weights& wa, const Exl3Weights& wb,
                     std::uint32_t ldy, std::uint32_t rows,
                     const Exl3Scratch& scratch, hipStream_t stream) {
   const bool same = wa.in == wb.in && wa.out == wb.out && wa.k == wb.k;
-  const int splits = Splits(wa, ids != nullptr);
+  const int splits = wa.front != 0 ? wa.front : Splits(wa, ids != nullptr);
+  if (wb.front != wa.front)
+    return false;
   const std::uint32_t groups = wa.out / 128;
   const std::size_t partial = static_cast<std::size_t>(splits) * rows * wa.out;
   if (!same || ids == nullptr || rows == 0 || wa.tiles == nullptr ||
@@ -1173,6 +1491,87 @@ bool Exl3LinearPair(const Exl3Weights& wa, const Exl3Weights& wb,
       break;
     default:
       return false;
+  }
+  return hipGetLastError() == hipSuccess;
+}
+
+bool Exl3LinearGroup(const Exl3Job* jobs, int count, const Exl3Scratch& scratch,
+                     hipStream_t stream) {
+  if (count < 1 || count > kExl3GroupJobs)
+    return false;
+  GroupArgs g{};
+  g.count = count;
+  // Dense row group: the narrowest of 1, 2, 4 or 8 rows that holds every
+  // dense job's rows.
+  std::uint32_t dense_rows = 1;
+  for (int j = 0; j < count; ++j)
+    if (jobs[j].ids == nullptr)
+      dense_rows = std::max(dense_rows, jobs[j].rows);
+  const unsigned R = dense_rows <= 1   ? 1
+                     : dense_rows <= 2 ? 2
+                     : dense_rows <= 4 ? 4
+                                       : 8;
+  std::size_t partial = 0;
+  std::size_t done = 0;
+  unsigned blocks = 0;
+  for (int j = 0; j < count; ++j) {
+    const Exl3Job& job = jobs[j];
+    const Exl3Weights& w = job.w;
+    if (job.rows == 0 || w.tiles == nullptr || w.in % 128 != 0 ||
+        w.out % 128 != 0 || w.k < fmt::kMinTileK || w.k > fmt::kMaxTileK ||
+        job.x_div == 0 ||
+        (job.ids == nullptr &&
+         job.rows > static_cast<std::uint32_t>(kExl3GemvRows)))
+      return false;
+    const int splits = w.front != 0 ? w.front : Splits(w, job.ids != nullptr);
+    const std::uint32_t groups = w.out / 128;
+    LinearArgs& a = g.job[j];
+    a = LinearArgs{w,
+                   job.x,
+                   nullptr,
+                   job.ldx,
+                   job.x_div,
+                   job.ids,
+                   job.y,
+                   job.ldy,
+                   job.rows,
+                   scratch.xh,
+                   scratch.partial + partial,
+                   splits,
+                   scratch.done + done,
+                   job.gate};
+    if (splits > 1) {
+      partial += static_cast<std::size_t>(splits) * job.rows * w.out;
+      done += static_cast<std::size_t>(job.rows) * groups;
+    }
+    g.groups[j] = groups;
+    g.k[j] = w.k;
+    g.start[j] = blocks;
+    const unsigned row_blocks =
+        job.ids != nullptr ? job.rows : (job.rows + R - 1) / R;
+    blocks += groups * static_cast<unsigned>(splits) * row_blocks;
+  }
+  g.start[count] = blocks;
+  if (partial > scratch.partial_elems ||
+      (done > 0 && (scratch.done == nullptr || done > scratch.done_elems)))
+    return false;
+  switch (R) {
+    case 1:
+      hipLaunchKernelGGL(Exl3GemvGroupKernel<1>, dim3(blocks),
+                         dim3(kBlockThreads), 0, stream, g);
+      break;
+    case 2:
+      hipLaunchKernelGGL(Exl3GemvGroupKernel<2>, dim3(blocks),
+                         dim3(kBlockThreads), 0, stream, g);
+      break;
+    case 4:
+      hipLaunchKernelGGL(Exl3GemvGroupKernel<4>, dim3(blocks),
+                         dim3(kBlockThreads), 0, stream, g);
+      break;
+    default:
+      hipLaunchKernelGGL(Exl3GemvGroupKernel<8>, dim3(blocks),
+                         dim3(kBlockThreads), 0, stream, g);
+      break;
   }
   return hipGetLastError() == hipSuccess;
 }
@@ -1217,7 +1616,9 @@ bool Exl3LinearGemm(const Exl3Weights& w, const float* x, std::uint32_t ldx,
     if (route.tiles == nullptr || out.x_half == nullptr)
       return false;
     const GemmArgs g{w, out.x_half, w.in, out, y, ldy, rows, route};
-    const dim3 grid((w.out + 127) / 128, row_tiles);
+    const dim3 grid((w.out + kGemmWaves * kDownBlocks * 16 - 1) /
+                        (kGemmWaves * kDownBlocks * 16),
+                    row_tiles);
     const dim3 block(kGemmWaves * 32);
     // Fused blocks cover 640 columns, so each row is transformed once per
     // 640 outputs.
@@ -1227,29 +1628,29 @@ bool Exl3LinearGemm(const Exl3Weights& w, const float* x, std::uint32_t ldx,
     if (out.x_transformed) {
       switch (w.k) {
         case 2:
-          hipLaunchKernelGGL(
-              (Exl3GemmKernel<2, false, kGemmWaves, 1, kTransformedTiles>),
-              grid, block, 0, stream, g);
+          hipLaunchKernelGGL((Exl3GemmKernel<2, false, kGemmWaves, kDownBlocks,
+                                             kTransformedTiles>),
+                             grid, block, 0, stream, g);
           break;
         case 3:
-          hipLaunchKernelGGL(
-              (Exl3GemmKernel<3, false, kGemmWaves, 1, kTransformedTiles>),
-              grid, block, 0, stream, g);
+          hipLaunchKernelGGL((Exl3GemmKernel<3, false, kGemmWaves, kDownBlocks,
+                                             kTransformedTiles>),
+                             grid, block, 0, stream, g);
           break;
         case 4:
-          hipLaunchKernelGGL(
-              (Exl3GemmKernel<4, false, kGemmWaves, 1, kTransformedTiles>),
-              grid, block, 0, stream, g);
+          hipLaunchKernelGGL((Exl3GemmKernel<4, false, kGemmWaves, kDownBlocks,
+                                             kTransformedTiles>),
+                             grid, block, 0, stream, g);
           break;
         case 5:
-          hipLaunchKernelGGL(
-              (Exl3GemmKernel<5, false, kGemmWaves, 1, kTransformedTiles>),
-              grid, block, 0, stream, g);
+          hipLaunchKernelGGL((Exl3GemmKernel<5, false, kGemmWaves, kDownBlocks,
+                                             kTransformedTiles>),
+                             grid, block, 0, stream, g);
           break;
         case 6:
-          hipLaunchKernelGGL(
-              (Exl3GemmKernel<6, false, kGemmWaves, 1, kTransformedTiles>),
-              grid, block, 0, stream, g);
+          hipLaunchKernelGGL((Exl3GemmKernel<6, false, kGemmWaves, kDownBlocks,
+                                             kTransformedTiles>),
+                             grid, block, 0, stream, g);
           break;
         default:
           return false;
@@ -1337,23 +1738,23 @@ bool Exl3DequantizeQ8(const Exl3Weights& w, std::uint32_t expert, void* dst,
   auto* out = static_cast<std::uint8_t*>(dst);
   switch (w.k) {
     case 2:
-      hipLaunchKernelGGL(Exl3DequantQ8Kernel<2>, grid, dim3(kBlockThreads), 0,
+      hipLaunchKernelGGL(Exl3DequantQ8Kernel<2>, grid, dim3(kDequantThreads), 0,
                          stream, w, expert, out);
       break;
     case 3:
-      hipLaunchKernelGGL(Exl3DequantQ8Kernel<3>, grid, dim3(kBlockThreads), 0,
+      hipLaunchKernelGGL(Exl3DequantQ8Kernel<3>, grid, dim3(kDequantThreads), 0,
                          stream, w, expert, out);
       break;
     case 4:
-      hipLaunchKernelGGL(Exl3DequantQ8Kernel<4>, grid, dim3(kBlockThreads), 0,
+      hipLaunchKernelGGL(Exl3DequantQ8Kernel<4>, grid, dim3(kDequantThreads), 0,
                          stream, w, expert, out);
       break;
     case 5:
-      hipLaunchKernelGGL(Exl3DequantQ8Kernel<5>, grid, dim3(kBlockThreads), 0,
+      hipLaunchKernelGGL(Exl3DequantQ8Kernel<5>, grid, dim3(kDequantThreads), 0,
                          stream, w, expert, out);
       break;
     case 6:
-      hipLaunchKernelGGL(Exl3DequantQ8Kernel<6>, grid, dim3(kBlockThreads), 0,
+      hipLaunchKernelGGL(Exl3DequantQ8Kernel<6>, grid, dim3(kDequantThreads), 0,
                          stream, w, expert, out);
       break;
     default:
@@ -1367,11 +1768,18 @@ void Exl3Repack(const std::uint8_t* base, const std::uint64_t* src_offsets,
                 std::uint32_t in, std::uint32_t out, int k,
                 std::uint32_t experts, std::size_t dst_stride,
                 const std::uint32_t* in_blocks, const std::uint32_t* out_blocks,
-                hipStream_t stream) {
+                int front, hipStream_t stream) {
   (void)src_in;
   hipLaunchKernelGGL(Exl3RepackKernel, dim3(2048), dim3(256), 0, stream, base,
                      src_offsets, dst, src_out, in, out, k, experts, dst_stride,
-                     in_blocks, out_blocks);
+                     in_blocks, out_blocks, front);
+}
+
+int Exl3DecodeSplits(std::uint32_t in, std::uint32_t out, bool experts) {
+  Exl3Weights w;
+  w.in = in;
+  w.out = out;
+  return Splits(w, experts);
 }
 
 void Exl3GatherScales(const std::uint8_t* base, const std::uint64_t* offsets,

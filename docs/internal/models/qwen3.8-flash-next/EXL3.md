@@ -63,34 +63,66 @@ for K6):
 
 ## Kernels
 
-- Decode and verification: one GEMV launch per linear (gate and up of the
-  routed experts share one). Each block stages and transforms its split's
-  inputs, decodes tiles with eight in flight through buffer loads, and the
-  last split to arrive reduces every split in a fixed order and applies the
-  output transform. Row groups of 1, 8 or 64 rows share each decoded tile;
-  every row keeps one accumulation chain in tile order, so its result is the
-  same at every batch width, and greedy MTP output equals AR output.
-- Prompt passes, dense layers: each layer is expanded per pass into the
-  official GGUF layout (stacked Q8_0 `ssm_in` and `attn_qkv`, Q8_0 outputs
-  and shared expert; `Exl3DequantizeQ8` writes
-  `diag(svh) H W^T H diag(suh)` with ggml's Q8_0 rounding), so the GGUF
-  fused projection kernels run unchanged.
+- Decode and verification: GEMVs whose blocks each stage and transform
+  their split's inputs, decode tiles through buffer loads (four in flight
+  per wave for dense matrices, eight for the small expert matrices), and
+  whose last split to arrive reduces every split in a fixed order and
+  applies the output transform. Row groups of 1, 2, 4, 8 or 64 rows share
+  each decoded tile; every row keeps one accumulation chain in tile order,
+  so its result is the same at every batch width, and greedy MTP output
+  equals AR output.
+- Tiles are stored in Crucible's front order (`Exl3FrontTile`) for the
+  split their GEMVs use (`DeviceTensor::exl3_front`): a chunk holds a
+  block's eight column blocks by four row tiles, so the blocks at one step
+  read neighbouring memory. The column-block-major order gave each wave its
+  own stream at a matrix-column stride; front order alone took 4.05 decode
+  from 29.8 to 32.2 tokens/s. The prompt GEMM and the Q8_0 expansion read
+  the same order.
+- Passes of up to eight rows group linears of one input into one launch
+  (`Exl3LinearGroup`): GDN `in_proj_qkv` and `in_proj_z`; attention q, k
+  and v; routed and shared gate and up; then routed and shared down, which
+  form SwiGLU while staging their inputs. The shared expert takes the
+  routed stacks' split, since its rows no longer fill the GPU alone.
+- Prompt passes, dense layers: each layer is expanded into the official
+  GGUF layout (stacked Q8_0 `ssm_in` and `attn_qkv`, Q8_0 outputs and
+  shared expert; `Exl3DequantizeQ8` writes `diag(svh) H W^T H diag(suh)`
+  with ggml's Q8_0 rounding), so the GGUF fused projection kernels run
+  unchanged. A layer is expanded on its first prompt pass and kept: the 48
+  layers hold 2.9 GiB of device memory and later passes expand nothing.
+  The expansion block decodes and input-transforms its column blocks in
+  registers (one LDS round trip fewer) with 16 waves.
 - Prompt passes, routed experts and the output head: a WMMA GEMM that
   decodes the A operand in registers. A gfx1151 WMMA reads each A row from
   one lane only (lane r for even rows, r + 16 for odd ones), so the reading
   lane decodes inputs 0..7 of its row, its partner inputs 8..15, and one
   `permlanex16` per dword completes the reading lane with no selects.
-  Routed experts run over `RoutedCompact`'s 16-row buckets: 128-row tiles
-  for gate and up, 256-row tiles (one column block per wave) for down and
-  the scratch-input path. Gate and up read the
-  F16 token rows and apply their input transform while staging each
-  128-input step in LDS; their 20-wave blocks cover 640 outputs, so a row
-  is transformed once per projection. Up's epilogue applies SwiGLU and
-  down's input transform, so down reads ready F16 rows; down leaves F16
-  rows for the fused MoE combine, which also defers the residual update as
-  for the Q4_K experts.
+  Routed experts run over `RoutedCompact`'s 16-row buckets in 128-row
+  tiles; down gives each wave two column blocks so each LDS B fragment
+  feeds two WMMAs. Gate and up read the F16 token rows and apply their
+  input transform while staging each 128-input step in LDS; their 20-wave
+  blocks cover 640 outputs, so a row is transformed once per projection.
+  Up's epilogue applies SwiGLU and down's input transform, so down reads
+  ready F16 rows; down leaves F16 rows for the fused MoE combine, which
+  also defers the residual update as for the Q4_K experts. The epilogue
+  keeps the tile's output rows in LDS and each wave's `svh` and next `suh`
+  in registers, and issues a tile's loads before any transform.
+- Prompt-pass Hadamard transforms use `Wht128Signed`: each butterfly is
+  `own + sign * peer`, one `v_fmac_f32_dpp`, where `Wht128`'s
+  `sign * own + peer` needs a separate DPP move. It returns
+  `(-1)^popcount(lane)` times `Wht128`'s values with the same rounding; the
+  sign folds into the next scale. A zero then comes out as -0 where
+  `Wht128` gives +0, and the matrix cores' sums depend on the sign of zero
+  inputs (prefill-check KL after 1,000 tokens moved from 0.0074 to 0.022),
+  so values that feed a WMMA are converted with a +0 addend
+  (`HalfPairScaled`), and the results are bit-identical to `Wht128`'s.
+  Decode keeps `Wht128`.
+- MoE prompt passes queue the shared expert on the side stream after the
+  routed gate and up, so it runs beside down: the 640-column gate and up
+  blocks each take a whole WGP and share it poorly.
 - EXL3 checkpoints prefill in 8,192-row passes (the GGUF in 4,096): each
-  pass streams every routed expert's trellis per row tile.
+  pass streams every routed expert's trellis per row tile. With the dense
+  expansions kept, 4,096-row passes still prefill the 8,022-token prompt 3%
+  slower (November 17).
 - Drafts use the draft vocabulary as for the GGUF: the EXL3 head is
   expanded once at load into its Q8_0 matrix (675 MB), whose prefix becomes
   the Q4_K draft head and whose rows fill the draft tables.
@@ -116,41 +148,90 @@ whose losses moved by at most 0.005; the 4.05 row is current. The prompt
 pass and the decode path agree as closely as the GGUF's: KL 0.0005 and
 0.0083 after 300 and 1,000 tokens of that text (GGUF 0.0019 and 0.0094),
 with the same top token. Greedy MTP output equals
-AR output on four chat prompts (4.05).
+AR output on four chat prompts (4.05). On November 17, after the shared
+expert moved to the routed stacks' split (a different but fixed summation
+order), the 4.05 decode path scores 1.40882 nats and 67.74% top-1 on the
+same tokens, and prompt/decode KL is 0.0003 and 0.0074.
 
 ## Performance
 
-As of November 14, 2026, Strix Halo, one session, greedy. AR decode is 128
-tokens after a 20-token prompt (`qwen38_flash_next_exl3_generate_probe`);
-prefill is an 8,022-token prompt (one pass for EXL3, two for the GGUF);
-MTP is `gufo serve --speculative mtp`
-over HTTP, thinking off, tokens/s for counting to 60 / five sentences of
-prose / a Python function:
+As of November 17, 2026, Strix Halo, one session, greedy, thinking off,
+`gufo serve` over HTTP: decode tokens/s after the first streamed token for
+counting to 60 / five sentences of prose / a Python function (256-token
+cap), the second of two runs. Prefill: `build/release` `gufo serve`,
+`--cache-ram-bytes off`, after a short warm-up request, the server's
+`prompt_ms` for an 8,022-token `/v1/completions` prompt (8,000 seeded
+random words of a 16-word vocabulary; one pass for EXL3, two for the GGUF),
+the GGUF and EXL3 servers alternated; runs vary by about 1%.
 
 | Artifact | Prefill (tokens/s) | AR decode (tokens/s) | MTP decode (tokens/s) |
 | --- | --- | --- | --- |
-| Q4 GGUF | 1,966.0 | 29.43 | 107.1 / 39.9 / 83.9 |
-| EXL3 4.05 | 1,844.3 | 29.79 | 105.1 / 53.2 / 79.5 |
-| EXL3 3.05 | 1,850.2 | 33.30 | 119.7 / 56.5 / 89.5 |
-| EXL3 2.05 | 1,853.4 | 35.35 | 110.8 / 54.2 / 67.3 |
+| Q4 GGUF | 1,981 | 30.3 / 30.1 / 30.3 | 107.4 / 42.6 / 79.2 |
+| EXL3 4.05 | 1,930 | 35.9 / 35.8 / 35.8 | 113.3 / 44.9 / 82.2 |
+| EXL3 3.05 | 1,920 | 39.8 / 39.3 / 39.7 | 124.9 / 46.9 / 88.2 |
+| EXL3 2.05 | 1,927 | 44.4 / 43.8 / 44.3 | 121.3 / 52.2 / 87.8 |
 
-MTP decode was measured before the prompt-pass changes, which leave the
-decode and verification kernels unchanged. Loads take 22 to 35 s from a
-warm page cache. The routed expert GEMMs are the prefill gap: 1.57 s of
-the 8k prompt (gate and up 1.11 s, down 0.45 s) against 1.21 s for the
-Q4_K experts. The 2.05 checkpoint, with half the 4.05's expert bytes,
-prefills no faster, so the GEMM is bound by its instruction schedule
-rather than by weight traffic. A thread trace (`rocprofv3 --att`) of the
-fused gate GEMM at 157 rows per expert shows 12.6 VALU instructions per
-WMMA (trellis decode, Hadamard transforms) on the pipe the WMMAs use, and
-waits on barriers (10%), weight loads (9%) and LDS B fragments (8%); down
-waits mostly on its B fragments (32%). Deeper weight prefetch, pairing
-tiles per decode, branch-free tile counts and software-pipelined B
-fragments were each slower: the extra registers or moves cost more than
-the waits they hid.
+On the same harness before the November 17 prefill changes, EXL3 4.05
+prefilled 1,853 tokens/s against the GGUF's 1,969.
+
+Crucible reports serial decode of 33.71 (4.05) and 38.79 (3.05) tokens/s
+on the same packs ([RESULTS.md](https://github.com/jaedync/crucible-strix-halo/blob/6c8b36f16a3dedfc759ce0eadae60eea437db459/docs/RESULTS.md)).
+One-token decode reads its weights from DRAM: an AR step of the 3.05 pack
+spends about 20 ms of its 25 ms in GEMVs at 165 to 230 GB/s (the measured
+read ceiling is about 245 GB/s), 4.3 ms in the Q8_0 hyper-connection
+mixers and 2 to 3 ms between kernels. `qwen38_flash_next_exl3_gemv_bench`
+cycles more than 256 MiB of weight copies, so its timings match decode
+rather than the 32 MiB memory-side cache. Small expert matrices cost a
+fixed block latency (input staging, split reduction) that low bit widths
+do not shrink: ten 2560x640 rows take 31, 37 and 44 us at K2, K3 and K4.
+Tried and rejected for decode: a side-stream read-ahead of the next weights
+into the memory-side cache (no gain; graph branches compete with the
+GEMVs), smaller LDS stages or VGPR caps for more resident blocks, deeper
+rings, one split for routed experts (no serve gain; changes outputs), and
+one launch for MoE gate/up and down with dependent blocks waiting on the
+first (slower).
+
+The routed expert GEMMs are the prefill gap. As of November 17, an
+8,022-token pass of 4.05 spends 1.39 s in them (gate 0.43 s, up 0.44 s,
+down 0.39 s, plus the shared expert beside down) against 1.23 s for the
+Q4_K experts, whose paired gate/up kernel needs no Hadamard transforms
+and no F32 gate round trip. The 2.05 checkpoint, with half the 4.05's
+expert bytes, prefills no faster: the GEMM is bound by its instruction
+schedule, not by weight traffic. `qwen38_flash_next_exl3_gemv_bench
+--counts` replays a real prompt's per-expert row counts (74% of rows go to
+experts with more than 1,024 rows; half the experts get none) through gate,
+up and down: 27.1 ms per layer at K4 before, 25.1 ms after (31.6 / 29.8 /
+33.0 TF). With a free trellis decode the same kernels take 21.8 ms, and
+without the staging transform gate takes 6% less; even then gate reaches
+only 36.5 of the measured 55 TF WMMA peak, because a 20-wave block of 233
+VGPRs fills its WGP and waits alone at its barriers. Accumulators bound
+the tile: 640 columns by 128 rows use 128 of 256 VGPRs per lane, so each
+decoded fragment serves 8 row tiles.
+
+November 17 changes (prefill +4%, outputs bit-identical): the epilogue
+fix above (it waited on dependent `y_rows`, `svh` and gate loads, about
+19% of a fused launch), `Wht128Signed`, no per-WMMA column check (the
+compiler re-materialised it as 3 SALU and a branch per WMMA), two column
+blocks per down wave, kept dense expansions (they took 117 ms per prefill),
+a 2x faster expansion kernel and the later shared-expert fork.
+
+Tried and rejected for prefill: LDS-only barriers in the fused main loop
+(slower: the hardware then waits on the weight loads elsewhere); a
+full-tile specialisation of the main loop and an unrolled epilogue (code
+size); B fragments loaded one tile ahead (+8 VGPRs, slower, as before);
+fused tiles of 64 rows, also forced to two blocks per WGP (decode per WMMA
+doubles; spills); down tiles of 192 rows (spills) or four column blocks
+of 64 rows; F16 gate outputs (0.6% faster, changes prefill numerics); gate
+and up in one launch, each block running gate then up over the same rows
+(the phase loop takes 20 more VGPRs and loses more than the cached reads
+save); full row tiles dispatched before partial ones (partial tiles lose
+their expert's cached weights); expanding layer il + 1 on a low-priority
+stream while layer il runs (expansions overlapped fully but stretched 10x;
+no prefill gain); running the shared expert serially, or its side stream at the least or
+greatest priority (no change); 4,096-row passes.
 
 ## Limits
 
 - `gufo chat`, `prompt` and `bench` take GGUF readers; EXL3 checkpoints are
   served through `gufo serve`.
-- Prefill is about 94% of the Q4 GGUF's (see Performance).
+- Prefill is about 97% of the Q4 GGUF's (see Performance).

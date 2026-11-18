@@ -1056,16 +1056,31 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       return nullptr;
     e->allocations_.push_back(q8);
     e->exl3_q8_ = q8;
-    // One layer's dense projections in Q8_0, each with its read tail.
-    e->exl3_layer_q8_bytes_ = std::size_t{80} << 20;
-    void* layer_q8 = nullptr;
-    if (!Check(hipMalloc(&layer_q8, e->exl3_layer_q8_bytes_), "EXL3 scratch",
-               error_msg) ||
-        !Check(hipMemset(layer_q8, 0, e->exl3_layer_q8_bytes_), "EXL3 scratch",
-               error_msg))
-      return nullptr;
-    e->allocations_.push_back(layer_q8);
-    e->exl3_layer_q8_ = layer_q8;
+    // Every layer's dense projections in Q8_0, each with its read tail,
+    // filled by the layer's first prompt pass.
+    const auto& layers = model.layers();
+    e->exl3_layers_.resize(layers.size());
+    e->exl3_layer_ready_.assign(layers.size(), 0);
+    e->exl3_layer_offset_.assign(layers.size() + 1, 0);
+    for (std::size_t il = 0; il < layers.size(); ++il) {
+      const std::size_t bytes =
+          e->Exl3ExpandLayer(layers[il], nullptr, nullptr);
+      if (bytes == SIZE_MAX) {
+        AssignError(error_msg, "EXL3 prompt layer expansion size");
+        return nullptr;
+      }
+      e->exl3_layer_offset_[il + 1] = e->exl3_layer_offset_[il] + bytes;
+    }
+    if (e->exl3_layer_offset_.back() != 0) {
+      void* layer_q8 = nullptr;
+      if (!Check(hipMalloc(&layer_q8, e->exl3_layer_offset_.back()),
+                 "EXL3 scratch", error_msg) ||
+          !Check(hipMemset(layer_q8, 0, e->exl3_layer_offset_.back()),
+                 "EXL3 scratch", error_msg))
+        return nullptr;
+      e->allocations_.push_back(layer_q8);
+      e->exl3_layers_q8_ = layer_q8;
+    }
     constexpr std::size_t kDoneElems = std::size_t{1} << 16;
     void* done = nullptr;
     if (!Check(hipMalloc(&done, kDoneElems * sizeof(unsigned)), "EXL3 scratch",
@@ -2066,17 +2081,26 @@ bool Executor::DenseF16Route(const DeviceTensor& w,
          w.cols <= model_->max_half_cols();
 }
 
+namespace {
+
+Exl3Weights Exl3Of(const DeviceTensor& w) {
+  return Exl3Weights{static_cast<const std::uint32_t*>(w.data),
+                     static_cast<const __half*>(w.exl3_suh),
+                     static_cast<const __half*>(w.exl3_svh),
+                     w.cols,
+                     w.rows,
+                     w.experts,
+                     w.exl3_k,
+                     w.exl3_front};
+}
+
+}  // namespace
+
 bool Executor::Exl3Project(const DeviceTensor& w, const float* x,
                            std::uint32_t x_div, const std::int32_t* ids,
                            float* out, std::uint32_t rows,
                            std::string* error_msg) const {
-  const Exl3Weights weights{static_cast<const std::uint32_t*>(w.data),
-                            static_cast<const __half*>(w.exl3_suh),
-                            static_cast<const __half*>(w.exl3_svh),
-                            w.cols,
-                            w.rows,
-                            w.experts,
-                            w.exl3_k};
+  const Exl3Weights weights = Exl3Of(w);
   // Prompt passes take the matrix cores at every width, so their
   // arithmetic does not depend on how a prompt is chunked; decode and
   // verification keep the vector route. A dense matrix that fits the Q8_0
@@ -2109,71 +2133,138 @@ bool Executor::Exl3Project(const DeviceTensor& w, const float* x,
   return true;
 }
 
-bool Executor::Exl3PromptLayer(const DeviceLayer& l,
-                               const DeviceLayer** expanded,
-                               std::string* error_msg) const {
-  *expanded = nullptr;
-  if (!prefill_phase || exl3_layer_q8_ == nullptr ||
-      !(l.ssm_qkv.IsExl3() || l.attn_q.IsExl3()))
-    return true;
+bool Executor::Exl3RowGroup(
+    std::initializer_list<std::pair<const DeviceTensor*, float*>> outs,
+    const float* x, std::uint32_t n_tokens) const {
+  if (prefill_phase || n_tokens == 0 || n_tokens > kExl3GemvRows ||
+      outs.size() > kExl3GroupJobs)
+    return false;
+  Exl3Job jobs[kExl3GroupJobs];
+  int n = 0;
+  for (const auto& [w, y] : outs) {
+    if (!w->IsExl3() || w->experts != 1)
+      return false;
+    jobs[n++] = {Exl3Of(*w), x,       w->cols,  1,      nullptr,
+                 y,          w->rows, n_tokens, nullptr};
+  }
+  return Exl3LinearGroup(jobs, n, exl3_scratch_, stream_);
+}
+
+bool Executor::Exl3MoeRows(const DeviceLayer& l, const float* x, float* out,
+                           std::uint32_t n_tokens) const {
+  const Config& c = config();
+  const std::uint32_t used = c.num_experts_used;
+  if (prefill_phase || n_tokens == 0 || n_tokens > kExl3GemvRows ||
+      !l.ffn_gate_exps.IsExl3() || !l.ffn_up_exps.IsExl3() ||
+      !l.ffn_down_exps.IsExl3() || !l.shexp_gate.IsExl3() ||
+      !l.shexp_up.IsExl3() || !l.shexp_down.IsExl3())
+    return false;
+  const std::uint32_t ff = l.ffn_gate_exps.rows;
+  const std::uint32_t shared_ff = l.shexp_gate.rows;
+  const std::uint32_t slots = n_tokens * used;
+  // Gate and up of the routed (token, slot) rows and of the shared expert,
+  // then both down projections with Swiglu formed while their inputs are
+  // staged: the arithmetic of GatedExperts, GatedDense, Experts and Dense.
+  const Exl3Job jobs[6] = {
+      {Exl3Of(l.ffn_gate_exps), x, c.hidden_size, used, s_.ids, s_.gate_e, ff,
+       slots, nullptr},
+      {Exl3Of(l.ffn_up_exps), x, c.hidden_size, used, s_.ids, s_.up_e, ff,
+       slots, nullptr},
+      {Exl3Of(l.shexp_gate), x, c.hidden_size, 1, nullptr, s_.shexp_up,
+       shared_ff, n_tokens, nullptr},
+      {Exl3Of(l.shexp_up), x, c.hidden_size, 1, nullptr, s_.shexp_gate,
+       shared_ff, n_tokens, nullptr},
+      {Exl3Of(l.ffn_down_exps), s_.up_e, ff, 1, s_.ids, s_.down_e,
+       c.hidden_size, slots, s_.gate_e},
+      {Exl3Of(l.shexp_down), s_.shexp_gate, shared_ff, 1, nullptr, s_.shexp_out,
+       c.hidden_size, n_tokens, s_.shexp_up}};
+  if (!Exl3LinearGroup(jobs, 4, exl3_scratch_, stream_) ||
+      !Exl3LinearGroup(jobs + 4, 2, exl3_scratch_, stream_))
+    return false;
+  // MoeExperts' epilogue for these rows.
+  if (MatrixRows(n_tokens)) {
+    MoeEpilogueVec4(s_.down_e, s_.weights, s_.shexp_out,
+                    s_.router + c.num_experts, c.num_experts + 1, out, n_tokens,
+                    used, c.hidden_size, stream_);
+  } else {
+    MoeEpilogue(s_.down_e, s_.weights, s_.shexp_out, s_.router + c.num_experts,
+                c.num_experts + 1, out, n_tokens, used, c.hidden_size, stream_);
+  }
+  return true;
+}
+
+std::size_t Executor::Exl3ExpandLayer(const DeviceLayer& l, std::uint8_t* base,
+                                      DeviceLayer* d) const {
+  if (!(l.ssm_qkv.IsExl3() || l.attn_q.IsExl3()))
+    return 0;
   // The layer in the official GGUF layout: stacked Q8_0 projections of one
   // input and Q8_0 outputs, so prompt passes take its fused projections.
-  DeviceLayer& d = exl3_layer_;
-  d = l;
   std::size_t offset = 0;
   bool ok = true;
   const auto stack = [&](std::initializer_list<const DeviceTensor*> parts) {
     DeviceTensor q8;
     if (!ok)
       return q8;
-    q8.data = static_cast<std::uint8_t*>(exl3_layer_q8_) + offset;
+    q8.data = base != nullptr ? base + offset : nullptr;
     q8.type = GgmlType::kQ8_0;
     q8.cols = (*parts.begin())->cols;
     for (const DeviceTensor* t : parts) {
-      const Exl3Weights w{static_cast<const std::uint32_t*>(t->data),
-                          static_cast<const __half*>(t->exl3_suh),
-                          static_cast<const __half*>(t->exl3_svh),
-                          t->cols,
-                          t->rows,
-                          t->experts,
-                          t->exl3_k};
-      const std::size_t bytes = Exl3Q8Bytes(w);
-      if (t->cols != q8.cols || offset + bytes > exl3_layer_q8_bytes_ ||
-          !Exl3DequantizeQ8(w, 0,
-                            static_cast<std::uint8_t*>(exl3_layer_q8_) + offset,
-                            stream_)) {
+      const Exl3Weights w = Exl3Of(*t);
+      if (t->cols != q8.cols ||
+          (base != nullptr &&
+           !Exl3DequantizeQ8(w, 0, base + offset, stream_))) {
         ok = false;
         return DeviceTensor{};
       }
-      offset += bytes;
+      offset += Exl3Q8Bytes(w);
       q8.rows += t->rows;
     }
     // Keep every tensor's start aligned, past the previous one's tail.
     offset = (offset + 4096 + 255) / 256 * 256;
     return q8;
   };
+  DeviceLayer scratch;
+  DeviceLayer& out = d != nullptr ? *d : scratch;
+  out = l;
   if (l.linear) {
-    d.ssm_in = stack({&l.ssm_qkv, &l.ssm_gate});
-    d.ssm_qkv = {};
-    d.ssm_gate = {};
-    d.ssm_out = stack({&l.ssm_out});
+    out.ssm_in = stack({&l.ssm_qkv, &l.ssm_gate});
+    out.ssm_qkv = {};
+    out.ssm_gate = {};
+    out.ssm_out = stack({&l.ssm_out});
   } else {
-    d.attn_qkv = stack({&l.attn_q, &l.attn_k, &l.attn_v});
-    d.attn_q = {};
-    d.attn_k = {};
-    d.attn_v = {};
-    d.attn_out = stack({&l.attn_out});
-    d.indexer_q = stack({&l.indexer_q});
-    d.indexer_k = stack({&l.indexer_k});
+    out.attn_qkv = stack({&l.attn_q, &l.attn_k, &l.attn_v});
+    out.attn_q = {};
+    out.attn_k = {};
+    out.attn_v = {};
+    out.attn_out = stack({&l.attn_out});
+    out.indexer_q = stack({&l.indexer_q});
+    out.indexer_k = stack({&l.indexer_k});
   }
-  d.shexp_gate = stack({&l.shexp_gate});
-  d.shexp_up = stack({&l.shexp_up});
-  d.shexp_down = stack({&l.shexp_down});
-  if (!ok) {
-    AssignError(error_msg, "EXL3 prompt layer expansion failed");
-    return false;
+  out.shexp_gate = stack({&l.shexp_gate});
+  out.shexp_up = stack({&l.shexp_up});
+  out.shexp_down = stack({&l.shexp_down});
+  return ok ? offset : SIZE_MAX;
+}
+
+bool Executor::Exl3PromptLayer(std::uint32_t il, const DeviceLayer** expanded,
+                               std::string* error_msg) const {
+  *expanded = nullptr;
+  if (!prefill_phase || exl3_layers_q8_ == nullptr ||
+      il >= exl3_layers_.size() ||
+      exl3_layer_offset_[il + 1] == exl3_layer_offset_[il])
+    return true;
+  if (exl3_layer_ready_[il] == 0) {
+    const std::size_t bytes = Exl3ExpandLayer(
+        model_->layers()[il],
+        static_cast<std::uint8_t*>(exl3_layers_q8_) + exl3_layer_offset_[il],
+        &exl3_layers_[il]);
+    if (bytes != exl3_layer_offset_[il + 1] - exl3_layer_offset_[il]) {
+      AssignError(error_msg, "EXL3 prompt layer expansion failed");
+      return false;
+    }
+    exl3_layer_ready_[il] = 1;
   }
-  *expanded = &d;
+  *expanded = &exl3_layers_[il];
   return true;
 }
 
@@ -2397,15 +2488,7 @@ bool Executor::GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
                             std::uint32_t n_tokens, std::uint32_t n_used,
                             std::string* error_msg) const {
   if (a.IsExl3() && b.IsExl3()) {
-    const auto weights = [](const DeviceTensor& w) {
-      return Exl3Weights{static_cast<const std::uint32_t*>(w.data),
-                         static_cast<const __half*>(w.exl3_suh),
-                         static_cast<const __half*>(w.exl3_svh),
-                         w.cols,
-                         w.rows,
-                         w.experts,
-                         w.exl3_k};
-    };
+    const auto weights = Exl3Of;
     // Gate and up of every (token, slot) row in one launch.
     if (!Exl3LinearPair(weights(a), weights(b), x, a.cols, n_used, ids, out,
                         s_.up_e, a.rows, n_tokens * n_used, exl3_scratch_,
@@ -3014,7 +3097,9 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
     qkv = s_.qkvz;
     z = s_.qkvz + channels;
     qkv_stride = z_stride = l.ssm_in.rows;
-  } else if (!projections_ready) {
+  } else if (!projections_ready &&
+             !Exl3RowGroup({{&l.ssm_qkv, s_.qkv}, {&l.ssm_gate, s_.z}}, x,
+                           n_tokens)) {
     Q8Input xq;
     if (!Quantize(x, n_tokens, c.hidden_size, &xq, error_msg) ||
         !Dense(l.ssm_qkv, xq, s_.qkv, error_msg) ||
@@ -3139,6 +3224,9 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   } else {
     Q8Input xq;
     if (!projections_ready &&
+        !Exl3RowGroup(
+            {{&l.attn_q, s_.qg}, {&l.attn_k, s_.k}, {&l.attn_v, s_.v}}, x,
+            n_tokens) &&
         (!Quantize(x, n_tokens, c.hidden_size, &xq, error_msg) ||
          !Dense(l.attn_q, xq, s_.qg, error_msg) ||
          !Dense(l.attn_k, xq, s_.k, error_msg) ||
@@ -3325,6 +3413,8 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
       return false;
     }
   }
+  if (!last_only && Exl3MoeRows(l, x, out, n_tokens))
+    return true;
   // The shared expert (gated by the last router row) does not depend on
   // routing. Queue its GEMMs after the count download, then prepare the
   // routed dispatch on the CPU without waiting for these GEMMs to finish.
@@ -3420,6 +3510,33 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
     }
     return Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, n_tokens, error_msg);
   };
+  // EXL3 prompt passes fork the shared expert after the routed gate and up
+  // instead: their 640-column blocks each take a whole WGP and share it
+  // poorly, while down's small blocks interleave with the shared expert.
+  if (overlap && prefill_phase && l.ffn_gate_exps.IsExl3() && !last_only) {
+    shared_scope.overlap = false;
+    if (!Check(shared_scope.Finish(), "side stream join", error_msg))
+      return false;
+    exl3_shared_ = [&]() -> bool {
+      const hipStream_t m = stream_;
+      if (!Check(hipEventRecord(side_start_, m), "side stream fork",
+                 error_msg) ||
+          !Check(hipStreamWaitEvent(side_stream_, side_start_, 0),
+                 "side stream wait", error_msg))
+        return false;
+      stream_ = side_stream_;
+      const bool ok = shared_expert();
+      stream_ = m;
+      if (!Check(hipEventRecord(side_done_, side_stream_), "side stream join",
+                 error_msg))
+        return false;
+      side_pending_ = true;
+      return ok;
+    };
+    const bool ok = MoeExperts(l, x, out, n_tokens, error_msg);
+    exl3_shared_ = nullptr;
+    return ok && JoinSide(error_msg);
+  }
   const bool shared_ok = shared_expert();
   if (!Check(shared_scope.Finish(), "side stream join", error_msg))
     return false;
@@ -3485,9 +3602,9 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   const bool wmma_experts = WmmaExperts(l, n_tokens);
   if (l.ffn_gate_exps.IsExl3() && prefill_phase) {
     // Prompt passes: assignments compacted by expert into 16-row padded
-    // buckets, then matrix-core products per (expert, row tile): 128-row
-    // tiles for gate and up, which transform their F16 token rows, then
-    // 256-row tiles for down. Both maps are one upload.
+    // buckets, then matrix-core products per (expert, 128-row tile): gate
+    // and up transform their F16 token rows, down reads up's. Both maps are
+    // one upload.
     std::uint32_t n_tiles = 0;
     for (std::uint32_t e = 0; e < c.num_experts; ++e) {
       for (std::uint32_t j = 0; j * kExl3GemmRows < counts_host_[e]; ++j)
@@ -3519,15 +3636,7 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
       half_cols_ = c.hidden_size;
       half_bf16_ = false;
     }
-    const auto weights = [](const DeviceTensor& w) {
-      return Exl3Weights{static_cast<const std::uint32_t*>(w.data),
-                         static_cast<const __half*>(w.exl3_suh),
-                         static_cast<const __half*>(w.exl3_svh),
-                         w.cols,
-                         w.rows,
-                         w.experts,
-                         w.exl3_k};
-    };
+    const auto weights = Exl3Of;
     const Exl3GemmRoute from_tokens{s_.routed_tiles, n_tiles, s_.routed_bounds,
                                     s_.rows_token, s_.rows_slot};
     const Exl3GemmRoute from_slots{s_.routed_tiles + n_tiles, n_down_tiles,
@@ -3569,6 +3678,7 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
         !Exl3LinearGemm(weights(l.ffn_up_exps), x, c.hidden_size, used, s_.ids,
                         slots, nullptr, c.expert_ff, 0, from_tokens,
                         exl3_scratch_, stream_, up_out) ||
+        (exl3_shared_ && !exl3_shared_()) ||
         !Exl3LinearGemm(weights(l.ffn_down_exps), nullptr, c.expert_ff, 1,
                         s_.ids, slots, nullptr, c.hidden_size, 0, from_slots,
                         exl3_scratch_, stream_, down_out)) {
@@ -4208,7 +4318,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     if (!session.CheckCancellation(error_msg))
       return false;
     const DeviceLayer* expanded = nullptr;
-    if (!Exl3PromptLayer(layers[il], &expanded, error_msg))
+    if (!Exl3PromptLayer(il, &expanded, error_msg))
       return false;
     const DeviceLayer& l = expanded != nullptr ? *expanded : layers[il];
     if (c.IsPleLayer(il) && !Ple(l, session, n, s_.res, speculative, error_msg,

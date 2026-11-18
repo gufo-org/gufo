@@ -87,7 +87,7 @@ struct Uploader {
                        error);
   }
 
-  DeviceTensor CopyExl3(const TensorRef& t) {
+  DeviceTensor CopyExl3(const TensorRef& t, bool expert_launch) {
     DeviceTensor d;
     const Exl3Ref& ref = *t.exl3;
     const std::size_t n = ref.parts.size();
@@ -174,11 +174,18 @@ struct Uploader {
             ? nullptr
             : reinterpret_cast<const std::uint32_t*>(base + blocks_at) +
                   ref.in_blocks.size();
+    // Every EXL3 linear has a one-row decode GEMV, which streams its tiles
+    // in front order for its split. Linears launched beside the routed
+    // expert stacks (the shared expert) take the stacks' split: their rows
+    // need not fill the GPU alone (4.05 decode 35.3 -> 35.8 tok/s).
+    const int front = Exl3DecodeSplits(static_cast<std::uint32_t>(in),
+                                       static_cast<std::uint32_t>(out),
+                                       n > 1 || expert_launch);
     Exl3Repack(base, offsets, static_cast<std::uint32_t*>(tiles), ref.src_in,
                ref.src_out, static_cast<std::uint32_t>(in),
                static_cast<std::uint32_t>(out), ref.k,
                static_cast<std::uint32_t>(n), ref.DeviceBytes() / 4, in_map,
-               out_map, nullptr);
+               out_map, front, nullptr);
     Exl3GatherScales(base, offsets + n, static_cast<std::uint32_t>(n),
                      ref.src_in, in_map, static_cast<std::uint32_t>(in),
                      static_cast<__half*>(suh), nullptr);
@@ -198,6 +205,7 @@ struct Uploader {
     d.exl3_suh = suh;
     d.exl3_svh = svh;
     d.exl3_k = ref.k;
+    d.exl3_front = front;
     return d;
   }
 
@@ -218,13 +226,14 @@ struct Uploader {
     return weights->Allocate(pointer, size);
   }
 
-  DeviceTensor Copy(const TensorRef& t) {
+  /// `expert_launch`: an EXL3 linear decoded in the routed experts' launch.
+  DeviceTensor Copy(const TensorRef& t, bool expert_launch = false) {
     DeviceTensor d;
     if (t.empty() || !ok) {
       return d;
     }
     if (t.exl3 != nullptr) {
-      return CopyExl3(t);
+      return CopyExl3(t, expert_launch);
     }
     const std::size_t size = t.SizeBytes();
     void* ptr = nullptr;
@@ -524,9 +533,9 @@ struct Uploader {
     d.ffn_gate_exps = Copy(l.ffn_gate_exps);
     d.ffn_up_exps = Copy(l.ffn_up_exps);
     d.ffn_down_exps = Copy(l.ffn_down_exps);
-    d.shexp_gate = Copy(l.shexp_gate);
-    d.shexp_up = Copy(l.shexp_up);
-    d.shexp_down = Copy(l.shexp_down);
+    d.shexp_gate = Copy(l.shexp_gate, true);
+    d.shexp_up = Copy(l.shexp_up, true);
+    d.shexp_down = Copy(l.shexp_down, true);
     d.nextn_enorm = Copy(l.nextn_enorm);
     d.nextn_hnorm = Copy(l.nextn_hnorm);
     SplitMtpProjection(l.nextn_eh_proj, d.nextn_fc_embedding,
@@ -578,7 +587,8 @@ bool DeviceModel::ExpandHeadQ8(std::string* error_msg) {
                       output_.cols,
                       output_.rows,
                       output_.experts,
-                      output_.exl3_k};
+                      output_.exl3_k,
+                      output_.exl3_front};
   const std::size_t bytes = Exl3Q8Bytes(w);
   void* q8 = nullptr;
   if (hipMalloc(&q8, bytes + kTailMargin) != hipSuccess) {

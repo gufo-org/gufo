@@ -30,6 +30,8 @@ struct DeviceTensor {
   const void* exl3_suh{nullptr};  ///< [experts][cols] fp16
   const void* exl3_svh{nullptr};  ///< [experts][rows] fp16
   int exl3_k{0};
+  /// Decode split the EXL3 tiles are in front order for (Exl3FrontTile).
+  int exl3_front{0};
 
   [[nodiscard]] bool empty() const noexcept { return data == nullptr; }
   [[nodiscard]] bool IsExl3() const noexcept { return exl3_k != 0; }

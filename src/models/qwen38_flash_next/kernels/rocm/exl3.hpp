@@ -23,11 +23,38 @@ struct Exl3Weights {
   std::uint32_t out{0};
   std::uint32_t experts{1};
   int k{0};
+  /// 0: tiles column-block-major (below), and GEMVs pick their split-K
+  /// factor from the shape. Otherwise tiles are in front order
+  /// (Exl3FrontTile) for split S = front, which every GEMV of them uses.
+  int front{0};
 
   [[nodiscard]] __host__ __device__ std::size_t ExpertWords() const noexcept {
     return static_cast<std::size_t>(in) * out * static_cast<unsigned>(k) / 32;
   }
 };
+
+/// Tile of column block b and row tile a in front order, for A row tiles,
+/// B column blocks and decode split S. Chunk (q, s * B/8 + g) holds column
+/// blocks 8g..8g+7 by row tiles 4q..4q+3 of split s, column-major inside the
+/// chunk. A one-row GEMV block owns one (split, 128-column group) item and
+/// walks its row tiles, so blocks at the same step read neighbouring memory
+/// instead of one short run per column block at a matrix-column stride.
+/// Every column keeps its tile order, so results are unchanged. The order
+/// is Crucible's (engine/exl3/front_order.h).
+__host__ __device__ inline std::size_t Exl3FrontTile(
+    std::size_t b, std::size_t a, std::size_t A, std::size_t B, std::size_t S) {
+  const std::size_t span = A / S;
+  const std::size_t s = a / span;
+  const std::size_t a2 = a % span;
+  return ((a2 / 4) * S * (B / 8) + s * (B / 8) + b / 8) * 32 + (b % 8) * 4 +
+         a2 % 4;
+}
+
+/// The split-K factor GEMVs of this shape choose (for an expert stack, or a
+/// linear launched beside one, when `experts`): the `front` to lay out its
+/// tiles for.
+[[nodiscard]] int Exl3DecodeSplits(std::uint32_t in, std::uint32_t out,
+                                   bool experts);
 
 /// Device scratch the linears share; sized by Exl3ScratchBytes.
 struct Exl3Scratch {
@@ -56,11 +83,34 @@ inline constexpr std::uint32_t kExl3GemvWideRows = 64;
                               std::uint32_t ldy, std::uint32_t rows,
                               const Exl3Scratch& scratch, hipStream_t stream);
 
+/// One linear of an Exl3LinearGroup launch: `rows` rows as Exl3Linear's,
+/// with expert ids (any row count) or without (at most kExl3GemvRows). With
+/// `gate`, the inputs are silu(gate) * x (Swiglu), gate laid out as x.
+struct Exl3Job {
+  Exl3Weights w;
+  const float* x{nullptr};
+  std::uint32_t ldx{0};
+  std::uint32_t x_div{1};
+  const std::int32_t* ids{nullptr};
+  float* y{nullptr};
+  std::uint32_t ldy{0};
+  std::uint32_t rows{1};
+  const float* gate{nullptr};
+};
+inline constexpr int kExl3GroupJobs = 4;
+
+/// Exl3Linear of up to kExl3GroupJobs decode or verification linears in one
+/// launch, each with Exl3Linear's per-row arithmetic. Returns false
+/// without launching when a job does not fit the launch or the scratch.
+[[nodiscard]] bool Exl3LinearGroup(const Exl3Job* jobs, int count,
+                                   const Exl3Scratch& scratch,
+                                   hipStream_t stream);
+
 /// Rows of one fused GEMM tile, and the routed tile map's tile height.
 inline constexpr std::uint32_t kExl3GemmRows = 128;
 /// Row tile of GEMMs whose inputs are already transformed (`x_transformed`)
 /// or go through the scratch pass; their route maps use this tile.
-inline constexpr std::uint32_t kExl3TransformedGemmRows = 256;
+inline constexpr std::uint32_t kExl3TransformedGemmRows = 128;
 
 /// The matrix-core route of a linear over many rows (prompt passes): input
 /// transform, F16 WMMA products with the trellis decoded on the fly, and the
@@ -131,7 +181,8 @@ struct Exl3GemmOut {
 
 /// Repacks `experts` stored trellis matrices (row-major tiles, as the
 /// checkpoint holds them, at byte offsets `src_offsets[e]` of `base`) into
-/// the device's column-block-major order at dst + e * dst_stride dwords.
+/// the device's column-block-major order (front order with `front` > 0) at
+/// dst + e * dst_stride dwords.
 /// `in_blocks`/`out_blocks` (device arrays of 128-block indices, or null for
 /// identity) select stored input/output blocks for each device block.
 void Exl3Repack(const std::uint8_t* base, const std::uint64_t* src_offsets,
@@ -139,7 +190,7 @@ void Exl3Repack(const std::uint8_t* base, const std::uint64_t* src_offsets,
                 std::uint32_t in, std::uint32_t out, int k,
                 std::uint32_t experts, std::size_t dst_stride,
                 const std::uint32_t* in_blocks, const std::uint32_t* out_blocks,
-                hipStream_t stream);
+                int front, hipStream_t stream);
 
 /// Gathers `count` fp16 scale vectors of `src_len` elements, selecting 128
 /// blocks through `blocks` (null keeps all), from byte offsets

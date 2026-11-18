@@ -11,6 +11,7 @@
 #include <functional>
 #include <gufo/ext/experimental/host_allocations.hpp>
 #include <gufo/ext/session_mode.hpp>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -641,6 +642,17 @@ private:
                  PassCheckpoints checkpoints = {}) const;
   /// Orders the main stream after the work queued on side_stream_.
   bool JoinSide(std::string* error_msg) const;
+  /// Decode and verification (up to kExl3GemvRows rows): EXL3 linears of one
+  /// input in one launch. False when the pass or the weights do not take
+  /// that route (nothing launched).
+  bool Exl3RowGroup(
+      std::initializer_list<std::pair<const DeviceTensor*, float*>> outs,
+      const float* x, std::uint32_t n_tokens) const;
+  /// Decode and verification of an all-EXL3 MoE after routing: two grouped
+  /// launches and the epilogue. False when the layer does not take that
+  /// route.
+  bool Exl3MoeRows(const DeviceLayer& l, const float* x, float* out,
+                   std::uint32_t n_tokens) const;
   bool Moe(const DeviceLayer& l, const float* x, float* out,
            std::uint32_t n_tokens, std::string* error_msg,
            bool last_only = false) const;
@@ -847,14 +859,21 @@ private:
                    std::string* error_msg) const;
   /// Shared by every EXL3 linear (exl3.hpp); empty for GGUF models.
   Exl3Scratch exl3_scratch_{};
-  /// Prompt passes over an EXL3 layer: `*expanded` becomes the layer with
-  /// its dense projections expanded to Q8_0 in the official GGUF layout
-  /// (valid until the next call); null leaves the layer as it is.
-  bool Exl3PromptLayer(const DeviceLayer& l, const DeviceLayer** expanded,
+  /// Prompt passes over EXL3 layer `il`: `*expanded` becomes the layer with
+  /// its dense projections expanded to Q8_0 in the official GGUF layout;
+  /// null leaves the layer as it is. A layer is expanded on its first
+  /// prompt pass and kept: the weights never change.
+  bool Exl3PromptLayer(std::uint32_t il, const DeviceLayer** expanded,
                        std::string* error_msg) const;
-  mutable DeviceLayer exl3_layer_{};
-  void* exl3_layer_q8_{nullptr};
-  std::size_t exl3_layer_q8_bytes_{0};
+  /// Bytes of layer `l`'s expansion; with `base`, also writes it there (on
+  /// the stream) and its tensors to `*d`. 0 when nothing is expanded,
+  /// SIZE_MAX on failure.
+  std::size_t Exl3ExpandLayer(const DeviceLayer& l, std::uint8_t* base,
+                              DeviceLayer* d) const;
+  mutable std::vector<DeviceLayer> exl3_layers_;
+  mutable std::vector<std::uint8_t> exl3_layer_ready_;
+  std::vector<std::size_t> exl3_layer_offset_;  ///< [layers + 1]
+  void* exl3_layers_q8_{nullptr};
   /// Q8_0 expansion of one dense EXL3 matrix for prompt passes.
   void* exl3_q8_{nullptr};
   std::size_t exl3_q8_bytes_{0};
@@ -980,6 +999,9 @@ private:
   /// Set by GatedDense when s_.shexp_half holds the SwiGLU rows its F16
   /// down projection reads.
   mutable bool shexp_half_ready_{false};
+  /// EXL3 prompt passes: the shared expert, queued on side_stream_ by
+  /// MoeExperts once gate and up are queued, so it runs beside down.
+  mutable std::function<bool()> exl3_shared_;
   // What s_.x_q8t / s_.x_half currently hold (input pointer, rows, cols,
   // and the half type), so a projection over the same rows skips its
   // activation pass. Cleared whenever the source buffer is rewritten.

@@ -11,11 +11,13 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "src/models/qwen38_flash_next/exl3/format.hpp"
 #include "src/models/qwen38_flash_next/exl3/reference.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/exl3.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace q = gufo::models::qwen38_flash_next::rocm;
 namespace fmt = gufo::models::qwen38_flash_next::exl3;
@@ -115,9 +117,11 @@ struct Stack {
     void* tiles = nullptr;
     CheckHip(hipMalloc(&tiles, dst_words * experts * 4), "tiles");
     allocations.push_back(tiles);
+    // The device model's layout: front order for the one-row GEMV's split.
+    const int front = q::Exl3DecodeSplits(in, dev_out, experts > 1);
     q::Exl3Repack(reinterpret_cast<const std::uint8_t*>(raw), dev_offsets,
                   static_cast<std::uint32_t*>(tiles), in, out, in, dev_out, k,
-                  experts, dst_words, nullptr, blocks, nullptr);
+                  experts, dst_words, nullptr, blocks, front, nullptr);
     // Scales: suh as stored, svh through the same block selection.
     std::vector<std::uint16_t> dev_svh;
     for (std::uint32_t e = 0; e < experts; ++e) {
@@ -137,7 +141,8 @@ struct Stack {
               in,
               dev_out,
               experts,
-              k};
+              k,
+              front};
   }
 };
 
@@ -486,6 +491,82 @@ void NgramCase() {
   }
 }
 
+std::vector<float> Download(const float* p, std::size_t n) {
+  std::vector<float> v(n);
+  CheckHip(hipMemcpy(v.data(), p, n * 4, hipMemcpyDeviceToHost), "download");
+  return v;
+}
+
+/// A grouped one-row launch gives each linear exactly Exl3Linear's rows:
+/// a routed and a dense linear of one input, then routed and dense down
+/// projections that form Swiglu while staging, against Swiglu then
+/// Exl3Linear.
+void GroupCase(int dense_k, int expert_k) {
+  constexpr std::uint32_t kHidden = 2560;
+  constexpr std::uint32_t kFf = 640;
+  constexpr std::uint32_t kExperts = 12;
+  constexpr std::uint32_t kUsed = 4;
+  const std::string name =
+      "group K" + std::to_string(dense_k) + "/K" + std::to_string(expert_k);
+  Stack routed(kHidden, kFf, expert_k, kExperts, 0xA11CE0U + expert_k);
+  Stack dense(kHidden, kFf, dense_k, 1, 0xB0B000U + dense_k);
+  Stack routed_down(kFf, kHidden, expert_k, kExperts, 0xC0FFEEU + expert_k);
+  Stack dense_down(kFf, kHidden, dense_k, 1, 0xD00D00U + dense_k);
+  for (Stack* st : {&routed, &dense, &routed_down, &dense_down})
+    st->Prepare();
+  std::uint32_t s = 4242U + dense_k * 7 + expert_k;
+  const auto random = [&](std::size_t n) {
+    std::vector<float> v(n);
+    for (auto& x : v)
+      x = Uniform(&s) * 2.0F;
+    return v;
+  };
+  std::vector<std::int32_t> host_ids(kUsed);
+  for (auto& id : host_ids)
+    id = static_cast<std::int32_t>(Next(&s) % kExperts);
+  float* x = Upload(random(kHidden));
+  std::int32_t* ids = Upload(host_ids);
+  // [routed rows][ff] then [ff] for the dense row, gate and up.
+  float* gate = Upload(random((kUsed + 1) * kFf));
+  float* up = Upload(random((kUsed + 1) * kFf));
+  float* y = Upload(std::vector<float>((kUsed + 1) * kHidden * 2));
+  float* ref = y + (kUsed + 1) * kHidden;
+  Scratch scratch(1 << 20, 1 << 22);
+  const q::Exl3Job first[2] = {
+      {routed.device, x, kHidden, kUsed, ids, y, kFf, kUsed, nullptr},
+      {dense.device, x, kHidden, 1, nullptr, y + kUsed * kFf, kFf, 1, nullptr}};
+  Expect(q::Exl3LinearGroup(first, 2, scratch.s, nullptr), name + " launch");
+  Expect(q::Exl3Linear(routed.device, x, kHidden, kUsed, ids, ref, kFf, kUsed,
+                       scratch.s, nullptr) &&
+             q::Exl3Linear(dense.device, x, kHidden, 1, nullptr,
+                           ref + kUsed * kFf, kFf, 1, scratch.s, nullptr),
+         name + " reference launch");
+  CheckHip(hipDeviceSynchronize(), "sync");
+  Expect(Download(y, (kUsed + 1) * kFf) == Download(ref, (kUsed + 1) * kFf),
+         name + " gate/up rows");
+  const q::Exl3Job second[2] = {
+      {routed_down.device, up, kFf, 1, ids, y, kHidden, kUsed, gate},
+      {dense_down.device, up + kUsed * kFf, kFf, 1, nullptr,
+       y + kUsed * kHidden, kHidden, 1, gate + kUsed * kFf}};
+  Expect(q::Exl3LinearGroup(second, 2, scratch.s, nullptr),
+         name + " down launch");
+  q::Swiglu(gate, up, (kUsed + 1) * kFf, nullptr);
+  Expect(
+      q::Exl3Linear(routed_down.device, gate, kFf, 1, ids, ref, kHidden, kUsed,
+                    scratch.s, nullptr) &&
+          q::Exl3Linear(dense_down.device, gate + kUsed * kFf, kFf, 1, nullptr,
+                        ref + kUsed * kHidden, kHidden, 1, scratch.s, nullptr),
+      name + " down reference launch");
+  CheckHip(hipDeviceSynchronize(), "sync");
+  Expect(Download(y, (kUsed + 1) * kHidden) ==
+             Download(ref, (kUsed + 1) * kHidden),
+         name + " Swiglu down rows");
+  for (void* p : {static_cast<void*>(x), static_cast<void*>(ids),
+                  static_cast<void*>(gate), static_cast<void*>(up),
+                  static_cast<void*>(y)})
+    (void)hipFree(p);
+}
+
 }  // namespace
 
 int main() {
@@ -493,6 +574,8 @@ int main() {
     for (const int k : {2, 3, 4, 5, 6}) {
       DenseCase(256, 384, k, 1);
       DenseCase(2560, 512, k, 11);
+      DenseCase(2560, 512, k, 2);
+      DenseCase(2560, 512, k, 3);
       ExpertCase(k);
     }
     for (const int k : {2, 3, 4, 5, 6}) {
@@ -507,6 +590,9 @@ int main() {
     DenseCase(2560, 640, 4, 70);
     DenseCase(6144, 2560, 6, 65);
     DenseCase(6144, 2560, 6, 9);
+    for (const auto& [dense_k, expert_k] :
+         {std::pair{6, 4}, std::pair{5, 3}, std::pair{4, 2}})
+      GroupCase(dense_k, expert_k);
     SelectCase();
     NgramCase();
   } catch (const std::exception& e) {
