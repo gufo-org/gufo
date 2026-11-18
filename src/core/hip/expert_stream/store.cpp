@@ -582,6 +582,7 @@ struct Store::Impl {
   /* With a routes_ready event, prepare copies the routes here on its own
    * stream, so work queued after the router keeps the device busy. */
   hipStream_t routes_stream = nullptr;
+  hipEvent_t routes_done = nullptr;  // the caller stream's routes copy
   int32_t* routes_host = nullptr;
   size_t routes_capacity = 0;
   std::vector<int> direct_fds;  // O_DIRECT descriptors the store opened
@@ -692,6 +693,8 @@ struct Store::Impl {
       (void)hipHostFree(routes_host);
     if (routes_stream)
       (void)hipStreamDestroy(routes_stream);
+    if (routes_done)
+      (void)hipEventDestroy(routes_done);
   }
 
   // Free memory the cache never grows into at this moment.
@@ -1654,12 +1657,34 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
       return false;
     std::copy_n(store->routes_host, n_routes, ids.begin());
   } else if (stream) {
-    // Synchronizing the caller's stream also finishes its earlier kernels,
-    // which may still read the previous tables and stage rows.
-    if (hipMemcpyAsync(ids.data(), routes, n_routes * sizeof(int32_t),
-                       hipMemcpyDeviceToHost, stream) != hipSuccess ||
-        hipStreamSynchronize(stream) != hipSuccess)
+    // Waiting for the copy also finishes the stream's earlier kernels, which
+    // may still read the previous tables and stage rows. The routes land in
+    // pinned memory and the wait spins: the host queues the experts as soon
+    // as the routes exist.
+    if (store->routes_capacity < n_routes) {
+      if (store->routes_host)
+        (void)hipHostFree(store->routes_host);
+      store->routes_host = nullptr;
+      store->routes_capacity = 0;
+      if (hipHostMalloc(reinterpret_cast<void**>(&store->routes_host),
+                        n_routes * sizeof(int32_t)) != hipSuccess)
+        return false;
+      store->routes_capacity = n_routes;
+    }
+    if (!store->routes_done &&
+        hipEventCreateWithFlags(&store->routes_done, hipEventDisableTiming) !=
+            hipSuccess)
       return false;
+    if (hipMemcpyAsync(store->routes_host, routes, n_routes * sizeof(int32_t),
+                       hipMemcpyDeviceToHost, stream) != hipSuccess ||
+        hipEventRecord(store->routes_done, stream) != hipSuccess)
+      return false;
+    hipError_t state;
+    while ((state = hipEventQuery(store->routes_done)) == hipErrorNotReady) {
+    }
+    if (state != hipSuccess)
+      return false;
+    std::copy_n(store->routes_host, n_routes, ids.begin());
   } else if (hipMemcpy(ids.data(), routes, n_routes * sizeof(int32_t),
                        hipMemcpyDeviceToHost) != hipSuccess) {
     return false;
