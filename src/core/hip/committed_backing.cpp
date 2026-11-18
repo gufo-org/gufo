@@ -651,21 +651,22 @@ void CommittedBackingPool::GrowAhead(std::size_t reserve_bytes) {
   const auto target_bytes =
       std::min(reserve_bytes, state_->capacity * state_->block_bytes);
   const std::lock_guard lock(ahead_mutex_);
-  if (state_->growing_ahead.load()) {
-    // A running thread follows the largest reserve asked of it. It rechecks
-    // the target after clearing its flag, so either it sees this raise or
-    // the flag reads clear here and a new thread starts.
-    auto current = state_->ahead_target.load();
-    while (current < target_bytes &&
-           !state_->ahead_target.compare_exchange_weak(current, target_bytes)) {
-    }
-    if (state_->growing_ahead.load())
-      return;
+  // A running thread follows the largest reserve asked of it. It rechecks
+  // the target after clearing its flag, so either it sees this raise and
+  // keeps the flag, or the flag is ours below and a new thread starts.
+  auto current = state_->ahead_target.load();
+  while (current < target_bytes &&
+         !state_->ahead_target.compare_exchange_weak(current, target_bytes)) {
   }
-  if (free_bytes(*state_) >= target_bytes)
+  if (state_->growing_ahead.exchange(true))
     return;
+  // No thread grows now: one that cleared its flag only has to return, so
+  // the join below never waits for growth.
+  if (free_bytes(*state_) >= target_bytes) {
+    state_->growing_ahead.store(false);
+    return;
+  }
   state_->ahead_target.store(target_bytes);
-  state_->growing_ahead.store(true);
   if (ahead_.joinable())
     ahead_.join();
   try {
