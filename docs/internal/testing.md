@@ -136,8 +136,10 @@ overwrite, insert and erase bytes; further headers hold arrays around the
 parser's block size and fill each charge of the descriptor budget to its last
 byte and one byte past it. Each must open with the same version, alignment,
 metadata and tensors, whose strings and data point at the same bytes, or fail
-with the same message, with and without `allow_unsized_tensors`. Every rejection
-must be reached. GGUF files given as arguments are compared and timed too. It
+with the same message, with and without `allow_unsized_tensors`. Only a header
+over the descriptor budget fails with its own message, which names the limit
+where 0.35.0 reported a malformed or over-long entry. Every rejection must be
+reached. GGUF files given as arguments are compared and timed too. It
 runs in `check-pr`; the crate's Rust tests cover the check order, the budget and
 the C ABI.
 

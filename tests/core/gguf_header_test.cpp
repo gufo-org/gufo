@@ -7,8 +7,10 @@
 // hold arrays around the Rust parser's block size and fill the descriptor
 // budget to its edge. Each buffer must open with the same version, alignment,
 // metadata and tensors, whose strings and data point at the same bytes, or
-// fail with the same message, with and without allow_unsized_tensors. Every
-// rejection must be reached. GGUF files named on the command line are compared
+// fail with the same message, with and without allow_unsized_tensors. Only a
+// header over the descriptor budget fails with a message of its own, which
+// names the limit, as 0.35.0 took it for a malformed one. Every rejection
+// must be reached. GGUF files named on the command line are compared
 // too, and both parsers are timed on them.
 #include <algorithm>
 #include <chrono>
@@ -57,6 +59,10 @@ constexpr std::uint32_t kKnownTypes[] = {0,  1,  2,  3,  6,  7,  8,  9,  10,
                                          20, 21, 22, 23, 26, 29, 30};
 // Storage types core cannot size.
 constexpr std::uint32_t kOtherTypes[] = {4, 5, 24, 25, 27, 28, 31, 200, 65535};
+// What the Rust parser reports for a header over the descriptor budget,
+// wherever 0.35.0 reported it.
+constexpr std::string_view kOverBudget =
+    "GGUF metadata and tensor index exceed the header limit of 128 MiB";
 // Every outcome of 0.35.0's OpenMemory; names are cut off.
 constexpr std::string_view kOutcomes[] = {
     "opened",
@@ -154,8 +160,11 @@ struct Totals {
   std::map<std::string, std::size_t> outcomes;
 };
 
+// `over_budget` marks a header that 0.35.0 rejects for its descriptor
+// budget.
 void Compare(Totals& totals, std::span<const std::uint8_t> bytes,
-             GgufOpenOptions options, const std::string& what) {
+             GgufOpenOptions options, const std::string& what,
+             bool over_budget) {
   const auto expected =
       reference::OpenMemory(bytes.data(), bytes.size(), options);
   std::string error;
@@ -169,13 +178,15 @@ void Compare(Totals& totals, std::span<const std::uint8_t> bytes,
         (options.allow_unsized_tensors ? ", unsized allowed" : "") +
         "): " + detail);
   };
+  if (over_budget && expected.opened)
+    fail("0.35.0 opened a header over the descriptor budget");
   if (!expected.opened) {
     if (reader)
       fail("opens; 0.35.0 failed with " + Escape(expected.error));
-    if (error != expected.error) {
-      fail("fails with " + Escape(error) + "; 0.35.0 with " +
-           Escape(expected.error));
-    }
+    const std::string want =
+        over_budget ? std::string(kOverBudget) : expected.error;
+    if (error != want)
+      fail("fails with " + Escape(error) + " instead of " + Escape(want));
     return;
   }
   if (!reader)
@@ -201,9 +212,9 @@ void Compare(Totals& totals, std::span<const std::uint8_t> bytes,
 }
 
 void CompareBoth(Totals& totals, std::span<const std::uint8_t> bytes,
-                 const std::string& what) {
-  Compare(totals, bytes, {}, what);
-  Compare(totals, bytes, {.allow_unsized_tensors = true}, what);
+                 const std::string& what, bool over_budget = false) {
+  Compare(totals, bytes, {}, what, over_budget);
+  Compare(totals, bytes, {.allow_unsized_tensors = true}, what, over_budget);
 }
 
 std::uint64_t Below(Random& random, std::uint64_t bound) {
@@ -541,7 +552,9 @@ Bytes Mutate(Random& random, Bytes bytes) {
 // each charge (the counts, a key, a string, the strings and numbers of an
 // array, a tensor name) fits exactly or overruns it by one byte. A metadata
 // entry is followed by the first tensor's one-byte name: the parse reaches
-// that tensor's dimension count, all zero bytes, only if both fit.
+// that tensor's dimension count, all zero bytes, only if both fit. 0.35.0
+// reported each overrun as a malformed or over-long entry; the Rust parser
+// names the budget.
 void Budget(Totals& totals) {
   constexpr std::size_t kBudget = std::size_t{128} << 20;
   constexpr std::size_t kNumberCharge = 8;
@@ -571,7 +584,7 @@ void Budget(Totals& totals) {
     Require(Outcome(expected) == outcome,
             "a budget case ends with " + Escape(Outcome(expected)) +
                 " instead of " + std::string(outcome));
-    CompareBoth(totals, bytes, "budget");
+    CompareBoth(totals, bytes, "budget", outcome != kFits);
   };
   // A key of `length` bytes and its value type.
   const auto key = [](std::size_t length, std::uint32_t type) {

@@ -168,7 +168,11 @@ pub enum Rejection<'a> {
     TooSmall,
     Magic,
     Version(u32),
+    /// The counts exceed what the rest of the file can hold.
     Counts,
+    /// The descriptors exceed the caller's budget of this many bytes, a
+    /// limit of the reader and not of the format.
+    Budget(usize),
     KeyUnreadable,
     KeyLimits,
     /// The type of this metadata key is missing.
@@ -199,6 +203,7 @@ impl Rejection<'_> {
                     .map(Some);
             }
             Self::Counts => ("GGUF descriptor counts exceed file or memory limits", b""),
+            Self::Budget(budget) => return budget_message(budget).map(Some),
             Self::KeyUnreadable => ("Failed to read metadata key", b""),
             Self::KeyLimits => ("GGUF metadata key exceeds limits", b""),
             Self::TypeUnreadable(key) => ("Failed to read metadata type for key ", key),
@@ -217,6 +222,21 @@ impl Rejection<'_> {
         };
         join(text, detail).map(Some)
     }
+}
+
+/// Names the limit, so that a valid file it rejects is not taken for a broken
+/// one.
+fn budget_message(budget: usize) -> Result<Vec<u8>, TryReserveError> {
+    const MIB: usize = 1 << 20;
+    let limit = if budget % MIB == 0 {
+        format!("{} MiB", budget / MIB)
+    } else {
+        format!("{budget} bytes")
+    };
+    join(
+        "GGUF metadata and tensor index exceed the header limit of ",
+        limit.as_bytes(),
+    )
 }
 
 fn join(text: &str, detail: &[u8]) -> Result<Vec<u8>, TryReserveError> {
@@ -257,7 +277,9 @@ const MALFORMED: Failure<'static> = Failure::Rejected(Rejection::Malformed);
 struct Cursor<'a> {
     bytes: &'a [u8],
     at: usize,
+    /// What remains of `limit`, the caller's descriptor budget.
     budget: usize,
+    limit: usize,
 }
 
 impl<'a> Cursor<'a> {
@@ -299,13 +321,14 @@ impl<'a> Cursor<'a> {
         self.take(len)
     }
 
-    /// Charges `count` descriptors of `item` bytes, or nothing on failure.
-    fn charge(&mut self, count: u64, item: usize) -> bool {
+    /// Charges `count` descriptors of `item` bytes, or nothing when they
+    /// exceed the budget.
+    fn charge(&mut self, count: u64, item: usize) -> Result<(), Failure<'static>> {
         if item != 0 && count > (self.budget / item) as u64 {
-            return false;
+            return Err(Rejection::Budget(self.limit).into());
         }
         self.budget -= count as usize * item;
-        true
+        Ok(())
     }
 
     /// `rank` dimensions; the others are 0.
@@ -318,12 +341,13 @@ impl<'a> Cursor<'a> {
     }
 
     /// A string whose bytes are charged one each.
-    fn charged_string(&mut self) -> Option<&'a [u8]> {
-        let string = self.string()?;
-        self.charge(string.len() as u64, 1).then_some(string)
+    fn charged_string(&mut self) -> Result<&'a [u8], Failure<'static>> {
+        let string = self.string().ok_or(MALFORMED)?;
+        self.charge(string.len() as u64, 1)?;
+        Ok(string)
     }
 
-    /// A value of any type but `ARRAY`.
+    /// A value of any type but `STRING` and `ARRAY`.
     fn scalar(&mut self, value_type: u32) -> Option<Value<'a>> {
         Some(match value_type {
             UINT8 => Value::Unsigned(self.u8()?.into()),
@@ -338,7 +362,6 @@ impl<'a> Cursor<'a> {
                 1 => true,
                 _ => return None,
             }),
-            STRING => Value::String(self.charged_string()?),
             UINT64 => Value::Unsigned(self.u64()?),
             INT64 => Value::Signed(i64::from_le_bytes(self.array()?)),
             FLOAT64 => Value::Float(f64::from_bits(self.u64()?)),
@@ -386,11 +409,10 @@ impl<S: Copy> Arrays<S> {
         } else {
             NUMBER_ITEM_BYTES
         };
-        if len > cursor.remaining() / ITEM_FILE_BYTES[item_type as usize]
-            || !cursor.charge(len, charge)
-        {
+        if len > cursor.remaining() / ITEM_FILE_BYTES[item_type as usize] {
             return Err(MALFORMED);
         }
+        cursor.charge(len, charge)?;
         // At most one item per remaining byte.
         let len = len as usize;
         let strings = &mut self.strings;
@@ -411,7 +433,7 @@ impl<S: Copy> Arrays<S> {
                 blocks(
                     unsigneds,
                     len,
-                    || cursor.u8().map(u64::from),
+                    || cursor.u8().map(u64::from).ok_or(MALFORMED),
                     |items, first| sink.items(Items::Unsigneds(items), first, len),
                 )?;
                 ArrayKind::Unsigneds
@@ -420,7 +442,7 @@ impl<S: Copy> Arrays<S> {
                 blocks(
                     unsigneds,
                     len,
-                    || cursor.u16().map(u64::from),
+                    || cursor.u16().map(u64::from).ok_or(MALFORMED),
                     |items, first| sink.items(Items::Unsigneds(items), first, len),
                 )?;
                 ArrayKind::Unsigneds
@@ -429,7 +451,7 @@ impl<S: Copy> Arrays<S> {
                 blocks(
                     unsigneds,
                     len,
-                    || cursor.u32().map(u64::from),
+                    || cursor.u32().map(u64::from).ok_or(MALFORMED),
                     |items, first| sink.items(Items::Unsigneds(items), first, len),
                 )?;
                 ArrayKind::Unsigneds
@@ -438,7 +460,7 @@ impl<S: Copy> Arrays<S> {
                 blocks(
                     unsigneds,
                     len,
-                    || cursor.u64(),
+                    || cursor.u64().ok_or(MALFORMED),
                     |items, first| sink.items(Items::Unsigneds(items), first, len),
                 )?;
                 ArrayKind::Unsigneds
@@ -447,7 +469,13 @@ impl<S: Copy> Arrays<S> {
                 blocks(
                     unsigneds,
                     len,
-                    || cursor.u8().filter(|&value| value <= 1).map(u64::from),
+                    || {
+                        cursor
+                            .u8()
+                            .filter(|&value| value <= 1)
+                            .map(u64::from)
+                            .ok_or(MALFORMED)
+                    },
                     |items, first| sink.items(Items::Unsigneds(items), first, len),
                 )?;
                 ArrayKind::Unsigneds
@@ -456,7 +484,12 @@ impl<S: Copy> Arrays<S> {
                 blocks(
                     signeds,
                     len,
-                    || cursor.array().map(|bytes| i8::from_le_bytes(bytes).into()),
+                    || {
+                        cursor
+                            .array()
+                            .map(|bytes| i8::from_le_bytes(bytes).into())
+                            .ok_or(MALFORMED)
+                    },
                     |items, first| sink.items(Items::Signeds(items), first, len),
                 )?;
                 ArrayKind::Signeds
@@ -465,7 +498,12 @@ impl<S: Copy> Arrays<S> {
                 blocks(
                     signeds,
                     len,
-                    || cursor.array().map(|bytes| i16::from_le_bytes(bytes).into()),
+                    || {
+                        cursor
+                            .array()
+                            .map(|bytes| i16::from_le_bytes(bytes).into())
+                            .ok_or(MALFORMED)
+                    },
                     |items, first| sink.items(Items::Signeds(items), first, len),
                 )?;
                 ArrayKind::Signeds
@@ -474,7 +512,12 @@ impl<S: Copy> Arrays<S> {
                 blocks(
                     signeds,
                     len,
-                    || cursor.array().map(|bytes| i32::from_le_bytes(bytes).into()),
+                    || {
+                        cursor
+                            .array()
+                            .map(|bytes| i32::from_le_bytes(bytes).into())
+                            .ok_or(MALFORMED)
+                    },
                     |items, first| sink.items(Items::Signeds(items), first, len),
                 )?;
                 ArrayKind::Signeds
@@ -483,7 +526,7 @@ impl<S: Copy> Arrays<S> {
                 blocks(
                     signeds,
                     len,
-                    || cursor.array().map(i64::from_le_bytes),
+                    || cursor.array().map(i64::from_le_bytes).ok_or(MALFORMED),
                     |items, first| sink.items(Items::Signeds(items), first, len),
                 )?;
                 ArrayKind::Signeds
@@ -492,7 +535,12 @@ impl<S: Copy> Arrays<S> {
                 blocks(
                     floats,
                     len,
-                    || cursor.u32().map(|bits| f32::from_bits(bits).into()),
+                    || {
+                        cursor
+                            .u32()
+                            .map(|bits| f32::from_bits(bits).into())
+                            .ok_or(MALFORMED)
+                    },
                     |items, first| sink.items(Items::Floats(items), first, len),
                 )?;
                 ArrayKind::Floats
@@ -501,7 +549,7 @@ impl<S: Copy> Arrays<S> {
                 blocks(
                     floats,
                     len,
-                    || cursor.u64().map(f64::from_bits),
+                    || cursor.u64().map(f64::from_bits).ok_or(MALFORMED),
                     |items, first| sink.items(Items::Floats(items), first, len),
                 )?;
                 ArrayKind::Floats
@@ -512,12 +560,12 @@ impl<S: Copy> Arrays<S> {
 }
 
 /// Reads `len` items from `next` into `buffer` and hands them to `deliver`
-/// block by block, with the index of each block's first item; `None` is
-/// malformed. The first block starts at 0, even when there are no items.
+/// block by block, with the index of each block's first item, until `next`
+/// fails. The first block starts at 0, even when there are no items.
 fn blocks<T>(
     buffer: &mut Vec<T>,
     len: usize,
-    mut next: impl FnMut() -> Option<T>,
+    mut next: impl FnMut() -> Result<T, Failure<'static>>,
     mut deliver: impl FnMut(&[T], usize) -> Result<(), Stopped>,
 ) -> Result<(), Failure<'static>> {
     buffer.clear();
@@ -527,7 +575,7 @@ fn blocks<T>(
         let end = len.min(first + BLOCK_ITEMS);
         buffer.clear();
         for _ in first..end {
-            buffer.push(next().ok_or(MALFORMED)?);
+            buffer.push(next()?);
         }
         deliver(buffer, first)?;
         if end == len {
@@ -569,6 +617,7 @@ pub fn parse<'a, K: Sink<'a>>(
         bytes,
         at: MAGIC.len(),
         budget: limits.budget,
+        limit: limits.budget,
     };
     // The fixed header is there, as checked above.
     let version = cursor.u32().ok_or(MALFORMED)?;
@@ -580,11 +629,11 @@ pub fn parse<'a, K: Sink<'a>>(
     let remaining = cursor.remaining();
     if metadata_count > remaining / METADATA_ENTRY_FILE_BYTES
         || tensor_count > remaining / TENSOR_ENTRY_FILE_BYTES
-        || !cursor.charge(metadata_count, limits.metadata_entry_bytes)
-        || !cursor.charge(tensor_count, limits.tensor_entry_bytes)
     {
         return Err(Rejection::Counts.into());
     }
+    cursor.charge(metadata_count, limits.metadata_entry_bytes)?;
+    cursor.charge(tensor_count, limits.tensor_entry_bytes)?;
     // At most one entry per remaining byte.
     sink.counts(metadata_count as usize, tensor_count as usize)?;
 
@@ -594,14 +643,15 @@ pub fn parse<'a, K: Sink<'a>>(
     let mut arrays = Arrays::<K::Str>::default();
     for _ in 0..metadata_count {
         let key = cursor.string().ok_or(Rejection::KeyUnreadable)?;
-        if key.is_empty() || key.len() > MAX_NAME_BYTES || !cursor.charge(key.len() as u64, 1) {
+        if key.is_empty() || key.len() > MAX_NAME_BYTES {
             return Err(Rejection::KeyLimits.into());
         }
+        cursor.charge(key.len() as u64, 1)?;
         let value_type = cursor.u32().ok_or(Rejection::TypeUnreadable(key))?;
-        let value = if value_type == ARRAY {
-            arrays.read(&mut cursor, limits, sink)?
-        } else {
-            cursor.scalar(value_type).ok_or(MALFORMED)?
+        let value = match value_type {
+            ARRAY => arrays.read(&mut cursor, limits, sink)?,
+            STRING => Value::String(cursor.charged_string()?),
+            _ => cursor.scalar(value_type).ok_or(MALFORMED)?,
         };
         if key == b"general.alignment" {
             alignment = match value {
@@ -628,9 +678,10 @@ pub fn parse<'a, K: Sink<'a>>(
     names.try_reserve(tensor_count as usize)?;
     for _ in 0..tensor_count {
         let name = cursor.string().ok_or(Rejection::NameUnreadable)?;
-        if name.is_empty() || name.len() > MAX_NAME_BYTES || !cursor.charge(name.len() as u64, 1) {
+        if name.is_empty() || name.len() > MAX_NAME_BYTES {
             return Err(MALFORMED);
         }
+        cursor.charge(name.len() as u64, 1)?;
         let rank = match cursor.u32() {
             Some(rank) if (1..=MAX_DIMENSIONS as u32).contains(&rank) => rank as usize,
             _ => return Err(Rejection::Dimensions.into()),
@@ -705,6 +756,7 @@ pub fn parse<'a, K: Sink<'a>>(
             bytes,
             at: tensor.dimensions_at,
             budget: 0,
+            limit: 0,
         };
         let dimensions = at.dimensions(rank).ok_or(MALFORMED)?;
         sink.tensor(&Tensor {
@@ -1189,17 +1241,33 @@ mod tests {
             budget: 104 + 1 + 2,
             ..LIMITS
         };
-        assert_eq!(run(&bytes.0, &short).0, Err(Rejection::Malformed.into()));
+        assert_eq!(run(&bytes.0, &short).0, Err(Rejection::Budget(107).into()));
         let no_key = Limits {
             budget: 104,
             ..LIMITS
         };
-        assert_eq!(run(&bytes.0, &no_key).0, Err(Rejection::KeyLimits.into()));
+        assert_eq!(run(&bytes.0, &no_key).0, Err(Rejection::Budget(104).into()));
         let no_entry = Limits {
             budget: 103,
             ..LIMITS
         };
-        assert_eq!(run(&bytes.0, &no_entry).0, Err(Rejection::Counts.into()));
+        assert_eq!(
+            run(&bytes.0, &no_entry).0,
+            Err(Rejection::Budget(103).into())
+        );
+        // Numbers in an array are charged 8 bytes each.
+        let numbers = Bytes::header(0, 1)
+            .key(b"k", ARRAY)
+            .raw(&UINT8.to_le_bytes());
+        let numbers = numbers.raw(&2u64.to_le_bytes()).raw(&[1, 2]);
+        let one_number = Limits {
+            budget: 104 + 1 + 8,
+            ..LIMITS
+        };
+        assert_eq!(
+            run(&numbers.0, &one_number).0,
+            Err(Rejection::Budget(113).into())
+        );
     }
 
     #[test]
@@ -1249,6 +1317,14 @@ mod tests {
         assert_eq!(
             message(Rejection::Extent(b"w\xff")).unwrap(),
             b"Tensor extent or alignment is invalid: w\xff"
+        );
+        assert_eq!(
+            message(Rejection::Budget(128 << 20)).unwrap(),
+            b"GGUF metadata and tensor index exceed the header limit of 128 MiB"
+        );
+        assert_eq!(
+            message(Rejection::Budget(107)).unwrap(),
+            b"GGUF metadata and tensor index exceed the header limit of 107 bytes"
         );
     }
 }
