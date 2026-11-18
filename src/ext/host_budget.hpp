@@ -60,6 +60,16 @@ struct HostMemorySample {
 /// so it is not subtracted twice (#1198). Pins still never count CMA pages.
 [[nodiscard]] std::uint64_t SnapshotCeilingBytes(
     const HostMemorySample& sample);
+/// How far the host's available memory is below its reserve:
+/// max(CmaFree, kHostSnapshotHeadroomBytes) minus MemAvailable, or 0. Memory
+/// actually in use, not state promised to sessions: a page the RAM cache
+/// borrowed from that promise and gives back raises the promise as much as
+/// MemAvailable, so only real memory measures what a release achieves. Gufo's
+/// own growth stops well above it (mem::HostFreeFloorBytes), so a shortfall
+/// means memory another process took (#932). The cgroup limit is not used:
+/// state pages are not charged to it.
+[[nodiscard]] std::uint64_t HostReserveShortfallBytes(
+    const HostMemorySample& sample);
 /// The sample and the ceiling it implies, as space-separated key=value pairs
 /// for refusal logs.
 [[nodiscard]] std::string DescribeHostMemory(const HostMemorySample& sample);

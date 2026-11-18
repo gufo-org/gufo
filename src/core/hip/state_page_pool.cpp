@@ -274,6 +274,11 @@ void PagePool::SetHome(hipMemGenericAllocationHandle_t handle,
   homes_[handle] = lender;
 }
 
+void PagePool::ClearHome(hipMemGenericAllocationHandle_t handle) {
+  std::lock_guard lock(lender_mutex_);
+  homes_.erase(handle);
+}
+
 std::size_t PagePool::Borrow(std::size_t pages) {
   std::vector<std::shared_ptr<PageLender>> lenders;
   {

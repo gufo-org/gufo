@@ -15,6 +15,7 @@
 #include "src/cli/serve/component_cache_metrics.hpp"
 #include "src/cli/serve/continuation_types.hpp"
 #include "src/cli/serve/text_publication_wait.hpp"
+#include "src/ext/host_budget.hpp"
 #include "src/mem/account.hpp"
 
 namespace gufo::server {
@@ -127,6 +128,18 @@ public:
   // five disk restores took 15 s. Losing one costs its whole prefill when
   // the conversation returns (40 s at 66K tokens).
   static constexpr std::chrono::milliseconds kStateWriteWait{30000};
+  // Host memory pressure from other processes (#932). When `sample` leaves
+  // MemAvailable short of the host reserve (ext::HostReserveShortfallBytes),
+  // gives
+  // RAM-cache memory back to the host until the shortfall plus
+  // kHostPressureReliefBytes is covered, evicting the least valuable
+  // checkpoints as needed (disk copies stay). Returns the bytes released.
+  // Releasing device-mapped pages waits for the device: call it only while
+  // no work runs (the idle scheduler).
+  std::size_t RelieveHostPressure(const ext::HostMemorySample& sample);
+  // Released beyond the shortfall, so that pressure hovering at the reserve
+  // does not release a little on every idle tick.
+  static constexpr std::size_t kHostPressureReliefBytes = std::size_t{2} << 30;
   // Charged bytes that ReclaimState could free: tails of all sessions and
   // idle sessions' frontiers.
   [[nodiscard]] std::size_t ReclaimableStateBytes() const;

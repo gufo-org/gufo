@@ -358,6 +358,8 @@ struct ComponentTextCache::Impl {
   std::size_t lender_grant{};
   // Checkpoints evicted so sessions could borrow their pages back.
   std::atomic<std::size_t> state_sheds{};
+  // A host-pressure episode was logged; cleared when the shortfall ends.
+  bool host_pressure_reported{};
   cache::ResourceCharge metadata;
 
   Impl(std::shared_ptr<TextModelRunner> runner, std::size_t count,
@@ -2934,6 +2936,56 @@ std::size_t ComponentTextCache::ReclaimableStateBytes() const {
       bytes += entry->busy ? entry->account->tail_bytes()
                            : entry->account->charged_bytes();
   return bytes;
+}
+
+std::size_t ComponentTextCache::RelieveHostPressure(
+    const ext::HostMemorySample& sample) {
+  auto& impl = *impl_;
+  const auto shortfall = ext::HostReserveShortfallBytes(sample);
+  if (!shortfall) {
+    impl.host_pressure_reported = false;
+    return 0;
+  }
+  if (!impl.ram_enabled || !impl.resources->release_host)
+    return 0;
+  const auto want = static_cast<std::size_t>(
+      std::min<std::uint64_t>(shortfall + kHostPressureReliefBytes,
+                              std::numeric_limits<std::size_t>::max()));
+  const auto start = Clock::now();
+  std::size_t released = 0, evicted = 0;
+  for (;;) {
+    released += impl.resources->release_host(want - released);
+    if (released >= want)
+      break;
+    // Free whole units by evicting the least valuable checkpoint, as when
+    // sessions borrow the cache's pages back.
+    impl.DiscardUnusedFrontierWrites();
+    bool reclaimed;
+    {
+      const std::lock_guard lock(impl.mutex);
+      reclaimed = impl.retention.Reclaim(cache::RetentionRequest{});
+    }
+    impl.DrainDemotion();
+    if (!reclaimed)
+      break;
+    ++evicted;
+  }
+  // Once per pressure episode when nothing more can go; each release.
+  if (released || evicted || !impl.host_pressure_reported) {
+    impl.host_pressure_reported = true;
+    Logger::Warn("cache",
+                 "schema=component-cache-v1 event=host_pressure_release "
+                 "shortfall_bytes=" +
+                     std::to_string(shortfall) +
+                     " wanted_bytes=" + std::to_string(want) +
+                     " released_bytes=" + std::to_string(released) +
+                     " evicted=" + std::to_string(evicted) + " ms=" +
+                     std::to_string(std::chrono::duration<double, std::milli>(
+                                        Clock::now() - start)
+                                        .count()) +
+                     " " + ext::DescribeHostMemory(sample));
+  }
+  return released;
 }
 
 bool ComponentTextCache::ReclaimState(std::size_t bytes,

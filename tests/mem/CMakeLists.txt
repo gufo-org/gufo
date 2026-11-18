@@ -41,4 +41,10 @@ if (ENGINE_ENABLE_HIP)
   add_test(NAME mem_cache_lending_test COMMAND mem_cache_lending_test)
   set_tests_properties(mem_cache_lending_test PROPERTIES
     LABELS "mem;hip;gpu;gfx1151" TIMEOUT 120)
+  add_executable(mem_cache_surrender_test cache_surrender_test.cpp)
+  target_link_libraries(mem_cache_surrender_test PRIVATE gufo_cache_hip gufo_mem_hip)
+  target_compile_options(mem_cache_surrender_test PRIVATE -UNDEBUG)
+  add_test(NAME mem_cache_surrender_test COMMAND mem_cache_surrender_test)
+  set_tests_properties(mem_cache_surrender_test PROPERTIES
+    LABELS "mem;hip;gpu;gfx1151" TIMEOUT 120)
 endif()

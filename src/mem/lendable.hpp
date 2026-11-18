@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace gufo::mem {
@@ -44,6 +45,19 @@ public:
   /// stay with the sessions that map them.
   virtual void SetOwner(Select select, Restore restore) = 0;
   virtual void ClearOwner() = 0;
+  /// Pages Decommit() gave back, and pages it could not unmap and retired:
+  /// those have no CPU view any more and must never be used or committed
+  /// again. Every other page passed in stays committed.
+  struct Decommitted {
+    std::vector<std::size_t> released;
+    std::vector<std::size_t> retired;
+  };
+  /// Gives committed pages back to the driver, and so to the host; Commit()
+  /// can back released pages again. The owner must not use them meanwhile.
+  /// Unmapping waits until no GPU work is in flight, so call it only while
+  /// the device is idle: beside running work it waited 0.05-15 s per page.
+  [[nodiscard]] virtual Decommitted Decommit(
+      std::span<const std::size_t> pages) = 0;
 };
 
 using LendableRangeFactory = std::shared_ptr<LendableRange> (*)(std::size_t);

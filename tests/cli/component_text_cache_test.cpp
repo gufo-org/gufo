@@ -19,6 +19,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 #include "src/cache/disk.hpp"
 #include "src/cache/retention.hpp"
@@ -54,6 +55,8 @@ public:
   mutable FakeAdapter* adapter{};
   mutable std::size_t captures{};
   std::function<void()> on_bind;
+  // Installed as the resources' release_host when set (#932).
+  std::function<std::size_t(std::size_t)> release_host;
   bool defer_idle{};
   bool check_capacity{};
   bool in_pass{};
@@ -115,13 +118,16 @@ public:
                                    window_rows, ring_rows, private_state)
                              : std::make_unique<FakeAdapter>(rows_per_chunk);
     adapter = owned.get();
-    return server::testing::MakeFakeCacheResources(
+    auto resources = server::testing::MakeFakeCacheResources(
         ledger, std::move(owned),
         {.private_blocks = private_blocks,
          .row_backing_bytes = row_backing_bytes,
          .defer_idle = &defer_idle,
          .captures = &captures,
          .check_capacity = check_capacity});
+    if (release_host)
+      resources->release_host = release_host;
+    return resources;
   }
   std::unique_ptr<TextRunnerState> BindComponentState(
       cache::Adapter& adapter, cache::Slot& slot) const override {
@@ -740,6 +746,67 @@ void GridCheckpointsCaptureInPass() {
   Prefill(restored);
   assert(Generate(restored) == expected);
   restored.Invalidate();
+}
+// Host pressure from other processes (#932): the idle pool gives RAM-cache
+// memory back only when the host is short of its reserve; it evicts
+// checkpoints only while what it can release does not cover the shortfall,
+// and stops when nothing is left to evict.
+void HostPressureReleasesRamCache() {
+  constexpr std::uint64_t gib = std::uint64_t{1} << 30;
+  std::vector<TextRunnerToken> prompt(4000);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto branch = prompt;
+  branch[3000] = 999;
+  auto runner = std::make_shared<Runner>();
+  runner->in_pass = true;
+  runner->max_in_pass_tail = std::numeric_limits<std::size_t>::max();
+  std::size_t calls = 0, asked = 0;
+  std::size_t releasable = 0;
+  runner->release_host = [&](std::size_t bytes) {
+    ++calls;
+    asked = bytes;
+    return std::exchange(releasable, 0);
+  };
+  TextRunnerPool pool(runner, 2);
+  std::uint64_t available = 64 * gib;
+  pool.SetHostSampler(
+      [&] { return ext::HostMemorySample{.available = available}; });
+  auto seed =
+      pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true, 3990);
+  Prefill(seed);
+  (void)Generate(seed);
+  (void)seed.Commit();
+  const auto cached = [&] {
+    auto lease =
+        pool.Acquire(branch, sampling::SamplingConfig{}, {}, {}, true, 3990);
+    const auto tokens = lease.cached_prompt_tokens();
+    lease.Invalidate();
+    return tokens;
+  };
+  assert(cached() == 2048);
+
+  // Above the reserve: nothing is asked.
+  pool.Idle();
+  assert(calls == 0);
+  // 1 GiB short, and the provider can release that plus the relief at once:
+  // no checkpoint goes.
+  available = 3 * gib;
+  releasable = 3 * gib;
+  pool.Idle();
+  assert(calls == 1 &&
+         asked == gib + ComponentTextCache::kHostPressureReliefBytes);
+  assert(cached() == 2048);
+  // Nothing releasable: checkpoints are evicted one at a time, asking again
+  // after each, until none is left.
+  calls = 0;
+  pool.Idle();
+  assert(calls >= 2);
+  assert(cached() == 0);
+  // Pressure persists with nothing left: one more ask per idle tick, no
+  // eviction to make.
+  calls = 0;
+  pool.Idle();
+  assert(calls == 1);
 }
 // A second question about a long document diverges inside the first
 // question, below its persisted prompt checkpoint. The deepest grid far enough
@@ -4491,6 +4558,7 @@ int main() {
   UnalignedRawPromptKeepsAnAlignedContinuation();
   DisabledCacheDoesNotPrepareARawPromptCheckpoint();
   GridCheckpointsCaptureInPass();
+  HostPressureReleasesRamCache();
   PersistedGridServesAnotherQuestionAfterRestart();
   PromptTargetBeforeGridKeepsItsPurpose();
   ColdAcquireResetsOnce();

@@ -131,6 +131,47 @@ public:
     owner_.reset();
   }
 
+  Decommitted Decommit(std::span<const std::size_t> pages) override {
+    Decommitted result;
+    const std::lock_guard lock(mutex_);
+    auto& ledger = StateLedger::Process();
+    for (const std::size_t p : pages) {
+      if (p >= pages_ || state_[p] != State::kCommitted)
+        continue;
+      std::byte* page = base_ + p * kPageBytes;
+      // The CPU view first, then the GPU mapping: the page's memory goes
+      // back to the driver only once both are gone.
+      platform::UnmapDeviceFileAt(page, kPageBytes);
+      if (hipMemUnmap(page, kPageBytes) != hipSuccess) {
+        (void)hipGetLastError();
+        // Still mapped for the GPU: give the CPU its view back and keep the
+        // page. Without one the owner must never use it again, so it is
+        // reported released and stays retired here.
+        int fd = -1;
+        if (hipMemExportToShareableHandle(&fd, handles_[p],
+                                          hipMemHandleTypePosixFileDescriptor,
+                                          0) == hipSuccess &&
+            platform::MapDeviceFileAt(page, kPageBytes, fd))
+          continue;
+        (void)hipGetLastError();
+        state_[p] = State::kRetired;
+        ledger.RemoveLendable(kPageBytes);
+        result.retired.push_back(p);
+        continue;
+      }
+      const auto handle = handles_[p];
+      pool_->ClearHome(handle);
+      index_.erase(handle);
+      (void)hipMemRelease(handle);
+      (void)hipGetLastError();
+      handles_[p] = {};
+      state_[p] = State::kAbsent;
+      ledger.RemoveLendable(kPageBytes);
+      result.released.push_back(p);
+    }
+    return result;
+  }
+
   std::size_t Lend(std::size_t pages,
                    std::vector<hipMemGenericAllocationHandle_t>& out) override {
     const auto owner = Current();
@@ -172,7 +213,8 @@ public:
   }
 
 private:
-  enum class State : std::uint8_t { kAbsent, kCommitted, kLent };
+  // kRetired: a decommit that could not unmap the page; never used again.
+  enum class State : std::uint8_t { kAbsent, kCommitted, kLent, kRetired };
   struct Owner {
     Select select;
     Restore restore;
