@@ -255,6 +255,48 @@ uncached experts without a router read 3.6 times the demand volume on
 DeepSeek and was rejected. Only DeepSeek has shaped these calls, so they may
 change. Gemma doesn't prefetch yet.
 
+**The window is one layer.** When `Prepare(L)` starts, `Prefetch` and
+`Predict` accept only layer `L + 1`; any other layer returns false.
+Prefetched bytes go to a stage of two halves chosen by layer parity: while
+layer L's kernels read their misses from one half, a prediction for L + 1
+fills the other. A prediction for L + 2 would overwrite the half L is still
+reading. The reader pool matches: one background job and one parked job.
+
+One layer of lead is enough for DeepSeek, but likely not for other shapes.
+The GGUF headers of two other mixture-of-experts models show why:
+
+| | Qwen3.8 Flash-Next Q8_0 | GLM 5.3 Flash UD-Q4_K_XL |
+|---|---|---|
+| MoE layers, experts, active | 48, 512, 10 | 42 + MTP, 288, 8 |
+| Bytes per expert-layer | 4.98 MiB | 14.5–17.6 MiB |
+| Routed experts | 119.5 GiB | 176.8 GiB |
+
+Both store their experts as `Layout` already describes: three stacked
+tensors per layer, each expert one contiguous slice, with sizes varying by
+layer and tensors split across files. Flash-Next's layers are narrow
+(hidden size 2560), so one layer's compute is probably shorter than one
+expert read, and prefetch would need to start 2–4 layers ahead (an estimate,
+not measured). Predictions made once per token, such as the previous token's
+routes or a draft model's routing, cover every layer at once.
+
+The signatures can stay: both calls already take the target layer. A
+`Policy` field would set the window W, accepting `L + 1 … L + W`, with W = 1
+keeping today's behaviour. Two ways to support it:
+
+- **More stage regions.** W + 1 regions in a ring and one job per target
+  layer. A wrong prediction still evicts nothing, but staging grows with W:
+  each region holds `prefetch_stage_rows` experts, 478 MiB on Flash-Next and
+  1.6 GiB on GLM, taken from the cache.
+- **Prefetch into the cache.** Predicted experts are admitted to cache slots
+  in the lowest frequency class, so a wrong prediction is evicted first and a
+  right one is a plain hit. No staging, so W can span the model. `Prepare`
+  must wait on an expert whose read is still running, as it already waits on
+  adopted stage rows.
+
+The second covers both a few layers of lead and per-token predictions;
+keeping the two-region path for W = 1 leaves DeepSeek's measured behaviour
+unchanged. `Expect`, `PredictFlush` and `wide` stay as they are.
+
 ### Reads and platforms
 
 Files and reads go through `src/core/platform/`. The store reopens each
