@@ -418,8 +418,9 @@ struct TextRunnerPool::Impl {
 
   // Under pressure the expert cache gives memory back first: its coldest
   // experts cost less than the prompt cache's checkpoints, and it is the
-  // largest holder. It is restored to its grant once the memory is back
-  // well above the floor. Updates `sample` after a release.
+  // largest holder. It is restored to its grant once what it gave back is
+  // free again: more than the floor, the released bytes and a margin are
+  // available. Updates `sample` after a release.
   void RelieveExperts(ext::HostMemorySample& sample, std::uint64_t reserve) {
 #if defined(ENGINE_ENABLE_HIP)
     auto* store = validated.resources.expert_cache.store;
@@ -447,7 +448,9 @@ struct TextRunnerPool::Impl {
       return;
     }
     expert_pressure_reported = false;
-    if (sample.available > reserve + 2 * relief)
+    const auto released = store->ReleasedBytes();
+    if (released &&
+        sample.available > reserve + released + kExpertRestoreMarginBytes)
       if (const auto raised = store->Restore())
         Logger::Info("cache",
                      "schema=component-cache-v1 event=expert_cache_restore "
@@ -460,6 +463,8 @@ struct TextRunnerPool::Impl {
 #endif
   }
   bool expert_pressure_reported{};
+  static constexpr std::uint64_t kExpertRestoreMarginBytes = std::uint64_t{256}
+                                                             << 20;
   ValidatedRunner validated;
   // Declared before the cache: the cap outlives the sessions' regions.
   SharedStateCap shared_state_cap;

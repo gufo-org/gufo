@@ -169,6 +169,8 @@ public:
    * misses need it, while more than FloorBytes stay available. Returns the
    * bytes the limit rose by. */
   uint64_t Restore();
+  /* Bytes Release freed since Fit or the last Restore. */
+  uint64_t ReleasedBytes() const;
   /* Free memory below which the cache stops growing: Policy::reserve_bytes
    * before Fit, Policy::live_floor_bytes after it. */
   uint64_t FloorBytes() const;

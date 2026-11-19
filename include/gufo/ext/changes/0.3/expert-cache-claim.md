@@ -26,7 +26,8 @@ with the RAM prompt cache.
   the host reserve while experts stream: the expert cache fills the host down
   to that floor on purpose. Below it, the idle scheduler releases experts
   first (`Store::Release`, logged as `event=expert_cache_release`), then
-  prompt-cache memory; once memory is back well above the floor,
+  prompt-cache memory; once what it gave back is free again (the floor plus
+  `Store::ReleasedBytes()` and 256 MiB available),
   `Store::Restore` lets the expert cache regrow to its grant
   (`event=expert_cache_restore`). New requests are refused below half the
   floor.

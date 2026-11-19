@@ -305,7 +305,8 @@ void OnePieceLayout(int32_t* routes) {
   // Release frees whole chunks (here the only one) and holds the cache
   // there: misses still read correctly and nothing is cached.
   const uint64_t held = store->GetStats().cache_bytes;
-  Check(store->Release(1) == held && store->GetStats().cache_bytes == 0,
+  Check(store->Release(1) == held && store->GetStats().cache_bytes == 0 &&
+            store->ReleasedBytes() == held,
         "one-piece release frees the chunk");
   for (int pass = 0; pass < 2; ++pass)
     Check(run.Run(1, {5, 7}), "one-piece bytes after release");
@@ -313,7 +314,8 @@ void OnePieceLayout(int32_t* routes) {
   Check(released.cache_bytes == 0, "one-piece release holds the cache");
   Check(store->Release(1) == 0, "one-piece release of an empty cache");
   // Restore lets misses refill it, within the grant.
-  Check(store->Restore() > 0 && store->Restore() == 0,
+  Check(store->Restore() > 0 && store->Restore() == 0 &&
+            store->ReleasedBytes() == 0,
         "one-piece restore raises the limit once");
   Check(run.Run(1, {5, 7}) && run.Run(1, {5, 7}) &&
             store->GetStats().hits == released.hits + 2,

@@ -646,6 +646,7 @@ struct Store::Impl {
   bool granted = false;  // Fit ran: the host sized the cache
   uint64_t granted_limit = 0;  // the cache's limit from Fit; Release lowers
                                // cache_limit below it until Restore
+  uint64_t released = 0;       // freed by Release since Fit or Restore
   /* The last ranking given to Seed, which Fit seeds again. */
   std::vector<Ranked> seed_ranking;
   std::string seed_source;
@@ -2151,6 +2152,7 @@ uint64_t Store::Release(uint64_t bytes) {
   const uint64_t before = store->stats.cache_bytes;
   (void)store->shrink_to(before > bytes ? before - bytes : 0);
   store->cache_limit = std::min(store->cache_limit, store->stats.cache_bytes);
+  store->released += before - store->stats.cache_bytes;
   return before - store->stats.cache_bytes;
 }
 
@@ -2161,7 +2163,12 @@ uint64_t Store::Restore() {
     return 0;
   const uint64_t raised = store->granted_limit - store->cache_limit;
   store->cache_limit = store->granted_limit;
+  store->released = 0;
   return raised;
+}
+
+uint64_t Store::ReleasedBytes() const {
+  return impl_->released;
 }
 
 uint64_t Store::FloorBytes() const {
@@ -2216,6 +2223,7 @@ bool Store::Fit(uint64_t grant_bytes) {
     limit = std::min(limit, store->requested_limit);
   store->cache_limit = limit;
   store->granted_limit = limit;
+  store->released = 0;
   const bool shrunk = store->shrink_to(limit);
   // Seed takes the ranking by value and records it again.
   const std::string source = store->seed_source;
