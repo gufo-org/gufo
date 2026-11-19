@@ -37,9 +37,10 @@ struct ComponentCacheResources {
   StagingAllocator staging;
   // Prepare on-demand backing immediately before the next prefill chunk.
   std::function<void(std::size_t)> prepare_prefill;
-  // Optional: prepare free backing for a capture of about this many payload
-  // bytes off the calling thread. A disk restore asks for its checkpoint's
-  // bytes before it starts, since the capture that follows needs them all.
+  // Optional: prepare free backing for captures of about this many payload
+  // bytes off the calling thread. A disk restore asks before it starts for
+  // its checkpoint's bytes plus those of restores not captured yet, since
+  // the capture after each one needs its whole checkpoint.
   std::function<void(std::size_t)> prepare_capture;
   // Optional capacity bound before assigning a complete capture. False takes
   // the ordinary reclamation path; true still requires every allocation.

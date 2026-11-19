@@ -1433,25 +1433,42 @@ void DiskRestorePreparesCaptureBacking() {
                                         .staging_capacity_bytes = 1 << 12,
                                         .min_checkpoint_step_tokens = 0};
   auto runner = std::make_shared<CaptureRunner>();
-  std::vector<TextRunnerToken> prompt(96);
+  std::vector<TextRunnerToken> prompt(96), other(96);
   std::iota(prompt.begin(), prompt.end(), 10);
+  std::iota(other.begin(), other.end(), 200);
   {
     TextRunnerPool pool(runner, 1, disk);
-    auto request = pool.Acquire(prompt);
-    while (!request.Prefill(64).decode_ready) {
+    for (const auto& tokens : {prompt, other}) {
+      auto request = pool.Acquire(tokens);
+      while (!request.Prefill(64).decode_ready) {
+      }
+      (void)request.Commit();
+      auto cached = pool.Acquire(tokens);
+      assert(!cached.cache_disk_hit());
+      cached.Invalidate();
     }
-    (void)request.Commit();
-    auto cached = pool.Acquire(prompt);
-    assert(!cached.cache_disk_hit());
-    cached.Invalidate();
     assert(runner->prepared.empty());
   }
-  TextRunnerPool restarted(runner, 1, disk);
+  TextRunnerPool restarted(runner, 2, disk);
   auto restored = restarted.Acquire(prompt);
   assert(restored.cache_disk_hit() && restored.cached_prompt_tokens() > 0);
-  assert(runner->prepared.size() == 1 && runner->prepared.front() != 0 &&
-         runner->prepared.front() == restored.cache_restore_bytes());
+  const auto first = restored.cache_restore_bytes();
+  assert(runner->prepared.size() == 1 && first != 0 &&
+         runner->prepared.front() == first);
+  // A second restore before the first one's capture asks for both: the
+  // provider's free backing must hold the two captures together.
+  auto second = restarted.Acquire(other);
+  assert(second.cache_disk_hit());
+  assert(runner->prepared.size() == 2 &&
+         runner->prepared.back() == first + second.cache_restore_bytes());
+  // A restore that ends uncaptured no longer counts.
   restored.Invalidate();
+  second.Invalidate();
+  auto again = restarted.Acquire(other);
+  assert(again.cache_disk_hit());
+  assert(runner->prepared.size() == 3 &&
+         runner->prepared.back() == again.cache_restore_bytes());
+  again.Invalidate();
 }
 
 void PartialFrontierDoesNotServeAnEqualPrompt() {

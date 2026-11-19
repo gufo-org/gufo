@@ -2,9 +2,10 @@
 
 Additive: `cache::ComponentCacheResources` (`src/cache/component_resources.hpp`)
 gains an optional `prepare_capture(bytes)` hook. The component cache calls it
-with a disk checkpoint's payload bytes when a disk warm-up starts and before a
-disk restore, because the capture after that restore shares no RAM chunks and
-needs backing for the whole checkpoint. The HIP provider grows its committed
+when a disk warm-up starts and before a disk restore, with the payload bytes of
+that checkpoint plus those of restores still reading or not captured yet,
+because the capture after each restore shares no RAM chunks and needs backing
+for its whole checkpoint. The HIP provider grows its committed
 backing toward that many free bytes on its own thread, so the capture no longer
 commits backing segments on the serving thread.
 
