@@ -33,6 +33,8 @@ constexpr std::string_view kUsage =
     "Commands:\n"
     "  list [--json]        List every model, the extension that offers it\n"
     "                       and what is installed\n"
+    "      --registry         Also list the models of reviewed registry\n"
+    "                         extensions that are not installed\n"
     "  install <ID>         Download a model\n"
     "      --component ROLE   Install this optional component as well;\n"
     "                         repeat for several. Without it, the default\n"
@@ -321,8 +323,8 @@ int Verify(const std::vector<std::string>& ids) {
   return status;
 }
 
-int List(bool json_mode) {
-  const auto models = catalog::Load();
+int List(bool json_mode, bool registry) {
+  const auto models = catalog::Load(registry);
   const auto directory = store::StoreDirectory();
   const auto installed = store::Read(directory);
   struct Row {
@@ -339,11 +341,15 @@ int List(bool json_mode) {
     Row row{model.id,          model.extension,
             model.description, Size(Defaults(model)),
             "available",       &model};
+    if (model.extension_status == "not installed")
+      row.status = "extension not installed";
     const auto found =
         std::ranges::find(installed, model.id, &store::Installed::id);
     if (found != installed.end()) {
       row.installed = &*found;
-      row.status = Current(*found, model) ? "installed" : "update available";
+      row.status = model.components.empty() || Current(*found, model)
+                       ? "installed"
+                       : "update available";
     }
     rows.push_back(std::move(row));
   }
@@ -369,6 +375,10 @@ int List(bool json_mode) {
       entry["extension"] = row.extension;
       entry["description"] = row.description;
       entry["status"] = row.status;
+      entry["downloadable"] =
+          row.model != nullptr && !row.model->components.empty();
+      entry["extensionStatus"] =
+          row.model != nullptr ? row.model->extension_status : "not installed";
       if (row.model != nullptr) {
         entry["extensionVersion"] = row.model->extension_version;
         entry["provider"] = row.model->provider;
@@ -432,6 +442,13 @@ int List(bool json_mode) {
               << pad(row.size > 0 ? Bytes(row.size) : "", 8)
               << pad(row.status, status_width) << row.description << "\n";
   }
+  if (std::ranges::any_of(rows, [](const Row& row) {
+        return row.model != nullptr &&
+               row.model->extension_status == "not installed";
+      }))
+    std::cout << "\nInstall an extension with gufo extension install "
+                 "<extension>. Models\nwithout a size pin no download; pass "
+                 "their weights to --model.\n";
   return 0;
 }
 
@@ -461,11 +478,14 @@ int RunModel(std::span<const char* const> args) {
     std::vector<std::string> positional;
     std::vector<std::string> roles;
     bool json_mode = false;
+    bool registry = false;
     for (std::size_t i = 0; i < rest.size(); ++i) {
       const std::string_view arg = rest[i];
       const bool has_value = i + 1 < rest.size();
       if (arg == "--json" && command == "list")
         json_mode = true;
+      else if (arg == "--registry" && command == "list")
+        registry = true;
       else if (arg == "--component" && command == "install" && has_value)
         roles.emplace_back(rest[++i]);
       else if (arg == "--connections" &&
@@ -479,8 +499,9 @@ int RunModel(std::span<const char* const> args) {
     }
     if (command == "list") {
       if (!positional.empty())
-        throw std::runtime_error("usage: gufo model list [--json]");
-      return List(json_mode);
+        throw std::runtime_error(
+            "usage: gufo model list [--json] [--registry]");
+      return List(json_mode, registry);
     }
     if (command == "install") {
       if (positional.size() != 1)

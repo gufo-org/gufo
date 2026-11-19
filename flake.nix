@@ -685,14 +685,35 @@
           h3-quality = h3QualityCheck;
           h3-ml-quality = h3MlQualityCheck;
           tests = testCheck;
+          model-sync =
+            assert import ./.devops/nix/model-sync-tests.nix {
+              pkgs = pkgsSys;
+              defaultPackage = self.packages.${system}.default;
+            };
+            pkgsSys.runCommand "check-model-sync" { nativeBuildInputs = [ pkgsSys.python3 ]; } ''
+              cp ${./.devops/nix/model-sync-tests.py} model-sync-tests.py
+              cp ${./.devops/nix/model-sync.py} model-sync.py
+              python3 model-sync-tests.py
+              touch $out
+            '';
           mk-serve = mkServeCheck;
           mk-serve-nixos = mkServeNixosCheck;
         }
       );
     in
     {
+      nixosModules.model-sync = import ./.devops/nix/model-sync-module.nix { inherit self; };
       lib = {
         inherit releaseVersion revision;
+        mkModelSync =
+          {
+            pkgs,
+            gufo ? self.packages.${pkgs.stdenv.hostPlatform.system}.default,
+            ...
+          }@args:
+          pkgs.callPackage ./.devops/nix/mk-model-sync.nix { inherit gufo; } (
+            builtins.removeAttrs args [ "pkgs" "gufo" ]
+          );
         mkGufoServe =
           {
             pkgs ? null,
