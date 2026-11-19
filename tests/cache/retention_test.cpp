@@ -384,8 +384,9 @@ std::vector<Token> Conversation(Token first, std::size_t size) {
 }
 void CheapCheckpointsGiveWayFirst() {
   // An idle deep conversation outlives newer short requests (cache-pressure
-  // idle resume). Retry copies still go before any cheap checkpoint.
-  PressureFixture f;
+  // idle resume) once a sixteenth of the budget was admitted after them: here
+  // under one checkpoint. Retry copies still go before any cheap checkpoint.
+  PressureFixture f(16 * 4096);
   const auto idle = f.Add(Conversation(1, 16));
   const auto first = f.Add(Conversation(2, 7));
   const auto second = f.Add(Conversation(3, 7));
@@ -401,6 +402,20 @@ void CheapCheckpointsGiveWayFirst() {
   assert(f.Reclaim() == first && f.Reclaim() == second);
   assert(f.Reclaim() == idle);
 }
+// A new short conversation keeps its recency until a sixteenth of the budget
+// is admitted after it. The next unrelated request then evicts a stale deep
+// conversation instead, and the short one's follow-up still reuses its
+// checkpoint (tool-mixed after the cache suites filled RAM).
+void NewShortConversationKeepsRecency() {
+  PressureFixture f;
+  const auto idle = f.Add(Conversation(1, 16));
+  const auto other = f.Add(Conversation(2, 16));
+  const auto fresh = f.Add(Conversation(3, 7));
+  assert(f.Reclaim() == idle);
+  assert(f.Cached(Conversation(3, 7)) == 7);
+  assert(f.Reclaim() == other);
+  assert(f.Reclaim() == fresh);
+}
 // A window is a fixed cost per checkpoint, like private state: conversations
 // whose window outweighs eight times their rows give way first. Rows of 64
 // bytes and a 32-row window of 1,024-byte rows: cheap below 64 tokens.
@@ -410,7 +425,10 @@ void ShortWindowCheckpointsAreCheap() {
       {{2}, 1, ComponentKind::kWindowRows, 1024, 4, 0, 32},
       {{3}, 1, ComponentKind::kPrivateState, 0, 0, 4},
   }};
-  ResourceLedger ledger({1ULL << 30, 1ULL << 30, 0, 1ULL << 30});
+  // A sixteenth of this budget is under one short checkpoint, so each one
+  // ages out of its grace window when the next is admitted.
+  constexpr std::size_t kRam = 16 * 16384;
+  ResourceLedger ledger({kRam, kRam, 0, kRam});
   {
     PrefixIndex index{ledger};
     index.Register({1}, kWindowed);
@@ -447,18 +465,21 @@ void ShortWindowCheckpointsAreCheap() {
     const auto idle = add(Conversation(1, 80));
     const auto first = add(Conversation(2, 16));
     const auto second = add(Conversation(3, 16));
+    const auto newest = add(Conversation(4, 16));
     assert(reclaim() == first && reclaim() == second);
     assert(reclaim() == idle);
+    assert(reclaim() == newest);
   }
   assert(ledger.Snapshot().total_bytes == 0);
 }
 void ReusedCheapCheckpointKeepsRecency() {
   // A short checkpoint restored one request ago is not cheap any more: its
   // next turn would be a full miss (state-edges). It competes by recency.
-  PressureFixture f;
+  // The other short conversation is older than its grace window.
+  PressureFixture f(16 * 4096);
   const auto idle = f.Add(Conversation(1, 16));
-  const auto restored = f.Add(Conversation(2, 7));
   const auto other = f.Add(Conversation(3, 7));
+  const auto restored = f.Add(Conversation(2, 7));
   f.policy.Touch(restored);
   assert(f.Reclaim() == other);
   assert(f.Reclaim() == idle);
@@ -1408,6 +1429,7 @@ int main() {
   HistoryBytePressureCanReplaceOldFamilies();
   CurrentTurnKeepsItsEditBoundaries();
   CheapCheckpointsGiveWayFirst();
+  NewShortConversationKeepsRecency();
   ReusedCheapCheckpointKeepsRecency();
   PersistingCheckpointIsNotAVictim();
   RetryCopyReplacesItsNearbySource();

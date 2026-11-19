@@ -279,6 +279,13 @@ When space is needed, RAM retention prefers removing:
    share, not an older turn, and never counts as covered.
 4. Remaining checkpoints, oldest-used first within each priority.
 
+Under byte pressure, a short checkpoint whose fixed state costs more than
+eight times its rows is cheap to prefill again and leaves before idle deep
+conversations, but only once a sixteenth of the RAM budget was admitted after
+its conversation's last use. Until then it competes by recency, so the next
+unrelated request evicts a stale conversation instead of the newest one, and
+that conversation's follow-up still reuses its checkpoint.
+
 Under entry pressure, an edited branch can first replace its incompatible
 tail, preserving earlier shared checkpoints. Optional history/retry copies
 are skipped rather than removing another prefix family's last useful copy.
