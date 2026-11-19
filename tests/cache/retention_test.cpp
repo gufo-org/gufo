@@ -577,6 +577,38 @@ void ResumedRetryReclaimsCoveredHistory() {
   // remain protected even if a full-prompt retry would still need more space.
   assert(!f.policy.Reclaim(request));
 }
+// An unchanged retry resumed from its stable boundary would save only the
+// framing with a full-prompt copy. It must not evict the conversation's own
+// grid below that boundary: an edit of the last turn resumes there
+// (cache-edits after cache-filling suites). Its source may still advance.
+void ShortRetryKeepsItsOwnEditHistory() {
+  for (const bool source_protected : {true, false}) {
+    PressureFixture f;
+    const auto other = Conversation(1, 16);
+    f.Add(other);
+    const auto current = Conversation(2, 16);
+    const auto grid = f.Add({current.begin(), current.begin() + 8},
+                            RetentionPurpose::kHistory);
+    const auto stable = f.Add(current);
+    auto prompt = current;
+    prompt.push_back(5);
+    RetentionRequest request{prompt, {1}, {}, RetentionPurpose::kRetry, 16};
+    request.reused = true;
+    request.reused_tokens = current.size();
+    request.source = stable;
+    const std::array protected_ids{stable};
+    if (source_protected)
+      request.protected_checkpoints = protected_ids;
+    assert(f.policy.Reclaim(request) != source_protected);
+    if (!source_protected)
+      assert(f.log.events.back().checkpoint == stable);
+    auto edited = current;
+    edited.back() = 999;
+    assert(f.Cached(edited) == 8);
+    assert(f.Cached(other) == other.size());
+    (void)grid;
+  }
+}
 void LongResumedRetryReclaimsOnlyOwnAncestors() {
   for (const bool named_source : {false, true}) {
     PressureFixture f;
@@ -1412,6 +1444,7 @@ int main() {
   PersistingCheckpointIsNotAVictim();
   RetryCopyReplacesItsNearbySource();
   ResumedRetryReclaimsCoveredHistory();
+  ShortRetryKeepsItsOwnEditHistory();
   LongResumedRetryReclaimsOnlyOwnAncestors();
   SharedShortPrefixIsNotCheap();
   UnreusedConversationKeepsItsStem();

@@ -474,9 +474,10 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
       Prefix(records_[source].checkpoint->Tokens(), r.tokens);
   const auto eligible = [&](std::size_t i) {
     // Byte admission for an edit boundary must not starve behind last copies
-    // of older families. A short resumed tail may also replace covered history
-    // to retain its complete retry state; faster captures can otherwise fill
-    // the pool with older ancestors before this final boundary is reached.
+    // of older families. A short resumed tail may also replace other
+    // conversations' covered history to retain its complete retry state;
+    // faster captures can otherwise fill the pool with older ancestors before
+    // this final boundary is reached.
     // Retry admission still protects last copies, forks and current edit
     // boundaries. A larger resumed turn can reclaim its own covered prefix
     // history, without taking another conversation's history for compaction.
@@ -497,9 +498,19 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
         (records_[i].checkpoint->Purpose() != CheckpointPurpose::kGenerated ||
          records_[i].frontier_used || records_[i].forked || Branch(i)))
       return false;
+    const auto& checkpoint = *records_[i].checkpoint;
+    // A short resumed tail's copy saves at most the retry framing, which the
+    // stable boundary it resumed from already restores. Its own conversation's
+    // history below that boundary is what an edit of the last turn resumes
+    // from, so the copy never displaces it; only last-resort rank-0 copies.
+    if (resumed_tail && r.purpose == RetentionPurpose::kRetry && level > 0 &&
+        checkpoint.Compatibility() == r.compatibility &&
+        checkpoint.Input() == r.input &&
+        checkpoint.Boundary() <= r.reused_tokens &&
+        Prefix(checkpoint.Tokens(), r.tokens))
+      return false;
     if (level <= maximum)
       return true;
-    const auto& checkpoint = *records_[i].checkpoint;
     return !record_pressure && r.purpose == RetentionPurpose::kRetry &&
            r.reused && r.reused_tokens && r.reused_tokens <= r.tokens.size() &&
            level <= 2 && checkpoint.Boundary() <= r.reused_tokens &&
