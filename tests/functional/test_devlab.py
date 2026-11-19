@@ -593,6 +593,25 @@ class GpuTestsTest(unittest.TestCase):
 
 
 class TimingTest(unittest.TestCase):
+    def test_service_arms_alternate_which_revision_goes_first(self):
+        # Always running main first would bias every repeat the same way.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'assets.json').write_text('{}')
+            argv = ['service_phases.py', '--base-binary', '/base', '--head-binary', '/head',
+                    '--assets', str(root / 'assets.json'), '--logs', str(root / 'logs'),
+                    '--output', str(root / 'out.json'), '--model-id', 'qwen3-asr',
+                    '--base-revision', 'a', '--head-revision', 'b', '--repeats', '4']
+            with patch.object(sys, 'argv', argv), \
+                    patch('service_phases.measure_arm', return_value={}), \
+                    patch('service_phases.gpu_temperature', return_value=None), \
+                    patch('service_phases.summarize', return_value=([], [])):
+                service_phases.main()
+            arms = json.loads((root / 'out.json').read_text())['arms']
+        self.assertEqual([arm['revision'] for arm in arms],
+                         ['base', 'head', 'head', 'base', 'base', 'head', 'head', 'base'])
+        self.assertEqual([arm['repeat'] for arm in arms], [0, 0, 1, 1, 2, 2, 3, 3])
+
     def arms(self):
         return [{'revision': side, 'startup': {'init': 1, 'weights': 100,
                  'vision': None, 'structured': None, 'listen': 1},

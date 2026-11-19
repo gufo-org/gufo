@@ -354,7 +354,10 @@ def main():
     started = time.perf_counter()
     arms = []
     for repeat in range(args.repeats):
-        for revision in ("base", "head"):
+        # Alternate which revision goes first: an order effect (the page cache,
+        # memory the previous arm is still returning) then moves the repeats in
+        # opposite directions and reads as noise, never as a slowdown.
+        for revision in ("base", "head") if repeat % 2 == 0 else ("head", "base"):
             temperature = cool_down(target) if target is not None else None
             print(f"Arm {revision} #{repeat + 1}: GPU {temperature} °C", flush=True)
             arm_started = time.perf_counter()

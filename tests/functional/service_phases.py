@@ -215,7 +215,8 @@ def main():
         time.sleep(30)
         idle = gpu_temperature()
     for repeat in range(args.repeats):
-        for side in ('base', 'head'):
+        # Alternate which revision goes first, as phases.py does.
+        for side in ('base', 'head') if repeat % 2 == 0 else ('head', 'base'):
             if side == 'base' and unsupported:
                 arms.append({'revision': side, 'repeat': repeat, 'unsupported': unsupported})
                 continue
