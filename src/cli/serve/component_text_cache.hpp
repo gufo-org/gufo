@@ -87,6 +87,11 @@ public:
   // the budget plus those pins, within the host ceiling. With `ram_enabled`
   // false, ram_bytes is ignored: no checkpoint stays in RAM and no backing is
   // committed, unless a disk cache needs some to stage captures.
+  /// Runs a restore's copies (cache::RestoreCopyRunner), told how long they
+  /// would stop the calling thread.
+  using RestoreRunner =
+      std::function<void(std::chrono::microseconds inline_estimate,
+                         const std::function<void()>& copies)>;
   ComponentTextCache(std::shared_ptr<TextModelRunner>, std::size_t,
                      std::size_t ram_bytes,
                      const std::optional<TextRunnerDiskCacheOptions>&,
@@ -101,7 +106,8 @@ public:
       std::span<const ContinuationToken>, const std::function<bool()>&,
       std::shared_ptr<const TextPromptContext>, bool, std::size_t, bool,
       bool persist = true, std::size_t state_tokens = 0,
-      mem::StateReservation* reservation = nullptr);
+      mem::StateReservation* reservation = nullptr,
+      const RestoreRunner& run_copies = {});
   // Whether sessions share their demand-mapped state (#715).
   [[nodiscard]] bool shared_state() const noexcept;
   // Bytes a session that holds nothing would charge for `tokens`; zero

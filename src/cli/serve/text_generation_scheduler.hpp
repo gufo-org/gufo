@@ -58,6 +58,11 @@ struct TextSchedulerPolicy {
   /// work holds (TextRunnerPool::Idle): a /proc/meminfo read when nothing is
   /// held.
   std::chrono::milliseconds idle_interval{std::chrono::seconds(1)};
+  /// A restore that would stop running decoders longer than this copies
+  /// beside them instead (RunBesideDecoders). Shorter ones run inline: a
+  /// worker hands them back only after the current decode round.
+  std::chrono::microseconds restore_beside_decoders_after{
+      std::chrono::milliseconds(10)};
 };
 
 /// Single-owner scheduler for opaque text-model runner states.

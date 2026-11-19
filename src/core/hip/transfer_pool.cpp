@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -240,6 +241,31 @@ cache::Completion TransferStream::Copy(void* destination, const void* source,
     throw;
   }
 }
+namespace {
+// HIP pools streams onto a few hardware queues, and a priority stream may
+// share one with the model's executor stream: a restore copy then waits
+// behind whole decode graphs (2.2 GB took 2.6 s beside decode, 0.1 s on its
+// own queue). A CU-masked stream gets a hardware queue of its own; the mask
+// keeps every CU. Where the runtime refuses one, keep the priority stream.
+hipError_t CreateOwnQueueStream(hipStream_t* stream, int priority) {
+  int device = 0, units = 0;
+  if (hipGetDevice(&device) == hipSuccess &&
+      hipDeviceGetAttribute(&units, hipDeviceAttributeMultiprocessorCount,
+                            device) == hipSuccess &&
+      units > 0) {
+    std::vector<std::uint32_t> mask((static_cast<std::size_t>(units) + 31) / 32,
+                                    ~std::uint32_t{0});
+    if (const auto tail = units % 32)
+      mask.back() = (std::uint32_t{1} << tail) - 1;
+    if (hipExtStreamCreateWithCUMask(stream,
+                                     static_cast<std::uint32_t>(mask.size()),
+                                     mask.data()) == hipSuccess)
+      return hipSuccess;
+  }
+  (void)hipGetLastError();
+  return hipStreamCreateWithPriority(stream, hipStreamNonBlocking, priority);
+}
+}  // namespace
 TransferPool::TransferPool(std::size_t capacity)
     : TransferPool(capacity, capacity) {}
 TransferPool::TransferPool(std::size_t capacity, std::size_t native_streams,
@@ -259,8 +285,7 @@ TransferPool::TransferPool(std::size_t capacity, std::size_t native_streams,
       Check(priority == 0
                 ? hipStreamCreateWithFlags(&state->lanes[i].stream,
                                            hipStreamNonBlocking)
-                : hipStreamCreateWithPriority(&state->lanes[i].stream,
-                                              hipStreamNonBlocking, priority));
+                : CreateOwnQueueStream(&state->lanes[i].stream, priority));
     const unsigned flags =
         hipEventDisableTiming | (state->shared ? hipEventReleaseToSystem : 0);
     Check(hipEventCreateWithFlags(&state->slots[i].event, flags));

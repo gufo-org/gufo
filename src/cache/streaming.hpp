@@ -97,6 +97,12 @@ private:
   std::uint64_t bytes_;
   std::size_t alignment_;
 };
+// Runs a restore's copy phase: the file reads, checks and the adapter's
+// CopyRowsIn/LoadPrivatePiece calls with their completions, no other adapter
+// call. It may run `copies` on another thread and do other work meanwhile, but
+// returns only once `copies` has, rethrowing what it threw.
+using RestoreCopyRunner =
+    std::function<void(const std::function<void()>& copies)>;
 // One initialization-time allocation, leased by piece to writers and held by
 // foreground restores. Optional yielding never holds staging or a stream. A HIP
 // allocator supplies committed pinned storage outside this CPU-only package.
@@ -122,11 +128,14 @@ public:
   // does not run fallback. All loads and disk pins settle before either path.
   // dependency_failed runs after invalidation and before fallback, only for
   // filesystem/checksum failures; it can quarantine reverse dependencies.
+  // BeginRestore, Validate and Invalidate run on the calling thread; an empty
+  // run_copies runs the copy phase there too.
   [[nodiscard]] bool Restore(
       CheckpointId, CompatibilityDigest expected_compatibility, Adapter&, Slot&,
       TransferTiming&, std::stop_token = {},
       const std::function<void()>& fallback = {},
-      const std::function<void(bool, DiskFileId)>& dependency_failed = {});
+      const std::function<void(bool, DiskFileId)>& dependency_failed = {},
+      const RestoreCopyRunner& run_copies = {});
   [[nodiscard]] std::size_t StagingBytes() const;
   [[nodiscard]] std::uint64_t StartupAllocatorNanoseconds() const;
 

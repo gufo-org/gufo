@@ -2,6 +2,7 @@
 #define GUFO_TESTS_CACHE_FAKE_HIP_RUNTIME_H_
 
 #include <cstddef>
+#include <cstdint>
 
 // Only the CPU transfer-pool target sees these declarations. Physical
 // payloads are small host pages; registration, streams and events are
@@ -30,6 +31,12 @@ hipError_t hipHostUnregister(void*);
 hipError_t hipMemGetInfo(std::size_t*, std::size_t*);
 hipError_t hipStreamCreateWithFlags(hipStream_t*, unsigned);
 hipError_t hipStreamCreateWithPriority(hipStream_t*, unsigned, int);
+enum hipDeviceAttribute_t { hipDeviceAttributeMultiprocessorCount };
+hipError_t hipGetDevice(int*);
+hipError_t hipDeviceGetAttribute(int*, hipDeviceAttribute_t, int);
+hipError_t hipExtStreamCreateWithCUMask(hipStream_t*, std::uint32_t,
+                                        const std::uint32_t*);
+hipError_t hipGetLastError();
 hipError_t hipStreamDestroy(hipStream_t);
 hipError_t hipStreamSynchronize(hipStream_t);
 hipError_t hipEventCreateWithFlags(hipEvent_t*, unsigned);

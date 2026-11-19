@@ -601,6 +601,14 @@ All native handles exist before cache sizing, so acquisition cannot introduce
 an unaccounted later stream allocation. Other providers keep their existing
 exclusive-stream policy unless they opt into the session-aware factory.
 
+Restores lease two more native streams, each on a hardware queue of its own
+(a stream whose CU mask holds every CU). HIP pools streams onto a few hardware
+queues and gave a priority restore stream the executor stream's: beside decode,
+each restore copy then waited for a whole decode graph, and a 2.2 GB disk
+restore took 2.6 s instead of 0.25 s (Flash-Next, November 2026). Where the
+runtime refuses a CU-masked stream, the restore streams keep the highest stream
+priority instead.
+
 ## The disk tier
 
 `--cache-disk DIR` adds a second tier that survives restarts. A checkpoint
@@ -613,6 +621,18 @@ restore, which still reads, checks and copies them in order. That restore took
 1.3–1.4 s with the files on disk and 0.85 s from the page cache, against
 8.7–9.9 s when one thread hinted each file in turn **(measured, NVMe under
 dm-crypt)**.
+
+A request admitted while other requests decode restores beside them: a worker
+thread runs the restore's reads, checks and copies, all on restore streams,
+while the scheduler keeps stepping the decoders. Only the adapter's
+`BeginRestore`, `Validate` and `Invalidate`, which use the executor stream, run
+on the scheduler thread. In November 2026, with a Flash-Next request decoding,
+a 76K-token (2.2 GB) disk restore beside it cut that request's longest pause
+between tokens from 326–328 ms to 162–186 ms; what remains is the restored
+request's short prefill. A restore still holds up other prompts' prefill and
+admission, so while another prompt prefills, or others wait to be admitted,
+the request first waits while 16 workers read its checkpoint into the page
+cache (`event=disk_warm`) and the others proceed.
 
 Learned divergence points (see above) are ordinary checkpoints, so they reach
 disk like any other and survive restarts.
@@ -764,7 +784,7 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | `schema=component-cache-v1 event=staging_exhausted` | `--cache-ram-bytes off`: a disk capture found no room in the capture backing; reports `staged_bytes`, `held_bytes` by other captures, `backing_bytes`, `waited_ms` and whether it was an exact `frontier` |
 | `schema=component-cache-v1 event=published` | A checkpoint finished disk publication; `checkpoint_id` identifies the capture and `tokens` its boundary |
 | `schema=component-cache-v1 event=disk_restore` | A checkpoint was restored from disk: `tokens`, `bytes`, `pieces` and timings. `filesystem_ms` and `checksum_ms` add up the parallel readers' time, so they can exceed the restore's wall time; `stream_wait_ms` is the restoring thread's wait for copies |
-| `schema=component-cache-v1 event=disk_warm` | A request admitted while others ran found its checkpoint only on disk; a worker read its `bytes` into the page cache in `ms`. `skipped=floor` when free pages would drop below the host floor |
+| `schema=component-cache-v1 event=disk_warm` | A request admitted while another prompt prefilled, or while others waited beside running requests, found its checkpoint only on disk; a worker read its `bytes` into the page cache in `ms`. `skipped=floor` when free pages would drop below the host floor |
 | `event=disk_warm_wait` | The request waited `wait_ms` for that read (`read=1`) or for the scheduler to go idle (`read=0`) before restoring |
 | `schema=component-cache-v1 event=persistence_refused reason=min_step` | A captured checkpoint is too close to an existing publication; includes `checkpoint_id` and `tokens` |
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |

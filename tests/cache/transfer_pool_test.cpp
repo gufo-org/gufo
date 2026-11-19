@@ -32,6 +32,8 @@ std::atomic<std::size_t> registered_bytes{};
 std::atomic<unsigned> native_creations{}, live_streams{}, live_events{};
 std::atomic<unsigned> system_release_events{}, stream_synchronizations{};
 std::atomic<unsigned> event_waits{};
+std::atomic<unsigned> masked_streams{}, priority_streams{};
+std::atomic<bool> refuse_cu_mask{};
 int fail_native_creation{-1};
 bool fail_event_record{};
 std::atomic<bool> fail_copy_after_submission{}, fail_event_wait{};
@@ -220,6 +222,28 @@ void TransferCompletionOwnership() {
   assert(!live_streams && !live_events && native_creations == 2);
 }
 
+// Restore streams get hardware queues of their own (all CUs); a runtime that
+// refuses keeps priority streams.
+void PriorityTransferOwnQueues() {
+  using namespace gufo;
+  masked_streams = priority_streams = 0;
+  {
+    hip::TransferPool pool(4, 2, -1);
+    assert(masked_streams == 2 && priority_streams == 0);
+    assert(pool.TryAcquire());
+  }
+  refuse_cu_mask = true;
+  {
+    hip::TransferPool pool(4, 2, -1);
+    assert(masked_streams == 2 && priority_streams == 2);
+  }
+  refuse_cu_mask = false;
+  {
+    hip::TransferPool pool(4, 2);
+    assert(masked_streams == 2 && priority_streams == 2);
+  }
+  assert(!live_streams && !live_events);
+}
 void SharedTransferConstructionAndCounts() {
   using namespace gufo;
   for (int failure = 0; failure < 7; ++failure) {
@@ -668,7 +692,29 @@ hipError_t hipStreamCreateWithFlags(hipStream_t* stream, unsigned) {
 }
 hipError_t hipStreamCreateWithPriority(hipStream_t* stream, unsigned flags,
                                        int) {
+  ++priority_streams;
   return hipStreamCreateWithFlags(stream, flags);
+}
+hipError_t hipGetDevice(int* device) {
+  *device = 0;
+  return hipSuccess;
+}
+hipError_t hipDeviceGetAttribute(int* value, hipDeviceAttribute_t, int) {
+  *value = 40;
+  return hipSuccess;
+}
+hipError_t hipExtStreamCreateWithCUMask(hipStream_t* stream,
+                                        std::uint32_t words,
+                                        const std::uint32_t* mask) {
+  // 40 compute units: one full word and eight bits.
+  assert(words == 2 && mask[0] == ~std::uint32_t{0} && mask[1] == 0xff);
+  if (refuse_cu_mask)
+    return hipErrorOutOfMemory;
+  ++masked_streams;
+  return hipStreamCreateWithFlags(stream, hipStreamNonBlocking);
+}
+hipError_t hipGetLastError() {
+  return hipSuccess;
 }
 hipError_t hipStreamDestroy(hipStream_t stream) {
   const auto* native = static_cast<NativeStream*>(stream);
@@ -755,6 +801,7 @@ int main() {
   TransferQuarantine();
   TransferCompletionOwnership();
   SharedTransferConstructionAndCounts();
+  PriorityTransferOwnQueues();
   ComponentTransferFactoryCounts();
   SharedTransferFences();
   SharedCachedNativeCleanup();

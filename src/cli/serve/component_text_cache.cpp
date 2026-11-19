@@ -54,6 +54,13 @@ cache::Identity At(const cache::InputIdentity& input, std::size_t boundary) {
   const auto bytes = input.At(boundary);
   return {bytes.begin(), bytes.end()};
 }
+// How long a restore of `bytes` stops the thread that runs it: RAM restores
+// copy ~55 GB/s, disk restores read ~13 GB/s from the page cache (Flash-Next
+// and Qwen 27B, November 2026).
+std::chrono::microseconds RestoreEstimate(std::size_t bytes, bool disk) {
+  return std::chrono::microseconds(bytes / (disk ? 13'000 : 55'000));
+}
+
 std::size_t PayloadBytes(const cache::DiskManifest& manifest) {
   std::size_t bytes = 0;
   for (const auto& component : manifest.components) {
@@ -1482,7 +1489,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     const std::function<bool()>& cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse,
     std::size_t stable, bool stop_at_eos, bool persist,
-    std::size_t state_tokens, mem::StateReservation* reservation) {
+    std::size_t state_tokens, mem::StateReservation* reservation,
+    const RestoreRunner& run_copies) {
   if (cancelled && cancelled())
     return {};
   auto input = Inputs(prompt.size(), context.get());
@@ -1714,88 +1722,102 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
             if (c.tail)
               pins.push_back(c.tail->PinRows());
           }
-          TransferBatch transfers(impl_->resources->transfer_batch_size);
-          std::size_t base = 0;
-          for (const auto& c : checkpoint.Components()) {
-            auto load = [&](const cache::RowPin& pin, cache::Rows first,
-                            cache::Rows end) {
-              const auto bytes =
-                  c.descriptor.kind == cache::ComponentKind::kPrivateState
-                      ? c.descriptor.state_bytes
-                      : (end - first) * c.descriptor.row_bytes;
-              if (pin.Bytes().empty())
-                throw std::logic_error("RAM source has no readable view");
-              const std::span<const std::byte> buffer(pin.Bytes().data(),
-                                                      bytes);
-              transfers.Add(
-                  [&] {
-                    // Restores take their own streams; a busy class falls
-                    // back to the shared pool rather than wait.
-                    std::unique_ptr<cache::Stream> stream;
-                    if (impl_->resources->restore_stream)
-                      stream = impl_->resources->restore_stream();
-                    return stream ? std::move(stream)
-                                  : impl_->resources->stream();
-                  },
-                  [&](cache::Stream& stream) {
-                    return c.descriptor.kind ==
-                                   cache::ComponentKind::kPrivateState
-                               ? impl_->resources->adapter->LoadPrivate(
-                                     request.slot.Execution(), c.descriptor.id,
-                                     buffer, stream)
-                               : impl_->resources->adapter->CopyRowsIn(
-                                     request.slot.Execution(), c.descriptor.id,
-                                     first, end, buffer, stream);
-                  });
-              request.restored += bytes;
-            };
-            if (c.private_state)
-              load(pins[base++], 0, 0);
-            auto same_source = [](const cache::RowPin& a,
-                                  const cache::RowPin& b) {
-              if (a.Location() || b.Location())
-                return a.Location() == b.Location();
-              return SameOwner(a.Owner(), b.Owner());
-            };
-            bool loaded_tail = false;
-            for (std::size_t i = 0; i < c.chunks.size();) {
-              const auto& chunk = c.chunks[i];
-              auto end = chunk.End();
-              const auto& pin = pins[base + i];
-              const auto* data = pin.Bytes().data();
-              auto next = i + 1;
-              while (data && next < c.chunks.size() &&
-                     c.chunks[next].First() == end &&
-                     same_source(pin, pins[base + next]) &&
-                     pins[base + next].Bytes().data() ==
-                         data +
-                             (end - chunk.First()) * c.descriptor.row_bytes) {
-                end = c.chunks[next].End();
-                ++next;
+          // Restore streams only: this may run beside decode rounds.
+          const auto copies = [&] {
+            TransferBatch transfers(impl_->resources->transfer_batch_size);
+            std::size_t base = 0;
+            for (const auto& c : checkpoint.Components()) {
+              auto load = [&](const cache::RowPin& pin, cache::Rows first,
+                              cache::Rows end) {
+                const auto bytes =
+                    c.descriptor.kind == cache::ComponentKind::kPrivateState
+                        ? c.descriptor.state_bytes
+                        : (end - first) * c.descriptor.row_bytes;
+                if (pin.Bytes().empty())
+                  throw std::logic_error("RAM source has no readable view");
+                const std::span<const std::byte> buffer(pin.Bytes().data(),
+                                                        bytes);
+                transfers.Add(
+                    [&] {
+                      // Restores take their own streams; a busy class falls
+                      // back to the shared pool rather than wait.
+                      std::unique_ptr<cache::Stream> stream;
+                      if (impl_->resources->restore_stream)
+                        stream = impl_->resources->restore_stream();
+                      return stream ? std::move(stream)
+                                    : impl_->resources->stream();
+                    },
+                    [&](cache::Stream& stream) {
+                      return c.descriptor.kind ==
+                                     cache::ComponentKind::kPrivateState
+                                 ? impl_->resources->adapter->LoadPrivate(
+                                       request.slot.Execution(),
+                                       c.descriptor.id, buffer, stream)
+                                 : impl_->resources->adapter->CopyRowsIn(
+                                       request.slot.Execution(),
+                                       c.descriptor.id, first, end, buffer,
+                                       stream);
+                    });
+                request.restored += bytes;
+              };
+              if (c.private_state)
+                load(pins[base++], 0, 0);
+              auto same_source = [](const cache::RowPin& a,
+                                    const cache::RowPin& b) {
+                if (a.Location() || b.Location())
+                  return a.Location() == b.Location();
+                return SameOwner(a.Owner(), b.Owner());
+              };
+              bool loaded_tail = false;
+              for (std::size_t i = 0; i < c.chunks.size();) {
+                const auto& chunk = c.chunks[i];
+                auto end = chunk.End();
+                const auto& pin = pins[base + i];
+                const auto* data = pin.Bytes().data();
+                auto next = i + 1;
+                while (data && next < c.chunks.size() &&
+                       c.chunks[next].First() == end &&
+                       same_source(pin, pins[base + next]) &&
+                       pins[base + next].Bytes().data() ==
+                           data +
+                               (end - chunk.First()) * c.descriptor.row_bytes) {
+                  end = c.chunks[next].End();
+                  ++next;
+                }
+                if (data && next == c.chunks.size() && c.tail &&
+                    same_source(pin, pins[base + c.chunks.size()]) &&
+                    end == c.position.valid_rows / c.descriptor.rows_per_chunk *
+                               c.descriptor.rows_per_chunk &&
+                    pins[base + c.chunks.size()].Bytes().data() ==
+                        data + (end - chunk.First()) * c.descriptor.row_bytes) {
+                  end = c.position.valid_rows;
+                  loaded_tail = true;
+                }
+                load(pin, chunk.First(), end);
+                i = next;
               }
-              if (data && next == c.chunks.size() && c.tail &&
-                  same_source(pin, pins[base + c.chunks.size()]) &&
-                  end == c.position.valid_rows / c.descriptor.rows_per_chunk *
-                             c.descriptor.rows_per_chunk &&
-                  pins[base + c.chunks.size()].Bytes().data() ==
-                      data + (end - chunk.First()) * c.descriptor.row_bytes) {
-                end = c.position.valid_rows;
-                loaded_tail = true;
+              base += c.chunks.size();
+              if (c.tail) {
+                if (!loaded_tail)
+                  load(pins[base],
+                       c.position.valid_rows / c.descriptor.rows_per_chunk *
+                           c.descriptor.rows_per_chunk,
+                       c.position.valid_rows);
+                ++base;
               }
-              load(pin, chunk.First(), end);
-              i = next;
             }
-            base += c.chunks.size();
-            if (c.tail) {
-              if (!loaded_tail)
-                load(pins[base],
-                     c.position.valid_rows / c.descriptor.rows_per_chunk *
-                         c.descriptor.rows_per_chunk,
-                     c.position.valid_rows);
-              ++base;
-            }
-          }
-          transfers.Finish();
+            transfers.Finish();
+          };
+          std::size_t restore_bytes = 0;
+          for (const auto& c : checkpoint.Components())
+            restore_bytes +=
+                c.descriptor.kind == cache::ComponentKind::kPrivateState
+                    ? c.descriptor.state_bytes
+                    : c.position.valid_rows * c.descriptor.row_bytes;
+          if (run_copies)
+            run_copies(RestoreEstimate(restore_bytes, false), copies);
+          else
+            copies();
           if (!impl_->resources->adapter->Validate(request.slot.Execution(),
                                                    positions))
             throw std::runtime_error("component RAM restore validation failed");
@@ -1828,7 +1850,15 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
               [this](bool private_file, cache::DiskFileId file) {
                 const std::lock_guard lock(impl_->mutex);
                 impl_->catalog->Invalidate(private_file, file);
-              });
+              },
+              run_copies
+                  ? cache::RestoreCopyRunner(
+                        [&, estimate = RestoreEstimate(
+                                PayloadBytes(candidate.durable->Manifest()),
+                                true)](const auto& copies) {
+                          run_copies(estimate, copies);
+                        })
+                  : cache::RestoreCopyRunner{});
           if (restored) {
             request.disk_hit = true;
             request.restored = timing.bytes;
