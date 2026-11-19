@@ -326,6 +326,10 @@ struct ComponentTextCache::Impl {
   };
   std::mutex warm_mutex;
   std::vector<std::unique_ptr<Warmup>> warmups;
+  // Payload bytes of disk restores admitted but not captured yet. Their
+  // captures share no RAM chunks, so each needs backing for its whole
+  // checkpoint, and a new restore must prepare for all of them.
+  std::atomic<std::size_t> pending_capture_bytes{};
   static constexpr std::size_t kPersistenceDepth = 8;
   // Backing that disk captures copy through when the RAM cache is off. It
   // equals the small explicit budget used before off existed, and it retains
@@ -548,6 +552,7 @@ struct ComponentTextCache::Impl {
         } else {
           // No pool exists, so a payload allocation must fail, not crash.
           resources->prepare_prefill = nullptr;
+          resources->prepare_capture = nullptr;
           resources->can_capture = nullptr;
           resources->allocate =
               [](const cache::PayloadRequest&) -> ComponentCaptureBuffer {
@@ -1095,9 +1100,18 @@ struct ComponentTextCache::Lease::Impl {
   // The session's shared-state account; its need returns to the live
   // frontier (or nothing) when the lease ends.
   std::shared_ptr<mem::StateAccount> account;
+  // Bytes of a disk restore whose first capture has not run yet, counted in
+  // the cache's pending_capture_bytes until then.
+  std::size_t pending_capture{};
   ~Impl() {
+    SettleCapture();
     if (active && account)
       (void)account->SetNeed(0);
+  }
+  void SettleCapture() noexcept {
+    if (pending_capture)
+      cache->pending_capture_bytes.fetch_sub(pending_capture);
+    pending_capture = 0;
   }
   Impl(ComponentTextCache::Impl* cache, ComponentTextCache::Impl::Entry* entry,
        cache::SlotLease&& slot, std::span<const cache::Token> prompt,
@@ -1797,6 +1811,17 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           clean = false;
           cache::TransferTiming timing;
           const auto id = candidate.durable->Manifest().checkpoint;
+          // The restored history shares no RAM chunks, so its next capture
+          // needs backing for the whole checkpoint: commit it off this
+          // thread while the restore reads, along with the backing of
+          // restores not captured yet.
+          request.SettleCapture();  // An earlier candidate that failed.
+          request.pending_capture = PayloadBytes(candidate.durable->Manifest());
+          const auto pending =
+              impl_->pending_capture_bytes.fetch_add(request.pending_capture) +
+              request.pending_capture;
+          if (impl_->resources->prepare_capture)
+            impl_->resources->prepare_capture(pending);
           restored = impl_->streaming->Restore(
               id, impl_->digest, *impl_->resources->adapter,
               request.slot.Execution(), timing, {}, {},
@@ -1833,6 +1858,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
             throw std::runtime_error("component restore reset failed");
           entry->history.reset();
+          request.SettleCapture();
           request.source = {};
           request.restored = 0;
           request.disk_hit = false;
@@ -1845,6 +1871,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           entry->durable = candidate.durable;
         }
       } catch (...) {
+        request.SettleCapture();
         if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
           throw;
         clean = true;
@@ -1852,6 +1879,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       }
     }
     if (!restored) {
+      request.SettleCapture();
       if (!clean &&
           !impl_->resources->adapter->Invalidate(request.slot.Execution()))
         throw std::runtime_error("component cold initialization failed");
@@ -2013,6 +2041,13 @@ std::shared_ptr<const std::atomic<bool>> ComponentTextCache::WarmDisk(
                      " floor_bytes=" + std::to_string(floor));
     return nullptr;
   }
+  // The restore after this read is captured in full: commit its backing
+  // while the request waits, not in its capture beside running decodes.
+  // Restores still reading, and restored ones not captured yet, are captured
+  // too, so ask for all of them.
+  if (impl_->resources->prepare_capture)
+    impl_->resources->prepare_capture(impl_->pending_capture_bytes.load() +
+                                      reading + bytes);
   auto warmup = std::make_unique<Impl::Warmup>();
   warmup->id = id;
   warmup->bytes = bytes;
@@ -2419,6 +2454,11 @@ std::size_t ComponentTextCache::Lease::CaptureBytes(
 std::unique_ptr<ContinuationSnapshot> ComponentTextCache::Lease::Capture() {
   auto& request = *impl_;
   auto& cache = *request.cache;
+  // After this capture, a restored history shares its chunks like any other.
+  struct Settle {
+    Impl& request;
+    ~Settle() { request.SettleCapture(); }
+  } settle{request};
   auto positions =
       cache.resources->adapter->Positions(request.slot.Execution());
   const auto bytes = request.entry->history->NewPayloadBytes(positions);
@@ -2828,6 +2868,7 @@ std::size_t ComponentTextCache::Lease::Commit(
 void ComponentTextCache::Lease::Invalidate() noexcept {
   if (!impl_ || !impl_->active)
     return;
+  impl_->SettleCapture();
   try {
     impl_->state->SetCancellationCheck({});
     impl_->slot = {};

@@ -592,6 +592,29 @@ void OnDemandBacking() {
   exact.GrowAhead(std::numeric_limits<std::size_t>::max());
   exact.WaitForGrowth();
   assert(exact.BlockCount() == many);
+  // A larger reserve asked while the ahead thread still grows a smaller one
+  // raises its target instead of being dropped. The first segment is held
+  // until the raise is asked, so the thread is still growing then.
+  std::atomic<bool> segment_asked{}, segment_open{};
+  cache::ResourceLedger raised_ledger(Limits(many_capacity));
+  hip::CommittedBackingPool raised(raised_ledger,
+                                   {many_capacity, block_bytes, many_headroom,
+                                    3 * block_bytes, [&](std::size_t) {
+                                      segment_asked.store(true);
+                                      while (!segment_open.load())
+                                        std::this_thread::yield();
+                                      return true;
+                                    }});
+  raised.GrowAhead(3 * block_bytes);
+  while (!segment_asked.load())
+    std::this_thread::yield();
+  raised.GrowAhead(9 * block_bytes);
+  segment_open.store(true);
+  raised.WaitForGrowth();
+  assert(raised.BlockCount() == 9);
+  raised.GrowAhead(3 * block_bytes);
+  raised.WaitForGrowth();
+  assert(raised.BlockCount() == 9);
 }
 void HeapReserveSegments() {
   // #781: 2.9 GiB of heap free, where registered pages are not charged.

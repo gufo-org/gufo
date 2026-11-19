@@ -196,6 +196,18 @@ int main() {
     assert(block);
     block.reset();
     assert(host->Surrender(capacity) == kSegment);
+    // A full pool that gave units back grows ahead again: a restore's
+    // prepare_capture brings them back off the serving thread.
+    std::vector<gufo::hip::BackingBlock> all;
+    while (auto next =
+               host->TryAcquire(ResourceCategory::kBackingAssigned, kPageBytes))
+      all.push_back(std::move(*next));
+    assert(host->CommittedBytes() == capacity && host->SurrenderedBytes() == 0);
+    all.clear();
+    assert(host->Surrender(capacity) == capacity);
+    host->GrowAhead(kSegment);
+    host->WaitForGrowth();
+    assert(host->SurrenderedBytes() == capacity - kSegment);
     host.reset();
     assert(hipGetLastError() == hipSuccess);
   }

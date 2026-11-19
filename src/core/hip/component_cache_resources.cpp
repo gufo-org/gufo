@@ -271,6 +271,9 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     // Short turns need a smaller reserve for private states and row tails.
     backing->pool->GrowAhead((tokens >= 512 ? 2ULL : 1ULL) << 30);
   };
+  result->prepare_capture = [backing](std::size_t bytes) {
+    backing->pool->GrowAhead(bytes);
+  };
   result->can_capture = [backing](auto payloads) {
     return backing->pool->CanFit(payloads);
   };
