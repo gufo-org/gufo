@@ -15,7 +15,9 @@ namespace gufo::sched {
 /// The policy's prompt granularity. A prompt within it runs unsplit beside
 /// decoders, a layered pass gets at most one group per unit of its tokens
 /// (arXiv 2510.08055, section 4.4), and a long prompt alone stops after each
-/// unit while a short peer or a capture waits.
+/// unit while a short peer or a capture waits. While a session is free, a
+/// lone prompt keeps the profile's pass width, so an arrival waits at most
+/// one such pass.
 inline constexpr std::size_t kPrefillUnitTokens = 512;
 
 /// Longest a decoder should wait for one layer group of a prompt pass. The
@@ -56,6 +58,8 @@ struct WorkQueues {
   bool forming_batch{false};
   /// No prefill unit has run beside decoders since the last decode.
   bool after_decode{true};
+  /// A free session would admit a request arriving during this unit.
+  bool admission_open{false};
 };
 
 /// Prefill one request of `prefilling`.

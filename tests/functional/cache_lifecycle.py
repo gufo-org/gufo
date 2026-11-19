@@ -33,8 +33,8 @@ def published_tokens(log):
 
 
 def wait_until(predicate, description, timeout=30):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline:
         result = predicate()
         if result:
             return result
@@ -82,10 +82,10 @@ class Lifecycle:
         continuation.TRACE = Recorder(self.stage_path / "requests.requests.json")
         record = {"command": command, "status": "running", "staging_bytes": staging}
         self.row["stages"][name] = record
-        started = time.monotonic()
+        started = time.perf_counter()
         try:
             with server(command, self.stage_path / "server.log", self.timeout, environment) as process:
-                record["startup_ms"] = (time.monotonic() - started) * 1000
+                record["startup_ms"] = (time.perf_counter() - started) * 1000
                 yield process
             join_server_timings(self.stage_path)
             record["execution"] = execution_coverage(self.stage_path, self.mode)

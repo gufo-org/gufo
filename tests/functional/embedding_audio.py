@@ -184,9 +184,9 @@ def main():
                             f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n").encode() + payload)
             time.sleep(0.02)
             client.shutdown(socket.SHUT_RDWR)
-        deadline = time.monotonic() + 15
+        deadline = time.perf_counter() + 15
         cancellation = None
-        while time.monotonic() < deadline:
+        while time.perf_counter() < deadline:
             lines = args.server_log.read_text().splitlines()[before:]
             received = [re.search(r"request=(\S+)", line).group(1) for line in lines
                         if "event=received " in line and "path=/v1/embeddings " in line]

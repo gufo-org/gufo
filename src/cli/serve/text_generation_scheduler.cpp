@@ -2470,7 +2470,10 @@ struct TextGenerationScheduler::Impl {
                        .decoding = decoding_view,
                        .capturing = !capturing.empty(),
                        .forming_batch = preparing_multi_token_batch,
-                       .after_decode = consecutive_active_prefill_chunks == 0},
+                       .after_decode = consecutive_active_prefill_chunks == 0,
+                       .admission_open = prefilling.size() + decoding.size() +
+                                             capturing.size() + waiting.size() <
+                                         runner_pool->capacity()},
                       publication_prefill);
 
       if (const auto* decode = std::get_if<sched::DecodeWork>(&work)) {

@@ -653,9 +653,14 @@ for edits. Forks and learned boundaries are exempt. Other conversations whose
 checkpoint or descendant was restored within one disk budget of newly admitted
 unique payload bytes outlive unreused conversations. This protection expires
 at a byte turnover and survives a clean restart. Within each tier, entries use
-the newest descendant's access recency, then covered entries, leaves and forks;
-ties prefer the retirement that frees more unique payload bytes. Shared chunks
-are excluded from that estimate. A busy store refuses eviction immediately,
+the newest descendant's access recency, and also the admission of any prefix
+no other branch shares, so a prefix published after its leaf (spacing and
+write order decide that) ranks with the leaf instead of outliving it. A
+restored prefix lends nothing: the client that resumed there did not match
+the leaf. Within one recency, covered entries leave first, then leaves and
+forks; ties prefer the retirement that frees more unique payload bytes. Shared
+chunks are excluded from that estimate. A busy store refuses eviction
+immediately,
 and reader pins still protect their publication.
 
 Access history lives in independently checksummed 40-byte files under

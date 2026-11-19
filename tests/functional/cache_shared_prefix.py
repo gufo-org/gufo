@@ -48,9 +48,9 @@ def check_cache_shared_prefix(client, model, checks, chat_result):
     def group(label, tail_lines, slack):
         system = system_prompt(f"cache_shared_prefix_{label}", 220)
         conversations = [[{"role": "system", "content": system},
-                          {"role": "user", "content": background(code, tail_lines) +
+                          {"role": "user", "content": background(f"task-{index + 1}", tail_lines) +
                            f"Reply with only the code {code}."}]
-                         for code in CODES]
+                         for index, code in enumerate(CODES)]
         results = []
         for index, (messages, code) in enumerate(zip(conversations, CODES)):
             result = chat(f"{label}_{index}", messages)
@@ -68,7 +68,10 @@ def check_cache_shared_prefix(client, model, checks, chat_result):
             if cached < shared:
                 failures.append(f"{label}_{index}: reused {cached} tokens, expected at least "
                                 f"{shared} of the shared system prompt")
-        for index, (messages, warm) in enumerate(zip(conversations, results)):
+        # Each warm reply already asserts its code; one uncached replay of the
+        # last conversation, restored through the shared prefix, checks the
+        # prompt renders the same.
+        for index, (messages, warm) in list(enumerate(zip(conversations, results)))[-1:]:
             cold = chat(f"{label}_cold_{index}", messages, cold=True)
             assert cold["usage"]["prompt_tokens"] == warm["usage"]["prompt_tokens"], (warm, cold)
             assert cold["text"].strip() == warm["text"].strip(), (warm, cold)

@@ -8,9 +8,10 @@ QUEUE_START_S = 5
 ENDPOINTS = ("chat", "completions", "responses")
 
 
-def cold_prompt(label, context):
+def cold_prompt(label, context, limit=None):
     # About a third of one session, so prefill clearly precedes the first token.
-    facts = " ".join(f"Entry {i} keeps value {i * 7 % 101}." for i in range(context // 30))
+    count = context // 30 if limit is None else min(limit, context // 30)
+    facts = " ".join(f"Entry {i} keeps value {i * 7 % 101}." for i in range(count))
     return f"{label}: {facts}\nWhich value does entry 3 keep? Answer with the number."
 
 
@@ -48,16 +49,16 @@ def is_output(endpoint, event):
 
 def stream_timing(client, model, endpoint, prompt, max_tokens, opened_event=None, stop=None):
     """Seconds to response headers and to the first generated output."""
-    started = time.monotonic()
+    started = time.perf_counter()
     stream = open_stream(client, model, endpoint, prompt, max_tokens)
-    opened = time.monotonic() - started
+    opened = time.perf_counter() - started
     if opened_event is not None:
         opened_event.set()
     first, usage = None, None
     with stream:
         for event in stream:
             if first is None and is_output(endpoint, event):
-                first = time.monotonic() - started
+                first = time.perf_counter() - started
             if getattr(event, "usage", None):
                 usage = event.usage.to_dict()
             if stop is not None and first is not None and stop(first):
@@ -68,7 +69,9 @@ def stream_timing(client, model, endpoint, prompt, max_tokens, opened_event=None
 def check_stream_start(client, model, checks, width, context):
     # Admission commits the response, so keepalives cover the whole prefill.
     for endpoint in ENDPOINTS:
-        timing = stream_timing(client, model, endpoint, cold_prompt(endpoint, context), 4)
+        # About 5.6K tokens: over a second of prefill even at 5,000 tokens/s;
+        # the check asserts at least 0.5 s.
+        timing = stream_timing(client, model, endpoint, cold_prompt(endpoint, context, 512), 4)
         prefill_s = checks.recorder.rows[-1]["metrics"]["prefill_ms"] / 1000
         checks[f"stream_start_{endpoint}"] = {**timing, "prefill_s": prefill_s}
         assert timing["first_output_s"] is not None, timing
@@ -102,13 +105,13 @@ def check_stream_start(client, model, checks, width, context):
 
         def wait_queued():
             queued.update(stream_timing(client, model, "chat", "Name a color.", 4, opened))
-        submitted = time.monotonic()
+        submitted = time.perf_counter()
         waiter = threading.Thread(target=wait_queued)
         waiter.start()
         # A deferred-only server opens after the peers finish; bound the wait.
         # Keep the queue occupied past the bound even if headers came first.
         opened.wait(QUEUE_START_S + 10)
-        time.sleep(max(0, submitted + QUEUE_START_S + 1 - time.monotonic()))
+        time.sleep(max(0, submitted + QUEUE_START_S + 1 - time.perf_counter()))
     finally:
         release.set()
         for thread in threads:

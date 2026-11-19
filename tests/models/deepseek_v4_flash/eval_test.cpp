@@ -5,6 +5,7 @@
 
 #include "src/eval/dataset.hpp"
 #include "src/eval/extract.hpp"
+#include "tests/support/source_path.hpp"
 
 #ifndef GUFO_EVAL_TEST_DATA
 #define GUFO_EVAL_TEST_DATA "tests/fixtures/eval/antirez-ds4.json"
@@ -26,7 +27,8 @@ gufo::eval::EvalCase MultipleChoiceCase(std::string answer,
 void TestPinnedDataset() {
   std::string error;
   const auto suite = gufo::eval::LoadEvalSuite(
-      std::filesystem::path(GUFO_EVAL_TEST_DATA), &error);
+      std::filesystem::path(gufo::testing::SourcePath(GUFO_EVAL_TEST_DATA)),
+      &error);
   assert(suite.has_value());
   assert(error.empty());
   assert(suite->source_revision == "84cc882352757baf628a1776badf7cc54d584e28");

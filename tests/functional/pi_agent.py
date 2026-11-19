@@ -119,7 +119,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         conn = http.client.HTTPConnection(
             server.upstream.hostname, server.upstream.port, timeout=server.request_timeout
         )
-        start = time.monotonic()
+        start = time.perf_counter()
         try:
             conn.request("POST", self.path, body, {"Content-Type": "application/json"})
             response = conn.getresponse()
@@ -134,7 +134,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             with stem.with_suffix(".sse").open("wb") as raw:
                 while chunk := response.read1(65536):
                     chunks.append(chunk)
-                    parts.append(((time.monotonic() - start) * 1000, chunk))
+                    parts.append(((time.perf_counter() - start) * 1000, chunk))
                     raw.write(chunk)
                     raw.flush()
                     self.wfile.write(chunk)
@@ -155,7 +155,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             row["error"] = repr(error)
         finally:
-            row["wall_ms"] = (time.monotonic() - start) * 1000
+            row["wall_ms"] = (time.perf_counter() - start) * 1000
             conn.close()
             self.close_connection = True
             save(stem.with_suffix(".timing.json"), row)
@@ -350,13 +350,13 @@ def run_case(args, recorder, env, index, name):
     save(case / "command.json", command)
     recorder.case = case.name
     row = {"case": case.name, "start_request": len(recorder.requests)}
-    start = time.monotonic()
+    start = time.perf_counter()
     proc = None
     try:
         with (case / "stdout.jsonl").open("w") as out, (case / "stderr.log").open("w") as err:
             proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=out, stderr=err, start_new_session=True)
             while proc.poll() is None:
-                if time.monotonic() - start > args.timeout:
+                if time.perf_counter() - start > args.timeout:
                     raise AssertionError("Pi task timeout")
                 history = messages(session)[previous_messages:]
                 if len(calls_from(history)) > 80 or repeated_actions(history) > 5:
@@ -375,7 +375,7 @@ def run_case(args, recorder, env, index, name):
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
-    row["wall_ms"] = (time.monotonic() - start) * 1000
+    row["wall_ms"] = (time.perf_counter() - start) * 1000
     history = messages(session)[previous_messages:]
     row["tool_calls"] = len(calls_from(history))
     row["tool_errors"] = [m for m in history if m.get("role") == "toolResult" and m.get("isError")]

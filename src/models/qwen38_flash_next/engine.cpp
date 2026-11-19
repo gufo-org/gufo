@@ -28,8 +28,9 @@ namespace {
 // read. Prefill logits do not depend on the chunk size (pre-budget queries
 // always take the dense attention tiles).
 constexpr std::uint32_t kPrefillChunkTokens = 4096;
-// A prompt pass with no session decoding beside it takes up to this many
-// rows when the host has the memory: served prompts of 28K-85K tokens
+// A prompt pass the scheduler leaves unbounded (no session decoding beside
+// it, none free to admit an arrival) takes up to this many rows when the
+// host has the memory: served prompts of 28K-85K tokens
 // prefill 2-7% faster than in 4096-row passes (#952). Those passes run on a
 // second set of the row buffers (4.6 GiB), mapped only while they run and
 // freed at the next decode step, so loading costs no more memory than

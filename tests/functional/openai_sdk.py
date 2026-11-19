@@ -46,6 +46,7 @@ from cache_compaction import check_cache_compaction
 from cache_workloads import check_cache_transforms, check_cache_pressure
 from cache_messages_loop import check_cache_messages_loop
 from system_injection import check_system_injection
+from suites import NOT_IN_ALL, SDK_SUITES, VISION
 from cache_growth import check_cache_growth, check_unchanged_retry, log_offset
 from messages_tools import check_messages_tools
 from reasoning_budget import check_reasoning_budget
@@ -2820,11 +2821,6 @@ def check_server_metrics(client, model, checks, width, context, speculative, ser
     assert proposed > 0 if speculative != "off" else proposed == 0, final
 
 
-SDK_SUITES = ("discovery", "openai-count-tokens", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "image-detail", "structured", "structured-limits",
-              "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
-              "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-type-unions", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "logprobs", "responses-logprobs", "batch",
-              "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
-              "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection")
 
 
 def main():
@@ -3020,12 +3016,12 @@ def main():
             "system-injection": lambda: check_system_injection(
                 client, args.model, checks, chat_result),
         }
-        selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
-                     and (name not in ("image-inputs", "image-count", "tool-images", "image-detail") or args.vision)]
+        selected = ([name for name in suites if name not in ("tool-native-types", *NOT_IN_ALL)
+                     and (name not in VISION or args.vision)]
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])
         for name in selected:
-            started = time.monotonic()
+            started = time.perf_counter()
             try:
                 suites[name]()
                 report["suites"][name] = {"status": "passed"}
@@ -3039,7 +3035,7 @@ def main():
                 report["status"] = "interrupted"
                 checks.save()
                 raise
-            report["suites"][name]["seconds"] = round(time.monotonic() - started, 3)
+            report["suites"][name]["seconds"] = round(time.perf_counter() - started, 3)
             checks.save()
             if args.through_case and args.through_case in checks:
                 break

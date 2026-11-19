@@ -113,16 +113,14 @@ int main(int argc, char** argv) {
                            "lazy dog' into French, German and Italian.")};
       passed = Check(mode + ",batched_3", runner, batched) && passed;
       // With the cache, passes also plan prompt checkpoints, as serving does.
-      for (const bool cache_prompt : {false, true}) {
-        for (const std::size_t groups : {16u, 3u}) {
-          test.layer_groups = groups;
-          test.cache_prompt = cache_prompt;
-          passed = Check(mode + "," + std::to_string(groups) + "_groups" +
-                             (cache_prompt ? "_cached" : ""),
-                         runner, test) &&
-                   passed;
-        }
-      }
+      // Coarse groups with the cache, beside the fine uncached batched case,
+      // cover both group widths and both prompt plans. A lone decoder beside
+      // a layered DSpark prefill is the functional prefill-scheduling suite's
+      // DeepSeek case (its output matches an unscheduled control), and the
+      // cache suites capture checkpoints inside real serving passes.
+      test.layer_groups = 3;
+      test.cache_prompt = true;
+      passed = Check(mode + ",3_groups_cached", runner, test) && passed;
     }
     return passed ? 0 : 1;
   } catch (const std::exception& failure) {

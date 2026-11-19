@@ -98,7 +98,7 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
             return (result["text"], result["tools"], result["finish"],
                     bool(result["reasoning"].strip()))
 
-        history = []
+        history, astray = [], []
         previous_total = previous_reused = 0
         for turn in range(4):
             messages.append({"role": "user", "content": f"Turn {turn}.\n" +
@@ -110,9 +110,13 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
             before_last = log_offset(server_log)
             result = chat(f"turn_{turn}", body)
             total, reused, prefilled = work(result)
-            assert result["text"].strip() == "BETA" and not result["tools"] \
-                and result["finish"] == "stop", result
+            assert not result["tools"] and result["finish"] == "stop", result
             assert bool(result["reasoning"].strip()) == thinking, result
+            # DeepSeek can miss the answer uncached too (third drop_reasoning
+            # turn: "responseBETA" in unclosed reasoning, #670). Such a turn
+            # gets its own cold control and must match it.
+            if result["text"].strip() != "BETA":
+                astray.append(turn)
             if turn == 0:
                 assert total >= 2048 and reused == 0 and prefilled == total, result
             else:
@@ -143,7 +147,10 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
 
         # Measure the whole growing history before cold controls can supply
         # missing checkpoints and accidentally hide a frozen-cache failure.
+        # The deepest turn's control renders every earlier turn too.
         for turn, (body, warm) in enumerate(history):
+            if turn not in astray and turn != len(history) - 1:
+                continue
             body["extra_body"]["cache_prompt"] = False
             cold = chat(f"cold_control_{turn}", body)
             total = warm["usage"]["prompt_tokens"]
@@ -202,6 +209,25 @@ def check_messages_growth(client, model, checks, chat_result, failures, server_l
             print(f"CHECK {label}_{phase}", file=sys.stderr, flush=True)
             return result
 
+        def renders_thinking(body):
+            # Count the prompt with and without the replayed thinking blocks,
+            # once: the template's policy does not change between turns.
+            if not thinking:
+                return False
+            if label + "_renders_thinking" in checks:
+                return checks[label + "_renders_thinking"]
+            stripped = deepcopy(body)
+            for message in stripped["messages"]:
+                if message["role"] == "assistant":
+                    message["content"] = [block for block in message["content"]
+                                          if block["type"] != "thinking"]
+            count = lambda request: client.post(  # noqa: E731
+                "/messages/count_tokens", cast_to=object, body={
+                    key: request[key] for key in ("model", "system", "messages", "thinking")}
+            )["input_tokens"]
+            checks[label + "_renders_thinking"] = rendered = count(body) != count(stripped)
+            return rendered
+
         history = []
         previous_total = previous_completion = 0
         for turn in range(4):
@@ -218,7 +244,11 @@ def check_messages_growth(client, model, checks, chat_result, failures, server_l
                 assert total > previous_total, (total, previous_total)
                 # An unchanged replay reproduces the generated assistant turn,
                 # so reuse must reach past the previous prompt into that turn.
-                floor = previous_total + (previous_completion // 2 if thinking else -16)
+                # A template that drops earlier turns' thinking (DeepSeek V4,
+                # #670) renders a different turn; reuse then stops at the
+                # previous prompt, as it does without thinking.
+                floor = previous_total + (previous_completion // 2
+                                          if renders_thinking(body) else -16)
                 if reused < floor:
                     failures.append(
                         f"{label}_turn_{turn}: cache did not cover the replayed turn: "
@@ -238,9 +268,10 @@ def check_messages_growth(client, model, checks, chat_result, failures, server_l
         assert (retry["text"], retry["reasoning"]) == \
             (history[-1][1]["text"], history[-1][1]["reasoning"]), retry
 
-        # Uncached Chat Completions controls render the same conversation; equal
-        # prompt sizes show both routes produce the same prompt.
-        for turn, (body, warm) in enumerate(history):
+        # An uncached Chat Completions control renders the same conversation;
+        # equal prompt sizes show both routes produce the same prompt. The
+        # deepest turn holds every earlier message.
+        for turn, (body, warm) in list(enumerate(history))[-1:]:
             chat = [{"role": "system", "content": system}]
             for message in body["messages"]:
                 if message["role"] == "user":

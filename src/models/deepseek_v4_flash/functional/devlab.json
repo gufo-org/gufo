@@ -32,24 +32,48 @@
       "draft_option": "--dspark-model",
       "mode": "dspark",
       "sampling": "deepseek4",
+      "ctest": {
+        "labels": [
+          "ds4"
+        ],
+        "rules": [
+          "private-deepseek",
+          "gpu-test-bundles"
+        ],
+        "environment": {
+          "GUFO_DEEPSEEK_V4_FLASH_MODEL": "target",
+          "GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL": "draft"
+        }
+      },
+      "settings": {
+        "cache-pressure": {
+          "cache_ram_bytes": 1073741824
+        }
+      },
       "suites": [
         "logprobs",
-        "responses-logprobs",
         "discovery",
-        "openai-count-tokens",
-        "messages-count-tokens",
+        "messages-image-counts",
         "responses",
         "stops",
         "conversation",
         "structured",
         "tool-streaming",
+        "reasoning-separator",
+        "reasoning-budget",
         "tools",
+        "tool-native-schemas",
         "sampling-defaults",
-        "sampling-ranges",
         "batch",
         "state-edges",
+        "prefill-scheduling",
+        "cache-edits",
+        "cache-depth",
+        "cache-bridge",
+        "system-injection",
         "cache"
-      ]
+      ],
+      "max_jobs": 1
     }
   },
   "rules": [

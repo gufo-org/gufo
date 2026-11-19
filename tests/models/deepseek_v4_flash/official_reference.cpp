@@ -17,6 +17,7 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/json.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+#include "tests/support/source_path.hpp"
 
 namespace gufo::testing::ds4 {
 namespace {
@@ -87,7 +88,8 @@ void WriteScoreJson(const json::Value& value, std::ostream& output) {
 json::Value ScoreOfficialContinuations(
     const std::shared_ptr<models::deepseek_v4_flash::Model>& model) {
   Require(!model->HasDspark(), "official scoring requires ordinary decoding");
-  std::ifstream input(GUFO_DS4_OFFICIAL_FIXTURE, std::ios::binary);
+  std::ifstream input(gufo::testing::SourcePath(GUFO_DS4_OFFICIAL_FIXTURE),
+                      std::ios::binary);
   Require(input.good(), "cannot open official continuation fixture");
   const std::string bytes{std::istreambuf_iterator<char>(input), {}};
   const auto fixture = json::parse(bytes);

@@ -324,13 +324,13 @@ def run(args):
             start_row = len(recorder.requests)
             invocation = command + (["--session", session] if session else []) + [prompt]
             save(args.output / f"turn-{turn:02d}.command.json", invocation)
-            started = time.monotonic()
+            started = time.perf_counter()
             with (args.output / f"turn-{turn:02d}.jsonl").open("w") as out, (
                     args.output / f"turn-{turn:02d}.stderr").open("w") as err:
                 process = subprocess.Popen(invocation, cwd=work, env=env, stdout=out,
                                            stderr=err, start_new_session=True)
                 while process.poll() is None:
-                    if time.monotonic() - started > args.timeout:
+                    if time.perf_counter() - started > args.timeout:
                         raise AssertionError(f"agent timed out on turn {turn}")
                     if len(recorder.requests) - start_row > 40:
                         raise AssertionError(f"excessive tool loop on turn {turn}")
@@ -448,7 +448,7 @@ def run(args):
                                     "resumed_task": bool(pending),
                                     "max_prompt_tokens": max_prompt,
                                     "tool_calls": len(turn_calls),
-                                    "wall_ms": (time.monotonic() - started) * 1000,
+                                    "wall_ms": (time.perf_counter() - started) * 1000,
                                     "requests": agent_rows})
             report["tool_calls"] = total_calls
             report.pop("pending_task")

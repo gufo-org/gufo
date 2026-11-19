@@ -632,6 +632,13 @@ if (BUILD_TESTING)
   target_include_directories(gufo_test_support PUBLIC ${CMAKE_SOURCE_DIR})
   target_link_libraries(gufo_test_support PUBLIC gufo_http gufo_serving)
 
+  # Fixture paths compiled into tests stay relocatable: Devlab runs GPU tests
+  # from a bundle built on another host (tests/support/source_path.hpp).
+  add_library(gufo_test_source_path INTERFACE)
+  target_include_directories(gufo_test_source_path INTERFACE ${CMAKE_SOURCE_DIR})
+  target_compile_definitions(gufo_test_source_path INTERFACE
+    GUFO_TEST_BUILD_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+
   add_subdirectory(tests/cache)
   add_subdirectory(tests/sched)
   add_subdirectory(tests/mem)

@@ -183,7 +183,9 @@ cost.
 Each model chooses its prefill chunk. Every text runner declares a scheduling
 profile: beside decoders, the host keeps the profile's pass width and splits
 each pass by layers, with a decode round between groups (one group runs it
-unsplit). A lone request keeps the model's own pass width. `--prefill-chunk`
+unsplit). A lone request keeps the profile's pass width while another session
+is free, so a request arriving during it waits for one such pass, and the
+model's own, possibly wider, pass when every session is taken. `--prefill-chunk`
 is deprecated: it is accepted, ignored with a `event=deprecated_option`
 warning, and will be removed at the next breaking release.
 

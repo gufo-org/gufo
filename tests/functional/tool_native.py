@@ -13,7 +13,7 @@ from copy import deepcopy
 import json
 import sys
 
-from tier import rotate
+from transports import rotate
 from tool_reasoning import response_result
 
 SCHEMA = "https://json-schema.org/draft/2020-12/schema"
@@ -179,10 +179,11 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
         assert_native(result, label)
 
     for index, name in enumerate(NEIGHBORS):
-        # The pr tier keeps the choice each neighbor's control runs with.
+        # Neighbors rotate tool choice and, every two neighbors, the stream,
+        # so the four (choice, stream) pairs each run.
         for choice in rotate(("auto", "required"), index):
             label = f"native_{name}_{choice}"
-            stream = bool(index % 2)
+            stream = bool(index // 2 % 2)
             request = {**common, "tool_choice": choice,
                        "tools": [*opencode_tools(), neighbor(name)],
                        "messages": [{"role": "system", "content": "You are a coding agent."},
@@ -213,16 +214,20 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
             # tool choice, so neighbors alternate which choice is controlled.
             if choice != ("auto", "required")[index % 2]:
                 continue
-            control = {**request, "tools": [*opencode_tools(), neighbor(name, True)],
-                       "max_completion_tokens": 1}
-            baseline = record(label + "_control", chat_result(client, control))
-            delta = first["usage"]["prompt_tokens"] - baseline["usage"]["prompt_tokens"]
+            # The control only needs its prompt size: count it instead of
+            # prefilling it (openai-count-tokens pins count == prompt_tokens).
+            control = {key: request[key] for key in (
+                "model", "messages", "tool_choice", "parallel_tool_calls", "reasoning_effort")}
+            control["tools"] = [*opencode_tools(), neighbor(name, True)]
+            baseline = record(label + "_control", client.post(
+                "/chat/completions/input_tokens", body=control, cast_to=object))
+            delta = first["usage"]["prompt_tokens"] - baseline["input_tokens"]
             # Each renamed keyword may add a token; the instruction alone was
             # about 40 tokens on main.
             tolerance = 2 + 2 * triggers(NEIGHBORS[name])
             assert tolerance < 30 and abs(delta) <= tolerance, (
                 label, "prompt changed beyond the schema text", delta, tolerance,
-                first["usage"], baseline["usage"])
+                first["usage"], baseline)
 
     # Calls to the neighbor itself keep their declared JSON types.
     typed = (
@@ -304,7 +309,7 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
     print(f"CHECK native_schemas_complete deepseek={deepseek}", file=sys.stderr, flush=True)
 
 
-# (responses, stream) pairs; the pr tier rotates one per finite type.
+# (responses, stream) pairs; each finite type takes one, rotating.
 TRANSPORTS = ((False, False), (False, True), (True, False), (True, True))
 
 

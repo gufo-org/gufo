@@ -28,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from metrics import NOISE_MS, SLOWDOWN  # noqa: E402
+from run import SERVER_POPEN, interrupt_server  # noqa: E402
 
 GENERATED_TOKENS = 128
 CONTEXT = 32768
@@ -69,8 +70,32 @@ def prompt(*parts):
     return " ".join(words)
 
 
+# Windows has no unprivileged GPU sensor interface; the APU's ACPI thermal
+# zones (tenths of a kelvin, or kelvin) stand in for the amdgpu hwmon reading.
+THERMAL_ZONES = ("Get-CimInstance Win32_PerfFormattedData_Counters_ThermalZoneInformation | "
+                 "ForEach-Object { \"$($_.HighPrecisionTemperature) $($_.Temperature)\" }")
+
+
+def thermal_zone_temperature():
+    """Return the hottest Windows ACPI thermal zone in °C, or None."""
+    try:
+        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", THERMAL_ZONES],
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    readings = []
+    for line in result.stdout.splitlines() if result.returncode == 0 else []:
+        fields = [int(field) for field in line.split() if field.isdigit()] + [0, 0]
+        precise, kelvin = fields[:2]
+        if precise or kelvin:
+            readings.append(round(precise / 10 - 273.15 if precise else kelvin - 273.15, 1))
+    return max(readings) if readings else None
+
+
 def gpu_temperature():
     """Return the hottest amdgpu hwmon reading in °C, or None."""
+    if os.name == "nt":
+        return thermal_zone_temperature()
     readings = []
     for device in Path("/sys/class/drm").glob("card*/device"):
         try:
@@ -86,9 +111,9 @@ def gpu_temperature():
 
 def cool_down(target):
     """Wait until the GPU is back near its idle temperature; return the reading."""
-    deadline = time.monotonic() + COOL_TIMEOUT_S
+    deadline = time.perf_counter() + COOL_TIMEOUT_S
     temperature = gpu_temperature()
-    while temperature is not None and temperature > target and time.monotonic() < deadline:
+    while temperature is not None and temperature > target and time.perf_counter() < deadline:
         time.sleep(5)
         temperature = gpu_temperature()
     return temperature
@@ -117,7 +142,7 @@ class Server:
 
     def _read(self, stream, log):
         for line in stream:
-            stamp = time.monotonic()
+            stamp = time.perf_counter()
             log.write(line)
             if "[loader]" in line or "event=listening " in line:
                 self.events.append((stamp, line))
@@ -126,21 +151,21 @@ class Server:
                     self.listener_recorded.set()
 
     def start(self, timeout):
-        self.log = self.log_path.open("w")
-        self.spawned = time.monotonic()
-        self.process = subprocess.Popen(self.command, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True, errors="replace")
+        self.log = self.log_path.open("w", encoding="utf-8")
+        self.spawned = time.perf_counter()
+        self.process = subprocess.Popen(self.command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        text=True, encoding="utf-8", errors="replace", **SERVER_POPEN)
         self.reader = threading.Thread(target=self._read, args=(self.process.stdout, self.log))
         self.reader.start()
         deadline = self.spawned + timeout
-        while time.monotonic() < deadline:
+        while time.perf_counter() < deadline:
             if self.process.poll() is not None:
                 raise RuntimeError(f"server exited {self.process.returncode}; see {self.log_path}")
             connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=1)
             try:
                 connection.request("GET", "/health")
                 if connection.getresponse().status == 200:
-                    self.ready = time.monotonic()
+                    self.ready = time.perf_counter()
                     # Let the log reader retain readiness even if the health response wins the race.
                     if not self.listener_recorded.wait(1):
                         raise RuntimeError("listener marker missing; see " + str(self.log_path))
@@ -154,7 +179,7 @@ class Server:
 
     def stop(self):
         if self.process.poll() is None:
-            self.process.send_signal(2)
+            interrupt_server(self.process)
             try:
                 self.process.wait(timeout=60)
             except subprocess.TimeoutExpired:
@@ -326,17 +351,20 @@ def main():
         time.sleep(30)
         idle = gpu_temperature()
     target = None if idle is None else idle + 3
-    started = time.monotonic()
+    started = time.perf_counter()
     arms = []
     for repeat in range(args.repeats):
-        for revision in ("base", "head"):
+        # Alternate which revision goes first: an order effect (the page cache,
+        # memory the previous arm is still returning) then moves the repeats in
+        # opposite directions and reads as noise, never as a slowdown.
+        for revision in ("base", "head") if repeat % 2 == 0 else ("head", "base"):
             temperature = cool_down(target) if target is not None else None
             print(f"Arm {revision} #{repeat + 1}: GPU {temperature} °C", flush=True)
-            arm_started = time.monotonic()
+            arm_started = time.perf_counter()
             arm = run_arm(revision, binaries[revision], weights, args.logs, repeat,
                           args.startup_timeout, args.model_id, assets)
             arms.append({"revision": revision, "repeat": repeat, "gpu_temp_c": temperature,
-                         "wall_s": time.monotonic() - arm_started, **arm})
+                         "wall_s": time.perf_counter() - arm_started, **arm})
     phases, diverged = summarize(arms)
     from devlab_models import registry
     mode = registry()['models'][args.model_id]['mode'] if args.model_id else 'mtp'
@@ -364,7 +392,7 @@ def main():
                      "speculative": mode, "generated_tokens": GENERATED_TOKENS,
                      "slowdown": SLOWDOWN, "noise_ms": NOISE_MS,
                      "idle_temp_c": idle, "requests": {key: label for key, label, *_ in REQUESTS}},
-        "wall_s": time.monotonic() - started,
+        "wall_s": time.perf_counter() - started,
         "arms": arms, "phases": phases, "diverged": diverged,
     }
     args.output.write_text(json.dumps(result, indent=2) + "\n")

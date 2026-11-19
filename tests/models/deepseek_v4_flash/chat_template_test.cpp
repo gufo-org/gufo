@@ -15,6 +15,7 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "tests/models/chat_template_golden_helpers.hpp"
+#include "tests/support/source_path.hpp"
 
 namespace {
 
@@ -264,7 +265,7 @@ void TestParallelToolOrder() {
       {.role = "tool", .content = "Result A", .tool_call_id = "call_A"},
   };
   const auto reverse = gufo::models::deepseek_v4_flash::RenderChat(messages);
-  std::ifstream input(GUFO_CHAT_TEMPLATE_HF_GOLDENS);
+  std::ifstream input(gufo::testing::SourcePath(GUFO_CHAT_TEMPLATE_HF_GOLDENS));
   Expect(input.good(), "Template fixture opens");
   const auto fixture = gufo::json::parse(std::string{
       std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()});
@@ -334,7 +335,9 @@ void TestHuggingFaceRenderedGoldens() {
 }
 
 void TestPinnedArtifactTemplateValidation() {
-  std::ifstream input(GUFO_DEEPSEEK_CHAT_TEMPLATE_REFERENCE, std::ios::binary);
+  std::ifstream input(
+      gufo::testing::SourcePath(GUFO_DEEPSEEK_CHAT_TEMPLATE_REFERENCE),
+      std::ios::binary);
   const std::string reference{std::istreambuf_iterator<char>(input),
                               std::istreambuf_iterator<char>()};
   Expect(!reference.empty(), "Pinned DeepSeek artifact template is readable");

@@ -38,8 +38,8 @@ class DiskGateTest(unittest.TestCase):
                                        stderr=subprocess.PIPE)
             try:
                 if blocked:
-                    deadline = time.monotonic() + 5
-                    while not (gate / "blocked").exists() and time.monotonic() < deadline:
+                    deadline = time.perf_counter() + 5
+                    while not (gate / "blocked").exists() and time.perf_counter() < deadline:
                         self.assertIsNone(process.poll())
                         time.sleep(.01)
                     self.assertTrue((gate / "blocked").exists())

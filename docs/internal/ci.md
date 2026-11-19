@@ -8,11 +8,11 @@ with a verb; a reusable workflow's jobs appear as `caller / called job`.
 | --- | --- | --- | --- | --- |
 | `checks.yml` | Repository checks | Run CPU and repository checks | GitHub Ubuntu | PRs to main, pushes to main, manual. Bounded CPU, repository and functional-harness tests. |
 | `checks.yml` | Repository checks | Warm Linux package cache | GitHub Ubuntu, via `linux-build.yml` | Main and manual only. Builds the production package to fill the shared cache. |
-| `linux-build.yml` | Linux build | Linux package | GitHub Ubuntu | Reusable. Main cache warming, and candidate and baseline packages for comparisons. |
+| `linux-build.yml` | Linux build | Linux package, Linux checked package | GitHub Ubuntu | Reusable. Main cache warming, candidate and baseline packages for comparisons, and on request the candidate's assertion-enabled `.#checked` package. |
 | `windows-build.yml` | Windows build | Windows package | GitHub Windows | Reusable. Builds the native application, runs CPU contracts and verifies the bundle. Called by Windows validation and by Toolboxes releases. |
 | `devlab-windows.yml` | Windows validation | Build, then Run Windows model checks | GitHub Windows, then Devlab Windows Strix Halo | PRs to main, pushes to main, manual. GPU diagnostics and model smoke checks on the same run's bundle. |
 | `devlab-linux.yml` | Linux validation | Authorize and select checks | GitHub Ubuntu | Non-draft PR updates and manual runs. Pins revisions and plans the affected checks. |
-| `devlab-linux.yml` | Linux validation | Build | GitHub Ubuntu, via `linux-build.yml` | When the plan selects work. Builds the candidate and `main` packages. |
+| `devlab-linux.yml` | Linux validation | Build | GitHub Ubuntu, via `linux-build.yml` | When the plan selects work. Builds the candidate and `main` packages, and the checked candidate that correctness runs on. |
 | `devlab-linux.yml` | Linux validation | Run Linux model checks | Devlab Linux Strix Halo | Prepares while the hosted build runs, then tests once the packages arrive. |
 | `devlab-linux.yml` | Linux validation | Publish results | GitHub Ubuntu | After testing, failures included. Publishes the report and the `devlab/functional` status. |
 | `devlab-comment.yml` | Functional reporting | Update PR comment | GitHub Ubuntu | When Linux validation starts or ends. Keeps the PR comment current, also for forks, without running PR code. |

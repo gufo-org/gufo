@@ -33,7 +33,8 @@ def check_cache_edits(client, model, checks, chat_result, server_log=None):
                 {"role": "tool", "tool_call_id": "fixture-call", "content":
                  "The fixture status is BETA.\n" + "Routine archive entry.\n" * 64},
                 {"role": "assistant", "content": "I have read the fixture."},
-                {"role": "user", "content": "Reply with only the fixture status."},
+                # "the fixture status" makes DeepSeek repeat the whole tool sentence (#670).
+                {"role": "user", "content": "Reply with only the status word."},
             ]
         else:
             messages.append({"role": "user", "content": "Reply with only ALPHA."})

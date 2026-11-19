@@ -75,7 +75,9 @@ refuses to load one that leaves a field at zero. While other sessions decode,
 Gufo bounds each prompt pass with it so they don't wait for all of it:
 
 - `pass_tokens` is the width Gufo uses for a prompt beside decoders, normally
-  the model's own prefill pass. A prompt running alone isn't bounded.
+  the model's own prefill pass. A prompt running alone gets it too while
+  another session is free, so an arrival waits for at most one such pass; with
+  every session taken it isn't bounded.
 - `max_layer_groups` is how many layer groups one such pass may be split into.
   One runs every pass unsplit, so decoders wait for the whole pass.
 - `max_yield_decode_width` is how many sessions one decode step between groups

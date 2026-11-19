@@ -31,7 +31,7 @@ set_tests_properties(ds4.config_f32 PROPERTIES LABELS "cpu;ds4;loader")
 
 add_executable(ds4_chat_template_test chat_template_test.cpp)
 target_link_libraries(ds4_chat_template_test PRIVATE gufo_core
-  gufo_deepseek_v4_flash_text)
+  gufo_deepseek_v4_flash_text gufo_test_source_path)
 target_compile_definitions(ds4_chat_template_test PRIVATE
   GUFO_DEEPSEEK_CHAT_TEMPLATE_REFERENCE="${PROJECT_SOURCE_DIR}/src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja"
   GUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
@@ -104,7 +104,7 @@ if(ENGINE_ENABLE_HIP)
     GUFO_DS4_OFFICIAL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/official-0731.json"
     GUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
   target_link_libraries(ds4_quality_test PRIVATE gufo_deepseek_v4_flash_hip hip::host
-    OpenSSL::Crypto)
+    OpenSSL::Crypto gufo_test_source_path)
   add_test(NAME ds4.target COMMAND ds4_quality_test)
   add_test(NAME ds4.dspark COMMAND ds4_quality_test --dspark)
   set_tests_properties(ds4.target ds4.dspark PROPERTIES
@@ -211,6 +211,6 @@ set_tests_properties(ds4.dataset PROPERTIES
 add_executable(ds4_eval_test eval_test.cpp)
 target_compile_definitions(ds4_eval_test PRIVATE
   GUFO_EVAL_TEST_DATA="${PROJECT_SOURCE_DIR}/tests/fixtures/eval/antirez-ds4.json")
-target_link_libraries(ds4_eval_test PRIVATE gufo_core gufo_eval)
+target_link_libraries(ds4_eval_test PRIVATE gufo_core gufo_eval gufo_test_source_path)
 add_test(NAME ds4.eval COMMAND ds4_eval_test)
 set_tests_properties(ds4.eval PROPERTIES LABELS "cpu;ds4;quality;eval;dataset;extractor")
