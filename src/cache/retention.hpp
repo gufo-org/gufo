@@ -128,8 +128,9 @@ struct RetentionRequest {
 // recently used conversation that it and its retained descendants have not
 // used within one record-table turnover (the record limit in uses). Byte
 // pressure removes, in order: unused generated copies; retry copies; cheap
-// checkpoints, whose private
-// state exceeds eight times the rows they restore; conversations not reused
+// checkpoints, whose private state exceeds eight times the rows they restore,
+// once a sixteenth of the RAM budget was admitted after their conversation's
+// last use (a newer one keeps its recency); conversations not reused
 // within one RAM-budget turnover, least recently used first; then reused
 // ones. A conversation's recency includes its retained descendants. An
 // unreused conversation gives up covered near-duplicates, then its leaf,
@@ -174,13 +175,23 @@ private:
     RetentionPurpose purpose{};
     Rows stable{};
     std::uint64_t last_used{};
-    // admitted_bytes_ at the last reuse of this record's conversation.
-    std::optional<std::uint64_t> reused_at;
+    // admitted_bytes_ at the last reuse of this record's conversation, valid
+    // when `reused` is set, and after its admission or last use. Two plain
+    // words keep the record table's metadata charge unchanged.
+    std::uint64_t reused_bytes{}, used_bytes{};
     // Two continuations once extended this record directly.
     std::uint64_t forked : 1 {false};
     std::uint64_t persistable : 1 {true};
     std::uint64_t frontier_used : 1 {false};
-    std::uint64_t turn : 61 {};
+    std::uint64_t reused : 1 {false};
+    std::uint64_t turn : 60 {};
+    [[nodiscard]] std::optional<std::uint64_t> ReusedAt() const {
+      return reused ? std::optional(reused_bytes) : std::nullopt;
+    }
+    void SetReusedAt(std::uint64_t bytes) {
+      reused = true;
+      reused_bytes = bytes;
+    }
     // Retained records extending this one, by slot.
     std::bitset<kRecordLimit> below;
   };
