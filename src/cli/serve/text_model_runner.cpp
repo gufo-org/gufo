@@ -1885,6 +1885,10 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
   return Acquire(std::move(prompt), sampling::SamplingConfig{}, is_cancelled);
 }
 
+bool TextRunnerPool::restores_beside_decode() const noexcept {
+  return impl_->component_cache->restores_beside_decode();
+}
+
 bool TextRunnerPool::shared_state() const noexcept {
   return impl_->component_cache->shared_state();
 }

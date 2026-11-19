@@ -53,9 +53,14 @@ constexpr std::size_t kQwenMaxResumeTokens = 9;
 static_assert(kQwenMaxResumeTokens ==
               hip::QwenDFlashGpuDraftBackend::kMaxPendingRows + 1);
 
+// Restores get a hardware queue of their own: the executors run on their own
+// streams and touch the legacy null stream only to load weights.
 [[nodiscard]] inline hip::ComponentCacheHooks HipComponentCacheHooks() {
-  return {[] { return ext::HostSnapshotCeilingBytes(); },
-          [](std::string_view) {}, [](std::string_view) {}};
+  hip::ComponentCacheHooks hooks{[] { return ext::HostSnapshotCeilingBytes(); },
+                                 [](std::string_view) {},
+                                 [](std::string_view) {}};
+  hooks.own_restore_queue = true;
+  return hooks;
 }
 
 template<typename State, typename Tokens>

@@ -2982,6 +2982,10 @@ ComponentCacheMetrics ComponentTextCache::Lease::Metrics() const {
   return report;
 }
 
+bool ComponentTextCache::restores_beside_decode() const noexcept {
+  return impl_->resources->restore_own_queue;
+}
+
 bool ComponentTextCache::shared_state() const noexcept {
   return mem::StateLedger::Process().PromiseCap() != 0 &&
          std::ranges::any_of(impl_->entries,

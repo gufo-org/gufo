@@ -71,5 +71,10 @@ struct ComponentCacheResources {
   // Released backing comes back as captures need it, under the provider's
   // usual growth rules.
   std::function<std::size_t(std::size_t)> release_host;
+  // restore_stream's copies run on a hardware queue of their own, so they
+  // never wait behind the model's work: a restore may copy beside decode
+  // (RestoreCopyRunner). Without one, a 15K-token DeepSeek restore beside
+  // decode waited ~1 s behind it instead of finishing in ~0.1 s.
+  bool restore_own_queue{false};
 };
 }  // namespace gufo::cache

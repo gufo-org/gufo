@@ -261,6 +261,8 @@ struct FakeControl {
   // Runs where a restore copies its first rows in; set before the scheduler
   // starts.
   std::function<void()> restore_callback;
+  // Whether restores may copy beside decode (a restore queue of its own).
+  bool restore_own_queue{true};
   std::atomic<bool> yielding{false};
   std::vector<std::string> output_pieces;
   std::uint32_t max_context{128};
@@ -526,7 +528,8 @@ public:
         ledger, std::make_unique<ObservedAdapter>(control_),
         {.private_blocks = 512,
          .row_backing_bytes = 1024,
-         .total_row_bytes = 1U << 24});
+         .total_row_bytes = 1U << 24,
+         .restore_own_queue = control_->restore_own_queue});
   }
   [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
       gufo::cache::Adapter& adapter, gufo::cache::Slot& slot) const override {
@@ -3220,11 +3223,14 @@ void TestSnapshotDoesNotBlockOtherRequests() {
   }
 }
 
-// A restore's copies run beside a running decoder instead of stopping it.
-void TestRestoreCopiesRunBesideDecoders() {
+// A restore's copies run beside a running decoder instead of stopping it, but
+// only where they have a hardware queue of their own: without one they would
+// wait behind decode work, so the restore stops the decoder as before.
+void CheckRestoreBesideDecoders(bool own_queue) {
   auto control = std::make_shared<FakeControl>();
   control->max_context = 4096;
   control->snapshots = true;
+  control->restore_own_queue = own_queue;
   const auto advances = [&] {
     std::size_t count = 0;
     for (const auto& event : control->Events())
@@ -3236,11 +3242,14 @@ void TestRestoreCopiesRunBesideDecoders() {
     if (!armed || restoring.exchange(true))
       return;
     const auto before = advances();
-    const auto deadline = std::chrono::steady_clock::now() + kTestTimeout;
+    // Without an own queue no decoder may step: wait long enough to see one.
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        (own_queue ? kTestTimeout : std::chrono::milliseconds(100));
     while (std::chrono::steady_clock::now() < deadline &&
            advances() < before + 3)
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    decoded = advances() >= before + 3;
+    decoded = advances() != before;
   };
   // The fake checkpoint is small: copy it beside decoders all the same.
   TextSchedulerPolicy policy;
@@ -3262,9 +3271,16 @@ void TestRestoreCopiesRunBesideDecoders() {
   control->advance_delay_us = 0;
   Expect(restoring && restored.cache_hit && restored.cache_restore_bytes > 0,
          "the branch restores a RAM checkpoint");
-  Expect(decoded, "the decoder advances while the restore copies");
+  Expect(decoded == own_queue,
+         own_queue ? "the decoder advances while the restore copies"
+                   : "without an own queue the restore stops the decoder");
   Expect(!decoder.Wait().cancelled, "the decoder completes");
   scheduler.reset();
+}
+
+void TestRestoreCopiesRunBesideDecoders() {
+  CheckRestoreBesideDecoders(true);
+  CheckRestoreBesideDecoders(false);
 }
 
 void TestCapturedDecoderResumesBeforeMorePrefill() {

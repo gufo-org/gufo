@@ -45,6 +45,14 @@ private:
   std::shared_ptr<detail::TransferLease> lease_;
 };
 
+// Hardware queues of their own that pools may still create in this process
+// (TransferPool `own_queues`); one unless set. Each costs one of the device's
+// compute queues for the process lifetime, so the serving layer sets it from
+// its queue plan before creating any pool.
+void SetOwnQueueAllowance(std::size_t queues);
+// What is left of that allowance.
+[[nodiscard]] std::size_t OwnQueueAllowance();
+
 class TransferPool {
 public:
   // Creates all nonblocking streams and timing-disabled events at startup.
@@ -55,18 +63,24 @@ public:
   // a native stream failure quarantines every lease mapped to that stream.
   // Both counts must be nonzero, with native_streams <= capacity. Equal counts
   // retain the one-argument constructor's exclusive stream behavior.
-  // A nonzero `priority` gives each native stream a hardware queue of its
-  // own, so its copies never wait behind kernels that other streams queued on
-  // a shared one; where the runtime cannot, the stream gets that HIP stream
-  // priority instead (lower is greater; -1 is the greatest on gfx1151).
+  // A nonzero `priority` creates the native streams with that HIP stream
+  // priority (lower is greater; -1 is the greatest on gfx1151).
+  // `own_queues` instead gives each native stream a hardware queue of its own
+  // while the process allowance lasts (SetOwnQueueAllowance), so its copies
+  // never wait behind kernels other streams queued on a shared one; past it,
+  // or where the runtime refuses, the stream falls back to `priority`. HIP
+  // creates such a stream blocking: it orders against legacy null-stream
+  // work, so a model that launches on the null stream must not ask for one.
   TransferPool(std::size_t capacity, std::size_t native_streams,
-               int priority = 0);
+               int priority = 0, bool own_queues = false);
   // Returns null on exhaustion. No HIP allocation/stream/event creation here.
   // An event returns only after BOTH stream and completion release their lease.
   // Failed resources are quarantined rather than reused. A shared pool throws
   // when exhausted after any quarantine: its consumers must not wait for lost
   // capacity to return. Exclusive pools retain null on exhaustion.
   [[nodiscard]] std::unique_ptr<TransferStream> TryAcquire();
+  // Whether every native stream got a hardware queue of its own.
+  [[nodiscard]] bool OwnQueues() const noexcept;
 
 private:
   std::shared_ptr<detail::TransferPoolState> state_;

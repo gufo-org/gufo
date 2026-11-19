@@ -223,6 +223,10 @@ public:
   /// are configured at full context than fit at once. Each request then
   /// claims the tokens it may write, and is admitted only when they fit.
   [[nodiscard]] bool shared_state() const noexcept;
+  /// Whether a restore's copies may run beside decoders (`run_copies` in
+  /// Acquire): only when they have a hardware queue of their own. Otherwise
+  /// they wait behind decode work, slower than stopping it to restore.
+  [[nodiscard]] bool restores_beside_decode() const noexcept;
   /// Generated tokens a request claims ahead, at admission and each time
   /// decoding nears its claim.
   static constexpr std::size_t kStateDecodeTokens = 8192;

@@ -222,25 +222,46 @@ void TransferCompletionOwnership() {
   assert(!live_streams && !live_events && native_creations == 2);
 }
 
-// Restore streams get hardware queues of their own (all CUs); a runtime that
-// refuses keeps priority streams.
+// Pools that ask get hardware queues of their own (all CUs) while the process
+// allowance lasts; past it, or where the runtime refuses one, they keep
+// priority streams, and a refusal gives the allowance back. Priority alone
+// never takes one.
 void PriorityTransferOwnQueues() {
   using namespace gufo;
   masked_streams = priority_streams = 0;
+  hip::SetOwnQueueAllowance(2);
   {
-    hip::TransferPool pool(4, 2, -1);
+    hip::TransferPool pool(4, 2, -1, true);
     assert(masked_streams == 2 && priority_streams == 0);
+    assert(pool.OwnQueues());
     assert(pool.TryAcquire());
   }
+  {
+    hip::TransferPool pool(4, 1, -1, true);
+    assert(masked_streams == 2 && priority_streams == 1);
+  }
+  hip::SetOwnQueueAllowance(1);
   refuse_cu_mask = true;
   {
-    hip::TransferPool pool(4, 2, -1);
-    assert(masked_streams == 2 && priority_streams == 2);
+    hip::TransferPool pool(4, 2, -1, true);
+    assert(masked_streams == 2 && priority_streams == 3);
   }
   refuse_cu_mask = false;
   {
-    hip::TransferPool pool(4, 2);
-    assert(masked_streams == 2 && priority_streams == 2);
+    hip::TransferPool pool(4, 2, -1, true);
+    assert(masked_streams == 3 && priority_streams == 4);
+    assert(!pool.OwnQueues());
+  }
+  hip::SetOwnQueueAllowance(1);
+  {
+    hip::TransferPool pool(4, 2, -1);
+    assert(masked_streams == 3 && priority_streams == 6);
+  }
+  {
+    assert(hip::OwnQueueAllowance() == 1);
+    hip::TransferPool pool(4, 2, 0, true);
+    assert(masked_streams == 4 && priority_streams == 6);
+    assert(hip::OwnQueueAllowance() == 0);
   }
   assert(!live_streams && !live_events);
 }
@@ -339,6 +360,37 @@ void ComponentTransferFactoryCounts() {
   }
 }
 
+// A provider that asks restores to own a hardware queue gets one native
+// restore stream on it while the process allowance lasts, and otherwise the two
+// priority streams every provider gets.
+void ComponentOwnRestoreQueue() {
+  using namespace gufo;
+  for (const std::size_t allowance : {1, 0}) {
+    hip::SetOwnQueueAllowance(allowance);
+    cache::ResourceLedger ledger(
+        {kBudgetBytes, kBudgetBytes, kBudgetBytes, kBudgetBytes});
+    hip::ComponentCacheHooks hooks;
+    hooks.transfer_streams = 4;
+    hooks.own_restore_queue = true;
+    hooks.host_ceiling = [] { return kBudgetBytes; };
+    hooks.warn = [](std::string_view) {};
+    hooks.info = [](std::string_view) {};
+    masked_streams = priority_streams = 0;
+    auto resources = hip::CreateHipComponentCacheResources(
+        std::make_unique<Adapter>(), ledger, std::move(hooks));
+    // Restores, then disk persistence on one stream.
+    const unsigned restore_streams = allowance ? 1 : 2;
+    assert(live_streams == 4 + restore_streams + 1);
+    assert(masked_streams == (allowance ? 1u : 0u) &&
+           priority_streams == (allowance ? 0u : 2u));
+    assert(hip::OwnQueueAllowance() == 0);
+    assert(resources->restore_own_queue == (allowance != 0));
+    assert(resources->restore_stream());
+    resources.reset();
+    assert(!live_streams && !live_events);
+  }
+  hip::SetOwnQueueAllowance(1);
+}
 void SharedTransferFences() {
   using namespace gufo;
   hip::TransferPool pool(3, 1);
@@ -803,6 +855,7 @@ int main() {
   SharedTransferConstructionAndCounts();
   PriorityTransferOwnQueues();
   ComponentTransferFactoryCounts();
+  ComponentOwnRestoreQueue();
   SharedTransferFences();
   SharedCachedNativeCleanup();
   SharedTransferServingBound();

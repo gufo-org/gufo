@@ -30,6 +30,7 @@ struct TransferPoolState {
   std::unique_ptr<Lane[]> lanes;
   std::size_t native_streams{};
   bool shared{};
+  bool own_queues{};
   std::atomic<bool> degraded{false};
   std::vector<Slot> slots;
   ~TransferPoolState() {
@@ -242,34 +243,61 @@ cache::Completion TransferStream::Copy(void* destination, const void* source,
   }
 }
 namespace {
+std::atomic<std::size_t> own_queue_allowance{1};
+// Takes one queue from the allowance; false when none is left.
+bool TakeOwnQueue() {
+  auto left = own_queue_allowance.load(std::memory_order_relaxed);
+  while (left != 0)
+    if (own_queue_allowance.compare_exchange_weak(left, left - 1,
+                                                  std::memory_order_relaxed))
+      return true;
+  return false;
+}
 // HIP pools streams onto a few hardware queues, and a priority stream may
 // share one with the model's executor stream: a restore copy then waits
 // behind whole decode graphs (2.2 GB took 2.6 s beside decode, 0.1 s on its
 // own queue). A CU-masked stream gets a hardware queue of its own; the mask
-// keeps every CU. Where the runtime refuses one, keep the priority stream.
-hipError_t CreateOwnQueueStream(hipStream_t* stream, int priority) {
+// keeps every CU. The runtime creates it blocking and at normal priority.
+// Without allowance left, or where the runtime refuses one, a nonblocking
+// stream of `priority` stands in.
+hipError_t CreateNativeStream(hipStream_t* stream, int priority, bool own_queue,
+                              bool* owns = nullptr) {
   int device = 0, units = 0;
-  if (hipGetDevice(&device) == hipSuccess &&
-      hipDeviceGetAttribute(&units, hipDeviceAttributeMultiprocessorCount,
-                            device) == hipSuccess &&
-      units > 0) {
-    std::vector<std::uint32_t> mask((static_cast<std::size_t>(units) + 31) / 32,
-                                    ~std::uint32_t{0});
-    if (const auto tail = units % 32)
-      mask.back() = (std::uint32_t{1} << tail) - 1;
-    if (hipExtStreamCreateWithCUMask(stream,
-                                     static_cast<std::uint32_t>(mask.size()),
-                                     mask.data()) == hipSuccess)
-      return hipSuccess;
+  if (own_queue && TakeOwnQueue()) {
+    if (hipGetDevice(&device) == hipSuccess &&
+        hipDeviceGetAttribute(&units, hipDeviceAttributeMultiprocessorCount,
+                              device) == hipSuccess &&
+        units > 0) {
+      std::vector<std::uint32_t> mask(
+          (static_cast<std::size_t>(units) + 31) / 32, ~std::uint32_t{0});
+      if (const auto tail = units % 32)
+        mask.back() = (std::uint32_t{1} << tail) - 1;
+      if (hipExtStreamCreateWithCUMask(stream,
+                                       static_cast<std::uint32_t>(mask.size()),
+                                       mask.data()) == hipSuccess) {
+        if (owns)
+          *owns = true;
+        return hipSuccess;
+      }
+    }
+    (void)hipGetLastError();
+    own_queue_allowance.fetch_add(1, std::memory_order_relaxed);
   }
-  (void)hipGetLastError();
-  return hipStreamCreateWithPriority(stream, hipStreamNonBlocking, priority);
+  return priority == 0 ? hipStreamCreateWithFlags(stream, hipStreamNonBlocking)
+                       : hipStreamCreateWithPriority(
+                             stream, hipStreamNonBlocking, priority);
 }
 }  // namespace
+void SetOwnQueueAllowance(std::size_t queues) {
+  own_queue_allowance.store(queues, std::memory_order_relaxed);
+}
+std::size_t OwnQueueAllowance() {
+  return own_queue_allowance.load(std::memory_order_relaxed);
+}
 TransferPool::TransferPool(std::size_t capacity)
     : TransferPool(capacity, capacity) {}
 TransferPool::TransferPool(std::size_t capacity, std::size_t native_streams,
-                           int priority) {
+                           int priority, bool own_queues) {
   if (!capacity || !native_streams || native_streams > capacity)
     throw std::invalid_argument("invalid transfer pool resource counts");
   auto state = std::make_shared<detail::TransferPoolState>();
@@ -281,16 +309,20 @@ TransferPool::TransferPool(std::size_t capacity, std::size_t native_streams,
   for (std::size_t i = 0; i < capacity; ++i) {
     // Keep the exclusive constructor's creation order; a partial failure is
     // cleaned by state ownership whether it leaves a stream or only events.
-    if (i < native_streams)
-      Check(priority == 0
-                ? hipStreamCreateWithFlags(&state->lanes[i].stream,
-                                           hipStreamNonBlocking)
-                : CreateOwnQueueStream(&state->lanes[i].stream, priority));
+    if (i < native_streams) {
+      bool owns = false;
+      Check(CreateNativeStream(&state->lanes[i].stream, priority, own_queues,
+                               &owns));
+      state->own_queues = (i == 0 || state->own_queues) && owns;
+    }
     const unsigned flags =
         hipEventDisableTiming | (state->shared ? hipEventReleaseToSystem : 0);
     Check(hipEventCreateWithFlags(&state->slots[i].event, flags));
   }
   state_ = std::move(state);
+}
+bool TransferPool::OwnQueues() const noexcept {
+  return state_->own_queues;
 }
 std::unique_ptr<TransferStream> TransferPool::TryAcquire() {
   const std::lock_guard lock(state_->mutex);

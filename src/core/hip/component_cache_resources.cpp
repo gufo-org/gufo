@@ -29,14 +29,22 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
                                  cache::ResourceLedger& ledger,
                                  ComponentCacheHooks hooks) {
   struct Backing {
-    Backing(std::size_t streams, std::size_t leases)
-        : streams(leases ? leases : streams, streams) {}
+    Backing(std::size_t streams, std::size_t leases, bool own_restore_queue)
+        : streams(leases ? leases : streams, streams),
+          restore(16, own_restore_queue ? 1 : 2, -1, own_restore_queue) {}
+    static bool OwnRestoreQueue(const ComponentCacheHooks& hooks) {
+      return hooks.own_restore_queue && hip::OwnQueueAllowance() != 0;
+    }
     hip::TransferPool streams;
-    // Foreground restores: two native streams at the greatest priority. A
-    // restore's copies submit in milliseconds but used to complete only
-    // after other sessions' captures and persistence queued on the shared
-    // FIFO streams (up to 2.9 s measured); here 2.47 GB restore in 31 ms.
-    hip::TransferPool restore{16, 2, -1};
+    // Foreground restores: two native streams at the greatest priority, or
+    // one on a hardware queue of its own (hooks.own_restore_queue, while the
+    // process allowance the serving queue plan sets has one left). One stream
+    // copies 2.2 GB from RAM in 36-38 ms, two pooled ones in 34.5 ms. A
+    // restore's copies submit in milliseconds but used to complete only after
+    // other sessions' captures and persistence queued on the shared FIFO
+    // streams (up to 2.9 s measured), or beside decode after decode graphs on a
+    // shared hardware queue; here 2.47 GB restore in 31 ms.
+    hip::TransferPool restore;
     // Disk persistence: its own stream, so writes never queue in front of a
     // restore or capture.
     hip::TransferPool background{8, 1};
@@ -50,7 +58,8 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
   auto result = std::make_unique<cache::ComponentCacheResources>();
   result->adapter = std::move(adapter);
   auto backing =
-      std::make_shared<Backing>(hooks.transfer_streams, hooks.transfer_leases);
+      std::make_shared<Backing>(hooks.transfer_streams, hooks.transfer_leases,
+                                Backing::OwnRestoreQueue(hooks));
   if (hooks.info)
     hooks.info(
         "schema=component-cache-v1 event=transfer_resources "
@@ -284,6 +293,7 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
   result->restore_stream = [backing]() -> std::unique_ptr<cache::Stream> {
     return backing->restore.TryAcquire();
   };
+  result->restore_own_queue = backing->restore.OwnQueues();
   result->background_stream = [backing]() -> std::unique_ptr<cache::Stream> {
     return backing->background.TryAcquire();
   };

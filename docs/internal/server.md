@@ -364,7 +364,7 @@ follows `--log-level` like the rest of the startup diagnostics; the
 
 | Server | `GPU_MAX_HW_QUEUES` | Resident compute queues |
 | --- | ---: | ---: |
-| `serve llm` | 2 | 3 |
+| `serve llm` | 2 | 3, plus 1 for restores |
 | `serve tts` | 1 | 2 |
 | `serve asr` | 1 | 2 |
 | `serve image`, `serve video`, `serve embedding` | runtime default | up to 5 |
@@ -380,6 +380,14 @@ with `"serving": {"hardware_queues": N}` in its `extension.json`, for example
 a TTS model that decodes audio on a second stream while it generates the next
 patch. The server probes the model's provider before the first HIP dispatch
 and uses that cap in place of 1. Providers that declare nothing keep 1.
+
+Flash-Next and Qwen servers also restore cached prompts on a stream with a
+hardware queue of its own, so a restore beside running decoders never waits
+behind their decode graphs on a pooled queue. The plan counts that queue for
+every text server and gives it up first when the device is short (`own=0` in
+the `queue_budget` line): the restores then use pooled priority streams and
+stop running decoders while they copy, and the cap is kept. Two text servers
+still fit the budget with their restore queues.
 
 The cap is only ever lowered to fit the free slots, never raised to fill them,
 so a server's throughput does not depend on the order the servers started. A

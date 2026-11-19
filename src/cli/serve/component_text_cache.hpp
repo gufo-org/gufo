@@ -110,6 +110,9 @@ public:
       const RestoreRunner& run_copies = {});
   // Whether sessions share their demand-mapped state (#715).
   [[nodiscard]] bool shared_state() const noexcept;
+  // Whether restores copy on a hardware queue of their own and so may run
+  // beside decode (ComponentCacheResources::restore_own_queue).
+  [[nodiscard]] bool restores_beside_decode() const noexcept;
   // Bytes a session that holds nothing would charge for `tokens`; zero
   // without shared state.
   [[nodiscard]] std::size_t StateBytesFor(std::size_t tokens) const;

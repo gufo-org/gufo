@@ -192,6 +192,8 @@ public:
             use_dspark_ ? gufo::core::SessionMode::kSpeculative
                         : gufo::core::SessionMode::kAutoregressive,
             max_context_, component_identity_),
+        // No own restore queue: the kernels launch on the legacy null
+        // stream, which a blocking own-queue stream would order against.
         ledger,
         {[] { return ext::HostSnapshotCeilingBytes(); },
          [](std::string_view) {}, [](std::string_view) {}});

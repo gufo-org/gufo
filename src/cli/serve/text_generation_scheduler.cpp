@@ -1483,13 +1483,18 @@ struct TextGenerationScheduler::Impl {
             LogPublicationWait(request, "skip", "no_estimate");
           }
         }
-        // A restore runs beside decoders and captures (RunBesideDecoders), but
-        // holds up other prompts' prefill and admission: when any wait or
-        // prefill, read its files first so they proceed meanwhile.
+        // A restore runs beside decoders and captures (RunBesideDecoders)
+        // where its copies have a hardware queue of their own, but holds up
+        // other prompts' prefill and admission: when any wait or prefill, or
+        // the restore would stop running work, read its files first so they
+        // proceed meanwhile.
+        const bool running = !decoding.empty() || !capturing.empty();
+        const bool restores_beside_decode =
+            running && runner_pool->restores_beside_decode();
         if (request->cache_prompt && !request->disk_warm_start &&
             (!prefilling.empty() ||
-             ((!decoding.empty() || !capturing.empty()) &&
-              (!waiting.empty() || QueuedCount() != 0)))) {
+             (running && (!restores_beside_decode || !waiting.empty() ||
+                          QueuedCount() != 0)))) {
           request->disk_warm_start = Clock::now();
           if (auto warm = runner_pool->WarmDisk(request->prompt,
                                                 request->prompt_context.get(),
@@ -1522,7 +1527,7 @@ struct TextGenerationScheduler::Impl {
         // A restore's copies use restore streams only, so running decoders
         // keep stepping while they run.
         TextRunnerPool::RestoreCopyRunner beside_decoders;
-        if (!decoding.empty() || !capturing.empty())
+        if (restores_beside_decode)
           beside_decoders = [&](std::chrono::microseconds estimate,
                                 const std::function<void()>& copies) {
             if (estimate < scheduler_policy.restore_beside_decoders_after)
