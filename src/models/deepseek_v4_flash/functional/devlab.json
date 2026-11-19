@@ -49,7 +49,33 @@
         "cache-pressure": {
           "cache_ram_bytes": 1073741824
         }
-      }
+      },
+      "suites": [
+        "logprobs",
+        "discovery",
+        "messages-image-counts",
+        "responses",
+        "stops",
+        "conversation",
+        "structured",
+        "tool-reasoning",
+        "tool-streaming",
+        "reasoning-separator",
+        "reasoning-budget",
+        "tools",
+        "tool-native-schemas",
+        "sampling-defaults",
+        "batch",
+        "long-context",
+        "state-edges",
+        "prefill-scheduling",
+        "cache-edits",
+        "cache-growth",
+        "cache-depth",
+        "cache-bridge",
+        "system-injection",
+        "cache"
+      ]
     }
   },
   "rules": [

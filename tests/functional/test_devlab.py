@@ -69,18 +69,22 @@ class PlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             devlab_plan.select(['src/models/qwen/engine.cpp'], unknown)
 
-    def test_deepseek_runs_every_suite_flash_next_runs(self):
-        # DeepSeek V4 Flash has no curated list; it skips only vision and the
-        # Flash-Next-only server configurations its profile does not take.
+    def test_deepseek_runs_its_own_paths_and_leaves_shared_ones_to_flash_next(self):
+        # DeepSeek runs the suites its runtime, cache, DSpark, template and native
+        # tool syntax change; Flash-Next covers the server-generic suites.
         def suites(path, model):
             return {suite for group in self.plan(path)['groups']
                     if group['profile'].startswith(model + '/') for suite in group['suites']}
-        self.assertNotIn('suites', self.registry['models']['deepseek4'])
         deepseek = suites('src/models/deepseek_v4_flash/engine.cpp', 'deepseek4')
-        self.assertTrue({'cache-bridge', 'cache-depth', 'cache-growth', 'cache-edits',
-                         'cache-concurrency', 'cache-shared-prefix', 'tool-reasoning',
-                         'tool-parameter-order'} <= deepseek)
-        self.assertLessEqual(deepseek, suites('src/models/qwen38_flash_next/engine.cpp', 'flash-next-q4'))
+        flash = suites('src/models/qwen38_flash_next/engine.cpp', 'flash-next-q4')
+        self.assertTrue({'cache', 'cache-bridge', 'cache-depth', 'cache-growth', 'cache-edits', 'batch',
+                         'prefill-scheduling', 'tools', 'tool-native-schemas', 'tool-reasoning',
+                         'tool-streaming', 'structured', 'sampling-defaults', 'reasoning-budget'} <= deepseek)
+        shared = {'sampling-ranges', 'stream-start', 'progress', 'metrics', 'tool-edges', 'tool-mixed',
+                  'cache-concurrency', 'cache-shared-prefix', 'cache-rotation'}
+        self.assertFalse(shared & deepseek)
+        self.assertLessEqual(shared, flash)
+        self.assertLessEqual(deepseek, flash)
 
     def test_model_settings_override_its_configurations(self):
         # DeepSeek checkpoints are too small for the shared 2 GiB bridge budget.

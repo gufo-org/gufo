@@ -336,8 +336,11 @@ A model's `suites` list in its `functional/devlab.json` limits Devlab to those
 suites at every tier; the report counts the others as out of scope. Qwen27 uses
 it to run only the suites its runtime changes (cache and checkpoints, batching
 and scheduling, DFlash2 with sampling, grammars and stops, vision); Flash-Next
-covers the shared Qwen protocol suites. Flash-Next and DeepSeek V4 have no list
-and run every suite their profile takes.
+covers the shared Qwen protocol suites. DeepSeek V4's list keeps its runtime,
+cache, DSpark, template and native tool-call suites; the server-generic ones
+(validation, accounting, streaming events, schema shapes, shared-prefix and
+rotation cache logic) run on Flash-Next. Flash-Next has no list and runs every
+suite its profile takes.
 
 A model's `settings` map, keyed by configuration, overrides that
 configuration's server settings for the model. DeepSeek V4 runs `cache-bridge`
