@@ -619,7 +619,14 @@ foreground lease is active, capture stays on the exclusive completion path.
 Complete chunks share the execution history; private state and tails copy under
 slot exclusivity, and borrowed rows use the existing idle preservation worker.
 Optional setup or admission refusal leaves the completed live execution valid.
-The disk queue writes these copies during idle work.
+The disk queue writes these copies during idle work. Each one is a turn end
+that an edit or a branch restores, so a queued turn end coalesces into newer
+ones only when the queue has no room for the next write, keeping the two most
+recent. That next write may belong to another conversation, so one
+conversation's backlog cannot crowd out another's newest turn end. A larger
+turn end coalesces as many older ones as it needs to fit, so the newest turn
+end is not the one skipped. A writer that falls behind delays turn ends
+instead of dropping them.
 A refused capture or full persistence queue can still leave an earlier fallback.
 Before their first restore, generated copies use free capacity or replace older
 unused frontiers. Where the backing provider can estimate capacity, optional

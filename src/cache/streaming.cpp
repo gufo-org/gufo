@@ -960,6 +960,8 @@ struct PersistenceQueue::Impl {
   std::mutex stop_mutex;
   std::condition_variable wake;
   std::vector<std::unique_ptr<PersistenceJob>> pending;
+  // TrySubmit scratch, sized with pending so submission allocates nothing.
+  std::vector<bool> chosen;
   std::unique_ptr<PersistenceJob> active;
   PersistenceQueueStats stats;
   bool stopped{};
@@ -978,7 +980,8 @@ struct PersistenceQueue::Impl {
         completed(std::move(on_completed)),
         reclaim(std::move(on_reclaim)),
         yield_limit(limit),
-        pending(depth) {
+        pending(depth),
+        chosen(depth) {
     if (!depth || !bytes || !idle)
       throw std::invalid_argument("invalid persistence queue limits");
     worker = std::jthread([this](std::stop_token stop) {
@@ -1053,7 +1056,7 @@ PersistenceQueue::PersistenceQueue(
     std::chrono::milliseconds yield_limit)
     : impl_(std::make_unique<Impl>(
           ledger.Reserve(ResourceCategory::kMetadata,
-                         Add(sizeof(Impl), Multiply(depth, sizeof(void*)))),
+                         Add(sizeof(Impl), Multiply(depth, sizeof(void*) + 1))),
           store, depth, bytes, std::move(model_idle), std::move(completed),
           std::move(reclaim), yield_limit)) {}
 PersistenceQueue::~PersistenceQueue() {
@@ -1075,44 +1078,6 @@ bool PersistenceQueue::TrySubmit(PersistenceJob job) {
   }
   auto slot = std::find_if(impl_->pending.begin(), impl_->pending.end(),
                            [](auto& item) { return !item; });
-  auto replacement = std::find_if(
-      impl_->pending.begin(), impl_->pending.end(), [&](const auto& other) {
-        if (!other || other->manifest_.purpose == CheckpointPurpose::kLearned ||
-            !Extends(job.manifest_, other->manifest_))
-          return false;
-        // A generated frontier must not coalesce away the prompt checkpoint
-        // that an edit or a retry of this request needs. Likewise preserve
-        // two recent generated frontiers before treating them as redundant.
-        if (job.manifest_.purpose == CheckpointPurpose::kGenerated &&
-            other->manifest_.purpose != CheckpointPurpose::kGenerated)
-          return false;
-        if (other->manifest_.purpose == CheckpointPurpose::kGenerated) {
-          std::size_t newer =
-              job.manifest_.purpose == CheckpointPurpose::kGenerated;
-          for (const auto& peer : impl_->pending)
-            newer += peer && peer.get() != other.get() &&
-                     peer->manifest_.purpose == CheckpointPurpose::kGenerated &&
-                     Extends(peer->manifest_, other->manifest_);
-          newer += impl_->active &&
-                   impl_->active->manifest_.purpose ==
-                       CheckpointPurpose::kGenerated &&
-                   Extends(impl_->active->manifest_, other->manifest_);
-          if (newer < 2)
-            return false;
-        }
-        // Keep the first pending boundary until its write starts. A busy
-        // writer may belong to another conversation; replacing this anchor
-        // would leave only a deep checkpoint after graceful shutdown.
-        return (impl_->active &&
-                Extends(other->manifest_, impl_->active->manifest_)) ||
-               std::any_of(impl_->pending.begin(), impl_->pending.end(),
-                           [&](const auto& earlier) {
-                             return earlier && earlier.get() != other.get() &&
-                                    Extends(other->manifest_,
-                                            earlier->manifest_);
-                           });
-      });
-  const bool redundant = replacement != impl_->pending.end();
   // Exact frontiers are optional write-through work. They must not displace
   // an unrelated conversation's pending prompt anchor when the queue is full,
   // nor may they consume more than half of the queue's pinned byte budget.
@@ -1124,8 +1089,83 @@ bool PersistenceQueue::TrySubmit(PersistenceJob job) {
        job.pinned_bytes_ >
            frontier_budget -
                std::min(frontier_budget, impl_->stats.pinned_bytes));
-  if (!redundant && full &&
-      job.manifest_.purpose == CheckpointPurpose::kGenerated) {
+  const bool generated = job.manifest_.purpose == CheckpointPurpose::kGenerated;
+  // Slots this job coalesces or displaces. A larger turn end can need more
+  // than one covered turn end to make room, so a full queue keeps coalescing
+  // until it fits instead of skipping the newest turn end.
+  auto& chosen = impl_->chosen;
+  std::fill(chosen.begin(), chosen.end(), false);
+  const auto present = [&](const auto& item) {
+    return item && !chosen[&item - impl_->pending.data()];
+  };
+  const auto covered = [&](const auto& other) {
+    if (!present(other) ||
+        other->manifest_.purpose == CheckpointPurpose::kLearned)
+      return false;
+    const bool extended = Extends(job.manifest_, other->manifest_);
+    // A generated frontier must not coalesce away the prompt checkpoint
+    // that an edit or a retry of this request needs. Likewise preserve
+    // two recent generated frontiers before treating them as redundant.
+    if (other->manifest_.purpose != CheckpointPurpose::kGenerated &&
+        (!extended || job.manifest_.purpose == CheckpointPurpose::kGenerated))
+      return false;
+    // Each generated frontier is a turn end that an edit or a branch
+    // restores, which no descendant covers. Coalesce one only when the
+    // queue has no room for this job (#1250), so whether a turn end
+    // reaches disk does not depend on how far behind the writer is. Any
+    // conversation's turn end with two newer queued ones qualifies, so
+    // one conversation's backlog cannot crowd out another's newest one.
+    if (other->manifest_.purpose == CheckpointPurpose::kGenerated) {
+      if (!full)
+        return false;
+      std::size_t newer = extended && generated;
+      for (const auto& peer : impl_->pending)
+        newer += present(peer) && &peer != &other &&
+                 peer->manifest_.purpose == CheckpointPurpose::kGenerated &&
+                 Extends(peer->manifest_, other->manifest_);
+      newer +=
+          impl_->active &&
+          impl_->active->manifest_.purpose == CheckpointPurpose::kGenerated &&
+          Extends(impl_->active->manifest_, other->manifest_);
+      if (newer < 2)
+        return false;
+    }
+    // Keep the first pending boundary until its write starts. A busy
+    // writer may belong to another conversation; replacing this anchor
+    // would leave only a deep checkpoint after graceful shutdown.
+    return (impl_->active &&
+            Extends(other->manifest_, impl_->active->manifest_)) ||
+           std::any_of(impl_->pending.begin(), impl_->pending.end(),
+                       [&](const auto& earlier) {
+                         return present(earlier) && &earlier != &other &&
+                                Extends(other->manifest_, earlier->manifest_);
+                       });
+  };
+  std::size_t released = 0, displaced = 0;
+  const auto fits = [&] {
+    const auto pinned = impl_->stats.pinned_bytes - released;
+    return impl_->stats.pending - displaced < impl_->pending.size() &&
+           job.pinned_bytes_ <= impl_->max_bytes - pinned &&
+           (!generated ||
+            job.pinned_bytes_ <=
+                frontier_budget - std::min(frontier_budget, pinned));
+  };
+  auto replacement = impl_->pending.end();
+  for (auto it =
+           std::find_if(impl_->pending.begin(), impl_->pending.end(), covered);
+       it != impl_->pending.end();
+       it = std::find_if(impl_->pending.begin(), impl_->pending.end(),
+                         covered)) {
+    if (replacement == impl_->pending.end())
+      replacement = it;
+    chosen[it - impl_->pending.begin()] = true;
+    released += (*it)->pinned_bytes_;
+    ++displaced;
+    if (!generated || !full || fits())
+      break;
+  }
+  const bool redundant = replacement != impl_->pending.end();
+  if (!redundant && full && generated) {
     ++impl_->stats.skipped;
     return false;
   }
@@ -1146,38 +1186,37 @@ bool PersistenceQueue::TrySubmit(PersistenceJob job) {
            (*it)->submitted_ < (*replacement)->submitted_))
         replacement = it;
     }
+    if (replacement != impl_->pending.end()) {
+      chosen[replacement - impl_->pending.begin()] = true;
+      released = (*replacement)->pinned_bytes_;
+      displaced = 1;
+    }
   }
-  const auto released =
-      replacement == impl_->pending.end() ? 0 : (*replacement)->pinned_bytes_;
-  if ((impl_->stats.pending == impl_->pending.size() && !released) ||
-      job.pinned_bytes_ >
-          impl_->max_bytes - (impl_->stats.pinned_bytes - released)) {
+  if (!fits()) {
     ++impl_->stats.skipped;
     return false;
   }
-  if (job.manifest_.purpose == CheckpointPurpose::kGenerated &&
-      job.pinned_bytes_ >
-          frontier_budget -
-              std::min(frontier_budget, impl_->stats.pinned_bytes - released)) {
-    ++impl_->stats.skipped;
-    return false;
-  }
-  std::optional<CheckpointId> superseded;
+  std::vector<CheckpointId> superseded;
   bool accepted = false;
   try {
     // Allocate job metadata before discarding anything. Release the old pins
     // before admitting new pins, including on a subsequent admission failure.
     auto next = std::make_unique<PersistenceJob>(std::move(job));
-    if (replacement != impl_->pending.end()) {
-      superseded = (*replacement)->manifest_.checkpoint;
-      impl_->stats.pinned_bytes -= released;
+    superseded.reserve(displaced);
+    for (std::size_t i = 0; i < chosen.size(); ++i) {
+      auto& item = impl_->pending[i];
+      if (!chosen[i] || !item)
+        continue;
+      superseded.push_back(item->manifest_.checkpoint);
+      impl_->stats.pinned_bytes -= item->pinned_bytes_;
       --impl_->stats.pending;
       ++impl_->stats.superseded;
       if (redundant)
         ++impl_->stats.coalesced;
-      replacement->reset();
-      slot = replacement;
+      item.reset();
     }
+    if (replacement != impl_->pending.end())
+      slot = replacement;
     for (auto& source : next->sources_)
       source.pin_ = source.Pin();
     next->submitted_ = ++impl_->sequence;
@@ -1194,12 +1233,13 @@ bool PersistenceQueue::TrySubmit(PersistenceJob job) {
     ++impl_->stats.skipped;
   }
   guard.unlock();
-  if (superseded && impl_->completed) {
-    try {
-      impl_->completed(*superseded, false);
-    } catch (...) {
+  if (impl_->completed)
+    for (const auto id : superseded) {
+      try {
+        impl_->completed(id, false);
+      } catch (...) {
+      }
     }
-  }
   impl_->wake.notify_all();
   return accepted;
 }
