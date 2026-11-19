@@ -352,7 +352,6 @@
       ],
       "status": "active",
       "configuration": "standard",
-      "isolation": "server",
       "vision_required": false
     },
     "structured-limits": {
@@ -858,7 +857,6 @@
       ],
       "status": "active",
       "configuration": "standard",
-      "isolation": "server",
       "vision_required": false
     },
     "progress": {
