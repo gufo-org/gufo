@@ -181,23 +181,33 @@ void run(unsigned dim, std::mt19937& random) {
               Tokens);
 }
 
-__global__ void unpack_iq2(uint64_t* output) {
+__global__ void unpack_iq2(uint64_t* output, uint64_t* masked) {
   const unsigned index = blockIdx.x * blockDim.x + threadIdx.x;
   int32_t low, high;
   dev_iq2_i8x8_lut(hip_iq2xxs_grid, index / 128, index % 128, &low, &high);
   output[index] = uint64_t(uint32_t(low)) | (uint64_t(uint32_t(high)) << 32);
+  // dev_iq2_dp4a_8's byte-mask form of the same expansion.
+  const uint64_t grid = hip_iq2xxs_grid[index / 128];
+  const uint32_t signs = dev_unpack_iq2_signs(index % 128);
+  const int32_t mask0 = __vcmpne4(signs & 0x08040201u, 0);
+  const int32_t mask1 = __vcmpne4(signs & 0x80402010u, 0);
+  low = __vsub4(int32_t(uint32_t(grid)) ^ mask0, mask0);
+  high = __vsub4(int32_t(uint32_t(grid >> 32)) ^ mask1, mask1);
+  masked[index] = uint64_t(uint32_t(low)) | (uint64_t(uint32_t(high)) << 32);
 }
 
 void iq2_signs() {
   std::array<uint64_t, 256> grid{};
   check(hipMemcpyFromSymbol(grid.data(), HIP_SYMBOL(hip_iq2xxs_grid),
                             sizeof(grid), 0, hipMemcpyDeviceToHost));
-  std::vector<uint64_t> actual(256 * 128);
-  Device<uint64_t> output(actual.size());
-  unpack_iq2<<<128, 256>>>(output.data);
+  std::vector<uint64_t> actual(256 * 128), masked(actual.size());
+  Device<uint64_t> output(actual.size()), masked_output(masked.size());
+  unpack_iq2<<<128, 256>>>(output.data, masked_output.data);
   check(hipGetLastError());
   check(hipMemcpy(actual.data(), output.data, actual.size() * sizeof(uint64_t),
                   hipMemcpyDeviceToHost));
+  check(hipMemcpy(masked.data(), masked_output.data,
+                  masked.size() * sizeof(uint64_t), hipMemcpyDeviceToHost));
   for (unsigned g = 0; g < grid.size(); ++g) {
     for (unsigned sign7 = 0; sign7 < 128; ++sign7) {
       const unsigned signs = sign7 | ((std::popcount(sign7) & 1) << 7);
@@ -212,7 +222,8 @@ void iq2_signs() {
         const int value = signs & (1U << byte) ? -magnitude : magnitude;
         expected |= uint64_t(uint8_t(value)) << (8 * byte);
       }
-      if (actual[g * 128 + sign7] != expected) {
+      if (actual[g * 128 + sign7] != expected ||
+          masked[g * 128 + sign7] != expected) {
         std::fprintf(stderr, "IQ2 sign expansion differs: grid=%u sign=%u\n", g,
                      sign7);
         std::exit(2);
