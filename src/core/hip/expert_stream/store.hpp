@@ -158,6 +158,21 @@ public:
    * cache. False when the stage, the shrink or the seed failed. */
   bool Fit(uint64_t grant_bytes);
 
+  /* Gives memory back to the host after Fit: frees whole chunks, newest
+   * first, until at least `bytes` went or the cache is empty, keeping the
+   * experts eviction ranks highest, and holds the cache at what is left
+   * until Restore. Waits for queued predictions and returns 0 while
+   * prefetch reads run; call it only while no Prepare runs (serving does
+   * when idle). Returns the bytes freed. */
+  uint64_t Release(uint64_t bytes);
+  /* Lets the cache grow back to its grant after Release; it regrows as
+   * misses need it, while more than FloorBytes stay available. Returns the
+   * bytes the limit rose by. */
+  uint64_t Restore();
+  /* Free memory below which the cache stops growing: Policy::reserve_bytes
+   * before Fit, Policy::live_floor_bytes after it. */
+  uint64_t FloorBytes() const;
+
   /* Primes the cache: `ranked` first, then every expert it leaves out,
    * interleaved across layers, as far as the budget reaches. Before Fit the
    * budget is 15/16 of the provisional size, leaving room for the sessions;

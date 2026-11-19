@@ -294,6 +294,7 @@ void OnePieceLayout(int32_t* routes) {
   // A grant takes the prefetch stage first, bounds the cache, and seeds the
   // room left with the last ranking.
   const uint64_t stage = uint64_t{3000} * policy.prefetch_stage_rows;
+  Check(store->Release(1) == 0, "one-piece release needs a grant");
   Check(store->Fit(stage + 4 * m.Slot(0)), "one-piece fit");
   Check(store->GetStats().cache_bytes <= 4 * m.Slot(0), "one-piece fit bound");
   const auto fitted = store->GetStats();
@@ -301,6 +302,24 @@ void OnePieceLayout(int32_t* routes) {
         "one-piece fit reseeds the ranking");
   Check(store->GetStats().cache_bytes <= 4 * m.Slot(0),
         "one-piece fit bounds growth");
+  // Release frees whole chunks (here the only one) and holds the cache
+  // there: misses still read correctly and nothing is cached.
+  const uint64_t held = store->GetStats().cache_bytes;
+  Check(store->Release(1) == held && store->GetStats().cache_bytes == 0,
+        "one-piece release frees the chunk");
+  for (int pass = 0; pass < 2; ++pass)
+    Check(run.Run(1, {5, 7}), "one-piece bytes after release");
+  const auto released = store->GetStats();
+  Check(released.cache_bytes == 0, "one-piece release holds the cache");
+  Check(store->Release(1) == 0, "one-piece release of an empty cache");
+  // Restore lets misses refill it, within the grant.
+  Check(store->Restore() > 0 && store->Restore() == 0,
+        "one-piece restore raises the limit once");
+  Check(run.Run(1, {5, 7}) && run.Run(1, {5, 7}) &&
+            store->GetStats().hits == released.hits + 2,
+        "one-piece restore regrows");
+  Check(store->GetStats().cache_bytes <= 4 * m.Slot(0),
+        "one-piece restore stays within the grant");
 }
 
 void CallerStream(int32_t* routes) {

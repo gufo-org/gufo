@@ -18,6 +18,9 @@
 #include "src/core/json.hpp"
 #include "src/mem/account.hpp"
 #include "src/mem/ledger.hpp"
+#if defined(ENGINE_ENABLE_HIP)
+#include "src/core/hip/expert_stream/store.hpp"
+#endif
 
 namespace gufo::server {
 
@@ -398,6 +401,65 @@ struct TextRunnerPool::Impl {
   }
   mutable std::mutex host_sampler_mutex;
   std::function<ext::HostMemorySample()> host_sampler;
+
+  // A streamed model's expert cache fills the host down to its own floor on
+  // purpose, so below the host reserve is its steady state, not pressure.
+  // Below that floor (or the free CMA pages), another process took the
+  // memory. Missing without streaming: the host reserve applies.
+  std::optional<std::uint64_t> ExpertReserve(
+      const ext::HostMemorySample& sample) const {
+#if defined(ENGINE_ENABLE_HIP)
+    if (const auto* store = validated.resources.expert_cache.store)
+      return std::max<std::uint64_t>(sample.cma_free, store->FloorBytes());
+#endif
+    (void)sample;
+    return std::nullopt;
+  }
+
+  // Under pressure the expert cache gives memory back first: its coldest
+  // experts cost less than the prompt cache's checkpoints, and it is the
+  // largest holder. It is restored to its grant once the memory is back
+  // well above the floor. Updates `sample` after a release.
+  void RelieveExperts(ext::HostMemorySample& sample, std::uint64_t reserve) {
+#if defined(ENGINE_ENABLE_HIP)
+    auto* store = validated.resources.expert_cache.store;
+    const std::uint64_t relief = ComponentTextCache::kHostPressureReliefBytes;
+    if (sample.available < reserve) {
+      const auto shortfall = reserve - sample.available;
+      const auto start = std::chrono::steady_clock::now();
+      const auto released = store->Release(shortfall + relief);
+      if (released || !expert_pressure_reported)
+        Logger::Warn(
+            "cache",
+            "schema=component-cache-v1 event=expert_cache_release "
+            "shortfall_bytes=" +
+                std::to_string(shortfall) + " released_bytes=" +
+                std::to_string(released) + " cache_bytes=" +
+                std::to_string(store->GetStats().cache_bytes) + " ms=" +
+                std::to_string(std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - start)
+                                   .count()) +
+                " floor_bytes=" + std::to_string(reserve) + " " +
+                ext::DescribeHostMemory(sample));
+      expert_pressure_reported = true;
+      if (released)
+        sample = HostSample();
+      return;
+    }
+    expert_pressure_reported = false;
+    if (sample.available > reserve + 2 * relief)
+      if (const auto raised = store->Restore())
+        Logger::Info("cache",
+                     "schema=component-cache-v1 event=expert_cache_restore "
+                     "raised_bytes=" +
+                         std::to_string(raised) + " " +
+                         ext::DescribeHostMemory(sample));
+#else
+    (void)sample;
+    (void)reserve;
+#endif
+  }
+  bool expert_pressure_reported{};
   ValidatedRunner validated;
   // Declared before the cache: the cap outlives the sessions' regions.
   SharedStateCap shared_state_cap;
@@ -1644,12 +1706,24 @@ const TextModelRunner& TextRunnerPool::runner() const noexcept {
 
 void TextRunnerPool::Idle() const {
   impl_->validated.runner->Idle();
+  auto sample = impl_->HostSample();
+  const auto reserve = impl_->ExpertReserve(sample);
+  if (reserve)
+    impl_->RelieveExperts(sample, *reserve);
   if (impl_->component_cache)
-    (void)impl_->component_cache->RelieveHostPressure(impl_->HostSample());
+    (void)impl_->component_cache->RelieveHostPressure(sample, reserve);
 }
 
 std::optional<std::uint64_t> TextRunnerPool::AdmissionShortfall() const {
-  const auto shortfall = ext::HostReserveShortfallBytes(impl_->HostSample());
+  const auto sample = impl_->HostSample();
+  if (const auto reserve = impl_->ExpertReserve(sample)) {
+    const auto shortfall =
+        sample.available < *reserve ? *reserve - sample.available : 0;
+    if (shortfall <= *reserve / 2)
+      return std::nullopt;
+    return shortfall;
+  }
+  const auto shortfall = ext::HostReserveShortfallBytes(sample);
   if (shortfall <= kAdmissionShortfallBytes)
     return std::nullopt;
   return shortfall;

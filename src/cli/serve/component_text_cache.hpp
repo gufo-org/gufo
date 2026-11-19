@@ -153,7 +153,11 @@ public:
   // checkpoints as needed (disk copies stay). Returns the bytes released.
   // Releasing device-mapped pages waits for the device: call it only while
   // no work runs (the idle scheduler).
-  std::size_t RelieveHostPressure(const ext::HostMemorySample& sample);
+  // `reserve` replaces the host reserve when given (a streamed model's
+  // expert-cache floor, TextRunnerPool::Idle).
+  std::size_t RelieveHostPressure(
+      const ext::HostMemorySample& sample,
+      std::optional<std::uint64_t> reserve = std::nullopt);
   // Released beyond the shortfall, so that pressure hovering at the reserve
   // does not release a little on every idle tick.
   static constexpr std::size_t kHostPressureReliefBytes = std::size_t{2} << 30;

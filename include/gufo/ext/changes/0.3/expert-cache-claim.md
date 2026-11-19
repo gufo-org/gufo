@@ -21,6 +21,15 @@ with the RAM prompt cache.
 - `Store::Fit` replaces `Store::SetReserve`: it takes the prefetch stage from
   the grant, shrinks the cache to it and seeds the room left with the ranking
   last given to `Seed`.
+- Host pressure (#1275) is measured against the store's floor
+  (`Store::FloorBytes()`, the larger of it and the free CMA pages) instead of
+  the host reserve while experts stream: the expert cache fills the host down
+  to that floor on purpose. Below it, the idle scheduler releases experts
+  first (`Store::Release`, logged as `event=expert_cache_release`), then
+  prompt-cache memory; once memory is back well above the floor,
+  `Store::Restore` lets the expert cache regrow to its grant
+  (`event=expert_cache_restore`). New requests are refused below half the
+  floor.
 - `HostAvailableBytes()` (`gufo/ext/host_budget.hpp`) is the host memory
   available after cgroup limits and promised session state. It replaces the
   store's `expert_stream::AvailableMemory()`.

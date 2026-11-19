@@ -3265,12 +3265,14 @@ std::size_t ComponentTextCache::ReclaimableStateBytes() const {
 }
 
 std::size_t ComponentTextCache::RelieveHostPressure(
-    const ext::HostMemorySample& sample) {
+    const ext::HostMemorySample& sample, std::optional<std::uint64_t> reserve) {
   auto& impl = *impl_;
   // Idle: nothing is in flight, so what waits for the device costs nothing.
   if (impl.resources->settle)
     impl.resources->settle();
-  const auto shortfall = ext::HostReserveShortfallBytes(sample);
+  const auto shortfall =
+      reserve ? (sample.available < *reserve ? *reserve - sample.available : 0)
+              : ext::HostReserveShortfallBytes(sample);
   if (!shortfall) {
     impl.host_pressure_reported = false;
     return 0;

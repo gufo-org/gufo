@@ -644,6 +644,8 @@ struct Store::Impl {
   uint64_t requested_limit = 0;  // Policy::cache_limit_bytes; 0: from memory
   uint64_t reserve = 0;  // free memory the cache never grows into before Fit
   bool granted = false;  // Fit ran: the host sized the cache
+  uint64_t granted_limit = 0;  // the cache's limit from Fit; Release lowers
+                               // cache_limit below it until Restore
   /* The last ranking given to Seed, which Fit seeds again. */
   std::vector<Ranked> seed_ranking;
   std::string seed_source;
@@ -826,7 +828,7 @@ struct Store::Impl {
   /* Frees the newest chunks until the cache fits `limit`, keeping the
    * highest keep values of each size class: survivors in the freed chunks
    * move into the kept slots of the lowest, which are evicted.
-   * Startup only: no prepare or prefetch may be running. */
+   * No prepare or prefetch may be running (startup, or Release). */
   bool shrink_to(uint64_t limit) {
     if (stats.cache_bytes <= limit || chunks.empty())
       return true;
@@ -2137,6 +2139,35 @@ void Store::TracePrediction(uint32_t layer, uint32_t lead, const int32_t* ids,
   (void)std::fwrite(ids, sizeof(int32_t), static_cast<size_t>(n_tokens) * k, f);
 }
 
+uint64_t Store::Release(uint64_t bytes) {
+  Impl* store = impl_.get();
+  if (!bytes || !store->granted)
+    return 0;
+  PredictFlush();
+  // Held so no prediction starts a prefetch while slots move.
+  std::lock_guard lock(store->pred_mutex);
+  if (!store->readers->Idle())
+    return 0;
+  const uint64_t before = store->stats.cache_bytes;
+  (void)store->shrink_to(before > bytes ? before - bytes : 0);
+  store->cache_limit = std::min(store->cache_limit, store->stats.cache_bytes);
+  return before - store->stats.cache_bytes;
+}
+
+uint64_t Store::Restore() {
+  Impl* store = impl_.get();
+  std::lock_guard lock(store->pred_mutex);
+  if (store->cache_limit >= store->granted_limit)
+    return 0;
+  const uint64_t raised = store->granted_limit - store->cache_limit;
+  store->cache_limit = store->granted_limit;
+  return raised;
+}
+
+uint64_t Store::FloorBytes() const {
+  return impl_->live_floor();
+}
+
 bool Store::PrefetchIdle() const {
   return impl_->readers->Idle();
 }
@@ -2184,6 +2215,7 @@ bool Store::Fit(uint64_t grant_bytes) {
   if (store->requested_limit)
     limit = std::min(limit, store->requested_limit);
   store->cache_limit = limit;
+  store->granted_limit = limit;
   const bool shrunk = store->shrink_to(limit);
   // Seed takes the ranking by value and records it again.
   const std::string source = store->seed_source;
