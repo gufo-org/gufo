@@ -339,7 +339,9 @@ and scheduling, DFlash2 with sampling, grammars and stops, vision); Flash-Next
 covers the shared Qwen protocol suites. DeepSeek V4's list keeps its runtime,
 cache, DSpark, template and native tool-call suites; the server-generic ones
 (validation, accounting, streaming events, schema shapes, shared-prefix and
-rotation cache logic) run on Flash-Next. Flash-Next has no list and runs every
+rotation cache logic) run on Flash-Next. So that DeepSeek fits one device,
+`long-context`, `tool-reasoning` and `cache-growth` run on Flash-Next and Qwen27
+only. Flash-Next has no list and runs every
 suite its profile takes.
 
 A model's `settings` map, keyed by configuration, overrides that

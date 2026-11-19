@@ -77,11 +77,13 @@ class PlanTest(unittest.TestCase):
                     if group['profile'].startswith(model + '/') for suite in group['suites']}
         deepseek = suites('src/models/deepseek_v4_flash/engine.cpp', 'deepseek4')
         flash = suites('src/models/qwen38_flash_next/engine.cpp', 'flash-next-q4')
-        self.assertTrue({'cache', 'cache-bridge', 'cache-depth', 'cache-growth', 'cache-edits', 'batch',
-                         'prefill-scheduling', 'tools', 'tool-native-schemas', 'tool-reasoning',
-                         'tool-streaming', 'structured', 'sampling-defaults', 'reasoning-budget'} <= deepseek)
+        self.assertTrue({'cache', 'cache-bridge', 'cache-depth', 'cache-edits', 'batch',
+                         'prefill-scheduling', 'tools', 'tool-native-schemas', 'tool-streaming',
+                         'structured', 'sampling-defaults', 'reasoning-budget'} <= deepseek)
+        # Left to Flash-Next and Qwen27 so DeepSeek fits one device.
         shared = {'sampling-ranges', 'stream-start', 'progress', 'metrics', 'tool-edges', 'tool-mixed',
-                  'cache-concurrency', 'cache-shared-prefix', 'cache-rotation'}
+                  'cache-concurrency', 'cache-shared-prefix', 'cache-rotation', 'long-context',
+                  'tool-reasoning', 'cache-growth'}
         self.assertFalse(shared & deepseek)
         self.assertLessEqual(shared, flash)
         self.assertLessEqual(deepseek, flash)
