@@ -384,6 +384,16 @@ struct TextRunnerPool::Impl {
     }
   }
 
+  ext::HostMemorySample HostSample() const {
+    std::function<ext::HostMemorySample()> sampler;
+    {
+      const std::lock_guard lock(host_sampler_mutex);
+      sampler = host_sampler;
+    }
+    return sampler ? sampler() : ext::SampleHostMemory();
+  }
+  mutable std::mutex host_sampler_mutex;
+  std::function<ext::HostMemorySample()> host_sampler;
   ValidatedRunner validated;
   // Declared before the cache: the cap outlives the sessions' regions.
   SharedStateCap shared_state_cap;
@@ -1625,6 +1635,21 @@ const TextModelRunner& TextRunnerPool::runner() const noexcept {
 
 void TextRunnerPool::Idle() const {
   impl_->validated.runner->Idle();
+  if (impl_->component_cache)
+    (void)impl_->component_cache->RelieveHostPressure(impl_->HostSample());
+}
+
+std::optional<std::uint64_t> TextRunnerPool::AdmissionShortfall() const {
+  const auto shortfall = ext::HostReserveShortfallBytes(impl_->HostSample());
+  if (shortfall <= kAdmissionShortfallBytes)
+    return std::nullopt;
+  return shortfall;
+}
+
+void TextRunnerPool::SetHostSampler(
+    std::function<ext::HostMemorySample()> sampler) {
+  const std::lock_guard lock(impl_->host_sampler_mutex);
+  impl_->host_sampler = std::move(sampler);
 }
 
 const TextRunnerResourceClaim& TextRunnerPool::resource_claim() const noexcept {

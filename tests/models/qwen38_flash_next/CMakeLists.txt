@@ -61,6 +61,10 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(qwen38_flash_next_attention_ops_test PRIVATE
     gufo_qwen38_flash_next_reference)
 
+  add_executable(qwen38_flash_next_host_pressure_probe EXCLUDE_FROM_ALL
+    host_pressure_probe.cpp)
+  target_link_libraries(qwen38_flash_next_host_pressure_probe PRIVATE
+    gufo_serving qwen38_flash_next_test_hip)
   add_executable(qwen38_flash_next_session_test EXCLUDE_FROM_ALL session_test.cpp)
   target_link_libraries(qwen38_flash_next_session_test PRIVATE gufo_serving
     qwen38_flash_next_test_hip)

@@ -20,6 +20,7 @@
 #include "src/cli/serve/continuation_types.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_publication_wait.hpp"
+#include "src/ext/host_budget.hpp"
 #include "src/mem/account.hpp"
 
 namespace gufo::server {
@@ -171,8 +172,20 @@ public:
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
   /// The scheduler is idle: nothing runs, is queued or waits. Called on its
   /// thread when it goes idle and about once a second while it stays idle,
-  /// to return memory only running work holds (TextModelRunner::Idle()).
+  /// to return memory only running work holds (TextModelRunner::Idle()),
+  /// and, when other processes leave the host short of its reserve, RAM-cache
+  /// memory (ComponentTextCache::RelieveHostPressure).
   void Idle() const;
+  /// The host's shortfall below its reserve (ext::HostReserveShortfallBytes)
+  /// when it is too short to admit new work: more than
+  /// kAdmissionShortfallBytes (#932), so MemAvailable below 2 GiB without
+  /// free CMA pages. Running work then finishes, the scheduler goes
+  /// idle and the RAM cache gives memory back.
+  [[nodiscard]] std::optional<std::uint64_t> AdmissionShortfall() const;
+  static constexpr std::uint64_t kAdmissionShortfallBytes =
+      ext::kHostSnapshotHeadroomBytes / 2;
+  /// Replaces the live host sample (ext::SampleHostMemory), for tests.
+  void SetHostSampler(std::function<ext::HostMemorySample()> sampler);
   [[nodiscard]] std::size_t capacity() const noexcept;
   /// Validated resource claim, including host prompt-state admission inputs.
   [[nodiscard]] const TextRunnerResourceClaim& resource_claim() const noexcept;

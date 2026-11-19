@@ -159,6 +159,15 @@ public:
   // Pages lent to sessions now, and in all.
   [[nodiscard]] std::size_t LentPages() const noexcept;
   [[nodiscard]] std::size_t LentPagesTotal() const noexcept;
+  // Gives up to about `bytes` of committed backing whose blocks are all free
+  // back to the host (whole state pages, then whole pinned segments) and
+  // returns the bytes released. Their blocks stay reserved until a later
+  // growth commits them again, before any new segment and under the same
+  // admission rules. Nothing is evicted here. Call only while no GPU work is
+  // in flight: unmapping a state page waits for the device.
+  std::size_t Surrender(std::size_t bytes);
+  // Bytes given back and not committed again yet.
+  [[nodiscard]] std::size_t SurrenderedBytes() const noexcept;
 
 private:
   std::shared_ptr<detail::BackingState> state_;

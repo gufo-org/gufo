@@ -622,7 +622,11 @@ Optional setup or admission refusal leaves the completed live execution valid.
 The disk queue writes these copies during idle work. Each one is a turn end
 that an edit or a branch restores, so a queued turn end coalesces into newer
 ones only when the queue has no room for the next write, keeping the two most
-recent. A writer that falls behind delays turn ends instead of dropping them.
+recent. That next write may belong to another conversation, so one
+conversation's backlog cannot crowd out another's newest turn end. A larger
+turn end coalesces as many older ones as it needs to fit, so the newest turn
+end is not the one skipped. A writer that falls behind delays turn ends
+instead of dropping them.
 A refused capture or full persistence queue can still leave an earlier fallback.
 Before their first restore, generated copies use free capacity or replace older
 unused frontiers. Where the backing provider can estimate capacity, optional
@@ -742,6 +746,7 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | `schema=component-cache-v1 event=configured` | Flash-Next: RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim; `ram_cache=on` or `ram_cache=off` at the end of the line, and `disk_backing_bytes` for the backing an off cache keeps for disk captures |
 | `schema=component-cache-v1 event=backing_grown` | Flash-Next: a capture committed another segment of cache pages (about 1 GiB); reports `committed_bytes`, `segments` and the capture's `acquire_ms` |
 | `schema=component-cache-v1 event=ram_cache_refused` | Warning before a load refusal for RAM: the sessions leave the cache nothing above the host reserve. Reports `sessions`, `budget_bytes` when the slots could not allocate under the budget, and the host sample before they allocated: `host_available_bytes` (MemAvailable), `cma_free_bytes`, `cgroup_available_bytes` under a container limit, `outstanding_state_bytes`, `host_reserve_bytes` and `host_ceiling_bytes` |
+| `schema=component-cache-v1 event=host_pressure_release` | Warning: the idle scheduler found MemAvailable below the host reserve (another process took memory) and the RAM cache gave memory back. Reports `shortfall_bytes`, `wanted_bytes` (shortfall + 2 GiB), `released_bytes`, `evicted` checkpoints, `ms` and the host sample. Logged on each release, and once when nothing more can go |
 | `schema=component-cache-v1 event=ram_cache_trimmed` | Qwen3.8-27B, Flash-Next and DeepSeek V4: an explicit `--cache-ram-bytes` exceeds what the host keeps above its 4 GiB reserve after the sessions allocated; reports `requested_bytes` and the granted `capacity_bytes` |
 | `schema=component-cache-v1 event=backing_limited reason=host_reserve` | Flash-Next: the cache stopped growing below its budget because the host would keep less than 4 GiB available |
 | `schema=component-cache-v1 event=backing_limited reason=device_heap_reserve` | Flash-Next: the cache stopped growing because registering a segment's pages took the device heap below its 4 GiB dispatch reserve, which would push session and scratch allocations onto managed memory. Hosts that do not charge registered pages to the heap log it only when other allocations shrink the heap during the registration |

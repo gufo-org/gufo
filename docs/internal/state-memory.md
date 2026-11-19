@@ -187,6 +187,40 @@ The scheduler drives it:
    `max_prompt_tokens`, and a request's token limit ends where the shared
    state ends, as at the context.
 
+### Pressure from other processes
+
+The steps above share memory between sessions. Another process can still take
+the host's memory while Gufo serves (#932). Gufo reacts to MemAvailable itself,
+not to the state it promised sessions. Releasing a page the cache borrowed from
+that promise raises the promise as much as MemAvailable, so only real memory
+shows what a release achieved.
+
+- **Give back at idle.** When the text scheduler is idle, on going idle and
+  then about once a second, it compares MemAvailable with the host reserve,
+  max(CmaFree, 4 GiB) (`ext::HostReserveShortfallBytes`). Below it, the RAM
+  cache evicts checkpoints, least valuable first, and gives whole state pages
+  and pinned segments back until MemAvailable is 2 GiB above the reserve.
+  Disk copies stay. `event=host_pressure_release` logs the shortfall, the
+  bytes released, the evictions and the time. The released backing comes
+  back as captures need it, under the cache's usual growth rules (free 2 MiB
+  blocks above the free floor), so it stays away while the other process
+  holds the memory.
+- **Only at idle.** Unmapping a device page waits until no GPU work is in
+  flight. Beside a decode loop it waited 0.05–15 s per page, without slowing
+  the loop; at idle it takes 1.5 ms per 128 MiB. Measured on Flash-Next: a
+  6 GiB shortfall released 8 GiB in 219 ms (35 evictions), and MemAvailable
+  rose by 8.2 GB. Greedy outputs were unchanged afterwards, and the cache
+  regrew once the pressure ended.
+- **Refuse new work.** While MemAvailable is more than 2 GiB below the
+  reserve, new requests get 503 `insufficient_memory` (retryable). Running
+  requests finish, and the scheduler goes idle and gives memory back.
+- **No preemption for it.** A running request is not stopped for another
+  process's memory. Its pages could only be given back at idle anyway.
+- **No cgroup limit.** Demand-mapped state pages and `hipMalloc` memory are
+  not charged to the process's memory cgroup (4 GiB each: `memory.current`
+  +0.01 and +0.00 GiB on kernel 7.3.3; pinned host memory +4.02 GiB), so the
+  ledger is not bounded by it.
+
 When a session's request ends, its need falls to the live frontier it keeps.
 `/metrics` publishes `gufo_shared_state_bytes`, `_charged_bytes`,
 `_reclaimable_bytes`, `_max_prompt_tokens`, and the `_waits_total`,

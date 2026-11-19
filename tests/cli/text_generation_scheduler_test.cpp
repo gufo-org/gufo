@@ -2677,6 +2677,55 @@ void TestIdleNotifiesRunnerWhileIdle() {
   Expect(slow->idle_probes == 0, "idle calls do not probe the device");
 }
 
+/// A host short of its reserve after promises (#932) refuses new work with
+/// a retryable insufficient_memory until the shortfall is small again; work
+/// already queued is not affected.
+void TestHostShortfallRefusesAdmission() {
+  constexpr std::uint64_t gib = std::uint64_t{1} << 30;
+  auto control = std::make_shared<FakeControl>();
+  auto runner = std::make_shared<FakeRunner>(control);
+  auto pool = std::make_shared<TextRunnerPool>(std::move(runner), 1);
+  std::atomic<std::uint64_t> available{64 * gib};
+  pool->SetHostSampler([&] {
+    return gufo::ext::HostMemorySample{.available = available.load()};
+  });
+  auto scheduler = std::make_unique<TextGenerationScheduler>(pool);
+  Expect(
+      scheduler->Submit({1, 10}, 2, 0.0F).Wait().tokens == ExpectedTokens(1, 2),
+      "a host with room admits work");
+  // 3 GiB available: 1 GiB short of the 4 GiB reserve, within the margin.
+  available = 3 * gib;
+  Expect(
+      scheduler->Submit({2, 20}, 2, 0.0F).Wait().tokens == ExpectedTokens(2, 2),
+      "a shortfall within the admission margin still admits");
+  // 1 GiB available: 3 GiB short.
+  available = 1 * gib;
+  bool refused = false;
+  try {
+    (void)scheduler->Submit({3, 30}, 2, 0.0F);
+  } catch (const TextGenerationError& error) {
+    refused = error.code() == TextGenerationErrorCode::kInsufficientMemory &&
+              error.http_status() == 503 && error.retryable() &&
+              error.required_bytes() == 3 * gib;
+  }
+  Expect(refused, "a host deep below its reserve refuses with 503");
+  // State promised to sessions is not memory in use: it never refuses.
+  pool->SetHostSampler([&] {
+    return gufo::ext::HostMemorySample{.available = 20 * gib,
+                                       .outstanding = 30 * gib};
+  });
+  Expect(
+      scheduler->Submit({5, 50}, 2, 0.0F).Wait().tokens == ExpectedTokens(5, 2),
+      "promised state alone does not refuse admission");
+  pool->SetHostSampler([&] {
+    return gufo::ext::HostMemorySample{.available = available.load()};
+  });
+  available = 64 * gib;
+  Expect(
+      scheduler->Submit({4, 40}, 2, 0.0F).Wait().tokens == ExpectedTokens(4, 2),
+      "admission resumes once memory is back");
+}
+
 void TestIdleDeviceProbe() {
   using Status = TextModelRunner::DeviceProbeStatus;
   auto control = std::make_shared<FakeControl>();
@@ -4249,6 +4298,7 @@ int main() {
   TestDeviceLossIsStickyAndReported();
   TestIdleDeviceProbe();
   TestIdleNotifiesRunnerWhileIdle();
+  TestHostShortfallRefusesAdmission();
   TestStallMonitor();
   Expect(
       gufo::server::detail::RequestsProcessing().load() == 0 &&

@@ -2944,6 +2944,8 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
     request->prompt_budget = impl_->prompt_budget;
     return true;
   };
+  // Sampled before the queue lock: it reads /proc/meminfo.
+  const auto host_shortfall = impl_->runner_pool->AdmissionShortfall();
   {
     const std::lock_guard<std::mutex> lock(impl_->queue_mutex);
     if (impl_->stopping) {
@@ -2982,6 +2984,19 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
         refusal_reason = "client_quota";
         decision_queued = impl_->queued_count;
         decision_client_queued = client_queued;
+      } else if (host_shortfall) {
+        // Other processes left the host short of its reserve. New work would
+        // only deepen it; once running work finishes, the idle scheduler
+        // gives RAM-cache memory back (#932).
+        refused = true;
+        refusal_code = TextGenerationErrorCode::kInsufficientMemory;
+        refusal_message = "the host is " + std::to_string(*host_shortfall) +
+                          " bytes short of its memory reserve; retry once "
+                          "other processes free memory";
+        refusal_reason = "insufficient_memory";
+        refusal_required_bytes = *host_shortfall;
+        refusal_remaining_bytes = 0;
+        decision_queued = impl_->queued_count;
       } else if (prompt_state_bytes.has_value() && !reserve_prompt()) {
         refused = true;
         refusal_code = TextGenerationErrorCode::kInsufficientMemory;

@@ -1358,10 +1358,13 @@ Use appropriate HTTP status codes:
 - `429` admission queue full or rate limit exceeded
 - `499` internally recorded client cancellation
 - `500` internal failure
-- `503` model or backend unavailable, GPU context lost (`device_lost`), or a
+- `503` model or backend unavailable, GPU context lost (`device_lost`), a
   prompt whose host prompt-state bytes do not fit the admission budget
   (`insufficient_memory`, with `error.required_bytes` and
-  `error.remaining_bytes` and the same values under `usage.gufo`)
+  `error.remaining_bytes` and the same values under `usage.gufo`), or a host
+  that other processes left more than 2 GiB short of its memory reserve
+  (`insufficient_memory`, with the shortfall as `error.required_bytes`; see
+  [state memory](state-memory.md#pressure-from-other-processes))
 
 Generation stops at the request budget or context capacity and reports a
 length finish reason when either limit is reached.
