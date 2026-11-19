@@ -398,9 +398,9 @@ them and the environment variables that point them at its pinned weights:
 assets; `asset` names the asset directory.
 
 The plan selects them when a listed rule matches a changed path, and on every
-release (`full`) run. The core `gpu-test-bundles` rule owns the bundling code
-(`tools/ci/ctest_bundle.py`, `tests/support/source_path.hpp`) and lists every
-model with GPU tests; `ctest_labels` in the plan reaches the hosted build
+release (`full`) run. The core `gpu-test-bundles` rule owns the bundling and
+running code (`tools/ci/ctest_bundle.py`, `tests/support/source_path.hpp`,
+`tests/functional/devlab_run.py`) and lists every model with GPU tests; `ctest_labels` in the plan reaches the hosted build
 (`tools/ci/linux-checked.nix`). `tools/ci/ctest_bundle.py` bundles each test of
 those labels whose command is an executable built in the tree, with its
 arguments, labels, timeout, skip code and environment from CTest. Tests that run

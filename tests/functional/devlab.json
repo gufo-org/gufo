@@ -665,7 +665,8 @@
       "priority": 30,
       "paths": [
         "tools/ci/ctest_bundle.py",
-        "tests/support/source_path.hpp"
+        "tests/support/source_path.hpp",
+        "tests/functional/devlab_run.py"
       ],
       "owners": [
         "deepseek4"

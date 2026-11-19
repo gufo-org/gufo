@@ -535,6 +535,11 @@ class GpuTestsTest(unittest.TestCase):
         release = self.plan('src/cli/serve/text_model_runner.cpp', tier='full')
         self.assertTrue(any(model.get('ctest') for model in release['models'] if model['id'] == 'deepseek4'))
 
+    def test_a_runner_change_runs_the_gpu_tests_and_every_model(self):
+        plan = self.plan('tests/functional/devlab_run.py')
+        self.assertEqual([model['id'] for model in plan['models'] if model.get('ctest')], ['deepseek4'])
+        self.assertIn('qwen27-q4', [model['id'] for model in plan['models']])
+
     def test_one_shard_runs_the_tests_where_the_weights_are(self):
         plan = self.plan(self.DEEPSEEK)
         parts = [part for row in devlab_plan.shard(plan) for part in row['parts'] if part.get('ctest')]
