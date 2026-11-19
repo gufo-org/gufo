@@ -235,8 +235,10 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                                         disk_cache_config, vision_model_path,
                                         attn_window, attn_sink, error)) {
       try {
+        const auto descriptor = staging->runner->Descriptor();
         auto new_state = std::make_shared<Impl::State>();
-        new_state->model_id = staging->runner->Descriptor().model_id;
+        new_state->model_id = descriptor.model_id;
+        new_state->max_context = descriptor.max_context;
         new_state->supports_images = staging->supports_images;
         auto runner_pool = std::make_shared<TextRunnerPool>(
             std::move(staging->runner), session_count);
