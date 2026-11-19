@@ -55,16 +55,6 @@ class PlanTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 devlab_models.registry()
 
-    def test_windows_plans_leave_out_models_its_runners_cannot_hold(self):
-        windows = devlab_plan.select(['CMakeLists.txt'], self.data, platform='windows')
-        left_out = {row['id']: row['reason'] for row in windows['disabled']}
-        self.assertEqual(set(left_out), {'flash-next-q4', 'deepseek4'})
-        self.assertTrue(all('Windows' in reason for reason in left_out.values()))
-        self.assertFalse({'flash-next-q4', 'deepseek4'} & {row['id'] for row in windows['models']})
-        self.assertIn('qwen27-q4', {row['id'] for row in windows['models']})
-        linux = devlab_plan.select(['CMakeLists.txt'], self.data)
-        self.assertLessEqual({'flash-next-q4', 'deepseek4'}, {row['id'] for row in linux['models']})
-
     def test_curated_suites_apply_at_every_tier(self):
         suites = set(self.registry['models']['qwen27-q4']['suites'])
         for tier in ('pr', 'full'):
@@ -804,35 +794,6 @@ class WindowsPortabilityTest(unittest.TestCase):
                 cache_rotation.host_available_memory()
         if Path('/proc/meminfo').is_file():
             self.assertGreater(cache_rotation.host_available_memory(), 0)
-
-    def test_windows_report_keeps_its_own_comment_and_status(self):
-        plan = devlab_plan.select(['src/cli/serve/audio_asr_api.cpp'], without_npu(devlab_models.registry()))
-        plan.update(base='a'*40, head='b'*40)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'plan.json').write_text(json.dumps(plan))
-            argv = ['report.py', '--plan', str(root / 'plan.json'), '--results', str(root),
-                    '--authorize', 'success', '--smoke', 'success', '--run-url', 'https://run',
-                    '--comment', str(root / 'comment.md'), '--status', str(root / 'status.env')]
-            for platform, marker, title, context in (
-                    (None, '<!-- devlab-functional -->', 'Devlab functional checks · PR tier',
-                     '`devlab/functional` is advisory on PRs; only the automatic release'),
-                    ('windows', '<!-- devlab-functional-windows -->',
-                     'Devlab functional checks · Windows · PR tier',
-                     '`devlab/functional-windows` is advisory on PRs. ')):
-                with patch.object(sys, 'argv', argv + (['--platform', platform] if platform else [])):
-                    self.assertEqual(report.main(), 0)
-                comment = (root / 'comment.md').read_text()
-                self.assertTrue(comment.startswith(marker + '\n'))
-                self.assertIn(title + ':', comment)
-                self.assertIn(context, comment)
-            # The Linux marker must not prefix-match the Windows comment.
-            self.assertFalse(comment.startswith('<!-- devlab-functional -->'))
-            # Planning failed: no plan reaches the report job.
-            (root / 'plan.json').unlink()
-            with patch.object(sys, 'argv', argv + ['--platform', 'windows']):
-                self.assertEqual(report.main(), 0)
-            self.assertTrue((root / 'comment.md').read_text().startswith('<!-- devlab-functional-windows -->'))
 
 
 if __name__ == '__main__':

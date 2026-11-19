@@ -331,10 +331,6 @@ Selections from separate paths are combined:
 
 Models listed under `disabled` in `devlab.core.json`, with a reason, are left
 out of the plan and named in the report. Remove the entry to restore the model.
-A model's `unsupported_platforms` in its `functional/devlab.json` names the
-platforms whose runners cannot hold it, with the reason; `devlab_plan.py
---platform windows` leaves it out the same way. Flash-Next (107 GiB) and DeepSeek
-V4 (81 GiB) exceed the Windows runners' device memory pool.
 
 A model's `suites` list in its `functional/devlab.json` limits Devlab to those
 suites at every tier; the report counts the others as out of scope. Qwen27 uses
@@ -447,18 +443,6 @@ preserves the models; logs report existing required files and download duration.
 The authorized controller checkout contains the English voice fixture. TTS uses
 the main Gufo binary and a pinned ASR checkpoint as its intelligibility
 evaluator. Missing downloads or fixtures fail visibly.
-
-`Windows validation` (`devlab-windows.yml`) runs the same plan on the Windows
-Devlab runners, with its own `devlab/functional-windows` status and PR comment.
-Its authorize job pins the same revisions; `windows-build.yml` builds the merge
-commit and its `main` parent as two bundles, each recording its revision in
-`revision.txt`. Both arms use the candidate's workflow pins (HIP SDK, XRT,
-IRON); each revision builds with its own `vcpkg.json`. The shard jobs start
-after both builds finish, then download the shard's weights with
-`devlab_models.py` into `%HF_HOME%\gufo\models` and run `devlab_run.py` as on
-Linux. The harness stops servers with `CTRL_BREAK_EVENT`, reads available RAM
-from `GlobalMemoryStatusEx` and, without hwmon, cools down on the hottest ACPI
-thermal zone. Set `PYTHONUTF8=1` when running the harness on Windows.
 
 The plan's `shards` split the work into GPU jobs, one device each:
 

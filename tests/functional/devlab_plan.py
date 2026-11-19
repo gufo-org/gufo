@@ -50,7 +50,7 @@ def curated(planned, suites):
     return rows
 
 
-def select(paths, data, tier='pr', ar=False, benchmark=False, platform='linux'):
+def select(paths, data, tier='pr', ar=False, benchmark=False):
     manifest = json.loads((HERE / 'impact.json').read_text())
     names = impact.suite_names(HERE / 'suites.py')
     impact.validate(manifest, names)
@@ -87,12 +87,6 @@ def select(paths, data, tier='pr', ar=False, benchmark=False, platform='linux'):
     # with the reason so the report shows the gap.
     disabled = [{'id': key, 'reason': data.get('disabled', {})[key], 'reasons': selected.pop(key)}
                 for key in sorted(selected) if key in data.get('disabled', {})]
-    # A model whose weights exceed a platform's runners stays out of that
-    # platform's plan, named with the reason like a disabled one.
-    disabled += [{'id': key, 'reason': data['models'][key]['unsupported_platforms'][platform],
-                  'reasons': selected.pop(key)}
-                 for key in sorted(selected)
-                 if platform in data['models'][key].get('unsupported_platforms', {})]
     # Every PR runs the release suite set, sharded across devices; the tier
     # only keeps image generation to one smoke-tested representative on PRs.
     result = {'schema': 2, 'tier': tier, 'suite_tier': 'full', 'paths': resolutions, 'models': [], 'groups': [],
@@ -263,7 +257,6 @@ def main():
     parser.add_argument('--tier', choices=('pr', 'full'), default='pr')
     parser.add_argument('--ar', action='store_true')
     parser.add_argument('--benchmark', action='store_true')
-    parser.add_argument('--platform', choices=('linux', 'windows'), default='linux')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if any((args.repo, args.base, args.head)):
@@ -272,7 +265,7 @@ def main():
         paths = impact.changed_paths(args.repo, args.base, args.head)
     else:
         paths = args.paths
-    planned = select(paths, registry(), args.tier, args.ar, args.benchmark, args.platform)
+    planned = select(paths, registry(), args.tier, args.ar, args.benchmark)
     planned.update(base=args.base, head=args.head, shards=shard(planned),
                    # The hosted checked build bundles these labels' test executables.
                    ctest_labels=sorted({label for model in planned['models']

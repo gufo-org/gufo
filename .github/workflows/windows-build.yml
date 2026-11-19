@@ -21,21 +21,6 @@ on:
         required: false
         default: 'main'
         type: string
-      revision:
-        description: Commit to build instead of the triggering ref (Devlab candidate or main baseline)
-        required: false
-        default: ''
-        type: string
-      bundle-name:
-        description: Validation bundle artifact name, before the run attempt; distinct per build in a run
-        required: false
-        default: 'windows-gufo'
-        type: string
-      checks:
-        description: Run the CPU and application checks (a main baseline build already passed them on main)
-        required: false
-        default: true
-        type: boolean
     outputs:
       bundle-id:
         description: Windows bundle artifact for model validation
@@ -47,9 +32,8 @@ on:
 permissions:
   contents: read
 
-# Devlab builds a candidate and a main baseline in one run; each needs its own group.
 concurrency:
-  group: windows-${{ inputs.release-tag || format('{0}-{1}', github.ref, inputs.bundle-name) }}
+  group: windows-${{ inputs.release-tag || github.ref }}
   cancel-in-progress: ${{ !inputs.release-tag }}
 
 jobs:
@@ -93,7 +77,7 @@ jobs:
           persist-credentials: false
           # A reusable workflow otherwise checks out its caller (Toolboxes).
           repository: ${{ inputs.release-tag && 'gufo-org/gufo' || github.repository }}
-          ref: ${{ inputs.release-tag && format('refs/tags/{0}', inputs.release-tag) || inputs.revision || github.ref }}
+          ref: ${{ inputs.release-tag && format('refs/tags/{0}', inputs.release-tag) || github.ref }}
 
       # The executable stays at the release tag. Packaging tools may be newer
       # (for example, repairing a missing runtime in an already released ZIP).
@@ -194,7 +178,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\ccache
-          key: gufo-windows-ccache-v1-${{ env.SDK_TARBALL }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.bundle-name }}
+          key: gufo-windows-ccache-v1-${{ env.SDK_TARBALL }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             gufo-windows-ccache-v1-${{ env.SDK_TARBALL }}-
 
@@ -211,7 +195,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\vcpkg-archives
-          key: gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.bundle-name }}
+          key: gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-
             gufo-vcpkg-v4-${{ runner.os }}-
@@ -354,7 +338,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\npu-cache
-          key: gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.bundle-name }}
+          key: gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-
 
@@ -499,7 +483,6 @@ jobs:
           ccache --show-stats
 
       - name: Run CPU and application checks
-        if: inputs.checks
         run: |
           $gufo = 'build\windows-release\gufo.exe'
           if (-not (Test-Path $gufo)) { throw "$gufo was not built" }
@@ -527,10 +510,6 @@ jobs:
       # the weight-free GPU tests and the model smoke checks with their
       # references (Devlab checks out only the download tools).
       - name: Package GPU validation bundle
-        env:
-          # A baseline bundle (checks off) only runs timing: it needs the
-          # server and its runtime, not the test executables.
-          WITH_TESTS: ${{ inputs.checks }}
         run: |
           $dist = "$env:RUNNER_TEMP\windows-gufo"
           $build = 'build\windows-release'
@@ -552,11 +531,9 @@ jobs:
           }
           if (Test-Path "$build\gufo-video-libraries.txt") {
             Copy-Item "$build\gufo-video-libraries.txt" $dist
-            if ($env:WITH_TESTS -eq 'true') {
-              $videoTest = Get-ChildItem $build -Recurse -Filter 'embedding_gemma2_video_processor_test.exe' | Select-Object -First 1
-              if (-not $videoTest) { throw 'video decoder CPU test was not built' }
-              Copy-Item $videoTest.FullName $dist
-            }
+            $videoTest = Get-ChildItem $build -Recurse -Filter 'embedding_gemma2_video_processor_test.exe' | Select-Object -First 1
+            if (-not $videoTest) { throw 'video decoder CPU test was not built' }
+            Copy-Item $videoTest.FullName $dist
           }
           Copy-Item "$env:GUFO_PACKAGING_ROOT/licenses/llvm-openmp.txt" "$dist/llvm-openmp-LICENSE.txt"
           Copy-Item "$env:XRT_ROOT/xrt_sdk/xrt/license/LICENSE" "$dist/xrt-LICENSE.txt"
@@ -568,8 +545,7 @@ jobs:
             Where-Object { $_.Name -like 'Microsoft.VC*.CRT' }
           foreach ($dir in $redist) { Copy-Item "$($dir.FullName)\*.dll" $dist -Force }
           $tests = @('gpu_queues_test', 'bandwidth_test', 'allocation_benchmark_test')
-          if ($env:WITH_TESTS -ne 'true') { $tests = @() }
-          elseif (Test-Path "$dist/npu") {
+          if (Test-Path "$dist/npu") {
             $tests += 'npu_device_test', 'npu_bfp_device_test', 'npu_qwen3dec_device_test'
           }
           foreach ($test in $tests) {
@@ -581,10 +557,6 @@ jobs:
           Copy-Item tests\fixtures\diagnostics, tests\fixtures\embedding_gemma2 "$dist\tests\fixtures" -Recurse
           Copy-Item tests\functional\family_smoke.py, tests\functional\devlab.json "$dist\tests\functional"
           Copy-Item tests\functional\fixtures\audio "$dist\tests\functional\fixtures" -Recurse
-          # Devlab checks each comparison bundle against its authorized revision.
-          $revision = git rev-parse HEAD
-          if ($LASTEXITCODE -ne 0) { throw 'cannot identify the built revision' }
-          $revision | Set-Content "$dist\revision.txt" -Encoding ascii
           $files = Get-ChildItem $dist -Recurse -File
           # The Devlab job checks the download against this list.
           $files | ForEach-Object { "{0}`t{1}" -f $_.Length, $_.FullName.Substring($dist.Length + 1) } |
@@ -633,7 +605,7 @@ jobs:
         id: bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ inputs.bundle-name }}-${{ github.run_attempt }}
+          name: windows-gufo-${{ github.run_attempt }}
           path: ${{ runner.temp }}\windows-gufo
           if-no-files-found: error
           retention-days: 3
@@ -724,7 +696,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ inputs.bundle-name }}-build-logs-${{ github.run_attempt }}
+          name: windows-build-logs-${{ github.run_attempt }}
           path: |
             build/windows-release/CMakeFiles/CMakeConfigureLog.yaml
             build/windows-release/vcpkg-manifest-install.log
@@ -745,7 +717,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\ccache
-          key: gufo-windows-ccache-v1-${{ env.SDK_TARBALL }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.bundle-name }}
+          key: gufo-windows-ccache-v1-${{ env.SDK_TARBALL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       # Saved even when the build fails or times out, so a rerun keeps every
       # design that finished; IRON drops failed compilations itself.
@@ -754,11 +726,11 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\npu-cache
-          key: gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.bundle-name }}
+          key: gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save vcpkg binary cache
         if: always() && steps.configure.outcome != 'skipped'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\vcpkg-archives
-          key: gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.bundle-name }}
+          key: gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}

@@ -45,9 +45,6 @@
           "GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL": "draft"
         }
       },
-      "unsupported_platforms": {
-        "windows": "its 81 GiB of weights exceed the Windows runners' device memory pool"
-      },
       "settings": {
         "cache-pressure": {
           "cache_ram_bytes": 1073741824

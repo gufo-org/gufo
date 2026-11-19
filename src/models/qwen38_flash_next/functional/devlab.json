@@ -29,10 +29,7 @@
       "draft": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
       "draft_option": "--mtp-model",
       "mode": "mtp",
-      "sampling": "qwen38",
-      "unsupported_platforms": {
-        "windows": "its 107 GiB of weights exceed the Windows runners' device memory pool"
-      }
+      "sampling": "qwen38"
     }
   },
   "rules": [
