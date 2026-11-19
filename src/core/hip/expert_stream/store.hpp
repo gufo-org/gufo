@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+#include "src/core/platform/mapped_file.hpp"
+
 namespace gufo::expert_stream {
 
 /* Most pieces per expert: gate/up/down are three, a fused gate_up two, and a
@@ -22,11 +24,12 @@ namespace gufo::expert_stream {
 inline constexpr uint32_t kMaxPieces = 16;
 
 /* One piece of every expert of a layer: expert e's bytes are
- * [offset + e * bytes, offset + (e + 1) * bytes) of fd, as for a GGUF expert
- * tensor whose expert dimension is outermost. The store opens its own
- * O_DIRECT descriptor through /proc/self/fd and never closes fd. */
+ * [offset + e * bytes, offset + (e + 1) * bytes) of file, as for a GGUF
+ * expert tensor whose expert dimension is outermost. The store reopens the
+ * handle for its reads (platform::ReopenRandomReadFile: unbuffered where the
+ * platform allows it) and never closes `file`, which must outlive the store. */
 struct Piece {
-  int fd = -1;
+  platform::PlatformFile file = platform::kInvalidFile;
   uint64_t offset = 0;
   uint64_t bytes = 0;  // one expert
 };
@@ -139,7 +142,9 @@ public:
   /* Splits every piece read between its file and a tails file holding the
    * end of each piece, normally on a second drive, so both read at once. Call
    * before seeding. The file must match the layout's pieces byte for byte;
-   * false (with a message) leaves reads unchanged. */
+   * false (with a message) leaves reads unchanged. On btrfs, create it in a
+   * NOCOW (`chattr +C`) directory: direct reads of copy-on-write files are
+   * not direct. */
   bool AttachTails(const char* path);
 
   /* Sizes the cache to the host's grant: the cache and its prefetch stage

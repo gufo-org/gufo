@@ -3,15 +3,7 @@
  * kernels and arithmetic as resident weights. */
 #include "src/core/hip/expert_stream/store.hpp"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <hip/hip_runtime_api.h>
-#include <linux/fs.h>
-#include <linux/magic.h>
-#include <sys/ioctl.h>
-#include <sys/stat.h>
-#include <sys/vfs.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -24,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -36,6 +29,8 @@
 
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/logging/logging.hpp"
+#include "src/core/platform/fs.hpp"
+#include "src/core/platform/mapped_file.hpp"
 #include "src/core/platform/os_info.hpp"
 #include "src/ext/host_budget.hpp"
 
@@ -102,9 +97,11 @@ struct Slot {
   uint32_t expert = kNoSlot;
 };
 
+/* `file` takes buffered reads, `direct` aligned unbuffered ones (invalid
+ * where the platform has none). */
 struct Source {
-  int fd = -1;
-  int direct_fd = -1;
+  platform::PlatformFile file = platform::kInvalidFile;
+  platform::PlatformFile direct = platform::kInvalidFile;
   uint64_t offset = 0;
   uint64_t bytes = 0;  // one expert
 };
@@ -119,8 +116,8 @@ struct TailSource {
 };
 
 struct ReadTask {
-  int fd;
-  int direct_fd;
+  platform::PlatformFile file;
+  platform::PlatformFile direct;
   uint64_t offset;
   uint64_t bytes;
   uint8_t* destination;
@@ -162,13 +159,23 @@ struct PrefetchJob {
   size_t taken = 0;  // tasks already handed to workers
 };
 
-bool read_all(int fd, uint8_t* dst, uint64_t bytes, uint64_t offset) {
+/* One positional read, retried when interrupted; 0 on failure or EOF. */
+size_t read_at(platform::PlatformFile file, uint8_t* dst, uint64_t bytes,
+               uint64_t offset) {
+  std::error_code ec;
+  for (;;) {
+    const size_t got =
+        platform::ReadAt(file, offset, dst, static_cast<size_t>(bytes), ec);
+    if (got || ec != std::errc::interrupted)
+      return got;
+  }
+}
+
+bool read_all(platform::PlatformFile file, uint8_t* dst, uint64_t bytes,
+              uint64_t offset) {
   while (bytes) {
-    const ssize_t got =
-        pread(fd, dst, static_cast<size_t>(bytes), static_cast<off_t>(offset));
-    if (got < 0 && errno == EINTR)
-      continue;
-    if (got <= 0)
+    const size_t got = read_at(file, dst, bytes, offset);
+    if (!got)
       return false;
     dst += got;
     offset += static_cast<uint64_t>(got);
@@ -177,11 +184,11 @@ bool read_all(int fd, uint8_t* dst, uint64_t bytes, uint64_t offset) {
   return true;
 }
 
-/* O_DIRECT needs aligned buffers and ranges. The last read can end at an
+/* Direct reads need aligned buffers and ranges. The last read can end at an
  * unaligned EOF, provided it contains the entire requested tensor span. */
-bool read_direct(int fd, uint8_t* dst, uint64_t bytes, uint64_t offset,
-                 uint64_t* skip) {
-  if (fd < 0)
+bool read_direct(platform::PlatformFile file, uint8_t* dst, uint64_t bytes,
+                 uint64_t offset, uint64_t* skip) {
+  if (!platform::FileValid(file))
     return false;
   const uint64_t aligned = offset / kDirectAlign * kDirectAlign;
   *skip = offset - aligned;
@@ -190,12 +197,8 @@ bool read_direct(int fd, uint8_t* dst, uint64_t bytes, uint64_t offset,
       (need + kDirectAlign - 1) / kDirectAlign * kDirectAlign;
   uint64_t done = 0;
   while (done < need) {
-    const ssize_t got =
-        pread(fd, dst + done, static_cast<size_t>(length - done),
-              static_cast<off_t>(aligned + done));
-    if (got < 0 && errno == EINTR)
-      continue;
-    if (got <= 0)
+    const size_t got = read_at(file, dst + done, length - done, aligned + done);
+    if (!got)
       return false;
     done += static_cast<uint64_t>(got);
     if (done < need && static_cast<uint64_t>(got) % kDirectAlign)
@@ -409,14 +412,14 @@ private:
                                               kDirectAlign * kDirectAlign);
     uint64_t skip = 0;
     const bool direct =
-        read_direct(task.direct_fd, buffer, task.bytes, task.offset, &skip);
+        read_direct(task.direct, buffer, task.bytes, task.offset, &skip);
     if (direct)
       ++direct_reads_;
     else {
       skip = 0;
       ++buffered_reads_;
     }
-    if ((!direct && !read_all(task.fd, buffer, task.bytes, task.offset)) ||
+    if ((!direct && !read_all(task.file, buffer, task.bytes, task.offset)) ||
         hipMemcpyAsync(task.destination, buffer + skip, task.bytes,
                        hipMemcpyHostToDevice, streams_[index]) != hipSuccess ||
         hipEventRecord(events_[index], streams_[index]) != hipSuccess ||
@@ -589,13 +592,13 @@ struct Store::Impl {
   hipEvent_t routes_done = nullptr;  // the caller stream's routes copy
   int32_t* routes_host = nullptr;
   size_t routes_capacity = 0;
-  std::vector<int> direct_fds;  // O_DIRECT descriptors the store opened
+  std::vector<platform::PlatformFile> owned_files;  // handles the store opened
   /* With an expert-tails file on a second drive, every piece read is
    * split: the head from the model file, the tail from the tails file, so
    * both drives read at once. */
   std::vector<std::array<TailSource, kMaxPieces>> tail;  // per layer
-  int tail_fd = -1;
-  int tail_direct_fd = -1;
+  platform::PlatformFile tail_file = platform::kInvalidFile;
+  platform::PlatformFile tail_direct = platform::kInvalidFile;
   std::vector<Slot> slots;
   /* Slot sizes: the distinct per-layer expert sizes, ascending. The builds
    * mix block types, so one largest-expert slot size wasted 14-16% of the
@@ -665,12 +668,8 @@ struct Store::Impl {
     readers.reset();
     if (trace)
       (void)std::fclose(trace);
-    for (int fd : direct_fds)
-      if (fd >= 0)
-        (void)close(fd);
-    for (int fd : {tail_fd, tail_direct_fd})
-      if (fd >= 0)
-        (void)close(fd);
+    for (platform::PlatformFile file : owned_files)
+      platform::CloseFile(file);
     (void)hipDeviceSynchronize();
     for (void* chunk : chunks)
       (void)hipFree(chunk);
@@ -947,7 +946,7 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
   for (const auto& pieces : layout.layers) {
     valid = valid && pieces.size() == layout.pieces;
     for (const Piece& piece : pieces)
-      valid = valid && piece.fd >= 0 && piece.bytes;
+      valid = valid && platform::FileValid(piece.file) && piece.bytes;
   }
   if (!valid) {
     fprintf(stderr, "%s: invalid streamed expert layout\n", tag);
@@ -980,18 +979,25 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
                   &store->placed})
     v->assign(layout.experts, 0);
   store->direct.assign(layout.experts, nullptr);
-  /* One O_DIRECT descriptor per distinct file, through /proc/self/fd so it
-   * names the very file the caller opened. */
-  std::vector<std::pair<int, int>> direct_of;
-  const auto direct_fd = [&](int fd) {
-    for (const auto& [from, to] : direct_of)
-      if (from == fd)
+  /* One reopened handle per distinct file, from the caller's handle so it
+   * names the very file the caller opened: unbuffered where the platform
+   * reads that way (Linux), else a handle for concurrent buffered reads
+   * (Windows). */
+  std::vector<std::pair<platform::PlatformFile, Source>> reopened;
+  const auto reopen = [&](platform::PlatformFile file) {
+    for (const auto& [from, to] : reopened)
+      if (from == file)
         return to;
-    char path[64];
-    std::snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
-    const int to = open(path, O_RDONLY | O_DIRECT | O_CLOEXEC);
-    direct_of.emplace_back(fd, to);
-    store->direct_fds.push_back(to);
+    Source to;
+    to.file = file;
+    bool direct = false;
+    const platform::PlatformFile handle =
+        platform::ReopenRandomReadFile(file, direct);
+    if (platform::FileValid(handle)) {
+      (direct ? to.direct : to.file) = handle;
+      store->owned_files.push_back(handle);
+    }
+    reopened.emplace_back(file, to);
     return to;
   };
   std::array<uint64_t, kMaxPieces> max_bytes{};
@@ -1000,8 +1006,9 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
     for (uint32_t p = 0; p < store->n_pieces; ++p) {
       const Piece& piece = layout.layers[layer][p];
       Source& src = store->source[layer][p];
-      src.fd = piece.fd;
-      src.direct_fd = direct_fd(piece.fd);
+      const Source handles = reopen(piece.file);
+      src.file = handles.file;
+      src.direct = handles.direct;
       src.offset = piece.offset;
       src.bytes = piece.bytes;
       max_bytes[p] = std::max(max_bytes[p], src.bytes);
@@ -1126,18 +1133,19 @@ bool Store::AttachTails(const char* path) {
     fprintf(stderr, "%s: ignoring expert tails %s: %s\n", tag, path, why);
     return false;
   };
-  const int fd = open(path, O_RDONLY | O_CLOEXEC);
-  if (fd < 0)
-    return fail(strerror(errno));
+  std::string error;
+  const platform::PlatformFile tails = platform::OpenReadFile(path, &error);
+  if (!platform::FileValid(tails))
+    return fail(error.c_str());
   std::vector<uint8_t> header(kTailHeader);
   std::vector<std::array<TailSource, kMaxPieces>> tail(n_layer);
-  bool ok = read_all(fd, header.data(), header.size(), 0);
+  bool ok = read_all(tails, header.data(), header.size(), 0);
   const uint8_t* h = header.data();
   if (!ok || std::memcmp(h, kTailMagic, sizeof(kTailMagic)) != 0 ||
       read_le<uint32_t>(h + 8) != kTailVersion ||
       read_le<uint32_t>(h + 12) != n_layer ||
       read_le<uint32_t>(h + 16) != store->n_expert) {
-    (void)close(fd);
+    platform::CloseFile(tails);
     return fail("not a tails file for this model layout");
   }
   const uint32_t head_ppm = read_le<uint32_t>(h + 20);
@@ -1160,10 +1168,10 @@ bool Store::AttachTails(const char* path) {
                      base = read_le<uint64_t>(h + pos + 24);
       const uint32_t file = read_le<uint32_t>(h + pos + 32);
       const Source& src = store->source[l][p];
-      struct stat st{};
+      const std::optional<uint64_t> size = platform::FileSizeBytes(src.file);
       ok = bytes == src.bytes && base == src.offset && cut > 0 && cut < bytes &&
-           padded >= bytes - cut && file < n_files && fstat(src.fd, &st) == 0 &&
-           (uint64_t)st.st_size == file_size[file];
+           padded >= bytes - cut && file < n_files && size &&
+           *size == file_size[file];
       tail[l][p].cut = cut;
       tail[l][p].stride = padded;  // the piece size; the record stride follows
     }
@@ -1184,13 +1192,13 @@ bool Store::AttachTails(const char* path) {
     ok = piece == record && first % kDirectAlign == 0 &&
          record % kDirectAlign == 0;
   }
-  struct stat st{};
   const uint64_t end = tail[n_layer - 1][0].first +
                        (uint64_t)store->n_expert * tail[n_layer - 1][0].stride;
-  if (ok && (fstat(fd, &st) != 0 || (uint64_t)st.st_size < end))
+  const std::optional<uint64_t> tails_size = platform::FileSizeBytes(tails);
+  if (ok && (!tails_size || *tails_size < end))
     ok = false;
   if (!ok) {
-    (void)close(fd);
+    platform::CloseFile(tails);
     return fail("it does not match this model's expert tensors; rebuild it");
   }
   /* Spot check: the tails of a few experts equal the model's bytes. */
@@ -1204,30 +1212,24 @@ bool Store::AttachTails(const char* path) {
       const uint64_t n = src.bytes - t.cut;
       a.resize(n);
       b.resize(n);
-      ok = read_all(src.fd, a.data(), n,
+      ok = read_all(src.file, a.data(), n,
                     src.offset + (uint64_t)e * src.bytes + t.cut) &&
-           read_all(fd, b.data(), n, t.first + (uint64_t)e * t.stride) &&
+           read_all(tails, b.data(), n, t.first + (uint64_t)e * t.stride) &&
            a == b;
     }
   if (!ok) {
-    (void)close(fd);
+    platform::CloseFile(tails);
     return fail("its bytes differ from the model's; rebuild it");
   }
-  /* Direct reads need an uncompressed, NOCOW file on btrfs; elsewhere the
-   * flag does not exist and direct I/O works as is. */
-  struct statfs fs{};
-  long flags = 0;
-  if (fstatfs(fd, &fs) == 0 && fs.f_type == BTRFS_SUPER_MAGIC &&
-      (ioctl(fd, FS_IOC_GETFLAGS, &flags) != 0 || !(flags & FS_NOCOW_FL)))
-    fprintf(stderr,
-            "%s: expert tails %s is on btrfs without NOCOW; its reads may be "
-            "compressed and buffered "
-            "(create it in a `chattr +C` directory)\n",
-            tag, path);
-  char proc[64];
-  std::snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
-  store->tail_direct_fd = open(proc, O_RDONLY | O_DIRECT | O_CLOEXEC);
-  store->tail_fd = fd;
+  bool direct = false;
+  const platform::PlatformFile reopened =
+      platform::ReopenRandomReadFile(tails, direct);
+  store->tail_file = tails;
+  store->owned_files.push_back(tails);
+  if (platform::FileValid(reopened)) {
+    (direct ? store->tail_direct : store->tail_file) = reopened;
+    store->owned_files.push_back(reopened);
+  }
   store->tail = tail;
   gufo::server::Logger::LogFormatted(gufo::server::LogLevel::kInfo, tag,
                                      "expert tails %s: %.2f GiB, %.0f%% of "
@@ -1354,14 +1356,15 @@ bool Store::Seed(std::vector<Ranked> ranked, const char* source) {
 
 namespace {
 
-/* The layer's pieces in file order (by descriptor, then offset), so reads
+/* The layer's pieces in file order (by handle, then offset), so reads
  * of one layer run sequentially through each file. */
 std::array<uint32_t, kMaxPieces> piece_order(const Store::Impl* store,
                                              uint32_t layer) {
   const auto& src = store->source[layer];
   const auto before = [&](uint32_t a, uint32_t b) {
-    return src[a].fd == src[b].fd ? src[a].offset < src[b].offset
-                                  : src[a].fd < src[b].fd;
+    return src[a].file == src[b].file
+               ? src[a].offset < src[b].offset
+               : std::less<platform::PlatformFile>()(src[a].file, src[b].file);
   };
   // Insertion sort: at most kMaxPieces distinct pieces.
   std::array<uint32_t, kMaxPieces> order{};
@@ -1384,17 +1387,16 @@ void append_projection(const Store::Impl* store, uint32_t layer, uint32_t p,
   const Source& src = store->source[layer][p];
   const uint64_t offset = src.offset + (uint64_t)e * src.bytes;
   const TailSource& t = store->tail[layer][p];
-  if (store->tail_fd < 0 || !t.stride) {
+  if (!platform::FileValid(store->tail_file) || !t.stride) {
     for (uint64_t done = 0; done < src.bytes;) {
       const uint64_t bytes = std::min(src.bytes - done, kReadBytes);
-      tasks.push_back(
-          {src.fd, src.direct_fd, offset + done, bytes, dst + done});
+      tasks.push_back({src.file, src.direct, offset + done, bytes, dst + done});
       done += bytes;
     }
     return;
   }
-  tasks.push_back({src.fd, src.direct_fd, offset, t.cut, dst});
-  tasks.push_back({store->tail_fd, store->tail_direct_fd,
+  tasks.push_back({src.file, src.direct, offset, t.cut, dst});
+  tasks.push_back({store->tail_file, store->tail_direct,
                    t.first + (uint64_t)e * t.stride, src.bytes - t.cut,
                    dst + t.cut});
 }
@@ -1426,7 +1428,7 @@ std::vector<ReadTask> build_read_tasks(const Store::Impl* store, uint32_t layer,
       const uint32_t first = e++;
       uint8_t* dst =
           store->stage[0][p] + (uint64_t)row_of[first] * src[p].bytes;
-      if (store->tail_fd >= 0) {
+      if (platform::FileValid(store->tail_file)) {
         append_projection(store, layer, p, first, dst, tasks);
         continue;
       }
@@ -1436,7 +1438,7 @@ std::vector<ReadTask> build_read_tasks(const Store::Impl* store, uint32_t layer,
       uint64_t left = (e - first) * src[p].bytes;
       while (left) {
         const uint64_t bytes = std::min(left, kReadBytes);
-        tasks.push_back({src[p].fd, src[p].direct_fd, offset, bytes, dst});
+        tasks.push_back({src[p].file, src[p].direct, offset, bytes, dst});
         offset += bytes;
         dst += bytes;
         left -= bytes;

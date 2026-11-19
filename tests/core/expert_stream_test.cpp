@@ -2,14 +2,18 @@
 // have: a fused gate_up + down layout (two pieces) and a one-piece layout,
 // with layer sizes that differ, through the store's own API only.
 #include <hip/hip_runtime_api.h>
-#include <unistd.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <vector>
 
 #include "src/core/hip/expert_stream/store.hpp"
+#include "src/core/platform/mapped_file.hpp"
+#include "src/core/platform/os_info.hpp"
 
 namespace {
 
@@ -30,7 +34,9 @@ uint8_t Byte(uint32_t layer, uint32_t piece, uint32_t expert, uint64_t index) {
 struct Model {
   Layout layout;
   std::vector<std::vector<uint64_t>> sizes;  // [layer][piece]
-  int fds[2] = {-1, -1};
+  std::filesystem::path paths[2];
+  gufo::platform::PlatformFile files[2] = {gufo::platform::kInvalidFile,
+                                           gufo::platform::kInvalidFile};
   bool ok = true;
 
   Model(uint32_t experts, uint32_t top_k,
@@ -40,38 +46,52 @@ struct Model {
     layout.top_k = top_k;
     layout.pieces = static_cast<uint32_t>(sizes[0].size());
     layout.max_batch_tokens = 64;
-    for (int& fd : fds) {
-      char path[] = "/tmp/gufo-expert-stream-XXXXXX";
-      fd = mkstemp(path);
-      if (fd < 0) {
-        ok = false;
-        return;
-      }
-      (void)unlink(path);
+    static int models = 0;
+    const std::string stem = "gufo-expert-stream-" +
+                             std::to_string(gufo::platform::ProcessId()) + "-" +
+                             std::to_string(models++);
+    std::ofstream out[2];
+    for (int f = 0; f < 2; ++f) {
+      paths[f] = std::filesystem::temp_directory_path() /
+                 (stem + "-" + std::to_string(f));
+      out[f].open(paths[f], std::ios::binary | std::ios::trunc);
+      ok = ok && out[f].good();
     }
     uint64_t offsets[2] = {96, 96};
+    for (int f = 0; f < 2 && ok; ++f)
+      out[f].write(std::string(offsets[f], '\0').data(), offsets[f]);
     for (uint32_t l = 0; l < sizes.size() && ok; ++l) {
       const uint32_t file = l % 2;
       std::vector<Piece> pieces;
       for (uint32_t p = 0; p < layout.pieces && ok; ++p) {
         const uint64_t size = sizes[l][p];
-        std::vector<uint8_t> bytes(size * experts);
+        std::vector<char> bytes(size * experts + 8);  // a gap between tensors
         for (uint32_t e = 0; e < experts; ++e)
           for (uint64_t i = 0; i < size; ++i)
-            bytes[e * size + i] = Byte(l, p, e, i);
-        ok = pwrite(fds[file], bytes.data(), bytes.size(),
-                    static_cast<off_t>(offsets[file])) ==
-             static_cast<ssize_t>(bytes.size());
-        pieces.push_back({fds[file], offsets[file], size});
-        offsets[file] += bytes.size() + 8;  // a gap between tensors
+            bytes[e * size + i] = static_cast<char>(Byte(l, p, e, i));
+        ok = static_cast<bool>(out[file].write(
+            bytes.data(), static_cast<std::streamsize>(bytes.size())));
+        pieces.push_back({gufo::platform::kInvalidFile, offsets[file], size});
+        offsets[file] += bytes.size();
       }
       layout.layers.push_back(pieces);
     }
+    for (int f = 0; f < 2 && ok; ++f) {
+      out[f].close();
+      files[f] = gufo::platform::OpenReadFile(paths[f]);
+      ok = gufo::platform::FileValid(files[f]);
+    }
+    for (uint32_t l = 0; l < layout.layers.size() && ok; ++l)
+      for (Piece& piece : layout.layers[l])
+        piece.file = files[l % 2];
   }
   ~Model() {
-    for (int fd : fds)
-      if (fd >= 0)
-        (void)close(fd);
+    for (int f = 0; f < 2; ++f) {
+      if (gufo::platform::FileValid(files[f]))
+        gufo::platform::CloseFile(files[f]);
+      std::error_code ec;
+      std::filesystem::remove(paths[f], ec);
+    }
   }
   uint64_t Slot(uint32_t layer) const {
     uint64_t bytes = 0;
