@@ -214,16 +214,20 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
             # tool choice, so neighbors alternate which choice is controlled.
             if choice != ("auto", "required")[index % 2]:
                 continue
-            control = {**request, "tools": [*opencode_tools(), neighbor(name, True)],
-                       "max_completion_tokens": 1}
-            baseline = record(label + "_control", chat_result(client, control))
-            delta = first["usage"]["prompt_tokens"] - baseline["usage"]["prompt_tokens"]
+            # The control only needs its prompt size: count it instead of
+            # prefilling it (openai-count-tokens pins count == prompt_tokens).
+            control = {key: request[key] for key in (
+                "model", "messages", "tool_choice", "parallel_tool_calls", "reasoning_effort")}
+            control["tools"] = [*opencode_tools(), neighbor(name, True)]
+            baseline = record(label + "_control", client.post(
+                "/chat/completions/input_tokens", body=control, cast_to=object))
+            delta = first["usage"]["prompt_tokens"] - baseline["input_tokens"]
             # Each renamed keyword may add a token; the instruction alone was
             # about 40 tokens on main.
             tolerance = 2 + 2 * triggers(NEIGHBORS[name])
             assert tolerance < 30 and abs(delta) <= tolerance, (
                 label, "prompt changed beyond the schema text", delta, tolerance,
-                first["usage"], baseline["usage"])
+                first["usage"], baseline)
 
     # Calls to the neighbor itself keep their declared JSON types.
     typed = (
