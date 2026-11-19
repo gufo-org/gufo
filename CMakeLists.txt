@@ -315,6 +315,20 @@ if (ENGINE_ENABLE_HIP)
   endif()
 endif()
 
+# json::parse (src/core/json.hpp), which builds its values from the events of
+# the Rust parser. The extension host keeps and exports it. The Rust headers
+# stay private, since extensions reach this library through gufo_ext_runtime.
+add_library(gufo_json STATIC src/core/json.cpp)
+target_link_libraries(gufo_json PRIVATE gufo_rust)
+# Test builds check the order of the parser's events.
+if (BUILD_TESTING)
+  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(gufo_json PRIVATE -UNDEBUG)
+  elseif (MSVC)
+    target_compile_options(gufo_json PRIVATE /UNDEBUG)
+  endif()
+endif()
+
 add_library(gufo_diagnostics STATIC
   src/core/diagnostics/gpu_queues.cpp
   src/core/diagnostics/linux_sysfs.cpp
@@ -329,7 +343,7 @@ add_library(gufo_diagnostics STATIC
   src/cli/diagnose/diagnose.cpp
 )
 target_include_directories(gufo_diagnostics PUBLIC ${CMAKE_SOURCE_DIR})
-target_link_libraries(gufo_diagnostics PUBLIC gufo_platform)
+target_link_libraries(gufo_diagnostics PUBLIC gufo_platform gufo_json)
 target_compile_definitions(gufo_diagnostics PRIVATE
   GUFO_REVISION="${GUFO_REVISION}")
 
@@ -371,7 +385,7 @@ add_library(gufo_core STATIC
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(gufo_core PUBLIC gufo_platform gufo_npu ICU::uc ICU::i18n
-  Threads::Threads gufo_rust JPEG::JPEG PkgConfig::WEBP CURL::libcurl
+  Threads::Threads gufo_json gufo_rust JPEG::JPEG PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
 
 # Family libraries come before the model that needs them; they may depend on
@@ -441,6 +455,10 @@ add_library(gufo_llm_cli STATIC
 target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_compare gufo_ext_runtime)
 
 add_subdirectory(src/ext)
+# The extension surface includes json::parse; programs that link the runtime
+# without gufo_core get it here. Projects that build src/ext on its own stay
+# free of Rust.
+target_link_libraries(gufo_ext_runtime PUBLIC gufo_json)
 
 # RFC step 6: the text-serving tier the gufo executable used to compile into
 # itself. Scheduler, runner pool, component text cache and InferenceBackend
@@ -887,6 +905,11 @@ endfunction()
   add_test(NAME json_test COMMAND json_test)
   set_tests_properties(json_test PROPERTIES LABELS "cpu;json")
 
+  add_executable(json_parse_test tests/core/json_parse_test.cpp)
+  target_link_libraries(json_parse_test PRIVATE gufo_json)
+  add_test(NAME json_parse_test COMMAND json_parse_test)
+  set_tests_properties(json_parse_test PROPERTIES LABELS "cpu;json;correctness")
+
   # The test writes its PNG cases with zlib directly.
   find_package(ZLIB REQUIRED)
   add_executable(png_decode_test
@@ -961,7 +984,7 @@ endfunction()
   # the trace suite simulates RLIMIT_FSIZE
   if (NOT WIN32)
   add_executable(trace_test tests/cli/trace_test.cpp)
-  target_link_libraries(trace_test PRIVATE gufo_logging gufo_platform)
+  target_link_libraries(trace_test PRIVATE gufo_logging gufo_json gufo_platform)
   add_test(NAME trace_test COMMAND trace_test)
   set_tests_properties(trace_test PROPERTIES LABELS "cpu;server;trace")
   endif()
