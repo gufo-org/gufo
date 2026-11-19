@@ -51,6 +51,10 @@ uint64_t AvailableMemory() {
 /* Each slot size class grows by its own chunks, so a smaller chunk bounds
  * the capacity a class can strand in a part-used chunk. */
 constexpr uint64_t kChunkBytes = 128ull << 20;
+/* A routing trace (Policy::trace_path) starts with kTraceMagic and the
+ * format version; records follow. */
+constexpr char kTraceMagic[8] = {'G', 'U', 'F', 'O', 'X', 'T', 'R', 'C'};
+constexpr uint32_t kTraceVersion = 2;
 constexpr uint64_t kReadBytes = 32ull << 20;
 constexpr uint64_t kDirectAlign = 4096;
 constexpr uint32_t kReadWorkers = 8;
@@ -1084,6 +1088,12 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
     if (!store->trace)
       fprintf(stderr, "%s: cannot open expert trace %s\n", tag,
               policy.trace_path.c_str());
+    else if (std::fwrite(kTraceMagic, sizeof(kTraceMagic), 1, store->trace) !=
+                 1 ||
+             std::fwrite(&kTraceVersion, sizeof(kTraceVersion), 1,
+                         store->trace) != 1)
+      fprintf(stderr, "%s: cannot write expert trace %s\n", tag,
+              policy.trace_path.c_str());
   }
   return std::unique_ptr<Store>(new Store(std::move(owner)));
 }
@@ -1578,27 +1588,37 @@ void trace_put(std::FILE* f, const T& value) {
   (void)std::fwrite(&value, sizeof(T), 1, f);
 }
 
-/* 'S': the cache as seeded, so a replay starts from the same state. */
+/* 'S': the cache as seeded, so a replay starts from the same state, with
+ * the layout and the policy values a replay mirrors. */
 void trace_snapshot(Store::Impl* store) {
   std::FILE* f = store->trace;
+  const Policy& policy = store->policy;
   trace_put(f, 'S');
-  trace_put(f, uint32_t{1});  // version
   trace_put(f, store->n_layer);
   trace_put(f, store->n_expert);
   trace_put(f, store->top_k);
+  trace_put(f, store->n_pieces);
+  trace_put(f, store->read_margin);  // uint64
   trace_put(f, store->tick);
   trace_put(f, store->cache_limit);
   trace_put(f, store->stats.cache_bytes);
   trace_put(f, AvailableMemory());
+  trace_put(f, kChunkBytes);
+  trace_put(f, policy.use_half_life);
+  trace_put(f, policy.use_cap);
+  trace_put(f, policy.max_class);
+  trace_put(f, policy.clock_rows);
+  trace_put(f, policy.seed_uses);
+  trace_put(f, policy.recent_rows);
+  trace_put(f, policy.sweep_tokens);
   trace_put(f, static_cast<uint32_t>(store->class_bytes.size()));
   for (uint64_t bytes : store->class_bytes)
     trace_put(f, bytes);
   for (uint32_t l = 0; l < store->n_layer; ++l) {
-    uint64_t expert_bytes = 0;
-    for (uint32_t p = 0; p < store->n_pieces; ++p)
-      expert_bytes += store->source[l][p].bytes;
     trace_put(f, store->layer_class[l]);
-    trace_put(f, expert_bytes);
+    trace_put(f, store->clock[l]);
+    for (uint32_t p = 0; p < store->n_pieces; ++p)
+      trace_put(f, store->source[l][p].bytes);
   }
   trace_put(f, static_cast<uint32_t>(store->slots.size()));
   for (const Slot& slot : store->slots) {

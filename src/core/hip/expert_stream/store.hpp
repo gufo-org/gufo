@@ -207,9 +207,9 @@ public:
    * event may be released. */
   void PredictFlush();
 
-  /* Policy::trace_path writes a binary routing trace (the seeded cache, then
-   * each Prepare's routes, hits and timing) for offline replay, such as the
-   * deepseek41 extension's tools/ds41/prefetch_sim.py.
+  /* Policy::trace_path writes a binary routing trace (the layout, policy
+   * and seeded cache, then each Prepare's routes, hits and timing) for
+   * offline replay with tools/expert_stream/ (format in its README).
    * Callers add router predictions for later layers with TracePrediction
    * once the target layer's Prepare returned. Tracing is a measurement mode:
    * callers should not predict while it runs. */
