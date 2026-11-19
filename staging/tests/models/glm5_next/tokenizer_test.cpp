@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "src/core/gguf_reader.hpp"
 
 namespace glm = gufo::models::glm5_next;
 
@@ -244,6 +247,193 @@ void TestSpecials(const Tok& tok) {
   }
 }
 
+// Minimal in-memory GGUF v3 writer for tokenizer metadata only.
+class GgufBuilder {
+public:
+  GgufBuilder() {
+    const char magic[4] = {'G', 'G', 'U', 'F'};
+    AppendBytes(magic, 4);
+    AppendPod(static_cast<std::uint32_t>(3));
+    AppendPod(static_cast<std::uint64_t>(0));  // tensor count
+    metadata_count_pos_ = buffer_.size();
+    AppendPod(static_cast<std::uint64_t>(0));
+  }
+
+  void AddString(std::string_view key, std::string_view val) {
+    AppendKey(key,
+              static_cast<std::uint32_t>(gufo::core::GgufValueType::kString));
+    AppendString(val);
+    ++metadata_count_;
+  }
+
+  void AddUint32(std::string_view key, std::uint32_t val) {
+    AppendKey(key,
+              static_cast<std::uint32_t>(gufo::core::GgufValueType::kUint32));
+    AppendPod(val);
+    ++metadata_count_;
+  }
+
+  void AddStringArray(std::string_view key,
+                      const std::vector<std::string>& arr) {
+    AppendKey(key,
+              static_cast<std::uint32_t>(gufo::core::GgufValueType::kArray));
+    AppendPod(static_cast<std::uint32_t>(gufo::core::GgufValueType::kString));
+    AppendPod(static_cast<std::uint64_t>(arr.size()));
+    for (const auto& s : arr) {
+      AppendString(s);
+    }
+    ++metadata_count_;
+  }
+
+  void AddInt32Array(std::string_view key,
+                     const std::vector<std::int32_t>& arr) {
+    AppendKey(key,
+              static_cast<std::uint32_t>(gufo::core::GgufValueType::kArray));
+    AppendPod(static_cast<std::uint32_t>(gufo::core::GgufValueType::kInt32));
+    AppendPod(static_cast<std::uint64_t>(arr.size()));
+    for (const std::int32_t v : arr) {
+      AppendPod(v);
+    }
+    ++metadata_count_;
+  }
+
+  void AddUint32Array(std::string_view key,
+                      const std::vector<std::uint32_t>& arr) {
+    AppendKey(key,
+              static_cast<std::uint32_t>(gufo::core::GgufValueType::kArray));
+    AppendPod(static_cast<std::uint32_t>(gufo::core::GgufValueType::kUint32));
+    AppendPod(static_cast<std::uint64_t>(arr.size()));
+    for (const std::uint32_t v : arr) {
+      AppendPod(v);
+    }
+    ++metadata_count_;
+  }
+
+  std::vector<std::uint8_t> Build() {
+    std::memcpy(buffer_.data() + metadata_count_pos_, &metadata_count_,
+                sizeof(metadata_count_));
+    const std::size_t rem = buffer_.size() % 32;
+    if (rem != 0) {
+      buffer_.resize(buffer_.size() + (32 - rem), 0);
+    }
+    return buffer_;
+  }
+
+private:
+  void AppendKey(std::string_view key, std::uint32_t type) {
+    AppendString(key);
+    AppendPod(type);
+  }
+
+  void AppendBytes(const void* data, std::size_t len) {
+    const auto* p = static_cast<const std::uint8_t*>(data);
+    buffer_.insert(buffer_.end(), p, p + len);
+  }
+
+  template<typename T>
+  void AppendPod(T val) {
+    AppendBytes(&val, sizeof(T));
+  }
+
+  void AppendString(std::string_view s) {
+    const std::uint64_t len = s.size();
+    AppendPod(len);
+    AppendBytes(s.data(), len);
+  }
+
+  std::vector<std::uint8_t> buffer_;
+  std::size_t metadata_count_pos_{0};
+  std::uint64_t metadata_count_{0};
+};
+
+// The shipped GLM GGUF declares frame-role ids (eot/eom) but no explicit
+// eog list; the loader must fall back to them so a turn boundary stops
+// generation instead of spilling into the next frame. An explicit eog
+// list still wins when present.
+void TestGgufStopFallback(const Fixture& fx) {
+  const glm::TokenId eos = 0;        // <|endoftext|>
+  const glm::TokenId user = 2;       // <|user|>: the GGUF's eot_token_id
+  const glm::TokenId assistant = 3;  // <|assistant|>: the GGUF's eom_token_id
+
+  std::vector<std::int32_t> token_types(fx.tokens.size(), 1);
+  for (std::size_t i = 0; i < fx.special_ids.size(); ++i) {
+    token_types[fx.special_ids[i]] = 3;  // CONTROL
+  }
+
+  // The reader borrows string_views into the blob, so every blob must
+  // outlive its reader.
+  const auto open = [](const std::vector<std::uint8_t>& blob,
+                       std::string& err) {
+    return gufo::core::GgufReader::OpenMemory(blob.data(), blob.size(), &err);
+  };
+
+  // Base metadata shared by all cases: everything but the stop-id keys.
+  const auto add_base = [&](GgufBuilder& b) {
+    b.AddString("tokenizer.ggml.model", "gpt2");
+    b.AddString("tokenizer.ggml.pre", "glm4");
+    b.AddStringArray("tokenizer.ggml.tokens", fx.tokens);
+    b.AddStringArray("tokenizer.ggml.merges", fx.merges);
+    b.AddInt32Array("tokenizer.ggml.token_type", token_types);
+    b.AddUint32("tokenizer.ggml.bos_token_id", 1);
+    b.AddUint32("tokenizer.ggml.eos_token_id", 0);
+  };
+
+  std::string err;
+
+  GgufBuilder with_roles;
+  add_base(with_roles);
+  with_roles.AddUint32("tokenizer.ggml.eot_token_id", user);
+  with_roles.AddUint32("tokenizer.ggml.eom_token_id", assistant);
+  const auto blob_roles = with_roles.Build();
+  const auto reader_roles = open(blob_roles, err);
+  if (reader_roles == nullptr) {
+    throw std::runtime_error("OpenMemory(eot/eom): " + err);
+  }
+  const auto tok_roles = glm::GlmTokenizer::CreateFromGguf(*reader_roles, &err);
+  if (tok_roles == nullptr) {
+    throw std::runtime_error("CreateFromGguf(eot/eom): " + err);
+  }
+  if (!tok_roles->IsStopToken(eos) || !tok_roles->IsStopToken(user) ||
+      !tok_roles->IsStopToken(assistant)) {
+    throw std::runtime_error("eot/eom fallback missing from stop set");
+  }
+  if (tok_roles->IsStopToken(4)) {
+    throw std::runtime_error("ordinary id marked stop");
+  }
+
+  GgufBuilder with_eog;
+  add_base(with_eog);
+  with_eog.AddUint32Array("tokenizer.ggml.eog_token_ids", {eos});
+  with_eog.AddUint32("tokenizer.ggml.eot_token_id", user);
+  const auto blob_eog = with_eog.Build();
+  const auto reader_eog = open(blob_eog, err);
+  if (reader_eog == nullptr) {
+    throw std::runtime_error("OpenMemory(eog): " + err);
+  }
+  const auto tok_eog = glm::GlmTokenizer::CreateFromGguf(*reader_eog, &err);
+  if (tok_eog == nullptr) {
+    throw std::runtime_error("CreateFromGguf(eog): " + err);
+  }
+  if (!tok_eog->IsStopToken(eos) || tok_eog->IsStopToken(user)) {
+    throw std::runtime_error("explicit eog list must win over eot");
+  }
+
+  GgufBuilder without_roles;
+  add_base(without_roles);
+  const auto blob_plain = without_roles.Build();
+  const auto reader_plain = open(blob_plain, err);
+  if (reader_plain == nullptr) {
+    throw std::runtime_error("OpenMemory(plain): " + err);
+  }
+  const auto tok_plain = glm::GlmTokenizer::CreateFromGguf(*reader_plain, &err);
+  if (tok_plain == nullptr) {
+    throw std::runtime_error("CreateFromGguf(plain): " + err);
+  }
+  if (!tok_plain->IsStopToken(eos) || tok_plain->IsStopToken(user)) {
+    throw std::runtime_error("without eot/eom only eos may stop");
+  }
+}
+
 void Run(const char* name, const Tok& tok, void (*test)(const Tok&)) {
   try {
     test(tok);
@@ -264,6 +454,7 @@ int main() {
     Run("TestCjkSingleRun", tok, TestCjkSingleRun);
     Run("TestWhitespaceBacktrack", tok, TestWhitespaceBacktrack);
     Run("TestSpecials", tok, TestSpecials);
+    TestGgufStopFallback(fx);
     std::cout << "glm5_next tokenizer: OK" << std::endl;
   } catch (const std::exception& error) {
     std::cerr << "glm5_next tokenizer FAILED: " << error.what() << std::endl;

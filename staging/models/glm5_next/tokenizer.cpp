@@ -458,8 +458,22 @@ std::unique_ptr<GlmTokenizer> GlmTokenizer::CreateFromGguf(
     pad = *id;
   }
 
-  const auto eog_ids =
+  std::vector<TokenId> eog_ids =
       collect_ids(reader.FindMetadata("tokenizer.ggml.eog_token_ids"));
+  // GLM chat frames end at the next CONTROL role token: the GGUF declares
+  // `tokenizer.ggml.eot_token_id` (`<|user|>` here) and
+  // `tokenizer.ggml.eom_token_id` (`<|observation|>`) but no explicit eog
+  // list (llama.cpp reaches for these ids in its GLM eog path). Without
+  // them generation only stops on eos, so turns spill raw reasoning into
+  // the next user frame instead of ending.
+  if (eog_ids.empty()) {
+    for (const char* key : {"tokenizer.ggml.eot_token_id",
+                            "tokenizer.ggml.eom_token_id"}) {
+      if (auto id = reader.GetMetadataUint32(key)) {
+        eog_ids.push_back(*id);
+      }
+    }
+  }
 
   return CreateFromVocabulary(tokens, merges, special_ids, bos, eos, pad,
                               eog_ids, error_msg);
