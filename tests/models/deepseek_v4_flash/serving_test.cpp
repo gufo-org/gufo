@@ -328,8 +328,6 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
       ModelOptions{.max_context = 262144, .dspark_model_path = support_path},
       &error);
   Expect(model != nullptr, error);
-  CheckExecutionModes(model);
-  CheckDsparkEosBoundary(model);
   const TextSpeculativeConfig speculative{
       .backend = TextSpeculativeBackend::kDSpark,
       .draft_model_path = support_path};
@@ -350,6 +348,12 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
            "DSpark prefix reuse resets policy and reproduces output and draft "
            "decisions");
   }
+  // After the full-context server, as in production: the first loaded
+  // server builds the F16 weight copies once its sessions claim memory. Built
+  // first for 512-token sessions, they took the device memory the 262144
+  // sessions need on a 100 GiB device.
+  CheckExecutionModes(model);
+  CheckDsparkEosBoundary(model);
 
   // C1 retains the point-mass route and its stronger AR seed-trace contract.
   {
