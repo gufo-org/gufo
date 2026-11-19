@@ -209,6 +209,25 @@ def check_messages_growth(client, model, checks, chat_result, failures, server_l
             print(f"CHECK {label}_{phase}", file=sys.stderr, flush=True)
             return result
 
+        def renders_thinking(body):
+            # Count the prompt with and without the replayed thinking blocks,
+            # once: the template's policy does not change between turns.
+            if not thinking:
+                return False
+            if label + "_renders_thinking" in checks:
+                return checks[label + "_renders_thinking"]
+            stripped = deepcopy(body)
+            for message in stripped["messages"]:
+                if message["role"] == "assistant":
+                    message["content"] = [block for block in message["content"]
+                                          if block["type"] != "thinking"]
+            count = lambda request: client.post(  # noqa: E731
+                "/messages/count_tokens", cast_to=object, body={
+                    key: request[key] for key in ("model", "system", "messages", "thinking")}
+            )["input_tokens"]
+            checks[label + "_renders_thinking"] = rendered = count(body) != count(stripped)
+            return rendered
+
         history = []
         previous_total = previous_completion = 0
         for turn in range(4):
@@ -225,7 +244,11 @@ def check_messages_growth(client, model, checks, chat_result, failures, server_l
                 assert total > previous_total, (total, previous_total)
                 # An unchanged replay reproduces the generated assistant turn,
                 # so reuse must reach past the previous prompt into that turn.
-                floor = previous_total + (previous_completion // 2 if thinking else -16)
+                # A template that drops earlier turns' thinking (DeepSeek V4,
+                # #670) renders a different turn; reuse then stops at the
+                # previous prompt, as it does without thinking.
+                floor = previous_total + (previous_completion // 2
+                                          if renders_thinking(body) else -16)
                 if reused < floor:
                     failures.append(
                         f"{label}_turn_{turn}: cache did not cover the replayed turn: "

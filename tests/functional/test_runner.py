@@ -744,7 +744,8 @@ class FunctionalRunnerTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.run_cache_rotation(contaminated=True)
 
-    def run_cache_growth(self, pinned=False, missing_reasoning=False, astray=None):
+    def run_cache_growth(self, pinned=False, missing_reasoning=False, astray=None,
+                         drops_thinking=False, replay_reuse=8):
         requests, checks, previous = [], {}, {}
 
         def chat_result(client, body):
@@ -780,11 +781,18 @@ class FunctionalRunnerTest(unittest.TestCase):
                 self.previous = {}
 
             def post(self, path, body, cast_to):
-                assert path == "/messages" and cast_to is object
+                assert cast_to is object
+                # A template that drops earlier thinking renders none of it.
+                thoughts = 0 if drops_thinking else sum(
+                    block["type"] == "thinking" for message in body["messages"]
+                    if message["role"] == "assistant" for block in message["content"])
+                if path == "/messages/count_tokens":
+                    return {"input_tokens": 3000 + (len(body["messages"]) - 1) * 100 + thoughts}
+                assert path == "/messages"
                 label = body["system"].splitlines()[0]
                 total = 3000 + (len(body["messages"]) - 1) * 100
                 last = self.previous.get(label, 0)
-                cached = total if total == last else min(total, last + 8) if last else 0
+                cached = total if total == last else min(total, last + replay_reuse) if last else 0
                 self.previous[label] = total
                 thinking = body["thinking"]["type"] == "enabled"
                 blocks = ([{"type": "thinking", "thinking": "The code word is BETA.",
@@ -802,7 +810,9 @@ class FunctionalRunnerTest(unittest.TestCase):
 
     def test_cache_growth_uses_real_replay_shapes_and_delays_cold_controls(self):
         requests, checks = self.run_cache_growth()
-        self.assertEqual(len(checks), 36)
+        # One rendering probe for the keep_thinking Messages scenario.
+        self.assertEqual(len(checks), 37)
+        self.assertTrue(checks['cache_growth_messages_keep_thinking_renders_thinking'])
         for offset, replay in enumerate(("drop_reasoning", "keep_reasoning",
                                         "discard_reasoning", "thinking_off")):
             history = requests[offset * 6:(offset + 1) * 6]
@@ -841,6 +851,13 @@ class FunctionalRunnerTest(unittest.TestCase):
                          ["cache_growth_keep_reasoning_cold_control_3"])
         with self.assertRaises(AssertionError):
             self.run_cache_growth(astray=lambda turn, cold: "BETA" if cold or turn != 2 else "")
+
+    def test_cache_growth_expects_messages_replay_reuse_only_where_thinking_renders(self):
+        # DeepSeek V4 drops earlier turns' thinking, so its reuse stops at the
+        # previous prompt (#670); a template that renders it must reuse more.
+        self.run_cache_growth(drops_thinking=True, replay_reuse=-3)
+        with self.assertRaisesRegex(AssertionError, "did not cover the replayed turn"):
+            self.run_cache_growth(replay_reuse=-3)
 
     def test_cache_growth_rejects_a_frozen_checkpoint(self):
         with self.assertRaisesRegex(AssertionError, "cache did not advance"):
