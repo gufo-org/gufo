@@ -535,6 +535,11 @@ class GpuTestsTest(unittest.TestCase):
         release = self.plan('src/cli/serve/text_model_runner.cpp', tier='full')
         self.assertTrue(any(model.get('ctest') for model in release['models'] if model['id'] == 'deepseek4'))
 
+    def test_a_runner_change_runs_the_gpu_tests_and_every_model(self):
+        plan = self.plan('tests/functional/devlab_run.py')
+        self.assertEqual([model['id'] for model in plan['models'] if model.get('ctest')], ['deepseek4'])
+        self.assertIn('qwen27-q4', [model['id'] for model in plan['models']])
+
     def test_one_shard_runs_the_tests_where_the_weights_are(self):
         plan = self.plan(self.DEEPSEEK)
         parts = [part for row in devlab_plan.shard(plan) for part in row['parts'] if part.get('ctest')]
@@ -544,11 +549,12 @@ class GpuTestsTest(unittest.TestCase):
         plan = self.plan(self.DEEPSEEK)
         plan['shards'] = devlab_plan.shard(plan)
         row = next(row for row in plan['shards'] if any(part.get('ctest') for part in row['parts']))
-        calls = []
+        calls, order = [], []
         def run(args, **kwargs):
             calls.append(args)
             output = Path(args[args.index('--output') + 1])
             if args[1].endswith('ctest_bundle.py'):
+                order.append('ctest')
                 output.mkdir(parents=True)
                 (output / 'results.json').write_text(json.dumps({'status': status, 'tests': [
                     {'name': 'ds4.target', 'status': status, 'seconds': 1.0, 'log_tail': 'boom'},
@@ -557,6 +563,7 @@ class GpuTestsTest(unittest.TestCase):
                 output.write_text('{}')
             return subprocess.CompletedProcess(args, 0)
         def execute(subplan, binary, baseline, output, assets):
+            order.append('suites')
             output.mkdir(parents=True)
             (output / 'summary.json').write_text(json.dumps({'groups': [
                 {**group, 'status': 'passed'} for group in subplan['groups']]}))
@@ -572,6 +579,8 @@ class GpuTestsTest(unittest.TestCase):
                                    Path('/checked'))
             summary = json.loads((root / 'report/summary.json').read_text())
         ctest = next(args for args in calls if args[1].endswith('ctest_bundle.py'))
+        # The GPU tests run before any server, while the page cache is the model's.
+        self.assertEqual(order[0], 'ctest')
         return plan, summary, ctest
 
     def test_the_tests_run_from_the_bundle_with_pinned_model_paths(self):

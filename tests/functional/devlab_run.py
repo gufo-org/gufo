@@ -100,6 +100,34 @@ def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=
                 'timing': 'pending' if timing else 'skipped', 'reasons': selection['reasons']}
         summary['models'].append(item)
         save()
+        if ctest:
+            # The model's GPU tests (the checked package's CTest labels) count as
+            # correctness. They run first, before servers churn the page cache
+            # that demand-mapped weights read through.
+            started = time.monotonic()
+            try:
+                if ctest_bundle is None:
+                    raise ValueError('The plan selects GPU tests but no --ctest-bundle was given')
+                destination = output / (key + '.ctest')
+                args = ctest_args(selection, ctest_bundle, assets, destination)
+                with (output / (key + '.ctest.log')).open('w') as log:
+                    subprocess.run(args, stdout=log, stderr=subprocess.STDOUT, timeout=3 * 3600)
+                path = destination / 'results.json'
+                observed = json.loads(path.read_text()) if path.exists() else {
+                    'status': 'error', 'tests': [], 'error': cluster.tail(output / (key + '.ctest.log'))}
+                item['ctest'] = {'labels': selection['ctest']['labels'], 'status': observed['status'],
+                                 'tests': [{field: row[field] for field in ('name', 'status', 'seconds', 'log_tail')
+                                            if field in row} for row in observed['tests']]}
+                if observed.get('error'):
+                    item['ctest']['error'] = observed['error']
+                write(report / (key + '.ctest.json'), observed)
+            except Exception:
+                item['ctest'] = {'labels': selection['ctest']['labels'], 'status': 'error',
+                                 'tests': [], 'error': traceback.format_exc()}
+            item['ctest_s'] = round(time.monotonic() - started, 1)
+            if item['ctest']['status'] != 'passed':
+                item['correctness'] = 'failed' if item['ctest']['status'] == 'failed' else 'error'
+            save()
         started = time.perf_counter()
         try:
             if not groups:
@@ -129,39 +157,14 @@ def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=
                 rows = [row]
             if groups:
                 summary['groups'].extend(rows)
-                item['correctness'] = 'passed' if all(row['status'] == 'passed' for row in rows) else 'failed'
+                if not all(row['status'] == 'passed' for row in rows):
+                    item['correctness'] = 'failed'
         except Exception:
             item.update(correctness='error', error=traceback.format_exc())
+        if item['correctness'] == 'running':
+            item['correctness'] = 'passed'
         item['correctness_s'] = round(time.perf_counter() - started, 1)
         save()
-        if ctest:
-            # The model's GPU tests (the checked package's CTest labels) count as correctness.
-            started = time.monotonic()
-            try:
-                if ctest_bundle is None:
-                    raise ValueError('The plan selects GPU tests but no --ctest-bundle was given')
-                destination = output / (key + '.ctest')
-                args = ctest_args(selection, ctest_bundle, assets, destination)
-                with (output / (key + '.ctest.log')).open('w') as log:
-                    subprocess.run(args, stdout=log, stderr=subprocess.STDOUT, timeout=3 * 3600)
-                path = destination / 'results.json'
-                observed = json.loads(path.read_text()) if path.exists() else {
-                    'status': 'error', 'tests': [], 'error': cluster.tail(output / (key + '.ctest.log'))}
-                item['ctest'] = {'labels': selection['ctest']['labels'], 'status': observed['status'],
-                                 'tests': [{field: row[field] for field in ('name', 'status', 'seconds', 'log_tail')
-                                            if field in row} for row in observed['tests']]}
-                if observed.get('error'):
-                    item['ctest']['error'] = observed['error']
-                write(report / (key + '.ctest.json'), observed)
-            except Exception:
-                item['ctest'] = {'labels': selection['ctest']['labels'], 'status': 'error',
-                                 'tests': [], 'error': traceback.format_exc()}
-            item['ctest_s'] = round(time.monotonic() - started, 1)
-            if item['ctest']['status'] != 'passed':
-                item['correctness'] = 'failed' if item['ctest']['status'] == 'failed' else 'error'
-            elif item['correctness'] == 'running':
-                item['correctness'] = 'passed'
-            save()
         if not timing:
             continue
         # Correctness failure must not hide the speed controls or other models.
