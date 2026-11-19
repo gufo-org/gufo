@@ -62,7 +62,9 @@ deterministic, independent of each other and cheap enough to run on every PR.
 - Read server counters as deltas across the suite's own requests.
 - A suite that depends on server-wide cache state (RAM budget, disk turnover,
   scheduling headroom) and cannot measure it in isolation gets
-  `"isolation": "server"`: its own server. Prefer making the suite independent.
+  `"isolation": "server"`: its own server. A suite that fills that state for
+  others joins the `"cache-fill"` pool, which shares one server apart from the
+  rest. Prefer making the suite independent.
 
 ## Validation
 

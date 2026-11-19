@@ -72,7 +72,8 @@
         "cache-bridge",
         "system-injection",
         "cache"
-      ]
+      ],
+      "max_jobs": 1
     }
   },
   "rules": [

@@ -5,6 +5,7 @@ import argparse
 import ast
 import fnmatch
 import json
+import re
 from pathlib import Path, PurePosixPath
 import subprocess
 import sys
@@ -50,7 +51,7 @@ def validate(manifest, names):
             raise ValueError("Unknown suite status: " + name)
         if suite.get("tier", "pr") not in ("pr", "release"):
             raise ValueError("Unknown suite tier: " + name)
-        if suite.get("isolation", "shared") not in ("shared", "server"):
+        if not re.fullmatch(r"[a-z][a-z-]*", suite.get("isolation", "shared")):
             raise ValueError("Unknown suite isolation: " + name)
         if "escalate" in suite and (suite.get("tier") != "release" or not suite["escalate"]):
             raise ValueError("Only release suites escalate, by path: " + name)

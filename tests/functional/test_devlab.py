@@ -383,6 +383,21 @@ class ShardTest(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(len({row['id'] for row in shards}), len(shards))
 
+    def test_cache_fill_pool_shares_one_server_and_deepseek_stays_on_one_device(self):
+        plan = devlab_plan.select(['src/core/sampling.cpp', 'src/models/deepseek_v4_flash/engine.cpp'],
+                                  without_npu(devlab_models.registry()), 'pr')
+        shards = devlab_plan.shard(plan)
+        servers = [server['suites'] for row in shards for part in row['parts']
+                   if part['model'] == 'flash-next-q4' for server in part['groups']]
+        pool = {'cache-concurrency', 'cache-shared-prefix', 'cache-growth', 'cache-edits'}
+        self.assertIn(pool, [set(suites) for suites in servers])
+        self.assertFalse(any(pool & set(suites) and set(suites) != pool for suites in servers))
+        # DeepSeek's suites, timing and GPU tests share one device past the budget.
+        deepseek = [row for row in shards if any(part['model'] == 'deepseek4' for part in row['parts'])]
+        self.assertEqual(len(deepseek), 1)
+        self.assertGreater(deepseek[0]['seconds'], devlab_plan.SHARD_BUDGET_S)
+        self.assertTrue(deepseek[0]['parts'][0].get('ctest') and deepseek[0]['parts'][0]['timing'])
+
     def test_order_seed_reaches_the_runner(self):
         plan = self.plan('src/models/qwen38_flash_next/engine.cpp')
         assets = {key: '/weights/' + key for key in devlab_models.registry()['assets']}

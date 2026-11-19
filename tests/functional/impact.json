@@ -959,6 +959,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "cache-fill",
       "vision_required": false,
       "tier": "release"
     },
@@ -978,6 +979,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "cache-fill",
       "vision_required": false,
       "tier": "release",
       "escalate": [
@@ -1096,6 +1098,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "cache-fill",
       "vision_required": false,
       "tier": "release",
       "escalate": [
@@ -1125,6 +1128,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "cache-fill",
       "vision_required": false,
       "tier": "release",
       "escalate": [

@@ -162,7 +162,7 @@ def pack(suites, cost, capacity):
     return bins
 
 
-def units(plan, table, budget, isolated):
+def units(plan, table, budget, isolation):
     """Indivisible pieces of work: one model's servers for one job, or its timing arms."""
     rows = []
     for selection in plan['models']:
@@ -186,9 +186,15 @@ def units(plan, table, budget, isolated):
         cost = lambda suite: suite_cost(table, key, suite)  # noqa: E731
         for group in groups:
             mode = group['profile'].split('/')[1]
-            shared = [suite for suite in group['suites'] if suite not in isolated]
+            shared = [suite for suite in group['suites'] if suite not in isolation]
             servers = pack(shared, cost, max(budget - load, 1)) + [
-                {'suites': [suite], 'seconds': cost(suite)} for suite in group['suites'] if suite in isolated]
+                {'suites': [suite], 'seconds': cost(suite)} for suite in group['suites']
+                if isolation.get(suite) == 'server']
+            # Suites in a named pool share one server apart from the rest.
+            for pool in sorted({isolation[suite] for suite in group['suites']
+                                if isolation.get(suite, 'server') != 'server'}):
+                members = [suite for suite in group['suites'] if isolation.get(suite) == pool]
+                servers.append({'suites': members, 'seconds': sum(cost(suite) for suite in members)})
             for number, server in enumerate(servers, 1):
                 server['seconds'] += load
                 rows.append({'label': f"{key}-{mode}-{group['configuration']}", 'pool': key,
@@ -214,15 +220,20 @@ def shard(plan, table=None, budget=SHARD_BUDGET_S):
     manifest = json.loads((HERE / 'impact.json').read_text())
     # These suites read server-wide cache state (RAM budget, disk turnover,
     # shared-prefix leaders) that earlier suites change; each gets a new server.
-    isolated = {name for name, suite in manifest['suites'].items() if suite.get('isolation') == 'server'}
+    # "server": a server of its own; another name: one server shared by that pool.
+    isolation = {name: suite['isolation'] for name, suite in manifest['suites'].items()
+                 if suite.get('isolation', 'shared') != 'shared'}
+    models = registry()['models']
     pools = {}
-    for row in units(plan, table, budget, isolated):
+    for row in units(plan, table, budget, isolation):
         pools.setdefault(row['pool'], []).append(row)
     shards = []
     for pool, rows in pools.items():
+        # A model with max_jobs 1 keeps all its work on one device, past the budget.
+        limit = budget if models.get(pool, {}).get('max_jobs') != 1 else float('inf')
         jobs = []
         for row in sorted(rows, key=lambda row: -row['seconds']):
-            job = next((job for job in jobs if job['seconds'] + row['seconds'] <= budget), None)
+            job = next((job for job in jobs if job['seconds'] + row['seconds'] <= limit), None)
             if job is None:
                 # The job's first server pays the cold load once.
                 job = {'rows': [], 'seconds': max((r.get('cold', 0) for r in rows), default=0)}

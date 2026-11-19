@@ -291,7 +291,8 @@
         "cache-bridge",
         "system-injection",
         "cache"
-      ]
+      ],
+      "max_jobs": 1
     },
     "embedding-gemma2": {
       "title": "EmbeddingGemma 2",

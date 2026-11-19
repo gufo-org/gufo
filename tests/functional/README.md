@@ -457,7 +457,12 @@ The plan's `shards` split the work into GPU jobs, one device each:
   and paired timing arms then pack into jobs up to the budget.
 - Suites marked `"isolation": "server"` in `impact.core.json` get a server of
   their own. They read server-wide cache state (RAM budget, disk turnover,
-  shared-prefix leaders) that earlier suites change.
+  shared-prefix leaders) that earlier suites change. Suites marked with another
+  name, such as `"isolation": "cache-fill"`, share one server apart from the
+  rest: they fill the RAM cache budget, which would refuse later suites'
+  checkpoints.
+- A model fragment with `"max_jobs": 1` keeps all its work, GPU tests included,
+  on one device past the budget. DeepSeek V4 Flash uses it.
 - Each model's timing arms run once, on one device.
 - The workflow runs one `smoke` matrix job per shard (`devlab_run.py --shard`,
   `devlab_models.py --shard`). The report job merges each shard's newest attempt
