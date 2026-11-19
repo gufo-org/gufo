@@ -356,7 +356,7 @@ struct TextRunnerPool::Impl {
             validated.runner, state_count, std::min(requested, ceiling),
             disk_cache_options, !ram_cache_options.capacity_bytes,
             std::max(ceiling, ComponentTextCache::kOffMetadataBytes),
-            ram_cache_options.enabled);
+            ram_cache_options.enabled, validated.resources.expert_cache);
       } catch (const cache::ResourceExhausted&) {
         Logger::Warn("cache",
                      "schema=component-cache-v1 event=ram_cache_refused "

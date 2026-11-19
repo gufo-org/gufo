@@ -384,8 +384,8 @@ struct ComponentTextCache::Impl {
   // prompt-cache budget still to commit (`backing_bytes` beyond what
   // commit_backing prepares). The backing may hold less than it prepares:
   // the log reports what it committed.
-  void FitExpertCache(std::size_t backing_bytes) const {
-    const auto claim = runner->ResourceClaim().expert_cache;
+  void FitExpertCache(const TextRunnerExpertCacheClaim& claim,
+                      std::size_t backing_bytes) const {
     if (!claim.store)
       return;
 #if defined(ENGINE_ENABLE_HIP)
@@ -427,7 +427,7 @@ struct ComponentTextCache::Impl {
   Impl(std::shared_ptr<TextModelRunner> runner, std::size_t count,
        std::size_t ram, std::size_t slot_ceiling,
        const std::optional<TextRunnerDiskCacheOptions>& options,
-       bool automatic_ram, bool ram_on)
+       bool automatic_ram, bool ram_on, TextRunnerExpertCacheClaim experts)
       : runner(std::move(runner)),
         // Disk transfers lease one fixed pinned staging buffer: one piece for
         // writes, whose speed a larger piece does not change (#562), and
@@ -637,7 +637,7 @@ struct ComponentTextCache::Impl {
       ledger.ConstrainLimits({ram + staging, ram, staging, ram});
     }
     budget = ram_enabled ? ram : 0;
-    FitExpertCache(ram);
+    FitExpertCache(experts, ram);
     if (options) {
       catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index,
                                                      options->capacity_bytes);
@@ -1558,10 +1558,10 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
 ComponentTextCache::ComponentTextCache(
     std::shared_ptr<TextModelRunner> runner, std::size_t count, std::size_t ram,
     const std::optional<TextRunnerDiskCacheOptions>& disk, bool automatic_ram,
-    std::size_t ceiling, bool ram_enabled)
+    std::size_t ceiling, bool ram_enabled, TextRunnerExpertCacheClaim experts)
     : impl_(std::make_unique<Impl>(std::move(runner), count, ram,
                                    std::max(ram, ceiling), disk, automatic_ram,
-                                   ram_enabled)) {}
+                                   ram_enabled, experts)) {}
 ComponentTextCache::~ComponentTextCache() = default;
 std::size_t ComponentTextCache::capacity() const noexcept {
   return impl_->entries.size();

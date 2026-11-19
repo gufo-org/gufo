@@ -22,6 +22,7 @@ namespace gufo::server {
 using ext::TextModelRunner;
 using ext::TextPromptContext;
 using ext::TextRunnerDiskCacheOptions;
+using ext::TextRunnerExpertCacheClaim;
 using ext::TextRunnerState;
 
 // The capture/backing contracts are cache-owned (RFC step 6); these aliases
@@ -90,7 +91,9 @@ public:
   // smaller budget does not refuse what they pin. The RAM limit then becomes
   // the budget plus those pins, within the host ceiling. With `ram_enabled`
   // false, ram_bytes is ignored: no checkpoint stays in RAM and no backing is
-  // committed, unless a disk cache needs some to stage captures.
+  // committed, unless a disk cache needs some to stage captures. A streamed
+  // model's expert cache (`experts`, from the load-time claim) is sized once
+  // the prompt cache's backing exists.
   /// Runs a restore's copies (cache::RestoreCopyRunner), told how long they
   /// would stop the calling thread.
   using RestoreRunner =
@@ -100,7 +103,8 @@ public:
                      std::size_t ram_bytes,
                      const std::optional<TextRunnerDiskCacheOptions>&,
                      bool automatic_ram = false, std::size_t ceiling_bytes = 0,
-                     bool ram_enabled = true);
+                     bool ram_enabled = true,
+                     TextRunnerExpertCacheClaim experts = {});
   ~ComponentTextCache();
   // With `state_tokens`, the session the prompt lands on claims them from
   // the shared state budget (StateAccount::Claim), drawing on
