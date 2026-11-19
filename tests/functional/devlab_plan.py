@@ -170,7 +170,7 @@ def units(plan, table, budget, isolation):
         model_costs = table['models'].get(key, {})
         timing = model_costs.get('timing_s', table['default_timing_s'])
         if selection.get('ctest'):
-            # GPU tests run in-process, after the suites, on a device that has the weights.
+            # GPU tests run first, on the device that then serves the model's suites.
             rows.append({'label': key + '-ctest', 'pool': key if selection['category'] == 'llm' else 'services',
                          'seconds': model_costs.get('ctest_s', table.get('default_ctest_s', 900)),
                          'part': {'model': key, 'groups': [], 'timing': False, 'ctest': True}})

@@ -409,7 +409,7 @@ other CTest property is refused at build time. Fixture files named by the tests'
 compile definitions are copied beside them; tests open them through
 `tests/support/source_path.hpp` (link `gufo_test_source_path`), which maps the
 compiled source root to the bundle's copy. On Devlab, the model's job runs the
-labels after its suites (`devlab_run.py --ctest-bundle`), one test at a time in
+labels before its suites (`devlab_run.py --ctest-bundle`), one test at a time in
 CTest order, and reports each test; a failure fails the model's correctness, and
 skips (exit code 77) are listed. DeepSeek V4 Flash runs `ds4`: 22 tests, about
 29 minutes on gfx1151 with 128 GB, where `ds4.dspark` also runs its C8 x 16384
