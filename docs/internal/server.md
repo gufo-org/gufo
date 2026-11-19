@@ -387,7 +387,9 @@ behind their decode graphs on a pooled queue. The plan counts that queue for
 every text server and gives it up first when the device is short (`own=0` in
 the `queue_budget` line): the restores then use pooled priority streams and
 stop running decoders while they copy, and the cap is kept. Two text servers
-still fit the budget with their restore queues.
+still fit the budget with their restore queues. Windows servers take no
+restore queue: there a restore beside decode still waited behind it, so
+restores run inline as before.
 
 The cap is only ever lowered to fit the free slots, never raised to fill them,
 so a server's throughput does not depend on the order the servers started. A

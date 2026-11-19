@@ -64,6 +64,7 @@ private:
 };
 
 using gufo::diagnostics::kComputeQueueBudget;
+using gufo::diagnostics::kTextOwnQueues;
 using gufo::diagnostics::PlanQueues;
 using gufo::diagnostics::QueryQueueCensus;
 using gufo::diagnostics::QueueCensus;
@@ -90,8 +91,9 @@ void ProfilesPickTheirMeasuredCap() {
   const QueueCensus empty;
   const auto text = PlanQueues(QueueProfile::kText, empty, nullptr);
   Expect(text.cap == 2, "text server asks for two queues");
-  Expect(text.own_queues == 1, "text server restores on a queue of its own");
-  Expect(text.expected_queues == 4,
+  Expect(text.own_queues == kTextOwnQueues,
+         "text server restores on a queue of its own where it has one");
+  Expect(text.expected_queues == 3 + kTextOwnQueues,
          "text server resolves to three pooled queues and its own");
   Expect(!text.exceeds_budget, "text server fits an empty device");
 
@@ -137,7 +139,7 @@ void TextOwnQueueIsGivenUpBeforeTheCap() {
   QueueCensus other_text;
   other_text.compute_queues = 4;
   const auto second = PlanQueues(QueueProfile::kText, other_text, nullptr);
-  Expect(second.cap == 2 && second.own_queues == 1,
+  Expect(second.cap == 2 && second.own_queues == kTextOwnQueues,
          "two text servers each keep two queues and their own");
   Expect(!second.may_exceed_budget, "two text servers fit the budget");
 
@@ -258,10 +260,12 @@ void PlanIsDescribedForTheLog() {
          "log line carries the event name");
   Expect(line.find("kind=llm") != std::string::npos, "log line carries a kind");
   Expect(line.find("cap=2") != std::string::npos, "log line carries the cap");
-  Expect(line.find("expected_max=4") != std::string::npos,
+  Expect(line.find("expected_max=" + std::to_string(3 + kTextOwnQueues)) !=
+             std::string::npos,
          "log line carries the resident count");
-  Expect(line.find("own=1") != std::string::npos,
-         "log line carries the own queues");
+  Expect(
+      line.find("own=" + std::to_string(kTextOwnQueues)) != std::string::npos,
+      "log line carries the own queues");
 }
 
 void OperatorPlanDoesNotPredictAQueueCount() {
@@ -270,7 +274,8 @@ void OperatorPlanDoesNotPredictAQueueCount() {
   const auto line = gufo::diagnostics::DescribeQueuePlan("llm", plan);
   Expect(line.find("cap=operator:4") != std::string::npos,
          "an operator setting is named in the log with its value");
-  Expect(line.find("expected_max=6") != std::string::npos,
+  Expect(line.find("expected_max=" + std::to_string(5 + kTextOwnQueues)) !=
+             std::string::npos,
          "the operator's value and the own queue bound the resident count");
 }
 

@@ -27,8 +27,14 @@ inline constexpr std::uint32_t kRuntimeDefaultCap = 4;
 /// Queues a text server adds beyond its cap: its cache restores copy on a
 /// stream with a hardware queue of its own (hip::TransferPool), so they never
 /// wait behind decode graphs on a pooled queue. The first thing given up when
-/// the device is short of queues.
+/// the device is short of queues. None on Windows: there restores beside
+/// decode still waited behind it on such a stream (stream waits ~0.4 s vs
+/// ~0.05 s inline, restoring TTFT 2-5x), so they stay inline.
+#if defined(_WIN32)
+inline constexpr std::uint32_t kTextOwnQueues = 0;
+#else
 inline constexpr std::uint32_t kTextOwnQueues = 1;
+#endif
 
 /// Compute and SDMA queues open across every process on the device.
 struct QueueCensus {
