@@ -602,8 +602,10 @@ an unaccounted later stream allocation. Other providers keep their existing
 exclusive-stream policy unless they opt into the session-aware factory.
 
 Restores lease their own native streams at the highest stream priority. For
-Flash-Next and Qwen they lease one stream on a hardware queue of its own
-instead (a stream whose CU mask holds every CU). HIP pools streams onto a few
+Flash-Next and Qwen, restores beside running decoders lease one more stream
+instead, on a hardware queue of its own (a stream whose CU mask holds every
+CU); alone it copies slower than the two priority streams (2.2 GB from RAM in
+36–38 ms against 34.5 ms), so restores with nothing beside them keep those. HIP pools streams onto a few
 hardware queues and gave a priority restore stream the executor stream's:
 beside decode, each restore copy then waited for a whole decode graph, and a
 2.2 GB disk restore took 2.6 s instead of 0.25 s (Flash-Next, November 2026).

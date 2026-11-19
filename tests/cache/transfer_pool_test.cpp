@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/cache/streaming.hpp"
 #include "src/core/hip/component_cache_resources.hpp"
 #include "tests/cache/fake_adapter.hpp"
 
@@ -360,9 +361,9 @@ void ComponentTransferFactoryCounts() {
   }
 }
 
-// A provider that asks restores to own a hardware queue gets one native
-// restore stream on it while the process allowance lasts, and otherwise the two
-// priority streams every provider gets.
+// A provider that asks restores to own a hardware queue keeps the two priority
+// restore streams, and adds one on a queue of its own while the process
+// allowance lasts. Only restores beside decode lease that one.
 void ComponentOwnRestoreQueue() {
   using namespace gufo;
   for (const std::size_t allowance : {1, 0}) {
@@ -378,17 +379,32 @@ void ComponentOwnRestoreQueue() {
     masked_streams = priority_streams = 0;
     auto resources = hip::CreateHipComponentCacheResources(
         std::make_unique<Adapter>(), ledger, std::move(hooks));
-    // Restores, then disk persistence on one stream.
-    const unsigned restore_streams = allowance ? 1 : 2;
-    assert(live_streams == 4 + restore_streams + 1);
-    assert(masked_streams == (allowance ? 1u : 0u) &&
-           priority_streams == (allowance ? 0u : 2u));
+    // Shared pool, restores, the restore stream beside decode, persistence.
+    const unsigned beside = allowance ? 1 : 0;
+    assert(live_streams == 4 + 2 + beside + 1);
+    assert(masked_streams == beside && priority_streams == 2);
     assert(hip::OwnQueueAllowance() == 0);
     assert(resources->restore_own_queue == (allowance != 0));
-    assert(resources->restore_stream());
+    const auto native = [](const std::unique_ptr<cache::Stream>& stream) {
+      return dynamic_cast<hip::TransferStream&>(*stream).Native();
+    };
+    // Two inline leases cover both priority lanes.
+    const auto first = resources->restore_stream();
+    const auto second = resources->restore_stream();
+    assert(!cache::CopyingBesideDecode());
+    {
+      const cache::BesideDecodeScope scope;
+      assert(cache::CopyingBesideDecode());
+      const auto beside_stream = resources->restore_stream();
+      assert(beside_stream);
+      const bool own = native(beside_stream) != native(first) &&
+                       native(beside_stream) != native(second);
+      assert(own == bool(beside));
+    }
+    assert(!cache::CopyingBesideDecode());
     resources.reset();
-    assert(!live_streams && !live_events);
   }
+  assert(!live_streams && !live_events);
   hip::SetOwnQueueAllowance(1);
 }
 void SharedTransferFences() {

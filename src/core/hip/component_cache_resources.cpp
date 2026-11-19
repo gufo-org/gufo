@@ -10,10 +10,12 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
+#include "src/cache/streaming.hpp"
 #include "src/core/hip/committed_backing.hpp"
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/host_allocations.hpp"
@@ -30,21 +32,26 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
                                  ComponentCacheHooks hooks) {
   struct Backing {
     Backing(std::size_t streams, std::size_t leases, bool own_restore_queue)
-        : streams(leases ? leases : streams, streams),
-          restore(16, own_restore_queue ? 1 : 2, -1, own_restore_queue) {}
-    static bool OwnRestoreQueue(const ComponentCacheHooks& hooks) {
-      return hooks.own_restore_queue && hip::OwnQueueAllowance() != 0;
+        : streams(leases ? leases : streams, streams) {
+      if (own_restore_queue && hip::OwnQueueAllowance() != 0) {
+        restore_beside.emplace(16, 1, -1, true);
+        if (!restore_beside->OwnQueues())
+          restore_beside.reset();
+      }
     }
     hip::TransferPool streams;
-    // Foreground restores: two native streams at the greatest priority, or
-    // one on a hardware queue of its own (hooks.own_restore_queue, while the
-    // process allowance the serving queue plan sets has one left). One stream
-    // copies 2.2 GB from RAM in 36-38 ms, two pooled ones in 34.5 ms. A
-    // restore's copies submit in milliseconds but used to complete only after
-    // other sessions' captures and persistence queued on the shared FIFO
-    // streams (up to 2.9 s measured), or beside decode after decode graphs on a
-    // shared hardware queue; here 2.47 GB restore in 31 ms.
-    hip::TransferPool restore;
+    // Foreground restores: two native streams at the greatest priority. A
+    // restore's copies submit in milliseconds but used to complete only
+    // after other sessions' captures and persistence queued on the shared
+    // FIFO streams (up to 2.9 s measured); here 2.47 GB restore in 31 ms.
+    hip::TransferPool restore{16, 2, -1};
+    // Restores beside decode (cache::BesideDecodeScope): one native stream on
+    // a hardware queue of its own (hooks.own_restore_queue, while the process
+    // allowance the serving queue plan sets has one left). On the pooled
+    // queues, each copy waited behind a whole decode graph. Alone it copies
+    // slower than the two pooled streams (1 MiB pieces: 87 vs 120 GB/s), so
+    // restores with nothing beside them keep those.
+    std::optional<hip::TransferPool> restore_beside;
     // Disk persistence: its own stream, so writes never queue in front of a
     // restore or capture.
     hip::TransferPool background{8, 1};
@@ -57,9 +64,8 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
   };
   auto result = std::make_unique<cache::ComponentCacheResources>();
   result->adapter = std::move(adapter);
-  auto backing =
-      std::make_shared<Backing>(hooks.transfer_streams, hooks.transfer_leases,
-                                Backing::OwnRestoreQueue(hooks));
+  auto backing = std::make_shared<Backing>(
+      hooks.transfer_streams, hooks.transfer_leases, hooks.own_restore_queue);
   if (hooks.info)
     hooks.info(
         "schema=component-cache-v1 event=transfer_resources "
@@ -291,9 +297,11 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     return backing->streams.TryAcquire();
   };
   result->restore_stream = [backing]() -> std::unique_ptr<cache::Stream> {
+    if (backing->restore_beside && cache::CopyingBesideDecode())
+      return backing->restore_beside->TryAcquire();
     return backing->restore.TryAcquire();
   };
-  result->restore_own_queue = backing->restore.OwnQueues();
+  result->restore_own_queue = backing->restore_beside.has_value();
   result->background_stream = [backing]() -> std::unique_ptr<cache::Stream> {
     return backing->background.TryAcquire();
   };

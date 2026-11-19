@@ -23,6 +23,7 @@
 #include <thread>
 #include <utility>
 
+#include "src/cache/streaming.hpp"
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
@@ -2319,6 +2320,7 @@ struct TextGenerationScheduler::Impl {
     std::exception_ptr error;
     std::thread worker([&] {
       try {
+        const cache::BesideDecodeScope beside;
         work();
       } catch (...) {
         error = std::current_exception();

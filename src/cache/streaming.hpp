@@ -103,6 +103,23 @@ private:
 // returns only once `copies` has, rethrowing what it threw.
 using RestoreCopyRunner =
     std::function<void(const std::function<void()>& copies)>;
+// Marks the calling thread, for its lifetime, as running a restore's copies
+// beside decode. A runner that does so holds one around `copies`, so a
+// provider can lease restore streams that never wait behind decode work there
+// (ComponentCacheResources::restore_own_queue) and its faster shared ones
+// elsewhere.
+class BesideDecodeScope {
+public:
+  BesideDecodeScope() noexcept;
+  ~BesideDecodeScope();
+  BesideDecodeScope(const BesideDecodeScope&) = delete;
+  BesideDecodeScope& operator=(const BesideDecodeScope&) = delete;
+
+private:
+  bool previous_;
+};
+// Whether the calling thread is inside a BesideDecodeScope.
+[[nodiscard]] bool CopyingBesideDecode() noexcept;
 // One initialization-time allocation, leased by piece to writers and held by
 // foreground restores. Optional yielding never holds staging or a stream. A HIP
 // allocator supplies committed pinned storage outside this CPU-only package.

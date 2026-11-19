@@ -410,7 +410,18 @@ bool Extends(const DiskManifest& next, const DiskManifest& prior) {
          std::equal(prior.tokens.begin(), prior.tokens.end(),
                     next.tokens.begin());
 }
+thread_local bool copying_beside_decode = false;
 }  // namespace
+BesideDecodeScope::BesideDecodeScope() noexcept
+    : previous_(copying_beside_decode) {
+  copying_beside_decode = true;
+}
+BesideDecodeScope::~BesideDecodeScope() {
+  copying_beside_decode = previous_;
+}
+bool CopyingBesideDecode() noexcept {
+  return copying_beside_decode;
+}
 
 PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
                                      std::uint64_t bytes, std::size_t alignment,
