@@ -211,6 +211,30 @@ stage from the grant, shrinks or seeds to the rest, and logs both budgets.
   idle. Longer prompts are restored from the disk cache instead.
 - **Before the claim**, DeepSeek did this arithmetic in its own constants and
   a backing hook. A second streaming extension would have copied both.
+- **Host pressure is measured against the store's floor.** Serving gives
+  prompt-cache memory back at idle while MemAvailable is below its 4 GiB host
+  reserve, assuming Gufo stays well above it, so that only another process
+  can push it there. A streamed model fills the host down to the store's
+  floor (`live_floor_bytes`, 1 GiB) on purpose. Against the reserve, DeepSeek
+  read its own steady state as pressure: the prompt cache lost its backing
+  10 s after startup and a 53-request agent replay prefilled in 198 s instead
+  of 35 s. Keeping the reserve free would have cost the expert cache 4 GiB.
+  So while experts stream, the floor replaces the reserve, and below it the
+  expert cache gives memory back first:
+  - `Store::Release(bytes)` evicts the coldest experts, frees whole chunks
+    and holds the cache there; the prompt cache gives memory only if that is
+    not enough. Evicting 2.3 GB of the least-used experts out of 100 GiB costs
+    less than dropping cached prompts.
+  - `Store::Restore()` lets the cache regrow to its grant once what it gave
+    back is free again (the floor, `ReleasedBytes()` and 256 MiB available);
+    misses refill it.
+  - New requests are refused below half the floor.
+
+  On DeepSeek, with another process taking memory at idle down to 0.7 GiB,
+  the next idle tick released 2.3 GB of experts in 155 ms and left the prompt
+  cache alone. A request during the pressure was served. One second after the
+  other process exited, the cache was restored, and the next request read
+  2.1 GiB of experts back (5.9 s instead of 1.2 s).
 
 ### Prefetch: `Predict`, `Prefetch`, `Expect`, `PredictFlush`
 
@@ -300,11 +324,16 @@ The extensions raise their `api_version` once each merges.
 
 ## Open questions
 
-- **Memory under pressure.** The grant subtracts memory promised to session
-  state, and the cache stops growing below `live_floor_bytes`, but nothing
-  can ask it to give memory back: it isn't a step in the state memory's
-  reclaim ladder. Neither extension shares session state, so the fixed split
-  works for them. Should evicting experts be a reclaim step from the start?
+- **Memory under pressure, and lending.** The expert cache now gives memory
+  back to other processes (above), but only at idle: freeing a chunk
+  synchronizes the device, because chunks are `hipMalloc` allocations. Two
+  more cases want it to lend memory to Gufo itself: transient pass scratch
+  (#1265's `mem::ScratchArena` maps only while enough memory is free, which
+  the expert cache never leaves) and session state under the reclaim ladder
+  (#1258). Backing the chunks with demand-mapped pages, as the state memory
+  does, would make lending an unmap with no slot moves. Should the store join
+  the state memory's ladder, and through which interface? Windows has no
+  demand mapping, so it would keep `hipMalloc` chunks.
 - **Option names.** Both extensions declare `--stream-experts` and
   `--expert-cache-bytes`, with the same names and types. Serving owns the
   budget, which makes `--expert-cache-bytes` look like host policy, but no
