@@ -25,6 +25,88 @@
       "entry": "minimax_h3_provider_register"
     }
   ],
+  "models": [
+    {
+      "id": "minimax-h3",
+      "provider": "minimax-h3",
+      "license": "MiniMax H3 Community License Agreement",
+      "description": "MiniMax H3 FL2VA, pinned BF16/F32 safetensors with text encoder and audio/video VAEs",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "MiniMaxAI/MiniMax-H3",
+            "revision": "42ed227ee7df40d41602854ae760620d6eb651fe"
+          },
+          "include": [
+            "FL2VA/audio_vae/config.json",
+            "FL2VA/audio_vae/config.yaml",
+            "FL2VA/audio_vae/metadata.json",
+            "FL2VA/audio_vae/model.safetensors",
+            "FL2VA/model_index.json",
+            "FL2VA/processor/chat_template.json",
+            "FL2VA/processor/merges.txt",
+            "FL2VA/processor/preprocessor_config.json",
+            "FL2VA/processor/tokenizer.json",
+            "FL2VA/processor/tokenizer_config.json",
+            "FL2VA/processor/video_preprocessor_config.json",
+            "FL2VA/processor/vocab.json",
+            "FL2VA/text_encoder/chat_template.json",
+            "FL2VA/text_encoder/config.json",
+            "FL2VA/text_encoder/merges.txt",
+            "FL2VA/text_encoder/model-00001-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00002-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00003-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00004-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00005-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00006-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00007-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00008-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00009-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00010-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00011-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00012-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00013-of-00014.safetensors",
+            "FL2VA/text_encoder/model-00014-of-00014.safetensors",
+            "FL2VA/text_encoder/model.safetensors.index.json",
+            "FL2VA/text_encoder/preprocessor_config.json",
+            "FL2VA/text_encoder/tokenizer.json",
+            "FL2VA/text_encoder/tokenizer_config.json",
+            "FL2VA/text_encoder/video_preprocessor_config.json",
+            "FL2VA/text_encoder/vocab.json",
+            "FL2VA/tokenizer/merges.txt",
+            "FL2VA/tokenizer/tokenizer.json",
+            "FL2VA/tokenizer/tokenizer_config.json",
+            "FL2VA/tokenizer/vocab.json",
+            "FL2VA/transformer/config.json",
+            "FL2VA/transformer/model-00001-of-00013.safetensors",
+            "FL2VA/transformer/model-00002-of-00013.safetensors",
+            "FL2VA/transformer/model-00003-of-00013.safetensors",
+            "FL2VA/transformer/model-00004-of-00013.safetensors",
+            "FL2VA/transformer/model-00005-of-00013.safetensors",
+            "FL2VA/transformer/model-00006-of-00013.safetensors",
+            "FL2VA/transformer/model-00007-of-00013.safetensors",
+            "FL2VA/transformer/model-00008-of-00013.safetensors",
+            "FL2VA/transformer/model-00009-of-00013.safetensors",
+            "FL2VA/transformer/model-00010-of-00013.safetensors",
+            "FL2VA/transformer/model-00011-of-00013.safetensors",
+            "FL2VA/transformer/model-00012-of-00013.safetensors",
+            "FL2VA/transformer/model-00013-of-00013.safetensors",
+            "FL2VA/transformer/model.safetensors.index.json",
+            "FL2VA/video_vae/config.json",
+            "FL2VA/video_vae/source/config.json",
+            "FL2VA/video_vae/source/model.safetensors",
+            "LICENSE",
+            "README.md",
+            "model_index.json"
+          ],
+          "entry": "."
+        }
+      ]
+    }
+  ],
   "targets": {
     "gufo_minimax_h3": {
       "requires": []
@@ -65,7 +147,8 @@
       "**/*.h",
       "**/*.hpp",
       "**/*.hip",
-      "extension.*"
+      "extension.*",
+      "models.lock.json"
     ],
     "exclude": [
       "tests/",

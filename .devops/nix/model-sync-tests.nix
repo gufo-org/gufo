@@ -29,6 +29,8 @@ let
   timer = os.config.systemd.timers.gufo-model-sync;
 in
 assert builtins.elem "qwen27-q4" known;
+assert lib.all (id: builtins.elem id known) [ "qwen3-tts" "minimax-h3" ];
+assert (mk { models = [ "qwen3-tts" "minimax-h3" ]; }).name == "gufo-model-sync";
 assert fails { models = [ "typo-model" ]; };
 assert fails {
   models = [ "qwen27-q4" ];
