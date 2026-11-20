@@ -68,11 +68,17 @@ public:
       const ext::TextProvider& provider, const core::GgufReader& reader,
       ext::TextRunnerOptions* options, std::string* error)>;
 
+  /// Receives each load stage as it starts: the fraction of the load that
+  /// precedes the stage (0 to 1) and a short description. Called on the
+  /// loading thread.
+  using LoadProgress =
+      std::function<void(double progress, std::string_view message)>;
+
   /// Loads weights from a GGUF file. Returns false and sets *error on failure.
   /// `enable_yarn` opts Flash-Next into YaRN, required for (and only accepted
   /// with) a `max_context` above its native context; each session scales only
   /// past the native context. `prepare_runner_options` runs after the
-  /// provider is selected.
+  /// provider is selected. `on_progress`, when set, receives the stages.
   bool load(const std::string& model_path, std::string* error,
             std::uint32_t max_context = 0, std::size_t session_count = 1,
             TextSchedulerPolicy scheduler_policy = {},
@@ -81,7 +87,8 @@ public:
             const std::string& vision_model_path = {},
             TextRunnerRamCacheOptions ram_cache_config = {},
             bool enable_yarn = false,
-            const PrepareRunnerOptions& prepare_runner_options = {});
+            const PrepareRunnerOptions& prepare_runner_options = {},
+            const LoadProgress& on_progress = {});
 
   /// Installs a previously prepared runner with request-owned sessions.
   bool load(std::shared_ptr<ext::TextModelRunner> runner, std::string* error,

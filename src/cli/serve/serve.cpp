@@ -1849,6 +1849,9 @@ int RunServe(std::span<const char* const> args) {
             *error = exception.what();
             return false;
           }
+        },
+        [&loading](double progress, std::string_view message) {
+          loading.SetProgress(progress, message);
         });
     loading.stop();
     if (!load_ok) {

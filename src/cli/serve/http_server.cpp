@@ -1872,11 +1872,35 @@ void LoadingResponder::stop() {
   }
 }
 
-void LoadingResponder::serve() {
-  HttpResponse loading = Err(503, "Service Unavailable", "Loading model",
-                             "unavailable_error", "loading");
+void LoadingResponder::SetProgress(double progress, std::string_view message) {
+  // NaN fails both comparisons and would serialise as invalid JSON.
+  progress = std::isnan(progress) ? 0.0 : std::clamp(progress, 0.0, 1.0);
+  const std::lock_guard lock(progress_mutex_);
+  progress_ = progress;
+  message_.assign(message);
+}
+
+std::string LoadingResponder::Reply() const {
+  json::Value error = json::Value::object();
+  error["message"] = "Loading model";
+  error["type"] = "unavailable_error";
+  error["code"] = "loading";
+  json::Value body = json::Value::object();
+  body["error"] = std::move(error);
+  {
+    const std::lock_guard lock(progress_mutex_);
+    body["progress"] = progress_;
+    body["message"] = message_;
+  }
+  HttpResponse loading;
+  loading.status = 503;
+  loading.reason = "Service Unavailable";
+  loading.body = body.dump();
   loading.headers.emplace_back("Retry-After", "1");
-  const std::string reply = BuildResponse(loading);
+  return BuildResponse(loading);
+}
+
+void LoadingResponder::serve() {
   // One connection at a time is enough for probes. Read the request head
   // before replying, and after replying read what the client still sends (a
   // request body) until it closes: closing with unread data resets the
@@ -1914,7 +1938,7 @@ void LoadingResponder::serve() {
     while (head.find("\r\n\r\n") == std::string::npos && head.size() < 8192 &&
            receive(head_deadline, &head)) {
     }
-    (void)SendAll(client_fd, reply);
+    (void)SendAll(client_fd, Reply());
     (void)net::ShutdownSocket(client_fd, net::ShutdownHow::kWrite);
     const auto drain_deadline = std::chrono::steady_clock::now() + kRequestWait;
     while (receive(drain_deadline, nullptr)) {
