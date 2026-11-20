@@ -46,6 +46,10 @@ public:
     bool whitespace{true};
     // Object members in sorted key order instead of schema order.
     bool sorted_keys{false};
+    // The root object as keyword arguments, `k='v', n=3`, without braces.
+    // Root strings, booleans and null may also use Python's spelling; nested
+    // values stay JSON. Property names must be identifiers.
+    bool keyword_root{false};
     auto operator<=>(const ValueSyntax&) const = default;
   };
   // Arguments as one tagged parameter per top-level property, in any order:
@@ -68,6 +72,8 @@ public:
   };
   // A native call written as
   //   open name_prefix NAME name_suffix ARGUMENTS close
+  // With block_close, calls share one block: open, calls joined by
+  // call_separator, block_close.
   // ARGUMENTS is either `tagged` parameters or, without them, the tool's
   // parameter object spelled by `values`.
   //
@@ -84,7 +90,13 @@ public:
     std::string open;
     std::string name_prefix;
     std::string name_suffix;
+    // If either is set, the name is written again after name_suffix:
+    // repeat_prefix NAME repeat_suffix.
+    std::string repeat_prefix;
+    std::string repeat_suffix;
     std::string close;
+    // Written before each call after the first.
+    std::string call_separator;
     std::string block_close;
     // Bytes that end a function name for the parser; a tool whose name holds
     // one cannot be constrained (std::invalid_argument).

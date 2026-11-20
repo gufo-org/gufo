@@ -159,8 +159,6 @@ struct ScheduledRequest {
   bool advance_pending{false};
   bool preview_stops{false};
   std::size_t generated_output_bytes{0};
-  // Bytes of runner pieces so far (Result::piece_ends).
-  std::size_t piece_bytes{0};
   StopSequenceFilter stop_filter;
   LogprobDecoder logprob_decoder;
 
@@ -1794,8 +1792,8 @@ struct TextGenerationScheduler::Impl {
     const auto* logprobs = RetainLogprobs(request, selection.logprobs);
     request->result.tokens.push_back(selection.token);
     if (incremental_text_is_exact) {
-      request->piece_bytes += selection.piece.size();
-      request->result.piece_ends.push_back(request->piece_bytes);
+      auto& ends = request->result.piece_ends;
+      ends.push_back((ends.empty() ? 0 : ends.back()) + selection.piece.size());
     }
     request->live_generated_tokens.store(request->result.tokens.size(),
                                          std::memory_order_relaxed);

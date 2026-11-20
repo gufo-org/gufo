@@ -103,7 +103,7 @@ bool Load(const gufo::ext::Registry& registry, const std::string& model,
       {.backend = gufo::ext::TextSpeculativeBackend::kDFlash}, {}, {}, {},
       false,
       [&](const gufo::ext::TextProvider& provider,
-          const gufo::core::GgufReader&, gufo::ext::TextRunnerOptions* options,
+          const gufo::core::GgufReader*, gufo::ext::TextRunnerOptions* options,
           std::string* message) {
         try {
           options->provider_options = provider_options.Select(provider.id);

@@ -68,8 +68,9 @@ public:
   /// Completes `options` for the selected text provider before its runner is
   /// created (command-line settings that depend on the provider); false, with
   /// `error` set, rejects the load.
+  /// `reader` is null for a model directory.
   using PrepareRunnerOptions = std::function<bool(
-      const ext::TextProvider& provider, const core::GgufReader& reader,
+      const ext::TextProvider& provider, const core::GgufReader* reader,
       ext::TextRunnerOptions* options, std::string* error)>;
 
   /// Receives each load stage as it starts: the fraction of the load that
@@ -78,7 +79,8 @@ public:
   using LoadProgress =
       std::function<void(double progress, std::string_view message)>;
 
-  /// Loads weights from a GGUF file. Returns false and sets *error on failure.
+  /// Loads weights from a GGUF file, or a model directory a provider's `probe`
+  /// claims. Returns false and sets *error on failure.
   /// `enable_yarn` opts Flash-Next into YaRN, required for (and only accepted
   /// with) a `max_context` above its native context; each session scales only
   /// past the native context. `prepare_runner_options` runs after the
