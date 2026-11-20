@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import random
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -206,7 +205,8 @@ with tempfile.TemporaryDirectory() as temporary:
     assert not store.exists() and not (extensions / "registry_fixture").exists()
     # Reviewed commits are immutable: the second listing reads the cache.
     assert (extensions / ".registry-metadata" / f"{commit}.json").is_file()
-    shutil.rmtree(repository)
+    # Git marks objects read-only, which Windows refuses to delete.
+    repository.rename(root / "moved_registry_fixture")
     cached = json.loads(gufo("model", "list", "--json", "--registry").stdout)
     assert any(row["id"] == "registry-model" for row in cached["models"]), cached
     registry.write_text("invalid registry")

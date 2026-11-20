@@ -231,7 +231,12 @@ Metadata FetchMetadata(const Release& release,
   struct Remove {
     fs::path path;
     ~Remove() {
+      // Git marks objects read-only, which Windows refuses to delete.
       std::error_code ignored;
+      for (fs::recursive_directory_iterator it(path, ignored), end; it != end;
+           it.increment(ignored))
+        fs::permissions(it->path(), fs::perms::owner_write,
+                        fs::perm_options::add, ignored);
       fs::remove_all(path, ignored);
     }
   } cleanup{scratch};
