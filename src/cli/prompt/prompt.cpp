@@ -1,10 +1,7 @@
 #include "src/cli/prompt/prompt.hpp"
 
-#include <filesystem>
-
-#include "src/cli/runner_cli.hpp"
-
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -18,6 +15,7 @@
 #include "gufo/ext/text.hpp"
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/provider_options.hpp"
+#include "src/cli/runner_cli.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/speculative_settings.hpp"
 #include "src/core/gguf_reader.hpp"

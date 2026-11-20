@@ -3045,9 +3045,10 @@ void TestProviderCallListAndKeywordSyntax() {
                  "<|call|>[weather(city=\"Paris\", days=3, on=True, "
                  "nothing=None, tags=[\"a\", \"b\"])]<|end|>"));
   assert(Accepts(*many, "<|call|>[weather(city='Paris', units='c')]<|end|>"));
-  assert(Accepts(*many,
-                 "<|call|>[weather(city='Paris', on=false, nothing=null)]<|end|>"));
-  assert(Accepts(*many, "<|call|>[clock(), weather(city='A'), clock()]<|end|>"));
+  assert(Accepts(
+      *many, "<|call|>[weather(city='Paris', on=false, nothing=null)]<|end|>"));
+  assert(
+      Accepts(*many, "<|call|>[clock(), weather(city='A'), clock()]<|end|>"));
   assert(Accepts(*one, "<|call|>[clock()]<|end|>"));
   assert(!Accepts(*one, "<|call|>[clock(), clock()]<|end|>"));
   assert(!Accepts(*many, "<|call|>[weather(city='Paris')"));
@@ -3076,7 +3077,8 @@ void TestProviderCallListAndKeywordSyntax() {
   const auto any =
       JsonConstraint::WithTools(nullptr, std::move(loose), true, false, python);
   assert(Accepts(*any, "<|call|>[f()]<|end|>"));
-  assert(Accepts(*any, "<|call|>[f(x=1, y='z', z={\"k\": [1]}, w=None)]<|end|>"));
+  assert(
+      Accepts(*any, "<|call|>[f(x=1, y='z', z={\"k\": [1]}, w=None)]<|end|>"));
   assert(!Accepts(*any, "<|call|>[f(1)]<|end|>"));
   assert(!Accepts(*any, "<|call|>[f(x 1)]<|end|>"));
 
@@ -3089,11 +3091,10 @@ void TestProviderCallListAndKeywordSyntax() {
       .close = "</call>",
       .call_separator = "<|next|>",
       .name_delimiters = "<\" ",
-      .tagged =
-          JsonConstraint::TaggedArguments{.parameter_open = "<p ",
-                                          .raw_value_open = ">",
-                                          .typed_value_open = ">",
-                                          .value_close = "</p>"},
+      .tagged = JsonConstraint::TaggedArguments{.parameter_open = "<p ",
+                                                .raw_value_open = ">",
+                                                .typed_value_open = ">",
+                                                .value_close = "</p>"},
   };
   const auto cschema = parse(
       R"({"type":"object","properties":{"a":{"type":"string"}},

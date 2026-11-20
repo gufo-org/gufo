@@ -199,9 +199,8 @@ public:
       string_ = StringValue(json::Value::object());
     if (values_.bare_keys)
       key_ = BareKey({});
-    if (values_.keyword_root &&
-        (values_.string_open.size() != 1 ||
-         values_.string_open != values_.string_close))
+    if (values_.keyword_root && (values_.string_open.size() != 1 ||
+                                 values_.string_open != values_.string_close))
       Invalid("keyword arguments quote strings with one byte");
   }
 
@@ -910,9 +909,8 @@ private:
   static bool IsIdentifier(std::string_view name) {
     if (name.empty() || std::isdigit(static_cast<unsigned char>(name[0])))
       return false;
-    return std::ranges::all_of(name, [](unsigned char c) {
-      return std::isalnum(c) || c == '_';
-    });
+    return std::ranges::all_of(
+        name, [](unsigned char c) { return std::isalnum(c) || c == '_'; });
   }
   bool Keywords(std::size_t depth) const {
     return values_.keyword_root && depth == 0;
@@ -1248,8 +1246,8 @@ private:
         auto choices = Sequence{Literal(value.dump())};
         if (value.str().find(values_.string_close) == std::string::npos &&
             value.str().find('\\') == std::string::npos)
-          choices.push_back(
-              Literal(values_.string_open + value.str() + values_.string_close));
+          choices.push_back(Literal(values_.string_open + value.str() +
+                                    values_.string_close));
         return Alt(choices);
       }
       if (value.is_bool())
@@ -1864,9 +1862,9 @@ private:
         required_at.push_back(members.size());
       if (keywords && !IsIdentifier(key))
         Invalid("property name cannot be written as a keyword argument");
-      members.push_back(Seq({KeyLiteral(key, keywords), keywords ? Seq({}) : ws_,
-                             Byte(assign), keywords ? Seq({}) : ws_,
-                             Visit(*value, depth + 1)}));
+      members.push_back(Seq(
+          {KeyLiteral(key, keywords), keywords ? Seq({}) : ws_, Byte(assign),
+           keywords ? Seq({}) : ws_, Visit(*value, depth + 1)}));
     }
     // Index 0 starts the object; index 1 follows a member and needs a comma.
     using Next = std::array<std::uint32_t, 2>;
@@ -2566,8 +2564,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::BuildTools(
         name.find_first_of(syntax->name_delimiters) != std::string::npos)
       Invalid("function name cannot be written in this tool syntax: " + name);
     const std::string repeated =
-        syntax &&
-                (!syntax->repeat_prefix.empty() || !syntax->repeat_suffix.empty())
+        syntax && (!syntax->repeat_prefix.empty() ||
+                   !syntax->repeat_suffix.empty())
             ? syntax->repeat_prefix + name + syntax->repeat_suffix
             : std::string();
     const auto begin = literal(

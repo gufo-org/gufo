@@ -1374,12 +1374,13 @@ void TestProviderToolDialectSelection() {
     Expect(constrained && constrained->messages.front().framing_suffix.empty(),
            "a native grammar syntax adds no JSON-call instruction");
     const auto& grammar = *sampling.constraint->grammar;
-    Expect(accepts(grammar, call) &&
-               accepts(grammar, "[[raw>>x<<raw]]" + call) &&
-               !accepts(grammar, "<think>x</think>" + call) &&
-               !accepts(grammar,
-                        R"(<tool_call>{"name":"record","arguments":{"text":"hi"}}</tool_call>)"),
-           "the grammar is written in the model's own spelling");
+    Expect(
+        accepts(grammar, call) && accepts(grammar, "[[raw>>x<<raw]]" + call) &&
+            !accepts(grammar, "<think>x</think>" + call) &&
+            !accepts(
+                grammar,
+                R"(<tool_call>{"name":"record","arguments":{"text":"hi"}}</tool_call>)"),
+        "the grammar is written in the model's own spelling");
   }
   // The reasoning phase of the grammar uses the runner's delimiters.
   const auto constrain = [](const DialectRunner& reasoner, bool tools,

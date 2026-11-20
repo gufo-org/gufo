@@ -511,8 +511,8 @@ public:
   ToolGrammarSyntax() const {
     return std::nullopt;
   }
-  [[nodiscard]] virtual std::optional<ReasoningMarkup>
-  ReasoningGrammarMarkers(const ChatRequest&) const {
+  [[nodiscard]] virtual std::optional<ReasoningMarkup> ReasoningGrammarMarkers(
+      const ChatRequest&) const {
     return std::nullopt;
   }
   [[nodiscard]] virtual std::uint32_t VocabularySize() const { return 0; }

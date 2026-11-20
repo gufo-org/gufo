@@ -1,12 +1,9 @@
 #include "src/cli/bench/bench.hpp"
 
-#include <filesystem>
-
-#include "src/cli/runner_cli.hpp"
-
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -19,6 +16,7 @@
 #include "gufo/ext/text.hpp"
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/provider_options.hpp"
+#include "src/cli/runner_cli.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/speculative_settings.hpp"
 #include "src/core/gguf_reader.hpp"

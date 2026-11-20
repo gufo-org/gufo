@@ -76,7 +76,7 @@ std::optional<ChatRequest> ConstrainChatRequest(
     const bool required =
         request.tool_choice == ChatRequest::ToolChoice::kRequired;
     const auto native_syntax = runner.ToolGrammarSyntax();
-    const auto* syntax = native_syntax ? &*native_syntax
+    const auto* syntax = native_syntax     ? &*native_syntax
                          : selected.format ? nullptr
                                            : &*selected.dialect->syntax;
     const auto format = selected.format.value_or(Format::kJson);
@@ -131,9 +131,8 @@ std::optional<ChatRequest> ConstrainChatRequest(
   // parsers do. Reasoning the prompt opened may still repeat the opener;
   // otherwise the model may open it itself unless the request disabled it.
   const auto initial = runner.InitialOutputState(request);
-  const auto reasoning =
-      runner.ReasoningGrammarMarkers(request).value_or(
-          runner.ReasoningDelimiters());
+  const auto reasoning = runner.ReasoningGrammarMarkers(request).value_or(
+      runner.ReasoningDelimiters());
   if (initial == ext::InitialOutputState::kReasoning)
     grammar = sampling::JsonConstraint::WithReasoning(grammar, reasoning.close);
   else if (initial == ext::InitialOutputState::kAuto &&
