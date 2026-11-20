@@ -8,6 +8,90 @@
 
 namespace gufo::models::yue2::hip {
 
+// One-token decode reads every AR weight once per token and is bound by
+// memory bandwidth, so the decode copy of those weights stores each BF16
+// value in 12 bits without losing any of them. A row keeps its largest
+// exponent; a weight is its sign, a 4-bit exponent code relative to the row
+// and its 7 mantissa bits. The few weights more than 14 binades below the
+// row's largest (about 0.04% of YuE2's) take code 0 and their bits from the
+// row's escape list.
+
+/// Weights per packed unit: eight 12-bit fields in three 32-bit words, field
+/// `k` at bits `[12 k, 12 k + 12)` of the little-endian 96-bit unit. A field
+/// is `sign << 11 | code << 7 | mantissa`.
+inline constexpr std::size_t kPackedUnitWeights = 8;
+inline constexpr std::size_t kPackedUnitWords = 3;
+
+struct PackedRow {
+  /// `(largest exponent - 15) << 23`: added to `code << 23` it gives the FP32
+  /// exponent field of a weight.
+  std::uint32_t exponent_base{0};
+  /// The row's escapes in the escape list, in no particular order.
+  std::uint32_t escape_begin{0};
+  std::uint32_t escape_count{0};
+  std::uint32_t reserved{0};
+};
+
+struct PackedEscape {
+  std::uint32_t column{0};
+  /// The weight as FP32 bits (`bf16 << 16`).
+  std::uint32_t bits{0};
+};
+
+/// Words of one packed row of `columns` weights.
+[[nodiscard]] constexpr std::size_t PackedRowWords(std::size_t columns) {
+  return columns / kPackedUnitWeights * kPackedUnitWords;
+}
+
+/// A packed matrix on the device: `PackedRowWords(columns)` words and one
+/// `PackedRow` per row, and the escape list the rows index.
+struct PackedMatrix {
+  std::uint32_t* units{nullptr};
+  PackedRow* rows{nullptr};
+  PackedEscape* escapes{nullptr};
+};
+
+/// First packing pass over `rows` BF16 rows of `columns` weights (a multiple
+/// of 8): writes each row's `exponent_base` and `escape_count` to
+/// `matrix.rows + first_row` and adds the escapes to `*escape_total`.
+void LaunchPackedRowsScan(const void* weights_bfloat16, std::size_t rows,
+                          std::size_t columns, const PackedMatrix& matrix,
+                          std::size_t first_row, std::uint32_t* escape_total,
+                          hipStream_t stream);
+
+/// Second pass: writes the units and escapes of the scanned rows, taking each
+/// row's escape range from `*escape_cursor`.
+void LaunchPackedRowsWrite(const void* weights_bfloat16, std::size_t rows,
+                           std::size_t columns, const PackedMatrix& matrix,
+                           std::size_t first_row, std::uint32_t* escape_cursor,
+                           hipStream_t stream);
+
+/// Decodes the packed rows as the GEMV does and adds the number of weights
+/// that differ from the BF16 rows to `*mismatches`.
+void LaunchPackedRowsVerify(const void* weights_bfloat16, std::size_t rows,
+                            std::size_t columns, const PackedMatrix& matrix,
+                            std::size_t first_row, std::uint32_t* mismatches,
+                            hipStream_t stream);
+
+/// `rows` consecutive matrix rows and where their FP32 products go.
+struct PackedOutput {
+  float* output{nullptr};
+  std::uint32_t rows{0};
+};
+
+inline constexpr std::size_t kPackedMaxOutputs = 3;
+
+/// One-token GEMV over packed rows: `outputs[i]` receives the products of
+/// the next `outputs[i].rows` matrix rows, starting at `first_row`, with the
+/// `columns` BF16 values at `input_bfloat16` (16-byte aligned). Every weight
+/// decodes to its BF16 value and each row is summed in the order of
+/// `eager::LaunchBfloat16Gemv`, so the results equal that kernel's bit for
+/// bit while reading three quarters of the bytes.
+void LaunchPackedGemv(const PackedMatrix& matrix, std::size_t first_row,
+                      const PackedOutput* outputs, std::size_t output_count,
+                      const void* input_bfloat16, std::size_t columns,
+                      hipStream_t stream);
+
 /// The acoustic input rows: `vae2llm(x) + time + position` with each upstream
 /// BF16 boundary. Row 0 and row `frames + 1` are the zero latent boundaries;
 /// row r takes `latent_pos_embed[r]`. `state` is FP32 `[frames][64]`;

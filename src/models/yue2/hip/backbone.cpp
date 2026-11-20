@@ -94,6 +94,9 @@ struct Path {
 struct Layer {
   Path ar;
   Path nar;
+  // 12-bit copies of the AR projections for one-token decode; q, k and v
+  // are one matrix, as are gate and up.
+  PackedMatrix qkv, o, gate_up, down;
 };
 
 // Where a pass writes its keys and values and which rows it attends to.
@@ -136,6 +139,9 @@ struct Backbone::Impl {
   const void* time_weight2{nullptr};
   const void* time_bias2{nullptr};
   const void* positions{nullptr};
+  void* packed_allocation{nullptr};
+  void* packed_escapes{nullptr};
+  PackedMatrix packed_head;
 
   hipStream_t stream{nullptr};
   hipblasHandle_t blas{nullptr};
@@ -162,6 +168,10 @@ struct Backbone::Impl {
       (void)hipFree(norm);
     if (weights_allocation != nullptr)
       (void)hipFree(weights_allocation);
+    if (packed_allocation != nullptr)
+      (void)hipFree(packed_allocation);
+    if (packed_escapes != nullptr)
+      (void)hipFree(packed_escapes);
     if (blas != nullptr)
       (void)hipblasDestroy(blas);
     if (stream != nullptr)
@@ -264,6 +274,110 @@ struct Backbone::Impl {
     time_weight2 = Matrix("time_embedder.mlp.2.weight", c.hidden, c.hidden);
     time_bias2 = Vector("time_embedder.mlp.2.bias", c.hidden);
     positions = Matrix("latent_pos_embed.pe", c.max_latent_frames, c.hidden);
+  }
+
+  /// Builds the 12-bit decode copies (`kernels.hpp`) of the AR projections
+  /// and of the head from the uploaded tensors, 2.5 GiB on the device:
+  /// one-token decode then reads three quarters of the weight bytes. Prefill
+  /// and the NAR path keep the BF16 tensors.
+  void PackDecode() {
+    const auto& c = config;
+    const std::size_t qd = c.heads * c.head_dim;
+    const std::size_t kvd = c.kv_heads * c.head_dim;
+    struct Source {
+      const void* weights{nullptr};
+      std::size_t rows{0};
+    };
+    struct Job {
+      PackedMatrix* matrix{nullptr};
+      std::size_t columns{0};
+      std::vector<Source> sources;
+      std::size_t units_offset{0};
+      std::size_t rows_offset{0};
+    };
+    std::vector<Job> jobs;
+    for (Layer& layer : layers) {
+      const Path& w = layer.ar;
+      jobs.push_back(
+          {&layer.qkv, c.hidden, {{w.q, qd}, {w.k, kvd}, {w.v, kvd}}});
+      jobs.push_back({&layer.o, qd, {{w.o, c.hidden}}});
+      jobs.push_back({&layer.gate_up,
+                      c.hidden,
+                      {{w.gate, c.intermediate}, {w.up, c.intermediate}}});
+      jobs.push_back({&layer.down, c.intermediate, {{w.down, c.hidden}}});
+    }
+    jobs.push_back({&packed_head, c.hidden, {{lm_head, c.vocabulary}}});
+
+    const auto aligned = [](std::size_t bytes) {
+      return (bytes + 255) & ~std::size_t{255};
+    };
+    // Three counters lead the allocation: the escape total, the cursor the
+    // write pass hands escape ranges out from, and the verify mismatches.
+    std::size_t total = aligned(3 * sizeof(std::uint32_t));
+    for (Job& job : jobs) {
+      std::size_t rows = 0;
+      for (const Source& source : job.sources)
+        rows += source.rows;
+      job.units_offset = total;
+      total +=
+          aligned(rows * PackedRowWords(job.columns) * sizeof(std::uint32_t));
+      job.rows_offset = total;
+      total += aligned(rows * sizeof(PackedRow));
+    }
+    RequireHip(hipMalloc(&packed_allocation, total), "hipMalloc packed");
+    auto* device = static_cast<std::uint8_t*>(packed_allocation);
+    auto* counters = static_cast<std::uint32_t*>(packed_allocation);
+    RequireHip(hipMemsetAsync(counters, 0, 3 * sizeof(std::uint32_t), stream),
+               "hipMemsetAsync packed counters");
+    for (const Job& job : jobs) {
+      job.matrix->units =
+          reinterpret_cast<std::uint32_t*>(device + job.units_offset);
+      job.matrix->rows = reinterpret_cast<PackedRow*>(device + job.rows_offset);
+    }
+    const auto each = [&](auto&& launch) {
+      for (const Job& job : jobs) {
+        std::size_t first = 0;
+        for (const Source& source : job.sources) {
+          launch(source.weights, source.rows, job.columns, *job.matrix, first);
+          first += source.rows;
+        }
+      }
+    };
+    each([&](const void* weights, std::size_t rows, std::size_t columns,
+             const PackedMatrix& matrix, std::size_t first) {
+      LaunchPackedRowsScan(weights, rows, columns, matrix, first, &counters[0],
+                           stream);
+    });
+    std::uint32_t escape_count = 0;
+    RequireHip(hipMemcpyAsync(&escape_count, &counters[0], sizeof(escape_count),
+                              hipMemcpyDeviceToHost, stream),
+               "hipMemcpyAsync packed escape count");
+    RequireHip(hipStreamSynchronize(stream), "packed scan");
+    // Never empty, so the kernels always hold a valid pointer.
+    RequireHip(hipMalloc(&packed_escapes, (std::size_t{escape_count} + 1) *
+                                              sizeof(PackedEscape)),
+               "hipMalloc packed escapes");
+    for (const Job& job : jobs)
+      job.matrix->escapes = static_cast<PackedEscape*>(packed_escapes);
+    each([&](const void* weights, std::size_t rows, std::size_t columns,
+             const PackedMatrix& matrix, std::size_t first) {
+      LaunchPackedRowsWrite(weights, rows, columns, matrix, first, &counters[1],
+                            stream);
+    });
+    // The copies must hold every weight exactly: decode them all once.
+    each([&](const void* weights, std::size_t rows, std::size_t columns,
+             const PackedMatrix& matrix, std::size_t first) {
+      LaunchPackedRowsVerify(weights, rows, columns, matrix, first,
+                             &counters[2], stream);
+    });
+    std::uint32_t mismatches = 0;
+    RequireHip(hipMemcpyAsync(&mismatches, &counters[2], sizeof(mismatches),
+                              hipMemcpyDeviceToHost, stream),
+               "hipMemcpyAsync packed mismatches");
+    RequireHip(hipStreamSynchronize(stream), "packed write");
+    RequireHip(hipGetLastError(), "packed launch");
+    if (mismatches != 0)
+      throw std::runtime_error("YuE2 packed decode weights differ from BF16");
   }
 
   void ReserveRows(std::size_t rows) {
@@ -382,6 +496,8 @@ struct Backbone::Impl {
     // From planned-GEMM size up, projections write BF16 into the FP32
     // buffers' storage; the BF16-input kernels then round nothing twice.
     const bool packed = rows >= kPackedRows;
+    // One AR token: the weight-bound projections read the 12-bit copies.
+    const bool single = !pass.nar && rows == 1;
     const auto bfloat16 = [](DeviceArray<float>& buffer) {
       return reinterpret_cast<std::uint16_t*>(buffer.get());
     };
@@ -392,6 +508,14 @@ struct Backbone::Impl {
         GemmBfloat16(w.q, scratch.get(), bfloat16(q), rows, qd, c.hidden);
         GemmBfloat16(w.k, scratch.get(), bfloat16(k), rows, kvd, c.hidden);
         GemmBfloat16(w.v, scratch.get(), bfloat16(v), rows, kvd, c.hidden);
+      } else if (single) {
+        const std::array<PackedOutput, 3> qkv{{
+            {q.get(), static_cast<std::uint32_t>(qd)},
+            {k.get(), static_cast<std::uint32_t>(kvd)},
+            {v.get(), static_cast<std::uint32_t>(kvd)},
+        }};
+        LaunchPackedGemv(layers[l].qkv, 0, qkv.data(), qkv.size(),
+                         scratch.get(), c.hidden, stream);
       } else {
         const std::array<eager::Bfloat16GemvGroup, 3> qkv{{
             {w.q, q.get(), qd},
@@ -483,6 +607,27 @@ struct Backbone::Impl {
         ResidualNormFromBfloat16(bfloat16(ffn), next_norm, rows);
         continue;
       }
+      if (single) {
+        const auto hidden_rows = static_cast<std::uint32_t>(c.hidden);
+        const auto wide_rows = static_cast<std::uint32_t>(c.intermediate);
+        const PackedOutput attended{o.get(), hidden_rows};
+        LaunchPackedGemv(layers[l].o, 0, &attended, 1, attention.get(), qd,
+                         stream);
+        ResidualNorm(o.get(), w.post_norm, rows);
+        const std::array<PackedOutput, 2> gate_up{{
+            {gate.get(), wide_rows},
+            {up.get(), wide_rows},
+        }};
+        LaunchPackedGemv(layers[l].gate_up, 0, gate_up.data(), gate_up.size(),
+                         scratch.get(), c.hidden, stream);
+        eager::LaunchBfloat16SwiGlu(gate.get(), up.get(), nullptr,
+                                    scratch.get(), c.intermediate, stream);
+        const PackedOutput projected_down{ffn.get(), hidden_rows};
+        LaunchPackedGemv(layers[l].down, 0, &projected_down, 1, scratch.get(),
+                         c.intermediate, stream);
+        ResidualNorm(ffn.get(), next_norm, rows);
+        continue;
+      }
       Gemm(w.o, attention.get(), o.get(), rows, c.hidden, qd);
       ResidualNorm(o.get(), w.post_norm, rows);
       const std::array<eager::Bfloat16GemvGroup, 2> gate_up{{
@@ -517,11 +662,10 @@ struct Backbone::Impl {
     const std::size_t count = window.size();
     logits.Reserve(count);
     logits_rounded.Reserve(count);
-    const auto* head = static_cast<const std::uint8_t*>(lm_head) +
-                       static_cast<std::size_t>(window.begin) * config.hidden *
-                           sizeof(std::uint16_t);
-    Gemm(head, scratch.get() + row * config.hidden, logits.get(), 1, count,
-         config.hidden);
+    const PackedOutput rows{logits.get(), static_cast<std::uint32_t>(count)};
+    LaunchPackedGemv(packed_head, window.begin, &rows, 1,
+                     scratch.get() + row * config.hidden, config.hidden,
+                     stream);
     LaunchBfloat16Logits(logits.get(), count, logits_rounded.get(), stream);
     output->resize(count);
     RequireHip(
@@ -678,6 +822,7 @@ std::unique_ptr<Backbone> Backbone::Create(
       throw std::runtime_error("YuE2 cannot create a hipBLAS handle");
     impl->Upload();
     impl->Resolve();
+    impl->PackDecode();
     impl->ReserveRows(kPrefillRows);
     impl->rotary.Reserve(config.context * config.head_dim);
     eager::LaunchBfloat16RotaryTable(

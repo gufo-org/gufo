@@ -2,6 +2,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <stdexcept>
 
 #include "src/models/yue2/hip/kernels.hpp"
 
@@ -368,6 +369,247 @@ __launch_bounds__(256) __global__
   }
 }
 
+__device__ __forceinline__ float LowBfloat16(std::uint32_t word) {
+  return __uint_as_float(word << 16U);
+}
+
+__device__ __forceinline__ float HighBfloat16(std::uint32_t word) {
+  return __uint_as_float(word & 0xFFFF0000U);
+}
+
+struct PackedUnit {
+  std::uint32_t words[kPackedUnitWords];
+};
+
+__device__ __forceinline__ std::uint32_t Bfloat16Exponent(std::uint32_t bits) {
+  return (bits >> 7U) & 0xFFU;
+}
+
+// Shared by the packing passes: one workgroup per row, thread t owning units
+// t, t + 256, ... A weight escapes when its exponent is not above the row's
+// base, which covers zeros and subnormals.
+__launch_bounds__(256) __global__
+    void PackedRowsScanKernel(const std::uint16_t* __restrict__ weights,
+                              std::uint32_t units_per_row,
+                              PackedRow* __restrict__ rows,
+                              std::uint32_t* __restrict__ escape_total) {
+  __shared__ std::uint32_t reduced[256];
+  const std::uint16_t* row = weights + static_cast<std::size_t>(blockIdx.x) *
+                                           units_per_row * kPackedUnitWeights;
+  std::uint32_t largest = 0;
+  for (std::uint32_t unit = threadIdx.x; unit < units_per_row; unit += 256) {
+#pragma unroll
+    for (unsigned k = 0; k < kPackedUnitWeights; ++k)
+      largest =
+          max(largest, Bfloat16Exponent(row[unit * kPackedUnitWeights + k]));
+  }
+  reduced[threadIdx.x] = largest;
+  __syncthreads();
+  for (unsigned t = 0; t < 256; ++t)
+    largest = max(largest, reduced[t]);
+  __syncthreads();
+  const std::uint32_t base = largest > 15U ? largest - 15U : 0U;
+  std::uint32_t count = 0;
+  for (std::uint32_t unit = threadIdx.x; unit < units_per_row; unit += 256) {
+#pragma unroll
+    for (unsigned k = 0; k < kPackedUnitWeights; ++k)
+      count +=
+          Bfloat16Exponent(row[unit * kPackedUnitWeights + k]) > base ? 0U : 1U;
+  }
+  reduced[threadIdx.x] = count;
+  __syncthreads();
+  if (threadIdx.x != 0)
+    return;
+  count = 0;
+  for (unsigned t = 0; t < 256; ++t)
+    count += reduced[t];
+  rows[blockIdx.x] = PackedRow{base << 23U, 0U, count, 0U};
+  if (count != 0)
+    atomicAdd(escape_total, count);
+}
+
+__launch_bounds__(256) __global__
+    void PackedRowsWriteKernel(const std::uint16_t* __restrict__ weights,
+                               std::uint32_t units_per_row,
+                               PackedUnit* __restrict__ units,
+                               PackedRow* __restrict__ rows,
+                               PackedEscape* __restrict__ escapes,
+                               std::uint32_t* __restrict__ escape_cursor) {
+  __shared__ std::uint32_t counts[256];
+  __shared__ std::uint32_t begin;
+  const std::uint16_t* row = weights + static_cast<std::size_t>(blockIdx.x) *
+                                           units_per_row * kPackedUnitWeights;
+  const PackedRow info = rows[blockIdx.x];
+  const std::uint32_t base = info.exponent_base >> 23U;
+  std::uint32_t slot = 0;
+  if (info.escape_count != 0) {
+    // Thread t's escapes follow those of the threads before it.
+    std::uint32_t count = 0;
+    for (std::uint32_t unit = threadIdx.x; unit < units_per_row; unit += 256) {
+#pragma unroll
+      for (unsigned k = 0; k < kPackedUnitWeights; ++k)
+        count += Bfloat16Exponent(row[unit * kPackedUnitWeights + k]) > base
+                     ? 0U
+                     : 1U;
+    }
+    counts[threadIdx.x] = count;
+    if (threadIdx.x == 0) {
+      begin = atomicAdd(escape_cursor, info.escape_count);
+      rows[blockIdx.x].escape_begin = begin;
+    }
+    __syncthreads();
+    slot = begin;
+    for (unsigned t = 0; t < threadIdx.x; ++t)
+      slot += counts[t];
+  }
+  for (std::uint32_t unit = threadIdx.x; unit < units_per_row; unit += 256) {
+    std::uint32_t fields[kPackedUnitWeights];
+#pragma unroll
+    for (unsigned k = 0; k < kPackedUnitWeights; ++k) {
+      const std::uint32_t column = unit * kPackedUnitWeights + k;
+      const std::uint32_t weight = row[column];
+      const std::uint32_t exponent = Bfloat16Exponent(weight);
+      fields[k] = 0;
+      if (exponent > base)
+        fields[k] = ((weight >> 4U) & 0x800U) | ((exponent - base) << 7U) |
+                    (weight & 0x7FU);
+      else
+        escapes[slot++] = PackedEscape{column, weight << 16U};
+    }
+    PackedUnit packed;
+    packed.words[0] = fields[0] | (fields[1] << 12U) | (fields[2] << 24U);
+    packed.words[1] = (fields[2] >> 8U) | (fields[3] << 4U) |
+                      (fields[4] << 16U) | (fields[5] << 28U);
+    packed.words[2] =
+        (fields[5] >> 4U) | (fields[6] << 8U) | (fields[7] << 20U);
+    units[static_cast<std::size_t>(blockIdx.x) * units_per_row + unit] = packed;
+  }
+}
+
+/// The eight weights of unit `index` of a row as FP32.
+__device__ __forceinline__ void UnpackUnit(
+    PackedUnit unit, PackedRow info, const PackedEscape* __restrict__ escapes,
+    std::uint32_t index, float* weights) {
+  const std::uint32_t a = unit.words[0], b = unit.words[1], c = unit.words[2];
+  // Each field moved to bits [20, 32): sign, exponent code, mantissa.
+  const std::uint32_t fields[kPackedUnitWeights] = {
+      a << 20U, a << 8U, (a >> 4U) | (b << 28U),
+      b << 16U, b << 4U, (b >> 8U) | (c << 24U),
+      c << 12U, c};
+#pragma unroll
+  for (unsigned k = 0; k < kPackedUnitWeights; ++k)
+    weights[k] = __uint_as_float(
+        (fields[k] & 0x80000000U) |
+        (((fields[k] >> 4U) & 0x07FF0000U) + info.exponent_base));
+  if (info.escape_count == 0)
+    return;
+#pragma unroll
+  for (unsigned k = 0; k < kPackedUnitWeights; ++k) {
+    if ((fields[k] & 0x78000000U) != 0)
+      continue;
+    const std::uint32_t column = index * kPackedUnitWeights + k;
+    std::uint32_t bits = 0;
+    for (std::uint32_t e = 0; e < info.escape_count; ++e) {
+      const PackedEscape escape = escapes[info.escape_begin + e];
+      if (escape.column == column)
+        bits = escape.bits;
+    }
+    weights[k] = __uint_as_float(bits);
+  }
+}
+
+__launch_bounds__(256) __global__
+    void PackedRowsVerifyKernel(const std::uint16_t* __restrict__ weights,
+                                std::uint32_t units_per_row,
+                                const PackedUnit* __restrict__ units,
+                                const PackedRow* __restrict__ rows,
+                                const PackedEscape* __restrict__ escapes,
+                                std::uint32_t* __restrict__ mismatches) {
+  const std::uint16_t* row = weights + static_cast<std::size_t>(blockIdx.x) *
+                                           units_per_row * kPackedUnitWeights;
+  const PackedRow info = rows[blockIdx.x];
+  std::uint32_t wrong = 0;
+  for (std::uint32_t unit = threadIdx.x; unit < units_per_row; unit += 256) {
+    float decoded[kPackedUnitWeights];
+    UnpackUnit(
+        units[static_cast<std::size_t>(blockIdx.x) * units_per_row + unit],
+        info, escapes, unit, decoded);
+#pragma unroll
+    for (unsigned k = 0; k < kPackedUnitWeights; ++k)
+      wrong +=
+          __float_as_uint(decoded[k]) ==
+                  static_cast<std::uint32_t>(row[unit * kPackedUnitWeights + k])
+                      << 16U
+              ? 0U
+              : 1U;
+  }
+  if (wrong != 0)
+    atomicAdd(mismatches, wrong);
+}
+
+struct PackedGemvArgs {
+  const PackedUnit* units;
+  const PackedRow* rows;
+  const PackedEscape* escapes;
+  float* outputs[kPackedMaxOutputs];
+  // Running row totals of the outputs; the last is the row count.
+  std::uint32_t row_end[kPackedMaxOutputs];
+};
+
+// The reduction of `eager::Bfloat16GemvKernel`, one vector: eight waves
+// stream a row with their own coalesced loads and add in the same order.
+// A workgroup takes `kRows` rows in turn: 3 KiB rows are too short for one
+// workgroup each to keep the stream at the memory rate.
+template<unsigned kRows>
+__launch_bounds__(256) __global__
+    void PackedGemvKernel(PackedGemvArgs args, const uint4* __restrict__ input,
+                          std::uint32_t units_per_row) {
+#pragma clang fp contract(off)
+  __shared__ float wave_sums[kRows][8];
+  const unsigned lane = threadIdx.x % 32, wave = threadIdx.x / 32;
+  const std::uint32_t rows = args.row_end[kPackedMaxOutputs - 1];
+#pragma unroll
+  for (unsigned r = 0; r < kRows; ++r) {
+    const std::uint32_t row = blockIdx.x * kRows + r;
+    if (row >= rows)
+      break;
+    const PackedUnit* units =
+        args.units + static_cast<std::size_t>(row) * units_per_row;
+    const PackedRow info = args.rows[row];
+    float sum = 0.0F;
+    for (std::uint32_t index = wave * 32 + lane; index < units_per_row;
+         index += 256) {
+      const uint4 x = input[index];
+      float weights[kPackedUnitWeights];
+      UnpackUnit(units[index], info, args.escapes, index, weights);
+      sum +=
+          (weights[0] * LowBfloat16(x.x)) + (weights[1] * HighBfloat16(x.x)) +
+          (weights[2] * LowBfloat16(x.y)) + (weights[3] * HighBfloat16(x.y)) +
+          (weights[4] * LowBfloat16(x.z)) + (weights[5] * HighBfloat16(x.z)) +
+          (weights[6] * LowBfloat16(x.w)) + (weights[7] * HighBfloat16(x.w));
+    }
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+      sum += __shfl_down(sum, offset, 32);
+    if (lane == 0)
+      wave_sums[r][wave] = sum;
+  }
+  __syncthreads();
+  const std::uint32_t row = blockIdx.x * kRows + threadIdx.x;
+  if (threadIdx.x >= kRows || row >= rows)
+    return;
+  float total = 0.0F;
+#pragma unroll
+  for (unsigned index = 0; index < 8; ++index)
+    total += wave_sums[threadIdx.x][index];
+  unsigned group = 0;
+#pragma unroll
+  for (unsigned boundary = 1; boundary < kPackedMaxOutputs; ++boundary)
+    group += row >= args.row_end[boundary - 1] ? 1U : 0U;
+  args.outputs[group][row - (group == 0U ? 0U : args.row_end[group - 1])] =
+      total;
+}
+
 dim3 Rows(std::size_t pitch, std::size_t channels) {
   const std::size_t blocks = std::min<std::size_t>((pitch + 255) / 256, 1024);
   return dim3(static_cast<unsigned int>(blocks),
@@ -449,6 +691,83 @@ void LaunchOdeStep(const float* state, const float* velocity, float scale,
 void LaunchBfloat16Logits(const float* input, std::size_t count, float* output,
                           hipStream_t stream) {
   Bfloat16LogitsKernel<<<Blocks(count), 256, 0, stream>>>(input, count, output);
+}
+
+namespace {
+
+std::uint32_t PackedUnitsPerRow(std::size_t rows, std::size_t columns) {
+  if (rows == 0 || columns == 0 || columns % kPackedUnitWeights != 0)
+    throw std::invalid_argument("unsupported packed rows");
+  return static_cast<std::uint32_t>(columns / kPackedUnitWeights);
+}
+
+}  // namespace
+
+void LaunchPackedRowsScan(const void* weights_bfloat16, std::size_t rows,
+                          std::size_t columns, const PackedMatrix& matrix,
+                          std::size_t first_row, std::uint32_t* escape_total,
+                          hipStream_t stream) {
+  const std::uint32_t units_per_row = PackedUnitsPerRow(rows, columns);
+  PackedRowsScanKernel<<<static_cast<unsigned int>(rows), 256, 0, stream>>>(
+      static_cast<const std::uint16_t*>(weights_bfloat16), units_per_row,
+      matrix.rows + first_row, escape_total);
+}
+
+void LaunchPackedRowsWrite(const void* weights_bfloat16, std::size_t rows,
+                           std::size_t columns, const PackedMatrix& matrix,
+                           std::size_t first_row, std::uint32_t* escape_cursor,
+                           hipStream_t stream) {
+  const std::uint32_t units_per_row = PackedUnitsPerRow(rows, columns);
+  PackedRowsWriteKernel<<<static_cast<unsigned int>(rows), 256, 0, stream>>>(
+      static_cast<const std::uint16_t*>(weights_bfloat16), units_per_row,
+      reinterpret_cast<PackedUnit*>(matrix.units) + first_row * units_per_row,
+      matrix.rows + first_row, matrix.escapes, escape_cursor);
+}
+
+void LaunchPackedRowsVerify(const void* weights_bfloat16, std::size_t rows,
+                            std::size_t columns, const PackedMatrix& matrix,
+                            std::size_t first_row, std::uint32_t* mismatches,
+                            hipStream_t stream) {
+  const std::uint32_t units_per_row = PackedUnitsPerRow(rows, columns);
+  PackedRowsVerifyKernel<<<static_cast<unsigned int>(rows), 256, 0, stream>>>(
+      static_cast<const std::uint16_t*>(weights_bfloat16), units_per_row,
+      reinterpret_cast<const PackedUnit*>(matrix.units) +
+          first_row * units_per_row,
+      matrix.rows + first_row, matrix.escapes, mismatches);
+}
+
+void LaunchPackedGemv(const PackedMatrix& matrix, std::size_t first_row,
+                      const PackedOutput* outputs, std::size_t output_count,
+                      const void* input_bfloat16, std::size_t columns,
+                      hipStream_t stream) {
+  if (output_count == 0 || output_count > kPackedMaxOutputs ||
+      columns % kPackedUnitWeights != 0 ||
+      reinterpret_cast<std::uintptr_t>(input_bfloat16) % sizeof(uint4) != 0)
+    throw std::invalid_argument("unsupported packed GEMV");
+  const auto units_per_row =
+      static_cast<std::uint32_t>(columns / kPackedUnitWeights);
+  PackedGemvArgs args{};
+  args.units = reinterpret_cast<const PackedUnit*>(matrix.units) +
+               first_row * units_per_row;
+  args.rows = matrix.rows + first_row;
+  args.escapes = matrix.escapes;
+  std::uint32_t rows = 0;
+  for (std::size_t i = 0; i < kPackedMaxOutputs; ++i) {
+    if (i < output_count) {
+      args.outputs[i] = outputs[i].output;
+      rows += outputs[i].rows;
+    }
+    args.row_end[i] = rows;
+  }
+  const auto* input = static_cast<const uint4*>(input_bfloat16);
+  // Rows per workgroup, measured on gfx1151 over one song's semantic stage:
+  // 26.3 s, 25.3 s, 24.9 s and 27.9 s for one to four 2048-column rows, and
+  // one row is best for the 6144-column rows, which are as long as three.
+  if (columns <= 2048)
+    PackedGemvKernel<3>
+        <<<(rows + 2) / 3, 256, 0, stream>>>(args, input, units_per_row);
+  else
+    PackedGemvKernel<1><<<rows, 256, 0, stream>>>(args, input, units_per_row);
 }
 
 void LaunchTransposeValues(const std::uint16_t* values, std::uint32_t stride,

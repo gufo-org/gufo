@@ -33,6 +33,10 @@ BF16 state:
 | The same with the previous FP32 state | cosine 0.99991, relative error 1.33% |
 | Audio from the upstream latents | relative error 6.5e-7 |
 
+On 2026-11-20 one-token decode moved to the 12-bit rows. The oracle test
+prints the same digits as before on every stage, and the seeded
+fixed-score song is byte-identical.
+
 `tests/functional/model_services.py music` against `gufo serve music` passed
 on 2026-11-15 in about 65 s. The 8-second song from an edited score measured
 RMS 0.16 with no clipped samples, and a same-seed replay was byte-identical.

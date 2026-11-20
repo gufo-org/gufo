@@ -4,6 +4,57 @@ Windows gfx1151 (Strix Halo, 96 GB carve-out), TheRock 10.0.0, `build/rock10`
 release binary. One `gufo music` request, model load excluded:
 `examples/song.json` (style and lyrics, seed 831001).
 
+## 2026-11-20: 12-bit decode rows
+
+Windows, the fixed-score request (929-token score, 1059-token prefix, 1995
+codec tokens), on `main` at 8327275c:
+
+| Change | Semantic | Acoustic | Decode | Total | Load |
+| --- | --- | --- | --- | --- | --- |
+| Before | 29.9 s (15.0 ms per token) | 20.3 s | 1.6 s | 52.2 s | 4.3 s |
+| Decode projections and head on 12-bit rows | 26.3 s | 20.3 s | 1.6 s | 48.5 s | 4.6 s |
+| Three 2048-column rows per workgroup | 24.8 s (12.4 ms per token) | 20.3 s | 1.6 s | 47.0 s | 4.6 s |
+
+A 79.8 s song takes 47.0 s (0.59x real time), and every row writes the same
+audio bytes.
+
+Decode was at the memory rate: about 2.9 GB of BF16 weights per token at 240
+GB/s. The only way left to speed it up was to read fewer bytes. The decode
+copies (`hip/kernels.hpp`) keep a weight's sign and 7 mantissa bits and
+replace its 8-bit exponent by a 4-bit code relative to the row's largest
+exponent. The 0.04% of weights below that range sit in a per-row escape
+list, so every weight decodes to its exact BF16 value. The GEMV adds the
+products in the order of the shared BF16 kernel and gives the same bits; a
+verify pass at load decodes every packed weight and compares it with the
+tensor.
+
+- The copies take 2.5 GiB of device memory (the AR projections of 28 layers
+  and the head). Prefill and the acoustic path keep the BF16 tensors for
+  hipBLASLt.
+- Packing runs on the GPU from the uploaded tensors: 0.3 s of load for the
+  scan, write and verify passes. Packing on 16 CPU threads from the mapped
+  file took 1.9 s.
+- In isolation the packed GEMV streams 213-232 GB/s of packed bytes: 1.29x
+  the BF16 kernel on q/k/v, o and down, and 1.15x on gate/up and the head.
+  Those two have many 3 KiB rows, and one workgroup per row cannot keep the
+  stream at the memory rate. In situ the semantic stage took 26.3 s, 25.3 s,
+  24.9 s and 27.9 s with one to four 2048-column rows per workgroup; one
+  row stays best for the 6144-column rows, which are as long as three.
+- What is left of a 12.4 ms token: about 9.5 ms of packed weights, 1.2 ms of
+  attention over the BF16 KV cache (also at the memory rate) and the small
+  per-layer kernels.
+
+The acoustic stage per velocity evaluation (318 ms at 1997 rows over a
+3055-token prefix), from host-clock timings with a synchronize after each
+operator: GEMMs 189 ms, attention 97 ms, norms, SwiGLU, RoPE and the value
+transpose 21 ms. Each synchronize costs about 0.16 ms here, which the
+figures exclude. hipBLASLt runs these shapes at 32-39 TFLOP/s in isolation
+on random weights and at 26-32 in situ. Removing parts of the attention kernel
+shows its time: 41% QK matrix products, 30% value products, 14% `expf` and
+15% staging and the rest, so it is bound by the matrix instructions and not
+by memory. Sixteen or 32 waves per workgroup, which read each key tile for
+two or four times as many queries, took 20.1 s and 21.4 s against 20.3 s.
+
 ## 2026-11-15: Linux kernel pass
 
 Linux gfx1151 (Strix Halo, 128 GB), ROCm 10.1 from `nix develop`,
