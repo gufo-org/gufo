@@ -209,6 +209,10 @@ public:
     std::size_t completion_tokens{0};
     /// Generated reasoning tokens, excluding the closing template delimiter.
     std::size_t reasoning_tokens{0};
+    /// With exact incremental text: the byte length of the runner's pieces
+    /// after each generated token, so per-token accounting reads the text
+    /// the response parsers read rather than re-decoding tokens.
+    std::vector<std::size_t> piece_ends;
     /// Number of speculative verification rounds actually executed.
     std::size_t draft_rounds{0};
     std::size_t draft_tokens{0};

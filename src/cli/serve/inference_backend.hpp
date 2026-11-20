@@ -40,6 +40,10 @@ using ext::TextDFlashDraftPolicyName;
 /// `open`; an automatic output counts only a block it opens itself, after blank
 /// text. An unclosed block counts to the end.
 [[nodiscard]] std::size_t CountReasoningTokens(
+    std::string_view text, std::span<const std::size_t> ends,
+    TextGenerationBackend::InitialOutputState initial,
+    const ext::ReasoningMarkup& reasoning);
+[[nodiscard]] std::size_t CountReasoningTokens(
     std::span<const tokenization::TokenId> tokens,
     TextGenerationBackend::InitialOutputState initial,
     const ext::ReasoningMarkup& reasoning,
