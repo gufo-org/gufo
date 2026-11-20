@@ -25,6 +25,7 @@
 
 #include "src/cache/streaming.hpp"
 #include "src/core/hip/component_cache_resources.hpp"
+#include "src/core/hip/copy_engine.hpp"
 #include "tests/cache/fake_adapter.hpp"
 
 namespace {
@@ -32,9 +33,7 @@ std::map<void*, std::size_t> registered;
 std::atomic<std::size_t> registered_bytes{};
 std::atomic<unsigned> native_creations{}, live_streams{}, live_events{};
 std::atomic<unsigned> system_release_events{}, stream_synchronizations{};
-std::atomic<unsigned> event_waits{};
-std::atomic<unsigned> masked_streams{}, priority_streams{};
-std::atomic<bool> refuse_cu_mask{};
+std::atomic<unsigned> event_waits{}, event_records{};
 int fail_native_creation{-1};
 bool fail_event_record{};
 std::atomic<bool> fail_copy_after_submission{}, fail_event_wait{};
@@ -223,49 +222,6 @@ void TransferCompletionOwnership() {
   assert(!live_streams && !live_events && native_creations == 2);
 }
 
-// Pools that ask get hardware queues of their own (all CUs) while the process
-// allowance lasts; past it, or where the runtime refuses one, they keep
-// priority streams, and a refusal gives the allowance back. Priority alone
-// never takes one.
-void PriorityTransferOwnQueues() {
-  using namespace gufo;
-  masked_streams = priority_streams = 0;
-  hip::SetOwnQueueAllowance(2);
-  {
-    hip::TransferPool pool(4, 2, -1, true);
-    assert(masked_streams == 2 && priority_streams == 0);
-    assert(pool.OwnQueues());
-    assert(pool.TryAcquire());
-  }
-  {
-    hip::TransferPool pool(4, 1, -1, true);
-    assert(masked_streams == 2 && priority_streams == 1);
-  }
-  hip::SetOwnQueueAllowance(1);
-  refuse_cu_mask = true;
-  {
-    hip::TransferPool pool(4, 2, -1, true);
-    assert(masked_streams == 2 && priority_streams == 3);
-  }
-  refuse_cu_mask = false;
-  {
-    hip::TransferPool pool(4, 2, -1, true);
-    assert(masked_streams == 3 && priority_streams == 4);
-    assert(!pool.OwnQueues());
-  }
-  hip::SetOwnQueueAllowance(1);
-  {
-    hip::TransferPool pool(4, 2, -1);
-    assert(masked_streams == 3 && priority_streams == 6);
-  }
-  {
-    assert(hip::OwnQueueAllowance() == 1);
-    hip::TransferPool pool(4, 2, 0, true);
-    assert(masked_streams == 4 && priority_streams == 6);
-    assert(hip::OwnQueueAllowance() == 0);
-  }
-  assert(!live_streams && !live_events);
-}
 void SharedTransferConstructionAndCounts() {
   using namespace gufo;
   for (int failure = 0; failure < 7; ++failure) {
@@ -315,6 +271,195 @@ void SharedTransferConstructionAndCounts() {
   }
 }
 
+// Copies queue until the test finishes them, as a copy engine would.
+class FakeEngine final : public gufo::hip::CopyEngine {
+public:
+  Fence CreateFence() override {
+    const std::lock_guard lock(mutex_);
+    ++live_fences;
+    pending_[next_];
+    return next_++;
+  }
+  void DestroyFence(Fence fence) noexcept override {
+    const std::lock_guard lock(mutex_);
+    assert(pending_.at(fence).empty());
+    pending_.erase(fence);
+    --live_fences;
+  }
+  bool Copy(void* destination, const void* source, std::size_t bytes,
+            Fence fence) noexcept override {
+    const std::lock_guard lock(mutex_);
+    if (refuse)
+      return false;
+    pending_.at(fence).push_back(
+        [=] { std::memcpy(destination, source, bytes); });
+    ++copies;
+    return true;
+  }
+  bool Done(Fence fence) const noexcept override {
+    const std::lock_guard lock(mutex_);
+    return pending_.at(fence).empty();
+  }
+  // The engine finishes on its own: a wait runs whatever is queued.
+  void Wait(Fence fence) noexcept override {
+    ++waits;
+    Finish(fence);
+  }
+  void Finish(Fence fence) {
+    std::vector<std::function<void()>> work;
+    {
+      const std::lock_guard lock(mutex_);
+      work.swap(pending_.at(fence));
+    }
+    for (const auto& copy : work)
+      copy();
+  }
+  void FinishAll() {
+    std::vector<Fence> fences;
+    {
+      const std::lock_guard lock(mutex_);
+      for (const auto& [fence, work] : pending_)
+        fences.push_back(fence);
+    }
+    for (const auto fence : fences)
+      Finish(fence);
+  }
+  bool refuse{};
+  unsigned live_fences{}, copies{}, waits{};
+
+private:
+  mutable std::mutex mutex_;
+  std::map<Fence, std::vector<std::function<void()>>> pending_;
+  Fence next_{1};
+};
+FakeEngine* device_engine{};
+
+// Engine leases complete when their engine copies do, with no event on the
+// native stream, so nothing waits behind work queued there. Native work in the
+// same lease is covered too. Every lease drains its engine copies before its
+// slot returns, and the pool's fences go with the pool.
+void EngineTransfers() {
+  using namespace gufo;
+  FakeEngine engine;
+  {
+    hip::TransferPool pool(4, 1, -1, &engine);
+    assert(pool.HasEngine() && engine.live_fences == 4);
+    // Without asking, a lease copies on the stream.
+    auto plain = pool.TryAcquire();
+    assert(!plain->OnEngine());
+    bool refused = false;
+    try {
+      (void)plain->EngineCopy(nullptr, nullptr, 0);
+    } catch (const std::logic_error&) {
+      refused = true;
+    }
+    assert(refused);
+    plain.reset();
+
+    std::array<std::byte, 8> source{std::byte{7}, std::byte{8}}, destination{};
+    auto lease = pool.TryAcquire(true);
+    assert(lease->OnEngine());
+    const auto records = event_records.load();
+    assert(lease->EngineCopy(destination.data(), source.data(), 8));
+    auto completion = lease->Complete();
+    assert(event_records == records);
+    assert(!completion.Ready() && destination != source);
+    engine.FinishAll();
+    assert(completion.Ready() && destination == source);
+    assert(completion.Wait() == cache::TransferResult::kSucceeded);
+    lease.reset();
+
+    // Engine and Native work in one lease: both must land.
+    std::array<std::byte, 8> second{}, third{};
+    lease = pool.TryAcquire(true);
+    assert(lease->EngineCopy(second.data(), source.data(), 8));
+    assert(hipMemcpyAsync(third.data(), source.data(), 8, hipMemcpyHostToDevice,
+                          lease->Native()) == hipSuccess);
+    completion = lease->Complete();
+    assert(event_records == records + 1);
+    engine.FinishAll();
+    assert(completion.Wait() == cache::TransferResult::kSucceeded);
+    assert(second == source && third == source);
+    lease.reset();
+
+    // Releasing a lease waits for its engine copies.
+    std::array<std::byte, 8> fourth{};
+    lease = pool.TryAcquire(true);
+    assert(lease->EngineCopy(fourth.data(), source.data(), 8));
+    const auto waits = engine.waits;
+    lease.reset();
+    assert(engine.waits > waits && fourth == source);
+
+    // A refused copy fails the lease, not the native lane.
+    engine.refuse = true;
+    lease = pool.TryAcquire(true);
+    assert(!lease->EngineCopy(fourth.data(), source.data(), 8));
+    assert(lease->Synchronize() == cache::TransferResult::kFailed);
+    engine.refuse = false;
+    auto other = pool.TryAcquire(true);
+    assert(other && other->Synchronize() == cache::TransferResult::kSucceeded);
+    lease.reset();
+    other.reset();
+
+    // A bound execution stream's pending work lands before the engine copies.
+    hipStream_t external{};
+    assert(hipStreamCreateWithFlags(&external, hipStreamNonBlocking) ==
+           hipSuccess);
+    auto owner = std::shared_ptr<void>(external, [](void* stream) {
+      assert(hipStreamSynchronize(stream) == hipSuccess);
+      assert(hipStreamDestroy(stream) == hipSuccess);
+    });
+    std::array<std::byte, 8> fifth{};
+    assert(hipMemcpyAsync(fifth.data(), source.data(), 8, hipMemcpyHostToDevice,
+                          external) == hipSuccess);
+    lease = pool.TryAcquire(true);
+    lease->BindTo(external, owner);
+    owner.reset();
+    assert(fifth != source);
+    assert(lease->EngineCopy(destination.data(), source.data(), 8));
+    assert(fifth == source);
+    completion = lease->Complete();
+    engine.FinishAll();
+    assert(completion.Wait() == cache::TransferResult::kSucceeded);
+    lease.reset();
+  }
+  assert(engine.live_fences == 0);
+  // A pool without an engine leases stream copies only.
+  hip::TransferPool pool(2, 1);
+  assert(!pool.HasEngine() && !pool.TryAcquire(true)->OnEngine());
+}
+
+// With a device copy engine, restores beside decode lease engine copies and
+// the provider says restores may run there; others keep the copy kernel.
+void ComponentRestoreEngine() {
+  using namespace gufo;
+  FakeEngine engine;
+  for (auto* const present : {&engine, static_cast<FakeEngine*>(nullptr)}) {
+    device_engine = present;
+    cache::ResourceLedger ledger(
+        {kBudgetBytes, kBudgetBytes, kBudgetBytes, kBudgetBytes});
+    hip::ComponentCacheHooks hooks;
+    hooks.transfer_streams = 4;
+    hooks.host_ceiling = [] { return kBudgetBytes; };
+    hooks.warn = [](std::string_view) {};
+    hooks.info = [](std::string_view) {};
+    auto resources = hip::CreateHipComponentCacheResources(
+        std::make_unique<Adapter>(), ledger, std::move(hooks));
+    assert(resources->restore_beside_decode == (present != nullptr));
+    const auto on_engine = [](const std::unique_ptr<cache::Stream>& stream) {
+      return dynamic_cast<hip::TransferStream&>(*stream).OnEngine();
+    };
+    assert(!on_engine(resources->restore_stream()));
+    {
+      const cache::BesideDecodeScope scope;
+      assert(on_engine(resources->restore_stream()) == (present != nullptr));
+    }
+    assert(!on_engine(resources->restore_stream()));
+  }
+  device_engine = nullptr;
+  assert(engine.live_fences == 0);
+}
+
 void ComponentTransferFactoryCounts() {
   using namespace gufo;
   // Zero selects the existing generic provider configuration. Serving passes
@@ -361,52 +506,6 @@ void ComponentTransferFactoryCounts() {
   }
 }
 
-// A provider that asks restores to own a hardware queue keeps the two priority
-// restore streams, and adds one on a queue of its own while the process
-// allowance lasts. Only restores beside decode lease that one.
-void ComponentOwnRestoreQueue() {
-  using namespace gufo;
-  for (const std::size_t allowance : {1, 0}) {
-    hip::SetOwnQueueAllowance(allowance);
-    cache::ResourceLedger ledger(
-        {kBudgetBytes, kBudgetBytes, kBudgetBytes, kBudgetBytes});
-    hip::ComponentCacheHooks hooks;
-    hooks.transfer_streams = 4;
-    hooks.own_restore_queue = true;
-    hooks.host_ceiling = [] { return kBudgetBytes; };
-    hooks.warn = [](std::string_view) {};
-    hooks.info = [](std::string_view) {};
-    masked_streams = priority_streams = 0;
-    auto resources = hip::CreateHipComponentCacheResources(
-        std::make_unique<Adapter>(), ledger, std::move(hooks));
-    // Shared pool, restores, the restore stream beside decode, persistence.
-    const unsigned beside = allowance ? 1 : 0;
-    assert(live_streams == 4 + 2 + beside + 1);
-    assert(masked_streams == beside && priority_streams == 2);
-    assert(hip::OwnQueueAllowance() == 0);
-    assert(resources->restore_own_queue == (allowance != 0));
-    const auto native = [](const std::unique_ptr<cache::Stream>& stream) {
-      return dynamic_cast<hip::TransferStream&>(*stream).Native();
-    };
-    // Two inline leases cover both priority lanes.
-    const auto first = resources->restore_stream();
-    const auto second = resources->restore_stream();
-    assert(!cache::CopyingBesideDecode());
-    {
-      const cache::BesideDecodeScope scope;
-      assert(cache::CopyingBesideDecode());
-      const auto beside_stream = resources->restore_stream();
-      assert(beside_stream);
-      const bool own = native(beside_stream) != native(first) &&
-                       native(beside_stream) != native(second);
-      assert(own == bool(beside));
-    }
-    assert(!cache::CopyingBesideDecode());
-    resources.reset();
-  }
-  assert(!live_streams && !live_events);
-  hip::SetOwnQueueAllowance(1);
-}
 void SharedTransferFences() {
   using namespace gufo;
   hip::TransferPool pool(3, 1);
@@ -760,29 +859,7 @@ hipError_t hipStreamCreateWithFlags(hipStream_t* stream, unsigned) {
 }
 hipError_t hipStreamCreateWithPriority(hipStream_t* stream, unsigned flags,
                                        int) {
-  ++priority_streams;
   return hipStreamCreateWithFlags(stream, flags);
-}
-hipError_t hipGetDevice(int* device) {
-  *device = 0;
-  return hipSuccess;
-}
-hipError_t hipDeviceGetAttribute(int* value, hipDeviceAttribute_t, int) {
-  *value = 40;
-  return hipSuccess;
-}
-hipError_t hipExtStreamCreateWithCUMask(hipStream_t* stream,
-                                        std::uint32_t words,
-                                        const std::uint32_t* mask) {
-  // 40 compute units: one full word and eight bits.
-  assert(words == 2 && mask[0] == ~std::uint32_t{0} && mask[1] == 0xff);
-  if (refuse_cu_mask)
-    return hipErrorOutOfMemory;
-  ++masked_streams;
-  return hipStreamCreateWithFlags(stream, hipStreamNonBlocking);
-}
-hipError_t hipGetLastError() {
-  return hipSuccess;
 }
 hipError_t hipStreamDestroy(hipStream_t stream) {
   const auto* native = static_cast<NativeStream*>(stream);
@@ -802,6 +879,11 @@ hipError_t hipStreamSynchronize(hipStream_t stream) {
   RunThrough(native, submitted);
   return fail_stream_wait.exchange(false) ? hipErrorOutOfMemory : hipSuccess;
 }
+hipError_t hipStreamQuery(hipStream_t stream) {
+  auto& native = *static_cast<NativeStream*>(stream);
+  const std::lock_guard lock(native.mutex);
+  return native.completed == native.submitted ? hipSuccess : hipErrorNotReady;
+}
 hipError_t hipEventCreateWithFlags(hipEvent_t* event, unsigned flags) {
   if (int(native_creations.fetch_add(1)) == fail_native_creation)
     return hipErrorOutOfMemory;
@@ -817,6 +899,7 @@ hipError_t hipEventDestroy(hipEvent_t event) {
   return hipSuccess;
 }
 hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream) {
+  ++event_records;
   if (fail_event_record)
     return hipErrorOutOfMemory;
   auto& native = *static_cast<NativeStream*>(stream);
@@ -862,6 +945,11 @@ hipError_t hipMemcpyAsync(void* destination, const void* source,
 const char* hipGetErrorString(hipError_t) {
   return "simulated HIP failure";
 }
+namespace gufo::hip {
+CopyEngine* DeviceCopyEngine() noexcept {
+  return device_engine;
+}
+}  // namespace gufo::hip
 
 int main() {
   TransferConstructionFailures();
@@ -869,9 +957,7 @@ int main() {
   TransferQuarantine();
   TransferCompletionOwnership();
   SharedTransferConstructionAndCounts();
-  PriorityTransferOwnQueues();
   ComponentTransferFactoryCounts();
-  ComponentOwnRestoreQueue();
   SharedTransferFences();
   SharedCachedNativeCleanup();
   SharedTransferServingBound();
@@ -880,5 +966,7 @@ int main() {
   SharedTransferFailures();
   SharedBoundFailure();
   SharedBoundCompletionOwnership();
+  EngineTransfers();
+  ComponentRestoreEngine();
   assert(!live_streams && !live_events);
 }

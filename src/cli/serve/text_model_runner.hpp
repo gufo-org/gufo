@@ -224,8 +224,8 @@ public:
   /// claims the tokens it may write, and is admitted only when they fit.
   [[nodiscard]] bool shared_state() const noexcept;
   /// Whether a restore's copies may run beside decoders (`run_copies` in
-  /// Acquire): only when they have a hardware queue of their own. Otherwise
-  /// they wait behind decode work, slower than stopping it to restore.
+  /// Acquire): only where they copy on a copy engine. Otherwise they wait
+  /// behind decode work, slower than stopping it to restore.
   [[nodiscard]] bool restores_beside_decode() const noexcept;
   /// Generated tokens a request claims ahead, at admission and each time
   /// decoding nears its claim.
@@ -262,7 +262,9 @@ public:
   /// page cache; see ComponentTextCache::WarmDisk.
   [[nodiscard]] std::shared_ptr<const std::atomic<bool>> WarmDisk(
       std::span<const TextRunnerToken> prompt, const TextPromptContext* context,
-      std::size_t stable) const;
+      std::size_t stable,
+      std::chrono::microseconds beside_after =
+          std::chrono::microseconds::max()) const;
   /// A disk job is still writing a prefix of prompt much deeper than any
   /// restorable checkpoint; admission may wait for it instead of prefilling.
   [[nodiscard]] std::optional<TextPendingPublication> PendingPublication(

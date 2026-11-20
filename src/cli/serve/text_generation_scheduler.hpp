@@ -58,11 +58,16 @@ struct TextSchedulerPolicy {
   /// work holds (TextRunnerPool::Idle): a /proc/meminfo read when nothing is
   /// held.
   std::chrono::milliseconds idle_interval{std::chrono::seconds(1)};
-  /// A restore that would stop running decoders longer than this copies
-  /// beside them instead (RunBesideDecoders). Shorter ones run inline: a
-  /// worker hands them back only after the current decode round.
+  /// A restore that would stop running decoders longer than this, and longer
+  /// than `restore_beside_rounds` of their decode rounds, copies beside them
+  /// instead (RunBesideDecoders). Shorter ones run inline: a worker hands them
+  /// back only after the current decode round, so a restore shorter than a
+  /// round would wait longer for it than it stops the decoders. A 224 MB
+  /// DeepSeek restore beside its decode rounds raised that request's TTFT
+  /// from 0.10 to 0.15 s and shortened no pause.
   std::chrono::microseconds restore_beside_decoders_after{
       std::chrono::milliseconds(10)};
+  double restore_beside_rounds{1.0};
 };
 
 /// Single-owner scheduler for opaque text-model runner states.

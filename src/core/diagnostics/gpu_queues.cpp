@@ -82,7 +82,6 @@ QueuePlan PlanQueues(QueueProfile profile, const QueueCensus& census,
                      const char* operator_value, std::uint32_t provider_cap) {
   QueuePlan plan;
   plan.observed_queues = census.compute_queues;
-  const std::uint32_t own = profile == QueueProfile::kText ? kTextOwnQueues : 0;
 
   if (operator_value != nullptr && *operator_value != '\0') {
     // A deliberate operator setting is never overridden, but it is still
@@ -105,13 +104,6 @@ QueuePlan PlanQueues(QueueProfile profile, const QueueCensus& census,
         census.compute_queues + kMinimumProcessQueues > kComputeQueueBudget;
     plan.may_exceed_budget =
         census.compute_queues + plan.expected_queues > kComputeQueueBudget;
-    // Own queues only where the operator's cap leaves room for them.
-    if (plan.operator_cap != 0 &&
-        census.compute_queues + plan.expected_queues + own <=
-            kComputeQueueBudget) {
-      plan.own_queues = own;
-      plan.expected_queues += own;
-    }
     return plan;
   }
 
@@ -139,10 +131,6 @@ QueuePlan PlanQueues(QueueProfile profile, const QueueCensus& census,
     plan.cap = 1;
   }
   plan.expected_queues = plan.cap + 1;
-  if (plan.expected_queues + own <= room) {
-    plan.own_queues = own;
-    plan.expected_queues += own;
-  }
   // The cap was chosen to fit, so it only fails when even the floor does not.
   plan.exceeds_budget =
       census.compute_queues + plan.expected_queues > kComputeQueueBudget;
@@ -178,7 +166,6 @@ std::string DescribeQueuePlan(std::string_view kind, const QueuePlan& plan) {
     message += " expected_max=" + std::to_string(plan.expected_queues);
     message += " cap=" + std::to_string(plan.cap);
   }
-  message += " own=" + std::to_string(plan.own_queues);
   return message;
 }
 

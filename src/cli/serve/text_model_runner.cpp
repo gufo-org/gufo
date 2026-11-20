@@ -1991,10 +1991,10 @@ std::optional<TextPendingPublication> TextRunnerPool::PendingPublication(
 
 std::shared_ptr<const std::atomic<bool>> TextRunnerPool::WarmDisk(
     std::span<const TextRunnerToken> prompt, const TextPromptContext* context,
-    std::size_t stable) const {
-  return impl_->component_cache
-             ? impl_->component_cache->WarmDisk(prompt, context, stable)
-             : nullptr;
+    std::size_t stable, std::chrono::microseconds beside_after) const {
+  return impl_->component_cache ? impl_->component_cache->WarmDisk(
+                                      prompt, context, stable, beside_after)
+                                : nullptr;
 }
 
 std::size_t TextRunnerPool::CachedPrefixTokens(

@@ -2020,7 +2020,7 @@ std::optional<TextPendingPublication> ComponentTextCache::PendingPublication(
 
 std::shared_ptr<const std::atomic<bool>> ComponentTextCache::WarmDisk(
     std::span<const ContinuationToken> prompt, const TextPromptContext* context,
-    std::size_t stable) {
+    std::size_t stable, std::chrono::microseconds beside_after) {
   if (!impl_->disk || !impl_->streaming)
     return nullptr;
   const auto input = Inputs(prompt.size(), context);
@@ -2038,14 +2038,15 @@ std::shared_ptr<const std::atomic<bool>> ComponentTextCache::WarmDisk(
     const auto& manifest = selected->durable->Manifest();
     id = manifest.checkpoint;
     boundary = selected->boundary;
-    for (const auto& c : manifest.components) {
-      for (const auto& chunk : c.chunks)
-        bytes += chunk.bytes;
-      if (c.tail)
-        bytes += c.tail->bytes;
-      if (c.private_state)
-        bytes += c.private_state->bytes;
-    }
+    bytes = PayloadBytes(manifest);
+  }
+  if (RestoreEstimate(bytes, true) >= beside_after) {
+    Logger::Info("cache",
+                 "schema=component-cache-v1 event=disk_warm skipped=beside "
+                 "tokens=" +
+                     std::to_string(boundary) +
+                     " bytes=" + std::to_string(bytes));
+    return nullptr;
   }
   const std::lock_guard lock(impl_->warm_mutex);
   std::erase_if(impl_->warmups, [](const auto& warmup) {
@@ -2983,7 +2984,7 @@ ComponentCacheMetrics ComponentTextCache::Lease::Metrics() const {
 }
 
 bool ComponentTextCache::restores_beside_decode() const noexcept {
-  return impl_->resources->restore_own_queue;
+  return impl_->resources->restore_beside_decode;
 }
 
 bool ComponentTextCache::shared_state() const noexcept {

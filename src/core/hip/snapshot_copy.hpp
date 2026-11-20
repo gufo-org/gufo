@@ -6,6 +6,7 @@
 #include <cstddef>
 
 namespace gufo::hip {
+class TransferStream;
 
 // Byte-exact, asynchronous snapshot download. Aligned registered host backing
 // uses its device alias; pageable/unaligned buffers retain HIP's copy path.
@@ -21,6 +22,16 @@ namespace gufo::hip {
                                               const void* source,
                                               std::size_t bytes,
                                               hipStream_t stream);
+
+// The same restore through a transfer lease. An OnEngine lease copies on its
+// copy engine what it can read in place: device memory, and registered host
+// memory whose device alias is its own address. Other sources, and any lease
+// without an engine, take the stream path above on the lease's Native
+// stream. Both settle with the lease's completion.
+[[nodiscard]] hipError_t CopySnapshotToDevice(void* destination,
+                                              const void* source,
+                                              std::size_t bytes,
+                                              TransferStream& transfer);
 
 }  // namespace gufo::hip
 #endif

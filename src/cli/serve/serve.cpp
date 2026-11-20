@@ -43,8 +43,6 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
-
-#include "src/core/hip/transfer_pool.hpp"
 #endif
 #include "src/cli/serve/audio_buffer.hpp"
 #include "src/cli/serve/trace.hpp"
@@ -1086,9 +1084,6 @@ int RunServe(std::span<const char* const> args) {
         profile, diagnostics::QueryQueueCensus(),
         std::getenv("GPU_MAX_HW_QUEUES"), provider_hardware_queues);
     diagnostics::ApplyQueuePlan(plan);
-#if defined(ENGINE_ENABLE_HIP)
-    hip::SetOwnQueueAllowance(plan.own_queues);
-#endif
     server::Logger::Info("gpu",
                          diagnostics::DescribeQueuePlan(subcommand, plan));
     if (plan.may_exceed_budget) {

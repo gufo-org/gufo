@@ -54,13 +54,6 @@ struct ComponentCacheHooks {
   // native resources on acquisition. Unsupported/unsized providers retain
   // their existing exclusive pool by leaving this zero.
   std::size_t transfer_leases{0};
-  // Restores beside decode (cache::BesideDecodeScope) copy on one more
-  // stream, with a hardware queue of its own (TransferPool `own_queues`),
-  // while the process allowance has one left, so they never wait behind
-  // decode graphs on a shared queue; other restores keep the two priority
-  // streams. Only for models that launch nothing on the legacy null stream:
-  // HIP creates that stream blocking.
-  bool own_restore_queue{false};
 };
 
 // HIP component-cache backing for any adapter: pinned committed pages, a

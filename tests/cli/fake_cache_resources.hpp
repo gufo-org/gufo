@@ -21,8 +21,8 @@ struct FakeCacheOptions {
   const bool* defer_idle{};
   std::size_t* captures{};
   bool check_capacity{};
-  // Restores may copy beside decode, as on a restore queue of its own.
-  bool restore_own_queue{true};
+  // Restores may copy beside decode, as on a copy engine.
+  bool restore_beside_decode{true};
 };
 
 // Host-memory backing for a FakeAdapter, so serving tests run the component
@@ -70,7 +70,7 @@ inline std::unique_ptr<ComponentCacheResources> MakeFakeCacheResources(
     return std::make_unique<FakeStream>(true);
   };
   resources->transfer_batch_size = 4;
-  resources->restore_own_queue = options.restore_own_queue;
+  resources->restore_beside_decode = options.restore_beside_decode;
   if (options.check_capacity)
     resources->can_capture = [blocks](auto requests) {
       std::vector<bool> assigned(blocks->size());

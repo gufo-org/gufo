@@ -110,8 +110,8 @@ public:
       const RestoreRunner& run_copies = {});
   // Whether sessions share their demand-mapped state (#715).
   [[nodiscard]] bool shared_state() const noexcept;
-  // Whether restores copy on a hardware queue of their own and so may run
-  // beside decode (ComponentCacheResources::restore_own_queue).
+  // Whether restores copy where decode work cannot hold them up, and so may
+  // run beside decode (ComponentCacheResources::restore_beside_decode).
   [[nodiscard]] bool restores_beside_decode() const noexcept;
   // Bytes a session that holds nothing would charge for `tokens`; zero
   // without shared state.
@@ -161,11 +161,15 @@ public:
       const TextPromptContext* context, std::uint64_t checkpoint_id = 0) const;
   // When the checkpoint Acquire would select for `prompt` is only on disk,
   // starts reading its files into the page cache on a worker and returns a
-  // flag set when that finishes. Null when there is nothing to read, or when
-  // the read would take free pages the host keeps (mem::HostFreeFloorBytes).
+  // flag set when that finishes. Null when there is nothing to read, when
+  // the read would take free pages the host keeps (mem::HostFreeFloorBytes),
+  // or when the restore would take `beside_after` or longer: the caller then
+  // copies it beside running work (RestoreRunner), which reads it there.
   [[nodiscard]] std::shared_ptr<const std::atomic<bool>> WarmDisk(
       std::span<const ContinuationToken> prompt,
-      const TextPromptContext* context, std::size_t stable);
+      const TextPromptContext* context, std::size_t stable,
+      std::chrono::microseconds beside_after =
+          std::chrono::microseconds::max());
   [[nodiscard]] std::size_t CachedPrefixTokens(
       std::span<const ContinuationToken>, const TextPromptContext*,
       bool common = false) const;

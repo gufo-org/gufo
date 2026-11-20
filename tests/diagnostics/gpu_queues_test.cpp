@@ -64,7 +64,6 @@ private:
 };
 
 using gufo::diagnostics::kComputeQueueBudget;
-using gufo::diagnostics::kTextOwnQueues;
 using gufo::diagnostics::PlanQueues;
 using gufo::diagnostics::QueryQueueCensus;
 using gufo::diagnostics::QueueCensus;
@@ -91,10 +90,7 @@ void ProfilesPickTheirMeasuredCap() {
   const QueueCensus empty;
   const auto text = PlanQueues(QueueProfile::kText, empty, nullptr);
   Expect(text.cap == 2, "text server asks for two queues");
-  Expect(text.own_queues == kTextOwnQueues,
-         "text server restores on a queue of its own where it has one");
-  Expect(text.expected_queues == 3 + kTextOwnQueues,
-         "text server resolves to three pooled queues and its own");
+  Expect(text.expected_queues == 3, "text server resolves to three queues");
   Expect(!text.exceeds_budget, "text server fits an empty device");
 
   const auto audio = PlanQueues(QueueProfile::kAudio, empty, nullptr);
@@ -131,39 +127,6 @@ void CapsClampDownToFreeSlots() {
   Expect(text.cap == 1, "text server clamps down to the free slots");
   Expect(text.expected_queues == 2, "clamped text server takes the floor");
   Expect(!text.exceeds_budget, "clamped text server still fits");
-}
-
-/// A text server's own restore queue fits beside its cap or is given up
-/// first, so every mix of servers that fit before it still fits.
-void TextOwnQueueIsGivenUpBeforeTheCap() {
-  QueueCensus other_text;
-  other_text.compute_queues = 4;
-  const auto second = PlanQueues(QueueProfile::kText, other_text, nullptr);
-  Expect(second.cap == 2 && second.own_queues == kTextOwnQueues,
-         "two text servers each keep two queues and their own");
-  Expect(!second.may_exceed_budget, "two text servers fit the budget");
-
-  QueueCensus crowded;
-  crowded.compute_queues = 5;
-  const auto third = PlanQueues(QueueProfile::kText, crowded, nullptr);
-  Expect(third.cap == 2 && third.own_queues == 0,
-         "the own queue goes before the cap");
-  Expect(third.expected_queues == 3 && !third.may_exceed_budget,
-         "without it the server fits as before");
-
-  QueueCensus tight;
-  tight.compute_queues = 6;
-  const auto last = PlanQueues(QueueProfile::kText, tight, nullptr);
-  Expect(last.cap == 1 && last.own_queues == 0,
-         "a tight device clamps the cap without an own queue");
-
-  QueueCensus busy;
-  busy.compute_queues = 3;
-  const auto operator_plan = PlanQueues(QueueProfile::kText, busy, "4");
-  Expect(operator_plan.own_queues == 0,
-         "an operator cap that fills the budget leaves no own queue");
-  const auto audio = PlanQueues(QueueProfile::kAudio, QueueCensus{}, nullptr);
-  Expect(audio.own_queues == 0, "only text servers take an own queue");
 }
 
 void CapsAreNeverRaisedToFillFreeSlots() {
@@ -260,12 +223,8 @@ void PlanIsDescribedForTheLog() {
          "log line carries the event name");
   Expect(line.find("kind=llm") != std::string::npos, "log line carries a kind");
   Expect(line.find("cap=2") != std::string::npos, "log line carries the cap");
-  Expect(line.find("expected_max=" + std::to_string(3 + kTextOwnQueues)) !=
-             std::string::npos,
+  Expect(line.find("expected_max=3") != std::string::npos,
          "log line carries the resident count");
-  Expect(
-      line.find("own=" + std::to_string(kTextOwnQueues)) != std::string::npos,
-      "log line carries the own queues");
 }
 
 void OperatorPlanDoesNotPredictAQueueCount() {
@@ -274,9 +233,8 @@ void OperatorPlanDoesNotPredictAQueueCount() {
   const auto line = gufo::diagnostics::DescribeQueuePlan("llm", plan);
   Expect(line.find("cap=operator:4") != std::string::npos,
          "an operator setting is named in the log with its value");
-  Expect(line.find("expected_max=" + std::to_string(5 + kTextOwnQueues)) !=
-             std::string::npos,
-         "the operator's value and the own queue bound the resident count");
+  Expect(line.find("expected_max=5") != std::string::npos,
+         "the operator's value bounds the resident count");
 }
 
 void ProviderCapReplacesTheProfileCap() {
@@ -315,7 +273,6 @@ int main() {
   UnmeasuredProfileKeepsTheRuntimeDefault();
   UnmeasuredProfileIsClampedWhenRoomIsShort();
   CapsClampDownToFreeSlots();
-  TextOwnQueueIsGivenUpBeforeTheCap();
   CapsAreNeverRaisedToFillFreeSlots();
   FullDeviceWarnsInsteadOfRefusing();
   OperatorValueIsNeverOverridden();

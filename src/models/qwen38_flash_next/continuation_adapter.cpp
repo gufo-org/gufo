@@ -696,7 +696,7 @@ cache::Completion ContinuationAdapter::LoadPrivatePiece(
               std::memcpy(destination, source, end - first);
             else
               Check(hip::CopySnapshotToDevice(destination, source, end - first,
-                                              transfer.Native()));
+                                              transfer));
           }
         });
   } catch (...) {
@@ -833,7 +833,7 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
             std::memcpy(destination, bytes.data(), bytes.size());
           else if (!bytes.empty())
             Check(hip::CopySnapshotToDevice(destination, bytes.data(),
-                                            bytes.size(), transfer.Native()));
+                                            bytes.size(), transfer));
         });
   } catch (...) {
     state.failed = true;

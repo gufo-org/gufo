@@ -62,15 +62,11 @@ bool EndsTurn(const State& state, const Tokens& tokens, int token) {
 // Cache backing diagnostics (transfer resources, backing growth and limits)
 // go to the process log under the cache component, as before the extension
 // migration.
-// Restores get a hardware queue of their own: the executor runs on its own
-// streams and touches the legacy null stream only to clear new allocations.
 [[nodiscard]] inline hip::ComponentCacheHooks HipComponentCacheHooks() {
-  hip::ComponentCacheHooks hooks{
+  return {
       [] { return ext::HostSnapshotCeilingBytes(); },
       [](std::string_view message) { server::Logger::Warn("cache", message); },
       [](std::string_view message) { server::Logger::Info("cache", message); }};
-  hooks.own_restore_queue = true;
-  return hooks;
 }
 
 struct QwenImageContext final : TextPromptContext {

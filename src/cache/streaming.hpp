@@ -106,7 +106,7 @@ using RestoreCopyRunner =
 // Marks the calling thread, for its lifetime, as running a restore's copies
 // beside decode. A runner that does so holds one around `copies`, so a
 // provider can lease restore streams that never wait behind decode work there
-// (ComponentCacheResources::restore_own_queue) and its faster shared ones
+// (ComponentCacheResources::restore_beside_decode) and its faster shared ones
 // elsewhere.
 class BesideDecodeScope {
 public:

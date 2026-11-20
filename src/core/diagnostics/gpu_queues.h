@@ -24,18 +24,6 @@ inline constexpr std::uint32_t kMinimumProcessQueues = 2;
 /// unmeasured modality has room to keep the runtime's own default.
 inline constexpr std::uint32_t kRuntimeDefaultCap = 4;
 
-/// Queues a text server adds beyond its cap: its cache restores copy on a
-/// stream with a hardware queue of its own (hip::TransferPool), so they never
-/// wait behind decode graphs on a pooled queue. The first thing given up when
-/// the device is short of queues. None on Windows: there restores beside
-/// decode still waited behind it on such a stream (stream waits ~0.4 s vs
-/// ~0.05 s inline, restoring TTFT 2-5x), so they stay inline.
-#if defined(_WIN32)
-inline constexpr std::uint32_t kTextOwnQueues = 0;
-#else
-inline constexpr std::uint32_t kTextOwnQueues = 1;
-#endif
-
 /// Compute and SDMA queues open across every process on the device.
 struct QueueCensus {
   std::uint32_t compute_queues{0};
@@ -69,11 +57,8 @@ struct QueuePlan {
   std::uint32_t observed_queues{0};
   /// GPU_MAX_HW_QUEUES to request. Zero leaves the variable untouched.
   std::uint32_t cap{0};
-  /// Hardware queues of their own this process may add beyond the cap
-  /// (hip::SetOwnQueueAllowance). Zero when they would not fit.
-  std::uint32_t own_queues{0};
-  /// Upper bound on the queues this process will add, own queues included. A
-  /// process that creates fewer streams than its cap allows settles below this.
+  /// Upper bound on the queues this process will add. A process that creates
+  /// fewer streams than its cap allows settles below this.
   std::uint32_t expected_queues{0};
   /// The operator set GPU_MAX_HW_QUEUES; their value is never overridden.
   bool operator_supplied{false};
@@ -90,8 +75,6 @@ struct QueuePlan {
 };
 
 /// Chooses a cap for this modality, clamped down to what the device has left.
-/// A text server's own queues (kTextOwnQueues) come on top of the cap, and
-/// only when they fit beside it: the cap is kept before them.
 /// The cap is only ever lowered to fit, never raised to fill free slots, so a
 /// server's throughput does not depend on the order the servers were started.
 /// A nonzero `provider_cap`, declared by the serving provider in its extension
