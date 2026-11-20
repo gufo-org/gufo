@@ -307,10 +307,18 @@ if (ENGINE_ENABLE_HIP)
   add_library(gufo_cache_hip STATIC
     src/core/hip/committed_backing.cpp
     src/core/hip/component_cache_resources.cpp
+    "$<$<NOT:$<PLATFORM_ID:Windows>>:${PROJECT_SOURCE_DIR}/src/core/hip/copy_engine.cpp>"
+    "$<$<PLATFORM_ID:Windows>:${PROJECT_SOURCE_DIR}/src/core/hip/copy_engine_windows.cpp>"
     src/core/hip/snapshot_copy.hip
     src/core/hip/staging.cpp
     src/core/hip/transfer_pool.cpp)
   target_link_libraries(gufo_cache_hip PUBLIC gufo_cache gufo_hip_host hip::host)
+  # The copy engine resolves ROCr's functions from the runtime HIP loaded, so
+  # it needs only the headers.
+  if (NOT WIN32 AND TARGET hsa-runtime64::hsa-runtime64)
+    target_include_directories(gufo_cache_hip PRIVATE
+      $<TARGET_PROPERTY:hsa-runtime64::hsa-runtime64,INTERFACE_INCLUDE_DIRECTORIES>)
+  endif()
   if (BUILD_TESTING)
     target_compile_options(gufo_cache_hip PRIVATE -UNDEBUG)
   endif()

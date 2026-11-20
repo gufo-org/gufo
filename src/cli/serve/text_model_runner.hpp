@@ -2,6 +2,7 @@
 #define GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -201,8 +202,14 @@ public:
     std::size_t tokens{0};
     mem::StateReservation reservation;
   };
+  /// Runs a restore's copies, possibly on another thread, told how long they
+  /// would stop the calling thread; see cache::RestoreCopyRunner.
+  using RestoreCopyRunner =
+      std::function<void(std::chrono::microseconds inline_estimate,
+                         const std::function<void()>& copies)>;
   /// With `state`, the session the request lands on claims its tokens from
-  /// the ticket's reservation.
+  /// the ticket's reservation. A restore runs its copies through
+  /// `run_copies` when given.
   [[nodiscard]] Request Acquire(
       std::vector<TextRunnerToken> prompt,
       const sampling::SamplingConfig& sampling,
@@ -210,12 +217,16 @@ public:
       std::shared_ptr<const TextPromptContext> context = {},
       bool reuse_prompt = true, std::size_t cache_prefix_tokens = 0,
       bool stop_at_eos = true, bool persist = true,
-      StateTicket* state = nullptr);
+      StateTicket* state = nullptr, const RestoreCopyRunner& run_copies = {});
 
   /// Whether sessions share their demand-mapped state (#715): more sessions
   /// are configured at full context than fit at once. Each request then
   /// claims the tokens it may write, and is admitted only when they fit.
   [[nodiscard]] bool shared_state() const noexcept;
+  /// Whether a restore's copies may run beside decoders (`run_copies` in
+  /// Acquire): only where they copy on a copy engine. Otherwise they wait
+  /// behind decode work, slower than stopping it to restore.
+  [[nodiscard]] bool restores_beside_decode() const noexcept;
   /// Generated tokens a request claims ahead, at admission and each time
   /// decoding nears its claim.
   static constexpr std::size_t kStateDecodeTokens = 8192;
@@ -251,7 +262,9 @@ public:
   /// page cache; see ComponentTextCache::WarmDisk.
   [[nodiscard]] std::shared_ptr<const std::atomic<bool>> WarmDisk(
       std::span<const TextRunnerToken> prompt, const TextPromptContext* context,
-      std::size_t stable) const;
+      std::size_t stable,
+      std::chrono::microseconds beside_after =
+          std::chrono::microseconds::max()) const;
   /// A disk job is still writing a prefix of prompt much deeper than any
   /// restorable checkpoint; admission may wait for it instead of prefilling.
   [[nodiscard]] std::optional<TextPendingPublication> PendingPublication(

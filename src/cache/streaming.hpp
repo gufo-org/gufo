@@ -97,6 +97,29 @@ private:
   std::uint64_t bytes_;
   std::size_t alignment_;
 };
+// Runs a restore's copy phase: the file reads, checks and the adapter's
+// CopyRowsIn/LoadPrivatePiece calls with their completions, no other adapter
+// call. It may run `copies` on another thread and do other work meanwhile, but
+// returns only once `copies` has, rethrowing what it threw.
+using RestoreCopyRunner =
+    std::function<void(const std::function<void()>& copies)>;
+// Marks the calling thread, for its lifetime, as running a restore's copies
+// beside decode. A runner that does so holds one around `copies`, so a
+// provider can lease restore streams that never wait behind decode work there
+// (ComponentCacheResources::restore_beside_decode) and its faster shared ones
+// elsewhere.
+class BesideDecodeScope {
+public:
+  BesideDecodeScope() noexcept;
+  ~BesideDecodeScope();
+  BesideDecodeScope(const BesideDecodeScope&) = delete;
+  BesideDecodeScope& operator=(const BesideDecodeScope&) = delete;
+
+private:
+  bool previous_;
+};
+// Whether the calling thread is inside a BesideDecodeScope.
+[[nodiscard]] bool CopyingBesideDecode() noexcept;
 // One initialization-time allocation, leased by piece to writers and held by
 // foreground restores. Optional yielding never holds staging or a stream. A HIP
 // allocator supplies committed pinned storage outside this CPU-only package.
@@ -122,11 +145,14 @@ public:
   // does not run fallback. All loads and disk pins settle before either path.
   // dependency_failed runs after invalidation and before fallback, only for
   // filesystem/checksum failures; it can quarantine reverse dependencies.
+  // BeginRestore, Validate and Invalidate run on the calling thread; an empty
+  // run_copies runs the copy phase there too.
   [[nodiscard]] bool Restore(
       CheckpointId, CompatibilityDigest expected_compatibility, Adapter&, Slot&,
       TransferTiming&, std::stop_token = {},
       const std::function<void()>& fallback = {},
-      const std::function<void(bool, DiskFileId)>& dependency_failed = {});
+      const std::function<void(bool, DiskFileId)>& dependency_failed = {},
+      const RestoreCopyRunner& run_copies = {});
   [[nodiscard]] std::size_t StagingBytes() const;
   [[nodiscard]] std::uint64_t StartupAllocatorNanoseconds() const;
 

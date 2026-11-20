@@ -601,6 +601,21 @@ All native handles exist before cache sizing, so acquisition cannot introduce
 an unaccounted later stream allocation. Other providers keep their existing
 exclusive-stream policy unless they opt into the session-aware factory.
 
+Restores lease their own native streams at the highest stream priority.
+Restores beside running decoders instead copy on the GPU's SDMA copy engine
+(HSA async copy), outside every stream and compute queue, where the runtime has
+one (not on Windows). HIP pools streams onto a few hardware queues and gave a
+priority restore stream the executor stream's: beside decode, each restore copy
+then waited for a whole decode graph, and a 2.2 GB disk restore took 2.6 s
+instead of 0.25 s (Flash-Next, November 2026). A stream on a hardware queue of
+its own avoided the wait but cost one of the device's compute queues and
+doubled decode step time while it copied; the engine does neither. Alone it
+copies slower than the copy kernel on the two priority streams (54–65 against
+117–124 GB/s), so restores with nothing beside them keep those. The engine
+reads and writes by GPU address, so it copies device memory and registered
+host memory; anything else, and Qwen's FP32 K/V rows, go through the
+lease's priority stream.
+
 ## The disk tier
 
 `--cache-disk DIR` adds a second tier that survives restarts. A checkpoint
@@ -613,6 +628,25 @@ restore, which still reads, checks and copies them in order. That restore took
 1.3–1.4 s with the files on disk and 0.85 s from the page cache, against
 8.7–9.9 s when one thread hinted each file in turn **(measured, NVMe under
 dm-crypt)**.
+
+Where restores have the copy engine (above), a request admitted while other
+requests decode restores beside them when the restore would take longer than
+their decode round: a worker thread runs the restore's reads, checks and
+copies, none on the executor stream, while the scheduler keeps stepping the
+decoders. Only the adapter's `BeginRestore`, `Validate` and `Invalidate`,
+which use the executor stream, run on the scheduler thread. In November 2026,
+with a Flash-Next request decoding, a 76K-token (2.2 GB) disk restore beside it
+cut that request's longest pause between tokens from 318–343 ms to
+159–200 ms; what remains is the restored request's short prefill. A shorter
+restore runs inline, as without the engine: the worker hands the restored
+request back only after the round in progress, so beside DeepSeek's rounds a
+224 MB restore raised that request's TTFT from 0.10 to 0.15 s and shortened no
+pause. A restore still holds up other prompts' prefill and admission, so while
+another prompt prefills, others wait to be admitted, or the restore will run
+inline, the request first waits while 16 workers read its checkpoint into the
+page cache (`event=disk_warm`) and the others proceed. Without the engine the
+copies would wait behind decode work: a 15K-token DeepSeek disk restore took
+1.1–1.3 s beside decode on priority streams instead of 0.1 s inline.
 
 Learned divergence points (see above) are ordinary checkpoints, so they reach
 disk like any other and survive restarts.
@@ -764,7 +798,7 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | `schema=component-cache-v1 event=staging_exhausted` | `--cache-ram-bytes off`: a disk capture found no room in the capture backing; reports `staged_bytes`, `held_bytes` by other captures, `backing_bytes`, `waited_ms` and whether it was an exact `frontier` |
 | `schema=component-cache-v1 event=published` | A checkpoint finished disk publication; `checkpoint_id` identifies the capture and `tokens` its boundary |
 | `schema=component-cache-v1 event=disk_restore` | A checkpoint was restored from disk: `tokens`, `bytes`, `pieces` and timings. `filesystem_ms` and `checksum_ms` add up the parallel readers' time, so they can exceed the restore's wall time; `stream_wait_ms` is the restoring thread's wait for copies |
-| `schema=component-cache-v1 event=disk_warm` | A request admitted while others ran found its checkpoint only on disk; a worker read its `bytes` into the page cache in `ms`. `skipped=floor` when free pages would drop below the host floor |
+| `schema=component-cache-v1 event=disk_warm` | A request admitted while another prompt prefilled, or while others ran, found its checkpoint only on disk; a worker read its `bytes` into the page cache in `ms`. `skipped=floor` when free pages would drop below the host floor; `skipped=beside` when nothing else waited and the restore copies beside the running requests instead |
 | `event=disk_warm_wait` | The request waited `wait_ms` for that read (`read=1`) or for the scheduler to go idle (`read=0`) before restoring |
 | `schema=component-cache-v1 event=persistence_refused reason=min_step` | A captured checkpoint is too close to an existing publication; includes `checkpoint_id` and `tokens` |
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |

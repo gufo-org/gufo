@@ -410,7 +410,18 @@ bool Extends(const DiskManifest& next, const DiskManifest& prior) {
          std::equal(prior.tokens.begin(), prior.tokens.end(),
                     next.tokens.begin());
 }
+thread_local bool copying_beside_decode = false;
 }  // namespace
+BesideDecodeScope::BesideDecodeScope() noexcept
+    : previous_(copying_beside_decode) {
+  copying_beside_decode = true;
+}
+BesideDecodeScope::~BesideDecodeScope() {
+  copying_beside_decode = previous_;
+}
+bool CopyingBesideDecode() noexcept {
+  return copying_beside_decode;
+}
 
 PersistenceSource::PersistenceSource(bool private_file, DiskFileId file,
                                      std::uint64_t bytes, std::size_t alignment,
@@ -695,7 +706,8 @@ bool StreamedStore::Restore(
     CheckpointId id, CompatibilityDigest compatibility, Adapter& adapter,
     Slot& slot, TransferTiming& timing, std::stop_token stop,
     const std::function<void()>& fallback,
-    const std::function<void(bool, DiskFileId)>& dependency_failed) {
+    const std::function<void(bool, DiskFileId)>& dependency_failed,
+    const RestoreCopyRunner& run_copies) {
   std::optional<std::pair<bool, DiskFileId>> failed;
   try {
     auto guard = impl_->Lock(stop, timing);
@@ -824,94 +836,100 @@ bool StreamedStore::Restore(
     // submits the copies in order: one reader read, checked and copied a
     // piece at a time, so a 2.47 GB restore spent 474 ms reading, 135 ms
     // checking and 161 ms waiting for copies one after another.
-    RestorePipeline pipeline(units.size(), plan.size(), pieces, timing);
-    Finally drain{[&] { pipeline.Drain(); }};
-    const auto read_item = [&](std::size_t index) {
-      const auto& item = plan[index];
-      const auto observe = [&](const DiskReadStats& costs) {
-        if (pipeline.Threaded()) {
-          pipeline.Observe(costs);
-        } else {
-          timing.filesystem_ns += costs.filesystem_ns;
-          timing.checksum_ns += costs.checksum_ns;
-        }
-      };
-      std::size_t offset{};
-      if (!item.pieces)
-        pipeline.WaitLane(item.unit);
-      for (const auto& file : item.files) {
-        CheckStop(stop);
-        prefetch.Reading(file.prefetch);
-        DiskReadStats costs;
-        Finally record{[&] { observe(costs); }};
-        try {
-          if (item.pieces) {
-            (void)impl_->disk->ReadPayload(
-                *snapshot, file.private_file, *file.payload,
-                [&](std::uint64_t at) {
-                  const auto unit = item.unit + at / item.capacity;
-                  pipeline.WaitLane(unit);
-                  return pieces.Lane(impl_->staging.bytes, unit)
-                      .first(item.capacity);
-                },
-                [&](std::uint64_t at, auto) {
-                  CheckStop(stop);
-                  pipeline.Read(item.unit + at / item.capacity);
-                },
-                &costs);
+    const auto copies = [&] {
+      RestorePipeline pipeline(units.size(), plan.size(), pieces, timing);
+      Finally drain{[&] { pipeline.Drain(); }};
+      const auto read_item = [&](std::size_t index) {
+        const auto& item = plan[index];
+        const auto observe = [&](const DiskReadStats& costs) {
+          if (pipeline.Threaded()) {
+            pipeline.Observe(costs);
           } else {
-            (void)impl_->disk->ReadPayload(
-                *snapshot, file.private_file, *file.payload,
-                pieces.Lane(impl_->staging.bytes, item.unit)
-                    .subspan(offset, file.payload->bytes),
-                [](std::uint64_t, auto) {}, &costs);
+            timing.filesystem_ns += costs.filesystem_ns;
+            timing.checksum_ns += costs.checksum_ns;
           }
-        } catch (const DiskDependencyError& error) {
-          pipeline.Failed(error.private_file, error.file);
-          throw;
+        };
+        std::size_t offset{};
+        if (!item.pieces)
+          pipeline.WaitLane(item.unit);
+        for (const auto& file : item.files) {
+          CheckStop(stop);
+          prefetch.Reading(file.prefetch);
+          DiskReadStats costs;
+          Finally record{[&] { observe(costs); }};
+          try {
+            if (item.pieces) {
+              (void)impl_->disk->ReadPayload(
+                  *snapshot, file.private_file, *file.payload,
+                  [&](std::uint64_t at) {
+                    const auto unit = item.unit + at / item.capacity;
+                    pipeline.WaitLane(unit);
+                    return pieces.Lane(impl_->staging.bytes, unit)
+                        .first(item.capacity);
+                  },
+                  [&](std::uint64_t at, auto) {
+                    CheckStop(stop);
+                    pipeline.Read(item.unit + at / item.capacity);
+                  },
+                  &costs);
+            } else {
+              (void)impl_->disk->ReadPayload(
+                  *snapshot, file.private_file, *file.payload,
+                  pieces.Lane(impl_->staging.bytes, item.unit)
+                      .subspan(offset, file.payload->bytes),
+                  [](std::uint64_t, auto) {}, &costs);
+            }
+          } catch (const DiskDependencyError& error) {
+            pipeline.Failed(error.private_file, error.file);
+            throw;
+          }
+          offset += file.payload->bytes;
         }
-        offset += file.payload->bytes;
+        if (!item.pieces)
+          pipeline.Read(item.unit);
+      };
+      const auto submit = [&](std::size_t index) {
+        const auto& unit = units[index];
+        const auto& c = manifest.components[unit.component];
+        const auto bytes = std::as_bytes(
+            pieces.Lane(impl_->staging.bytes, index).first(unit.bytes));
+        auto stream = impl_->Lease(timing, &impl_->restore_lease);
+        auto completion =
+            unit.private_state
+                ? adapter.LoadPrivatePiece(slot, c.descriptor.id, unit.offset,
+                                           bytes, *stream)
+                : adapter.CopyRowsIn(
+                      slot, c.descriptor.id,
+                      unit.first + unit.offset / c.descriptor.row_bytes,
+                      unit.first +
+                          (unit.offset + unit.bytes) / c.descriptor.row_bytes,
+                      bytes, *stream);
+        pipeline.Submitted(index, std::move(stream), std::move(completion));
+        ++timing.pieces;
+        timing.bytes += unit.bytes;
+      };
+      try {
+        pipeline.Run(read_item, submit);
+      } catch (...) {
+        if (const auto file = pipeline.FailedFile())
+          failed = file;
+        throw;
       }
-      if (!item.pieces)
-        pipeline.Read(item.unit);
-    };
-    const auto submit = [&](std::size_t index) {
-      const auto& unit = units[index];
-      const auto& c = manifest.components[unit.component];
-      const auto bytes = std::as_bytes(
-          pieces.Lane(impl_->staging.bytes, index).first(unit.bytes));
-      auto stream = impl_->Lease(timing, &impl_->restore_lease);
-      auto completion =
-          unit.private_state
-              ? adapter.LoadPrivatePiece(slot, c.descriptor.id, unit.offset,
-                                         bytes, *stream)
-              : adapter.CopyRowsIn(
-                    slot, c.descriptor.id,
-                    unit.first + unit.offset / c.descriptor.row_bytes,
-                    unit.first +
-                        (unit.offset + unit.bytes) / c.descriptor.row_bytes,
-                    bytes, *stream);
-      pipeline.Submitted(index, std::move(stream), std::move(completion));
-      ++timing.pieces;
-      timing.bytes += unit.bytes;
-    };
-    try {
-      pipeline.Run(read_item, submit);
-    } catch (...) {
-      if (const auto file = pipeline.FailedFile())
-        failed = file;
-      throw;
-    }
-    if (pipeline.Threaded())
-      for (std::size_t index = 0; index < units.size(); ++index) {
-        CheckStop(stop);
-        if (const auto error = pipeline.WaitRead(index)) {
-          failed = pipeline.FailedFile();
-          std::rethrow_exception(error);
+      if (pipeline.Threaded())
+        for (std::size_t index = 0; index < units.size(); ++index) {
+          CheckStop(stop);
+          if (const auto error = pipeline.WaitRead(index)) {
+            failed = pipeline.FailedFile();
+            std::rethrow_exception(error);
+          }
+          submit(index);
         }
-        submit(index);
-      }
-    pipeline.Finish();
+      pipeline.Finish();
+    };
+    if (run_copies)
+      run_copies(copies);
+    else
+      copies();
     CheckStop(stop);
     if (!adapter.Validate(slot, positions))
       throw std::runtime_error("checkpoint position validation failed");

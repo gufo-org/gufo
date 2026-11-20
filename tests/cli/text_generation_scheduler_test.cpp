@@ -256,6 +256,13 @@ struct FakeControl {
   std::function<void()> before_yield;
   // Each decode advance inside a yield takes this long.
   std::chrono::milliseconds yield_advance_delay{0};
+  // Every decode advance takes this many microseconds.
+  std::atomic<unsigned> advance_delay_us{0};
+  // Runs where a restore copies its first rows in; set before the scheduler
+  // starts.
+  std::function<void()> restore_callback;
+  // Whether restores may copy beside decode (a restore queue of its own).
+  bool restore_beside_decode{true};
   std::atomic<bool> yielding{false};
   std::vector<std::string> output_pieces;
   std::uint32_t max_context{128};
@@ -330,6 +337,16 @@ public:
     if (executed)
       control_->RecordInvalidation();
     return FakeAdapter::Invalidate(slot);
+  }
+  gufo::cache::Completion CopyRowsIn(gufo::cache::Slot& slot,
+                                     gufo::cache::ComponentId id,
+                                     gufo::cache::Rows first,
+                                     gufo::cache::Rows end,
+                                     std::span<const std::byte> bytes,
+                                     gufo::cache::Stream& stream) override {
+    if (first == 0 && control_->restore_callback)
+      control_->restore_callback();
+    return FakeAdapter::CopyRowsIn(slot, id, first, end, bytes, stream);
   }
   gufo::cache::Completion CapturePrivatePiece(
       const gufo::cache::Slot& slot, gufo::cache::ComponentId id,
@@ -511,7 +528,8 @@ public:
         ledger, std::make_unique<ObservedAdapter>(control_),
         {.private_blocks = 512,
          .row_backing_bytes = 1024,
-         .total_row_bytes = 1U << 24});
+         .total_row_bytes = 1U << 24,
+         .restore_beside_decode = control_->restore_beside_decode});
   }
   [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
       gufo::cache::Adapter& adapter, gufo::cache::Slot& slot) const override {
@@ -647,6 +665,8 @@ public:
     }
     if (control_->yielding)
       std::this_thread::sleep_for(control_->yield_advance_delay);
+    if (const auto delay = control_->advance_delay_us.load())
+      std::this_thread::sleep_for(std::chrono::microseconds(delay));
 
     {
       std::unique_lock<std::mutex> lock(control_->mutex);
@@ -3203,6 +3223,73 @@ void TestSnapshotDoesNotBlockOtherRequests() {
   }
 }
 
+// A restore's copies run beside a running decoder instead of stopping it, but
+// only where they run on a copy engine: without one they would wait behind
+// decode work, so the restore stops the decoder as before. A restore shorter
+// than a decode round also stops it: beside, it would wait for the round.
+void CheckRestoreBesideDecoders(bool engine, bool longer_than_round = true) {
+  const bool beside = engine && longer_than_round;
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 4096;
+  control->snapshots = true;
+  control->restore_beside_decode = engine;
+  const auto advances = [&] {
+    std::size_t count = 0;
+    for (const auto& event : control->Events())
+      count += event.kind == EventKind::kAdvance && event.label == 2;
+    return count;
+  };
+  std::atomic<bool> armed{false}, restoring{false}, decoded{false};
+  control->restore_callback = [&] {
+    if (!armed || restoring.exchange(true))
+      return;
+    const auto before = advances();
+    // Inline, no decoder may step: wait long enough to see one.
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        (beside ? kTestTimeout : std::chrono::milliseconds(100));
+    while (std::chrono::steady_clock::now() < deadline &&
+           advances() < before + 3)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    decoded = advances() != before;
+  };
+  // The fake checkpoint is small: copy it beside decoders all the same,
+  // unless its estimate counts against their rounds (500 us each here).
+  TextSchedulerPolicy policy;
+  policy.restore_beside_decoders_after = {};
+  if (longer_than_round)
+    policy.restore_beside_rounds = 0;
+  auto scheduler = MakeScheduler(control, 2, 2, policy);
+  const std::vector<TextRunnerToken> history(2200, 1);
+  Expect(!scheduler->Submit(history, 2, 0.0F).Wait().cancelled,
+         "history request completes");
+  control->advance_delay_us = 500;
+  auto decoder = scheduler->Submit({2, 20}, 2000, 0.0F);
+  while (advances() == 0)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  // Diverges after the history's 2,048-token checkpoint: no live frontier
+  // continues it, so admission restores that checkpoint from RAM.
+  std::vector<TextRunnerToken> branch(history.begin(), history.begin() + 2100);
+  branch.push_back(9);
+  armed = true;
+  const auto restored = scheduler->Submit(branch, 2, 0.0F).Wait();
+  control->advance_delay_us = 0;
+  Expect(restoring && restored.cache_hit && restored.cache_restore_bytes > 0,
+         "the branch restores a RAM checkpoint");
+  Expect(decoded == beside,
+         beside   ? "the decoder advances while the restore copies"
+         : engine ? "a restore shorter than a decode round stops the decoder"
+                  : "without an engine the restore stops the decoder");
+  Expect(!decoder.Wait().cancelled, "the decoder completes");
+  scheduler.reset();
+}
+
+void TestRestoreCopiesRunBesideDecoders() {
+  CheckRestoreBesideDecoders(true);
+  CheckRestoreBesideDecoders(false);
+  CheckRestoreBesideDecoders(true, false);
+}
+
 void TestCapturedDecoderResumesBeforeMorePrefill() {
   auto control = std::make_shared<FakeControl>();
   control->max_context = 4096;
@@ -4308,6 +4395,7 @@ int main() {
   TestZeroPendingLimitsAdmitOnlyFreeSessions();
   TestSharedStateWaitsInOrder();
   TestSharedStatePausesThenPreempts();
+  TestRestoreCopiesRunBesideDecoders();
   TestPromptStateAdmissionBudget();
   TestPromptAdmissionTracksLiveHeadroom();
   TestPromptAdmissionRollsBackFailedEnqueue();

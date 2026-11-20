@@ -14,7 +14,9 @@
 #include <string>
 #include <utility>
 
+#include "src/cache/streaming.hpp"
 #include "src/core/hip/committed_backing.hpp"
+#include "src/core/hip/copy_engine.hpp"
 #include "src/core/hip/heap_placement.hpp"
 #include "src/core/hip/host_allocations.hpp"
 #include "src/core/hip/state_memory.hpp"
@@ -36,7 +38,12 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     // restore's copies submit in milliseconds but used to complete only
     // after other sessions' captures and persistence queued on the shared
     // FIFO streams (up to 2.9 s measured); here 2.47 GB restore in 31 ms.
-    hip::TransferPool restore{16, 2, -1};
+    // Restores beside decode (cache::BesideDecodeScope) copy on the GPU's
+    // copy engine instead: on these streams each copy waited behind a whole
+    // decode graph, as HIP pools them onto the executor's hardware queue
+    // (2.2 GB took 2.6 s beside decode, 0.25 s inline). Inline restores keep
+    // the copy kernel, faster alone (117-124 vs 54-65 GB/s).
+    hip::TransferPool restore{16, 2, -1, hip::DeviceCopyEngine()};
     // Disk persistence: its own stream, so writes never queue in front of a
     // restore or capture.
     hip::TransferPool background{8, 1};
@@ -58,7 +65,8 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
         std::to_string(hooks.transfer_streams) + " event_leases=" +
         std::to_string(hooks.transfer_leases ? hooks.transfer_leases
                                              : hooks.transfer_streams) +
-        " allocation=eager");
+        " allocation=eager restore_engine=" +
+        (backing->restore.HasEngine() ? "sdma" : "none"));
   result->transfer_batch_size = 16;
   const auto rounded = [](std::size_t bytes) {
     return (bytes + 4095) / 4096 * 4096;
@@ -282,8 +290,9 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     return backing->streams.TryAcquire();
   };
   result->restore_stream = [backing]() -> std::unique_ptr<cache::Stream> {
-    return backing->restore.TryAcquire();
+    return backing->restore.TryAcquire(cache::CopyingBesideDecode());
   };
+  result->restore_beside_decode = backing->restore.HasEngine();
   result->background_stream = [backing]() -> std::unique_ptr<cache::Stream> {
     return backing->background.TryAcquire();
   };

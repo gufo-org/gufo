@@ -87,6 +87,11 @@ public:
   // the budget plus those pins, within the host ceiling. With `ram_enabled`
   // false, ram_bytes is ignored: no checkpoint stays in RAM and no backing is
   // committed, unless a disk cache needs some to stage captures.
+  /// Runs a restore's copies (cache::RestoreCopyRunner), told how long they
+  /// would stop the calling thread.
+  using RestoreRunner =
+      std::function<void(std::chrono::microseconds inline_estimate,
+                         const std::function<void()>& copies)>;
   ComponentTextCache(std::shared_ptr<TextModelRunner>, std::size_t,
                      std::size_t ram_bytes,
                      const std::optional<TextRunnerDiskCacheOptions>&,
@@ -101,9 +106,13 @@ public:
       std::span<const ContinuationToken>, const std::function<bool()>&,
       std::shared_ptr<const TextPromptContext>, bool, std::size_t, bool,
       bool persist = true, std::size_t state_tokens = 0,
-      mem::StateReservation* reservation = nullptr);
+      mem::StateReservation* reservation = nullptr,
+      const RestoreRunner& run_copies = {});
   // Whether sessions share their demand-mapped state (#715).
   [[nodiscard]] bool shared_state() const noexcept;
+  // Whether restores copy where decode work cannot hold them up, and so may
+  // run beside decode (ComponentCacheResources::restore_beside_decode).
+  [[nodiscard]] bool restores_beside_decode() const noexcept;
   // Bytes a session that holds nothing would charge for `tokens`; zero
   // without shared state.
   [[nodiscard]] std::size_t StateBytesFor(std::size_t tokens) const;
@@ -152,11 +161,15 @@ public:
       const TextPromptContext* context, std::uint64_t checkpoint_id = 0) const;
   // When the checkpoint Acquire would select for `prompt` is only on disk,
   // starts reading its files into the page cache on a worker and returns a
-  // flag set when that finishes. Null when there is nothing to read, or when
-  // the read would take free pages the host keeps (mem::HostFreeFloorBytes).
+  // flag set when that finishes. Null when there is nothing to read, when
+  // the read would take free pages the host keeps (mem::HostFreeFloorBytes),
+  // or when the restore would take `beside_after` or longer: the caller then
+  // copies it beside running work (RestoreRunner), which reads it there.
   [[nodiscard]] std::shared_ptr<const std::atomic<bool>> WarmDisk(
       std::span<const ContinuationToken> prompt,
-      const TextPromptContext* context, std::size_t stable);
+      const TextPromptContext* context, std::size_t stable,
+      std::chrono::microseconds beside_after =
+          std::chrono::microseconds::max());
   [[nodiscard]] std::size_t CachedPrefixTokens(
       std::span<const ContinuationToken>, const TextPromptContext*,
       bool common = false) const;

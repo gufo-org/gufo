@@ -23,6 +23,7 @@
 #include <thread>
 #include <utility>
 
+#include "src/cache/streaming.hpp"
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
@@ -1270,6 +1271,11 @@ struct TextGenerationScheduler::Impl {
     }
   }
 
+  [[nodiscard]] std::size_t QueuedCount() {
+    const std::lock_guard lock(queue_mutex);
+    return queued_count;
+  }
+
   [[nodiscard]] static std::shared_ptr<ScheduledRequest> PopReleased(
       std::deque<std::shared_ptr<ScheduledRequest>>& waiting) {
     const auto released =
@@ -1478,12 +1484,30 @@ struct TextGenerationScheduler::Impl {
             LogPublicationWait(request, "skip", "no_estimate");
           }
         }
+        // A restore runs beside decoders and captures (RunBesideDecoders)
+        // where its copies run on a copy engine and it would take
+        // `beside_after` or longer, but holds up other prompts' prefill and
+        // admission: when any wait or prefill, or the restore would stop
+        // running work, read its files first so they proceed meanwhile.
+        const bool running = !decoding.empty() || !capturing.empty();
+        const auto beside_after =
+            running && runner_pool->restores_beside_decode()
+                ? std::max(
+                      scheduler_policy.restore_beside_decoders_after,
+                      std::chrono::duration_cast<std::chrono::microseconds>(
+                          DecodeRoundEstimate(decoding.size() +
+                                              capturing.size()) *
+                          scheduler_policy.restore_beside_rounds))
+                : std::chrono::microseconds::max();
         if (request->cache_prompt && !request->disk_warm_start &&
-            (!prefilling.empty() || !decoding.empty() || !capturing.empty())) {
+            (!prefilling.empty() || running)) {
+          const bool alone =
+              prefilling.empty() && waiting.empty() && QueuedCount() == 0;
           request->disk_warm_start = Clock::now();
-          if (auto warm = runner_pool->WarmDisk(request->prompt,
-                                                request->prompt_context.get(),
-                                                request->cache_prefix_tokens);
+          if (auto warm = runner_pool->WarmDisk(
+                  request->prompt, request->prompt_context.get(),
+                  request->cache_prefix_tokens,
+                  alone ? beside_after : std::chrono::microseconds::max());
               warm && !warm->load(std::memory_order_acquire)) {
             request->disk_warm = std::move(warm);
             request->disk_warming = true;
@@ -1509,6 +1533,17 @@ struct TextGenerationScheduler::Impl {
         }
 
         const std::weak_ptr<ScheduledRequest> weak_request = request;
+        // A restore's copies use restore streams only, so running decoders
+        // keep stepping while they run.
+        TextRunnerPool::RestoreCopyRunner beside_decoders;
+        if (beside_after != std::chrono::microseconds::max())
+          beside_decoders = [&](std::chrono::microseconds estimate,
+                                const std::function<void()>& copies) {
+            if (estimate < beside_after)
+              copies();
+            else
+              RunBesideDecoders(copies, decoding, capturing);
+          };
         request->runner_request = runner_pool->Acquire(
             std::move(request->prompt), request->sampling,
             [weak_request, stop_token] {
@@ -1520,7 +1555,8 @@ struct TextGenerationScheduler::Impl {
             std::move(request->prompt_context), request->cache_prompt,
             request->cache_prefix_tokens, request->stop_at_eos,
             request->cache_persist,
-            request->state_ticket ? &*request->state_ticket : nullptr);
+            request->state_ticket ? &*request->state_ticket : nullptr,
+            beside_decoders);
         // What the session did not claim returns to the budget.
         request->state_ticket.reset();
         // Each admission may restore or capture a checkpoint of its own.
@@ -2231,7 +2267,11 @@ struct TextGenerationScheduler::Impl {
       request->decode_due = false;
       batch.push_back(std::move(request));
     }
+    const auto start = Clock::now();
     StepDecodeBatch(batch);
+    last_decode_unit = {std::chrono::duration_cast<std::chrono::microseconds>(
+                            Clock::now() - start),
+                        batch_size};
     for (auto& request : batch) {
       if (!IsTerminal(request)) {
         if (request->runner_request.SnapshotPending())
@@ -2277,6 +2317,58 @@ struct TextGenerationScheduler::Impl {
         }
       }
     }
+  }
+
+  /// How long `decoders` take to step once, from the last decode unit: a
+  /// restore beside them waits for the round in progress when it finishes.
+  [[nodiscard]] std::chrono::microseconds DecodeRoundEstimate(
+      std::size_t decoders) const {
+    const auto& [time, batch] = last_decode_unit;
+    if (batch == 0)
+      return {};
+    return time * static_cast<long>((decoders + batch - 1) / batch);
+  }
+
+  /// Runs `work` on its own thread while this thread steps decoders, until
+  /// it returns; rethrows what it threw. Only an admission's restore copies
+  /// come here: they touch no executor stream (cache::RestoreCopyRunner).
+  void RunBesideDecoders(
+      const std::function<void()>& work,
+      std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
+      std::deque<std::shared_ptr<ScheduledRequest>>& capturing) {
+    std::mutex mutex;
+    std::condition_variable finished;
+    bool done = false;
+    std::exception_ptr error;
+    std::thread worker([&] {
+      try {
+        const cache::BesideDecodeScope beside;
+        work();
+      } catch (...) {
+        error = std::current_exception();
+      }
+      const std::lock_guard lock(mutex);
+      done = true;
+      finished.notify_one();
+    });
+    const auto is_done = [&] {
+      const std::lock_guard lock(mutex);
+      return done;
+    };
+    while (!is_done()) {
+      const auto rounds = yield_rounds;
+      RunYieldRound(decoding, capturing);
+      if (yield_rounds != rounds)
+        continue;
+      // Nothing to decode: wait, but look again soon in case a capture
+      // finished and its request can decode.
+      std::unique_lock lock(mutex);
+      finished.wait_for(lock, std::chrono::milliseconds(1),
+                        [&] { return done; });
+    }
+    worker.join();
+    if (error)
+      std::rethrow_exception(error);
   }
 
   /// Between two layer groups of a prompt pass, the prompt's request is in no
@@ -2522,10 +2614,13 @@ struct TextGenerationScheduler::Impl {
   // Reused by every work-unit decision.
   std::vector<sched::PrefillingRequest> prefilling_view;
   std::vector<sched::DecodingRequest> decoding_view;
-  // Decode rounds run between layer groups since startup.
+  // Decode rounds run between layer groups, or beside restore copies, since
+  // startup.
   std::size_t yield_rounds{0};
   // Time those rounds took, which their prompt's pass excludes.
   double yield_ms{0};
+  // The last decode unit's time and batch size.
+  std::pair<std::chrono::microseconds, std::size_t> last_decode_unit{};
   detail::PublicationWaitEstimate publication_prefill;
   std::shared_ptr<OutputBudget> output_budget;
   std::shared_ptr<PromptBudget> prompt_budget =

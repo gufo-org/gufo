@@ -9,6 +9,7 @@
 #include "src/cache/stream.hpp"
 
 namespace gufo::hip {
+class CopyEngine;
 namespace detail {
 struct TransferPoolState;
 struct TransferLease;
@@ -38,6 +39,16 @@ public:
   [[nodiscard]] cache::Completion Copy(void* destination, const void* source,
                                        std::size_t bytes, CopyDirection,
                                        std::size_t piece_bytes);
+  // Whether this lease copies on the pool's copy engine (TryAcquire
+  // `on_engine`). Native submissions still run on its stream, and Complete
+  // covers both.
+  [[nodiscard]] bool OnEngine() const noexcept;
+  // Queues one copy on the copy engine, which reads and writes the two
+  // addresses as they are (see CopyEngine). Unordered against Native work and
+  // other engine copies; only for an OnEngine lease that is neither sealed nor
+  // failed. A refusal fails the lease and returns false.
+  [[nodiscard]] bool EngineCopy(void* destination, const void* source,
+                                std::size_t bytes);
 
 private:
   friend class TransferPool;
@@ -57,14 +68,21 @@ public:
   // retain the one-argument constructor's exclusive stream behavior.
   // A nonzero `priority` creates the native streams with that HIP stream
   // priority (lower is greater; -1 is the greatest on gfx1151).
+  // With an `engine`, each lease gets a fence of its own on it, for leases
+  // acquired `on_engine`.
   TransferPool(std::size_t capacity, std::size_t native_streams,
-               int priority = 0);
+               int priority = 0, CopyEngine* engine = nullptr);
   // Returns null on exhaustion. No HIP allocation/stream/event creation here.
   // An event returns only after BOTH stream and completion release their lease.
   // Failed resources are quarantined rather than reused. A shared pool throws
   // when exhausted after any quarantine: its consumers must not wait for lost
   // capacity to return. Exclusive pools retain null on exhaustion.
-  [[nodiscard]] std::unique_ptr<TransferStream> TryAcquire();
+  // `on_engine` leases copy on the pool's engine (TransferStream::EngineCopy)
+  // where it has one.
+  [[nodiscard]] std::unique_ptr<TransferStream> TryAcquire(
+      bool on_engine = false);
+  // Whether leases can copy on an engine.
+  [[nodiscard]] bool HasEngine() const noexcept;
 
 private:
   std::shared_ptr<detail::TransferPoolState> state_;

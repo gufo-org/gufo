@@ -71,5 +71,11 @@ struct ComponentCacheResources {
   // Released backing comes back as captures need it, under the provider's
   // usual growth rules.
   std::function<std::size_t(std::size_t)> release_host;
+  // Inside a BesideDecodeScope, restore_stream leases streams whose copies
+  // never wait behind the model's work (the HIP provider's copy engine): a
+  // restore may copy beside decode (RestoreCopyRunner). On streams that share
+  // a hardware queue with decode, a 15K-token DeepSeek restore beside decode
+  // waited ~1 s behind it instead of finishing in ~0.1 s.
+  bool restore_beside_decode{false};
 };
 }  // namespace gufo::cache

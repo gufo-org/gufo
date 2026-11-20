@@ -1835,7 +1835,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     const CancellationCheck& is_cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse_prompt,
     std::size_t cache_prefix_tokens, bool stop_at_eos, bool persist,
-    StateTicket* state) {
+    StateTicket* state, const RestoreCopyRunner& run_copies) {
   sampling_config.Validate();
   if (prompt.empty()) {
     throw std::invalid_argument("text runner prompt must not be empty");
@@ -1856,7 +1856,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     auto lease = impl_->component_cache->Acquire(
         prompt, is_cancelled, context, reuse_prompt, cache_prefix_tokens,
         stop_at_eos, persist, state ? state->tokens : 0,
-        state ? &state->reservation : nullptr);
+        state ? &state->reservation : nullptr, run_copies);
     if (!lease)
       return {};
     Request request(std::make_unique<Request::Impl>(
@@ -1883,6 +1883,10 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     std::vector<TextRunnerToken> prompt,
     const CancellationCheck& is_cancelled) {
   return Acquire(std::move(prompt), sampling::SamplingConfig{}, is_cancelled);
+}
+
+bool TextRunnerPool::restores_beside_decode() const noexcept {
+  return impl_->component_cache->restores_beside_decode();
 }
 
 bool TextRunnerPool::shared_state() const noexcept {
@@ -1987,10 +1991,10 @@ std::optional<TextPendingPublication> TextRunnerPool::PendingPublication(
 
 std::shared_ptr<const std::atomic<bool>> TextRunnerPool::WarmDisk(
     std::span<const TextRunnerToken> prompt, const TextPromptContext* context,
-    std::size_t stable) const {
-  return impl_->component_cache
-             ? impl_->component_cache->WarmDisk(prompt, context, stable)
-             : nullptr;
+    std::size_t stable, std::chrono::microseconds beside_after) const {
+  return impl_->component_cache ? impl_->component_cache->WarmDisk(
+                                      prompt, context, stable, beside_after)
+                                : nullptr;
 }
 
 std::size_t TextRunnerPool::CachedPrefixTokens(

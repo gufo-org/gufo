@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/copy_engine.hpp"
+
 namespace gufo::hip {
 namespace {
 void Check(hipError_t status) {
@@ -22,6 +24,8 @@ struct TransferPoolState {
   };
   struct Slot {
     hipEvent_t event{};
+    CopyEngine::Fence fence{};
+    bool has_fence{};
     bool busy{};
     bool failed{};
   };
@@ -29,6 +33,7 @@ struct TransferPoolState {
   std::unique_ptr<Lane[]> lanes;
   std::size_t native_streams{};
   bool shared{};
+  CopyEngine* engine{};
   std::atomic<bool> degraded{false};
   std::vector<Slot> slots;
   ~TransferPoolState() {
@@ -38,9 +43,13 @@ struct TransferPoolState {
         (void)hipStreamDestroy(lanes[i].stream);
       }
     }
-    for (auto& slot : slots)
+    for (auto& slot : slots) {
       if (slot.event)
         (void)hipEventDestroy(slot.event);
+      // Every lease drained its fence before releasing its slot.
+      if (slot.has_fence)
+        engine->DestroyFence(slot.fence);
+    }
   }
 };
 struct TransferLease {
@@ -49,6 +58,10 @@ struct TransferLease {
   std::atomic<bool> failed{false};
   bool sealed{};
   bool claimed{};
+  // Acquired to copy on the pool's engine; engine_used once it queued one.
+  bool on_engine{};
+  bool engine_used{};
+  bool bound_drained{};
   bool native_used{};
   bool event_recorded{};
   bool event_settled{};
@@ -74,10 +87,17 @@ struct TransferLease {
     if (!bound_stream)
       Lane().failed = true;
   }
+  bool EngineDone() const noexcept {
+    return !engine_used || state->engine->Done(Slot().fence);
+  }
   cache::TransferResult Drain() noexcept {
     // Stream and completion owners can independently drain the same lease.
     // Serialize its fence state, never holding the pool lock while HIP waits.
     const std::lock_guard lock(drain_mutex);
+    // Engine copies hold their operands until the engine finishes them, even
+    // after a failure elsewhere in the lease.
+    if (engine_used)
+      state->engine->Wait(Slot().fence);
     if (!state->shared) {
       if (hipStreamSynchronize(Stream()) != hipSuccess)
         Fail();
@@ -145,6 +165,11 @@ public:
   explicit TransferSignal(std::shared_ptr<detail::TransferLease> lease)
       : lease_(std::move(lease)) {}
   bool Ready() const noexcept override {
+    if (!lease_->EngineDone())
+      return false;
+    // An engine lease without Native work records no event.
+    if (!lease_->native_used)
+      return true;
     const auto status = hipEventQuery(lease_->Slot().event);
     if (status != hipSuccess && status != hipErrorNotReady)
       lease_->Fail();
@@ -152,7 +177,7 @@ public:
     return status == hipSuccess;
   }
   cache::TransferResult Wait() noexcept override {
-    if (!lease_->state->shared &&
+    if (!lease_->state->shared && lease_->native_used &&
         hipEventSynchronize(lease_->Slot().event) != hipSuccess)
       lease_->Fail();
     // Drain also on error; adapters may have submitted work through Native.
@@ -193,6 +218,15 @@ cache::TransferResult TransferStream::Synchronize() noexcept {
   return lease_->Drain();
 }
 cache::Completion TransferStream::Complete() {
+  if (lease_->on_engine && !lease_->native_used) {
+    if (lease_->sealed || lease_->Failed())
+      throw std::logic_error("transfer stream is sealed or failed");
+    // No event: a marker on a native stream that shares a hardware queue with
+    // decode graphs would complete only after them, as copies there did.
+    auto signal = std::make_unique<TransferSignal>(lease_);
+    lease_->sealed = true;
+    return cache::Completion(std::move(signal));
+  }
   const auto stream = Native();
   // Allocate host metadata before recording; on an allocation failure the
   // caller still owns the stream and must drain any Native work.
@@ -240,10 +274,38 @@ cache::Completion TransferStream::Copy(void* destination, const void* source,
     throw;
   }
 }
+bool TransferStream::OnEngine() const noexcept {
+  return lease_->on_engine;
+}
+bool TransferStream::EngineCopy(void* destination, const void* source,
+                                std::size_t bytes) {
+  if (!lease_->on_engine || lease_->sealed || lease_->Failed())
+    throw std::logic_error("transfer stream cannot copy on an engine");
+  // A bound execution stream may still write or read these operands; the
+  // engine is not ordered against it.
+  if (lease_->bound_stream && !lease_->bound_drained) {
+    const auto pending = hipStreamQuery(lease_->bound_stream);
+    if (pending != hipSuccess &&
+        (pending != hipErrorNotReady ||
+         hipStreamSynchronize(lease_->bound_stream) != hipSuccess)) {
+      lease_->Fail();
+      return false;
+    }
+    lease_->bound_drained = true;
+  }
+  lease_->engine_used = true;
+  if (!bytes || lease_->state->engine->Copy(destination, source, bytes,
+                                            lease_->Slot().fence))
+    return true;
+  // A refused copy implicates the engine, not the native stream.
+  lease_->failed = true;
+  lease_->state->degraded = true;
+  return false;
+}
 TransferPool::TransferPool(std::size_t capacity)
     : TransferPool(capacity, capacity) {}
 TransferPool::TransferPool(std::size_t capacity, std::size_t native_streams,
-                           int priority) {
+                           int priority, CopyEngine* engine) {
   if (!capacity || !native_streams || native_streams > capacity)
     throw std::invalid_argument("invalid transfer pool resource counts");
   auto state = std::make_shared<detail::TransferPoolState>();
@@ -251,6 +313,7 @@ TransferPool::TransferPool(std::size_t capacity, std::size_t native_streams,
       std::make_unique<detail::TransferPoolState::Lane[]>(native_streams);
   state->native_streams = native_streams;
   state->shared = native_streams < capacity;
+  state->engine = engine;
   state->slots.resize(capacity);
   for (std::size_t i = 0; i < capacity; ++i) {
     // Keep the exclusive constructor's creation order; a partial failure is
@@ -264,10 +327,17 @@ TransferPool::TransferPool(std::size_t capacity, std::size_t native_streams,
     const unsigned flags =
         hipEventDisableTiming | (state->shared ? hipEventReleaseToSystem : 0);
     Check(hipEventCreateWithFlags(&state->slots[i].event, flags));
+    if (engine) {
+      state->slots[i].fence = engine->CreateFence();
+      state->slots[i].has_fence = true;
+    }
   }
   state_ = std::move(state);
 }
-std::unique_ptr<TransferStream> TransferPool::TryAcquire() {
+bool TransferPool::HasEngine() const noexcept {
+  return state_->engine != nullptr;
+}
+std::unique_ptr<TransferStream> TransferPool::TryAcquire(bool on_engine) {
   const std::lock_guard lock(state_->mutex);
   for (std::size_t i = 0; i < state_->slots.size(); ++i) {
     auto& slot = state_->slots[i];
@@ -280,6 +350,7 @@ std::unique_ptr<TransferStream> TransferPool::TryAcquire() {
     auto stream = std::unique_ptr<TransferStream>(new TransferStream(lease));
     slot.busy = true;
     lease->claimed = true;
+    lease->on_engine = on_engine && state_->engine;
     return stream;
   }
   if (state_->shared && state_->degraded)
