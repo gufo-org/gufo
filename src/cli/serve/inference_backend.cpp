@@ -262,15 +262,24 @@ bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner> runner,
   }
 }
 
-bool InferenceBackend::load(
-    const std::string& model_path, std::string* error,
-    std::uint32_t max_context, std::size_t session_count,
-    TextSchedulerPolicy scheduler_policy,
-    const TextSpeculativeConfig& speculative_config,
-    const TextDiskCacheConfig& disk_cache_config,
-    const std::string& vision_model_path,
-    TextRunnerRamCacheOptions ram_cache_config, bool enable_yarn,
-    const PrepareRunnerOptions& prepare_runner_options) {
+bool InferenceBackend::load(const std::string& model_path, std::string* error,
+                            std::uint32_t max_context,
+                            std::size_t session_count,
+                            TextSchedulerPolicy scheduler_policy,
+                            const TextSpeculativeConfig& speculative_config,
+                            const TextDiskCacheConfig& disk_cache_config,
+                            const std::string& vision_model_path,
+                            TextRunnerRamCacheOptions ram_cache_config,
+                            bool enable_yarn,
+                            const PrepareRunnerOptions& prepare_runner_options,
+                            const LoadProgress& on_progress) {
+  // Stage boundaries, as rough shares of a typical load: the runner loads the
+  // weights, then the sessions are prepared and the disk tier is walked.
+  const auto report = [&](double progress, std::string_view message) {
+    if (on_progress)
+      on_progress(progress, message);
+  };
+  report(0.0, "Opening model");
   std::string load_error;
   auto reader_owner = core::GgufReader::OpenFile(
       model_path, &load_error, {.allow_unsized_tensors = true});
@@ -304,10 +313,12 @@ bool InferenceBackend::load(
       !prepare_runner_options(*provider, *reader, &options, error)) {
     return false;
   }
+  report(0.05, "Loading weights");
   auto runner = provider->create(options, error);
   if (runner == nullptr) {
     return false;
   }
+  report(0.9, "Preparing sessions and cache");
   return load(std::move(runner), error, session_count, scheduler_policy,
               disk_cache_config, ram_cache_config);
 }
@@ -325,7 +336,7 @@ bool InferenceBackend::load(const std::string&, std::string* error,
                             const TextSpeculativeConfig&,
                             const TextDiskCacheConfig&, const std::string&,
                             TextRunnerRamCacheOptions, bool,
-                            const PrepareRunnerOptions&) {
+                            const PrepareRunnerOptions&, const LoadProgress&) {
   SetError(error, "HIP engine is disabled");
   return false;
 }

@@ -2,7 +2,8 @@
 """Startup contract while a text model loads, then after the listener handoff.
 
 Polls health, readiness and generation from process start. While loading,
-every answer must be llama-server's 503 `Loading model`, `/health` included:
+every answer must be llama-server's 503 `Loading model`, `/health` included,
+with a non-decreasing `progress` and a `message` naming the load stage:
 pollers such as llama-swap and `run.py` treat a 200 health check as ready.
 After the handoff the real server must answer health, readiness and a
 generation. The runner owns the port; pass a production `gufo serve llm`
@@ -55,8 +56,12 @@ def probe(port, method, path, body=None):
 
 
 def is_loading(result):
-    return (result["status"] == 503 and isinstance(result["body"], dict)
-            and result["body"].get("error") == LOADING
+    body = result["body"] if isinstance(result.get("body"), dict) else {}
+    progress = body.get("progress")
+    # `progress` and `message` are the load stage llama-swap v269+ reads.
+    return (result["status"] == 503 and body.get("error") == LOADING
+            and isinstance(progress, (int, float)) and 0 <= progress <= 1
+            and isinstance(body.get("message"), str) and body["message"] != ""
             and result["retry_after"] == "1")
 
 
@@ -116,9 +121,13 @@ def check_loading_phase(observations):
     interleaved = [item for item in observations[first_loading:last_loading]
                    if item["status"] is None]
     require(not interleaved, f"connection refused between loading answers: {interleaved}")
+    progress = [item["body"]["progress"] for item in loading]
+    require(progress == sorted(progress), f"loading progress went back: {progress}")
+    stages = list(dict.fromkeys(item["body"]["message"] for item in loading))
     handoff_s = observations[first_real]["t_s"] - observations[last_loading]["t_s"]
     require(handoff_s < MAX_HANDOFF_S, f"handoff took {handoff_s:.3f}s")
     return {"loading_answers": len(loading),
+            "loading_stages": stages,
             "first_loading_s": loading[0]["t_s"],
             "last_loading_s": observations[last_loading]["t_s"],
             "first_real_s": observations[first_real]["t_s"],

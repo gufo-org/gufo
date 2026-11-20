@@ -524,7 +524,8 @@ python3 -m unittest discover -s tests/functional -p test_devlab.py
 
 The startup-loading runner polls health, readiness and generation from process
 start. Every answer during the load must be 503 `Loading model`, `/health`
-included, and the real server must answer all three after the listener handoff:
+included, with a non-decreasing `progress` and a stage `message`, and the real
+server must answer all three after the listener handoff:
 
 ```sh
 nix develop -c python3 tests/functional/startup_loading.py \
