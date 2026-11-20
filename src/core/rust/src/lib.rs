@@ -8,6 +8,7 @@
 // static library; an unused dependency would not be linked at all.
 extern crate gufo_audio_decode;
 extern crate gufo_base64;
+extern crate gufo_cache_manifest;
 extern crate gufo_gguf;
 extern crate gufo_http;
 extern crate gufo_json;

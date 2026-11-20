@@ -173,6 +173,24 @@ every prefix of up to three bytes and on generated longer ones. It runs in
 `check-pr`; the crate's Rust tests cover the decimal arithmetic, the keywords,
 a few languages and rejections, and the C ABI.
 
+`cache_disk_manifest_test` compares the Rust disk manifest codec and CRC-64
+(`src/core/cache_manifest`), through `src/cache/disk.hpp`, with a frozen copy
+of the 0.35.0 C++ code in `tests/cache/disk_manifest_reference.cpp`. Generated
+manifests cover row, window and private-state components of random geometry,
+format versions 2 and 3, and each limit reached and exceeded: 2 Mi tokens,
+64 KiB of input, 256 components and 65,536 payload references. They must
+encode to the same bytes, and one or two changed fields must make both sides
+reject a manifest or encode it identically. Every encoding, the same bytes
+under each format version and past the reference limit, its truncations
+(all of them under 1 KiB), and byte changes, insertions and erasures, each
+also re-signed so the structure behind the checksum is checked, must decode to
+the same manifest with the same capacities, or be rejected by both, and plan
+the same metadata. Checksums over every length to 1,100 bytes and random
+lengths to 1 MiB, offsets and seeds must match both reference paths, also when
+chained. It runs in `check-pr` in about 1.5 s; the crate's Rust tests cover
+both checksum paths against a bitwise definition, truncations, the callbacks
+and the C ABI. `cache_disk_test` checks the store around it.
+
 The hosted Rust check uses Cargo's default test profile, with overflow checks
 and debug assertions enabled. The Windows job builds the Rust library and C++
 callers but does not run `cargo test`. A workspace registration check runs in
