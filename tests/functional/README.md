@@ -87,9 +87,8 @@ TTS requests use checkpoint sampling, fixed seeds and a 180-codec-step cap.
 TTS intelligibility requires an explicitly selected ASR evaluator binary. Pin its
 revision and checkpoint independently when changing ASR or TTS runtime behavior;
 using the same candidate as its own evaluator does not qualify those changes.
-The current ASR malformed-WAV path returns `500 transcription_failed` rather than
-400. The suite records this known limitation and checks its exact error and
-subsequent recovery; it does not claim correct client-error classification.
+A malformed ASR WAV must return `400 invalid_audio_input`, and the server must
+recover for the next request.
 
 Every invocation requires a new output directory. `report.json` retains status,
 per-case results, request timings and headers (including available server phase
@@ -182,6 +181,21 @@ nix develop -c python3 tests/functional/cache_alignment_qwen38.py \
 
 Add `--mtp-model /path/to/mtp.gguf` before `--` for the MTP mode. The test owns
 its servers, cache directory and loopback listener.
+
+A second question about the same long document has a focused disk check.
+The first question seeds `--cache-disk`; after a restart, the second question
+must restore at least `--min-cached` tokens of the document from disk. Its
+greedy reply must equal the same request on a fresh server without a cache:
+
+```sh
+nix develop -c python3 tests/functional/cache_document_qwen38.py \
+  --output /tmp/cache-document --min-cached 12288 -- \
+  /path/to/production/gufo serve llm --model /path/to/flash-next.gguf \
+  --context 65536
+```
+
+The test owns its servers, cache directory and loopback listener, and retains
+each request's usage, timings and server log.
 
 Flash-Next MTP and Qwen27B DFlash2 prompt lookup have a focused runner. It
 requires actual accepted copies, compares isolated and C2/C4/C6/C8 requests under greedy and the model's
@@ -283,22 +297,15 @@ python3 tests/functional/impact.py --model flash-next-q4 \
 `--repo PATH --base SHA --head SHA` reads a Git diff instead. Renames retain both
 old and new ownership. Rules with the highest explicit priority apply; equal
 priority rules contribute a union. Unknown paths expand to all compatible
-coverage. Suite metadata must cover every name in `run.py`; dependencies are
+coverage. Suite metadata must cover every name in `suites.py`; dependencies are
 deliberately conservative, so even narrow source rules can select many suites.
 
-`--tier pr` plans the per-PR set: one or two suites per behavior (`discovery`,
-`state-edges`, `messages-count-tokens`, `responses`, `stops`, `conversation`,
-`image-inputs`, `structured`, `tools`, `tool-streaming`, `sampling-defaults`,
-`batch` and `cache`). Every other suite is marked `"tier": "release"` and moves
-to `release_only`; the deep cache histories, `cache-stalls`, `long-context` and
-`reasoning-budget` still run on a PR when a changed path matches their
-`escalate` patterns: cache code, the suite's own module, or Flash-Next model
-code for depth checks. `run.py
---tier pr` also trims transport matrices that a case does not depend on:
-`tool-reasoning` keeps the streamed mode, whose partial parses end in the same
-final parse a buffered reply uses, and `tool-native-schemas` rotates endpoint,
-stream and tool choice across cases. `--tier full` (the default for manual runs)
-keeps every suite and combination.
+Suites marked `"tier": "release"` are left out of `impact.py --tier pr` plans
+unless a changed path matches their `escalate` patterns; Devlab plans every
+suite. Cases that vary a transport (endpoint, stream, tool choice) cover every
+option, not every combination: `transports.py` rotates one option per case, and
+parse checks use the streamed mode, which must end in the same final parse a
+buffered reply returns.
 
 The literal-closer cases from #786 (a lone `</invoke>` and a closer before or
 between calls) use the deterministic HTTP fixtures in
@@ -308,13 +315,14 @@ checks must not depend on a model following a request to copy tool markup.
 
 `Linux validation` runs on every push to a non-draft PR, like `Repository checks`
 (`pull_request`), with the repository's fork approval policy. A newer push cancels
-the PR's earlier run. PRs use the `pr` tier; release-please PRs and dispatches
-(unless they choose `tier: pr`) use `full`. Maintain/Admin users can dispatch a
-PR number. Authorization pins its head and GitHub's merge of it into main. Like
-`CI`, the GPU job builds and tests that merge commit with the suites it contains,
-so tests added on main never run against a PR binary that predates them. The
-merge's main parent is the diff base and the timing baseline. The GPU controller
-recreates the hosted plan from the merge commit.
+the PR's earlier run. PRs and release-please PRs run the same suites; the `pr`
+tier only keeps image generation to one smoke-tested representative, and
+release PRs and dispatches (unless they choose `tier: pr`) use `full`.
+Maintain/Admin users can dispatch a PR number. Authorization pins its head and
+GitHub's merge of it into main. Like `CI`, the GPU jobs build and test that merge
+commit with the suites it contains, so tests added on main never run against a
+PR binary that predates them. The merge's main parent is the diff base and the
+timing baseline.
 
 `devlab_plan.py` selects owners per path using reviewed priority rules in
 `devlab.json`, then uses `impact.py` for each selected LLM's affected suites.
@@ -322,28 +330,40 @@ Selections from separate paths are combined:
 
 | Changes | Automatic model coverage |
 | --- | --- |
-| Shared LLM behavior, cache, sampling or Qwen framing/vision | Flash-Next Q4/MTP |
-| Private Qwen27 implementation | Qwen27 Q4/DFlash2 |
-| Private DeepSeek implementation | DeepSeek V4/DSpark |
-| Shared LLM and private DeepSeek code | Flash-Next and DeepSeek |
-| Embedding, ASR, TTS or image generation code | That category's representative |
-| Shared infrastructure or unmapped paths | One representative per supported category |
+| Shared LLM behavior, cache, sampling or Qwen framing/vision | Every LLM: Flash-Next Q4/MTP, Qwen27 Q4/DFlash2, DeepSeek V4/DSpark |
+| Private Qwen27, Flash-Next or DeepSeek implementation | That model |
+| Embedding, ASR or TTS code | Every model in the category, NPU variants included |
+| Image generation code | Qwen-Image-2.1-Turbo smoke; both image models in the full tier |
+| Shared infrastructure or unmapped paths | Every model above |
 | Documentation or H3-only paths | No GPU job in this workflow |
 
 Models listed under `disabled` in `devlab.core.json`, with a reason, are left
 out of the plan and named in the report. Remove the entry to restore the model.
 
 A model's `suites` list in its `functional/devlab.json` limits Devlab to those
-suites at every tier; the report counts the others as out of scope. DeepSeek V4
-uses it to run the PR-tier set that passes on the runner. Its other full-tier
-suites still assume Flash-Next checkpoint sizes and Qwen token counts.
+suites at every tier; the report counts the others as out of scope. Qwen27 uses
+it to run only the suites its runtime changes (cache and checkpoints, batching
+and scheduling, DFlash2 with sampling, grammars and stops, vision); Flash-Next
+covers the shared Qwen protocol suites. DeepSeek V4's list keeps its runtime,
+cache, DSpark, template and native tool-call suites; the server-generic ones
+(validation, accounting, streaming events, schema shapes, shared-prefix and
+rotation cache logic) run on Flash-Next. So that DeepSeek fits one device,
+`long-context`, `tool-reasoning` and `cache-growth` run on Flash-Next and Qwen27
+only. Flash-Next has no list and runs every
+suite its profile takes.
 
-The embedding and ASR representatives are EmbeddingGemma 2 and Qwen3-ASR. TTS
-uses Base cloning in the PR tier; the full tier exercises Base, CustomVoice and
-VoiceDesign. Image generation uses Qwen-Image-2.1-Turbo in the PR tier; the full
-tier runs the full image suite on both Turbo and Qwen-Image-2.1. All requests use
-512 × 512 and eight steps, without LoRA adapters, so the LoRA case is recorded as not run. Manual `ar` adds the selected LLMs' AR profiles. The existing manual
-`benchmark` option adds Flash-Next and its main/candidate AR depth sweep.
+A model's `settings` map, keyed by configuration, overrides that
+configuration's server settings for the model. DeepSeek V4 runs `cache-bridge`
+with a 1 GiB `cache_ram_bytes`: its checkpoints are under 1/16 of the shared
+2 GiB budget, so that budget leaves the suite unqualified.
+
+Embedding runs its text, image, audio and video suites; TTS covers Base,
+CustomVoice and VoiceDesign. Image generation uses Qwen-Image-2.1-Turbo with the
+smoke suite on PRs; the full tier runs the full image suite on both Turbo and
+Qwen-Image-2.1. All image requests use 512 × 512 and eight steps, without LoRA
+adapters, so the LoRA case is recorded as not run. Manual `ar` adds the selected
+LLMs' AR profiles. The manual `benchmark` option adds Flash-Next and its
+main/candidate AR depth sweep.
 Qwen27 Q8 remains an explicit manual functional qualification outside this bounded
 CI selection. Numerical and agent-replay obligations outside the selected suites
 remain separate; representative coverage is not all-model qualification.
@@ -361,6 +381,59 @@ Only the binary transfer uses the proxy; runner control and model mirror traffic
 keep their existing routes. Temporary credentials and the loopback proxy are
 removed after transfer. The original Actions artifact SHA-256 is mandatory.
 No release relay or privileged publishing workflow is needed.
+
+A second hosted job, in parallel, builds the candidate's checked package
+(`nix build .#checked`): the `gpu-test` configuration (`BUILD_TESTING=ON`,
+RelWithDebInfo), which keeps the serving, memory and cache assertions and the
+checked Rust profile that the production package compiles out with `NDEBUG`. A
+broken runner or cache invariant then aborts the server, which the functional
+harness reports, instead of passing silently. Model libraries keep `NDEBUG` in
+both builds. The job restores the release compiler cache, whose production
+objects it reuses, and keeps its own; its artifact (`linux-devlab-<attempt>-checked`)
+carries only the executable and resolves its libraries from the shared runtime.
+
+The checked build also compiles a model's GPU tests when the plan selects them.
+A model's `devlab.json` fragment names its CTest labels, the rules that select
+them and the environment variables that point them at its pinned weights:
+
+```json
+{"ctest": {"labels": ["ds4"], "rules": ["private-deepseek", "gpu-test-bundles"],
+           "environment": {"GUFO_DEEPSEEK_V4_FLASH_MODEL": "target",
+                           "GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL": "draft"}}}
+```
+
+`target` and `draft` name the model's target and draft files in its pinned
+assets; `asset` names the asset directory.
+
+The plan selects them when a listed rule matches a changed path, and on every
+release (`full`) run. The core `gpu-test-bundles` rule owns the bundling and
+running code (`tools/ci/ctest_bundle.py`, `tests/support/source_path.hpp`,
+`tests/functional/devlab_run.py`) and lists every model with GPU tests; `ctest_labels` in the plan reaches the hosted build
+(`tools/ci/linux-checked.nix`). `tools/ci/ctest_bundle.py` bundles each test of
+those labels whose command is an executable built in the tree, with its
+arguments, labels, timeout, skip code and environment from CTest. Tests that run
+an interpreter from the source tree (`ds4.dataset`) stay with the CPU checks; any
+other CTest property is refused at build time. Fixture files named by the tests'
+compile definitions are copied beside them; tests open them through
+`tests/support/source_path.hpp` (link `gufo_test_source_path`), which maps the
+compiled source root to the bundle's copy. On Devlab, the model's job runs the
+labels before its suites (`devlab_run.py --ctest-bundle`), one test at a time in
+CTest order, and reports each test; a failure fails the model's correctness, and
+skips (exit code 77) are listed. DeepSeek V4 Flash runs `ds4`: 22 tests, about
+29 minutes on gfx1151 with 128 GB, where `ds4.dspark` also runs its C8 x 16384
+replay (`ds4.layered_prefill` 9.3 min, `ds4.target` and `ds4.dspark` 6.4 min
+each). Its `ctest_s` in `devlab_costs.json` gives it a device of its own. Reproduce the Devlab step from a clean checkout (the
+bundle never reads the source tree it was built from):
+
+```sh
+nix build --impure --file tools/ci/linux-checked.nix --argstr labels ds4 -o result-checked
+python3 tools/ci/linux_artifact.py pack --package result-checked \
+  --revision "$(git rev-parse HEAD)" --output bundle/checked
+python3 tools/ci/ctest_bundle.py run --bundle bundle/checked --label ds4 --output ds4-results \
+  --env GUFO_DEEPSEEK_V4_FLASH_MODEL=/models/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf \
+  --env GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL=/models/DeepSeek-V4-Flash-DSpark-support-0731.gguf
+```
+
 The large Linux runtime is archived separately and cached under
 `$HF_HOME/gufo/runtimes` by SHA-256. Cache hits are hash-checked and unpacked
 locally; changed toolchains get a new content hash. Ordinary builds transfer
@@ -384,9 +457,40 @@ The authorized controller checkout contains the English voice fixture. TTS uses
 the main Gufo binary and a pinned ASR checkpoint as its intelligibility
 evaluator. Missing downloads or fixtures fail visibly.
 
-`devlab_run.py` executes models sequentially on the same GPU. LLM configuration
-groups use fresh server/cache histories; service suites use `model_services.py`.
-Correctness runs on the candidate only. A model failure does not hide other
+The plan's `shards` split the work into GPU jobs, one device each:
+
+- Each LLM is one job, and the embedding, ASR and TTS models (NPU variants
+  included) share one. A model splits further only when its measured suite
+  seconds in `devlab_costs.json` exceed the 30-minute job budget; its servers
+  and paired timing arms then pack into jobs up to the budget.
+- Suites marked `"isolation": "server"` in `impact.core.json` get a server of
+  their own. They read server-wide cache state (RAM budget, disk turnover,
+  shared-prefix leaders) that earlier suites change. Suites marked with another
+  name, such as `"isolation": "cache-fill"`, share one server apart from the
+  rest: they fill the RAM cache budget, which would refuse later suites'
+  checkpoints.
+- A model fragment with `"max_jobs": 1` keeps all its work, GPU tests included,
+  on one device past the budget. DeepSeek V4 Flash uses it.
+- Each model's timing arms run once, on one device.
+- The workflow runs one `smoke` matrix job per shard (`devlab_run.py --shard`,
+  `devlab_models.py --shard`). The report job merges each shard's newest attempt
+  with `devlab_merge.py`; a shard without a summary fails its model. *Re-run
+  failed jobs* repeats only the failed shards.
+- Suites run in a per-revision order: the plan's `order_seed`, taken from the
+  merge commit, reaches `run.py --order-seed`, and each `report.json` records the
+  seed and order. A failure that depends on suite order reproduces from them.
+
+Refresh the cost table from a run's `model-functional-*` artifacts or local
+results when suites change:
+
+```sh
+python3 tests/functional/devlab_costs.py path/to/functional-results
+```
+
+Within a job, LLM servers use fresh server/cache histories; service suites use
+`model_services.py`. Correctness runs on the checked candidate only
+(`devlab_run.py --check-binary`); paired timing compares the release builds of
+the candidate and main, and the TTS evaluator stays main's release build. A model failure does not hide other
 models or their speed observations. Each LLM's `phases.py` arms exercise startup,
 short, long and follow-up requests; `service_phases.py` measures bounded service
 histories. Both alternate main/candidate servers for two paired repeats,
@@ -617,8 +721,14 @@ unchanged retries expect full reuse.
 
 Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`
-uses its own 8 GiB disk budget and 1 GiB staging area inside the output directory;
-the runner removes that disk cache when the run ends, keeping reports and logs.
+uses its own disk budget (`--cache-disk-bytes`, 8 GiB by default) and 1 GiB staging
+area inside the output directory; the runner removes that disk cache when the run
+ends, keeping reports and logs. Its restart checks replay every case after the
+whole suite, and disk retention evicts checkpoints unused for a budget of newer
+writes, so the budget must hold what the suite publishes before the restart:
+about 6 GiB of 130–300 MB checkpoints on Flash-Next, but 15 GiB of 256–676 MB
+checkpoints on Qwen27. A model whose checkpoints are that large sets
+`cache_disk_bytes` in its `devlab.json` entry; Qwen27 uses 24 GiB.
 Flash-Next allocates that staging as pinned host memory at startup, beyond its
 RAM budget, although its default 1 MiB transfer buffer suffices. The runner
 keeps 1 GiB so results stay comparable with retained runs and other models.

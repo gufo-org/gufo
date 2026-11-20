@@ -117,7 +117,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
 
   const MultipartPart* file = Find(parts, "file");
   if (file == nullptr || file->body.empty()) {
-    return Error(400, "Bad Request", "a non-empty WAV 'file' is required",
+    return Error(400, "Bad Request", "a non-empty audio 'file' is required",
                  "missing_file");
   }
   const MultipartPart* model = Find(parts, "model");
@@ -238,7 +238,9 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
             return !connected || (cancelled && cancelled());
           };
           if (!service.Transcribe(input, stop, &result, &error)) {
-            log->error_code = stop() ? "cancelled" : "transcription_failed";
+            log->error_code = stop()                 ? "cancelled"
+                              : result.invalid_audio ? "invalid_audio_input"
+                                                     : "transcription_failed";
             if (!stop()) {
               auto event = json::Value::object();
               event["type"] = "error";
@@ -276,6 +278,9 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
     if (request.is_cancelled && request.is_cancelled()) {
       return Error(499, "Client Closed Request", "transcription cancelled",
                    "cancelled");
+    }
+    if (result.invalid_audio) {
+      return Error(400, "Bad Request", std::move(error), "invalid_audio_input");
     }
     return Error(500, "Internal Server Error", std::move(error),
                  "transcription_failed");

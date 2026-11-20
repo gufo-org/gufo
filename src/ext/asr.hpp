@@ -47,6 +47,9 @@ struct TranscriptionResult {
   std::size_t prompt_tokens{0};
   std::size_t chunks{0};
   TranscriptionTimings timings;
+  /// Set by a failed Transcribe when the request's audio could not be
+  /// decoded: the caller's input, not the model, is at fault.
+  bool invalid_audio{false};
 };
 
 using CancellationCheck = std::function<bool()>;

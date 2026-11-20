@@ -15,7 +15,7 @@ namespace {
 constexpr int kCodes = 4096, kMaxTiles = 32;
 using Acc = aie::accum<acc64, 16>;
 alignas(128) Acc g_c[kMaxTiles * 4];  // [tile][group][quarter]
-int32_t g_groups, g_chunks, g_tiles, g_parity, g_a, g_rec, g_t, g_kc, g_out;
+int32_t g_groups, g_chunks, g_tiles, g_parity, g_a, g_rec, g_t, g_kc, g_out, g_compact;
 }  // namespace
 
 extern "C" {
@@ -25,7 +25,13 @@ void gemm_begin(const int32_t* rtp, int32_t parity) {
   aie::set_rounding(aie::rounding_mode::floor);
   aie::set_saturation(aie::saturation_mode::none);
   g_groups = rtp[0], g_chunks = rtp[1], g_tiles = rtp[2], g_parity = parity;
-  g_a = g_rec = g_t = g_kc = g_out = 0;
+  g_compact = rtp[7];
+  g_a = 0;
+}
+
+// Before each output part: zero the accumulators (A stays).
+void gemm_reset(const int32_t*) {
+  g_rec = g_t = g_kc = g_out = 0;
   for (int i = 0; i < g_groups * g_tiles * 4; ++i) g_c[i] = aie::zeros<acc64, 16>();
 }
 
@@ -66,8 +72,20 @@ void gemm_mac(const int8_t* a, const int8_t* b) {
 }
 
 // Output records [tile][group]: the 8 x 8 acc64 as floor(acc / 2^24) [64] int32,
-// then acc mod 2^32 [64]; the host joins them.
+// then acc mod 2^32 [64]; the host joins them. Compact (one row): a record holds
+// row 0 of 8 tiles, [tile 8][8] then the same for acc mod 2^32.
 void gemm_store(int32_t* out) {
+  if (g_compact) {
+    for (int i = 0; i < 8; ++i) {
+      const int tile = g_out * 8 + i;
+      if (tile >= g_tiles) break;
+      const Acc acc = g_c[tile * g_groups * 4];
+      aie::store_v(out + 8 * i, acc.to_vector<int32>(24).extract<8>(0));
+      aie::store_v(out + 64 + 8 * i, acc.to_vector<int32>(0).extract<8>(0));
+    }
+    ++g_out;
+    return;
+  }
   const Acc* src = g_c + g_out * 4;
   for (int q = 0; q < 4; ++q) {
     aie::store_v(out + 16 * q, src[q].to_vector<int32>(24));

@@ -5,6 +5,7 @@
 #include <bit>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -695,48 +696,287 @@ void GatedRows(const float* gate, std::size_t gate_stride, const float* up,
       });
 }
 
-void Attention(const AttentionArgs& p, const KeyRange& keys, bool skip_empty) {
+namespace {
+
+// Attention of one query row per call: dots of its keys, softmax, values.
+void AttentionRows(const AttentionArgs& p, const std::size_t* kb,
+                   const std::size_t* ke, bool skip_empty) {
   const std::size_t group = p.heads / p.kv_heads;
-  // Work items: (head, block of 4 query rows) so a key row serves 4 dots.
-  constexpr std::size_t kBlock = 4;
-  const std::size_t blocks = (p.rows + kBlock - 1) / kBlock;
-  ParallelFor(p.heads * blocks, 1, [&](std::size_t b, std::size_t e) {
+  ParallelFor(p.heads * p.rows, 1, [&](std::size_t b, std::size_t e) {
     std::vector<float> scores;
     std::vector<float> acc(p.dim_v);
     for (std::size_t item = b; item < e; ++item) {
-      const std::size_t h = item / blocks, blk = item % blocks;
+      const std::size_t h = item / p.rows, r = item % p.rows;
       const std::size_t kh = h / group;
-      const std::size_t r0 = blk * kBlock, r1 = std::min(p.rows, r0 + kBlock);
-      for (std::size_t r = r0; r < r1; ++r) {
-        std::size_t kb = 0, ke = 0;
-        keys(r, &kb, &ke);
-        float* o = p.out + r * p.out_stride + h * p.dim_v;
-        if (ke <= kb) {
-          if (!skip_empty)
-            std::fill_n(o, p.dim_v, 0.0f);
+      float* o = p.out + r * p.out_stride + h * p.dim_v;
+      if (ke[r] <= kb[r]) {
+        if (!skip_empty)
+          std::fill_n(o, p.dim_v, 0.0f);
+        continue;
+      }
+      const float* q = p.q + r * p.q_stride + h * p.dim;
+      scores.resize(ke[r] - kb[r]);
+      float top = -INFINITY;
+      for (std::size_t t = kb[r]; t < ke[r]; ++t) {
+        float s = Dot(q, p.k + t * p.k_stride + kh * p.dim, p.dim) * p.scale;
+        if (p.softcap > 0)
+          s = p.softcap * std::tanh(s / p.softcap);
+        scores[t - kb[r]] = s;
+        top = std::max(top, s);
+      }
+      float sum = 0;
+      ExpInPlace(scores.data(), scores.size(), top, &sum);
+      const float inv = 1.0f / sum;
+      std::fill(acc.begin(), acc.end(), 0.0f);
+      for (std::size_t t = kb[r]; t < ke[r]; ++t)
+        Axpy(scores[t - kb[r]] * inv, p.v + t * p.v_stride + kh * p.dim_v,
+             acc.data(), p.dim_v);
+      std::copy(acc.begin(), acc.end(), o);
+    }
+  });
+}
+
+// Tiles of keys: a work item takes one KV head and a block of query rows, so
+// each key tile (transposed, [dim][kTile]) and value tile serves the block's
+// rows times the head group, with an online softmax over the tiles.
+constexpr std::size_t kTile = 64, kBlockRows = 8;
+
+// One step of the online softmax for a query whose scores s[a, z) are set:
+// rescales its sum and accumulator to the new maximum and exponentiates s.
+void SoftmaxStep(float* s, std::size_t a, std::size_t z, float* top, float* sum,
+                 float* o, std::size_t dv) {
+  float m = -INFINITY;
+  for (std::size_t j = a; j < z; ++j)
+    m = std::max(m, s[j]);
+  if (m > *top) {
+    const float f = std::exp(*top - m);
+    *sum *= f;
+    for (std::size_t d = 0; d < dv; ++d)
+      o[d] *= f;
+    *top = m;
+  }
+  float total = 0;
+  ExpInPlace(s + a, z - a, *top, &total);
+  *sum += total;
+}
+
+#ifdef GUFO_NPU_HOST_AVX2
+// s0, s1 [kTile] = q0, q1 . a transposed key tile kd [dim][kTile].
+void TileScores2(const float* q0, const float* q1, const float* kd,
+                 std::size_t dim, float* s0, float* s1) {
+  for (std::size_t jb = 0; jb < kTile; jb += 32) {
+    __m256 a0 = _mm256_setzero_ps(), a1 = a0, a2 = a0, a3 = a0, b0 = a0,
+           b1 = a0, b2 = a0, b3 = a0;
+    for (std::size_t d = 0; d < dim; ++d) {
+      const float* kr = kd + d * kTile + jb;
+      const __m256 k0 = _mm256_loadu_ps(kr), k1 = _mm256_loadu_ps(kr + 8),
+                   k2 = _mm256_loadu_ps(kr + 16), k3 = _mm256_loadu_ps(kr + 24);
+      const __m256 x = _mm256_broadcast_ss(q0 + d),
+                   y = _mm256_broadcast_ss(q1 + d);
+      a0 = _mm256_fmadd_ps(x, k0, a0);
+      a1 = _mm256_fmadd_ps(x, k1, a1);
+      a2 = _mm256_fmadd_ps(x, k2, a2);
+      a3 = _mm256_fmadd_ps(x, k3, a3);
+      b0 = _mm256_fmadd_ps(y, k0, b0);
+      b1 = _mm256_fmadd_ps(y, k1, b1);
+      b2 = _mm256_fmadd_ps(y, k2, b2);
+      b3 = _mm256_fmadd_ps(y, k3, b3);
+    }
+    _mm256_storeu_ps(s0 + jb, a0);
+    _mm256_storeu_ps(s0 + jb + 8, a1);
+    _mm256_storeu_ps(s0 + jb + 16, a2);
+    _mm256_storeu_ps(s0 + jb + 24, a3);
+    _mm256_storeu_ps(s1 + jb, b0);
+    _mm256_storeu_ps(s1 + jb + 8, b1);
+    _mm256_storeu_ps(s1 + jb + 16, b2);
+    _mm256_storeu_ps(s1 + jb + 24, b3);
+  }
+}
+
+// o0, o1 [dv] += sum over n keys of w0[t], w1[t] times value row t.
+void TileValues2(const float* w0, const float* w1, const float* v,
+                 std::size_t v_stride, std::size_t n, std::size_t dv, float* o0,
+                 float* o1) {
+  for (std::size_t db = 0; db < dv; db += 32) {
+    __m256 a0 = _mm256_loadu_ps(o0 + db), a1 = _mm256_loadu_ps(o0 + db + 8),
+           a2 = _mm256_loadu_ps(o0 + db + 16),
+           a3 = _mm256_loadu_ps(o0 + db + 24), b0 = _mm256_loadu_ps(o1 + db),
+           b1 = _mm256_loadu_ps(o1 + db + 8),
+           b2 = _mm256_loadu_ps(o1 + db + 16),
+           b3 = _mm256_loadu_ps(o1 + db + 24);
+    for (std::size_t t = 0; t < n; ++t) {
+      const float* vt = v + t * v_stride + db;
+      const __m256 v0 = _mm256_loadu_ps(vt), v1 = _mm256_loadu_ps(vt + 8),
+                   v2 = _mm256_loadu_ps(vt + 16), v3 = _mm256_loadu_ps(vt + 24);
+      const __m256 x = _mm256_broadcast_ss(w0 + t),
+                   y = _mm256_broadcast_ss(w1 + t);
+      a0 = _mm256_fmadd_ps(x, v0, a0);
+      a1 = _mm256_fmadd_ps(x, v1, a1);
+      a2 = _mm256_fmadd_ps(x, v2, a2);
+      a3 = _mm256_fmadd_ps(x, v3, a3);
+      b0 = _mm256_fmadd_ps(y, v0, b0);
+      b1 = _mm256_fmadd_ps(y, v1, b1);
+      b2 = _mm256_fmadd_ps(y, v2, b2);
+      b3 = _mm256_fmadd_ps(y, v3, b3);
+    }
+    _mm256_storeu_ps(o0 + db, a0);
+    _mm256_storeu_ps(o0 + db + 8, a1);
+    _mm256_storeu_ps(o0 + db + 16, a2);
+    _mm256_storeu_ps(o0 + db + 24, a3);
+    _mm256_storeu_ps(o1 + db, b0);
+    _mm256_storeu_ps(o1 + db + 8, b1);
+    _mm256_storeu_ps(o1 + db + 16, b2);
+    _mm256_storeu_ps(o1 + db + 24, b3);
+  }
+}
+#endif
+
+void AttentionTiled(const AttentionArgs& p, const std::size_t* kb,
+                    const std::size_t* ke, bool skip_empty) {
+  const std::size_t group = p.heads / p.kv_heads, D = p.dim, DV = p.dim_v;
+  std::size_t first = SIZE_MAX, last = 0;
+  for (std::size_t r = 0; r < p.rows; ++r)
+    if (ke[r] > kb[r])
+      first = std::min(first, kb[r]), last = std::max(last, ke[r]);
+  if (first >= last) {
+    if (!skip_empty)
+      for (std::size_t r = 0; r < p.rows; ++r)
+        for (std::size_t h = 0; h < p.heads; ++h)
+          std::fill_n(p.out + r * p.out_stride + h * DV, DV, 0.0f);
+    return;
+  }
+  const std::size_t t0 = first / kTile * kTile,
+                    tiles = (last - t0 + kTile - 1) / kTile;
+  // kt [kv head][tile][dim][kTile], zero past the keys.
+  std::vector<float> kt(p.kv_heads * tiles * D * kTile);
+  ParallelFor(p.kv_heads * tiles, 1, [&](std::size_t b, std::size_t e) {
+    for (std::size_t item = b; item < e; ++item) {
+      const std::size_t kh = item / tiles, tile = item % tiles;
+      float* dst = kt.data() + item * D * kTile;
+      for (std::size_t j = 0; j < kTile; ++j) {
+        const std::size_t t = t0 + tile * kTile + j;
+        if (t >= last) {
+          for (std::size_t d = 0; d < D; ++d)
+            dst[d * kTile + j] = 0.0f;
           continue;
         }
-        const float* q = p.q + r * p.q_stride + h * p.dim;
-        scores.resize(ke - kb);
-        float top = -INFINITY;
-        for (std::size_t t = kb; t < ke; ++t) {
-          float s = Dot(q, p.k + t * p.k_stride + kh * p.dim, p.dim) * p.scale;
-          if (p.softcap > 0)
-            s = p.softcap * std::tanh(s / p.softcap);
-          scores[t - kb] = s;
-          top = std::max(top, s);
-        }
-        float sum = 0;
-        ExpInPlace(scores.data(), scores.size(), top, &sum);
-        const float inv = 1.0f / sum;
-        std::fill(acc.begin(), acc.end(), 0.0f);
-        for (std::size_t t = kb; t < ke; ++t)
-          Axpy(scores[t - kb] * inv, p.v + t * p.v_stride + kh * p.dim_v,
-               acc.data(), p.dim_v);
-        std::copy(acc.begin(), acc.end(), o);
+        const float* src = p.k + t * p.k_stride + kh * D;
+        for (std::size_t d = 0; d < D; ++d)
+          dst[d * kTile + j] = src[d];
       }
     }
   });
+  const std::size_t blocks = (p.rows + kBlockRows - 1) / kBlockRows;
+  // Paired heads need whole vectors of dims and of 32 values.
+  [[maybe_unused]] const bool pairs = DV % 32 == 0;
+  ParallelFor(p.kv_heads * blocks, 1, [&](std::size_t b, std::size_t e) {
+    const std::size_t queries = kBlockRows * group;
+    std::vector<float> acc(queries * DV), top(queries), sum(queries);
+    alignas(32) float s[kTile], s2[kTile];
+    (void)s2;
+    for (std::size_t item = b; item < e; ++item) {
+      const std::size_t kh = item / blocks, blk = item % blocks;
+      const std::size_t r0 = blk * kBlockRows,
+                        r1 = std::min(p.rows, r0 + kBlockRows);
+      std::size_t lo = SIZE_MAX, hi = 0;
+      for (std::size_t r = r0; r < r1; ++r)
+        if (ke[r] > kb[r])
+          lo = std::min(lo, kb[r]), hi = std::max(hi, ke[r]);
+      std::fill(acc.begin(), acc.end(), 0.0f);
+      std::fill(top.begin(), top.end(), -INFINITY);
+      std::fill(sum.begin(), sum.end(), 0.0f);
+      if (lo < hi) {
+        for (std::size_t tile = (lo - t0) / kTile; tile * kTile + t0 < hi;
+             ++tile) {
+          const std::size_t base = t0 + tile * kTile;
+          const float* kd = kt.data() + (kh * tiles + tile) * D * kTile;
+          for (std::size_t r = r0; r < r1; ++r) {
+            const std::size_t a = std::max(kb[r], base),
+                              z = std::min(ke[r], base + kTile);
+            if (a >= z)
+              continue;
+            for (std::size_t g = 0; g < group;) {
+              const std::size_t h = kh * group + g, qi = (r - r0) * group + g;
+              const float* q = p.q + r * p.q_stride + h * D;
+              float* o = acc.data() + qi * DV;
+#ifdef GUFO_NPU_HOST_AVX2
+              // Two heads of the group at once: they share every key and
+              // value load.
+              if (pairs && g + 1 < group) {
+                TileScores2(q, q + D, kd, D, s, s2);
+                for (std::size_t j = a - base; j < z - base; ++j) {
+                  float v0 = s[j] * p.scale, v1 = s2[j] * p.scale;
+                  if (p.softcap > 0) {
+                    v0 = p.softcap * std::tanh(v0 / p.softcap);
+                    v1 = p.softcap * std::tanh(v1 / p.softcap);
+                  }
+                  s[j] = v0, s2[j] = v1;
+                }
+                float* o2 = o + DV;
+                SoftmaxStep(s, a - base, z - base, &top[qi], &sum[qi], o, DV);
+                SoftmaxStep(s2, a - base, z - base, &top[qi + 1], &sum[qi + 1],
+                            o2, DV);
+                TileValues2(s + (a - base), s2 + (a - base),
+                            p.v + a * p.v_stride + kh * DV, p.v_stride, z - a,
+                            DV, o, o2);
+                g += 2;
+                continue;
+              }
+#endif
+              for (std::size_t j = 0; j < kTile; ++j)
+                s[j] = 0.0f;
+              for (std::size_t d = 0; d < D; ++d) {
+                const float qd = q[d];
+                const float* kr = kd + d * kTile;
+                for (std::size_t j = 0; j < kTile; ++j)
+                  s[j] += qd * kr[j];
+              }
+              for (std::size_t j = a - base; j < z - base; ++j) {
+                float v = s[j] * p.scale;
+                if (p.softcap > 0)
+                  v = p.softcap * std::tanh(v / p.softcap);
+                s[j] = v;
+              }
+              SoftmaxStep(s, a - base, z - base, &top[qi], &sum[qi], o, DV);
+              for (std::size_t t = a; t < z; ++t) {
+                const float w = s[t - base];
+                const float* v = p.v + t * p.v_stride + kh * DV;
+                for (std::size_t d = 0; d < DV; ++d)
+                  o[d] += w * v[d];
+              }
+              ++g;
+            }
+          }
+        }
+      }
+      for (std::size_t r = r0; r < r1; ++r)
+        for (std::size_t g = 0; g < group; ++g) {
+          const std::size_t h = kh * group + g, qi = (r - r0) * group + g;
+          float* out = p.out + r * p.out_stride + h * DV;
+          if (ke[r] <= kb[r]) {
+            if (!skip_empty)
+              std::fill_n(out, DV, 0.0f);
+            continue;
+          }
+          const float inv = 1.0f / sum[qi];
+          for (std::size_t d = 0; d < DV; ++d)
+            out[d] = acc[qi * DV + d] * inv;
+        }
+    }
+  });
+}
+
+}  // namespace
+
+void Attention(const AttentionArgs& p, const KeyRange& keys, bool skip_empty) {
+  std::vector<std::size_t> kb(p.rows), ke(p.rows);
+  for (std::size_t r = 0; r < p.rows; ++r)
+    keys(r, &kb[r], &ke[r]);
+  // Few rows (decode): the tiles' transposition would cost more than it saves.
+  if (p.rows < kBlockRows)
+    AttentionRows(p, kb.data(), ke.data(), skip_empty);
+  else
+    AttentionTiled(p, kb.data(), ke.data(), skip_empty);
 }
 
 }  // namespace gufo::npu::host

@@ -13,6 +13,8 @@ bool Continuation(RetentionPurpose p) {
   return p == RetentionPurpose::kContinuation ||
          p == RetentionPurpose::kBranchPoint;
 }
+// Fraction of the RAM budget a cheap conversation keeps its recency for.
+constexpr std::uint64_t kCheapGrace = 16;
 std::uint32_t MaxRank(RetentionPurpose p) {
   return p == RetentionPurpose::kRetry     ? 0
          : p == RetentionPurpose::kHistory ? 1
@@ -178,8 +180,8 @@ std::uint32_t RetentionPolicy::Priority(
   // retry copy. Unrelated cold retries must not evict it immediately merely
   // because its earlier stable prefix is also retained. Advancing the same
   // history above still permits replacement; reuse protection ages by bytes.
-  if (e.purpose == RetentionPurpose::kRetry && e.reused_at &&
-      admitted_bytes_ - *e.reused_at < ledger_.Limits().ram_bytes)
+  if (e.purpose == RetentionPurpose::kRetry && e.reused &&
+      admitted_bytes_ - e.reused_bytes < ledger_.Limits().ram_bytes)
     return 3;
   for (std::size_t i = 0; i < limit_; ++i) {
     const auto& peer = records_[i];
@@ -256,7 +258,7 @@ std::array<std::uint64_t, 5> RetentionPolicy::PressureOrder(
       rows += c.position.valid_rows * c.descriptor.row_bytes;
   const auto turnover = ledger_.Limits().ram_bytes;
   const auto fresh = [&](const Record& x) {
-    return x.reused_at && admitted_bytes_ - *x.reused_at < turnover;
+    return x.reused && admitted_bytes_ - x.reused_bytes < turnover;
   };
   // A short prompt is cheap to prefill again. Once reused it competes by
   // recency with unreused conversations instead: evicting the checkpoint a
@@ -268,9 +270,20 @@ std::array<std::uint64_t, 5> RetentionPolicy::PressureOrder(
                              e.checkpoint->Input() == r.input &&
                              e.checkpoint->Boundary() < r.tokens.size() &&
                              Prefix(e.checkpoint->Tokens(), r.tokens);
+  // A new short conversation keeps its recency for a sixteenth of the budget:
+  // otherwise the next unrelated request evicts it ahead of stale ones, and
+  // its follow-up misses. Older ones still give way before deep idle ones.
+  const auto young = [&](const Record& x) {
+    return admitted_bytes_ - x.used_bytes < turnover / kCheapGrace;
+  };
   const bool cheap = rows * 8 < state && !shared_prefix;
-  if (cheap && !fresh(e))
-    return {1, 0, e.last_used, 0, 0};
+  if (cheap && !fresh(e)) {
+    bool recent = young(e);
+    for (std::size_t j = 0; j < limit_ && !recent; ++j)
+      recent = e.below[j] && young(records_[j]);
+    if (!recent)
+      return {1, 0, e.last_used, 0, 0};
+  }
   bool rooted = false, reused = fresh(e);
   auto recency = e.last_used;
   const bool covered = e.below.any();
@@ -474,9 +487,10 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
       Prefix(records_[source].checkpoint->Tokens(), r.tokens);
   const auto eligible = [&](std::size_t i) {
     // Byte admission for an edit boundary must not starve behind last copies
-    // of older families. A short resumed tail may also replace covered history
-    // to retain its complete retry state; faster captures can otherwise fill
-    // the pool with older ancestors before this final boundary is reached.
+    // of older families. A short resumed tail may also replace other
+    // conversations' covered history to retain its complete retry state;
+    // faster captures can otherwise fill the pool with older ancestors before
+    // this final boundary is reached.
     // Retry admission still protects last copies, forks and current edit
     // boundaries. A larger resumed turn can reclaim its own covered prefix
     // history, without taking another conversation's history for compaction.
@@ -497,9 +511,19 @@ std::size_t RetentionPolicy::Victim(const RetentionRequest& r,
         (records_[i].checkpoint->Purpose() != CheckpointPurpose::kGenerated ||
          records_[i].frontier_used || records_[i].forked || Branch(i)))
       return false;
+    const auto& checkpoint = *records_[i].checkpoint;
+    // A short resumed tail's copy saves at most the retry framing, which the
+    // stable boundary it resumed from already restores. Its own conversation's
+    // history below that boundary is what an edit of the last turn resumes
+    // from, so the copy never displaces it; only last-resort rank-0 copies.
+    if (resumed_tail && r.purpose == RetentionPurpose::kRetry && level > 0 &&
+        checkpoint.Compatibility() == r.compatibility &&
+        checkpoint.Input() == r.input &&
+        checkpoint.Boundary() <= r.reused_tokens &&
+        Prefix(checkpoint.Tokens(), r.tokens))
+      return false;
     if (level <= maximum)
       return true;
-    const auto& checkpoint = *records_[i].checkpoint;
     return !record_pressure && r.purpose == RetentionPurpose::kRetry &&
            r.reused && r.reused_tokens && r.reused_tokens <= r.tokens.size() &&
            level <= 2 && checkpoint.Boundary() <= r.reused_tokens &&
@@ -683,7 +707,7 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
   std::optional<std::uint64_t> reused_at;
   bool frontier_used = false;
   if (exact != limit_) {
-    reused_at = records_[exact].reused_at;
+    reused_at = records_[exact].ReusedAt();
     frontier_used = records_[exact].frontier_used;
   }
   while (true) {
@@ -708,7 +732,7 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
       const auto entry =
           index_.Insert(checkpoint, std::move(available), r.stable);
       if (exact != limit_ && records_[exact].checkpoint) {
-        reused_at = records_[exact].reused_at;
+        reused_at = records_[exact].ReusedAt();
         frontier_used = records_[exact].frontier_used;
         Erase(exact, RetentionReason::kExactReplacement, Priority(exact, &r));
       } else if (size_ == limit_) {
@@ -738,9 +762,10 @@ bool RetentionPolicy::Admit(const RetentionRequest& r, const Capture& capture) {
       if (retained_payload_bytes_)
         *retained_payload_bytes_ += UniquePayloadBytes(target);
       admitted_bytes_ += UniqueBytes(target);
+      e.used_bytes = admitted_bytes_;
       Relate(target);
       if (r.reused || reused_at)
-        e.reused_at = r.reused ? admitted_bytes_ : reused_at;
+        e.SetReusedAt(r.reused ? admitted_bytes_ : *reused_at);
       Emit(RetentionAction::kAdmitted, RetentionReason::kCaptured,
            e.checkpoint->Id(), e.checkpoint->Boundary(), purpose,
            Priority(target), e.last_used);
@@ -851,7 +876,8 @@ void RetentionPolicy::Touch(CheckpointId id) {
   auto& e = records_[i];
   e.last_used = ++clock_;
   e.frontier_used = true;
-  e.reused_at = admitted_bytes_;
+  e.SetReusedAt(admitted_bytes_);
+  e.used_bytes = admitted_bytes_;
   Emit(RetentionAction::kTouched, RetentionReason::kExplicit, id,
        e.checkpoint->Boundary(), e.purpose, Priority(i), e.last_used);
 }

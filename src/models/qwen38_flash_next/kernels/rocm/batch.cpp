@@ -208,6 +208,9 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
         item.session->mtp_.position + n > item.session->max_context_) {
       return Fail(error, "invalid MTP body request");
     }
+    if (!EnsureKv(*item.session, item.session->position_,
+                  item.session->mtp_.position + n, error))
+      return false;
     for (std::size_t j = 0; j < i; ++j) {
       if (items[j].session == item.session)
         return Fail(error, "MTP body requests must be independent");
@@ -220,7 +223,7 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
     rows += n;
     final_rows[i] = rows - 1;
   }
-  if (rows > options_.max_batch)
+  if (rows > scratch_rows_)
     return Fail(error, "MTP body batch exceeds executor capacity");
   if (!AnyActive(items))
     return true;
@@ -700,7 +703,7 @@ bool Executor::QuantizeBatch(const float* x, std::uint32_t rows,
   // is idle during batch decoding; borrow it without adding another buffer.
   const auto padded = (rows + kDecodeRows - 1) / kDecodeRows * kDecodeRows;
   const auto bytes = qfn_mmq_q8_1_bytes(padded, cols);
-  if (bytes > Q8TiledBytes(options_.max_batch, model_->max_q8_cols()))
+  if (bytes > Q8TiledBytes(scratch_rows_, model_->max_q8_cols()))
     return Fail(error, "batched projection exceeds activation scratch");
   void* quantized = s_.x_q8t;
   q8t_src_ = nullptr;
@@ -874,6 +877,15 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
             item.session->max_context_) {
       return Fail(error, "invalid session or chain in decode batch");
     }
+    if (!EnsureKv(*item.session,
+                  item.session->position_ +
+                      static_cast<std::uint32_t>(item.tokens.size()),
+                  item.session->mtp_enabled_
+                      ? item.session->mtp_.position +
+                            static_cast<std::uint32_t>(item.tokens.size())
+                      : 0,
+                  error))
+      return false;
     for (std::size_t j = 0; j < i; ++j) {
       if (items[j].session == item.session) {
         return Fail(error, "decode batch contains a duplicate session");
@@ -892,7 +904,7 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
     sparse[i] = c.compress_ratio > 0 && end > c.indexer_top_k;
     complete[i] = c.compress_ratio > 0 ? end / c.compress_ratio : 0;
   }
-  if (rows > options_.max_batch) {
+  if (rows > scratch_rows_) {
     return Fail(error, "decode batch exceeds executor capacity");
   }
   if (!AnyActive(items))

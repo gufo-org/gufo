@@ -28,10 +28,20 @@ struct ComponentCacheResources {
   std::shared_ptr<void> owner;
   std::unique_ptr<Adapter> adapter;
   StreamLease stream;
+  // Optional stream classes; empty ones fall back to `stream`. Foreground
+  // restores never queue behind captures or persistence on a shared FIFO
+  // stream, and disk writes never queue in front of a restore.
+  StreamLease restore_stream;
+  StreamLease background_stream;
   std::function<ComponentCaptureBuffer(const PayloadRequest&)> allocate;
   StagingAllocator staging;
   // Prepare on-demand backing immediately before the next prefill chunk.
   std::function<void(std::size_t)> prepare_prefill;
+  // Optional: prepare free backing for captures of about this many payload
+  // bytes off the calling thread. A disk restore asks before it starts for
+  // its checkpoint's bytes plus those of restores not captured yet, since
+  // the capture after each one needs its whole checkpoint.
+  std::function<void(std::size_t)> prepare_capture;
   // Optional capacity bound before assigning a complete capture. False takes
   // the ordinary reclamation path; true still requires every allocation.
   std::function<bool(std::span<const PayloadRequest>)> can_capture;
@@ -42,6 +52,11 @@ struct ComponentCacheResources {
   // allocated. Serving charges them on top of the cache's budget, and adds
   // them back to the runner's claim, which measures the host after them.
   std::function<std::size_t()> pinned_bytes;
+  // Optional: installs how the provider evicts one retained checkpoint when
+  // sessions need its pages back (nullptr removes it; a call in progress
+  // finishes first). The function returns false when nothing could go. Only
+  // a provider whose backing sessions can borrow sets this.
+  std::function<void(std::function<bool()>)> set_shed;
   PersistenceSource::CopyRows copy_observed_rows;
   // At most this many transfers of one capture/restore are in flight before
   // waiting (16 at most). When the shared pool is momentarily exhausted, the
@@ -49,5 +64,12 @@ struct ComponentCacheResources {
   // usable without a pool-capacity contract.
   std::size_t transfer_batch_size{1};
   std::size_t reassignment_batch_size{1};
+  // Optional: gives up to about the bytes asked for of committed backing
+  // whose payloads are all gone back to the host, and returns the bytes it
+  // released; nothing is evicted. The serving layer calls it only while no
+  // work runs, since releasing device-mapped pages waits for the device.
+  // Released backing comes back as captures need it, under the provider's
+  // usual growth rules.
+  std::function<std::size_t(std::size_t)> release_host;
 };
 }  // namespace gufo::cache

@@ -33,7 +33,7 @@ def require(condition, message):
 
 
 def probe(port, method, path, body=None):
-    started = time.monotonic()
+    started = time.perf_counter()
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
         connection.request(method, path, None if body is None else json.dumps(body),
@@ -46,10 +46,10 @@ def probe(port, method, path, body=None):
             payload = text
         return {"status": response.status, "body": payload,
                 "retry_after": response.getheader("Retry-After"),
-                "wall_s": time.monotonic() - started}
+                "wall_s": time.perf_counter() - started}
     except (OSError, http.client.HTTPException) as error:
         return {"status": None, "error": type(error).__name__,
-                "wall_s": time.monotonic() - started}
+                "wall_s": time.perf_counter() - started}
     finally:
         connection.close()
 
@@ -67,18 +67,18 @@ def generation(model):
 
 def observe(process, port, deadline, observations):
     """Probes until /ready answers 200, appending every observation in order."""
-    spawned = time.monotonic()
+    spawned = time.perf_counter()
 
     def record(method, path, body=None):
         result = probe(port, method, path, body)
-        result.update(t_s=round(time.monotonic() - spawned, 3),
+        result.update(t_s=round(time.perf_counter() - spawned, 3),
                       method=method, path=path)
         observations.append(result)
         return result
 
     while True:
         require(process.poll() is None, f"server exited {process.returncode} during load")
-        require(time.monotonic() < deadline, "startup timed out before /ready")
+        require(time.perf_counter() < deadline, "startup timed out before /ready")
         health = record("GET", "/health")
         if record("GET", "/ready")["status"] == 200:
             return
@@ -186,7 +186,7 @@ def main():
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                    **SERVER_POPEN)
         try:
-            observe(process, port, time.monotonic() + args.startup_timeout,
+            observe(process, port, time.perf_counter() + args.startup_timeout,
                     observations)
             report["loading"] = check_loading_phase(observations)
             report["ready"] = check_ready(port, model)

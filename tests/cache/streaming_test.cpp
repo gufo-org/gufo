@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <barrier>
 #include <cassert>
 #include <cstring>
@@ -9,6 +10,7 @@
 #include <fstream>
 #include <future>
 #include <numeric>
+#include <optional>
 #include <thread>
 
 #include "src/cache/prefetch_cursor.hpp"
@@ -221,6 +223,127 @@ void RestoreGroupsAdjacentFilesWithinStaging() {
   const auto positions = fixture.adapter.Positions(*destination);
   assert(
       std::ranges::all_of(positions, [](auto p) { return p.valid_rows == 0; }));
+}
+// Readers fill eight 35-byte pieces in parallel. The copies, their grouping
+// and the restored state equal those of one 35-byte piece; a corrupt file
+// fails the whole restore after every copy settles, and a stop cancels it.
+void RestoreReadsGroupsInParallel() {
+  constexpr std::size_t kPiece = 35;
+  constexpr std::size_t kStaging = 9 * kPiece;
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, kStaging, 4096}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  std::stop_source stop;
+  std::atomic<unsigned> leases{};
+  std::atomic<unsigned> stop_at{0};
+  StreamedStore streams(
+      ledger, disk, kStaging, Allocate,
+      [&] {
+        if (++leases == stop_at.load())
+          stop.request_stop();
+        return Lease();
+      },
+      kPiece);
+  Fixture fixture(ledger, 1, 0, 43);
+  auto sources = fixture.Sources();
+  TransferTiming written;
+  streams.Write(Id(100), fixture.manifest, sources, written);
+  assert(written.pieces != 0);
+  for (int round = 0; round < 20; ++round) {
+    auto destination = fixture.adapter.CreateSlot(fixture.guard);
+    TransferTiming restored;
+    assert(streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                           *destination, restored));
+    assert(restored.pieces == 12 && restored.bytes == 360);
+    assert(fixture.adapter.RecurrentHash(*destination) == fixture.hash);
+  }
+  {
+    auto destination = fixture.adapter.CreateSlot(fixture.guard);
+    TransferTiming restored;
+    assert(streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                           *destination, restored));
+    const std::array<Token, 2> next{88, 91};
+    fixture.adapter.Append(*destination, next, next);
+    fixture.adapter.Append(*fixture.source, next, next);
+    assert(fixture.adapter.RecurrentHash(*destination) ==
+           fixture.adapter.RecurrentHash(*fixture.source));
+  }
+  assert(ledger.Snapshot().peak_bytes[static_cast<std::size_t>(
+             ResourceCategory::kTransferStaging)] == kStaging);
+  // Stopped after its third copy: nothing restored, no fallback.
+  {
+    leases = 0;
+    stop_at = 3;
+    auto destination = fixture.adapter.CreateSlot(fixture.guard);
+    TransferTiming cancelled;
+    bool fallback{};
+    assert(!streams.Restore({1}, fixture.manifest.compatibility,
+                            fixture.adapter, *destination, cancelled,
+                            stop.get_token(), [&] { fallback = true; }));
+    assert(!fallback && destination->IsValid());
+    for (auto position : fixture.adapter.Positions(*destination))
+      assert(position.valid_rows == 0);
+    stop_at = 0;
+  }
+  // A corrupt file in a later group fails after earlier groups were copied.
+  const auto file = fixture.manifest.components[0].chunks[7].file;
+  {
+    std::fstream corrupt(dir.path / "v2/chunks" / DiskFileName(file),
+                         std::ios::in | std::ios::out | std::ios::binary);
+    corrupt.put('\xff');
+  }
+  auto destination = fixture.adapter.CreateSlot(fixture.guard);
+  TransferTiming failed;
+  std::optional<std::pair<bool, DiskFileId>> reported;
+  assert(!streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                          *destination, failed, {}, {},
+                          [&](bool private_file, DiskFileId id) {
+                            reported.emplace(private_file, id);
+                          }));
+  assert(reported && !reported->first && reported->second == file);
+  const auto positions = fixture.adapter.Positions(*destination);
+  assert(
+      std::ranges::all_of(positions, [](auto p) { return p.valid_rows == 0; }));
+}
+// Pieces smaller than a file: readers read every chunk and the private state
+// piece by piece into successive pieces, which the restoring thread copies.
+void RestoreReadsLargeFilesInPieces() {
+  constexpr std::size_t kPiece = 8;
+  constexpr std::size_t kStaging = 8 * kPiece;
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, kStaging, 4096}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, kStaging, Allocate, Lease, kPiece);
+  Fixture fixture(ledger, 1, 0, 43);
+  auto sources = fixture.Sources();
+  TransferTiming written;
+  streams.Write(Id(100), fixture.manifest, sources, written);
+  for (int round = 0; round < 20; ++round) {
+    auto destination = fixture.adapter.CreateSlot(fixture.guard);
+    TransferTiming restored;
+    assert(streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                           *destination, restored));
+    assert(restored.bytes == 360 && restored.pieces > 12);
+    assert(fixture.adapter.RecurrentHash(*destination) == fixture.hash);
+  }
+  const auto file = fixture.manifest.components[0].chunks[5].file;
+  {
+    std::fstream corrupt(dir.path / "v2/chunks" / DiskFileName(file),
+                         std::ios::in | std::ios::out | std::ios::binary);
+    corrupt.seekp(9);
+    corrupt.put('\xff');
+  }
+  auto destination = fixture.adapter.CreateSlot(fixture.guard);
+  TransferTiming failed;
+  std::optional<std::pair<bool, DiskFileId>> reported;
+  assert(!streams.Restore({1}, fixture.manifest.compatibility, fixture.adapter,
+                          *destination, failed, {}, {},
+                          [&](bool private_file, DiskFileId id) {
+                            reported.emplace(private_file, id);
+                          }));
+  assert(reported && !reported->first && reported->second == file);
+  for (auto position : fixture.adapter.Positions(*destination))
+    assert(position.valid_rows == 0);
 }
 void RoundTripAndFailures() {
   Directory dir;
@@ -967,6 +1090,153 @@ void FirstPendingAnchorSurvivesCoalescing() {
                          *destination, timing));
   assert(latest.adapter.RecurrentHash(*destination) == latest.hash);
 }
+// #1250: a slow writer must not decide which turn ends reach disk. Each
+// generated frontier is a branch point; it coalesces into newer turn ends only
+// when the queue has no room for the next one.
+void TurnEndsSurviveWhileQueueHasRoom() {
+  for (const bool full : {false, true}) {
+    Directory dir;
+    ResourceLedger ledger{{1 << 22, 1 << 21, 16, 8192}};
+    DiskStore disk(ledger, dir.path, 1 << 20);
+    StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+    Fixture active(ledger), first(ledger, 2, 100, 48),
+        second(ledger, 3, 200, 56), third(ledger, 4, 300, 64);
+    for (auto* fixture : {&active, &first, &second, &third})
+      fixture->manifest.purpose = CheckpointPurpose::kGenerated;
+    std::atomic<bool> idle{}, started{};
+    std::vector<CheckpointId> superseded;
+    PersistenceQueue queue(
+        ledger, streams, full ? 3 : 4, 8192,
+        [&] {
+          started = true;
+          return idle.load();
+        },
+        [&](CheckpointId id, bool succeeded) {
+          if (!succeeded)
+            superseded.push_back(id);
+        },
+        {}, std::chrono::hours(1));
+    assert(queue.TrySubmit(
+        PersistenceJob(ledger, Id(1000), active.manifest, active.Sources())));
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!started && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    assert(started);
+    for (auto* fixture : {&first, &second, &third})
+      assert(queue.TrySubmit(
+          PersistenceJob(ledger, Id(1000 + fixture->manifest.checkpoint.value),
+                         fixture->manifest, fixture->Sources())));
+    const auto stats = queue.Stats();
+    assert(stats.superseded == full && stats.coalesced == full);
+    assert(stats.pending == (full ? 3U : 4U));
+    idle = true;
+    queue.Drain();
+    assert(superseded.size() == full);
+    if (full)
+      assert(superseded.front() == CheckpointId{2});
+    assert(disk.Open({1}) && disk.Open({3}) && disk.Open({4}));
+    assert(bool(disk.Open({2})) == !full);
+    assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+  }
+}
+// One conversation's queued turn ends must not leave a full queue without room
+// for another conversation's newest turn end: the oldest one with two newer
+// queued turn ends coalesces instead.
+void TurnEndBacklogLeavesRoomForOtherConversations() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 22, 1 << 21, 16, 8192}};
+  DiskStore disk(ledger, dir.path, 1 << 20);
+  StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+  Fixture active(ledger), first(ledger, 2, 100, 48), second(ledger, 3, 200, 56),
+      third(ledger, 4, 300, 64), other(ledger, 5, 400, 48);
+  for (auto* fixture : {&active, &first, &second, &third, &other})
+    fixture->manifest.purpose = CheckpointPurpose::kGenerated;
+  other.manifest.lineage = {2};
+  other.manifest.compatibility[0] = 43;
+  std::atomic<bool> idle{}, started{};
+  std::vector<CheckpointId> superseded;
+  PersistenceQueue queue(
+      ledger, streams, 4, 8192,
+      [&] {
+        started = true;
+        return idle.load();
+      },
+      [&](CheckpointId id, bool succeeded) {
+        if (!succeeded)
+          superseded.push_back(id);
+      },
+      {}, std::chrono::hours(1));
+  assert(queue.TrySubmit(
+      PersistenceJob(ledger, Id(1000), active.manifest, active.Sources())));
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!started && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  assert(started);
+  for (auto* fixture : {&first, &second, &third, &other})
+    assert(queue.TrySubmit(
+        PersistenceJob(ledger, Id(1000 + fixture->manifest.checkpoint.value),
+                       fixture->manifest, fixture->Sources())));
+  const auto stats = queue.Stats();
+  assert(stats.superseded == 1 && stats.coalesced == 1 && stats.pending == 4);
+  idle = true;
+  queue.Drain();
+  assert(superseded == std::vector<CheckpointId>{CheckpointId{2}});
+  assert(disk.Open({1}) && disk.Open({3}) && disk.Open({4}) && disk.Open({5}));
+  assert(!disk.Open({2}));
+  assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+}
+// Under pressure a larger, newer turn end may need more than one covered turn
+// end to coalesce before it fits the generated half of the pinned budget.
+// Coalescing only one would skip the newest turn end, the one the next request
+// continues from, while older ones stay queued.
+void NewestTurnEndCoalescesEnoughToFit() {
+  Directory dir;
+  ResourceLedger ledger{{1 << 24, 1 << 23, 64, 1 << 16}};
+  DiskStore disk(ledger, dir.path, 1 << 22);
+  StreamedStore streams(ledger, disk, 16, Allocate, Lease);
+  std::vector<std::unique_ptr<Fixture>> turns;
+  for (unsigned i = 0; i < 9; ++i) {
+    turns.push_back(
+        std::make_unique<Fixture>(ledger, i + 1, 100 * (i + 1), 40 + 8 * i));
+    turns.back()->manifest.purpose = CheckpointPurpose::kGenerated;
+  }
+  std::atomic<bool> idle{}, started{};
+  std::vector<CheckpointId> superseded;
+  PersistenceQueue queue(
+      ledger, streams, 8, 8192,
+      [&] {
+        started = true;
+        return idle.load();
+      },
+      [&](CheckpointId id, bool succeeded) {
+        if (!succeeded)
+          superseded.push_back(id);
+      },
+      {}, std::chrono::hours(1));
+  for (auto& turn : turns) {
+    assert(queue.TrySubmit(
+        PersistenceJob(ledger, Id(5000 + turn->manifest.checkpoint.value),
+                       turn->manifest, turn->Sources())));
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!started && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    assert(started);
+  }
+  // Turn 8 fits after coalescing turn 2; turn 9 needs turns 3 and 4.
+  const auto stats = queue.Stats();
+  assert(stats.skipped == 0 && stats.coalesced == 3 && stats.pending == 6);
+  idle = true;
+  queue.Drain();
+  assert(
+      (superseded == std::vector<CheckpointId>{CheckpointId{2}, CheckpointId{3},
+                                               CheckpointId{4}}));
+  for (unsigned i = 1; i <= 9; ++i)
+    assert(bool(disk.Open({i})) == (i == 1 || i > 4));
+  assert(ledger.Snapshot().persistence_pinned_bytes == 0);
+}
 void AdmissionFailures() {
   Directory dir;
   ResourceLedger ledger{{1 << 22, 1 << 21, 16, 4096}};
@@ -1245,6 +1515,8 @@ int main() {
   MinimumStagingHoldsWidestRow();
   PrefetchDoesNotValidateOrAdmitPayload();
   RestoreGroupsAdjacentFilesWithinStaging();
+  RestoreReadsGroupsInParallel();
+  RestoreReadsLargeFilesInPieces();
   LiveRowsStreamWithoutWholeHistoryBacking();
   BorrowedSourcesWaitWithoutBlockingForeground();
   LiveBorrowedSourcesPublishFromSlot();
@@ -1256,6 +1528,9 @@ int main() {
   BusyModelYieldIsBounded();
   NewestPendingFrontierSurvives();
   FirstPendingAnchorSurvivesCoalescing();
+  TurnEndsSurviveWhileQueueHasRoom();
+  TurnEndBacklogLeavesRoomForOtherConversations();
+  NewestTurnEndCoalescesEnoughToFit();
   GeneratedJobsYieldToPromptAnchors();
   CoalescingKeepsFrontierHeadroom();
   DiscardPendingReleasesPinsAndDrainWaitsForItsCallback();

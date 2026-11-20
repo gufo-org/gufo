@@ -55,7 +55,10 @@ public:
   // a native stream failure quarantines every lease mapped to that stream.
   // Both counts must be nonzero, with native_streams <= capacity. Equal counts
   // retain the one-argument constructor's exclusive stream behavior.
-  TransferPool(std::size_t capacity, std::size_t native_streams);
+  // A nonzero `priority` creates the native streams with that HIP stream
+  // priority (lower is greater; -1 is the greatest on gfx1151).
+  TransferPool(std::size_t capacity, std::size_t native_streams,
+               int priority = 0);
   // Returns null on exhaustion. No HIP allocation/stream/event creation here.
   // An event returns only after BOTH stream and completion release their lease.
   // Failed resources are quarantined rather than reused. A shared pool throws

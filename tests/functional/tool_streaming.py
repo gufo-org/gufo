@@ -70,7 +70,7 @@ def request(model, api, thinking=False):
 
 
 def collect(client, api, body):
-    started = time.monotonic()
+    started = time.perf_counter()
     if api == "chat":
         stream = client.chat.completions.create(
             **body, stream=True, stream_options={"include_usage": True})
@@ -85,7 +85,7 @@ def collect(client, api, body):
         for item in stream:
             event = item if isinstance(item, dict) else item.to_dict()
             events.append(event)
-            arrivals.append((time.monotonic() - started) * 1000)
+            arrivals.append((time.perf_counter() - started) * 1000)
     return analyze(api, events, arrivals)
 
 

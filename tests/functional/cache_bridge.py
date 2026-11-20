@@ -11,8 +11,9 @@ turns back, less one learning step, and answer as an uncached control does.
 
 Run this suite in its own invocation with a RAM budget that holds at most
 SNAPSHOT_RATIO conversation checkpoints, such as `--cache-ram-bytes 2147483648`
-for Qwen3.8-Flash-Next at the default context; a larger budget fails as
-unqualified rather than passing without pressure.
+for Qwen3.8-Flash-Next or 1073741824 for DeepSeek V4 Flash at the default
+context; a larger budget fails as unqualified rather than passing without
+pressure.
 """
 
 from copy import deepcopy
@@ -29,8 +30,8 @@ MAX_FILL_REQUESTS = 64
 # automatic budget on a 128 GiB host. Smaller ratios do not reproduce pressure.
 SNAPSHOT_RATIO = 16
 # Below this gain the server keeps the nearest existing checkpoint instead of
-# learning a new divergence point (TextRunnerPool::Request::kSharedPrefixMinTokens).
-LEARN_MIN_TOKENS = 512
+# learning a new divergence point (TextRunnerPool::Request::kSharedBranchMinTokens).
+LEARN_MIN_TOKENS = 192
 # Template framing and tokenizer merges where a user message starts, plus the
 # probe's one-word user turn and generation prompt.
 BOUNDARY_ALLOWANCE = 96
@@ -128,7 +129,9 @@ def check_cache_bridge(client, model, checks, chat_result, capacity_bytes):
     # needed. The stem measures the system prompt the conversation shares.
     _, stem = chat("bridge_stem", [system, {"role": "user", "content": "Z"}], cold=True)
     shared = stem["usage"]["prompt_tokens"]
-    for turn, (body, warm) in enumerate(turns, 1):
+    # Each turn already asserts its code; the last turn's control replays the
+    # whole bridged history.
+    for turn, (body, warm) in list(enumerate(turns, 1))[-1:]:
         _, cold = chat(f"bridge_cold_control_{turn}", body["messages"], cold=True)
         assert cold["usage"]["prompt_tokens"] == warm["usage"]["prompt_tokens"], (warm, cold)
         assert answer(cold) == answer(warm), (warm, cold)

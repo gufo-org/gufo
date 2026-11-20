@@ -288,7 +288,7 @@ class ServerResourceSampler:
         except (FileNotFoundError, ProcessLookupError):
             pass
         return {'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                'monotonic_seconds': time.monotonic(), 'event': event,
+                'monotonic_seconds': time.perf_counter(), 'event': event,
                 'pid': self.process.pid, 'start_ticks': self.identity,
                 'process_identity': identity_status, 'host': host, 'process': process}
 
@@ -387,7 +387,7 @@ def assert_cold_control(out, label, cached, cold):
 
 def wait_for_published(out, log_name, minimum, server, timeout=120):
     import time
-    started = time.monotonic()
+    started = time.perf_counter()
     deadline = started + timeout
     path = Path(out) / log_name
     while True:
@@ -403,7 +403,7 @@ def wait_for_published(out, log_name, minimum, server, timeout=120):
             if observation['server_returncode'] is not None:
                 raise RuntimeError('Server exited before controlled SIGKILL')
             return observation
-        if server.poll() is not None or time.monotonic() >= deadline:
+        if server.poll() is not None or time.perf_counter() >= deadline:
             observation = {'minimum': minimum, 'published_tokens': published,
                            'server_returncode': server.poll(), 'qualified': False}
             (Path(out) / (log_name + '.pre-kill-publication.json')).write_text(

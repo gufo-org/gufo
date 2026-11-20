@@ -47,6 +47,14 @@ bool UseQwen27bFp16Prefill(const models::QwenModelWeights& weights,
 }
 }  // namespace
 
+double QwenGpuExecutor::PrefillPassCost(std::size_t rows) const {
+  // Measured on gfx1151 at depth 2048 (gufo-org/gufo#1178): every pass reads
+  // all weights once, about 120 ms, and each row then costs about 2.25 ms,
+  // or 1.80 ms on the FP16 route of a large low-bit pass.
+  return 120.0 + static_cast<double>(rows) *
+                     (UseQwen27bFp16Prefill(weights_, rows) ? 1.80 : 2.25);
+}
+
 tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
     std::span<const tokenization::TokenId> prompt_tokens,
     std::uint32_t start_pos, bool compute_logits) {
@@ -71,6 +79,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
   if (batch_size > arena_.GetMaxBatch()) {
     throw std::length_error("prompt chunk exceeds the GPU batch length");
   }
+  arena_.EnsureKvRows(start_pos + static_cast<std::uint32_t>(batch_size));
   models::qwen::ContinuationWrite write(
       continuation_hooks_, start_pos,
       start_pos + static_cast<std::uint32_t>(batch_size));
@@ -722,6 +731,8 @@ void QwenGpuExecutor::CommitVerificationChunk(
   if (start_pos > arena_.GetMaxContext() ||
       committed_tokens.size() > arena_.GetMaxContext() - start_pos)
     throw std::length_error("committed Qwen chunk exceeds context");
+  arena_.EnsureKvRows(start_pos +
+                      static_cast<std::uint32_t>(committed_tokens.size()));
   models::qwen::ContinuationWrite write(
       continuation_hooks_, start_pos,
       start_pos + static_cast<std::uint32_t>(committed_tokens.size()));

@@ -183,7 +183,9 @@ cost.
 Each model chooses its prefill chunk. Every text runner declares a scheduling
 profile: beside decoders, the host keeps the profile's pass width and splits
 each pass by layers, with a decode round between groups (one group runs it
-unsplit). A lone request keeps the model's own pass width. `--prefill-chunk`
+unsplit). A lone request keeps the profile's pass width while another session
+is free, so a request arriving during it waits for one such pass, and the
+model's own, possibly wider, pass when every session is taken. `--prefill-chunk`
 is deprecated: it is accepted, ignored with a `event=deprecated_option`
 warning, and will be removed at the next breaking release.
 
@@ -209,9 +211,11 @@ at 32 GiB and half the available host RAM after model/state allocation, respecti
 container limits. Available RAM is `MemAvailable` minus `CmaFree`: free CMA
 pages, such as the kernel's KHO scratch area on Ubuntu 26.04, only hold
 movable pages, not GPU allocations. 27B also checks HIP free memory. A
-positive value sets a byte cap that may exceed the automatic budget, up to the
-available host RAM minus 4 GiB; the startup line reports both as
-`automatic_bytes` and `max_bytes`.
+positive value sets a byte cap that may exceed the automatic budget, up to
+`MemAvailable` minus the larger of `CmaFree` and a 4 GiB host reserve (within
+a container, its limit minus 4 GiB). The OS keeps its reserve in the free CMA
+pages, which the cache cannot pin, so the two are not subtracted together. The
+startup line reports both as `automatic_bytes` and `max_bytes`.
 The pinned disk staging buffer comes out of that ceiling, and `max_bytes`
 excludes it.
 The 128 checkpoint records are independent of `--sessions`; more than one can
@@ -303,9 +307,9 @@ Do not share a directory with another model server; the component cache removes
 their checkpoint and temporary files too, including writes in progress.
 The server ignores `--cache-disk-staging-bytes` and logs
 `event=option_ignored`. Writes and restores stream each checkpoint through an
-internal 1 MiB pinned buffer, piece by piece; a larger buffer did not change
-restore or write speed and took pinned RAM and device heap from the cache and
-the sessions. Remove the option from Qwen27B and Flash-Next command lines.
+internal 8 MiB pinned buffer of 1 MiB pieces: writes move one piece at a time,
+restores read and check eight pieces in parallel while copying others out.
+Remove the option from Qwen27B and Flash-Next command lines.
 
 For DeepSeek, `--cache-disk-staging-bytes 0` (the default) selects the
 smaller of one eighth of available host RAM after model/session loading
@@ -316,7 +320,7 @@ Snapshots that exceed either limit are skipped with their required size and
 available budget logged; live conversation reuse remains available. Existing
 files that exceed the current staging limit are preserved subject to disk LRU
 eviction and can be reused after restarting with sufficient staging.
-Qwen27B streams large checkpoints through the same fixed 1 MiB staging buffer;
+Qwen27B streams large checkpoints through the same fixed 8 MiB staging buffer;
 `--cache-disk-bytes` still needs to fit the retained checkpoints.
 
 For a focused cancellation check, run
@@ -370,6 +374,12 @@ the runtime default down to a single queue at one and at four concurrent
 requests, and both audio servers are flat within run-to-run noise. Image,
 video, and embedding are unmeasured, so they keep the runtime default
 unless the device is too busy to hold it.
+
+A speech provider that overlaps work across streams can replace the audio cap
+with `"serving": {"hardware_queues": N}` in its `extension.json`, for example
+a TTS model that decodes audio on a second stream while it generates the next
+patch. The server probes the model's provider before the first HIP dispatch
+and uses that cap in place of 1. Providers that declare nothing keep 1.
 
 The cap is only ever lowered to fit the free slots, never raised to fill them,
 so a server's throughput does not depend on the order the servers started. A
@@ -632,6 +642,9 @@ and supports `json`, `text`, and `verbose_json`. `stream=true` with JSON emits
 OpenAI transcript delta/done events. Long uploads are split within model
 capacity; `max_tokens` applies per chunk. Timestamp (`timestamp_granularities[]`)
 and logprobs (`include[]`) requests are rejected; unknown fields are ignored.
+A `file` the model cannot decode returns 400 `invalid_audio_input` (an
+`invalid_audio_input` error event when streaming); other failures return 500
+`transcription_failed`.
 
 `GET /v1/realtime?intent=transcription` upgrades to OpenAI's manual-commit
 transcription WebSocket interface. [ASR streaming examples](../models/qwen3-asr.md#streaming-a-file)
@@ -1345,10 +1358,13 @@ Use appropriate HTTP status codes:
 - `429` admission queue full or rate limit exceeded
 - `499` internally recorded client cancellation
 - `500` internal failure
-- `503` model or backend unavailable, GPU context lost (`device_lost`), or a
+- `503` model or backend unavailable, GPU context lost (`device_lost`), a
   prompt whose host prompt-state bytes do not fit the admission budget
   (`insufficient_memory`, with `error.required_bytes` and
-  `error.remaining_bytes` and the same values under `usage.gufo`)
+  `error.remaining_bytes` and the same values under `usage.gufo`), or a host
+  that other processes left more than 2 GiB short of its memory reserve
+  (`insufficient_memory`, with the shortfall as `error.required_bytes`; see
+  [state memory](state-memory.md#pressure-from-other-processes))
 
 Generation stops at the request budget or context capacity and reports a
 length finish reason when either limit is reached.

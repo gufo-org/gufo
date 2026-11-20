@@ -40,7 +40,8 @@ sampled frontier and pending output tokens. DFlash2 adds private ring KV with
 its own injected frontier, pending target features and draft controller state.
 Borrowed target KV rows are preserved before mutation or rollback; private
 frontiers are captured into committed host backing. Disk transfers use fixed
-1 MiB staging regardless of checkpoint size.
+8 MiB staging regardless of checkpoint size: writes move one 1 MiB piece at a
+time, restores read eight pieces in parallel.
 
 DeepSeek shares its compressed attention and indexer rows, which are final once
 emitted, one row per `ratio` tokens. Each layer's sliding window and compressor
@@ -278,6 +279,13 @@ When space is needed, RAM retention prefers removing:
    share, not an older turn, and never counts as covered.
 4. Remaining checkpoints, oldest-used first within each priority.
 
+Under byte pressure, a short checkpoint whose fixed state costs more than
+eight times its rows is cheap to prefill again and leaves before idle deep
+conversations, but only once a sixteenth of the RAM budget was admitted after
+its conversation's last use. Until then it competes by recency, so the next
+unrelated request evicts a stale conversation instead of the newest one, and
+that conversation's follow-up still reuses its checkpoint.
+
 Under entry pressure, an edited branch can first replace its incompatible
 tail, preserving earlier shared checkpoints. Optional history/retry copies
 are skipped rather than removing another prefix family's last useful copy.
@@ -414,10 +422,24 @@ can still fail if host memory is exhausted. This does not enable RAM checkpoints
 or enlarge the fixed capture backing and disk staging buffer. Persistence pins
 remain capped at the 512 MiB disk-capture backing capacity.
 
+The disk-capture backing is the cache's own share of state pages: it lends no
+page to sessions, so idle sessions holding long frontiers cannot take it and
+stop later captures. Each disk capture is queued as soon as it is staged,
+before its request publishes it, so the backing returns as each write ends. A
+prompt capture that finds the backing full waits up to 20 s for queued writes
+to release it (`event=staging_waited`); exact-frontier captures stay optional
+and don't wait. A capture that still finds no room logs
+`event=staging_exhausted` with its staged bytes, the bytes other captures hold
+and how long it waited.
+
 When the sessions leave no RAM for the cache above the 4 GiB host reserve,
 the server refuses to load with that reason and the remedies: fewer
 `--sessions`, a smaller `--context`, or `--cache-ram-bytes off`. `off` loads
 even when the host is already below its reserve before the sessions allocate.
+The refusal also logs `event=ram_cache_refused` with the host sample it
+judged: `host_available_bytes`, `cma_free_bytes`, `cgroup_available_bytes`
+(under a container limit), `outstanding_state_bytes`, `host_reserve_bytes`
+and `host_ceiling_bytes`.
 When an explicit value is only partly available, the server loads with what
 the host allows and logs `event=ram_cache_trimmed` with the requested and the
 granted bytes; the same remedies restore the full budget.
@@ -499,7 +521,7 @@ Qwen27B and Flash-Next use the same options with these meanings:
 | --- | --- |
 | `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in equal steps of about 1 GiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
 | `--cache-disk-bytes` | Counts referenced, temporary, orphaned and access-history files. A lower budget at startup removes temporaries and orphans, then applies the same lineage-aware eviction order as runtime, using persisted access history when available. |
-| `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 1 MiB pinned buffer; checkpoints of any size stream through it. Its size did not change restore or write speed, and a larger value only took pinned RAM and device heap. |
+| `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 8 MiB pinned buffer; checkpoints of any size stream through it. Writes move one 1 MiB piece at a time, whose size did not change write speed; restores read and check eight pieces in parallel while copying others out. |
 | `--cache-disk DIR` | Owned by one server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory.  model's server sharing it. |
 
 The 128-record limit stays internal. The following measured sizes and timings
@@ -604,7 +626,14 @@ foreground lease is active, capture stays on the exclusive completion path.
 Complete chunks share the execution history; private state and tails copy under
 slot exclusivity, and borrowed rows use the existing idle preservation worker.
 Optional setup or admission refusal leaves the completed live execution valid.
-The disk queue writes these copies during idle work.
+The disk queue writes these copies during idle work. Each one is a turn end
+that an edit or a branch restores, so a queued turn end coalesces into newer
+ones only when the queue has no room for the next write, keeping the two most
+recent. That next write may belong to another conversation, so one
+conversation's backlog cannot crowd out another's newest turn end. A larger
+turn end coalesces as many older ones as it needs to fit, so the newest turn
+end is not the one skipped. A writer that falls behind delays turn ends
+instead of dropping them.
 A refused capture or full persistence queue can still leave an earlier fallback.
 Before their first restore, generated copies use free capacity or replace older
 unused frontiers. Where the backing provider can estimate capacity, optional
@@ -631,9 +660,14 @@ for edits. Forks and learned boundaries are exempt. Other conversations whose
 checkpoint or descendant was restored within one disk budget of newly admitted
 unique payload bytes outlive unreused conversations. This protection expires
 at a byte turnover and survives a clean restart. Within each tier, entries use
-the newest descendant's access recency, then covered entries, leaves and forks;
-ties prefer the retirement that frees more unique payload bytes. Shared chunks
-are excluded from that estimate. A busy store refuses eviction immediately,
+the newest descendant's access recency, and also the admission of any prefix
+no other branch shares, so a prefix published after its leaf (spacing and
+write order decide that) ranks with the leaf instead of outliving it. A
+restored prefix lends nothing: the client that resumed there did not match
+the leaf. Within one recency, covered entries leave first, then leaves and
+forks; ties prefer the retirement that frees more unique payload bytes. Shared
+chunks are excluded from that estimate. A busy store refuses eviction
+immediately,
 and reader pins still protect their publication.
 
 Access history lives in independently checksummed 40-byte files under
@@ -718,13 +752,20 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | --- | --- |
 | `schema=component-cache-v1 event=configured` | Flash-Next: RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim; `ram_cache=on` or `ram_cache=off` at the end of the line, and `disk_backing_bytes` for the backing an off cache keeps for disk captures |
 | `schema=component-cache-v1 event=backing_grown` | Flash-Next: a capture committed another segment of cache pages (about 1 GiB); reports `committed_bytes`, `segments` and the capture's `acquire_ms` |
+| `schema=component-cache-v1 event=ram_cache_refused` | Warning before a load refusal for RAM: the sessions leave the cache nothing above the host reserve. Reports `sessions`, `budget_bytes` when the slots could not allocate under the budget, and the host sample before they allocated: `host_available_bytes` (MemAvailable), `cma_free_bytes`, `cgroup_available_bytes` under a container limit, `outstanding_state_bytes`, `host_reserve_bytes` and `host_ceiling_bytes` |
+| `schema=component-cache-v1 event=host_pressure_release` | Warning: the idle scheduler found MemAvailable below the host reserve (another process took memory) and the RAM cache gave memory back. Reports `shortfall_bytes`, `wanted_bytes` (shortfall + 2 GiB), `released_bytes`, `evicted` checkpoints, `ms` and the host sample. Logged on each release, and once when nothing more can go |
 | `schema=component-cache-v1 event=ram_cache_trimmed` | Qwen3.8-27B, Flash-Next and DeepSeek V4: an explicit `--cache-ram-bytes` exceeds what the host keeps above its 4 GiB reserve after the sessions allocated; reports `requested_bytes` and the granted `capacity_bytes` |
 | `schema=component-cache-v1 event=backing_limited reason=host_reserve` | Flash-Next: the cache stopped growing below its budget because the host would keep less than 4 GiB available |
 | `schema=component-cache-v1 event=backing_limited reason=device_heap_reserve` | Flash-Next: the cache stopped growing because registering a segment's pages took the device heap below its 4 GiB dispatch reserve, which would push session and scratch allocations onto managed memory. Hosts that do not charge registered pages to the heap log it only when other allocations shrink the heap during the registration |
 | `schema=component-cache-v1 event=option_ignored option=--cache-disk-staging-bytes` | Flash-Next: the staging option is ignored; disk transfers use the internal buffer |
 | `schema=component-cache-v1 event=disk_evicted reason=budget` | Startup applied lineage and persisted access ordering to fit a lowered `--cache-disk-bytes` |
 | `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
+| `schema=component-cache-v1 event=staging_waited` | `--cache-ram-bytes off`: a disk capture waited `waited_ms` for queued writes to release the capture backing |
+| `schema=component-cache-v1 event=staging_exhausted` | `--cache-ram-bytes off`: a disk capture found no room in the capture backing; reports `staged_bytes`, `held_bytes` by other captures, `backing_bytes`, `waited_ms` and whether it was an exact `frontier` |
 | `schema=component-cache-v1 event=published` | A checkpoint finished disk publication; `checkpoint_id` identifies the capture and `tokens` its boundary |
+| `schema=component-cache-v1 event=disk_restore` | A checkpoint was restored from disk: `tokens`, `bytes`, `pieces` and timings. `filesystem_ms` and `checksum_ms` add up the parallel readers' time, so they can exceed the restore's wall time; `stream_wait_ms` is the restoring thread's wait for copies |
+| `schema=component-cache-v1 event=disk_warm` | A request admitted while others ran found its checkpoint only on disk; a worker read its `bytes` into the page cache in `ms`. `skipped=floor` when free pages would drop below the host floor |
+| `event=disk_warm_wait` | The request waited `wait_ms` for that read (`read=1`) or for the scheduler to go idle (`read=0`) before restoring |
 | `schema=component-cache-v1 event=persistence_refused reason=min_step` | A captured checkpoint is too close to an existing publication; includes `checkpoint_id` and `tokens` |
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
 | `event=snapshot action=skipped reason=entry_capacity` | no checkpoint record could be replaced safely for this capture |

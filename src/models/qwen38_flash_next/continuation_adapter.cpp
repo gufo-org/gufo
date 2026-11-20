@@ -6,6 +6,7 @@
 #include <cstring>
 #include <gufo/ext/snapshot_copy.hpp>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -340,9 +341,9 @@ std::vector<Rows> ContinuationAdapter::PlanPrefill(const cache::Slot& slot,
   std::vector<Rows> result;
   while (first < end) {
     const auto remaining = end - first;
-    const auto capacity = remaining <= model_->PrefillThroughCapacity()
-                              ? model_->PrefillThroughCapacity()
-                              : model_->PrefillCapacity();
+    const auto capacity = remaining <= model_->PlannedThrough()
+                              ? model_->PlannedThrough()
+                              : model_->PlannedChunk();
     first += std::min<Rows>(remaining, capacity);
     result.push_back(first);
   }
@@ -438,6 +439,10 @@ void ContinuationAdapter::BeginRestore(
   state.GuardAll();
   Check(hipStreamSynchronize(model_->executor_->stream()));
   state.session->session_->PreserveSnapshots(0, 0);
+  // Restores write K/V rows without a forward pass: back them first.
+  if (std::string error; !model_->executor_->EnsureKv(*state.session->session_,
+                                                      target, draft, &error))
+    throw std::bad_alloc();
   state.expected = std::move(ordered);
   state.coverage = std::move(coverage);
   state.metadata.fill(std::byte{});

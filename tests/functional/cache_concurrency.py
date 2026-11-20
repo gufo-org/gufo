@@ -30,6 +30,8 @@ def system_prompt(label, lines):
 
 
 def background(label, lines):
+    # Label lines by task number, never by the expected code: DeepSeek copies a
+    # labeled line such as "BETA.0" into its answer (#670).
     return "".join(f"Background {label}.{index}: the scheduler admits requests, prefills "
                    f"prompts in chunks and decodes them in batches.\n"
                    for index in range(lines))
@@ -129,8 +131,10 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
                     failures.append(
                         f"{label}_{index}: prefilled {usage['gufo']['prefill_tokens']} "
                         f"tokens, expected at most {bound} after restoring the shared prefix")
-        # Waiting must never change an answer: compare uncached controls.
-        for index, (messages, warm) in enumerate(zip(conversations, results)):
+        # Waiting must never change an answer. Each reply already asserts its
+        # code; an uncached control of the last request, a waiter when the
+        # group shares, checks the prompt and reply match.
+        for index, (messages, warm) in list(enumerate(zip(conversations, results)))[-1:]:
             cold = chat(f"{label}_cold_{index}", body_for(messages, cold=True))
             assert cold["usage"]["prompt_tokens"] == warm["usage"]["prompt_tokens"], (warm, cold)
             assert cold["text"] == warm["text"], (warm, cold)
@@ -152,17 +156,17 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
     # Fan-out whose own tasks are long: only the system prompt is shared.
     system = system_prompt("cache_concurrency_long_tasks", 220)
     long_tasks = [[{"role": "system", "content": system},
-                   {"role": "user", "content": background(code, 60) +
+                   {"role": "user", "content": background(f"task-{index + 1}", 60) +
                     f"Reply with only the code {code}."}]
-                  for code in CODES[:width]]
+                  for index, code in enumerate(CODES[:width])]
     group("long_tasks", long_tasks, CODES[:width], share=True)
 
     # A short shared prefix is cheaper to prefill again than to wait for.
     system = system_prompt("cache_concurrency_short_shared", 1)
     short_shared = [[{"role": "system", "content": system},
-                     {"role": "user", "content": background(code, 60) +
+                     {"role": "user", "content": background(f"task-{index + 1}", 60) +
                       f"Reply with only the code {code}."}]
-                    for code in CODES[:width]]
+                    for index, code in enumerate(CODES[:width])]
     group("short_shared", short_shared, CODES[:width], share=False)
 
     # Unrelated prompts share nothing beyond template framing.

@@ -264,10 +264,18 @@ endif()
 
 add_subdirectory(src/cache)
 add_subdirectory(src/sched)
+add_subdirectory(src/mem)
 
 if (ENGINE_ENABLE_HIP)
+  add_library(gufo_mem_hip STATIC src/core/hip/state_page_pool.cpp
+    src/core/hip/state_lendable_range.cpp src/core/hip/state_region.cpp
+    src/core/hip/scratch_arena.cpp)
+  target_link_libraries(gufo_mem_hip PUBLIC gufo_mem hip::host Threads::Threads)
+  if (BUILD_TESTING)
+    target_compile_options(gufo_mem_hip PRIVATE -UNDEBUG)
+  endif()
   add_library(gufo_hip_host STATIC src/core/hip/host_allocations.cpp)
-  target_link_libraries(gufo_hip_host PUBLIC hip::host gufo_platform)
+  target_link_libraries(gufo_hip_host PUBLIC hip::host gufo_platform gufo_mem_hip)
   # HIP loads ROCr through libamdhip64's own RUNPATH, so a build tree runs
   # the unpatched runtime unless LD_LIBRARY_PATH names the patched one (the
   # Nix package wraps `gufo` for this). With GUFO_ROCR_LIBRARY_DIR (the Nix
@@ -444,7 +452,7 @@ add_library(gufo_serving STATIC
   src/cli/serve/text_generation_scheduler.cpp
   src/cli/serve/inference_backend.cpp)
 target_link_libraries(gufo_serving PUBLIC gufo_ext_runtime gufo_logging
-  gufo_core gufo_cache gufo_sched)
+  gufo_core gufo_cache gufo_sched gufo_mem)
 # The executable's own objects carried production NDEBUG, the test binaries that
 # re-compiled these sources forced assertions on. One library can only pick
 # one: test builds keep assertions, so a test-preset `gufo` now asserts where it
@@ -628,8 +636,16 @@ if (BUILD_TESTING)
   target_include_directories(gufo_test_support PUBLIC ${CMAKE_SOURCE_DIR})
   target_link_libraries(gufo_test_support PUBLIC gufo_http gufo_serving)
 
+  # Fixture paths compiled into tests stay relocatable: Devlab runs GPU tests
+  # from a bundle built on another host (tests/support/source_path.hpp).
+  add_library(gufo_test_source_path INTERFACE)
+  target_include_directories(gufo_test_source_path INTERFACE ${CMAKE_SOURCE_DIR})
+  target_compile_definitions(gufo_test_source_path INTERFACE
+    GUFO_TEST_BUILD_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+
   add_subdirectory(tests/cache)
   add_subdirectory(tests/sched)
+  add_subdirectory(tests/mem)
   add_subdirectory(tests/extensions)
 
   # Opt-in live process-failure checks, never preloaded into hosted tests or
@@ -682,6 +698,16 @@ function(gufo_qwen3_asr_register_tests)
   set_tests_properties(qwen3_asr_audio_test PROPERTIES
     LABELS "cpu;models;qwen3-asr;audio;quality;external-model"
     SKIP_RETURN_CODE 77)
+
+  add_executable(qwen3_asr_decode_test
+    ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/decode_test.cpp)
+  target_link_libraries(qwen3_asr_decode_test PRIVATE gufo_qwen3_asr)
+  target_compile_definitions(qwen3_asr_decode_test PRIVATE
+    GUFO_QWEN3_ASR_SPEECH_FIXTURES="${PROJECT_SOURCE_DIR}/tests/functional/fixtures/audio"
+    GUFO_AUDIO_DECODE_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/audio")
+  add_test(NAME qwen3_asr_decode_test COMMAND qwen3_asr_decode_test)
+  set_tests_properties(qwen3_asr_decode_test PROPERTIES
+    LABELS "cpu;models;qwen3-asr;audio;correctness")
 
   add_executable(qwen3_asr_prompt_test
     ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/prompt_test.cpp)
@@ -1330,6 +1356,10 @@ endfunction()
   target_link_libraries(gpu_queues_test PRIVATE gufo_diagnostics gufo_platform)
   add_test(NAME gpu_queues_test COMMAND gpu_queues_test)
   set_tests_properties(gpu_queues_test PROPERTIES LABELS "cpu;diagnostics;serving")
+  add_executable(linux_sysfs_test tests/diagnostics/linux_sysfs_test.cpp)
+  target_link_libraries(linux_sysfs_test PRIVATE gufo_diagnostics gufo_platform)
+  add_test(NAME linux_sysfs_test COMMAND linux_sysfs_test)
+  set_tests_properties(linux_sysfs_test PROPERTIES LABELS "cpu;diagnostics")
 
   add_executable(bandwidth_test tests/diagnostics/bandwidth_test.cpp)
   target_compile_definitions(bandwidth_test PRIVATE TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diagnostics")
@@ -1346,6 +1376,14 @@ endfunction()
   add_test(NAME allocation_benchmark_test COMMAND allocation_benchmark_test)
   set_tests_properties(allocation_benchmark_test PROPERTIES
     LABELS "gpu;hip;gfx1151;diagnostics;allocation;opt-c091")
+
+  add_executable(gguf_header_test
+    tests/core/gguf_header_test.cpp
+    tests/core/gguf_header_reference.cpp)
+  target_link_libraries(gguf_header_test PRIVATE gufo_core)
+  add_test(NAME gguf_header_test COMMAND gguf_header_test)
+  set_tests_properties(gguf_header_test PROPERTIES
+    LABELS "cpu;core;gguf;correctness")
 
   # the prefetch fixture uses mkstemp and mmap
   if (NOT WIN32)

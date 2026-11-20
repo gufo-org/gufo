@@ -242,7 +242,8 @@ cache::Completion TransferStream::Copy(void* destination, const void* source,
 }
 TransferPool::TransferPool(std::size_t capacity)
     : TransferPool(capacity, capacity) {}
-TransferPool::TransferPool(std::size_t capacity, std::size_t native_streams) {
+TransferPool::TransferPool(std::size_t capacity, std::size_t native_streams,
+                           int priority) {
   if (!capacity || !native_streams || native_streams > capacity)
     throw std::invalid_argument("invalid transfer pool resource counts");
   auto state = std::make_shared<detail::TransferPoolState>();
@@ -255,8 +256,11 @@ TransferPool::TransferPool(std::size_t capacity, std::size_t native_streams) {
     // Keep the exclusive constructor's creation order; a partial failure is
     // cleaned by state ownership whether it leaves a stream or only events.
     if (i < native_streams)
-      Check(hipStreamCreateWithFlags(&state->lanes[i].stream,
-                                     hipStreamNonBlocking));
+      Check(priority == 0
+                ? hipStreamCreateWithFlags(&state->lanes[i].stream,
+                                           hipStreamNonBlocking)
+                : hipStreamCreateWithPriority(&state->lanes[i].stream,
+                                              hipStreamNonBlocking, priority));
     const unsigned flags =
         hipEventDisableTiming | (state->shared ? hipEventReleaseToSystem : 0);
     Check(hipEventCreateWithFlags(&state->slots[i].event, flags));

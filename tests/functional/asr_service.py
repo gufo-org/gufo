@@ -46,6 +46,13 @@ def run(evidence, url, audio_root, model):
             files={'file': ('speech.wav', item['path'].read_bytes(), 'audio/wav')})
         assert status == 200 and body.decode().strip() == references[0].strip(), body
 
+    with evidence.case('mp3-equals-wav'):
+        # #1257: compressed uploads decode to the same speech as the WAV.
+        mp3 = item['path'].with_suffix('.mp3')
+        result = evidence.json(endpoint, label='mp3', data=fields(item),
+                               files={'file': ('speech.mp3', mp3.read_bytes(), 'audio/mpeg')})
+        assert result['text'] == references[0], result
+
     with evidence.case('streaming-equals-buffered'):
         with evidence.request(endpoint, label='stream', data=fields(item, stream='true'),
                 files={'file': ('speech.wav', item['path'].read_bytes(), 'audio/wav')}) as (response, row, path):
@@ -90,13 +97,8 @@ def run(evidence, url, audio_root, model):
                               ({'include[]': 'logprobs'}, 'unsupported_option')]:
             evidence.reject(endpoint, code, label=code, data=fields(item, **options),
                 files={'file': ('speech.wav', item['path'].read_bytes(), 'audio/wav')})
-        status, body, _ = evidence.call(endpoint, label='malformed-audio', data={'model': model},
-            files={'file': ('broken.wav', b'not a WAV', 'audio/wav')})
-        # Current API maps native WAV decode failures to transcription_failed.
-        # Keep this limitation explicit rather than accepting arbitrary errors.
-        assert status == 500 and json.loads(body)['error']['code'] == 'transcription_failed', (status, body)
-        evidence.report['known_limitations'] = [
-            'Malformed WAV returns HTTP 500 transcription_failed rather than HTTP 400.']
+        evidence.reject(endpoint, 'invalid_audio_input', label='malformed-audio',
+            data={'model': model}, files={'file': ('broken.wav', b'not a WAV', 'audio/wav')})
         assert request(item, 'recovered')['text'] == references[0]
 
     with evidence.case('cancel-stream-and-recover'):

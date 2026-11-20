@@ -237,6 +237,33 @@ void OperatorPlanDoesNotPredictAQueueCount() {
          "the operator's value bounds the resident count");
 }
 
+void ProviderCapReplacesTheProfileCap() {
+  const QueueCensus empty;
+  const auto plan = PlanQueues(QueueProfile::kAudio, empty, nullptr, 2);
+  Expect(plan.cap == 2, "provider asks for two queues");
+  Expect(plan.expected_queues == 3, "provider cap resolves to three queues");
+  Expect(!plan.may_exceed_budget, "provider cap fits an empty device");
+
+  const auto undeclared = PlanQueues(QueueProfile::kAudio, empty, nullptr, 0);
+  Expect(undeclared.cap == 1, "providers that declare nothing keep one queue");
+}
+
+void ProviderCapIsClampedToFreeSlots() {
+  QueueCensus tight;
+  tight.compute_queues = 6;
+  const auto plan = PlanQueues(QueueProfile::kAudio, tight, nullptr, 2);
+  Expect(plan.cap == 1, "provider cap clamps down to the free slots");
+  Expect(!plan.exceeds_budget, "clamped provider cap still fits");
+}
+
+void OperatorValueOverridesProviderCap() {
+  const QueueCensus empty;
+  const auto plan = PlanQueues(QueueProfile::kAudio, empty, "1", 2);
+  Expect(plan.operator_supplied, "operator value wins over the provider");
+  Expect(plan.cap == 0, "operator plan leaves the variable to the operator");
+  Expect(plan.operator_cap == 1, "operator value is kept");
+}
+
 }  // namespace
 
 int main() {
@@ -255,6 +282,9 @@ int main() {
   EmptyOperatorValueIsIgnored();
   PlanIsDescribedForTheLog();
   OperatorPlanDoesNotPredictAQueueCount();
+  ProviderCapReplacesTheProfileCap();
+  ProviderCapIsClampedToFreeSlots();
+  OperatorValueOverridesProviderCap();
   std::cout << "gpu_queues_test: all checks passed\n";
   return 0;
 }

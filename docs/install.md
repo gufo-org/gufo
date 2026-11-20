@@ -18,9 +18,43 @@ ls -l /dev/kfd /dev/dri/renderD* /dev/accel/accel0
 
 As of November 2026, use Linux 6.18.4 or newer and linux-firmware 20260110 or
 newer. The [host configuration guide](https://github.com/gufo-org/toolboxes/blob/main/docs/host-configuration.md)
-lists the kernel parameters and known bad versions. After installing, run
-`gufo diagnose` to check the setup; [troubleshooting](troubleshooting.md)
-explains its findings.
+lists known bad versions. After installing, run `gufo diagnose` to check the
+setup; [troubleshooting](troubleshooting.md) explains its findings.
+
+### Memory settings
+
+The GPU shares system RAM. Let it use almost all of it, through the kernel's
+**GTT** (the system memory the GPU can map), rather than reserving it in the
+BIOS:
+
+1. In the BIOS, set the GPU's dedicated memory (UMA frame buffer or iGPU
+   memory size) to its minimum, 512 MiB.
+2. Add these kernel parameters to the boot command line (on NixOS,
+   `boot.kernelParams`). For 128 GiB of RAM they give the GPU 124 GiB and leave
+   4 GiB to the system:
+
+   ```text
+   amdgpu.gttsize=126976 ttm.pages_limit=32505856
+   ```
+
+   For another size, `amdgpu.gttsize` is your RAM in MiB minus 4096, and
+   `ttm.pages_limit` is that value times 256 (4 KiB pages).
+3. Allow unlimited locked memory: `LimitMEMLOCK=infinity` for a systemd
+   service, or `memlock unlimited` in `/etc/security/limits.d/` for your
+   user.
+
+Reboot and check:
+
+```sh
+cat /sys/class/drm/card*/device/mem_info_vram_total   # 536870912 (512 MiB)
+cat /sys/class/drm/card*/device/mem_info_gtt_total    # about your RAM minus 4 GiB
+ulimit -l                                             # unlimited
+```
+
+Gufo runs with other values, but with a GTT limit well below your RAM the RAM
+cache cannot borrow memory that sessions have reserved and not used yet, and
+with locked memory limited, GPU work can stall for seconds while the kernel
+compacts memory.
 
 For `--npu`, keep the NPU out of runtime suspend. Otherwise, the first request
 after 5 s idle takes about 110 ms longer. The setting resets at boot:

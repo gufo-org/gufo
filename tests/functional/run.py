@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import random
 import re
 import shutil
 import signal
@@ -27,23 +28,10 @@ import time
 import traceback
 import zlib
 from metrics import compare, comparison_status, join_server_timings, timing_measurement
+from suites import INCLUDED_IN, MIN_CONTEXT, NEEDS_CACHE_RAM, NOT_IN_ALL, SUITES, VISION
 
 TESTS = Path(__file__).resolve().parent
-SUITES = ("discovery", "openai-count-tokens", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "image-detail", "structured", "structured-limits",
-          "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
-          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-type-unions", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "logprobs", "responses-logprobs", "batch",
-          "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection", "cache")
-# Suites that already run another suite's checks; selecting both repeats the work.
-INCLUDED_IN = {"auto-tools": "tools", "tool-native-types": "tool-native-schemas"}
-# Server --context each suite's histories need. Without an explicit --context
-# the runner starts the server with the largest one selected (8192 at least).
-MIN_CONTEXT = {"cache-stalls": 65536, "cache-depth": 32768, "cache-transforms": 32768,
-               "cache-pressure": 32768, "cache-shared-prefix": 16384, "cache-compaction": 16384,
-               "cache-messages-loop": 16384, "prefill-scheduling": 16384}
 DEFAULT_CONTEXT = 8192
-# These fill the RAM budget before measuring; the default budget sized for the
-# host takes far more requests than they send for a model with small checkpoints.
-NEEDS_CACHE_RAM = ("cache-bridge", "cache-pressure")
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
     "--top-k": ("top_k", int), "--min-p": ("min_p", float),
@@ -53,7 +41,7 @@ SAMPLING = {
     "--repeat-penalty": ("repeat_penalty", float),
     "--repeat-last-n": ("repeat_last_n", int),
 }
-COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides", "request_timeout", "tier",
+COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides", "request_timeout",
                      "vision", "speculative", "environment", "harness_sha256", "build_inputs_sha256",
                      "expected_input_modalities")
 
@@ -186,9 +174,7 @@ def compare_runs(baseline_dir, candidate_dir):
         if report.get("functional_status", report["status"]) != "passed":
             raise ValueError("functional checks did not pass")
     for key in (*COMPARISON_FIELDS, "through_case"):
-        # Reports from before tiers always ran the full matrix.
-        default = "full" if key == "tier" else None
-        if baseline.get(key, default) != candidate.get(key, default):
+        if baseline.get(key) != candidate.get(key):
             raise ValueError(f"unmatched baseline {key}")
     if list(baseline["suites"]) != list(candidate["suites"]):
         raise ValueError("unmatched baseline suites")
@@ -225,8 +211,8 @@ def server(command, log_path, startup_timeout, environment=None):
                                  for signum in stop_signals}
             process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                        env=environment, **SERVER_POPEN)
-            deadline = time.monotonic() + startup_timeout
-            while time.monotonic() < deadline:
+            deadline = time.perf_counter() + startup_timeout
+            while time.perf_counter() < deadline:
                 if process.poll() is not None:
                     raise RuntimeError(f"server exited {process.returncode}; see {log_path}")
                 connection = http.client.HTTPConnection(
@@ -275,8 +261,6 @@ def main():
                         help="Repeat to select affected suites; use all for an explicit full run")
     parser.add_argument("--expected-input-modalities", choices=("text", "text,image"),
                         help="Expected loaded inputs for the discovery suite")
-    parser.add_argument("--tier", choices=("pr", "full"), default="full",
-                        help="pr trims each suite's transport matrix; full runs every combination")
     parser.add_argument("--startup-timeout", type=float, default=240)
     parser.add_argument("--suite-timeout", type=float, default=900)
     parser.add_argument("--request-timeout", type=float, default=120,
@@ -288,13 +272,20 @@ def main():
                                help="Explicitly capture the reference; no regression claim yet")
     parser.add_argument("--through-case", metavar="SUITE:CASE",
                         help="Replay preceding suites/cases, then stop; focused investigation only")
+    parser.add_argument("--order-seed", type=int,
+                        help="Shuffle the selected suites with this seed; suites must not depend on order")
     parser.add_argument("--allow-missing-progress", action="store_true",
                         help="Baseline only: older revisions without progress events")
+    parser.add_argument("--cache-disk-bytes", type=int, default=8 * 1024**3,
+                        help="Disk budget for the cache restart checks; size it so one "
+                             "cache run's checkpoints fit (see README)")
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="-- ./result/bin/gufo serve llm --model PATH [server options]")
     args = parser.parse_args()
     if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
         parser.error("--request-timeout must be finite and positive")
+    if args.cache_disk_bytes <= 0:
+        parser.error("--cache-disk-bytes must be positive")
     if set(args.suite) & {"discovery", "openai-count-tokens", "messages-image-counts", "all"} and args.expected_input_modalities is None:
         parser.error("discovery, openai-count-tokens and messages-image-counts require --expected-input-modalities text or text,image")
     if args.allow_missing_progress and not args.record_baseline:
@@ -306,16 +297,17 @@ def main():
                      "--cache-disk-staging-bytes"):
         if option(command, reserved) is not None:
             parser.error(f"the test runner owns {reserved}; omit it from the server command")
-    if set(args.suite) & {"image-inputs", "image-count", "tool-images", "image-detail"} and option(command, "--mmproj") is None:
+    if set(args.suite) & set(VISION) and option(command, "--mmproj") is None:
         parser.error("image-inputs, image-count, tool-images, and image-detail require --mmproj in the server command")
     selected = args.suite
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
-        selected = [suite for suite in SUITES if suite not in (*INCLUDED_IN, "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
-                    and (suite not in ("image-inputs", "image-count", "tool-images", "image-detail")
-                         or option(command, "--mmproj") is not None)]
+        selected = [suite for suite in SUITES if suite not in (*INCLUDED_IN, *NOT_IN_ALL)
+                    and (suite not in VISION or option(command, "--mmproj") is not None)]
     selected = [suite for suite in dict.fromkeys(selected) if INCLUDED_IN.get(suite) not in selected]
+    if args.order_seed is not None:
+        random.Random(args.order_seed).shuffle(selected)
     disk_enabled = bool(set(selected) & {"cache", "image-count"})
     context_needed = max([DEFAULT_CONTEXT, *(MIN_CONTEXT.get(suite, 0) for suite in selected)])
     try:
@@ -347,8 +339,6 @@ def main():
     except (ValueError, OSError) as error:
         parser.error(str(error))
     output = args.output.resolve()
-    # Every suite process inherits the tier; see tier.py.
-    os.environ["GUFO_FUNCTIONAL_TIER"] = args.tier
     with socket.socket() as reserve:
         reserve.bind(("127.0.0.1", 0))
         port = reserve.getsockname()[1]
@@ -361,7 +351,7 @@ def main():
             command += [flag, default]
     if disk_enabled:
         command += ["--cache-disk", str(output / "disk"),
-                    "--cache-disk-bytes", str(8 * 1024**3),
+                    "--cache-disk-bytes", str(args.cache_disk_bytes),
                     "--cache-disk-staging-bytes", str(1024**3)]
     model = option(command, "--served-model-name")
     vision = option(command, "--mmproj") is not None
@@ -376,9 +366,10 @@ def main():
               "binary": str(Path(command[0]).resolve()),
               "mode": "baseline" if args.record_baseline else "qualification",
               "sampling_preset": args.sampling_preset, "sampling_overrides": overrides,
-              "request_timeout": args.request_timeout, "tier": args.tier,
+              "request_timeout": args.request_timeout,
               "vision": vision, "speculative": speculative,
-              "suites": {}, "through_case": args.through_case,
+              "suites": {}, "through_case": args.through_case, "order_seed": args.order_seed,
+              "order": selected,
               "allow_missing_progress": args.allow_missing_progress,
               "started_ns": time.time_ns(), "status": "running"}
     report["expected_input_modalities"] = args.expected_input_modalities
@@ -386,7 +377,7 @@ def main():
     write_json(report_path, report)
 
     def run(label, script, arguments):
-        started = time.monotonic()
+        started = time.perf_counter()
         row = {"status": "running", "report": label + ".json"}
         report["suites"][label] = row
         write_json(report_path, report)
@@ -421,7 +412,7 @@ def main():
             row["status"] = "passed"
         except Exception as error:
             row.update(status="failed", error=str(error), traceback=traceback.format_exc())
-        row["seconds"] = round(time.monotonic() - started, 3)
+        row["seconds"] = round(time.perf_counter() - started, 3)
         write_json(report_path, report)
         print(f"{label}: {row['status']} ({row['seconds']}s)", flush=True)
         return row["status"] == "passed"
@@ -447,11 +438,11 @@ def main():
     persist = False
     try:
         if "cache-rotation" in selected:
-            from cache_rotation import check_snapshot_budget, host_available_bytes
-            available_before_load = host_available_bytes(Path("/proc/meminfo").read_text())
-        startup_started = time.monotonic()
+            from cache_rotation import check_snapshot_budget, host_available_memory
+            available_before_load = host_available_memory()
+        startup_started = time.perf_counter()
         with server(command, output / "server.log", args.startup_timeout):
-            report["startup_ms"] = (time.monotonic() - startup_started) * 1000
+            report["startup_ms"] = (time.perf_counter() - startup_started) * 1000
             if "cache-rotation" in selected:
                 report["snapshot_budget"] = check_snapshot_budget(
                     (output / "server.log").read_text(), available_before_load,
@@ -498,18 +489,22 @@ def main():
                             "--url", base_url, "--model", model, "--prefix-repetitions", "16",
                             "--output", str(output / (label + ".json")), *extra]):
                         ready_to_restore.append(label)
+                persist = run("cache-persist", "cache_persist.py", [
+                    "--url", base_url, "--model", model,
+                    "--output", str(output / "cache-persist.json")])
+                # Write spacing last: disk evicts the oldest unreused entries
+                # first, so its newest checkpoint outlives the restores' writes
+                # after the restart. Its bound measures spacing, not how long
+                # a checkpoint survives other suites' disk turnover (#1244).
                 # Retain the window; checkpoint IDs identify fixture-owned writes.
                 spacing_offset = (output / "server.log").stat().st_size
                 spacing = run("disk-spacing", "cache_disk_spacing.py", [
                     "--url", base_url, "--model", model,
                     "--output", str(output / "disk-spacing.json")])
-                persist = run("cache-persist", "cache_persist.py", [
-                    "--url", base_url, "--model", model,
-                    "--output", str(output / "cache-persist.json")])
         if ready_to_restore or spacing or persist:
-            startup_started = time.monotonic()
+            startup_started = time.perf_counter()
             with server(command, output / "server-restarted.log", args.startup_timeout):
-                report["restart_ms"] = (time.monotonic() - startup_started) * 1000
+                report["restart_ms"] = (time.perf_counter() - startup_started) * 1000
                 for label in ready_to_restore:
                     run(label + "-disk", "continuation.py", [
                         "--url", base_url, "--model", model,

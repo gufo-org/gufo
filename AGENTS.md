@@ -64,7 +64,8 @@ video generation or duplicate suites for routine edits. A missing-model skip
 is not a quality pass. Broaden checks when shared behavior changes or failures
 expose risk.
 
-Text API functional/regression tests live in [tests/functional/](tests/functional/README.md).
+Text API functional/regression tests live in [tests/functional/](tests/functional/README.md);
+follow [tests/functional/AGENTS.md](tests/functional/AGENTS.md) when adding or changing them.
 Select suites explicitly. Model-specific changes need the affected model/modes;
 use all four profiles only for shared behavior changes. Run correctness on the
 candidate; use main for matched affected timing controls and suspected regressions,

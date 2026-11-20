@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/host.hpp>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -23,6 +24,7 @@
 #include "gufo/ext/gguf_identity.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "gufo/ext/text.hpp"
+#include "src/mem/account.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/continuation_adapter.hpp"
 #include "src/models/deepseek_v4_flash/continuation_identity.hpp"
@@ -62,6 +64,11 @@ public:
         .per_request_state_bytes = static_cast<std::size_t>(bytes),
         .temporary_scratch_bytes = std::nullopt,
     };
+  }
+
+  [[nodiscard]] std::shared_ptr<mem::StateAccount> state_account()
+      const override {
+    return session_->StateAccount();
   }
 
   [[nodiscard]] models::deepseek_v4_flash::Session& session() const {
@@ -151,11 +158,13 @@ public:
                      std::uint32_t max_context, bool use_dspark,
                      std::uint32_t max_draft_tokens,
                      std::string artifact_fingerprint = {},
-                     std::string support_fingerprint = {})
+                     std::string support_fingerprint = {},
+                     std::size_t session_count = 1)
       : model_(std::move(model)),
         max_context_(max_context),
         use_dspark_(use_dspark),
-        max_draft_tokens_(std::max(max_draft_tokens, 1u)) {
+        max_draft_tokens_(std::max(max_draft_tokens, 1u)),
+        session_count_(std::max<std::size_t>(session_count, 1)) {
     if (!artifact_fingerprint.empty()) {
       if (use_dspark_ && !IsSha256Hex(support_fingerprint)) {
         throw std::invalid_argument(
@@ -191,8 +200,13 @@ public:
       cache::Adapter& adapter, cache::Slot& slot) const override {
     auto& deepseek =
         dynamic_cast<models::deepseek_v4_flash::ContinuationAdapter&>(adapter);
-    return std::make_unique<DeepSeekTextRunnerState>(deepseek.GetSession(slot),
-                                                     adapter, slot);
+    auto state = std::make_unique<DeepSeekTextRunnerState>(
+        deepseek.GetSession(slot), adapter, slot);
+    // Every session exists once the last one binds: build the weight copies
+    // now, at load, not inside the first request.
+    if (++bound_states_ == session_count_)
+      model_->BuildWeightCopies();
+    return state;
   }
   void ReconcileComponentState(TextRunnerState& state,
                                std::size_t position) const override {
@@ -235,14 +249,32 @@ public:
       capacity = memory->free_bytes;
       gufo::hip::LogStateCapacity(*memory, *capacity, 0, 0);
     }
+    // With demand-mapped compressed rows the sessions claim their worst
+    // case, and share those rows when not all fit at full context (#715).
+    // Otherwise (managed or whole allocations) no claim is made, as before.
+    const std::size_t demand = model_->DemandMappedBytes(max_context_);
+    std::optional<std::size_t> session_bytes;
+    if (demand != 0)
+      session_bytes = model_->SessionBytes(max_context_);
+    if (!session_bytes)
+      return {
+          .resident_weights_bytes = std::nullopt,
+          .state_capacity_bytes = capacity,
+          .per_request_state_bytes = std::nullopt,
+          .temporary_scratch_bytes = std::nullopt,
+          .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
+          .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
+          .requires_device_runtime_lock = true,
+      };
     return {
         .resident_weights_bytes = std::nullopt,
         .state_capacity_bytes = capacity,
-        .per_request_state_bytes = std::nullopt,
-        .temporary_scratch_bytes = std::nullopt,
+        .per_request_state_bytes = session_bytes,
+        .temporary_scratch_bytes = 0,
         .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
         .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
         .requires_device_runtime_lock = true,
+        .demand_mapped_state_bytes = demand,
     };
   }
 
@@ -746,6 +778,9 @@ private:
   std::uint32_t max_context_;
   bool use_dspark_;
   std::uint32_t max_draft_tokens_;
+  std::size_t session_count_;
+  /// Sessions bound so far (BindComponentState), at load.
+  mutable std::size_t bound_states_{0};
   cache::Identity component_identity_;
 };
 
@@ -754,13 +789,42 @@ private:
 std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
     std::shared_ptr<Model> model, std::uint32_t max_context,
     const ext::TextSpeculativeConfig& speculative_config,
-    std::string artifact_fingerprint, std::string support_fingerprint) {
+    std::string artifact_fingerprint, std::string support_fingerprint,
+    std::size_t session_count) {
   const bool use_dspark =
       speculative_config.backend == ext::TextSpeculativeBackend::kDSpark;
+  // Demand-mapped sessions claim their measured size, so the host can share
+  // their rows when not all fit at full context (#715).
+  if (const std::size_t demand = model->DemandMappedBytes(max_context)) {
+    std::string error;
+    if (!model->MeasureSessionState(
+            use_dspark ? gufo::core::SessionMode::kSpeculative
+                       : gufo::core::SessionMode::kAutoregressive,
+            max_context, &error))
+      throw std::runtime_error("DeepSeek V4 Flash session: " + error);
+    // Configurations that do not fit even sharing their rows load as they
+    // did before the claim, on the managed-memory policy, instead of being
+    // refused: requests at full context may then exhaust memory, as before.
+    const auto session_bytes = model->SessionBytes(max_context);
+    const auto memory = gufo::hip::QueryAdmissionMemory();
+    const std::size_t sessions = std::max<std::size_t>(session_count, 1);
+    if (session_bytes && memory &&
+        mem::FitSessions(sessions, *session_bytes, demand, memory->free_bytes)
+                .kind == mem::SessionFit::Kind::kRefused) {
+      model->DisableStateRegions();
+      gufo::server::Logger::LogFormatted(
+          gufo::server::LogLevel::kWarn, "ds4",
+          "event=state_unclaimed sessions=%zu context=%u session_bytes=%zu "
+          "capacity_bytes=%zu: the sessions do not fit even sharing their "
+          "compressed rows; they use the managed-memory policy and claim "
+          "nothing, and long requests may exhaust memory",
+          sessions, max_context, *session_bytes, memory->free_bytes);
+    }
+  }
   return std::make_shared<DeepSeekTextRunner>(
       std::move(model), max_context, use_dspark,
       speculative_config.max_draft_tokens, std::move(artifact_fingerprint),
-      std::move(support_fingerprint));
+      std::move(support_fingerprint), session_count);
 }
 
 std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
@@ -859,7 +923,7 @@ std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
   }
   return CreateDeepSeekTextRunner(std::move(model), max_context,
                                   options.speculative, model_fingerprint,
-                                  support_fingerprint);
+                                  support_fingerprint, options.session_count);
 }
 
 }  // namespace gufo::models::deepseek_v4_flash

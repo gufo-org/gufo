@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 #define GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -19,6 +20,8 @@
 #include "src/cli/serve/continuation_types.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_publication_wait.hpp"
+#include "src/ext/host_budget.hpp"
+#include "src/mem/account.hpp"
 
 namespace gufo::server {
 
@@ -110,9 +113,14 @@ public:
     /// use than capturing another one: followers prefill the gap themselves.
     static constexpr std::size_t kSharedCheckpointSlack = 64;
     /// A shared prefix must add at least this many tokens to what a request
-    /// can already restore before it waits for a peer or captures an extra
-    /// checkpoint for later requests. Shorter gaps cost less to prefill again.
+    /// can already restore before it waits for a peer's shared checkpoint.
+    /// Shorter gaps cost less to prefill again.
     static constexpr std::size_t kSharedPrefixMinTokens = 512;
+    /// A prompt that diverges from a retained one after at least this many
+    /// common tokens publishes a checkpoint there for later prompts. Lower
+    /// than kSharedPrefixMinTokens: nobody waits for it, and a short system
+    /// prompt shared by many short requests is worth one RAM copy.
+    static constexpr std::size_t kSharedBranchMinTokens = 192;
 
     void PrepareBatchExecution();
     /// With `yield`, a runner with a scheduling profile splits the pass into
@@ -139,6 +147,8 @@ public:
     [[nodiscard]] bool PreparePromptSnapshot();
     [[nodiscard]] bool SnapshotPending() const;
     void Invalidate() noexcept;
+    /// The session's shared-state account (#715), or null.
+    [[nodiscard]] std::shared_ptr<mem::StateAccount> state_account() const;
 
   private:
     friend class TextRunnerPool;
@@ -160,6 +170,22 @@ public:
   TextRunnerPool& operator=(TextRunnerPool&&) = delete;
 
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
+  /// The scheduler is idle: nothing runs, is queued or waits. Called on its
+  /// thread when it goes idle and about once a second while it stays idle,
+  /// to return memory only running work holds (TextModelRunner::Idle()),
+  /// and, when other processes leave the host short of its reserve, RAM-cache
+  /// memory (ComponentTextCache::RelieveHostPressure).
+  void Idle() const;
+  /// The host's shortfall below its reserve (ext::HostReserveShortfallBytes)
+  /// when it is too short to admit new work: more than
+  /// kAdmissionShortfallBytes (#932), so MemAvailable below 2 GiB without
+  /// free CMA pages. Running work then finishes, the scheduler goes
+  /// idle and the RAM cache gives memory back.
+  [[nodiscard]] std::optional<std::uint64_t> AdmissionShortfall() const;
+  static constexpr std::uint64_t kAdmissionShortfallBytes =
+      ext::kHostSnapshotHeadroomBytes / 2;
+  /// Replaces the live host sample (ext::SampleHostMemory), for tests.
+  void SetHostSampler(std::function<ext::HostMemorySample()> sampler);
   [[nodiscard]] std::size_t capacity() const noexcept;
   /// Validated resource claim, including host prompt-state admission inputs.
   [[nodiscard]] const TextRunnerResourceClaim& resource_claim() const noexcept;
@@ -170,13 +196,50 @@ public:
       const TextExecutionPlan& plan);
   std::vector<std::exception_ptr> AdvanceBatch(std::span<Request*> requests,
                                                const TextExecutionPlan& plan);
+  /// State a request reserved ahead of its session (ReserveState).
+  struct StateTicket {
+    std::size_t tokens{0};
+    mem::StateReservation reservation;
+  };
+  /// With `state`, the session the request lands on claims its tokens from
+  /// the ticket's reservation.
   [[nodiscard]] Request Acquire(
       std::vector<TextRunnerToken> prompt,
       const sampling::SamplingConfig& sampling,
       const CancellationCheck& is_cancelled = {},
       std::shared_ptr<const TextPromptContext> context = {},
       bool reuse_prompt = true, std::size_t cache_prefix_tokens = 0,
-      bool stop_at_eos = true, bool persist = true);
+      bool stop_at_eos = true, bool persist = true,
+      StateTicket* state = nullptr);
+
+  /// Whether sessions share their demand-mapped state (#715): more sessions
+  /// are configured at full context than fit at once. Each request then
+  /// claims the tokens it may write, and is admitted only when they fit.
+  [[nodiscard]] bool shared_state() const noexcept;
+  /// Generated tokens a request claims ahead, at admission and each time
+  /// decoding nears its claim.
+  static constexpr std::size_t kStateDecodeTokens = 8192;
+  /// Tokens a request of `prompt_tokens` claims at admission: the prompt and
+  /// up to kStateDecodeTokens of `max_new_tokens`, within the context and
+  /// as far as the shared state could ever hold. Empty when not even the
+  /// prompt and one token fit in it: the request can never run.
+  [[nodiscard]] std::optional<std::size_t> StateClaimTokens(
+      std::size_t prompt_tokens, std::size_t max_new_tokens) const;
+  /// The longest prompt the shared state can hold with one generated token,
+  /// at most one token short of the context.
+  [[nodiscard]] std::size_t MaxPromptTokens() const;
+  /// Reserves `tokens` of state for a request about to be admitted, first
+  /// reclaiming idle sessions' state when short (never the frontier `prompt`
+  /// continues). Empty when they do not fit now. Call where no model work is
+  /// in flight.
+  [[nodiscard]] std::optional<StateTicket> ReserveState(
+      std::size_t tokens, std::span<const TextRunnerToken> prompt,
+      const TextPromptContext* context);
+  /// Raises a running request's claim to `tokens`, reclaiming idle
+  /// sessions' state when short. False when it does not fit now.
+  [[nodiscard]] bool ExtendState(Request& request, std::size_t tokens);
+  /// Charged state bytes ReclaimState could free.
+  [[nodiscard]] std::size_t ReclaimableStateBytes() const;
   [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,
                                 const CancellationCheck& is_cancelled = {});
   /// Longest RAM-retained prefix of prompt that Acquire could reuse, without
@@ -184,6 +247,11 @@ public:
   [[nodiscard]] std::size_t CachedPrefixTokens(
       std::span<const TextRunnerToken> prompt,
       const TextPromptContext* context) const;
+  /// Starts reading the disk-only checkpoint prompt would restore into the
+  /// page cache; see ComponentTextCache::WarmDisk.
+  [[nodiscard]] std::shared_ptr<const std::atomic<bool>> WarmDisk(
+      std::span<const TextRunnerToken> prompt, const TextPromptContext* context,
+      std::size_t stable) const;
   /// A disk job is still writing a prefix of prompt much deeper than any
   /// restorable checkpoint; admission may wait for it instead of prefilling.
   [[nodiscard]] std::optional<TextPendingPublication> PendingPublication(

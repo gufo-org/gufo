@@ -127,6 +127,22 @@ and queue limits. Rust tests cover protocol rejections and buffer reuse;
 v0.34.0 or earlier. The audio decoder has no frozen C++ oracle; its independent
 symphonia PCM and numerical resampler checks remain.
 
+`gguf_header_test` compares the Rust GGUF header parser, through
+`GgufReader::OpenMemory`, with a frozen copy of the 0.35.0 C++ parser in
+`tests/core/gguf_header_reference.cpp`. Generated headers cover every metadata
+value and array item type, alignments, tensor ranks, known and unknown storage
+types, unsized tensors and data layouts; deterministic mutations truncate, flip,
+overwrite, insert and erase bytes; further headers hold arrays around the
+parser's block size and fill each charge of the descriptor budget to its last
+byte and one byte past it. Each must open with the same version, alignment,
+metadata and tensors, whose strings and data point at the same bytes, or fail
+with the same message, with and without `allow_unsized_tensors`. Only a header
+over the descriptor budget fails with its own message, which names the limit
+where 0.35.0 reported a malformed or over-long entry. Every rejection must be
+reached. GGUF files given as arguments are compared and timed too. It
+runs in `check-pr`; the crate's Rust tests cover the check order, the budget and
+the C ABI.
+
 The hosted Rust check uses Cargo's default test profile, with overflow checks
 and debug assertions enabled. The Windows job builds the Rust library and C++
 callers but does not run `cargo test`. A workspace registration check runs in

@@ -33,6 +33,10 @@
 #include "src/cache/component_resources.hpp"
 #include "src/core/text_sampling_defaults.hpp"
 
+namespace gufo::mem {
+class StateAccount;
+}  // namespace gufo::mem
+
 namespace gufo::ext {
 
 using ComponentCacheResources = cache::ComponentCacheResources;
@@ -209,6 +213,15 @@ struct TextRunnerResourceClaim {
   /// The server subtracts outstanding reservations conservatively, including
   /// those released during the sample. Empty keeps the fixed budget.
   std::function<std::size_t()> prompt_admission_available_bytes;
+  /// The part of `per_request_state_bytes` in demand-mapped state regions
+  /// charged to the session's state account (TextRunnerState::state_account):
+  /// pages a session takes only as it writes rows. When the configured
+  /// sessions do not all fit at full context, the host lets them share this
+  /// memory instead of refusing the configuration (mem::FitSessions), and
+  /// admits each request against its own tokens. Missing or zero keeps the
+  /// full-context check. Declared last, so positional initializers of the
+  /// earlier fields keep their meaning.
+  std::optional<std::size_t> demand_mapped_state_bytes;
 };
 
 struct TextRunnerMeasuredResources {
@@ -253,6 +266,18 @@ struct TextDecodeStep {
 class TextRunnerState : public ContinuationState {
 public:
   using CancellationCheck = std::function<bool()>;
+
+  /// The session's state account, whose regions hold the
+  /// demand-mapped state `TextRunnerResourceClaim::demand_mapped_state_bytes`
+  /// counts; null when the runner has none. The host claims a request's
+  /// tokens on it before the request writes them, sets it to the live
+  /// frontier afterwards, and trims an idle session's pages when another
+  /// request needs them; every write past the claim maps only what the
+  /// shared budget allows.
+  [[nodiscard]] virtual std::shared_ptr<mem::StateAccount> state_account()
+      const {
+    return nullptr;
+  }
 
   void SetStopAtEos(bool value) noexcept { stop_at_eos_ = value; }
   [[nodiscard]] bool stop_at_eos() const noexcept { return stop_at_eos_; }
@@ -639,6 +664,11 @@ public:
   [[nodiscard]] virtual std::size_t CheckpointPosition(
       const TextRunnerState& state) const = 0;
   virtual void PrepareCancellation(TextRunnerState&) const {}
+  /// Called on the scheduler thread when it goes idle (no request runs, is
+  /// queued or waits) and about once a second while it stays idle. Release
+  /// memory held only while work runs, such as scratch a prefill kept for
+  /// the next one. It must be cheap when nothing is held.
+  virtual void Idle() const {}
   using DeviceProbeStatus = ext::DeviceProbeStatus;
   [[nodiscard]] virtual DeviceProbeStatus PollDevice() const {
     return DeviceProbeStatus::kUsable;

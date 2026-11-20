@@ -34,6 +34,8 @@ void SetError(std::string* error, std::string message) {
   }
 }
 
+// PCM and float WAV keep the strict reader they have always used, so their
+// samples, and therefore transcripts, do not change.
 constexpr core::AudioLimits kWavLimits{
     .max_channels = 8,
     .max_sample_rate = 192000,
@@ -41,40 +43,67 @@ constexpr core::AudioLimits kWavLimits{
     .max_pcm_bits = 32,
 };
 
-std::string_view WavMessage(core::AudioStatus status) {
+// Everything else the shared decoder reads: FLAC, MP3, Ogg Vorbis and Opus,
+// and 8-bit, float64, A-law, mu-law and ADPCM WAV. ASR only needs mono, so
+// the channels are mixed down while decoding instead of being held until
+// resampling.
+constexpr core::AudioLimits kEncodedLimits{
+    .formats = core::AudioFormats::kAll,
+    .max_channels = kWavLimits.max_channels,
+    .max_sample_rate = kWavLimits.max_sample_rate,
+    .max_seconds = kWavLimits.max_seconds,
+    .downmix_mono = true,
+};
+
+std::string_view AudioMessage(core::AudioStatus status) {
   switch (status) {
     case core::AudioStatus::kUnrecognized:
-      return "Qwen3-ASR input must be a RIFF WAV";
-    case core::AudioStatus::kMalformedHeader:
-      return "Qwen3-ASR WAV fmt chunk is invalid";
     case core::AudioStatus::kUnsupportedCodec:
-    case core::AudioStatus::kOutOfBounds:
-    case core::AudioStatus::kNoAudio:
-      return "Qwen3-ASR WAV format is unsupported";
     case core::AudioStatus::kUnsupportedLayout:
-      return "Qwen3-ASR supports PCM16/24/32 or float32 interleaved WAV";
+      return "Qwen3-ASR input must be WAV, FLAC, MP3, Ogg Vorbis or Ogg Opus";
+    case core::AudioStatus::kMalformedHeader:
+      return "Qwen3-ASR audio header is invalid";
+    case core::AudioStatus::kOutOfBounds:
+      return "Qwen3-ASR audio must have 1 to 8 channels and at most 192 kHz";
+    case core::AudioStatus::kNoAudio:
+      return "Qwen3-ASR audio contains no samples";
     case core::AudioStatus::kTooLong:
-      return "Qwen3-ASR WAV must be at most 30 minutes";
+      return "Qwen3-ASR audio must be at most 30 minutes";
     case core::AudioStatus::kTruncated:
-      return "Qwen3-ASR WAV is truncated";
+      return "Qwen3-ASR audio is truncated";
     case core::AudioStatus::kNonFinite:
-      return "Qwen3-ASR WAV contains non-finite samples";
+      return "Qwen3-ASR audio contains non-finite samples";
     case core::AudioStatus::kStopped:
       break;
   }
-  return "Qwen3-ASR WAV could not be decoded";
+  return "Qwen3-ASR audio could not be decoded";
 }
 
-AudioBuffer DecodeWavBytes(std::span<const std::byte> bytes) {
+AudioBuffer ToBuffer(core::DecodedAudio audio) {
+  return AudioBuffer{
+      .sample_rate = audio.sample_rate,
+      .channels = audio.channels,
+      .samples = std::move(audio.samples),
+  };
+}
+
+AudioBuffer DecodeAudioBytes(std::span<const std::byte> bytes) {
   try {
-    core::DecodedAudio wav = core::DecodeAudio(bytes, kWavLimits);
-    return AudioBuffer{
-        .sample_rate = wav.sample_rate,
-        .channels = wav.channels,
-        .samples = std::move(wav.samples),
-    };
+    return ToBuffer(core::DecodeAudio(bytes, kWavLimits));
   } catch (const core::AudioError& error) {
-    throw std::invalid_argument(std::string(WavMessage(error.status())));
+    // Only a container, codec or sample width the strict reader does not
+    // take goes on to the shared decoder; a WAV it rejected for any other
+    // reason, such as its length, would be rejected there too.
+    if (error.status() != core::AudioStatus::kUnrecognized &&
+        error.status() != core::AudioStatus::kUnsupportedCodec &&
+        error.status() != core::AudioStatus::kUnsupportedLayout) {
+      throw std::invalid_argument(std::string(AudioMessage(error.status())));
+    }
+  }
+  try {
+    return ToBuffer(core::DecodeAudio(bytes, kEncodedLimits));
+  } catch (const core::AudioError& error) {
+    throw std::invalid_argument(std::string(AudioMessage(error.status())));
   }
 }
 
@@ -219,7 +248,7 @@ bool DecodeWav(std::span<const std::byte> bytes, AudioBuffer* output,
   }
   *output = {};
   try {
-    *output = DecodeWavBytes(bytes);
+    *output = DecodeAudioBytes(bytes);
     return true;
   } catch (const std::exception& exception) {
     SetError(error, exception.what());

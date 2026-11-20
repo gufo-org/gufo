@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../kernels/rocm/resident_api.h"
+#include "src/mem/account.hpp"
 #include <gufo/ext/host.hpp>
 #include <gufo/ext/platform/fs.hpp>
 #include "dspark_internal.h"
@@ -111,6 +112,9 @@ struct ds4_rocm_graph {
      * for every ratio-128 layer. */
     uint32_t layer_comp_cap[DS4_MAX_LAYER];
     bool managed_kv_cache;
+    /* Heap-held std::shared_ptr<gufo::mem::StateAccount> charging the
+     * demand-mapped rows to this session; null without demand mapping. */
+    void *state_account;
     /* Per-layer work tensors.  They are reused in place by every layer instead
      * of allocating a generic graph arena.  This is why the code is verbose but
      * predictable: each pointer names an actual DS4 stage. */
@@ -123,6 +127,11 @@ struct ds4_rocm_graph {
     ds4_gpu_tensor *indexer_q;
     ds4_gpu_tensor *indexer_weights;
     ds4_gpu_tensor* indexer_scores;
+    /* With demand mapping, indexer_scores is a region of rows of this many
+     * bytes (the creation prefill capacity in floats): rows map as deeper
+     * chunks need them, charged to the session's account. Zero when it is a
+     * whole allocation that grows by reallocation. */
+    uint64_t indexer_score_row_bytes;
     ds4_gpu_tensor *comp_selected;
     ds4_gpu_tensor *heads;
     ds4_gpu_tensor *heads_q8;
@@ -299,6 +308,44 @@ struct ds4_rocm_graph {
 };
 
 typedef struct ds4_rocm_graph ds4_gpu_graph;
+using Ds4StateAccount = std::shared_ptr<gufo::mem::StateAccount>;
+
+/* Tokens past a frontier the compressed rows are backed for: reservations
+ * cover the next raw window plus two rows of the widest ratio. */
+static uint32_t ds4_rocm_graph_state_margin_tokens() {
+  uint32_t max_ratio = 1;
+  for (uint32_t il = 0; il < DS4_N_LAYER; ++il)
+    max_ratio = std::max(max_ratio, ds4_layer_compress_ratio(il));
+  return DS4_N_SWA + 2u * max_ratio;
+}
+
+/* Largest indexer score matrix (compressed rows x tokens, floats) a prefill
+ * chunk computes in one pass. Wider chunks score and select their tokens in
+ * slices (rocm_graph_indexer_select_sliced), so a session's score scratch stays near
+ * this size at any depth instead of growing to comp_cap x prefill_cap (4.3 GB
+ * at 1M tokens). Below it (depths up to ~64K at the default 4096-token chunk)
+ * every chunk is one pass, as before. */
+static constexpr uint64_t kIndexerScoreBudgetBytes = 256ull << 20;
+
+/* Tokens per score slice: a multiple of 16 (the score kernels' token tile),
+ * or all of them when the whole matrix fits the budget. */
+static uint32_t rocm_graph_indexer_slice_tokens(uint32_t n_comp,
+                                                uint32_t n_tokens) {
+  const uint64_t fit =
+      kIndexerScoreBudgetBytes / ((uint64_t)n_comp * sizeof(float));
+  if (fit >= n_tokens)
+    return n_tokens;
+  return std::max<uint32_t>(16u, (uint32_t)(fit & ~(uint64_t)15u));
+}
+
+/* Bytes of the largest score matrix a session computes: one slice, whose
+ * last may absorb a tail of up to 15 tokens (never a slice of its own). */
+static uint64_t rocm_graph_indexer_scores_max_bytes(uint32_t comp_cap,
+                                                    uint32_t prefill_cap) {
+  return std::min<uint64_t>(
+      (uint64_t)comp_cap * prefill_cap * sizeof(float),
+      kIndexerScoreBudgetBytes + (uint64_t)comp_cap * 31u * sizeof(float));
+}
 
 /* DSpark feature capture, defined with the drafting code below. Both are no-ops
  * until a support model is attached, so the target paths only pay a branch. */
@@ -599,6 +646,7 @@ static void rocm_graph_free(ds4_gpu_graph *g) {
     ds4_gpu_tensor_free(g->hc_split);
     ds4_gpu_tensor_free(g->hc_mix);
     ds4_gpu_tensor_free(g->cur_hc);
+    delete static_cast<Ds4StateAccount *>(g->state_account);
     memset(g, 0, sizeof(*g));
 }
 
@@ -647,11 +695,51 @@ static ds4_gpu_tensor *rocm_graph_alloc_kv_cache_tensor(bool managed, uint64_t b
     return managed ? ds4_gpu_tensor_alloc_managed(bytes) : ds4_gpu_tensor_alloc(bytes);
 }
 
+/* Compressed rows that grow with the context. Outside the managed policy
+ * they keep one address for `max_rows` and map pages as rows are reserved;
+ * otherwise, or without demand mapping, `initial_rows` are allocated whole
+ * and later growth reallocates (rocm_graph_reserve_compressed_rows). */
+static const Ds4StateAccount &rocm_graph_account(const ds4_gpu_graph *g) {
+  static const Ds4StateAccount none;
+  return g->state_account ? *static_cast<Ds4StateAccount *>(g->state_account)
+                          : none;
+}
+
+static ds4_gpu_tensor *rocm_graph_alloc_comp_rows(const ds4_gpu_graph *g,
+                                                  uint64_t row_bytes,
+                                                  uint64_t max_rows,
+                                                  uint64_t initial_rows,
+                                                  uint32_t tokens_per_row) {
+    if (!g->managed_kv_cache) {
+        if (ds4_gpu_tensor *rows = ds4_gpu_tensor_alloc_rows(
+                row_bytes, max_rows, initial_rows, rocm_graph_account(g),
+                tokens_per_row))
+            return rows;
+    }
+    return rocm_graph_alloc_kv_cache_tensor(g->managed_kv_cache,
+                                            initial_rows * row_bytes);
+}
+
 static bool rocm_graph_reserve_compressed_rows(ds4_gpu_graph* g, uint32_t il,
                                                uint32_t required) {
   if (required > g->layer_comp_cap[il])
     return false;
   const uint64_t row_bytes = DS4_N_HEAD_DIM * sizeof(float);
+  const bool indexed = ds4_layer_compress_ratio(il) == 4;
+  if (ds4_gpu_tensor_demand_mapped(g->layer_attn_comp_cache[il])) {
+    // Demand-mapped rows grow in place: no copy and no free, so neither the
+    // device drain of hipFree nor a second copy of the rows. A reclaim may
+    // have unmapped rows past the session's need since they were backed, so
+    // ask the regions themselves (lock-free when backed). Failure means the
+    // shared state budget is spent: there is nothing to fall back to.
+    return ds4_gpu_tensor_ensure_rows(g->layer_attn_comp_cache[il],
+                                      required) &&
+           (!indexed ||
+            (ds4_gpu_tensor_ensure_rows(g->layer_attn_comp_cache_f16[il],
+                                        required) &&
+             ds4_gpu_tensor_ensure_rows(g->layer_index_comp_cache[il],
+                                        required)));
+  }
   const uint64_t capacity =
       ds4_gpu_tensor_bytes(g->layer_attn_comp_cache[il]) / row_bytes;
   if (required <= capacity)
@@ -666,7 +754,6 @@ static bool rocm_graph_reserve_compressed_rows(ds4_gpu_graph* g, uint32_t il,
                    ds4_gpu_tensor_free);
   Tensor mirror(nullptr, ds4_gpu_tensor_free);
   Tensor indexer(nullptr, ds4_gpu_tensor_free);
-  const bool indexed = ds4_layer_compress_ratio(il) == 4;
   if (indexed) {
     mirror.reset(rocm_graph_alloc_kv_cache_tensor(
         g->managed_kv_cache,
@@ -854,7 +941,8 @@ static bool rocm_graph_alloc_raw_cap(
         uint32_t                raw_cap,
         uint32_t                ctx_size,
         uint32_t                prefill_cap,
-        const ds4_gpu_graph    *batch_workspace) {
+        const ds4_gpu_graph    *batch_workspace,
+        bool                    state_regions) {
     memset(g, 0, sizeof(*g));
     if (raw_cap == 0) raw_cap = 1;
     if (ctx_size == 0) ctx_size = raw_cap;
@@ -903,7 +991,8 @@ static bool rocm_graph_alloc_raw_cap(
     const uint64_t context_bytes =
         rocm_graph_context_bytes_for_kv_policy(ctx_size, raw_cap, prefill_cap, &kv_cache_bytes);
     const bool managed_kv_cache =
-        ds4_gpu_should_use_managed_kv_cache(kv_cache_bytes, context_bytes) != 0;
+        ds4_gpu_should_use_managed_kv_cache(kv_cache_bytes, context_bytes,
+                                            state_regions) != 0;
     g->managed_kv_cache = managed_kv_cache;
     if (managed_kv_cache) {
         /*
@@ -920,6 +1009,13 @@ static bool rocm_graph_alloc_raw_cap(
             "contexts",
             ctx_size, (double)kv_cache_bytes / 1073741824.0,
             (double)context_bytes / 1073741824.0);
+    } else if (auto account = state_regions
+                                  ? ds4_gpu_state_account_create(
+                                        ds4_rocm_graph_state_margin_tokens())
+                                  : nullptr) {
+        g->state_account =
+            new (std::nothrow) Ds4StateAccount(std::move(account));
+        if (!g->state_account) return false;
     }
 
     g->cur_hc = ds4_gpu_tensor_alloc(hc_dim * sizeof(float));
@@ -955,13 +1051,13 @@ static bool rocm_graph_alloc_raw_cap(
           const uint32_t coff = ratio == 4 ? 2u : 1u;
           const uint64_t attn_width = (uint64_t)coff * DS4_N_HEAD_DIM;
           const uint64_t attn_rows = (uint64_t)coff * ratio;
-          g->layer_attn_comp_cache[il] = rocm_graph_alloc_kv_cache_tensor(
-              managed_kv_cache,
-              initial_comp_cap * DS4_N_HEAD_DIM * sizeof(float));
+          g->layer_attn_comp_cache[il] = rocm_graph_alloc_comp_rows(
+              g, DS4_N_HEAD_DIM * sizeof(float), g->layer_comp_cap[il],
+              initial_comp_cap, ratio);
           if (ratio == 4) {
-            g->layer_attn_comp_cache_f16[il] = rocm_graph_alloc_kv_cache_tensor(
-                managed_kv_cache,
-                initial_comp_cap * DS4_N_HEAD_DIM * sizeof(uint16_t));
+            g->layer_attn_comp_cache_f16[il] = rocm_graph_alloc_comp_rows(
+                g, DS4_N_HEAD_DIM * sizeof(uint16_t), g->layer_comp_cap[il],
+                initial_comp_cap, ratio);
           }
             g->layer_attn_state_kv[il] = ds4_gpu_tensor_alloc(attn_width * attn_rows * sizeof(float));
             g->layer_attn_state_score[il] = ds4_gpu_tensor_alloc(attn_width * attn_rows * sizeof(float));
@@ -977,11 +1073,9 @@ static bool rocm_graph_alloc_raw_cap(
             if (ratio == 4) {
                 const uint64_t index_width = (uint64_t)coff * DS4_N_INDEXER_HEAD_DIM;
                 const uint64_t index_rows = (uint64_t)coff * ratio;
-                g->layer_index_comp_cache[il] =
-                    rocm_graph_alloc_kv_cache_tensor(
-                        managed_kv_cache, initial_comp_cap *
-                                              DS4_N_INDEXER_HEAD_DIM *
-                                              sizeof(float));
+                g->layer_index_comp_cache[il] = rocm_graph_alloc_comp_rows(
+                    g, DS4_N_INDEXER_HEAD_DIM * sizeof(float),
+                    g->layer_comp_cap[il], initial_comp_cap, ratio);
                 g->layer_index_state_kv[il] = ds4_gpu_tensor_alloc(index_width * index_rows * sizeof(float));
                 g->layer_index_state_score[il] = ds4_gpu_tensor_alloc(index_width * index_rows * sizeof(float));
                 if (g->layer_index_state_kv[il]) {
@@ -1006,8 +1100,30 @@ static bool rocm_graph_alloc_raw_cap(
     // A large configured window must not reserve a full-window prefill matrix.
     const uint64_t initial_score_count = std::max<uint64_t>(
         g->comp_cap, std::min<uint64_t>(g->comp_cap, pc / min_ratio + 2) * pc);
-    g->indexer_scores =
-        ds4_gpu_tensor_alloc(initial_score_count * sizeof(float));
+    // With a state account the scratch is a region of rows of one prefill
+    // chunk of floats, up to the largest score matrix
+    // (rocm_graph_indexer_scores_max_bytes), at one address: rows map as
+    // depth grows, with no hipFree drain, and the account charges them as it
+    // charges the session's compressed rows (one row per `min_ratio` tokens). A reclaim's trim
+    // releases them like K/V; scores are rewritten before every read.
+    if (g->state_account) {
+      const uint64_t row_bytes = pc * sizeof(float);
+      const uint64_t max_rows =
+          (rocm_graph_indexer_scores_max_bytes(g->comp_cap, prefill_cap) +
+           row_bytes - 1) /
+          row_bytes;
+      g->indexer_scores = ds4_gpu_tensor_alloc_rows(
+          row_bytes, max_rows,
+          std::min<uint64_t>(
+              max_rows,
+              (initial_score_count * sizeof(float) + row_bytes - 1) / row_bytes),
+          rocm_graph_account(g), min_ratio);
+      if (g->indexer_scores)
+        g->indexer_score_row_bytes = row_bytes;
+    }
+    if (!g->indexer_scores)
+      g->indexer_scores =
+          ds4_gpu_tensor_alloc(initial_score_count * sizeof(float));
     g->comp_selected = ds4_gpu_tensor_alloc((uint64_t)(DS4_N_INDEXER_TOP_K ? DS4_N_INDEXER_TOP_K : 1u) *
                                               pc * sizeof(uint32_t));
     g->heads = ds4_gpu_tensor_alloc(q_dim * sizeof(float));
@@ -1290,11 +1406,19 @@ static bool rocm_graph_reserve_indexer_scores(ds4_gpu_graph* g, uint32_t n_comp,
   }
   const uint64_t required =
       static_cast<uint64_t>(n_comp) * n_tokens * sizeof(float);
+  if (g->indexer_score_row_bytes != 0) {
+    // A region: back the rows this matrix spans in place. Ask the region
+    // itself (lock-free when backed): a reclaim may have trimmed rows the
+    // tensor's byte count still covers.
+    return ds4_gpu_tensor_ensure_rows(
+               g->indexer_scores, (required + g->indexer_score_row_bytes - 1) /
+                                      g->indexer_score_row_bytes) != 0;
+  }
   const uint64_t capacity = ds4_gpu_tensor_bytes(g->indexer_scores);
   if (required <= capacity)
     return true;
   const uint64_t maximum =
-      static_cast<uint64_t>(g->comp_cap) * g->prefill_cap * sizeof(float);
+      rocm_graph_indexer_scores_max_bytes(g->comp_cap, g->prefill_cap);
   auto* replacement =
       ds4_gpu_tensor_alloc(std::min(maximum, std::max(required, capacity * 2)));
   if (replacement == nullptr)
@@ -1304,6 +1428,46 @@ static bool rocm_graph_reserve_indexer_scores(ds4_gpu_graph* g, uint32_t n_comp,
   ds4_gpu_tensor_free(g->indexer_scores);
   g->indexer_scores = replacement;
   return true;
+}
+
+/* Scores the compressed rows of layer `il` for `n_tokens` batch tokens at
+ * `pos0` and selects each token's top rows into comp_selected, in token
+ * slices when the whole matrix exceeds kIndexerScoreBudgetBytes. Each token's
+ * scores and selection depend only on that token, the rows and n_comp, and
+ * every slice is a multiple of 16 tokens wider than 8 (a short tail joins the
+ * slice before it), so the kernels and results equal one pass. */
+static bool rocm_graph_indexer_select_sliced(ds4_gpu_graph *g, uint32_t il,
+                                             uint32_t n_comp, uint32_t pos0,
+                                             uint32_t n_tokens, float scale) {
+  const uint32_t width = rocm_graph_indexer_slice_tokens(n_comp, n_tokens);
+  const uint64_t q_row =
+      (uint64_t)DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM * sizeof(float);
+  const uint64_t w_row = (uint64_t)DS4_N_INDEXER_HEAD * sizeof(float);
+  const uint64_t sel_row = (uint64_t)DS4_N_INDEXER_TOP_K * sizeof(uint32_t);
+  bool ok = true;
+  for (uint32_t t0 = 0; ok && t0 < n_tokens;) {
+    uint32_t n = std::min(width, n_tokens - t0);
+    if (n_tokens - t0 - n < 16u)
+      n = n_tokens - t0;
+    ds4_gpu_tensor *q =
+        ds4_gpu_tensor_view(g->batch_indexer_q, t0 * q_row, n * q_row);
+    ds4_gpu_tensor *w =
+        ds4_gpu_tensor_view(g->batch_indexer_weights, t0 * w_row, n * w_row);
+    ds4_gpu_tensor *sel =
+        ds4_gpu_tensor_view(g->comp_selected, t0 * sel_row, n * sel_row);
+    ok = q && w && sel && rocm_graph_reserve_indexer_scores(g, n_comp, n) &&
+         ds4_gpu_indexer_scores_decode_batch_tensor(
+             g->indexer_scores, q, w, g->layer_index_comp_cache[il], n_comp,
+             n, pos0 + t0, DS4_N_INDEXER_HEAD, DS4_N_INDEXER_HEAD_DIM,
+             ds4_layer_compress_ratio(il), scale, g->batch_heads) != 0 &&
+         ds4_gpu_indexer_topk_tensor(sel, g->indexer_scores, n_comp, n,
+                                     DS4_N_INDEXER_TOP_K) != 0;
+    ds4_gpu_tensor_free(sel);
+    ds4_gpu_tensor_free(w);
+    ds4_gpu_tensor_free(q);
+    t0 += n;
+  }
+  return ok;
 }
 
 static bool rocm_graph_encode_decode_layer(
@@ -3408,6 +3572,16 @@ static bool rocm_graph_encode_layer_attention_batch(
                                                                     n_comp,
                                                                     &index_stage_t0);
                 }
+                if (ok && rocm_graph_indexer_slice_tokens(n_comp, n_tokens) <
+                              n_tokens) {
+                  ok = rocm_graph_indexer_select_sliced(g, il, n_comp, pos0,
+                                                        n_tokens, index_scale);
+                  if (ok && index_stage_profile) {
+                    ok = rocm_graph_indexer_stage_profile_boundary(
+                        "score_topk", il, pos0, n_tokens, n_comp,
+                        &index_stage_t0);
+                  }
+                } else {
                 ok = ok &&
                      rocm_graph_reserve_indexer_scores(g, n_comp, n_tokens) &&
                      ds4_gpu_indexer_scores_decode_batch_tensor(
@@ -3432,6 +3606,7 @@ static bool rocm_graph_encode_layer_attention_batch(
                     ok = rocm_graph_indexer_stage_profile_boundary(
                         "topk", il, pos0, n_tokens, n_comp, &index_stage_t0);
                   }
+                }
                 }
                 if (ok) {
                     use_indexed_comp = true;
@@ -7100,6 +7275,52 @@ uint32_t ds4_rocm_graph_prefill_capacity(int context_size) {
     return rocm_graph_prefill_cap_for_prompt(context_size);
 }
 
+std::shared_ptr<gufo::mem::StateAccount> ds4_rocm_graph_state_account(
+    const ds4_rocm_graph *graph) {
+  return graph ? rocm_graph_account(graph) : nullptr;
+}
+
+uint64_t ds4_rocm_graph_demand_mapped_bytes(int context_size) {
+  if (context_size <= 0)
+    return 0;
+  const auto pages = [](uint64_t row_bytes, uint64_t rows) {
+    return static_cast<uint64_t>(gufo::mem::RegionPageBytes(
+        {.row_bytes = static_cast<std::size_t>(row_bytes),
+         .rows = static_cast<std::size_t>(rows)},
+        static_cast<std::size_t>(rows)));
+  };
+  uint64_t bytes = 0;
+  for (uint32_t il = 0; il < DS4_N_LAYER; ++il) {
+    const uint32_t ratio = ds4_layer_compress_ratio(il);
+    if (ratio == 0)
+      continue;
+    const uint64_t rows = (uint64_t)context_size / ratio + 2u;
+    bytes += pages(DS4_N_HEAD_DIM * sizeof(float), rows);
+    if (ratio == 4)
+      bytes += pages(DS4_N_HEAD_DIM * sizeof(uint16_t), rows) +
+               pages(DS4_N_INDEXER_HEAD_DIM * sizeof(float), rows);
+  }
+  // The indexer score scratch region (rocm_graph_alloc_raw_cap): rows of
+  // one prefill chunk of floats, up to the largest score matrix.
+  uint32_t min_ratio = UINT32_MAX;
+  for (uint32_t il = 0; il < DS4_N_LAYER; ++il) {
+    const uint32_t ratio = ds4_layer_compress_ratio(il);
+    if (ratio != 0 && ratio < min_ratio)
+      min_ratio = ratio;
+  }
+  if (min_ratio != UINT32_MAX) {
+    const uint32_t prefill_cap = ds4_rocm_graph_prefill_capacity(context_size);
+    const uint32_t comp_cap =
+        std::max<uint32_t>((uint32_t)context_size / min_ratio + 2u, 2u);
+    const uint64_t row_bytes = (uint64_t)std::max(prefill_cap, 1u) * sizeof(float);
+    bytes += pages(row_bytes,
+                   (rocm_graph_indexer_scores_max_bytes(comp_cap, prefill_cap) +
+                    row_bytes - 1) /
+                       row_bytes);
+  }
+  return bytes;
+}
+
 uint32_t ds4_rocm_graph_resume_prefill_min_tokens(void) {
     return rocm_graph_resume_prefill_min_tokens();
 }
@@ -7155,7 +7376,8 @@ ds4_rocm_graph *ds4_rocm_graph_create(ds4_engine *engine,
     }
     if (!rocm_graph_alloc_raw_cap(
             graph, engine->weights, &engine->weights->layer[0], raw_capacity,
-            (uint32_t)context_size, prefill_capacity, batch_workspace)) {
+            (uint32_t)context_size, prefill_capacity, batch_workspace,
+            !engine->state_regions_off)) {
       free(graph);
       return NULL;
     }

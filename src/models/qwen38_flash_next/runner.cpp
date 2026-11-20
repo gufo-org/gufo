@@ -187,6 +187,10 @@ public:
     return {.per_request_state_bytes = session_->AllocatedBytes(),
             .temporary_scratch_bytes = 0};
   }
+  [[nodiscard]] std::shared_ptr<mem::StateAccount> state_account()
+      const override {
+    return session_->StateAccount();
+  }
 
   [[nodiscard]] QwenFlashNextSession& session() const { return *session_; }
   [[nodiscard]] models::qwen38_flash_next::ContinuationAdapter& adapter()
@@ -356,10 +360,9 @@ public:
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
-    const auto session_bytes = model_->SessionBytes(
-        use_mtp_ ? gufo::core::SessionMode::kSpeculative
-                 : gufo::core::SessionMode::kAutoregressive,
-        max_context_);
+    const auto mode = use_mtp_ ? gufo::core::SessionMode::kSpeculative
+                               : gufo::core::SessionMode::kAutoregressive;
+    const auto session_bytes = model_->SessionBytes(mode, max_context_);
     std::optional<std::size_t> capacity;
     if (const auto memory = gufo::hip::QueryAdmissionMemory()) {
       const auto deferred = model_->DeferredScratchBytes();
@@ -379,6 +382,8 @@ public:
         .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
         .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
         .requires_device_runtime_lock = true,
+        .demand_mapped_state_bytes =
+            model_->DemandMappedBytes(mode, max_context_),
     };
   }
 
@@ -490,9 +495,7 @@ public:
     const std::size_t remaining = prompt.size() - offset;
     const std::size_t consumed =
         StepTokens(offset, max_input_tokens, remaining,
-                   remaining <= model_->PrefillThroughCapacity()
-                       ? model_->PrefillThroughCapacity()
-                       : model_->PrefillCapacity());
+                   model_->StepCapacity(remaining, max_input_tokens));
     const std::size_t next_position = offset + consumed;
     const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
     // The next step most likely takes the same budget; its n-gram rows are
@@ -502,11 +505,10 @@ public:
                           ? state.prefill_lookahead()
                           : prompt.subspan(next_position);
     const std::size_t after = rest.size();
-    const auto next = QwenFlashNextEngineTokens(rest.subspan(
-        0, std::min<std::size_t>({max_input_tokens, after,
-                                  after <= model_->PrefillThroughCapacity()
-                                      ? model_->PrefillThroughCapacity()
-                                      : model_->PrefillCapacity()})));
+    const auto next = QwenFlashNextEngineTokens(
+        rest.subspan(0, std::min<std::size_t>(
+                            {max_input_tokens, after,
+                             model_->StepCapacity(after, max_input_tokens)})));
     std::string error;
     const PrefillYieldScope yield(*model_, state);
     if (!qfn.session().Sync(prefix, &error, next)) {
@@ -525,8 +527,9 @@ public:
       std::size_t offset, std::size_t budget,
       std::size_t boundary) const override {
     const auto& qfn = RequireQwenFlashNextState(state);
-    const auto consumed = StepTokens(offset, budget, prompt.size() - offset,
-                                     model_->PrefillThroughCapacity());
+    const auto consumed =
+        StepTokens(offset, budget, prompt.size() - offset,
+                   model_->StepThrough(prompt.size() - offset, budget));
     if (boundary <= offset + 1 || boundary >= offset + consumed)
       return std::nullopt;
     const auto bytes = qfn.session().PrefillCheckpointBytes(
@@ -542,8 +545,9 @@ public:
     auto& qfn = RequireQwenFlashNextState(state);
     if (!consume || boundaries.empty() || offset != qfn.position())
       throw std::logic_error("invalid component in-pass checkpoint request");
-    const auto consumed = StepTokens(offset, budget, prompt.size() - offset,
-                                     model_->PrefillThroughCapacity());
+    const auto consumed =
+        StepTokens(offset, budget, prompt.size() - offset,
+                   model_->StepThrough(prompt.size() - offset, budget));
     const auto next_position = offset + consumed;
     const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
     // As in Prefill: the next step's n-gram rows are read during this one.
@@ -552,10 +556,8 @@ public:
                           : prompt.subspan(next_position);
     const std::size_t after = rest.size();
     const auto next = QwenFlashNextEngineTokens(rest.subspan(
-        0, std::min<std::size_t>({budget, after,
-                                  after <= model_->PrefillThroughCapacity()
-                                      ? model_->PrefillThroughCapacity()
-                                      : model_->PrefillCapacity()})));
+        0, std::min<std::size_t>(
+               {budget, after, model_->StepCapacity(after, budget)})));
     std::vector<std::uint32_t> points(boundaries.begin(), boundaries.end());
     double capture_ms = 0;
     const PrefillYieldScope yield(*model_, state);
@@ -781,6 +783,12 @@ public:
     return RequireQwenFlashNextState(state).position();
   }
 
+  // A prefill that ends without advancing a token (cancelled, failed, or a
+  // stop token sampled from its logits) keeps the wide pass scratch, since
+  // decode steps and Advance release it. Idle, nothing will use it soon: give
+  // it back to the host.
+  void Idle() const override { model_->ReleaseWidePasses(); }
+
   [[nodiscard]] TextRunnerNgramRows NgramRows(
       const TextRunnerState& state) const override {
     const auto totals =
@@ -910,18 +918,30 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
   // until the configured sessions fit, rather than refusing a session count
   // the ordinary verifier width fits.
   if (std::size_t free_bytes = 0, total_bytes = 0;
-      use_mtp && hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+      use_mtp && mem::MemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
     const std::size_t sessions =
         std::max<std::size_t>(options.session_count, 1);
-    for (std::uint32_t rows = rocm::Executor::kWideRows;; rows -= 8) {
+    const auto mode = gufo::core::SessionMode::kSpeculative;
+    const auto fit = [&](std::uint32_t rows) {
       model->LimitCopyRows(rows);
-      if (rows == 8 ||
-          sessions * model->SessionBytes(gufo::core::SessionMode::kSpeculative,
-                                         max_context) +
-                  model->DeferredScratchBytes() <=
-              free_bytes)
-        break;
-    }
+      const std::size_t deferred = model->DeferredScratchBytes();
+      if (free_bytes <= deferred)
+        return mem::SessionFit::Kind::kRefused;
+      return mem::FitSessions(sessions, model->SessionBytes(mode, max_context),
+                              model->DemandMappedBytes(mode, max_context),
+                              free_bytes - deferred)
+          .kind;
+    };
+    std::uint32_t rows = rocm::Executor::kWideRows;
+    while (rows > 8 && fit(rows) != mem::SessionFit::Kind::kFits)
+      rows -= 8;
+    // When no width fits every session at full context, the sessions share
+    // their K/V (mem::FitSessions): keep the widest width that allows it.
+    if (fit(rows) != mem::SessionFit::Kind::kFits)
+      for (rows = rocm::Executor::kWideRows;
+           rows > 8 && fit(rows) == mem::SessionFit::Kind::kRefused;)
+        rows -= 8;
+    model->LimitCopyRows(rows);
   }
   std::string model_fingerprint = options.disk_cache.model_artifact_fingerprint;
   if (!options.disk_cache.directory.empty() && model_fingerprint.empty()) {

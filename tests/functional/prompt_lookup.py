@@ -232,9 +232,9 @@ def main():
                         assert control["text"].startswith(partial)
                         cancelled = re.compile(
                             rf"\brequest={re.escape(request_id)}\b.*\bfinish=cancelled\b")
-                        deadline = time.monotonic() + 10
+                        deadline = time.perf_counter() + 10
                         while not cancelled.search((output / "server.log").read_text()):
-                            assert time.monotonic() < deadline, "server did not observe cancellation"
+                            assert time.perf_counter() < deadline, "server did not observe cancellation"
                             time.sleep(.02)
                         assert copied() > start, "cancelled image request exercised no accepted copies"
                         record(f"image-cancel-{row}", {

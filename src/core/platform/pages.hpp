@@ -67,6 +67,35 @@ SharedTempMapping CreateSharedTempMapping(std::size_t bytes) noexcept;
 /// Releases a mapping created by CreateSharedTempMapping().
 void ReleaseSharedTempMapping(SharedTempMapping& mapping) noexcept;
 
+/// True when device pages are made from host RAM, so state promised to
+/// sessions but not mapped yet is host memory the host budgets must hold
+/// back. False on Windows, where they come from the dedicated carve-out.
+bool DevicePagesUseHostMemory() noexcept;
+
+/// True when an exported device-memory file (a Linux dma-buf) can be mapped
+/// for the CPU with MapDeviceFileAt().
+bool CanMapDeviceFiles() noexcept;
+
+/// True when every byte of [address, address + bytes) is already mapped in
+/// this process (reserved by the device runtime, for example), so a fixed
+/// mapping over it cannot replace anything else.
+bool IsAddressRangeReserved(const void* address, std::size_t bytes);
+
+/// Maps `bytes` of the device-memory file `handle` read-write at `address`,
+/// replacing the reservation there, then closes the handle, and faults the
+/// range in so later CPU reads take no page faults. The device runtime
+/// reserves the same range for the GPU, so the CPU and the GPU use one
+/// pointer. Returns false (the handle still closed) on failure.
+bool MapDeviceFileAt(void* address, std::size_t bytes,
+                     std::intptr_t handle) noexcept;
+
+/// Closes a device-memory file handle that was not mapped.
+void CloseDeviceFile(std::intptr_t handle) noexcept;
+
+/// Replaces a MapDeviceFileAt() mapping with an inaccessible reservation,
+/// as the device runtime left the range.
+void UnmapDeviceFileAt(void* address, std::size_t bytes) noexcept;
+
 }  // namespace gufo::platform
 
 #endif  // GUFO_CORE_PLATFORM_PAGES_HPP_

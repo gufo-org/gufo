@@ -750,8 +750,10 @@ void Check(const std::shared_ptr<qfn::Model>& model, bool mtp,
   auto& a = adapter.GetSession(*source);
   auto& b = adapter.GetSession(*destination);
   std::string error;
-  const auto capacity = model->PrefillCapacity();
-  const auto through = model->PrefillThroughCapacity();
+  // Plans assume the widest passes, which stay below this 16,384 context.
+  const auto capacity = model->PlannedChunk();
+  const auto through = model->PlannedThrough();
+  Require(through < 16384, "widest pass reaches the test context");
   Require(adapter.PlanPrefill(*source, 0, through) ==
               std::vector<cache::Rows>{through},
           "prefill plan split a supported tail");

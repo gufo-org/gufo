@@ -4,6 +4,67 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/internal/releasing.md).
 
+## [0.35.0](https://github.com/gufo-org/gufo/compare/v0.34.0...v0.35.0) (2026-11-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* **serve:** parse multipart/form-data bodies per RFC 7578 ([#1176](https://github.com/gufo-org/gufo/issues/1176))
+
+### Features
+
+* **ext:** trim the reasoning separator after a block the prompt closed ([#1210](https://github.com/gufo-org/gufo/issues/1210)) ([d69ceda](https://github.com/gufo-org/gufo/commit/d69ceda987d5d71e85f5878af1e987d98549dd19))
+* **model:** download extension-provided model weights with gufo model ([#1203](https://github.com/gufo-org/gufo/issues/1203)) ([dec06b8](https://github.com/gufo-org/gufo/commit/dec06b8319c13ae6444fdce9be9853edfcf316b1))
+* **npu:** run EmbeddingGemma 2, Qwen3-ASR and Qwen3-TTS on the XDNA NPU (--npu) ([#1216](https://github.com/gufo-org/gufo/issues/1216)) ([a27bbf9](https://github.com/gufo-org/gufo/commit/a27bbf9820d125ef1532fd7154f33415e677064f))
+* **npu:** run XDNA NPU programs through XRT from core and extensions ([#1186](https://github.com/gufo-org/gufo/issues/1186)) ([e671f85](https://github.com/gufo-org/gufo/commit/e671f85e90f6e44b902375007aa9f5375e559b1f))
+* **qwen-image:** true CFG, image to image, and multi-reference CFG edits that fit into GPU memory ([#1212](https://github.com/gufo-org/gufo/issues/1212)) ([cae8759](https://github.com/gufo-org/gufo/commit/cae8759ac3c8290c061500f5d2c9f043febf83ce))
+* **sched:** require a text scheduling profile and remove the legacy prefill budget ([#1175](https://github.com/gufo-org/gufo/issues/1175)) ([0d238d4](https://github.com/gufo-org/gufo/commit/0d238d4f5fee49720d6be45c2c27795100922d5c))
+* **serve:** add the A1111 (sdapi) image API ([#1214](https://github.com/gufo-org/gufo/issues/1214)) ([58ec079](https://github.com/gufo-org/gufo/commit/58ec0797abe2cde931e61e8283ed5d6fda4cc490))
+
+
+### Bug Fixes
+
+* **cache:** count recovered manifest storage once during startup ([#1194](https://github.com/gufo-org/gufo/issues/1194)) ([07e1191](https://github.com/gufo-org/gufo/commit/07e1191f36885c144b34566aac8eaa9777d8fa78))
+* **cache:** retain generated frontiers and coordinate RAM and disk retention ([#1183](https://github.com/gufo-org/gufo/issues/1183)) ([48aeeee](https://github.com/gufo-org/gufo/commit/48aeeee992a754f06ccf6ffe93995e5de446c184))
+* **cmake:** discover only XRT coreutil ([#1227](https://github.com/gufo-org/gufo/issues/1227)) ([91d3993](https://github.com/gufo-org/gufo/commit/91d3993a5a94c5a677b0e8cc723d716e9f0b7ccc))
+* **core:** keep GPU-visible host buffers out of compaction ([#1249](https://github.com/gufo-org/gufo/issues/1249)) ([6ecfa50](https://github.com/gufo-org/gufo/commit/6ecfa504312c1b7ee428a6abaf685f43c3984e88))
+* **hip:** match Clang 23 value-style WMMA builtin signatures on gfx1151 ([#945](https://github.com/gufo-org/gufo/issues/945)) ([fc26f52](https://github.com/gufo-org/gufo/commit/fc26f52c9b5d2047f917897a880d9e087f1078e5))
+* **npu:** load XRT from a module on first NPU use on Linux ([#1229](https://github.com/gufo-org/gufo/issues/1229)) ([11e1cf3](https://github.com/gufo-org/gufo/commit/11e1cf38e6ae06dd93dd01e41338df29128d9a69))
+* **qwen38-flash-next:** keep compacted MTP inject rows out of the norm buffer ([#1230](https://github.com/gufo-org/gufo/issues/1230)) ([800ce32](https://github.com/gufo-org/gufo/commit/800ce3280201e94104cfff9d310837ab6a6f3d95))
+* **qwen:** add missing 0 return in benchmark lambdas ([#1222](https://github.com/gufo-org/gufo/issues/1222)) ([466d1bc](https://github.com/gufo-org/gufo/commit/466d1bc9cf54d2446f308d440d3a94447afbe014))
+* **qwen:** define the SSM post-norm kernel in the shared kernels library ([#1190](https://github.com/gufo-org/gufo/issues/1190)) ([e74e16b](https://github.com/gufo-org/gufo/commit/e74e16b5d99efee52b9a08fc9574883ac1456846))
+* **serve:** bind the listener exclusively on Windows so a second server fails at bind() ([#1191](https://github.com/gufo-org/gufo/issues/1191)) ([4f2ecf1](https://github.com/gufo-org/gufo/commit/4f2ecf12861347a6ec4b7e9451ba26f28242d9ec))
+* **serve:** do not split prefill passes for runners without prefix reuse ([#1184](https://github.com/gufo-org/gufo/issues/1184)) ([bc35aa8](https://github.com/gufo-org/gufo/commit/bc35aa81fe851ced7d6ec96cc5c906d7bf1b3775))
+* **serve:** let --max-pending 0 reject when every session is busy ([#1207](https://github.com/gufo-org/gufo/issues/1207)) ([6858788](https://github.com/gufo-org/gufo/commit/6858788b7cbd20519b5bb7ab16706f244f3fabbd))
+* **serve:** parse multipart/form-data bodies per RFC 7578 ([#1176](https://github.com/gufo-org/gufo/issues/1176)) ([5ace393](https://github.com/gufo-org/gufo/commit/5ace393c42025cfe2e6f26642705d425aa2360be))
+* **serve:** resume captured prefills before repeating peer work ([#1181](https://github.com/gufo-org/gufo/issues/1181)) ([77621b2](https://github.com/gufo-org/gufo/commit/77621b27db0e4518adeaed012873ffb6d46cc953))
+* **windows:** pass GCC-style math and vectorizer flags through clang-cl ([#1215](https://github.com/gufo-org/gufo/issues/1215)) ([192f9ac](https://github.com/gufo-org/gufo/commit/192f9ac51a6d9db6bde571fd598597c9e75bd055))
+* **windows:** use the NPU driver's XRT and Xilinx's XRT Windows SDK ([#1204](https://github.com/gufo-org/gufo/issues/1204)) ([eabda7a](https://github.com/gufo-org/gufo/commit/eabda7acffe94a9c07b9285a61e25a700f9ee997))
+
+
+### Performance
+
+* **cache:** reuse dependency metadata during disk recovery ([#1196](https://github.com/gufo-org/gufo/issues/1196)) ([e8f2fe0](https://github.com/gufo-org/gufo/commit/e8f2fe0e066faa658972b835ee53eaf8bcd23585))
+* **cache:** share native transfer streams in Flash-Next ([#1195](https://github.com/gufo-org/gufo/issues/1195)) ([7674e71](https://github.com/gufo-org/gufo/commit/7674e71afbd3f23616d6890adf09a85a0a88ce62))
+* **cache:** sync new disk checkpoint payloads concurrently ([#1205](https://github.com/gufo-org/gufo/issues/1205)) ([70bd0fd](https://github.com/gufo-org/gufo/commit/70bd0fdaf313de517c641d6698e38fc32ef0651c))
+* **npu:** cut host overhead of EmbeddingGemma 2 on the NPU ([#1225](https://github.com/gufo-org/gufo/issues/1225)) ([e8e60cb](https://github.com/gufo-org/gufo/commit/e8e60cbf53edda24bb4050d0ae18a1652f14dd7c))
+* **npu:** run each Q8Gemm matrix as one job and tile host attention ([#1237](https://github.com/gufo-org/gufo/issues/1237)) ([9a198f4](https://github.com/gufo-org/gufo/commit/9a198f46ca5391d0bad1e047f9adbb9c1e10f97a))
+* **qwen27b:** capture prompt checkpoints inside the prefill step ([#1224](https://github.com/gufo-org/gufo/issues/1224)) ([a59df29](https://github.com/gufo-org/gufo/commit/a59df2913dd0b1c7765bef41ea251d84917077ca))
+* **qwen27b:** share KV tiles across verification rows in split-K attention ([#1185](https://github.com/gufo-org/gufo/issues/1185)) ([e39a314](https://github.com/gufo-org/gufo/commit/e39a314e6fd60ee3d0ae849295a23cdddcb64e59))
+* **qwen38-flash-next:** draft MTP proposals with a Q4_K copy of the head prefix ([#1209](https://github.com/gufo-org/gufo/issues/1209)) ([a33323f](https://github.com/gufo-org/gufo/commit/a33323f2581cb5db0f0922f108a20b070a4aa034))
+* **qwen:** fuse the vision encoder attention into one WMMA kernel ([#1236](https://github.com/gufo-org/gufo/issues/1236)) ([6bd1051](https://github.com/gufo-org/gufo/commit/6bd1051f7850286a64acdc1fd64569fe4f3952a0))
+
+
+### Documentation
+
+* add a recipe for running third-party extensions ([#1163](https://github.com/gufo-org/gufo/issues/1163)) ([7b277d6](https://github.com/gufo-org/gufo/commit/7b277d6a0d0462c55749fdf6b4c0d36bd02f0613))
+* **install:** keep the NPU out of runtime suspend ([#1226](https://github.com/gufo-org/gufo/issues/1226)) ([8541cd4](https://github.com/gufo-org/gufo/commit/8541cd43a5b2cec7d5d7c0b8ccc4e98ac072ddda))
+
+
+### Code Refactoring
+
+* **rust:** share ABI guards and run unit tests in CI ([#1182](https://github.com/gufo-org/gufo/issues/1182)) ([580d053](https://github.com/gufo-org/gufo/commit/580d053b92569755efda88f926aa119c15856825))
+
 ## [0.34.0](https://github.com/gufo-org/gufo/compare/v0.33.0...v0.34.0) (2026-11-11)
 
 

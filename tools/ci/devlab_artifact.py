@@ -190,7 +190,13 @@ def signed_url(github, artifact):
     raise RuntimeError('Expected an artifact download redirect')
 
 
-def wait_artifact(github, run, attempt, name):
+# The hosted job that produces each Devlab package, as the caller's "Build"
+# job names the reusable linux-build.yml job.
+BUILD_JOBS = {'release': 'Build / Linux package', 'checked': 'Build / Linux checked package'}
+PACKAGES = {'release': ('', 'linux-artifacts.tar.gz'), 'checked': ('-checked', 'linux-checked.tar.gz')}
+
+
+def wait_artifact(github, run, attempt, name, job=BUILD_JOBS['release']):
     deadline = time.monotonic() + 7200
     while time.monotonic() < deadline:
         artifacts = [item for item in github.artifacts(run, name)
@@ -202,9 +208,9 @@ def wait_artifact(github, run, attempt, name):
         if state['run_attempt'] != attempt or state['status'] == 'completed':
             raise RuntimeError('Source run ended or was superseded before artifact delivery')
         jobs = github.api(f'/actions/runs/{run}/attempts/{attempt}/jobs?per_page=100')['jobs']
-        if any(job['name'].startswith('Hosted Linux binaries /') and
-               job['conclusion'] in ('failure', 'cancelled', 'timed_out', 'skipped') for job in jobs):
-            raise RuntimeError('Hosted Linux build failed')
+        if any(row['name'] == job and
+               row['conclusion'] in ('failure', 'cancelled', 'timed_out', 'skipped') for row in jobs):
+            raise RuntimeError(f'Hosted job {job} failed')
         print(f'Waiting for {name}; model downloads continue', flush=True)
         time.sleep(10)
     raise TimeoutError('Hosted artifact unavailable')
@@ -267,6 +273,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--manifest', type=Path)
     parser.add_argument('--cache', type=Path)
+    parser.add_argument('--variant', choices=sorted(PACKAGES), default='release',
+                        help='linux: the release comparison packages or the assertion-enabled candidate')
     args = parser.parse_args()
     github = GitHub(args.repository)
     if args.operation == 'fetch':
@@ -281,11 +289,13 @@ def main():
                 parser.error('--manifest and --cache are required')
             runtime(github, args.run, args.attempt, args.manifest, args.cache, args.output)
         else:
-            artifact = wait_artifact(github, args.run, args.attempt, f'linux-devlab-{args.attempt}')
+            suffix, member = PACKAGES[args.variant]
+            artifact = wait_artifact(github, args.run, args.attempt, f'linux-devlab-{args.attempt}{suffix}',
+                                     BUILD_JOBS[args.variant])
             with tempfile.TemporaryDirectory() as directory:
                 source = Path(directory) / 'binaries.zip'
                 fetch(github, artifact, source)
-                extract_member(source, 'linux-artifacts.tar.gz', args.output)
+                extract_member(source, member, args.output)
 
 
 if __name__ == '__main__':

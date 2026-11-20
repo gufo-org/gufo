@@ -122,8 +122,14 @@ static __device__ __forceinline__ int __vsubss4(const int a, const int b) {
 #endif
 }
 
+// Wrapping per-byte subtraction, as CUDA defines __vsub4. Setting each byte's
+// high bit of a and clearing it in b keeps every byte difference from
+// borrowing into its neighbour; the XOR then restores the true high bit.
 static __device__ __forceinline__ int __vsub4(const int a, const int b) {
-    return __vsubss4(a, b);
+    const unsigned int a_high = (unsigned int) a | 0x80808080u;
+    const unsigned int b_low  = (unsigned int) b & 0x7f7f7f7fu;
+    const unsigned int flip   = ((unsigned int) a ^ ~(unsigned int) b) & 0x80808080u;
+    return (int) ((a_high - b_low) ^ flip);
 }
 
 static __device__ __forceinline__ unsigned int __vcmpeq4(unsigned int a, unsigned int b) {
@@ -138,14 +144,13 @@ static __device__ __forceinline__ unsigned int __vcmpeq4(unsigned int a, unsigne
     return c;
 }
 
+// 0xff in each byte where a and b differ, 0x00 where they match. Adding 0x7f
+// to a byte's low seven bits carries into its high bit exactly when one of
+// them is set, and cannot carry further, so no compare or byte shuffles are
+// needed (llama.cpp #27962).
 static __device__ __forceinline__ unsigned int __vcmpne4(unsigned int a, unsigned int b) {
-    const uint8x4_t &va = reinterpret_cast<const uint8x4_t &>(a);
-    const uint8x4_t &vb = reinterpret_cast<const uint8x4_t &>(b);
-    unsigned int c;
-    uint8x4_t &vc = reinterpret_cast<uint8x4_t &>(c);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        vc[i] = va[i] == vb[i] ? 0x00 : 0xff;
-    }
-    return c;
+    const unsigned int x    = a ^ b;
+    const unsigned int low  = ((x & 0x7f7f7f7fu) + 0x7f7f7f7fu) & 0x80808080u;
+    const unsigned int high = x & 0x80808080u;
+    return ((low | high) >> 7) * 0xffu;
 }

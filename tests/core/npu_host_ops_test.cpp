@@ -120,61 +120,84 @@ int main() {
     Check(one == many, "EncodeBfp16Blocks == EncodeBfp16Block");
   }
 
-  // Attention: grouped heads and a sliding window against a naive loop.
+  // Attention against a naive loop: grouped heads with a sliding window, a
+  // causal prompt over several key tiles (past keys first), a soft cap, and a
+  // few rows (the per-row path), and vector dims with even and odd head groups
+  // (paired heads).
   {
-    const std::size_t rows = 37, heads = 4, kv = 2, dim = 24, window = 5;
-    std::vector<float> q(rows * heads * dim), k(rows * kv * dim),
-        v(rows * kv * dim), out(rows * heads * dim);
-    for (auto* t : {&q, &k, &v})
-      for (float& x : *t)
-        x = normal(rng) * 0.3f;
-    host::Attention({.q = q.data(),
-                     .q_stride = heads * dim,
-                     .k = k.data(),
-                     .k_stride = kv * dim,
-                     .v = v.data(),
-                     .v_stride = kv * dim,
-                     .out = out.data(),
-                     .out_stride = heads * dim,
-                     .rows = rows,
-                     .heads = heads,
-                     .kv_heads = kv,
-                     .dim = dim,
-                     .dim_v = dim,
-                     .scale = 0.5f},
-                    [&](std::size_t r, std::size_t* b, std::size_t* e) {
-                      *b = r > window ? r - window : 0;
-                      *e = std::min(rows, r + window + 1);
-                    });
-    std::vector<double> ref(out.size());
-    for (std::size_t r = 0; r < rows; ++r)
-      for (std::size_t h = 0; h < heads; ++h) {
-        const std::size_t kh = h / (heads / kv);
-        const std::size_t b = r > window ? r - window : 0,
-                          e = std::min(rows, r + window + 1);
-        std::vector<double> s(e - b);
-        double top = -1e300, total = 0;
-        for (std::size_t t = b; t < e; ++t) {
-          double d = 0;
-          for (std::size_t i = 0; i < dim; ++i)
-            d += double(q[(r * heads + h) * dim + i]) *
-                 k[(t * kv + kh) * dim + i];
-          s[t - b] = d * 0.5;
-          top = std::max(top, s[t - b]);
+    struct Case {
+      std::size_t rows, past, heads, kv, dim, window;  // window 0: causal
+      float softcap;
+    };
+    for (const Case cs :
+         {Case{37, 0, 4, 2, 24, 5, 0.0f}, Case{150, 70, 8, 2, 40, 0, 0.0f},
+          Case{20, 9, 4, 4, 16, 0, 2.0f}, Case{3, 100, 4, 1, 32, 0, 0.0f},
+          Case{90, 40, 8, 2, 128, 0, 0.0f}, Case{33, 0, 6, 2, 64, 0, 1.5f}}) {
+      const std::size_t rows = cs.rows, keys = cs.past + rows, heads = cs.heads,
+                        kv = cs.kv, dim = cs.dim, window = cs.window;
+      auto range = [&](std::size_t r, std::size_t* b, std::size_t* e) {
+        if (window) {
+          *b = r > window ? r - window : 0;
+          *e = std::min(rows, r + window + 1);
+        } else {
+          *b = 0;
+          *e = cs.past + r + 1;
         }
-        for (double& x : s)
-          total += x = std::exp(x - top);
-        for (std::size_t i = 0; i < dim; ++i) {
-          double acc = 0;
-          for (std::size_t t = b; t < e; ++t)
-            acc += s[t - b] / total * v[(t * kv + kh) * dim + i];
-          ref[(r * heads + h) * dim + i] = acc;
+      };
+      std::vector<float> q(rows * heads * dim), k(keys * kv * dim),
+          v(keys * kv * dim), out(rows * heads * dim);
+      for (auto* t : {&q, &k, &v})
+        for (float& x : *t)
+          x = normal(rng) * 0.3f;
+      host::Attention({.q = q.data(),
+                       .q_stride = heads * dim,
+                       .k = k.data(),
+                       .k_stride = kv * dim,
+                       .v = v.data(),
+                       .v_stride = kv * dim,
+                       .out = out.data(),
+                       .out_stride = heads * dim,
+                       .rows = rows,
+                       .heads = heads,
+                       .kv_heads = kv,
+                       .dim = dim,
+                       .dim_v = dim,
+                       .scale = 0.5f,
+                       .softcap = cs.softcap},
+                      range);
+      std::vector<double> ref(out.size());
+      for (std::size_t r = 0; r < rows; ++r)
+        for (std::size_t h = 0; h < heads; ++h) {
+          const std::size_t kh = h / (heads / kv);
+          std::size_t b = 0, e = 0;
+          range(r, &b, &e);
+          std::vector<double> s(e - b);
+          double top = -1e300, total = 0;
+          for (std::size_t t = b; t < e; ++t) {
+            double d = 0;
+            for (std::size_t i = 0; i < dim; ++i)
+              d += double(q[(r * heads + h) * dim + i]) *
+                   k[(t * kv + kh) * dim + i];
+            d *= 0.5;
+            if (cs.softcap > 0)
+              d = cs.softcap * std::tanh(d / cs.softcap);
+            s[t - b] = d;
+            top = std::max(top, s[t - b]);
+          }
+          for (double& x : s)
+            total += x = std::exp(x - top);
+          for (std::size_t i = 0; i < dim; ++i) {
+            double acc = 0;
+            for (std::size_t t = b; t < e; ++t)
+              acc += s[t - b] / total * v[(t * kv + kh) * dim + i];
+            ref[(r * heads + h) * dim + i] = acc;
+          }
         }
-      }
-    double worst = 0;
-    for (std::size_t i = 0; i < out.size(); ++i)
-      worst = std::max(worst, std::fabs(out[i] - ref[i]));
-    Check(worst < 1e-5, "Attention");
+      double worst = 0;
+      for (std::size_t i = 0; i < out.size(); ++i)
+        worst = std::max(worst, std::fabs(out[i] - ref[i]));
+      Check(worst < 1e-5, "Attention");
+    }
   }
 
   // RMS norm and rotary embedding with a row stride.

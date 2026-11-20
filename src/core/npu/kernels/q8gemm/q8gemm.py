@@ -6,10 +6,17 @@ broadcasts to two cores: both keep the A records, and they take alternate B
 records. Each column joins its four cores' output records.
 
 Dispatch-time values: g, kc, nt, ga = 2 g kc (A records), gt = g nt (output
-records per core), nt2 = 2 nt, kt = 2 kc nt (B records per stream) and the
-word offsets a_base, b_base and c_base of the rows in A, the matrix in W and
-the output in C. Instruction streams of several products concatenate into one
-dispatch (the cores restart at every barrier).
+records per core), nt2 = 2 nt, kt = 2 kc nt (B records per stream), parts
+(output parts of the same shape that share the A rows: the cores keep A and
+run the parts one after another), ktp = parts kt and gtp = parts gt (a
+stream's B records and a core's output records over the parts), kts (the B
+records per stream of the whole matrix: the stride between streams in W),
+the word offsets a_base, b_base and c_base of the rows in A, the matrix in W
+and the output in C, and a_ss, the stride between the streams' copies of the
+rows in A (0: one shared copy; otherwise each set of streams takes its own K
+slice), and compact (one row: gt counts records of 8 tiles' row 0). W holds
+[stream][part][record]; C [column][part][record]. Instruction streams of several products concatenate
+into one dispatch (the cores restart at every barrier).
 Usage: q8gemm.py <out dir>: writes q8gemm.xclbin and q8gemm_dispatch.so, the
 files gufo::npu::Q8Gemm::Open loads (src/core/npu/q8_gemm.hpp). Needs an
 mlir-aie (IRON) Python with Peano.
@@ -29,7 +36,7 @@ COLS, ROWS = 8, 4
 OBJ = 1088                      # words per record (4352 bytes)
 OUT = 128                       # words per output record (one core's 8 x 8 tile)
 MAX_A, MAX_C = 8, 32            # A records (4096 bytes kept) and 8 x 8 accumulator tiles per core
-A_WORDS, W_WORDS, C_WORDS = 64 << 20, 512 << 20, 64 << 20  # W: up to a 2 GiB arena
+A_WORDS, W_WORDS, C_WORDS = 64 << 20, 1024 << 20, 64 << 20  # W: up to a 4 GiB arena
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -41,7 +48,10 @@ def tap(total, offset, sizes, strides):
 def q8gemm(A: In, W: In, C: InOut, *, g: DispatchTime[np.int32], kc: DispatchTime[np.int32],
            nt: DispatchTime[np.int32], ga: DispatchTime[np.int32], gt: DispatchTime[np.int32],
            nt2: DispatchTime[np.int32], kt: DispatchTime[np.int32], a_base: DispatchTime[np.int32],
-           b_base: DispatchTime[np.int32], c_base: DispatchTime[np.int32]):
+           b_base: DispatchTime[np.int32], c_base: DispatchTime[np.int32], parts: DispatchTime[np.int32],
+           ktp: DispatchTime[np.int32], gtp: DispatchTime[np.int32], kts: DispatchTime[np.int32],
+           a_ss: DispatchTime[np.int32],
+           compact: DispatchTime[np.int32]):
     rec_ty = np.ndarray[(OBJ,), np.dtype[np.int32]]
     out_ty = np.ndarray[(OUT,), np.dtype[np.int32]]
     out4_ty = np.ndarray[(ROWS * OUT,), np.dtype[np.int32]]
@@ -50,6 +60,7 @@ def q8gemm(A: In, W: In, C: InOut, *, g: DispatchTime[np.int32], kc: DispatchTim
     obj = "q8gemm.o"
     begin = ExternalFunction("gemm_begin", source_file=os.path.join(HERE, "q8gemm.cc"), arg_types=[rtp_ty, np.int32],
                              object_file_name=obj, compile_flags=["-O2"] + os.environ.get("GEMM_FLAGS", "").split())
+    reset = Kernel("gemm_reset", obj, [rtp_ty])
     copy = Kernel("gemm_copy", obj, [rec_ty, abuf_ty])
     mac = Kernel("gemm_mac", obj, [abuf_ty, rec_ty])
     store = Kernel("gemm_store", obj, [out_ty])
@@ -63,15 +74,15 @@ def q8gemm(A: In, W: In, C: InOut, *, g: DispatchTime[np.int32], kc: DispatchTim
             l1[(c, 2 * h)] = l1[(c, 2 * h + 1)] = fwd
         o = ObjectFifo(out4_ty, name=f"y_{c}", depth=2)
         outs.append(o)
-        parts = o.prod().join([OUT * j for j in range(ROWS)], obj_types=[out_ty] * ROWS,
+        pieces = o.prod().join([OUT * j for j in range(ROWS)], obj_types=[out_ty] * ROWS,
                               names=[f"y_{c}_{j}" for j in range(ROWS)], depths=[2] * ROWS)
         for j in range(ROWS):
-            joins[(c, j)] = parts[j]
+            joins[(c, j)] = pieces[j]
 
     rtps = {k: Buffer(rtp_ty, name=f"rtp_{k[0]}_{k[1]}", use_write_rtp=True) for k in l1}
     barriers = {k: WorkerRuntimeBarrier() for k in l1}
 
-    def body(w_in, y_out, a, rtp, bar, parity, begin, copy, mac, store):
+    def body(w_in, y_out, a, rtp, bar, parity, begin, reset, copy, mac, store):
         bar.wait_for_value(1)
         bar.release_with_value(1)
         begin(rtp, parity)
@@ -79,39 +90,42 @@ def q8gemm(A: In, W: In, C: InOut, *, g: DispatchTime[np.int32], kc: DispatchTim
             r = w_in.acquire(1)
             copy(r, a)
             w_in.release(1)
-        for _ in range_(rtp[1]):
-            for _ in range_(rtp[5]):
-                r = w_in.acquire(1)
-                mac(a, r)
-                w_in.release(1)
-        for _ in range_(rtp[4]):
-            y = y_out.acquire(1)
-            store(y)
-            y_out.release(1)
+        for _ in range_(rtp[6]):
+            reset(rtp)
+            for _ in range_(rtp[1]):
+                for _ in range_(rtp[5]):
+                    r = w_in.acquire(1)
+                    mac(a, r)
+                    w_in.release(1)
+            for _ in range_(rtp[4]):
+                y = y_out.acquire(1)
+                store(y)
+                y_out.release(1)
 
     workers = [Worker(body, [l1[k].cons(), joins[k].prod(), Buffer(abuf_ty, name=f"a_{k[0]}_{k[1]}"), rtps[k],
-                             barriers[k], k[1] % 2, begin, copy, mac, store],
+                             barriers[k], k[1] % 2, begin, reset, copy, mac, store],
                       tile=Tile(k[0], 2 + k[1]), stack_size=0x800, dynamic_objfifo_lowering=True) for k in sorted(l1)]
 
     a_ty = np.ndarray[(A_WORDS,), np.dtype[np.int32]]
     w_ty = np.ndarray[(W_WORDS,), np.dtype[np.int32]]
     c_ty = np.ndarray[(C_WORDS,), np.dtype[np.int32]]
 
-    def sequence(A, W, C, g, kc, nt, ga, gt, nt2, kt, a_base, b_base, c_base, wh, yh):
+    def sequence(A, W, C, g, kc, nt, ga, gt, nt2, kt, a_base, b_base, c_base, parts, ktp, gtp, kts, a_ss, compact, wh, yh):
         for k in sorted(l1):
-            for i, v in enumerate((g, kc, nt, ga, gt, nt2)):
+            for i, v in enumerate((g, kc, nt, ga, gt, nt2, parts, compact)):
                 rtps[k][i] = v
             barriers[k].set(1)
         tg = TaskGroup()
         for s in range(2 * COLS):
-            wh[s].fill(A, tap(A_WORDS, a_base, [1, 1, ga, OBJ], [0, 0, OBJ, 1]), group=tg)
-            wh[s].fill(W, tap(W_WORDS, b_base + kt * (s * OBJ), [1, 1, kt, OBJ], [0, 0, OBJ, 1]), group=tg)
+            wh[s].fill(A, tap(A_WORDS, a_base + a_ss * s, [1, 1, ga, OBJ], [0, 0, OBJ, 1]), group=tg)
+            wh[s].fill(W, tap(W_WORDS, b_base + kts * (s * OBJ), [1, 1, ktp, OBJ], [0, 0, OBJ, 1]), group=tg)
         for c in range(COLS):
-            yh[c].drain(C, tap(C_WORDS, c_base + gt * (c * ROWS * OUT), [1, 1, gt, ROWS * OUT], [0, 0, ROWS * OUT, 1]),
+            yh[c].drain(C, tap(C_WORDS, c_base + gtp * (c * ROWS * OUT), [1, 1, gtp, ROWS * OUT], [0, 0, ROWS * OUT, 1]),
                         wait=True, group=tg)
         tg.finish()
 
-    rt = Runtime(sequence, [a_ty, w_ty, c_ty, g, kc, nt, ga, gt, nt2, kt, a_base, b_base, c_base, [f.prod() for f in streams],
+    rt = Runtime(sequence, [a_ty, w_ty, c_ty, g, kc, nt, ga, gt, nt2, kt, a_base, b_base, c_base, parts, ktp, gtp, kts, a_ss, compact,
+                            [f.prod() for f in streams],
                             [o.cons() for o in outs]])
     return Program(from_name("npu2", n_cols=None), rt, workers=workers).resolve_program()
 

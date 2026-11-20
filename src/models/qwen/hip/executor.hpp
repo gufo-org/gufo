@@ -27,6 +27,7 @@
 #include <hipblas/hipblas.h>
 
 #include <gufo/ext/experimental/hip_graph_decode_executor.hpp>
+#include <gufo/ext/experimental/state_memory.hpp>
 
 #include "src/families/qwen/hip_common/execution_policy.hpp"
 #include "src/families/qwen/kernels/ops/gemm.hpp"
@@ -258,6 +259,9 @@ class QwenGpuArena {
 public:
   /// Rows of one prompt pass, or the context when it is shorter.
   static constexpr std::uint32_t kMaxPromptBatch = 4096;
+  /// K/V rows backed past the frontier: tile-rounded attention reads and
+  /// the next steps' writes.
+  static constexpr std::size_t kKvTileRows = 2048;
 
   explicit QwenGpuArena(
       const core::ModelConfig& config, std::uint32_t max_context = 4096,
@@ -325,6 +329,8 @@ public:
   float* d_ssm_kq_scales{nullptr};
   float* d_ssm_alpha_beta{nullptr};
   float* d_logits{nullptr};
+  // K and V planes of [layer][position][width], one of the two per policy.
+  // Both point into kv_region_, backed as positions are written.
   void* d_attention_kv_f16{nullptr};
   float* d_kv_cache{nullptr};
   // Mirrors of the live recurrent buffers (see BeginRecurrentWrite); reassigned
@@ -349,6 +355,11 @@ public:
   [[nodiscard]] std::uint32_t GetMaxContext() const noexcept {
     return max_context_;
   }
+  /// Backs the K/V rows of positions below `end`, plus a tile of rows past
+  /// it, before they are written or read; maps further ahead on the page
+  /// pool's thread. Every writer calls it first, cache restores included.
+  /// Throws std::bad_alloc when no memory is left.
+  void EnsureKvRows(std::uint32_t end);
   [[nodiscard]] std::size_t GetAttentionKvPlaneElements() const noexcept {
     // Qwen27B reaches 2^32 elements per plane at context 262144.
     return static_cast<std::size_t>(config_.FullAttentionLayerCount()) *
@@ -363,6 +374,16 @@ public:
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
   [[nodiscard]] static std::size_t RecurrentStateBytes(
       const core::ModelConfig& config, QwenExecutionPolicy policy);
+  /// Attention K/V bytes at `max_context`: the demand-mapped part of
+  /// EstimateMemoryUsage().
+  [[nodiscard]] static std::size_t KvBytes(const core::ModelConfig& config,
+                                           std::uint32_t max_context,
+                                           QwenExecutionPolicy policy);
+  /// The account of this arena's K/V region (shared session state, #715).
+  [[nodiscard]] const std::shared_ptr<gufo::mem::StateAccount>& state_account()
+      const noexcept {
+    return account_;
+  }
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       std::uint32_t valid_context) const;
@@ -391,6 +412,8 @@ private:
   [[nodiscard]] bool AllocateSsmReplayLog();
 
   core::ModelConfig config_;
+  std::shared_ptr<gufo::mem::StateAccount> account_;
+  std::shared_ptr<gufo::mem::Region> kv_region_;
   std::uint32_t max_context_;
   std::uint32_t max_batch_;
   QwenExecutionPolicy policy_;
@@ -576,6 +599,10 @@ public:
   [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
       const core::ModelConfig& config, std::uint32_t max_context,
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+  [[nodiscard]] const std::shared_ptr<gufo::mem::StateAccount>& state_account()
+      const noexcept {
+    return arena_.state_account();
+  }
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
   void SetCancellationCheck(std::function<bool()> check) {
     cancellation_check_ = std::move(check);
@@ -586,6 +613,13 @@ public:
   /// layers have finished; other sessions may decode there on their own
   /// executors. One group, or an empty `yield`, restores unsplit passes.
   void SetPrefillYield(std::size_t groups, std::function<void()> yield);
+  /// Yields before the given ascending `layers` of each following prompt
+  /// pass instead; layer zero yields before the pass's first layer.
+  void SetPrefillYieldLayers(std::vector<std::uint32_t> layers,
+                             std::function<void()> yield);
+  /// Estimated milliseconds of one prompt pass of `rows` rows on gfx1151, for
+  /// spreading layer groups over passes of different widths.
+  [[nodiscard]] double PrefillPassCost(std::size_t rows) const;
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       std::uint32_t valid_context) const;
   void ConfigureVision(

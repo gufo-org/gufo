@@ -10,8 +10,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <gufo/ext/experimental/managed_alloc.hpp>
 #include <gufo/ext/experimental/snapshot_transfer.hpp>
+#include <gufo/ext/experimental/state_memory.hpp>
 #include <gufo/ext/platform/pages.hpp>
 #include <limits>
 #include <memory>
@@ -30,6 +32,13 @@ namespace gufo::models::qwen38_flash_next::rocm {
 namespace {
 
 using core::GgmlType;
+
+// Rows past the frontier that must be backed now: tile-rounded attention
+// reads and the next steps' writes.
+constexpr std::size_t kKvTileRows = 2048;
+// Rows the pool thread maps further ahead, off the scheduler thread: a
+// prefill pass and more, so a writer normally finds its pages mapped.
+constexpr std::size_t kKvAheadRows = 8192;
 
 void AssignError(std::string* error_msg, const std::string& message) {
   if (error_msg != nullptr) {
@@ -148,6 +157,13 @@ std::size_t RoutedTileCapacity(std::size_t slots, const Config& c) {
          c.num_experts + 1;
 }
 
+/// Address space reserved per row of the widest pass for its scratch set
+/// (about 0.35 MiB per row today, plus 2 MiB alignment per buffer).
+constexpr std::size_t kArenaRowBytesBound = std::size_t{1} << 20;
+/// Memory a wide pass needs beyond its scratch set: its own K/V, indexer
+/// and checkpoint pages.
+constexpr std::size_t kWidePassSpare = std::size_t{1} << 30;
+
 std::uint32_t IndexerCapacity(const Config& c, std::uint32_t batch,
                               std::uint32_t context) {
   return static_cast<std::uint32_t>(std::bit_ceil(std::min<std::uint64_t>(
@@ -249,7 +265,7 @@ public:
                           std::uint64_t reserved = 0) const {
     std::size_t free = 0;
     std::size_t total = 0;
-    if (hipMemGetInfo(&free, &total) != hipSuccess)
+    if (mem::MemGetInfo(&free, &total) != hipSuccess)
       return false;
     return free >= bytes && free - bytes + reserved >= reserve_;
   }
@@ -994,6 +1010,18 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   e->ngram_ = ngram;
   e->options_ = options;
   e->options_.max_batch = std::max<std::uint32_t>(1, options.max_batch);
+  e->narrow_batch_ =
+      options.narrow_batch == 0
+          ? e->options_.max_batch
+          : std::min(options.narrow_batch, e->options_.max_batch);
+  if (e->narrow_batch_ < e->options_.max_batch) {
+    // Wide passes run on their own scratch, mapped only while they run
+    // (#952). Without demand mapping, every pass is narrow.
+    e->scratch_arena_ = gufo::mem::ScratchArena::Reserve(
+        std::size_t{e->options_.max_batch} * kArenaRowBytesBound, error_msg);
+    if (!e->scratch_arena_)
+      e->options_.max_batch = e->narrow_batch_;
+  }
   e->options_.max_logit_rows = std::clamp<std::uint32_t>(
       options.max_logit_rows, 1, e->options_.max_batch);
   e->options_.max_speculative = std::clamp<std::uint32_t>(
@@ -1041,12 +1069,14 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     e->yarn_max_ = c.rope_scaling;
     e->yarn_ = YarnRope{};  // every session starts unscaled
   }
+  // Pinned host staging serves both scratch sets: T is the widest pass.
   const std::size_t T = e->options_.max_batch;
+  const std::size_t Tn = e->narrow_batch_;
   e->blaslt_ = BlasLt::Create(e->stream_, error_msg);
   if (e->blaslt_ == nullptr) {
     return nullptr;
   }
-  if (MatrixRows(T)) {
+  if (MatrixRows(Tn)) {
     // The first indexer heuristic query also loads the library's code object.
     // Do that before readiness instead of leaving a ~100 ms GPU idle gap in
     // the first prefill. Exact geometry still determines every plan; no trial
@@ -1058,7 +1088,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
              tensor->type == GgmlType::kF16) &&
             !e->blaslt_->Prepare(
                 tensor->type == GgmlType::kBF16 ? HIP_R_16BF : HIP_R_16F,
-                tensor->rows, T, tensor->cols, error_msg)) {
+                tensor->rows, Tn, tensor->cols, error_msg)) {
           return nullptr;
         }
       }
@@ -1070,8 +1100,6 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   auto& a = e->allocations_;
   Scratch& s = e->s_;
   auto f32 = [&](std::size_t n) { return Alloc<float>(a, n, error_msg); };
-  s.tokens = Alloc<std::int32_t>(a, T, error_msg);
-  s.x_half = Alloc<std::uint16_t>(a, T * model.max_half_cols(), error_msg);
   for (void*& slot : s.x_q8) {
     slot = Alloc<std::uint8_t>(
         a,
@@ -1089,71 +1117,9 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   s.mixed_q8_1 = q8_1(hidden);
   s.gdn_q8_1 = q8_1(c.SsmValueDim());
   s.ctx_q8_1 = q8_1(c.AttentionQDim());
-  s.x_q8t =
-      Alloc<std::uint8_t>(a, Q8TiledBytes(T, model.max_q8_cols()), error_msg);
-  s.res = f32(T * hc_dim);
-  s.xn = f32(T * hc_dim);
-  s.xn_half = Alloc<__half>(a, T * hc_dim, error_msg);
-  s.xn_q8t = Alloc<std::uint8_t>(a, Q8TiledBytes(T, hc_dim), error_msg);
-  s.lo = f32(T * c.hc_low_rank);
-  s.mixed = f32(T * hidden);
-  s.inject = f32(T * c.hc_count * HcInjectParts(hidden));
-  s.block_out = f32(T * hidden);
-  s.hc_defer_w = f32(T * c.hc_count);
   e->hc_fused_state_ =
       Alloc<std::uint8_t>(a, HcMixQ8FusedStateBytes(), error_msg);
   e->mask_words_ = c.SparseMaskWords(e->context_capacity_);
-  const std::size_t linear_projection = std::max<std::size_t>(
-      c.SsmConvChannels() + c.SsmValueDim(), c.ple_layer >= 0 ? hc_dim : 0);
-  const std::size_t linear_floats =
-      T * (linear_projection + 2 * c.ssm_num_v_heads + 2 * c.SsmKeyDim() +
-           2 * c.SsmValueDim()) +
-      (T + c.ssm_conv_kernel) * c.SsmConvChannels();
-  const std::size_t attention_floats =
-      T * (5 * c.AttentionQDim() + 4 * c.AttentionKvDim() +
-           c.indexer_heads * c.indexer_head_dim + c.indexer_head_dim +
-           e->mask_words_);
-  const std::size_t expert_floats = slots * (2 * c.expert_ff + hidden);
-  // Linear/full attention and routed experts run sequentially on stream_.
-  // Their intermediates die before the next stage, including batched rows,
-  // MTP catch-up and the deferred MoE epilogue consumed by Combine. Keep
-  // stable addresses for graph replay without reserving all three stages.
-  float* const stage =
-      f32(std::max({linear_floats, attention_floats, expert_floats,
-                    T * (linear_projection + hc_dim)}));
-  if (stage == nullptr) {
-    return nullptr;
-  }
-  // Mixer gates die before attention/experts start. PLE also uses this
-  // buffer as its key, so keep it beyond PLE's gated output at stage.
-  s.hc_gate = stage + T * linear_projection;
-  float* cursor = stage;
-  const auto take = [&](std::size_t count) {
-    float* result = cursor;
-    cursor += count;
-    return result;
-  };
-  // Stacked and separate SSM projections are mutually exclusive. MTP's
-  // projected embedding is consumed before attention and reuses this space.
-  s.qkvz = take(T * linear_projection);
-  s.qkv = s.qkvz;
-  s.z = s.qkvz != nullptr ? s.qkvz + T * c.SsmConvChannels() : nullptr;
-  s.alpha_beta = take(T * 2 * c.ssm_num_v_heads);
-  s.conv_scratch = take((T + c.ssm_conv_kernel) * c.SsmConvChannels());
-  s.qn = take(T * c.SsmKeyDim());
-  s.kn = take(T * c.SsmKeyDim());
-  s.gdn_raw = take(T * c.SsmValueDim());
-  s.gdn_out = take(T * c.SsmValueDim());
-  cursor = stage;
-  s.qg = take(T * (2 * c.AttentionQDim() + 2 * c.AttentionKvDim()));
-  s.q = take(T * c.AttentionQDim());
-  s.attn_gate = take(T * c.AttentionQDim());
-  s.k = take(T * c.AttentionKvDim());
-  s.v = take(T * c.AttentionKvDim());
-  s.iq = take(T * c.indexer_heads * c.indexer_head_dim);
-  s.ik = take(T * c.indexer_head_dim);
-  s.mask = reinterpret_cast<std::uint32_t*>(take(T * e->mask_words_));
-  s.ctx = take(T * c.AttentionQDim());
   // Keep score/selection traffic near the device cache size. Captured
   // verification still needs all its rows at the maximum context.
   const std::size_t score_stride = std::size_t{e->mask_words_} * 32;
@@ -1168,21 +1134,13 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       error_msg);
   s.attn_counts = Alloc<std::uint32_t>(a, kVecBatch, error_msg);
   if (c.ple_layer >= 0) {
-    // PLE finishes before this layer's mixer/SSM. Its gate consumes key
-    // and query before normalization/convolution reuse those two buffers.
-    // The gated input stays separate until PleInject consumes both outputs.
-    s.ple_key = s.hc_gate;
-    s.ple_value = s.block_out;
-    s.ple_query = s.xn;
-    s.ple_gated = s.qkvz;
-    s.ple_norm = s.hc_gate;
-    s.ple_conv = s.xn;
     s.ple_history_scratch =
         f32(static_cast<std::size_t>(c.PleConvHistory()) * hc_dim);
     // The quantizer reads each n-gram row once. On this UMA target it can
     // consume the coherent reader buffer directly, without another device
     // allocation or upload. Its address stays fixed for graph replay; the
     // next-chunk prefetch uses separate storage until this forward finishes.
+    // Both scratch sets share it, so it holds the widest pass.
     void* pinned = nullptr;
     if (!Check(e->host_allocations_.Allocate(
                    &pinned, T * c.PleEmbeddingDim() * sizeof(float),
@@ -1200,27 +1158,14 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     if (ngram)
       ngram->ReserveGather(T * c.ple_heads);
   }
-  s.router = f32(T * (c.num_experts + 1));
-  s.ids = Alloc<std::int32_t>(a, slots, error_msg);
   s.expert_counts = Alloc<std::uint32_t>(a, c.num_experts, error_msg);
-  {
-    const std::size_t compact = RoutedCompactRows(slots, c.num_experts);
-    s.routed_bounds = Alloc<std::int32_t>(a, c.num_experts + 1, error_msg);
-    s.routed_cursors = Alloc<std::int32_t>(a, c.num_experts, error_msg);
-    s.rows_token = Alloc<std::int32_t>(a, compact, error_msg);
-    s.rows_slot = Alloc<std::int32_t>(a, compact, error_msg);
-    s.routed_tiles =
-        Alloc<std::int32_t>(a, 3 * RoutedTileCapacity(slots, c), error_msg);
-  }
-  s.weights = f32(slots);
-  cursor = stage;
-  s.gate_e = take(slots * c.expert_ff);
-  s.up_e = take(slots * c.expert_ff);
-  s.down_e = take(slots * hidden);
-  s.shexp_gate = f32(T * c.shared_expert_ff);
-  s.shexp_up = f32(T * c.shared_expert_ff);
-  s.shexp_out = f32(T * hidden);
-  s.shexp_half = Alloc<__half>(a, T * c.shared_expert_ff, error_msg);
+  s.routed_bounds = Alloc<std::int32_t>(a, c.num_experts + 1, error_msg);
+  s.routed_cursors = Alloc<std::int32_t>(a, c.num_experts, error_msg);
+  // Buffers with a row per pass token, whole at the narrow width.
+  if (!e->CarveRowScratch(s, Tn, [&](std::size_t bytes) -> void* {
+        return Alloc<std::uint8_t>(a, bytes, error_msg);
+      }))
+    return nullptr;
   s.logits =
       f32(static_cast<std::size_t>(e->options_.max_logit_rows) * c.vocab_size);
   {
@@ -1265,13 +1210,6 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
                    !model.layers().empty() &&
                    model.layers()[0].hc_ffn.down.type == GgmlType::kQ8_0;
   if (model.has_mtp()) {
-    // The trunk's kept rows are session-owned. Its transient residual and
-    // mixer buffers are free while MTP constructs its input. The split
-    // projections consume h/embd before the first mixer rewrites xn/mixed.
-    s.mtp_h = s.xn;
-    s.mtp_embd = s.mixed;
-    s.mtp_eproj = s.qkvz;
-    s.mtp_res = s.res;
     s.mtp_argmax = Alloc<ArgmaxCandidate>(a, kArgmaxParts, error_msg);
     // The draft token and its confidence (float bits), one host transfer.
     s.mtp_token = Alloc<std::int32_t>(a, 2, error_msg);
@@ -1323,9 +1261,175 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       return nullptr;
     }
   }
+  e->narrow_s_ = s;
+  e->scratch_rows_ = e->narrow_batch_;
+  if (e->scratch_arena_) {
+    // Wide passes run on a second set of the row buffers, whose pages are
+    // mapped only while such passes run; every other buffer is shared.
+    e->wide_s_ = s;
+    if (!e->CarveRowScratch(e->wide_s_, T, [&](std::size_t bytes) {
+          return e->scratch_arena_->Take(bytes, 0, error_msg);
+        }))
+      return nullptr;
+  }
   if (!e->CalibrateDecodeOverlap(error_msg))
     return nullptr;
   return e;
+}
+
+bool Executor::CarveRowScratch(
+    Scratch& s, std::size_t T,
+    const std::function<void*(std::size_t)>& allocate) const {
+  const Config& c = config();
+  const DeviceModel& model = *model_;
+  const std::size_t hc_dim = c.HcDim();
+  const std::size_t hidden = c.hidden_size;
+  const std::size_t slots = T * c.num_experts_used;
+  bool ok = true;
+  const auto bytes = [&](std::size_t count) {
+    void* p = allocate(count);
+    ok = ok && p != nullptr;
+    return p;
+  };
+  const auto f32 = [&](std::size_t n) {
+    return static_cast<float*>(bytes(n * sizeof(float)));
+  };
+  const auto i32 = [&](std::size_t n) {
+    return static_cast<std::int32_t*>(bytes(n * sizeof(std::int32_t)));
+  };
+  s.tokens = i32(T);
+  s.x_half = bytes(T * model.max_half_cols() * sizeof(std::uint16_t));
+  s.x_q8t = bytes(Q8TiledBytes(T, model.max_q8_cols()));
+  s.res = f32(T * hc_dim);
+  s.xn = f32(T * hc_dim);
+  s.xn_half = static_cast<__half*>(bytes(T * hc_dim * sizeof(__half)));
+  s.xn_q8t = bytes(Q8TiledBytes(T, hc_dim));
+  s.lo = f32(T * c.hc_low_rank);
+  s.mixed = f32(T * hidden);
+  s.inject = f32(T * c.hc_count * HcInjectParts(hidden));
+  s.block_out = f32(T * hidden);
+  s.hc_defer_w = f32(T * c.hc_count);
+  const std::size_t linear_projection = std::max<std::size_t>(
+      c.SsmConvChannels() + c.SsmValueDim(), c.ple_layer >= 0 ? hc_dim : 0);
+  const std::size_t linear_floats =
+      T * (linear_projection + 2 * c.ssm_num_v_heads + 2 * c.SsmKeyDim() +
+           2 * c.SsmValueDim()) +
+      (T + c.ssm_conv_kernel) * c.SsmConvChannels();
+  const std::size_t attention_floats =
+      T *
+      (5 * c.AttentionQDim() + 4 * c.AttentionKvDim() +
+       c.indexer_heads * c.indexer_head_dim + c.indexer_head_dim + mask_words_);
+  const std::size_t expert_floats = slots * (2 * c.expert_ff + hidden);
+  // Linear/full attention and routed experts run sequentially on stream_.
+  // Their intermediates die before the next stage, including batched rows,
+  // MTP catch-up and the deferred MoE epilogue consumed by Combine. Keep
+  // stable addresses for graph replay without reserving all three stages.
+  float* const stage =
+      f32(std::max({linear_floats, attention_floats, expert_floats,
+                    T * (linear_projection + hc_dim)}));
+  if (stage == nullptr) {
+    return false;
+  }
+  // Mixer gates die before attention/experts start. PLE also uses this
+  // buffer as its key, so keep it beyond PLE's gated output at stage.
+  s.hc_gate = stage + T * linear_projection;
+  float* cursor = stage;
+  const auto take = [&](std::size_t count) {
+    float* result = cursor;
+    cursor += count;
+    return result;
+  };
+  // Stacked and separate SSM projections are mutually exclusive. MTP's
+  // projected embedding is consumed before attention and reuses this space.
+  s.qkvz = take(T * linear_projection);
+  s.qkv = s.qkvz;
+  s.z = s.qkvz + T * c.SsmConvChannels();
+  s.alpha_beta = take(T * 2 * c.ssm_num_v_heads);
+  s.conv_scratch = take((T + c.ssm_conv_kernel) * c.SsmConvChannels());
+  s.qn = take(T * c.SsmKeyDim());
+  s.kn = take(T * c.SsmKeyDim());
+  s.gdn_raw = take(T * c.SsmValueDim());
+  s.gdn_out = take(T * c.SsmValueDim());
+  cursor = stage;
+  s.qg = take(T * (2 * c.AttentionQDim() + 2 * c.AttentionKvDim()));
+  s.q = take(T * c.AttentionQDim());
+  s.attn_gate = take(T * c.AttentionQDim());
+  s.k = take(T * c.AttentionKvDim());
+  s.v = take(T * c.AttentionKvDim());
+  s.iq = take(T * c.indexer_heads * c.indexer_head_dim);
+  s.ik = take(T * c.indexer_head_dim);
+  s.mask = reinterpret_cast<std::uint32_t*>(take(T * mask_words_));
+  s.ctx = take(T * c.AttentionQDim());
+  if (c.ple_layer >= 0) {
+    // PLE finishes before this layer's mixer/SSM. Its gate consumes key
+    // and query before normalization/convolution reuse those two buffers.
+    // The gated input stays separate until PleInject consumes both outputs.
+    s.ple_key = s.hc_gate;
+    s.ple_value = s.block_out;
+    s.ple_query = s.xn;
+    s.ple_gated = s.qkvz;
+    s.ple_norm = s.hc_gate;
+    s.ple_conv = s.xn;
+  }
+  s.router = f32(T * (c.num_experts + 1));
+  s.ids = i32(slots);
+  const std::size_t compact = RoutedCompactRows(slots, c.num_experts);
+  s.rows_token = i32(compact);
+  s.rows_slot = i32(compact);
+  s.routed_tiles = i32(3 * RoutedTileCapacity(slots, c));
+  s.weights = f32(slots);
+  cursor = stage;
+  s.gate_e = take(slots * c.expert_ff);
+  s.up_e = take(slots * c.expert_ff);
+  s.down_e = take(slots * hidden);
+  s.shexp_gate = f32(T * c.shared_expert_ff);
+  s.shexp_up = f32(T * c.shared_expert_ff);
+  s.shexp_out = f32(T * hidden);
+  s.shexp_half =
+      static_cast<__half*>(bytes(T * c.shared_expert_ff * sizeof(__half)));
+  if (model.has_mtp()) {
+    // The trunk's kept rows are session-owned. Its transient residual and
+    // mixer buffers are free while MTP constructs its input. The split
+    // projections consume h/embd before the first mixer rewrites xn/mixed.
+    s.mtp_h = s.xn;
+    s.mtp_embd = s.mixed;
+    s.mtp_eproj = s.qkvz;
+    s.mtp_res = s.res;
+  }
+  return ok;
+}
+
+bool Executor::AcquireWidePasses() const {
+  if (!scratch_arena_)
+    return false;
+  if (scratch_arena_->transient_mapped())
+    return true;
+  // The wide set plus room for what the pass maps itself (its K/V and
+  // checkpoint pages) must fit the device heap after the state promised to
+  // sessions, and leave the host its free floor. Mapping may reclaim clean
+  // page cache: 55-91 ms for the 4.6 GiB set with no compaction stalls,
+  // while only prefills run. The RAM cache's pages are pinned and stay.
+  const std::size_t bytes = scratch_arena_->transient_bytes() + kWidePassSpare;
+  std::size_t free_bytes = 0;
+  std::size_t total_bytes = 0;
+  if (gufo::mem::MemGetInfo(&free_bytes, &total_bytes) != hipSuccess) {
+    (void)hipGetLastError();
+    return false;
+  }
+  if (free_bytes < bytes ||
+      gufo::mem::HostAvailableBytes() < gufo::mem::HostFreeFloorBytes() + bytes)
+    return false;
+  return scratch_arena_->MapTransient(nullptr);
+}
+
+void Executor::ReleaseWidePasses() const {
+  // Nothing reads the wide set once the pass that used it returned: only
+  // the shared pinned n-gram buffer outlives it, for the next prefetch.
+  // Unmapping waits for in-flight GPU work (10-15 ms measured).
+  if (!scratch_arena_ || !scratch_arena_->transient_mapped() ||
+      wide_pass_running_)
+    return;
+  scratch_arena_->ReleaseTransient();
 }
 
 bool Executor::CalibrateDecodeOverlap(std::string* error_msg) {
@@ -1415,6 +1519,27 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
       static_cast<std::size_t>(c.ssm_conv_kernel - 1) * c.SsmConvChannels();
   const std::size_t state_elems = static_cast<std::size_t>(c.ssm_num_v_heads) *
                                   c.ssm_head_dim * c.ssm_head_dim;
+  // K/V keeps a fixed address for the whole context, backed by pages as
+  // positions are written (EnsureKv). The session still accounts its full
+  // size, and the state ledger keeps the unwritten rows promised to it. A
+  // failed reservation leaves a null entry. The account charges the pages
+  // to the shared state budget (#715); EnsureKv backs a tile past the
+  // frontier, which its margin covers.
+  s->account_ = std::make_shared<gufo::mem::StateAccount>(kKvTileRows);
+  const auto grow =
+      [&](std::vector<std::shared_ptr<gufo::mem::Region>>& regions) {
+        auto region = gufo::mem::Region::Create(
+            {.row_bytes = kv_row * sizeof(__half), .rows = max_context},
+            error_msg, s->account_);
+        if (!region) {
+          a.push_back(nullptr);
+          return static_cast<__half*>(nullptr);
+        }
+        s->allocated_bytes_ += region->bytes();
+        auto* data = static_cast<__half*>(region->data());
+        regions.push_back(std::move(region));
+        return data;
+      };
   for (std::uint32_t il = 0; il < c.num_layers; ++il) {
     if (c.IsLinearLayer(il)) {
       auto& l = s->linear_[il];
@@ -1423,12 +1548,8 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
       l.state = Alloc<float>(a, state_elems, error_msg, &s->allocated_bytes_);
     } else {
       auto& at = s->attention_[il];
-      at.k_cache =
-          Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                        error_msg, &s->allocated_bytes_);
-      at.v_cache =
-          Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                        error_msg, &s->allocated_bytes_);
+      at.k_cache = grow(s->kv_regions_);
+      at.v_cache = grow(s->kv_regions_);
       at.index_k = Alloc<float>(
           a, static_cast<std::size_t>(s->index_capacity_) * c.indexer_head_dim,
           error_msg, &s->allocated_bytes_);
@@ -1453,12 +1574,8 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
                          std::max(options_.max_speculative, max_copy_rows())) *
                          c.HcDim(),
                      error_msg, &s->allocated_bytes_);
-    s->mtp_.k_cache =
-        Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                      error_msg, &s->allocated_bytes_);
-    s->mtp_.v_cache =
-        Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                      error_msg, &s->allocated_bytes_);
+    s->mtp_.k_cache = grow(s->mtp_kv_regions_);
+    s->mtp_.v_cache = grow(s->mtp_kv_regions_);
     s->mtp_.index_k =
         Alloc<float>(a, std::size_t{s->index_capacity_} * c.indexer_head_dim,
                      error_msg, &s->allocated_bytes_);
@@ -1688,6 +1805,30 @@ bool Executor::EnsureWideSegments(std::uint32_t segments,
     wide_segments_.push_back(std::move(seg));
   }
   return true;
+}
+
+bool Executor::EnsureKv(Session& session, std::uint32_t trunk_end,
+                        std::uint32_t mtp_end, std::string* error) const {
+  const auto ensure = [&](const auto& regions, std::size_t end) {
+    for (const auto& region : regions) {
+      if (!region->Ensure(end + kKvTileRows, error))
+        return false;
+      region->MapAhead(end + kKvAheadRows);
+    }
+    return true;
+  };
+  return ensure(session.kv_regions_, trunk_end) &&
+         ensure(session.mtp_kv_regions_, mtp_end);
+}
+
+std::size_t Executor::DemandMappedBytes(
+    core::SessionMode mode, std::uint32_t max_context) const noexcept {
+  const auto& c = config();
+  const std::size_t kv =
+      2 * std::size_t{max_context} * c.AttentionKvDim() * sizeof(__half);
+  const std::size_t buffers = c.num_layers / c.full_attention_interval +
+                              (mode == core::SessionMode::kSpeculative);
+  return buffers * kv;
 }
 
 std::size_t Executor::SessionBytes(
@@ -2041,7 +2182,7 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
     // GEMM. Both staging buffers hold max_batch rows; a wider call (the
     // draft block folds its streams into rows) runs in pieces.
     const bool f16 = DenseF16Route(w, n_tokens);
-    const std::uint32_t piece = static_cast<std::uint32_t>(options_.max_batch);
+    const std::uint32_t piece = scratch_rows_;
     for (std::uint32_t r0 = 0; r0 < n_tokens; r0 += piece) {
       const std::uint32_t rows = std::min(piece, n_tokens - r0);
       // The staging buffer may already hold this input (a producer wrote
@@ -3596,10 +3737,28 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
       return false;
     }
   }
-  if (n == 0 || n > options_.max_batch ||
+  if (n == 0 || n > pass_rows() ||
       (speculative && n > options_.max_speculative)) {
     AssignError(error_msg, "token batch is empty or exceeds the batch limit");
     return false;
+  }
+  // A wide pass runs on the wide scratch set; ReleaseWidePasses() leaves it
+  // mapped until the pass is done.
+  struct WidePassScope {
+    const Executor* executor;
+    bool wide;
+    ~WidePassScope() {
+      if (wide) {
+        executor->UseScratch(executor->narrow_s_);
+        executor->scratch_rows_ = executor->narrow_batch_;
+        executor->wide_pass_running_ = false;
+      }
+    }
+  } wide_scope{this, n > narrow_batch_};
+  if (wide_scope.wide) {
+    wide_pass_running_ = true;
+    scratch_rows_ = options_.max_batch;
+    UseScratch(wide_s_);
   }
   if (n_logits > n || n_logits > options_.max_logit_rows) {
     AssignError(error_msg, "requested logit rows exceed the batch or limit");
@@ -3609,6 +3768,10 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
     AssignError(error_msg, "session context is full");
     return false;
   }
+  if (!EnsureKv(session, session.position_ + n,
+                session.mtp_enabled_ ? session.mtp_.position + n : 0,
+                error_msg))
+    return false;
   for (auto t : tokens) {
     if (t < 0 || static_cast<std::uint32_t>(t) >= c.vocab_size) {
       AssignError(error_msg, "token out of range");
@@ -4655,6 +4818,8 @@ bool Executor::RestoreSnapshot(Session& session,
     AssignError(error_msg, "snapshot positions do not fit this session");
     return false;
   }
+  if (!EnsureKv(session, h.position, h.mtp_position, error_msg))
+    return false;
   if (h.position - h.blocks * h.compress_ratio > session.index_capacity_) {
     AssignError(error_msg, "unpooled indexer rows exceed the ring capacity");
     return false;
@@ -5144,11 +5309,11 @@ bool Executor::MtpForward(Session& session,
     return false;
   }
 
-  if (n == 0 || n > options_.max_batch || (hidden_row < 0 && n != 1) ||
+  if (n == 0 || n > scratch_rows_ || (hidden_row < 0 && n != 1) ||
       (hidden_row >= 0 &&
        static_cast<std::uint32_t>(hidden_row) + n >
            (hidden_source
-                ? options_.max_batch
+                ? scratch_rows_
                 : std::max(options_.max_speculative, max_copy_rows())))) {
     AssignError(error_msg, "MTP batch outside the kept hidden rows");
     return false;
@@ -5170,6 +5335,8 @@ bool Executor::MtpForward(Session& session,
     AssignError(error_msg, "MTP context is full");
     return false;
   }
+  if (!EnsureKv(session, session.position_, pos + n, error_msg))
+    return false;
   if (session.continuation_hooks_)
     session.continuation_hooks_->BeforeWrite(
         true, pos, pos + n, session.mtp_.blocks,

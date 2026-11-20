@@ -102,6 +102,12 @@
       "ctest": "qwen3_asr_audio_api_test",
       "check_pr": true,
       "windows_build": true
+    },
+    {
+      "target": "qwen3_asr_decode_test",
+      "ctest": "qwen3_asr_decode_test",
+      "check_pr": true,
+      "windows_build": true
     }
   ],
   "test_labels": [

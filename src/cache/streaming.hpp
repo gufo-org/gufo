@@ -14,7 +14,16 @@
 
 namespace gufo::cache {
 class BorrowedRows;
-inline constexpr std::size_t kDefaultDiskStagingBytes = 1ULL << 20;
+// Disk writes move one piece at a time. A restore reads and checks files
+// into kDiskRestoreReaders pieces in parallel while it copies others out.
+inline constexpr std::size_t kDiskStagingPieceBytes = 1ULL << 20;
+inline constexpr std::size_t kDiskRestoreReaders = 8;
+inline constexpr std::size_t kDefaultDiskStagingBytes =
+    kDiskRestoreReaders * kDiskStagingPieceBytes;
+// Files read from disk at once by a restore's read-ahead or a warm-up. One
+// thread reads the encrypted NVMe of the reference host at 0.8 GB/s; whole
+// 1 MiB files at 4 at a time 3.9 GB/s, 16 6.0 GB/s, 32 6.7 GB/s (measured).
+inline constexpr std::size_t kDiskReadsInFlight = 16;
 inline constexpr std::chrono::milliseconds kPersistenceYieldLimit{500};
 // Restores and observed-row captures move whole rows per staging piece; a
 // smaller staging budget can never restore a checkpoint of these components.
@@ -94,12 +103,18 @@ private:
 // The disk store, ledger and stream provider must outlive this object.
 class StreamedStore {
 public:
+  // Restores divide staging into pieces of `piece_bytes` (see
+  // kDiskRestoreReaders); writes use one.
   StreamedStore(ResourceLedger&, DiskStore&, std::size_t staging_bytes,
-                StagingAllocator, StreamLease);
+                StagingAllocator, StreamLease,
+                std::size_t piece_bytes = kDiskStagingPieceBytes);
   StreamedStore(ResourceLedger&, DiskStore&, StagingAllocator, StreamLease);
   ~StreamedStore();
   StreamedStore(const StreamedStore&) = delete;
   StreamedStore& operator=(const StreamedStore&) = delete;
+  // Optional stream classes for disk writes and restores; empty leases keep
+  // the constructor's. Call before the first Write or Restore.
+  void SetStreamClasses(StreamLease write, StreamLease restore);
   void Write(DiskFileId, const DiskManifest&, std::span<PersistenceSource>,
              TransferTiming&, std::stop_token = {},
              const std::function<bool()>& model_idle = {});
@@ -149,7 +164,8 @@ struct PersistenceQueueStats {
 // device-source locks. A job yields for at most yield_limit after its write
 // starts, so continuous load cannot hold its pins indefinitely.
 // Keep the first pending boundary and coalesce later pending ancestors into
-// their newest descendant. Under pressure, recent jobs
+// their newest descendant. Generated frontiers coalesce only when the queue has
+// no room, keeping two newer ones. Under pressure, recent jobs
 // may replace the oldest pending non-learned job; active writes are untouched.
 // Completion reports false for superseded work, outside the queue lock.
 class PersistenceQueue {

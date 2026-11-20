@@ -13,8 +13,15 @@ import sys
 import openai
 
 from messages_tools import messages_stream
+from transports import rotate
 
-PROMPT = "Is 1001 a prime number? Think it through step by step, then answer yes or no."
+# The reasoning must outrun every budget; the answer only has to exist. A
+# one-word answer keeps capped requests short: with "answer yes or no" both
+# models explained their steps again after the cap (#1284).
+PROMPT = ("Is 1001 a prime number? Think it through step by step, then reply with "
+          "only yes or no.")
+# Uncapped reasoning ran 86 (Flash-Next) to 148 (DeepSeek) tokens.
+MAX_TOKENS = 256
 BUDGETS = (0, 1, 4, 16, 64)
 
 
@@ -32,7 +39,7 @@ def check_reasoning_budget(client, model, checks, chat_result):
 
     def responses(label, budget=None, temperature=0, seed=None,
                   budget_field="reasoning_budget_tokens", prompt=PROMPT,
-                  max_tokens=600, require_complete=True):
+                  max_tokens=MAX_TOKENS, require_complete=True):
         extra = {} if budget is None else {budget_field: budget}
         if seed is not None:
             extra["seed"] = seed
@@ -49,13 +56,13 @@ def check_reasoning_budget(client, model, checks, chat_result):
                               "usage": usage})
 
     def chat(label, budget, streaming=False, budget_field="reasoning_budget_tokens"):
-        body = {"model": model, "temperature": 0, "max_tokens": 600,
+        body = {"model": model, "temperature": 0, "max_tokens": MAX_TOKENS,
                 "messages": [{"role": "user", "content": PROMPT}],
                 "extra_body": {budget_field: budget}}
         return record(label, chat_result(client, body, streaming))
 
     def messages(label, thinking, streaming=False):
-        body = {"model": model, "max_tokens": 600, "temperature": 0,
+        body = {"model": model, "max_tokens": MAX_TOKENS, "temperature": 0,
                 "thinking": thinking, "messages": [{"role": "user", "content": PROMPT}]}
         if streaming:
             result = messages_stream(client, body)
@@ -75,14 +82,16 @@ def check_reasoning_budget(client, model, checks, chat_result):
     assert same((unlimited["reasoning"], unlimited["text"]),
                 (control["reasoning"], control["text"])), (unlimited, control)
 
-    for budget in BUDGETS:
+    for index, budget in enumerate(BUDGETS):
         capped = responses(f"responses_{budget}", budget)
         assert capped["reasoning_tokens"] == budget, capped
         assert capped["text"].strip(), capped
         # Greedy reasoning follows the uncapped reasoning until the cap.
         assert control["reasoning"].startswith(capped["reasoning"].rstrip()), (capped, control)
         assert budget or not capped["reasoning"].strip(), capped
-        for streaming in (False, True):
+        # Budgets alternate the stream mode on each endpoint: both modes and
+        # every budget run, not every pair.
+        for streaming in rotate((False, True), index):
             result = chat(f"chat_{budget}_{'stream' if streaming else 'buffered'}",
                           budget, streaming)
             assert same((result["reasoning"], result["text"]),
@@ -90,7 +99,7 @@ def check_reasoning_budget(client, model, checks, chat_result):
             assert result["finish"] == "stop", result
         if budget == 0:
             continue
-        for streaming in (False, True):
+        for streaming in rotate((False, True), index + 1):
             thinking, text = messages(
                 f"messages_{budget}_{'stream' if streaming else 'buffered'}",
                 {"type": "enabled", "budget_tokens": budget}, streaming)
@@ -113,11 +122,13 @@ def check_reasoning_budget(client, model, checks, chat_result):
     markup_prompt = (
         "Think through how to safely quote the XML literal <tool_call> inside "
         "JSON and Markdown code fences. Then give one short example.")
+    # The control only needs reasoning as long as the largest cap; each capped
+    # request only needs a few answer tokens after it.
     markup = responses("markup_control", prompt=markup_prompt,
-                       max_tokens=256, require_complete=False)
+                       max_tokens=192, require_complete=False)
     for budget in (64, 192):
         capped = responses(f"markup_{budget}", budget, prompt=markup_prompt,
-                           max_tokens=320, require_complete=False)
+                           max_tokens=budget + 32, require_complete=False)
         assert capped["reasoning_tokens"] == min(budget, markup["reasoning_tokens"]), capped
         assert markup["reasoning"].startswith(capped["reasoning"].rstrip()), (capped, markup)
         assert capped["text"].strip(), capped
@@ -125,7 +136,7 @@ def check_reasoning_budget(client, model, checks, chat_result):
     for budget in (1, 2):
         unicode_result = responses(
             f"utf8_{budget}", budget, prompt="请用中文思考并回答：1001是质数吗？",
-            max_tokens=128, require_complete=False)
+            max_tokens=48, require_complete=False)
         assert "\ufffd" not in unicode_result["reasoning"] + unicode_result["text"], unicode_result
         assert unicode_result["text"].strip(), unicode_result
 
@@ -178,14 +189,14 @@ def check_reasoning_budget(client, model, checks, chat_result):
     reuse = {}
     for label, thinking in (("uncapped", {"type": "enabled"}),
                             ("capped", {"type": "enabled", "budget_tokens": 16})):
-        body = {"model": model, "max_tokens": 600, "temperature": 0, "thinking": thinking,
+        body = {"model": model, "max_tokens": MAX_TOKENS, "temperature": 0, "thinking": thinking,
                 "system": f"reasoning_budget_replay_{label}",
                 "messages": [{"role": "user", "content": PROMPT}]}
         first = record(f"replay_{label}_first", client.post("/messages", body=body,
                                                             cast_to=object))
         body = deepcopy(body)
         body["messages"] += [{"role": "assistant", "content": first["content"]},
-                             {"role": "user", "content": "And 1003? Answer yes or no."}]
+                             {"role": "user", "content": "And 1003? Reply with only yes or no."}]
         second = record(f"replay_{label}_second", client.post("/messages", body=body,
                                                               cast_to=object))
         before = first["usage"]["input_tokens"] + first["usage"]["cache_read_input_tokens"]

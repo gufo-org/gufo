@@ -8,6 +8,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <semaphore>
@@ -690,6 +691,119 @@ void TestMeminfoAvailableExcludesFreeCma() {
          "missing MemAvailable keeps the caller's fallback");
 }
 
+/// The host reserve and free CMA pages overlap (#1198): the OS keeps its
+/// reserve in pages pins cannot take, so the ceiling subtracts the larger of
+/// the two, never their sum, and still never counts CMA pages as pinnable.
+void TestSnapshotCeilingOverlapsCmaWithReserve() {
+  using gufo::ext::HostMemorySample;
+  using gufo::ext::MeminfoSample;
+  using gufo::ext::PinnableBytes;
+  using gufo::ext::SnapshotBudgetBytes;
+  using gufo::ext::SnapshotCeilingBytes;
+  constexpr std::uint64_t gib = std::uint64_t{1} << 30;
+  constexpr std::uint64_t reserve = gufo::server::kHostSnapshotHeadroomBytes;
+  // A cold boot on Ubuntu 26.04: 8.74 GiB of KHO scratch reported as CmaFree.
+  const auto parsed = MeminfoSample(
+      "MemTotal:       131072000 kB\n"
+      "MemAvailable:    9437184 kB\n"
+      "CmaTotal:               0 kB\n"
+      "CmaFree:         9164288 kB\n");
+  Expect(parsed && parsed->available == 9437184ULL * 1024 &&
+             parsed->cma_free == 9164288ULL * 1024,
+         "MemAvailable and CmaFree parse in bytes");
+  Expect(
+      parsed->cgroup_available == std::numeric_limits<std::uint64_t>::max() &&
+          parsed->outstanding == 0,
+      "parsed meminfo has no cgroup limit or outstanding state");
+  Expect(!MeminfoSample("MemTotal: 4000 kB\nCmaFree: 10 kB\n"),
+         "missing MemAvailable keeps the caller's fallback");
+  Expect(MeminfoSample("MemAvailable: 8 kB\n")->cma_free == 0,
+         "no CmaFree line means no free CMA pages");
+
+  // 40 GiB available, 8 GiB of it free CMA: pins may take 32 GiB, the OS
+  // keeps the 8 GiB of CMA pages, which covers its 4 GiB reserve.
+  HostMemorySample kho{.available = 40 * gib, .cma_free = 8 * gib};
+  Expect(SnapshotCeilingBytes(kho) == 32 * gib,
+         "free CMA pages larger than the reserve are subtracted once");
+  Expect(PinnableBytes(kho) == 32 * gib && SnapshotBudgetBytes(kho) == 16 * gib,
+         "the automatic budget stays half of the non-CMA pages");
+  // Less free CMA than the reserve: the reserve decides.
+  HostMemorySample small{.available = 40 * gib, .cma_free = 1 * gib};
+  Expect(SnapshotCeilingBytes(small) == 40 * gib - reserve,
+         "a reserve larger than free CMA is subtracted once");
+  // Without CMA the ceiling is unchanged from before #1198.
+  HostMemorySample none{.available = 40 * gib};
+  Expect(SnapshotCeilingBytes(none) == 36 * gib,
+         "no CMA leaves available minus the reserve");
+  // CmaFree beyond MemAvailable leaves nothing for pins.
+  HostMemorySample over{.available = 4 * gib, .cma_free = 9 * gib};
+  Expect(SnapshotCeilingBytes(over) == 0 && PinnableBytes(over) == 0,
+         "free CMA beyond MemAvailable saturates at zero");
+
+  // A cgroup limit gives no CMA credit: its own reserve applies in full.
+  HostMemorySample limited = kho;
+  limited.cgroup_available = 20 * gib;
+  Expect(SnapshotCeilingBytes(limited) == 20 * gib - reserve,
+         "a cgroup limit keeps the full reserve below it");
+  Expect(PinnableBytes(limited) == 20 * gib,
+         "a cgroup limit bounds pinnable memory");
+  limited.cgroup_available = 2 * gib;
+  Expect(SnapshotCeilingBytes(limited) == 0,
+         "a cgroup below the reserve leaves no ceiling");
+
+  // Outstanding state comes off after the reserve, as before.
+  HostMemorySample promised = kho;
+  promised.outstanding = 10 * gib;
+  Expect(SnapshotCeilingBytes(promised) == 22 * gib &&
+             PinnableBytes(promised) == 22 * gib,
+         "outstanding state is promised away");
+  promised.outstanding = 50 * gib;
+  Expect(SnapshotCeilingBytes(promised) == 0 && PinnableBytes(promised) == 0,
+         "outstanding state beyond available saturates at zero");
+
+  // The shortfall below the reserve (#932): memory in use, not promises.
+  using gufo::ext::HostReserveShortfallBytes;
+  Expect(HostReserveShortfallBytes(none) == 0 &&
+             HostReserveShortfallBytes(kho) == 0,
+         "a host above its reserve has no shortfall");
+  HostMemorySample pressed{.available = 3 * gib};
+  Expect(HostReserveShortfallBytes(pressed) == reserve - 3 * gib,
+         "a host below its reserve is short by the difference");
+  pressed.cma_free = 2 * gib;
+  Expect(HostReserveShortfallBytes(pressed) == reserve - 3 * gib,
+         "free CMA within the reserve does not deepen it");
+  HostMemorySample kho_full{.available = 9 * gib, .cma_free = 8 * gib};
+  Expect(HostReserveShortfallBytes(kho_full) == 0,
+         "a full cache on a KHO host leaves its reserve in CMA pages");
+  kho_full.available = 7 * gib;
+  Expect(HostReserveShortfallBytes(kho_full) == 1 * gib,
+         "free CMA larger than the reserve is the reserve");
+  HostMemorySample owed{.available = 10 * gib, .outstanding = 30 * gib};
+  Expect(HostReserveShortfallBytes(owed) == 0,
+         "state promised to sessions is not memory in use");
+  HostMemorySample contained = kho;
+  contained.cgroup_available = 0;
+  Expect(HostReserveShortfallBytes(contained) == 0,
+         "a cgroup limit does not make a shortfall: state pages ignore it");
+
+  // The refusal log names each figure and the ceiling.
+  const auto text = gufo::ext::DescribeHostMemory(kho);
+  Expect(text.find("host_available_bytes=" + std::to_string(40 * gib)) !=
+                 std::string::npos &&
+             text.find("cma_free_bytes=" + std::to_string(8 * gib)) !=
+                 std::string::npos &&
+             text.find("host_reserve_bytes=" + std::to_string(reserve)) !=
+                 std::string::npos &&
+             text.find("host_ceiling_bytes=" + std::to_string(32 * gib)) !=
+                 std::string::npos &&
+             text.find("cgroup_available_bytes") == std::string::npos,
+         "the description names available, CMA, reserve and ceiling");
+  Expect(gufo::ext::DescribeHostMemory(limited).find("cgroup_available_bytes=" +
+                                                     std::to_string(2 * gib)) !=
+             std::string::npos,
+         "a cgroup limit is described when present");
+}
+
 void TestCgroupAvailableCountsReclaimableCache() {
   namespace fs = std::filesystem;
   using gufo::server::CgroupAvailableBytes;
@@ -1327,6 +1441,7 @@ int main() {
   TestResourceClaimsAreValidatedBeforeAllocation();
   TestRamCacheOptionParsing();
   TestMeminfoAvailableExcludesFreeCma();
+  TestSnapshotCeilingOverlapsCmaWithReserve();
   TestCgroupAvailableCountsReclaimableCache();
   std::cout << "All text model runner tests passed\n";
   return 0;

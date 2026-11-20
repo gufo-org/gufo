@@ -99,19 +99,19 @@ def server(binary, service, model, extra, log_path, timeout):
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
         try:
-            started = time.monotonic()
+            started = time.perf_counter()
             while True:
                 if process.poll() is not None:
                     raise RuntimeError(f"{service} server exited with {process.returncode} "
                                        f"before /ready; see {log_path}")
-                if time.monotonic() - started > timeout:
+                if time.perf_counter() - started > timeout:
                     raise TimeoutError(f"{service} server not ready after {timeout} s")
                 try:
                     request(url + "/ready", timeout=5)
                     break
                 except (urllib.error.URLError, ConnectionError, TimeoutError):
                     time.sleep(1)
-            print(f"{service} ready in {time.monotonic() - started:.1f} s", flush=True)
+            print(f"{service} ready in {time.perf_counter() - started:.1f} s", flush=True)
             yield url
             if process.poll() is not None:
                 raise RuntimeError(f"{service} server exited during the check")
@@ -258,7 +258,7 @@ def main():
         parser.error("--npu is supported only for embedding, asr and tts")
     args.log_dir.mkdir(parents=True, exist_ok=True)
 
-    started = time.monotonic()
+    started = time.perf_counter()
     try:
         summary = FAMILIES[args.family](args)
     except Exception as error:
@@ -267,7 +267,7 @@ def main():
             print(f"--- {log.name} (tail) ---", file=sys.stderr)
             print(log.read_text(encoding="utf-8", errors="replace")[-4000:], file=sys.stderr)
         return 1
-    print(f"PASS {args.family}: {summary} ({time.monotonic() - started:.1f} s)")
+    print(f"PASS {args.family}: {summary} ({time.perf_counter() - started:.1f} s)")
     return 0
 
 

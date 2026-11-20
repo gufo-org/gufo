@@ -1,9 +1,12 @@
 #ifndef GUFO_SERVER_COMPONENT_TEXT_CACHE_HPP_
 #define GUFO_SERVER_COMPONENT_TEXT_CACHE_HPP_
 
+#include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 
 #include "gufo/ext/text.hpp"
 #include "src/cache/checkpoint.hpp"
@@ -12,6 +15,8 @@
 #include "src/cli/serve/component_cache_metrics.hpp"
 #include "src/cli/serve/continuation_types.hpp"
 #include "src/cli/serve/text_publication_wait.hpp"
+#include "src/ext/host_budget.hpp"
+#include "src/mem/account.hpp"
 
 namespace gufo::server {
 using ext::TextModelRunner;
@@ -62,6 +67,11 @@ public:
     [[nodiscard]] ComponentCacheMetrics Metrics() const;
     [[nodiscard]] std::vector<std::size_t> PlannedCaptures(
         std::size_t stable) const;
+    /// Also persists one of the `planned` grid captures: the deepest far
+    /// enough below the prompt checkpoint at `boundary` to serve another
+    /// question about the same prefix after RAM has lost it.
+    void PersistGrid(std::span<const std::size_t> planned,
+                     std::size_t boundary);
 
   private:
     friend class ComponentTextCache;
@@ -83,10 +93,56 @@ public:
                      bool automatic_ram = false, std::size_t ceiling_bytes = 0,
                      bool ram_enabled = true);
   ~ComponentTextCache();
+  // With `state_tokens`, the session the prompt lands on claims them from
+  // the shared state budget (StateAccount::Claim), drawing on
+  // `reservation` first. Throws StateMemoryShort when the budget cannot
+  // cover them; the scheduler reserves first, so it does not.
   [[nodiscard]] std::unique_ptr<Lease> Acquire(
       std::span<const ContinuationToken>, const std::function<bool()>&,
       std::shared_ptr<const TextPromptContext>, bool, std::size_t, bool,
-      bool persist = true);
+      bool persist = true, std::size_t state_tokens = 0,
+      mem::StateReservation* reservation = nullptr);
+  // Whether sessions share their demand-mapped state (#715).
+  [[nodiscard]] bool shared_state() const noexcept;
+  // Bytes a session that holds nothing would charge for `tokens`; zero
+  // without shared state.
+  [[nodiscard]] std::size_t StateBytesFor(std::size_t tokens) const;
+  // Frees state pages of sessions until `bytes` can be charged to the
+  // shared budget: first pages mapped past each session's need (no state
+  // lost), then the live frontiers of idle sessions, the cheapest to lose
+  // first, never the one `prompt` would continue. Unmapping waits for the
+  // device: call it where no model work is in flight (the scheduler, between
+  // work units). Returns whether `bytes` can be charged now.
+  //
+  // A frontier that a disk write still reads in place goes last, and stays
+  // while the write is younger than `write_wait`: dropping it would fail
+  // the write. Admission waits for such writes (kStateWriteWait); a running
+  // request's decode does not wait.
+  [[nodiscard]] bool ReclaimState(std::size_t bytes,
+                                  std::span<const ContinuationToken> prompt,
+                                  const TextPromptContext* context,
+                                  std::chrono::milliseconds write_wait = {});
+  // How long admission keeps an idle frontier for a disk write that reads
+  // it, from the write's capture. Writes queue one after another and share
+  // the disk with restores: three queued 1.9 GB Flash-Next frontiers beside
+  // five disk restores took 15 s. Losing one costs its whole prefill when
+  // the conversation returns (40 s at 66K tokens).
+  static constexpr std::chrono::milliseconds kStateWriteWait{30000};
+  // Host memory pressure from other processes (#932). When `sample` leaves
+  // MemAvailable short of the host reserve (ext::HostReserveShortfallBytes),
+  // gives
+  // RAM-cache memory back to the host until the shortfall plus
+  // kHostPressureReliefBytes is covered, evicting the least valuable
+  // checkpoints as needed (disk copies stay). Returns the bytes released.
+  // Releasing device-mapped pages waits for the device: call it only while
+  // no work runs (the idle scheduler).
+  std::size_t RelieveHostPressure(const ext::HostMemorySample& sample);
+  // Released beyond the shortfall, so that pressure hovering at the reserve
+  // does not release a little on every idle tick.
+  static constexpr std::size_t kHostPressureReliefBytes = std::size_t{2} << 30;
+  // Charged bytes that ReclaimState could free: tails of all sessions and
+  // idle sessions' frontiers.
+  [[nodiscard]] std::size_t ReclaimableStateBytes() const;
   // A disk job is writing a prefix of the prompt much deeper than any
   // restorable boundary; admission may wait for it instead of prefilling.
   // A nonzero checkpoint ID follows that one job, even if another deeper job
@@ -94,6 +150,13 @@ public:
   [[nodiscard]] std::optional<TextPendingPublication> PendingPublication(
       std::span<const ContinuationToken> prompt,
       const TextPromptContext* context, std::uint64_t checkpoint_id = 0) const;
+  // When the checkpoint Acquire would select for `prompt` is only on disk,
+  // starts reading its files into the page cache on a worker and returns a
+  // flag set when that finishes. Null when there is nothing to read, or when
+  // the read would take free pages the host keeps (mem::HostFreeFloorBytes).
+  [[nodiscard]] std::shared_ptr<const std::atomic<bool>> WarmDisk(
+      std::span<const ContinuationToken> prompt,
+      const TextPromptContext* context, std::size_t stable);
   [[nodiscard]] std::size_t CachedPrefixTokens(
       std::span<const ContinuationToken>, const TextPromptContext*,
       bool common = false) const;
@@ -115,6 +178,12 @@ public:
 
 private:
   std::unique_ptr<Impl> impl_;
+};
+
+// The shared state budget cannot cover a request's tokens.
+class StateMemoryShort final : public std::runtime_error {
+public:
+  StateMemoryShort() : std::runtime_error("shared session state exhausted") {}
 };
 
 }  // namespace gufo::server

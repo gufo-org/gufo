@@ -41,6 +41,12 @@ public:
     context = request.context;
     language = request.language;
     maximum_tokens = request.max_new_tokens;
+    if (fail) {
+      result->invalid_audio = invalid_audio;
+      if (error != nullptr)
+        *error = "Qwen3-ASR audio is truncated";
+      return false;
+    }
     result->language = "English";
     result->text = "A native transcript.";
     result->audio_samples = 32000;
@@ -56,6 +62,8 @@ public:
     return true;
   }
 
+  bool fail{false};
+  bool invalid_audio{false};
   int calls{0};
   std::size_t wav_bytes{0};
   std::string context;
@@ -184,6 +192,35 @@ void TestFormatsAndValidation() {
   Check(runner.calls == 3, "invalid requests never invoke inference");
 }
 
+void TestFailures() {
+  FakeRunner runner;
+  AsrService service = MakeService(&runner);
+  runner.fail = true;
+  runner.invalid_audio = true;
+  const HttpResponse malformed = Send(service, Multipart());
+  Check(malformed.status == 400 &&
+            malformed.body.find("\"code\":\"invalid_audio_input\"") !=
+                std::string::npos &&
+            malformed.body.find("audio is truncated") != std::string::npos,
+        "undecodable audio is a client error");
+  const auto stream = Send(service, Multipart("json", {}, "true"));
+  std::string events;
+  stream.streaming_body([&](std::string_view part) {
+    events += part;
+    return true;
+  });
+  Check(
+      stream.stream_log->error_code == "invalid_audio_input" &&
+          events.find("\"code\":\"invalid_audio_input\"") != std::string::npos,
+      "streaming reports undecodable audio as invalid input");
+  runner.invalid_audio = false;
+  const HttpResponse failed = Send(service, Multipart());
+  Check(failed.status == 500 &&
+            failed.body.find("\"code\":\"transcription_failed\"") !=
+                std::string::npos,
+        "other runner failures stay server errors");
+}
+
 void TestStreamingAndChunks() {
   FakeRunner runner;
   AsrService service = MakeService(&runner);
@@ -247,6 +284,7 @@ void TestStreamingAndChunks() {
 int main() {
   TestJsonRequest();
   TestFormatsAndValidation();
+  TestFailures();
   TestStreamingAndChunks();
   std::cout << "PASS qwen3_asr_audio_api_test\n";
   return 0;

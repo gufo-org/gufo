@@ -60,7 +60,15 @@ exit.
   the responses. If it's near zero, something early in the prompt changes
   between turns; see [what breaks reuse](cache.md#what-breaks-reuse).
 - **Requests wait:** each `--sessions` slot runs one request; others queue.
-  `/slots` shows what each session is doing.
+  `/slots` shows what each session is doing. When sessions share memory (more
+  than fit at full context), a request also waits until its tokens fit; the
+  log shows `event=state_wait` and `event=state_wait_end`, and `/metrics`
+  `gufo_shared_state_*`. A request stopped with `memory_pressure` (503) can be
+  retried; `insufficient_memory_permanent` (507) means the prompt never fits.
+- **Requests fail with `insufficient_memory` (503) while another program
+  runs:** the host has less than about 2 GiB of available memory. Gufo
+  finishes running requests, then gives RAM-cache memory back (the log shows
+  `event=host_pressure_release`); retry, or close the other program.
 - **Prefill seems stuck:** start the server with `--log-progress` to log each
   prefill chunk and every 50 decoded tokens, with speeds.
 

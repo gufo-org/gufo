@@ -215,7 +215,31 @@
       "draft": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
       "draft_option": "--dflash-model",
       "mode": "dflash2",
-      "sampling": "qwen38"
+      "sampling": "qwen38",
+      "cache_disk_bytes": 25769803776,
+      "suites": [
+        "logprobs",
+        "discovery",
+        "stops",
+        "conversation",
+        "image-inputs",
+        "structured",
+        "tool-streaming",
+        "tools",
+        "sampling-defaults",
+        "batch",
+        "long-context",
+        "state-edges",
+        "prefill-scheduling",
+        "cache-edits",
+        "cache-growth",
+        "cache-depth",
+        "cache-rotation",
+        "cache-concurrency",
+        "cache-shared-prefix",
+        "cache-bridge",
+        "cache"
+      ]
     },
     "deepseek4": {
       "title": "DeepSeek V4 Flash",
@@ -227,24 +251,48 @@
       "draft_option": "--dspark-model",
       "mode": "dspark",
       "sampling": "deepseek4",
+      "ctest": {
+        "labels": [
+          "ds4"
+        ],
+        "rules": [
+          "private-deepseek",
+          "gpu-test-bundles"
+        ],
+        "environment": {
+          "GUFO_DEEPSEEK_V4_FLASH_MODEL": "target",
+          "GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL": "draft"
+        }
+      },
+      "settings": {
+        "cache-pressure": {
+          "cache_ram_bytes": 1073741824
+        }
+      },
       "suites": [
         "logprobs",
-        "responses-logprobs",
         "discovery",
-        "openai-count-tokens",
-        "messages-count-tokens",
+        "messages-image-counts",
         "responses",
         "stops",
         "conversation",
         "structured",
         "tool-streaming",
+        "reasoning-separator",
+        "reasoning-budget",
         "tools",
+        "tool-native-schemas",
         "sampling-defaults",
-        "sampling-ranges",
         "batch",
         "state-edges",
+        "prefill-scheduling",
+        "cache-edits",
+        "cache-depth",
+        "cache-bridge",
+        "system-injection",
         "cache"
-      ]
+      ],
+      "max_jobs": 1
     },
     "embedding-gemma2": {
       "title": "EmbeddingGemma 2",
@@ -598,7 +646,8 @@
         "tests/functional/service_phases.py",
         "tests/functional/requirements.txt",
         "tools/ci/linux_artifact.py",
-        "tools/ci/devlab_artifact.py"
+        "tools/ci/devlab_artifact.py",
+        "tools/ci/linux-checked.nix"
       ],
       "owners": [
         "llm",
@@ -609,6 +658,18 @@
         "embedding-gemma2-npu",
         "qwen3-asr-npu",
         "qwen3-tts-custom-npu"
+      ]
+    },
+    {
+      "id": "gpu-test-bundles",
+      "priority": 30,
+      "paths": [
+        "tools/ci/ctest_bundle.py",
+        "tests/support/source_path.hpp",
+        "tests/functional/devlab_run.py"
+      ],
+      "owners": [
+        "deepseek4"
       ]
     }
   ]

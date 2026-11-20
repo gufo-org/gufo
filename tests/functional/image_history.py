@@ -116,14 +116,14 @@ def run(args, command):
         server = subprocess.Popen(command, stdout=stream, stderr=subprocess.STDOUT)
         try:
             base = f"http://127.0.0.1:{port}"
-            deadline = time.monotonic() + 240
+            deadline = time.perf_counter() + 240
             while True:
                 assert server.poll() is None, f"server exited; see {log}"
                 try:
                     model = request(base, "/v1/models")[0]["data"][0]["id"]
                     break
                 except (urllib.error.URLError, OSError):
-                    if time.monotonic() >= deadline:
+                    if time.perf_counter() >= deadline:
                         raise TimeoutError(f"server not ready; see {log}")
                     time.sleep(0.25)
             metadata["ready_rss_bytes"] = rss_bytes(server.pid)
