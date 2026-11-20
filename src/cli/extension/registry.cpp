@@ -193,7 +193,7 @@ std::optional<Release> Resolve(const json::Value& index, std::string_view name,
 namespace {
 std::string Git(const std::filesystem::path& repository,
                 std::vector<std::string> arguments) {
-  arguments.insert(arguments.begin(), {"git", "-C", repository.string()});
+  arguments.insert(arguments.begin(), {"-C", repository.string()});
   std::string output;
   std::string error;
   if (!platform::RunCapture("git", arguments, &output, &error))

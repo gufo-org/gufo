@@ -215,7 +215,10 @@ int RunInherited(const char* program, std::span<const std::string> arguments_in,
 
 bool RunCapture(const char* program, std::span<const std::string> arguments_in,
                 std::string* output, std::string* error) {
-  std::vector<std::string> storage(arguments_in.begin(), arguments_in.end());
+  std::vector<std::string> storage;
+  storage.reserve(arguments_in.size() + 1);
+  storage.emplace_back(program);
+  storage.insert(storage.end(), arguments_in.begin(), arguments_in.end());
   std::vector<char*> arguments = MutableArgv(storage);
   int stream[2] = {-1, -1};
   if (pipe(stream) != 0) {

@@ -26,6 +26,9 @@ namespace gufo::platform {
 [[nodiscard]] std::filesystem::path PartialMediaPath(
     const std::filesystem::path& destination);
 
+/// Runs `program` (searched on PATH) with `arguments`, which exclude the
+/// program name, and captures up to 1 MiB of its standard output. Returns
+/// false with `error` set when it cannot start or exits nonzero.
 [[nodiscard]] bool RunCapture(const char* program,
                               std::span<const std::string> arguments,
                               std::string* output,
