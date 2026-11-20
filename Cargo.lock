@@ -85,6 +85,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gufo-cache-manifest"
+version = "0.0.0"
+dependencies = [
+ "gufo-ffi",
+]
+
+[[package]]
 name = "gufo-ffi"
 version = "0.0.0"
 
@@ -135,6 +142,7 @@ version = "0.0.0"
 dependencies = [
  "gufo-audio-decode",
  "gufo-base64",
+ "gufo-cache-manifest",
  "gufo-gguf",
  "gufo-http",
  "gufo-json",

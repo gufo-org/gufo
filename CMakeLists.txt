@@ -33,8 +33,9 @@ include_directories(${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/include)
 # paths need their own hit-rate measurement before they join the cache.
 include(cmake/CompilerCache.cmake)
 
-# Windows host checks build only the OS leaves, the CPU cache library and
-# their portable tests. The rest of the tree targets Linux only.
+# Windows host checks build only the OS leaves, the CPU cache library with the
+# Rust components it uses, and their portable tests. The rest of the tree
+# targets Linux only.
 option(GUFO_PLATFORM_ONLY
   "Build only the platform leaves, the CPU cache and their portable tests" OFF)
 if (GUFO_PLATFORM_ONLY)
@@ -45,6 +46,7 @@ if (GUFO_PLATFORM_ONLY)
     add_compile_options(-Wall -Wextra -Wpedantic -UNDEBUG)
   endif()
   add_subdirectory(src/core/platform)
+  add_subdirectory(src/core/rust)
   add_subdirectory(src/cache)
   include(CTest)
   if (BUILD_TESTING)

@@ -10,6 +10,7 @@ set(gufo_pr_targets
   cache_slot_test
   cache_idle_spill_test
   cache_disk_test
+  cache_disk_manifest_test
   cache_disk_publication_test
   cache_streaming_test
   cache_tiered_test
