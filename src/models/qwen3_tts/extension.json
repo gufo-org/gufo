@@ -28,6 +28,35 @@
       }
     }
   ],
+  "models": [
+    {
+      "id": "qwen3-tts",
+      "provider": "qwen3-tts",
+      "license": "apache-2.0",
+      "description": "Qwen3-TTS 12Hz 1.7B Base, BF16 safetensors with speech tokenizer",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+            "revision": "fd4b254389122332181a7c3db7f27e918eec64e3"
+          },
+          "include": [
+            "config.json",
+            "model.safetensors",
+            "vocab.json",
+            "merges.txt",
+            "tokenizer_config.json",
+            "speech_tokenizer/config.json",
+            "speech_tokenizer/model.safetensors"
+          ],
+          "entry": "."
+        }
+      ]
+    }
+  ],
   "options": [
     {
       "name": "--npu",
@@ -57,7 +86,8 @@
       "**/*.h",
       "**/*.hpp",
       "**/*.hip",
-      "extension.*"
+      "extension.*",
+      "models.lock.json"
     ],
     "exclude": [
       "tests/",
