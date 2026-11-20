@@ -20,10 +20,12 @@ typedef enum GufoJsonSchemaStatus {
   /* The schema is valid but no value satisfies it; the error sink got the
      reason, as for GUFO_JSON_SCHEMA_REJECTED. */
   GUFO_JSON_SCHEMA_EMPTY = 2,
+  /* An allocation sized by the input failed. */
+  GUFO_JSON_SCHEMA_NO_MEMORY = 3,
   /* The UnicodeSet callback failed. */
-  GUFO_JSON_SCHEMA_STOPPED = 3,
+  GUFO_JSON_SCHEMA_STOPPED = 4,
   /* A caller bug (null pointer, unknown value kind) or a compiler bug. */
-  GUFO_JSON_SCHEMA_INTERNAL = 4,
+  GUFO_JSON_SCHEMA_INTERNAL = 5,
 } GufoJsonSchemaStatus;
 
 /* The kind of a GufoJsonSchemaValue. */
@@ -56,12 +58,22 @@ typedef void (*GufoJsonSchemaBytesFn)(void* context, const uint8_t* data,
 /* Adds the codepoints [first, last] to the set being resolved. */
 typedef void (*GufoJsonSchemaRangeFn)(void* sink, uint32_t first,
                                       uint32_t last);
+/* Adds the string of len codepoints to the set being resolved: a property
+   such as \p{RGI_Emoji_Flag_Sequence} holds multi-codepoint strings. */
+typedef void (*GufoJsonSchemaStringFn)(void* sink, const uint32_t* codepoints,
+                                       size_t len);
 /* Resolves the ICU UnicodeSet pattern in pattern[0, len), such as
-   "[\p{L}]", by calling add(sink, ...) for its ranges. Returns 0 when
-   resolved, 1 when ICU rejects the pattern, and any other value on failure
-   (the compile then returns GUFO_JSON_SCHEMA_STOPPED). */
+   "[\p{L}]", by calling add(sink, ...) for its ranges and
+   add_string(sink, ...) for its strings. Returns
+   GUFO_JSON_SCHEMA_SET_RESOLVED, GUFO_JSON_SCHEMA_SET_REJECTED when ICU
+   rejects the pattern, or any other value (GUFO_JSON_SCHEMA_SET_FAILED) on
+   failure; the compile then returns GUFO_JSON_SCHEMA_STOPPED. */
+#define GUFO_JSON_SCHEMA_SET_RESOLVED 0
+#define GUFO_JSON_SCHEMA_SET_REJECTED 1
+#define GUFO_JSON_SCHEMA_SET_FAILED 2
 typedef int (*GufoJsonSchemaSetFn)(void* context, const uint8_t* pattern,
                                    size_t len, GufoJsonSchemaRangeFn add,
+                                   GufoJsonSchemaStringFn add_string,
                                    void* sink);
 
 typedef struct GufoJsonSchemaRegex GufoJsonSchemaRegex;

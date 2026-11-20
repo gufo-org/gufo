@@ -26,8 +26,9 @@ pub enum GufoJsonSchemaStatus {
     Complete = 0,
     Rejected = 1,
     Empty = 2,
-    Stopped = 3,
-    Internal = 4,
+    NoMemory = 3,
+    Stopped = 4,
+    Internal = 5,
 }
 
 pub const GUFO_JSON_SCHEMA_ABSENT: c_int = 0;
@@ -55,16 +56,20 @@ pub struct GufoJsonSchemaBytes {
 pub type GufoJsonSchemaBytesFn =
     unsafe extern "C" fn(context: *mut c_void, data: *const u8, len: usize);
 pub type GufoJsonSchemaRangeFn = unsafe extern "C" fn(sink: *mut c_void, first: u32, last: u32);
+pub type GufoJsonSchemaStringFn =
+    unsafe extern "C" fn(sink: *mut c_void, codepoints: *const u32, len: usize);
 pub type GufoJsonSchemaSetFn = unsafe extern "C" fn(
     context: *mut c_void,
     pattern: *const u8,
     len: usize,
     add: GufoJsonSchemaRangeFn,
+    add_string: GufoJsonSchemaStringFn,
     sink: *mut c_void,
 ) -> c_int;
 
-const SET_RESOLVED: c_int = 0;
-const SET_REJECTED: c_int = 1;
+pub const GUFO_JSON_SCHEMA_SET_RESOLVED: c_int = 0;
+pub const GUFO_JSON_SCHEMA_SET_REJECTED: c_int = 1;
+pub const GUFO_JSON_SCHEMA_SET_FAILED: c_int = 2;
 
 /// The tables of a compiled pattern, borrowed from its handle.
 #[repr(C)]
@@ -130,6 +135,7 @@ impl Callbacks {
                 self.bytes(self.error, reason.as_bytes());
                 (GufoJsonSchemaStatus::Empty, None)
             }
+            Err(Failure::NoMemory) => (GufoJsonSchemaStatus::NoMemory, None),
             Err(Failure::Stopped) => (GufoJsonSchemaStatus::Stopped, None),
         }
     }
@@ -154,6 +160,23 @@ unsafe extern "C" fn add_range(sink: *mut c_void, first: u32, last: u32) {
     }
 }
 
+#[allow(unsafe_code)]
+unsafe extern "C" fn add_string(sink: *mut c_void, codepoints: *const u32, len: usize) {
+    // SAFETY: as in `add_range`.
+    let sink = unsafe { &mut *sink.cast::<RangeSink>() };
+    // SAFETY: the callback passes `len` readable codepoints.
+    let Some(string) = (unsafe { gufo_ffi::input(codepoints, len) }) else {
+        sink.failed = true;
+        return;
+    };
+    if !guard(false, || {
+        sink.chars.add_string(string);
+        true
+    }) {
+        sink.failed = true;
+    }
+}
+
 impl regex::UnicodeSets for Callbacks {
     #[allow(unsafe_code)]
     fn resolve(&mut self, pattern: &str) -> error::Result<Option<Chars>> {
@@ -169,12 +192,13 @@ impl regex::UnicodeSets for Callbacks {
                 pattern.as_ptr(),
                 pattern.len(),
                 add_range,
+                add_string,
                 std::ptr::from_mut(&mut sink).cast(),
             )
         };
         match status {
-            SET_RESOLVED if !sink.failed => Ok(Some(sink.chars)),
-            SET_REJECTED => Ok(None),
+            GUFO_JSON_SCHEMA_SET_RESOLVED if !sink.failed => Ok(Some(sink.chars)),
+            GUFO_JSON_SCHEMA_SET_REJECTED => Ok(None),
             _ => Err(Failure::Stopped),
         }
     }
@@ -246,7 +270,10 @@ pub unsafe extern "C" fn gufo_json_schema_regex_compile(
         let Some(entries) = (unsafe { gufo_ffi::input(patterns, count) }) else {
             return GufoJsonSchemaStatus::Internal;
         };
-        let mut texts = Vec::with_capacity(entries.len());
+        let mut texts = Vec::new();
+        if texts.try_reserve(entries.len()).is_err() {
+            return GufoJsonSchemaStatus::NoMemory;
+        }
         for entry in entries {
             // SAFETY: the caller guarantees each entry's bytes.
             let Some(text) = (unsafe { gufo_ffi::input(entry.data, entry.len) }) else {

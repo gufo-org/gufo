@@ -162,7 +162,8 @@ a key set, failed allocations and the C ABI.
 `JsonSchemaRegex` and the string and number lexemes, with a frozen copy of
 the 0.35.0 C++ compiler in `tests/core/json_schema_reference.hpp`. Patterns
 from a grid of atoms and quantifiers, every string format, fixtures and their
-deterministic mutations, ill-formed UTF-8 and the size, nesting, repetition
+deterministic mutations, properties of strings such as
+`\p{RGI_Emoji_Flag_Sequence}`, ill-formed UTF-8 and the size, nesting, repetition
 and state limits must compile to the same DFA tables, step the same way in
 `Advance`, `CanFinish` and `CanAdvance`, or fail with the same exception and
 message. String schemas over length, `pattern` and `format` grids must match

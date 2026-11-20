@@ -7,6 +7,7 @@
 #include <gufo/json_schema.h>
 #include <unicode/uniset.h>
 #include <unicode/unistr.h>
+#include <unicode/usetiter.h>
 
 #include <algorithm>
 #include <chrono>
@@ -92,7 +93,8 @@ struct Sets {
 };
 
 int Resolve(void* context, const std::uint8_t* pattern, std::size_t len,
-            GufoJsonSchemaRangeFn add, void* sink) noexcept {
+            GufoJsonSchemaRangeFn add, GufoJsonSchemaStringFn add_string,
+            void* sink) noexcept {
   try {
     UErrorCode status = U_ZERO_ERROR;
     const icu::UnicodeSet set(icu::UnicodeString::fromUTF8(std::string_view(
@@ -102,6 +104,16 @@ int Resolve(void* context, const std::uint8_t* pattern, std::size_t len,
       return 1;
     for (int32_t i = 0; i < set.getRangeCount(); ++i)
       add(sink, set.getRangeStart(i), set.getRangeEnd(i));
+    icu::UnicodeSetIterator strings(set);
+    strings.skipToStrings();
+    std::vector<std::uint32_t> codepoints;
+    while (strings.next()) {
+      const auto& string = strings.getString();
+      codepoints.clear();
+      for (int32_t i = 0; i < string.length(); i = string.moveIndex32(i, 1))
+        codepoints.push_back(string.char32At(i));
+      add_string(sink, codepoints.data(), codepoints.size());
+    }
     return 0;
   } catch (...) {
     static_cast<Sets*>(context)->failed = true;
@@ -153,15 +165,19 @@ void CompareTables(const std::vector<std::string>& patterns,
     for (std::size_t i = 0; same && i < state.successors.size(); ++i)
       same = t.successors[t.successor_offsets[s] + i] == state.successors[i];
   }
-  // The lookup covers every codepoint with its class.
+  // The lookup covers every codepoint, from 0 to 0x110000, with its class.
+  same = same && t.lookup_len > 0 && t.lookup_starts[0] == 0 &&
+         t.lookup_starts[t.lookup_len] == 0x110000;
   for (std::size_t i = 0; same && i < t.lookup_len; ++i) {
-    const auto first = t.lookup_starts[i], cls = t.lookup_classes[i];
-    if (cls == UINT32_MAX)
-      same = first == 0xd800 && t.lookup_starts[i + 1] == 0xe000;
-    else
-      same = impl.alphabet[cls].contains(static_cast<UChar32>(first)) &&
-             impl.alphabet[cls].contains(
-                 static_cast<UChar32>(t.lookup_starts[i + 1] - 1));
+    const auto first = t.lookup_starts[i], last = t.lookup_starts[i + 1] - 1,
+               cls = t.lookup_classes[i];
+    same = first <= last;
+    if (same && cls == UINT32_MAX)
+      same = first == 0xd800 && last == 0xdfff;
+    else if (same)
+      same = cls < t.classes &&
+             impl.alphabet[cls].contains(static_cast<UChar32>(first),
+                                         static_cast<UChar32>(last));
   }
   if (!same)
     Fail(name + ": tables differ");
@@ -236,6 +252,20 @@ void CompareRegex(const std::vector<std::string>& patterns,
           Fail(name + ": CanAdvance differs");
     }
   }
+  // Brent's cycle skip, with minLength far beyond the states, from the
+  // first sampled states.
+  for (std::uint32_t s = 0; s < std::min(states, 8 * stride); s += stride)
+    for (auto [low, high] :
+         std::initializer_list<std::pair<std::uint32_t, std::uint32_t>>{
+             {1000003, UINT32_MAX},
+             {4294967290U, UINT32_MAX},
+             {999999937, 999999942}}) {
+      if (expected->CanFinish(s, low, high) != actual->CanFinish(s, low, high))
+        Fail(name + ": CanFinish differs for large bounds");
+      if (expected->CanAdvance(s, 0, 0x10ffff, low, high) !=
+          actual->CanAdvance(s, 0, 0x10ffff, low, high))
+        Fail(name + ": CanAdvance differs for large bounds");
+    }
   if (expected->MaximumSuffix() != actual->MaximumSuffix())
     Fail(name + ": MaximumSuffix differs");
 }
@@ -335,6 +365,15 @@ void Mutations() {
     }
     CompareRegex({pattern}, round % 2 ? 16U : UINT32_MAX);
   }
+  // Properties of strings keep their sets nonempty and distinct, as in ICU.
+  for (const char* pattern :
+       {"\\p{RGI_Emoji_Flag_Sequence}", "^\\p{Emoji_Keycap_Sequence}$",
+        "[^\\p{RGI_Emoji_Flag_Sequence}]*a[^\\p{RGI_Emoji_Flag_Sequence}]*",
+        "^[\\p{RGI_Emoji}a]+$", "[\\p{RGI_Emoji_Flag_Sequence}-a]",
+        "[a-\\p{Emoji_Keycap_Sequence}]", "\\P{RGI_Emoji}",
+        "^(?:[\\p{Basic_Emoji}]|x)*$"})
+    for (std::uint32_t maximum : {3U, UINT32_MAX})
+      CompareRegex({pattern}, maximum);
   // Ill-formed UTF-8 decodes to U+FFFD, as in ICU.
   for (const char* bytes :
        {"\xff", "a\xc3", "\xe2\x82", "\xed\xa0\x80", "[\xf0\x9f]", "\xc0\xaf"})

@@ -7,6 +7,8 @@ pub enum Failure {
     Rejected(String),
     /// The schema is valid but no value satisfies it.
     Empty(String),
+    /// An allocation sized by the input failed.
+    NoMemory,
     /// A caller callback failed; it holds the cause.
     Stopped,
 }

@@ -409,10 +409,12 @@ impl<'a> Parser<'a> {
             return invalid("regex exceeds 16384 bytes");
         }
         // ICU decodes ill-formed UTF-8 to U+FFFD per maximal subpart, as this does.
-        let text = String::from_utf8_lossy(pattern)
-            .chars()
-            .map(u32::from)
-            .collect();
+        let decoded = String::from_utf8_lossy(pattern);
+        let mut text = Vec::new();
+        if text.try_reserve(decoded.len()).is_err() {
+            return Err(crate::error::Failure::NoMemory);
+        }
+        text.extend(decoded.chars().map(u32::from));
         Ok(Self {
             e,
             sets,

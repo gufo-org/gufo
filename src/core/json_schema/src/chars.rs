@@ -1,6 +1,10 @@
 //! Sets of codepoints as sorted, disjoint, non-adjacent inclusive ranges, as
-//! ICU's `UnicodeSet` keeps them: two sets are equal exactly when their
-//! ranges are.
+//! ICU's `UnicodeSet` keeps them, plus the multi-codepoint strings of
+//! properties such as `\p{RGI_Emoji_Flag_Sequence}`: two sets are equal
+//! exactly when their ranges and strings are. Strings never match a single
+//! codepoint, but they keep a set nonempty and distinct, as in ICU.
+
+use std::collections::BTreeSet;
 
 pub const MAX_CODEPOINT: u32 = 0x10ffff;
 pub const SURROGATES: (u32, u32) = (0xd800, 0xdfff);
@@ -8,6 +12,7 @@ pub const SURROGATES: (u32, u32) = (0xd800, 0xdfff);
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Chars {
     ranges: Vec<(u32, u32)>,
+    strings: BTreeSet<Vec<u32>>,
 }
 
 impl Chars {
@@ -37,15 +42,26 @@ impl Chars {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.ranges.is_empty()
+        self.ranges.is_empty() && self.strings.is_empty()
     }
 
-    /// The number of codepoints.
+    /// The number of codepoints and strings, as ICU's `size()` counts them.
     pub fn size(&self) -> u64 {
         self.ranges
             .iter()
             .map(|&(first, last)| u64::from(last - first) + 1)
-            .sum()
+            .sum::<u64>()
+            + self.strings.len() as u64
+    }
+
+    /// Adds a string, or its codepoint when it has one, as ICU does.
+    pub fn add_string(&mut self, string: &[u32]) {
+        match string {
+            [cp] => self.add(*cp, *cp),
+            _ => {
+                self.strings.insert(string.to_vec());
+            }
+        }
     }
 
     /// The smallest codepoint.
@@ -102,6 +118,7 @@ impl Chars {
         for &(first, last) in &other.ranges {
             self.add(first, last);
         }
+        self.strings.extend(other.strings.iter().cloned());
     }
 
     /// Removes `[first, last]`.
@@ -125,7 +142,8 @@ impl Chars {
         self.ranges = kept;
     }
 
-    /// Complements within all codepoints, surrogates included, as ICU does.
+    /// Complements within all codepoints, surrogates included, and keeps the
+    /// strings, as ICU does.
     pub fn complement(&mut self) {
         let mut result = Vec::with_capacity(self.ranges.len() + 1);
         let mut next = 0u32;
@@ -166,6 +184,22 @@ mod tests {
         assert_eq!(all, Chars::range(0, MAX_CODEPOINT));
         all.complement();
         assert!(all.is_empty());
+    }
+
+    #[test]
+    fn strings_keep_sets_distinct() {
+        let mut flags = Chars::new();
+        flags.add_string(&[0x1f1e6, 0x1f1e8]);
+        assert!(!flags.is_empty() && flags.first().is_none());
+        assert_eq!(flags.size(), 1);
+        assert!(!flags.contains(0x1f1e6));
+        let mut negated = flags.clone();
+        negated.complement();
+        assert_ne!(negated, Chars::range(0, MAX_CODEPOINT));
+        assert_eq!(negated.size(), 0x110000 + 1);
+        let mut one = Chars::new();
+        one.add_string(&[0x61]);
+        assert_eq!(one, Chars::single(0x61));
     }
 
     #[test]

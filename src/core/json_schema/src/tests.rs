@@ -10,6 +10,7 @@ unsafe extern "C" fn sets(
     pattern: *const u8,
     len: usize,
     add: GufoJsonSchemaRangeFn,
+    add_string: GufoJsonSchemaStringFn,
     sink: *mut c_void,
 ) -> c_int {
     // SAFETY: the compiler passes readable bytes.
@@ -23,7 +24,14 @@ unsafe extern "C" fn sets(
             (0xfeff, 0xfeff),
         ],
         b"[\\p{L}]" => &[(0x41, 0x5a), (0x61, 0x7a)],
-        b"[\\p{Fail}]" => return 2,
+        b"[\\p{Fail}]" => return GUFO_JSON_SCHEMA_SET_FAILED,
+        b"[\\p{Flags}]" => {
+            let flag = [0x1f1e6u32, 0x1f1e8];
+            // SAFETY: `add_string` and `sink` come from the compiler for this
+            // call; `flag` outlives it.
+            unsafe { add_string(sink, flag.as_ptr(), flag.len()) };
+            return GUFO_JSON_SCHEMA_SET_RESOLVED;
+        }
         _ => return 1,
     };
     for &(first, last) in ranges {
@@ -153,6 +161,13 @@ fn languages() {
     // States first reached at the bound have no transitions.
     let cut = compile(&["^(?:ab|ba)*$"], 1).unwrap();
     assert!(!cut.matches("ab"));
+    // A set of strings matches no codepoint but is not empty: the class
+    // stays distinct from `[^]`, as in ICU.
+    let flags = compile(&["^[^\\p{Flags}]$"], u32::MAX).unwrap();
+    assert!(flags.matches("a") && !flags.matches(""));
+    let strings = compile(&["^\\p{Flags}?$"], u32::MAX).unwrap();
+    assert!(strings.matches("") && !strings.matches("\u{1f1e6}"));
+    assert_eq!(rejected("[\\p{Flags}-z]"), "invalid regex character range");
     let any = compile(&[], u32::MAX).unwrap();
     assert!(any.matches("") && any.matches("\u{10ffff}"));
     // The start state alone matches `^`.
@@ -435,6 +450,27 @@ fn caller_errors_are_internal() {
         gufo_json_schema_number_free(std::ptr::null_mut());
     }
     assert!(handle.is_null());
+    // An unknown value kind is a caller error.
+    let mut keywords = [GufoJsonSchemaValue {
+        kind: GUFO_JSON_SCHEMA_ABSENT,
+        number: 0.0,
+        text: std::ptr::null(),
+        len: 0,
+    }; 4];
+    keywords[2].kind = 7;
+    let (mut minimum, mut maximum) = (0, 0);
+    // SAFETY: the buffers outlive the call.
+    let status = unsafe {
+        gufo_json_schema_string(
+            keywords.as_ptr(),
+            &mut minimum,
+            &mut maximum,
+            None,
+            None,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(status, GufoJsonSchemaStatus::Internal);
     // A pattern needing a set without a resolver stops.
     let pattern = b"\\s";
     let entry = GufoJsonSchemaBytes {

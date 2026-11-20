@@ -196,29 +196,37 @@ impl Number {
         // Decimal prefixes cover an interval. Before the decimal point, appending
         // integer digits also shifts that interval by powers of ten.
         let mut low = value;
-        low.negative = false;
         let mut high = add_unit(&low, places);
+        // The interval [first, last] in signed terms, without copying digits:
+        // a negative prefix spans [-high, -low].
+        low.negative = negative && !low.is_zero();
+        high.negative = negative && !high.is_zero();
         let extend_integer = dot.is_none() && text[0] != b'0';
         for shift in 0..=MAX_SHIFTS {
-            let mut first = if negative { high.clone() } else { low.clone() };
-            let mut last = if negative { low.clone() } else { high.clone() };
-            first.negative = negative && !first.is_zero();
-            last.negative = negative && !last.is_zero();
+            let (first, last) = if negative {
+                (&high, &low)
+            } else {
+                (&low, &high)
+            };
             let intersects_lower = self.lower.as_ref().is_none_or(|lower| {
-                let c = compare(&last, &lower.value);
+                let c = compare(last, &lower.value);
                 c > 0 || (negative && !lower.exclusive && c == 0)
             });
             let intersects_upper = self.upper.as_ref().is_none_or(|upper| {
-                let c = compare(&first, &upper.value);
+                let c = compare(first, &upper.value);
                 c < 0 || (!negative && !upper.exclusive && c == 0)
             });
             if intersects_lower && intersects_upper {
+                // Without a step every value in the interval is accepted.
+                if self.multiple.is_none() {
+                    return matched(true, complete);
+                }
                 let mut lower = Bound {
-                    value: first,
+                    value: first.clone(),
                     exclusive: negative,
                 };
                 let mut upper = Bound {
-                    value: last,
+                    value: last.clone(),
                     exclusive: !negative,
                 };
                 if let Some(bound) = &self.lower {
@@ -233,7 +241,7 @@ impl Number {
                         upper = bound.clone();
                     }
                 }
-                if self.multiple.is_none() || self.grid_point(lower, upper) {
+                if self.grid_point(lower, upper) {
                     return matched(true, complete);
                 }
             }

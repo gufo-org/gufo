@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -46,6 +47,8 @@ struct JsonSchemaCall {
         throw std::invalid_argument("JSON Schema: " + reason);
       case GUFO_JSON_SCHEMA_EMPTY:
         throw JsonSchemaEmpty("JSON Schema: " + reason);
+      case GUFO_JSON_SCHEMA_NO_MEMORY:
+        throw std::bad_alloc();
       case GUFO_JSON_SCHEMA_STOPPED:
       case GUFO_JSON_SCHEMA_INTERNAL:
         break;
