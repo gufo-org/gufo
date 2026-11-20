@@ -1346,7 +1346,8 @@ void TestProviderToolDialectSelection() {
                   std::string(1, static_cast<char>(id)), false};
             });
       }
-      std::optional<Constraint::ToolSyntax> ToolGrammarSyntax() const override {
+      std::optional<Constraint::ToolSyntax> ToolGrammarSyntax(
+          const ChatRequest&) const override {
         return syntax_;
       }
       std::optional<gufo::ext::ReasoningMarkup> ReasoningGrammarMarkers(

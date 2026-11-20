@@ -53,18 +53,21 @@ void PrintStats(const server::TextGenerationBackend::Result& result) {
             << " tok/s, decode " << decode << " tok/s]\n";
 }
 
-// Splits "<think>reasoning</think>answer" as the server's parsers do.
-void SplitReasoning(const std::string& text, std::string* thought,
-                    std::string* content) {
-  const auto close = text.rfind("</think>");
+// Splits "<open>reasoning<close>answer" with the request's own delimiters,
+// as the server's parsers do.
+void SplitReasoning(const std::string& text, const ext::ReasoningMarkup& markup,
+                    std::string* thought, std::string* content) {
+  const auto close =
+      markup.close.empty() ? std::string::npos : text.rfind(markup.close);
   if (close == std::string::npos) {
     *content = text;
     return;
   }
-  auto open = text.find("<think>");
-  open = open == std::string::npos || open > close ? 0 : open + 7;
+  auto open = markup.open.empty() ? std::string::npos : text.find(markup.open);
+  open =
+      open == std::string::npos || open > close ? 0 : open + markup.open.size();
   *thought = text.substr(open, close - open);
-  *content = text.substr(close + 8);
+  *content = text.substr(close + markup.close.size());
   const auto first = content->find_first_not_of(" \t\r\n");
   *content =
       first == std::string::npos ? std::string() : content->substr(first);
@@ -137,10 +140,12 @@ int RunRunnerChat(const ext::TextPromptOptions& opt,
       if (line.empty())
         continue;
       request.messages.emplace_back(ext::ChatRole::kUser, line);
-      const auto result =
-          backend.chat(request, opt.max_tokens, opt.sampling, {}, print);
+      const auto pending =
+          backend.start_chat(request, opt.max_tokens, opt.sampling);
+      const auto result = pending->Wait(print);
       std::string thought, content;
-      SplitReasoning(result.text, &thought, &content);
+      SplitReasoning(result.text, pending->ReasoningDelimiters(), &thought,
+                     &content);
       request.messages.emplace_back(ext::ChatRole::kAssistant, content,
                                     std::string(), thought);
       std::cout << "\n";
@@ -188,7 +193,9 @@ int RunRunnerBench(const ext::TextBenchOptions& opt,
               /*ignore_eos=*/true, "bench", {}, false, /*cache_prompt=*/false,
               /*cache_persist=*/false);
           const auto result = request->Wait();
-          prefill.push_back(result.prompt_tokens / (result.prefill_ms / 1000));
+          if (result.prefill_ms > 0)
+            prefill.push_back(result.prompt_tokens /
+                              (result.prefill_ms / 1000));
           if (result.completion_tokens > 1 && result.decode_ms > 0)
             decode.push_back((result.completion_tokens - 1) /
                              (result.decode_ms / 1000));

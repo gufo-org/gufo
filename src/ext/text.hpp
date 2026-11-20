@@ -508,7 +508,7 @@ public:
   /// markup but whose model writes another spelling: the spelling grammars
   /// must constrain. std::nullopt (the default) uses the published one.
   [[nodiscard]] virtual std::optional<sampling::JsonConstraint::ToolSyntax>
-  ToolGrammarSyntax() const {
+  ToolGrammarSyntax(const ChatRequest&) const {
     return std::nullopt;
   }
   [[nodiscard]] virtual std::optional<ReasoningMarkup> ReasoningGrammarMarkers(
