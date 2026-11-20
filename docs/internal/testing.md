@@ -158,6 +158,20 @@ rejection: its exception must reach the caller. It runs in `check-pr`; the
 crate's Rust tests cover the integer fast path, the string scan, the switch to
 a key set, failed allocations and the C ABI.
 
+`json_schema_test` compares the Rust JSON Schema compiler, through
+`JsonSchemaRegex` and the string and number lexemes, with a frozen copy of
+the 0.35.0 C++ compiler in `tests/core/json_schema_reference.hpp`. Patterns
+from a grid of atoms and quantifiers, every string format, fixtures and their
+deterministic mutations, ill-formed UTF-8 and the size, nesting, repetition
+and state limits must compile to the same DFA tables, step the same way in
+`Advance`, `CanFinish` and `CanAdvance`, or fail with the same exception and
+message. String schemas over length, `pattern` and `format` grids must match
+generated JSON strings byte by byte with the same canonical mask states;
+number schemas over bound, exclusivity and `multipleOf` grids must agree on
+every prefix of up to three bytes and on generated longer ones. It runs in
+`check-pr`; the crate's Rust tests cover the decimal arithmetic, the keywords,
+a few languages and rejections, and the C ABI.
+
 The hosted Rust check uses Cargo's default test profile, with overflow checks
 and debug assertions enabled. The Windows job builds the Rust library and C++
 callers but does not run `cargo test`. A workspace registration check runs in

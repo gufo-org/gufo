@@ -920,6 +920,13 @@ endfunction()
   add_test(NAME json_constraint_test COMMAND json_constraint_test)
   set_tests_properties(json_constraint_test PROPERTIES LABELS "cpu;json;sampling")
 
+  # Compares the Rust JSON Schema compiler with the frozen C++ one in
+  # tests/core/json_schema_reference.hpp; the Rust headers come from gufo_rust.
+  add_executable(json_schema_test tests/core/json_schema_test.cpp)
+  target_link_libraries(json_schema_test PRIVATE gufo_core gufo_rust ICU::uc)
+  add_test(NAME json_schema_test COMMAND json_schema_test)
+  set_tests_properties(json_schema_test PROPERTIES LABELS "cpu;json;sampling;correctness")
+
   add_executable(json_test tests/core/json_test.cpp)
   target_link_libraries(json_test PRIVATE gufo_core)
   add_test(NAME json_test COMMAND json_test)

@@ -16,7 +16,7 @@ set(gufo_pr_targets
   cache_retention_test
   sched_policy_test
   extension_runtime_test extension_role_test
-  arg_parser_test transcribe_cli_test json_test json_parse_test json_constraint_test gguf_reader_test gguf_header_test qwen_config_test qwen_draft_vocab_test
+  arg_parser_test transcribe_cli_test json_test json_parse_test json_constraint_test json_schema_test gguf_reader_test gguf_header_test qwen_config_test qwen_draft_vocab_test
   gguf_identity_test
   png_decode_test wav_decode_test audio_decode_test base64_test websocket_frame_test
   http_request_test multipart_test

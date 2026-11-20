@@ -15,5 +15,6 @@ gufo-base64 = { path = "../base64" }
 gufo-gguf = { path = "../gguf" }
 gufo-http = { path = "../http" }
 gufo-json = { path = "../json" }
+gufo-json-schema = { path = "../json_schema" }
 gufo-png-decode = { path = "../png_decode" }
 gufo-websocket = { path = "../websocket" }
