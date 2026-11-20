@@ -177,6 +177,10 @@ private:
 /// Best effort: when the address cannot be bound, or for port 0, nothing
 /// listens and the caller proceeds exactly as without it. stop() closes the
 /// socket so `HttpServer::start` can bind the same address.
+///
+/// Beside the `error` object the body reports the load stage as top-level
+/// `progress` (0 to 1) and `message`, which llama-swap v269 and later show
+/// and use to restart `healthCheckTimeout` whenever `progress` changes.
 class LoadingResponder {
 public:
   LoadingResponder(const std::string& host, int port);
@@ -195,11 +199,19 @@ public:
   /// answered client to close.
   void stop();
 
+  /// Reports a load stage in later replies. `progress` is clamped to [0, 1].
+  /// Safe to call from any thread, before or after stop().
+  void SetProgress(double progress, std::string_view message);
+
 private:
   void serve();
+  [[nodiscard]] std::string Reply() const;
 
   int listen_fd_ = -1;
   std::atomic<bool> stopped_{false};
+  mutable std::mutex progress_mutex_;
+  double progress_ = 0.0;
+  std::string message_ = "Loading model";
   std::thread thread_;
 };
 

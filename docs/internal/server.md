@@ -1388,8 +1388,10 @@ waits for `/ready` to return HTTP 200 before forwarding the triggering
 request. Gufo returns 503 while the model loads. The served model name
 matches the llama-swap model ID, so clients can request `gufo-model`
 through the proxy. Gufo requires no credentials on any route, so llama-swap's
-default `/health` probe works too. For long cold starts, increase llama-swap's
-`healthCheckTimeout` to cover model and disk-cache loading.
+default `/health` probe works too. While `gufo serve llm` loads, its 503 body
+reports the load stage, which llama-swap v269 and later show; each new stage
+restarts the `healthCheckTimeout` countdown. Set `healthCheckTimeout` to cover
+the longest stage, usually loading the weights or walking the disk cache.
 
 Gufo answers the names passed to `--served-model-name` plus its built-in
 identifiers: TTS also accepts `qwen3-tts`, ASR also accepts `qwen3-asr` and
@@ -1475,9 +1477,17 @@ recorded device state without performing GPU work on each poll. HTTP model repla
 conversations are not implemented.
 
 While `gufo serve llm` loads its model and walks the disk cache tier, the port
-already answers every request, `/health` included, with 503
-`{"error":{"message":"Loading model","type":"unavailable_error","code":"loading"}}`
-and `Retry-After: 1`, as llama-server does. A refused connection therefore
+already answers every request, `/health` included, with 503 and
+`Retry-After: 1`, as llama-server does. The body carries llama-server's error
+object plus the load stage as top-level `progress` (0 to 1) and `message`:
+
+```json
+{"error":{"message":"Loading model","type":"unavailable_error","code":"loading"},"progress":0.05,"message":"Loading weights"}
+```
+
+The stages are `Opening model` (0), `Loading weights` (0.05) and
+`Preparing sessions and cache` (0.9), which includes the disk-tier walk.
+`progress` marks the stage, not a share of the remaining time. A refused connection therefore
 means the process is not running; supervisors such as llama-swap, which treat
 only a 200 health check as ready, keep waiting until the model is loaded. If
 the address cannot be bound early, the port stays closed until the load ends.

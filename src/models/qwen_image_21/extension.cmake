@@ -46,7 +46,7 @@ if(TARGET gufo_qwen_image_21_hip)
   )
   target_compile_definitions(gufo_qwen_image_21_hip PUBLIC ENGINE_ENABLE_HIP=1)
   target_compile_options(gufo_qwen_image_21_hip PRIVATE
-    $<$<COMPILE_LANGUAGE:HIP>:-O3;${GUFO_CLANG_OPTION}-ffp-contract=off>)
+    $<$<COMPILE_LANGUAGE:HIP>:${GUFO_CLANG_OPTION}-O3;${GUFO_CLANG_OPTION}-ffp-contract=off>)
   target_include_directories(gufo_qwen_image_21_hip PUBLIC
     ${PROJECT_SOURCE_DIR}
     ${GUFO_EXTENSION_BUILD_ROOT}

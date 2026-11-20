@@ -1,12 +1,15 @@
 #include "src/cli/model/catalog.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
 
+#include "src/cli/extension/registry.hpp"
 #include "src/cli/extension/store.hpp"
 
 namespace gufo::cli {
@@ -202,7 +205,8 @@ Model ParseModel(const json::Value& declared, const json::Value& lock) {
 
 // Adds one extension's models; a broken extension becomes a problem.
 void Add(Catalog& catalog, const json::Value& models, const json::Value& lock,
-         const std::string& extension, const std::string& version) {
+         const std::string& extension, const std::string& version,
+         const std::string& status = "built-in") {
   try {
     for (auto& model : Parse(models, lock, extension, version)) {
       if (const auto* other = catalog.Find(model.id)) {
@@ -211,6 +215,7 @@ void Add(Catalog& catalog, const json::Value& models, const json::Value& lock,
                                    other->extension);
         continue;
       }
+      model.extension_status = status;
       catalog.models.push_back(std::move(model));
     }
   } catch (const std::exception& error) {
@@ -261,7 +266,91 @@ std::vector<Model> Parse(const json::Value& models, const json::Value& lock,
   return parsed;
 }
 
-Catalog Load() {
+namespace {
+std::string Lower(std::string text) {
+  for (auto& c : text)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return text;
+}
+
+// Models of reviewed extensions this gufo can install but has neither built
+// in nor installed, read from each newest compatible release's commit. Local
+// extensions stay authoritative: an installed one gains models through
+// `gufo extension update`. Registry failures become problems.
+void AddRegistry(Catalog& catalog, const std::vector<std::string>& local,
+                 const fs::path& cache) {
+  namespace registry = extension_registry;
+  json::Value index;
+  try {
+    index = registry::FetchIndex();
+  } catch (const std::exception& error) {
+    catalog.problems.push_back(std::string("extension registry: ") +
+                               error.what());
+    return;
+  }
+  const auto& extensions = *index.find("extensions");
+  std::vector<registry::Release> releases;
+  for (const auto& [name, entry] : extensions.members()) {
+    std::string why;
+    if (std::ranges::find(local, name) != local.end())
+      continue;
+    if (auto release = registry::Resolve(index, name, {}, &why))
+      releases.push_back(std::move(*release));
+  }
+  std::vector<std::future<registry::Metadata>> fetched;
+  for (const auto& release : releases)
+    fetched.push_back(std::async(std::launch::async, [&cache, &release] {
+      return registry::FetchMetadata(release, cache);
+    }));
+  for (std::size_t i = 0; i < releases.size(); ++i) {
+    const auto& release = releases[i];
+    try {
+      const auto metadata = fetched[i].get();
+      const auto* models = metadata.manifest.find("models");
+      const auto* locked = metadata.lock.find("models");
+      for (auto& model : Parse(models ? *models : json::Value::array(),
+                               locked ? *locked : json::Value::object(),
+                               release.name, release.version)) {
+        if (const auto* other = catalog.Find(model.id)) {
+          catalog.problems.push_back(release.name + ": model " + model.id +
+                                     " is already provided by " +
+                                     other->extension);
+          continue;
+        }
+        model.extension_status = "not installed";
+        catalog.models.push_back(std::move(model));
+      }
+      // Extensions without model declarations only name the weights they
+      // recognise, often in several spellings: list each name once.
+      const auto* providers = metadata.manifest.find("providers");
+      if (providers == nullptr || !providers->is_array())
+        continue;
+      const auto description =
+          extensions.find(release.name)->member_str("description");
+      for (const auto& provider : providers->items()) {
+        for (const auto& id : Strings(provider, "model_ids")) {
+          if (std::ranges::any_of(catalog.models, [&](const Model& model) {
+                return Lower(model.id) == Lower(id);
+              }))
+            continue;
+          Model model;
+          model.id = id;
+          model.provider = provider.member_str("id");
+          model.description = description;
+          model.extension = release.name;
+          model.extension_version = release.version;
+          model.extension_status = "not installed";
+          catalog.models.push_back(std::move(model));
+        }
+      }
+    } catch (const std::exception& error) {
+      catalog.problems.push_back(release.name + ": " + error.what());
+    }
+  }
+}
+}  // namespace
+
+Catalog Load(bool include_registry) {
   Catalog catalog;
   std::vector<extension_store::Installed> installed;
   fs::path store;
@@ -286,7 +375,7 @@ Catalog Load() {
                                               : json::Value::object();
       const auto* locked = lock.find("models");
       Add(catalog, *models, locked ? *locked : json::Value::object(),
-          extension.name, extension.version);
+          extension.name, extension.version, "installed");
     } catch (const std::exception& error) {
       catalog.problems.push_back(extension.name + ": " + error.what());
     }
@@ -305,6 +394,15 @@ Catalog Load() {
     Add(catalog, models ? *models : json::Value::array(),
         locked ? *locked : json::Value::object(), name,
         entry.member_str("version"));
+  }
+  if (include_registry) {
+    std::vector<std::string> local;
+    for (const auto& extension : installed)
+      local.push_back(extension.name);
+    for (const auto& entry : builtin.items())
+      local.push_back(entry.member_str("name"));
+    AddRegistry(catalog, local,
+                store.empty() ? fs::path() : store / ".registry-metadata");
   }
   std::ranges::sort(catalog.models, {}, &Model::id);
   return catalog;

@@ -184,9 +184,8 @@ next to its DLLs and kernel folders. To build it yourself, see
 
 ## Model files
 
-Each extension pins the weights its models run on: a Hugging Face revision and
-every file's size and SHA-256. `gufo model` downloads them and checks each
-file:
+Extensions can pin weights by Hugging Face revision, file size and SHA-256.
+`gufo model` downloads those weights and checks each file:
 
 ```sh
 gufo model list                   # every model and the extension that offers it
@@ -195,6 +194,11 @@ gufo transcribe --model qwen3-asr --audio speech.wav
 gufo model update                 # move to the files extensions pin now
 gufo model remove qwen3-asr
 ```
+
+`gufo model list --registry` adds the models of [registry](extensions.md)
+extensions you have not installed, read with Git from each reviewed commit
+without building it. A model without a size pins no download; pass its weights'
+path to `--model`. `--json` reports `extensionStatus` and `downloadable`.
 
 Pass an installed model's ID to `--model`; a path still works for weights you
 download yourself. `install` also fetches a model's default companions, such as
@@ -209,3 +213,36 @@ store it once.
 A Hugging Face token is optional. Set `HF_TOKEN`, or run `hf auth login`, for
 gated models and higher rate limits; Gufo sends it only to Hugging Face, never
 to the download servers it redirects to. `HF_ENDPOINT` selects a mirror.
+
+## Scheduled models on NixOS
+
+Import `gufo.nixosModules.model-sync` from your Gufo flake input:
+
+```nix
+{
+  imports = [ gufo.nixosModules.model-sync ];
+  services.gufo-model-sync = {
+    enable = true;
+    models = [ "qwen27-q4" "qwen3-asr" ];
+    onCalendar = "daily";
+    randomizedDelaySec = "30m";
+  };
+}
+```
+
+Only the calendar timer starts sync; activation and boot do not start it or
+catch up missed runs. It installs missing models and calls `gufo model update`
+for installed ones, following the files pinned by their local extensions.
+It never installs extensions, deletes undeclared models or starts Gufo.
+llama-swap can launch Gufo independently using `--model <ID>`.
+
+The default account is `gufo` and the model directory is `/var/lib/gufo/models`.
+Set `user`, `group` and `directory` to share readable files with your inference
+process; give that process the same `GUFO_MODELS_DIR`.
+
+Evaluation rejects IDs that no extension built into `package` offers. To sync
+an external extension's model, [compile it in](extensions.md#compiling-an-extension-in)
+and pass that package as `package`. Each run still checks `gufo model list --json`
+before downloading. For custom deployment hooks, `gufo.lib.mkModelSync {
+inherit pkgs; models = [ "qwen27-q4" ]; }` returns the same executable without
+configuring a service or timer.

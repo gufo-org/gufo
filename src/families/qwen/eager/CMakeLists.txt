@@ -12,4 +12,4 @@ target_link_libraries(gufo_qwen_eager PUBLIC hip::host roc::hipblaslt)
 set_source_files_properties(attention.hip
   TARGET_DIRECTORY gufo_qwen_eager
   PROPERTIES COMPILE_OPTIONS
-  "-O3;${GUFO_CLANG_OPTION}-ffp-contract=off;-gline-tables-only;-Xarch_device;-mllvm=-amdgpu-sched-strategy=iterative-ilp")
+  "${GUFO_CLANG_OPTION}-O3;${GUFO_CLANG_OPTION}-ffp-contract=off;-gline-tables-only;-Xarch_device;-mllvm=-amdgpu-sched-strategy=iterative-ilp")

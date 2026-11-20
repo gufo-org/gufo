@@ -38,6 +38,7 @@ struct Model {
   std::string description;
   std::string extension;
   std::string extension_version;
+  std::string extension_status = "built-in";
   std::vector<Component> components;
 
   const Component* Find(std::string_view role) const;
@@ -60,8 +61,11 @@ struct Catalog {
 };
 
 // The models of the built-in extensions and of the installed ones; an
-// installed extension replaces a built-in of the same name.
-Catalog Load();
+// installed extension replaces a built-in of the same name. With
+// `include_registry`, also the models of reviewed registry extensions that
+// are not available locally, including recognition IDs without components.
+// Registry failures become problems and leave local models available.
+Catalog Load(bool include_registry = false);
 
 // True when `path` is a safe relative path inside a model directory.
 bool SafeRelativePath(std::string_view path);

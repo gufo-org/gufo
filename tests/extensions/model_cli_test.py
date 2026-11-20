@@ -140,13 +140,79 @@ with tempfile.TemporaryDirectory() as temporary:
            "HF_ENDPOINT": f"http://127.0.0.1:{server.server_address[1]}",
            "HF_HOME": str(root / "hf"), "HF_TOKEN": ""}
     env.pop("HF_HUB_CACHE", None)
+    # Plain listings never read the registry.
+    registry = root / "index.json"
+    registry.write_text("invalid registry")
+    env["GUFO_EXTENSION_REGISTRY"] = str(registry)
 
     listing = json.loads(gufo("model", "list", "--json").stdout)
     rows = {m["id"]: m for m in listing["models"]}
     assert rows["fixture-model"]["extension"] == "fixture_models", rows
     assert rows["fixture-model"]["status"] == "available", rows
+    assert rows["fixture-model"]["extensionStatus"] == "installed", rows
+    assert rows["fixture-model"]["downloadable"] is True, rows
     assert "stale-model" not in rows, rows
     assert any("fixture_stale" in p and "stale" in p for p in listing["problems"]), listing
+    assert not any("extension registry" in p for p in listing["problems"]), listing
+
+    # --registry reads models from each reviewed commit, without installing
+    # or building extension code.
+    api = json.loads(gufo("diagnose", "--section", "extensions", "--json").stdout)["extensionApiVersion"]
+    remote = {"id": "registry-model", "provider": "remote", "description": "Registry weights",
+              "components": [gated]}
+    repository = root / "registry_fixture"
+    repository.mkdir()
+    (repository / "extension.json").write_text(json.dumps({
+        "schema": 1, "name": "registry_fixture", "version": "1.0.0",
+        "models": [remote, {**remote, "id": "fixture-model"}],
+        "providers": [{"id": "remote", "model_ids": ["Legacy-Recognition", "legacy-recognition"]}]}))
+    (repository / "models.lock.json").write_text(json.dumps({"schema": 1, "models": {
+        name: {"weights": lock_entry(gated)} for name in ("registry-model", "fixture-model")}}))
+    git = ["git", "-C", str(repository), "-c", "user.name=fixture", "-c", "user.email=fixture@invalid"]
+    subprocess.run([*git, "init", "--quiet"], check=True)
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "--quiet", "-m", "fixture"], check=True)
+    commit = subprocess.run([*git, "rev-parse", "HEAD"], check=True, text=True,
+                            capture_output=True).stdout.strip()
+    release = {"version": "1.0.0", "revision": commit, "digest": "sha256:" + "a" * 64,
+               "api_version": ">= " + api, "platforms": ["linux", "windows"]}
+    unreachable = "file://" + str(root / "missing")
+    registry.write_text(json.dumps({"schema": 1, "extensions": {
+        "registry_fixture": {"source": repository.as_uri(), "description": "Registry fixture",
+                             "releases": [{**release, "version": "2.0.0", "api_version": ">= 99.0.0",
+                                           "revision": "f" * 40}, release]},
+        # Neither an installed extension nor an incompatible one is fetched.
+        "fixture_models": {"source": unreachable, "releases": [{**release, "revision": "e" * 40}]},
+        "unsupported_fixture": {"source": unreachable,
+                                "releases": [{**release, "api_version": ">= 99.0.0"}]},
+    }}))
+    listing = json.loads(gufo("model", "list", "--json", "--registry").stdout)
+    rows = {row["id"]: row for row in listing["models"]}
+    assert rows["registry-model"]["extensionStatus"] == "not installed", rows
+    assert rows["registry-model"]["status"] == "extension not installed", rows
+    assert rows["registry-model"]["downloadable"] is True, rows
+    assert rows["registry-model"]["extensionVersion"] == "1.0.0", rows
+    assert rows["fixture-model"]["extension"] == "fixture_models", rows
+    assert any("already provided by fixture_models" in p for p in listing["problems"]), listing
+    legacy = [row for row in listing["models"] if row["id"].lower() == "legacy-recognition"]
+    assert len(legacy) == 1 and legacy[0]["downloadable"] is False, legacy
+    assert legacy[0]["description"] == "Registry fixture", legacy
+    assert not any(row["extension"] == "unsupported_fixture" for row in listing["models"]), rows
+    assert not any("cannot read" in p for p in listing["problems"]), listing
+    table = gufo("model", "list", "--registry").stdout
+    assert "extension not installed" in table and "gufo extension install" in table, table
+    assert "gufo extension install" not in gufo("model", "list").stdout
+    assert not store.exists() and not (extensions / "registry_fixture").exists()
+    # Reviewed commits are immutable: the second listing reads the cache.
+    assert (extensions / ".registry-metadata" / f"{commit}.json").is_file()
+    # Git marks objects read-only, which Windows refuses to delete.
+    repository.rename(root / "moved_registry_fixture")
+    cached = json.loads(gufo("model", "list", "--json", "--registry").stdout)
+    assert any(row["id"] == "registry-model" for row in cached["models"]), cached
+    registry.write_text("invalid registry")
+    offline = json.loads(gufo("model", "list", "--json", "--registry").stdout)
+    assert any("extension registry" in problem for problem in offline["problems"]), offline
+    assert any(row["id"] == "fixture-model" for row in offline["models"]), offline
 
     missing = gufo("prompt", "--model", "fixture-model", check=False)
     assert missing.returncode == 1 and "gufo model install fixture-model" in missing.stderr, missing

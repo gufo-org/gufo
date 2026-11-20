@@ -121,8 +121,9 @@ set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
 
 # clang-cl (Windows) ignores GCC-style driver options such as -ffast-math,
 # -ffp-contract=off or -fno-slp-vectorize; its only diagnostic is a
-# -Wunknown-argument warning. Prefix such options with ${GUFO_CLANG_OPTION} so
-# they reach clang on both platforms.
+# -Wunknown-argument warning. It also leaves a plain -O3 unused: since clang 24
+# (ROCm 10.1) HIP device code then gets no optimisation level at all. Prefix such
+# options with ${GUFO_CLANG_OPTION} so they reach clang on both platforms.
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
   set(GUFO_CLANG_OPTION "/clang:")
@@ -163,6 +164,14 @@ if (ENGINE_ENABLE_HIP)
       "${CMAKE_HIP_FLAGS_RELWITHDEBINFO}")
     string(REPLACE "/Ob1" "/Ob2" CMAKE_HIP_FLAGS_MINSIZEREL
       "${CMAKE_HIP_FLAGS_MINSIZEREL}")
+    # Since clang 24 (ROCm 10.1) clang-cl's /O2 no longer reaches the device
+    # compile, so HIP sources without their own level build device code at
+    # -O0. /clang:-O3 is what /O2 already means to clang and reaches both
+    # compiles.
+    string(REPLACE "/O2" "/O2 /clang:-O3" CMAKE_HIP_FLAGS_RELWITHDEBINFO
+      "${CMAKE_HIP_FLAGS_RELWITHDEBINFO}")
+    string(REPLACE "/O2" "/O2 /clang:-O3" CMAKE_HIP_FLAGS_RELEASE
+      "${CMAKE_HIP_FLAGS_RELEASE}")
     # Under /Fo, clang-cl writes the device image and .hipfb into the build
     # directory named after the source, so same-named sources race and can
     # swap device code in parallel builds. -o keeps them in unique temp files

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -2545,13 +2546,19 @@ std::string SendParts(const std::string& host, int port,
   return response;
 }
 
-void ExpectLoading(const std::string& response) {
+// `progress` and `message` are the top-level fields llama-swap v269 and later
+// read from a not-ready health reply (#957).
+void ExpectLoading(const std::string& response,
+                   std::string_view progress = R"("progress":0,)",
+                   std::string_view message = "Loading model") {
   ExpectStatus(response, 503);
   assert(response.find("\r\nRetry-After: 1\r\n") != std::string::npos);
   const auto body = response.substr(response.find("\r\n\r\n") + 4);
   assert(body ==
          R"({"error":{"message":"Loading model","type":"unavailable_error",)"
-         R"("code":"loading"}})");
+         R"("code":"loading"},)" +
+             std::string(progress) + R"("message":")" + std::string(message) +
+             R"("})");
 }
 
 void TestLoadingResponder() {
@@ -2595,6 +2602,16 @@ void TestLoadingResponder() {
   // A request head split across segments is answered after it completes.
   ExpectLoading(
       SendParts("127.0.0.1", port, {"GET /hea", "lth HTTP/1.1\r\n", "\r\n"}));
+
+  // Later replies report the latest stage; progress stays within [0, 1].
+  loading.SetProgress(0.05, "Loading weights");
+  ExpectLoading(SendParts("127.0.0.1", port, {"GET /ready HTTP/1.1\r\n\r\n"}),
+                R"("progress":0.05,)", "Loading weights");
+  loading.SetProgress(7.0, "Preparing sessions and cache");
+  ExpectLoading(SendParts("127.0.0.1", port, {"GET /health HTTP/1.1\r\n\r\n"}),
+                R"("progress":1,)", "Preparing sessions and cache");
+  loading.SetProgress(std::nan(""), "Loading model");
+  ExpectLoading(SendParts("127.0.0.1", port, {"GET / HTTP/1.1\r\n\r\n"}));
 
   // The port is held: the real server cannot bind it until stop().
   {
