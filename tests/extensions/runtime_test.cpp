@@ -160,7 +160,9 @@ public:
   gufo::json::Value Decide(const gufo::json::Value& request) override {
     if (!request.contains("questions"))
       throw std::invalid_argument("questions required");
-    return gufo::json::parse(R"({"answers":{}})");
+    auto decision = gufo::json::Value::object();
+    decision["answers"] = gufo::json::Value::object();
+    return decision;
   }
   bool Multimodal() const override { return true; }
   std::string ModelId() const override { return "fixed-decision"; }

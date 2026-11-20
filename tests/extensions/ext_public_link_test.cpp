@@ -9,6 +9,7 @@
 #include <gufo/ext/gguf_identity.hpp>
 #include <gufo/ext/gguf_reader.hpp>
 #include <gufo/ext/image.hpp>
+#include <gufo/ext/json.hpp>
 #include <gufo/ext/sampling.hpp>
 #include <gufo/ext/sha256.hpp>
 #include <iostream>
@@ -27,6 +28,9 @@
 // Linking the implementation must not publish the private headers behind it.
 #if __has_include("src/core/sampling_logit_row.hpp")
 #error "a private header is reachable through the public link targets"
+#endif
+#if __has_include(<gufo/json.h>)
+#error "the Rust C interface is reachable through the public link targets"
 #endif
 
 namespace {
@@ -63,6 +67,7 @@ int main() {
             row == source,
         "dequantization");
 
+  Check(json::parse(R"({"a":[1]})")["a"].size() == 1, "json parsing");
   Check(sampling::JsonConstraint::Object() != nullptr, "json constraint");
   sampling::SamplerState sampler;
   sampling::SamplerState copy = sampler;
