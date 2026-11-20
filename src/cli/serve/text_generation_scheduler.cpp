@@ -1642,6 +1642,7 @@ struct TextGenerationScheduler::Impl {
       const auto start = Clock::now();
       const std::size_t rounds_before = yield_rounds;
       const double yield_ms_before = yield_ms;
+      const std::size_t depth = request->runner_request.prefill_position();
       const auto step =
           request->runner_request.Prefill(budget, work.layer_groups, yield);
       request->result.prefill_yield_rounds += yield_rounds - rounds_before;
@@ -1658,6 +1659,9 @@ struct TextGenerationScheduler::Impl {
       request->result.prefill_tokens += step.consumed_tokens;
       if (!decoder_runnable && !peer_waiting)
         publication_prefill.Observe(step.consumed_tokens, step_ms);
+      // A pass costs the same beside decoders, whose rounds between its
+      // groups are not counted in it.
+      publication_prefill.ObserveContext(step.consumed_tokens, depth, step_ms);
       request->live_prefill_tokens.store(request->result.prefill_tokens,
                                          std::memory_order_relaxed);
       detail::TotalPromptTokens().fetch_add(step.consumed_tokens,
@@ -2557,7 +2561,8 @@ struct TextGenerationScheduler::Impl {
       for (const auto& request : prefilling)
         prefilling_view.push_back(
             {.remaining_tokens = request->runner_request.prompt_tokens() -
-                                 request->runner_request.prefill_position()});
+                                 request->runner_request.prefill_position(),
+             .position = request->runner_request.prefill_position()});
       decoding_view.clear();
       for (const auto& request : decoding)
         decoding_view.push_back({.due = request->decode_due,

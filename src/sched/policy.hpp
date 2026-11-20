@@ -22,7 +22,8 @@ inline constexpr std::size_t kPrefillUnitTokens = 512;
 
 /// Longest a decoder should wait for one layer group of a prompt pass. The
 /// group count follows from the measured pass time, up to the profile's
-/// maximum and one group per unit of the pass's tokens.
+/// maximum and one group per unit of the pass's tokens. A pass within a unit
+/// is split only by the time passes like it spent on a context as deep.
 inline constexpr std::chrono::milliseconds kTargetDecoderWait{250};
 
 struct PolicyOptions {
@@ -37,6 +38,8 @@ struct PolicyOptions {
 
 struct PrefillingRequest {
   std::size_t remaining_tokens{0};
+  /// Tokens already in its context: the depth its next pass attends over.
+  std::size_t position{0};
 };
 
 struct DecodingRequest {
@@ -114,7 +117,7 @@ public:
 
 private:
   [[nodiscard]] std::size_t LayerGroups(const PrefillRate& rate,
-                                        std::size_t remaining_tokens) const;
+                                        const PrefillingRequest& request) const;
   [[nodiscard]] bool Short(const PrefillingRequest& request) const noexcept {
     return request.remaining_tokens <= options_.unit_tokens;
   }
