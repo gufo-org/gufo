@@ -560,6 +560,7 @@ struct ComponentTextCache::Impl {
           // No pool exists, so a payload allocation must fail, not crash.
           resources->prepare_prefill = nullptr;
           resources->prepare_capture = nullptr;
+          resources->await_capture = nullptr;
           resources->can_capture = nullptr;
           resources->allocate =
               [](const cache::PayloadRequest&) -> ComponentCaptureBuffer {
@@ -1856,7 +1857,15 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
                         [&, estimate = RestoreEstimate(
                                 PayloadBytes(candidate.durable->Manifest()),
                                 true)](const auto& copies) {
-                          run_copies(estimate, copies);
+                          // Beside decoders the restore can outrun the
+                          // backing its capture needs: wait for it here,
+                          // not in the capture on the serving thread.
+                          run_copies(estimate, [&] {
+                            copies();
+                            if (cache::CopyingBesideDecode() &&
+                                impl_->resources->await_capture)
+                              impl_->resources->await_capture();
+                          });
                         })
                   : cache::RestoreCopyRunner{});
           if (restored) {

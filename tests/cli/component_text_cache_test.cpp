@@ -1418,12 +1418,14 @@ void DiskRestorePreparesCaptureBacking() {
   class CaptureRunner final : public Runner {
   public:
     mutable std::vector<std::size_t> prepared;
+    mutable std::size_t awaited{0};
     std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
         cache::ResourceLedger& ledger, std::size_t ram) const override {
       auto resources = Runner::CreateComponentCacheResources(ledger, ram);
       resources->prepare_capture = [this](std::size_t bytes) {
         prepared.push_back(bytes);
       };
+      resources->await_capture = [this] { ++awaited; };
       return resources;
     }
   };
@@ -1469,6 +1471,29 @@ void DiskRestorePreparesCaptureBacking() {
   assert(runner->prepared.size() == 3 &&
          runner->prepared.back() == again.cache_restore_bytes());
   again.Invalidate();
+  // Those restores stopped the serving thread, where the capture can wait
+  // for its backing as well. One whose copies run beside decoders can outrun
+  // the backing: it waits there, after its copies, before the serving thread
+  // captures it.
+  assert(runner->awaited == 0);
+  bool copied = false;
+  auto beside = restarted.Acquire(
+      other, {}, {}, {}, true, 0, true, true, nullptr,
+      [&](std::chrono::microseconds, const std::function<void()>& copies) {
+        const cache::BesideDecodeScope scope;
+        copies();
+        assert(runner->awaited == 1);
+        copied = true;
+      });
+  assert(beside.cache_disk_hit() && copied && runner->awaited == 1);
+  // A runner that keeps the copies on the serving thread does not wait.
+  beside.Invalidate();
+  auto inline_copies =
+      restarted.Acquire(other, {}, {}, {}, true, 0, true, true, nullptr,
+                        [&](std::chrono::microseconds,
+                            const std::function<void()>& copies) { copies(); });
+  assert(inline_copies.cache_disk_hit() && runner->awaited == 1);
+  inline_copies.Invalidate();
 }
 
 void PartialFrontierDoesNotServeAnEqualPrompt() {

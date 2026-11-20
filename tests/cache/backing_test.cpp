@@ -615,6 +615,32 @@ void OnDemandBacking() {
   raised.GrowAhead(3 * block_bytes);
   raised.WaitForGrowth();
   assert(raised.BlockCount() == 9);
+  // A restore's worker waits for the reserve without a lock: while it does,
+  // and the thread still grows, the serving thread asks for more unblocked.
+  std::atomic<bool> waited_asked{}, waited_open{}, waited{};
+  cache::ResourceLedger waited_ledger(Limits(many_capacity));
+  hip::CommittedBackingPool waiting(waited_ledger,
+                                    {many_capacity, block_bytes, many_headroom,
+                                     3 * block_bytes, [&](std::size_t) {
+                                       waited_asked.store(true);
+                                       while (!waited_open.load())
+                                         std::this_thread::yield();
+                                       return true;
+                                     }});
+  waiting.WaitWhileGrowingAhead();
+  waiting.GrowAhead(3 * block_bytes);
+  while (!waited_asked.load())
+    std::this_thread::yield();
+  std::thread waiter([&] {
+    waiting.WaitWhileGrowingAhead();
+    waited.store(true);
+  });
+  waiting.GrowAhead(6 * block_bytes);
+  assert(!waited.load() && waiting.BlockCount() == 0);
+  waited_open.store(true);
+  waiter.join();
+  assert(waited.load() && waiting.BlockCount() == 6);
+  waiting.WaitWhileGrowingAhead();
 }
 void HeapReserveSegments() {
   // #781: 2.9 GiB of heap free, where registered pages are not charged.
