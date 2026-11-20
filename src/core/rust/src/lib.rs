@@ -11,5 +11,6 @@ extern crate gufo_base64;
 extern crate gufo_gguf;
 extern crate gufo_http;
 extern crate gufo_json;
+extern crate gufo_json_schema;
 extern crate gufo_png_decode;
 extern crate gufo_websocket;
