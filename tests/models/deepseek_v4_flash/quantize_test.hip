@@ -84,6 +84,41 @@ void test_quantize(ggml_type type, int rows) {
   check(hipFree(device_output));
   check(hipFree(device_input));
 }
+
+// One thread per byte pair. Each byte lane holds a different pair, so a carry
+// or borrow leaking into a neighbouring lane also shows up.
+__global__ void byte_intrinsics(unsigned* failures) {
+  const unsigned pair = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned x = pair >> 8, y = pair & 255u;
+  const unsigned a = x | y << 8 | (x ^ 0x80u) << 16 | (255u - y) << 24;
+  const unsigned b = y | x << 8 | (y ^ 0x7fu) << 16 | (255u - x) << 24;
+  const unsigned ne = __vcmpne4(a, b);
+  const unsigned sub = unsigned(__vsub4(int(a), int(b)));
+  for (unsigned shift = 0; shift < 32; shift += 8) {
+    const unsigned ab = a >> shift & 255u, bb = b >> shift & 255u;
+    if ((ne >> shift & 255u) != (ab != bb ? 255u : 0u) ||
+        (sub >> shift & 255u) != ((ab - bb) & 255u))
+      atomicAdd(failures, 1u);
+  }
+}
+
+// The IQ2/IQ3 loaders apply signs with __vsub4(grid ^ mask, mask) on bytes
+// built by __vcmpne4; both must match CUDA's per-byte definitions.
+void test_byte_intrinsics() {
+  unsigned* device_failures = nullptr;
+  check(hipMalloc(&device_failures, sizeof(unsigned)));
+  check(hipMemset(device_failures, 0, sizeof(unsigned)));
+  byte_intrinsics<<<256, 256>>>(device_failures);
+  check(hipGetLastError());
+  unsigned failures = 0;
+  check(hipMemcpy(&failures, device_failures, sizeof(unsigned),
+                  hipMemcpyDeviceToHost));
+  check(hipFree(device_failures));
+  if (failures != 0) {
+    std::fprintf(stderr, "__vcmpne4/__vsub4: %u byte mismatches\n", failures);
+    std::exit(2);
+  }
+}
 }  // namespace
 
 int main() {
@@ -94,4 +129,6 @@ int main() {
     for (int rows : {1, 4, 32, 129})
       test_quantize(type, rows);
   std::puts("MMQ quantization rounding and zero/tail rows pass");
+  test_byte_intrinsics();
+  std::puts("__vcmpne4/__vsub4: all byte pairs exact");
 }

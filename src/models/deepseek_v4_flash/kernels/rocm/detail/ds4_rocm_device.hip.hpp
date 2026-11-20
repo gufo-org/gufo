@@ -7,15 +7,13 @@
 #define ROCM_QK_K 256
 
 static __device__ __forceinline__ int32_t __vcmpne4(uint32_t a, uint32_t b) {
-  // For each byte: 0xFF if a != b, 0x00 if a == b
-  uint32_t diff = a ^ b;
-  // Spread any set bit in each byte to fill the whole byte
-  diff |= (diff >> 1);
-  diff |= (diff >> 2);
-  diff |= (diff >> 4);
-  diff &= 0x01010101u;
-  diff *= 0xFFu;  // 0x01 -> 0xFF per byte
-  return (int32_t)diff;
+  // For each byte: 0xFF if a != b, 0x00 if a == b. Adding 0x7F to a byte's
+  // low seven bits carries into its high bit exactly when one of them is set,
+  // and cannot carry into the next byte.
+  const uint32_t diff = a ^ b;
+  const uint32_t low = ((diff & 0x7F7F7F7Fu) + 0x7F7F7F7Fu) & 0x80808080u;
+  const uint32_t high = diff & 0x80808080u;
+  return (int32_t)(((low | high) >> 7) * 0xFFu);
 }
 
 static __device__ __forceinline__ int32_t __vsub4(int32_t a, int32_t b) {
