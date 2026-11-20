@@ -615,10 +615,15 @@ struct TextGenerationScheduler::Impl {
     }
     incremental_prefill_supported =
         runner_pool->runner().Descriptor().capabilities.incremental_prefill;
-    final_token_advance_required =
-        runner_pool->runner()
-            .Descriptor()
-            .capabilities.final_token_advance_required;
+    // Leaving the final selected token unexecuted saves a decode step only
+    // when no state outlives the request. A retained frontier covers every
+    // generated token, as after EOS or a multi-token step, so the next turn
+    // continues the same history whether or not this one ran speculatively.
+    skip_final_advance =
+        !runner_pool->runner()
+             .Descriptor()
+             .capabilities.final_token_advance_required &&
+        !runner_pool->runner().Descriptor().capabilities.prefix_reuse;
     incremental_text_is_exact = runner_pool->runner()
                                     .Descriptor()
                                     .capabilities.incremental_text_is_exact;
@@ -1662,7 +1667,7 @@ struct TextGenerationScheduler::Impl {
       if (!request->runner_request.PreparePromptSnapshot())
         return std::nullopt;
       request->advance_pending = false;
-      if (!final_token_advance_required &&
+      if (skip_final_advance &&
           request->result.tokens.size() >= request->token_limit) {
         CompleteSuccess(request, TextGenerationBackend::FinishReason::kLength);
         return std::nullopt;
@@ -2527,7 +2532,7 @@ struct TextGenerationScheduler::Impl {
       std::make_shared<PromptBudget>();
   std::shared_ptr<SessionTable> sessions;
   bool incremental_prefill_supported{false};
-  bool final_token_advance_required{true};
+  bool skip_final_advance{false};
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
   bool batched_multi_token_decode{false};
