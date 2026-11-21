@@ -37,9 +37,10 @@ experts matter and how much memory to leave stay with the extension.
 ## How it works
 
 At load, the extension describes where each expert's bytes are (`Layout`) and
-how the cache should behave (`Policy`), creates the store, and can prime the
-cache (`Seed`). Once serving has created the sessions and the prompt cache,
-it tells the store how much memory it may keep (`Fit`).
+how the cache should behave (`Policy`, which also ranks the experts to cache
+first), and creates the store; nothing is cached yet. Once serving has
+created the sessions and the prompt cache, it tells the store how much memory
+it may keep (`Fit`), and the store fills that once, from the ranking.
 
 For each MoE layer, after the router has chosen the experts:
 
@@ -149,9 +150,9 @@ sets only the limit, the trace path and the log tag.
 
 | Field | Default | Effect |
 | --- | --- | --- |
-| `cache_limit_bytes` | 0 | Hard cap on the cache; 0 leaves the size to memory and serving's grant |
-| `reserve_bytes` | 4 GiB | Before the grant, free memory the cache leaves for later allocations |
-| `live_floor_bytes` | 1 GiB | After the grant, the cache grows only while this much stays free |
+| `cache_limit_bytes` | 0 | Hard cap on the cache; 0 leaves the size to serving's grant |
+| `live_floor_bytes` | 1 GiB | The cache grows only while this much stays free |
+| `ranking`, `ranking_source` | empty | Experts `Fit` caches first, most wanted first, and the ranking's name in the log |
 | `use_half_life` | 2,048 tokens | Decay of an expert's use count, in tokens of its layer's clock |
 | `use_cap` | 4 | Most uses one `Prepare` counts per expert |
 | `max_class` | 7 | Highest frequency class: protection of at most 2^7 |
@@ -167,16 +168,23 @@ sets only the limit, the trace path and the log tag.
 decode's real working set replaces them. A cold batch with more misses than
 `demand_stage_rows` reads the experts it admits straight into their slots.
 
-### `Seed`: start warm
+### The ranking: start warm
 
-An empty cache makes the first requests pay for every expert. `Seed` reads
-experts at startup in the order given (`Ranked`: layer, expert, weight), then
-the rest interleaved across layers, as far as memory allows. The ranking is
-model knowledge, so the extension supplies it: DeepSeek ships one measured on
-real traffic. Gemma passes none and seeds every expert when the cache holds
-them all, which took its full-cache decode from 88 to 104 tok/s (resident:
-106). Before the grant, the seed fills 15/16 of the available memory; `Fit`
-seeds the room left with the same ranking.
+An empty cache makes the first requests pay for every expert. `Fit` reads
+experts in the order of `Policy::ranking` (`Ranked`: layer, expert, weight),
+then the rest interleaved across layers, as far as the grant and free memory
+allow. The ranking is model knowledge, so the extension supplies it:
+DeepSeek ships one measured on real traffic. Gemma passes none and starts
+with every expert when the cache holds them all, which took its full-cache
+decode from 88 to 104 tok/s (resident: 106).
+
+The cache is filled once, at its final size. An earlier version also seeded
+at load, before the grant, into a guessed share of memory: it read part of
+the cache twice, and on DeepSeek it took the device memory the prompt cache's
+backing needed next, which then committed 711 of 948 MB. Before `Fit`
+nothing is cached and misses read into the stage; a host without serving
+(DeepSeek's `gufo prompt` and `bench`) calls `Fit` itself once its session
+exists.
 
 ### `Fit` and the claim: serving owns the budget
 
@@ -199,7 +207,7 @@ sessions), then grants the store what it holds plus `HostAvailableBytes()`,
 less the headroom and the prompt-cache budget beyond the backing already
 committed, calls `Store::Fit(grant)` and logs both budgets
 (`expert_cache_grant`). The store allocates its prefetch stage from the
-grant, and shrinks or seeds to the rest.
+grant and fills the rest from its ranking.
 
 - **A fixed share, not a ratio.** What the prompt cache needs follows the
   workload (sessions, context, prefix reuse), not the machine's size. A ratio
@@ -222,10 +230,10 @@ grant, and shrinks or seeds to the rest.
   in 200-205 s instead of 35 s, with 22 replies different. Keeping the reserve free would have cost the expert cache 4 GiB.
   So while experts stream, the floor replaces the reserve, and below it the
   expert cache gives memory back first:
-  - `Store::Release(bytes)` evicts the coldest experts, frees whole chunks
-    and holds the cache there; the prompt cache gives memory only if that is
-    not enough. Evicting 2.3 GB of the least-used experts out of 100 GiB costs
-    less than dropping cached prompts.
+  - `Store::Release(bytes)` frees the newest whole chunks, drops the experts
+    in them without reading them, and holds the cache there; the prompt cache
+    gives memory only if that is not enough. Losing 3 GB of experts out of
+    100 GiB costs less than dropping cached prompts.
   - `Store::Restore()` lets the cache regrow to its grant once what it gave
     back is free again (the floor, `ReleasedBytes()` and 256 MiB available);
     misses refill it.
@@ -234,9 +242,35 @@ grant, and shrinks or seeds to the rest.
   On DeepSeek, with another process taking memory at idle down to 0.67 GiB,
   the next idle tick released 2.7 GB of experts in 108 ms and left the prompt
   cache alone; once the process exited, the cache was restored and the same
-  request gave the same reply. Down to 0.21 GiB available, the release freed
-  2.4 GB but took 67 s; where that time went was not measured. `Release`
-  runs on the idle scheduler, so requests wait for it.
+  request gave the same reply. Down to 0.21 GiB available, a first version
+  took 67 s: it moved the experts it kept out of the freed chunks, and the
+  kernel had swapped part of the cache out, so the moves read it back.
+  Dropping them instead took 3.3 s with swap; keeping the cache in device
+  pages (below), 0.8-1.3 s for 3.0-3.1 GB at 0.25-0.29 GiB available.
+  `Release` runs on the idle scheduler, so requests wait for it.
+
+### Residence: device pages
+
+On Strix Halo the cache is host RAM either way; what matters is whether the
+kernel may swap it. Managed memory (`hipMallocManaged`) is pageable, and
+under pressure the kernel swapped cache pages out, which made every later
+hit on them a page fault and the release above slow. The store therefore
+maps the cache from 2 MiB device pages (`hipMemCreate`) where the device
+supports virtual memory management and its heap covers host memory
+(`mem::HeapCoversHost`), and falls back to managed memory elsewhere. Device
+pages are not swapped: in the pressure run above, none of the server's
+95-135 MiB in swap was cache. They are also what lending through
+`mem::PageLender` needs (Decisions).
+
+- **Packed slots.** Each size class's slots lie back to back in one
+  reserved address range, mapped a page at a time as the class grows, so a
+  slot may cross a page and a chunk leaves no part page unused.
+- **Two limits.** The cache grows only while both the host and the device
+  heap have room above the floor.
+- **Cost.** The kernel keeps about 330 MiB for the 51,000 pages of a
+  101 GiB cache, against about 200 MiB of page tables for managed memory.
+  At an equal cache size, DeepSeek wrote the same expert trace on both and
+  decoded within 0.3%.
 
 ### Prefetch: `Predict`, `Prefetch`, `Expect`, `PredictFlush`
 

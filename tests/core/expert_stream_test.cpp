@@ -180,6 +180,18 @@ struct Runner {
   }
 };
 
+// A grant large enough that cache_limit_bytes alone bounds the cache.
+constexpr uint64_t kAmpleGrant = uint64_t{1} << 40;
+
+// Fit fills the cache; the checks of cold misses, admission and eviction
+// start from an empty one that misses refill.
+bool FitEmpty(Store& store) {
+  if (!store.Fit(kAmpleGrant))
+    return false;
+  (void)store.Release(UINT64_MAX);
+  return store.Restore() > 0 && store.GetStats().cache_bytes == 0;
+}
+
 void FusedLayout(int32_t* routes) {
   // Five layers of 100 experts, top 8, gate_up and down pieces; odd layers
   // are smaller, as a build mixing block types would be.
@@ -199,6 +211,7 @@ void FusedLayout(int32_t* routes) {
   Check(store != nullptr, "fused create");
   if (!store)
     return;
+  Check(FitEmpty(*store), "fused fit, then empty");
   Runner run{m, *store, routes};
   const std::vector<int32_t> first{0, 1, 2, 3, 4, 5, 6, 7};
   Check(run.Run(0, first), "fused cold bytes");
@@ -267,7 +280,7 @@ void FusedLayout(int32_t* routes) {
 
 void OnePieceLayout(int32_t* routes) {
   // Three layers of 16 experts, top 2, one piece each (a format that stores
-  // an expert's tensors back to back); seeded from a ranking.
+  // an expert's tensors back to back), with a ranking.
   Model m(16, 2, {{3000}, {2000}, {3000}});
   Check(m.ok, "one-piece fixture");
   if (!m.ok)
@@ -275,31 +288,38 @@ void OnePieceLayout(int32_t* routes) {
   Policy policy;
   policy.cache_limit_bytes = 64 * m.Slot(0);
   policy.log_tag = "expert_stream_test";
+  policy.ranking_source = "test ranking";
+  policy.ranking = {{3, 0, 1}};
+  Check(Store::Create(m.layout, policy) == nullptr,
+        "one-piece create rejects a ranked layer");
+  policy.ranking = {{0, 1, 1}, {0, 1, 2}};
+  Check(Store::Create(m.layout, policy) == nullptr,
+        "one-piece create rejects a duplicate");
+  policy.ranking = {{1, 5, 10}, {2, 9, 8}};
   auto store = Store::Create(m.layout, policy);
   Check(store != nullptr, "one-piece create");
   if (!store)
     return;
-  Check(store->Seed({{1, 5, 10}, {2, 9, 8}}, "test ranking"), "one-piece seed");
-  Check(!store->Seed({{3, 0, 1}}, "bad layer"),
-        "one-piece seed rejects a layer");
-  Check(!store->Seed({{0, 1, 1}, {0, 1, 2}}, "duplicate"),
-        "one-piece seed rejects duplicates");
   Runner run{m, *store, routes};
-  const auto seeded = store->GetStats();
-  Check(seeded.uses == 0 && seeded.bytes_read == 0,
-        "one-piece seed stays out of the stats");
-  Check(run.Run(1, {5, 5}) && store->GetStats().hits == 2,
-        "one-piece seeded hit");
-  Check(run.Run(2, {9, 3}), "one-piece bytes");
-  // A grant takes the prefetch stage first, bounds the cache, and seeds the
-  // room left with the last ranking.
-  const uint64_t stage = uint64_t{3000} * policy.prefetch_stage_rows;
+  // Until Fit nothing is cached: misses read into the stage.
+  Check(run.Run(1, {5, 5}) && store->GetStats().hits == 0 &&
+            store->GetStats().cache_bytes == 0,
+        "one-piece nothing cached before fit");
   Check(store->Release(1) == 0, "one-piece release needs a grant");
+  // A grant takes the prefetch stage first, bounds the cache, and fills the
+  // room left from the ranking, outside the statistics.
+  const uint64_t stage = uint64_t{3000} * policy.prefetch_stage_rows;
+  const auto before = store->GetStats();
   Check(store->Fit(stage + 4 * m.Slot(0)), "one-piece fit");
-  Check(store->GetStats().cache_bytes <= 4 * m.Slot(0), "one-piece fit bound");
+  Check(store->GetStats().cache_bytes > 0 &&
+            store->GetStats().cache_bytes <= 4 * m.Slot(0),
+        "one-piece fit bound");
   const auto fitted = store->GetStats();
+  Check(fitted.uses == before.uses && fitted.bytes_read == before.bytes_read,
+        "one-piece fit reads stay out of the stats");
   Check(run.Run(1, {5, 5}) && store->GetStats().hits == fitted.hits + 2,
-        "one-piece fit reseeds the ranking");
+        "one-piece fit caches the ranking");
+  Check(run.Run(2, {9, 3}), "one-piece bytes");
   Check(store->GetStats().cache_bytes <= 4 * m.Slot(0),
         "one-piece fit bounds growth");
   // Release frees whole chunks (here the only one) and holds the cache
@@ -339,6 +359,7 @@ void CallerStream(int32_t* routes) {
   Check(store != nullptr, "caller-stream create");
   if (!store)
     return;
+  Check(FitEmpty(*store), "caller-stream fit, then empty");
   Runner run{m, *store, routes};
   Check(
       hipStreamCreateWithFlags(&run.stream, hipStreamNonBlocking) == hipSuccess,
@@ -357,7 +378,7 @@ void CallerStream(int32_t* routes) {
   // The prefetch stage: each piece's widest layer, plus its margin.
   const uint64_t stage = uint64_t{1200 + 700} * policy.prefetch_stage_rows +
                          2 * uint64_t{m.layout.read_margin_bytes};
-  Check(store->Fit(stage + 2 * m.Slot(0)), "caller-stream fit");
+  Check(store->Fit(stage + 2 * m.Slot(0)), "caller-stream refit");
   Check(store->GetStats().cache_bytes <= 2 * m.Slot(0),
         "caller-stream fit counts the margin");
   Check(run.Run(1, {3, 4}), "caller-stream after fit");

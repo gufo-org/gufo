@@ -773,15 +773,11 @@ struct Store::Impl {
   std::array<uint8_t*, kReadWorkers> read_buffers{};
   std::unique_ptr<ReadPool> readers;
   uint64_t cache_limit = 0;
-  uint64_t requested_limit = 0;  // Policy::cache_limit_bytes; 0: from memory
-  uint64_t reserve = 0;  // free memory the cache never grows into before Fit
+  uint64_t requested_limit = 0;  // Policy::cache_limit_bytes; 0: the grant
   bool granted = false;  // Fit ran: the host sized the cache
   uint64_t granted_limit = 0;  // the cache's limit from Fit; Release lowers
                                // cache_limit below it until Restore
   uint64_t released = 0;       // freed by Release since Fit or Restore
-  /* The last ranking given to Seed, which Fit seeds again. */
-  std::vector<Ranked> seed_ranking;
-  std::string seed_source;
   uint64_t tick = 0;
   uint64_t logged_tokens = 0;
   /* Policy::trace_path: binary routing trace (Store::Tracing), opened at
@@ -839,10 +835,7 @@ struct Store::Impl {
   }
 
   /* Memory the cache may take now: host memory, and with device pages the
-   * device heap too, which they are charged to. Before Fit the heap keeps
-   * Gufo's dispatch reserve on top of the store's reserve, so the prompt
-   * cache prepares its backing in full; the grant already leaves room for
-   * it, and the cache then grows to its floor in both. */
+   * device heap too, which they are charged to. */
   uint64_t available_memory() const {
     const uint64_t host = AvailableMemory();
     if (!device_pages)
@@ -852,9 +845,7 @@ struct Store::Impl {
       (void)hipGetLastError();
       return 0;
     }
-    const uint64_t heap_reserve = granted ? 0 : gufo::hip::kDispatchReserve;
-    return std::min<uint64_t>(
-        host, heap_free > heap_reserve ? heap_free - heap_reserve : 0);
+    return std::min<uint64_t>(host, heap_free);
   }
 
   /* Frees the newest chunk. A device-page chunk returns its pages, and its
@@ -874,9 +865,7 @@ struct Store::Impl {
   }
 
   // Free memory the cache never grows into at this moment.
-  uint64_t live_floor() const {
-    return granted ? policy.live_floor_bytes : reserve;
-  }
+  uint64_t live_floor() const { return policy.live_floor_bytes; }
 
   bool grow(uint32_t size_class) {
     const uint64_t free_bytes = available_memory();
@@ -1163,6 +1152,18 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
                                        "invalid streamed expert layout");
     return nullptr;
   }
+  // The ranking names each layer's expert at most once.
+  std::vector<uint8_t> ranked(uint64_t{n_layer} * layout.experts, 0);
+  for (const Ranked& item : policy.ranking) {
+    if (item.layer >= n_layer || item.expert >= layout.experts ||
+        ranked[uint64_t{item.layer} * layout.experts + item.expert]++) {
+      gufo::server::Logger::LogFormatted(
+          gufo::server::LogLevel::kError, tag,
+          "invalid expert ranking (%s): layer %u, expert %u",
+          policy.ranking_source.c_str(), item.layer, item.expert);
+      return nullptr;
+    }
+  }
   auto owner = std::unique_ptr<Impl>(new (std::nothrow) Impl);
   Impl* store = owner.get();
   if (!store)
@@ -1173,7 +1174,6 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
   store->top_k = layout.top_k;
   store->n_pieces = layout.pieces;
   store->split_rows = layout.max_batch_tokens * layout.top_k;
-  store->reserve = policy.reserve_bytes;
   store->source.resize(n_layer);
   store->tail.resize(n_layer);
   store->clock.assign(n_layer, 0);
@@ -1299,12 +1299,9 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
   } catch (const std::exception&) {
     return nullptr;
   }
-  const uint64_t available = store->available_memory();
-  store->cache_limit =
-      available > store->reserve ? available - store->reserve : 0;
+  // Nothing is cached until Fit sizes the cache: misses read into the stage.
+  store->cache_limit = 0;
   store->requested_limit = policy.cache_limit_bytes;
-  if (policy.cache_limit_bytes)
-    store->cache_limit = std::min(store->cache_limit, policy.cache_limit_bytes);
   if (!policy.trace_path.empty()) {
     store->trace = std::fopen(policy.trace_path.c_str(), "wb");
     if (!store->trace)
@@ -1469,25 +1466,21 @@ bool prefetch(Store::Impl* store, uint32_t layer, const int32_t* experts,
 
 }  // namespace
 
-bool Store::Seed(std::vector<Ranked> ranked, const char* source) {
-  Impl* store = impl_.get();
+/* Fills the room the grant leaves with Policy::ranking first, then every
+ * expert it leaves out, interleaved across layers, as far as the cache's
+ * limit and free memory reach. Startup work: it does not count as inference
+ * in the statistics. */
+static bool seed_cache(Store::Impl* store) {
   const uint32_t n_layer = store->n_layer;
   const uint32_t top_k = store->top_k;
-  /* Experts the ranking leaves out follow it, interleaved across layers, so
-   * a cache larger than the ranked set does not start part empty. */
-  const size_t ranked_count = ranked.size();
+  const char* source = store->policy.ranking_source.empty()
+                           ? "no ranking"
+                           : store->policy.ranking_source.c_str();
+  const size_t ranked_count = store->policy.ranking.size();
+  std::vector<Ranked> ranked = store->policy.ranking;
   std::vector<uint8_t> ranked_set(store->table_entries, 0);
-  for (const Ranked& item : ranked) {
-    if (item.layer >= n_layer || item.expert >= store->n_expert)
-      return false;
-    uint8_t& seen =
-        ranked_set[uint64_t{item.layer} * store->n_expert + item.expert];
-    if (seen)
-      return false;
-    seen = 1;
-  }
-  store->seed_ranking = ranked;
-  store->seed_source = source ? source : "";
+  for (const Ranked& item : ranked)
+    ranked_set[uint64_t{item.layer} * store->n_expert + item.expert] = 1;
   for (uint32_t e = 0; e < store->n_expert; ++e)
     for (uint32_t l = 0; l < n_layer; ++l)
       if (!ranked_set[uint64_t{l} * store->n_expert + e])
@@ -1495,15 +1488,9 @@ bool Store::Seed(std::vector<Ranked> ranked, const char* source) {
   const uint64_t available = store->available_memory();
   const uint64_t floor = store->live_floor();
   const uint64_t free_budget = available > floor ? available - floor : 0;
-  // Before the sessions exist, leave capacity for their allocations and for
-  // experts learned from the actual request; once they exist, growing the
-  // last sixteenth during the first prompt slows it, so seed everything.
-  // The ranking prefix to hold: what is cached plus the room left (a second
-  // seed after the sessions keeps the experts already resident).
-  uint64_t budget =
+  // The ranking prefix to hold: what is cached plus the room left.
+  const uint64_t budget =
       std::min(store->cache_limit, store->stats.cache_bytes + free_budget);
-  if (!store->granted)
-    budget = budget / 16 * 15;
   size_t target = 0;
   for (uint64_t used = 0; target < ranked.size(); ++target) {
     used += store->class_bytes[store->layer_class[ranked[target].layer]];
@@ -1671,17 +1658,20 @@ std::vector<ReadTask> build_read_tasks(const Store::Impl* store, uint32_t layer,
 }
 
 /* The compact prefetch stage is bought when prefetch first starts, or by
- * Fit before a server seeds the cache. `allocated`, when given, receives the
- * bytes this call allocated. */
-bool ensure_stage_pairs(Store::Impl* store, uint64_t* allocated = nullptr) {
-  if (allocated)
-    *allocated = 0;
-  if (store->stage_pairs)
-    return true;
+ * Fit. `stage_bytes`, when given, receives its size, bought now or before. */
+bool ensure_stage_pairs(Store::Impl* store, uint64_t* stage_bytes = nullptr) {
   std::array<uint64_t, kMaxPieces> bytes{};
   for (uint32_t p = 0; p < store->n_pieces; ++p)
     for (uint32_t layer = 0; layer < store->n_layer; ++layer)
       bytes[p] = std::max(bytes[p], store->source[layer][p].bytes);
+  if (stage_bytes) {
+    *stage_bytes = 0;
+    for (uint32_t p = 0; p < store->n_pieces; ++p)
+      *stage_bytes +=
+          bytes[p] * store->policy.prefetch_stage_rows + store->read_margin;
+  }
+  if (store->stage_pairs)
+    return true;
   store->stage_stride = bytes;
   for (uint32_t p = 0; p < store->n_pieces; ++p)
     if (hipMalloc(&store->stage[1][p],
@@ -1695,10 +1685,6 @@ bool ensure_stage_pairs(Store::Impl* store, uint64_t* allocated = nullptr) {
       return false;
     }
   store->stage_pairs = true;
-  if (allocated)
-    for (uint32_t p = 0; p < store->n_pieces; ++p)
-      *allocated +=
-          bytes[p] * store->policy.prefetch_stage_rows + store->read_margin;
   return true;
 }
 
@@ -2445,11 +2431,7 @@ bool Store::Fit(uint64_t grant_bytes) {
   store->granted_limit = limit;
   store->released = 0;
   const bool shrunk = store->shrink_to(limit, /*move_survivors=*/true);
-  // Seed takes the ranking by value and records it again.
-  const std::string source = store->seed_source;
-  const bool seeded =
-      store->seed_ranking.empty() || Seed(store->seed_ranking, source.c_str());
-  return staged && shrunk && seeded;
+  return staged && shrunk && seed_cache(store);
 }
 
 }  // namespace gufo::expert_stream

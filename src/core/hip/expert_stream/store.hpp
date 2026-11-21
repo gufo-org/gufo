@@ -58,14 +58,25 @@ struct Layout {
 
 /* How the cache sizes itself and evicts. The defaults are the values
  * measured on DeepSeek V4.1 Flash (the deepseek41 extension). */
+/* An expert to cache first, most wanted first; count weighs its starting
+ * uses. */
+struct Ranked {
+  uint32_t layer;
+  uint32_t expert;
+  uint64_t count;
+};
+
 struct Policy {
-  /* Bounds the cache when nonzero; zero sizes it from available memory. */
+  /* Bounds the cache when nonzero, below the grant Fit receives. */
   uint64_t cache_limit_bytes = 0;
-  /* Free memory the cache leaves for allocations made after it, until the
-   * host grants it a size (Fit). */
-  uint64_t reserve_bytes = 4ull << 30;
-  /* Free memory below which the cache stops growing once Fit ran. */
+  /* Free memory below which the cache stops growing. */
   uint64_t live_floor_bytes = 1ull << 30;
+  /* The experts Fit caches first, most wanted first; every expert it leaves
+   * out follows, interleaved across layers, as far as the grant and free
+   * memory reach. Each (layer, expert) at most once; empty, every expert is
+   * interleaved. `ranking_source` names it in the log. */
+  std::vector<Ranked> ranking;
+  std::string ranking_source;
   /* Uses decay with this half-life, in tokens of the layer's clock; a
    * Prepare counts at most use_cap uses per expert and advances the clock by
    * at most clock_rows tokens. The victim is the slot with the largest
@@ -120,13 +131,6 @@ struct Overlap {
   const void* const* table = nullptr;  // [pieces] device tables
 };
 
-/* An expert to seed, most wanted first; count weighs its starting uses. */
-struct Ranked {
-  uint32_t layer;
-  uint32_t expert;
-  uint64_t count;
-};
-
 class Store {
 public:
   struct Impl;
@@ -141,21 +145,24 @@ public:
 
   /* Splits every piece read between its file and a tails file holding the
    * end of each piece, normally on a second drive, so both read at once. Call
-   * before seeding. The file must match the layout's pieces byte for byte;
+   * before Fit. The file must match the layout's pieces byte for byte;
    * false (with a message) leaves reads unchanged. On btrfs, create it in a
    * NOCOW (`chattr +C`) directory: direct reads of copy-on-write files are
    * not direct. */
   bool AttachTails(const char* path);
 
-  /* Sizes the cache to the host's grant: the cache and its prefetch stage
-   * take at most grant_bytes. Allocates the stage (bought on the first
-   * prompt otherwise), frees the newest chunks, keeping the experts eviction
-   * ranks highest, when the cache is over the grant, and seeds the room left
-   * with the last ranking given to Seed. From then on the cache grows only
-   * up to the grant, while more than live_floor_bytes stay available. Serving
-   * calls it once the sessions and the prompt cache's backing exist (see
-   * TextRunnerExpertCacheClaim); a nonzero cache_limit_bytes still bounds the
-   * cache. False when the stage, the shrink or the seed failed. */
+  /* Sizes the cache to the host's grant and fills it: the cache and its
+   * prefetch stage take at most grant_bytes. Allocates the stage (bought on
+   * the first prompt otherwise), frees the newest chunks, keeping the
+   * experts eviction ranks highest, when the cache is over the grant, and
+   * reads Policy::ranking into the room left, while more than
+   * live_floor_bytes stay available. Until the first Fit nothing is cached
+   * (misses are read into the stage); from then on the cache grows only up
+   * to the grant. The host calls it once everything else it allocates at
+   * startup exists: serving once the sessions and the prompt cache's backing
+   * do (see TextRunnerExpertCacheClaim). A nonzero cache_limit_bytes still
+   * bounds the cache. False when the stage, the shrink or the reads
+   * failed. */
   bool Fit(uint64_t grant_bytes);
 
   /* Gives memory back to the host after Fit: frees whole chunks, newest
@@ -173,17 +180,9 @@ public:
   uint64_t Restore();
   /* Bytes Release freed since Fit or the last Restore. */
   uint64_t ReleasedBytes() const;
-  /* Free memory below which the cache stops growing: Policy::reserve_bytes
-   * before Fit, Policy::live_floor_bytes after it. */
+  /* Free memory below which the cache stops growing
+   * (Policy::live_floor_bytes). */
   uint64_t FloorBytes() const;
-
-  /* Primes the cache: `ranked` first, then every expert it leaves out,
-   * interleaved across layers, as far as the budget reaches. Before Fit the
-   * budget is 15/16 of the provisional size, leaving room for the sessions;
-   * Fit seeds again with the same ranking. `source` names the ranking in the
-   * log. Startup work: it does not count as inference in
-   * the statistics. */
-  bool Seed(std::vector<Ranked> ranked, const char* source);
 
   /* Routes are device [n_tokens][top_k]; -1 marks a dropped row. On success
    * tables[0..pieces) hold the layer's device tables, valid until the next
