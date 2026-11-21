@@ -48,6 +48,7 @@ if (ENGINE_ENABLE_HIP)
     ${QFN_MMQ_DIR}/qfn_mmq.hip.cpp
     ${QFN_MMQ_DIR}/mmid.hip.cpp
     ${QFN_MMQ_DIR}/mmvq.hip.cpp
+    ${QFN_MMQ_DIR}/moe_wave32.hip.cpp
     ${QFN_MMQ_DIR}/moe_wave64.hip.cpp
     ${QFN_MMQ_DIR}/quantize.hip.cpp)
 

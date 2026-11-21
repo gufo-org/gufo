@@ -1456,16 +1456,25 @@ bool Session::FinishDecode(const DecodeRequest& request,
       continue;
     }
     if (sampled) {
-      if (gpu_verification && !cpu_rows && sampler.NeedsConstraintMask() &&
-          !download_remaining(keep - 1))
-        return false;
+      std::optional<MtpVerification> compact;
+      if (gpu_verification && !cpu_rows) {
+        compact = TryVerifyMtpProposal(candidates[keep - 1], kMtpCandidates,
+                                       vocab, proposals[keep - 1], sampler);
+        if (!compact) {
+          verify_logits_.resize(
+              std::max<std::size_t>(exec.max_speculative(), k) * vocab);
+          auto row =
+              std::span(verify_logits_).subspan((keep - 1) * vocab, vocab);
+          if (!exec.ReadVerificationRows(keep - 1, row, error_msg))
+            return false;
+          compact = VerifyMtpProposal(row, proposals[keep - 1], sampler);
+        }
+      }
       const auto verified =
-          gpu_verification && !cpu_rows
-              ? VerifyMtpProposal(candidates[keep - 1], vocab,
-                                  proposals[keep - 1], sampler)
-              : VerifyMtpProposal(std::span<const float>(verify_logits_)
-                                      .subspan((keep - 1) * vocab, vocab),
-                                  proposals[keep - 1], sampler);
+          compact ? *compact
+                  : VerifyMtpProposal(std::span<const float>(verify_logits_)
+                                          .subspan((keep - 1) * vocab, vocab),
+                                      proposals[keep - 1], sampler);
       const auto token = static_cast<std::int32_t>(verified.token);
       const bool accepted = verified.accepted;
       if (is_stop(token)) {

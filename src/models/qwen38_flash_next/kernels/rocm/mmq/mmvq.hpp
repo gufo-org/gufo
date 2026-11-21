@@ -16,6 +16,12 @@ struct MoeBatchGroup {
   uint32_t slots[MMVQ_MAX_BATCH_SIZE];
 };
 
+struct DownExpertGroup {
+  int32_t expert;
+  int16_t start;
+  int16_t count;
+};
+
 // Tuned routed-vector batch limits for gfx1151.
 constexpr __host__ __device__ int mmvq_moe_max_batch(ggml_type type) {
     return type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K ? 4 : 8;
@@ -24,12 +30,32 @@ constexpr __host__ __device__ int mmvq_moe_max_batch(ggml_type type) {
 void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
                             const block_q8_1* input, float* output,
                             int k, int rows, int tokens, int input_stride,
-                            hipStream_t stream);
+                            hipStream_t stream, float* split_scratch = nullptr);
+void mul_mat_vec_q8_dispatch_mode(const void* weights, const void* gate,
+                                  const block_q8_1* input, float* output,
+                                  int k, int rows, int tokens, int input_stride,
+                                  hipStream_t stream, float* split_scratch,
+                                  bool force_fast);
+void mul_mat_vec_q4k_dense_dispatch(const void* weights, const void* gate,
+                                    const block_q8_1* input, float* output,
+                                    int k, int rows, int tokens,
+                                    int input_stride, hipStream_t stream,
+                                    float* split_scratch = nullptr);
+void mul_mat_vec_q4k_dense_dispatch_mode(const void* weights, const void* gate,
+                                         const block_q8_1* input, float* output,
+                                         int k, int rows, int tokens,
+                                         int input_stride, hipStream_t stream,
+                                         float* split_scratch, bool force_fast);
 void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
                              const block_q8_1* input, const int32_t* ids, float* output,
                              int k, int rows, int tokens, int experts_used,
                              int input_stride, hipStream_t stream,
                              const int32_t* dst_slots = nullptr);
+void mul_mat_vec_moe_down_grouped_dispatch(
+    const void* weights, ggml_type type, const block_q8_1* input,
+    const int32_t* sorted_ids, const int32_t* slot_of_rank, int32_t* plan,
+    float* output, int k, int rows, int slots, int input_stride,
+    hipStream_t stream);
 // Scratch ints mul_mat_vec_moe_gated needs for 2..MMVQ_MAX_BATCH_SIZE tokens:
 // a group per slot and two anchor lists.
 constexpr int mmvq_moe_group_ints(int tokens, int experts_used) {
@@ -40,10 +66,36 @@ void mul_mat_vec_moe_gated(const void* gate, const void* up, ggml_type type,
                            const block_q8_1* input, const int32_t* ids,
                            int32_t* groups, float* output, int k, int rows,
                            int tokens, int experts_used, int input_stride,
-                           hipStream_t stream);
+                           hipStream_t stream, bool split_wide = false);
 
 void mul_mat_vec_moe_batch_wave64(const void* gate, const void* up,
                                  const block_q8_1* input, const int32_t* groups,
                                  float* output, int k, int rows,
                                  int experts_used, int input_stride,
                                  hipStream_t stream);
+
+void mul_mat_vec_moe_batch_wave64_split(const void* gate, const void* up,
+                                       const block_q8_1* input,
+                                       const int32_t* storage, float* output,
+                                       int k, int rows, int tokens,
+                                       int experts_used, int input_stride,
+                                       hipStream_t stream);
+
+void mul_mat_vec_moe_batch_wave64_split_ref(const void* gate, const void* up,
+                                           const block_q8_1* input,
+                                           const int32_t* storage,
+                                           float* output, int k, int rows,
+                                           int tokens, int experts_used,
+                                           int input_stride,
+                                           hipStream_t stream);
+
+void mul_mat_vec_moe_batch_wave32_split(const void* gate, const void* up,
+                                       const block_q8_1* input,
+                                       const int32_t* storage, float* output,
+                                       int k, int rows, int tokens,
+                                       int experts_used, int input_stride,
+                                       hipStream_t stream);
+
+void group_moe_batch_split_launch(const int32_t* ids, int32_t* storage,
+                                  int tokens, int experts_used,
+                                  hipStream_t stream);

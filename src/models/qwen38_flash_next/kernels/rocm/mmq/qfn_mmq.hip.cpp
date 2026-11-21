@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // HIP adapters for the llama.cpp-derived quantized kernels. See VENDOR.md.
 #include "qfn_mmq_prelude.h"
+#include <algorithm>
 namespace qfn_mmq {
 #include "qfn_mmq.h"
 #include "common.hpp"
@@ -10,6 +11,10 @@ namespace qfn_mmq {
 #include "mmid.hpp"
 static int g_routed_max_expert_rows = 0;
 static int g_routed_tile_cols = 0;
+static constexpr bool WideBatchWmma() noexcept { return true; }
+static constexpr bool SplitKQ8Enabled() noexcept { return true; }
+static constexpr bool FastQ8WmmaEnabled() noexcept { return true; }
+static constexpr bool FastQ4kDenseEnabled() noexcept { return false; }
 static int prepare_decode_kernels();
 extern "C" int qfn_mmq_init(int device) {
     if (device < 0) {
@@ -410,14 +415,28 @@ static int moe_vector_projection(int weight_type, const void* W,
   // slots that share an expert read its weights in the same block.
   const bool by_expert =
       !gated && !W_b && !X_q8 &&
-      (type == GGML_TYPE_Q5_1 || type == GGML_TYPE_Q8_0) && K == 640 &&
-      n_expert_used == 1 && n_tokens > 1;
+      (type == GGML_TYPE_Q5_1 || type == GGML_TYPE_Q8_0) &&
+      K == 640 && n_expert_used == 1 && n_tokens > 1;
+  const bool grouped_down = false;
+  const bool split_wide_gu =
+      gated && n_tokens > MMVQ_MAX_BATCH_SIZE && WideBatchWmma();
+  const size_t by_expert_bytes =
+      by_expert ? (grouped_down ? GGML_PAD(2 * size_t(n_tokens) * sizeof(int32_t),
+                                           16)
+                                : 2 * size_t(n_tokens) * sizeof(int32_t))
+                : 0;
   const size_t group_bytes =
-      by_expert ? 2 * size_t(n_tokens) * sizeof(int32_t)
+      by_expert
+          ? by_expert_bytes +
+                (grouped_down
+                     ? 2 * sizeof(int32_t) +
+                           2 * size_t(n_tokens) * sizeof(DownExpertGroup)
+                     : 0)
       : gated && n_tokens > 1
           ? (n_tokens > MMVQ_MAX_BATCH_SIZE
-                 ? sizeof(int32_t) +
-                       size_t(n_tokens) * n_expert_used * sizeof(MoeBatchGroup)
+                 ? (split_wide_gu ? 2 : 1) * sizeof(int32_t) +
+                       (split_wide_gu ? 2 : 1) * size_t(n_tokens) *
+                           n_expert_used * sizeof(MoeBatchGroup)
                  : size_t(mmvq_moe_group_ints(n_tokens, n_expert_used)) *
                        sizeof(int32_t))
           : 0;
@@ -459,18 +478,33 @@ static int moe_vector_projection(int weight_type, const void* W,
   }
   const auto* input = reinterpret_cast<const block_q8_1*>(
       X_q8 ? X_q8 : static_cast<const void*>(src1_q8_1_ptr));
-  int32_t* groups = reinterpret_cast<int32_t*>(src1_q8_1_ptr + input_bytes);
+  int32_t* groups = reinterpret_cast<int32_t*>(src1_q8_1_ptr + input_bytes +
+                                               by_expert_bytes);
 
   const int input_stride = ne10_padded / QK8_1;
   if (gated) {
     if (n_tokens > MMVQ_MAX_BATCH_SIZE &&
-        hipMemsetAsync(groups, 0, sizeof(int32_t), stream) != hipSuccess)
+        hipMemsetAsync(groups, 0, (split_wide_gu ? 2 : 1) * sizeof(int32_t),
+                       stream) != hipSuccess)
       return -2;
     mul_mat_vec_moe_gated(W, W_b, type, input, ids, groups, out_f32, K, M,
-                          n_tokens, n_expert_used, input_stride, stream);
+                          n_tokens, n_expert_used, input_stride, stream,
+                          split_wide_gu);
     err = hipGetLastError();
     if (err != hipSuccess) {
       fprintf(stderr, "%s: gated vector launch failed: %s\n", tag,
+              hipGetErrorString(err));
+      return -3;
+    }
+    return 0;
+  }
+  if (grouped_down) {
+    mul_mat_vec_moe_down_grouped_dispatch(W, type, input, sorted_ids,
+                                          slot_of_rank, groups, out_f32, K, M,
+                                          n_tokens, input_stride, stream);
+    err = hipGetLastError();
+    if (err != hipSuccess) {
+      fprintf(stderr, "%s: grouped down dispatch failed: %s\n", tag,
               hipGetErrorString(err));
       return -3;
     }
@@ -506,6 +540,49 @@ extern "C" int qfn_mmq_moe_vec(int weight_type, const void* W,
   return moe_vector_projection(weight_type, W, X_f32, ids, out_f32, M, K,
                                n_tokens, n_experts, n_expert_used, stream, W_b,
                                out_b, false);
+}
+
+extern "C" int qfn_mmq_q4_K_dense_vec_preq(const void* W, const void* W_gate,
+                                           const void* X_q8, float* out_f32,
+                                           int M, int N, int K,
+                                           hipStream_t stream) {
+  if (!W || !X_q8 || !out_f32 || M <= 0 || N <= 0 || N > 48 || K <= 0 ||
+      K % 256 != 0) {
+    fprintf(stderr, "qfn_mmq_q4_K_dense_vec_preq: bad arguments M=%d N=%d K=%d\n",
+            M, N, K);
+    return -1;
+  }
+  float* split_scratch = nullptr;
+  ggml_hip_pool_alloc<float> split_pool;
+  const bool split_plain = WideBatchWmma() && !W_gate && N >= 9 && N <= 48 &&
+                           M <= 512 && K >= 8192 && (K / QK_K) % 4 == 0;
+  const bool split_gated = FastQ4kDenseEnabled() && WideBatchWmma() &&
+                           W_gate != nullptr && N >= 9 && N <= 48 &&
+                           M <= 640 && K >= 2048 && (K / QK_K) % 2 == 0;
+  if (split_plain || split_gated) {
+    const int dev = ggml_hip_get_device();
+    ggml_backend_hip_context* ctx = get_ctx_for_device(dev);
+    if (!ctx)
+      return -1;
+    split_pool.alloc(qfn_pool_for_stream(ctx->device, stream),
+                     4 * static_cast<size_t>(N) * M);
+    split_scratch = split_pool.get();
+  }
+  const int input_stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;
+  mul_mat_vec_q4k_dense_dispatch(W, W_gate,
+                                 static_cast<const block_q8_1*>(X_q8), out_f32,
+                                 K, M, N, input_stride, stream, split_scratch);
+  return hipGetLastError() == hipSuccess ? 0 : -3;
+}
+
+extern "C" int qfn_mmq_moe_vec_preq(int weight_type, const void* W,
+                                    const void* X_q8, const int32_t* ids,
+                                    float* out_f32, int M, int K, int n_tokens,
+                                    int n_experts, int n_expert_used,
+                                    hipStream_t stream) {
+  return moe_vector_projection(weight_type, W, nullptr, ids, out_f32, M, K,
+                               n_tokens, n_experts, n_expert_used, stream,
+                               nullptr, nullptr, false, X_q8);
 }
 
 extern "C" int qfn_mmq_moe_gated_vec(int weight_type, const void* gate,
@@ -694,14 +771,19 @@ extern "C" int qfn_mmq_q8_0_dense_vec_preq(const void* W, const void* W_gate,
                                            const void* X_q8, float* out_f32,
                                            int M, int N, int K,
                                            hipStream_t stream) {
-  const bool wide_matrix = K == 2560 && M >= 8192 && N <= 48;
+  const bool wide_wmma = WideBatchWmma();
+  const bool wide_matrix =
+      ((K == 2560 && M >= 8192) ||
+       (wide_wmma && !W_gate && M >= 256 && K % 32 == 0)) &&
+      N <= 48;
   const bool grouped_matrix =
       N > 48 && N % 32 == 0 &&
-      ((K == 2560 && M >= 1024) || (K == 320 && M == 10240));
+      ((K == 2560 && M >= 1024) || (K == 320 && M == 10240) ||
+       (wide_wmma && !W_gate && M >= 256 && K % 32 == 0));
   if (!W || !X_q8 || !out_f32 || M <= 0 || N <= 0 || K <= 0 || K % 32 != 0 ||
       (N > 32 && !wide_matrix && !grouped_matrix &&
        (M != 320 || K != 10240 || N % 8 != 0)) ||
-      (N > MMVQ_MAX_BATCH_SIZE && W_gate)) {
+      (N > 32 && W_gate)) {
     fprintf(stderr,
             "qfn_mmq_q8_0_dense_vec_preq: bad arguments M=%d N=%d K=%d\n", M, N,
             K);
@@ -711,17 +793,33 @@ extern "C" int qfn_mmq_q8_0_dense_vec_preq(const void* W, const void* W_gate,
     launch_q8_hc_down(W, X_q8, out_f32, N, stream);
     return hipGetLastError() == hipSuccess ? 0 : -3;
   }
-  if (N > MMVQ_MAX_BATCH_SIZE && N % 8 == 0 && M == 320 && K == 10240) {
+  if (N > MMVQ_MAX_BATCH_SIZE && N % 8 == 0 && M == 320 && K == 10240 &&
+      !(wide_wmma && N <= 48)) {
     qfn_q8_hc_down_kernel<8, true><<<dim3(320, N / 8), 32, 0, stream>>>(
         static_cast<const block_q8_0*>(W),
         static_cast<const block_q8_1*>(X_q8), out_f32);
     return hipGetLastError() == hipSuccess ? 0 : -3;
   }
+  float* split_scratch = nullptr;
+  ggml_hip_pool_alloc<float> split_pool;
+  const int split_k_min = FastQ8WmmaEnabled() ? 2048 : 8192;
+  if (wide_wmma && SplitKQ8Enabled() && !W_gate && N >= 9 && N <= 48 &&
+      M <= 512 && K >= split_k_min && (K / QK8_0) % 4 == 0) {
+    const int dev = ggml_hip_get_device();
+    ggml_backend_hip_context* ctx = get_ctx_for_device(dev);
+    if (!ctx)
+      return -1;
+    split_pool.alloc(qfn_pool_for_stream(ctx->device, stream),
+                     4 * static_cast<size_t>(N) * M);
+    split_scratch = split_pool.get();
+  }
   const int input_stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;
   mul_mat_vec_q8_dispatch(W, W_gate, static_cast<const block_q8_1*>(X_q8),
-                          out_f32, K, M, N, input_stride, stream);
+                          out_f32, K, M, N, input_stride, stream,
+                          split_scratch);
   return hipGetLastError() == hipSuccess ? 0 : -3;
 }
+
 template void mul_mat_q_case<GGML_TYPE_Q8_0>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 template void mul_mat_q_case<GGML_TYPE_Q4_K>(

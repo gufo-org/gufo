@@ -4006,7 +4006,9 @@ template<bool First>
 __global__ void VerificationCandidateTileKernel(
     const float* logits, GreedyPenaltyRows penalties,
     const std::uint32_t* input, std::uint32_t* output, std::uint32_t size,
-    std::uint32_t vocab, std::uint32_t stride) {
+    std::uint32_t vocab, std::uint32_t stride,
+    const std::uint32_t* allowed_masks = nullptr, std::uint32_t mask_stride = 0,
+    std::uint32_t mask_active = 0) {
   using Sort = hipcub::BlockRadixSort<float, kThreads, 4, std::uint32_t>;
   __shared__ Sort::TempStorage scratch;
   __shared__ unsigned excluded[kMtpCandidateTile / 32];
@@ -4048,8 +4050,15 @@ __global__ void VerificationCandidateTileKernel(
     auto id = i < size ? (First ? i : input[std::size_t(row) * stride + i])
                        : UINT32_MAX;
     if constexpr (First) {
-      if ((excluded[offset / 32] >> (offset % 32)) & 1U)
+      if ((excluded[offset / 32] >> (offset % 32)) & 1U) {
         id = UINT32_MAX;
+      } else if (id < vocab && allowed_masks != nullptr &&
+                 ((mask_active >> row) & 1U) != 0U) {
+        const auto word =
+            allowed_masks[std::size_t(row) * mask_stride + (id >> 5)];
+        if (((word >> (id & 31U)) & 1U) == 0U)
+          id = UINT32_MAX;
+      }
     }
     const float value =
         id < vocab ? logits[std::size_t(row) * vocab + id] : -INFINITY;
@@ -9297,7 +9306,10 @@ std::uint32_t MtpCandidateWorkspaceSize(std::uint32_t vocab) {
 void VerificationCandidates(const float* logits, GreedyPenaltyRows penalties,
                             std::uint32_t* ids, std::uint32_t* scratch_ids,
                             sampling::LogitCandidate* out, std::uint32_t rows,
-                            std::uint32_t vocab, hipStream_t stream) {
+                            std::uint32_t vocab, hipStream_t stream,
+                            const std::uint32_t* allowed_masks,
+                            std::uint32_t mask_stride,
+                            std::uint32_t mask_active) {
   if (!logits || !ids || !scratch_ids || !out || !vocab || !rows || rows > 7)
     throw std::invalid_argument("invalid verification candidate shape");
   const auto stride = MtpCandidateWorkspaceSize(vocab);
@@ -9305,8 +9317,9 @@ void VerificationCandidates(const float* logits, GreedyPenaltyRows penalties,
   auto size = vocab;
   auto blocks = tiles(size);
   VerificationCandidateTileKernel<true>
-      <<<dim3(blocks, rows), kThreads, 0, stream>>>(logits, penalties, nullptr,
-                                                    ids, size, vocab, stride);
+      <<<dim3(blocks, rows), kThreads, 0, stream>>>(
+          logits, penalties, nullptr, ids, size, vocab, stride, allowed_masks,
+          mask_stride, mask_active);
   auto* source = ids;
   auto* destination = scratch_ids;
   while (blocks > 1) {

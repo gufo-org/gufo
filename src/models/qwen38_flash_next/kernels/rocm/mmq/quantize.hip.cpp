@@ -64,7 +64,6 @@ static __global__ void quantize_q8_1_by_expert(
         void * __restrict__ vy, int32_t * __restrict__ sorted_ids,
         int32_t * __restrict__ slot_of_rank, const int64_t ne00,
         const int64_t s01, const int64_t ne0, const int slots) {
-    const int64_t i0 = (int64_t)blockDim.x*blockIdx.x + threadIdx.x;
     const int i1 = blockIdx.y;
     const int lane = threadIdx.x % 32;
     const int32_t expert = ids[i1];
@@ -76,43 +75,38 @@ static __global__ void quantize_q8_1_by_expert(
             j < slots && (other < expert || (other == expert && j < i1)))));
     }
 
-    if (i0 >= ne0) {
-        return;
-    }
-
-    const int64_t i_cont = (int64_t)rank * ne0 + i0;
-
-    block_q8_1 * y = (block_q8_1 *) vy;
-
-    const int64_t ib  = i_cont / QK8_1; // block index
-    const int64_t iqs = i_cont % QK8_1; // quant index
-
-    const float xi = i0 < ne00 ? x[i1*s01 + i0] : 0.0f;
-    float amax = fabsf(xi);
-
-    amax = warp_reduce_max<QK8_1>(amax);
-
-    const float  d = amax / 127.0f;
-    const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
-
-    // block_q8_1's sum is d*sum(qs), the sum of the values the dot products
-    // consume, as ggml's CPU quantize_row_q8_1 stores it. The sum of the
-    // unquantized x would leave the Q4_1/Q5_1 min term and the Q4_K/Q5_K MMQ
-    // mins with m*sum(x - d*q), a rounding bias shared by every output row.
-    const int sumq = warp_reduce_sum<QK8_1>((int) q);
-
-    y[ib].qs[iqs] = q;
-
-    if (i0 == 0) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
         sorted_ids[rank] = expert;
         slot_of_rank[rank] = i1;
     }
 
-    if (iqs > 0) {
-        return;
-    }
+    block_q8_1 * y = (block_q8_1 *) vy;
+    for (int64_t i0 = (int64_t)blockDim.x * blockIdx.x + threadIdx.x; i0 < ne0;
+         i0 += (int64_t)blockDim.x * gridDim.x) {
+        const int64_t i_cont = (int64_t)rank * ne0 + i0;
+        const int64_t ib  = i_cont / QK8_1; // block index
+        const int64_t iqs = i_cont % QK8_1; // quant index
 
-    y[ib].ds = make_half2(d, d*sumq);
+        const float xi = i0 < ne00 ? x[i1*s01 + i0] : 0.0f;
+        float amax = fabsf(xi);
+
+        amax = warp_reduce_max<QK8_1>(amax);
+
+        const float  d = amax / 127.0f;
+        const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
+
+        // block_q8_1's sum is d*sum(qs), the sum of the values the dot products
+        // consume, as ggml's CPU quantize_row_q8_1 stores it. The sum of the
+        // unquantized x would leave the Q4_1/Q5_1 min term and the Q4_K/Q5_K MMQ
+        // mins with m*sum(x - d*q), a rounding bias shared by every output row.
+        const int sumq = warp_reduce_sum<QK8_1>((int) q);
+
+        y[ib].qs[iqs] = q;
+
+        if (iqs == 0) {
+            y[ib].ds = make_half2(d, d*sumq);
+        }
+    }
 }
 
 template <mmq_q8_1_ds_layout ds_layout>
@@ -233,7 +227,7 @@ void quantize_row_q8_1_by_expert_hip(
         int32_t * slot_of_rank, const int64_t ne00, const int64_t s01,
         const int64_t ne0, const int slots, hipStream_t stream) {
     GGML_ASSERT(ne0 % QK8_1 == 0 && slots > 0);
-    const int64_t block_num_x = (ne0 + HIP_QUANTIZE_BLOCK_SIZE - 1) / HIP_QUANTIZE_BLOCK_SIZE;
+    const int64_t block_num_x = ne0 <= 1024 ? 1 : (ne0 + HIP_QUANTIZE_BLOCK_SIZE - 1) / HIP_QUANTIZE_BLOCK_SIZE;
     const dim3 num_blocks(block_num_x, slots, 1);
     const dim3 block_size(HIP_QUANTIZE_BLOCK_SIZE, 1, 1);
     quantize_q8_1_by_expert<<<num_blocks, block_size, 0, stream>>>(

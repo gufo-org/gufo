@@ -19,6 +19,11 @@ constexpr std::uint32_t kDecodeRows = 8;
 static_assert(kBatchSessions * kDecodeRows <= Executor::kHookParkedRows,
               "a batched decode inside a layer hook must fit the parked rows");
 
+bool UnpaddedQ8(std::uint32_t k) noexcept {
+  return k % 32 == 0 &&
+         qfn_mmq_q8_1_bytes(1, static_cast<int>(k)) == k / 32 * 36;
+}
+
 bool Fail(std::string* error, const std::string& message) {
   if (error != nullptr) {
     *error = message;
@@ -143,34 +148,76 @@ bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
                           std::string* error) const {
   const auto& c = config();
   xn_half_ = false;
-  DropReadyQ8();  // the batched route rewrites xn and mixed unfused
-  if (!normed)
+  mixed_q8_ready_ = {};
+  if (!normed) {
+    xn_q8_ready_ = {};
+    q8t_src_ = nullptr;
     RmsNormRows(res, m.norm.f32(), s_.xn, rows, c.HcDim(), c.hc_count,
                 c.rms_eps, stream_);
+  }
   if (!DenseBatch(m.down, s_.xn, s_.lo, rows, error))
     return false;
-  SiluScale(s_.lo, 1.0F / static_cast<float>(c.hc_count),
-            std::size_t{rows} * c.hc_low_rank, stream_);
-  if (!DenseBatch(m.up, s_.lo, s_.hc_gate, rows, error))
-    return false;
+  const float scale = 1.0F / static_cast<float>(c.hc_count);
+  const std::uint32_t lo_q8_cols = static_cast<std::uint32_t>(
+      qfn_mmq_q8_1_bytes(1, static_cast<int>(c.hc_low_rank)) / 36 * 32);
+  bool up_done = false;
+  if (m.up.type == core::GgmlType::kQ8_0 && m.up.cols == c.hc_low_rank) {
+    if (rows <= kDecodeRows && SiluScaleQ8_1(s_.lo, scale, rows, c.hc_low_rank,
+                                             lo_q8_cols, s_.lo_q8_1, stream_)) {
+      if (!Dense(m.up, Q8Input{s_.lo, s_.lo_q8_1, rows, c.hc_low_rank},
+                 s_.hc_gate, error))
+        return false;
+      up_done = true;
+    } else if (rows > kDecodeRows) {
+      const auto padded = (rows + kDecodeRows - 1) / kDecodeRows * kDecodeRows;
+      if (qfn_mmq_q8_1_bytes(padded, c.hc_low_rank) <=
+              Q8TiledBytes(scratch_rows_, model_->max_q8_cols()) &&
+          SiluScaleQ8_1(s_.lo, scale, rows, c.hc_low_rank, lo_q8_cols, s_.x_q8t,
+                        stream_)) {
+        q8t_src_ = s_.lo;
+        q8t_rows_ = rows;
+        q8t_cols_ = c.hc_low_rank;
+        if (!DenseBatch(m.up, s_.lo, s_.hc_gate, rows, error))
+          return false;
+        up_done = true;
+      }
+    }
+  }
+  if (!up_done) {
+    SiluScale(s_.lo, scale, std::size_t{rows} * c.hc_low_rank, stream_);
+    if (!DenseBatch(m.up, s_.lo, s_.hc_gate, rows, error))
+      return false;
+  }
   const bool fused_inject = inject != nullptr && !m.inject.empty() &&
                             m.inject.type == core::GgmlType::kF32;
+  const bool separate_inject =
+      inject != nullptr && !m.inject.empty() && !fused_inject;
   q8t_src_ = nullptr;
   half_src_ = nullptr;
-  // Keep each row's scalar epilogue/reduction independently of the total
-  // row count, including prompt replay and concatenated decode batches.
-  // Decode-sized projections can consume the epilogue's exact Q8_1 rows.
-  // Wider batches retain their existing tiled/padded quantization route.
-  const bool q8 = rows <= kDecodeRows && c.hidden_size % 32 == 0 &&
-                  qfn_mmq_q8_1_bytes(1, static_cast<int>(c.hidden_size)) ==
-                      c.hidden_size / 32 * 36;
+  void* mixed_q8 = nullptr;
+  if (UnpaddedQ8(c.hidden_size)) {
+    if (rows <= kDecodeRows) {
+      mixed_q8 = s_.mixed_q8_1;
+    } else if (!separate_inject) {
+      const auto padded = (rows + kDecodeRows - 1) / kDecodeRows * kDecodeRows;
+      if (qfn_mmq_q8_1_bytes(padded, c.hidden_size) <=
+          Q8TiledBytes(scratch_rows_, model_->max_q8_cols())) {
+        mixed_q8 = s_.x_q8t;
+      }
+    }
+  }
   HcMixEpilogue(s_.xn, s_.hc_gate, fused_inject ? m.inject.f32() : nullptr,
                 mixed, inject, rows, c.hidden_size, c.hc_count, stream_,
-                q8 ? s_.mixed_q8_1 : nullptr);
-  if (q8)
+                mixed_q8);
+  if (mixed_q8 == s_.mixed_q8_1) {
     mixed_q8_ready_ = {mixed, s_.mixed_q8_1, rows, c.hidden_size};
+  } else if (mixed_q8 == s_.x_q8t) {
+    q8t_src_ = mixed;
+    q8t_rows_ = rows;
+    q8t_cols_ = c.hidden_size;
+  }
   inject_parts_ = fused_inject ? HcInjectParts(c.hidden_size) : 1;
-  if (inject != nullptr && !m.inject.empty() && !fused_inject) {
+  if (separate_inject) {
     if (!DenseBatch(m.inject, s_.xn, inject, rows, error))
       return false;
   }
@@ -181,6 +228,28 @@ void Executor::CombineBatch(float* res, const float* gamma,
                             std::uint32_t rows) const {
   const auto& c = config();
   DropReadyQ8();
+  q8t_src_ = nullptr;
+  if (gamma != nullptr && UnpaddedQ8(c.HcDim())) {
+    if (rows <= kDecodeRows &&
+        HcCombineQ8_1(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn,
+                      s_.xn_q8_1, rows, c.hidden_size, c.hc_count, c.rms_eps,
+                      stream_)) {
+      xn_q8_ready_ = {s_.xn, s_.xn_q8_1, rows, c.HcDim()};
+      return;
+    }
+    const auto padded = (rows + kDecodeRows - 1) / kDecodeRows * kDecodeRows;
+    if (rows > kDecodeRows &&
+        qfn_mmq_q8_1_bytes(padded, c.HcDim()) <=
+            Q8TiledBytes(scratch_rows_, model_->max_q8_cols()) &&
+        HcCombineQ8_1(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn,
+                      s_.x_q8t, rows, c.hidden_size, c.hc_count, c.rms_eps,
+                      stream_)) {
+      q8t_src_ = s_.xn;
+      q8t_rows_ = rows;
+      q8t_cols_ = c.HcDim();
+      return;
+    }
+  }
   HcCombine(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn, rows,
             c.hidden_size, c.hc_count, c.rms_eps, stream_, true);
 }
@@ -699,6 +768,9 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
 
 bool Executor::QuantizeBatch(const float* x, std::uint32_t rows,
                              std::uint32_t cols, std::string* error) const {
+  if (q8t_src_ == x && q8t_rows_ == rows && q8t_cols_ == cols) {
+    return true;
+  }
   // Quantize once for all independent rows. The prefill staging allocation
   // is idle during batch decoding; borrow it without adding another buffer.
   const auto padded = (rows + kDecodeRows - 1) / kDecodeRows * kDecodeRows;
@@ -707,15 +779,12 @@ bool Executor::QuantizeBatch(const float* x, std::uint32_t rows,
     return Fail(error, "batched projection exceeds activation scratch");
   void* quantized = s_.x_q8t;
   q8t_src_ = nullptr;
-  if (padded != rows &&
-      !Check(
-          hipMemsetAsync(static_cast<std::uint8_t*>(quantized) +
-                             qfn_mmq_q8_1_bytes(rows, cols),
-                         0, qfn_mmq_q8_1_bytes(padded - rows, cols), stream_),
-          error))
-    return false;
-  return qfn_mmq_quantize_q8_1(x, quantized, rows, cols, stream_) == 0 ||
-         Fail(error, "batched activation quantization failed");
+  if (qfn_mmq_quantize_q8_1(x, quantized, rows, cols, stream_) != 0)
+    return Fail(error, "batched activation quantization failed");
+  q8t_src_ = x;
+  q8t_rows_ = rows;
+  q8t_cols_ = cols;
+  return true;
 }
 
 bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
@@ -807,17 +876,26 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
     return false;
   if (l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
       l.ffn_up_exps.type == core::GgmlType::kQ4_K) {
+    const bool reuse_q8 =
+        q8t_src_ == x && q8t_rows_ == rows && q8t_cols_ == c.hidden_size;
     // Share expert weights across request boundaries while retaining the
     // scalar Q8 activation quantization and dot-product reduction.
-    if (qfn_mmq_moe_gated_vec(static_cast<int>(l.ffn_gate_exps.type),
-                              l.ffn_gate_exps.data, l.ffn_up_exps.data, x,
-                              base.ids, base.gate_e, c.expert_ff, c.hidden_size,
-                              rows, c.num_experts, c.num_experts_used,
-                              stream_) != 0 ||
-        qfn_mmq_moe_vec(
-            static_cast<int>(l.ffn_down_exps.type), l.ffn_down_exps.data,
-            base.gate_e, base.ids, base.down_e, c.hidden_size, c.expert_ff,
-            rows * c.num_experts_used, c.num_experts, 1, stream_) != 0)
+    const int gu_rc =
+        reuse_q8 ? qfn_mmq_moe_gated_vec_preq(
+                       static_cast<int>(l.ffn_gate_exps.type),
+                       l.ffn_gate_exps.data, l.ffn_up_exps.data, base.x_q8t,
+                       base.ids, base.gate_e, c.expert_ff, c.hidden_size, rows,
+                       c.num_experts, c.num_experts_used, stream_)
+                 : qfn_mmq_moe_gated_vec(
+                       static_cast<int>(l.ffn_gate_exps.type),
+                       l.ffn_gate_exps.data, l.ffn_up_exps.data, x, base.ids,
+                       base.gate_e, c.expert_ff, c.hidden_size, rows,
+                       c.num_experts, c.num_experts_used, stream_);
+    if (gu_rc != 0 || qfn_mmq_moe_vec(static_cast<int>(l.ffn_down_exps.type),
+                                      l.ffn_down_exps.data, base.gate_e,
+                                      base.ids, base.down_e, c.hidden_size,
+                                      c.expert_ff, rows * c.num_experts_used,
+                                      c.num_experts, 1, stream_) != 0)
       return Fail(error, "batched routed vector projection failed");
     MoeEpilogue(base.down_e, base.weights, base.shexp_out,
                 base.router + c.num_experts, c.num_experts + 1, out, rows,
@@ -1046,60 +1124,124 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
   }
 
   const Scratch base = s_;
+  const auto& layers = model_->layers();
+  bool can_graph =
+      !wide && items.size() >= 2 && batch_gdn && hook_layers_.empty();
+  BatchGraphKey suffix_key{};
+  suffix_key.kind = 2;
+  suffix_key.count = static_cast<std::uint8_t>(items.size());
+  suffix_key.flags = (batch_gdn ? (std::uint32_t{1} << 24) : 0U) |
+                     (c.ple_layer > 0 ? (std::uint32_t{1} << 25) : 0U);
+  std::array<std::uint32_t, kBatchSessions> pool_arr{};
+  std::array<std::uint32_t, kBatchSessions> graph_pool_arr{};
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    const auto& item = items[i];
+    auto& session = *item.session;
+    pool_arr[i] = sparse[i] && complete[i] > session.blocks_
+                      ? complete[i] - session.blocks_
+                      : 0U;
+    if (can_graph) {
+      if (!session.CheckCancellation(nullptr) ||
+          session.vision_input_.rope() != nullptr || pool_arr[i] > 1U) {
+        can_graph = false;
+      } else {
+        suffix_key.sessions[i] = &session;
+        suffix_key.tokens[i] = static_cast<std::uint8_t>(item.tokens.size());
+        suffix_key.yarn_bits[i] =
+            std::bit_cast<std::uint32_t>(session.yarn_factor_);
+        if (item.speculative)
+          suffix_key.flags |= (std::uint32_t{1} << i);
+        if (sparse[i])
+          suffix_key.flags |= (std::uint32_t{1} << (8 + i));
+        if (pool_arr[i] != 0U)
+          suffix_key.flags |= (std::uint32_t{1} << (16 + i));
+        graph_pool_arr[i] = pool_arr[i];
+      }
+    }
+  }
+  if (can_graph) {
+    for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+      const auto& l = layers[il];
+      if (!l.linear)
+        continue;
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        const auto& item = items[i];
+        auto& session = *item.session;
+        auto view = RowScratch(base, offsets[i]);
+        const auto& state = session.linear_[il];
+        batch_gdn_host_[il * kBatchSessions + i] = {
+            l.ssm_in.empty() ? view.qkv : view.qkvz,
+            l.ssm_in.empty() ? view.z : view.qkvz + c.SsmConvChannels(),
+            view.alpha_beta,
+            state.conv_state,
+            base.conv_scratch + std::size_t{offsets[i]} * c.SsmConvChannels(),
+            view.qn,
+            view.kn,
+            view.gdn_raw,
+            state.state,
+            view.gdn_out,
+            item.speculative ? state.state_snapshots : RollbackRows{},
+            item.speculative ? state.conv_snapshots : RollbackRows{},
+            static_cast<std::uint32_t>(item.tokens.size())};
+      }
+    }
+  }
+
   // Every exit restores the ordinary single-session scratch view. Enqueued
   // work is drained before a caller can reuse its pinned staging buffers.
-  const auto body = [&]() -> bool {
-    if (!AnyActive(items))
-      return true;
-    for (std::size_t i = 0; i < items.size(); ++i) {
-      if (!Check(hipMemcpyAsync(items[i].session->control_, batch_controls_ + i,
-                                sizeof(Session::Control), hipMemcpyHostToDevice,
-                                stream_),
+  const auto run_layers = [&](std::uint32_t first_layer,
+                              std::uint32_t end_layer, bool& normed) -> bool {
+    if (first_layer == 0) {
+      if (!can_graph && !AnyActive(items))
+        return true;
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        if (!Check(hipMemcpyAsync(items[i].session->control_,
+                                  batch_controls_ + i, sizeof(Session::Control),
+                                  hipMemcpyHostToDevice, stream_),
+                   error)) {
+          return false;
+        }
+      }
+      if (wide) {
+        // Later segments read their own positions; their controls stage in
+        // the batch slots a single-session pass leaves unused.
+        const auto segs = segments_of(0);
+        for (std::size_t s = 1; s < segs.size(); ++s) {
+          batch_controls_[s] = batch_controls_[0];
+          batch_controls_[s].position = segs[s].start;
+          batch_controls_[s].blocks = segs[s].blocks;
+          if (!Check(hipMemcpyAsync(wide_controls_ + s, batch_controls_ + s,
+                                    sizeof(Session::Control),
+                                    hipMemcpyHostToDevice, stream_),
+                     error))
+            return false;
+        }
+      }
+      if (!Check(hipMemcpyAsync(base.tokens, tokens_host_,
+                                rows * sizeof(std::int32_t),
+                                hipMemcpyHostToDevice, stream_),
                  error)) {
         return false;
       }
-    }
-    if (wide) {
-      // Later segments read their own positions; their controls stage in
-      // the batch slots a single-session pass leaves unused.
-      const auto segs = segments_of(0);
-      for (std::size_t s = 1; s < segs.size(); ++s) {
-        batch_controls_[s] = batch_controls_[0];
-        batch_controls_[s].position = segs[s].start;
-        batch_controls_[s].blocks = segs[s].blocks;
-        if (!Check(hipMemcpyAsync(wide_controls_ + s, batch_controls_ + s,
-                                  sizeof(Session::Control),
-                                  hipMemcpyHostToDevice, stream_),
-                   error))
-          return false;
+      EmbedTokens(model_->token_embd().data,
+                  EmbeddingType(model_->token_embd().type), base.tokens,
+                  base.res, rows, c.hidden_size, c.hc_count, stream_);
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        items[i].session->vision_input_.Inject(
+            base.res + std::size_t{offsets[i]} * c.HcDim(),
+            items[i].session->position_, items[i].tokens.size(), c.hidden_size,
+            c.hc_count, stream_);
       }
     }
-    if (!Check(hipMemcpyAsync(base.tokens, tokens_host_,
-                              rows * sizeof(std::int32_t),
-                              hipMemcpyHostToDevice, stream_),
-               error)) {
-      return false;
-    }
-    EmbedTokens(model_->token_embd().data,
-                EmbeddingType(model_->token_embd().type), base.tokens, base.res,
-                rows, c.hidden_size, c.hc_count, stream_);
-    for (std::size_t i = 0; i < items.size(); ++i) {
-      items[i].session->vision_input_.Inject(
-          base.res + std::size_t{offsets[i]} * c.HcDim(),
-          items[i].session->position_, items[i].tokens.size(), c.hidden_size,
-          c.hc_count, stream_);
-    }
-    const auto& layers = model_->layers();
-    bool normed = false;
-    for (std::uint32_t il = 0; il < c.num_layers; ++il) {
-      if (!AnyActive(items))
+    for (std::uint32_t il = first_layer; il < end_layer; ++il) {
+      if (!can_graph && !AnyActive(items))
         return true;
       const auto& l = layers[il];
-      if (c.IsPleLayer(il) && !WaitPle(error))
+      if (c.IsPleLayer(il) && !can_graph && !WaitPle(error))
         return false;
       for (std::size_t i = 0; i < items.size(); ++i) {
         const auto& item = items[i];
-        if (item.session->Cancelled() || !c.IsPleLayer(il))
+        if ((!can_graph && item.session->Cancelled()) || !c.IsPleLayer(il))
           continue;
         auto& session = *item.session;
         const auto segs = segments_of(i);
@@ -1165,7 +1307,7 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
                                   c.AttentionQDim();
         }
         UseScratch(view);
-        if (!session.CheckCancellation(nullptr)) {
+        if (!can_graph && !session.CheckCancellation(nullptr)) {
           auto* output = l.linear ? s_.gdn_out : s_.ctx;
           const auto width = l.linear ? c.SsmValueDim() : c.AttentionQDim();
           if (!Check(hipMemsetAsync(output, 0,
@@ -1207,18 +1349,20 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
           }
         } else if (l.linear) {
           if (batch_gdn) {
-            const auto& state = session.linear_[il];
-            batch_gdn_host_[il * kBatchSessions + i] = {
-                l.ssm_in.empty() ? view.qkv : view.qkvz,
-                l.ssm_in.empty() ? view.z : view.qkvz + c.SsmConvChannels(),
-                view.alpha_beta, state.conv_state,
-                // Short convolution saves history in registers, so each
-                // request needs only its own token rows of staging.
-                base.conv_scratch +
-                    std::size_t{offsets[i]} * c.SsmConvChannels(),
-                view.qn, view.kn, view.gdn_raw, state.state, view.gdn_out,
-                item.speculative ? state.state_snapshots : RollbackRows{},
-                item.speculative ? state.conv_snapshots : RollbackRows{}, n};
+            if (!can_graph) {
+              const auto& state = session.linear_[il];
+              batch_gdn_host_[il * kBatchSessions + i] = {
+                  l.ssm_in.empty() ? view.qkv : view.qkvz,
+                  l.ssm_in.empty() ? view.z : view.qkvz + c.SsmConvChannels(),
+                  view.alpha_beta, state.conv_state,
+                  // Short convolution saves history in registers, so each
+                  // request needs only its own token rows of staging.
+                  base.conv_scratch +
+                      std::size_t{offsets[i]} * c.SsmConvChannels(),
+                  view.qn, view.kn, view.gdn_raw, state.state, view.gdn_out,
+                  item.speculative ? state.state_snapshots : RollbackRows{},
+                  item.speculative ? state.conv_snapshots : RollbackRows{}, n};
+            }
             gdn_active |= 1U << i;
           } else if (!LinearAttention(l, session.linear_[il], s_.mixed,
                                       s_.block_out, n, item.speculative, error,
@@ -1243,9 +1387,7 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
               return false;
           }
         } else {
-          const auto pool = sparse[i] && complete[i] > session.blocks_
-                                ? complete[i] - session.blocks_
-                                : 0;
+          const auto pool = can_graph ? graph_pool_arr[i] : pool_arr[i];
           UseYarn(session);
           if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out, n,
                          &session.control_->position, &session.control_->blocks,
@@ -1300,34 +1442,84 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
       CombineBatch(base.res, next_norm, rows);
       normed = next_norm != nullptr;
     }
-    for (std::size_t i = 0; i < items.size(); ++i) {
-      const auto n = static_cast<std::uint32_t>(items[i].tokens.size());
-      UseScratch(RowScratch(base, offsets[i]));
-      if (!items[i].session->Cancelled() && items[i].session->mtp_enabled_ &&
-          !Check(hipMemcpyAsync(
-                     items[i].session->mtp_.target_hidden, s_.res,
-                     static_cast<std::size_t>(n) * c.HcDim() * sizeof(float),
-                     hipMemcpyDeviceToDevice, stream_),
-                 error)) {
-        return false;
+    if (end_layer == c.num_layers) {
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        const auto n = static_cast<std::uint32_t>(items[i].tokens.size());
+        UseScratch(RowScratch(base, offsets[i]));
+        if ((can_graph || !items[i].session->Cancelled()) &&
+            items[i].session->mtp_enabled_ &&
+            !Check(hipMemcpyAsync(
+                       items[i].session->mtp_.target_hidden, s_.res,
+                       static_cast<std::size_t>(n) * c.HcDim() * sizeof(float),
+                       hipMemcpyDeviceToDevice, stream_),
+                   error)) {
+          return false;
+        }
       }
+      UseScratch(base);
+      return HcMixBatch(model_->hc_head(), base.res, false, base.mixed, nullptr,
+                        rows, error) &&
+             DenseBatch(model_->output(), base.mixed, batch_logits_, rows,
+                        error);
     }
-    UseScratch(base);
-    return HcMixBatch(model_->hc_head(), base.res, false, base.mixed, nullptr,
-                      rows, error) &&
-           DenseBatch(model_->output(), base.mixed, batch_logits_, rows, error);
+    return true;
   };
   bool ok = false;
   try {
-    ok = body();
+    if (can_graph) {
+      const std::uint32_t first_layer =
+          c.ple_layer > 0 ? static_cast<std::uint32_t>(c.ple_layer) : 0U;
+      if (first_layer > 0) {
+        BatchGraphKey prefix_key = suffix_key;
+        prefix_key.kind = 1;
+        if (!RunBatchGraph(
+                prefix_key, true,
+                [&]() {
+                  bool normed = false;
+                  return run_layers(0, first_layer, normed);
+                },
+                error, false)) {
+          (void)hipStreamSynchronize(stream_);
+          UseScratch(base);
+          return false;
+        }
+        if (ple_pending_ && !WaitPle(error)) {
+          (void)hipStreamSynchronize(stream_);
+          UseScratch(base);
+          return false;
+        }
+        ok = RunBatchGraph(
+            suffix_key, true,
+            [&]() {
+              bool normed = false;
+              return run_layers(first_layer, c.num_layers, normed);
+            },
+            error, true);
+      } else {
+        if (c.ple_layer == 0 && ple_pending_ && !WaitPle(error)) {
+          UseScratch(base);
+          return false;
+        }
+        ok = RunBatchGraph(
+            suffix_key, true,
+            [&]() {
+              bool normed = false;
+              return run_layers(0, c.num_layers, normed);
+            },
+            error, true);
+      }
+    } else {
+      bool normed = false;
+      ok = run_layers(0, c.num_layers, normed) &&
+           Check(hipStreamSynchronize(stream_), error);
+    }
   } catch (...) {
     (void)hipStreamSynchronize(stream_);
     UseScratch(base);
     throw;
   }
-  const auto status = hipStreamSynchronize(stream_);
   UseScratch(base);
-  if (!ok || !Check(status, error)) {
+  if (!ok) {
     return false;
   }
   for (std::size_t i = 0; i < items.size(); ++i) {

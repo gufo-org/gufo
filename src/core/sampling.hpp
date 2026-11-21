@@ -157,6 +157,13 @@ public:
   /// Retain ordinary CPU/GPU sampling while its mask makes no restriction.
   /// Also true while ForcedToken() is set, so GPU samplers defer to the host.
   [[nodiscard]] bool NeedsConstraintMask() const;
+  [[nodiscard]] bool HasConstraint() const noexcept {
+    return config_.constraint != nullptr;
+  }
+  [[nodiscard]] bool AllowsToken(TokenId token) const;
+  [[nodiscard]] std::shared_ptr<const TokenBitmask> ConstraintBitmask() const;
+  [[nodiscard]] std::shared_ptr<const TokenBitmask> CachedConstraintBitmask()
+      const;
   [[nodiscard]] std::span<const TokenId> history() const noexcept;
   /// The token every sampling path returns next, if any: an exhausted
   /// reasoning budget forces its end sequence.
@@ -199,6 +206,9 @@ public:
   /// Retains the full-row sampler's FP64 filtering and normalization.
   [[nodiscard]] SamplingDistribution DistributionFromCandidates(
       std::span<const LogitCandidate> logits) const;
+  [[nodiscard]] std::optional<SamplingDistribution>
+  TryDistributionFromCandidates(std::span<const LogitCandidate> logits,
+                                std::size_t unpenalized_count) const;
   /// Retain a speculative residual draw for the next Sample call. Copies
   /// preserve this draw along with the RNG; resetting history discards it.
   void DeferSample(TokenId token);
@@ -223,6 +233,8 @@ private:
   void PrepareSelected(std::span<const float> logits);
   void FilterSelected(std::optional<std::size_t> top_p_keep = std::nullopt);
   [[nodiscard]] SamplingDistribution SelectedDistribution();
+  [[nodiscard]] SamplingDistribution DistributionConstrainedTopK(
+      std::span<const float> logits) const;
   void StartReasoning();
   void OpenReasoning();
   void AdvanceReasoning(TokenId token);
