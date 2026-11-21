@@ -76,7 +76,8 @@ struct Api {
 };
 
 // The library's file name, and where a build or an install puts it: beside
-// gufo.exe on Windows, <prefix>/lib/gufo on Linux.
+// gufo.exe on Windows, <prefix>/lib/gufo on Linux; else the build tree, else
+// the library search path.
 #ifdef _WIN32
 inline constexpr const char* kLibrary = "loom_text_embed.dll";
 #else
@@ -119,8 +120,15 @@ inline const Api& LoadApi() {
       }
     }
     if (library == nullptr) {
-      error = std::string(kLibrary) + " was not found; looked in:" + tried;
-      return;
+      // Then the loader's search path: the portable Linux artifact runs Gufo
+      // through a bundled ELF loader whose --library-path holds lib/gufo.
+      try {
+        library = std::make_unique<platform::Library>(kLibrary);
+      } catch (const platform::LibraryError& e) {
+        error = std::string(kLibrary) + " was not found; looked in:" + tried +
+                "\n  the library search path (" + e.what() + ")";
+        return;
+      }
     }
     try {
 #define GUFO_LOOM_BIND(name) \
