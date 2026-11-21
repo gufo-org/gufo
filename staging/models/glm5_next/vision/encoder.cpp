@@ -280,6 +280,10 @@ bool Encoder::Encode(const float* pixels, std::uint32_t nx,
   float* upb = alloc(frow);
   float* gateb = alloc(frow);
   float* act = alloc(frow);
+  // Merger im2col gathers four emb-wide patch rows per merged token, so it
+  // needs n_tokens * 4 * emb = n_patches * emb floats: patchmat is only
+  // kPatchVec wide and cannot back it.
+  float* mergerin = alloc(row);
   float* mrow = alloc(token_row);
   float* mrow2 = alloc(token_row);
   float* pf1 = alloc(pff);
@@ -294,7 +298,8 @@ bool Encoder::Encode(const float* pixels, std::uint32_t nx,
   if (pix_dev == nullptr || patchmat == nullptr || h == nullptr ||
       xn == nullptr || q == nullptr || k == nullptr || v == nullptr ||
       attn == nullptr || delta == nullptr || upb == nullptr ||
-      gateb == nullptr || act == nullptr || mrow == nullptr ||
+      gateb == nullptr || act == nullptr || mergerin == nullptr ||
+      mrow == nullptr ||
       mrow2 == nullptr || pf1 == nullptr || pf2 == nullptr ||
       pff_act == nullptr || out_dev == nullptr) {
     release();
@@ -361,8 +366,8 @@ bool Encoder::Encode(const float* pixels, std::uint32_t nx,
   g5r::RmsNorm(h, m.post_ln, xn, n_patches, emb, emb, emb, eps, s);
 
   // 2x2 merge-window conv, then fc + LayerNorm(1e-5) + gelu_erf.
-  MergerIm2Col(xn, patchmat, n_tokens, emb, s);
-  VisionGemm(m.merger, patchmat, mrow, nout, 4 * emb, n_tokens, s);
+  MergerIm2Col(xn, mergerin, n_tokens, emb, s);
+  VisionGemm(m.merger, mergerin, mrow, nout, 4 * emb, n_tokens, s);
   g5r::AddBias(mrow, m.merger_bias, static_cast<std::uint32_t>(token_row), nout,
                s);
   VisionGemm(m.fc, mrow, mrow2, nout, nout, n_tokens, s);
