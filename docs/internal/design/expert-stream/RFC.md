@@ -1,7 +1,7 @@
 # RFC: expert streaming for extensions
 
-Status: implemented on the `feat/expert-stream` branch as an experimental
-extension API (0.3.26 to 0.3.28), proposed for review. Written November 2026.
+Status: an experimental extension API (0.3.38), discussed in #1286. Written
+November 2026.
 Two extensions use it: DeepSeek V4.1 Flash, where the store came from, and
 Gemma 4 26B-A4B, which tests the API on a second model.
 
@@ -295,7 +295,9 @@ keeping today's behaviour. Two ways to support it:
 
 The second covers both a few layers of lead and per-token predictions;
 keeping the two-region path for W = 1 leaves DeepSeek's measured behaviour
-unchanged. `Expect`, `PredictFlush` and `wide` stay as they are.
+unchanged. `Expect`, `PredictFlush` and `wide` stay as they are. No core
+model is planned to stream (#1286), so the window stays one layer until a
+model needs more.
 
 ### Reads and platforms
 
@@ -356,30 +358,32 @@ The partial caches fall off steeply because Gemma doesn't prefetch.
 
 ## Delivery
 
-Two pull requests, each with one change record:
+One pull request with two change records: the store (with its HIP test, the
+caller-stream contract and `tools/expert_stream/`), and the serving claim
+with host-pressure handling. On its own the store would fill the host to its
+reserve, which #1275's idle relief reads as pressure, so the two land
+together. The extensions raise their `api_version` once it merges.
 
-1. The store, its HIP test (no model needed), the caller-stream contract and
-   `tools/expert_stream/`.
-2. The serving claim and `Store::Fit`, stacked on the first.
+## Decisions (#1286)
 
-The extensions raise their `api_version` once each merges.
+- **Lending memory to Gufo** goes through `mem::PageLender` on the device's
+  `PagePool`, as the RAM cache does, and not through an unmap:
+  `hipMemUnmap` waits for in-flight GPU work like a free. Cache chunks on
+  pool pages keep their own mapping while the pool maps a lent page a second
+  time, with no change to `Layout`, `Prepare` or the tables. The first gain
+  is a larger cache, borrowing the sessions' promised but unwritten state
+  (#1251). Still to solve: `Lend` runs beside `Prepare`, so it may give only
+  pages no handed-out table points to and must evict in place; and while
+  serving, the pool makes lender pages only above a floor of about 12 GiB, so
+  the store would commit its pages at `Fit`. Release to other processes stays
+  idle-only, and pass scratch (#1265) waits until wider passes are shown to
+  help DeepSeek. Not part of this change.
+- **Option names.** `--stream-experts` and `--expert-cache-bytes` stay in the
+  extensions.
+- **Core models.** No core model is planned to stream, so prefetch keeps its
+  one-layer window.
 
 ## Open questions
 
-- **Memory under pressure, and lending.** The expert cache now gives memory
-  back to other processes (above), but only at idle: freeing a chunk
-  synchronizes the device, because chunks are `hipMalloc` allocations. Two
-  more cases want it to lend memory to Gufo itself: transient pass scratch
-  (#1265's `mem::ScratchArena` maps only while enough memory is free, which
-  the expert cache never leaves) and session state under the reclaim ladder
-  (#1258). Backing the chunks with demand-mapped pages, as the state memory
-  does, would make lending an unmap with no slot moves. Should the store join
-  the state memory's ladder, and through which interface? Windows has no
-  demand mapping, so it would keep `hipMalloc` chunks.
-- **Option names.** Both extensions declare `--stream-experts` and
-  `--expert-cache-bytes`, with the same names and types. Serving owns the
-  budget, which makes `--expert-cache-bytes` look like host policy, but no
-  core model streams yet. Keep them in the extensions until one does, or
-  reserve them in core now?
 - **Refitting at runtime.** `Fit` runs once at startup. Should a change to
   the prompt-cache budget at runtime refit the expert cache?
