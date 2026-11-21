@@ -22,6 +22,7 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <new>
 #include <random>
 #include <set>
@@ -46,9 +47,10 @@ using Bytes = std::vector<std::uint8_t>;
 // islow IDCT and fancy upsampling; the run prints the largest values seen.
 // With subsampled chroma, a width or height of 8 mod 16 ends the image inside
 // a chroma block, and zune-jpeg upsamples the outermost row or column against
-// the block's padding where libjpeg-turbo replicates the last sample.
-constexpr int kMaxInteriorDifference = 6;
-constexpr int kMaxBorderDifference = 40;
+// the block's padding where libjpeg-turbo replicates the last sample. Only
+// subsampled images get the border allowance.
+constexpr int kMaxDifference = 6;
+constexpr int kMaxSubsampledBorderDifference = 40;
 constexpr double kMaxMeanDifference = 1.0;
 
 constexpr std::string_view kArithmetic =
@@ -61,18 +63,40 @@ constexpr std::string_view kShortScan =
     "interval without its RST marker, with zeros; libjpeg-turbo warns, which "
     "the reference rejects";
 
-const std::map<std::string_view, std::string_view> kKnownDeviations{
-    {"arithmetic420", kArithmetic},  {"arithmetic-progressive420", kArithmetic},
-    {"lossless-rgb", kLossless},     {"sof-wider-than-data", kShortScan},
-    {"dri-without-rst", kShortScan},
+constexpr std::string_view kDnl =
+    "zune-jpeg's strict mode rejects a DNL marker; libjpeg-turbo skips one "
+    "that follows a nonzero SOF height";
+
+constexpr std::string_view kAcOverrun =
+    "a flipped bit makes an AC run pass coefficient 63; libjpeg-turbo silently "
+    "stores it in coefficient 63, zune-jpeg's slow Huffman path (pos & 63) "
+    "wraps it into a low-frequency coefficient";
+
+// What DecodeImage returns instead of the reference: pixels of this size, or
+// std::invalid_argument when the size is zero.
+struct Deviation {
+  std::string_view reason;
+  std::uint32_t width{0};
+  std::uint32_t height{0};
 };
 
-// A bit flip inside entropy-coded data or a Huffman table still decodes in
-// zune-jpeg, to different pixels; libjpeg-turbo decodes it too, or warns about
-// the bad Huffman code or the bytes left before the next marker, which the
-// reference rejects. A flip elsewhere must match.
+const std::map<std::string_view, Deviation> kKnownDeviations{
+    {"arithmetic420", {kArithmetic}},
+    {"arithmetic-progressive420", {kArithmetic}},
+    {"lossless-rgb", {kLossless}},
+    {"dnl-after-scan", {kDnl}},
+    {"sof-wider-than-data", {kShortScan, 330, 31}},
+    {"dri-without-rst", {kShortScan, 33, 31}},
+    {"ycc420-mutation-7-at-2183", {kAcOverrun, 64, 48}},
+};
+
+// A bit flip inside entropy-coded data or a Huffman table can make
+// libjpeg-turbo warn about a bad Huffman code or bytes left before the next
+// marker, which the reference rejects; zune-jpeg may still decode it. When the
+// reference decodes, the result must match.
 constexpr std::string_view kEntropyMutation =
-    "a flipped entropy-coded or Huffman table bit decodes to other pixels";
+    "a flipped entropy-coded or Huffman table bit that libjpeg-turbo warns "
+    "about may decode";
 
 struct Outcome {
   enum class Kind {
@@ -202,7 +226,7 @@ Outcome DecodeCurrent(const Bytes& jpeg) {
 // Outcomes match when both reject with the same exception type, or both
 // decode to the same size within the pixel tolerance. Messages differ by
 // design: the Rust decoder reports one "invalid JPEG image".
-bool Matches(const Outcome& expected, const Outcome& actual) {
+bool Matches(const Outcome& expected, const Outcome& actual, int border_limit) {
   if (expected.kind != actual.kind)
     return false;
   if (expected.kind != Outcome::Kind::kPixels)
@@ -211,8 +235,8 @@ bool Matches(const Outcome& expected, const Outcome& actual) {
       expected.pixels.size() != actual.pixels.size())
     return false;
   const auto difference = Compare(expected, actual);
-  return difference.interior_max <= kMaxInteriorDifference &&
-         difference.max <= kMaxBorderDifference &&
+  return difference.interior_max <= kMaxDifference &&
+         difference.max <= border_limit &&
          difference.mean <= kMaxMeanDifference;
 }
 
@@ -249,9 +273,23 @@ struct Segment {
   Bytes data;
 };
 
-struct WriterError {
+// Everything libjpeg modifies lives on the heap, so its values stay defined
+// after its error handler longjmps back.
+struct Writer {
+  // First, so the error manager's address is the Writer's.
   jpeg_error_mgr manager{};
+  jpeg_compress_struct encoder{};
   std::jmp_buf jump;
+  unsigned char* buffer{nullptr};
+  unsigned long size{0};
+  bool created{false};
+  std::vector<std::uint8_t> row;
+  std::mt19937 noise;
+  ~Writer() {
+    if (created)
+      jpeg_destroy_compress(&encoder);
+    std::free(buffer);
+  }
 };
 
 std::uint8_t Sample(unsigned x, unsigned y, unsigned c, std::mt19937& noise) {
@@ -262,28 +300,20 @@ std::uint8_t Sample(unsigned x, unsigned y, unsigned c, std::mt19937& noise) {
   return static_cast<std::uint8_t>((base + edge + noise() % 9) & 0xff);
 }
 
-// Returns an empty buffer when this libjpeg-turbo cannot write the format.
-Bytes WriteJpeg(const Format& format, unsigned width, unsigned height,
-                const std::vector<Segment>& segments = {}) {
-  jpeg_compress_struct encoder{};
-  WriterError error;
-  encoder.err = jpeg_std_error(&error.manager);
-  error.manager.error_exit = [](j_common_ptr common) {
-    std::longjmp(reinterpret_cast<WriterError*>(common->err)->jump, 1);
-  };
-  error.manager.output_message = [](j_common_ptr) {};
-  unsigned char* buffer = nullptr;
-  unsigned long size = 0;
+// Writes the JPEG into writer. libjpeg-turbo may longjmp out of it, so it
+// keeps every object with a destructor in writer, and its caller holds no
+// locals across the setjmp.
+void Encode(Writer& writer, const Format& format, unsigned width,
+            unsigned height, const std::vector<Segment>& segments) {
+  auto& encoder = writer.encoder;
+  auto& row = writer.row;
+  auto& noise = writer.noise;
   const int channels = InputComponents(format.input);
-  std::vector<std::uint8_t> row(std::size_t{width} * channels);
-  std::mt19937 noise(width * 131 + height);
-  if (setjmp(error.jump) != 0) {
-    jpeg_destroy_compress(&encoder);
-    std::free(buffer);
-    return {};
-  }
+  row.resize(std::size_t{width} * channels);
+  noise.seed(width * 131 + height);
   jpeg_create_compress(&encoder);
-  jpeg_mem_dest(&encoder, &buffer, &size);
+  writer.created = true;
+  jpeg_mem_dest(&encoder, &writer.buffer, &writer.size);
   encoder.image_width = width;
   encoder.image_height = height;
   encoder.input_components = channels;
@@ -322,10 +352,21 @@ Bytes WriteJpeg(const Format& format, unsigned width, unsigned height,
     jpeg_write_scanlines(&encoder, &pointer, 1);
   }
   jpeg_finish_compress(&encoder);
-  jpeg_destroy_compress(&encoder);
-  Bytes out(buffer, buffer + size);
-  std::free(buffer);
-  return out;
+}
+
+// Returns an empty buffer when this libjpeg-turbo cannot write the format.
+Bytes WriteJpeg(const Format& format, unsigned width, unsigned height,
+                const std::vector<Segment>& segments = {}) {
+  const auto writer = std::make_unique<Writer>();
+  writer->encoder.err = jpeg_std_error(&writer->manager);
+  writer->manager.error_exit = [](j_common_ptr common) {
+    std::longjmp(reinterpret_cast<Writer*>(common->err)->jump, 1);
+  };
+  writer->manager.output_message = [](j_common_ptr) {};
+  if (setjmp(writer->jump) != 0)
+    return {};
+  Encode(*writer, format, width, height, segments);
+  return Bytes(writer->buffer, writer->buffer + writer->size);
 }
 
 // --- Cases ----------------------------------------------------------------
@@ -527,6 +568,12 @@ void AddFramingCases(Cases& cases) {
   dri.insert(dri.begin() + static_cast<std::ptrdiff_t>(sos),
              dri_segment.begin(), dri_segment.end());
   cases.Mutated("dri-without-rst", dri);
+
+  // A DNL segment that repeats the SOF height after the scan.
+  auto dnl = jpeg;
+  const Bytes dnl_segment{0xff, 0xdc, 0x00, 0x04, 0x00, 31};
+  dnl.insert(dnl.end() - 2, dnl_segment.begin(), dnl_segment.end());
+  cases.Mutated("dnl-after-scan", dnl);
 }
 
 void AddMetadataCases(Cases& cases) {
@@ -733,6 +780,34 @@ struct Worst {
   }
 };
 
+// Whether the frame header samples its components at different rates.
+bool Subsampled(const Bytes& jpeg) {
+  for (std::size_t i = 2; i + 10 < jpeg.size(); ++i) {
+    if (jpeg[i] != 0xff || jpeg[i + 1] < 0xc0 || jpeg[i + 1] > 0xc2)
+      continue;
+    const std::size_t components = jpeg[i + 9];
+    if (i + 10 + components * 3 > jpeg.size())
+      return false;
+    for (std::size_t c = 1; c < components; ++c) {
+      if (jpeg[i + 11 + c * 3] != jpeg[i + 11])
+        return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+int BorderLimit(const Bytes& jpeg) {
+  return Subsampled(jpeg) ? kMaxSubsampledBorderDifference : kMaxDifference;
+}
+
+bool IsListedOutcome(const Deviation& deviation, const Outcome& actual) {
+  if (deviation.width == 0)
+    return actual.kind == Outcome::Kind::kInvalidArgument;
+  return actual.kind == Outcome::Kind::kPixels &&
+         actual.width == deviation.width && actual.height == deviation.height;
+}
+
 void CheckCase(const Case& test, Failures& failures, Worst& worst) {
   const auto expected = DecodeReference(test.jpeg);
   const auto actual = DecodeCurrent(test.jpeg);
@@ -744,33 +819,32 @@ void CheckCase(const Case& test, Failures& failures, Worst& worst) {
   }
   if (test.valid)
     worst.Add(test.name, expected, actual);
-  const bool deviates = !Matches(expected, actual);
-  if (test.entropy_mutation) {
-    // Either side may reject; both must not fail otherwise, and pixels must
-    // keep the size.
-    const auto acceptable = [](const Outcome& outcome) {
-      return outcome.kind == Outcome::Kind::kPixels ||
-             outcome.kind == Outcome::Kind::kInvalidArgument;
-    };
-    const bool same_size =
-        expected.kind != Outcome::Kind::kPixels ||
-        actual.kind != Outcome::Kind::kPixels ||
-        (expected.width == actual.width && expected.height == actual.height);
-    if (!acceptable(expected) || !acceptable(actual) || !same_size) {
+  if (test.entropy_mutation &&
+      expected.kind == Outcome::Kind::kInvalidArgument) {
+    if (actual.kind != Outcome::Kind::kPixels &&
+        actual.kind != Outcome::Kind::kInvalidArgument) {
       failures.Add(test.name + ": " + std::string(kEntropyMutation) +
-                   ", but the outcome is not one it allows\n" +
+                   ", or be rejected as invalid\n" +
                    Difference(expected, actual));
     }
     return;
   }
-  const bool listed = kKnownDeviations.contains(test.name);
-  if (deviates && !listed) {
-    failures.Add(test.name + ": DecodeImage differs from the reference\n" +
-                 Difference(expected, actual));
-  } else if (!deviates && listed) {
+  const bool deviates = !Matches(expected, actual, BorderLimit(test.jpeg));
+  const auto listed = kKnownDeviations.find(test.name);
+  if (listed == kKnownDeviations.end()) {
+    if (deviates) {
+      failures.Add(test.name + ": DecodeImage differs from the reference\n" +
+                   Difference(expected, actual));
+    }
+  } else if (!deviates) {
     failures.Add(
         test.name +
         " is in kKnownDeviations but matches the reference; remove the row");
+  } else if (!IsListedOutcome(listed->second, actual)) {
+    failures.Add(test.name +
+                 ": DecodeImage differs from its kKnownDeviations "
+                 "row\n" +
+                 Difference(expected, actual));
   }
 }
 
@@ -863,7 +937,7 @@ int RunCorpus(const std::vector<std::filesystem::path>& directories,
     }
     const auto expected = DecodeReference(jpeg);
     const auto actual = DecodeCurrent(jpeg);
-    const bool same = Matches(expected, actual);
+    const bool same = Matches(expected, actual, BorderLimit(jpeg));
     PixelDifference difference;
     if (expected.kind == Outcome::Kind::kPixels &&
         actual.kind == Outcome::Kind::kPixels &&

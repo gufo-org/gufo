@@ -78,10 +78,12 @@ it replaced, frozen in `tests/core/jpeg_reference.cpp`. libjpeg-turbo writes
 every case: gray, YCbCr from 4:4:4 to 4:1:0, RGB, CMYK and YCCK, baseline,
 progressive, optimized, restart intervals and qualities from 1 to 100, at sizes
 that end inside an MCU, plus EXIF orientations, metadata, framing errors,
-truncations and bit flips. Pixels must stay within 6 of the reference away from
-the border, 40 on it and 1.0 on average. Arithmetic coding, lossless JPEG and
-scans that end early are listed deviations; a flipped bit in entropy-coded data
-or a Huffman table may decode either way. Only the test links libjpeg-turbo.
+truncations and bit flips. Pixels must stay within 6 of the reference and 1.0
+on average; the border of an image with subsampled chroma may differ by 40.
+Arithmetic coding, lossless JPEG, DNL markers, scans that end early and an AC
+run past coefficient 63 are listed deviations, each with the outcome the Rust
+decoder must return. A flipped entropy-coded or Huffman table bit that the
+reference rejects may decode. Only the test links libjpeg-turbo.
 `jpeg_decode_test --corpus DIR... [--repeat N]` compares and times real photos.
 
 `wav_decode_test` checks PCM16 values, the strict caller's status mapping,

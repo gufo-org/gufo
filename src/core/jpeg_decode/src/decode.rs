@@ -28,6 +28,8 @@ pub struct Jpeg<'a> {
 /// Walks the segments after SOI and the entropy-coded data after each SOS.
 /// True when EOI ends the walk; false when the bytes end first, or when a
 /// marker is missing where a segment ends, which libjpeg-turbo warns about.
+/// Between segments, `FF 00` reads as a marker with a length, where zune-jpeg
+/// treats it as fill; the image is rejected either way.
 fn reaches_eoi(bytes: &[u8]) -> bool {
     let mut offset = 2;
     loop {

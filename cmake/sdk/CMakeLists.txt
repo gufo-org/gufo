@@ -36,7 +36,7 @@ endif()
 find_package(Threads REQUIRED)
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-foreach(package CURL PNG JPEG ZLIB OpenMP)
+foreach(package CURL PNG ZLIB OpenMP)
   find_package(${package} QUIET)
 endforeach()
 # Extension-only libraries come from each extension's manifest `packages`.

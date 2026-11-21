@@ -335,7 +335,6 @@
               pkgsSys.icu
               pkgsSys.curl
               pkgsSys.libpng
-              pkgsSys.libjpeg
               pkgsSys.libwebp
               pkgsSys.libopus
               rustToolchain
