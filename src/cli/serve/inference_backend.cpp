@@ -52,6 +52,7 @@ struct InferenceBackend::Impl {
     SamplingDefaults sampling_defaults;
     std::uint32_t max_context{0};
     bool supports_images{false};
+    ChatTemplateCaps chat_template_caps;
     ReasoningOptions reasoning_defaults;
     std::string model_path;
     std::string build_info;
@@ -188,6 +189,7 @@ bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner> runner,
     new_state->sampling_defaults.sampling = sampling::SamplingConfig{};
     new_state->sampling_defaults.supplied = {};
     new_state->supports_images = desc.capabilities.supports_vision;
+    new_state->chat_template_caps = runner->TemplateCaps();
     new_state->model_id = desc.model_id;
     new_state->max_context = desc.max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
@@ -247,6 +249,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         new_state->model_id = descriptor.model_id;
         new_state->max_context = descriptor.max_context;
         new_state->supports_images = staging->supports_images;
+        new_state->chat_template_caps = staging->runner->TemplateCaps();
         auto runner_pool = std::make_shared<TextRunnerPool>(
             std::move(staging->runner), session_count);
         new_state->scheduler = std::make_shared<TextGenerationScheduler>(
@@ -354,6 +357,15 @@ bool InferenceBackend::supports_images() const {
   return state != nullptr && state->supports_images;
 #else
   return false;
+#endif
+}
+
+ChatTemplateCaps InferenceBackend::chat_template_caps() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state != nullptr ? state->chat_template_caps : ChatTemplateCaps{};
+#else
+  return {};
 #endif
 }
 

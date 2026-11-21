@@ -710,6 +710,21 @@ public:
     };
   }
 
+  // The shared Qwen renderer maps the six levels onto three distinct prompts:
+  // low yields the brief-thinking instruction, medium the unmodified prompt,
+  // and high/xhigh/max the xhigh instruction, which is also the prompt of an
+  // unset effort. Advertised levels exclude that fallback rendering and
+  // collapse aliases onto the highest name, as llama.cpp derives them.
+  [[nodiscard]] ChatTemplateCaps TemplateCaps() const override {
+    ChatTemplateCaps caps;
+    caps.supports_typed_content = true;
+    caps.supports_preserve_reasoning = true;
+    caps.supports_reasoning_effort = true;
+    caps.supports_object_arguments = true;
+    caps.reasoning_effort_levels = {"low", "medium"};
+    return caps;
+  }
+
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
     auto usage = hip::QwenGpuExecutor::EstimateMemoryUsage(
         model_->GetConfig(), max_context_, execution_policy_);

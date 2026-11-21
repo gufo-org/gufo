@@ -288,6 +288,10 @@ public:
   }
   /// Whether the loaded backend accepts image inputs in chat requests.
   [[nodiscard]] virtual bool supports_images() const { return false; }
+  /// Chat-template capabilities for llama-server's `chat_template_caps`.
+  [[nodiscard]] virtual ChatTemplateCaps chat_template_caps() const {
+    return {};
+  }
   /// The served model file and build revision, as llama-server's /props
   /// reports them. Empty when unknown.
   [[nodiscard]] virtual std::string model_path() const { return {}; }

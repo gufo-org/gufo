@@ -513,10 +513,26 @@ void TestLlamaProps() {
   assert(params->find("max_tokens")->as_double() == -1.0);
   assert(!bare.find("modalities")->find("vision")->as_bool(true));
 
+  // A backend that declares nothing still reports the llama.cpp capability
+  // field names so clients can read them unconditionally.
+  const auto* bare_caps = bare.find("chat_template_caps");
+  assert(bare_caps != nullptr);
+  assert(bare_caps->find("supports_string_content")->as_bool());
+  assert(!bare_caps->find("supports_typed_content")->as_bool(true));
+  assert(!bare_caps->find("supports_preserve_reasoning")->as_bool(true));
+  assert(!bare_caps->find("supports_reasoning_effort")->as_bool(true));
+  assert(bare_caps->find("reasoning_effort_levels")->dump() == "[]");
+  assert(bare_caps->find("reasoning_effort_rejected")->dump() == "[]");
+
   server.backend->served_path = "/models/model-00001-of-00002.gguf";
   server.backend->served_build = "0.2.0 (abc1234)";
   server.backend->sessions.resize(2);
   server.backend->image_support = true;
+  server.backend->caps.supports_typed_content = true;
+  server.backend->caps.supports_preserve_reasoning = true;
+  server.backend->caps.supports_reasoning_effort = true;
+  server.backend->caps.supports_object_arguments = true;
+  server.backend->caps.reasoning_effort_levels = {"low", "xhigh"};
   server.backend->defaults.max_tokens = 512;
   const auto full = props("/props");
   assert(full.member_str("model_path") == "/models/model-00001-of-00002.gguf");
@@ -526,6 +542,17 @@ void TestLlamaProps() {
              ->find("params")
              ->member_size("n_predict") == 512);
   assert(full.find("modalities")->find("vision")->as_bool());
+  const auto* full_caps = full.find("chat_template_caps");
+  assert(full_caps->find("supports_typed_content")->as_bool());
+  assert(full_caps->find("supports_tools")->as_bool());
+  assert(full_caps->find("supports_tool_calls")->as_bool());
+  assert(full_caps->find("supports_parallel_tool_calls")->as_bool());
+  assert(full_caps->find("supports_system_role")->as_bool());
+  assert(full_caps->find("supports_preserve_reasoning")->as_bool());
+  assert(full_caps->find("supports_reasoning_effort")->as_bool());
+  assert(full_caps->find("supports_object_arguments")->as_bool());
+  assert(full_caps->find("reasoning_effort_levels")->dump() ==
+         R"(["low","xhigh"])");
 
   // ?model= is accepted and not required, as outside llama-server router mode.
   const auto named = props("/props?model=alias");

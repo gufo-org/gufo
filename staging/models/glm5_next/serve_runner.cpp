@@ -174,6 +174,21 @@ class Glm5TextRunner final : public TextModelRunner {
     return markers;
   }
 
+  // The reference header renders "Low" for low, "High" for high and xhigh,
+  // and "Max" (the fallback also serving unset effort) otherwise, so alias
+  // collapsing keeps the highest distinct name: low and xhigh. Preserving
+  // thinking (the default) replays history thoughts; images and per-argument
+  // tool frames are consumed as typed content and object arguments.
+  [[nodiscard]] ChatTemplateCaps TemplateCaps() const override {
+    ChatTemplateCaps caps;
+    caps.supports_typed_content = true;
+    caps.supports_preserve_reasoning = true;
+    caps.supports_reasoning_effort = true;
+    caps.supports_object_arguments = true;
+    caps.reasoning_effort_levels = {"low", "xhigh"};
+    return caps;
+  }
+
   // The prompt framing appends the thought opener (matching the reference
   // template's generation prompt), so the completion always starts inside
   // the thought and the stream needs no opener to enter reasoning.

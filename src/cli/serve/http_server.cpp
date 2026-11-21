@@ -1522,6 +1522,32 @@ HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend& b) {
   modalities["video"] = false;
   modalities["audio"] = false;
   resp["modalities"] = std::move(modalities);
+
+  // llama.cpp derives this by probing its Jinja template at load; gufo
+  // renders templates in engine code, so the loaded runner declares the
+  // same fields.
+  const auto caps = b.chat_template_caps();
+  json::Value caps_json = json::Value::object();
+  caps_json["supports_string_content"] = caps.supports_string_content;
+  caps_json["supports_typed_content"] = caps.supports_typed_content;
+  caps_json["supports_tools"] = caps.supports_tools;
+  caps_json["supports_tool_calls"] = caps.supports_tool_calls;
+  caps_json["supports_parallel_tool_calls"] = caps.supports_parallel_tool_calls;
+  caps_json["supports_system_role"] = caps.supports_system_role;
+  caps_json["supports_preserve_reasoning"] = caps.supports_preserve_reasoning;
+  caps_json["supports_reasoning_effort"] = caps.supports_reasoning_effort;
+  caps_json["supports_object_arguments"] = caps.supports_object_arguments;
+  json::Value levels = json::Value::array();
+  for (const auto& level : caps.reasoning_effort_levels) {
+    levels.push_back(level);
+  }
+  caps_json["reasoning_effort_levels"] = std::move(levels);
+  json::Value rejected = json::Value::array();
+  for (const auto& level : caps.reasoning_effort_rejected) {
+    rejected.push_back(level);
+  }
+  caps_json["reasoning_effort_rejected"] = std::move(rejected);
+  resp["chat_template_caps"] = std::move(caps_json);
   return Ok(resp);
 }
 
