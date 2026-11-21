@@ -113,7 +113,10 @@ def merge(plan, results, output):
             row.update(error='\n'.join(errors) or None, failures=failures,
                        log_tail='\n'.join(part['log_tail'] for part in observed if part.get('log_tail')))
         merged['groups'].append(row)
-    if any(item[field] != 'passed' for item in merged['models'] for field in ('correctness', 'timing')):
+    # Timing is skipped only for a model the plan leaves untimed: a timed part
+    # passes or errors, and a missing shard errors.
+    if any(item['correctness'] != 'passed' or item['timing'] not in ('passed', 'skipped')
+           for item in merged['models']):
         merged['status'] = 'failed'
     (output / 'summary.json').write_text(json.dumps(merged, indent=2) + '\n')
     return merged

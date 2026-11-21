@@ -525,6 +525,25 @@ class ShardTest(unittest.TestCase):
         self.assertEqual(merged['status'], 'passed')
         self.assertEqual(set(merged['shards'].values()), {'passed'})
 
+    def test_an_untimed_model_passes_without_speed_evidence(self):
+        import devlab_merge
+        plan = self.plan('src/models/loom/loom_runner.cpp')
+        plan['shards'] = devlab_plan.shard(plan, self.TABLE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for row in plan['shards']:
+                self.write_shard(root / 'in', row)
+            merged = devlab_merge.merge(plan, root / 'in', root / 'out')
+            self.assertEqual(merged['status'], 'passed')
+            args = SimpleNamespace(authorize='success', smoke='success', benchmark=False,
+                                   results=root / 'out', run_url='https://run')
+            state, _, comment = report.render_models(args, plan, merged)
+            self.assertEqual(state, 'success')
+            self.assertIn('| not timed |', comment)
+            # Correctness still gates it.
+            merged['models'][0]['correctness'] = 'error'
+            self.assertEqual(report.render_models(args, plan, merged)[0], 'error')
+
 
 class GpuTestsTest(unittest.TestCase):
     """A model's CTest labels run from the checked bundle when its private paths change."""
