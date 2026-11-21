@@ -93,9 +93,19 @@ if(ENGINE_ENABLE_HIP)
     "GUFO_GLM5_NEXT_FIXTURE=${PROJECT_SOURCE_DIR}/tests/fixtures/glm_next/llama_reference.json"
     LABELS "glm5_next;hip;gpu;gfx1151")
 
+  add_executable(glm5_next_rocm_vision_encode_test EXCLUDE_FROM_ALL
+    rocm_vision_encode_test.cpp)
+  target_link_libraries(glm5_next_rocm_vision_encode_test PRIVATE
+    gufo_glm5_next_executor)
+  add_test(NAME glm5_next.rocm_vision_encode
+    COMMAND glm5_next_rocm_vision_encode_test)
+  set_tests_properties(glm5_next.rocm_vision_encode PROPERTIES
+    LABELS "glm5_next;hip;gpu;gfx1151")
+
   add_dependencies(glm5_next_tests glm5_next_rocm_gemv_test
     glm5_next_routed_wmma_test glm5_next_dense_wmma_test
     glm5_next_w8a8_dense_test glm5_next_rocm_ops_test
     glm5_next_rocm_attention_test
-    glm5_next_rocm_device_model_test glm5_next_rocm_forward_test)
+    glm5_next_rocm_device_model_test glm5_next_rocm_forward_test
+    glm5_next_rocm_vision_encode_test)
 endif()
