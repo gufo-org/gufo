@@ -10,6 +10,7 @@ gufo_extension_target(
   LINK_LIBRARIES
     gufo_ext_runtime
     gufo_core
+    gufo_cache
     gufo_platform
 )
 
