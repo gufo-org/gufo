@@ -8,6 +8,7 @@
 #include <cstring>
 #include <gufo/ext/experimental/managed_alloc.hpp>
 #include <gufo/ext/experimental/weight_upload.hpp>
+#include <gufo/ext/platform/prefault.hpp>
 #include <initializer_list>
 #include <iomanip>
 #include <sstream>
@@ -266,6 +267,9 @@ struct Uploader {
         return false;
       }
     }
+    // The merge read the stock rows through the mapping; drop those pages
+    // from the process, as the stock tensors never enter it.
+    platform::ReleaseMappedPages(patch.target.data, patch.target.SizeBytes());
     ++merged;
     merge_time += std::chrono::steady_clock::now() - start;
     return true;
