@@ -22,7 +22,9 @@ python3 tools/expert_stream/evict_sim.py TRACE current,lru,belady
 
 `prefetch_sim.py` and `evict_sim.py` model the store's rule before frequency
 classes (decayed score); `evict_sim.py`'s `classlru` rule approximates the
-current one. Prefetch policies need router predictions in the trace
+current one. `prefetch_sim.py`'s predefined policies are the ones compared on
+DeepSeek V4.1 Flash (top-6 predictions); edit them for a model with another
+top-k. Prefetch policies need router predictions in the trace
 (`Store::TracePrediction`); without them only the cache figures apply.
 
 ## Format, version 2
