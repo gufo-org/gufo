@@ -53,6 +53,15 @@ using core::GgmlType;
   return value;
 }
 
+/// bfloat16 -> binary32: the F32 layout already contains BF16's fields,
+/// so the upcast is an exact 16-bit left shift of the raw pattern.
+[[nodiscard]] float Bfloat16ToFloat(std::uint16_t h) noexcept {
+  const std::uint32_t bits = static_cast<std::uint32_t>(h) << 16;
+  float value = 0.0F;
+  __builtin_memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
 struct Binder {
   const core::GgufReader& reader;
   std::string* error;
@@ -65,12 +74,12 @@ struct Binder {
     ok = false;
   }
 
-  /// Binds `name` with the exact dimension list and accepted formats,
-  /// folding into a row-major [rows x cols] `TensorRef` (ne[0] -> cols
-  /// after folding, ne[1] -> rows; ne[3] must be 1).
+  /// Binds `name` with the exact dimension list, folding into a row-major
+  /// [rows x cols] `TensorRef` (ne[0] -> cols after folding, ne[1] -> rows;
+  /// ne[3] must be 1). Every float storage is accepted: the encoder uploads
+  /// F32, F16 and BF16 alike into the F32 tower.
   TensorRef Get(const std::string& name,
-                std::initializer_list<std::uint64_t> dims,
-                std::initializer_list<GgmlType> types) {
+                std::initializer_list<std::uint64_t> dims) {
     TensorRef t;
     const auto* info = reader.FindTensor(name);
     if (info == nullptr) {
@@ -93,11 +102,7 @@ struct Binder {
         return t;
       }
     }
-    bool type_ok = false;
-    for (auto type : types) {
-      type_ok = type_ok || info->type == type;
-    }
-    if (!type_ok || ElementBytes(info->type) == 0) {
+    if (ElementBytes(info->type) == 0) {
       Fail("tensor " + name + " has unsupported format " +
            std::string(core::ToString(info->type)));
       return t;
@@ -147,6 +152,11 @@ struct Binder {
       for (std::uint64_t i = 0; i < count; ++i) {
         out[i] = HalfToFloat(src[i]);
       }
+    } else if (info->type == GgmlType::kBF16) {
+      const auto* src = static_cast<const std::uint16_t*>(info->data);
+      for (std::uint64_t i = 0; i < count; ++i) {
+        out[i] = Bfloat16ToFloat(src[i]);
+      }
     } else {
       Fail("tensor " + name + " has unsupported format");
       out.clear();
@@ -160,22 +170,20 @@ struct Binder {
     const std::uint64_t hidden = 1024;
     const std::uint64_t ff = 4096;
     const std::uint64_t head_dim = 64;
-    const auto dense = {GgmlType::kF16};
-    const auto norm = {GgmlType::kF32};
-    b.ln1 = Get(p + "ln1.weight", {hidden}, norm);
-    b.qkv = Get(p + "attn_qkv.weight", {hidden, 3 * hidden}, dense);
-    b.qkv_bias = Get(p + "attn_qkv.bias", {3 * hidden}, norm);
-    b.q_norm = Get(p + "attn_q_norm.weight", {head_dim}, norm);
-    b.k_norm = Get(p + "attn_k_norm.weight", {head_dim}, norm);
-    b.attn_out = Get(p + "attn_out.weight", {hidden, hidden}, dense);
-    b.attn_bias = Get(p + "attn_out.bias", {hidden}, norm);
-    b.ln2 = Get(p + "ln2.weight", {hidden}, norm);
-    b.ffn_up = Get(p + "ffn_up.weight", {hidden, ff}, dense);
-    b.ffn_up_bias = Get(p + "ffn_up.bias", {ff}, norm);
-    b.ffn_gate = Get(p + "ffn_gate.weight", {hidden, ff}, dense);
-    b.ffn_gate_bias = Get(p + "ffn_gate.bias", {ff}, norm);
-    b.ffn_down = Get(p + "ffn_down.weight", {ff, hidden}, dense);
-    b.ffn_down_bias = Get(p + "ffn_down.bias", {hidden}, norm);
+    b.ln1 = Get(p + "ln1.weight", {hidden});
+    b.qkv = Get(p + "attn_qkv.weight", {hidden, 3 * hidden});
+    b.qkv_bias = Get(p + "attn_qkv.bias", {3 * hidden});
+    b.q_norm = Get(p + "attn_q_norm.weight", {head_dim});
+    b.k_norm = Get(p + "attn_k_norm.weight", {head_dim});
+    b.attn_out = Get(p + "attn_out.weight", {hidden, hidden});
+    b.attn_bias = Get(p + "attn_out.bias", {hidden});
+    b.ln2 = Get(p + "ln2.weight", {hidden});
+    b.ffn_up = Get(p + "ffn_up.weight", {hidden, ff});
+    b.ffn_up_bias = Get(p + "ffn_up.bias", {ff});
+    b.ffn_gate = Get(p + "ffn_gate.weight", {hidden, ff});
+    b.ffn_gate_bias = Get(p + "ffn_gate.bias", {ff});
+    b.ffn_down = Get(p + "ffn_down.weight", {ff, hidden});
+    b.ffn_down_bias = Get(p + "ffn_down.bias", {hidden});
     return b;
   }
 };
@@ -206,8 +214,8 @@ std::optional<VisionWeights> VisionWeights::Bind(const core::GgufReader& reader,
   for (std::uint64_t i = 0; i < kElems; ++i) {
     w.patch_weight[i] = w0[i] + w1[i];
   }
-  w.patch_bias = b.Get("v.patch_embd.bias", {1024}, {GgmlType::kF32});
-  w.post_ln = b.Get("v.post_ln.weight", {1024}, {GgmlType::kF32});
+  w.patch_bias = b.Get("v.patch_embd.bias", {1024});
+  w.post_ln = b.Get("v.post_ln.weight", {1024});
 
   w.blocks.reserve(w.config.block_count);
   for (std::uint32_t il = 0; il < w.config.block_count; ++il) {
@@ -217,18 +225,18 @@ std::optional<VisionWeights> VisionWeights::Bind(const core::GgufReader& reader,
   // Merger conv [kx=2, ky=2, cin=1024, cout=4096]: the flat order is already
   // row-major [cout][kx + 2*ky + 4*cin], so only the axes fold.
   TensorRef merger =
-      b.Get("mm.patch_merger.weight", {2, 2, 1024, 4096}, {GgmlType::kF16});
+      b.Get("mm.patch_merger.weight", {2, 2, 1024, 4096});
   merger.cols = 4096;
   merger.rows = 4096;
   merger.experts = 1;
   w.merger = merger;
-  w.merger_bias = b.Get("mm.patch_merger.bias", {4096}, {GgmlType::kF32});
-  w.fc = b.Get("mm.model.fc.weight", {4096, 4096}, {GgmlType::kF16});
-  w.ln_weight = b.Get("mm.post_norm.weight", {4096}, {GgmlType::kF32});
-  w.ln_bias = b.Get("mm.post_norm.bias", {4096}, {GgmlType::kF32});
-  w.up = b.Get("mm.up.weight", {4096, 10240}, {GgmlType::kF16});
-  w.gate = b.Get("mm.gate.weight", {4096, 10240}, {GgmlType::kF16});
-  w.down = b.Get("mm.down.weight", {10240, 4096}, {GgmlType::kF16});
+  w.merger_bias = b.Get("mm.patch_merger.bias", {4096});
+  w.fc = b.Get("mm.model.fc.weight", {4096, 4096});
+  w.ln_weight = b.Get("mm.post_norm.weight", {4096});
+  w.ln_bias = b.Get("mm.post_norm.bias", {4096});
+  w.up = b.Get("mm.up.weight", {4096, 10240});
+  w.gate = b.Get("mm.gate.weight", {4096, 10240});
+  w.down = b.Get("mm.down.weight", {10240, 4096});
   if (!b.ok) {
     return std::nullopt;
   }

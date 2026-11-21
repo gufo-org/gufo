@@ -93,6 +93,14 @@ namespace {
   return value;
 }
 
+/// bfloat16 -> binary32: exact 16-bit left shift of the raw pattern.
+[[nodiscard]] float Bfloat16ToFloat(std::uint16_t h) noexcept {
+  const std::uint32_t bits = static_cast<std::uint32_t>(h) << 16;
+  float value = 0.0F;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
 struct Uploader {
   std::vector<void*>& allocs;
   std::size_t& bytes;
@@ -129,9 +137,9 @@ struct Uploader {
     return CopyRaw(host.data(), host.size(), what);
   }
 
-  /// Uploads an F16 or F32 tensor as F32 (the F16 mmproj weights are upcast
-  /// host-side so the tower computes in full precision, matching the CPU
-  /// oracle; it is tiny next to the text model).
+  /// Uploads an F16, BF16 or F32 tensor as F32 (the F16/BF16 mmproj weights
+  /// are upcast host-side so the tower computes in full precision, matching
+  /// the CPU oracle; it is tiny next to the text model).
   float* Proj(const TensorRef& t) {
     if (!ok || t.empty()) {
       return nullptr;
@@ -146,6 +154,14 @@ struct Uploader {
       std::vector<float> host(elems);
       for (std::size_t i = 0; i < elems; ++i) {
         host[i] = HalfToFloat(bits[i]);
+      }
+      return CopyRaw(host.data(), elems, std::string(t.name));
+    }
+    if (t.type == core::GgmlType::kBF16) {
+      const auto* bits = static_cast<const std::uint16_t*>(t.data);
+      std::vector<float> host(elems);
+      for (std::size_t i = 0; i < elems; ++i) {
+        host[i] = Bfloat16ToFloat(bits[i]);
       }
       return CopyRaw(host.data(), elems, std::string(t.name));
     }
