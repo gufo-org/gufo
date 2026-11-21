@@ -88,7 +88,9 @@ std::shared_ptr<Region> Region::Create(
     SetError(error, "state region allocation failed");
     return nullptr;
   }
-  if (hipMemset(data, 0, region->bytes_) != hipSuccess) {
+  // Finish the default-stream clear before a non-blocking stream can write.
+  if (hipMemset(data, 0, region->bytes_) != hipSuccess ||
+      hipStreamSynchronize(nullptr) != hipSuccess) {
     (void)hipGetLastError();
     (void)hipFree(data);
     SetError(error, "state region clear failed");

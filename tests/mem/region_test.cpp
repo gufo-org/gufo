@@ -59,6 +59,32 @@ bool RowsMatch(const Region& region, std::size_t rows, std::uint32_t salt) {
   return true;
 }
 
+// A consumer on a non-blocking stream can write as soon as Create returns.
+void EagerClearBeforeFirstWrite() {
+  constexpr std::size_t bytes = 4096;
+  hipStream_t writer = nullptr;
+  Check(hipStreamCreateWithFlags(&writer, hipStreamNonBlocking), "writer");
+  std::uint8_t* host = nullptr;
+  Check(hipHostMalloc(&host, bytes, hipHostMallocDefault), "pinned sentinel");
+  std::fill_n(host, bytes, 0x5a);
+
+  std::string error;
+  auto region = Region::Create({.row_bytes = bytes, .rows = 1}, &error);
+  assert(region && !region->demand_mapped());
+  Check(hipMemcpyAsync(region->data(), host, bytes, hipMemcpyHostToDevice,
+                       writer),
+        "first write");
+  Check(hipStreamSynchronize(writer), "finish first write");
+  Check(hipDeviceSynchronize(), "drain outstanding work");
+  Check(hipMemcpy(host, region->data(), bytes, hipMemcpyDeviceToHost),
+        "read sentinel");
+  assert(std::all_of(host, host + bytes,
+                     [](std::uint8_t value) { return value == 0x5a; }));
+
+  Check(hipHostFree(host), "free sentinel");
+  Check(hipStreamDestroy(writer), "destroy writer");
+}
+
 // Layer-major growth: every segment backs its first rows, odd strides share
 // boundary pages, and the address never moves.
 void Segments(bool demand) {
@@ -321,6 +347,8 @@ void Lending() {
 int main() {
   Check(hipSetDevice(0), "device");
   const bool demand = PagePool::ForDevice(0) != nullptr;
+  if (!demand)
+    EagerClearBeforeFirstWrite();
   Segments(demand);
   Recycled();
   if (!demand) {
