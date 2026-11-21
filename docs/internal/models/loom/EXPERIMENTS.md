@@ -1,0 +1,14 @@
+# Loom package experiments
+
+| Experiment | Decision / evidence |
+| --- | --- |
+| Extension built into Gufo | Retained: `src/models/loom`, in `extensions.lock`; the source of loom-gufo-extension 0.3.6 (683a9bf7) with its tests as CTest targets. |
+| Runtime loaded on first use | Retained: `loom_api.hpp` loads `libloom_text_embed` when a package opens, so Gufo starts and serves other models without it, as with the NPU's XRT module. |
+| Runtime built from source outside Nix | Retained: `runtime.cmake` builds hrx-system v0.2.0's `loom_text_embed` with `ExternalProject` when no `loom-text-embed` pkg-config module exists, so the Debian package, the Windows ZIP and source builds include it. About 3,200 objects. |
+| Separate hrx-system pin | Retained: loom-fun packages follow Loom SDK releases (v0.2.0), the HRX staging package a Gufo fork for HIP experiments (865 commits behind v0.2.0). `loom-runtime.nix` reuses `hrx-deps.py`. |
+| HIP and Loom in one process | Avoided: on Linux, libamdf and ROCr each acquire the KFD VM with their own render-node file (`AMDKFD_IOC_ACQUIRE_VM`), which the kernel binds to the first; not reproduced yet. `serving.hip: false` keeps `serve` from calling HIP for the model (its load log then has no `gpu_device_*` fields). |
+| Native Windows | Retained: hrx-system v0.2.0 configures and builds with clang-cl (TheRock 10.0.0) and CMake 4.4; Loom's AMD GPU route is enabled through libamdf's WDDM backend. The embed library exports through `exports.def` and replaces `mkdtemp`, `setrlimit`, `usleep` and `strndup`. |
+| Windows probe | `tools/validation/embed_probe.c` on `qwen3-0.6b-loom` (preset `chat`), 2 rows, 8 steps: 18/18 checks, logits argmax equals the device's token on every step, 0 failures. |
+| Windows conformance | `conformance.py --logits` on `gufo serve llm` with the package and GGUF downloaded separately: 29/29. |
+| Owner locks instead of PIDs | Retained: a private package directory holds a locked `.owner` file; another process removes it once the lock is free, on Linux and Windows. A server stopped with `Stop-Process -Force` left its directory, which the next load removed. |
+| Hard links when Windows refuses symbolic links | Retained: without Developer Mode, package files are hard-linked and directories recreated; this needs the temporary folder on the model's drive. The Windows conformance run used this path. |

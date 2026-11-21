@@ -708,6 +708,40 @@ if (BUILD_TESTING)
     endforeach()
   endif()
 
+# The Loom runner's host sampling and package resolution, against a fake
+# libloom_text_embed: no GPU and no Loom runtime.
+function(gufo_loom_register_tests)
+  if (NOT TARGET gufo_loom)
+    return()
+  endif()
+  set(root ${PROJECT_SOURCE_DIR}/src/models/loom)
+  add_executable(loom_package_test ${root}/tests/package_test.cpp)
+  # The runner's include path, with its generated provider constants.
+  target_include_directories(loom_package_test PRIVATE
+    ${PROJECT_SOURCE_DIR} $<TARGET_PROPERTY:gufo_loom,INCLUDE_DIRECTORIES>)
+  target_link_libraries(loom_package_test PRIVATE
+    gufo_loom gufo_ext_runtime gufo_core gufo_platform)
+  # A private temporary folder: the test counts the directories left in it.
+  set(tmp ${CMAKE_CURRENT_BINARY_DIR}/loom_package_test_tmp)
+  file(MAKE_DIRECTORY ${tmp})
+  add_test(NAME loom_package_test COMMAND loom_package_test)
+  set_tests_properties(loom_package_test PROPERTIES LABELS "cpu;models;loom"
+    ENVIRONMENT "TMPDIR=${tmp};TMP=${tmp};TEMP=${tmp}")
+
+  # The test compiles the runner itself (its types are file-local) and takes
+  # the rest from gufo_loom.
+  add_executable(loom_runner_logits_test ${root}/tests/runner_logits_test.cpp
+    ${root}/tests/fake_embed.cpp)
+  target_include_directories(loom_runner_logits_test PRIVATE
+    ${PROJECT_SOURCE_DIR} $<TARGET_PROPERTY:gufo_loom,INCLUDE_DIRECTORIES>)
+  target_compile_definitions(loom_runner_logits_test PRIVATE GUFO_LOOM_LINKED=1)
+  target_link_libraries(loom_runner_logits_test PRIVATE
+    gufo_loom gufo_ext_runtime gufo_core gufo_cache gufo_platform)
+  add_test(NAME loom_runner_logits_test COMMAND loom_runner_logits_test)
+  set_tests_properties(loom_runner_logits_test PROPERTIES
+    LABELS "cpu;models;loom")
+endfunction()
+
 function(gufo_qwen3_asr_register_tests)
   if (NOT TARGET gufo_qwen3_asr)
     return()
@@ -848,6 +882,7 @@ endfunction()
   add_subdirectory(tests/families/qwen)
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
+  gufo_loom_register_tests()
   gufo_qwen3_asr_register_tests()
   gufo_qwen_image_21_register_tests()
 

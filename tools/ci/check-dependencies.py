@@ -41,6 +41,7 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "ICU",
     "curl / libcurl",
     "FFmpeg",
+    "Loom / hrx-system",
 }
 
 REQUIRED_EVALUATION_COMPONENTS = {

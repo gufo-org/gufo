@@ -138,6 +138,7 @@ toolchain: GCC 16.2 and ROCm 10.1.0. Without Nix, install these first:
 | ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing, images |
 | Rust 1.88 or newer, libopus | PNG, WAV and audio decoding |
 | FFmpeg libraries | EmbeddingGemma 2 only |
+| CMake 3.26+ (4.2+ on Windows), Python 3.12+, network access | Building the [Loom runtime](models/loom.md#platforms) from its pinned release |
 | `ffmpeg` and `ffprobe` | Video and audio output |
 
 On Debian or Ubuntu, with

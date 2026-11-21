@@ -39,7 +39,11 @@ release packaging builds the upstream runtime instead.
 - **Visual Studio 2022 or 18** with the "Desktop development with C++"
   workload (MSVC x64).
 - **Git**, **CMake ≥ 3.29**, **Ninja** (Visual Studio bundles both;
-  `vs-env.cmd` puts them on `PATH`) and **Python 3**.
+  `vs-env.cmd` puts them on `PATH`) and **Python 3**. The
+  [Loom runtime](docs/models/loom.md#platforms), which the build compiles
+  from source, needs **CMake ≥ 4.2**, newer than Visual Studio's; put a
+  standalone CMake first on `PATH`, or leave Loom out with
+  `-DGUFO_EXTENSIONS=<list>`.
 - **Rust 1.88 or newer** from [rustup](https://rustup.rs), with the
   `x86_64-pc-windows-msvc` target. Rustup reads the pinned version from
   `rust-toolchain.toml`; Cargo builds the Rust components.
