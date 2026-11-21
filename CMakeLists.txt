@@ -67,7 +67,6 @@ find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 find_package(PNG REQUIRED)
-find_package(JPEG REQUIRED)
 if (WIN32)
   # Windows has no system pkg-config; locate the pkgconf tool vcpkg installs.
   # .pc files resolve via CMAKE_PREFIX_PATH, which the vcpkg toolchain already
@@ -404,7 +403,7 @@ add_library(gufo_core STATIC
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(gufo_core PUBLIC gufo_platform gufo_npu ICU::uc ICU::i18n
-  Threads::Threads gufo_json gufo_rust JPEG::JPEG PkgConfig::WEBP CURL::libcurl
+  Threads::Threads gufo_json gufo_rust PkgConfig::WEBP CURL::libcurl
   OpenSSL::Crypto)
 
 # Family libraries come before the model that needs them; they may depend on
@@ -946,6 +945,16 @@ endfunction()
   target_link_libraries(png_decode_test PRIVATE gufo_core PNG::PNG ZLIB::ZLIB)
   add_test(NAME png_decode_test COMMAND png_decode_test)
   set_tests_properties(png_decode_test PROPERTIES LABELS "cpu;image;correctness")
+
+  # libjpeg-turbo writes the cases and is the frozen reference decoder; the
+  # shipped binary decodes JPEG in Rust.
+  find_package(JPEG REQUIRED)
+  add_executable(jpeg_decode_test
+    tests/core/jpeg_decode_test.cpp
+    tests/core/jpeg_reference.cpp)
+  target_link_libraries(jpeg_decode_test PRIVATE gufo_core JPEG::JPEG)
+  add_test(NAME jpeg_decode_test COMMAND jpeg_decode_test)
+  set_tests_properties(jpeg_decode_test PROPERTIES LABELS "cpu;image;correctness")
 
   add_executable(audio_decode_test tests/core/audio_decode_test.cpp)
   target_link_libraries(audio_decode_test PRIVATE gufo_core)
