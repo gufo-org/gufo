@@ -15,6 +15,11 @@ parity remain unqualified.
 | Target verification, widths 2–8 and ragged cohorts | Full logits/features match scalar | Full logits/features match scalar |
 | Serving and state | Cancellation, continuation, RAM/disk restore and seeded replay pass | Same; also eight 32K continuation forks |
 
+On Windows gfx1151, the Q8 target-only runner lost its text prefix when the
+first image was encoded. Waiting for the eager K/V clear before handing the
+buffer to the compute stream restored the expected keyword on the 12,425-token
+request. [Reproduction and measured results](artifacts/windows-eager-kv-clear.json).
+
 ## Draft integration on October 21
 
 Rebased onto main `e060aeed` (#699), preserving Flash-Next's requirement for
