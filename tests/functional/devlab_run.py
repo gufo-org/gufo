@@ -36,7 +36,7 @@ def jobs(plan, shard_id=None):
     """(selection, correctness groups, run timing, run GPU tests) per model; a shard runs only its part."""
     if shard_id is None:
         return [(selection, [group for group in plan['groups'] if group['profile'].split('/')[0] == selection['id']],
-                 True, bool(selection.get('ctest'))) for selection in plan['models']]
+                 selection['category'] != 'loom', bool(selection.get('ctest'))) for selection in plan['models']]
     shard = next((row for row in plan.get('shards', []) if row['id'] == shard_id), None)
     if shard is None:
         raise ValueError('Unknown shard: ' + shard_id)
@@ -132,6 +132,20 @@ def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=
         try:
             if not groups:
                 pass
+            elif model['category'] == 'loom':
+                # One greedy answer and one forced tool call (host sampling from
+                # the package's logits) through `gufo serve llm`.
+                command = [sys.executable, str(HERE / 'family_smoke.py'), 'loom', '--binary', str(checked),
+                           '--model', assets[model['asset']],
+                           '--loom-checkpoint', assets[model['checkpoint_asset']],
+                           '--log-dir', str(output / key)]
+                with (output / (key + '.log')).open('w') as log:
+                    result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=900)
+                row = {**groups[0], 'status': 'passed' if result.returncode == 0 else 'failed',
+                       'command': command, 'exit_code': result.returncode}
+                if result.returncode != 0:
+                    row.update(error='Loom smoke check failed', log_tail=cluster.tail(output / (key + '.log')))
+                rows = [row]
             elif model['category'] == 'llm':
                 subplan = {**plan, 'groups': groups}
                 cluster.execute(subplan, checked, None, output / key, assets)

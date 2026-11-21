@@ -168,6 +168,7 @@
   "test_labels": [
     "loom"
   ],
+  "functional": "functional/",
   "licenses": [
     "LICENSE"
   ],

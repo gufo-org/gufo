@@ -124,7 +124,8 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
         else:
             suites = {'embedding': ['embedding-text', 'embedding-images', 'embedding-audio', 'embedding-video'],
                       'asr': ['asr-http'], 'tts': ['tts-http'],
-                      'image': ['image-smoke' if tier == 'pr' else 'image-http']}[model['category']]
+                      'image': ['image-smoke' if tier == 'pr' else 'image-http'],
+                      'loom': ['loom-smoke']}[model['category']]
             result['groups'].append({'profile': key + ('/npu' if model.get('npu') else '/native'),
                                      'configuration': 'standard', 'settings': {}, 'suites': suites})
     return result
@@ -178,8 +179,10 @@ def units(plan, table, budget, isolation):
         if selection['category'] != 'llm':
             # One service command runs every suite; its timing arms follow on the same device.
             seconds = sum(suite_cost(table, key, suite) for group in groups for suite in group['suites'])
-            rows.append({'label': key, 'pool': 'services', 'seconds': seconds + timing,
-                         'part': {'model': key, 'groups': groups, 'timing': True}})
+            # Loom packages have a smoke check only, no timing arms.
+            timed = selection['category'] != 'loom'
+            rows.append({'label': key, 'pool': 'services', 'seconds': seconds + (timing if timed else 0),
+                         'part': {'model': key, 'groups': groups, 'timing': timed}})
             continue
         # A job's first server reads cold weights; the rest load from the page cache.
         load = model_costs.get('warm_load_s', model_costs.get('load_s', table['default_load_s']))

@@ -103,6 +103,14 @@ class PlanTest(unittest.TestCase):
     def models(self, *paths, **kwargs):
         return {item['id'] for item in self.plan(*paths, **kwargs)['models']}
 
+    def test_loom_runs_its_smoke_check(self):
+        plan = self.plan('src/models/loom/loom_runner.cpp')
+        self.assertEqual({item['id'] for item in plan['models']}, {'loom-qwen3.5-2b'})
+        self.assertEqual([(group['profile'], group['suites']) for group in plan['groups']],
+                         [('loom-qwen3.5-2b/native', ['loom-smoke'])])
+        self.assertEqual(devlab_models.asset_keys(plan, self.registry),
+                         ['loom-qwen35-2b', 'loom-qwen35-2b-gguf'])
+
     def test_shared_llm_covers_every_llm(self):
         for path in ('src/core/sampling.cpp', 'src/cache/cache.cpp',
                      'src/families/qwen/text/tokenizer.cpp', 'src/families/qwen/vision/encoder.hip',
@@ -350,6 +358,11 @@ class ShardTest(unittest.TestCase):
     @staticmethod
     def parts(shards, model):
         return [part for row in shards for part in row['parts'] if part['model'] == model]
+
+    def test_loom_has_no_timing_arm(self):
+        shards = devlab_plan.shard(self.plan('src/models/loom/loom_runner.cpp'), self.TABLE)
+        parts = self.parts(shards, 'loom-qwen3.5-2b')
+        self.assertEqual([part['timing'] for part in parts], [False])
 
     def test_every_suite_runs_once_within_budget(self):
         plan = self.plan('src/models/qwen38_flash_next/engine.cpp', 'src/models/qwen3_asr/model.cpp',

@@ -199,7 +199,7 @@ jobs:
         env:
           # One small model per family. Flash-Next (107 GiB) and DeepSeek V4
           # (81 GiB) are deferred.
-          GUFO_ASSETS: embedding,asr,tts-base,qwen27
+          GUFO_ASSETS: embedding,asr,tts-base,qwen27,loom-qwen35-2b,loom-qwen35-2b-gguf
           HF_HUB_DOWNLOAD_TIMEOUT: '120'
           HF_HUB_ETAG_TIMEOUT: '60'
         run: |
@@ -263,6 +263,7 @@ jobs:
             'asr-npu' = @('asr', '--model', $assets.asr, '--npu')
             'tts-npu' = @('tts', '--model', $assets.'tts-base', '--asr-model', $assets.asr, '--npu')
             qwen27    = @('llm', '--model', (Join-Path $assets.qwen27 'Qwen3.8-27B-UD-Q4_K_XL.gguf'))
+            loom      = @('loom', '--model', $assets.'loom-qwen35-2b', '--loom-checkpoint', $assets.'loom-qwen35-2b-gguf')
           }
           $failed = @()
           foreach ($name in $checks.Keys) {

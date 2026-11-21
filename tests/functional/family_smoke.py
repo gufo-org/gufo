@@ -9,8 +9,9 @@ host) can run it next to a downloaded gufo bundle:
 Each family runs gufo once and checks one property against a committed
 reference: EmbeddingGemma 2 vectors against sentence-transformers goldens,
 Qwen3-ASR against a reviewed transcript, Qwen3-TTS speech back through
-Qwen3-ASR, and a Qwen LLM on one greedy arithmetic answer through
-`gufo prompt`. The broader suites (embeddings.py, asr_service.py, ...) stay
+Qwen3-ASR, a Qwen LLM on one greedy arithmetic answer through
+`gufo prompt`, and a Loom package on the same answer and one forced tool call
+through `gufo serve llm`. The broader suites (embeddings.py, asr_service.py, ...) stay
 the quality gate.
 """
 
@@ -240,7 +241,39 @@ def check_llm(args):
     return "greedy 6 x 7 = 42"
 
 
-FAMILIES = {"embedding": check_embedding, "asr": check_asr, "tts": check_tts, "llm": check_llm}
+def check_loom(args):
+    # The package and its GGUF as downloaded separately; --loom-checkpoint
+    # finds the GGUF by its origin path.
+    extra = ["--served-model-name", "loom", "--loom-checkpoint", str(args.loom_checkpoint)]
+    thinking_off = {"chat_template_kwargs": {"enable_thinking": False}}
+    with server(args.binary, "llm", args.model, extra,
+                args.log_dir / "loom-server.log", args.startup_timeout) as url:
+        answer = request(url + "/v1/chat/completions", {
+            "model": "loom", "temperature": 0, "max_tokens": 32, **thinking_off,
+            "messages": [{"role": "user",
+                          "content": "What is 6 times 7? Answer with the number only."}]})
+        text = answer["choices"][0]["message"]["content"] or ""
+        print(f"  answer: {text!r}")
+        assert re.search(r"\b42\b", text), "the greedy answer does not contain 42"
+        # A required tool choice samples on the host from the package's logits.
+        tool = request(url + "/v1/chat/completions", {
+            "model": "loom", "temperature": 0, "max_tokens": 128, **thinking_off,
+            "tool_choice": "required",
+            "tools": [{"type": "function", "function": {
+                "name": "get_weather", "description": "Get the weather for a city.",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                               "required": ["city"]}}}],
+            "messages": [{"role": "user", "content": "What is the weather in Paris?"}]})
+    calls = tool["choices"][0]["message"].get("tool_calls") or []
+    print(f"  tool calls: {json.dumps(calls)}")
+    assert calls and calls[0]["function"]["name"] == "get_weather", "no get_weather call"
+    city = json.loads(calls[0]["function"]["arguments"]).get("city", "")
+    assert "paris" in city.lower(), f"the call names {city!r}, not Paris"
+    return "greedy 6 x 7 = 42 and a required get_weather call for Paris"
+
+
+FAMILIES = {"embedding": check_embedding, "asr": check_asr, "tts": check_tts, "llm": check_llm,
+            "loom": check_loom}
 
 
 def main():
@@ -248,14 +281,18 @@ def main():
     parser.add_argument("family", choices=sorted(FAMILIES))
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True,
-                        help="Model directory, or the GGUF file for llm")
+                        help="Model directory, the GGUF file for llm, or the package for loom")
+    parser.add_argument("--loom-checkpoint", type=Path,
+                        help="loom: directory holding the package's GGUF files")
     parser.add_argument("--asr-model", type=Path, help="tts: Qwen3-ASR directory for a round trip")
     parser.add_argument("--npu", action="store_true", help="Run embedding, ASR or TTS on the NPU")
     parser.add_argument("--startup-timeout", type=int, default=900)
     parser.add_argument("--log-dir", type=Path, default=Path("."))
     args = parser.parse_args()
-    if args.npu and args.family == "llm":
+    if args.npu and args.family in ("llm", "loom"):
         parser.error("--npu is supported only for embedding, asr and tts")
+    if (args.family == "loom") != (args.loom_checkpoint is not None):
+        parser.error("--loom-checkpoint is required for loom, and only for it")
     args.log_dir.mkdir(parents=True, exist_ok=True)
 
     started = time.perf_counter()
