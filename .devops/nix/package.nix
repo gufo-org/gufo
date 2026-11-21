@@ -167,7 +167,6 @@ stdenv.mkDerivation ({
     icu
     curl
     libpng
-    libjpeg
     libwebp
     libopus
     openssl
@@ -179,7 +178,10 @@ stdenv.mkDerivation ({
     rocmPackages.rocprim
     rocmPackages.rocwmma
     rocmPackages.rocblas
-  ] ++ lib.optionals (!hasRustAudio) [
+  ]
+  # The JPEG decoder test writes its cases and checks them with libjpeg-turbo.
+  ++ lib.optional checked libjpeg
+  ++ lib.optionals (!hasRustAudio) [
     libsndfile
     soxr
   ] ++ lib.optionals (xrt != null) [
