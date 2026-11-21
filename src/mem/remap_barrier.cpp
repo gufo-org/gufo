@@ -101,6 +101,7 @@ void RemapBarrier::Enter() noexcept {
       });
     }
     s.open.fetch_add(1, std::memory_order_acq_rel);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
     // A Hold() or Settle() that began between the check and the count has
     // not seen this scope: step back and wait for it.
     if (!Gated(s))
@@ -120,6 +121,10 @@ void RemapBarrier::Hold() noexcept {
     return;
   s.settler.store(me, std::memory_order_relaxed);
   s.settling.store(true, std::memory_order_release);
+  // Pairs with the fence in Enter(): either this thread sees the scope's
+  // count or that thread sees the gate. Release/acquire alone lets both
+  // loads run before the other thread's store is visible.
+  std::atomic_thread_fence(std::memory_order_seq_cst);
   // Their work in flight ends within a piece; an unmap behind it would
   // wait for all of it.
   WaitForOthers(s, std::chrono::milliseconds(2));
@@ -159,6 +164,10 @@ void RemapBarrier::Settle() noexcept {
                      std::memory_order_release);
   s.settler.store(std::this_thread::get_id(), std::memory_order_relaxed);
   s.settling.store(true, std::memory_order_release);
+  // Pairs with the fence in Enter(): either this thread sees the scope's
+  // count or that thread sees the gate. Release/acquire alone lets both
+  // loads run before the other thread's store is visible.
+  std::atomic_thread_fence(std::memory_order_seq_cst);
   // What this call covers: addresses stamped and remaps noted before it. A
   // thread that unmaps or maps during the idle time gets the next stamp and
   // waits for the next call.

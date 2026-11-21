@@ -82,12 +82,18 @@ void HoldsOthersBack() {
     RemapBarrier::NoteRemap();
     RemapBarrier::Settle();
     assert(RemapBarrier::Clean(stamp) && !RemapBarrier::Pending());
+    // The held worker resumes once the barrier ends. Barriers back to back
+    // close the gate again before a waiter wakes, so give it the chance.
+    const long resumed = scopes.load();
+    const auto deadline = Clock::now() + std::chrono::seconds(1);
+    while (scopes.load() == resumed && Clock::now() < deadline)
+      std::this_thread::yield();
+    assert(scopes.load() > resumed);
   }
-  const long progressed = scopes.load();
   stop.store(true);
   worker.join();
   // The worker ran between barriers and was never inside one.
-  assert(progressed > 100 && entered_during_drain.load() == 0);
+  assert(entered_during_drain.load() == 0);
   // Whether each barrier found the device quiet depends on this machine's
   // scheduling; that all of them returned is the point.
   assert(RemapBarrier::Stats().settles == before.settles + 20);
