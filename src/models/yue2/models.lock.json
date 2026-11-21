@@ -1,0 +1,299 @@
+{
+  "schema": 1,
+  "models": {
+    "yue2-3b": {
+      "weights": {
+        "source": {
+          "hf": "m-a-p/YuE2-3B",
+          "revision": "8f24312f187763b9854adeec87e437e2b03bbff1"
+        },
+        "include": [],
+        "exclude": [
+          "assets/*",
+          "*.whl"
+        ],
+        "files": [
+          {
+            "path": ".gitattributes",
+            "size": 2134,
+            "sha256": "12ed2bedb5bdcaec199eeee105d8f37af6ecb6d1eabcde581268fda26c09c3ec"
+          },
+          {
+            "path": "LICENSE",
+            "size": 20309,
+            "sha256": "060985741d20e70613b4c189c7de106cabd3fb2109fbbfb6d705c9d619417dd0"
+          },
+          {
+            "path": "README.md",
+            "size": 21898,
+            "sha256": "469ac88a01ef1be99a60ece8fdf1f3b81221e7c6943048782ed7487e06d159f0"
+          },
+          {
+            "path": "THIRD_PARTY_NOTICES.md",
+            "size": 793,
+            "sha256": "14d3fd9f6fee86b4260b69b0979735b99ffec8c6b4db254567047a4215cd9af3"
+          },
+          {
+            "path": "config.json",
+            "size": 959,
+            "sha256": "ad3477bbef890bf98ae196c1e4b44779494a6231c4ab66f32708eabadf265329"
+          },
+          {
+            "path": "examples/tonight-awake.json",
+            "size": 1734,
+            "sha256": "96087e19caa63beda8a0509afe2f2fe9f8779d300c31bd8947d6504733bd54cf"
+          },
+          {
+            "path": "generation_config.json",
+            "size": 204,
+            "sha256": "ccc842772f029049fadf9b288393bcdd9f79271b361c0f1875ec1218e4ba5170"
+          },
+          {
+            "path": "licenses/SnakeBeta-NVIDIA-MIT.txt",
+            "size": 1076,
+            "sha256": "da9858d516047d82096d01c112a61bd67f26d289039464d668a1d45f91738ecc"
+          },
+          {
+            "path": "licenses/stable-audio-tools-MIT.txt",
+            "size": 1069,
+            "sha256": "a1fac33b7bcd791b74fb33aeb439f825e7277e239fc119fb7d2ab6f084a0c101"
+          },
+          {
+            "path": "model.safetensors",
+            "size": 7261441640,
+            "sha256": "1d55c42c1a9875c34f5d736e15078449992b044e807ce2a138e6cf289a1e59e9"
+          },
+          {
+            "path": "modeling_yue2.py",
+            "size": 32983,
+            "sha256": "62d2bd758c8fff1a0d64584a699343076fca9a7880db5d8e19263bc30ae79d7c"
+          },
+          {
+            "path": "qwen.tiktoken",
+            "size": 2561218,
+            "sha256": "b2b1b8dfb5cc5f024bafc373121c6aba3f66f9a5a0269e243470a1de16a33186"
+          },
+          {
+            "path": "weights_manifest.json",
+            "size": 179,
+            "sha256": "2296f82c29dcb11aeefde07e216403a32fc86c8f6da2ec15a70102abfd936a93"
+          },
+          {
+            "path": "yue2_generation_config.json",
+            "size": 466,
+            "sha256": "203830cebde6e3644eb291925362990d198e66c3b6006cd11f1aaa21904bcc61"
+          }
+        ]
+      },
+      "vae": {
+        "source": {
+          "hf": "m-a-p/YuE2-Vae",
+          "revision": "152733a19ad43aa67e367f9b5503ef8075bb5126"
+        },
+        "include": [],
+        "exclude": [
+          "assets/*"
+        ],
+        "files": [
+          {
+            "path": ".gitattributes",
+            "size": 1634,
+            "sha256": "2344624b5ce0c6809fc513e84f41a93ba7f9bd82cd80dc916dd404f19edc9a3d"
+          },
+          {
+            "path": "LICENSE",
+            "size": 20309,
+            "sha256": "060985741d20e70613b4c189c7de106cabd3fb2109fbbfb6d705c9d619417dd0"
+          },
+          {
+            "path": "README.md",
+            "size": 10434,
+            "sha256": "7c4359464599b946cbcb979a6143c81ea8f047023638b18d709702b8f97d52b2"
+          },
+          {
+            "path": "THIRD_PARTY_NOTICES.md",
+            "size": 793,
+            "sha256": "14d3fd9f6fee86b4260b69b0979735b99ffec8c6b4db254567047a4215cd9af3"
+          },
+          {
+            "path": "config.json",
+            "size": 1378,
+            "sha256": "f0191bb9694009956de44e0c361a6f1334760be4c8f848e599bde242a54a0970"
+          },
+          {
+            "path": "licenses/SnakeBeta-NVIDIA-MIT.txt",
+            "size": 1076,
+            "sha256": "da9858d516047d82096d01c112a61bd67f26d289039464d668a1d45f91738ecc"
+          },
+          {
+            "path": "licenses/stable-audio-tools-MIT.txt",
+            "size": 1069,
+            "sha256": "a1fac33b7bcd791b74fb33aeb439f825e7277e239fc119fb7d2ab6f084a0c101"
+          },
+          {
+            "path": "model.safetensors",
+            "size": 530512720,
+            "sha256": "807ce9d5149fa27c5ad3e6582058469852e908f6c5acc8c8aa338e7ab7751346"
+          },
+          {
+            "path": "modeling_vae.py",
+            "size": 25265,
+            "sha256": "b6578ff461e6be9fd079ca5ddf12893940f3b3338ff3435fceae89c466486f5a"
+          },
+          {
+            "path": "weights_manifest.json",
+            "size": 178,
+            "sha256": "017d64a4d288217a43fcac3866a0e1d55f796fa891d4dfb6de0bd170ab750026"
+          }
+        ]
+      }
+    },
+    "yue2-3b-legacy": {
+      "weights": {
+        "source": {
+          "hf": "m-a-p/YuE2-3B",
+          "revision": "8f24312f187763b9854adeec87e437e2b03bbff1"
+        },
+        "include": [],
+        "exclude": [
+          "assets/*",
+          "*.whl"
+        ],
+        "files": [
+          {
+            "path": ".gitattributes",
+            "size": 2134,
+            "sha256": "12ed2bedb5bdcaec199eeee105d8f37af6ecb6d1eabcde581268fda26c09c3ec"
+          },
+          {
+            "path": "LICENSE",
+            "size": 20309,
+            "sha256": "060985741d20e70613b4c189c7de106cabd3fb2109fbbfb6d705c9d619417dd0"
+          },
+          {
+            "path": "README.md",
+            "size": 21898,
+            "sha256": "469ac88a01ef1be99a60ece8fdf1f3b81221e7c6943048782ed7487e06d159f0"
+          },
+          {
+            "path": "THIRD_PARTY_NOTICES.md",
+            "size": 793,
+            "sha256": "14d3fd9f6fee86b4260b69b0979735b99ffec8c6b4db254567047a4215cd9af3"
+          },
+          {
+            "path": "config.json",
+            "size": 959,
+            "sha256": "ad3477bbef890bf98ae196c1e4b44779494a6231c4ab66f32708eabadf265329"
+          },
+          {
+            "path": "examples/tonight-awake.json",
+            "size": 1734,
+            "sha256": "96087e19caa63beda8a0509afe2f2fe9f8779d300c31bd8947d6504733bd54cf"
+          },
+          {
+            "path": "generation_config.json",
+            "size": 204,
+            "sha256": "ccc842772f029049fadf9b288393bcdd9f79271b361c0f1875ec1218e4ba5170"
+          },
+          {
+            "path": "licenses/SnakeBeta-NVIDIA-MIT.txt",
+            "size": 1076,
+            "sha256": "da9858d516047d82096d01c112a61bd67f26d289039464d668a1d45f91738ecc"
+          },
+          {
+            "path": "licenses/stable-audio-tools-MIT.txt",
+            "size": 1069,
+            "sha256": "a1fac33b7bcd791b74fb33aeb439f825e7277e239fc119fb7d2ab6f084a0c101"
+          },
+          {
+            "path": "model.safetensors",
+            "size": 7261441640,
+            "sha256": "1d55c42c1a9875c34f5d736e15078449992b044e807ce2a138e6cf289a1e59e9"
+          },
+          {
+            "path": "modeling_yue2.py",
+            "size": 32983,
+            "sha256": "62d2bd758c8fff1a0d64584a699343076fca9a7880db5d8e19263bc30ae79d7c"
+          },
+          {
+            "path": "qwen.tiktoken",
+            "size": 2561218,
+            "sha256": "b2b1b8dfb5cc5f024bafc373121c6aba3f66f9a5a0269e243470a1de16a33186"
+          },
+          {
+            "path": "weights_manifest.json",
+            "size": 179,
+            "sha256": "2296f82c29dcb11aeefde07e216403a32fc86c8f6da2ec15a70102abfd936a93"
+          },
+          {
+            "path": "yue2_generation_config.json",
+            "size": 466,
+            "sha256": "203830cebde6e3644eb291925362990d198e66c3b6006cd11f1aaa21904bcc61"
+          }
+        ]
+      },
+      "vae": {
+        "source": {
+          "hf": "m-a-p/YuE2-Vae-legacy",
+          "revision": "d0585a9cdbb36e8b6930046974500ad7078317ca"
+        },
+        "include": [],
+        "exclude": [
+          "assets/*"
+        ],
+        "files": [
+          {
+            "path": ".gitattributes",
+            "size": 1634,
+            "sha256": "2344624b5ce0c6809fc513e84f41a93ba7f9bd82cd80dc916dd404f19edc9a3d"
+          },
+          {
+            "path": "LICENSE",
+            "size": 20309,
+            "sha256": "060985741d20e70613b4c189c7de106cabd3fb2109fbbfb6d705c9d619417dd0"
+          },
+          {
+            "path": "README.md",
+            "size": 10071,
+            "sha256": "4d0c5a22994319889a55a97f9facf81c129904b4b76f4deb705a535a6968dc88"
+          },
+          {
+            "path": "THIRD_PARTY_NOTICES.md",
+            "size": 793,
+            "sha256": "14d3fd9f6fee86b4260b69b0979735b99ffec8c6b4db254567047a4215cd9af3"
+          },
+          {
+            "path": "config.json",
+            "size": 1376,
+            "sha256": "a5053282e619d241155769b9b26751a5badd1f5644707ea3ebb0c6ed849a038c"
+          },
+          {
+            "path": "licenses/SnakeBeta-NVIDIA-MIT.txt",
+            "size": 1076,
+            "sha256": "da9858d516047d82096d01c112a61bd67f26d289039464d668a1d45f91738ecc"
+          },
+          {
+            "path": "licenses/stable-audio-tools-MIT.txt",
+            "size": 1069,
+            "sha256": "a1fac33b7bcd791b74fb33aeb439f825e7277e239fc119fb7d2ab6f084a0c101"
+          },
+          {
+            "path": "model.safetensors",
+            "size": 530512720,
+            "sha256": "b6d283628913bb41145ba99e2314eef613905ee95f690eb70e8212d5f4965044"
+          },
+          {
+            "path": "modeling_vae.py",
+            "size": 25265,
+            "sha256": "b6578ff461e6be9fd079ca5ddf12893940f3b3338ff3435fceae89c466486f5a"
+          },
+          {
+            "path": "weights_manifest.json",
+            "size": 178,
+            "sha256": "92652174b1218d24303dbad37cc420058de3d90229c218e0cf9a57c1114ed0aa"
+          }
+        ]
+      }
+    }
+  }
+}

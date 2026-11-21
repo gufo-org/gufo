@@ -13,6 +13,7 @@ and family code never includes a model header.
 | `config` | `gufo_qwen_config` | static (CPU) | `ExtractQwenConfig`: Qwen GGUF configuration extraction and structural validation. Reaches no HIP. | Qwen 27B, text (chat-template shape check), `prompt` |
 | `text` | `gufo_qwen_text` | static (CPU) | Tokenizer and bounded deterministic ChatML template. | Qwen 27B, Flash-Next, Qwen-Image-2.1 |
 | `kernels` | `gufo_qwen_kernels` | static (HIP) | Shared Qwen HIP operators: `ops.hpp`, `ops/` launcher interfaces and the kernel translation units. | Qwen 27B, Flash-Next, Qwen3-TTS |
+| `eager` | `gufo_qwen_eager` | static (HIP) | Qwen3 BF16 operators that keep PyTorch's eager rounding boundaries: norms, RoPE, decode GEMV, split-K decode attention and the fused WMMA attention. | Qwen3-TTS, Qwen-Image-2.1, YuE2 |
 | `vision` | `gufo_qwen_vision` | static | Vision encoder, device image input, image prompt expansion and image cache. | Qwen 27B, Flash-Next |
 
 Dependency order (each library may use the ones above it):

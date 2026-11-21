@@ -35,6 +35,7 @@ class GenerateInfrastructureTest(unittest.TestCase):
             "qwen3_asr",
             "qwen3_tts",
             "qwen_image_21",
+            "yue2",
         ]
         self.assertEqual(names, sorted(expected))
 

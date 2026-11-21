@@ -13,6 +13,7 @@
 #include "src/cli/extension/extension.hpp"
 #include "src/cli/extension_diagnostics.hpp"
 #include "src/cli/model/model.hpp"
+#include "src/cli/music/music.hpp"
 #include "src/cli/prompt/prompt.hpp"
 #include "src/cli/serve/serve.hpp"
 #include "src/cli/speak/speak.hpp"
@@ -49,6 +50,7 @@ void print_help(std::string_view program_name) {
       << "  bench          Benchmark prompt processing and token generation\n"
       << "  eval           Evaluate an OpenAI-compatible text server\n"
       << "  video          Generate MiniMax H3 text-to-video\n"
+      << "  music          Generate a song (YuE2)\n"
       << "  transcribe     Transcribe WAV audio with a speech recognition "
          "model\n"
       << "  speak          Synthesize speech or voice-chat with a speech "
@@ -120,6 +122,9 @@ int run(std::span<const char* const> args) {
     if (sub == "video") {
       return gufo::cli::RunVideo(help_flag);
     }
+    if (sub == "music") {
+      return gufo::cli::RunMusic(help_flag);
+    }
     if (sub == "transcribe") {
       return gufo::cli::RunTranscribe(help_flag);
     }
@@ -173,6 +178,10 @@ int run(std::span<const char* const> args) {
 
   if (first_arg == "video") {
     return gufo::cli::RunVideo(options.subspan(1));
+  }
+
+  if (first_arg == "music") {
+    return gufo::cli::RunMusic(options.subspan(1));
   }
 
   if (first_arg == "transcribe") {

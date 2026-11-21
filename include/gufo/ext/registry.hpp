@@ -10,6 +10,7 @@
 #include "gufo/ext/decision.hpp"
 #include "gufo/ext/embeddings.hpp"
 #include "gufo/ext/image.hpp"
+#include "gufo/ext/music.hpp"
 #include "gufo/ext/options.hpp"
 #include "gufo/ext/text.hpp"
 #include "gufo/ext/tts.hpp"
@@ -24,6 +25,7 @@ enum class Capability {
   kSpeechSynthesis,
   kImageGeneration,
   kVideoGeneration,
+  kMusicGeneration,
   kDecision,
 };
 struct ExtensionInfo {
@@ -71,6 +73,7 @@ public:
   void AddTtsProvider(TtsProvider provider);
   void AddImageProvider(ImageProvider provider);
   void AddVideoProvider(VideoProvider provider);
+  void AddMusicProvider(MusicProvider provider);
   void AddDecisionProvider(DecisionProvider provider);
   void AddTextProvider(TextProvider provider);
   std::span<const ExcludedExtension> Excluded() const { return excluded_; }
