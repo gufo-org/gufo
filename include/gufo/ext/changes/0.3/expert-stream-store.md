@@ -28,8 +28,8 @@ routed experts from its files into a bounded device cache, linked through
 - `Fit(grant)` sizes the cache to the host's grant, its prefetch stage and
   read margin included, and fills the room left from `Policy::ranking`, then
   with the experts it leaves out; until the first `Fit` nothing is cached.
-  `Release(bytes)` frees the newest chunks, dropping their experts without
-  reading them, and holds the cache there, `Restore()` lets it regrow to the
+  `Release(bytes)` frees the newest chunks, each size class keeping the
+  experts eviction ranks highest, and holds the cache there, `Restore()` lets it regrow to the
   grant, and `ReleasedBytes()` and `FloorBytes()` report what was released
   and the free memory below which it stops growing.
 - The cache is mapped from 2 MiB device pages (`hipMemCreate`) where the

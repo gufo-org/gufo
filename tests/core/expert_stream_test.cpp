@@ -367,6 +367,44 @@ void OnePieceLayout(int32_t* routes) {
         "one-piece restore stays within the grant");
 }
 
+void ReleaseKeepsHottest(int32_t* routes) {
+  // One size class filled in two chunks: the older holds the two experts
+  // ranked first, the newer the next two, which then take every route.
+  Model m(16, 2, {{3000}, {3000}});
+  Check(m.ok, "release-keep fixture");
+  if (!m.ok)
+    return;
+  Policy policy;
+  policy.cache_limit_bytes = 64 * m.Slot(0);
+  policy.log_tag = "expert_stream_test";
+  policy.ranking_source = "test ranking";
+  policy.ranking = {{0, 0, 4}, {0, 1, 3}, {0, 2, 2}, {0, 3, 1}};
+  auto store = Store::Create(m.layout, policy);
+  Check(store != nullptr, "release-keep create");
+  if (!store)
+    return;
+  Runner run{m, *store, routes};
+  const uint64_t stage = uint64_t{3000} * policy.prefetch_stage_rows;
+  Check(store->Fit(stage + 2 * m.Slot(0)) &&
+            store->Fit(stage + 4 * m.Slot(0)) &&
+            store->GetStats().cache_bytes == 4 * m.Slot(0),
+        "release-keep fit in two chunks");
+  for (int i = 0; i < 4; ++i)
+    Check(run.Run(0, {2, 3}), "release-keep bytes");
+  // Release frees the newer chunk; its experts are the ones in use, so they
+  // move into the older chunk and the two ranked first are evicted.
+  const uint64_t held = store->GetStats().cache_bytes;
+  Check(store->Release(1) == 2 * m.Slot(0) &&
+            store->GetStats().cache_bytes == held - 2 * m.Slot(0),
+        "release-keep frees the newer chunk");
+  const auto released = store->GetStats();
+  Check(run.Run(0, {2, 3}) && store->GetStats().hits == released.hits + 2,
+        "release keeps the experts in use");
+  const auto kept = store->GetStats();
+  Check(run.Run(0, {0, 1}) && store->GetStats().hits == kept.hits,
+        "release evicts the coldest");
+}
+
 void CallerStream(int32_t* routes) {
   // Two pieces, a read margin, and every call on a non-blocking stream: each
   // miss is staged and admitted through copies on that stream.
@@ -438,6 +476,7 @@ int main() {
     return 1;
   FusedLayout(routes);
   OnePieceLayout(routes);
+  ReleaseKeepsHottest(routes);
   CallerStream(routes);
   InvalidLayouts();
   (void)hipFree(routes);

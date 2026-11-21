@@ -167,10 +167,9 @@ public:
 
   /* Gives memory back to the host after Fit: frees whole chunks, newest
    * first, until at least `bytes` went or the cache is empty, and holds the
-   * cache at what is left until Restore. The experts in the freed chunks
-   * are dropped, not moved: a cache in managed memory (where device pages
-   * are not used) may have been swapped out under host pressure, and moving
-   * its experts would read it back in. Waits for queued predictions and
+   * cache at what is left until Restore. Each size class keeps the experts
+   * eviction ranks highest: those in the freed chunks move into the slots
+   * of the lowest. Waits for queued predictions and
    * returns 0 while prefetch reads run; call it only while no Prepare runs
    * (serving does when idle). Returns the bytes freed. */
   uint64_t Release(uint64_t bytes);

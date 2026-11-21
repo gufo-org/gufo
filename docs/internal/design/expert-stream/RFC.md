@@ -266,10 +266,12 @@ pressure against the floor (`Store::FloorBytes`), and below it the expert
 cache gives memory back first:
 
 - `Release(bytes)` frees the newest whole chunks and holds the cache there.
-  The experts in them are dropped, not moved into kept slots, so a release
-  never reads cache memory, which may be swapped where the cache is managed.
-  Losing a few GB of experts costs less than dropping cached prompts; the
-  prompt cache gives memory only if that is not enough.
+  Each size class keeps the experts eviction ranks highest: those in the
+  freed chunks move into the slots of the lowest, as a shrinking `Fit` does.
+  The moves are device copies of a few GB at most, since the device pages
+  are never swapped; in the managed fallback they can read swapped memory
+  back. Losing a few GB of cold experts costs less than dropping cached
+  prompts; the prompt cache gives memory only if that is not enough.
 - `Restore()` lets the cache regrow to its grant once what it released is
   free again (the floor, `ReleasedBytes()` and 256 MiB); misses refill it.
 - New requests are refused below half the floor.
