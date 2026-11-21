@@ -28,6 +28,10 @@
   # The IRON toolchain (.devops/nix/iron): compiles the in-tree NPU designs
   # (src/core/npu/kernels) into share/gufo/npu. Null builds without them.
   iron ? null,
+  # The Loom runtime (.devops/nix/hrx/loom-runtime.nix) of the loom extension,
+  # found through pkg-config. Null builds it from source, which the sandbox
+  # cannot download.
+  loomRuntime ? null,
   releaseVersion ? null,
   extensionsFromLock ? false,
   extensions ? [ ],
@@ -185,7 +189,7 @@ stdenv.mkDerivation ({
   ] ++ lib.optionals (xrt != null) [
     xrt
     libuuid
-  ];
+  ] ++ lib.optional (loomRuntime != null) loomRuntime;
 
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo"

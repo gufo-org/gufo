@@ -468,6 +468,9 @@
               # The NPU runtime links XRT on Linux.
               gufoPackages.${system}.xrt-amdxdna
               pkgsSys.libuuid
+              # The loom extension's runtime, which the sandbox cannot build
+              # from source (its configure step downloads dependencies).
+              gufoPackages.${system}.loom-runtime
             ];
             src = testSource;
           } (cargoSetup + rustCacheSetup + ''
@@ -799,6 +802,8 @@
           # XRT with its amdxdna plugin, as the Gufo package links it.
           xrt-amdxdna = gufoPackages.${system}.xrt-amdxdna;
           iron = gufoPackages.${system}.iron;
+          # The Loom runtime the loom extension loads.
+          loom-runtime = gufoPackages.${system}.loom-runtime;
         }
       );
 
