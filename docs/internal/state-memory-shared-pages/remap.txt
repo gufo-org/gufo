@@ -1,0 +1,22 @@
+reserve 3 x 2.7 GiB: 10.4 us each
+reserve 256 GiB: no error, 5.4 us
+map first 3.25 us/page; alias 2 2.94 us/page (+access 6189 us); alias 3 2.83 us/page (+access 5854 us); 1400 pages = 9.82 ms per alias
+map + access per page: 6.62 us/page
+unmap alias idle, per page calls: 4.05 us/page
+unmap alias idle, one call for 1400 pages: 1.27 us/page
+coherence: park sees A's rows: bad=0; B sees them: bad=0
+write through A: park bad=0, B bad=0
+detach idle: unmap 4.51 us/page, map fresh 6.84 us/page => 15.88 ms for 1400 pages
+after detach: park bad=0, B bad=0 (old rows), A bad=0 (new rows)
+graph captured before page swap, replayed after: bad=0
+park still holds the old rows after the swap: bad=0
+gather through A (own pages)  159.55 ms
+gather through B (alias)      153.26 ms
+gather through park (alias)   155.05 ms
+beside reader of the shared pages (29 rounds warm, worst 10.3 ms): map alias 17.55 us/page (worst round 0.0 ms); unmap alias 2343921.0 us/page, worst call 27396.4 ms (worst round 10.4 ms); one unmap of 16 pages 22.8 ms
+beside unrelated ~30 ms kernels   (36 rounds warm, worst 8.3 ms): map alias 17.99 us/page (worst round 0.0 ms); unmap alias 1327897.7 us/page, worst call 4001.1 ms (worst round 8.3 ms); one unmap of 16 pages 16.5 ms
+beside 1 MiB copies from park     (22093 rounds warm, worst 0.1 ms): map alias 21.11 us/page (worst round 0.0 ms); unmap alias 1406.8 us/page, worst call 7.0 ms (worst round 0.1 ms); one unmap of 16 pages 0.1 ms
+boundary copies: 64 x 1 MiB in 0.74 ms
+release while mapped: no error
+still usable after release-while-mapped: bad=0
+DONE

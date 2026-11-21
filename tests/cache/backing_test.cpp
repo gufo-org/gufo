@@ -713,6 +713,11 @@ void CaptureCapacity() {
   const auto physical = allocations.load(), host = host_allocations.load();
   assert(pool.CanFit(capture));
   assert(pool.CanFit({}));
+  // Budget that payloads outside the pool hold (rows sharing session pages)
+  // is capacity the pool cannot grow into: the capture needs four blocks.
+  assert(pool.CanFit(capture, 2 * block_bytes));
+  assert(!pool.CanFit(capture, 2 * block_bytes + 1));
+  assert(!pool.CanFit(capture, std::numeric_limits<std::size_t>::max()));
   // Capacity checks must neither commit pages nor allocate metadata.
   assert(pool.BlockCount() == 0 && ledger.Snapshot() == before);
   assert(allocations.load() == physical && host_allocations.load() == host);

@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "src/core/hip/state_page_pool.hpp"
+#include "src/mem/remap_barrier.hpp"
 
 namespace gufo::mem {
 namespace {
@@ -161,10 +162,18 @@ bool ScratchArena::MapTransient(std::string* error) {
     p = q;
   }
   transient_mapped_ = true;
+  // The addresses had other pages until the last pass released them, and
+  // the device goes on reaching those, which the driver has freed, until it
+  // has been idle (RemapBarrier): wait for that before the pass uses the
+  // rows. About 0.5 ms, once per wide pass.
+  if (!transient_runs_.empty() && !RemapBarrier::Clean(released_at_))
+    RemapBarrier::Settle();
   return true;
 }
 
 void ScratchArena::ReleaseTransient() noexcept {
+  if (!transient_runs_.empty())
+    released_at_ = RemapBarrier::Stamp();
   for (const Run& run : transient_runs_)
     UnmapRun(run);
   transient_runs_.clear();

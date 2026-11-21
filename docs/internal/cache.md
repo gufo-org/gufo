@@ -353,11 +353,18 @@ be captured first.
 Flash-Next copies its mutable recurrent, convolution and PLE state into
 private device storage at capture; the small indexer-ring, draft-residual and
 kept-row regions go directly into the host payload. Committed K/V and pooled
-rows remain in the live session while it appends, without a K/V copy.
-A same-session rewind allocates backing blocks for only the rows it would
-overwrite and copies them once for checkpoints sharing those rows. Appending
-allocates no K/V backing blocks. Restore keeps the still-live prefix without
-a K/V upload.
+rows are not copied: where session state is demand-mapped, the checkpoint
+keeps the session's own pages ([shared pages](state-memory.md#shared-pages)).
+The session goes on appending to them, a rewind copies only the pages it
+rewrites, and a session given to another conversation leaves the pages with
+the checkpoint. A RAM restore maps every page the checkpoint fills into the
+target session and loads only the rest: the page it ends in, tails and
+private state. Elsewhere (no demand mapping, or a GPU heap smaller than host
+memory) Flash-Next borrows those rows from the live session as Qwen3.8-27B
+does: a same-session rewind allocates backing blocks for only the rows it
+would overwrite and copies them once for checkpoints sharing those rows.
+A disk write copies shared pages to its staging memory on the device's copy
+engine, outside every stream.
 
 A model with a sliding attention window declares that attention as a
 window-rows component (`ComponentKind::kWindowRows` with `window_rows`) instead
@@ -391,7 +398,9 @@ copies before prefill resumes, so disk serialization does not introduce a
 background K/V transfer during inference.
 
 **Admission is advisory, never fatal.** A refused reservation or a failed
-capture is a skipped optimisation. The request must still complete.
+capture is a skipped optimisation. The request must still complete. That
+includes sizing a checkpoint inside a prefill pass: an adapter that cannot
+take one at a boundary refuses, and the pass ends there instead.
 
 **Eviction cannot skip a victim.** If removing an entry fails, the eviction
 loop stops rather than trying the next candidate, in both tiers **(source)**.
@@ -519,7 +528,7 @@ Qwen27B and Flash-Next use the same options with these meanings:
 
 | Option | Meaning |
 | --- | --- |
-| `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in equal steps of about 1 GiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
+| `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in equal steps of about 1 GiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. Rows a checkpoint shares with a session ([shared pages](state-memory.md#shared-pages)) count against the cap like copies but commit no cache page. |
 | `--cache-disk-bytes` | Counts referenced, temporary, orphaned and access-history files. A lower budget at startup removes temporaries and orphans, then applies the same lineage-aware eviction order as runtime, using persisted access history when available. |
 | `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 8 MiB pinned buffer; checkpoints of any size stream through it. Writes move one 1 MiB piece at a time, whose size did not change write speed; restores read and check eight pieces in parallel while copying others out. |
 | `--cache-disk DIR` | Owned by one server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory.  model's server sharing it. |
@@ -796,6 +805,9 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
 | `schema=component-cache-v1 event=staging_waited` | `--cache-ram-bytes off`: a disk capture waited `waited_ms` for queued writes to release the capture backing |
 | `schema=component-cache-v1 event=staging_exhausted` | `--cache-ram-bytes off`: a disk capture found no room in the capture backing; reports `staged_bytes`, `held_bytes` by other captures, `backing_bytes`, `waited_ms` and whether it was an exact `frontier` |
+| `schema=component-cache-v1 event=row_storage` | At startup: `mode=shared_pages` when checkpoints keep the session pages that hold their rows, `mode=backing` when rows are copied or borrowed |
+| `schema=component-cache-v1 event=acquire` | The reuse a request got: `reuse` (`live`, `ram`, `disk`, `none`), `selected_tokens`, `restored_bytes`, and `remapped_bytes`, the part of them restored by mapping shared pages instead of a copy |
+| `schema=component-cache-v1 event=in_pass_unsupported` | The adapter could not take a checkpoint at `tokens` inside a prefill pass (`cached_tokens` is the reused prefix); the pass ends there and the checkpoint is captured after it |
 | `schema=component-cache-v1 event=published` | A checkpoint finished disk publication; `checkpoint_id` identifies the capture and `tokens` its boundary |
 | `schema=component-cache-v1 event=disk_restore` | A checkpoint was restored from disk: `tokens`, `bytes`, `pieces` and timings. `filesystem_ms` and `checksum_ms` add up the parallel readers' time, so they can exceed the restore's wall time; `stream_wait_ms` is the restoring thread's wait for copies |
 | `schema=component-cache-v1 event=disk_warm` | A request admitted while another prompt prefilled, or while others ran, found its checkpoint only on disk; a worker read its `bytes` into the page cache in `ms`. `skipped=floor` when free pages would drop below the host floor; `skipped=beside` when nothing else waited and the restore copies beside the running requests instead |
@@ -827,6 +839,10 @@ stored prompt shares a token with the request and `no_compatible_boundary`
 when one does but no restorable boundary covers it;
 `cache_common_prefix_tokens` is then the longest agreement and
 `cache_checkpoint_tokens` the deepest compatible boundary.
+
+`usage.gufo.component_cache` adds `remapped_bytes` (restored bytes that took
+no copy) and `shared_payload_bytes` (captured bytes that share their session's
+pages, part of `borrowed_capacity_bytes`).
 
 Flash-Next also reports `usage.gufo.component_cache.captured_checkpoint_ids`.
 Match these request-local IDs to `checkpoint_id` in publication/refusal logs:

@@ -7,6 +7,11 @@
 #include "src/models/qwen38_flash_next/continuation_layout.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 
+namespace gufo::mem {
+class PagePark;
+class Region;
+}  // namespace gufo::mem
+
 namespace gufo::models::qwen38_flash_next {
 
 // The caller supplies the complete artifact/tokenizer/template identity. The
@@ -45,6 +50,11 @@ public:
   PrefillCheckpointPositions(const cache::Slot&, cache::Rows) const override;
   void BeginRestore(cache::Slot&,
                     std::span<const cache::ComponentPosition>) override;
+  // K/V rows whose pages the cache shares are restored by mapping those
+  // pages into the session: whole pages only, the rest is loaded.
+  [[nodiscard]] std::vector<cache::RestoredRows> BeginSharedRestore(
+      cache::Slot&, std::span<const cache::ComponentPosition>,
+      std::span<const cache::RestoreSource>) override;
   [[nodiscard]] cache::Completion CapturePrivate(const cache::Slot&,
                                                  cache::ComponentId,
                                                  std::span<std::byte>,
@@ -86,6 +96,9 @@ private:
   [[nodiscard]] Region PrivateRegion(State&, const ContinuationComponent&,
                                      bool loading) const;
   [[nodiscard]] void* RowData(State&, const ContinuationComponent&) const;
+  // The demand-mapped region that holds a K/V component's rows, or null.
+  [[nodiscard]] gufo::mem::Region* KvRegion(State&,
+                                            const ContinuationComponent&) const;
   void CopyNativeKeys(const rocm::Session&, const ContinuationComponent&,
                       cache::Rows first, cache::Rows end, std::span<std::byte>,
                       gufo::hip::TransferStream&) const;
@@ -98,6 +111,8 @@ private:
   ContinuationLayout layout_;
   std::vector<cache::ComponentDescriptor> descriptors_;
   cache::Identity identity_;
+  // Where the cache keeps the session pages it shares; null where it copies.
+  std::shared_ptr<gufo::mem::PagePark> park_;
 };
 }  // namespace gufo::models::qwen38_flash_next
 #endif

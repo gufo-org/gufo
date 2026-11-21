@@ -1,0 +1,43 @@
+mode 0 idle    0 us: all new   44/300; canary new   44; canary new while an address was old 0; settled by polling within 318 us max, never 0
+mode 0 idle   20 us: all new  261/300; canary new  261; canary new while an address was old 0; settled by polling within 303 us max, never 0
+mode 0 idle   40 us: all new  289/300; canary new  289; canary new while an address was old 0; settled by polling within 161 us max, never 0
+mode 0 idle   60 us: all new  296/300; canary new  296; canary new while an address was old 0; settled by polling within 160 us max, never 0
+mode 0 idle  100 us: all new  300/300; canary new  300; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 0 idle  200 us: all new  300/300; canary new  300; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 0 idle  400 us: all new  300/300; canary new  300; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 5 idle    0 us: all new   18/300; canary new   19; canary new while an address was old 1; settled by polling within 329 us max, never 0
+mode 5 idle   20 us: all new    3/300; canary new    3; canary new while an address was old 0; settled by polling within 427 us max, never 0
+mode 5 idle   40 us: all new    4/300; canary new    4; canary new while an address was old 0; settled by polling within 323 us max, never 0
+mode 5 idle   60 us: all new  241/300; canary new  241; canary new while an address was old 0; settled by polling within 403 us max, never 0
+mode 5 idle  100 us: all new  296/300; canary new  296; canary new while an address was old 0; settled by polling within 281 us max, never 0
+mode 5 idle  200 us: all new  300/300; canary new  300; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 5 idle  400 us: all new  300/300; canary new  300; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 4 idle    0 us: all new   23/300; canary new  162; canary new while an address was old 142; settled by polling within 312 us max, never 0
+mode 4 idle   20 us: all new   17/300; canary new  152; canary new while an address was old 136; settled by polling within 304 us max, never 0
+mode 4 idle   40 us: all new   15/300; canary new  134; canary new while an address was old 121; settled by polling within 413 us max, never 0
+mode 4 idle   60 us: all new    3/300; canary new  121; canary new while an address was old 123; settled by polling within 410 us max, never 0
+mode 4 idle  100 us: all new  293/300; canary new  299; canary new while an address was old 6; settled by polling within 229 us max, never 0
+mode 4 idle  200 us: all new  300/300; canary new  300; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 4 idle  400 us: all new  300/300; canary new  300; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 2 idle    0 us: all new   19/300; canary new   20; canary new while an address was old 2; settled by polling within 20200 us max, never 0
+mode 2 idle   20 us: all new   22/300; canary new   23; canary new while an address was old 1; settled by polling within 10713 us max, never 0
+mode 2 idle   40 us: all new   46/300; canary new   47; canary new while an address was old 4; settled by polling within 20542 us max, never 0
+mode 2 idle   60 us: all new   96/300; canary new   96; canary new while an address was old 0; settled by polling within 19366 us max, never 0
+mode 2 idle  100 us: all new  251/300; canary new  251; canary new while an address was old 0; settled by polling within 11978 us max, never 0
+mode 2 idle  200 us: all new  275/300; canary new  275; canary new while an address was old 0; settled by polling within 12969 us max, never 0
+mode 2 idle  400 us: all new  293/300; canary new  293; canary new while an address was old 0; settled by polling within 2895 us max, never 0
+mode 0 idle  150 us: all new 3000/3000; canary new 3000; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 0 idle  200 us: all new 3000/3000; canary new 3000; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 0 idle  300 us: all new 3000/3000; canary new 3000; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 0 idle  500 us: all new 3000/3000; canary new 3000; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 4 idle  150 us: all new 3000/3000; canary new 3000; canary new while an address was old 0; settled by polling within 1 us max, never 0
+mode 4 idle  200 us: all new 3000/3000; canary new 3000; canary new while an address was old 0; settled by polling within 2 us max, never 0
+mode 4 idle  300 us: all new 3000/3000; canary new 3000; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 4 idle  500 us: all new 3000/3000; canary new 3000; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 5 idle  150 us: all new 3000/3000; canary new 3000; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 5 idle  200 us: all new 3000/3000; canary new 3000; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 5 idle  300 us: all new 3000/3000; canary new 3000; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 5 idle  500 us: all new 3000/3000; canary new 3000; canary new while an address was old 0; settled by polling within 0 us max, never 0
+case 2 (engine touch, idle, engine copy) idle 200 us: new 400, old 0, other 0 of 400
+case 2 (engine touch, idle, engine copy) idle 300 us: new 400, old 0, other 0 of 400
+case 2 (engine touch, idle, engine copy) idle 500 us: new 400, old 0, other 0 of 400
