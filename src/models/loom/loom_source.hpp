@@ -1,8 +1,7 @@
 // Every loom-fun package as a Gufo model, resolved when it is installed:
-// `gufo model install loom-fun/<repo>` needs no entry in extension.json.
-// The same rules as tools/models.py, which pins the declared models: the
-// package revision built for this runtime's Loom SDK, and one component per
-// origin its card's parameter files come from, at the revision the card pins.
+// `gufo model install loom-fun/<repo>`. The package revision built for this
+// runtime's Loom SDK, and one component per origin its card's parameter files
+// come from, at the revision the card pins.
 #ifndef GUFO_LOOM_SOURCE_HPP_
 #define GUFO_LOOM_SOURCE_HPP_
 

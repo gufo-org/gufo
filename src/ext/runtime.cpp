@@ -319,6 +319,10 @@ void Registry::AddModelSource(ModelSource source) {
   g_model_sources.push_back(std::move(source));
 }
 
+const std::vector<ModelSource>& ModelSources() {
+  return g_model_sources;
+}
+
 const ModelSource* FindModelSource(std::string_view owner) {
   for (const auto& source : g_model_sources) {
     if (source.owner == owner) {

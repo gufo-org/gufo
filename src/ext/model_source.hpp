@@ -67,6 +67,7 @@ struct ModelSource {
 
 /// The source registered for a Hugging Face owner, or nullptr.
 const ModelSource* FindModelSource(std::string_view owner);
+const std::vector<ModelSource>& ModelSources();
 
 }  // namespace gufo::ext
 

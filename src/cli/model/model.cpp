@@ -39,8 +39,8 @@ constexpr std::string_view kUsage =
     "                         extensions that are not installed\n"
     "  install <ID>         Download a model\n"
     "  install <OWNER>/<NAME>\n"
-    "                       Download a model an extension resolves from its\n"
-    "                         Hugging Face repository (loom-fun/<NAME>)\n"
+    "                       Download a model by its Hugging Face repository,\n"
+    "                         e.g. loom-fun/<NAME> for any Loom package\n"
     "      --component ROLE   Install this optional component as well;\n"
     "                         repeat for several. Without it, the default\n"
     "                         components are installed\n"
@@ -50,7 +50,9 @@ constexpr std::string_view kUsage =
     "  verify [ID...]       Check installed files against their SHA-256\n\n"
     "Options for install and update:\n"
     "      --connections N  Parallel connections (default 16)\n\n"
-    "Pass an installed model's ID to --model to use it. Models live in\n"
+    "A model installed by repository goes by that repository everywhere.\n"
+    "Pass an installed model's ID or repository to --model to use it.\n"
+    "Models live in\n"
     "$GUFO_MODELS_DIR, else $XDG_DATA_HOME/gufo/models. HF_TOKEN, or the\n"
     "token `hf auth login` saved, is sent to Hugging Face for gated models\n"
     "and higher rate limits; HF_ENDPOINT selects a mirror. Files already in\n"
@@ -84,10 +86,42 @@ std::vector<const catalog::Component*> Defaults(const catalog::Model& model) {
   return selected;
 }
 
-store::Installed* FindInstalled(std::vector<store::Installed>& installed,
-                                std::string_view id) {
-  const auto found = std::ranges::find(installed, id, &store::Installed::id);
+// Hugging Face repository names ignore case.
+bool SameRepository(std::string_view a, std::string_view b) {
+  return a.size() == b.size() &&
+         std::ranges::equal(a, b, [](unsigned char x, unsigned char y) {
+           return std::tolower(x) == std::tolower(y);
+         });
+}
+
+// What users type for an installed model: the repository it was resolved
+// from (`loom-fun/<name>`), else its ID.
+const std::string& Name(const store::Installed& model) {
+  return model.source.empty() ? model.id : model.source;
+}
+
+// The installed model `name` (an ID, or the repository it came from) names.
+template<class Models>
+auto* FindInstalled(Models& installed, std::string_view name) {
+  const auto found = std::ranges::find_if(installed, [&](const auto& model) {
+    return model.id == name ||
+           (!model.source.empty() && SameRepository(model.source, name));
+  });
   return found == installed.end() ? nullptr : &*found;
+}
+
+// The store IDs of `names`; throws for one that is not installed.
+std::vector<std::string> InstalledIds(
+    const std::vector<store::Installed>& installed,
+    const std::vector<std::string>& names) {
+  std::vector<std::string> ids;
+  for (const auto& name : names) {
+    const auto* model = FindInstalled(installed, name);
+    if (model == nullptr)
+      throw std::runtime_error("model " + name + " is not installed");
+    ids.push_back(model->id);
+  }
+  return ids;
 }
 
 std::string Roles(const catalog::Model& model) {
@@ -162,7 +196,10 @@ void Apply(const fs::path& directory, const catalog::Model& model,
 }
 
 void PrintUsage(const fs::path& directory, const store::Installed& model) {
-  std::cout << "Use it with --model " << model.id << "\n";
+  std::cout << "Use it with --model " << Name(model) << "\n";
+  // A resolved model's runner finds its other files in the model directory.
+  if (!model.source.empty())
+    return;
   for (const auto& component : model.components) {
     if (component.option != "--model")
       std::cout << "  " << component.option << " "
@@ -174,26 +211,6 @@ void PrintUsage(const fs::path& directory, const store::Installed& model) {
 platform::FileLock LockStore(const fs::path& directory) {
   fs::create_directories(directory);
   return platform::FileLock::Acquire((directory / ".lock").string());
-}
-
-// The declared model whose package is `reference` (`<owner>/<name>`).
-const catalog::Model* Declared(const catalog::Catalog& models,
-                               std::string_view reference) {
-  const auto lower = [](std::string_view text) {
-    std::string out(text);
-    std::ranges::transform(out, out.begin(), [](unsigned char c) {
-      return static_cast<char>(std::tolower(c));
-    });
-    return out;
-  };
-  for (const auto& model : models.models) {
-    for (const auto& component : model.components) {
-      if (component.option == "--model" &&
-          lower(component.repo) == lower(reference))
-        return &model;
-    }
-  }
-  return nullptr;
 }
 
 // Installs the model a source resolves `reference` to.
@@ -210,15 +227,15 @@ int InstallResolved(const std::string& reference,
   std::cout << "Resolving " << reference << "\n" << std::flush;
   const auto model = model_source::Resolve(reference, directory);
   if (const auto* existing = FindInstalled(installed, model.id);
-      existing != nullptr && existing->source != reference)
+      existing != nullptr && !SameRepository(existing->source, reference))
     throw std::runtime_error("model " + model.id +
                              " is already installed from another source; "
                              "remove it first");
   std::vector<const catalog::Component*> selected;
   for (const auto& component : model.components)
     selected.push_back(&component);
-  std::cout << "Installing " << model.id << " from " << reference << " ("
-            << model.extension << " " << model.extension_version
+  std::cout << "Installing " << reference << " (" << model.extension << " "
+            << model.extension_version
             << (model.license.empty() ? "" : ", license " + model.license)
             << "): ";
   for (std::size_t i = 0; i < selected.size(); ++i)
@@ -226,7 +243,7 @@ int InstallResolved(const std::string& reference,
               << selected[i]->repo << "@" << selected[i]->revision.substr(0, 8);
   std::cout << " (" << Bytes(Size(selected)) << ")\n" << std::flush;
   Apply(directory, model, selected, installed, options, reference);
-  std::cout << "Installed " << model.id << " in "
+  std::cout << "Installed " << reference << " in "
             << store::ModelDirectory(directory, model.id).string() << "\n";
   PrintUsage(directory, *FindInstalled(installed, model.id));
   return 0;
@@ -235,14 +252,8 @@ int InstallResolved(const std::string& reference,
 int Install(const std::string& id, const std::vector<std::string>& roles,
             const download::Options& options) {
   const auto models = catalog::Load();
-  if (models.Find(id) == nullptr && model_source::HasSource(id)) {
-    // A declared model keeps the files its extension reviewed and pinned.
-    if (const auto* declared = Declared(models, id)) {
-      std::cout << id << " is " << declared->id << "\n";
-      return Install(declared->id, roles, options);
-    }
+  if (models.Find(id) == nullptr && model_source::HasSource(id))
     return InstallResolved(id, roles, options);
-  }
   const auto& model = Require(models, id);
   const auto directory = store::StoreDirectory();
   const auto lock = LockStore(directory);
@@ -275,16 +286,13 @@ int Install(const std::string& id, const std::vector<std::string>& roles,
   return 0;
 }
 
-int Update(const std::vector<std::string>& ids,
+int Update(const std::vector<std::string>& names,
            const download::Options& options) {
   const auto models = catalog::Load();
   const auto directory = store::StoreDirectory();
   const auto lock = LockStore(directory);
   auto installed = store::Read(directory);
-  for (const auto& id : ids) {
-    if (FindInstalled(installed, id) == nullptr)
-      throw std::runtime_error("model " + id + " is not installed");
-  }
+  const auto ids = InstalledIds(installed, names);
   int status = 0;
   const auto snapshot = installed;
   for (const auto& current : snapshot) {
@@ -293,17 +301,15 @@ int Update(const std::vector<std::string>& ids,
     if (!current.source.empty()) {
       const auto resolved = model_source::Resolve(current.source, directory);
       if (Current(current, resolved)) {
-        std::cout << current.id << " is up to date\n";
+        std::cout << current.source << " is up to date\n";
         continue;
       }
       std::vector<const catalog::Component*> selected;
       for (const auto& component : resolved.components)
         selected.push_back(&component);
-      std::cout << "Updating " << current.id << " from " << current.source
-                << "\n"
-                << std::flush;
+      std::cout << "Updating " << current.source << "\n" << std::flush;
       Apply(directory, resolved, selected, installed, options, current.source);
-      std::cout << "Updated " << current.id << "\n";
+      std::cout << "Updated " << current.source << "\n";
       continue;
     }
     const auto* model = models.Find(current.id);
@@ -333,10 +339,12 @@ int Update(const std::vector<std::string>& ids,
   return status;
 }
 
-int Remove(const std::string& id) {
+int Remove(const std::string& name) {
   const auto directory = store::StoreDirectory();
   const auto lock = LockStore(directory);
   auto installed = store::Read(directory);
+  const auto* named = FindInstalled(installed, name);
+  const std::string id = named != nullptr ? named->id : name;
   // Partial downloads of this model go too.
   std::size_t partials = 0;
   const auto models = catalog::Load();
@@ -362,18 +370,15 @@ int Remove(const std::string& id) {
   store::Write(directory, installed);
   fs::remove_all(store::ModelDirectory(directory, id));
   store::CollectGarbage(directory, installed);
-  std::cout << "Removed " << id
+  std::cout << "Removed " << name
             << ". Running gufo processes keep its files until they exit.\n";
   return 0;
 }
 
-int Verify(const std::vector<std::string>& ids) {
+int Verify(const std::vector<std::string>& names) {
   const auto directory = store::StoreDirectory();
   auto installed = store::Read(directory);
-  for (const auto& id : ids) {
-    if (FindInstalled(installed, id) == nullptr)
-      throw std::runtime_error("model " + id + " is not installed");
-  }
+  const auto ids = InstalledIds(installed, names);
   int status = 0;
   for (const auto& model : installed) {
     if (!ids.empty() && std::ranges::find(ids, model.id) == ids.end())
@@ -392,7 +397,8 @@ int Verify(const std::vector<std::string>& ids) {
         else if (crypto::Sha256FileHex(path) != file.sha256)
           problem = "SHA-256 mismatch";
         if (!problem.empty()) {
-          std::cout << model.id << ": " << file.path << ": " << problem << "\n";
+          std::cout << Name(model) << ": " << file.path << ": " << problem
+                    << "\n";
           // Install trusts the blobs it finds: drop the damaged one.
           fs::remove(store::BlobPath(directory, file.sha256), ec);
           ++bad;
@@ -400,7 +406,7 @@ int Verify(const std::vector<std::string>& ids) {
       }
     }
     if (bad == 0)
-      std::cout << model.id << ": ok\n";
+      std::cout << Name(model) << ": ok\n";
     else
       status = 1;
   }
@@ -443,8 +449,8 @@ int List(bool json_mode, bool registry) {
     if (models.Find(model.id) != nullptr)
       continue;
     if (!model.source.empty())
-      rows.push_back({model.id, model.extension, "from " + model.source, 0,
-                      "installed", nullptr, &model});
+      rows.push_back(
+          {model.source, model.extension, "", 0, "installed", nullptr, &model});
     else
       rows.push_back({model.id, model.extension, "", 0,
                       "installed, no loaded extension offers it", nullptr,
@@ -500,6 +506,14 @@ int List(bool json_mode, bool registry) {
       entries.push_back(std::move(entry));
     }
     report["models"] = std::move(entries);
+    auto sources = json::Value::array();
+    for (const auto& source : model_source::Sources()) {
+      auto entry = json::Value::object();
+      entry["owner"] = source.owner;
+      entry["extension"] = source.extension;
+      sources.push_back(std::move(entry));
+    }
+    report["sources"] = std::move(sources);
     std::cout << report.dump() << "\n";
     return 0;
   }
@@ -540,6 +554,10 @@ int List(bool json_mode, bool registry) {
     std::cout << "\nInstall an extension with gufo extension install "
                  "<extension>. Models\nwithout a size pin no download; pass "
                  "their weights to --model.\n";
+  for (const auto& source : model_source::Sources())
+    std::cout << "\nAny " << source.extension << " model installs by its "
+              << "repository: gufo model install " << source.owner
+              << "/<NAME>\n(https://huggingface.co/" << source.owner << ")\n";
   return 0;
 }
 
@@ -652,10 +670,8 @@ std::vector<std::string> ResolveModelArguments(
         installed.emplace();
       }
     }
-    const auto found =
-        reference ? std::ranges::find(*installed, id, &store::Installed::source)
-                  : std::ranges::find(*installed, id, &store::Installed::id);
-    if (found != installed->end()) {
+    const auto* found = FindInstalled(*installed, id);
+    if (found != nullptr) {
       for (const auto& component : found->components) {
         if (component.option == "--model")
           *value =

@@ -5,7 +5,9 @@
 // file's size and SHA-256 from the Hub: LFS files by their recorded SHA-256,
 // other files by downloading them and checking their Git object ID.
 #include <filesystem>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "src/cli/model/catalog.hpp"
 
@@ -14,6 +16,13 @@ namespace gufo::cli::model_source {
 // True when `reference` is `<owner>/<name>` and a source is registered for
 // the owner.
 bool HasSource(std::string_view reference);
+
+struct Source {
+  std::string owner;      // Hugging Face owner, e.g. loom-fun
+  std::string extension;  // the extension that registered it
+};
+// Every registered source, by owner.
+std::vector<Source> Sources();
 
 // The model `reference` resolves to, with every component required. Files
 // that are not in LFS are stored as blobs of `store` while their SHA-256 is

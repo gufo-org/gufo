@@ -79,16 +79,20 @@ It exports only `loom_text_embed_*` (`exports.map`, `exports.def`).
 Gufo's scheduler, prefix cache, parsers and every API endpoint drive the
 package's kernels unchanged.
 
-**Models (`gufo model`).** The manifest declares the loom-fun packages as
-Gufo models (`tools/models.py` from `tools/models.txt`; Gufo's
-`tools/models/lock.py` pins `models.lock.json`). Each has a `package`
-component, the loom-fun repository at a pinned revision, which fills
-`--model` with the model directory, and one component per origin its card's
-parameter files come from (`checkpoint`, and `drafter` or `vision` where the
-package uses one), with those files at their repository paths. `gufo model
-install` puts every component in the one model directory, so a package is
-served as published rather than as loom-fetch materializes it, which
-`src/loom_package.hpp` bridges at load:
+**Models (`gufo model`).** The extension declares no models. It registers a
+model source for the `loom-fun` owner (`loom_source.hpp`), and `gufo model
+install loom-fun/<name>` resolves the package when it is installed
+(`src/cli/model/source.cpp`): a `package` component, the loom-fun repository
+at the revision for the runtime's SDK, which fills `--model` with the model
+directory, and one component per origin its card's parameter files come from
+(`checkpoint`, and `drafter` or `vision` where the package uses one), at the
+revisions the card pins, with those files at their repository paths. Every
+file's size and SHA-256 comes from the Hub. The repository is the model's
+name everywhere (`list`, `update`, `remove`, `verify`, `--model`); the store
+directory name derived from it is internal. `gufo model install` puts every
+component in the one model directory, so a package is served as published
+rather than as loom-fetch materializes it, which `loom_package.hpp` bridges
+at load:
 
 - **Preset.** A card with several presets and no `--loom-preset` serves the
   one loom-fun publishes for the GPU Loom opens by default, the first GPU KFD
@@ -117,21 +121,15 @@ extension is built for one release: `runtime.cmake` and
 `.devops/nix/hrx/loom-runtime.nix` pin it, and the embed's
 `LOOM_TEXT_EMBED_HRX_LOOM` states it.
 
-- Packages that are not declared install by repository: the extension
-  registers a model source for `loom-fun` (`loom_source.hpp`, the rules of
-  `tools/models.py` at install time), and `gufo model install
-  loom-fun/<name>` pins each file from the Hub (`src/cli/model/source.cpp`).
-- An extension release pins its models' exact revisions (`models.lock.json`),
-  so it keeps serving packages built for its SDK after the cards move on.
-  `tools/models.py` pins each card's `v<sdk>` tag when it has one, else its
-  default branch, and refuses a revision whose `llm_config.json` targets
-  another SDK; `--check` verifies the current pins.
+- `gufo model install` takes each card's `v<sdk>` tag when it has one, else
+  its default branch, and refuses a revision whose `llm_config.json` targets
+  another SDK. `gufo model update` resolves the package again.
 - At load, a package whose `llm_config.json` names another SDK series (none:
   0.1.0) is refused with what to fetch instead, rather than failing inside
   Loom.
-- A new SDK release means a new extension release: bump the runtime, rerun
-  `tools/models.py` (pins the cards' new default branches), lock, validate.
-  Users get it with a Gufo release and `gufo model update`.
+- A new SDK release means a new Gufo release: bump the runtime, validate.
+  Users then run `gufo model update`, which moves each package to the
+  revision for the new SDK.
 
 `tests/package_test.cpp` covers these, without a GPU.
 

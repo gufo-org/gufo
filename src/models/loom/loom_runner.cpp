@@ -1576,7 +1576,7 @@ void loom_text_provider_register(gufo::ext::Registry& registry) {
       .probe = &gufo::loom::ProbeLoomText,
       .create = &gufo::loom::CreateLoomRunner,
   });
-  // Every loom-fun package installs by its repository, declared or not.
+  // Every loom-fun package installs by its repository.
   registry.AddModelSource({
       .owner = std::string(gufo::loom::source::kOwner),
       .provider = "loom-text",

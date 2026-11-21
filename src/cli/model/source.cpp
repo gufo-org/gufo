@@ -160,6 +160,21 @@ bool HasSource(std::string_view reference) {
   return Find(reference) != nullptr;
 }
 
+std::vector<Source> Sources() {
+  const auto& registry = Registry();
+  std::vector<Source> sources;
+  for (const auto& source : ext::ModelSources()) {
+    Source entry{source.owner, {}};
+    for (const auto& provider : registry.Providers()) {
+      if (provider.id == source.provider)
+        entry.extension = provider.extension;
+    }
+    sources.push_back(std::move(entry));
+  }
+  std::ranges::sort(sources, {}, &Source::owner);
+  return sources;
+}
+
 bool Matches(std::string_view pattern, std::string_view path) {
   const auto slash = path.rfind('/');
   return Match(pattern, path) || (slash != std::string_view::npos &&

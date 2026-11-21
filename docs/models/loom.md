@@ -10,28 +10,25 @@ Loom programs and tokenizer, for an unmodified GGUF checkpoint that it names
 by origin (`@checkpoint/<file>`), plus a drafter or a vision projector where
 it uses one.
 
-## Files
+## Run
 
-`gufo model install` downloads a package and the GGUF files its card names,
-pinned by revision, size and SHA-256, into one model directory:
-
-```sh
-gufo model list                       # the *-loom IDs
-gufo model install qwen3-4b-loom      # 3.1 GB
-```
-
-Any other loom-fun text package installs by its repository, with no Gufo
-update. Gufo takes the package revision built for its Loom SDK (the `v<SDK>`
-tag, else the default branch), the GGUF revisions its card pins, and each
-file's SHA-256 from Hugging Face; `gufo model update` resolves it again:
+Install a package by its repository and serve it under the same name:
 
 ```sh
-gufo model install loom-fun/unsloth-Inkling-2-Mini-loom
-gufo serve llm --model loom-fun/unsloth-Inkling-2-Mini-loom   # or its ID
+gufo model install loom-fun/unsloth-Qwen3.5-2B-loom
+gufo serve llm --model loom-fun/unsloth-Qwen3.5-2B-loom
+curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3.5-2B","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-The models listed above keep the files Gufo's release pins and verified;
-installing one of their repositories installs that model.
+Any loom-fun text package works, with no Gufo update. `gufo model install`
+takes the package revision built for Gufo's Loom SDK (the `v<SDK>` tag, else
+the default branch) and the GGUF files its card names, at the revisions the
+card pins, and checks each file's SHA-256 from Hugging Face. `gufo model
+update`, `remove` and `verify`, and `--model` in `serve`, `prompt`, `chat`
+and `bench`, take the same repository. Requests name the model by its card
+ID (`Qwen/Qwen3.5-2B` here; `/v1/models` lists it), unless
+`--served-model-name` sets another.
 
 Files you download yourself work too. Pass the package directory to
 `--model` and each origin's files with `--loom-checkpoint`, `--loom-drafter`
@@ -47,20 +44,11 @@ gufo serve llm --model models/qwen3-4b-loom --loom-checkpoint models/qwen3-4b-gg
 Without these options Gufo also looks for the files in the package
 directory, at their origin paths (`hf download` both repositories into one
 directory), and a package fetched with `loom-fetch`, which places them itself,
-needs none. Use the package revision `models.lock.json` pins: a package built
-for another Loom SDK release is refused at load with the revision to fetch.
+needs none. A package built for another Loom SDK release is refused at load
+with the revision to fetch.
 
-## Run
-
-```sh
-gufo serve llm --model qwen3-4b-loom
-curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model":"Qwen/Qwen3-4B","messages":[{"role":"user","content":"Hello!"}]}'
-```
-
-`gufo prompt`, `gufo chat` and `gufo bench` take the same `--model`. The
-package's preset for your GPU is chosen automatically (`loom: preset chat for
-gfx1151` in the log); `--loom-preset` picks another.
+The package's preset for your GPU is chosen automatically (`loom: preset chat
+for gfx1151` in the log); `--loom-preset` picks another.
 
 | Option | Use |
 | --- | --- |
@@ -104,7 +92,7 @@ driver and needs no ROCm.
 
 ## Quality and performance
 
-As of November 2026, on Strix Halo, every declared package passed Gufo's API
+As of November 2026, on Strix Halo, 51 loom-fun packages passed Gufo's API
 conformance checks through `gufo model install`: 44 of 51 pass all 29, the
 rest miss checks for model behavior. Loom decodes faster than llama.cpp ROCm
 on 45 of the 50 measured packages. See the
