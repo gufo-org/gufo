@@ -29,6 +29,15 @@ inline constexpr std::string_view kToolResponseOpenTag =
 inline constexpr std::string_view kToolResponseCloseTag =
     "\x3C" "/tool_response" "\x3E";
 
+// Vision framing for `glm5v` image turns. One triple per attached image wraps
+// the placeholder span the vision tier expands (`vision/prompt.hpp` reuses
+// kImageTag as the filler spelling).
+inline constexpr std::string_view kBeginOfImageTag =
+    "\x3C" "|begin_of_image|" "\x3E";
+inline constexpr std::string_view kImageTag = "\x3C" "|image|" "\x3E";
+inline constexpr std::string_view kEndOfImageTag =
+    "\x3C" "|end_of_image|" "\x3E";
+
 /// GGUF tokenizer.ggml.eos_token_id (154820) spelling, declared once here.
 /// It is the only stop token the runtime honors numerically (through the
 /// tokenizer GetEosTokenId/IsStopToken accessors); this module keeps its

@@ -940,7 +940,7 @@ void Executor::Ffn(const DeviceLayer& l, std::uint32_t il, const float* x,
 }
 
 void Executor::Step(Session& session, std::int32_t token) {
-  RunTokens(session, &token, 1U);
+  RunTokens(session, &token, 1U, 0U);
 }
 
 void Executor::Prefill(Session& session, const std::int32_t* tokens,
@@ -952,17 +952,19 @@ void Executor::Prefill(Session& session, const std::int32_t* tokens,
     const std::uint32_t cnt = static_cast<std::uint32_t>(
         std::min(step, count - done));
     const std::int64_t p0 = session.pos_ + 1;
-    RunTokens(session, tokens + done, cnt);
+    RunTokens(session, tokens + done, cnt, static_cast<std::uint32_t>(done));
     if (mtp_prefill_) {
       // Pair every fresh position >= 1 of this chunk with the preceding
       // trunk hidden row so the draft caches cover the whole prompt.
       MtpPrefillChunk(session, tokens + done, cnt, p0);
     }
   }
+  // The armed spans belong to this prompt only; decode never re-embeds them.
+  vision_.clear();
 }
 
 void Executor::RunTokens(Session& session, const std::int32_t* tokens,
-                         std::uint32_t n) {
+                         std::uint32_t n, std::uint32_t token_base) {
   const Config& c = c_;
   const std::uint32_t h = c.hidden_size;
   const std::uint32_t hc = c.hc_count;
@@ -973,10 +975,28 @@ void Executor::RunTokens(Session& session, const std::int32_t* tokens,
   const std::size_t sp = static_cast<std::size_t>(hc) * h;
   const std::size_t mix_w = hc * (2 + hc);
 
+  // Vision rows staged by SetVision: the first embedding row of a token
+  // inside a span comes from the tower instead of the embedding table.
+  const auto vision_row = [&](std::uint32_t index) -> const float* {
+    for (const VisionImage& img : vision_) {
+      if (index >= img.offset && index < img.offset + img.row_count) {
+        return img.rows + static_cast<std::size_t>(index - img.offset) * h;
+      }
+    }
+    return nullptr;
+  };
+
   for (std::uint32_t r = 0; r < n; ++r) {
     float* emb = s0_ + static_cast<std::size_t>(r) * sp;
-    EmbedRow(model_->token_embd().data, OfType(model_->token_embd().type),
-             static_cast<std::uint32_t>(tokens[r]), h, emb, nullptr);
+    const float* vis =
+        vision_.empty() ? nullptr : vision_row(token_base + r);
+    if (vis != nullptr) {
+      static_cast<void>(hipMemcpyAsync(emb, vis, sizeof(float) * h,
+                                       hipMemcpyDeviceToDevice, nullptr));
+    } else {
+      EmbedRow(model_->token_embd().data, OfType(model_->token_embd().type),
+               static_cast<std::uint32_t>(tokens[r]), h, emb, nullptr);
+    }
     for (std::uint32_t i = 1; i < hc; ++i) {
       static_cast<void>(hipMemcpyAsync(
           emb + static_cast<std::size_t>(i) * h, emb, sizeof(float) * h,
@@ -1135,7 +1155,7 @@ void Executor::Verify(Session& session, std::int32_t token,
   // Per-row KDA snapshots let RollbackVerify() restore any accepted
   // prefix; the batched conv/fold path has no per-row boundary to take.
   kda_snap_ = true;
-  RunTokens(session, seq, k + 1U);
+  RunTokens(session, seq, k + 1U, 0U);
   kda_snap_ = false;
   GemvN(k + 1U, model_->output(), h_, c.hidden_size, verify_logits_,
         c.vocab_size);

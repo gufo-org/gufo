@@ -19,11 +19,12 @@ namespace gufo::models::glm5_next {
 #if defined(ENGINE_ENABLE_HIP)
 
 /// Validates the serve configuration and loads the GLM-5 model at
-/// `model_path`. Returns nullptr and sets `error` when the configuration
-/// is unsupported or the load fails.
+/// `model_path`. A non-empty `vision_model_path` also loads the `glm5v`
+/// mmproj tower and enables image prompts. Returns nullptr and sets
+/// `error` when the configuration is unsupported or the load fails.
 [[nodiscard]] std::shared_ptr<Model> LoadServeModel(
     const std::string& model_path, const core::GgufReader& reader,
-    std::uint32_t max_context,
+    std::uint32_t max_context, const std::string& vision_model_path,
     const server::TextSpeculativeConfig& speculative_config,
     std::string* error);
 

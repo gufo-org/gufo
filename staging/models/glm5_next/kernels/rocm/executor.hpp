@@ -69,6 +69,16 @@ class Session {
   std::uint64_t* topk_scratch{nullptr};
 };
 
+/// One image's embedding rows staged on the device and the prompt-token span
+/// they replace. `rows` points at `row_count * hidden_size` f32 device floats
+/// produced by the vision encoder; the offsets are absolute indices into the
+/// prompt passed to the next `Prefill`.
+struct VisionImage {
+  const float* rows{nullptr};
+  std::uint32_t offset{0};
+  std::uint32_t row_count{0};
+};
+
 /// Per-token decode executor of the resident device model. `Step` embeds the
 /// token, walks the 45 trunk blocks (mHC, KDA or DSA attention, dense or MoE
 /// FFN) and leaves the logits of the sampled position in `logits()`; the
@@ -84,6 +94,10 @@ class Session {
 /// per-token dot product is bit-identical to the same computation under
 /// `Step`, so chunked prefill leaves exactly the same state and logits as
 /// stepping the tokens one by one.
+///
+/// Vision prompts: `SetVision` stores the staged image embedding rows, the
+/// next `Prefill` substitutes them for the token embeddings inside each
+/// span and clears the list; `Step` never sees them.
 class Executor {
  public:
   /// Validates that every stored tensor type is decodable by the GEMV tier
@@ -104,8 +118,8 @@ class Executor {
   [[nodiscard]] std::unique_ptr<Session> CreateSession(
       std::uint32_t capacity, std::string* error_msg = nullptr) const;
 
-  /// Chunk width of `Prefill`. The multi-row tier walks any width as
-  /// power-of-two slices; the bucketed MoE tier covers the wide chunks.
+/// Chunk width of `Prefill`. The multi-row tier walks any width as
+/// power-of-two slices; the bucketed MoE tier covers the wide chunks.
   static constexpr std::uint32_t kChunk = 2048;
 
   /// Chunks of at least this many tokens take the bucketed routed MoE
@@ -124,6 +138,14 @@ class Executor {
   /// their per-step semantics.
   void Prefill(Session& session, const std::int32_t* tokens,
                std::size_t count);
+
+  /// Arms image embedding rows for the next `Prefill`. Spans must be
+  /// disjoint and inside the prompt; the rows replace the token embeddings
+  /// at those absolute positions and the list is cleared when `Prefill`
+  /// returns. An empty list is the text-only normal state.
+  void SetVision(std::vector<VisionImage> images) {
+    vision_ = std::move(images);
+  }
 
   [[nodiscard]] const float* logits() const noexcept { return logits_; }
   [[nodiscard]] const DeviceModel& model() const noexcept { return *model_; }
@@ -205,9 +227,11 @@ class Executor {
 
   /// Runs `n` (1..kChunk) consecutive tokens; the shared layer helpers
   /// batch their weight GEMVs over the chunk and loop over the tokens for
-  /// the sequential state. `Step` is the n == 1 case.
+  /// the sequential state. `Step` is the n == 1 case. `token_base` is the
+  /// absolute index of `tokens[0]` in the prompt, used to match the armed
+  /// vision spans (0 outside prefill).
   void RunTokens(Session& session, const std::int32_t* tokens,
-                 std::uint32_t n);
+                 std::uint32_t n, std::uint32_t token_base);
 
   /// Chunk-friendly GEMV dispatch (see the note above its definition).
   void GemvN(std::uint32_t tokens, const DeviceTensor& t, const float* x,
@@ -238,6 +262,9 @@ class Executor {
   Config c_{};
   std::string dbg_dir_;
   std::uint32_t dbg_il_{0};
+  // Image embedding spans armed by `SetVision`, consumed and cleared by
+  // the next `Prefill`.
+  std::vector<VisionImage> vision_;
 
   // Shared scratch (default-stream order, reused by every layer). Buffers
   // marked NC hold `kChunk` rows behind the stride of the current use; the

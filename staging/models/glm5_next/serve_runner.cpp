@@ -4,6 +4,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -18,8 +19,10 @@
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
 #include "src/core/gguf_reader.hpp"
+#include "src/core/image.hpp"
 #include "src/core/reasoning.hpp"
 #include "staging/models/glm5_next/chat_template.hpp"
+#include "staging/models/glm5_next/vision/prompt.hpp"
 
 namespace gufo::models::glm5_next {
 namespace {
@@ -70,6 +73,24 @@ std::optional<std::string> RenderEffort(ReasoningEffort effort) {
   return std::nullopt;
 }
 
+/// Builds the template knobs from the request: effort label mapping and the
+/// clear-thinking rule shared by the text and vision prompt paths.
+[[nodiscard]] ChatRenderOptions RenderOptionsFor(const ChatRequest& request) {
+  ChatRenderOptions options;
+  if (request.reasoning.effort.has_value()) {
+    options.reasoning_effort = RenderEffort(*request.reasoning.effort);
+  }
+  options.clear_thinking =
+      request.reasoning.preserve_thinking.value_or(true) == false;
+  return options;
+}
+
+/// Prompt context carried by an image request: the prepared per-image slots
+/// the prefill splices, plus the FNV identity that keys the KV cache.
+struct Glm5ImageContext final : TextPromptContext {
+  std::vector<vision::VisionSlot> slots;
+};
+
 class Glm5TextRunnerState final : public TextRunnerState {
  public:
   Glm5TextRunnerState(const std::shared_ptr<Model>& model,
@@ -88,15 +109,25 @@ class Glm5TextRunnerState final : public TextRunnerState {
 
   void Invalidate() noexcept override {
     session_->Reset();
+    vision_context_.reset();
     position_ = 0;
   }
 
   [[nodiscard]] Session& session() const { return *session_; }
   [[nodiscard]] std::size_t position() const noexcept { return position_; }
   void set_position(std::size_t position) noexcept { position_ = position; }
+  void set_vision_context(
+      std::shared_ptr<const Glm5ImageContext> context) noexcept {
+    vision_context_ = std::move(context);
+  }
+  [[nodiscard]] const std::shared_ptr<const Glm5ImageContext>& vision_context()
+      const noexcept {
+    return vision_context_;
+  }
 
  private:
   std::shared_ptr<Session> session_;
+  std::shared_ptr<const Glm5ImageContext> vision_context_;
   std::size_t position_{0};
 };
 
@@ -222,22 +253,77 @@ class Glm5TextRunner final : public TextModelRunner {
 
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
       const ChatRequest& request) const override {
-    ChatRenderOptions options;
-    if (request.reasoning.effort.has_value()) {
-      options.reasoning_effort = RenderEffort(*request.reasoning.effort);
-    }
-    options.clear_thinking =
-        request.reasoning.preserve_thinking.value_or(true) == false;
     const auto prompt = RenderChat(
         request.messages, true,
         request.tool_choice == ChatRequest::ToolChoice::kNone
             ? std::span<const tokenization::ChatTool>{}
             : std::span<const tokenization::ChatTool>{request.tools},
-        options);
+        RenderOptionsFor(request));
     if (!prompt.has_value()) {
       return std::nullopt;
     }
     return model_->tokenizer().Encode(*prompt);
+  }
+
+  [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
+      const ChatRequest& request) const override {
+    const bool has_images = std::ranges::any_of(
+        request.messages, [](const auto& m) { return !m.images.empty(); });
+    if (!has_images) {
+      auto tokens = RenderAndTokenize(request);
+      if (!tokens) {
+        return std::nullopt;
+      }
+      return TextPreparedPrompt{std::move(*tokens), {}};
+    }
+    if (!model_->HasVision()) {
+      throw std::invalid_argument(
+          "image input requires a matching --mmproj sidecar");
+    }
+    std::vector<core::Image> images;
+    for (const auto& message : request.messages) {
+      for (const auto& part : message.images) {
+        if (part.bytes == nullptr) {
+          throw std::invalid_argument("image part carries no bytes");
+        }
+        images.push_back(
+            core::DecodeImage(std::span<const std::uint8_t>(*part.bytes)));
+      }
+    }
+    std::string error;
+    const auto prepared = model_->EncodeChatVision(
+        request.messages,
+        request.tool_choice == ChatRequest::ToolChoice::kNone
+            ? std::span<const tokenization::ChatTool>{}
+            : std::span<const tokenization::ChatTool>{request.tools},
+        RenderOptionsFor(request), images, &error);
+    if (prepared.tokens.empty()) {
+      throw std::invalid_argument("GLM-5 image prompt failed: " + error);
+    }
+    std::vector<TextRunnerToken> tokens;
+    tokens.reserve(prepared.tokens.size());
+    for (const TokenId token : prepared.tokens) {
+      tokens.push_back(static_cast<TextRunnerToken>(token));
+    }
+    auto context = std::make_shared<Glm5ImageContext>();
+    context->slots = std::move(prepared.images);
+    context->cache_identity = ImageCacheIdentity(request);
+    return TextPreparedPrompt{std::move(tokens), std::move(context), 0};
+  }
+
+  void SetPromptContext(
+      TextRunnerState& state,
+      std::shared_ptr<const TextPromptContext> context) const override {
+    auto& runner = RequireGlm5State(state);
+    if (context == nullptr) {
+      runner.set_vision_context(nullptr);
+      return;
+    }
+    if (dynamic_cast<const Glm5ImageContext*>(context.get()) == nullptr) {
+      throw std::invalid_argument("invalid GLM-5 prompt context");
+    }
+    runner.set_vision_context(
+        std::static_pointer_cast<const Glm5ImageContext>(std::move(context)));
   }
 
   [[nodiscard]] std::string Decode(
@@ -271,11 +357,30 @@ class Glm5TextRunner final : public TextModelRunner {
     if (offset >= prompt.size()) {
       throw std::logic_error("GLM-5 prefill has no remaining input");
     }
+    std::string error;
+    if (const auto vision = runner.vision_context(); vision != nullptr) {
+      if (offset != 0) {
+        throw std::logic_error(
+            "GLM-5 image prefill cannot resume mid-prompt");
+      }
+      // Image rows cannot be reused from a text prefix, so the whole prompt
+      // is replayed with the staged embeddings spliced over the token rows;
+      // the executor chunks internally, so one call bounds peak memory.
+      if (!runner.session().Sync(EngineTokens(prompt), vision->slots,
+                                 &error)) {
+        runner.set_position(0);
+        throw std::runtime_error("GLM-5 image prefill failed: " + error);
+      }
+      runner.set_position(prompt.size());
+      return {
+          .consumed_tokens = prompt.size(),
+          .decode_ready = true,
+      };
+    }
     const std::size_t consumed =
         std::min<std::size_t>(max_input_tokens, prompt.size() - offset);
     const std::size_t next_position = offset + consumed;
     const auto prefix = EngineTokens(prompt.first(next_position));
-    std::string error;
     if (!runner.session().Sync(prefix, &error)) {
       runner.set_position(0);
       throw std::runtime_error("GLM-5 prefill failed: " + error);
@@ -375,6 +480,42 @@ class Glm5TextRunner final : public TextModelRunner {
   }
 
  private:
+  /// FNV-1a over every image's raw bytes so distinct image sets never share
+  /// a cached KV prefix; the count is folded in first to separate ordering.
+  [[nodiscard]] static std::vector<std::uint8_t> ImageCacheIdentity(
+      const ChatRequest& request) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    auto mix = [&hash](std::uint64_t value) {
+      for (int byte = 0; byte < 8; ++byte) {
+        hash = (hash ^ ((value >> (byte * 8)) & 0xFFULL)) * 1099511628211ULL;
+      }
+    };
+    std::size_t count = 0;
+    for (const auto& message : request.messages) {
+      count += message.images.size();
+    }
+    mix(count);
+    for (const auto& message : request.messages) {
+      for (const auto& part : message.images) {
+        if (part.bytes == nullptr) {
+          mix(0);
+          continue;
+        }
+        for (const std::uint8_t byte : *part.bytes) {
+          hash = (hash ^ byte) * 1099511628211ULL;
+        }
+        mix(part.bytes->size());
+      }
+    }
+    std::vector<std::uint8_t> identity;
+    identity.reserve(8);
+    for (int byte = 0; byte < 8; ++byte) {
+      identity.push_back(
+          static_cast<std::uint8_t>((hash >> (byte * 8)) & 0xFF));
+    }
+    return identity;
+  }
+
   std::shared_ptr<Model> model_;
   std::uint32_t max_context_;
   bool use_mtp_;
@@ -386,7 +527,7 @@ class Glm5TextRunner final : public TextModelRunner {
 
 std::shared_ptr<Model> LoadServeModel(
     const std::string& model_path, const core::GgufReader& reader,
-    std::uint32_t max_context,
+    std::uint32_t max_context, const std::string& vision_model_path,
     const server::TextSpeculativeConfig& speculative_config,
     std::string* error) {
   if (speculative_config.backend != server::TextSpeculativeBackend::kDisabled &&
@@ -397,8 +538,11 @@ std::shared_ptr<Model> LoadServeModel(
     return nullptr;
   }
   std::string load_error;
-  auto model = Model::Load(model_path, ModelOptions{.max_context = max_context},
-                           &load_error);
+  auto model = Model::Load(
+      model_path,
+      ModelOptions{.max_context = max_context,
+                   .vision_model_path = vision_model_path},
+      &load_error);
   if (model == nullptr) {
     SetError(error, "Failed to create GLM-5 model: " + load_error);
     return nullptr;

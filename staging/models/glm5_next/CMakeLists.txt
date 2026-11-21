@@ -7,7 +7,10 @@ add_library(gufo_glm5_next STATIC
   chat_template.cpp
   config.cpp
   tokenizer.cpp
-  weights.cpp)
+  weights.cpp
+  vision/config.cpp
+  vision/prompt.cpp
+  vision/weights.cpp)
 
 target_include_directories(gufo_glm5_next PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(gufo_glm5_next PUBLIC gufo_core Threads::Threads)
@@ -27,7 +30,8 @@ if (ENGINE_ENABLE_HIP)
     kernels/rocm/routed_wmma.hip.cpp
     kernels/rocm/attention.hip.cpp
     kernels/rocm/w8a8_dense.hip.cpp
-    kernels/rocm/w8a8_wave64.hip.cpp)
+    kernels/rocm/w8a8_wave64.hip.cpp
+    vision/kernels.hip.cpp)
   set_source_files_properties(kernels/rocm/dense_wmma.hip.cpp
     PROPERTIES LANGUAGE HIP)
   set_source_files_properties(kernels/rocm/gemv.hip.cpp
@@ -46,6 +50,10 @@ if (ENGINE_ENABLE_HIP)
   # same SLP/disable choice as the shared qwen prefill GEMM units.
   set_source_files_properties(kernels/rocm/w8a8_wave64.hip.cpp
     PROPERTIES LANGUAGE HIP COMPILE_OPTIONS "-std=c++20;-mwavefrontsize64;-fno-slp-vectorize")
+  # Vision tower operators (patch fold, plain f32 GEMM, RoPE, LN, merger):
+  # self-contained HIP, no C++20 dependencies, HIP_STANDARD 17 like the rest.
+  set_source_files_properties(vision/kernels.hip.cpp
+    PROPERTIES LANGUAGE HIP)
   # The shared Qwen WK kernel header reaches std::span (C++20, the top-level
   # standard); this target pins HIP_STANDARD 17 for its own decoders, so the
   # W8A8 wrapper TU switches back explicitly.
@@ -68,7 +76,8 @@ if (ENGINE_ENABLE_HIP)
   # to the GPU in its GGUF encoding and steps one token per call.
   add_library(gufo_glm5_next_executor STATIC
     kernels/rocm/device_model.cpp
-    kernels/rocm/executor.cpp)
+    kernels/rocm/executor.cpp
+    vision/encoder.cpp)
   set_target_properties(gufo_glm5_next_executor PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
   target_include_directories(gufo_glm5_next_executor PUBLIC

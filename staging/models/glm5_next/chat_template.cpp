@@ -260,6 +260,13 @@ std::optional<std::string> RenderChat(
         std::string text = message.content;
         HideEosLiterals(&text);
         prompt.append(RoleToken("user"));
+        // Attached images frame the text with one vision triple per image,
+        // matching the reference template's image content parts.
+        for (std::size_t image = 0; image < message.images.size(); ++image) {
+          prompt.append(kBeginOfImageTag);
+          prompt.append(kImageTag);
+          prompt.append(kEndOfImageTag);
+        }
         prompt.append(text);
         break;
       }

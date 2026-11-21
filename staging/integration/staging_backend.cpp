@@ -126,18 +126,24 @@ std::optional<StagingLoadedModel> StagingLoadModel(
     }
     if (architecture == "glm5-next") {
       auto model = models::glm5_next::LoadServeModel(
-          model_path, reader, max_context, speculative_config, &load_error);
+          model_path, reader, max_context, vision_model_path,
+          speculative_config, &load_error);
       if (model == nullptr) {
         SetError(error, load_error);
         return std::nullopt;
       }
+      // Read the vision flag before the model is moved into the runner; a
+      // loaded `glm5v` mmproj tower is what lets the HTTP layer accept
+      // image inputs.
+      const bool has_vision = model->HasVision();
       auto runner = models::glm5_next::CreateTextRunner(
           std::move(model), max_context, session_count, speculative_config,
           disk_cache_config, error);
       if (runner == nullptr) {
         return std::nullopt;
       }
-      return StagingLoadedModel{.runner = std::move(runner)};
+      return StagingLoadedModel{
+          .runner = std::move(runner), .supports_images = has_vision};
     }
     auto model = models::flint::LoadServeModel(model_path, reader, max_context,
                                                speculative_config, &load_error);

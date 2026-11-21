@@ -10,11 +10,14 @@
 #include <vector>
 
 #include "src/core/sampling.hpp"
+#include "staging/models/glm5_next/chat_template.hpp"
 #include "staging/models/glm5_next/config.hpp"
 #include "staging/models/glm5_next/tokenizer.hpp"
+#include "staging/models/glm5_next/vision/prompt.hpp"
 
 namespace gufo::core {
 class GgufReader;
+class Image;
 }
 
 namespace gufo::models::glm5_next {
@@ -27,8 +30,15 @@ class Executor;
 class Session;
 }  // namespace rocm
 
+namespace vision {
+class Encoder;
+}  // namespace vision
+
 struct ModelOptions {
   std::uint32_t max_context = 4096;
+  // Optional `glm5v` vision mmproj sidecar. When set, the tower is resident
+  // and image prompts are supported via EncodeChatVision and the vision Sync.
+  std::string vision_model_path;
 };
 
 class Session;
@@ -79,6 +89,20 @@ class Model final : public std::enable_shared_from_this<Model> {
     return *tokenizer_;
   }
 
+  /// Renders a conversation, encodes it, and expands every image marker
+  /// into its placeholder span, returning the tokens plus the per-image
+  /// slots (pixels + absolute offsets) the vision Sync fills. Requires a
+  /// loaded vision tower; returns an empty prompt and fills `error_msg`
+  /// otherwise.
+  [[nodiscard]] vision::PreparedPrompt EncodeChatVision(
+      std::span<const tokenization::ChatMessage> messages,
+      std::span<const tokenization::ChatTool> tools,
+      const ChatRenderOptions& options,
+      const std::vector<core::Image>& images, std::string* error_msg) const;
+
+  /// True when a `glm5v` vision tower was loaded and image prompts work.
+  [[nodiscard]] bool HasVision() const noexcept { return vision_ != nullptr; }
+
  private:
   friend class Session;
   Model() = default;
@@ -89,6 +113,8 @@ class Model final : public std::enable_shared_from_this<Model> {
   std::unique_ptr<GlmTokenizer> tokenizer_;
   std::unique_ptr<rocm::DeviceModel> device_;
   std::unique_ptr<rocm::Executor> executor_;
+  // Optional `glm5v` vision tower: the mmproj sidecar resident on the device.
+  std::unique_ptr<vision::Encoder> vision_;
   std::weak_ptr<Session> live_session_;
 };
 
@@ -108,6 +134,14 @@ class Session final {
   /// Returns false on a context overflow (the executor itself aborts on a
   /// HIP failure, so no other failure mode reaches the caller).
   [[nodiscard]] bool Sync(std::span<const std::int32_t> prompt,
+                          std::string* error_msg = nullptr);
+  /// Vision-aware sync: runs the tower over each slot's pixels, uploads the
+  /// image embeddings, and splices them over the token embeddings at the slot
+  /// offsets during prefill. Always reprocesses the whole prompt (image rows
+  /// cannot be reused from a text-only prefix). An empty `images` defers to
+  /// the plain Sync.
+  [[nodiscard]] bool Sync(std::span<const std::int32_t> prompt,
+                          const std::vector<vision::VisionSlot>& images,
                           std::string* error_msg = nullptr);
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
@@ -178,6 +212,10 @@ class Session final {
   // the k + 1 verify rows, copied once per round.
   std::vector<float> draft_logits_;
   std::vector<float> verify_rows_;
+  // Device staging buffer for the image embeddings of the last vision Sync,
+  // grown on demand and reused across requests.
+  float* vision_dev_{nullptr};
+  std::size_t vision_dev_cap_{0};
   std::uint32_t draft_min_{1};
   std::uint32_t draft_max_{1};
   std::uint32_t draft_k_{1};

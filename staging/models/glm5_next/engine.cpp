@@ -8,6 +8,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "staging/models/glm5_next/kernels/rocm/device_model.hpp"
 #include "staging/models/glm5_next/kernels/rocm/executor.hpp"
+#include "staging/models/glm5_next/vision/encoder.hpp"
 #include "staging/models/glm5_next/weights.hpp"
 
 namespace gufo::models::glm5_next {
@@ -59,6 +60,18 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   if (m->executor_ == nullptr) {
     return nullptr;
   }
+  if (!options.vision_model_path.empty()) {
+    m->vision_ = vision::Encoder::Open(options.vision_model_path, error_msg);
+    if (m->vision_ == nullptr) {
+      return nullptr;
+    }
+    if (m->vision_->config().projection_dim != c.hidden_size) {
+      AssignError(error_msg,
+                  "vision projection width does not match the trunk");
+      m->vision_.reset();
+      return nullptr;
+    }
+  }
   return m;
 }
 
@@ -98,6 +111,26 @@ std::string Model::Decode(std::span<const std::int32_t> tokens) const {
   return tokenizer_->Decode(ids);
 }
 
+vision::PreparedPrompt Model::EncodeChatVision(
+    std::span<const tokenization::ChatMessage> messages,
+    std::span<const tokenization::ChatTool> tools,
+    const ChatRenderOptions& options, const std::vector<core::Image>& images,
+    std::string* error_msg) const {
+  vision::PreparedPrompt empty;
+  if (vision_ == nullptr) {
+    AssignError(error_msg, "no vision tower loaded: pass --mmproj");
+    return empty;
+  }
+  const std::optional<std::string> rendered =
+      RenderChat(messages, true, tools, options);
+  if (!rendered.has_value()) {
+    AssignError(error_msg, "chat template rendering failed");
+    return empty;
+  }
+  return vision::BuildPrompt(*tokenizer_, *rendered, images,
+                             vision_->config(), error_msg);
+}
+
 std::string Model::TokenText(std::int32_t token) const {
   return tokenizer_->DecodeTokenCopy(static_cast<TokenId>(token));
 }
@@ -124,7 +157,9 @@ std::string Model::ModelName() const {
 }
 
 std::size_t Model::ResidentBytes() const noexcept {
-  return device_ == nullptr ? 0 : device_->resident_bytes();
+  const std::size_t trunk =
+      device_ == nullptr ? 0 : device_->resident_bytes();
+  return trunk + (vision_ == nullptr ? 0 : vision_->resident_bytes());
 }
 
 std::size_t Model::SessionBytes(std::uint32_t context) const noexcept {
@@ -145,7 +180,11 @@ Session::Session(std::shared_ptr<Model> model,
   verify_rows_.resize(rocm::Executor::kMaxVerifyRows * model_->VocabSize());
 }
 
-Session::~Session() = default;
+Session::~Session() {
+  if (vision_dev_ != nullptr) {
+    (void)hipFree(vision_dev_);
+  }
+}
 
 void Session::SyncLogits() {
   logits_.resize(model_->VocabSize());
@@ -197,6 +236,83 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
     tokens_.insert(tokens_.end(), tail.begin(), tail.end());
     SyncLogits();
   }
+  return valid_;
+}
+
+bool Session::Sync(std::span<const std::int32_t> prompt,
+                   const std::vector<vision::VisionSlot>& images,
+                   std::string* error_msg) {
+  if (images.empty()) {
+    return Sync(prompt, error_msg);
+  }
+  if (prompt.size() > max_context_) {
+    AssignError(error_msg, "prompt exceeds the session context");
+    return false;
+  }
+  vision::Encoder* encoder = model_->vision_.get();
+  if (encoder == nullptr) {
+    AssignError(error_msg, "no vision tower loaded: pass --mmproj");
+    return false;
+  }
+  const std::size_t hidden = model_->config().hidden_size;
+  std::size_t total_rows = 0;
+  for (const vision::VisionSlot& slot : images) {
+    if (slot.count == 0U || slot.offset >= prompt.size() ||
+        static_cast<std::size_t>(slot.offset) + slot.count >
+            prompt.size()) {
+      AssignError(error_msg, "image span is outside the prompt");
+      return false;
+    }
+    total_rows += slot.count;
+  }
+  if (total_rows * hidden > vision_dev_cap_) {
+    (void)hipFree(vision_dev_);
+    vision_dev_ = nullptr;
+    vision_dev_cap_ = 0;
+    if (hipMalloc(&vision_dev_,
+                  total_rows * hidden * sizeof(float)) != hipSuccess) {
+      vision_dev_ = nullptr;
+      AssignError(error_msg, "vision embedding staging allocation failed");
+      return false;
+    }
+    vision_dev_cap_ = total_rows * hidden;
+  }
+  std::vector<rocm::VisionImage> staged;
+  staged.reserve(images.size());
+  std::vector<float> encoded;
+  std::size_t row_base = 0;
+  for (const vision::VisionSlot& slot : images) {
+    const float* pixels = slot.pixels.empty() ? nullptr : slot.pixels.data();
+    if (pixels == nullptr ||
+        !encoder->Encode(pixels, slot.nx, slot.ny, encoded, error_msg)) {
+      valid_ = false;
+      return false;
+    }
+    if (encoded.size() != static_cast<std::size_t>(slot.count) * hidden) {
+      AssignError(error_msg, "vision encoder output size mismatch");
+      valid_ = false;
+      return false;
+    }
+    float* dst = vision_dev_ + row_base * hidden;
+    if (hipMemcpy(dst, encoded.data(), encoded.size() * sizeof(float),
+                  hipMemcpyHostToDevice) != hipSuccess) {
+      AssignError(error_msg, "vision embedding upload failed");
+      valid_ = false;
+      return false;
+    }
+    staged.push_back({dst, slot.offset, slot.count});
+    row_base += slot.count;
+  }
+  // Image rows cannot be recovered from a text-only cache prefix, so vision
+  // prompts always replay from the start.
+  logits_.assign(model_->VocabSize(), 0.0f);
+  pending_token_ = -1;
+  state_->Reset();
+  tokens_.clear();
+  model_->executor_->SetVision(std::move(staged));
+  model_->executor_->Prefill(*state_, prompt.data(), prompt.size());
+  tokens_.assign(prompt.begin(), prompt.end());
+  SyncLogits();
   return valid_;
 }
 

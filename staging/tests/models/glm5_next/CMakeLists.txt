@@ -15,6 +15,13 @@ set_tests_properties(glm5_next.chat_template PROPERTIES
   LABELS "glm5_next;cpu")
 add_dependencies(glm5_next_tests glm5_next_chat_template_test)
 
+add_executable(glm5_next_vision_prompt_test vision_prompt_test.cpp)
+target_link_libraries(glm5_next_vision_prompt_test PRIVATE gufo_glm5_next)
+add_test(NAME glm5_next.vision_prompt COMMAND glm5_next_vision_prompt_test)
+set_tests_properties(glm5_next.vision_prompt PROPERTIES
+  LABELS "glm5_next;cpu")
+add_dependencies(glm5_next_tests glm5_next_vision_prompt_test)
+
 # Operator and model checks run on the GPU (exclusive access) against the
 # real shards and the self-regression fixture; see the model docs.
 if(ENGINE_ENABLE_HIP)

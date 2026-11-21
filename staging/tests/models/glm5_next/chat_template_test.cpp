@@ -1,6 +1,8 @@
 #include "staging/models/glm5_next/chat_template.hpp"
 
+#include <cstdint>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -332,6 +334,29 @@ void TestEosHidden() {
   }
 }
 
+void TestImageTriples() {
+  auto blob = std::make_shared<std::vector<std::uint8_t>>(4, 7);
+  ChatMessage two_images = Message(ChatRole::kUser, "what?");
+  two_images.images.push_back({0, blob, {}});
+  two_images.images.push_back({1, blob, {}});
+  const std::string triple = std::string(glm::kBeginOfImageTag) +
+                             std::string(glm::kImageTag) +
+                             std::string(glm::kEndOfImageTag);
+  const std::vector<ChatMessage> user_turns{
+      Message(ChatRole::kUser, "first"), two_images};
+  ExpectPrompt(user_turns,
+               kEffortHeader + Role("user") + "first" + Role("user") +
+                   triple + triple + "what?" + kGenPrompt);
+
+  // Only user turns frame images; an assistant image is dropped framing.
+  ChatMessage assistant_image = Message(ChatRole::kAssistant, "A");
+  assistant_image.images.push_back({0, blob, {}});
+  const std::vector<ChatMessage> assistant_turn{assistant_image};
+  ExpectPrompt(assistant_turn,
+               kEffortHeader + Role("assistant") + glm::kThinkOpenTag +
+                   glm::kThinkCloseTag + "A" + kGenPrompt);
+}
+
 void TestSystemAndDeveloper() {
   const std::vector<ChatMessage> messages{
       Message(ChatRole::kSystem, "S"), Message(ChatRole::kDeveloper, "D"),
@@ -362,6 +387,7 @@ int main() {
     Run("TestToolSchemasPreamble", TestToolSchemasPreamble);
     Run("TestToolSchemaDefinitionJson", TestToolSchemaDefinitionJson);
     Run("TestEosHidden", TestEosHidden);
+    Run("TestImageTriples", TestImageTriples);
     Run("TestSystemAndDeveloper", TestSystemAndDeveloper);
     std::cout << "glm5_next chat_template: OK" << std::endl;
   } catch (const std::exception& error) {
