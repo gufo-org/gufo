@@ -30,6 +30,7 @@
 #include "loom_cache.hpp"
 #include "loom_chat.hpp"
 #include "loom_dialect.hpp"
+#include "loom_source.hpp"
 
 namespace gufo::loom {
 namespace {
@@ -1574,6 +1575,16 @@ void loom_text_provider_register(gufo::ext::Registry& registry) {
       .id = "loom-text",
       .probe = &gufo::loom::ProbeLoomText,
       .create = &gufo::loom::CreateLoomRunner,
+  });
+  // Every loom-fun package installs by its repository, declared or not.
+  registry.AddModelSource({
+      .owner = std::string(gufo::loom::source::kOwner),
+      .provider = "loom-text",
+      .resolve =
+          [](std::string_view repo, const gufo::ext::ModelSourceHub& hub) {
+            return gufo::loom::source::Resolve(repo, hub,
+                                               gufo::loom::kRuntimeSdk);
+          },
   });
 }
 

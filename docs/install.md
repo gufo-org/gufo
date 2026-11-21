@@ -191,6 +191,7 @@ Extensions can pin weights by Hugging Face revision, file size and SHA-256.
 ```sh
 gufo model list                   # every model and the extension that offers it
 gufo model install qwen3-asr      # download it
+gufo model install loom-fun/<name>   # an extension resolves the repository
 gufo transcribe --model qwen3-asr --audio speech.wav
 gufo model update                 # move to the files extensions pin now
 gufo model remove qwen3-asr

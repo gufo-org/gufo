@@ -117,6 +117,10 @@ extension is built for one release: `runtime.cmake` and
 `.devops/nix/hrx/loom-runtime.nix` pin it, and the embed's
 `LOOM_TEXT_EMBED_HRX_LOOM` states it.
 
+- Packages that are not declared install by repository: the extension
+  registers a model source for `loom-fun` (`loom_source.hpp`, the rules of
+  `tools/models.py` at install time), and `gufo model install
+  loom-fun/<name>` pins each file from the Hub (`src/cli/model/source.cpp`).
 - An extension release pins its models' exact revisions (`models.lock.json`),
   so it keeps serving packages built for its SDK after the cards move on.
   `tools/models.py` pins each card's `v<sdk>` tag when it has one, else its

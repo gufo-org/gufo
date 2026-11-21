@@ -68,6 +68,7 @@ std::vector<Installed> Read(const fs::path& store) {
     model.id = entry.member_str("id");
     model.extension = entry.member_str("extension");
     model.extension_version = entry.member_str("extension_version");
+    model.source = entry.member_str("source");
     if (!model_catalog::SafeRelativePath(model.id))
       throw std::runtime_error(path.string() + ": invalid model id");
     if (const auto* components = entry.find("components");
@@ -103,6 +104,8 @@ void Write(const fs::path& store, const std::vector<Installed>& installed) {
     entry["id"] = model.id;
     entry["extension"] = model.extension;
     entry["extension_version"] = model.extension_version;
+    if (!model.source.empty())
+      entry["source"] = model.source;
     auto components = json::Value::array();
     for (const auto& component : model.components) {
       auto item = json::Value::object();

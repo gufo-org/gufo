@@ -32,6 +32,9 @@ struct Installed {
   std::string id;
   std::string extension;
   std::string extension_version;
+  // The repository a model source resolved it from (`<owner>/<name>`);
+  // empty for a model an extension declares.
+  std::string source;
   std::vector<Component> components;
 
   const Component* Find(std::string_view role) const;

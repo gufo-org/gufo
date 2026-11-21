@@ -10,6 +10,7 @@
 #include "gufo/ext/decision.hpp"
 #include "gufo/ext/embeddings.hpp"
 #include "gufo/ext/image.hpp"
+#include "gufo/ext/model_source.hpp"
 #include "gufo/ext/options.hpp"
 #include "gufo/ext/text.hpp"
 #include "gufo/ext/tts.hpp"
@@ -78,6 +79,9 @@ public:
   void AddVideoProvider(VideoProvider provider);
   void AddDecisionProvider(DecisionProvider provider);
   void AddTextProvider(TextProvider provider);
+  /// Registers the source of one Hugging Face owner's models; a later source
+  /// for the same owner replaces it.
+  void AddModelSource(ModelSource source);
   std::span<const ExcludedExtension> Excluded() const { return excluded_; }
   // Empty means the key was not found among excluded extensions.
   std::string ExcludedKeyDiagnostic(std::string_view key) const;

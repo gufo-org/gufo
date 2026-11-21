@@ -20,6 +20,19 @@ gufo model list                       # the *-loom IDs
 gufo model install qwen3-4b-loom      # 3.1 GB
 ```
 
+Any other loom-fun text package installs by its repository, with no Gufo
+update. Gufo takes the package revision built for its Loom SDK (the `v<SDK>`
+tag, else the default branch), the GGUF revisions its card pins, and each
+file's SHA-256 from Hugging Face; `gufo model update` resolves it again:
+
+```sh
+gufo model install loom-fun/unsloth-Inkling-2-Mini-loom
+gufo serve llm --model loom-fun/unsloth-Inkling-2-Mini-loom   # or its ID
+```
+
+The models listed above keep the files Gufo's release pins and verified;
+installing one of their repositories installs that model.
+
 Files you download yourself work too. Pass the package directory to
 `--model` and each origin's files with `--loom-checkpoint`, `--loom-drafter`
 or `--loom-vision` (a file, or a directory holding them at their repository

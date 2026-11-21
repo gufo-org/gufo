@@ -1,6 +1,7 @@
 #include "src/cli/model/model.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
@@ -14,6 +15,7 @@
 
 #include "src/cli/model/catalog.hpp"
 #include "src/cli/model/download.hpp"
+#include "src/cli/model/source.hpp"
 #include "src/cli/model/store.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/json.hpp"
@@ -36,6 +38,9 @@ constexpr std::string_view kUsage =
     "      --registry         Also list the models of reviewed registry\n"
     "                         extensions that are not installed\n"
     "  install <ID>         Download a model\n"
+    "  install <OWNER>/<NAME>\n"
+    "                       Download a model an extension resolves from its\n"
+    "                         Hugging Face repository (loom-fun/<NAME>)\n"
     "      --component ROLE   Install this optional component as well;\n"
     "                         repeat for several. Without it, the default\n"
     "                         components are installed\n"
@@ -127,7 +132,7 @@ bool Current(const store::Installed& installed, const catalog::Model& model) {
 void Apply(const fs::path& directory, const catalog::Model& model,
            const std::vector<const catalog::Component*>& components,
            std::vector<store::Installed>& installed,
-           const download::Options& options) {
+           const download::Options& options, const std::string& source = {}) {
   std::vector<download::Item> items;
   for (const auto* component : components) {
     for (const auto& file : component->files) {
@@ -143,6 +148,7 @@ void Apply(const fs::path& directory, const catalog::Model& model,
   record.id = model.id;
   record.extension = model.extension;
   record.extension_version = model.extension_version;
+  record.source = source;
   for (const auto* component : components)
     record.components.push_back({component->role, component->option,
                                  component->repo, component->revision,
@@ -170,9 +176,73 @@ platform::FileLock LockStore(const fs::path& directory) {
   return platform::FileLock::Acquire((directory / ".lock").string());
 }
 
+// The declared model whose package is `reference` (`<owner>/<name>`).
+const catalog::Model* Declared(const catalog::Catalog& models,
+                               std::string_view reference) {
+  const auto lower = [](std::string_view text) {
+    std::string out(text);
+    std::ranges::transform(out, out.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+    return out;
+  };
+  for (const auto& model : models.models) {
+    for (const auto& component : model.components) {
+      if (component.option == "--model" &&
+          lower(component.repo) == lower(reference))
+        return &model;
+    }
+  }
+  return nullptr;
+}
+
+// Installs the model a source resolves `reference` to.
+int InstallResolved(const std::string& reference,
+                    const std::vector<std::string>& roles,
+                    const download::Options& options) {
+  if (!roles.empty())
+    throw std::runtime_error(
+        "--component applies to declared models; a resolved model installs "
+        "every component");
+  const auto directory = store::StoreDirectory();
+  const auto lock = LockStore(directory);
+  auto installed = store::Read(directory);
+  std::cout << "Resolving " << reference << "\n" << std::flush;
+  const auto model = model_source::Resolve(reference, directory);
+  if (const auto* existing = FindInstalled(installed, model.id);
+      existing != nullptr && existing->source != reference)
+    throw std::runtime_error("model " + model.id +
+                             " is already installed from another source; "
+                             "remove it first");
+  std::vector<const catalog::Component*> selected;
+  for (const auto& component : model.components)
+    selected.push_back(&component);
+  std::cout << "Installing " << model.id << " from " << reference << " ("
+            << model.extension << " " << model.extension_version
+            << (model.license.empty() ? "" : ", license " + model.license)
+            << "): ";
+  for (std::size_t i = 0; i < selected.size(); ++i)
+    std::cout << (i == 0 ? "" : ", ") << selected[i]->role << " "
+              << selected[i]->repo << "@" << selected[i]->revision.substr(0, 8);
+  std::cout << " (" << Bytes(Size(selected)) << ")\n" << std::flush;
+  Apply(directory, model, selected, installed, options, reference);
+  std::cout << "Installed " << model.id << " in "
+            << store::ModelDirectory(directory, model.id).string() << "\n";
+  PrintUsage(directory, *FindInstalled(installed, model.id));
+  return 0;
+}
+
 int Install(const std::string& id, const std::vector<std::string>& roles,
             const download::Options& options) {
   const auto models = catalog::Load();
+  if (models.Find(id) == nullptr && model_source::HasSource(id)) {
+    // A declared model keeps the files its extension reviewed and pinned.
+    if (const auto* declared = Declared(models, id)) {
+      std::cout << id << " is " << declared->id << "\n";
+      return Install(declared->id, roles, options);
+    }
+    return InstallResolved(id, roles, options);
+  }
   const auto& model = Require(models, id);
   const auto directory = store::StoreDirectory();
   const auto lock = LockStore(directory);
@@ -220,6 +290,22 @@ int Update(const std::vector<std::string>& ids,
   for (const auto& current : snapshot) {
     if (!ids.empty() && std::ranges::find(ids, current.id) == ids.end())
       continue;
+    if (!current.source.empty()) {
+      const auto resolved = model_source::Resolve(current.source, directory);
+      if (Current(current, resolved)) {
+        std::cout << current.id << " is up to date\n";
+        continue;
+      }
+      std::vector<const catalog::Component*> selected;
+      for (const auto& component : resolved.components)
+        selected.push_back(&component);
+      std::cout << "Updating " << current.id << " from " << current.source
+                << "\n"
+                << std::flush;
+      Apply(directory, resolved, selected, installed, options, current.source);
+      std::cout << "Updated " << current.id << "\n";
+      continue;
+    }
     const auto* model = models.Find(current.id);
     if (model == nullptr) {
       std::cerr << current.id << ": no loaded extension offers it any more ("
@@ -354,7 +440,12 @@ int List(bool json_mode, bool registry) {
     rows.push_back(std::move(row));
   }
   for (const auto& model : installed) {
-    if (models.Find(model.id) == nullptr)
+    if (models.Find(model.id) != nullptr)
+      continue;
+    if (!model.source.empty())
+      rows.push_back({model.id, model.extension, "from " + model.source, 0,
+                      "installed", nullptr, &model});
+    else
       rows.push_back({model.id, model.extension, "", 0,
                       "installed, no loaded extension offers it", nullptr,
                       &model});
@@ -545,9 +636,13 @@ std::vector<std::string> ResolveModelArguments(
     } else {
       continue;
     }
-    const auto id = value->substr(prefix.size());
+    auto id = value->substr(prefix.size());
     std::error_code ec;
-    if (!std::regex_match(id, id_pattern) || fs::exists(id, ec))
+    if (fs::exists(id, ec))
+      continue;
+    const bool reference =
+        id.find('/') != std::string::npos && model_source::HasSource(id);
+    if (!reference && !std::regex_match(id, id_pattern))
       continue;
     if (!installed) {
       try {
@@ -557,7 +652,9 @@ std::vector<std::string> ResolveModelArguments(
         installed.emplace();
       }
     }
-    const auto found = std::ranges::find(*installed, id, &store::Installed::id);
+    const auto found =
+        reference ? std::ranges::find(*installed, id, &store::Installed::source)
+                  : std::ranges::find(*installed, id, &store::Installed::id);
     if (found != installed->end()) {
       for (const auto& component : found->components) {
         if (component.option == "--model")
@@ -566,7 +663,7 @@ std::vector<std::string> ResolveModelArguments(
       }
       continue;
     }
-    if (catalog::Load().Find(id) != nullptr)
+    if (reference || catalog::Load().Find(id) != nullptr)
       throw std::runtime_error(
           "model " + id + " is not installed; run gufo model install " + id);
   }

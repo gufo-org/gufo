@@ -1,5 +1,6 @@
 // Tests for loom_package.hpp: preset choice per GPU and parameter files found
-// by origin (the layout `gufo model install` writes). No GPU, no Loom.
+// by origin (the layout `gufo model install` writes), and for loom_source.hpp:
+// a loom-fun repository resolved to a model. No GPU, no Loom, no network.
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -8,6 +9,7 @@
 #include <string>
 
 #include "../loom_package.hpp"
+#include "../loom_source.hpp"
 
 using namespace gufo;
 using namespace gufo::loom;
@@ -302,6 +304,90 @@ void TestUnsafePaths() {
 
 }  // namespace
 
+// A Hub that serves one package: `sdk` in its llm_config.json, `tags` in its
+// refs, and a card with a checkpoint and a drafter origin.
+ext::ModelSourceHub FakeHub(const std::string& sdk, const std::string& tags,
+                            const std::string& kind = "text") {
+  const std::string head(40, 'a'), tagged(40, 'b'), weights(40, 'c');
+  return {
+      .api = [=](std::string_view path) -> std::string {
+        if (path == "models/loom-fun/Test-loom/refs")
+          return R"({"tags":[)" + tags + R"(],"branches":[]})";
+        if (path == "models/loom-fun/Test-loom")
+          return R"({"sha":")" + head + R"("})";
+        if (path == "models/org/Test-GGUF")
+          return R"({"cardData":{"license":"apache-2.0"}})";
+        return R"({"tags":["license:mit"]})";
+      },
+      .file = [=](std::string_view, std::string_view revision,
+                  std::string_view path) -> std::string {
+        if (path == "llm_config.json")
+          return R"({"sdk":{"hrx_loom":")" + sdk + R"("}})";
+        return std::string(
+                   R"({"schema_version":1,"programs":{},"model":{"id":"Org/Test"},)") +
+               R"("services":{"chat":{"kind":")" + kind + R"("}},)" +
+               R"("origins":{"checkpoint":{"kind":"hf","repository":"org/Test-GGUF","revision":")" +
+               weights +
+               R"("},"drafter":{"kind":"hf","repository":"org/Draft","revision":")" +
+               weights +
+               R"("}},"variants":{"v":{"services":{"chat":{"parameters":{)" +
+               R"("m":{"files":[{"path":"parameter/a.gguf","origin":"@checkpoint/a.gguf"},)" +
+               R"({"path":"parameter/mmproj.gguf","origin":"@checkpoint/mmproj.gguf"}]},)" +
+               R"("d":{"files":[{"path":"parameter/d.gguf","origin":"@drafter/sub/d.gguf"}]}}}}}}})" +
+               (revision.empty() ? "" : "");
+      },
+  };
+}
+
+void TestSource() {
+  // The default branch serves a package built for this SDK series.
+  auto model =
+      source::Resolve("loom-fun/Test-loom", FakeHub("0.2.0", ""), "0.2.0");
+  CHECK(model.id == "test-loom", "the ID is the lowercased repository name");
+  CHECK(model.components.size() == 3, "package, checkpoint and drafter");
+  CHECK(model.components[0].option == "--model" &&
+            model.components[0].revision == std::string(40, 'a') &&
+            model.components[0].include.empty() &&
+            !model.components[0].exclude.empty(),
+        "the package: every file but the prose, at the default branch");
+  CHECK(model.components[1].role == "checkpoint" &&
+            model.components[1].repo == "org/Test-GGUF" &&
+            model.components[1].include ==
+                std::vector<std::string>({"a.gguf", "mmproj.gguf"}) &&
+            model.components[1].entry == ".",
+        "the checkpoint origin, at the revision the card pins");
+  CHECK(model.components[2].option == "--loom-drafter" &&
+            model.components[2].entry == "sub/d.gguf",
+        "a one-file origin's option names the file");
+  CHECK(model.license == "apache-2.0; drafter (org/Draft): mit",
+        "the checkpoint's license first");
+  // A v<sdk> tag wins over the default branch.
+  model =
+      source::Resolve("loom-fun/Test-loom",
+                      FakeHub("0.2.0", R"({"name":"v0.2.0","targetCommit":")" +
+                                           std::string(40, 'b') + R"("})"),
+                      "0.2.0");
+  CHECK(model.components[0].revision == std::string(40, 'b'), "the SDK's tag");
+  for (const auto& [hub, what] :
+       {std::pair{FakeHub("0.3.0", ""), "a package for another SDK"},
+        std::pair{FakeHub("0.2.0", "", "image"), "an image package"}}) {
+    bool threw = false;
+    try {
+      (void)source::Resolve("loom-fun/Test-loom", hub, "0.2.0");
+    } catch (const std::exception&) {
+      threw = true;
+    }
+    CHECK(threw, std::string(what) + " is refused");
+  }
+  bool threw = false;
+  try {
+    (void)source::Resolve("other/Test-loom", FakeHub("0.2.0", ""), "0.2.0");
+  } catch (const std::exception&) {
+    threw = true;
+  }
+  CHECK(threw, "another owner's repository is refused");
+}
+
 int main() {
   // CTest runs this in a private temporary folder (TMPDIR, TMP): the
   // leftovers check counts this run's directories only.
@@ -313,6 +399,7 @@ int main() {
   TestUnsafePaths();
   TestSdk();
   TestStaleAndLayouts();
+  TestSource();
   if (failures) {
     std::cerr << failures << " failed\n";
     return 1;
