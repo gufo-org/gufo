@@ -34,6 +34,7 @@
 #include "src/core/platform/os_info.hpp"
 #include "src/core/platform/pages.hpp"
 #include "src/ext/host_budget.hpp"
+#include "src/mem/ledger.hpp"
 
 namespace gufo::expert_stream {
 namespace {
@@ -48,11 +49,11 @@ uint64_t AvailableMemory() {
  * the capacity a class can strand in a part-used chunk. */
 constexpr uint64_t kChunkBytes = 128ull << 20;
 /* Cache chunks are physical device pages mapped into a reserved range
- * (hipMemCreate), the pages Gufo's PagePool hands out: the kernel cannot
- * swap them, and copies into them run at device speed (75.6 GB/s from
- * pinned staging, against 23.7 into managed memory; kernel reads are the
- * same). Without virtual memory management, or when the device heap has no
- * pages left, a chunk is managed memory. */
+ * (hipMemCreate), the pages Gufo's PagePool hands out: the host cannot swap
+ * them, and copies into them run at device speed (75.6 GB/s from pinned
+ * staging, against 23.7 into managed memory; kernel reads are the same).
+ * Where the device heap is smaller than host memory, or the device has no
+ * virtual memory management, the whole cache is managed memory instead. */
 constexpr uint64_t kPageBytes = 2ull << 20;
 
 struct Chunk {
@@ -83,7 +84,17 @@ bool DevicePagesAvailable(int device) {
     (void)hipGetLastError();
     return false;
   }
-  return granularity && kPageBytes % granularity == 0;
+  if (!granularity || kPageBytes % granularity != 0)
+    return false;
+  // As Gufo's PagePool lends: only where the heap covers host memory, so the
+  // whole cache fits in one kind of memory.
+  size_t heap_free = 0, heap_total = 0;
+  const auto host = platform::QueryHostMemory();
+  if (hipMemGetInfo(&heap_free, &heap_total) != hipSuccess) {
+    (void)hipGetLastError();
+    return false;
+  }
+  return mem::HeapCoversHost(heap_total, host ? host->total_bytes : 0);
 }
 
 void FreeChunk(Chunk& chunk) {
@@ -671,6 +682,7 @@ struct Store::Impl {
   std::vector<Chunk> chunks;
   int device = 0;
   bool device_pages = false;          // DevicePagesAvailable at Create
+  bool pages_refused = false;         // until chunks are freed
   std::vector<uint32_t> chunk_first;  // first slot index of each chunk
   /* Per-layer device tables of each expert's weight base (slot data or stage
    * row) with pinned host mirrors of what was uploaded, and the hit/miss
@@ -804,13 +816,32 @@ struct Store::Impl {
       (void)hipEventDestroy(routes_done);
   }
 
+  /* Memory the cache may take now: host memory, and with device pages the
+   * device heap too, which they are charged to. Before Fit the heap keeps
+   * Gufo's dispatch reserve on top of the store's reserve, so the prompt
+   * cache prepares its backing in full; the grant already leaves room for
+   * it, and the cache then grows to its floor in both. */
+  uint64_t available_memory() const {
+    const uint64_t host = AvailableMemory();
+    if (!device_pages)
+      return host;
+    size_t heap_free = 0, heap_total = 0;
+    if (hipMemGetInfo(&heap_free, &heap_total) != hipSuccess) {
+      (void)hipGetLastError();
+      return 0;
+    }
+    const uint64_t heap_reserve = granted ? 0 : gufo::hip::kDispatchReserve;
+    return std::min<uint64_t>(
+        host, heap_free > heap_reserve ? heap_free - heap_reserve : 0);
+  }
+
   // Free memory the cache never grows into at this moment.
   uint64_t live_floor() const {
     return granted ? policy.live_floor_bytes : reserve;
   }
 
   bool grow(uint32_t size_class) {
-    const uint64_t free_bytes = AvailableMemory();
+    const uint64_t free_bytes = available_memory();
     const uint64_t floor = live_floor();
     if (free_bytes <= floor)
       return false;
@@ -819,24 +850,28 @@ struct Store::Impl {
       return false;
     available = std::min(available, cache_limit - stats.cache_bytes);
     const uint64_t slot_bytes = class_bytes[size_class];
-    const uint64_t count = std::min(available, kChunkBytes) / slot_bytes;
+    uint64_t count = std::min(available, kChunkBytes) / slot_bytes;
     if (!count)
       return false;
     Chunk chunk;
-    if (device_pages)
-      (void)MapDevicePages(device,
-                           (count * slot_bytes + read_margin + kPageBytes - 1) /
-                               kPageBytes * kPageBytes,
-                           chunk);
-    if (device_pages && !chunk.base) {
-      // The device heap is out of pages: this and later chunks are managed.
-      device_pages = false;
-      gufo::server::Logger::LogFormatted(
-          gufo::server::LogLevel::kWarn, policy.log_tag.c_str(),
-          "no device pages left for the expert cache; growing it in managed "
-          "memory, which the host may swap");
-    }
-    if (!chunk.base) {
+    if (device_pages) {
+      if (pages_refused)
+        return false;
+      const uint64_t mapped =
+          (count * slot_bytes + read_margin + kPageBytes - 1) / kPageBytes *
+          kPageBytes;
+      if (!MapDevicePages(device, mapped, chunk)) {
+        gufo::server::Logger::LogFormatted(
+            gufo::server::LogLevel::kWarn, policy.log_tag.c_str(),
+            "the device heap refused expert cache pages at %.2f GiB",
+            static_cast<double>(stats.cache_bytes) / kGiB);
+        pages_refused = true;
+        return false;
+      }
+      // Slots fill the last page too, within the budget.
+      count =
+          std::min((mapped - read_margin) / slot_bytes, available / slot_bytes);
+    } else {
       void* allocation = nullptr;
       if (gufo::hip::AllocateManaged(
               &allocation, count * slot_bytes + read_margin) != hipSuccess)
@@ -1028,6 +1063,7 @@ struct Store::Impl {
     }
     for (size_t k = drop; k < chunks.size(); ++k)
       FreeChunk(chunks[k]);
+    pages_refused = false;
     chunks.resize(drop);
     chunk_first.resize(drop);
     slots.resize(cut);
@@ -1218,7 +1254,7 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
   } catch (const std::exception&) {
     return nullptr;
   }
-  const uint64_t available = AvailableMemory();
+  const uint64_t available = store->available_memory();
   store->cache_limit =
       available > store->reserve ? available - store->reserve : 0;
   store->requested_limit = policy.cache_limit_bytes;
@@ -1411,7 +1447,7 @@ bool Store::Seed(std::vector<Ranked> ranked, const char* source) {
     for (uint32_t l = 0; l < n_layer; ++l)
       if (!ranked_set[uint64_t{l} * store->n_expert + e])
         ranked.push_back({l, e, 0});
-  const uint64_t available = AvailableMemory();
+  const uint64_t available = store->available_memory();
   const uint64_t floor = store->live_floor();
   const uint64_t free_budget = available > floor ? available - floor : 0;
   // Before the sessions exist, leave capacity for their allocations and for
@@ -1455,7 +1491,7 @@ bool Store::Seed(std::vector<Ranked> ranked, const char* source) {
     }
     if (ids.empty())
       continue;
-    if (AvailableMemory() <= floor)
+    if (store->available_memory() <= floor)
       break;
     while (ids.size() % top_k)
       ids.push_back(ids.back());
@@ -1742,7 +1778,7 @@ void trace_snapshot(Store::Impl* store) {
   trace_put(f, store->tick);
   trace_put(f, store->cache_limit);
   trace_put(f, store->stats.cache_bytes);
-  trace_put(f, AvailableMemory());
+  trace_put(f, store->available_memory());
   trace_put(f, kChunkBytes);
   trace_put(f, policy.use_half_life);
   trace_put(f, policy.use_cap);

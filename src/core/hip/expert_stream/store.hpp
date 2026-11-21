@@ -161,8 +161,8 @@ public:
   /* Gives memory back to the host after Fit: frees whole chunks, newest
    * first, until at least `bytes` went or the cache is empty, and holds the
    * cache at what is left until Restore. The experts in the freed chunks
-   * are dropped, not moved: a chunk in managed memory (when the device heap
-   * had no pages) may have been swapped out under host pressure, and moving
+   * are dropped, not moved: a cache in managed memory (where device pages
+   * are not used) may have been swapped out under host pressure, and moving
    * its experts would read it back in. Waits for queued predictions and
    * returns 0 while prefetch reads run; call it only while no Prepare runs
    * (serving does when idle). Returns the bytes freed. */
