@@ -21,7 +21,8 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
     std::string_view artifact_fingerprint, std::string_view mtp_fingerprint,
     bool has_mtp, std::uint32_t max_context, std::uint32_t max_draft_tokens,
     std::uint32_t decode_concurrency, std::string_view position_policy,
-    std::string_view artifact_scheme, std::string_view draft_scheme) {
+    std::string_view artifact_scheme, std::string_view draft_scheme,
+    std::string_view adapters) {
   if (!IsSha256Hex(artifact_fingerprint)) {
     throw std::invalid_argument(
         "Qwen3.8-Flash-Next disk cache requires an artifact fingerprint");
@@ -30,6 +31,10 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
     throw std::invalid_argument(
         "Qwen3.8-Flash-Next MTP disk cache requires a draft artifact "
         "fingerprint");
+  }
+  if (adapters.empty() || adapters.find('\n') != std::string_view::npos) {
+    throw std::invalid_argument(
+        "Qwen3.8-Flash-Next disk cache requires a one-line adapter identity");
   }
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
@@ -45,7 +50,7 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
            << Session::kSnapshotPayloadVersion << '\n'
            << "context_tokens=" << max_context << '\n'
            << "position_policy=" << position_policy << '\n'
-           << "adapters=none\n";
+           << "adapters=" << adapters << '\n';
   if (has_mtp) {
     identity << "draft_backend=qfn-mtp-v1\n"
              << "draft_artifact_id=" << draft_scheme << ':' << mtp_fingerprint

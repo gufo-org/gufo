@@ -16,6 +16,10 @@ namespace gufo::ext::qwen::flash_next {
 class WeightSource;
 }  // namespace gufo::ext::qwen::flash_next
 
+namespace gufo::models::qwen38_flash_next {
+class LoraAdapter;
+}
+
 namespace gufo::models::qwen38_flash_next::rocm {
 
 /// One weight resident in device memory, still in its GGUF encoding, or in
@@ -113,16 +117,18 @@ public:
   DeviceModel& operator=(const DeviceModel&) = delete;
 
   /// Streams tensors from the same open files used to bind their metadata.
+  /// With `lora`, each trunk tensor it patches is merged on the host and
+  /// uploaded in its stock format and shape instead; the MTP block never is.
   [[nodiscard]] static std::unique_ptr<DeviceModel> Upload(
       const ModelWeights& weights, const core::GgufReader& reader,
       const MtpWeights* mtp, const core::GgufReader* mtp_reader,
-      std::string* error_msg = nullptr);
+      std::string* error_msg = nullptr, const LoraAdapter* lora = nullptr);
   /// Streams tensors from `source`'s regions; tensors with format_state go
   /// through WeightSource::Upload.
   [[nodiscard]] static std::unique_ptr<DeviceModel> Upload(
       const ModelWeights& weights, const MtpWeights* mtp,
       ext::qwen::flash_next::WeightSource& source,
-      std::string* error_msg = nullptr);
+      std::string* error_msg = nullptr, const LoraAdapter* lora = nullptr);
 
   const Config& config() const noexcept { return config_; }
   const DeviceTensor& token_embd() const noexcept { return token_embd_; }
@@ -173,6 +179,8 @@ public:
   [[nodiscard]] std::size_t max_q8_cols() const noexcept {
     return max_q8_cols_;
   }
+  /// Wall time spent merging and copying LoRA-patched tensors at upload.
+  [[nodiscard]] double lora_seconds() const noexcept { return lora_seconds_; }
 
 private:
   friend struct DeviceModelTestAccess;  // synthetic models in GPU tests
@@ -182,7 +190,8 @@ private:
   static std::unique_ptr<DeviceModel> UploadShards(
       const ModelWeights& weights, const MtpWeights* mtp,
       std::vector<core::GgufMappedRegion> shards, std::uint32_t trunk_shards,
-      ext::qwen::flash_next::WeightSource* source, std::string* error_msg);
+      ext::qwen::flash_next::WeightSource* source, std::string* error_msg,
+      const LoraAdapter* lora);
 
   Config config_;
   DeviceTensor token_embd_;
@@ -200,6 +209,7 @@ private:
   std::size_t bytes_{0};
   std::size_t max_half_cols_{1};
   std::size_t max_q8_cols_{32};
+  double lora_seconds_{0};
 };
 
 }  // namespace gufo::models::qwen38_flash_next::rocm

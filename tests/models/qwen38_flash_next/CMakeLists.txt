@@ -35,6 +35,13 @@ add_qwen38_flash_next_test(rope_scaling gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(rope_scaling_oracle
   gufo_qwen38_flash_next_reference "cpu")
 add_qwen38_flash_next_test(prompt_lookup gufo_core "cpu")
+add_qwen38_flash_next_test(lora gufo_qwen38_flash_next "cpu")
+target_link_libraries(qwen38_flash_next_lora_test PRIVATE gufo_core)
+# Real-weight LoRA oracle against an offline merge; reads multi-GiB
+# checkpoints, so it is built and run explicitly (usage in lora_oracle.cpp).
+add_executable(qwen38_flash_next_lora_oracle EXCLUDE_FROM_ALL lora_oracle.cpp)
+target_link_libraries(qwen38_flash_next_lora_oracle PRIVATE
+  gufo_qwen38_flash_next)
 
 add_executable(qwen38_flash_next_reference_probe EXCLUDE_FROM_ALL reference_probe.cpp)
 target_link_libraries(qwen38_flash_next_reference_probe PRIVATE

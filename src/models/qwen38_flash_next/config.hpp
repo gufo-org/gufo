@@ -7,6 +7,7 @@
 #include <gufo/ext/gguf_reader.hpp>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
@@ -17,6 +18,7 @@ namespace gufo::models::qwen38_flash_next {
 /// from the file; the fixed limits below only bound what this runtime was
 /// written and validated for (Qwen3.8-Flash-Next, 48 trunk layers).
 struct Config {
+  static constexpr std::string_view kArchitecture = "qwen4exp";
   static constexpr std::uint32_t kMaxPleHeads = 16;
   static constexpr std::uint32_t kMaxPleNgram = 3;
 
