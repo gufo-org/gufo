@@ -161,10 +161,11 @@ public:
   /* Gives memory back to the host after Fit: frees whole chunks, newest
    * first, until at least `bytes` went or the cache is empty, and holds the
    * cache at what is left until Restore. The experts in the freed chunks
-   * are dropped, not moved: under host pressure the kernel may have swapped
-   * cache pages out, and moving them would read them back in. Waits for queued predictions and returns 0 while
-   * prefetch reads run; call it only while no Prepare runs (serving does
-   * when idle). Returns the bytes freed. */
+   * are dropped, not moved: a chunk in managed memory (when the device heap
+   * had no pages) may have been swapped out under host pressure, and moving
+   * its experts would read it back in. Waits for queued predictions and
+   * returns 0 while prefetch reads run; call it only while no Prepare runs
+   * (serving does when idle). Returns the bytes freed. */
   uint64_t Release(uint64_t bytes);
   /* Lets the cache grow back to its grant after Release; it regrows as
    * misses need it, while more than FloorBytes stay available. Returns the

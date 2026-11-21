@@ -32,6 +32,7 @@
 #include "src/core/platform/fs.hpp"
 #include "src/core/platform/mapped_file.hpp"
 #include "src/core/platform/os_info.hpp"
+#include "src/core/platform/pages.hpp"
 #include "src/ext/host_budget.hpp"
 
 namespace gufo::expert_stream {
@@ -46,6 +47,104 @@ uint64_t AvailableMemory() {
 /* Each slot size class grows by its own chunks, so a smaller chunk bounds
  * the capacity a class can strand in a part-used chunk. */
 constexpr uint64_t kChunkBytes = 128ull << 20;
+/* Cache chunks are physical device pages mapped into a reserved range
+ * (hipMemCreate), the pages Gufo's PagePool hands out: the kernel cannot
+ * swap them, and copies into them run at device speed (75.6 GB/s from
+ * pinned staging, against 23.7 into managed memory; kernel reads are the
+ * same). Without virtual memory management, or when the device heap has no
+ * pages left, a chunk is managed memory. */
+constexpr uint64_t kPageBytes = 2ull << 20;
+
+struct Chunk {
+  uint8_t* base = nullptr;
+  uint64_t bytes = 0;                                  // mapped (or allocated)
+  std::vector<hipMemGenericAllocationHandle_t> pages;  // empty: managed
+};
+
+bool DevicePagesAvailable(int device) {
+  if (!platform::DevicePagesUseHostMemory())
+    return false;
+  int supported = 0;
+  if (hipDeviceGetAttribute(&supported,
+                            hipDeviceAttributeVirtualMemoryManagementSupported,
+                            device) != hipSuccess ||
+      !supported) {
+    (void)hipGetLastError();
+    return false;
+  }
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  size_t granularity = 0;
+  if (hipMemGetAllocationGranularity(&granularity, &prop,
+                                     hipMemAllocationGranularityMinimum) !=
+      hipSuccess) {
+    (void)hipGetLastError();
+    return false;
+  }
+  return granularity && kPageBytes % granularity == 0;
+}
+
+void FreeChunk(Chunk& chunk) {
+  if (!chunk.base)
+    return;
+  if (chunk.pages.empty()) {
+    (void)hipFree(chunk.base);
+  } else {
+    (void)hipMemUnmap(chunk.base, chunk.bytes);
+    for (hipMemGenericAllocationHandle_t page : chunk.pages)
+      (void)hipMemRelease(page);
+    (void)hipMemAddressFree(chunk.base, chunk.bytes);
+  }
+  (void)hipGetLastError();
+  chunk = {};
+}
+
+/* `bytes` (a multiple of kPageBytes) of device pages, mapped readable and
+ * writable by `device`; false (nothing held) when any step fails. */
+bool MapDevicePages(int device, uint64_t bytes, Chunk& chunk) {
+  hipMemAllocationProp prop{};
+  prop.type = hipMemAllocationTypePinned;
+  prop.location.type = hipMemLocationTypeDevice;
+  prop.location.id = device;
+  void* base = nullptr;
+  if (hipMemAddressReserve(&base, bytes, kPageBytes, nullptr, 0) !=
+      hipSuccess) {
+    (void)hipGetLastError();
+    return false;
+  }
+  chunk.base = static_cast<uint8_t*>(base);
+  chunk.bytes = 0;
+  for (uint64_t offset = 0; offset < bytes; offset += kPageBytes) {
+    hipMemGenericAllocationHandle_t page{};
+    if (hipMemCreate(&page, kPageBytes, &prop, 0) != hipSuccess)
+      break;
+    if (hipMemMap(chunk.base + offset, kPageBytes, 0, page, 0) != hipSuccess) {
+      (void)hipMemRelease(page);
+      break;
+    }
+    chunk.pages.push_back(page);
+    chunk.bytes += kPageBytes;
+  }
+  hipMemAccessDesc access{};
+  access.location = prop.location;
+  access.flags = hipMemAccessFlagsProtReadWrite;
+  if (chunk.bytes != bytes ||
+      hipMemSetAccess(chunk.base, bytes, &access, 1) != hipSuccess) {
+    // Unmap only what was mapped, then free the whole reservation.
+    const uint64_t mapped = chunk.bytes;
+    if (mapped)
+      (void)hipMemUnmap(chunk.base, mapped);
+    for (hipMemGenericAllocationHandle_t page : chunk.pages)
+      (void)hipMemRelease(page);
+    (void)hipMemAddressFree(chunk.base, bytes);
+    (void)hipGetLastError();
+    chunk = {};
+    return false;
+  }
+  return true;
+}
 /* A routing trace (Policy::trace_path) starts with kTraceMagic and the
  * format version; records follow. */
 constexpr char kTraceMagic[8] = {'G', 'U', 'F', 'O', 'X', 'T', 'R', 'C'};
@@ -569,7 +668,9 @@ struct Store::Impl {
   std::vector<Prediction> pred_queue;
   bool pred_active = false;
   bool pred_stopping = false;
-  std::vector<void*> chunks;
+  std::vector<Chunk> chunks;
+  int device = 0;
+  bool device_pages = false;          // DevicePagesAvailable at Create
   std::vector<uint32_t> chunk_first;  // first slot index of each chunk
   /* Per-layer device tables of each expert's weight base (slot data or stage
    * row) with pinned host mirrors of what was uploaded, and the hit/miss
@@ -674,8 +775,8 @@ struct Store::Impl {
     for (platform::PlatformFile file : owned_files)
       platform::CloseFile(file);
     (void)hipDeviceSynchronize();
-    for (void* chunk : chunks)
-      (void)hipFree(chunk);
+    for (Chunk& chunk : chunks)
+      FreeChunk(chunk);
     for (auto& set : stage)
       for (void* p : set)
         if (p)
@@ -721,12 +822,31 @@ struct Store::Impl {
     const uint64_t count = std::min(available, kChunkBytes) / slot_bytes;
     if (!count)
       return false;
+    Chunk chunk;
+    if (device_pages)
+      (void)MapDevicePages(device,
+                           (count * slot_bytes + read_margin + kPageBytes - 1) /
+                               kPageBytes * kPageBytes,
+                           chunk);
+    if (device_pages && !chunk.base) {
+      // The device heap is out of pages: this and later chunks are managed.
+      device_pages = false;
+      gufo::server::Logger::LogFormatted(
+          gufo::server::LogLevel::kWarn, policy.log_tag.c_str(),
+          "no device pages left for the expert cache; growing it in managed "
+          "memory, which the host may swap");
+    }
+    if (!chunk.base) {
+      void* allocation = nullptr;
+      if (gufo::hip::AllocateManaged(
+              &allocation, count * slot_bytes + read_margin) != hipSuccess)
+        return false;
+      chunk.base = static_cast<uint8_t*>(allocation);
+      chunk.bytes = count * slot_bytes + read_margin;
+    }
     const uint64_t bytes = count * slot_bytes;
-    void* allocation = nullptr;
-    if (gufo::hip::AllocateManaged(&allocation, bytes + read_margin) !=
-        hipSuccess)
-      return false;
-    chunks.push_back(allocation);
+    uint8_t* const allocation = chunk.base;
+    chunks.push_back(std::move(chunk));
     chunk_first.push_back(static_cast<uint32_t>(slots.size()));
     stats.cache_bytes += bytes;
     for (uint64_t i = 0; i < count; ++i) {
@@ -831,8 +951,8 @@ struct Store::Impl {
    * survivors in the freed chunks move into the kept slots of the lowest,
    * which are evicted. Without it, the freed chunks' experts are dropped and
    * no cache memory is touched, so a release under host pressure does not
-   * read pages the kernel may have swapped out. No prepare or prefetch may
-   * be running (startup, or Release). */
+   * read managed chunks the kernel may have swapped out. No prepare or prefetch
+   * may be running (startup, or Release). */
   bool shrink_to(uint64_t limit, bool move_survivors) {
     if (stats.cache_bytes <= limit || chunks.empty())
       return true;
@@ -907,7 +1027,7 @@ struct Store::Impl {
       }
     }
     for (size_t k = drop; k < chunks.size(); ++k)
-      (void)hipFree(chunks[k]);
+      FreeChunk(chunks[k]);
     chunks.resize(drop);
     chunk_first.resize(drop);
     slots.resize(cut);
@@ -1086,6 +1206,8 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
   if (hipGetDevice(&device) != hipSuccess) {
     return nullptr;
   }
+  store->device = device;
+  store->device_pages = DevicePagesAvailable(device);
   try {
     store->readers = std::make_unique<ReadPool>(store->read_buffers, device);
   } catch (const std::exception&) {
