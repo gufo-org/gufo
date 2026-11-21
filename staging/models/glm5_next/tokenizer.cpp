@@ -549,6 +549,11 @@ std::unique_ptr<GlmTokenizer> GlmTokenizer::CreateFromVocabulary(
       tokenizer->stop_token_ids_.insert(id);
     }
   }
+  for (const TokenId id : tokenizer->stop_token_ids_) {
+    if (id < tokenizer->turn_end_token_id_) {
+      tokenizer->turn_end_token_id_ = id;
+    }
+  }
 
   tokenizer->InitializeByteTokens();
   return tokenizer;

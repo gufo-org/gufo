@@ -304,13 +304,8 @@ public:
     if (!ling3.session().DecodeStep(max_tokens, sampler, &decoded, &error)) {
       throw std::runtime_error("Ling 3.0 Flash MTP decode failed: " + error);
     }
-    // The round commits the framing token that ends the turn; it is the
-    // stop signal, not content. Dropping it here mirrors the non-MTP
-    // SelectNext path so the stream ends without the raw control text.
-    if (decoded.stop && !decoded.tokens.empty() &&
-        model_->IsStopToken(decoded.tokens.back())) {
-      decoded.tokens.pop_back();
-    }
+    // The engine never commits a stop token, so `decoded.tokens` is pure
+    // content and Post() equals the prompt plus this content.
     server::TextDecodeStep step;
     step.stop = decoded.stop;
     step.selections.reserve(decoded.tokens.size());

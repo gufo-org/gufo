@@ -94,6 +94,12 @@ public:
   [[nodiscard]] TokenId GetEosTokenId() const noexcept { return eos_token_id_; }
   [[nodiscard]] TokenId GetPadTokenId() const noexcept { return pad_token_id_; }
 
+  /// Lowest stop-token id: ChatGLM's end-of-turn control token, which also
+  /// terminates a thought that carries no explicit close tag.
+  [[nodiscard]] TokenId GetTurnEndTokenId() const noexcept {
+    return turn_end_token_id_;
+  }
+
   /// End-of-generation set: eog metadata plus eos.
   [[nodiscard]] bool IsStopToken(TokenId token) const noexcept {
     return token != kInvalidTokenId && stop_token_ids_.contains(token);
@@ -143,6 +149,7 @@ private:
   TokenId bos_token_id_{kInvalidTokenId};
   TokenId eos_token_id_{kInvalidTokenId};
   TokenId pad_token_id_{kInvalidTokenId};
+  TokenId turn_end_token_id_{kInvalidTokenId};
   std::unordered_set<TokenId> stop_token_ids_;
 };
 

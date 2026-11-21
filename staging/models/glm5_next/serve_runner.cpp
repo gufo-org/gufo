@@ -130,6 +130,36 @@ class Glm5TextRunner final : public TextModelRunner {
         min_drafts_(min_drafts),
         max_drafts_(max_drafts) {}
 
+  // GLM frames thoughts with plain text tags and closes a thought by ending
+  // the turn: no explicit close tag means the next-turn control token
+  // terminates it, mirroring the reference template's reasoning split.
+  [[nodiscard]] ext::ThoughtMarkers ThoughtMarkers() const override {
+    ext::ThoughtMarkers markers;
+    markers.open = kThinkOpenTag;
+    markers.close = kThinkCloseTag;
+    const auto turn_end = model_->tokenizer().GetTurnEndTokenId();
+    if (turn_end != kInvalidTokenId)
+      markers.turn_end = model_->tokenizer().DecodeToken(turn_end);
+    return markers;
+  }
+
+  // The prompt framing appends the thought opener (matching the reference
+  // template's generation prompt), so the completion always starts inside
+  // the thought and the stream needs no opener to enter reasoning.
+  [[nodiscard]] ext::InitialOutputState InitialOutputState(
+      const ChatRequest&) const override {
+    return ext::InitialOutputState::kReasoning;
+  }
+
+  // GLM writes calls as kToolCallOpenTag + name + kArgKeyOpenTag frames,
+  // recognized in the output like Ling 3.0 Flash: constraining them with the
+  // JSON grammar would rewrite the template's dialect and reject its own
+  // tokens.
+  [[nodiscard]] sampling::JsonConstraint::ToolFormat ToolFormat()
+      const override {
+    return sampling::JsonConstraint::ToolFormat::kLing3;
+  }
+
   [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
   BuildConstraintVocabulary() const override {
     return std::make_shared<const sampling::ConstraintVocabulary>(
@@ -323,13 +353,11 @@ class Glm5TextRunner final : public TextModelRunner {
     if (!runner.session().DecodeStep(max_tokens, sampler, &decoded, &error)) {
       throw std::runtime_error("GLM-5 MTP decode failed: " + error);
     }
-    // The round commits the framing token that ends the turn; it is the
-    // stop signal, not content. Dropping it here mirrors the non-MTP
-    // SelectNext path so the stream ends without the raw control text.
-    if (decoded.stop && !decoded.tokens.empty() &&
-        model_->IsStopToken(decoded.tokens.back())) {
-      decoded.tokens.pop_back();
-    }
+    // The engine never commits a stop token: a mid-chain end-of-turn
+    // truncates the accepted prefix and a rejected-row end-of-turn stays
+    // out of the deferred correction. So `decoded.tokens` is pure content
+    // and Post() equals the prompt plus this content, which is exactly the
+    // committed history `Request::Commit` validates.
     server::TextDecodeStep step;
     step.stop = decoded.stop;
     step.selections.reserve(decoded.tokens.size());

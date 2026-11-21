@@ -63,10 +63,12 @@ struct InferenceBackend::Impl {
         std::shared_ptr<const State> model_state,
         TextGenerationScheduler::Request scheduled_request,
         InitialOutputState initial = InitialOutputState::kContent,
-        std::optional<sampling::JsonConstraint::ToolFormat> tool_format = {})
+        std::optional<sampling::JsonConstraint::ToolFormat> tool_format = {},
+        std::optional<ext::ThoughtMarkers> thought = {})
         : state_(std::move(model_state)),
           request_(std::move(scheduled_request)),
-          tool_format_(tool_format) {
+          tool_format_(tool_format),
+          thought_(thought) {
       if (initial == InitialOutputState::kReasoning)
         reasoning_end_ =
             state_->scheduler->runner().TokenizeControl("</think>");
@@ -93,11 +95,16 @@ struct InferenceBackend::Impl {
       return tool_format_;
     }
 
+    std::optional<ext::ThoughtMarkers> ThoughtMarkers() const override {
+      return thought_;
+    }
+
   private:
     std::shared_ptr<const State> state_;
     TextGenerationScheduler::Request request_;
     std::vector<tokenization::TokenId> reasoning_end_;
     const std::optional<sampling::JsonConstraint::ToolFormat> tool_format_;
+    const std::optional<ext::ThoughtMarkers> thought_;
   };
 
   [[nodiscard]] std::shared_ptr<const State> Snapshot() const {
@@ -622,8 +629,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
 
   auto effective_sampling = sampling_config;
   std::optional<sampling::JsonConstraint::ToolFormat> tool_format;
-  auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
-                                          &effective_sampling, &tool_format);
+  std::optional<ext::ThoughtMarkers> thought;
+  auto constrained =
+      ConstrainChatRequest(request, state->scheduler->runner(),
+                           &effective_sampling, &tool_format, &thought);
   const auto& effective_request = constrained ? *constrained : request;
   auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
@@ -655,7 +664,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .return_progress = request.return_progress,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
-      state, std::move(scheduled_request), initial, tool_format);
+      state, std::move(scheduled_request), initial, tool_format, thought);
 #else
   return TextGenerationBackend::start_chat(request, max_tokens, sampling_config,
                                            is_cancelled, stream_output);

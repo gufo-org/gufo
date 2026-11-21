@@ -52,9 +52,10 @@ ChatMessage Message(ChatRole role, std::string content) {
 void ExpectPrompt(std::span<const ChatMessage> messages,
                   const std::string& expected,
                   const glm::ChatRenderOptions& options = {},
-                  bool add_generation_prompt = true) {
+                  bool add_generation_prompt = true,
+                  std::span<const ChatTool> tools = {}) {
   const auto rendered =
-      glm::RenderChat(messages, add_generation_prompt, {}, options);
+      glm::RenderChat(messages, add_generation_prompt, tools, options);
   if (!rendered.has_value()) {
     throw std::runtime_error("RenderChat unexpectedly nullopt");
   }
@@ -211,14 +212,99 @@ void TestToolResponseRun() {
                    "X" + glm::kToolResponseCloseTag + kGenPrompt);
 }
 
-void TestToolSchemasFailClosed() {
-  const std::vector<ChatMessage> messages{Message(ChatRole::kUser, "Hi")};
+ChatTool SchemaTool(std::string name, std::string description,
+                    std::string parameters_json) {
   ChatTool tool;
-  tool.name = "lookup";
-  const std::vector<ChatTool> tools{tool};
-  if (glm::RenderChat(messages, true, tools).has_value()) {
-    throw std::runtime_error("tool schemas must render nullopt");
-  }
+  tool.name = std::move(name);
+  tool.description = std::move(description);
+  tool.parameters_json = std::move(parameters_json);
+  return tool;
+}
+
+std::string SchemaEntry(const ChatTool& tool) {
+  return "{\"name\": \"" + tool.name + "\", \"description\": \"" +
+         tool.description + "\", \"parameters\": " + tool.parameters_json +
+         "}";
+}
+
+// The reference preamble block, spelled like the reference template: a
+// second system block opened after the effort header.
+const std::string kPreambleHead =
+    "\n# Tools\n\nYou may call one or more functions to assist with the "
+    "user query.\n\nYou are provided with function signatures within "
+    "<tools></tools> XML tags:\n<tools>\n";
+
+std::string PreambleTail() {
+  return "\n</tools>\n\nFor each function call, output the function name "
+         "and arguments within the following XML format:\n" +
+         std::string(glm::kToolCallOpenTag) + "{function-name}" +
+         std::string(glm::kArgKeyOpenTag) + "{arg-key-1}" +
+         std::string(glm::kArgKeyCloseTag) +
+         std::string(glm::kArgValueOpenTag) + "{arg-value-1}" +
+         std::string(glm::kArgValueCloseTag) + std::string(glm::kArgKeyOpenTag) +
+         "{arg-key-2}" + std::string(glm::kArgKeyCloseTag) +
+         std::string(glm::kArgValueOpenTag) + "{arg-value-2}" +
+         std::string(glm::kArgValueCloseTag) + "..." +
+         std::string(glm::kToolCallCloseTag);
+}
+
+std::string ToolsTurn(const std::string& per_tool) {
+  return kEffortHeader + Role("system") + kPreambleHead + per_tool +
+         PreambleTail() + Role("user") + "Hi" + kGenPrompt;
+}
+
+void TestToolSchemasPreamble() {
+  const std::string params =
+      "{\"type\": \"object\", \"properties\": {\"expr\": {\"type\": "
+      "\"string\"}}, \"required\": [\"expr\"]}";
+  const std::vector<ChatMessage> messages{Message(ChatRole::kUser, "Hi")};
+
+  // Synthesized definition: name, description, parameters in that order.
+  const ChatTool one = SchemaTool("calculator", "Arithmetic", params);
+  const std::vector<ChatTool> single{one};
+  ExpectPrompt(messages, ToolsTurn("\n" + SchemaEntry(one) + "\n\n"),
+               {}, true, single);
+
+  // Each tool contributes its own entry; the second entry follows a blank
+  // line only from the first entry's closing newlines.
+  const ChatTool two = SchemaTool("weather", "Forecast", params);
+  const std::vector<ChatTool> pair{one, two};
+  ExpectPrompt(messages,
+               ToolsTurn("\n" + SchemaEntry(one) + "\n\n" + "\n" +
+                                   SchemaEntry(two) + "\n\n"),
+               {}, true, pair);
+}
+
+void TestToolSchemaDefinitionJson() {
+  const std::string params = "{\"type\": \"object\", \"properties\": {}}";
+  const std::vector<ChatMessage> messages{Message(ChatRole::kUser, "Hi")};
+
+  // definition_json wins: member order is preserved verbatim, and
+  // defer_loading/strict are dropped from the serialized entry.
+  ChatTool strict = SchemaTool("c", "ignored", params);
+  strict.definition_json =
+      "{\"type\": \"function\", \"function\": {\"parameters\": "
+      "{\"type\": \"object\", \"properties\": {}}, \"strict\": true, "
+      "\"name\": \"c\", \"defer_loading\": false}}";
+  const std::vector<ChatTool> strict_tools{strict};
+  ExpectPrompt(
+      messages,
+      ToolsTurn("\n{\"parameters\": {\"type\": \"object\", \"properties\": "
+                "{}}, \"name\": \"c\"}\n\n"),
+      {}, true, strict_tools);
+
+  // A deferred tool contributes only its newline; the rest still renders.
+  ChatTool deferred = SchemaTool("a", "d", params);
+  deferred.definition_json =
+      "{\"type\": \"function\", \"function\": {\"name\": \"a\", "
+      "\"defer_loading\": true, \"description\": \"d\", \"parameters\": " +
+      params + "}}";
+  const ChatTool kept = SchemaTool("b", "d2", params);
+  const std::vector<ChatTool> mixed{deferred, kept};
+  ExpectPrompt(messages,
+               ToolsTurn(std::string("\n") + "\n" +
+                                    SchemaEntry(kept) + "\n\n"),
+               {}, true, mixed);
 }
 
 void TestEosHidden() {
@@ -273,7 +359,8 @@ int main() {
     Run("TestClearThinking", TestClearThinking);
     Run("TestToolCallSection", TestToolCallSection);
     Run("TestToolResponseRun", TestToolResponseRun);
-    Run("TestToolSchemasFailClosed", TestToolSchemasFailClosed);
+    Run("TestToolSchemasPreamble", TestToolSchemasPreamble);
+    Run("TestToolSchemaDefinitionJson", TestToolSchemaDefinitionJson);
     Run("TestEosHidden", TestEosHidden);
     Run("TestSystemAndDeveloper", TestSystemAndDeveloper);
     std::cout << "glm5_next chat_template: OK" << std::endl;

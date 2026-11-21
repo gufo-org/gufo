@@ -198,7 +198,8 @@ private:
 [[nodiscard]] std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
     sampling::SamplingConfig* sampling,
-    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr);
+    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format = nullptr,
+    std::optional<ext::ThoughtMarkers>* thought = nullptr);
 
 }  // namespace gufo::server
 

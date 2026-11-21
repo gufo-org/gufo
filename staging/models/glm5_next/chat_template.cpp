@@ -7,6 +7,8 @@
 
 #include <unicode/uchar.h>
 
+#include "src/core/json.hpp"
+
 namespace gufo::models::glm5_next {
 namespace {
 
@@ -124,6 +126,81 @@ void AppendToolCall(std::string* out,
   out->append(kToolCallCloseTag);
 }
 
+/// Python truthiness for the template's `defer_loading` guard: absent, null,
+/// false, 0 and "" keep the tool; anything else defers it.
+[[nodiscard]] bool Deferred(const json::Value* defer) {
+  if (defer == nullptr || defer->is_null()) {
+    return false;
+  }
+  if (defer->is_bool()) {
+    return defer->as_bool();
+  }
+  if (defer->is_number()) {
+    return defer->as_double() != 0.0;
+  }
+  if (defer->is_string()) {
+    return !defer->str().empty();
+  }
+  return true;
+}
+
+/// The reference `tool_to_json`: the tool object (unwrapped from a
+/// `function` member) minus `defer_loading` and `strict`, serialized with
+/// Jinja `tojson` (Python `json.dumps(ensure_ascii=False)`) in member order.
+[[nodiscard]] json::Value ToolDefinitionJson(
+    const tokenization::ChatTool& tool) {
+  json::Value definition;
+  if (!tool.definition_json.empty()) {
+    definition = json::parse(tool.definition_json);
+  } else {
+    definition = json::Value::object();
+    definition.append_member("name", json::Value(tool.name));
+    if (!tool.description.empty()) {
+      definition.append_member("description", json::Value(tool.description));
+    }
+    definition.append_member("parameters", json::parse(tool.parameters_json));
+  }
+  if (const auto* function = definition.find("function")) {
+    definition = *function;
+  }
+  return definition;
+}
+
+/// The reference tools preamble: a dedicated system block listing each tool
+/// schema between `<tools>` tags, emitted once before the message loop.
+void AppendToolsPreamble(
+    std::string* prompt, std::span<const tokenization::ChatTool> tools) {
+  prompt->append(RoleToken("system"));
+  prompt->append(
+      "\n# Tools\n\nYou may call one or more functions to assist with the "
+      "user query.\n\nYou are provided with function signatures within "
+      "<tools></tools> XML tags:\n<tools>\n");
+  for (const auto& tool : tools) {
+    // Each iteration contributes its own leading newline; a deferred tool
+    // contributes only that newline.
+    prompt->push_back('\n');
+    const auto raw = ToolDefinitionJson(tool);
+    if (Deferred(raw.find("defer_loading"))) {
+      continue;
+    }
+    auto emitted = json::Value::object();
+    for (const auto& member : raw.members()) {
+      if (member.first == "defer_loading" || member.first == "strict") {
+        continue;
+      }
+      emitted.append_member(member.first, member.second);
+    }
+    prompt->append(emitted.tojson());
+    prompt->append("\n\n");
+  }
+  prompt->append(
+      "\n</tools>\n\nFor each function call, output the function name and "
+      "arguments within the following XML format:\n<tool_call>"
+      "{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>"
+      "{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>"
+      "{arg-value-2}</arg_value>...</tool_call>");
+}
+
 }  // namespace
 
 void HideEosLiterals(std::string* text) {
@@ -135,11 +212,6 @@ std::optional<std::string> RenderChat(
     bool add_generation_prompt,
     std::span<const tokenization::ChatTool> tools,
     const ChatRenderOptions& options) {
-  if (!tools.empty()) {
-    // The tools-schema preamble branch is not implemented; fail closed.
-    return std::nullopt;
-  }
-
   std::string prompt;
   prompt.append("\x5B" "gMASK" "\x5D");
   prompt.append("\x3C" "sop" "\x3E");
@@ -157,6 +229,10 @@ std::optional<std::string> RenderChat(
   prompt.append(RoleToken("system"));
   prompt.append("Reasoning Effort: ");
   prompt.append(label);
+
+  if (!tools.empty()) {
+    AppendToolsPreamble(&prompt, tools);
+  }
 
   std::size_t last_user_index = 0;
   bool have_user = false;

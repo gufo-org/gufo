@@ -25,11 +25,14 @@ namespace gufo::server {
 std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
     sampling::SamplingConfig* sampling,
-    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format) {
+    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format,
+    std::optional<ext::ThoughtMarkers>* thought) {
   // Output parsing needs the model's dialect even without tool constraints
   // (for example Qwen's whitespace boundary after </think>).
   if (tool_format)
     *tool_format = runner.ToolFormat();
+  if (thought)
+    *thought = runner.ThoughtMarkers();
   if (!request.response_format &&
       (request.tools.empty() ||
        request.tool_choice == ChatRequest::ToolChoice::kNone))

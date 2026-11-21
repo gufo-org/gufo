@@ -395,10 +395,14 @@ bool Session::DecodeStep(std::size_t max_tokens,
       break;
     }
   }
+  // A stop token truncates the accepted prefix to the content before it:
+  // like the serial path, the engine never applies an end-of-turn token, so
+  // the rollback keeps exactly the committed content rows and Position()
+  // equals the prompt plus `result->tokens`.
   bool stopped = false;
   for (std::size_t i = 0; i < accepted; ++i) {
     if (is_stop(drafts[i])) {
-      accepted = i + 1;
+      accepted = i;
       stopped = true;
       break;
     }
@@ -437,6 +441,11 @@ bool Session::DecodeStep(std::size_t max_tokens,
     result->tokens.push_back(static_cast<std::int32_t>(id));
   }
   sampler.Accept(std::span<const sampling::TokenId>(committed));
+  if (!stopped && correction >= 0 && is_stop(correction)) {
+    // The target ends the turn at the rejected row; it is a stop
+    // signal, never content, and it must not reach the trunk.
+    stopped = true;
+  }
   if (!stopped && correction >= 0) {
     // The target's own token at the first rejected row continues the
     // sequence; feeding it is the round's only extra cost.
@@ -448,10 +457,8 @@ bool Session::DecodeStep(std::size_t max_tokens,
     sampler.Accept(static_cast<sampling::TokenId>(correction));
     (void)hipMemcpy(logits_.data(), executor_->logits(), vocab * sizeof(float),
                     hipMemcpyDeviceToHost);
-    result->stop = is_stop(correction);
-  } else if (stopped) {
-    result->stop = true;
   }
+  result->stop = stopped;
   valid_ = true;
   return true;
 }

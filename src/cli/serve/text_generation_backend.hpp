@@ -245,6 +245,13 @@ public:
     /// Effective constrained tool format, including any schema fallback.
     /// Available before Wait and stable for this admitted request. Backends
     /// without this metadata retain the adapter's legacy format detection.
+    /// Thought framing resolved from the model runner; nullopt when the
+    /// serve default (Qwen dialect) applies.
+    [[nodiscard]] virtual std::optional<gufo::ext::ThoughtMarkers>
+    ThoughtMarkers() const {
+      return std::nullopt;
+    }
+
     [[nodiscard]] virtual std::optional<sampling::JsonConstraint::ToolFormat>
     ToolFormat() const {
       return std::nullopt;

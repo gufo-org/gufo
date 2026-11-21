@@ -352,6 +352,10 @@ public:
       const {
     return sampling::JsonConstraint::ToolFormat::kJson;
   }
+  /// Thought framing the output parser applies to this model's generations.
+  [[nodiscard]] virtual ext::ThoughtMarkers ThoughtMarkers() const {
+    return {};
+  }
   [[nodiscard]] std::shared_ptr<const sampling::TokenConstraint> BindConstraint(
       std::shared_ptr<const sampling::JsonConstraint> grammar) const;
   std::size_t PrepareConstraintVocabulary() const;

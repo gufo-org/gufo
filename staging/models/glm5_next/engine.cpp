@@ -406,10 +406,15 @@ bool Session::DecodeStep(std::size_t max_tokens,
       break;
     }
   }
+  // A stop token truncates the accepted prefix to the content before it:
+  // like the serial path, which checks the sampled token before Step, the
+  // engine never applies an end-of-turn token to the trunk. The verify-row
+  // rollback keeps exactly the committed content rows below, so Post()
+  // always equals the length of `result->tokens`.
   bool stopped = false;
   for (std::size_t i = 0; i < accepted; ++i) {
     if (is_stop(drafts[i])) {
-      accepted = i + 1;
+      accepted = i;
       stopped = true;
       break;
     }
@@ -451,6 +456,12 @@ bool Session::DecodeStep(std::size_t max_tokens,
     result->tokens.push_back(static_cast<std::int32_t>(id));
   }
   sampler.Accept(std::span<const sampling::TokenId>(committed));
+  if (!stopped && correction >= 0 && is_stop(correction)) {
+    // The target ends the turn at the rejected row. Like every other stop
+    // signal it is not committed: it never reached the trunk, so the
+    // session already ends at the committed content.
+    stopped = true;
+  }
   if (!stopped && correction >= 0) {
     // The target's own token at the first rejected row continues the
     // sequence. Commit it now but keep it out of the trunk: the next round
@@ -461,10 +472,8 @@ bool Session::DecodeStep(std::size_t max_tokens,
     tokens_.push_back(correction);
     result->tokens.push_back(correction);
     sampler.Accept(static_cast<sampling::TokenId>(correction));
-    result->stop = is_stop(correction);
-  } else if (stopped) {
-    result->stop = true;
   }
+  result->stop = stopped;
   valid_ = true;
   return true;
 }
