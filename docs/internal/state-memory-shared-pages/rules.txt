@@ -1,0 +1,16 @@
+T1 replace: X sees 2e3 (want 2e3), park sees 2e3 (want 1d), old=2e3 new=0
+T3 restore: X sees e (want 5a), own=e (want e) shared=5a
+   after writer appends via A: X sees e park sees 5b (want 5b)
+T4 park: first 10 (want 10) reuse 10 (want 11) h0=10 h1=11
+Va plain reuse: S sees a1 (want a1) f0=a1 (want a0) f1=0 (want a1)
+Vb moved handle: S sees b1 (want b1) B sees b1 (want b0) f0=b1 f1=0
+Vc alias reuse: S saw c0 then c0 (want c0 c1); after write via S: B0 cc (want c0) B1 c1 (want cc)
+Vd twice: X d2 (want d2) park0 d2 (d0) park1 0 (d1) h0=d2 h1=0 h2=0
+Ve recycle: X e1 (want e1) Y e1 (want e5) h0=e1 h1=0
+Vf moved handle, synced: S sees b1 (want b1) B sees b1 (want b0) f0=b1 f1=0
+Vg alias then unmap first: S sees b1 (want b1) B sees b1 (want b0) f0=b1 f1=0
+scratch release pattern: write reached the new handle 50 of 50; went to the released page 0
+scratch release pattern, idle first: write reached the new handle 50 of 50; went to the released page 0
+no gap, unmap + release old handle: write reached the new handle 0 of 50
+no gap, unmap only: write reached the new handle 0 of 50
+no gap, unmap, release another used handle: write reached the new handle 0 of 50

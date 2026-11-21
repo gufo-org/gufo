@@ -77,6 +77,7 @@ struct BackingState {
   std::function<bool(std::size_t)> admit_state_pages;
   std::function<bool()> shed;
   std::function<bool()> may_lend;
+  std::function<std::size_t()> state_pool_free_pages;
   std::size_t page_blocks{};
   std::mutex lend_mutex;
   std::unique_ptr<cache::ResourceReservation[]> lent;
@@ -322,6 +323,10 @@ struct BackingState {
     const auto start = out.size();
     if (may_lend && !may_lend())
       return 0;
+    const auto pool_free = [&] {
+      return state_pool_free_pages ? state_pool_free_pages() : 0;
+    };
+    const auto pool_before = pool_free();
     for (int sheds = 0;; ++sheds) {
       {
         const std::lock_guard lock(lend_mutex);
@@ -347,6 +352,11 @@ struct BackingState {
         }
       }
       if (out.size() - start >= want || sheds == kMaxSheds || !shed || !shed())
+        break;
+      // Pages the evicted checkpoint shared with sessions are already back
+      // in the state pool.
+      if (const auto now = pool_free();
+          now > pool_before && out.size() - start + (now - pool_before) >= want)
         break;
     }
     return out.size() - start;
@@ -501,6 +511,7 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
     state->admit_state_pages = std::move(config.admit_state_pages);
     state->shed = std::move(config.shed);
     state->may_lend = std::move(config.may_lend);
+    state->state_pool_free_pages = std::move(config.state_pool_free_pages);
     state->lent = std::make_unique<cache::ResourceReservation[]>(
         (count + page_blocks - 1) / page_blocks);
     const std::weak_ptr<detail::BackingState> weak = state;
@@ -546,7 +557,8 @@ CommittedBackingPool::CommittedBackingPool(cache::ResourceLedger& ledger,
   state_ = std::move(state);
 }
 bool CommittedBackingPool::CanFit(
-    std::span<const cache::PayloadRequest> payloads) const {
+    std::span<const cache::PayloadRequest> payloads,
+    std::size_t held_bytes) const {
   std::size_t needed = 0;
   for (const auto& payload : payloads) {
     const auto blocks =
@@ -558,8 +570,11 @@ bool CommittedBackingPool::CanFit(
   }
   // Read the committed frontier first. Concurrent growth can then only
   // overestimate available space, leaving final admission to TryAcquire.
-  const auto uncommitted =
+  const auto growable =
       state_->capacity - state_->committed.load(std::memory_order_acquire);
+  // Payloads kept outside the pool hold budget the pool cannot grow into.
+  const auto held = held_bytes ? 1 + (held_bytes - 1) / state_->block_bytes : 0;
+  const auto uncommitted = growable - std::min(growable, held);
   if (needed <= uncommitted)
     return true;
   // Other pools on this ledger can also make this bound optimistic. It must

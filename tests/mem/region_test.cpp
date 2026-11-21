@@ -14,6 +14,7 @@
 #include "src/core/hip/state_memory.hpp"
 #include "src/core/hip/state_page_pool.hpp"
 #include "src/core/hip/state_region.hpp"
+#include "src/core/hip/state_shared_page.hpp"
 #include "src/mem/ledger.hpp"
 #include "src/mem/lendable.hpp"
 
@@ -41,21 +42,56 @@ __global__ void FillRows(std::uint32_t* data, std::size_t stride_words,
         salt ^ static_cast<std::uint32_t>(segment * 1000003u + i);
 }
 
+// Checks read memory with a kernel, through the device's own translation
+// of the address. A runtime copy can disagree with it after an address was
+// mapped again (mem::RemapBarrier), and the model's kernels are what counts.
+__global__ void CountMismatches(const std::uint32_t* data, std::size_t words,
+                                std::uint32_t salt, std::uint32_t base,
+                                bool constant, std::uint32_t* bad) {
+  std::uint32_t local = 0;
+  for (std::size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < words;
+       i += gridDim.x * blockDim.x)
+    local += data[i] !=
+             (constant ? salt : salt ^ static_cast<std::uint32_t>(base + i));
+  if (local)
+    atomicAdd(bad, local);
+}
+
+std::uint32_t Mismatches(const void* data, std::size_t words,
+                         std::uint32_t salt, std::size_t base, bool constant) {
+  static std::uint32_t* bad = nullptr;
+  if (bad == nullptr)
+    Check(hipMalloc(&bad, sizeof(*bad)), "mismatch counter");
+  Check(hipMemset(bad, 0, sizeof(*bad)), "clear counter");
+  CountMismatches<<<64, 256>>>(static_cast<const std::uint32_t*>(data), words,
+                               salt, static_cast<std::uint32_t>(base), constant,
+                               bad);
+  Check(hipDeviceSynchronize(), "check words");
+  std::uint32_t count = 0;
+  Check(hipMemcpy(&count, bad, sizeof(count), hipMemcpyDeviceToHost),
+        "read counter");
+  return count;
+}
+
+// Words [0, words) at `data` hold FillRows' pattern from `first_word` on.
+bool WordsMatch(const void* data, std::size_t words, std::uint32_t salt,
+                std::size_t first_word = 0) {
+  return Mismatches(data, words, salt, first_word, false) == 0;
+}
+
+bool WordsAre(const void* data, std::size_t words, std::uint32_t value) {
+  return Mismatches(data, words, value, 0, true) == 0;
+}
+
 bool RowsMatch(const Region& region, std::size_t rows, std::uint32_t salt) {
   const auto& shape = region.shape();
   const std::size_t stride = shape.segment_stride
                                  ? shape.segment_stride
                                  : shape.rows * shape.row_bytes;
-  std::vector<std::uint32_t> host(rows * shape.row_bytes / 4);
-  for (std::size_t s = 0; s < shape.segments; ++s) {
-    Check(hipMemcpy(host.data(),
-                    static_cast<std::uint8_t*>(region.data()) + s * stride,
-                    host.size() * 4, hipMemcpyDeviceToHost),
-          "read rows");
-    for (std::size_t i = 0; i < host.size(); ++i)
-      if (host[i] != (salt ^ static_cast<std::uint32_t>(s * 1000003u + i)))
-        return false;
-  }
+  for (std::size_t s = 0; s < shape.segments; ++s)
+    if (!WordsMatch(static_cast<std::uint8_t*>(region.data()) + s * stride,
+                    rows * shape.row_bytes / 4, salt, s * 1000003u))
+      return false;
   return true;
 }
 
@@ -153,12 +189,12 @@ void SharedAccount() {
     // Growing again maps zeroed pages.
     assert(account->Claim(2048));
     assert(region->Ensure(2048, &error));
-    std::vector<std::uint32_t> host(1024 * words);
-    Check(hipMemcpy(host.data(),
-                    static_cast<std::uint8_t*>(region->data()) + 1024 * 2048,
-                    host.size() * 4, hipMemcpyDeviceToHost),
-          "read regrown rows");
-    assert(std::ranges::all_of(host, [](std::uint32_t v) { return v == 0; }));
+    // The addresses lost their pages a moment ago: the new pages are
+    // reachable, and cleared, only after the remap barrier Ensure() ran.
+    assert(WordsAre(static_cast<std::uint8_t*>(region->data()) + 1024 * 2048,
+                    1024 * words, 0));
+    // The rows before them are still the region's own.
+    assert(RowsMatch(*region, 1024, 11));
     ledger.SetPromiseCap(0);
   }
   assert(ledger.ChargedBytes() == charged_before);
@@ -316,6 +352,251 @@ void Lending() {
   (void)hipFree(bad);
 }
 
+// A checkpoint keeps a session's pages instead of copying its rows: the
+// park maps them a second time, a second session restores them by mapping,
+// the writer copies a page only when it rewrites shared rows, and the ledger
+// counts every page once.
+void SharedPages() {
+  auto park = gufo::mem::PagePark::ForDevice(0);
+  if (!park) {
+    std::puts("mem_region_test: pages cannot be shared; sharing skipped");
+    return;
+  }
+  auto pool = PagePool::ForDevice(0);
+  auto& ledger = StateLedger::Process();
+  const auto before = ledger.Totals();
+  const auto used_before = pool->Stats().pages_in_use;
+  const std::size_t row_bytes = 1024, rows_per_page = kPageBytes / row_bytes;
+  const std::size_t pages = 6, rows = pages * rows_per_page;
+  const std::size_t page_words = kPageBytes / 4;
+  std::string error;
+  auto a = Region::Create({.row_bytes = row_bytes, .rows = rows}, &error);
+  auto b = Region::Create({.row_bytes = row_bytes, .rows = rows}, &error);
+  assert(a && b);
+  assert(Region::Find(a->data()) == a);
+  assert(Region::Find(static_cast<std::uint8_t*>(a->data()) + a->bytes() - 1) ==
+         a);
+  assert(Region::Find(static_cast<std::uint8_t*>(b->data()) + 5) == b);
+  // The writer fills four pages and half of the fifth.
+  const std::size_t frontier = 4 * rows_per_page + rows_per_page / 2;
+  assert(a->Ensure(frontier, &error));
+  auto* a_words = static_cast<std::uint32_t*>(a->data());
+  FillRows<<<dim3(64, 1), 256>>>(a_words, 0, row_bytes / 4, frontier, 0xaau);
+  Check(hipDeviceSynchronize(), "fill a");
+  const auto mapped = ledger.Totals().mapped_bytes;
+  // A checkpoint shares the rows written so far: no copy, no new page.
+  std::vector<std::shared_ptr<gufo::mem::ParkedPage>> parked;
+  for (std::size_t p = 0; p < 5; ++p) {
+    const auto end = std::min((p + 1) * kPageBytes, frontier * row_bytes);
+    auto page = a->Share(p, end);
+    assert(page);
+    parked.push_back(park->Park(page));
+    assert(parked.back() && parked.back()->page() == page);
+    assert(park->Park(page) == parked.back());  // One address per page.
+    assert(park->Find(parked.back()->data() + 4096) == parked.back());
+    assert(park->Contains(parked.back()->data()));
+  }
+  assert(!park->Contains(a->data()));
+  assert(a->shared_pages() == 5);
+  assert(ledger.Totals().mapped_bytes == mapped);
+  assert(ledger.Totals().lendable_bytes == before.lendable_bytes);
+  assert(pool->Stats().pages_in_use == used_before + 5);
+  for (std::size_t p = 0; p < 4; ++p)
+    assert(WordsMatch(parked[p]->data(), page_words, 0xaau, p * page_words));
+  // Appending past the shared rows writes in place, even in a shared page.
+  assert(a->PrepareWrite(frontier, frontier + 16, frontier, &error));
+  assert(a->shared_pages() == 5);
+  // A second session restores the four whole pages by mapping them and
+  // leaves the fifth, which the checkpoint only half fills, to a load.
+  std::vector<std::shared_ptr<gufo::mem::SharedPage>> plan(pages);
+  for (std::size_t p = 0; p < 4; ++p)
+    plan[p] = parked[p]->page();
+  auto adopted = b->Restore(plan, frontier);
+  assert(b->SettleRemaps(&error));
+  assert((adopted == std::vector<bool>{true, true, true, true, false, false}));
+  assert(b->backed_rows() == 4 * rows_per_page && b->shared_pages() == 4);
+  assert(ledger.Totals().mapped_bytes == mapped);  // Still counted once.
+  assert(b->Ensure(frontier, &error));
+  assert(ledger.Totals().mapped_bytes == mapped + kPageBytes);
+  assert(WordsMatch(b->data(), 4 * page_words, 0xaau));
+  // Restoring the same checkpoint again keeps what is already mapped.
+  adopted = b->Restore(plan, frontier);
+  assert(b->SettleRemaps(&error));
+  assert(adopted[0] && adopted[3] && b->shared_pages() == 4);
+  // The second session rewinds into page 2 and rewrites from there: it gets
+  // a copy of page 2, whose first rows it keeps, and a cleared page 3; the
+  // others stay shared.
+  const std::size_t rewind = 2 * rows_per_page + 100;
+  assert(b->PrepareWrite(rewind, 4 * rows_per_page, rewind, &error));
+  // The new pages are reachable, copied and cleared only after the barrier.
+  assert(b->SettleRemaps(&error));
+  assert(b->shared_pages() == 2);
+  assert(ledger.Totals().mapped_bytes == mapped + 3 * kPageBytes);
+  assert(WordsMatch(b->data(), 3 * page_words, 0xaau));
+  assert(WordsAre(static_cast<std::uint8_t*>(b->data()) + 3 * kPageBytes,
+                  page_words, 0));
+  auto* b_words = static_cast<std::uint32_t*>(b->data());
+  FillRows<<<dim3(64, 1), 256>>>(b_words + rewind * row_bytes / 4, 0,
+                                 row_bytes / 4, 4 * rows_per_page - rewind,
+                                 0xbbu);
+  Check(hipDeviceSynchronize(), "rewrite b");
+  assert(WordsMatch(b->data(), rewind * row_bytes / 4, 0xaau));
+  assert(WordsMatch(b_words + rewind * row_bytes / 4, 1024, 0xbbu));
+  // Neither the writer nor the checkpoint saw that.
+  assert(WordsMatch(a->data(), frontier * row_bytes / 4, 0xaau));
+  assert(WordsMatch(parked[3]->data(), page_words, 0xaau, 3 * page_words));
+  // The writer is given to another conversation: the checkpoint keeps the
+  // pages, now cache memory, and the writer maps new ones as it writes.
+  (void)a->Restore({}, rows);
+  assert(a->SettleRemaps(&error));
+  assert(a->backed_rows() == 0 && a->shared_pages() == 0);
+  // Pages 0 and 1 are still mapped by the second session; 2, 3 and 4 only
+  // by the checkpoint.
+  assert(ledger.Totals().mapped_bytes == mapped);
+  assert(ledger.Totals().lendable_bytes ==
+         before.lendable_bytes + 3 * kPageBytes);
+  assert(a->Ensure(frontier, &error));
+  FillRows<<<dim3(64, 1), 256>>>(a_words, 0, row_bytes / 4, frontier, 0xccu);
+  Check(hipDeviceSynchronize(), "refill a");
+  for (std::size_t p = 0; p < 4; ++p)
+    assert(WordsMatch(parked[p]->data(), page_words, 0xaau, p * page_words));
+  // The first session restores the checkpoint into its new pages: it takes
+  // the shared pages back, and its own pages there return to the pool.
+  adopted = a->Restore(plan, frontier);
+  assert(a->SettleRemaps(&error));
+  assert(adopted[0] && adopted[3] && !adopted[4]);
+  assert(WordsMatch(a->data(), 4 * page_words, 0xaau));
+  // The checkpoint is evicted: pages no session maps return to the pool,
+  // the others stay with their sessions, and the park addresses go at the
+  // next sweep.
+  const auto stats = park->Stats();
+  assert(stats.parked == 5);
+  parked.clear();
+  plan.clear();
+  assert(park->Stats().parked == 0 && park->Stats().stale >= 5);
+  assert(ledger.Totals().lendable_bytes == before.lendable_bytes);
+  assert(park->Sweep() >= 5 && park->Stats().stale == 0);
+  assert(WordsMatch(a->data(), 4 * page_words, 0xaau));
+  assert(WordsMatch(b->data(), rewind * row_bytes / 4, 0xaau));
+  // A page with a single user left is that user's again: writes go in place.
+  const auto mapped_now = ledger.Totals().mapped_bytes;
+  assert(a->shared_pages() == 2 && b->shared_pages() == 2);
+  assert(a->PrepareWrite(2 * rows_per_page, 3 * rows_per_page,
+                         2 * rows_per_page, &error));
+  assert(ledger.Totals().mapped_bytes == mapped_now);
+  // Pages 0 and 1 are still shared by the two sessions: rewriting page 0 in
+  // place copies it, rows included.
+  assert(b->PrepareWrite(0, rows_per_page, rows_per_page, &error));
+  assert(b->SettleRemaps(&error));
+  assert(ledger.Totals().mapped_bytes == mapped_now + kPageBytes);
+  assert(a->shared_pages() == 1 && b->shared_pages() == 1);
+  assert(WordsMatch(a->data(), 4 * page_words, 0xaau));
+  assert(WordsMatch(b->data(), rewind * row_bytes / 4, 0xaau));
+  a.reset();
+  b.reset();
+  const auto after = ledger.Totals();
+  assert(after.mapped_bytes == before.mapped_bytes);
+  assert(after.lendable_bytes == before.lendable_bytes);
+  assert(pool->Stats().pages_in_use == used_before);
+}
+
+// A region of several segments shares pages when each segment starts on a
+// page: every segment's rows are shared, restored and rewritten as one
+// segment's are.
+void SharedSegments() {
+  auto park = gufo::mem::PagePark::ForDevice(0);
+  if (!park)
+    return;
+  auto pool = PagePool::ForDevice(0);
+  auto& ledger = StateLedger::Process();
+  const auto before = ledger.Totals();
+  const auto used_before = pool->Stats().pages_in_use;
+  const std::size_t row_bytes = 1024, rows_per_page = kPageBytes / row_bytes;
+  const std::size_t segments = 3, segment_pages = 4;
+  const std::size_t rows = segment_pages * rows_per_page;
+  std::string error;
+  const gufo::mem::RegionShape shape{
+      .row_bytes = row_bytes, .rows = rows, .segments = segments};
+  auto a = Region::Create(shape, &error);
+  auto b = Region::Create(shape, &error);
+  assert(a && b);
+  const std::size_t stride = rows * row_bytes;
+  const std::size_t frontier = 2 * rows_per_page + rows_per_page / 2;
+  assert(a->Ensure(frontier, &error));
+  FillRows<<<dim3(64, segments), 256>>>(static_cast<std::uint32_t*>(a->data()),
+                                        stride / 4, row_bytes / 4, frontier,
+                                        0xaau);
+  Check(hipDeviceSynchronize(), "fill segments");
+  assert(RowsMatch(*a, frontier, 0xaau));
+  const auto mapped = ledger.Totals().mapped_bytes;
+  std::vector<std::shared_ptr<gufo::mem::ParkedPage>> parked;
+  std::vector<std::shared_ptr<gufo::mem::SharedPage>> plan(segments *
+                                                           segment_pages);
+  for (std::size_t s = 0; s < segments; ++s)
+    for (std::size_t p = 0; p < 3; ++p) {
+      const std::size_t page = s * segment_pages + p;
+      auto shared = a->Share(page, s * stride + std::min((p + 1) * kPageBytes,
+                                                         frontier * row_bytes));
+      assert(shared);
+      parked.push_back(park->Park(shared));
+      assert(parked.back());
+      if (p < 2)
+        plan[page] = shared;
+    }
+  assert(a->shared_pages() == 9 && ledger.Totals().mapped_bytes == mapped);
+  // Appending past the shared rows writes in place in every segment.
+  assert(a->PrepareWrite(frontier, frontier + 16, frontier, &error));
+  assert(a->shared_pages() == 9);
+  // A second region restores the whole pages of every segment by mapping.
+  const auto adopted = b->Restore(plan, frontier);
+  assert(b->SettleRemaps(&error));
+  for (std::size_t page = 0; page < adopted.size(); ++page)
+    assert(adopted[page] == (page % segment_pages < 2));
+  assert(b->backed_rows() == 2 * rows_per_page && b->shared_pages() == 6);
+  assert(ledger.Totals().mapped_bytes == mapped);
+  assert(b->Ensure(frontier, &error));
+  assert(ledger.Totals().mapped_bytes == mapped + segments * kPageBytes);
+  assert(RowsMatch(*b, 2 * rows_per_page, 0xaau));
+  // It rewinds into the second page: a copy of that page in every segment,
+  // whose first rows it keeps; the first pages stay shared.
+  const std::size_t rewind = rows_per_page + 100;
+  // One page per segment is copied, back to back: every copy must reach its
+  // own new page, which it does only after the barrier.
+  assert(b->PrepareWrite(rewind, frontier, rewind, &error));
+  assert(b->SettleRemaps(&error));
+  assert(b->shared_pages() == 3);
+  assert(ledger.Totals().mapped_bytes == mapped + 2 * segments * kPageBytes);
+  assert(RowsMatch(*b, rewind, 0xaau));
+  // Its new rows reach neither the writer nor the checkpoint.
+  FillRows<<<dim3(64, segments), 256>>>(
+      static_cast<std::uint32_t*>(b->data()) + rewind * row_bytes / 4,
+      stride / 4, row_bytes / 4, frontier - rewind, 0xbbu);
+  Check(hipDeviceSynchronize(), "rewrite segments");
+  assert(RowsMatch(*b, rewind, 0xaau) && RowsMatch(*a, frontier, 0xaau));
+  for (std::size_t s = 0; s < segments; ++s)
+    assert(WordsMatch(parked[s * 3 + 1]->data(), kPageBytes / 4, 0xaau,
+                      s * 1000003u + kPageBytes / 4));
+  // A restore that maps nothing releases what others share in the rows it
+  // brings, in every segment.
+  (void)a->Restore({}, frontier);
+  assert(a->SettleRemaps(&error));
+  assert(a->shared_pages() == 0 && a->backed_rows() == 0);
+  // Segments that do not start on a page share nothing.
+  auto c =
+      Region::Create({.row_bytes = 1000, .rows = 5000, .segments = 2}, &error);
+  assert(c && c->Ensure(5000, &error) && !c->Share(0, 1000));
+  parked.clear();
+  plan.clear();
+  (void)park->Sweep();
+  a.reset();
+  b.reset();
+  c.reset();
+  const auto after = ledger.Totals();
+  assert(after.mapped_bytes == before.mapped_bytes);
+  assert(after.lendable_bytes == before.lendable_bytes);
+  assert(pool->Stats().pages_in_use == used_before);
+}
+
 }  // namespace
 
 int main() {
@@ -331,6 +612,8 @@ int main() {
   SharedAccount();
   MapAhead();
   GraphAcrossGrowth();
+  SharedPages();
+  SharedSegments();
   Lending();
   const auto stats =
       PagePool::ForDevice(0)->Stats();  // after Stop: counters only

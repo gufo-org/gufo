@@ -75,6 +75,9 @@ struct Capabilities {
   // False explicitly describes models with no token-prefix continuation.
   bool continuation{false};
   bool persistent_encoding{false};
+  // BeginSharedRestore can take rows from the storage a resident checkpoint
+  // keeps them in; the cache then tells it where they are.
+  bool shared_restore{false};
 };
 
 }  // namespace gufo::cache

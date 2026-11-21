@@ -1,0 +1,13 @@
+case 1 (engine touch, engine copy at once) idle 0 us: new 0, old 20, other 0 of 20
+case 3 (kernel touch, engine copy at once) idle 0 us: new 1, old 19, other 0 of 20
+case 5 (engine touch, kernel read at once) idle 0 us: new 0, old 20, other 0 of 20
+case 2 (engine touch, idle, engine copy) idle 0 us: new 0, old 20, other 0 of 20
+case 2 (engine touch, idle, engine copy) idle 0 us: new 0, old 20, other 0 of 20
+case 2 (engine touch, idle, engine copy) idle 0 us: new 0, old 20, other 0 of 20
+case 6 (engine touch, idle with kernels running, engine copy) idle 0 us: new 1, old 19, other 0 of 20
+case 2 (engine touch, idle, engine copy) idle 100 us: new 28, old 2, other 0 of 30
+case 2 (engine touch, idle, engine copy) idle 300 us: new 30, old 0, other 0 of 30
+case 2 (engine touch, idle, engine copy) idle 1000 us: new 30, old 0, other 0 of 30
+case 2 (engine touch, idle, engine copy) idle 5000 us: new 30, old 0, other 0 of 30
+case 6 (engine touch, idle with kernels running, engine copy) idle 1000 us: new 1, old 29, other 0 of 30
+case 6 (engine touch, idle with kernels running, engine copy) idle 20000 us: new 3, old 27, other 0 of 30

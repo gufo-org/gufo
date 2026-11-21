@@ -53,6 +53,19 @@ public:
   [[nodiscard]] virtual bool ExecutionComplete() const noexcept { return true; }
 };
 
+// Rows [first, end) of an append component as a resident checkpoint keeps
+// them: immutable bytes the caller pins for the whole restore.
+struct RestoreSource {
+  ComponentId component;
+  Rows first{}, end{};
+  std::span<const std::byte> bytes;
+};
+// Rows a restore took without a load.
+struct RestoredRows {
+  ComponentId component;
+  Rows first{}, end{};
+};
+
 // One pinned-host backing class: block size, block count and per-block host
 // metadata. Models own the arithmetic that fills it; the backing provider
 // commits what the plan asks for.
@@ -112,6 +125,19 @@ public:
   // allow loads. Refuse if any slot transfer is pending or failure is latched.
   // After success, CopyRowsIn/LoadPrivate need no further preservation waits.
   virtual void BeginRestore(Slot&, std::span<const ComponentPosition>) = 0;
+
+  // BeginRestore for a resident checkpoint, with where it keeps its complete
+  // chunks. An adapter whose storage can be shared takes rows from `sources`
+  // without a load (for example by mapping the pages that hold them) and
+  // returns them, in ascending order per component; the caller loads every
+  // other row as after BeginRestore. Rows it returns are in place when this
+  // returns and count as loaded for Validate. The default takes none.
+  [[nodiscard]] virtual std::vector<RestoredRows> BeginSharedRestore(
+      Slot& slot, std::span<const ComponentPosition> positions,
+      std::span<const RestoreSource>) {
+    BeginRestore(slot, positions);
+    return {};
+  }
 
   // Transfers touch exactly the supplied range/buffer. Private state is copied
   // whole; append rows use component-specific positions, never prompt length.

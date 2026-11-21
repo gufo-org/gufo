@@ -1,0 +1,14 @@
+alias mapped without SetAccess: GPU memory access fault (page not present), measured 2026-11-20
+map 1024 pages 2.19 ms (2.14 us/page); SetAccess whole range 2.99 ms (2.92 us/page)
+SetAccess again on the same range: 0.43 ms
+unmap whole range: 3.27 ms
+1 thread(s): map 2.25 ms, SetAccess 3.17 ms
+2 thread(s): map 3.93 ms, SetAccess 3.41 ms
+4 thread(s): map 3.90 ms, SetAccess 4.14 ms
+8 thread(s): map 4.15 ms, SetAccess 3.86 ms
+SetAccess over a range with holes: invalid argument (0.00 ms)
+Unmap over a range with holes: invalid argument (0.00 ms)
+512 MiB as 256 handles of  2 MiB: map 0.86 ms, SetAccess 1.06 ms
+512 MiB as  64 handles of  8 MiB: map 0.12 ms, SetAccess 0.23 ms
+512 MiB as  16 handles of 32 MiB: map 0.04 ms, SetAccess 0.10 ms
+DONE
