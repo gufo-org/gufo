@@ -4,7 +4,7 @@ prefetch_sim.py's cache model without prefetch: the store's score and
 decay/bonus variants, LRU, per-expert reuse-interval prediction, and
 Belady's offline optimum (evict the expert whose next use is farthest), with
 and without its admission bypass. `current` and prefetch_sim.py's cache
-model are the store's rule before E105 (decayed score); the store now evicts
+model are the store's rule before frequency classes (decayed score); the store now evicts
 by frequency class, `classlru:2048/1/16/0/4` (its seeded uses at half the
 ranking weight are not modeled); traces record those uses where the score was.
 

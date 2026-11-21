@@ -243,10 +243,11 @@ struct TextRunnerResourceClaim {
   /// sessions do not all fit at full context, the host lets them share this
   /// memory instead of refusing the configuration (mem::FitSessions), and
   /// admits each request against its own tokens. Missing or zero keeps the
-  /// full-context check. Declared last, so positional initializers of the
-  /// earlier fields keep their meaning.
+  /// full-context check. Declared after the fields above, so their
+  /// positional initializers keep their meaning.
   std::optional<std::size_t> demand_mapped_state_bytes;
   /// Experimental: the expert cache serving sizes with the prompt cache.
+  /// Declared last for the same reason.
   TextRunnerExpertCacheClaim expert_cache{};
 };
 

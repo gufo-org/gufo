@@ -2,8 +2,8 @@
 
 The experimental expert store (`<gufo/ext/experimental/expert_stream.hpp>`)
 writes a binary routing trace when `Policy::trace_path` is set. Extensions
-expose it through their own switch (deepseek41: `DS41_EXPERT_TRACE=PATH`,
-gemma4: `GEMMA4_EXPERT_TRACE=PATH`). These tools replay a trace offline, so
+expose it through their own switch (the deepseek41 extension:
+`DS41_EXPERT_TRACE=PATH`). These tools replay a trace offline, so
 cache and prefetch rules can be compared before a live A/B. They need Python 3
 and numpy; `trace_compare.py` needs only the standard library.
 

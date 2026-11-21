@@ -69,9 +69,9 @@ struct Entry {
    * while the evaluation thread promotes or evicts entries. */
   std::atomic<uint32_t> slot{kNoSlot};
   uint64_t last = 0;  // tick of the last use; victim lists detect uses by it
-  /* Eviction by frequency class (E105): `uses` counts uses (at most
-   * use_cap per prepare) decaying with a half-life of use_half_life tokens
-   * of the layer's clock; at each use the expert takes class
+  /* Eviction by frequency class, after llama.cpp's ClassLRU: `uses` counts uses
+   * (at most use_cap per prepare) decaying with a half-life of use_half_life
+   * tokens of the layer's clock; at each use the expert takes class
    * floor(log2(uses)), at most max_class, and `protect` = 2^class. The
    * victim is the expert with the largest age / protect: an expert used
    * twice as often may stay unused twice as long. A prompt chunk advances
@@ -952,7 +952,8 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
       valid = valid && platform::FileValid(piece.file) && piece.bytes;
   }
   if (!valid) {
-    fprintf(stderr, "%s: invalid streamed expert layout\n", tag);
+    gufo::server::Logger::LogFormatted(gufo::server::LogLevel::kError, tag,
+                                       "invalid streamed expert layout");
     return nullptr;
   }
   auto owner = std::unique_ptr<Impl>(new (std::nothrow) Impl);
@@ -1069,8 +1070,9 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
          hipHostMalloc(reinterpret_cast<void**>(&store->split_host),
                        2 * store->split_rows * sizeof(int32_t)) == hipSuccess;
   if (!ok) {
-    fprintf(stderr, "%s: unable to allocate streamed expert staging buffers\n",
-            tag);
+    gufo::server::Logger::LogFormatted(
+        gufo::server::LogLevel::kError, tag,
+        "unable to allocate streamed expert staging buffers");
     return nullptr;
   }
   int device = 0;
@@ -1096,14 +1098,16 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
   if (!policy.trace_path.empty()) {
     store->trace = std::fopen(policy.trace_path.c_str(), "wb");
     if (!store->trace)
-      fprintf(stderr, "%s: cannot open expert trace %s\n", tag,
-              policy.trace_path.c_str());
+      gufo::server::Logger::LogFormatted(gufo::server::LogLevel::kWarn, tag,
+                                         "cannot open expert trace %s",
+                                         policy.trace_path.c_str());
     else if (std::fwrite(kTraceMagic, sizeof(kTraceMagic), 1, store->trace) !=
                  1 ||
              std::fwrite(&kTraceVersion, sizeof(kTraceVersion), 1,
                          store->trace) != 1)
-      fprintf(stderr, "%s: cannot write expert trace %s\n", tag,
-              policy.trace_path.c_str());
+      gufo::server::Logger::LogFormatted(gufo::server::LogLevel::kWarn, tag,
+                                         "cannot write expert trace %s",
+                                         policy.trace_path.c_str());
   }
   return std::unique_ptr<Store>(new Store(std::move(owner)));
 }
@@ -1133,7 +1137,9 @@ bool Store::AttachTails(const char* path) {
   const uint32_t n_layer = store->n_layer;
   const uint32_t n_pieces = store->n_pieces;
   const auto fail = [&](const char* why) {
-    fprintf(stderr, "%s: ignoring expert tails %s: %s\n", tag, path, why);
+    gufo::server::Logger::LogFormatted(gufo::server::LogLevel::kWarn, tag,
+                                       "ignoring expert tails %s: %s", path,
+                                       why);
     return false;
   };
   std::string error;
@@ -1730,7 +1736,8 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
     if (id == -1)
       continue;
     if (id < 0 || id >= static_cast<int32_t>(store->n_expert)) {
-      fprintf(stderr, "%s: invalid routed expert %d\n", tag, id);
+      gufo::server::Logger::LogFormatted(gufo::server::LogLevel::kError, tag,
+                                         "invalid routed expert %d", id);
       return false;
     }
     ++counts[id];
@@ -1852,7 +1859,8 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
       void* row = nullptr;
       if (hipMalloc(&row, store->emergency_row_bytes + store->read_margin) !=
           hipSuccess) {
-        fprintf(stderr, "%s: unable to stage a missed expert\n", tag);
+        gufo::server::Logger::LogFormatted(gufo::server::LogLevel::kError, tag,
+                                           "unable to stage a missed expert");
         return false;
       }
       store->emergency_rows.push_back(static_cast<uint8_t*>(row));
@@ -1954,8 +1962,9 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
     }
     if (!store->readers->RunPhase(layer, tasks, overlap, overlap_context,
                                   info)) {
-      fprintf(stderr, "%s: failed to stage experts or run overlapped work\n",
-              tag);
+      gufo::server::Logger::LogFormatted(
+          gufo::server::LogLevel::kError, tag,
+          "failed to stage experts or run overlapped work");
       return false;
     }
     store->stats.read_wait_ns += store->readers->last_wait_ns();
@@ -2046,7 +2055,7 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
     store->logged_tokens = store->stats.tokens;
   }
   // After admission: a victim's age counts this batch's tokens only from the
-  // next prepare of its layer on, as measured in E105.
+  // next prepare of its layer on, which measured best on DeepSeek V4.1 Flash.
   store->clock[layer] += std::min<uint64_t>(n_tokens, policy.clock_rows);
   return true;
 }
