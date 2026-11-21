@@ -18,9 +18,6 @@ with the RAM prompt cache.
   available, less the headroom and the prompt-cache budget beyond the
   prepared backing, calls `Store::Fit(grant)`, and logs both budgets with
   the backing actually committed.
-- `Store::Fit` replaces `Store::SetReserve`: it takes the prefetch stage from
-  the grant, shrinks the cache to it and seeds the room left with the ranking
-  last given to `Seed`.
 - Host pressure (#1275) is measured against the store's floor
   (`Store::FloorBytes()`, the larger of it and the free CMA pages) instead of
   the host reserve while experts stream: the expert cache fills the host down
@@ -32,9 +29,6 @@ with the RAM prompt cache.
   (`event=expert_cache_restore`). New requests are refused below half the
   floor.
 - `HostAvailableBytes()` (`gufo/ext/host_budget.hpp`) is the host memory
-  available after cgroup limits and promised session state. It replaces the
-  store's `expert_stream::AvailableMemory()`.
+  available after cgroup limits and promised session state.
 
-Migration: a runner that called `SetReserve` once its sessions existed
-declares `expert_cache` instead; callers of `expert_stream::AvailableMemory()`
-call `HostAvailableBytes()`.
+Migration: none.
