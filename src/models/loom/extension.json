@@ -1,0 +1,2447 @@
+{
+  "schema": 1,
+  "name": "loom",
+  "version": "0.3.6",
+  "api_version": ">= 0.3.37",
+  "entry": "loom_register",
+  "registration_target": "gufo_loom",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "loom-text",
+      "capability": "text_generation",
+      "keys": [
+        "manifest:loom"
+      ],
+      "model_ids": [],
+      "target": "gufo_loom",
+      "entry": "loom_text_provider_register",
+      "serving": {
+        "hip": false
+      }
+    }
+  ],
+  "options": [
+    {
+      "name": "--loom-device",
+      "type": "string",
+      "commands": [
+        "serve",
+        "prompt",
+        "chat",
+        "bench"
+      ],
+      "providers": [
+        "loom-text"
+      ],
+      "help": "Loom device URI (default: amdgpu://?completion_spin_ns=4294967295)"
+    },
+    {
+      "name": "--loom-memory-bytes",
+      "type": "integer",
+      "commands": [
+        "serve",
+        "prompt",
+        "chat",
+        "bench"
+      ],
+      "providers": [
+        "loom-text"
+      ],
+      "help": "Budget for an elastic Loom memory pool (weights and state); default: none, a fixed pool committed at load"
+    },
+    {
+      "name": "--loom-logits",
+      "type": "string",
+      "commands": [
+        "serve",
+        "prompt",
+        "chat",
+        "bench"
+      ],
+      "providers": [
+        "loom-text"
+      ],
+      "help": "Logits readback for host sampling (grammars, logprobs, min-p, penalties): auto, on or off (default: auto, on when the package declares it)"
+    },
+    {
+      "name": "--loom-preset",
+      "type": "string",
+      "commands": [
+        "serve",
+        "prompt",
+        "chat",
+        "bench"
+      ],
+      "providers": [
+        "loom-text"
+      ],
+      "help": "Preset of the Loom package to serve (default: the one the package publishes for this GPU)"
+    },
+    {
+      "name": "--loom-checkpoint",
+      "type": "path",
+      "commands": [
+        "serve",
+        "prompt",
+        "chat",
+        "bench"
+      ],
+      "providers": [
+        "loom-text"
+      ],
+      "help": "The package's GGUF checkpoint files when they are not in the model directory: a file, or a directory holding them at their repository paths (default: the model directory, where gufo model install puts them)"
+    },
+    {
+      "name": "--loom-drafter",
+      "type": "path",
+      "commands": [
+        "serve",
+        "prompt",
+        "chat",
+        "bench"
+      ],
+      "providers": [
+        "loom-text"
+      ],
+      "help": "The package's draft model files when they are not in the model directory: a file, or a directory holding them at their repository paths (default: the model directory, where gufo model install puts them)"
+    },
+    {
+      "name": "--loom-vision",
+      "type": "path",
+      "commands": [
+        "serve",
+        "prompt",
+        "chat",
+        "bench"
+      ],
+      "providers": [
+        "loom-text"
+      ],
+      "help": "The package's vision projector files when they are not in the model directory: a file, or a directory holding them at their repository paths (default: the model directory, where gufo model install puts them)"
+    }
+  ],
+  "targets": {
+    "gufo_loom": {
+      "requires": []
+    }
+  },
+  "production_paths": {
+    "include": [
+      "**/*.c",
+      "**/*.cpp",
+      "**/*.h",
+      "**/*.hpp",
+      "embed/*",
+      "extension.*",
+      "runtime.cmake",
+      "models.lock.json"
+    ],
+    "exclude": [
+      "tests/",
+      "tools/"
+    ]
+  },
+  "docs": {
+    "title": "Loom packages",
+    "inputs": "loom-fun packages: GGUF models on AMD Loom kernels",
+    "guide": "docs/models/loom.md"
+  },
+  "tests": [
+    {
+      "target": "loom_package_test",
+      "ctest": "loom_package_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "loom_runner_logits_test",
+      "ctest": "loom_runner_logits_test",
+      "check_pr": true,
+      "windows_build": true
+    }
+  ],
+  "test_labels": [
+    "loom"
+  ],
+  "licenses": [
+    "LICENSE"
+  ],
+  "models": [
+    {
+      "id": "qwen3-0.6b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3-0.6B on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Qwen3-0.6B-loom",
+            "revision": "564d578f4e487c6fbabd84915439f873651b5953"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3-0.6B-GGUF",
+            "revision": "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
+          },
+          "include": [
+            "Qwen3-0.6B-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-0.5b-instruct-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen2.5-0.5B-Instruct on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/bartowski-Qwen2.5-0.5B-Instruct-loom",
+            "revision": "6fe5ac03a656c4e5d51ecb270c7d7bedc56c2a57"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/Qwen2.5-0.5B-Instruct-GGUF",
+            "revision": "41ba88dbac95fed2528c92514c131d73eb5a174b"
+          },
+          "include": [
+            "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3.5-0.8b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3.5-0.8B on AMD Loom (Q4_K_M GGUF, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Qwen3.5-0.8B-loom",
+            "revision": "9131414f6d7c0e37a890bb23fb7a1693e82b4db3"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3.5-0.8B-GGUF",
+            "revision": "6ab461498e2023f6e3c1baea90a8f0fe38ab64d0"
+          },
+          "include": [
+            "Qwen3.5-0.8B-Q4_K_M.gguf",
+            "mmproj-F16.gguf"
+          ],
+          "entry": "."
+        }
+      ]
+    },
+    {
+      "id": "gemma-3-1b-it-loom",
+      "provider": "loom-text",
+      "license": "gemma",
+      "description": "gemma-3-1b-it on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-gemma-3-1b-it-loom",
+            "revision": "ed544f633706e706da5098bd5f2fd3c1579921ac"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/gemma-3-1b-it-GGUF",
+            "revision": "f9c28bcd85737ffc5aef028638d3341d49869c27"
+          },
+          "include": [
+            "gemma-3-1b-it-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-1.5b-instruct-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen2.5-1.5B-Instruct on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/bartowski-Qwen2.5-1.5B-Instruct-loom",
+            "revision": "a78f4fd5b9cda2a40ce321c2f60ea09228ca9950"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/Qwen2.5-1.5B-Instruct-GGUF",
+            "revision": "9eadc66189c7641e1ddd226b8267a9119b2ce2d4"
+          },
+          "include": [
+            "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lfm3-omni-2b-loom",
+      "provider": "loom-text",
+      "license": "lfm1.0",
+      "description": "LFM3-Omni-2B on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-LFM3-Omni-2B-loom",
+            "revision": "82e3ff40dd639c936f2909111d73191b2d6d0da6"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/LFM3-Omni-2B-GGUF",
+            "revision": "8e0303f6b4dfe1760e608abdd259af78d2677fd7"
+          },
+          "include": [
+            "LFM3-Omni-2B-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lfm3-1.7b-loom",
+      "provider": "loom-text",
+      "license": "lfm1.0",
+      "description": "LFM3-1.7B on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/bartowski-LFM3-1.7B-loom",
+            "revision": "b2554fcb467b22105aff94eb4b63e2017bc76e4c"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/LFM3-1.7B-GGUF",
+            "revision": "9693095706f068e826377eaf576263ebeda926df"
+          },
+          "include": [
+            "LFM3-1.7B-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "hyperclovax-seed-text-instruct-1.5b-loom",
+      "provider": "loom-text",
+      "license": "hyperclovax-seed",
+      "description": "HyperCLOVAX-SEED-Text-Instruct-1.5B on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/rippertnt-HyperCLOVAX-SEED-Text-Instruct-1.5B-loom",
+            "revision": "0c8e8831544e6625431a8177873fa531e75d0cc0"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "rippertnt/HyperCLOVAX-SEED-Text-Instruct-1.5B-Q4_K_M-GGUF",
+            "revision": "3d2edd543d75372922aabd4ae538e6d181634b5d"
+          },
+          "include": [
+            "hyperclovax-seed-text-instruct-1.5b-q4_k_m.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3-1.7b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3-1.7B on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-Qwen3-1.7B-loom",
+            "revision": "e1d356b458ad21cb476546c6454abbb4f32a3bf2"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/Qwen3-1.7B-GGUF",
+            "revision": "daeb8e2d528a760970442092f6bf1e55c3b659eb"
+          },
+          "include": [
+            "Qwen3-1.7B-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3.5-2b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3.5-2B on AMD Loom (Q4_K_M GGUF, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Qwen3.5-2B-loom",
+            "revision": "0841f9d4e1058fa2efdd8dcc663504c255aae1a6"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3.5-2B-GGUF",
+            "revision": "f6d5376be1edb4d416d56da11e5397a961aca8ae"
+          },
+          "include": [
+            "Qwen3.5-2B-Q4_K_M.gguf",
+            "mmproj-F16.gguf"
+          ],
+          "entry": "."
+        }
+      ]
+    },
+    {
+      "id": "llama-3.2-3b-instruct-loom",
+      "provider": "loom-text",
+      "license": "llama3.2",
+      "description": "Llama-3.2-3B-Instruct on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Llama-3.2-3B-Instruct-loom",
+            "revision": "c6defa4cd5a8764b2cd8d4c14cb81ca0f118a76c"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Llama-3.2-3B-Instruct-GGUF",
+            "revision": "e7d0997e49c9cb00d88b4c1a6a16aa894b0bbc31"
+          },
+          "include": [
+            "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3-4b-instruct-2507-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3-4B-Instruct-2507 on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Qwen3-4B-Instruct-2507-loom",
+            "revision": "d0df214dfcbf73e905ad7930498e110bb5525e3d"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+            "revision": "a06e946bb6b655725eafa393f4a9745d460374c9"
+          },
+          "include": [
+            "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "spark-x2.5-4b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Spark-X2.5-4B on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/XHToken-Spark-X2.5-4B-loom",
+            "revision": "b2e87e163ac1e1db1912ea4aaed57bc3816b78a5"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "XHToken/Spark-X2.5-4B-GGUF",
+            "revision": "9826e0be84e6e6e8b9668abc91421109a1df1e2d"
+          },
+          "include": [
+            "Spark-X2.5-4B-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "spark-x2.6-4b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Spark-X2.6-4B on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/bartowski-Spark-X2.6-4B-loom",
+            "revision": "d38e0b2578353ca0a7dc999b3c8ee44944ad1753"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/Spark-X2.6-4B-GGUF",
+            "revision": "17682e38297a4510899b12a95ab3d8dcebc674e5"
+          },
+          "include": [
+            "Spark-X2.6-4B-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3-4b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0; drafter (AtomicChat/Qwen3-4B-DFlash-GGUF): mit",
+      "description": "Qwen3-4B on AMD Loom (Q4_K_M GGUF, speculative decoding)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-Qwen3-4B-loom",
+            "revision": "b0944ed9f7f284e15f31aa4a9d14473c193707a8"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/Qwen3-4B-GGUF",
+            "revision": "2f3b082b1356a6123f7ed71e65aea340da25d53c"
+          },
+          "include": [
+            "Qwen3-4B-Q4_K_M.gguf"
+          ]
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "AtomicChat/Qwen3-4B-DFlash-GGUF",
+            "revision": "700be51d025f928249abf1c72aef735961051e23"
+          },
+          "include": [
+            "Qwen3-4B-DFlash.Q8_0.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3-vl-4b-instruct-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3-VL-4B-Instruct on AMD Loom (Q4_K_M GGUF, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Qwen3-VL-4B-Instruct-loom",
+            "revision": "c9e8f9868c0be8bbef11ee5f7bebf35f2feb419b"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3-VL-4B-Instruct-GGUF",
+            "revision": "00c00da0690c4b14b5539b02c4ea5d7c9102b35e"
+          },
+          "include": [
+            "Qwen3-VL-4B-Instruct-Q4_K_M.gguf",
+            "mmproj-F16.gguf"
+          ],
+          "entry": "."
+        }
+      ]
+    },
+    {
+      "id": "qwen3.5-4b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3.5-4B on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Qwen3.5-4B-loom",
+            "revision": "7e1a042bfa355360b8d17ee6c51c38410af8d0b6"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3.5-4B-GGUF",
+            "revision": "e87f176479d0855a907a41277aca2f8ee7a09523"
+          },
+          "include": [
+            "Qwen3.5-4B-Q4_K_M.gguf",
+            "mmproj-F16.gguf"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "magnitudedev/Qwen3.5-4B-DFlash-GGUF",
+            "revision": "0094e74a88676605d53b79c7c3d26096335c9746"
+          },
+          "include": [
+            "Qwen3.5-4B-DFlash-Q8_0.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gemma-4-e2b-it-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "gemma-4-E2B-it on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-gemma-4-E2B-it-loom",
+            "revision": "3503abcf7cfff7bc58bd819ea32ccab8c18c075d"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/gemma-4-E2B-it-GGUF",
+            "revision": "0314792d7f1f7e229411f620751375812bb9faf2"
+          },
+          "include": [
+            "gemma-4-E2B-it-Q4_K_M.gguf",
+            "mmproj-F16.gguf"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "AtomicChat/gemma-4-E2B-it-assistant-GGUF",
+            "revision": "c540008a0f33650558acdc87c823f7d1591191e3"
+          },
+          "include": [
+            "gemma-4-E2B-it-assistant.Q8_0.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-7b-instruct-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen2.5-7B-Instruct on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/bartowski-Qwen2.5-7B-Instruct-loom",
+            "revision": "7a755e3f50d67b6bf97487135d025c19cce0f14c"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+            "revision": "8911e8a47f92bac19d6f5c64a2e2095bd2f7d031"
+          },
+          "include": [
+            "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-vl-7b-instruct-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen2.5-VL-7B-Instruct on AMD Loom (Q4_K_M GGUF, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-Qwen2.5-VL-7B-Instruct-loom",
+            "revision": "2611dac7db74f0042ce3fc06dd821ca613efe3fa"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF",
+            "revision": "508edd0afaa66bb9e9f40587acc2184f02daf1f6"
+          },
+          "include": [
+            "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+            "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf"
+          ],
+          "entry": "."
+        }
+      ]
+    },
+    {
+      "id": "gemma-4-e4b-it-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "gemma-4-E4B-it on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-gemma-4-E4B-it-loom",
+            "revision": "e53717d9759ed9faa3454a65818c8401b5ff9f14"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/gemma-4-E4B-it-GGUF",
+            "revision": "bfc15c382204943c3a8fff0c750b94ae2364d7a3"
+          },
+          "include": [
+            "gemma-4-E4B-it-Q4_K_M.gguf",
+            "mmproj-F16.gguf"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "AtomicChat/gemma-4-E4B-it-assistant-GGUF",
+            "revision": "d87ced306ffb9d82e032e60b34beef4a702e308b"
+          },
+          "include": [
+            "gemma-4-E4B-it-assistant.Q8_0.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3-8b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0; drafter (AtomicChat/Qwen3-8B-DFlash-GGUF): mit",
+      "description": "Qwen3-8B on AMD Loom (Q4_K_M GGUF, speculative decoding)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Qwen3-8B-loom",
+            "revision": "35d393f359b50ec874e5f2d635bcf03fb48d080f"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3-8B-GGUF",
+            "revision": "a6adef130ffb23ddaf1a62fec9dced968c9bc482"
+          },
+          "include": [
+            "Qwen3-8B-Q4_K_M.gguf"
+          ]
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "AtomicChat/Qwen3-8B-DFlash-GGUF",
+            "revision": "603692f6ac1fac016e03f3ad47321312614f3581"
+          },
+          "include": [
+            "Qwen3-8B-DFlash.Q8_0.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3-vl-8b-instruct-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3-VL-8B-Instruct on AMD Loom (Q4_K_M GGUF, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Qwen3-VL-8B-Instruct-loom",
+            "revision": "4c126a53d2beabbcd03700071be10ac811b6778a"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3-VL-8B-Instruct-GGUF",
+            "revision": "b93a7ee713758252c555be4210c00540df954dc2"
+          },
+          "include": [
+            "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+            "mmproj-F16.gguf"
+          ],
+          "entry": "."
+        }
+      ]
+    },
+    {
+      "id": "ornith-1.0-9b-loom",
+      "provider": "loom-text",
+      "license": "mit",
+      "description": "Ornith-1.0-9B on AMD Loom (Q4_K_M GGUF, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Ornith-1.0-9B-loom",
+            "revision": "dff6b66ed20512c86ec2f847bfe78fc6b5589149"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Ornith-1.0-9B-GGUF",
+            "revision": "a674c5a128bb74049b1bb3619f1355073db5b48c"
+          },
+          "include": [
+            "Ornith-1.0-9B-Q4_K_M.gguf",
+            "mmproj-F16.gguf"
+          ],
+          "entry": "."
+        }
+      ]
+    },
+    {
+      "id": "ornith-1.5-9b-loom",
+      "provider": "loom-text",
+      "license": "mit",
+      "description": "Ornith-1.5-9B on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/bartowski-Ornith-1.5-9B-loom",
+            "revision": "fd3c6efebabc4ea9502c296326402a079bb84827"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/Ornith-1.5-9B-GGUF",
+            "revision": "1fc60d6805eaa18bbed4088391db9336eb9581c4"
+          },
+          "include": [
+            "Ornith-1.5-9B-Q4_K_M.gguf",
+            "mmproj-Ornith-1.5-9B-f16.gguf"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "abenzerps/Ornith-1.5-9B-DFlash-GGUF",
+            "revision": "4ba29c7a17fb17ba07deb79e25ebdeb00fd01e01"
+          },
+          "include": [
+            "Ornith-1.5-9B-DFlash-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "nemotron-3.5-bolt-e4b-loom",
+      "provider": "loom-text",
+      "license": "openmdw-1.1",
+      "description": "nemotron-3.5-bolt-e4b on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/nvidia-NVIDIA-Nemotron-3.5-Bolt-E4B-4GB-loom",
+            "revision": "3f36ed722f6c8bdb51d90526bc05e03a05f24dbf"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-4GB",
+            "revision": "1db54d5b12533ff1bcaa8e42cf4c667988a1f1be"
+          },
+          "include": [
+            "Nemotron-3.5-Bolt-E4B-Q4_K_M.gguf"
+          ]
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-4GB-DFlash",
+            "revision": "0949a2eb7152ec6fda1a91ff9302aecbcd464fbf"
+          },
+          "include": [
+            "Nemotron-3.5-Bolt-E4B-DFlash-BF16.gguf"
+          ]
+        },
+        {
+          "role": "vision",
+          "option": "--loom-vision",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/NVIDIA-Nemotron-3.5-Bolt-E4B-GGUF",
+            "revision": "b738967d6da3441a7d1c71fcec15e49e32e16ecd"
+          },
+          "include": [
+            "mmproj-F16.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3.5-9b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3.5-9B on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Qwen3.5-9B-loom",
+            "revision": "3bfcc8acc5988ecd195e68ea26260984bdddc355"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3.5-9B-GGUF",
+            "revision": "3885219b6810b007914f3a7950a8d1b469d598a5"
+          },
+          "include": [
+            "Qwen3.5-9B-Q4_K_M.gguf",
+            "mmproj-F16.gguf"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "AtomicChat/Qwen3.5-9B-DFlash-GGUF",
+            "revision": "de44b8556576637d1049951f8fdbd98bcb2462f3"
+          },
+          "include": [
+            "Qwen3.5-9B-DFlash.Q8_0.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "mellum2.1-12b-a2.5b-thinking-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Mellum2.1-12B-A2.5B-Thinking on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/bartowski-Mellum2.1-12B-A2.5B-Thinking-loom",
+            "revision": "5d172ab9262e8f7f64f14541d43b876f150132fe"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/Mellum2.1-12B-A2.5B-Thinking-GGUF",
+            "revision": "355e97042763a75b33efc51efd731ce0149413d4"
+          },
+          "include": [
+            "Mellum2.1-12B-A2.5B-Thinking-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3-14b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3-14B on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-Qwen3-14B-loom",
+            "revision": "71bad2d9362daa394f2ed58ae5fb97628a139021"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/Qwen3-14B-GGUF",
+            "revision": "af3732ec4e23a1dfff21a0479cd3545ace763e38"
+          },
+          "include": [
+            "Qwen3-14B-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gpt-oss-20b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "gpt-oss-20b on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-gpt-oss-20b-loom",
+            "revision": "caf72ae4ed037eeaeb9d818b7d3e358ba464c16a"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/gpt-oss-20b-GGUF",
+            "revision": "d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4"
+          },
+          "include": [
+            "gpt-oss-20b-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lfm2.5-24b-a2b-loom",
+      "provider": "loom-text",
+      "license": "lfm1.0",
+      "description": "LFM2.5-24B-A2B on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-LFM2.5-24B-A2B-loom",
+            "revision": "5dc159ccab5c1f446f7f5454ff5a94d9f78ac280"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/LFM2.5-24B-A2B-GGUF",
+            "revision": "93d5056976d1340c8975f6b4e792b50f6c4f7423"
+          },
+          "include": [
+            "LFM2.5-24B-A2B-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gemma-4-26b-a4b-it-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "gemma-4-26B-A4B-it on AMD Loom (Q4_K_M GGUF, speculative decoding)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/lmstudio-community-gemma-4-26B-A4B-it-loom",
+            "revision": "eb2bd1117e4a1de4d949b39fb6ac217e7ef35e6a"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "lmstudio-community/gemma-4-26B-A4B-it-GGUF",
+            "revision": "f6e6747823b2912661935db7e0009287c4838073"
+          },
+          "include": [
+            "gemma-4-26B-A4B-it-Q4_K_M.gguf"
+          ]
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "Anbeeld/gemma-4-26B-A4B-it-DFlash-GGUF",
+            "revision": "d5262e1db8fc07d80f41ef2d0f333eac7978e97a"
+          },
+          "include": [
+            "gemma4-26b-a4b-it-dflash-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3-coder-30b-a3b-instruct-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0; drafter (Anbeeld/Qwen3-Coder-30B-A3B-DFlash-GGUF): mit",
+      "description": "Qwen3-Coder-30B-A3B-Instruct on AMD Loom (Q4_K_M GGUF, speculative decoding)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-Qwen3-Coder-30B-A3B-Instruct-loom",
+            "revision": "90f4d2874d066ab7ad0c16daab9a383fa55f47a5"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+            "revision": "0ca51122012fe4a20dc82988ee58780b008ce4e3"
+          },
+          "include": [
+            "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
+          ]
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "Anbeeld/Qwen3-Coder-30B-A3B-DFlash-GGUF",
+            "revision": "313e1f5ac2144a583057a4e864e46b7780ce4c11"
+          },
+          "include": [
+            "Qwen3-Coder-30B-A3B-DFlash-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3.8-27b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "qwen3.8-27b on AMD Loom (Q4_K_M GGUF, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/bartowski-Qwen3.8-27B-loom",
+            "revision": "a73a11eba342bde5e2ab489b2687cf731b9c7128"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/Qwen3.8-27B-GGUF",
+            "revision": "87410e7b9a5c21e6ca70c0c9cc5237de909fe621"
+          },
+          "include": [
+            "Qwen3.8-27B-Q4_K_M.gguf",
+            "mmproj-Qwen3.8-27B-f16.gguf"
+          ],
+          "entry": "."
+        }
+      ]
+    },
+    {
+      "id": "qwen3-30b-a3b-instruct-2507-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3-30B-A3B-Instruct-2507 on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Qwen3-30B-A3B-Instruct-2507-loom",
+            "revision": "c6598438289b2cbb1543e73e90b749136c888797"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF",
+            "revision": "eea7b2be5805a5f151f8847ede8e5f9a9284bf77"
+          },
+          "include": [
+            "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gemma-4-31b-it-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "gemma-4-31B-it on AMD Loom (Q4_K_M GGUF, speculative decoding)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-gemma-4-31B-it-loom",
+            "revision": "568071f2fbee4b39c45d10ed9ea2453d5eec7137"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/gemma-4-31B-it-GGUF",
+            "revision": "c1ac76e99d5513b141e8adde7288b85c3f9c32ec"
+          },
+          "include": [
+            "gemma-4-31B-it-Q4_K_M.gguf"
+          ]
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "Anbeeld/gemma-4-31B-it-DFlash-GGUF",
+            "revision": "16e51736d898d460e527acebd5aaa31f72cf7ff7"
+          },
+          "include": [
+            "gemma4-31b-it-dflash-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-32b-instruct-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen2.5-32B-Instruct on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/bartowski-Qwen2.5-32B-Instruct-loom",
+            "revision": "07da8bface8f684e61d007ed15295e861c734a33"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+            "revision": "2116cbb385b8ce3a4d28cf3bf1cd2039a55821a6"
+          },
+          "include": [
+            "Qwen2.5-32B-Instruct-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "laguna-xs-2.1-loom",
+      "provider": "loom-text",
+      "license": "openmdw-1.1",
+      "description": "Laguna-XS-2.1 on AMD Loom (Q4_K_M GGUF, speculative decoding)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-Laguna-XS-2.1-loom",
+            "revision": "640cfee4a72a1336888459ba83948d5d74ab9f44"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/Laguna-XS-2.1-GGUF",
+            "revision": "1c7823dff255ab71b381a6c5082af8b07e70c150"
+          },
+          "include": [
+            "Laguna-XS-2.1-Q4_K_M.gguf"
+          ]
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "dev7a/Laguna-XS-2.1-DFlash-GGUF",
+            "revision": "335be330b72a556fb107f99881261e275b21050d"
+          },
+          "include": [
+            "Laguna-XS-2.1-DFlash-Q8_0.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "nanbeige4.3-33b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Nanbeige4.3-33B on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/bartowski-Nanbeige4.3-33B-loom",
+            "revision": "bfe6f26ea510f721ba5751dc5115e8fca18ef66b"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/Nanbeige_Nanbeige4.3-33B-GGUF",
+            "revision": "9beb68421fdf7be095093a6888325fa2c83ddd38"
+          },
+          "include": [
+            "Nanbeige_Nanbeige4.3-33B-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3.6-27b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0; drafter (Anbeeld/Qwen3.6-27B-DFlash-GGUF): mit",
+      "description": "Qwen3.6-27B on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-Qwen3.6-27B-loom",
+            "revision": "f86d908dd9e7caaf8312c4f753a600c3dfdc6ad8"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/Qwen3.6-27B-GGUF",
+            "revision": "1132d03976d88e30a09ab0ddbf1531d5e1b46e7c"
+          },
+          "include": [
+            "Qwen3.6-27B-Q4_K_M.gguf",
+            "mmproj-Qwen3.6-27B-BF16.gguf"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "Anbeeld/Qwen3.6-27B-DFlash-GGUF",
+            "revision": "f14c6b308ee71deb2b2cb47c331e164271968e6b"
+          },
+          "include": [
+            "Qwen3.6-27B-DFlash-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3.6-35b-a3b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3.6-35B-A3B on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-Qwen3.6-35B-A3B-loom",
+            "revision": "9a06cc9ba5ca93e2de3a5fa40b2ad4e415d191fe"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/Qwen3.6-35B-A3B-GGUF",
+            "revision": "52f9f9b8052fb9c8b69bba4a95eda0f319ac3d2a"
+          },
+          "include": [
+            "Qwen3.6-35B-A3B-Q4_K_M.gguf",
+            "mmproj-Qwen3.6-35B-A3B-BF16.gguf"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "magnitudedev/Qwen3.6-35B-A3B-DFlash-GGUF",
+            "revision": "4f5e4df8dc4520256bdc0bc8752c7010bbfb1eec"
+          },
+          "include": [
+            "Qwen3.6-35B-A3B-DFlash-Q8_0.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ornith-1.0-35b-loom",
+      "provider": "loom-text",
+      "license": "mit",
+      "description": "Ornith-1.0-35B on AMD Loom (Q4_K_M GGUF, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/lmstudio-community-Ornith-1.0-35B-loom",
+            "revision": "70e56c1cc62e13fda963337500228fded6ffdb9d"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "lmstudio-community/Ornith-1.0-35B-GGUF",
+            "revision": "a133768a77ba629558f3910ece680e8f60d2aa3d"
+          },
+          "include": [
+            "Ornith-1.0-35B-Q4_K_M.gguf",
+            "mmproj-Ornith-1.0-35B-BF16.gguf"
+          ],
+          "entry": "."
+        }
+      ]
+    },
+    {
+      "id": "minicpm-v-4.7-35b-a3b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "MiniCPM-V-4.7-35B-A3B on AMD Loom (Q4_K_M GGUF)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/bartowski-MiniCPM-V-4.7-35B-A3B-loom",
+            "revision": "bb64688865697edb8b1f1329dc9bf1c32d520e71"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/MiniCPM-V-4.7-35B-A3B-GGUF",
+            "revision": "098bdee54114f39f7b2246e3d4632aaa05f0da78"
+          },
+          "include": [
+            "MiniCPM-V-4.7-35B-A3B-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sage-a1.5-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Sage-A1.5 on AMD Loom (Q4_K_M GGUF, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/InternScience-Sage-A1.5-loom",
+            "revision": "bfa32772063c03a549b3452520d3110e0d978f2f"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "InternScience/Sage-A1.5-Q4_K_M-GGUF",
+            "revision": "10b179b52f2c841030db327627e707d076b4c8cf"
+          },
+          "include": [
+            "Sage-A1.5-Q4_K_M.gguf",
+            "Sage-A1.5-mmproj.gguf"
+          ],
+          "entry": "."
+        }
+      ]
+    },
+    {
+      "id": "qwen3.5-35b-a3b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Qwen3.5-35B-A3B on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Qwen3.5-35B-A3B-loom",
+            "revision": "89e9db91429a851ccf55e5f31f3c81d1c3b7bea4"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3.5-35B-A3B-GGUF",
+            "revision": "bc014a17be43adabd7066b7a86075ff935c6a4e2"
+          },
+          "include": [
+            "Qwen3.5-35B-A3B-Q4_K_M.gguf",
+            "mmproj-F16.gguf"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "Anbeeld/Qwen3.5-35B-A3B-DFlash-GGUF",
+            "revision": "31335d2996d3fcaf269225f17693c5d9205822a4"
+          },
+          "include": [
+            "Qwen3.5-35B-A3B-DFlash-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ornith-1.5-35b-a3b-loom",
+      "provider": "loom-text",
+      "license": "mit",
+      "description": "Ornith-1.5-35B-A3B on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/bartowski-Ornith-1.5-35B-A3B-loom",
+            "revision": "a04f7adb325c45a30c8c9a5196bc4bac3e98fb9e"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/Ornith-1.5-35B-A3B-GGUF",
+            "revision": "64b0493d34a5ca4c1b4ad67bb99b41d74b4f07d6"
+          },
+          "include": [
+            "Ornith-1.5-35B-A3B-Q4_K_M.gguf",
+            "mmproj-Ornith-1.5-35B-A3B-f16.gguf"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "na0x2c6/Ornith-1.5-35B-A3B-DFlash-GGUF",
+            "revision": "3427ea426d150d03c633b0d25b8a0626453b3f2f"
+          },
+          "include": [
+            "Ornith-1.5-35B-A3B-DFlash-Q8_0.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "muse-glimmer-30b-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "Muse-Glimmer-30B on AMD Loom (Q4_K_M GGUF, speculative decoding, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-Muse-Glimmer-30B-loom",
+            "revision": "40344e99e4b4d632b89c45278e5d1ffc46023cfb"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/Muse-Glimmer-30B-GGUF",
+            "revision": "5da9c17514ceb04baf73445648d215272275b114"
+          },
+          "include": [
+            "Muse-Glimmer-30B-Q4_K_M.gguf",
+            "mmproj-Muse-Glimmer-30B-BF16.gguf"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "z-lab/Muse-Glimmer-30B-DFlash2-GGUF",
+            "revision": "880882627431093d99d3b2368efb4a6fcf12d4cb"
+          },
+          "include": [
+            "Muse-Glimmer-30B-DFlash2-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3.8-27b-ud-q4_k_xl-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "qwen3.8-27b-ud-q4_k_xl on AMD Loom (UD-Q4_K_XL GGUF, vision)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-Qwen3.8-27B-UD-Q4_K_XL",
+            "revision": "3e43d41d0bfae65f17a77794264f82a3b5f2c990"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Qwen3.8-27B-GGUF",
+            "revision": "4af51b3542f775b0a8e4b310bfb3f17e01c306c9"
+          },
+          "include": [
+            "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+          ]
+        },
+        {
+          "role": "vision",
+          "option": "--loom-vision",
+          "install": "required",
+          "source": {
+            "hf": "bartowski/Qwen3.8-27B-GGUF",
+            "revision": "87410e7b9a5c21e6ca70c0c9cc5237de909fe621"
+          },
+          "include": [
+            "mmproj-Qwen3.8-27B-f16.gguf"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gemma-4-26b-a4b-it-qat-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "gemma-4-26B-A4B-it-qat-q4_0-unquantized on AMD Loom (UD-Q4_K_XL GGUF, speculative decoding)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-gemma-4-26B-A4B-it-qat-loom",
+            "revision": "da1e6ae137920f0565d989e0731128288eb712e3"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+            "revision": "7b92b5b28818151e8669af2e45e88d6086f490dd"
+          },
+          "include": [
+            "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+            "mtp-gemma-4-26B-A4B-it.gguf"
+          ],
+          "entry": "."
+        }
+      ]
+    },
+    {
+      "id": "gemma-4-31b-it-qat-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "gemma-4-31B-it-qat-q4_0-unquantized on AMD Loom (UD-Q4_K_XL GGUF, speculative decoding)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/unsloth-gemma-4-31B-it-qat-loom",
+            "revision": "0826c6e9d4cc3971f94f2730a07f6b33ad9982e2"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/gemma-4-31B-it-qat-GGUF",
+            "revision": "43cc1aeb31adf47ec06a854507ce552cd9862e6f"
+          },
+          "include": [
+            "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+            "mtp-gemma-4-31B-it.gguf"
+          ],
+          "entry": "."
+        }
+      ]
+    },
+    {
+      "id": "flint-loom",
+      "provider": "loom-text",
+      "license": "apache-2.0",
+      "description": "flint on AMD Loom (Q4_K_M GGUF, speculative decoding)",
+      "components": [
+        {
+          "role": "package",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "loom-fun/ggml-org-Flint-loom",
+            "revision": "d60f073d32ca9f4c78fb20e79bb1187f8d60841f"
+          },
+          "exclude": [
+            "README.md",
+            "REPORT.md",
+            "info.json",
+            ".gitattributes",
+            "*.png",
+            "*.jpg",
+            "*.svg"
+          ],
+          "entry": "."
+        },
+        {
+          "role": "checkpoint",
+          "option": "--loom-checkpoint",
+          "install": "required",
+          "source": {
+            "hf": "ggml-org/Flint-GGUF",
+            "revision": "468307a1b38259e9e4c9d4fe53d4e3b76386572c"
+          },
+          "include": [
+            "Flint-Q4_K_M.gguf"
+          ]
+        },
+        {
+          "role": "drafter",
+          "option": "--loom-drafter",
+          "install": "required",
+          "source": {
+            "hf": "incoai/Flint-DFlash2-GGUF",
+            "revision": "74e6ac0c538cfd393d97bd93694e5c4c6b6aa8c3"
+          },
+          "include": [
+            "Flint-DFlash2-Q4_K_M.gguf"
+          ]
+        }
+      ]
+    }
+  ]
+}

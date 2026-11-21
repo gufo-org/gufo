@@ -3,6 +3,7 @@
   "extensions": [
     "deepseek_v4_flash",
     "embedding_gemma2",
+    "loom",
     "minimax_h3",
     "qwen",
     "qwen3_asr",

@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "name": "loom",
+  "target": "gufo_loom",
+  "kind": "static",
+  "purpose": "Loom model packages served on their own Loom kernels through libloom_text_embed.",
+  "consumers": [],
+  "checks": [
+    "loom_package_test",
+    "loom_runner_logits_test"
+  ]
+}

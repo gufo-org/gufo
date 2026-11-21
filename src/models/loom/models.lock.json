@@ -1,0 +1,5708 @@
+{
+  "schema": 1,
+  "models": {
+    "qwen3-0.6b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Qwen3-0.6B-loom",
+          "revision": "564d578f4e487c6fbabd84915439f873651b5953"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 409793,
+            "sha256": "83eb79b2797fcdd327afe399d789d26f29aa560145159c1ad7a7fa8d36480758"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 4425,
+            "sha256": "5ba3739e12aff966dc674ddf5d2270b455de4d243259e080058e1565304d4830"
+          },
+          {
+            "path": "model.json",
+            "size": 1785,
+            "sha256": "c411b99905c9498d2ee779c856c3a3b9c4e0a3587cb73759c73fa40388783d3e"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 693,
+            "sha256": "73ef40ffd343d9c054b203c09f7a4afe1b1b4237c725a715c7b197c8d68e6209"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 136357,
+            "sha256": "53b02ba39a8b38a200d6d303b47cc1febe01226f13e2192000c0e0cd86058cf3"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2534018,
+            "sha256": "3236113a3c3151238babb9f3cf905fe1d6c89af45ab353172d07c7f1a2b0da90"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7809,
+            "sha256": "1b5c38d757a0488d22978cc522d2096f117715bc4de916f942a62ccccf7ab5fe"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "8dd5690fd94721f7b91f13aa78a1dd3aaca5968f1ff079960abf36fb3fcd5ca0"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5969576,
+            "sha256": "a15cda23be411de16c671b7e1c50a9c0ba1516a69f348d159e4c6ee6f3c02a26"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Qwen3-0.6B-GGUF",
+          "revision": "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
+        },
+        "include": [
+          "Qwen3-0.6B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-0.6B-Q4_K_M.gguf",
+            "size": 396705472,
+            "sha256": "ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a"
+          }
+        ]
+      }
+    },
+    "qwen2.5-0.5b-instruct-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/bartowski-Qwen2.5-0.5B-Instruct-loom",
+          "revision": "6fe5ac03a656c4e5d51ecb270c7d7bedc56c2a57"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 379453,
+            "sha256": "b0e9be586e5e029efda84facfc85da5509e9a0921223e4f8355b44ca9c1fcceb"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 6085,
+            "sha256": "cf2f75e0ae7fc518e500126f4bc4d869624a5dd35562d2bd35d8e0bfb1d6cc1e"
+          },
+          {
+            "path": "model.json",
+            "size": 1842,
+            "sha256": "696003e7839a4aa4b13b4f16692a898758dfb1d6bc43ed5808add767f5d3d1a2"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 717,
+            "sha256": "f4a79e7132f83d287ce3060b6bd14ae644eb68dbcc33a12d2546cdbc60c79b9d"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 136424,
+            "sha256": "59bbfd4061a89d2d1d89d4024b1e8edbfa530b73911c2feba3b6c8d7370c1d35"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2397826,
+            "sha256": "8d364699fcaab4ca120fc3505605dcea76fe1862f4e1d03687e3331c98b1eefe"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7809,
+            "sha256": "97446c4c14578aa03c3878f527710e0d8de892ed5bd2ba505fb4865034c9a0fd"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8939,
+            "sha256": "482f0e01ec702252b893f576da8ff0ccce375c52ea8c84f2101532f08e0a5832"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5212067,
+            "sha256": "20f3f185bfd9a4f9f69c9e605911d6c4d9b004c9993ac29c1bc7c666d1b33877"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "bartowski/Qwen2.5-0.5B-Instruct-GGUF",
+          "revision": "41ba88dbac95fed2528c92514c131d73eb5a174b"
+        },
+        "include": [
+          "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
+            "size": 397808192,
+            "sha256": "6eb923e7d26e9cea28811e1a8e852009b21242fb157b26149d3b188f3a8c8653"
+          }
+        ]
+      }
+    },
+    "qwen3.5-0.8b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Qwen3.5-0.8B-loom",
+          "revision": "9131414f6d7c0e37a890bb23fb7a1693e82b4db3"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 440959,
+            "sha256": "2f30169852a2340c3291019cbaddbfb0270818401b4474c3d0101e85a0a6c3dd"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 6089,
+            "sha256": "a1c80ec36a1edddac46f0cf3231933f9680b23c619abc785ee2bcf7da52b246c"
+          },
+          {
+            "path": "model.json",
+            "size": 1982,
+            "sha256": "ccf3e951950b5899ce63e0a3ae7616cf6bd1212bc2025cc461909dd6ebe2a7c8"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 865,
+            "sha256": "952832f9afad36a98b83827c96f759758c15784c4a8ef9bc9e27601a0c0ba50a"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 164568,
+            "sha256": "c63a1a82e70a9795836b20fa5d34075f4142fdc11f1022f0cb495264b30f6c94"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 3009854,
+            "sha256": "b9f3e7e6b30439e794cf36613b0489e0bfc0c48ef3aca41a7d744fd1eaaa6c04"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "e5366b7c9fa88781b9941656a6995f70f9d651843055b510c96e912ad905c490"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8956,
+            "sha256": "434109a8b4b0a336ab4b2abe213f13833323fcfa11fb5420bc503eedacedd15b"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8539,
+            "sha256": "71115b0c30d979659fe2176c2bf7acc463ca0064f72a01f7f9b32a71333818e0"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 234784,
+            "sha256": "52881e59dd374a294a34438b4d9e383e4cce6606ccbf5f52cb72deac1f18f9c6"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "4185ded6f2a19820a5d6ee11fec5dba4f00cdd9c6724e16c7f08b04e64dd94f1"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 9832586,
+            "sha256": "cf360f770fae77c3e5e783bce81eb01aebda1627cdc38736b4a0d30f8c5f4fe7"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Qwen3.5-0.8B-GGUF",
+          "revision": "6ab461498e2023f6e3c1baea90a8f0fe38ab64d0"
+        },
+        "include": [
+          "Qwen3.5-0.8B-Q4_K_M.gguf",
+          "mmproj-F16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.5-0.8B-Q4_K_M.gguf",
+            "size": 532517120,
+            "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517"
+          },
+          {
+            "path": "mmproj-F16.gguf",
+            "size": 204987232,
+            "sha256": "56e4c6cfe73b0c82e3e82bc518d7591997e61d81f723fc41a586f4fa69ea2453"
+          }
+        ]
+      }
+    },
+    "gemma-3-1b-it-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-gemma-3-1b-it-loom",
+          "revision": "ed544f633706e706da5098bd5f2fd3c1579921ac"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 424089,
+            "sha256": "309c259f1233e3893d23c1eeb003c265847184371634d3d0923ed1b8fa9c257a"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 4721,
+            "sha256": "36ed6948fe48bfef5ff0039370cb09e6af86cf87b9b3d67d9708f09b292fe9f4"
+          },
+          {
+            "path": "model.json",
+            "size": 1803,
+            "sha256": "c28d545632ee4f8d7bee8c136841b40c58479e46ef5b7b9f1aeb1e0728751cb7"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 701,
+            "sha256": "1a6be38f2c60e7bfb4cf75a5858084d482dfa5d1e4061664d05caadedbda0000"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 136247,
+            "sha256": "0a6c9cab8cd697cdb0252ac28a83be064124b81f9bf54f9b8eb7a670a8f0573d"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2597368,
+            "sha256": "2fa948e52079dcbc459798c9e6471f32fafca63e8af5b3fe209581feff880f77"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7818,
+            "sha256": "10f66023fdfa2ce59b81a308c509c757475ebd1ec7aa44965a3e0050e94377cf"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8940,
+            "sha256": "30f5f6130c42cf116e4713506e46d273627403541f5f704c54bd26a85fde220c"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 16030258,
+            "sha256": "bc3c85152202ea9186bef74f279293b317df98648bfc84db9e8a919d174cfe05"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/gemma-3-1b-it-GGUF",
+          "revision": "f9c28bcd85737ffc5aef028638d3341d49869c27"
+        },
+        "include": [
+          "gemma-3-1b-it-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "gemma-3-1b-it-Q4_K_M.gguf",
+            "size": 806058240,
+            "sha256": "8ccc5cd1f1b3602548715ae25a66ed73fd5dc68a210412eea643eb20eb75a135"
+          }
+        ]
+      }
+    },
+    "qwen2.5-1.5b-instruct-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/bartowski-Qwen2.5-1.5B-Instruct-loom",
+          "revision": "a78f4fd5b9cda2a40ce321c2f60ea09228ca9950"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 596029,
+            "sha256": "e0586c1e3282ed0e309b3ad8dd887109f13df3181fb94efd4d10b256f7c1d127"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 4924,
+            "sha256": "b3e151eb249d1c4b9cf81af342b1135f02793ec381d662ce2a8b716f0fa6a145"
+          },
+          {
+            "path": "model.json",
+            "size": 1842,
+            "sha256": "e25d00cd10f6890cadf25dcc64f2ed4f4626373aad2fec50cac881d62a27ec3d"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 717,
+            "sha256": "880b16a78c7ec8cf4784082f54a9bedd5c88a3240645791d2189f377a51d5315"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 136424,
+            "sha256": "5c50d5815d106361ed6a6b7e4b9e948156e4529f463cec254474e6777f04edc8"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2664086,
+            "sha256": "e24f2f09f944a355303a6cfeaf97f1997812cf984db9e11816fdeca1b3a33055"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7809,
+            "sha256": "97446c4c14578aa03c3878f527710e0d8de892ed5bd2ba505fb4865034c9a0fd"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8939,
+            "sha256": "7b8537a1a6e65344906c3f1e79e00f8d648d9dacf702c59a5c06718c6ea85aa0"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5212067,
+            "sha256": "20f3f185bfd9a4f9f69c9e605911d6c4d9b004c9993ac29c1bc7c666d1b33877"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "bartowski/Qwen2.5-1.5B-Instruct-GGUF",
+          "revision": "9eadc66189c7641e1ddd226b8267a9119b2ce2d4"
+        },
+        "include": [
+          "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
+            "size": 986048768,
+            "sha256": "1adf0b11065d8ad2e8123ea110d1ec956dab4ab038eab665614adba04b6c3370"
+          }
+        ]
+      }
+    },
+    "lfm3-omni-2b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-LFM3-Omni-2B-loom",
+          "revision": "82e3ff40dd639c936f2909111d73191b2d6d0da6"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 612887,
+            "sha256": "0c528ac8eb5e625e57905132f6bf714d9326bc17995a117bd50b90f6ac411f3d"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 6004,
+            "sha256": "ff3570944784a0d3c61674aa4121309376ac25516704271348aa1e7db23ec198"
+          },
+          {
+            "path": "model.json",
+            "size": 1803,
+            "sha256": "87d4dbdec22c790ef851905cc8eab16914e1e994afbd33a93aa1d5ff8b88b5d6"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 699,
+            "sha256": "714807bda9c6d4f39b31b2078593a1c0085585c4c17c14d06b846c37951c1e8d"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 135950,
+            "sha256": "73f0865c28c4fe66c1900d2a440734d4ad4e64f2299d6b05cd6def8cf7981b9e"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2614736,
+            "sha256": "f8ea381d1a6ce44873f60c71cc7c4856286b981a2d7a98e954575df67fa120d8"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "8fdd7cb0901cc1097585d4b9175518b228aae5efb579af569acb84bdacf24133"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8952,
+            "sha256": "7859e1032e75642e9d16543c0dcd35e3e87424f188a5feb164d5daeaa3bed121"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 8352146,
+            "sha256": "7694d6f0aec367906ab3dbb1736b51075396dc3458365bed9aa2c478c334b7b3"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/LFM3-Omni-2B-GGUF",
+          "revision": "8e0303f6b4dfe1760e608abdd259af78d2677fd7"
+        },
+        "include": [
+          "LFM3-Omni-2B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "LFM3-Omni-2B-Q4_K_M.gguf",
+            "size": 1099630048,
+            "sha256": "cc0879a5ae593a84ea4681535feb30377f1c867f8feda77b3b5b68b7881dea06"
+          }
+        ]
+      }
+    },
+    "lfm3-1.7b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/bartowski-LFM3-1.7B-loom",
+          "revision": "b2554fcb467b22105aff94eb4b63e2017bc76e4c"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 612887,
+            "sha256": "0c528ac8eb5e625e57905132f6bf714d9326bc17995a117bd50b90f6ac411f3d"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 6749,
+            "sha256": "daf518fdc660e10e03ebd8b7d038cd963ea8e152b3d07487f611d3e3672a04ac"
+          },
+          {
+            "path": "model.json",
+            "size": 1789,
+            "sha256": "7d597434592d6d55e811f32d16c48b0724caf2b4d30e2b0ca0e97e326cd1edc1"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 694,
+            "sha256": "7abe7839991175658988a8e435544fd47b7ddf96854a1c4034e4e1198bf2f269"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 135943,
+            "sha256": "f60c75e971ab2f1a5a545fea0db53c32aa2cd010af5a3aab8b61a98d6a5df4a0"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 3185355,
+            "sha256": "25aaa71d606d6cfa3469927c142dd1c61b42d66eb0df5c9638fe7575bacc0d1e"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "e5366b7c9fa88781b9941656a6995f70f9d651843055b510c96e912ad905c490"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8952,
+            "sha256": "7859e1032e75642e9d16543c0dcd35e3e87424f188a5feb164d5daeaa3bed121"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 8352146,
+            "sha256": "7694d6f0aec367906ab3dbb1736b51075396dc3458365bed9aa2c478c334b7b3"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "bartowski/LFM3-1.7B-GGUF",
+          "revision": "9693095706f068e826377eaf576263ebeda926df"
+        },
+        "include": [
+          "LFM3-1.7B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "LFM3-1.7B-Q4_K_M.gguf",
+            "size": 1115637312,
+            "sha256": "ecc02a0720a349ef4b4069eff58fa679640eaeae7d381d3aee120fc2e018d8ce"
+          }
+        ]
+      }
+    },
+    "hyperclovax-seed-text-instruct-1.5b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/rippertnt-HyperCLOVAX-SEED-Text-Instruct-1.5B-loom",
+          "revision": "0c8e8831544e6625431a8177873fa531e75d0cc0"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 409793,
+            "sha256": "d5618ae10fccf15b9b50c9da4e89386584b30bde65b4120545fa867b519754b4"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 5508,
+            "sha256": "d5a79f6d86a6c7b0b5f6b067ec1e20a9b59a63fa9f746a1e41b76b059082a934"
+          },
+          {
+            "path": "model.json",
+            "size": 1935,
+            "sha256": "7d099fe167f516619283115eacdce82277672d57338f28adb89fa5739b5dc718"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 753,
+            "sha256": "301f72804848cf14e68f8921fb66e7f3a8d245ddbe767b32aa35e6ea0a68583e"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 135433,
+            "sha256": "ff5a8d212fedd5b2ac54f2a51d226edcd50c6af725cfad2422291f471f93b87b"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2691246,
+            "sha256": "8d2813a282e2a68d81128f12c72fc9e9aa56488d5706c3473449e3d73440f3fd"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "a574fed3a375f3ba2573d0ab866f3ed86eef95858a8f60f07f62e50fc3a6480b"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "96a18bdaecf380e8ca1bf191e118aca3da563837470768d207296108a0b7673e"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 4054532,
+            "sha256": "ae13691b0bce375d40340adc88d7de78a00ce731b6addd8849e2551ea0ffd847"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "rippertnt/HyperCLOVAX-SEED-Text-Instruct-1.5B-Q4_K_M-GGUF",
+          "revision": "3d2edd543d75372922aabd4ae538e6d181634b5d"
+        },
+        "include": [
+          "hyperclovax-seed-text-instruct-1.5b-q4_k_m.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "hyperclovax-seed-text-instruct-1.5b-q4_k_m.gguf",
+            "size": 1133974368,
+            "sha256": "95659a99a087fe5803150f47569dd55716a6806b6c3bf18e901ca0d341a701e4"
+          }
+        ]
+      }
+    },
+    "qwen3-1.7b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-Qwen3-1.7B-loom",
+          "revision": "e1d356b458ad21cb476546c6454abbb4f32a3bf2"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 409793,
+            "sha256": "83eb79b2797fcdd327afe399d789d26f29aa560145159c1ad7a7fa8d36480758"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 4422,
+            "sha256": "4ae097175fdf0b0ef137421b801857dbdc16549e1d7a4da63a54e4f437846eee"
+          },
+          {
+            "path": "model.json",
+            "size": 1786,
+            "sha256": "2cc8164fe7ad7f32162be7953a4a845ea1f7b60dcbc794962ef7fb74ed38a082"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 695,
+            "sha256": "21da42b2df12fa3b2a01f78c0111587e5aa51ec9ad607ea847f9d62d816dcad0"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 136357,
+            "sha256": "4d607e6629655bb0d64267716e7bd0aced55e33329d61825f4445ff2e0398ba4"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2426395,
+            "sha256": "f58c5ef5e534ffe2967b01ae67251b43067decb14ea7adb548687940ead86417"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7809,
+            "sha256": "1b5c38d757a0488d22978cc522d2096f117715bc4de916f942a62ccccf7ab5fe"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "8dd5690fd94721f7b91f13aa78a1dd3aaca5968f1ff079960abf36fb3fcd5ca0"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5969576,
+            "sha256": "a15cda23be411de16c671b7e1c50a9c0ba1516a69f348d159e4c6ee6f3c02a26"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/Qwen3-1.7B-GGUF",
+          "revision": "daeb8e2d528a760970442092f6bf1e55c3b659eb"
+        },
+        "include": [
+          "Qwen3-1.7B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-1.7B-Q4_K_M.gguf",
+            "size": 1282439264,
+            "sha256": "d2387ca2dbfee2ffabce7120d3770dadca0b293052bc2f0e138fdc940d9bc7b5"
+          }
+        ]
+      }
+    },
+    "qwen3.5-2b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Qwen3.5-2B-loom",
+          "revision": "0841f9d4e1058fa2efdd8dcc663504c255aae1a6"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 440959,
+            "sha256": "2f30169852a2340c3291019cbaddbfb0270818401b4474c3d0101e85a0a6c3dd"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 6393,
+            "sha256": "9665baa29f147d18de78c210bee05b7e2c13c48aeafc8d0652fa74bc55569d39"
+          },
+          {
+            "path": "model.json",
+            "size": 1972,
+            "sha256": "d1ae0bf1d8656e861225314105842cb083590a77f2bf98679870dca341354253"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 862,
+            "sha256": "6ffbed87b6afb2f706e878a17a0806f92dd5e015240cebc752de29a404b74f70"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 164564,
+            "sha256": "48488286900955aa2af312eaded335d66f58cbff43d38dfa9f83190bbc113ff7"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2793137,
+            "sha256": "cde08fa1b733c45dc84189572e37bc8376c7760921a25099499c3a305848d513"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "e5366b7c9fa88781b9941656a6995f70f9d651843055b510c96e912ad905c490"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8956,
+            "sha256": "434109a8b4b0a336ab4b2abe213f13833323fcfa11fb5420bc503eedacedd15b"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8539,
+            "sha256": "970ab752025f3a8aee0d23469af41ccc370335bbb90fde255be0498e0c4990f9"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 281305,
+            "sha256": "76c86a50e2aa6babbb35ffac3d6e1b7703568baf3b5426e881e38758111bc72a"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "14ee1c788d8382471b0dbd8fbb71bb4ffe7bd493582740992ce77a54c827b49d"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 9832586,
+            "sha256": "cf360f770fae77c3e5e783bce81eb01aebda1627cdc38736b4a0d30f8c5f4fe7"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Qwen3.5-2B-GGUF",
+          "revision": "f6d5376be1edb4d416d56da11e5397a961aca8ae"
+        },
+        "include": [
+          "Qwen3.5-2B-Q4_K_M.gguf",
+          "mmproj-F16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.5-2B-Q4_K_M.gguf",
+            "size": 1280835840,
+            "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"
+          },
+          {
+            "path": "mmproj-F16.gguf",
+            "size": 668227264,
+            "sha256": "7035e9cb8d7c6a9681d07eef9a364783e86ea4cd73faab2eabb4f43a101830c7"
+          }
+        ]
+      }
+    },
+    "llama-3.2-3b-instruct-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Llama-3.2-3B-Instruct-loom",
+          "revision": "c6defa4cd5a8764b2cd8d4c14cb81ca0f118a76c"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 596009,
+            "sha256": "31bbf95d213240d2aaf0b3ed1202c04a92ca2467f068aef3adb2b544180b8a4b"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 5916,
+            "sha256": "83324c3a866c93144af703bebd7f3a074cb74a27a8ab2f3489cc35b7c3a5d80b"
+          },
+          {
+            "path": "model.json",
+            "size": 1634,
+            "sha256": "acdc89452501d1a066d2a2e007dbdc55ef220368ac3392142786fe01262e502a"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 716,
+            "sha256": "8cc35caba71c137b6de5757ac06d0828163a5ca71b4558e40a40eee3aaf00e1c"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 159740,
+            "sha256": "a77a6dba31e52441a041911db44160f689f1bb0fc2ab809f1e120f8575602969"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 3023123,
+            "sha256": "e473c146eacd4c87ae5011f7eeedefa99ccddf821e61c0d10dd49b9edc88a7ad"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "4ec8bdad94ced9c126e09087f2bf88b1356b3ba2ad06f59ea48910ef21fd3d17"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "7f0d2c0a7037851192f69383c352f544ce9e1baf4e971a53855efd5b5c057459"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 6622524,
+            "sha256": "f3020410ed9547ce259b3f3236a3492f384bcd5ac200c4d847dff569b597932d"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Llama-3.2-3B-Instruct-GGUF",
+          "revision": "e7d0997e49c9cb00d88b4c1a6a16aa894b0bbc31"
+        },
+        "include": [
+          "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+            "size": 2019377600,
+            "sha256": "6c99cc00ae910f6a532a80022cb4bc1939094527a089c29294b841c0bd87f74d"
+          }
+        ]
+      }
+    },
+    "qwen3-4b-instruct-2507-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Qwen3-4B-Instruct-2507-loom",
+          "revision": "d0df214dfcbf73e905ad7930498e110bb5525e3d"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 593183,
+            "sha256": "39c23cbaa62862858a3243e8eb5ec1f76a0d9f809959a65348aa4d31a0e922a5"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 7860,
+            "sha256": "72e6ab03ae638cb0c95c59146ad4eaa92068aa362a46c0dde4d789e80b46d024"
+          },
+          {
+            "path": "model.json",
+            "size": 1847,
+            "sha256": "b2f3d447ba429da52010a7ab3654e1a519757cb4deffb4989c5a57c0e9296dda"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 718,
+            "sha256": "6f392b0c75ad7eaabe4d41e1124379c3255dbbe758a349c428a6ade00ae66630"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 136328,
+            "sha256": "f92c4f3886020d2c62213d9eaab7e367c0db3e82b42400df59abfe1a8cc0d7d6"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2866081,
+            "sha256": "c41327c5248026a5b71faf6044fe5a11b1d5fe62ab1b601706e4d9010f266d22"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "e5366b7c9fa88781b9941656a6995f70f9d651843055b510c96e912ad905c490"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "fc70bd3e1194f386745fd1e606eb7e3e422554de2d8e5780311a58db3f062f9a"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5969576,
+            "sha256": "a15cda23be411de16c671b7e1c50a9c0ba1516a69f348d159e4c6ee6f3c02a26"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+          "revision": "a06e946bb6b655725eafa393f4a9745d460374c9"
+        },
+        "include": [
+          "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+            "size": 2497281120,
+            "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"
+          }
+        ]
+      }
+    },
+    "spark-x2.5-4b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/XHToken-Spark-X2.5-4B-loom",
+          "revision": "b2e87e163ac1e1db1912ea4aaed57bc3816b78a5"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 440963,
+            "sha256": "6df34d0672c03f2b362fed2b6ce36d82b0ad1d614d8680f21a1fa8fc4cd1e72b"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 5987,
+            "sha256": "8a5576bfd1c2c4a54a65f65c59a35b5d30c98f8010131be665d9e50eed7cc19b"
+          },
+          {
+            "path": "model.json",
+            "size": 1801,
+            "sha256": "8a6245d4ce92d0ff591d582f1d49c1fa4846d3680c6b3d64e0b7b78441cd251f"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 700,
+            "sha256": "b3ca9e0b0c06d05885d605d6dae46d2740aa5e9545645de566587335045a952a"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 136378,
+            "sha256": "7298d403ecb690e86d2616c96579bc28de483d23479234c8aab0efbae5a3e81f"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2642898,
+            "sha256": "0361c55454f77d44089b09919a897c572f8fe238b20abeb47e19414430aa125e"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7864,
+            "sha256": "29963b1dc917f10cde7d3c7c94d68df1f9cbc814f9abf3d4b306a3a9030c6f0f"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "db033985cd1cbe436e5d2bf576f298d5906274198501848d10d116d4a372d589"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5401522,
+            "sha256": "bd7882663af9e21dc134ee02a289770fca356ef4817dd31721a23c42b340cd65"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "XHToken/Spark-X2.5-4B-GGUF",
+          "revision": "9826e0be84e6e6e8b9668abc91421109a1df1e2d"
+        },
+        "include": [
+          "Spark-X2.5-4B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Spark-X2.5-4B-Q4_K_M.gguf",
+            "size": 2600224352,
+            "sha256": "adfcfa19a4ed6a5985da8bf565fe15f8e1a7e131d79bae2d19d48d1c40109428"
+          }
+        ]
+      }
+    },
+    "spark-x2.6-4b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/bartowski-Spark-X2.6-4B-loom",
+          "revision": "d38e0b2578353ca0a7dc999b3c8ee44944ad1753"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 440963,
+            "sha256": "6df34d0672c03f2b362fed2b6ce36d82b0ad1d614d8680f21a1fa8fc4cd1e72b"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 6434,
+            "sha256": "4058f06a9aa1b059b16d3a965900eea7a50f4cfd09662a83d7344b0bf6bf4106"
+          },
+          {
+            "path": "model.json",
+            "size": 1807,
+            "sha256": "135a7e373aa893ce6276bc64c758bbceec0d542fb9e826fadc899f5e5cf70f6f"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 702,
+            "sha256": "b95786647c455cdf2716cd4a67a317be96f2c4035a05a1038dcf7338144792a1"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 141624,
+            "sha256": "635b30a97abb80037d48c3e18bf79293076d0b373df19234ca8364f54c6bb595"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 3103426,
+            "sha256": "8ff4d442efef63fccbad2054a4d67ed6f2f4d8f8715e54222af65fd19bc4076e"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7864,
+            "sha256": "29963b1dc917f10cde7d3c7c94d68df1f9cbc814f9abf3d4b306a3a9030c6f0f"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "db033985cd1cbe436e5d2bf576f298d5906274198501848d10d116d4a372d589"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5401522,
+            "sha256": "bd7882663af9e21dc134ee02a289770fca356ef4817dd31721a23c42b340cd65"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "bartowski/Spark-X2.6-4B-GGUF",
+          "revision": "17682e38297a4510899b12a95ab3d8dcebc674e5"
+        },
+        "include": [
+          "Spark-X2.6-4B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Spark-X2.6-4B-Q4_K_M.gguf",
+            "size": 2621104768,
+            "sha256": "30b77e2ede85c37da7071048c91fcf47c3e8cbfad51971640530f8ba9753301a"
+          }
+        ]
+      }
+    },
+    "qwen3-4b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-Qwen3-4B-loom",
+          "revision": "b0944ed9f7f284e15f31aa4a9d14473c193707a8"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 593183,
+            "sha256": "39c23cbaa62862858a3243e8eb5ec1f76a0d9f809959a65348aa4d31a0e922a5"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 7728,
+            "sha256": "0e3321aa27e3f4d7d64dff68aaa8bd581479e99718b3d0d6cb4bc8ecbcb82f90"
+          },
+          {
+            "path": "model.json",
+            "size": 1965,
+            "sha256": "1e3729d47cb5bf3ea6549193ee48d20c5a417071475189ac35335789e73bd100"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1153,
+            "sha256": "e6c74a83468d7d95a191cd1ec650b82f5f2a92a0faf1ce8645601fb55ecce381"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 155348,
+            "sha256": "a837fcd0d9f38a9cbef6d6d0d369d689dcac232509a0209b7be46033f8758d6e"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4610817,
+            "sha256": "9c78e93ff2ab834370c50aa14816a1ee18c52e3b4ee252d8a88890b29cb15bbe"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16096,
+            "sha256": "b0bb01eaa86cb9a41c60f9070e654a1b62cbb0ae58b11d290ee2cc2038a5169c"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12728,
+            "sha256": "3eed25f5059db6d7d061073e511c169f2bacf09687b556786683193f8c5a6c42"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5969576,
+            "sha256": "a15cda23be411de16c671b7e1c50a9c0ba1516a69f348d159e4c6ee6f3c02a26"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/Qwen3-4B-GGUF",
+          "revision": "2f3b082b1356a6123f7ed71e65aea340da25d53c"
+        },
+        "include": [
+          "Qwen3-4B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-4B-Q4_K_M.gguf",
+            "size": 2497280640,
+            "sha256": "ab27b9bfa375a178d6cba48f3ad892b94b7739659dcc7aae8058ce0ffed6b328"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "AtomicChat/Qwen3-4B-DFlash-GGUF",
+          "revision": "700be51d025f928249abf1c72aef735961051e23"
+        },
+        "include": [
+          "Qwen3-4B-DFlash.Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-4B-DFlash.Q8_0.gguf",
+            "size": 577047008,
+            "sha256": "2913a8a5619b30233c0745ccd58de8fbe144b831b54770eb04d4a371221ca273"
+          }
+        ]
+      }
+    },
+    "qwen3-vl-4b-instruct-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Qwen3-VL-4B-Instruct-loom",
+          "revision": "c9e8f9868c0be8bbef11ee5f7bebf35f2feb419b"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 593183,
+            "sha256": "39c23cbaa62862858a3243e8eb5ec1f76a0d9f809959a65348aa4d31a0e922a5"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 6357,
+            "sha256": "7d968ea91c02d345ebb6816fd1981e2321d99f448570182fed44f24a3e1074c0"
+          },
+          {
+            "path": "model.json",
+            "size": 2236,
+            "sha256": "887d42eab2c976bddaf18a20978efea393769ad2f6e7cd1f7f402b9f266550ef"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 882,
+            "sha256": "c47a591cf0b2cb947889e517c579a180bfb73283782fc9c9c6c13db8906d924f"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 163461,
+            "sha256": "2533aab640176afacb83a490a78f1a57e7073aca829944339d99b3970d1d713a"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2857346,
+            "sha256": "a776938458141805fd20195277b4e174f888039c53736e3c160e644e73a60855"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "e5366b7c9fa88781b9941656a6995f70f9d651843055b510c96e912ad905c490"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "ecfccf3ff140a0f4877abb6e3e585008f7363526f8a3c2280743d510333e722e"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8542,
+            "sha256": "51705a0f8de47232ffbd7acb3cdc90a19113b6848df80017f291cc7aa7f8b84b"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 294438,
+            "sha256": "f17fefe4480c25df8065fc479ec6e5df9492df69b49e2b3714cc2953ef2109d5"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1815,
+            "sha256": "5706b83a865c320e2a49022fc8e2e87d3e11aee76380abd8cf67f9487db7d6dd"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5212617,
+            "sha256": "69a3ff5a64972c8689b8dba6737b051a92999387d934c89815f5d0476a854d29"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Qwen3-VL-4B-Instruct-GGUF",
+          "revision": "00c00da0690c4b14b5539b02c4ea5d7c9102b35e"
+        },
+        "include": [
+          "Qwen3-VL-4B-Instruct-Q4_K_M.gguf",
+          "mmproj-F16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-VL-4B-Instruct-Q4_K_M.gguf",
+            "size": 2497282336,
+            "sha256": "d4dcd426bfba75752a312b266b80fec8136fbaca13c62d93b7ac41fa67f0492b"
+          },
+          {
+            "path": "mmproj-F16.gguf",
+            "size": 836180640,
+            "sha256": "1b9f4e92f0fbda14d7d7b58baed86039b8a980fe503d9d6a9393f25c0028f1fc"
+          }
+        ]
+      }
+    },
+    "qwen3.5-4b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Qwen3.5-4B-loom",
+          "revision": "7e1a042bfa355360b8d17ee6c51c38410af8d0b6"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 440999,
+            "sha256": "284860fcc049e0eb65c949125a744b9be88ec3c48884d082a86d440a2790589b"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 10594,
+            "sha256": "f9ff04a9cbf39bf53550ad5eaada7d1960a0d41514c155e257c1ef4843f8239c"
+          },
+          {
+            "path": "model.json",
+            "size": 2621,
+            "sha256": "ecd78331ca5edf929ab6cd60e856f048ff7de03f5c358eed2cbccd200896becf"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1330,
+            "sha256": "2822f73c9fac214f66d3bb3c87e17c4205a745bf6110d9a87f5878a7b7633c53"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 183222,
+            "sha256": "a46453a5e63fccce1175b0497286f5b885dd9ab907c8b1ed32e721de18abdb49"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4765678,
+            "sha256": "7ce484bcfa617385cb340b09de0f32e197fbff1119b4cf46ec224bbdfebcfdbb"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16100,
+            "sha256": "cb474c144bc2eeb41e9d65ac6f1841cf954e64dfe6d39f7e83a072139d2be1bb"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12742,
+            "sha256": "0033f24e7bbbdb401dd41e13c52c90010f0d6690ff2c8ce6337c1fad3fa3126f"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8541,
+            "sha256": "cdb9374a707f1e68b2dc7558ad248c6f32b91f4c8a522f9e373c67e7fec9560c"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 281308,
+            "sha256": "e60a9a6ca2daa092d29157ff67899765c5ea9fb8771f653a11ca555def97388d"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "d1eba8c96d4db6c183ce803e7528bb52f6d526f8a73826441a509c86942a64ae"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 9832586,
+            "sha256": "cf360f770fae77c3e5e783bce81eb01aebda1627cdc38736b4a0d30f8c5f4fe7"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Qwen3.5-4B-GGUF",
+          "revision": "e87f176479d0855a907a41277aca2f8ee7a09523"
+        },
+        "include": [
+          "Qwen3.5-4B-Q4_K_M.gguf",
+          "mmproj-F16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.5-4B-Q4_K_M.gguf",
+            "size": 2740937888,
+            "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"
+          },
+          {
+            "path": "mmproj-F16.gguf",
+            "size": 672423616,
+            "sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "magnitudedev/Qwen3.5-4B-DFlash-GGUF",
+          "revision": "0094e74a88676605d53b79c7c3d26096335c9746"
+        },
+        "include": [
+          "Qwen3.5-4B-DFlash-Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.5-4B-DFlash-Q8_0.gguf",
+            "size": 685134176,
+            "sha256": "56f48817d527e4539d1bceb5eb2134951ae6fe60ed8e9856b417e390a9f30c5a"
+          }
+        ]
+      }
+    },
+    "gemma-4-e2b-it-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-gemma-4-E2B-it-loom",
+          "revision": "3503abcf7cfff7bc58bd819ea32ccab8c18c075d"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 363058,
+            "sha256": "b86180ec27fbbf16ad7e183933ba9f134bac5fa31e9a8e09b13132d96cb23ce1"
+          },
+          {
+            "path": "gen/flash2_cfg.json",
+            "size": 44453,
+            "sha256": "529c5bfc01091f86141432ae76da935b91f241ecc3c12ae795b24f61bad6294c"
+          },
+          {
+            "path": "gen/flash2_d512.loom",
+            "size": 294311,
+            "sha256": "5046dd29aa91682ae6cd74cf5155a85ef259b419e065ae4da27aad27fb532e3e"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 7632,
+            "sha256": "45003f05f7c3c4195031a7afe4ea377156d9449fd45df8d21210e43f760a619b"
+          },
+          {
+            "path": "model.json",
+            "size": 2661,
+            "sha256": "57238a8a74eb01c3221daafc7d641de2b89191a1d524c15933d5e8ff660eb96d"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1350,
+            "sha256": "eca8c5370a922c155b8a8519be69fd236052c74a87a70f915da6ef2120fcaaab"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 274188,
+            "sha256": "8e38e921bfe5a296bef4daee0e4a39bb3211b4ba2f6f51d8e66cfbaad302530e"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 5650310,
+            "sha256": "70eb6f79d07f8affb2dda82c955a01de7f1b91c2a9e49db0b2ab5c2a1e7d340f"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 15592,
+            "sha256": "b2026bef8f4d07ceff934aa4982cdf66ffef334093b7729de4e774ea385c76c4"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12723,
+            "sha256": "16f7d82c066ed1a65c1baf1f5d48383effd0858405940f2a16d7b59a9fc7029a"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8539,
+            "sha256": "640d512c7e9448159c4c1d0b32386b5c65485344884d012c6677ab099bc744a7"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 309512,
+            "sha256": "f3c669f822c10cdb56ae52410e9a849611727e1c9e9ae9d11cd34fd0bcc0fee5"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1797,
+            "sha256": "ba6cf7580390545e1672d3329df9fd2203fa8c80e226f2fff24de30594704437"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 15142008,
+            "sha256": "8c0b8e8453a0b492b28dfe234356239db4a1b855869d4a8c62c7e0d4351834fe"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/gemma-4-E2B-it-GGUF",
+          "revision": "0314792d7f1f7e229411f620751375812bb9faf2"
+        },
+        "include": [
+          "gemma-4-E2B-it-Q4_K_M.gguf",
+          "mmproj-F16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "gemma-4-E2B-it-Q4_K_M.gguf",
+            "size": 3106738272,
+            "sha256": "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8"
+          },
+          {
+            "path": "mmproj-F16.gguf",
+            "size": 985654080,
+            "sha256": "140be8d7849741f88c50757d529b84373ee8e27052cc2236855b537f4a8215fa"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "AtomicChat/gemma-4-E2B-it-assistant-GGUF",
+          "revision": "c540008a0f33650558acdc87c823f7d1591191e3"
+        },
+        "include": [
+          "gemma-4-E2B-it-assistant.Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "gemma-4-E2B-it-assistant.Q8_0.gguf",
+            "size": 97817696,
+            "sha256": "bbb29c822cad3df242fd0f75fc0928a29e90bdd52aa1625b2d6bff476b739095"
+          }
+        ]
+      }
+    },
+    "qwen2.5-7b-instruct-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/bartowski-Qwen2.5-7B-Instruct-loom",
+          "revision": "7a755e3f50d67b6bf97487135d025c19cce0f14c"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 596029,
+            "sha256": "0fa711768d7ee7afe9a7c655bb68ed3f31725d36ee127a7b31436df0b4346992"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 4416,
+            "sha256": "d28f6b0ed05cb9b940d8128611f605ff6b13465e9abdf85a5e019b741b7d1e7e"
+          },
+          {
+            "path": "model.json",
+            "size": 1618,
+            "sha256": "766bcd5bf92425f28d1536471acb38790c5abb88c819e7e49698b02f837467f2"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 714,
+            "sha256": "e6462539fa6d8c96546b7ffb616bcc6328926df11b0b30385a47e464b478d60c"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 136420,
+            "sha256": "280753fff37382231120f2ef226ac46637e09df5a4e81eb2369cada86487afb2"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2675165,
+            "sha256": "b26b9c929b2f84d7f8591f785bba5719f5d4b0062658d74af0faa92f415b8aea"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7809,
+            "sha256": "97446c4c14578aa03c3878f527710e0d8de892ed5bd2ba505fb4865034c9a0fd"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "e0ebb2da749dbda1444c542c2c2c58b39854c8dd1866d09d1d4e76ef447b8244"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5212067,
+            "sha256": "20f3f185bfd9a4f9f69c9e605911d6c4d9b004c9993ac29c1bc7c666d1b33877"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+          "revision": "8911e8a47f92bac19d6f5c64a2e2095bd2f7d031"
+        },
+        "include": [
+          "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+            "size": 4683074240,
+            "sha256": "65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423"
+          }
+        ]
+      }
+    },
+    "qwen2.5-vl-7b-instruct-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-Qwen2.5-VL-7B-Instruct-loom",
+          "revision": "2611dac7db74f0042ce3fc06dd821ca613efe3fa"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 596029,
+            "sha256": "0fa711768d7ee7afe9a7c655bb68ed3f31725d36ee127a7b31436df0b4346992"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 5099,
+            "sha256": "543c0253106c55aea0db36011de3362e5947173fa7d635db022df33a1c8a59da"
+          },
+          {
+            "path": "model.json",
+            "size": 2079,
+            "sha256": "4b4ff2316c5361d402cfa84a6bf92df0a17ac582f2432b2487f1526bbf541042"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 911,
+            "sha256": "4372353cebf499311c2e345cffa3406a6a126b2b9d4cc57437fb2e109b3c7705"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 162612,
+            "sha256": "3fb7c4a6604331952184f1e690f347018932ebd270e0871ea2f39cf155af0b66"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2660658,
+            "sha256": "79f0ae4732a2fd25575bb0b655404c40e03a0b749809803caf39012c050059a4"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "8fdd7cb0901cc1097585d4b9175518b228aae5efb579af569acb84bdacf24133"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "782fe44b2af4abebd4a8024adad04b5878f24ba897510ff70c26855e1cd54808"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8541,
+            "sha256": "1f04f1c0e61751060f9b270f95cf696466d5799cce1e4e823df35b4bd2a690e8"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 362766,
+            "sha256": "e3c819d346a870b8a2b38d793a02789da1f1e438e2c75cddf9ab0f654973c293"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1816,
+            "sha256": "a4b21b982efaf658d589b9d0faff99609d0346b16643d9d3252f6f09452926e8"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5212067,
+            "sha256": "20f3f185bfd9a4f9f69c9e605911d6c4d9b004c9993ac29c1bc7c666d1b33877"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF",
+          "revision": "508edd0afaa66bb9e9f40587acc2184f02daf1f6"
+        },
+        "include": [
+          "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+          "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+            "size": 4683072032,
+            "sha256": "9258bf05b12686d097ff3b6b18d968ab393649780aa2b3cd67fec43d50554392"
+          },
+          {
+            "path": "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf",
+            "size": 1354162912,
+            "sha256": "c24a7f5fcfc68286f0a217023b6738e73bea4f11787a43e8238d4bb1b8604cde"
+          }
+        ]
+      }
+    },
+    "gemma-4-e4b-it-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-gemma-4-E4B-it-loom",
+          "revision": "e53717d9759ed9faa3454a65818c8401b5ff9f14"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 295589,
+            "sha256": "8161118c50f01d1d774adacb8ddb5a51dc0ebb399fc74541c0a1e56a48164618"
+          },
+          {
+            "path": "gen/flash2_cfg.json",
+            "size": 52000,
+            "sha256": "4d1f546788683b93e2b0d62e6a7406543fb9eff9fbed3190da9a4f6ccf424497"
+          },
+          {
+            "path": "gen/flash2_d512.loom",
+            "size": 282185,
+            "sha256": "c8eb7535b9fd307fb57789f59ec5071b7f50c9e677a113e6f780f77008b58a8b"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 7326,
+            "sha256": "4f6091b0cc9244e6ff9a233bb4b5eee0d9735431b90c25ecf96d2abde20f766b"
+          },
+          {
+            "path": "model.json",
+            "size": 2423,
+            "sha256": "8fd22f6d5cb5882ae32d76505941b2871a3e111cef090fbd9247de2b801ce60d"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1350,
+            "sha256": "16fa7a4fdd39f2c5d6568c2b657272532dcd43aa33c36d1487d07607df0745a2"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 271078,
+            "sha256": "7d9bf0570f69c58eb964748484e1f3c7e4465f76a8af2e7e0298e3a03a6d324e"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 5377822,
+            "sha256": "a1acafb4237f20a8d26e555e10daf0ae3213207dfdc70c498c4b6a913f3fede9"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 13985,
+            "sha256": "b9250da59263ab2ebe23d7a1681a2820397fc307da6fd07865561dd6cb24e7ed"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12725,
+            "sha256": "62ab19951a2128b5dd2a6c720fae217daca2ffac191f68fe4253f241fee97dd2"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8541,
+            "sha256": "99d269b511972e38f64288300bc851ca59e1b89f6d59d71a7e6c51673e162a79"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 309512,
+            "sha256": "56b4c80c36e9fe8cf8f9ce1452be6865ab56ac911c0191118cd17893d99d739c"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1798,
+            "sha256": "f61ebd85c7fb5943e09183966a7f36575a3b20898430d8807c2f8e703c2a7b47"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 15142283,
+            "sha256": "fad8ef1277f412fd6276f1fef8169f1c4b36dc3e1b784888c58ae458470900fd"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/gemma-4-E4B-it-GGUF",
+          "revision": "bfc15c382204943c3a8fff0c750b94ae2364d7a3"
+        },
+        "include": [
+          "gemma-4-E4B-it-Q4_K_M.gguf",
+          "mmproj-F16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "gemma-4-E4B-it-Q4_K_M.gguf",
+            "size": 4977171584,
+            "sha256": "85a896a047553e842f25297ee5b031d64ff30147d9c4af17b1e4b394cd1fab87"
+          },
+          {
+            "path": "mmproj-F16.gguf",
+            "size": 990372672,
+            "sha256": "ddf46c21d7078e95338cfc22306b19b276a29a5ad089023449dd54d4b6170a51"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "AtomicChat/gemma-4-E4B-it-assistant-GGUF",
+          "revision": "d87ced306ffb9d82e032e60b34beef4a702e308b"
+        },
+        "include": [
+          "gemma-4-E4B-it-assistant.Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "gemma-4-E4B-it-assistant.Q8_0.gguf",
+            "size": 98653280,
+            "sha256": "80291890b359435865beccdbbf1d7932933966f51e4f0fb3abf28f18303eac35"
+          }
+        ]
+      }
+    },
+    "qwen3-8b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Qwen3-8B-loom",
+          "revision": "35d393f359b50ec874e5f2d635bcf03fb48d080f"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 593183,
+            "sha256": "39c23cbaa62862858a3243e8eb5ec1f76a0d9f809959a65348aa4d31a0e922a5"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 10340,
+            "sha256": "60506c5d4ec9d2032dd8e8f06e9005bb4921f969f46147d559f01e58331a3841"
+          },
+          {
+            "path": "model.json",
+            "size": 1964,
+            "sha256": "31039112eb63aa1d532ce7f31b58f3ce56a0f3b0295f0fc0c380ceb1b980e946"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1153,
+            "sha256": "968cf127a64e1e9fc8bf78fa1e959bab37169b9c156cdc262ba2c474cf1e10f3"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 155300,
+            "sha256": "d8f1df44202742a5256c549d9abf2557561e0d7cc0158ebec33326279a0ed0f5"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4425423,
+            "sha256": "a5c9dde8347365d0a65fb2d971d14b896aaeb0c645db7c205dca2bbad7facf77"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16252,
+            "sha256": "996a677efdfab15ed79ac582cc362ed3e441c90eafc98edfcdad01c8884224ca"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12728,
+            "sha256": "79f2da21810befe85d8d5a169d12f91b9023957a2db4b3bca2ec90e1de7581db"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5969576,
+            "sha256": "a15cda23be411de16c671b7e1c50a9c0ba1516a69f348d159e4c6ee6f3c02a26"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Qwen3-8B-GGUF",
+          "revision": "a6adef130ffb23ddaf1a62fec9dced968c9bc482"
+        },
+        "include": [
+          "Qwen3-8B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-8B-Q4_K_M.gguf",
+            "size": 5027784512,
+            "sha256": "120307ba529eb2439d6c430d94104dabd578497bc7bfe7e322b5d9933b449bd4"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "AtomicChat/Qwen3-8B-DFlash-GGUF",
+          "revision": "603692f6ac1fac016e03f3ad47321312614f3581"
+        },
+        "include": [
+          "Qwen3-8B-DFlash.Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-8B-DFlash.Q8_0.gguf",
+            "size": 1120250336,
+            "sha256": "5be4f6b1bfd5c2c1aa753d4c03e30700114654fefbbf29f02257ef37adb00bf0"
+          }
+        ]
+      }
+    },
+    "qwen3-vl-8b-instruct-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Qwen3-VL-8B-Instruct-loom",
+          "revision": "4c126a53d2beabbcd03700071be10ac811b6778a"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 593183,
+            "sha256": "39c23cbaa62862858a3243e8eb5ec1f76a0d9f809959a65348aa4d31a0e922a5"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 5385,
+            "sha256": "03aa2d8ecabd3a47220ae6eb342d47e962a350fafbec6c316861203e6f18fb96"
+          },
+          {
+            "path": "model.json",
+            "size": 2236,
+            "sha256": "00ece76788cb2594d54cab0d2e223c7a4c0cba0fe75a209fc333928d8b2d5d6c"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 883,
+            "sha256": "37b95bbf4f59c054c92cd2bf3eabce6fec00d38e2632dc6305bab485643bd7bd"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 163461,
+            "sha256": "dce3cc3800e1425debd589fec6d4dfcbebd1e341091a007e87764a0ce1ec3c55"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2749474,
+            "sha256": "cbb5b56d6a065ac7981e01c7a4c9a83d71cd74988e89bf53209d510ffbbf7b3d"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "e5366b7c9fa88781b9941656a6995f70f9d651843055b510c96e912ad905c490"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "ecfccf3ff140a0f4877abb6e3e585008f7363526f8a3c2280743d510333e722e"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8542,
+            "sha256": "583bd69ca1c79a30ddb6044496729f97c8dd1dadc595d84fb1a14df8a47a0c31"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 308817,
+            "sha256": "46c50c790803f9f808f34a3aaba550b44a3c2c65685dc32fdee0a7954aa82dba"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1815,
+            "sha256": "6b46b91855447c76060d8cd65aaef6dd879a4db984ea94a193945f929b93f77c"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5212617,
+            "sha256": "69a3ff5a64972c8689b8dba6737b051a92999387d934c89815f5d0476a854d29"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Qwen3-VL-8B-Instruct-GGUF",
+          "revision": "b93a7ee713758252c555be4210c00540df954dc2"
+        },
+        "include": [
+          "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+          "mmproj-F16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+            "size": 5027785568,
+            "sha256": "108e7ff92b78eefd3db4741885104acba514255c11b617d3c7b197a5f46efe89"
+          },
+          {
+            "path": "mmproj-F16.gguf",
+            "size": 1159030336,
+            "sha256": "d406d03ebabefdef86a2c86bf0c1b65f9e046f7a81c218f25de4931b46a07fc4"
+          }
+        ]
+      }
+    },
+    "ornith-1.0-9b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Ornith-1.0-9B-loom",
+          "revision": "dff6b66ed20512c86ec2f847bfe78fc6b5589149"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 440999,
+            "sha256": "284860fcc049e0eb65c949125a744b9be88ec3c48884d082a86d440a2790589b"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 6750,
+            "sha256": "acee3569ed6d13759e05e8d4c044ad1f3f850eedf5bd81132d61802ee4fd10fe"
+          },
+          {
+            "path": "model.json",
+            "size": 1999,
+            "sha256": "cd0f76b35cbd76d01e73067064ed5a76b94f39951fd274118efe0a0a81805edb"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 869,
+            "sha256": "f6615809589c2098eb98767bf6390d27b10ebe437245a8d1c10fec7f5c476305"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 164593,
+            "sha256": "686762a7818afa6478e3f15ed9b137fd6d9ee3400368a5cdc2eb0f4586f58b8a"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2967410,
+            "sha256": "78ac439b3c7b4939499d17485a09e3cfb077fc74f0162768338851a80f505214"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "e5366b7c9fa88781b9941656a6995f70f9d651843055b510c96e912ad905c490"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8956,
+            "sha256": "372316ab6bde9cf2640b0ac1ecbcb44c3a7411db5ae3eaa3d5cbfe62b0d1e150"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8541,
+            "sha256": "79bfbcedd0300bbd12dc2b34fcd97fa2dc539a0fd611a1df3a21fb3f4b01cb1b"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 295683,
+            "sha256": "d13702d48fc5a6a40c2b00504af09274803eb6f7be081a8dc4063680cad69dc3"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "8b108b3a05e9abed1d0345592738a27d36edfe6f55328ce7edd3509338bee2d7"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 11071477,
+            "sha256": "f913b92a26abaa0ef27571382c9c3cffdea931cc27f2acb3fcb964a182ed628a"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Ornith-1.0-9B-GGUF",
+          "revision": "a674c5a128bb74049b1bb3619f1355073db5b48c"
+        },
+        "include": [
+          "Ornith-1.0-9B-Q4_K_M.gguf",
+          "mmproj-F16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Ornith-1.0-9B-Q4_K_M.gguf",
+            "size": 5701067872,
+            "sha256": "641675b356a4463677a02a0d703f7b571b39f0b747fbd270b379c848edc29e84"
+          },
+          {
+            "path": "mmproj-F16.gguf",
+            "size": 918166144,
+            "sha256": "013638437d619467b92412e6efa281f706132f05ba6d0f4733e50f812c7e32fa"
+          }
+        ]
+      }
+    },
+    "ornith-1.5-9b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/bartowski-Ornith-1.5-9B-loom",
+          "revision": "fd3c6efebabc4ea9502c296326402a079bb84827"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 440999,
+            "sha256": "284860fcc049e0eb65c949125a744b9be88ec3c48884d082a86d440a2790589b"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 9382,
+            "sha256": "85a5ee8cc00537538dbd637aa908526bffff810aa3867fba5ae7d43477d00d97"
+          },
+          {
+            "path": "model.json",
+            "size": 2442,
+            "sha256": "ccf24aaddaa5deeb6c2d7fdada04cfc49b585fd535d08b978e756499d02784be"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1357,
+            "sha256": "a9d5861cf057bf1d87b60b9ebd27b05dfcf41c00c15207f22570d8fd74371fe0"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 180127,
+            "sha256": "f3f942d13f7b4f79a73b0132ffa9e049afca8de801c0fd5b069dec5a7918c737"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4263300,
+            "sha256": "990c0aefa7b54941c5f9a77744abc848b92b4c3d00f8161b8107fa2caeb1a3ff"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 14649,
+            "sha256": "e501d5631292df37abb9bf95c8675144dfb2ac94fc598178a0c2b9cd00eaf3cb"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12743,
+            "sha256": "6038dace90d8b2b6f2100d237f3e4645742f64e19b85dad59bb1756639a4fba1"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8541,
+            "sha256": "79bfbcedd0300bbd12dc2b34fcd97fa2dc539a0fd611a1df3a21fb3f4b01cb1b"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 295683,
+            "sha256": "d13702d48fc5a6a40c2b00504af09274803eb6f7be081a8dc4063680cad69dc3"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "8b108b3a05e9abed1d0345592738a27d36edfe6f55328ce7edd3509338bee2d7"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 9832586,
+            "sha256": "cf360f770fae77c3e5e783bce81eb01aebda1627cdc38736b4a0d30f8c5f4fe7"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "bartowski/Ornith-1.5-9B-GGUF",
+          "revision": "1fc60d6805eaa18bbed4088391db9336eb9581c4"
+        },
+        "include": [
+          "Ornith-1.5-9B-Q4_K_M.gguf",
+          "mmproj-Ornith-1.5-9B-f16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Ornith-1.5-9B-Q4_K_M.gguf",
+            "size": 5910782848,
+            "sha256": "886e98b1d7f6e7d7f277a261d692f1a38edd08e24d28c5f9bcf689169ed4b266"
+          },
+          {
+            "path": "mmproj-Ornith-1.5-9B-f16.gguf",
+            "size": 918165728,
+            "sha256": "946850fd82bd43b856d878267bc9db809f0aaa37c81bf11918ecad1de464625e"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "abenzerps/Ornith-1.5-9B-DFlash-GGUF",
+          "revision": "4ba29c7a17fb17ba07deb79e25ebdeb00fd01e01"
+        },
+        "include": [
+          "Ornith-1.5-9B-DFlash-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Ornith-1.5-9B-DFlash-Q4_K_M.gguf",
+            "size": 765960480,
+            "sha256": "a6730c2bc06cd855946decd88ac392c413f74cdfe25903ec5dd6b922c2c173e1"
+          }
+        ]
+      }
+    },
+    "nemotron-3.5-bolt-e4b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/nvidia-NVIDIA-Nemotron-3.5-Bolt-E4B-4GB-loom",
+          "revision": "3f36ed722f6c8bdb51d90526bc05e03a05f24dbf"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "draft_weights.loom",
+            "size": 22660,
+            "sha256": "8588606e857ea27606924563e416a02c6c09e7f866f26afabd98053218a2985e"
+          },
+          {
+            "path": "gen/flash2.loom",
+            "size": 295589,
+            "sha256": "8161118c50f01d1d774adacb8ddb5a51dc0ebb399fc74541c0a1e56a48164618"
+          },
+          {
+            "path": "gen/flash2_cfg.json",
+            "size": 54112,
+            "sha256": "bdb12299d472b06a03f1aa14b10f7cde7837c2af2c27489df7f61716a2ea4336"
+          },
+          {
+            "path": "gen/flash2_d512.loom",
+            "size": 282185,
+            "sha256": "c8eb7535b9fd307fb57789f59ec5071b7f50c9e677a113e6f780f77008b58a8b"
+          },
+          {
+            "path": "head_weights.loom",
+            "size": 3110,
+            "sha256": "bba8f3f1075626d77f7ff921ed8ee0a571c11ae11f7984e4fda2b1fc3d836142"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 10787,
+            "sha256": "1bd108ab834ade3b6109da3aa34fc0b151bc8d99511303fdc6725323cc3826a8"
+          },
+          {
+            "path": "model.json",
+            "size": 2677,
+            "sha256": "1c3356606a2e82da3de00acc194df94d5a8c17fcf992daaf0b6fd1f43e8e672e"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1672,
+            "sha256": "fe9cc86af2a0a3fc5203aca37cbf76a126498437b449512eaecac03a2256dee4"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 266474,
+            "sha256": "a214cf791b04a0673044a969eea41645bb7756e485ae0ff7989f7f4e30dcb7ea"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 5636844,
+            "sha256": "f2ae65b5c00f0bf0deb0ab0e310aca8b69db77c09d3ffddc51ee3d2456433944"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 14998,
+            "sha256": "4d26c620705438b2ad6e1e5baf0dde1dffdb425ed52a8b009861b626b6a2b52f"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12729,
+            "sha256": "0742aaf9c664982dd2159b2b912d274b8a97d9c598eb5a213a150717e429ca63"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8541,
+            "sha256": "99d269b511972e38f64288300bc851ca59e1b89f6d59d71a7e6c51673e162a79"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 309512,
+            "sha256": "56b4c80c36e9fe8cf8f9ce1452be6865ab56ac911c0191118cd17893d99d739c"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1798,
+            "sha256": "f61ebd85c7fb5943e09183966a7f36575a3b20898430d8807c2f8e703c2a7b47"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 15147891,
+            "sha256": "5ae2598b2fc4484841bbf11595edf45d99efa0308d22724f172fa1f6debe30a1"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-4GB",
+          "revision": "1db54d5b12533ff1bcaa8e42cf4c667988a1f1be"
+        },
+        "include": [
+          "Nemotron-3.5-Bolt-E4B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Nemotron-3.5-Bolt-E4B-Q4_K_M.gguf",
+            "size": 6180446208,
+            "sha256": "c8af2b8aea10a690a1d9491db744a9446660173cb38fc489612b556615a69612"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-4GB-DFlash",
+          "revision": "0949a2eb7152ec6fda1a91ff9302aecbcd464fbf"
+        },
+        "include": [
+          "Nemotron-3.5-Bolt-E4B-DFlash-BF16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Nemotron-3.5-Bolt-E4B-DFlash-BF16.gguf",
+            "size": 736812096,
+            "sha256": "8103aa42fd31fb661c3fbe8701d04d698ea2c5d09351dc3e8c9da639958de989"
+          }
+        ]
+      },
+      "vision": {
+        "source": {
+          "hf": "unsloth/NVIDIA-Nemotron-3.5-Bolt-E4B-GGUF",
+          "revision": "b738967d6da3441a7d1c71fcec15e49e32e16ecd"
+        },
+        "include": [
+          "mmproj-F16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "mmproj-F16.gguf",
+            "size": 990373568,
+            "sha256": "6bc77b7ac2b62cf61bc86757605e45e39f6345373f0a6b76cc5b1ed97f2e233e"
+          }
+        ]
+      }
+    },
+    "qwen3.5-9b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Qwen3.5-9B-loom",
+          "revision": "3bfcc8acc5988ecd195e68ea26260984bdddc355"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 440999,
+            "sha256": "284860fcc049e0eb65c949125a744b9be88ec3c48884d082a86d440a2790589b"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 9086,
+            "sha256": "13488b7f01893ff64c205726cea85d462f24be1a7ca31066afcb46364c0ca35c"
+          },
+          {
+            "path": "model.json",
+            "size": 2618,
+            "sha256": "399009937a027d3e09eb8929bfa853b032da2a5ba746bb112c19243a1c16445b"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1329,
+            "sha256": "8db8fe35ad223c485ff7d3c21c7af66b3dd900ed49fc32213dd937cf1db9d489"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 180112,
+            "sha256": "aea85b8500816c16b6713d8c3c6101d14269e2c3f6be57a83345f34a31796090"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4530570,
+            "sha256": "2ddfec4e7030fcd478d92badee0f31fe079db41b4937c735bb8226ab595f2dbf"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 14649,
+            "sha256": "e501d5631292df37abb9bf95c8675144dfb2ac94fc598178a0c2b9cd00eaf3cb"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12743,
+            "sha256": "6038dace90d8b2b6f2100d237f3e4645742f64e19b85dad59bb1756639a4fba1"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8541,
+            "sha256": "79bfbcedd0300bbd12dc2b34fcd97fa2dc539a0fd611a1df3a21fb3f4b01cb1b"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 295683,
+            "sha256": "d13702d48fc5a6a40c2b00504af09274803eb6f7be081a8dc4063680cad69dc3"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "8b108b3a05e9abed1d0345592738a27d36edfe6f55328ce7edd3509338bee2d7"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 9832586,
+            "sha256": "cf360f770fae77c3e5e783bce81eb01aebda1627cdc38736b4a0d30f8c5f4fe7"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Qwen3.5-9B-GGUF",
+          "revision": "3885219b6810b007914f3a7950a8d1b469d598a5"
+        },
+        "include": [
+          "Qwen3.5-9B-Q4_K_M.gguf",
+          "mmproj-F16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.5-9B-Q4_K_M.gguf",
+            "size": 5680522464,
+            "sha256": "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8"
+          },
+          {
+            "path": "mmproj-F16.gguf",
+            "size": 918166080,
+            "sha256": "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "AtomicChat/Qwen3.5-9B-DFlash-GGUF",
+          "revision": "de44b8556576637d1049951f8fdbd98bcb2462f3"
+        },
+        "include": [
+          "Qwen3.5-9B-DFlash.Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.5-9B-DFlash.Q8_0.gguf",
+            "size": 1383768224,
+            "sha256": "27b9d18e605aea9c50ef506e4b63921e0dc624cc91c63c60617a8295f153d436"
+          }
+        ]
+      }
+    },
+    "mellum2.1-12b-a2.5b-thinking-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/bartowski-Mellum2.1-12B-A2.5B-Thinking-loom",
+          "revision": "5d172ab9262e8f7f64f14541d43b876f150132fe"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 593113,
+            "sha256": "912c01c9c03da81ef9a406ea6161bb8add9e0c9a77f69f1f6b8fe4e89d50048b"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 4715,
+            "sha256": "3b30c270f741a03026689b35e5717836176c085a6a39f44ff435c348837806c0"
+          },
+          {
+            "path": "model.json",
+            "size": 1669,
+            "sha256": "dd8ff2476f19cd5b754f946a6458709a23cdb58e1e5ee3dd3a6d22a60fe964dd"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 732,
+            "sha256": "3e7732278408e7887929b876f451bb4dd051a47cfba3a2402cc3a3cca51d8079"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 136403,
+            "sha256": "ebef63e73faba9d89ab012842f4a02473ee69a65dae3ccde0cea0c1da11a030f"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2250480,
+            "sha256": "cdbe37d882ad89a5ccee4bdf128f3c6046fe71b60fc6c2100679dd13b8c31773"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "a574fed3a375f3ba2573d0ab866f3ed86eef95858a8f60f07f62e50fc3a6480b"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "a948d92b13f1993b4f519f12fa0d9337ff3c65561a959928421915ede2008443"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 3559384,
+            "sha256": "287370d3d856b58cd399d9fc63d47196b85823b1ceb77ebf6609ccf499a5e2c0"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "bartowski/Mellum2.1-12B-A2.5B-Thinking-GGUF",
+          "revision": "355e97042763a75b33efc51efd731ce0149413d4"
+        },
+        "include": [
+          "Mellum2.1-12B-A2.5B-Thinking-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Mellum2.1-12B-A2.5B-Thinking-Q4_K_M.gguf",
+            "size": 8819358432,
+            "sha256": "7adfc5bc1f8bf180db6e94c9d207600aadbe7b9368314b8533d6c4df1d7b8fea"
+          }
+        ]
+      }
+    },
+    "qwen3-14b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-Qwen3-14B-loom",
+          "revision": "71bad2d9362daa394f2ed58ae5fb97628a139021"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 596027,
+            "sha256": "7fde2b53fed0ee04d1fefcab0c8d8bd8b7eff31a35265d6f9b1bbdbb60cb721a"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 5086,
+            "sha256": "550036da32efea5e36a912246c6c5fba81ad187748adab3a3877665358ed4d69"
+          },
+          {
+            "path": "model.json",
+            "size": 1567,
+            "sha256": "b77306e333d7abc21ba87a5de0d28933efd2e1c0e2fcb2679e68ffabc6d789d6"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 693,
+            "sha256": "9361ef172958239693bbd7657754c8943d700c25f22ab1cfe34d1465831ba756"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 136355,
+            "sha256": "32aa36339eb9f3d1167b0279e9c1b624bb7bf0100b99b23622954a172fa22541"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2831124,
+            "sha256": "3ea9d64a07935f880a3792e524334f78d46184b1e06dba55fe667b39894c1f1a"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7809,
+            "sha256": "1b5c38d757a0488d22978cc522d2096f117715bc4de916f942a62ccccf7ab5fe"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "3cc6ece9a1ef0a13cff1d0305093951b470240a0dd049449601537fa740b0df0"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5969576,
+            "sha256": "a15cda23be411de16c671b7e1c50a9c0ba1516a69f348d159e4c6ee6f3c02a26"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/Qwen3-14B-GGUF",
+          "revision": "af3732ec4e23a1dfff21a0479cd3545ace763e38"
+        },
+        "include": [
+          "Qwen3-14B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-14B-Q4_K_M.gguf",
+            "size": 9001753376,
+            "sha256": "5ff1fe7a07aebc8d090682d01b17cf268a1b4680c6477050ce75a600aecb9efb"
+          }
+        ]
+      }
+    },
+    "gpt-oss-20b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-gpt-oss-20b-loom",
+          "revision": "caf72ae4ed037eeaeb9d818b7d3e358ba464c16a"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 255229,
+            "sha256": "795e96b064f8764fee56e3d51c0fc8ec90ab32f48ab45ec88d23a5c8567b91dd"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 4360,
+            "sha256": "c8c81ef5951c59dff9be83fc1d28a96b25102e8320e24817e4adea69b5761397"
+          },
+          {
+            "path": "model.json",
+            "size": 1579,
+            "sha256": "a0677496f042e0fec2b6500b726303e618665808442db9a629616b1b1c384612"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 698,
+            "sha256": "d39acafb9bad4b6fcea23fb5710b8b14849a15ea6b8a730571dc00a18267cc27"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 201244,
+            "sha256": "4e3037b528797b397a76c98f86812d5331a8c838b5e9baffe453d75a3fd38944"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 1910846,
+            "sha256": "264829916c3b9318c9dc0d40e19c0ec0b714f06b8c07a94d2d1cac2f62fbf74a"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "d0c63c08ffd621cfcbabd27782acee6147cbd65aaee890e97a0a80a9d21ad6fc"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "ca05e904f6219e32d72131e5d07c8689593612115f5b86a7ed841e1fbb4763e8"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 13281179,
+            "sha256": "e805588a70b3db161db6b1b0a898e3c78d29b689355fac225dbc5636cce7bae2"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/gpt-oss-20b-GGUF",
+          "revision": "d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4"
+        },
+        "include": [
+          "gpt-oss-20b-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "gpt-oss-20b-Q4_K_M.gguf",
+            "size": 11624759488,
+            "sha256": "c27536640e410032865dc68781d80a08b98f8db5e93575919af8ccc0568aeb4f"
+          }
+        ]
+      }
+    },
+    "lfm2.5-24b-a2b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-LFM2.5-24B-A2B-loom",
+          "revision": "5dc159ccab5c1f446f7f5454ff5a94d9f78ac280"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 376679,
+            "sha256": "c045ff63121d35657e3bbe74dfe4de7c13a4eba3680bc5cc5ae615b393d04d89"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 3141,
+            "sha256": "508b76fa71ba18337235328ca5daa2ae11ae6c88f6a8936fba0c7ed41c6de028"
+          },
+          {
+            "path": "model.json",
+            "size": 1595,
+            "sha256": "c6e2d8f9f8ce6b388519e314ff85eaece88dcf97057fb1a7e7097429ec363f56"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 704,
+            "sha256": "166b4b4797187808c2a0b1f205dd4a6588cb8287ad8fd35d18055ebb0c0db12b"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 135721,
+            "sha256": "0d921f1bd62e38d0e4bf5f93aefb684b019dafaadfc975b3a3898c49be44fc07"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2483540,
+            "sha256": "1ef14b6a26254ed67c3b8f35084410e3d27e5af1b7e680415c738094e95eecba"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "a574fed3a375f3ba2573d0ab866f3ed86eef95858a8f60f07f62e50fc3a6480b"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8952,
+            "sha256": "b294cd6af72f30879909352b02cfa746d4411f84608405f69a404989b9fa5408"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 8349933,
+            "sha256": "701d8ca0bf089993c8d5ad482abeb1272c13203684a2741bfc75bf8bee9f2d25"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/LFM2.5-24B-A2B-GGUF",
+          "revision": "93d5056976d1340c8975f6b4e792b50f6c4f7423"
+        },
+        "include": [
+          "LFM2.5-24B-A2B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "LFM2.5-24B-A2B-Q4_K_M.gguf",
+            "size": 14526259296,
+            "sha256": "5c286f305e7f485c00b86db6faf75876cab96ecbca024b1931324d3be8351272"
+          }
+        ]
+      }
+    },
+    "gemma-4-26b-a4b-it-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/lmstudio-community-gemma-4-26B-A4B-it-loom",
+          "revision": "eb2bd1117e4a1de4d949b39fb6ac217e7ef35e6a"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 295665,
+            "sha256": "964a67a73454f4cb91952bfde46b8f6ebd3c86092bb7b4ed51563b86664c3cb3"
+          },
+          {
+            "path": "gen/flash2_cfg.json",
+            "size": 49189,
+            "sha256": "faf2ebadc45ec5629e7968228c3b0245970f502532f7e9b017cf960305bab7d8"
+          },
+          {
+            "path": "gen/flash2_d512.loom",
+            "size": 283173,
+            "sha256": "0e17417653f3933279e2faf6bfedbfa9e76a257a65c6aff1db067fbdc47f9ec8"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 7540,
+            "sha256": "57983f1f8d600916055012714af4edb5a5102034cf2cbeb9f5c72fd4cf0c4468"
+          },
+          {
+            "path": "model.json",
+            "size": 2055,
+            "sha256": "97948120afd98a4e80056b24d2151b35263809c35acb5cfa984c85f338e9c5d3"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1203,
+            "sha256": "1fd65e7850cd28581179408fd156d44f0d9fa642d219308933c1de94600927b8"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 253239,
+            "sha256": "fa3e9e70fd002492fadaf9cdb4bfcb428d69a235cec340619283e8c1e8c651c8"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4807426,
+            "sha256": "a6828c88b1d3e438e46c509fc04cf3c6a4f6da17bce3e84055ed6082062eedc4"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16091,
+            "sha256": "736779db3876be4d9fa5197a167df35214912f8fcb8774264bc1f7a052ac080b"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12729,
+            "sha256": "2912da6da93db613efb7e975c5052de7527ad8dfb7ea44afbff873a0894b774f"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 15147891,
+            "sha256": "5ae2598b2fc4484841bbf11595edf45d99efa0308d22724f172fa1f6debe30a1"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "lmstudio-community/gemma-4-26B-A4B-it-GGUF",
+          "revision": "f6e6747823b2912661935db7e0009287c4838073"
+        },
+        "include": [
+          "gemma-4-26B-A4B-it-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "gemma-4-26B-A4B-it-Q4_K_M.gguf",
+            "size": 16796017248,
+            "sha256": "e19514d9541344001cb7c8eaf88704b8bf2e5d8f4e9aac12402eed360cffdfc4"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "Anbeeld/gemma-4-26B-A4B-it-DFlash-GGUF",
+          "revision": "d5262e1db8fc07d80f41ef2d0f333eac7978e97a"
+        },
+        "include": [
+          "gemma4-26b-a4b-it-dflash-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "gemma4-26b-a4b-it-dflash-Q4_K_M.gguf",
+            "size": 267271136,
+            "sha256": "8fbc00b801a41cad25f1fd9e0edaef2258acd6eb16b9ff90dac8422cff076f39"
+          }
+        ]
+      }
+    },
+    "qwen3-coder-30b-a3b-instruct-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-Qwen3-Coder-30B-A3B-Instruct-loom",
+          "revision": "90f4d2874d066ab7ad0c16daab9a383fa55f47a5"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 593149,
+            "sha256": "6cf52acd4b63fe89b6f77ca679d19ef23c704cbc1867d241be0596c96213efa8"
+          },
+          {
+            "path": "head_weights.loom",
+            "size": 3097,
+            "sha256": "84ab85fc7f8a69f8f0879ef8dda3ad1e05f312ae1322de2fbd8cd441fe6e6411"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 8128,
+            "sha256": "5f452a08092867c80cfcfac993ed9e3fa8833909712a3f15fe6784576c857f60"
+          },
+          {
+            "path": "model.json",
+            "size": 2128,
+            "sha256": "8dd0347d9952ef6e7a428de1be3e54c45d388e905b43e3c4e72b67995bc1bc5d"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1106,
+            "sha256": "644dfb093bf60e669cb2401655116a4eb70ee878fdc2ea74523614c7c9daa54c"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 170138,
+            "sha256": "6c7c4cec2352c2df3f49cba6f3d32facda3e60a749e00ba97ac7fa5b2bfcab86"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4715009,
+            "sha256": "f37dcae6344147d95cb9b4d9b610ca831f5bbf45dfea32ed8c9db507c2ef8cf9"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16423,
+            "sha256": "62a6aa80a8d5bd2f16a613aff485d1d44e8815be61b50662565f60db48193ab4"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12728,
+            "sha256": "baa168ae073e4c8116132e94f1aed605d13e2537baf8f048ea00dec104293a8f"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5212617,
+            "sha256": "69a3ff5a64972c8689b8dba6737b051a92999387d934c89815f5d0476a854d29"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+          "revision": "0ca51122012fe4a20dc82988ee58780b008ce4e3"
+        },
+        "include": [
+          "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+            "size": 17988419552,
+            "sha256": "f6050b4da22869aa3fb9d94bb3314e9fc5a027d4741c1f97761c387d6b2b2335"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "Anbeeld/Qwen3-Coder-30B-A3B-DFlash-GGUF",
+          "revision": "313e1f5ac2144a583057a4e864e46b7780ce4c11"
+        },
+        "include": [
+          "Qwen3-Coder-30B-A3B-DFlash-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-Coder-30B-A3B-DFlash-Q4_K_M.gguf",
+            "size": 286754240,
+            "sha256": "8cdb3a093a091e6bd55deb6cbff6b69397323dd7cb2a2373f4bc07217324b522"
+          }
+        ]
+      }
+    },
+    "qwen3.8-27b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/bartowski-Qwen3.8-27B-loom",
+          "revision": "a73a11eba342bde5e2ab489b2687cf731b9c7128"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 364411,
+            "sha256": "4711c8ea8424e3b0450e43aa64d784a80b4f9c033f69b75d21190cba8a25bc66"
+          },
+          {
+            "path": "head_weights.loom",
+            "size": 3853,
+            "sha256": "9facc9ae44613f7a898d98ca26e01b3b1bb9651675be1493fa674cd18cb545f4"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 23398,
+            "sha256": "0b1b031119fc051e4383248a6e95ffc6898003918eaf296072c476e3953be1c0"
+          },
+          {
+            "path": "model.json",
+            "size": 2070,
+            "sha256": "95e4b326bc114dec2af5ab78d78febb45053ad9a1422a72a811c4ef9bfb21b8c"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 879,
+            "sha256": "aac7d9cfb694ff19235372d44434b25dc46702bad555aa623f9937a8508770ac"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 189286,
+            "sha256": "d56a52614cdf85ad6b8a4a74c6666990f61d4f534435cb40f36537851b3b159d"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 8063453,
+            "sha256": "2d6d83dfb3638cde69a631971122033dfbab483400c536c4713da9593b8a75b0"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 17146,
+            "sha256": "3c2a194893f14229e0c81ab8274cb1d21d11125410b1a272d6f9caa34100b401"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12746,
+            "sha256": "188ac650704dcace496b1dd28c3a4edc5d30a7871bf29ec9ea7b1a7bc3d142a2"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8541,
+            "sha256": "b99b3f89d46fdf1ae4174120cee9f3ec8d8a4480cb5c7b2973aeb2695416f9c9"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 295683,
+            "sha256": "0b34b65c0e509fd0b05629ee1272121bb6aae78ca85ee5df5ca241199148c9c2"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "35dc9527a04d96427d306f4fc6430b5d7f1b8426e569f11efebf31d67ddf3b7a"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 9833560,
+            "sha256": "ee20a0ca8532087074711e292a9c7d12f8ef1229676e8259260187f93286b29d"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "bartowski/Qwen3.8-27B-GGUF",
+          "revision": "87410e7b9a5c21e6ca70c0c9cc5237de909fe621"
+        },
+        "include": [
+          "Qwen3.8-27B-Q4_K_M.gguf",
+          "mmproj-Qwen3.8-27B-f16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.8-27B-Q4_K_M.gguf",
+            "size": 17442399968,
+            "sha256": "880a52af8317974f7b4b064a6bc29ff49e188b91aa218e08eea3078b6b1cc673"
+          },
+          {
+            "path": "mmproj-Qwen3.8-27B-f16.gguf",
+            "size": 927607008,
+            "sha256": "cb0a71fe9b84af2552fc6260acf8e9773a29d115c683aba01c72a7ac537b212b"
+          }
+        ]
+      }
+    },
+    "qwen3-30b-a3b-instruct-2507-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Qwen3-30B-A3B-Instruct-2507-loom",
+          "revision": "c6598438289b2cbb1543e73e90b749136c888797"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 465940,
+            "sha256": "eddf7ab68bd52c2b1d71a992f747951c50212491c89bc8e87f683b36b6e049a3"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 9334,
+            "sha256": "a5112cade6fbd82ce47f686f6fd5a5ea273cb830068cd32ddbdd9b1dc81ec24a"
+          },
+          {
+            "path": "model.json",
+            "size": 1658,
+            "sha256": "a1fcdec8a074f403d1f91f1ab89571437340b265577e63e7d1ec030c3adfa07d"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 665,
+            "sha256": "9ea3c7b89bb5633e9fd3f8ba078bb2115a66cc11c66c1a03dfe67cd0b1f32559"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 136338,
+            "sha256": "9def7eb5d806d2435b748ba9353d16b7abb5a5c6f500bc88b9f71baf8b799378"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2539018,
+            "sha256": "7706c0afe5eb721d5f06c1205f82414de8b7b4a280a705bfcad79fc802e8fd9c"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "e5366b7c9fa88781b9941656a6995f70f9d651843055b510c96e912ad905c490"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8942,
+            "sha256": "403d4721a813d33e7ea3531d09eba20f1a995abf2eedf66aa2b63355433df305"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5969576,
+            "sha256": "a15cda23be411de16c671b7e1c50a9c0ba1516a69f348d159e4c6ee6f3c02a26"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF",
+          "revision": "eea7b2be5805a5f151f8847ede8e5f9a9284bf77"
+        },
+        "include": [
+          "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf",
+            "size": 18556686752,
+            "sha256": "6c997b8af17debdfb01d890214400ccbab00db6acc0ba8da5de1cc906c4774d0"
+          }
+        ]
+      }
+    },
+    "gemma-4-31b-it-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-gemma-4-31B-it-loom",
+          "revision": "568071f2fbee4b39c45d10ed9ea2453d5eec7137"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 295689,
+            "sha256": "7d74c8bfc5b24af448f15f191d07edc1598bfaed535801aa5df6f915ad4a6305"
+          },
+          {
+            "path": "gen/flash2_cfg.json",
+            "size": 59489,
+            "sha256": "77486cc1313b1e94a7ef9c657863ed369ffdd13533099d215997cd0727cd1782"
+          },
+          {
+            "path": "gen/flash2_d512.loom",
+            "size": 283307,
+            "sha256": "6a94f88e302866d990bd139baef66bf867a226e1707300598e7bf28958731c5b"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 6952,
+            "sha256": "3eea995918d10d52262bbe7e5dfe542277c81a38ff700054fb91fb529242d3a5"
+          },
+          {
+            "path": "model.json",
+            "size": 2013,
+            "sha256": "518878de7f7063f4f7e7604b5b6ebb4f5a198d0bb8fcdadc02733f4c204f03bf"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1176,
+            "sha256": "44696c76316059cf4c866a9087ed010462a31394863069858d5503e4006fb8f5"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 252894,
+            "sha256": "2b00b09d7a17b7e14489e5b1ef00563d55003d715b08b619ded7b903a62d511b"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 5133437,
+            "sha256": "eff6a334820e7c320e1e234d669c10e34e53bd9853775f75c3d08dcdf9c515b0"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16087,
+            "sha256": "514fafb42075b48b199c61840ec2ace8f53fc3111519277405de913899cd5e2c"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12733,
+            "sha256": "21a7ba156689ea598a6f772c191765073d19dbba3050b7426e7ec0b8d5204f38"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 15147891,
+            "sha256": "5ae2598b2fc4484841bbf11595edf45d99efa0308d22724f172fa1f6debe30a1"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/gemma-4-31B-it-GGUF",
+          "revision": "c1ac76e99d5513b141e8adde7288b85c3f9c32ec"
+        },
+        "include": [
+          "gemma-4-31B-it-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "gemma-4-31B-it-Q4_K_M.gguf",
+            "size": 18323733440,
+            "sha256": "38bd64c852c4b460434cc7162fa9bdcf242faf86502581a754cb72956bb17f84"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "Anbeeld/gemma-4-31B-it-DFlash-GGUF",
+          "revision": "16e51736d898d460e527acebd5aaa31f72cf7ff7"
+        },
+        "include": [
+          "gemma4-31b-it-dflash-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "gemma4-31b-it-dflash-Q4_K_M.gguf",
+            "size": 912636896,
+            "sha256": "859f365b1e3cf8e2c0791fae6b5d5e74af4eb7411f6d440f8126dd9765af83da"
+          }
+        ]
+      }
+    },
+    "qwen2.5-32b-instruct-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/bartowski-Qwen2.5-32B-Instruct-loom",
+          "revision": "07da8bface8f684e61d007ed15295e861c734a33"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 596027,
+            "sha256": "019c8c37b175004fd4a8cbe023b5ff3fb9153ed5d57d232084ed878b4135af1a"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 5171,
+            "sha256": "6ef02fb5bfb62337cc6efff441935a847584327d1cef8d5642c72aa769ff5329"
+          },
+          {
+            "path": "model.json",
+            "size": 1624,
+            "sha256": "15f6614ea975cbca851ed8c5627ab5af59c1a7a7fe30108468dbbd010249963b"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 717,
+            "sha256": "c8e96ba4e22f23000866c178b9034994911cd70d3c416ab3190cb2498f800477"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 136422,
+            "sha256": "2019d5a85ba034de04f0bbbb1b1ff3c5e437a541c716e4ea724a9e78d97f836c"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 3205940,
+            "sha256": "4d017e4ea782878881aa3e3d5219ce35c5b89d247d38bb1fcd1dc4fe73fd5316"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7809,
+            "sha256": "97446c4c14578aa03c3878f527710e0d8de892ed5bd2ba505fb4865034c9a0fd"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8944,
+            "sha256": "fde2bc8217a096338bbe0770225ca660213728e22c546cef176f272aaa9baff2"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5212067,
+            "sha256": "20f3f185bfd9a4f9f69c9e605911d6c4d9b004c9993ac29c1bc7c666d1b33877"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+          "revision": "2116cbb385b8ce3a4d28cf3bf1cd2039a55821a6"
+        },
+        "include": [
+          "Qwen2.5-32B-Instruct-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen2.5-32B-Instruct-Q4_K_M.gguf",
+            "size": 19851336576,
+            "sha256": "2e5f6daea180dbc59f65a40641e94d3973b5dbaa32b3c0acf54647fa874e519e"
+          }
+        ]
+      }
+    },
+    "laguna-xs-2.1-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-Laguna-XS-2.1-loom",
+          "revision": "640cfee4a72a1336888459ba83948d5d74ab9f44"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 612853,
+            "sha256": "35726c8ada9175278a149a08941b982e67a7093e27364d2b42cfd522461c6738"
+          },
+          {
+            "path": "gen/flash2_h48.loom",
+            "size": 615733,
+            "sha256": "779757891c9883a06a3c328dbc3fc2cee1ca9540402205c4b1e3cd79ebade0ef"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 9033,
+            "sha256": "ae1db30be022475a94e51719443dfdd9969857c1f28b8c12a249b877b4c83845"
+          },
+          {
+            "path": "model.json",
+            "size": 2006,
+            "sha256": "42764f9ab3e03849ecf8fd9632e34b4e4cacb06a802868aef9f2a4e0588df16c"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1169,
+            "sha256": "bc17d0ebc1990e1a18688e2a04596abc650a8e7e84f6923a39eb95340d160bd4"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 155293,
+            "sha256": "474dc4e4393f57622cdffc7ce8a6f886da66b6094537ee95a6e43fefd7ddcbaa"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 6153515,
+            "sha256": "d7a5d735dbb153dc4ae3d8cde9c0d0fd8204b8eb4e3e9e5da43843bbc50f0c8d"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16262,
+            "sha256": "70ecdf5601ed04b34f0b0cca983905d8b36120ab6a6b3870b4f993752bac17b8"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12728,
+            "sha256": "ad5a58dd9ba381a401d4693f004ca19836235ea65e69aca48195ab20e825ed57"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 3680407,
+            "sha256": "d43e7a0e4ed004af29d9ee3ef23f9a691e588cdc65b85c884531c49f47a9e252"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/Laguna-XS-2.1-GGUF",
+          "revision": "1c7823dff255ab71b381a6c5082af8b07e70c150"
+        },
+        "include": [
+          "Laguna-XS-2.1-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Laguna-XS-2.1-Q4_K_M.gguf",
+            "size": 19563570240,
+            "sha256": "0a8301bc1b8509b27ed39ec86b98278c03341db6311c065326bd6629cd7304d6"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "dev7a/Laguna-XS-2.1-DFlash-GGUF",
+          "revision": "335be330b72a556fb107f99881261e275b21050d"
+        },
+        "include": [
+          "Laguna-XS-2.1-DFlash-Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Laguna-XS-2.1-DFlash-Q8_0.gguf",
+            "size": 494735712,
+            "sha256": "8b01363d09eac264d93e54df8020b0c73d229f6092bbbdb99ec6774c7a2aa4db"
+          }
+        ]
+      }
+    },
+    "nanbeige4.3-33b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/bartowski-Nanbeige4.3-33B-loom",
+          "revision": "bfe6f26ea510f721ba5751dc5115e8fca18ef66b"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 596029,
+            "sha256": "747be335c9a6ad6ce55646ca6a83740f910cf78dff6e7a2123f71a860c4b0bb9"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 8698,
+            "sha256": "c0d49911d2da54d6c52950783b20c51d676d56d59d9ca61fb29da5662d27a554"
+          },
+          {
+            "path": "model.json",
+            "size": 1631,
+            "sha256": "302b4833d3b9d3924518afad4391c373db0db7254010c0ce9065b1b03714dc1b"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 725,
+            "sha256": "e6a7e9574c72fdb21b136c533d4a23c8ec32614f187ccc9ded0e5212e8676cc1"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 138280,
+            "sha256": "1f2aab96443f296410a2c57195cc296669b05069e7c2d2db0b0f02611e502d39"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4529568,
+            "sha256": "c9c3d2544e2e3f230aba5e2792a278436fe09b95169a3f481952cb03ee1b46be"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "f5485f1470e34051393c14f6bbccc2376d4e3667633a250bb0c1396faab35a26"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8944,
+            "sha256": "045a572f223b4a1675fa1e67c42321646c124db83fee1f450a1b8460783f7719"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 8546525,
+            "sha256": "976515650a4b6a6af849b1873aedf3e221008282fbc0acd3a39814d7f35a3aa9"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "bartowski/Nanbeige_Nanbeige4.3-33B-GGUF",
+          "revision": "9beb68421fdf7be095093a6888325fa2c83ddd38"
+        },
+        "include": [
+          "Nanbeige_Nanbeige4.3-33B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Nanbeige_Nanbeige4.3-33B-Q4_K_M.gguf",
+            "size": 20788825216,
+            "sha256": "2cef79855ca47ee6571e166db32a07089e34f3cf78e0397b262d124ddb814c37"
+          }
+        ]
+      }
+    },
+    "qwen3.6-27b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-Qwen3.6-27B-loom",
+          "revision": "f86d908dd9e7caaf8312c4f753a600c3dfdc6ad8"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 441007,
+            "sha256": "fa4caa13d5bea6ac6f6da2747af5c4e681805c72ff143ed29b288f9cbfa8d9b8"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 7712,
+            "sha256": "67ac3d50bf560aab26e7e6a2c7fd1f63c8fbfee886dcdec5f919eaa6571192e3"
+          },
+          {
+            "path": "model.json",
+            "size": 2417,
+            "sha256": "7dd0fd3c298941a5c6316fcb447d7e1e794e5240b81eab720aae9ea189ab72bc"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1347,
+            "sha256": "47bf3e4413e3a74603ce1bec828ecdd94940042866e043a29b4edba765a93a1d"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 180113,
+            "sha256": "374802f13f8e9486573e74aa96415a83c6eeaf4f2ed13b6da7d3b7f3b1d4f8e6"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4987733,
+            "sha256": "16367e13b8d57d618c54f2e268ee3ac5d2d5adc44aea48db367a3e76cc8295b8"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 14649,
+            "sha256": "e501d5631292df37abb9bf95c8675144dfb2ac94fc598178a0c2b9cd00eaf3cb"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12745,
+            "sha256": "3844ea24b375d592fc6a08d6cce94d692e724da16886f8acceaec99ea0268bbe"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8541,
+            "sha256": "b99b3f89d46fdf1ae4174120cee9f3ec8d8a4480cb5c7b2973aeb2695416f9c9"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 297033,
+            "sha256": "76dc118ff88e04e6301ecc56b475d46ff1156234043009bee18c12b03ec9ad9c"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "35dc9527a04d96427d306f4fc6430b5d7f1b8426e569f11efebf31d67ddf3b7a"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 9832586,
+            "sha256": "cf360f770fae77c3e5e783bce81eb01aebda1627cdc38736b4a0d30f8c5f4fe7"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/Qwen3.6-27B-GGUF",
+          "revision": "1132d03976d88e30a09ab0ddbf1531d5e1b46e7c"
+        },
+        "include": [
+          "Qwen3.6-27B-Q4_K_M.gguf",
+          "mmproj-Qwen3.6-27B-BF16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.6-27B-Q4_K_M.gguf",
+            "size": 19095766304,
+            "sha256": "65b753ea835627f7b511143c6ceb976525c7f21f5df8c664bc0a9c23d1c49921"
+          },
+          {
+            "path": "mmproj-Qwen3.6-27B-BF16.gguf",
+            "size": 931145984,
+            "sha256": "65582658c19c23ce991818985ecddf3a403fd31c9307b229c9ea0da4cb78d260"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "Anbeeld/Qwen3.6-27B-DFlash-GGUF",
+          "revision": "f14c6b308ee71deb2b2cb47c331e164271968e6b"
+        },
+        "include": [
+          "Qwen3.6-27B-DFlash-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.6-27B-DFlash-Q4_K_M.gguf",
+            "size": 1033066592,
+            "sha256": "9600166778e487031cc711b30c0ec098df91156ec9bfda177185637784935c18"
+          }
+        ]
+      }
+    },
+    "qwen3.6-35b-a3b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-Qwen3.6-35B-A3B-loom",
+          "revision": "9a06cc9ba5ca93e2de3a5fa40b2ad4e415d191fe"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 441895,
+            "sha256": "380b1262f2176368e4dcabe5ae2ae031195faaedb0e7865ca4d263471b7e1831"
+          },
+          {
+            "path": "head_weights.loom",
+            "size": 3098,
+            "sha256": "3810cad78cd2841a8e5ea779a37324dcd8e9cfe1a3a7d4b53e931d97654e2579"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 10318,
+            "sha256": "44bb11ec7ecfe112a44066879a568bc4a58139f34eb05193bc08ae92f8affacb"
+          },
+          {
+            "path": "model.json",
+            "size": 2485,
+            "sha256": "a6c3e7b2d81fefbbfa8afd70e66d2bca261fb1d27768b06fae512ace794a86da"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1247,
+            "sha256": "a3ec2da7f9c0e210807de0c547937b250b045b46612d69f78fe36a108bd6116e"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 183231,
+            "sha256": "d9b9189da2db64e3e3c94a84363bf8866aa7310aa3d0145c38578f6c8b2cdc1b"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4237404,
+            "sha256": "252a2862ec8c17ecebafca6a547e0898b4a8d9a9134a16166cb36e0112557242"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16423,
+            "sha256": "62a6aa80a8d5bd2f16a613aff485d1d44e8815be61b50662565f60db48193ab4"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12742,
+            "sha256": "69ab78ebbf536ce741887077335fbf973694bac4957522fa70e265d87194c891"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8539,
+            "sha256": "9c2ff0ca17e7d1f20197036e0cd4377785ec09d27565e7506f3d88967c38f2a2"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 297030,
+            "sha256": "923b14bad4fe563f7d3052a4795bd182035a7d2838daaa516a31fd556e71977e"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "14ee1c788d8382471b0dbd8fbb71bb4ffe7bd493582740992ce77a54c827b49d"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 9832586,
+            "sha256": "cf360f770fae77c3e5e783bce81eb01aebda1627cdc38736b4a0d30f8c5f4fe7"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/Qwen3.6-35B-A3B-GGUF",
+          "revision": "52f9f9b8052fb9c8b69bba4a95eda0f319ac3d2a"
+        },
+        "include": [
+          "Qwen3.6-35B-A3B-Q4_K_M.gguf",
+          "mmproj-Qwen3.6-35B-A3B-BF16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.6-35B-A3B-Q4_K_M.gguf",
+            "size": 20542732576,
+            "sha256": "f4ffe03c9139e6a905a5d346f77d9fabdd179367c3280dfd005d1e75ca5ed8c8"
+          },
+          {
+            "path": "mmproj-Qwen3.6-35B-A3B-BF16.gguf",
+            "size": 902822144,
+            "sha256": "360c746ddf38fb67c06f83a0a88742492aa231e59e335cd980e6302f59ea6089"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "magnitudedev/Qwen3.6-35B-A3B-DFlash-GGUF",
+          "revision": "4f5e4df8dc4520256bdc0bc8752c7010bbfb1eec"
+        },
+        "include": [
+          "Qwen3.6-35B-A3B-DFlash-Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.6-35B-A3B-DFlash-Q8_0.gguf",
+            "size": 421060896,
+            "sha256": "70ae9123ab1060719c3a22fbf3c830a2de1c558e73e2bf54317d380373ed03f3"
+          }
+        ]
+      }
+    },
+    "ornith-1.0-35b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/lmstudio-community-Ornith-1.0-35B-loom",
+          "revision": "70e56c1cc62e13fda963337500228fded6ffdb9d"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 441895,
+            "sha256": "380b1262f2176368e4dcabe5ae2ae031195faaedb0e7865ca4d263471b7e1831"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 7108,
+            "sha256": "9761be2ec3ac078a1a559df0511002b94940d1c88a87036bee8743d92dc13529"
+          },
+          {
+            "path": "model.json",
+            "size": 2058,
+            "sha256": "2e5c16a436706db6ce37e1ec1d658bea816fa01bfe6fc94a5b271a8529e72cae"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 822,
+            "sha256": "7d3d7771da67e9e9772c0ce3960371cc278cba81625471c18f4d9e6948db358e"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 164580,
+            "sha256": "f15d8a9b92dd5558b2642319f9da5bc0610968c53dccccb2a2f047c667b2168f"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 3257209,
+            "sha256": "68ee27706444478f584bda40abb80399a7d1121c1380f34dcc4f5cbfda1c11c2"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "e5366b7c9fa88781b9941656a6995f70f9d651843055b510c96e912ad905c490"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8956,
+            "sha256": "983edb1bb40a329391f288755c730a554cda237dec00a7cc2aa5d5e6fe821c6c"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8539,
+            "sha256": "9c2ff0ca17e7d1f20197036e0cd4377785ec09d27565e7506f3d88967c38f2a2"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 297030,
+            "sha256": "923b14bad4fe563f7d3052a4795bd182035a7d2838daaa516a31fd556e71977e"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "14ee1c788d8382471b0dbd8fbb71bb4ffe7bd493582740992ce77a54c827b49d"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 11071477,
+            "sha256": "f913b92a26abaa0ef27571382c9c3cffdea931cc27f2acb3fcb964a182ed628a"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "lmstudio-community/Ornith-1.0-35B-GGUF",
+          "revision": "a133768a77ba629558f3910ece680e8f60d2aa3d"
+        },
+        "include": [
+          "Ornith-1.0-35B-Q4_K_M.gguf",
+          "mmproj-Ornith-1.0-35B-BF16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Ornith-1.0-35B-Q4_K_M.gguf",
+            "size": 21166757536,
+            "sha256": "680c08dac706bc524b741cd59cb18067fa64a0e42a7f5c030e6b9bcab26d5254"
+          },
+          {
+            "path": "mmproj-Ornith-1.0-35B-BF16.gguf",
+            "size": 902822048,
+            "sha256": "9d95e14a136b03bc7c760e36786b51706dae42d7de9b38ccd8d76207211ce7d9"
+          }
+        ]
+      }
+    },
+    "minicpm-v-4.7-35b-a3b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/bartowski-MiniCPM-V-4.7-35B-A3B-loom",
+          "revision": "bb64688865697edb8b1f1329dc9bf1c32d520e71"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 441895,
+            "sha256": "380b1262f2176368e4dcabe5ae2ae031195faaedb0e7865ca4d263471b7e1831"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 6250,
+            "sha256": "f37dcc9be2a17d95fbda3d3282f39475b3df236bc026d61e944cd915a0ff9ccc"
+          },
+          {
+            "path": "model.json",
+            "size": 1634,
+            "sha256": "5e6f5ecc18f1244b00688ce110cf3d10f4c6e140f91af7a2bd1cfc004cfcf6e2"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 656,
+            "sha256": "8cbc787c8957a30e1fadc6cb9c51b9d70fe69b86369a011746475b1db673362e"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 137696,
+            "sha256": "ed7d8a9e3f937ac1d9c0813fa0a5adc3b8eb7e2476235e24fc26114493054dca"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 2961491,
+            "sha256": "c796df05b8e8fcda0e38f1f2900fd9265b70401d2f9e4079cc915544ef021b99"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 7813,
+            "sha256": "e5366b7c9fa88781b9941656a6995f70f9d651843055b510c96e912ad905c490"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 8956,
+            "sha256": "b9f4d4f431fa800bde1f8ee39330363d3358f30be6b71aeea706c2c2733a0f3f"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 11080603,
+            "sha256": "5fa8d0d6771a6d9a0896c9efd9b7b999d4eae6b6bfb3fbd32155a0c22a2a5f57"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "bartowski/MiniCPM-V-4.7-35B-A3B-GGUF",
+          "revision": "098bdee54114f39f7b2246e3d4632aaa05f0da78"
+        },
+        "include": [
+          "MiniCPM-V-4.7-35B-A3B-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "MiniCPM-V-4.7-35B-A3B-Q4_K_M.gguf",
+            "size": 22317742272,
+            "sha256": "ca6830e2d3a28942e5c3e053ffce93543fd6ecbd7c1c9f6fb53f402e8aa1d37e"
+          }
+        ]
+      }
+    },
+    "sage-a1.5-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/InternScience-Sage-A1.5-loom",
+          "revision": "bfa32772063c03a549b3452520d3110e0d978f2f"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 441895,
+            "sha256": "380b1262f2176368e4dcabe5ae2ae031195faaedb0e7865ca4d263471b7e1831"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 7858,
+            "sha256": "d989871d1717db4c231f1ca7484f57344d73adcde5e198d9971421c427791f67"
+          },
+          {
+            "path": "model.json",
+            "size": 2048,
+            "sha256": "9cc1dfb643c737a0fb56c8c1c229f21758eec78eea7d13c71a39d1f367b9220e"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 804,
+            "sha256": "cdc2ae8603b848f7711db452ba62cc40b368904a96ef6471e8b947a877a46148"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 183277,
+            "sha256": "367c398facf8cbeb9060bd1f9ad9ace649cc8b95c62fa871735438c877bc1f7c"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4029757,
+            "sha256": "a73963d1af8f5a02b4a132a72ea72ce2fac23f974989d085de1dc22b992e4b6c"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16979,
+            "sha256": "6c3ef7256bab11094e13621ab23977561cd2f3cb52353bc427b7aab774a205db"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12742,
+            "sha256": "aae69150f120a383c6e9a1a09910af2197fbe3ac41666eab598dacbaff8cc076"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8539,
+            "sha256": "9c2ff0ca17e7d1f20197036e0cd4377785ec09d27565e7506f3d88967c38f2a2"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 295680,
+            "sha256": "59e937a1b4f48ed36c7f10860f372410b62fba3a9b73632fa6edf3ba31655d16"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "14ee1c788d8382471b0dbd8fbb71bb4ffe7bd493582740992ce77a54c827b49d"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 11071495,
+            "sha256": "ab9bb5518649e876e12f412c37db2de9edfac106bb78d0a6c5b22b12d796f848"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "InternScience/Sage-A1.5-Q4_K_M-GGUF",
+          "revision": "10b179b52f2c841030db327627e707d076b4c8cf"
+        },
+        "include": [
+          "Sage-A1.5-Q4_K_M.gguf",
+          "Sage-A1.5-mmproj.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Sage-A1.5-Q4_K_M.gguf",
+            "size": 21713463520,
+            "sha256": "a64fe0bbf936db3eb54f66f142c2b2eee569ade83673649f549a21daef8ca395"
+          },
+          {
+            "path": "Sage-A1.5-mmproj.gguf",
+            "size": 899282880,
+            "sha256": "51cd4410057e8dc4152ca771a726fbfb34856f047e7049018c757d42ddd481f2"
+          }
+        ]
+      }
+    },
+    "qwen3.5-35b-a3b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Qwen3.5-35B-A3B-loom",
+          "revision": "89e9db91429a851ccf55e5f31f3c81d1c3b7bea4"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 441895,
+            "sha256": "380b1262f2176368e4dcabe5ae2ae031195faaedb0e7865ca4d263471b7e1831"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 10479,
+            "sha256": "d32fb1d06b2fc779abbc4fe4efaa3c8242addbb3a6641820e083d2f58433c603"
+          },
+          {
+            "path": "model.json",
+            "size": 2422,
+            "sha256": "e9c2a0a747830c19d1ed27db46ac29d3e3cd2e1c977c91507c2474348cfd6b39"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1226,
+            "sha256": "2d65f9d20c3c03dae9024a9ca75f7234d041d47d9c0c1378759adff8d6adec25"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 183568,
+            "sha256": "3f4e674ad6647096ba77996372a2f2199855cc3792ea97e90868be1141404ed5"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4976532,
+            "sha256": "ad4e277ea36073e424ec548601649867806b9da6018b1e909cceefcb0e51e404"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16256,
+            "sha256": "8658bb1219ca76adc1ad6746a2a1fd39870bafd7f791c7b483310d928d3a9efe"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12742,
+            "sha256": "69ab78ebbf536ce741887077335fbf973694bac4957522fa70e265d87194c891"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8539,
+            "sha256": "9c2ff0ca17e7d1f20197036e0cd4377785ec09d27565e7506f3d88967c38f2a2"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 295680,
+            "sha256": "59e937a1b4f48ed36c7f10860f372410b62fba3a9b73632fa6edf3ba31655d16"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "14ee1c788d8382471b0dbd8fbb71bb4ffe7bd493582740992ce77a54c827b49d"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 9832586,
+            "sha256": "cf360f770fae77c3e5e783bce81eb01aebda1627cdc38736b4a0d30f8c5f4fe7"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Qwen3.5-35B-A3B-GGUF",
+          "revision": "bc014a17be43adabd7066b7a86075ff935c6a4e2"
+        },
+        "include": [
+          "Qwen3.5-35B-A3B-Q4_K_M.gguf",
+          "mmproj-F16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.5-35B-A3B-Q4_K_M.gguf",
+            "size": 22016023168,
+            "sha256": "3b46d1066bc91cc2d613e3bc22ce691dd77e6f0d33c9060690d24ce6de494375"
+          },
+          {
+            "path": "mmproj-F16.gguf",
+            "size": 899283648,
+            "sha256": "a516ab92e8240da4734d68352bdfba84c16e830ee40010b8fac80d69c77272ff"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "Anbeeld/Qwen3.5-35B-A3B-DFlash-GGUF",
+          "revision": "31335d2996d3fcaf269225f17693c5d9205822a4"
+        },
+        "include": [
+          "Qwen3.5-35B-A3B-DFlash-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.5-35B-A3B-DFlash-Q4_K_M.gguf",
+            "size": 235692352,
+            "sha256": "b92b48aaeef7048c102ac8f7e7796fd5c5c49a8d696095e5ccec33fd36c56700"
+          }
+        ]
+      }
+    },
+    "ornith-1.5-35b-a3b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/bartowski-Ornith-1.5-35B-A3B-loom",
+          "revision": "a04f7adb325c45a30c8c9a5196bc4bac3e98fb9e"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 441895,
+            "sha256": "380b1262f2176368e4dcabe5ae2ae031195faaedb0e7865ca4d263471b7e1831"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 10358,
+            "sha256": "c8b4b0182aed268f6d6bb87e2762b642fcd39029e9a5168f54e527d418d87ec3"
+          },
+          {
+            "path": "model.json",
+            "size": 2487,
+            "sha256": "1b3f247370689ef6bc734dec0c958e76e7a23d7f3b400036de26df49d6b12317"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1257,
+            "sha256": "d1abab1fbf2ac7bfe90558b44fc0256adaad0ecfd4b62ec30abadd471962c1fa"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 183584,
+            "sha256": "8dd021bd24f9665b8f764b2a4ea227c8f20da70af51927421f21d9a771ba7f36"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 5548616,
+            "sha256": "9b8112fad4e332007427abd37ca00613c16bc17f94e425dc331c093f0a2abad4"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16256,
+            "sha256": "8658bb1219ca76adc1ad6746a2a1fd39870bafd7f791c7b483310d928d3a9efe"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12742,
+            "sha256": "69ab78ebbf536ce741887077335fbf973694bac4957522fa70e265d87194c891"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8539,
+            "sha256": "9c2ff0ca17e7d1f20197036e0cd4377785ec09d27565e7506f3d88967c38f2a2"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 295680,
+            "sha256": "59e937a1b4f48ed36c7f10860f372410b62fba3a9b73632fa6edf3ba31655d16"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "14ee1c788d8382471b0dbd8fbb71bb4ffe7bd493582740992ce77a54c827b49d"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 9832586,
+            "sha256": "cf360f770fae77c3e5e783bce81eb01aebda1627cdc38736b4a0d30f8c5f4fe7"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "bartowski/Ornith-1.5-35B-A3B-GGUF",
+          "revision": "64b0493d34a5ca4c1b4ad67bb99b41d74b4f07d6"
+        },
+        "include": [
+          "Ornith-1.5-35B-A3B-Q4_K_M.gguf",
+          "mmproj-Ornith-1.5-35B-A3B-f16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Ornith-1.5-35B-A3B-Q4_K_M.gguf",
+            "size": 21864081056,
+            "sha256": "12d8d5c01bae7f23ea4822b2f96ba069d531f827d02a57c31002f2f95e72614a"
+          },
+          {
+            "path": "mmproj-Ornith-1.5-35B-A3B-f16.gguf",
+            "size": 899283296,
+            "sha256": "815c9a671991aceeef46ca1aa103b64499db8cfadf21c83005a20ed839d53c7c"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "na0x2c6/Ornith-1.5-35B-A3B-DFlash-GGUF",
+          "revision": "3427ea426d150d03c633b0d25b8a0626453b3f2f"
+        },
+        "include": [
+          "Ornith-1.5-35B-A3B-DFlash-Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Ornith-1.5-35B-A3B-DFlash-Q8_0.gguf",
+            "size": 421060960,
+            "sha256": "fe60bd77ad7eb65a1357c8b959d053ef528e38a4b883a8f175afa8698ce83a6a"
+          }
+        ]
+      }
+    },
+    "muse-glimmer-30b-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-Muse-Glimmer-30B-loom",
+          "revision": "40344e99e4b4d632b89c45278e5d1ffc46023cfb"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 421569,
+            "sha256": "fe9a1aa0ee0d4fa3cf615c28a441c11b32eb3a2d2690efd24f413944c473f779"
+          },
+          {
+            "path": "head_weights.loom",
+            "size": 3098,
+            "sha256": "95dd41997e660a94c33a2870aa51d98efe90dedbacb430570c4249632a711e0f"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 7028,
+            "sha256": "ffab1ce6824b9225dacfe8d2a817b01933ace8b707356745c1cdca9f9e2a6d4a"
+          },
+          {
+            "path": "model.json",
+            "size": 2539,
+            "sha256": "37e89e392b5736649d7249252a7b09fc61aa72424c0aeabcbe9794222ce5b280"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1374,
+            "sha256": "c532d64c2c4f48ef34af8fb2c6ef8b8f59ce74145ceb32dfd0ba2d1dc6f03454"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 227654,
+            "sha256": "d14e3a4a16408d8654fc1391974964ba43135cd5902d88554b519a209da739e6"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4860425,
+            "sha256": "603728f5abadcc50a4f2278cd0421368ca57591ec6bf80b703ae6183fe071e1a"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 14807,
+            "sha256": "db300d3e7b6c313791aac59260de94599ada3a520d6d5dd98b1afe016904fe7b"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12728,
+            "sha256": "e231f11f62333c7e7425ee4547feaaaf177e2987ba37b7f2d2faa599864780ea"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8541,
+            "sha256": "ceb8647dd6261fc3d866b401f71be6f308f2841af3d62917cfd1ec17b087aedd"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 454178,
+            "sha256": "8a22f78bd3489c9daef908fb06770dcc4dd3457272d657591036ecf8d377abd0"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1809,
+            "sha256": "ac2ff261f43caf6f4838489cee592c3e67a4df5957edcef116847337044d0f5b"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 13628686,
+            "sha256": "4e87a2fc776fa839fd3e6ee7f089706768090e7949ed22d06842e589bff7119f"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/Muse-Glimmer-30B-GGUF",
+          "revision": "5da9c17514ceb04baf73445648d215272275b114"
+        },
+        "include": [
+          "Muse-Glimmer-30B-Q4_K_M.gguf",
+          "mmproj-Muse-Glimmer-30B-BF16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Muse-Glimmer-30B-Q4_K_M.gguf",
+            "size": 19246214464,
+            "sha256": "f37a84eb8eab734d6d17f9a693b1ff95651e8f30ea5f8cff31c295f4c0abee27"
+          },
+          {
+            "path": "mmproj-Muse-Glimmer-30B-BF16.gguf",
+            "size": 3849173952,
+            "sha256": "da0190414f5efa3df5db1e26ddb491d96f8151ebc5630c44742fc9e4d8fabfde"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "z-lab/Muse-Glimmer-30B-DFlash2-GGUF",
+          "revision": "880882627431093d99d3b2368efb4a6fcf12d4cb"
+        },
+        "include": [
+          "Muse-Glimmer-30B-DFlash2-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Muse-Glimmer-30B-DFlash2-Q4_K_M.gguf",
+            "size": 1645657280,
+            "sha256": "93dbfb6f88e4645dec1347cf93f9d6fc80b90d413038722385b2a8e53565c949"
+          }
+        ]
+      }
+    },
+    "qwen3.8-27b-ud-q4_k_xl-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-Qwen3.8-27B-UD-Q4_K_XL",
+          "revision": "3e43d41d0bfae65f17a77794264f82a3b5f2c990"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 364411,
+            "sha256": "4711c8ea8424e3b0450e43aa64d784a80b4f9c033f69b75d21190cba8a25bc66"
+          },
+          {
+            "path": "head_weights.loom",
+            "size": 3853,
+            "sha256": "9facc9ae44613f7a898d98ca26e01b3b1bb9651675be1493fa674cd18cb545f4"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 31299,
+            "sha256": "45e6398f97aad026c22566a039823ff3fd1180a3874ac1e26347756882fd016d"
+          },
+          {
+            "path": "model.json",
+            "size": 2292,
+            "sha256": "40625d5a71f5f57ee58d1705db7fcd97b3bc317804315bec16bb0ff6e2bfce25"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1158,
+            "sha256": "98698b7a885b8a5ffe1c34a054bf45dedba08049f0f439860ea84e66cf8e82de"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 190078,
+            "sha256": "a127c78f294c69d244ee7087ae8ec647dde91be66bfb7de8b2f7cccda8cac02c"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 5920825,
+            "sha256": "d74ef1a6d7031e368bc46fd8f9e871317b87ff3cebd61380b8db40037d346fc8"
+          },
+          {
+            "path": "program/llm_kernels_1.loom",
+            "size": 2967347,
+            "sha256": "0667c8cac34148f3f76a6813960289dd8e3fda0ab25c782643f517fe300f1e87"
+          },
+          {
+            "path": "program/llm_kernels_2.loom",
+            "size": 1415577,
+            "sha256": "e952a011c2142f8c27e4a4aa9f94bc68651ebff56bd74ea4fa151f6f327a12f3"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 17146,
+            "sha256": "3c2a194893f14229e0c81ab8274cb1d21d11125410b1a272d6f9caa34100b401"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12746,
+            "sha256": "188ac650704dcace496b1dd28c3a4edc5d30a7871bf29ec9ea7b1a7bc3d142a2"
+          },
+          {
+            "path": "program/vision_control.loom",
+            "size": 8541,
+            "sha256": "b99b3f89d46fdf1ae4174120cee9f3ec8d8a4480cb5c7b2973aeb2695416f9c9"
+          },
+          {
+            "path": "program/vision_encoder.loom",
+            "size": 295683,
+            "sha256": "0b34b65c0e509fd0b05629ee1272121bb6aae78ca85ee5df5ca241199148c9c2"
+          },
+          {
+            "path": "program/vision_prepare.loom",
+            "size": 1814,
+            "sha256": "35dc9527a04d96427d306f4fc6430b5d7f1b8426e569f11efebf31d67ddf3b7a"
+          },
+          {
+            "path": "program/vision_stages.loom",
+            "size": 916,
+            "sha256": "0aa463123aa20128c17c6659f1a4b4539727cca472addaa61825597b2fae7004"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 9833560,
+            "sha256": "ee20a0ca8532087074711e292a9c7d12f8ef1229676e8259260187f93286b29d"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/Qwen3.8-27B-GGUF",
+          "revision": "4af51b3542f775b0a8e4b310bfb3f17e01c306c9"
+        },
+        "include": [
+          "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+            "size": 17659407264,
+            "sha256": "2a5f3565f39cf885103da591182c1266da64745737b42b452fd3e675369f1211"
+          }
+        ]
+      },
+      "vision": {
+        "source": {
+          "hf": "bartowski/Qwen3.8-27B-GGUF",
+          "revision": "87410e7b9a5c21e6ca70c0c9cc5237de909fe621"
+        },
+        "include": [
+          "mmproj-Qwen3.8-27B-f16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "mmproj-Qwen3.8-27B-f16.gguf",
+            "size": 927607008,
+            "sha256": "cb0a71fe9b84af2552fc6260acf8e9773a29d115c683aba01c72a7ac537b212b"
+          }
+        ]
+      }
+    },
+    "gemma-4-26b-a4b-it-qat-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-gemma-4-26B-A4B-it-qat-loom",
+          "revision": "da1e6ae137920f0565d989e0731128288eb712e3"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 295665,
+            "sha256": "964a67a73454f4cb91952bfde46b8f6ebd3c86092bb7b4ed51563b86664c3cb3"
+          },
+          {
+            "path": "gen/flash2_cfg.json",
+            "size": 50684,
+            "sha256": "ad4bb6fd1a34f27784986c4e5d61182c389328251f078cb8975607f1f6d1789b"
+          },
+          {
+            "path": "gen/flash2_d512.loom",
+            "size": 283173,
+            "sha256": "0e17417653f3933279e2faf6bfedbfa9e76a257a65c6aff1db067fbdc47f9ec8"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 11450,
+            "sha256": "e10892a583ea15700b616cd65d7df25bef933c82989c30436cf70d8d3d012af7"
+          },
+          {
+            "path": "model.json",
+            "size": 1946,
+            "sha256": "94c3a4e5730e623f3e0fca91c56890a95137beecb111bb9cf52d923b6a923702"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 904,
+            "sha256": "14695c74ec4e9a9b37453bc39a790476d076afe777683439f109ae87ce723f69"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 252972,
+            "sha256": "c2caa32f1d7d6ce29a8f1cc2b5eed5d7a1d87819c1945ae2b1b6efca8d0c2225"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4099185,
+            "sha256": "f458f7e03e429cb6a1ea6657cc79343e3b291fabbbafde20600fb74c97c37e42"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 15592,
+            "sha256": "a65d80f5e74bea744472094a0af63380186d4265d7a067deb20166c85832d9a0"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12725,
+            "sha256": "115bbe2dbb665c3d42a9c3ea01e9583b53a0719da86d97d2c61655792e6f83c4"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 15147891,
+            "sha256": "5ae2598b2fc4484841bbf11595edf45d99efa0308d22724f172fa1f6debe30a1"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+          "revision": "7b92b5b28818151e8669af2e45e88d6086f490dd"
+        },
+        "include": [
+          "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+          "mtp-gemma-4-26B-A4B-it.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+            "size": 14249047104,
+            "sha256": "a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891"
+          },
+          {
+            "path": "mtp-gemma-4-26B-A4B-it.gguf",
+            "size": 251939328,
+            "sha256": "7272d97595f0d4c74bd7b623492b7dbdaafd8b7c72f329a8270ba4eca68f768a"
+          }
+        ]
+      }
+    },
+    "gemma-4-31b-it-qat-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/unsloth-gemma-4-31B-it-qat-loom",
+          "revision": "0826c6e9d4cc3971f94f2730a07f6b33ad9982e2"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 295689,
+            "sha256": "7d74c8bfc5b24af448f15f191d07edc1598bfaed535801aa5df6f915ad4a6305"
+          },
+          {
+            "path": "gen/flash2_cfg.json",
+            "size": 61368,
+            "sha256": "82be8b7a79756534639fa78dd5c74738baf864fd059241717a5b31d76fa83fa2"
+          },
+          {
+            "path": "gen/flash2_d512.loom",
+            "size": 283307,
+            "sha256": "6a94f88e302866d990bd139baef66bf867a226e1707300598e7bf28958731c5b"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 11352,
+            "sha256": "676993b0cdc6dfc944cc26022febfa5c8167cf6fa8a320eb0f5b56eaea61f2da"
+          },
+          {
+            "path": "model.json",
+            "size": 1916,
+            "sha256": "ebdf99cf8f1dea1796a70e9a9609e80f3622d761d6c0799c294b9f85607b9cc8"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 892,
+            "sha256": "1788ac8b742d41a3d319f81d4bac1593e39284230d0fa71a9c70bfe7ef7dcd0c"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 252964,
+            "sha256": "04bd4ec0b26a906031d72f0582efd914f1315db90784bf1523438758ae27b782"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 4666562,
+            "sha256": "6c9faaa232b5f235a6a531318d0ac5f729805cb386498147efb6d46e2223eb99"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 15588,
+            "sha256": "0544b64acb48a54924b5f268e3a37b1c787ce5d167dfb9145da58851fdfef9db"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12728,
+            "sha256": "783a8d8ee2926c0277e6c898817c1898baf945871f0c4149970fe7c6c6a9e61f"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 15147891,
+            "sha256": "5ae2598b2fc4484841bbf11595edf45d99efa0308d22724f172fa1f6debe30a1"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "unsloth/gemma-4-31B-it-qat-GGUF",
+          "revision": "43cc1aeb31adf47ec06a854507ce552cd9862e6f"
+        },
+        "include": [
+          "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+          "mtp-gemma-4-31B-it.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+            "size": 17287670048,
+            "sha256": "00b5a7c497f0c8934033088c10a7fa9a4c015e46ee6d89e9c6890650ba5d0e71"
+          },
+          {
+            "path": "mtp-gemma-4-31B-it.gguf",
+            "size": 279955968,
+            "sha256": "3a5e99fd8d0b23afb1fccd1ee0c9ebd1f571d00399c2dae2292d217feeec0f6b"
+          }
+        ]
+      }
+    },
+    "flint-loom": {
+      "package": {
+        "source": {
+          "hf": "loom-fun/ggml-org-Flint-loom",
+          "revision": "d60f073d32ca9f4c78fb20e79bb1187f8d60841f"
+        },
+        "include": [],
+        "exclude": [
+          "README.md",
+          "REPORT.md",
+          "info.json",
+          ".gitattributes",
+          "*.png",
+          "*.jpg",
+          "*.svg"
+        ],
+        "files": [
+          {
+            "path": "gen/flash2.loom",
+            "size": 405559,
+            "sha256": "e38a27f5c2ba59f2120e9bf083b43d10af92184bc5f78374799f83b56eb24841"
+          },
+          {
+            "path": "head_weights.loom",
+            "size": 3097,
+            "sha256": "c98028f73fba618d499e42f1cc7859345bfeb3b8445680df1bd0091f10fc7599"
+          },
+          {
+            "path": "llm_config.json",
+            "size": 8591,
+            "sha256": "fa9e145b2bfe65a66600d626ca00c15984287155e91a809f6c1ec326ac164abd"
+          },
+          {
+            "path": "model.json",
+            "size": 2005,
+            "sha256": "a6f1a95a18c2e3e49c14254931d83f0c033d77eba625bb21ff276c8fb84a29fb"
+          },
+          {
+            "path": "model.json.lock",
+            "size": 1142,
+            "sha256": "fdf52625d05116b3b8b6a7d106f39e1400d63e16e6a5d399b9293d1f5adc97da"
+          },
+          {
+            "path": "program/control.loom",
+            "size": 154678,
+            "sha256": "8bbc34ee0895e6badde1b08c4757a28d2b0242918f302112a8f8375840182986"
+          },
+          {
+            "path": "program/llm.loom",
+            "size": 5447739,
+            "sha256": "ecadf8f67158bb4f232e6189cf37d01209da4eab3808f75807722c40193e7fa9"
+          },
+          {
+            "path": "program/prepare.loom",
+            "size": 16437,
+            "sha256": "f0083114e214638461a74585880222a6ce35f87167c80937f004529b43c0058c"
+          },
+          {
+            "path": "program/service.loom",
+            "size": 26042,
+            "sha256": "5dcd083b26d98f39b3215f9f47b9acfaa08e62df406718cdb92aa0684323f7db"
+          },
+          {
+            "path": "program/storage.loom",
+            "size": 12728,
+            "sha256": "f0dd950480cf2c2810a621adef113469adb011c225862387983e25c4f7325a77"
+          },
+          {
+            "path": "tokenizer.json",
+            "size": 5478957,
+            "sha256": "860c699bdc78beb3bb24bcfb7addc1fd02fe49a9993081bbf295d4249d9f56c8"
+          },
+          {
+            "path": "weights.loom",
+            "size": 121,
+            "sha256": "fb3c96e131283f9f78f45b2fff79bd3b2e86f292e012f1f37d752e15edafc916"
+          }
+        ]
+      },
+      "checkpoint": {
+        "source": {
+          "hf": "ggml-org/Flint-GGUF",
+          "revision": "468307a1b38259e9e4c9d4fe53d4e3b76386572c"
+        },
+        "include": [
+          "Flint-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Flint-Q4_K_M.gguf",
+            "size": 23387911136,
+            "sha256": "c3c4d93f9db92627a2fc47ea8fe8c64a094cabd3549db544bcdd2c00e9a9a347"
+          }
+        ]
+      },
+      "drafter": {
+        "source": {
+          "hf": "incoai/Flint-DFlash2-GGUF",
+          "revision": "74e6ac0c538cfd393d97bd93694e5c4c6b6aa8c3"
+        },
+        "include": [
+          "Flint-DFlash2-Q4_K_M.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Flint-DFlash2-Q4_K_M.gguf",
+            "size": 239808192,
+            "sha256": "c14e92d3f666e0bb58e6afa76b1f44994272b2ca0b4c4b92b6b09af57de7f4b9"
+          }
+        ]
+      }
+    }
+  }
+}

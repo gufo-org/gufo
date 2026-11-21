@@ -60,6 +60,11 @@ struct ProviderInfo {
   /// modality's default. The server still clamps it to the device budget, and
   /// an operator's GPU_MAX_HW_QUEUES always wins.
   std::uint32_t hardware_queues = 0;
+  /// False when the provider drives the GPU through its own runtime instead
+  /// of HIP, from `serving.hip` in its metadata. A server running it makes no
+  /// HIP call: on Linux, a process's GPU address space belongs to the first
+  /// runtime that opens it.
+  bool uses_hip = true;
 };
 class Registry {
 public:
