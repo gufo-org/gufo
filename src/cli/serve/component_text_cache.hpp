@@ -61,7 +61,11 @@ public:
                        std::vector<ContinuationToken> = {});
     void Invalidate() noexcept;
     [[nodiscard]] std::size_t CaptureBytes() const;
-    [[nodiscard]] std::size_t CaptureBytes(std::size_t boundary) const;
+    // The same for a checkpoint taken at `boundary` inside a prefill pass.
+    // Nullopt when the adapter cannot take one there: the caller captures
+    // at a pass boundary instead. Never a reason to fail the request (#1240).
+    [[nodiscard]] std::optional<std::size_t> CaptureBytes(
+        std::size_t boundary) const;
     [[nodiscard]] std::unique_ptr<ContinuationSnapshot> Capture();
     void PreparePrefill(std::size_t tokens);
     [[nodiscard]] ComponentCacheMetrics Metrics() const;

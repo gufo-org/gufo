@@ -82,6 +82,9 @@ private:
   std::vector<Run> resident_runs_;
   std::vector<Run> transient_runs_;
   bool transient_mapped_{false};
+  /// RemapBarrier::Stamp() of the last ReleaseTransient() that unmapped
+  /// rows; 0 before the first.
+  std::uint64_t released_at_{0};
 };
 
 }  // namespace gufo::mem

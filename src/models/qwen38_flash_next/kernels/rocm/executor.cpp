@@ -1540,6 +1540,22 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
         regions.push_back(std::move(region));
         return data;
       };
+  // Pooled keys: one row per compressed block, backed whole from the start.
+  const auto pooled =
+      [&](std::vector<std::shared_ptr<gufo::mem::Region>>& regions) {
+        const std::size_t rows = max_context / c.compress_ratio + 1;
+        auto region = gufo::mem::Region::Create(
+            {.row_bytes = c.indexer_head_dim * sizeof(__half), .rows = rows},
+            error_msg);
+        if (!region || !region->Ensure(rows, error_msg)) {
+          a.push_back(nullptr);
+          return static_cast<__half*>(nullptr);
+        }
+        s->allocated_bytes_ += region->bytes();
+        auto* data = static_cast<__half*>(region->data());
+        regions.push_back(std::move(region));
+        return data;
+      };
   for (std::uint32_t il = 0; il < c.num_layers; ++il) {
     if (c.IsLinearLayer(il)) {
       auto& l = s->linear_[il];
@@ -1553,11 +1569,7 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
       at.index_k = Alloc<float>(
           a, static_cast<std::size_t>(s->index_capacity_) * c.indexer_head_dim,
           error_msg, &s->allocated_bytes_);
-      at.block_k = Alloc<__half>(
-          a,
-          static_cast<std::size_t>(max_context / c.compress_ratio + 1) *
-              c.indexer_head_dim,
-          error_msg, &s->allocated_bytes_);
+      at.block_k = pooled(s->pooled_regions_);
     }
   }
   if (c.ple_layer >= 0) {
@@ -1579,9 +1591,7 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
     s->mtp_.index_k =
         Alloc<float>(a, std::size_t{s->index_capacity_} * c.indexer_head_dim,
                      error_msg, &s->allocated_bytes_);
-    s->mtp_.block_k = Alloc<__half>(
-        a, std::size_t{max_context / c.compress_ratio + 1} * c.indexer_head_dim,
-        error_msg, &s->allocated_bytes_);
+    s->mtp_.block_k = pooled(s->mtp_pooled_regions_);
     s->mtp_.h = Alloc<float>(a, c.HcDim(), error_msg, &s->allocated_bytes_);
     if (!model_->draft_output().empty()) {
       s->mtp_.draft_rows =
@@ -1817,8 +1827,41 @@ bool Executor::EnsureKv(Session& session, std::uint32_t trunk_end,
     }
     return true;
   };
+  // Pooled keys stay backed whole; a restore can leave pages to map again.
+  const auto whole = [&](const auto& regions) {
+    return std::ranges::all_of(regions, [&](const auto& region) {
+      return region->Ensure(region->shape().rows, error);
+    });
+  };
   return ensure(session.kv_regions_, trunk_end) &&
-         ensure(session.mtp_kv_regions_, mtp_end);
+         ensure(session.mtp_kv_regions_, mtp_end) &&
+         whole(session.pooled_regions_) && whole(session.mtp_pooled_regions_);
+}
+
+void Executor::MapKvAhead(Session& session, std::uint32_t trunk_end,
+                          std::uint32_t mtp_end) const {
+  for (const auto& region : session.kv_regions_)
+    region->MapAhead(trunk_end + kKvAheadRows);
+  for (const auto& region : session.mtp_kv_regions_)
+    region->MapAhead(mtp_end + kKvAheadRows);
+}
+
+bool Executor::UnshareKv(Session& session, bool draft, std::uint32_t first,
+                         std::uint32_t end, std::uint32_t kept,
+                         std::uint32_t first_block, std::uint32_t end_block,
+                         std::uint32_t kept_block, std::string* error) const {
+  for (const auto& region :
+       draft ? session.mtp_kv_regions_ : session.kv_regions_)
+    if (!region->PrepareWrite(first, end, kept, error))
+      return false;
+  for (const auto& region :
+       draft ? session.mtp_pooled_regions_ : session.pooled_regions_)
+    if (!region->PrepareWrite(first_block, end_block, kept_block, error))
+      return false;
+  // Replaced pages reach the device, and get their copies, only now: one
+  // barrier for every buffer. Two atomic reads when nothing was replaced.
+  const auto& regions = draft ? session.mtp_kv_regions_ : session.kv_regions_;
+  return regions.empty() || regions.front()->SettleRemaps(error);
 }
 
 std::size_t Executor::DemandMappedBytes(
@@ -1990,9 +2033,9 @@ bool Executor::SetYarnFactor(Session& s, float factor, std::string* error_msg) {
   // and the rows the cache borrowed or is copying out.
   s.PreserveSnapshots(0, 0);
   if (s.continuation_hooks_) {
-    s.continuation_hooks_->BeforeWrite(false, 0, s.position_, 0, s.blocks_);
-    s.continuation_hooks_->BeforeWrite(true, 0, s.mtp_.position, 0,
-                                       s.mtp_.blocks);
+    s.continuation_hooks_->BeforeRewrite(false, 0, s.position_, 0, s.blocks_);
+    s.continuation_hooks_->BeforeRewrite(true, 0, s.mtp_.position, 0,
+                                         s.mtp_.blocks);
   }
   // A prefill checkpoint over these rows is consumed before the next
   // forward, which this precedes.
@@ -4819,6 +4862,11 @@ bool Executor::RestoreSnapshot(Session& session,
     return false;
   }
   if (!EnsureKv(session, h.position, h.mtp_position, error_msg))
+    return false;
+  // The payload overwrites these rows: never in a page a checkpoint shares.
+  if (!UnshareKv(session, false, 0, h.position, 0, 0, h.blocks, 0, error_msg) ||
+      !UnshareKv(session, true, 0, h.mtp_position, 0, 0, h.mtp_blocks, 0,
+                 error_msg))
     return false;
   if (h.position - h.blocks * h.compress_ratio > session.index_capacity_) {
     AssignError(error_msg, "unpooled indexer rows exceed the ring capacity");

@@ -23,6 +23,8 @@
 #include "src/core/hip/transfer_pool.hpp"
 #include "src/mem/ledger.hpp"
 #include "src/mem/lendable.hpp"
+#include "src/mem/remap_barrier.hpp"
+#include "src/mem/shared_rows.hpp"
 
 namespace gufo::hip {
 
@@ -48,6 +50,27 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     // restore or capture.
     hip::TransferPool background{8, 1};
     std::unique_ptr<hip::CommittedBackingPool> pool;
+    // Keeps checkpoint rows in the session pages that hold them; null where
+    // rows are copied to the pool instead.
+    std::shared_ptr<mem::SharedRows> shared;
+    std::function<void(std::string_view)> info;
+    ~Backing() {
+      // What the remap barrier cost this server; `unquiet` counts barriers
+      // that gave up waiting for a quiet device.
+      const auto barrier = mem::RemapBarrier::Stats();
+      if (info && barrier.settles != 0)
+        info("schema=component-cache-v1 event=remap_barrier settles=" +
+             std::to_string(barrier.settles) +
+             " unquiet=" + std::to_string(barrier.unquiet) +
+             " total_us=" + std::to_string(barrier.micros));
+    }
+    // Bytes of payloads that share session pages, and the payload bytes the
+    // RAM budget covers. Shared payloads and the pool's committed blocks
+    // together stay within it: what the budget holds beyond is the ledger's
+    // room for metadata, and a payload that took it would fail every later
+    // capture and disk write.
+    std::atomic<std::size_t> shared_bytes{0};
+    std::size_t payload_capacity{0};
     std::map<std::uint32_t, std::size_t> component_classes;
     // The serving layer's eviction for borrowed pages. The state pool's
     // thread calls it under this mutex, so clearing waits for a call.
@@ -136,6 +159,7 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
       limited->refused = std::chrono::steady_clock::now();
       return false;
     };
+    backing->payload_capacity = allocation.blocks * allocation.block_bytes;
     backing->pool = std::make_unique<hip::CommittedBackingPool>(
         ledger,
         hip::BackingPoolConfig{
@@ -144,6 +168,15 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
             allocation.block_bytes, allocation.metadata_bytes, segment,
             [limited, refuse, hooks, lends,
              weak = std::weak_ptr<Backing>(backing)](std::size_t bytes) {
+              // Payloads that share session pages hold this part of the
+              // budget. The capture evicts and asks again, so no latch: the
+              // answer changes with the next eviction.
+              if (const auto owner = weak.lock();
+                  owner && owner->pool &&
+                  owner->pool->CommittedBytes() + bytes +
+                          owner->shared_bytes.load(std::memory_order_relaxed) >
+                      owner->payload_capacity)
+                return false;
               const std::lock_guard lock(limited->mutex);
               if (limited->active &&
                   std::chrono::steady_clock::now() - limited->refused <
@@ -234,6 +267,10 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
                 return false;
               const std::lock_guard lock(owner->shed_mutex);
               return bool(owner->shed);
+            },
+            [weak = std::weak_ptr<Backing>(backing)]() -> std::size_t {
+              const auto owner = weak.lock();
+              return owner && owner->shared ? owner->shared->FreePages() : 0;
             }});
     // Prepare a bounded reserve before readiness. The first shared-prefix
     // capture needs more than one segment; preparing 2 GiB avoids moving
@@ -267,8 +304,103 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
         " backing=" + (backing->pool->Lends() ? "state_pages" : "host_pages") +
         " prepare_ms=" + std::to_string(prepare_ms));
   };
+  backing->shared = mem::CreateSharedRows();
+  backing->info = hooks.info;
+  if (hooks.info)
+    hooks.info(
+        std::string("schema=component-cache-v1 event=row_storage mode=") +
+        (backing->shared ? "shared_pages" : "backing"));
+  if (backing->shared) {
+    // Completed rows in a session's own pages: the checkpoint keeps the
+    // pages, mapped a second time in the park, instead of a copy. The
+    // session goes on appending to them and copies a page only when it
+    // rewrites rows a checkpoint holds.
+    result->share =
+        [backing, &ledger](
+            const cache::PayloadRequest& request,
+            std::span<const std::byte> view) -> std::optional<cache::Payload> {
+      if (view.size() != request.bytes)
+        return std::nullopt;
+      // Within the part of the budget the pool has not committed. Past it
+      // the budget is in pool blocks, free or not: the rows go there.
+      const auto committed =
+          backing->pool ? backing->pool->CommittedBytes() : 0;
+      if (committed + backing->shared_bytes.load(std::memory_order_relaxed) +
+              request.bytes >
+          backing->payload_capacity)
+        return std::nullopt;
+      auto rows = backing->shared->Share(view);
+      if (!rows)
+        return std::nullopt;
+      cache::ResourceReservation reservation;
+      try {
+        reservation = ledger.ReserveShared(request.bytes);
+      } catch (const std::bad_alloc&) {
+        return std::nullopt;
+      }
+      // The payload's owner: the shared page, counted until it is dropped.
+      struct Counted {
+        std::shared_ptr<const void> rows;
+        std::shared_ptr<Backing> backing;
+        std::size_t bytes;
+        ~Counted() {
+          backing->shared_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+        }
+      };
+      const auto* const data = rows.get();
+      backing->shared_bytes.fetch_add(request.bytes, std::memory_order_relaxed);
+      auto counted =
+          std::make_shared<Counted>(std::move(rows), backing, request.bytes);
+      return cache::Payload::Committed(
+          reservation.Convert(),
+          std::shared_ptr<const void>(std::move(counted), data));
+    };
+    result->device_only = [shared = backing->shared](const void* address) {
+      return shared->Contains(address);
+    };
+    // A disk write reads shared pages on the device's copy engine: a copy
+    // on the write's stream completes only behind the decode rounds that
+    // share its queue (2.2 GB took 6-13 s beside a decoder), and mapping
+    // the pages for the CPU from the writer's thread stalled the model's
+    // own work for 100-250 ms at a time.
+    if (auto* const engine = hip::DeviceCopyEngine())
+      result->copy_device_only = [engine](std::span<const std::byte> source,
+                                          std::span<std::byte> destination) {
+        struct Fence {
+          hip::CopyEngine* engine;
+          hip::CopyEngine::Fence fence;
+          explicit Fence(hip::CopyEngine* engine)
+              : engine(engine), fence(engine->CreateFence()) {}
+          ~Fence() { engine->DestroyFence(fence); }
+        };
+        thread_local std::unique_ptr<Fence> fence;
+        try {
+          if (!fence)
+            fence = std::make_unique<Fence>(engine);
+        } catch (const std::exception&) {
+          return false;
+        }
+        // Device work of this thread's own, for the remap barrier.
+        const mem::DeviceWorkScope work;
+        if (!engine->Copy(destination.data(), source.data(), destination.size(),
+                          fence->fence))
+          return false;
+        engine->Wait(fence->fence);
+        return true;
+      };
+    result->settle = [shared = backing->shared] { shared->Sweep(); };
+  }
   result->release_host = [backing](std::size_t bytes) -> std::size_t {
-    return backing->pool ? backing->pool->Surrender(bytes) : 0;
+    // Evicted checkpoints' shared pages are back in the state pool; their
+    // park addresses still map them until swept.
+    std::size_t released = 0;
+    if (backing->shared) {
+      backing->shared->Sweep();
+      released = backing->shared->ReleaseFree(bytes);
+    }
+    if (released < bytes && backing->pool)
+      released += backing->pool->Surrender(bytes - released);
+    return released;
   };
   result->set_shed = [backing](std::function<bool()> shed) {
     const std::lock_guard lock(backing->shed_mutex);
@@ -284,7 +416,8 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
   };
   result->await_capture = [backing] { backing->pool->WaitWhileGrowingAhead(); };
   result->can_capture = [backing](auto payloads) {
-    return backing->pool->CanFit(payloads);
+    return backing->pool->CanFit(
+        payloads, backing->shared_bytes.load(std::memory_order_relaxed));
   };
   result->owner = backing;
   result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
@@ -310,6 +443,10 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     const auto segments = backing->pool->PageCommitAllocations();
     const auto started = std::chrono::steady_clock::now();
     auto block = backing->pool->TryAcquire(category, request.bytes);
+    // Backing committed where a page was given back to the host reaches the
+    // device only after the remap barrier; two atomic reads otherwise.
+    if (backing->shared)
+      (void)backing->shared->SettleRemaps();
     if (backing->pool->PageCommitAllocations() != segments)
       hooks.info(
           "schema=component-cache-v1 event=backing_grown committed_bytes=" +

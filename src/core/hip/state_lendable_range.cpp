@@ -13,6 +13,7 @@
 #include "src/core/hip/state_page_pool.hpp"
 #include "src/core/platform/pages.hpp"
 #include "src/mem/ledger.hpp"
+#include "src/mem/remap_barrier.hpp"
 
 namespace gufo::mem {
 namespace {
@@ -28,7 +29,8 @@ public:
         base_(base),
         pages_(pages),
         handles_(pages),
-        state_(pages, State::kAbsent) {}
+        state_(pages, State::kAbsent),
+        unmapped_at_(pages, 0) {}
 
   ~VmmLendableRange() override {
     pool_->RemoveLender(this);
@@ -166,6 +168,8 @@ public:
       (void)hipGetLastError();
       handles_[p] = {};
       state_[p] = State::kAbsent;
+      // The device may still reach the old page here until it has been idle.
+      unmapped_at_[p] = RemapBarrier::Stamp();
       ledger.RemoveLendable(kPageBytes);
       result.released.push_back(p);
     }
@@ -243,8 +247,13 @@ private:
                                       hipMemHandleTypePosixFileDescriptor,
                                       0) == hipSuccess &&
         platform::MapDeviceFileAt(page, kPageBytes, fd);
-    if (mapped)
+    if (mapped) {
+      // A page committed where another was decommitted: the cache settles
+      // before the device writes a capture there (PagePool::SettleRemaps).
+      if (!RemapBarrier::Clean(unmapped_at_[p]))
+        RemapBarrier::NoteRemap();
       return true;
+    }
     (void)hipGetLastError();
     platform::UnmapDeviceFileAt(page, kPageBytes);
     (void)hipMemUnmap(page, kPageBytes);
@@ -258,6 +267,8 @@ private:
   std::mutex mutex_;
   std::vector<hipMemGenericAllocationHandle_t> handles_;
   std::vector<State> state_;
+  /// RemapBarrier::Stamp() of each page's last decommit; 0 without one.
+  std::vector<std::uint64_t> unmapped_at_;
   std::unordered_map<hipMemGenericAllocationHandle_t, std::size_t> index_;
   std::mutex owner_mutex_;
   std::shared_ptr<const Owner> owner_;
