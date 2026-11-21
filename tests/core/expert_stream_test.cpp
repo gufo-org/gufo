@@ -14,6 +14,8 @@
 #include "src/core/hip/expert_stream/store.hpp"
 #include "src/core/platform/mapped_file.hpp"
 #include "src/core/platform/os_info.hpp"
+#include "src/mem/ledger.hpp"
+#include "src/mem/remap_barrier.hpp"
 
 namespace {
 
@@ -180,6 +182,20 @@ struct Runner {
   }
 };
 
+// Whether the store keeps its cache in device pages here, as it decides:
+// virtual memory management and a device heap that covers host memory.
+bool DevicePages() {
+  int device = 0, vmm = 0;
+  size_t heap_free = 0, heap_total = 0;
+  const auto host = gufo::platform::QueryHostMemory();
+  return hipGetDevice(&device) == hipSuccess &&
+         hipDeviceGetAttribute(
+             &vmm, hipDeviceAttributeVirtualMemoryManagementSupported,
+             device) == hipSuccess &&
+         vmm && hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
+         gufo::mem::HeapCoversHost(heap_total, host ? host->total_bytes : 0);
+}
+
 // A grant large enough that cache_limit_bytes alone bounds the cache.
 constexpr uint64_t kAmpleGrant = uint64_t{1} << 40;
 
@@ -337,9 +353,16 @@ void OnePieceLayout(int32_t* routes) {
   Check(store->Restore() > 0 && store->Restore() == 0 &&
             store->ReleasedBytes() == 0,
         "one-piece restore raises the limit once");
-  Check(run.Run(1, {5, 7}) && run.Run(1, {5, 7}) &&
-            store->GetStats().hits == released.hits + 2,
+  // Misses refill both size classes, two experts each, within the grant,
+  // so one class maps new pages where the released chunk had its own: the
+  // device may still reach the freed pages there until a remap barrier
+  // settles.
+  const auto settles = gufo::mem::RemapBarrier::Stats().settles;
+  Check(run.Run(0, {4, 6}) && run.Run(0, {4, 6}) && run.Run(1, {5, 7}) &&
+            run.Run(1, {5, 7}) && store->GetStats().hits == released.hits + 4,
         "one-piece restore regrows");
+  Check(!DevicePages() || gufo::mem::RemapBarrier::Stats().settles > settles,
+        "one-piece regrowth settles the remap barrier");
   Check(store->GetStats().cache_bytes <= 4 * m.Slot(0),
         "one-piece restore stays within the grant");
 }

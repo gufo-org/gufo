@@ -27,10 +27,17 @@ routed experts from its files into a bounded device cache, linked through
   complete it.
 - `Fit(grant)` sizes the cache to the host's grant, its prefetch stage and
   read margin included, and fills the room left from `Policy::ranking`, then
-  with the experts it leaves out; until the first `Fit` nothing is cached. `Release(bytes)` frees the coldest chunks and holds the cache
-  there, `Restore()` lets it regrow to the grant, and `ReleasedBytes()` and
-  `FloorBytes()` report what was released and the free memory below which it
-  stops growing.
+  with the experts it leaves out; until the first `Fit` nothing is cached.
+  `Release(bytes)` frees the newest chunks, dropping their experts without
+  reading them, and holds the cache there, `Restore()` lets it regrow to the
+  grant, and `ReleasedBytes()` and `FloorBytes()` report what was released
+  and the free memory below which it stops growing.
+- The cache is mapped from 2 MiB device pages (`hipMemCreate`) where the
+  device supports virtual memory management and its heap covers host memory
+  (`mem::HeapCoversHost`), from managed memory elsewhere. When it maps pages
+  where it released others, it settles `mem::RemapBarrier` before the tables
+  point there, and on destruction it leaves its addresses clean. Its reader
+  threads bracket their uploads with `mem::DeviceWorkScope`.
 - `Policy::trace_path` writes a versioned binary routing trace (layout,
   policy, seeded cache, then each `Prepare`'s routes and hits).
   `tools/expert_stream/` reads it and replays eviction and prefetch rules

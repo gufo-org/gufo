@@ -35,6 +35,7 @@
 #include "src/core/platform/pages.hpp"
 #include "src/ext/host_budget.hpp"
 #include "src/mem/ledger.hpp"
+#include "src/mem/remap_barrier.hpp"
 
 namespace gufo::expert_stream {
 namespace {
@@ -73,6 +74,11 @@ struct Chunk {
 struct ClassRange {
   uint8_t* base = nullptr;
   uint64_t reserved = 0, mapped = 0, used = 0;
+  /* The most the range has had mapped, and the RemapBarrier stamp of the
+   * last time it lost pages: mapping below `high_water` reuses addresses
+   * the device may still translate to the freed pages. */
+  uint64_t high_water = 0;
+  uint64_t released_at = 0;
 };
 
 hipMemAllocationProp DeviceProp(int device) {
@@ -127,7 +133,9 @@ void UnmapPages(uint8_t* at, const hipMemGenericAllocationHandle_t* pages,
 
 /* Maps `bytes` (a multiple of kPageBytes) of new device pages at the end of
  * `range`, reserving the range first; false, with nothing held, when any
- * step fails. */
+ * step fails. Pages mapped where the range lost pages before are reached
+ * only after RemapBarrier::Settle, which this runs when needed: call it on
+ * the thread that runs the model, between its launches. */
 bool MapClassPages(int device, ClassRange& range, uint64_t bytes,
                    Chunk& chunk) {
   const hipMemAllocationProp prop = DeviceProp(device);
@@ -170,7 +178,13 @@ bool MapClassPages(int device, ClassRange& range, uint64_t bytes,
   chunk.base = at;
   chunk.bytes = bytes;
   chunk.pages = std::move(pages);
+  // Until the device has been idle it reaches the pages these addresses
+  // had before (RemapBarrier): wait for that before any table points here.
+  if (range.mapped < range.high_water &&
+      !mem::RemapBarrier::Clean(range.released_at))
+    mem::RemapBarrier::Settle();
   range.mapped += bytes;
+  range.high_water = std::max(range.high_water, range.mapped);
   return true;
 }
 
@@ -547,12 +561,19 @@ private:
       skip = 0;
       ++buffered_reads_;
     }
-    if ((!direct && !read_all(task.file, buffer, task.bytes, task.offset)) ||
-        hipMemcpyAsync(task.destination, buffer + skip, task.bytes,
-                       hipMemcpyHostToDevice, streams_[index]) != hipSuccess ||
-        hipEventRecord(events_[index], streams_[index]) != hipSuccess ||
-        hipEventSynchronize(events_[index]) != hipSuccess)
+    if (!direct && !read_all(task.file, buffer, task.bytes, task.offset))
       return false;
+    {
+      // Device work of this thread's own: a remap barrier elsewhere waits
+      // for it and holds the next upload back (RemapBarrier).
+      const mem::DeviceWorkScope device_work;
+      if (hipMemcpyAsync(task.destination, buffer + skip, task.bytes,
+                         hipMemcpyHostToDevice,
+                         streams_[index]) != hipSuccess ||
+          hipEventRecord(events_[index], streams_[index]) != hipSuccess ||
+          hipEventSynchronize(events_[index]) != hipSuccess)
+        return false;
+    }
     if (task.job_bytes)
       task.job_bytes->fetch_add(task.bytes);
     return true;
@@ -802,8 +823,15 @@ struct Store::Impl {
     for (platform::PlatformFile file : owned_files)
       platform::CloseFile(file);
     (void)hipDeviceSynchronize();
+    const bool had_pages =
+        std::any_of(chunks.begin(), chunks.end(),
+                    [](const Chunk& chunk) { return !chunk.pages.empty(); });
     while (!chunks.empty())
       free_last_chunk();
+    // The next owner of these addresses may map them at once: leave them
+    // clean (RemapBarrier). The device is already idle.
+    if (had_pages)
+      mem::RemapBarrier::Settle();
     for (ClassRange& range : ranges)
       if (range.base)
         (void)hipMemAddressFree(range.base, range.reserved);
@@ -856,8 +884,9 @@ struct Store::Impl {
       (void)hipFree(chunk.base);
       (void)hipGetLastError();
     } else {
-      UnmapPages(chunk.base, chunk.pages.data(), chunk.pages.size());
       ClassRange& range = ranges[chunk.size_class];
+      range.released_at = mem::RemapBarrier::Stamp();
+      UnmapPages(chunk.base, chunk.pages.data(), chunk.pages.size());
       range.mapped = static_cast<uint64_t>(chunk.base - range.base);
       range.used = chunk.class_used;
     }
@@ -1289,6 +1318,13 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
   }
   store->device = device;
   store->device_pages = DevicePagesAvailable(device);
+  // A cache that lost pages maps new ones at the same addresses, which must
+  // wait for the device's work (RemapBarrier), as Gufo's page pool does.
+  if (store->device_pages)
+    mem::RemapBarrier::SetDeviceDrain(+[]() noexcept {
+      (void)hipDeviceSynchronize();
+      (void)hipGetLastError();
+    });
   try {
     store->readers = std::make_unique<ReadPool>(store->read_buffers, device);
   } catch (const std::exception&) {

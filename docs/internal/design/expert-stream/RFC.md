@@ -169,6 +169,15 @@ class's slots lie back to back in one reserved address range, mapped in
 leaves a part page unused. The cache grows only while both the host and the
 device heap stay above the floor.
 
+Releasing and regrowing reuses addresses. Until its work has been idle, the
+device keeps reaching the page an address had before it was unmapped
+(`mem::RemapBarrier`), so when a class maps new pages where it released
+others, the store settles the barrier before any table points there, about
+0.5 ms on the first regrowth after a release; on destruction it leaves its
+addresses clean for their next owner. Its reader threads upload on their
+own streams, so they bracket that work with `mem::DeviceWorkScope`, and a
+barrier settling elsewhere waits for them.
+
 **Eviction** is by frequency class, after llama.cpp's ClassLRU. Each cached
 expert counts its uses, decaying with a half-life measured in tokens of its
 layer's clock; its class is `floor(log2(uses))`, capped. The victim is the
