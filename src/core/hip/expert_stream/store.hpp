@@ -159,9 +159,10 @@ public:
   bool Fit(uint64_t grant_bytes);
 
   /* Gives memory back to the host after Fit: frees whole chunks, newest
-   * first, until at least `bytes` went or the cache is empty, keeping the
-   * experts eviction ranks highest, and holds the cache at what is left
-   * until Restore. Waits for queued predictions and returns 0 while
+   * first, until at least `bytes` went or the cache is empty, and holds the
+   * cache at what is left until Restore. The experts in the freed chunks
+   * are dropped, not moved: under host pressure the kernel may have swapped
+   * cache pages out, and moving them would read them back in. Waits for queued predictions and returns 0 while
    * prefetch reads run; call it only while no Prepare runs (serving does
    * when idle). Returns the bytes freed. */
   uint64_t Release(uint64_t bytes);

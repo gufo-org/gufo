@@ -826,11 +826,14 @@ struct Store::Impl {
     }
   }
 
-  /* Frees the newest chunks until the cache fits `limit`, keeping the
-   * highest keep values of each size class: survivors in the freed chunks
-   * move into the kept slots of the lowest, which are evicted.
-   * No prepare or prefetch may be running (startup, or Release). */
-  bool shrink_to(uint64_t limit) {
+  /* Frees the newest chunks until the cache fits `limit`. With
+   * `move_survivors`, keeps the highest keep values of each size class:
+   * survivors in the freed chunks move into the kept slots of the lowest,
+   * which are evicted. Without it, the freed chunks' experts are dropped and
+   * no cache memory is touched, so a release under host pressure does not
+   * read pages the kernel may have swapped out. No prepare or prefetch may
+   * be running (startup, or Release). */
+  bool shrink_to(uint64_t limit, bool move_survivors) {
     if (stats.cache_bytes <= limit || chunks.empty())
       return true;
     size_t drop = chunks.size();
@@ -845,7 +848,11 @@ struct Store::Impl {
     const uint32_t cut = chunk_first[drop];
     if (hipDeviceSynchronize() != hipSuccess)
       return false;
-    for (uint32_t c = 0; c < class_bytes.size(); ++c) {
+    if (!move_survivors)
+      for (uint32_t i = cut; i < slots.size(); ++i)
+        if (slots[i].layer != kNoSlot)
+          entry(slots[i].layer, slots[i].expert).slot = kNoSlot;
+    for (uint32_t c = 0; move_survivors && c < class_bytes.size(); ++c) {
       // Occupied slots of this class, kept region and freed region.
       std::vector<uint32_t> kept, moving;
       uint32_t kept_slots = 0;
@@ -2159,7 +2166,8 @@ uint64_t Store::Release(uint64_t bytes) {
   if (!store->readers->Idle())
     return 0;
   const uint64_t before = store->stats.cache_bytes;
-  (void)store->shrink_to(before > bytes ? before - bytes : 0);
+  (void)store->shrink_to(before > bytes ? before - bytes : 0,
+                         /*move_survivors=*/false);
   store->cache_limit = std::min(store->cache_limit, store->stats.cache_bytes);
   store->released += before - store->stats.cache_bytes;
   return before - store->stats.cache_bytes;
@@ -2233,7 +2241,7 @@ bool Store::Fit(uint64_t grant_bytes) {
   store->cache_limit = limit;
   store->granted_limit = limit;
   store->released = 0;
-  const bool shrunk = store->shrink_to(limit);
+  const bool shrunk = store->shrink_to(limit, /*move_survivors=*/true);
   // Seed takes the ranking by value and records it again.
   const std::string source = store->seed_source;
   const bool seeded =
