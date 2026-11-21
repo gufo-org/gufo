@@ -1495,7 +1495,15 @@ the version and revision `gufo --version` prints, `total_slots` the
 and `default_generation_settings.params` the sampling a request without
 sampling fields gets, with `n_predict` and `max_tokens` -1 when no default
 limit is set. `modalities.vision` is true only when a vision encoder
-loaded. Fields the server cannot report are omitted rather than sent as zero.
+loaded. `chat_template_caps` carries the llama.cpp capability field names
+(`supports_preserve_reasoning`, `supports_reasoning_effort`,
+`reasoning_effort_levels`, `reasoning_effort_rejected`, the tool, content and
+system-role flags) for the loaded model's compiled template. llama.cpp derives
+them by probing its Jinja template at load; gufo templates are engine code, so
+the engine declares the same facts: a level appears in `reasoning_effort_levels`
+when the template renders it distinctly from its fallback, lowest to highest,
+with alias groups collapsed onto their highest name. Fields the server cannot
+report are omitted rather than sent as zero.
 
 `POST /apply-template` takes a Chat Completions body and returns
 `{"prompt": "..."}`, the text the model's compiled chat template renders it
