@@ -37,11 +37,17 @@ enum class DFlashDraftPolicy : std::uint32_t { kFixed, kAdaptive };
 class DFlashLengthController {
 public:
   static constexpr std::uint32_t kMaxDraftTokens = 7;
+  /// A fixed block may fill a 16-row verification (DSpine b16: block - 1).
+  /// The adaptive cost tables stop at kMaxDraftTokens.
+  static constexpr std::uint32_t kMaxFixedDraftTokens = 15;
 
   DFlashLengthController(DFlashDraftPolicy policy, std::uint32_t limit,
                          bool q8_target = false)
       : policy_(policy),
-        limit_(std::clamp(limit, 1U, kMaxDraftTokens)),
+        limit_(std::clamp(limit, 1U,
+                          policy == DFlashDraftPolicy::kFixed
+                              ? kMaxFixedDraftTokens
+                              : kMaxDraftTokens)),
         q8_target_(q8_target) {
     Reset();
   }

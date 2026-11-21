@@ -7,6 +7,7 @@
 #include <gufo/ext/experimental/hip_utils.hpp>
 #include <gufo/ext/experimental/snapshot_transfer.hpp>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -88,6 +89,30 @@ std::size_t DraftTableBytes(const QwenDFlashGpuModel& model) {
     return 0;
   return kDraftRows * (model.DraftRowBytes() + sizeof(std::int32_t) +
                        model.GetDFlashConfig().block_size * sizeof(float));
+}
+
+/// Matches Tencent's eps (dspine.py) and gufo's RMSNorm eps.
+constexpr float kDSpineEps = 1e-6F;
+/// Context length from which DSpine's draft attention takes the split route
+/// (LaunchDSpineAttention); both routes give the same bits. On gfx1151 the
+/// split route is faster from 2048 at 4 to 16 rows, the wave kernel at 1024.
+constexpr std::uint32_t kDSpineSplitAttentionContext = 2048;
+
+/// Elements of each DSpine scratch buffer, in the order of dflash.hpp's
+/// d_dspine_* members; all zero for DFlash-2.
+std::array<std::size_t, 11> DSpineScratchElements(
+    const QwenDFlashGpuModel& model) {
+  if (!model.IsDSpine())
+    return {};
+  const auto& bridge = *model.GetWeights().dspine;
+  const std::size_t block = model.GetDFlashConfig().block_size;
+  const std::size_t lanes = model.GetDFlashConfig().selector_top_k;
+  const std::size_t pairs = (block - 1U) * lanes;
+  const std::size_t code = bridge.code_size, rank = bridge.rank;
+  const std::size_t hidden = model.GetConfig().hidden_size;
+  return {block,          block * code,   block * 3U * rank, code,
+          block * lanes,  pairs * rank,   pairs * code,      pairs * 2U * rank,
+          pairs * hidden, pairs * hidden, pairs * lanes};
 }
 
 void NormalizeAndRotateQK(float* query, float* key, const float* query_weight,
@@ -262,7 +287,9 @@ void QwenDFlashGpuExecutor::Allocate() {
   const std::size_t num_layers = df_cfg.num_layers;
   const std::size_t enc_in_dim = df_cfg.target_layer_ids.size() * hidden_size;
   const std::size_t dynamic_size =
-      2U * df_cfg.conv_kernel_size * (hidden_size / df_cfg.conv_group_size);
+      model_->IsDSpine() ? 0U
+                         : 2U * df_cfg.conv_kernel_size *
+                               (hidden_size / df_cfg.conv_group_size);
 
   const auto error = hipStreamCreate(&stream_);
   if (error != hipSuccess) {
@@ -287,6 +314,8 @@ void QwenDFlashGpuExecutor::Allocate() {
   }
 
   const auto allocate_scratch = [this](auto*& pointer, std::size_t elements) {
+    if (elements == 0)  // DSpine: no convolution or selector rank
+      return;
     AllocateBuffer(pointer, elements);
     scratch_bytes_ += elements * sizeof(*pointer);
   };
@@ -329,6 +358,32 @@ void QwenDFlashGpuExecutor::Allocate() {
   allocate_scratch(d_out_token_, block_size);
   if (block_size > kDFlashMaxSharedBatch)
     allocate_scratch(d_bf16_input_, block_size * intermediate_size);
+  const auto dspine = DSpineScratchElements(*model_);
+  allocate_scratch(d_dspine_scratch_,
+                   std::reduce(dspine.begin(), dspine.end()));
+  if (d_dspine_scratch_ != nullptr) {
+    float* next = d_dspine_scratch_;
+    std::size_t index = 0;
+    const auto take = [&]<typename T>(T*& pointer) {
+      pointer = reinterpret_cast<T*>(next);
+      next += dspine[index++];
+    };
+    take(d_dspine_rms_);
+    take(d_dspine_codes_);
+    take(d_dspine_packed_);
+    take(d_dspine_anchor_code_);
+    take(d_dspine_ids_);
+    take(d_dspine_message_);
+    take(d_dspine_senders_);
+    take(d_dspine_sender_gates_);
+    take(d_dspine_delta_);
+    take(d_dspine_heads_);
+    take(d_dspine_table_);
+    allocate_scratch(d_dspine_scores_,
+                     kernels::DSpineAttentionScoreElements(
+                         static_cast<std::uint32_t>(block_size),
+                         cfg.num_attention_heads, history_capacity_));
+  }
   if (model_->DraftPrefixRows() != 0) {
     allocate_scratch(d_draft_rows_, kDraftRows * model_->DraftRowBytes());
     allocate_scratch(d_draft_ids_, kDraftRows);
@@ -402,8 +457,12 @@ void QwenDFlashGpuExecutor::PrewarmBlockGemms() {
   const std::size_t q_dim = cfg.AttentionSize();
   const std::size_t kv_dim =
       static_cast<std::size_t>(cfg.num_key_value_heads) * cfg.head_dim;
+  // DSpine has no convolution (its empty refs skip below); its bridge uses
+  // the exact FP32-activation GEMM, which needs no prewarm.
   const std::size_t dynamic_size =
-      2U * df_cfg.conv_kernel_size * (hidden_size / df_cfg.conv_group_size);
+      model_->IsDSpine() ? 0U
+                         : 2U * df_cfg.conv_kernel_size *
+                               (hidden_size / df_cfg.conv_group_size);
 
   HIP_CHECK(hipMemsetAsync(d_block_normed_, 0,
                            df_cfg.block_size * hidden_size * sizeof(float),
@@ -473,6 +532,13 @@ void QwenDFlashGpuExecutor::RunBlockGemm(const models::QwenTensorRef& weight,
       if (TryLaunchVerifyGemm27(weight.type, weight.data, input, output,
                                 batch_size, output_size, input_size, stream_))
         return;
+      LaunchBatchedQuantGEMMFp32(weight.type, weight.data, input, output,
+                                 batch_size, output_size, input_size, stream_);
+      return;
+    }
+    // DSpine's 9-16 row blocks: the FP32 route groups up to sixteen rows per
+    // weight read, where the BF16 route below reads every weight once per row.
+    if (batch_size <= 2U * kDFlashMaxSharedBatch) {
       LaunchBatchedQuantGEMMFp32(weight.type, weight.data, input, output,
                                  batch_size, output_size, input_size, stream_);
       return;
@@ -613,6 +679,10 @@ void QwenDFlashGpuExecutor::Free() noexcept {
     (void)hipFree(d_draft_ids_);
   if (d_draft_logits_ != nullptr)
     (void)hipFree(d_draft_logits_);
+  if (d_dspine_scratch_ != nullptr)
+    (void)hipFree(d_dspine_scratch_);
+  if (d_dspine_scores_ != nullptr)
+    (void)hipFree(d_dspine_scores_);
   if (d_batch_scratch_ != nullptr)
     (void)hipFree(d_batch_scratch_);
   hipblaslt_gemm_.reset();
@@ -653,7 +723,9 @@ QwenGpuMemoryUsage QwenDFlashGpuExecutor::EstimateMemoryUsage(
   const std::size_t injection = std::min(max_context, std::uint32_t{256});
   const std::size_t shared = std::max(injection, block);
   const std::size_t dynamic =
-      2U * draft.conv_kernel_size * (hidden / draft.conv_group_size);
+      model.IsDSpine()
+          ? 0U
+          : 2U * draft.conv_kernel_size * (hidden / draft.conv_group_size);
   const auto ffn_scratch_width = std::max<std::size_t>(
       config.intermediate_size,
       kernels::DFlashSelectorScratchElements(config.vocab_size));
@@ -674,7 +746,17 @@ QwenGpuMemoryUsage QwenDFlashGpuExecutor::EstimateMemoryUsage(
     usage.temporary_scratch_bytes +=
         block * config.intermediate_size * sizeof(hip_bfloat16);
   usage.temporary_scratch_bytes += DraftTableBytes(model);
-  if (max_batch_width > 1 && config.head_dim <= 256)
+  const auto dspine = DSpineScratchElements(model);
+  usage.temporary_scratch_bytes +=
+      std::reduce(dspine.begin(), dspine.end()) * sizeof(float);
+  if (model.IsDSpine())
+    usage.temporary_scratch_bytes +=
+        kernels::DSpineAttentionScoreElements(
+            draft.block_size, config.num_attention_heads,
+            std::min(max_context, draft.sliding_window)) *
+        sizeof(float);
+  // DSpine drafts each session alone (ProposeEach): no batch workspace.
+  if (max_batch_width > 1 && config.head_dim <= 256 && !model.IsDSpine())
     usage.temporary_scratch_bytes += BatchScratchBytes(
         model, max_batch_width * std::min<std::size_t>(block, max_context));
   return usage;
@@ -1033,6 +1115,99 @@ kernels::DFlashSampling QwenDFlashGpuExecutor::PrepareDraftSampling(
   return result;
 }
 
+void QwenDFlashGpuExecutor::RunDSpineBridge(std::size_t layer,
+                                            std::uint32_t rows) {
+  const auto& bridge = *model_->GetWeights().dspine;
+  const std::size_t hidden = model_->GetConfig().hidden_size;
+  const std::size_t code = bridge.code_size;
+  const std::size_t rank = bridge.rank;
+  // c_t from row t's hidden state (row 0: the anchor's codebook row), then
+  // [G; P; A] c_t, row t's message from row t - 1, and W_l m_t scaled by
+  // rms_t. Every bridge matrix is BF16; activations stay FP32.
+  kernels::LaunchDSpineRowStats(d_block_hidden_, d_block_normed_, d_dspine_rms_,
+                                rows, static_cast<std::uint32_t>(hidden),
+                                kDSpineEps, stream_);
+  LaunchExactBf16GEMMFp32SmallBatch(bridge.read[layer].data, d_block_normed_,
+                                    d_dspine_codes_, rows, code, hidden,
+                                    stream_);
+  kernels::LaunchDSpineCodes(d_dspine_codes_, d_dspine_anchor_code_, rows,
+                             bridge.code_size, kDSpineEps, stream_);
+  LaunchExactBf16GEMMFp32SmallBatch(bridge.gates.data, d_dspine_codes_,
+                                    d_dspine_packed_, rows, 3U * rank, code,
+                                    stream_);
+  kernels::LaunchDSpineMessage(d_dspine_packed_, nullptr,
+                               static_cast<const float*>(bridge.gate_bias.data),
+                               d_dspine_message_, rows, bridge.rank, 0, 1.0F,
+                               stream_);
+  LaunchExactBf16GEMMFp32SmallBatch(bridge.write[layer].data, d_dspine_message_,
+                                    d_ffn_down_, rows, hidden, rank, stream_);
+  const bool last = layer + 1 == model_->GetWeights().layers.size();
+  kernels::LaunchDSpineWrite(d_block_hidden_, d_ffn_down_, d_dspine_rms_,
+                             last ? d_fused_features_ : d_block_hidden_, rows,
+                             static_cast<std::uint32_t>(hidden), stream_);
+}
+
+void QwenDFlashGpuExecutor::DraftDSpine(std::uint32_t draft_count,
+                                        float temperature,
+                                        std::span<const float> uniforms,
+                                        const DFlashTrace& trace) {
+  const auto& weights = model_->GetWeights();
+  const auto& bridge = *weights.dspine;
+  const std::uint32_t hidden = model_->GetConfig().hidden_size;
+  const std::uint32_t vocab = model_->GetConfig().vocab_size;
+  const std::uint32_t lanes = model_->GetDFlashConfig().selector_top_k;
+  const std::uint32_t pairs = draft_count * lanes;
+  const std::size_t code = bridge.code_size;
+  const std::size_t rank = bridge.rank;
+  // First pass: the head on the written rows and each proposal's top-k.
+  // d_dspine_ids_ row 0 repeats the anchor: proposal 0's only sender.
+  RunBlockGemm(weights.output, d_block_normed_ + hidden, d_logits_, draft_count,
+               vocab, hidden);
+  TraceTensor(trace, "logits", d_logits_, std::size_t{draft_count} * vocab,
+              stream_);
+  kernels::LaunchDSpineTopK(d_logits_, draft_count, vocab, lanes, d_out_token_,
+                            d_dspine_ids_, stream_);
+  // Second pass (dspine.py:571-585): redo the last write once per exact
+  // predecessor, proposal t - 1's candidate j for proposal t: its codebook
+  // row e_j, [P; A] e_j, the message with t's own query and W_last.
+  LaunchBatchedEmbeddingLookup(bridge.codebook.data, bridge.codebook.type,
+                               d_dspine_ids_, d_dspine_senders_, pairs, code,
+                               stream_);
+  const auto* sender_gates =
+      static_cast<const std::uint8_t*>(bridge.gates.data) +
+      (rank * code * sizeof(std::uint16_t));
+  LaunchExactBf16GEMMFp32SmallBatch(sender_gates, d_dspine_senders_,
+                                    d_dspine_sender_gates_, pairs, 2U * rank,
+                                    code, stream_);
+  kernels::LaunchDSpineMessage(d_dspine_packed_, d_dspine_sender_gates_,
+                               static_cast<const float*>(bridge.gate_bias.data),
+                               d_dspine_message_, pairs, bridge.rank, lanes,
+                               std::sqrt(static_cast<float>(code)), stream_);
+  LaunchExactBf16GEMMFp32SmallBatch(bridge.write.back().data, d_dspine_message_,
+                                    d_dspine_delta_, pairs, hidden, rank,
+                                    stream_);
+  // Each candidate's head row against each refined, output-normed row.
+  LaunchBatchedEmbeddingLookup(weights.output.data, weights.output.type,
+                               d_dspine_ids_ + lanes, d_dspine_heads_, pairs,
+                               hidden, stream_);
+  kernels::LaunchDSpineTable(
+      d_block_hidden_, d_dspine_rms_, d_dspine_delta_,
+      static_cast<const float*>(weights.output_norm.data), d_dspine_heads_,
+      d_dspine_table_, draft_count, lanes, hidden, kDSpineEps, stream_);
+  TraceTensor(trace, "dspine.table", d_dspine_table_,
+              std::size_t{pairs} * lanes, stream_);
+  if (temperature > 0.0F &&
+      hipMemcpyAsync(d_selector_uniforms_, uniforms.data(),
+                     draft_count * sizeof(float), hipMemcpyHostToDevice,
+                     stream_) != hipSuccess)
+    throw std::runtime_error("DSpine GPU sampling upload failed");
+  kernels::LaunchDSpineChain(
+      d_dspine_table_, d_dspine_ids_, draft_count, lanes, temperature,
+      temperature > 0.0F ? d_selector_uniforms_ : nullptr, d_out_token_ + 1U,
+      d_confidences_, d_selector_candidate_ids_,
+      d_selector_candidate_probabilities_, stream_);
+}
+
 std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
     tokenization::TokenId anchor_token, std::uint32_t current_pos,
     std::uint32_t draft_count, float temperature,
@@ -1053,8 +1228,13 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
   const std::size_t kv_dim = static_cast<std::size_t>(num_kv_heads) * head_dim;
   const std::size_t vocab_size = cfg.vocab_size;
   const float scale = 1.0F / std::sqrt(static_cast<float>(head_dim));
+  // DSpine layers are plain DFlash layers (no dynamic convolutions) with a
+  // code bridge after each; only pointers and calls that differ branch.
+  const bool dspine = model_->IsDSpine();
   const std::size_t dynamic_size =
-      2U * df_cfg.conv_kernel_size * (hidden_size / df_cfg.conv_group_size);
+      dspine ? 0U
+             : 2U * df_cfg.conv_kernel_size *
+                   (hidden_size / df_cfg.conv_group_size);
 
   draft_count = std::min(draft_count,
                          df_cfg.block_size > 0 ? df_cfg.block_size - 1U : 0U);
@@ -1103,6 +1283,13 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
   }
   TraceTensor(trace, "embedding", d_block_hidden_, block_count * hidden_size,
               stream_);
+  if (dspine) {
+    // The anchor row's code is its codebook row (dspine.py:49-52).
+    const auto& codebook = weights.dspine->codebook;
+    LaunchBatchedEmbeddingLookup(codebook.data, codebook.type, d_out_token_,
+                                 d_dspine_anchor_code_, 1,
+                                 weights.dspine->code_size, stream_);
+  }
 
   // Five DFlash-2 decoder blocks.
   for (std::size_t i = 0; i < df_cfg.num_layers; ++i) {
@@ -1121,21 +1308,25 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
         d_block_normed_, nullptr, block_count, hidden_size, 1e-6F, stream_);
     emit("attn_norm", d_block_normed_, hidden_size);
 
-    RunBlockGemm(dflash_layer.attention_conv_projection, d_block_normed_,
-                 d_dynamic_coefficients_, block_count, dynamic_size,
-                 hidden_size);
-    kernels::LaunchDFlashGroupedDynamicConv(
-        d_block_normed_, d_dynamic_coefficients_,
-        static_cast<const float*>(dflash_layer.attention_conv_base.data),
-        d_conv_hidden_, block_count, hidden_size, df_cfg.conv_kernel_size,
-        df_cfg.conv_group_size, 0, stream_);
-    emit("attn_conv_in", d_conv_hidden_, hidden_size);
+    const float* attention_input = d_block_normed_;
+    if (!dspine) {
+      RunBlockGemm(dflash_layer.attention_conv_projection, d_block_normed_,
+                   d_dynamic_coefficients_, block_count, dynamic_size,
+                   hidden_size);
+      kernels::LaunchDFlashGroupedDynamicConv(
+          d_block_normed_, d_dynamic_coefficients_,
+          static_cast<const float*>(dflash_layer.attention_conv_base.data),
+          d_conv_hidden_, block_count, hidden_size, df_cfg.conv_kernel_size,
+          df_cfg.conv_group_size, 0, stream_);
+      emit("attn_conv_in", d_conv_hidden_, hidden_size);
+      attention_input = d_conv_hidden_;
+    }
 
-    RunBlockGemm(layer.attn_q, d_conv_hidden_, d_q_, block_count, q_dim,
+    RunBlockGemm(layer.attn_q, attention_input, d_q_, block_count, q_dim,
                  hidden_size);
-    RunBlockGemm(layer.attn_k, d_conv_hidden_, d_k_block_, block_count, kv_dim,
+    RunBlockGemm(layer.attn_k, attention_input, d_k_block_, block_count, kv_dim,
                  hidden_size);
-    RunBlockGemm(layer.attn_v, d_conv_hidden_, d_v_block_, block_count, kv_dim,
+    RunBlockGemm(layer.attn_v, attention_input, d_v_block_, block_count, kv_dim,
                  hidden_size);
 
     NormalizeAndRotateQK(d_q_, d_k_block_,
@@ -1146,27 +1337,41 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
     emit("k", d_k_block_, kv_dim);
     emit("v", d_v_block_, kv_dim);
 
-    kernels::LaunchDFlashNonCausalAttention(
-        d_q_, d_injected_k_[i], d_injected_v_[i], d_k_block_, d_v_block_,
-        d_attn_out_, current_pos, std::min(current_pos, injected_context_len_),
-        block_count, df_cfg.sliding_window,
-        static_cast<std::uint32_t>(num_q_heads),
-        static_cast<std::uint32_t>(num_kv_heads),
-        static_cast<std::uint32_t>(head_dim), scale, stream_,
-        history_capacity_);
+    // A long context reads the K/V window once per KV head instead of once
+    // per (row, head pair): same bits, fewer bytes.
+    const std::uint32_t history = std::min(current_pos, injected_context_len_);
+    if (!dspine || current_pos < kDSpineSplitAttentionContext ||
+        !kernels::LaunchDSpineAttention(
+            d_q_, d_injected_k_[i], d_injected_v_[i], d_k_block_, d_v_block_,
+            d_attn_out_, current_pos, history, block_count,
+            df_cfg.sliding_window, static_cast<std::uint32_t>(num_q_heads),
+            static_cast<std::uint32_t>(num_kv_heads),
+            static_cast<std::uint32_t>(head_dim), scale, stream_,
+            history_capacity_, d_dspine_scores_))
+      kernels::LaunchDFlashNonCausalAttention(
+          d_q_, d_injected_k_[i], d_injected_v_[i], d_k_block_, d_v_block_,
+          d_attn_out_, current_pos, history, block_count, df_cfg.sliding_window,
+          static_cast<std::uint32_t>(num_q_heads),
+          static_cast<std::uint32_t>(num_kv_heads),
+          static_cast<std::uint32_t>(head_dim), scale, stream_,
+          history_capacity_, df_cfg.causal);
     emit("attention", d_attn_out_, q_dim);
 
     RunBlockGemm(layer.attn_output, d_attn_out_, d_fused_features_, block_count,
                  hidden_size, q_dim);
     emit("attn_output", d_fused_features_, hidden_size);
-    kernels::LaunchDFlashGroupedDynamicConv(
-        d_fused_features_, d_dynamic_coefficients_,
-        static_cast<const float*>(dflash_layer.attention_conv_base.data),
-        d_conv_hidden_, block_count, hidden_size, df_cfg.conv_kernel_size,
-        df_cfg.conv_group_size, 1, stream_);
-    emit("attn_conv_out", d_conv_hidden_, hidden_size);
+    const float* attention_update = d_fused_features_;
+    if (!dspine) {
+      kernels::LaunchDFlashGroupedDynamicConv(
+          d_fused_features_, d_dynamic_coefficients_,
+          static_cast<const float*>(dflash_layer.attention_conv_base.data),
+          d_conv_hidden_, block_count, hidden_size, df_cfg.conv_kernel_size,
+          df_cfg.conv_group_size, 1, stream_);
+      emit("attn_conv_out", d_conv_hidden_, hidden_size);
+      attention_update = d_conv_hidden_;
+    }
 
-    LaunchBatchedResidualAdd(d_block_hidden_, d_conv_hidden_, d_block_hidden_,
+    LaunchBatchedResidualAdd(d_block_hidden_, attention_update, d_block_hidden_,
                              block_count, hidden_size, stream_);
     emit("attn_residual", d_block_hidden_, hidden_size);
 
@@ -1175,19 +1380,23 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
         d_block_normed_, nullptr, block_count, hidden_size, 1e-6F, stream_);
     emit("ffn_norm", d_block_normed_, hidden_size);
 
-    RunBlockGemm(dflash_layer.ffn_conv_projection, d_block_normed_,
-                 d_dynamic_coefficients_, block_count, dynamic_size,
-                 hidden_size);
-    kernels::LaunchDFlashGroupedDynamicConv(
-        d_block_normed_, d_dynamic_coefficients_,
-        static_cast<const float*>(dflash_layer.ffn_conv_base.data),
-        d_conv_hidden_, block_count, hidden_size, df_cfg.conv_kernel_size,
-        df_cfg.conv_group_size, 0, stream_);
-    emit("ffn_conv_in", d_conv_hidden_, hidden_size);
+    const float* ffn_input = d_block_normed_;
+    if (!dspine) {
+      RunBlockGemm(dflash_layer.ffn_conv_projection, d_block_normed_,
+                   d_dynamic_coefficients_, block_count, dynamic_size,
+                   hidden_size);
+      kernels::LaunchDFlashGroupedDynamicConv(
+          d_block_normed_, d_dynamic_coefficients_,
+          static_cast<const float*>(dflash_layer.ffn_conv_base.data),
+          d_conv_hidden_, block_count, hidden_size, df_cfg.conv_kernel_size,
+          df_cfg.conv_group_size, 0, stream_);
+      emit("ffn_conv_in", d_conv_hidden_, hidden_size);
+      ffn_input = d_conv_hidden_;
+    }
 
-    RunBlockGemm(layer.ffn_gate, d_conv_hidden_, d_ffn_gate_, block_count,
+    RunBlockGemm(layer.ffn_gate, ffn_input, d_ffn_gate_, block_count,
                  intermediate_size, hidden_size);
-    RunBlockGemm(layer.ffn_up, d_conv_hidden_, d_ffn_up_, block_count,
+    RunBlockGemm(layer.ffn_up, ffn_input, d_ffn_up_, block_count,
                  intermediate_size, hidden_size);
     kernels::LaunchDFlashSiLUMul(d_ffn_gate_, d_ffn_up_,
                                  block_count * intermediate_size, stream_);
@@ -1195,61 +1404,33 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
                  hidden_size, intermediate_size);
     emit("ffn_down", d_ffn_down_, hidden_size);
 
-    kernels::LaunchDFlashGroupedDynamicConv(
-        d_ffn_down_, d_dynamic_coefficients_,
-        static_cast<const float*>(dflash_layer.ffn_conv_base.data),
-        d_conv_hidden_, block_count, hidden_size, df_cfg.conv_kernel_size,
-        df_cfg.conv_group_size, 1, stream_);
-    emit("ffn_conv_out", d_conv_hidden_, hidden_size);
+    const float* ffn_update = d_ffn_down_;
+    if (!dspine) {
+      kernels::LaunchDFlashGroupedDynamicConv(
+          d_ffn_down_, d_dynamic_coefficients_,
+          static_cast<const float*>(dflash_layer.ffn_conv_base.data),
+          d_conv_hidden_, block_count, hidden_size, df_cfg.conv_kernel_size,
+          df_cfg.conv_group_size, 1, stream_);
+      emit("ffn_conv_out", d_conv_hidden_, hidden_size);
+      ffn_update = d_conv_hidden_;
+    }
 
-    LaunchBatchedResidualAdd(d_block_hidden_, d_conv_hidden_, d_block_hidden_,
+    LaunchBatchedResidualAdd(d_block_hidden_, ffn_update, d_block_hidden_,
                              block_count, hidden_size, stream_);
     emit("output", d_block_hidden_, hidden_size);
+    if (dspine)
+      RunDSpineBridge(i, block_count);
   }
 
-  LaunchBatchedRMSNorm(
-      d_block_hidden_, static_cast<const float*>(weights.output_norm.data),
-      d_block_normed_, nullptr, block_count, hidden_size, 1e-6F, stream_);
+  // DSpine's last write went out of place (RunDSpineBridge).
+  LaunchBatchedRMSNorm(dspine ? d_fused_features_ : d_block_hidden_,
+                       static_cast<const float*>(weights.output_norm.data),
+                       d_block_normed_, nullptr, block_count, hidden_size,
+                       1e-6F, stream_);
   TraceTensor(trace, "normalized", d_block_normed_, block_count * hidden_size,
               stream_);
 
   std::vector<tokenization::TokenId> tokens(draft_count, 0);
-  RunBlockGemm(weights.selector_hidden, d_block_normed_ + hidden_size,
-               d_selector_hidden_, draft_count, df_cfg.selector_rank,
-               hidden_size);
-  TraceTensor(trace, "selector_hidden", d_selector_hidden_,
-              draft_count * df_cfg.selector_rank, stream_);
-
-  // The draft vocabulary scores the head's leading rows in place, then the
-  // request's table (draft_vocab.hpp).
-  const std::uint32_t prefix = draft_subset ? model_->DraftPrefixRows() : 0;
-  if (draft_subset) {
-    RunBlockGemm(weights.output, d_block_normed_ + hidden_size, d_logits_,
-                 draft_count, prefix, hidden_size);
-    RunBlockGemm(DraftTable(), d_block_normed_ + hidden_size, d_draft_logits_,
-                 draft_count, kDraftRows, hidden_size);
-    kernels::LaunchDFlashDraftTableLogits(nullptr, 0, d_draft_ids_,
-                                          d_draft_logits_, draft_count,
-                                          kDraftRows, stream_);
-    TraceTensor(trace, "logits", d_logits_, draft_count * prefix, stream_);
-    TraceTensor(trace, "draft_table_logits", d_draft_logits_,
-                draft_count * kDraftRows, stream_);
-  } else {
-    RunBlockGemm(weights.output, d_block_normed_ + hidden_size, d_logits_,
-                 draft_count, vocab_size, hidden_size);
-    TraceTensor(trace, "logits", d_logits_, draft_count * vocab_size, stream_);
-  }
-
-  if (temperature > 0.0F) {
-    const auto uniform_copy = hipMemcpyAsync(
-        d_selector_uniforms_, sample_uniforms.data(),
-        draft_count * sizeof(float), hipMemcpyHostToDevice, stream_);
-    if (uniform_copy != hipSuccess) {
-      throw std::runtime_error("DFlash GPU sampling upload failed");
-    }
-  }
-  // The FFN is finished. Its buffers hold all independent top-k partials;
-  // one selector launch then walks this request's predecessor chain.
   struct SamplingUploadCompletion {
     hipStream_t stream;
     bool pending;
@@ -1257,23 +1438,65 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
       if (pending)
         (void)hipStreamSynchronize(stream);
     }
-  } sampling_upload{stream_, sampler != nullptr};
-  const std::array sequences{kernels::DFlashSelectorSequence{
-      draft_count, temperature, PrepareDraftSampling(sampler, stream_),
-      draft_subset ? kernels::DFlashSelectorVocab{prefix, d_draft_logits_,
-                                                  d_draft_ids_, kDraftRows}
-                   : kernels::DFlashSelectorVocab{}}};
-  kernels::LaunchDFlashSelectorBatch(
-      d_logits_, d_selector_hidden_, weights.selector_predecessor.data,
-      weights.selector_successor.data, d_out_token_, d_confidences_,
-      d_ffn_gate_, reinterpret_cast<std::uint32_t*>(d_ffn_up_),
-      temperature > 0.0F ? d_selector_uniforms_ : nullptr,
-      out_candidate_ids != nullptr ? d_selector_candidate_ids_ : nullptr,
-      out_candidate_probabilities != nullptr
-          ? d_selector_candidate_probabilities_
-          : nullptr,
-      sequences, vocab_size, df_cfg.selector_rank, df_cfg.selector_top_k,
-      stream_, prefix);
+  } sampling_upload{stream_, false};
+  if (dspine) {
+    DraftDSpine(draft_count, temperature, sample_uniforms, trace);
+  } else {
+    RunBlockGemm(weights.selector_hidden, d_block_normed_ + hidden_size,
+                 d_selector_hidden_, draft_count, df_cfg.selector_rank,
+                 hidden_size);
+    TraceTensor(trace, "selector_hidden", d_selector_hidden_,
+                draft_count * df_cfg.selector_rank, stream_);
+
+    // The draft vocabulary scores the head's leading rows in place, then the
+    // request's table (draft_vocab.hpp).
+    const std::uint32_t prefix = draft_subset ? model_->DraftPrefixRows() : 0;
+    if (draft_subset) {
+      RunBlockGemm(weights.output, d_block_normed_ + hidden_size, d_logits_,
+                   draft_count, prefix, hidden_size);
+      RunBlockGemm(DraftTable(), d_block_normed_ + hidden_size, d_draft_logits_,
+                   draft_count, kDraftRows, hidden_size);
+      kernels::LaunchDFlashDraftTableLogits(nullptr, 0, d_draft_ids_,
+                                            d_draft_logits_, draft_count,
+                                            kDraftRows, stream_);
+      TraceTensor(trace, "logits", d_logits_, draft_count * prefix, stream_);
+      TraceTensor(trace, "draft_table_logits", d_draft_logits_,
+                  draft_count * kDraftRows, stream_);
+    } else {
+      RunBlockGemm(weights.output, d_block_normed_ + hidden_size, d_logits_,
+                   draft_count, vocab_size, hidden_size);
+      TraceTensor(trace, "logits", d_logits_, draft_count * vocab_size,
+                  stream_);
+    }
+
+    if (temperature > 0.0F) {
+      const auto uniform_copy = hipMemcpyAsync(
+          d_selector_uniforms_, sample_uniforms.data(),
+          draft_count * sizeof(float), hipMemcpyHostToDevice, stream_);
+      if (uniform_copy != hipSuccess) {
+        throw std::runtime_error("DFlash GPU sampling upload failed");
+      }
+    }
+    // The FFN is finished. Its buffers hold all independent top-k partials;
+    // one selector launch then walks this request's predecessor chain.
+    sampling_upload.pending = sampler != nullptr;
+    const std::array sequences{kernels::DFlashSelectorSequence{
+        draft_count, temperature, PrepareDraftSampling(sampler, stream_),
+        draft_subset ? kernels::DFlashSelectorVocab{prefix, d_draft_logits_,
+                                                    d_draft_ids_, kDraftRows}
+                     : kernels::DFlashSelectorVocab{}}};
+    kernels::LaunchDFlashSelectorBatch(
+        d_logits_, d_selector_hidden_, weights.selector_predecessor.data,
+        weights.selector_successor.data, d_out_token_, d_confidences_,
+        d_ffn_gate_, reinterpret_cast<std::uint32_t*>(d_ffn_up_),
+        temperature > 0.0F ? d_selector_uniforms_ : nullptr,
+        out_candidate_ids != nullptr ? d_selector_candidate_ids_ : nullptr,
+        out_candidate_probabilities != nullptr
+            ? d_selector_candidate_probabilities_
+            : nullptr,
+        sequences, vocab_size, df_cfg.selector_rank, df_cfg.selector_top_k,
+        stream_, prefix);
+  }
 
   const auto token_copy =
       hipMemcpyAsync(tokens.data(), d_out_token_ + 1U,

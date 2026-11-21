@@ -33,11 +33,31 @@ struct QwenDFlashConfig {
   std::uint32_t selector_rank{0};
   std::uint32_t selector_top_k{0};
 
-  /// Attention topology. DFlash-2 is non-causal inside the current block.
+  /// Attention topology. DFlash-2 is non-causal inside the current block;
+  /// DSpine is causal.
   std::uint32_t sliding_window{0};
+  bool causal{false};
 
   /// Number of transformer blocks in the draft model.
   std::uint32_t num_layers{0};
+};
+
+/// DSpine code bridge (tencent DSpine): after every layer each block row gets
+/// a gated message from its predecessor's token code, and the last write is
+/// redone once per top-k predecessor candidate. DSpine has no dynamic
+/// convolutions and no low-rank selector; selector_top_k is its K.
+struct QwenDSpineWeights {
+  std::uint32_t code_size{0};      ///< C
+  std::uint32_t rank{0};           ///< R
+  models::QwenTensorRef codebook;  ///< [vocab_size, C]
+  /// [G; P; A], 3R x C: gate, predecessor gate and value. The GGUF holds
+  /// three R x C tensors; the GPU model packs them into this one matrix.
+  models::QwenTensorRef gates;
+  models::QwenTensorRef predecessor_gate;    ///< [R, C], GGUF only
+  models::QwenTensorRef value;               ///< [R, C], GGUF only
+  models::QwenTensorRef gate_bias;           ///< [R]
+  std::vector<models::QwenTensorRef> read;   ///< per layer [C, hidden_size]
+  std::vector<models::QwenTensorRef> write;  ///< per layer [hidden_size, R]
 };
 
 /// DFlash-2 transformer weights plus the layer-local dynamic convolutions.
@@ -75,6 +95,9 @@ struct QwenDFlashWeights {
   models::QwenTensorRef selector_predecessor;  // [selector_rank, vocab_size]
   models::QwenTensorRef selector_successor;    // [selector_rank, vocab_size]
   models::QwenTensorRef selector_hidden;       // [hidden_size, selector_rank]
+
+  /// Set for a DSpine draft (a GGUF with dspine_codebook.weight).
+  std::optional<QwenDSpineWeights> dspine;
 
   [[nodiscard]] static std::optional<QwenDFlashWeights> LoadFromGguf(
       const core::GgufReader& reader, std::string* error_msg = nullptr);

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 
 #include "src/families/qwen/hip_common/quant_ops.hpp"
 #include "src/families/qwen/kernels/dflash_kernels.hpp"
@@ -112,7 +113,9 @@ __global__ void dflash_silu_mul_kernel(float* __restrict__ gate,
 
 // Coalesced QK loads and shared K/V reads for adjacent query heads. Each
 // head retains its original dot-product and 256-thread softmax reduction.
-template<uint32_t QueryHeads>
+// Causal (DSpine) masks block keys after the query row: exp(-1e20 - max) is
+// exactly zero, so a row's output does not depend on the rows after it.
+template<uint32_t QueryHeads, bool Causal = false>
 __global__ void dflash_noncausal_attention_wave_kernel(
     const float* __restrict__ q, const float* __restrict__ injected_k,
     const float* __restrict__ injected_v, const float* __restrict__ block_k,
@@ -193,7 +196,8 @@ __global__ void dflash_noncausal_attention_wave_kernel(
 #pragma unroll
       for (unsigned g = 0; g < QueryHeads; ++g)
         scores[g * total_k + history_count + p] =
-            distance < sliding_window ? dot[g] * scale : -1e20F;
+            distance < sliding_window && (!Causal || p <= tok) ? dot[g] * scale
+                                                               : -1e20F;
     }
   }
   __syncthreads();
@@ -910,7 +914,7 @@ void LaunchDFlashNonCausalAttentionWave(
     std::uint32_t block_count, std::uint32_t sliding_window,
     std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
     std::uint32_t head_dim, float scale, hipStream_t stream,
-    std::uint32_t history_capacity) {
+    std::uint32_t history_capacity, bool causal) {
   const auto geometry = DFlashAttentionGeometry(
       current_pos, history_length, block_count, sliding_window, num_q_heads);
   // Wider blocks benefit from two query heads per CTA. Keep narrow blocks
@@ -920,8 +924,24 @@ void LaunchDFlashNonCausalAttentionWave(
       geometry.shared_bytes <= (64U * 1024U - 2U * 256U * sizeof(float)) / 2U) {
     auto grid = geometry.grid;
     grid.y /= 2U;
+    if (causal) {
+      dflash_noncausal_attention_wave_kernel<2, true>
+          <<<grid, 256, 2U * geometry.shared_bytes, stream>>>(
+              q, injected_k, injected_v, block_k, block_v, out, current_pos,
+              history_length, block_count, sliding_window, num_q_heads,
+              num_kv_heads, head_dim, scale, history_capacity);
+      return;
+    }
     dflash_noncausal_attention_wave_kernel<2>
         <<<grid, 256, 2U * geometry.shared_bytes, stream>>>(
+            q, injected_k, injected_v, block_k, block_v, out, current_pos,
+            history_length, block_count, sliding_window, num_q_heads,
+            num_kv_heads, head_dim, scale, history_capacity);
+    return;
+  }
+  if (causal) {
+    dflash_noncausal_attention_wave_kernel<1, true>
+        <<<geometry.grid, 256, geometry.shared_bytes, stream>>>(
             q, injected_k, injected_v, block_k, block_v, out, current_pos,
             history_length, block_count, sliding_window, num_q_heads,
             num_kv_heads, head_dim, scale, history_capacity);
@@ -941,15 +961,18 @@ void LaunchDFlashNonCausalAttention(
     std::uint32_t block_count, std::uint32_t sliding_window,
     std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
     std::uint32_t head_dim, float scale, hipStream_t stream,
-    std::uint32_t history_capacity) {
+    std::uint32_t history_capacity, bool causal) {
   // Coalesced float4 reads cover all shipped DFlash2 head dimensions.
   if ((head_dim % 4U) == 0U) {
     LaunchDFlashNonCausalAttentionWave(
         q, injected_k, injected_v, block_k, block_v, out, current_pos,
         history_length, block_count, sliding_window, num_q_heads, num_kv_heads,
-        head_dim, scale, stream, history_capacity);
+        head_dim, scale, stream, history_capacity, causal);
     return;
   }
+  // The DSpine loader requires head_dim % 4 == 0: only the wave route masks.
+  if (causal)
+    throw std::invalid_argument("causal DFlash attention needs head_dim % 4");
   LaunchDFlashNonCausalAttentionScalar(
       q, injected_k, injected_v, block_k, block_v, out, current_pos,
       history_length, block_count, sliding_window, num_q_heads, num_kv_heads,
@@ -1086,6 +1109,684 @@ void LaunchDFlashDraftTableLogits(const float* source, std::uint32_t stride,
   dflash_draft_table_logits_kernel<<<
       dim3((table_rows + kThreads - 1U) / kThreads, rows), kThreads, 0,
       stream>>>(source, stride, ids, table_logits, table_rows);
+}
+
+// DSpine (tencent/Qwen3.8-27B-DSpine-b16). The maths follows Tencent's
+// reference, sglang_dspine/kernels/dspine.py at 321b0fc ("dspine.py" below),
+// in FP32; ties go to the lower token ID. Row 0 of a block is the anchor and
+// rows 1..n are proposals; proposal t (0-based) is block row t + 1.
+
+constexpr uint32_t kDSpineThreads = 256;
+
+/// Workgroup sum; every thread receives it. `scratch` holds one float per
+/// wave and may be reused by the next call.
+__device__ float DSpineBlockSum(float value, float* scratch) {
+  for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+    value += __shfl_xor(value, offset);
+  __syncthreads();
+  if (threadIdx.x % warpSize == 0)
+    scratch[threadIdx.x / warpSize] = value;
+  __syncthreads();
+  float total = 0.0F;
+  for (uint32_t wave = 0; wave < blockDim.x / warpSize; ++wave)
+    total += scratch[wave];
+  return total;
+}
+
+/// rms_t = sqrt(mean(h_t^2)), normalized_t = h_t / (rms_t + eps)
+/// (dspine.py:12-32, prepare_read).
+__global__ void dspine_row_stats_kernel(const float* __restrict__ hidden,
+                                        float* __restrict__ normalized,
+                                        float* __restrict__ rms,
+                                        uint32_t hidden_size, float eps) {
+  __shared__ float scratch[32];
+  const float* row = hidden + uint64_t(blockIdx.x) * hidden_size;
+  float sum = 0.0F;
+  for (uint32_t i = threadIdx.x; i < hidden_size; i += blockDim.x)
+    sum += row[i] * row[i];
+  const float row_rms =
+      sqrtf(fmaxf(DSpineBlockSum(sum, scratch) / float(hidden_size), FLT_MIN));
+  float* out = normalized + uint64_t(blockIdx.x) * hidden_size;
+  for (uint32_t i = threadIdx.x; i < hidden_size; i += blockDim.x)
+    out[i] = row[i] / (row_rms + eps);
+  if (threadIdx.x == 0)
+    rms[blockIdx.x] = row_rms;
+}
+
+/// Row 0: sqrt(C) * codebook[anchor]; row t: sqrt(C) * z_t / (|z_t| + eps)
+/// (dspine.py:35-57, normalize_codes).
+__global__ void dspine_codes_kernel(float* __restrict__ codes,
+                                    const float* __restrict__ anchor_code,
+                                    uint32_t code_size, float eps) {
+  __shared__ float scratch[32];
+  float* row = codes + uint64_t(blockIdx.x) * code_size;
+  const float scale = sqrtf(float(code_size));
+  if (blockIdx.x == 0) {
+    for (uint32_t i = threadIdx.x; i < code_size; i += blockDim.x)
+      row[i] = anchor_code[i] * scale;
+    return;
+  }
+  float sum = 0.0F;
+  for (uint32_t i = threadIdx.x; i < code_size; i += blockDim.x)
+    sum += row[i] * row[i];
+  const float norm = sqrtf(DSpineBlockSum(sum, scratch));
+  for (uint32_t i = threadIdx.x; i < code_size; i += blockDim.x)
+    row[i] = scale * row[i] / (norm + eps);
+}
+
+/// message = sigmoid(query + gate + bias) * value. lanes == 0: the bridge
+/// (dspine.py:60-73); `packed` rows are [G c; P c; A c], row r's gate and
+/// value come from row r - 1 and row 0 sends nothing. lanes > 0: the
+/// refinement (dspine.py:571-579); row r = t * lanes + j pairs proposal t's
+/// query (packed row t + 1) with sender lane j, whose `sender` row is
+/// [P e_j; A e_j] for an unscaled codebook row e_j (scaled here).
+__global__ void dspine_message_kernel(const float* __restrict__ packed,
+                                      const float* __restrict__ sender,
+                                      const float* __restrict__ bias,
+                                      float* __restrict__ message,
+                                      uint32_t rank, uint32_t lanes,
+                                      float sender_scale) {
+  const uint32_t row = blockIdx.x;
+  float* out = message + uint64_t(row) * rank;
+  const float* query = nullptr;
+  const float* gate = nullptr;
+  if (lanes == 0) {
+    if (row == 0) {
+      for (uint32_t k = threadIdx.x; k < rank; k += blockDim.x)
+        out[k] = 0.0F;
+      return;
+    }
+    query = packed + uint64_t(row) * 3U * rank;
+    gate = packed + uint64_t(row - 1U) * 3U * rank + rank;
+  } else {
+    query = packed + uint64_t(row / lanes + 1U) * 3U * rank;
+    gate = sender + uint64_t(row) * 2U * rank;
+  }
+  const float* value = gate + rank;
+  for (uint32_t k = threadIdx.x; k < rank; k += blockDim.x) {
+    const float logit = query[k] + sender_scale * gate[k] + bias[k];
+    out[k] = (sender_scale * value[k]) / (1.0F + expf(-logit));
+  }
+}
+
+/// out_t = h_t + rms_t * delta_t for t >= 1; row 0 passes through
+/// (dspine.py:76-108, feature_finish). `out` may alias `hidden`.
+__global__ void dspine_write_kernel(const float* hidden,
+                                    const float* __restrict__ delta,
+                                    const float* __restrict__ rms, float* out,
+                                    uint32_t hidden_size) {
+  const uint32_t row = blockIdx.y;
+  const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= hidden_size)
+    return;
+  const uint64_t at = uint64_t(row) * hidden_size + i;
+  out[at] = row == 0 ? hidden[at] : hidden[at] + rms[row] * delta[at];
+}
+
+__device__ __forceinline__ bool DSpineBetter(float score, uint32_t id,
+                                             float other_score,
+                                             uint32_t other_id) {
+  return score > other_score || (score == other_score && id < other_id);
+}
+
+/// Each proposal row's top_k logits by (score desc, ID asc), stored in
+/// ascending ID order as dspine.py:111-208 (topk_ids) returns them. `ids`
+/// has rows + 1 rows of top_k: row 0 repeats the anchor (the refinement's
+/// sender for proposal 0), row t + 1 holds proposal t's candidates.
+__global__ void dspine_topk_kernel(const float* __restrict__ logits,
+                                   uint32_t vocab_size, uint32_t top_k,
+                                   const uint32_t* __restrict__ anchor,
+                                   uint32_t* __restrict__ ids) {
+  __shared__ float shared_scores[kDSpineThreads * kMaxSelectorTopK];
+  __shared__ uint32_t shared_ids[kDSpineThreads * kMaxSelectorTopK];
+  float scores[kMaxSelectorTopK];
+  uint32_t lane_ids[kMaxSelectorTopK];
+  for (uint32_t i = 0; i < kMaxSelectorTopK; ++i) {
+    scores[i] = -INFINITY;
+    lane_ids[i] = UINT32_MAX;
+  }
+  const float* row = logits + uint64_t(blockIdx.x) * vocab_size;
+  for (uint32_t id = threadIdx.x; id < vocab_size; id += blockDim.x) {
+    const float score = row[id];
+    if (!DSpineBetter(score, id, scores[top_k - 1U], lane_ids[top_k - 1U]))
+      continue;
+    uint32_t at = top_k - 1U;
+    while (at > 0U &&
+           DSpineBetter(score, id, scores[at - 1U], lane_ids[at - 1U])) {
+      scores[at] = scores[at - 1U];
+      lane_ids[at] = lane_ids[at - 1U];
+      --at;
+    }
+    scores[at] = score;
+    lane_ids[at] = id;
+  }
+  float* mine_scores = shared_scores + threadIdx.x * kMaxSelectorTopK;
+  uint32_t* mine_ids = shared_ids + threadIdx.x * kMaxSelectorTopK;
+  for (uint32_t i = 0; i < top_k; ++i) {
+    mine_scores[i] = scores[i];
+    mine_ids[i] = lane_ids[i];
+  }
+  // Pairwise merges of the sorted lists; (score, ID) pairs are distinct, so
+  // the merged prefix is the row's exact top_k.
+  for (uint32_t stride = blockDim.x / 2U; stride > 0U; stride >>= 1U) {
+    __syncthreads();
+    if (threadIdx.x < stride) {
+      const float* other_scores = mine_scores + stride * kMaxSelectorTopK;
+      const uint32_t* other_ids = mine_ids + stride * kMaxSelectorTopK;
+      uint32_t mine = 0, other = 0;
+      for (uint32_t i = 0; i < top_k; ++i) {
+        if (DSpineBetter(mine_scores[mine], mine_ids[mine], other_scores[other],
+                         other_ids[other])) {
+          scores[i] = mine_scores[mine];
+          lane_ids[i] = mine_ids[mine++];
+        } else {
+          scores[i] = other_scores[other];
+          lane_ids[i] = other_ids[other++];
+        }
+      }
+      for (uint32_t i = 0; i < top_k; ++i) {
+        mine_scores[i] = scores[i];
+        mine_ids[i] = lane_ids[i];
+      }
+    }
+  }
+  if (threadIdx.x != 0U)
+    return;
+  for (uint32_t i = 1; i < top_k; ++i) {
+    const uint32_t id = lane_ids[i];
+    uint32_t at = i;
+    for (; at > 0U && lane_ids[at - 1U] > id; --at)
+      lane_ids[at] = lane_ids[at - 1U];
+    lane_ids[at] = id;
+  }
+  uint32_t* out = ids + uint64_t(blockIdx.x + 1U) * top_k;
+  for (uint32_t i = 0; i < top_k; ++i)
+    out[i] = lane_ids[i];
+  if (blockIdx.x == 0U) {
+    for (uint32_t i = 0; i < top_k; ++i)
+      ids[i] = *anchor;
+  }
+}
+
+/// table[t][j][k] = head[cand_t,k] . RMSNorm_out(raw_t + rms_t * delta_tj):
+/// proposal t, predecessor lane j, candidate lane k (dspine.py:571-585,
+/// serial_rs_table). One workgroup per (t, j); `head_rows` row t * top_k + k
+/// is candidate k's head row.
+__global__ void dspine_table_kernel(const float* __restrict__ raw,
+                                    const float* __restrict__ rms,
+                                    const float* __restrict__ delta,
+                                    const float* __restrict__ norm_weight,
+                                    const float* __restrict__ head_rows,
+                                    float* __restrict__ table, uint32_t top_k,
+                                    uint32_t hidden_size, float eps) {
+  extern __shared__ float refined[];
+  __shared__ float scratch[32];
+  __shared__ float partial[kMaxSelectorTopK][32];
+  const uint32_t pair = blockIdx.x, proposal = pair / top_k;
+  const float* base = raw + uint64_t(proposal + 1U) * hidden_size;
+  const float* update = delta + uint64_t(pair) * hidden_size;
+  const float scale = rms[proposal + 1U];
+  float sum = 0.0F;
+  for (uint32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+    const float value = base[i] + scale * update[i];
+    refined[i] = value;
+    sum += value * value;
+  }
+  const float inverse =
+      rsqrtf(DSpineBlockSum(sum, scratch) / float(hidden_size) + eps);
+  const float* heads = head_rows + uint64_t(proposal) * top_k * hidden_size;
+  float dots[kMaxSelectorTopK] = {};
+  // Each thread reads back only the elements it wrote above.
+  for (uint32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+    const float value = refined[i] * inverse * norm_weight[i];
+#pragma unroll
+    for (uint32_t k = 0; k < kMaxSelectorTopK; ++k)
+      if (k < top_k)
+        dots[k] += heads[uint64_t(k) * hidden_size + i] * value;
+  }
+  const uint32_t lane = threadIdx.x % warpSize, wave = threadIdx.x / warpSize;
+#pragma unroll
+  for (uint32_t k = 0; k < kMaxSelectorTopK; ++k) {
+    float value = dots[k];
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+      value += __shfl_xor(value, offset);
+    if (lane == 0U)
+      partial[k][wave] = value;
+  }
+  __syncthreads();
+  if (threadIdx.x < top_k) {
+    float total = 0.0F;
+    for (uint32_t w = 0; w < blockDim.x / warpSize; ++w)
+      total += partial[threadIdx.x][w];
+    table[uint64_t(pair) * top_k + threadIdx.x] = total;
+  }
+}
+
+/// Walks the tables from the anchor (dspine.py:287-320 greedy, 589-641
+/// sampled): proposal 0 reads lane 0 (all its senders are the anchor), then
+/// k_t = argmax_k table[t][j_t][k] (ties: lower lane, so lower ID) or a draw
+/// from softmax(table[t][j_t] / temperature), and j_(t+1) = k_t. The sampled
+/// q is the softmax actually drawn from, conditional on the previous pick,
+/// with FinalizeSelector's inverse-CDF convention.
+__global__ void dspine_chain_kernel(
+    const float* __restrict__ table, const uint32_t* __restrict__ ids,
+    uint32_t count, uint32_t top_k, float temperature,
+    const float* __restrict__ uniforms, uint32_t* __restrict__ tokens,
+    float* __restrict__ confidences, uint32_t* __restrict__ candidate_ids,
+    float* __restrict__ candidate_probabilities) {
+  if (threadIdx.x != 0U)
+    return;
+  uint32_t lane = 0;
+  for (uint32_t t = 0; t < count; ++t) {
+    const float* scores = table + (uint64_t(t) * top_k + lane) * top_k;
+    const uint32_t* candidates = ids + uint64_t(t + 1U) * top_k;
+    uint32_t best = 0;
+    for (uint32_t k = 1; k < top_k; ++k)
+      if (scores[k] > scores[best])
+        best = k;
+    float weights[kMaxSelectorTopK];
+    float denominator = 1.0F;
+    uint32_t pick = best;
+    if (temperature > 0.0F) {
+      const float divisor = fmaxf(temperature, FLT_MIN);
+      denominator = 0.0F;
+      for (uint32_t k = 0; k < top_k; ++k) {
+        weights[k] = expf((scores[k] - scores[best]) / divisor);
+        denominator += weights[k];
+      }
+      const float inverse = 1.0F / fmaxf(denominator, 1e-30F);
+      float threshold =
+          fminf(fmaxf(uniforms[t], 0.0F), 0.99999994F) * denominator;
+      bool selected = false;
+      for (uint32_t k = 0; k < top_k; ++k) {
+        const float weight = weights[k];
+        weights[k] = weight * inverse;
+        if (!selected && weights[k] > 0.0F)
+          pick = k;
+        threshold -= weight;
+        if (threshold < 0.0F && !selected) {
+          pick = k;
+          selected = true;
+        }
+      }
+    } else {
+      for (uint32_t k = 0; k < top_k; ++k)
+        weights[k] = k == best ? 1.0F : 0.0F;
+    }
+    tokens[t] = candidates[pick];
+    if (confidences != nullptr)
+      confidences[t] = weights[pick];
+    for (uint32_t k = 0; k < top_k; ++k) {
+      if (candidate_ids != nullptr)
+        candidate_ids[uint64_t(t) * top_k + k] = candidates[k];
+      if (candidate_probabilities != nullptr)
+        candidate_probabilities[uint64_t(t) * top_k + k] = weights[k];
+    }
+    lane = pick;
+  }
+}
+
+void LaunchDSpineRowStats(const float* hidden, float* normalized, float* rms,
+                          std::uint32_t rows, std::uint32_t hidden_size,
+                          float eps, hipStream_t stream) {
+  dspine_row_stats_kernel<<<rows, kDSpineThreads, 0, stream>>>(
+      hidden, normalized, rms, hidden_size, eps);
+}
+
+void LaunchDSpineCodes(float* codes, const float* anchor_code,
+                       std::uint32_t rows, std::uint32_t code_size, float eps,
+                       hipStream_t stream) {
+  dspine_codes_kernel<<<rows, kDSpineThreads, 0, stream>>>(codes, anchor_code,
+                                                           code_size, eps);
+}
+
+void LaunchDSpineMessage(const float* packed, const float* sender,
+                         const float* bias, float* message, std::uint32_t rows,
+                         std::uint32_t rank, std::uint32_t lanes,
+                         float sender_scale, hipStream_t stream) {
+  dspine_message_kernel<<<rows, kDSpineThreads, 0, stream>>>(
+      packed, sender, bias, message, rank, lanes, sender_scale);
+}
+
+void LaunchDSpineWrite(const float* hidden, const float* delta,
+                       const float* rms, float* out, std::uint32_t rows,
+                       std::uint32_t hidden_size, hipStream_t stream) {
+  dspine_write_kernel<<<
+      dim3((hidden_size + kDSpineThreads - 1U) / kDSpineThreads, rows),
+      kDSpineThreads, 0, stream>>>(hidden, delta, rms, out, hidden_size);
+}
+
+void LaunchDSpineTopK(const float* logits, std::uint32_t rows,
+                      std::uint32_t vocab_size, std::uint32_t top_k,
+                      const std::uint32_t* anchor, std::uint32_t* ids,
+                      hipStream_t stream) {
+  if (rows == 0 || top_k < 2 || top_k > kMaxSelectorTopK || top_k > vocab_size)
+    throw std::invalid_argument("invalid DSpine top-k shape");
+  dspine_topk_kernel<<<rows, kDSpineThreads, 0, stream>>>(logits, vocab_size,
+                                                          top_k, anchor, ids);
+}
+
+void LaunchDSpineTable(const float* raw, const float* rms, const float* delta,
+                       const float* norm_weight, const float* head_rows,
+                       float* table, std::uint32_t rows, std::uint32_t top_k,
+                       std::uint32_t hidden_size, float eps,
+                       hipStream_t stream) {
+  if (top_k > kMaxSelectorTopK || hidden_size * sizeof(float) > 48U * 1024U)
+    throw std::invalid_argument("invalid DSpine table shape");
+  dspine_table_kernel<<<rows * top_k, kDSpineThreads,
+                        hidden_size * sizeof(float), stream>>>(
+      raw, rms, delta, norm_weight, head_rows, table, top_k, hidden_size, eps);
+}
+
+void LaunchDSpineChain(const float* table, const std::uint32_t* ids,
+                       std::uint32_t rows, std::uint32_t top_k,
+                       float temperature, const float* uniforms,
+                       std::uint32_t* tokens, float* confidences,
+                       std::uint32_t* candidate_ids,
+                       float* candidate_probabilities, hipStream_t stream) {
+  if (top_k > kMaxSelectorTopK || (temperature > 0.0F && uniforms == nullptr))
+    throw std::invalid_argument("invalid DSpine chain");
+  dspine_chain_kernel<<<1, 32, 0, stream>>>(
+      table, ids, rows, top_k, temperature, uniforms, tokens, confidences,
+      candidate_ids, candidate_probabilities);
+}
+
+// DSpine draft attention in three phases (commit 3). The wave kernel above
+// gives every (block row, head pair) its own CTA, and each CTA reads its KV
+// head's whole window: at 16 rows and a 4k context that is 256 CTAs x 4 MB.
+// Here the scores are split over KEYS (each K row is read once per KV head
+// and held in registers while all rows x heads of that KV head reuse it), the
+// softmax runs one 256-thread CTA per four score rows on a global score array,
+// and PV is split over DIM. Ported from our gufo fork's GUFO_DEV_DRAFTK=2
+// route (0a1521c1) with the causal block mask and partial PV groups added.
+// Every float chain stays in one thread in the wave kernel's order (the
+// per-lane K float4 dot and xor butterfly, the strided 256-thread softmax
+// partials and LDS tree, the ascending-key PV sum with the same 32-key
+// prefetch), so the output equals the causal wave route bitwise.
+// Scores are laid out [block row * num_q_heads + head][total_k].
+
+/// `KRegs` = ceil(head_dim / 4 / 32), the K float4s one lane keeps; a
+/// template parameter because a runtime-indexed local array is promoted to LDS.
+template<uint32_t KRegs>
+__global__ __launch_bounds__(256) void dspine_attention_scores_kernel(
+    const float* __restrict__ q, const float* __restrict__ injected_k,
+    const float* __restrict__ block_k, float* __restrict__ scores,
+    uint32_t current_pos, uint32_t history_start, uint32_t history_count,
+    uint32_t block_count, uint32_t sliding_window, uint32_t num_q_heads,
+    uint32_t num_kv_heads, uint32_t head_dim, float scale,
+    uint32_t history_capacity, uint32_t keys_per_block) {
+  const uint32_t kv_h = blockIdx.y;
+  const uint32_t heads_per_kv = num_q_heads / num_kv_heads;
+  const uint32_t q_dim = num_q_heads * head_dim,
+                 kv_dim = num_kv_heads * head_dim;
+  const uint32_t total_k = history_count + block_count;
+  const uint32_t num_vec = head_dim / 4U, lane = threadIdx.x & 31U,
+                 wave = threadIdx.x >> 5U, waves = blockDim.x >> 5U;
+  const uint32_t key_begin = blockIdx.x * keys_per_block;
+  const uint32_t key_limit = key_begin + keys_per_block;
+  const uint32_t key_end = key_limit < total_k ? key_limit : total_k;
+
+  for (uint32_t key = key_begin + wave; key < key_end; key += waves) {
+    const bool in_block = key >= history_count;
+    const uint32_t block_index = in_block ? key - history_count : 0U;
+    const uint32_t key_position =
+        in_block ? current_pos + block_index : history_start + key;
+    const float4* source =
+        in_block ? reinterpret_cast<const float4*>(
+                       block_k + uint64_t(block_index) * kv_dim +
+                       uint64_t(kv_h) * head_dim)
+                 : reinterpret_cast<const float4*>(
+                       injected_k +
+                       uint64_t(key_position % history_capacity) * kv_dim +
+                       uint64_t(kv_h) * head_dim);
+    float4 held[KRegs];
+#pragma unroll
+    for (uint32_t i = 0; i < KRegs; ++i) {
+      const uint32_t d = lane + (i * 32U);
+      if (d < num_vec)
+        held[i] = source[d];
+    }
+    for (uint32_t row = 0; row < block_count; ++row) {
+      const uint32_t query_position = current_pos + row;
+      bool visible;
+      if (in_block) {
+        const uint32_t distance = query_position > key_position
+                                      ? query_position - key_position
+                                      : key_position - query_position;
+        visible = distance < sliding_window && block_index <= row;
+      } else {
+        visible = query_position - key_position < sliding_window;
+      }
+      const float4* q_vec = reinterpret_cast<const float4*>(
+          q + uint64_t(row) * q_dim + uint64_t(kv_h * heads_per_kv) * head_dim);
+      float* out_row =
+          scores +
+          (uint64_t(row) * num_q_heads + (kv_h * heads_per_kv)) * total_k + key;
+      for (uint32_t r = 0; r < heads_per_kv; ++r) {
+        float dot = 0.f;
+#pragma unroll
+        for (uint32_t i = 0; i < KRegs; ++i) {
+          const uint32_t d = lane + (i * 32U);
+          if (d >= num_vec)
+            break;
+          const float4 kv = held[i];
+          const float4 qv = q_vec[d];
+          dot += (qv.x * kv.x) + (qv.y * kv.y) + (qv.z * kv.z) + (qv.w * kv.w);
+        }
+        for (int offset = 16; offset > 0; offset >>= 1)
+          dot += __shfl_xor(dot, offset);
+        if (lane == 0)
+          *out_row = visible ? dot * scale : -1e20F;
+        q_vec += num_vec;
+        out_row += total_k;
+      }
+    }
+  }
+}
+
+/// The wave kernel's exact softmax, on `Combos` score rows per CTA. The
+/// strided partials and the LDS tree pin blockDim.x at 256.
+template<uint32_t Combos>
+__global__ __launch_bounds__(256) void dspine_attention_softmax_kernel(
+    float* __restrict__ scores, uint32_t total_k, uint32_t num_q_heads) {
+  __shared__ float reduce[Combos][256];
+  float* row[Combos];
+#pragma unroll
+  for (unsigned c = 0; c < Combos; ++c)
+    row[c] = scores +
+             (uint64_t(blockIdx.x) * num_q_heads + (blockIdx.y * Combos) + c) *
+                 total_k;
+  float maxima[Combos];
+#pragma unroll
+  for (unsigned c = 0; c < Combos; ++c)
+    maxima[c] = -1e20F;
+  for (uint32_t p = threadIdx.x; p < total_k; p += blockDim.x) {
+#pragma unroll
+    for (unsigned c = 0; c < Combos; ++c)
+      maxima[c] = fmaxf(maxima[c], row[c][p]);
+  }
+#pragma unroll
+  for (unsigned c = 0; c < Combos; ++c)
+    reduce[c][threadIdx.x] = maxima[c];
+  __syncthreads();
+  for (uint32_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
+    if (threadIdx.x < stride) {
+#pragma unroll
+      for (unsigned c = 0; c < Combos; ++c)
+        reduce[c][threadIdx.x] =
+            fmaxf(reduce[c][threadIdx.x], reduce[c][threadIdx.x + stride]);
+    }
+    __syncthreads();
+  }
+#pragma unroll
+  for (unsigned c = 0; c < Combos; ++c)
+    maxima[c] = reduce[c][0];
+  __syncthreads();
+  float sums[Combos] = {};
+  for (uint32_t p = threadIdx.x; p < total_k; p += blockDim.x) {
+#pragma unroll
+    for (unsigned c = 0; c < Combos; ++c) {
+      const float e = expf(row[c][p] - maxima[c]);
+      row[c][p] = e;
+      sums[c] += e;
+    }
+  }
+#pragma unroll
+  for (unsigned c = 0; c < Combos; ++c)
+    reduce[c][threadIdx.x] = sums[c];
+  __syncthreads();
+  for (uint32_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
+    if (threadIdx.x < stride) {
+#pragma unroll
+      for (unsigned c = 0; c < Combos; ++c)
+        reduce[c][threadIdx.x] += reduce[c][threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+#pragma unroll
+  for (unsigned c = 0; c < Combos; ++c)
+    sums[c] = 1.f / (reduce[c][0] + 1e-9F);
+  __syncthreads();
+  for (uint32_t p = threadIdx.x; p < total_k; p += blockDim.x) {
+#pragma unroll
+    for (unsigned c = 0; c < Combos; ++c)
+      row[c][p] *= sums[c];
+  }
+}
+
+/// PV over one KV head: grid (combo groups, dim tiles, kv heads). A wave owns
+/// one 32-wide dim tile and `Accumulators` combos (block row x head of this KV
+/// head); combos past the end of the last group compute nothing they store.
+template<uint32_t Accumulators>
+__global__ __launch_bounds__(256) void dspine_attention_pv_kernel(
+    const float* __restrict__ injected_v, const float* __restrict__ block_v,
+    const float* __restrict__ scores, float* __restrict__ out,
+    uint32_t history_start, uint32_t history_count, uint32_t block_count,
+    uint32_t num_q_heads, uint32_t num_kv_heads, uint32_t head_dim,
+    uint32_t history_capacity) {
+  constexpr uint32_t kPrefetch = 32;
+  constexpr uint32_t kDimTile = 32;
+  const uint32_t kv_h = blockIdx.z;
+  const uint32_t heads_per_kv = num_q_heads / num_kv_heads;
+  const uint32_t q_dim = num_q_heads * head_dim,
+                 kv_dim = num_kv_heads * head_dim;
+  const uint32_t total_k = history_count + block_count;
+  const uint32_t combos = block_count * heads_per_kv;
+  const uint32_t lane = threadIdx.x & 31U, wave = threadIdx.x >> 5U,
+                 waves = blockDim.x >> 5U;
+  const uint32_t d = (blockIdx.y * kDimTile) + lane;
+  const uint32_t combo_base = (blockIdx.x * waves * Accumulators) + wave;
+
+  const float* srow[Accumulators];
+#pragma unroll
+  for (unsigned j = 0; j < Accumulators; ++j) {
+    const uint32_t combo = min(combo_base + (j * waves), combos - 1U);
+    const uint32_t row = combo / heads_per_kv;
+    const uint32_t head = (kv_h * heads_per_kv) + (combo % heads_per_kv);
+    srow[j] = scores + (uint64_t(row) * num_q_heads + head) * total_k;
+  }
+  float acc[Accumulators] = {};
+  uint32_t slot = history_count > 0 ? history_start % history_capacity : 0;
+  const float* vbase = injected_v + (uint64_t(kv_h) * head_dim) + d;
+  uint32_t local = 0;
+  for (; history_count - local >= kPrefetch; local += kPrefetch) {
+    float values[kPrefetch];
+#pragma unroll
+    for (unsigned i = 0; i < kPrefetch; ++i) {
+      values[i] = vbase[uint64_t(slot) * kv_dim];
+      slot = slot + 1 == history_capacity ? 0 : slot + 1;
+    }
+#pragma unroll
+    for (unsigned i = 0; i < kPrefetch; ++i) {
+#pragma unroll
+      for (unsigned j = 0; j < Accumulators; ++j)
+        acc[j] += srow[j][local + i] * values[i];
+    }
+  }
+  for (; local < history_count; ++local) {
+    const float value = vbase[uint64_t(slot) * kv_dim];
+#pragma unroll
+    for (unsigned j = 0; j < Accumulators; ++j)
+      acc[j] += srow[j][local] * value;
+    slot = slot + 1 == history_capacity ? 0 : slot + 1;
+  }
+  for (uint32_t p = 0; p < block_count; ++p) {
+    const float value =
+        block_v[uint64_t(p) * kv_dim + uint64_t(kv_h) * head_dim + d];
+#pragma unroll
+    for (unsigned j = 0; j < Accumulators; ++j)
+      acc[j] += srow[j][history_count + p] * value;
+  }
+#pragma unroll
+  for (unsigned j = 0; j < Accumulators; ++j) {
+    const uint32_t combo = combo_base + (j * waves);
+    if (combo >= combos)
+      continue;
+    const uint32_t row = combo / heads_per_kv;
+    const uint32_t head = (kv_h * heads_per_kv) + (combo % heads_per_kv);
+    out[(uint64_t(row) * q_dim) + (uint64_t(head) * head_dim) + d] = acc[j];
+  }
+}
+
+std::size_t DSpineAttentionScoreElements(std::uint32_t block_count,
+                                         std::uint32_t num_q_heads,
+                                         std::uint32_t history_capacity) {
+  return static_cast<std::size_t>(block_count) * num_q_heads *
+         (static_cast<std::size_t>(history_capacity) + block_count);
+}
+
+bool LaunchDSpineAttention(
+    const float* q, const float* injected_k, const float* injected_v,
+    const float* block_k, const float* block_v, float* out,
+    std::uint32_t current_pos, std::uint32_t history_length,
+    std::uint32_t block_count, std::uint32_t sliding_window,
+    std::uint32_t num_q_heads, std::uint32_t num_kv_heads,
+    std::uint32_t head_dim, float scale, hipStream_t stream,
+    std::uint32_t history_capacity, float* scores) {
+  // The softmax tree pins 256 threads; a wave reads one 32-float V line.
+  constexpr std::uint32_t kThreads = 256, kWaves = kThreads / 32U;
+  constexpr std::uint32_t kDimTile = 32, kCombos = 4, kAccumulators = 2;
+  constexpr std::uint32_t kTargetCtas = 160;  // 40 CUs, a little over 4x
+  if (scores == nullptr || block_count == 0 || num_kv_heads == 0 ||
+      num_q_heads % num_kv_heads != 0 || num_q_heads % kCombos != 0 ||
+      head_dim % kDimTile != 0 || head_dim / 4U > 32U * 4U)
+    return false;
+  const std::uint32_t history_start = current_pos + 1U > sliding_window
+                                          ? current_pos + 1U - sliding_window
+                                          : 0U;
+  const std::uint32_t history_count =
+      history_length > history_start ? history_length - history_start : 0U;
+  if (history_count > history_capacity)
+    return false;
+  const std::uint32_t total_k = history_count + block_count;
+  const std::uint32_t splits = (kTargetCtas + num_kv_heads - 1U) / num_kv_heads;
+  std::uint32_t keys_per_block = (total_k + splits - 1U) / splits;
+  keys_per_block = (keys_per_block + kWaves - 1U) / kWaves * kWaves;
+  const std::uint32_t score_blocks =
+      (total_k + keys_per_block - 1U) / keys_per_block;
+  const auto launch_scores = [&](auto regs) {
+    dspine_attention_scores_kernel<decltype(regs)::value>
+        <<<dim3(score_blocks, num_kv_heads), kThreads, 0, stream>>>(
+            q, injected_k, block_k, scores, current_pos, history_start,
+            history_count, block_count, sliding_window, num_q_heads,
+            num_kv_heads, head_dim, scale, history_capacity, keys_per_block);
+  };
+  if (head_dim / 4U <= 32U)
+    launch_scores(std::integral_constant<std::uint32_t, 1U>{});
+  else
+    launch_scores(std::integral_constant<std::uint32_t, 4U>{});
+  dspine_attention_softmax_kernel<kCombos>
+      <<<dim3(block_count, num_q_heads / kCombos), kThreads, 0, stream>>>(
+          scores, total_k, num_q_heads);
+  const std::uint32_t combos = block_count * (num_q_heads / num_kv_heads);
+  const std::uint32_t per_group = kWaves * kAccumulators;
+  dspine_attention_pv_kernel<kAccumulators>
+      <<<dim3((combos + per_group - 1U) / per_group, head_dim / kDimTile,
+              num_kv_heads),
+         kThreads, 0, stream>>>(injected_v, block_v, scores, out, history_start,
+                                history_count, block_count, num_q_heads,
+                                num_kv_heads, head_dim, history_capacity);
+  return true;
 }
 
 }  // namespace gufo::hip::kernels
