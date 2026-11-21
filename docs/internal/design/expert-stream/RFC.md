@@ -197,8 +197,9 @@ Once the sessions and the prompt cache's backing exist, serving gives the
 prompt cache its budget (`--cache-ram-bytes`, or the share times the
 sessions), then grants the store what it holds plus `HostAvailableBytes()`,
 less the headroom and the prompt-cache budget beyond the backing already
-committed, and calls `Store::Fit(grant)`. The store allocates its prefetch
-stage from the grant, shrinks or seeds to the rest, and logs both budgets.
+committed, calls `Store::Fit(grant)` and logs both budgets
+(`expert_cache_grant`). The store allocates its prefetch stage from the
+grant, and shrinks or seeds to the rest.
 
 - **A fixed share, not a ratio.** What the prompt cache needs follows the
   workload (sessions, context, prefix reuse), not the machine's size. A ratio
@@ -217,8 +218,8 @@ stage from the grant, shrinks or seeds to the rest, and logs both budgets.
   can push it there. A streamed model fills the host down to the store's
   floor (`live_floor_bytes`, 1 GiB) on purpose. Against the reserve, DeepSeek
   read its own steady state as pressure: the prompt cache lost its backing
-  10 s after startup and a 53-request agent replay prefilled in 198 s instead
-  of 35 s. Keeping the reserve free would have cost the expert cache 4 GiB.
+  as the server started listening, and a 53-request agent replay prefilled
+  in 200-205 s instead of 35 s, with 22 replies different. Keeping the reserve free would have cost the expert cache 4 GiB.
   So while experts stream, the floor replaces the reserve, and below it the
   expert cache gives memory back first:
   - `Store::Release(bytes)` evicts the coldest experts, frees whole chunks
@@ -230,11 +231,12 @@ stage from the grant, shrinks or seeds to the rest, and logs both budgets.
     misses refill it.
   - New requests are refused below half the floor.
 
-  On DeepSeek, with another process taking memory at idle down to 0.7 GiB,
-  the next idle tick released 2.3 GB of experts in 155 ms and left the prompt
-  cache alone. A request during the pressure was served. One second after the
-  other process exited, the cache was restored, and the next request read
-  2.1 GiB of experts back (5.9 s instead of 1.2 s).
+  On DeepSeek, with another process taking memory at idle down to 0.67 GiB,
+  the next idle tick released 2.7 GB of experts in 108 ms and left the prompt
+  cache alone; once the process exited, the cache was restored and the same
+  request gave the same reply. Down to 0.21 GiB available, the release freed
+  2.4 GB but took 67 s; where that time went was not measured. `Release`
+  runs on the idle scheduler, so requests wait for it.
 
 ### Prefetch: `Predict`, `Prefetch`, `Expect`, `PredictFlush`
 
