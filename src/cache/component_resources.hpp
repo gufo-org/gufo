@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 
 #include "src/cache/adapter.hpp"
@@ -34,6 +35,29 @@ struct ComponentCacheResources {
   StreamLease restore_stream;
   StreamLease background_stream;
   std::function<ComponentCaptureBuffer(const PayloadRequest&)> allocate;
+  // Optional: a payload for completed append rows that shares their storage
+  // (`view`, from Adapter::BorrowRowsView) instead of copying it, charged to
+  // the ledger like a copy. The rows stay valid when the slot is rewound,
+  // reused or destroyed, so they need no borrow, guard or preservation.
+  // Nullopt when this storage cannot be shared; the caller then allocates.
+  std::function<std::optional<Payload>(const PayloadRequest&,
+                                       std::span<const std::byte> view)>
+      share;
+  // Optional: whether payload bytes at this address are readable by the
+  // device only. A reader on the host copies them through a stream
+  // (copy_observed_rows) instead of reading the address.
+  std::function<bool(const void*)> device_only;
+  // Optional: copies device-only payload bytes to host memory the device
+  // can address (staging), on the caller's thread and outside every stream,
+  // and waits for the copy. False when it cannot: the reader then copies
+  // through its stream, behind whatever that stream's queue is running.
+  std::function<bool(std::span<const std::byte> source,
+                     std::span<std::byte> destination)>
+      copy_device_only;
+  // Optional housekeeping that waits for the device (releasing addresses of
+  // shared storage that is gone). The serving layer calls it on the thread
+  // that runs the model, between its launches, and while idle.
+  std::function<void()> settle;
   StagingAllocator staging;
   // Prepare on-demand backing immediately before the next prefill chunk.
   std::function<void(std::size_t)> prepare_prefill;

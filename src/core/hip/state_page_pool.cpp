@@ -8,8 +8,10 @@
 
 #include "src/core/hip/state_lendable_range.hpp"
 #include "src/core/hip/state_region.hpp"
+#include "src/core/hip/state_shared_page.hpp"
 #include "src/core/platform/os_info.hpp"
 #include "src/core/platform/pages.hpp"
+#include "src/mem/remap_barrier.hpp"
 
 namespace gufo::mem {
 namespace {
@@ -137,7 +139,13 @@ PagePool::PagePool(int device, std::function<bool(std::uint64_t)> may_create,
     prop_.requestedHandleType = hipMemHandleTypePosixFileDescriptor;
     StateLedger::Process().EnableLending();
     SetLendableRangeFactory(&CreateVmmLendableRange);
+    SetSharedRowsFactory(&CreateParkedRows);
   }
+  // Every demand-mapped region remaps addresses (RemapBarrier).
+  RemapBarrier::SetDeviceDrain(+[]() noexcept {
+    (void)hipDeviceSynchronize();
+    (void)hipGetLastError();
+  });
   access_.location = prop_.location;
   access_.flags = hipMemAccessFlagsProtReadWrite;
   thread_ = std::thread([this] { Run(); });
@@ -326,6 +334,125 @@ hipStream_t PagePool::ZeroStream() {
   return zero_stream_;
 }
 
+std::size_t PagePool::ReleaseFree(std::size_t bytes) {
+  std::size_t released = 0;
+  while (released < bytes) {
+    hipMemGenericAllocationHandle_t handle{};
+    {
+      std::lock_guard lock(mutex_);
+      auto& list = recycled_.empty() ? free_ : recycled_;
+      if (list.empty())
+        break;
+      handle = list.back();
+      list.pop_back();
+      StateLedger::Process().RemovePooled(kPageBytes);
+    }
+    // A page the cache lent goes back to it; the cache gives up its own.
+    if (ReturnHome(handle))
+      continue;
+    (void)hipMemRelease(handle);
+    (void)hipGetLastError();
+    released += kPageBytes;
+  }
+  return released;
+}
+
+std::byte* PagePool::AliasForCopy(hipMemGenericAllocationHandle_t handle) {
+  const std::lock_guard lock(fixup_mutex_);
+  if (scratch_ == nullptr) {
+    void* base = nullptr;
+    if (hipMemAddressReserve(&base, kScratchPages * kPageBytes, kPageBytes,
+                             nullptr, 0) != hipSuccess) {
+      (void)hipGetLastError();
+      return nullptr;
+    }
+    scratch_ = static_cast<std::byte*>(base);
+  }
+  if (scratch_used_ == kScratchPages)
+    return nullptr;
+  std::byte* const address = scratch_ + scratch_used_ * kPageBytes;
+  if (hipMemMap(address, kPageBytes, 0, handle, 0) != hipSuccess) {
+    (void)hipGetLastError();
+    return nullptr;
+  }
+  ++scratch_used_;
+  if (hipMemSetAccess(address, kPageBytes, &access_, 1) != hipSuccess) {
+    (void)hipGetLastError();
+    // Unmapped with the others at the next SettleRemaps().
+    return nullptr;
+  }
+  // The scratch address had another page until the last SettleRemaps(): it
+  // reaches this one only after the next, which runs before the copy.
+  RemapBarrier::NoteRemap();
+  return address;
+}
+
+void PagePool::QueueCopy(std::byte* destination, const std::byte* source,
+                         std::shared_ptr<void> keep) {
+  const std::lock_guard lock(fixup_mutex_);
+  fixups_.push_back({destination, source, kPageBytes, std::move(keep)});
+  queued_.store(fixups_.size(), std::memory_order_release);
+}
+
+void PagePool::QueueClear(std::byte* destination, std::size_t bytes) {
+  const std::lock_guard lock(fixup_mutex_);
+  fixups_.push_back({destination, nullptr, bytes, nullptr});
+  queued_.store(fixups_.size(), std::memory_order_release);
+}
+
+bool PagePool::SettleRemaps() {
+  if (queued_.load(std::memory_order_acquire) == 0 && !RemapBarrier::Pending())
+    return true;
+  // Another model's thread may be settling: its barrier does not cover what
+  // this thread remapped after it began.
+  const std::lock_guard settle_lock(settle_mutex_);
+  std::vector<Fixup> work;
+  std::size_t aliases = 0;
+  {
+    const std::lock_guard lock(fixup_mutex_);
+    work.swap(fixups_);
+    queued_.store(0, std::memory_order_release);
+    aliases = scratch_used_;
+  }
+  if (RemapBarrier::Pending() || !work.empty())
+    RemapBarrier::Settle();
+  bool ok = true;
+  // The copies read aliases this thread unmaps right after: other threads'
+  // device work stays held back until both are done.
+  if (!work.empty() || aliases != 0)
+    RemapBarrier::Hold();
+  if (!work.empty()) {
+    const hipStream_t stream = ZeroStream();
+    ok = stream != nullptr;
+    for (const auto& fixup : work) {
+      if (!ok)
+        break;
+      ok = (fixup.source != nullptr
+                ? hipMemcpyAsync(fixup.destination, fixup.source, fixup.bytes,
+                                 hipMemcpyDeviceToDevice, stream)
+                : hipMemsetAsync(fixup.destination, 0, fixup.bytes, stream)) ==
+           hipSuccess;
+    }
+    // Wait even after a failure: queued copies still read their sources.
+    if (stream != nullptr && hipStreamSynchronize(stream) != hipSuccess)
+      ok = false;
+    if (!ok)
+      (void)hipGetLastError();
+  }
+  if (aliases != 0) {
+    // Idle here: nothing reads the aliases any more.
+    (void)hipMemUnmap(scratch_, aliases * kPageBytes);
+    (void)hipGetLastError();
+    const std::lock_guard lock(fixup_mutex_);
+    // An alias mapped meanwhile by another thread sits past `aliases`; it
+    // cannot be, under settle_mutex_'s callers' rule, but never reuse one.
+    if (scratch_used_ == aliases)
+      scratch_used_ = 0;
+  }
+  RemapBarrier::Release();
+  return ok;
+}
+
 void PagePool::MapAhead(const std::shared_ptr<Region>& region,
                         std::size_t rows) {
   {
@@ -402,6 +529,10 @@ void PagePool::Run() {
           BorrowBelowFloor(4 * region->shape().segments);
           if (!region->EnsureAhead(std::min(job.rows, rows + step)))
             break;
+          // No further: the next address needs the remap barrier, which
+          // the writer runs (Region::Ensure).
+          if (region->backed_rows() == rows)
+            break;
           rows = region->backed_rows();
         }
       }
@@ -421,7 +552,9 @@ void PagePool::Run() {
         const std::size_t borrowed =
             Borrow(std::min(kBorrowBatchPages, kLowPages - free));
         lock.lock();
-        if (borrowed)
+        // An eviction may also have returned pages a checkpoint shared with
+        // sessions straight to the free pages.
+        if (borrowed || free_.size() + recycled_.size() > free)
           continue;
       }
       // Pages from reclaim (possibly compaction) only for the warm-up at

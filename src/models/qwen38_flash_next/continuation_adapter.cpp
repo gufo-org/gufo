@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <gufo/ext/experimental/state_memory.hpp>
 #include <gufo/ext/snapshot_copy.hpp>
 #include <mutex>
 #include <new>
@@ -124,6 +125,16 @@ public:
   void BeforeWrite(bool draft, std::uint32_t first, std::uint32_t end,
                    std::uint32_t first_block,
                    std::uint32_t end_block) override {
+    Guard(draft, first, end, first_block, end_block, false);
+  }
+  void BeforeRewrite(bool draft, std::uint32_t first, std::uint32_t end,
+                     std::uint32_t first_block,
+                     std::uint32_t end_block) override {
+    Guard(draft, first, end, first_block, end_block, true);
+  }
+  void Guard(bool draft, std::uint32_t first, std::uint32_t end,
+             std::uint32_t first_block, std::uint32_t end_block,
+             bool in_place) {
     // Model execution temporarily disables its public validity flag. The
     // adapter's restore/failure status and outstanding transfers still gate
     // every native write, including graph replay and speculative rollback.
@@ -139,6 +150,15 @@ public:
       if (a < b)
         guard.BeforeOverwrite(component.descriptor.id, a, b);
     }
+    // Pages of these rows that a checkpoint or another session shares become
+    // the session's own before the write: copies where it still needs their
+    // rows (those before an append, or all of them when rewriting in place),
+    // cleared pages elsewhere.
+    std::string error;
+    if (!adapter.model_->executor_->UnshareKv(
+            *session->session_, draft, first, end, in_place ? end : first,
+            first_block, end_block, in_place ? end_block : first_block, &error))
+      throw std::runtime_error("Flash-Next state page copy failed: " + error);
   }
   void BeforeReset() override {
     if (invalidating)
@@ -241,6 +261,10 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
   put(model_->DecodeConcurrency());
   for (const auto& component : layout_.Components())
     descriptors_.push_back(component.descriptor);
+  if (int device = 0; hipGetDevice(&device) == hipSuccess)
+    park_ = gufo::mem::PagePark::ForDevice(device);
+  else
+    (void)hipGetLastError();
 }
 ContinuationAdapter::~ContinuationAdapter() = default;
 ContinuationAdapter::State& ContinuationAdapter::As(cache::Slot& slot) const {
@@ -307,7 +331,9 @@ std::optional<cache::CostEstimate> ContinuationAdapter::Cost() const {
              : cache::CostEstimate{0.000573457239, 0.000058015348, 96e9, 3.3e9};
 }
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
-  return {.continuation = true, .persistent_encoding = true};
+  return {.continuation = true,
+          .persistent_encoding = true,
+          .shared_restore = park_ != nullptr};
 }
 std::span<const cache::ComponentDescriptor> ContinuationAdapter::Components()
     const {
@@ -400,8 +426,45 @@ void* ContinuationAdapter::RowData(
   }
 }
 
+gufo::mem::Region* ContinuationAdapter::KvRegion(
+    State& state, const ContinuationComponent& component) const {
+  auto& native = *state.session->session_;
+  const bool value = component.part == ContinuationPart::kValue ||
+                     component.part == ContinuationPart::kDraftValue;
+  if (component.part == ContinuationPart::kDraftPooledKeys)
+    return native.mtp_pooled_regions_.size() == 1
+               ? native.mtp_pooled_regions_[0].get()
+               : nullptr;
+  if (component.part == ContinuationPart::kDraftKey ||
+      component.part == ContinuationPart::kDraftValue)
+    return native.mtp_kv_regions_.size() == 2
+               ? native.mtp_kv_regions_[value].get()
+               : nullptr;
+  const bool pooled = component.part == ContinuationPart::kPooledKeys;
+  if (component.part != ContinuationPart::kKey && !value && !pooled)
+    return nullptr;
+  // Per attention layer, in layer order: keys and values, and pooled keys.
+  const auto& config = model_->config();
+  std::size_t layers = 0;
+  for (std::uint32_t layer = 0; layer < component.layer; ++layer)
+    layers += !config.IsLinearLayer(layer);
+  if (pooled)
+    return layers < native.pooled_regions_.size()
+               ? native.pooled_regions_[layers].get()
+               : nullptr;
+  const auto index = 2 * layers + value;
+  return index < native.kv_regions_.size() ? native.kv_regions_[index].get()
+                                           : nullptr;
+}
+
 void ContinuationAdapter::BeginRestore(
     cache::Slot& slot, std::span<const cache::ComponentPosition> positions) {
+  (void)BeginSharedRestore(slot, positions, {});
+}
+
+std::vector<cache::RestoredRows> ContinuationAdapter::BeginSharedRestore(
+    cache::Slot& slot, std::span<const cache::ComponentPosition> positions,
+    std::span<const cache::RestoreSource> sources) {
   auto& state = As(slot);
   state.BeforeExecution();
   if (positions.size() != descriptors_.size())
@@ -439,10 +502,66 @@ void ContinuationAdapter::BeginRestore(
   state.GuardAll();
   Check(hipStreamSynchronize(model_->executor_->stream()));
   state.session->session_->PreserveSnapshots(0, 0);
-  // Restores write K/V rows without a forward pass: back them first.
-  if (std::string error; !model_->executor_->EnsureKv(*state.session->session_,
-                                                      target, draft, &error))
-    throw std::bad_alloc();
+  // Pages the checkpoint's rows already live in are mapped into the session
+  // as they are; pages others share that the restore rewrites are released.
+  // Every K/V region goes through this, sources or not: a load must never
+  // write a page a checkpoint still reads.
+  std::vector<cache::RestoredRows> taken;
+  {
+    using gufo::mem::kPageBytes;
+    struct Plan {
+      gufo::mem::Region* region{};
+      cache::ComponentId component;
+      std::size_t row_bytes{};
+      // Rows the restore brings: mapped here or loaded afterwards.
+      std::size_t rows{};
+      gufo::mem::RestorePlan pages;
+    };
+    std::vector<Plan> plans;
+    for (const auto& component : layout_.Components())
+      if (auto* region = KvRegion(state, component);
+          region != nullptr && region->demand_mapped())
+        plans.push_back({region,
+                         component.descriptor.id,
+                         component.descriptor.row_bytes,
+                         static_cast<std::size_t>(
+                             std::ranges::find(ordered, component.descriptor.id,
+                                               &cache::ComponentPosition::id)
+                                 ->valid_rows),
+                         {*region, park_.get()}});
+    for (const auto& source : sources)
+      if (const auto plan =
+              std::ranges::find(plans, source.component, &Plan::component);
+          plan != plans.end() && kPageBytes % plan->row_bytes == 0)
+        plan->pages.Add(source.first * plan->row_bytes, source.bytes);
+    for (auto& plan : plans) {
+      const auto adopted = plan.pages.Apply(plan.rows);
+      const auto rows = kPageBytes / plan.row_bytes;
+      for (std::size_t p = 0; p < adopted.size(); ++p) {
+        if (!adopted[p])
+          continue;
+        if (!taken.empty() && taken.back().component == plan.component &&
+            taken.back().end == p * rows)
+          taken.back().end += rows;
+        else
+          taken.push_back({plan.component, p * rows, (p + 1) * rows});
+        coverage[plan.component.value - 1].emplace_back(p * kPageBytes,
+                                                        (p + 1) * kPageBytes);
+      }
+    }
+    // The pages mapped above reach the device only after the remap barrier:
+    // once for all buffers, before any load or read.
+    if (std::string error;
+        !plans.empty() && !plans.front().region->SettleRemaps(&error))
+      throw std::runtime_error("Flash-Next state page map failed: " + error);
+  }
+  // Restores write K/V rows without a forward pass. A session that gave its
+  // pages to a checkpoint needs new ones for every row a load brings, and
+  // making a page takes 50-80 us: 1,064 pages for a 76K-token disk restore
+  // took 54 ms here. The page pool's thread backs the rows instead while
+  // the loads read their files; each load backs what it writes if the pool
+  // is not there yet (CopyRowsIn), and Validate backs the rest.
+  model_->executor_->MapKvAhead(*state.session->session_, target, draft);
   state.expected = std::move(ordered);
   state.coverage = std::move(coverage);
   state.metadata.fill(std::byte{});
@@ -453,6 +572,7 @@ void ContinuationAdapter::BeginRestore(
   state.session->tokens_.resize(target);
   state.session->ForgetDraftVocab();
   state.session->logits_.resize(model_->VocabSize());
+  return taken;
 }
 
 cache::Completion ContinuationAdapter::Transfer(
@@ -823,6 +943,11 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
         bytes.empty()
             ? nullptr
             : static_cast<std::byte*>(RowData(state, component)) + first * row;
+    // Back the rows this load writes; lock-free once they are.
+    if (auto* region = KvRegion(state, component);
+        region != nullptr && !bytes.empty())
+      if (std::string error; !region->Ensure(end, &error))
+        throw std::bad_alloc();
     {
       const std::lock_guard lock(state.jobs_mutex);
       state.coverage[id.value - 1].emplace_back(first * row, end * row);
@@ -881,6 +1006,10 @@ bool ContinuationAdapter::Validate(
   try {
     if (layout_.Positions(metadata.target, metadata.draft, metadata.blocks,
                           metadata.draft_blocks) != state.expected)
+      return refuse();
+    // Every row and the tile past the frontier that attention reads.
+    if (std::string error; !model_->executor_->EnsureKv(native, metadata.target,
+                                                        metadata.draft, &error))
       return refuse();
     const auto identity = session.ImageIdentity(metadata.target);
     if (metadata.image_bytes && (identity.size() != 32 ||

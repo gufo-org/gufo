@@ -293,6 +293,28 @@ void LimitsAndFaults() {
   for (auto invalid : {Spill, Chunk, static_cast<ResourceCategory>(255)})
     Throws<std::invalid_argument>([&] { auto r = ledger.Reserve(invalid, 1); });
   Throws<std::invalid_argument>([&] { auto r = ledger.Reserve(Private, 0); });
+  // Shared rows are charged like a copied chunk, outside the pool.
+  Throws<std::invalid_argument>([&] { auto r = ledger.ReserveShared(0); });
+  {
+    const auto before = ledger.Snapshot();
+    auto shared = ledger.ReserveShared(8);
+    assert(shared.Info().category == Chunk && shared.Info().reserved &&
+           !shared.Info().pool_backing);
+    auto charge = shared.Convert();
+    assert(ledger.Snapshot().bytes[Index(Chunk)] ==
+           before.bytes[Index(Chunk)] + 8);
+    assert(ledger.Snapshot().ram_bytes == before.ram_bytes + 8);
+    {
+      auto pin = charge.PinPersistence();
+      assert(ledger.Snapshot().persistence_pinned_bytes ==
+             before.persistence_pinned_bytes + 8);
+    }
+    charge = {};
+    assert(ledger.Snapshot().bytes == before.bytes);
+    assert(ledger.Snapshot().ram_bytes == before.ram_bytes);
+    Throws<ResourceExhausted>(
+        [&] { auto r = ledger.ReserveShared(ledger.Limits().ram_bytes + 1); });
+  }
 
   ResourceLedger partitions({1000, 80, 30, 20});
   auto ram = partitions.Reserve(Metadata, 80).Convert();

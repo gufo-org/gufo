@@ -96,6 +96,7 @@ src/core/hip/snapshot_copy.hpp
 src/core/hip/snapshot_transfer.hpp
 src/core/hip/state_memory.hpp
 src/core/hip/state_region.hpp
+src/core/hip/state_shared_page.hpp
 src/core/hip/transfer_pool.hpp
 src/core/hip/weight_upload.hpp
 src/core/image.hpp
@@ -144,4 +145,6 @@ src/ext/tts.hpp
 src/ext/video.hpp
 src/mem/account.hpp
 src/mem/ledger.hpp
+src/mem/remap_barrier.hpp
+src/mem/shared_rows.hpp
 src/sched/profile.hpp

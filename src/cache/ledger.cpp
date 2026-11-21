@@ -212,6 +212,15 @@ ResourceReservation ResourceLedger::Reserve(ResourceCategory category,
       category == Chunk || bytes == 0)
     throw std::invalid_argument(
         "ledger reserve requires a nonzero allocation category");
+  return Admit(category, bytes);
+}
+ResourceReservation ResourceLedger::ReserveShared(std::size_t bytes) {
+  if (bytes == 0)
+    throw std::invalid_argument("shared payload has no bytes");
+  return Admit(Chunk, bytes);
+}
+ResourceReservation ResourceLedger::Admit(ResourceCategory category,
+                                          std::size_t bytes) {
   // Host bookkeeping allocation is outside the lock and has strong exception
   // safety. Charge payload sizes must include any owner/index metadata
   // separately.

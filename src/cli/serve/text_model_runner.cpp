@@ -484,11 +484,15 @@ struct TextRunnerPool::Request::Impl {
       if (count > prefill_offset && count < prompt.size()) {
         count = std::max(Aligned(count), prefill_offset);
       } else if (const auto aligned = Aligned(count);
-                 aligned > prefill_offset && aligned < count &&
-                 lease->TryReserveSnapshot(
-                     lease->CaptureBytes(aligned), aligned, retain_fallback,
-                     SnapshotPurpose::kContinuation,
-                     std::span<const TextRunnerToken>(prompt).first(aligned))) {
+                 aligned > prefill_offset && aligned < count && [&] {
+                   const auto bytes = lease->CaptureBytes(aligned);
+                   return bytes &&
+                          lease->TryReserveSnapshot(
+                              *bytes, aligned, retain_fallback,
+                              SnapshotPurpose::kContinuation,
+                              std::span<const TextRunnerToken>(prompt).first(
+                                  aligned));
+                 }()) {
         // A disabled cache (or a refused disk-only capture) must not prepare
         // checkpoint scratch or split a pass for a fallback it cannot keep.
         count = aligned;
@@ -1168,7 +1172,8 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens,
         // Admission happens before the pass, as for the prompt snapshot
         // captured after one; later targets are admitted when captured.
         bytes = impl_->lease->CaptureBytes(snapshot_position);
-        if (impl_->lease->TryReserveSnapshot(
+        if (bytes &&
+            impl_->lease->TryReserveSnapshot(
                 *bytes, snapshot_position,
                 impl_->retain_fallback && impl_->fallback_position == 0,
                 SnapshotPurpose::kContinuation, impl_->snapshot_tokens)) {

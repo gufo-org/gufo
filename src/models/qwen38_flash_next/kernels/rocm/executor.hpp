@@ -228,6 +228,11 @@ private:
   /// Trunk and MTP K/V, one region per buffer, backed as rows are written.
   std::vector<std::shared_ptr<gufo::mem::Region>> kv_regions_;
   std::vector<std::shared_ptr<gufo::mem::Region>> mtp_kv_regions_;
+  /// Pooled indexer keys, one region per attention layer and one for the
+  /// predictor. Small (17 MiB at 262,144 tokens), so backed whole; regions
+  /// so checkpoints share their pages like the K/V's.
+  std::vector<std::shared_ptr<gufo::mem::Region>> pooled_regions_;
+  std::vector<std::shared_ptr<gufo::mem::Region>> mtp_pooled_regions_;
   std::size_t allocated_bytes_{0};
   std::size_t rollback_bytes_{0};
   std::function<bool()> is_cancelled_;
@@ -321,6 +326,22 @@ public:
   /// K/V writer calls it first, cache restores included.
   [[nodiscard]] bool EnsureKv(Session& session, std::uint32_t trunk_end,
                               std::uint32_t mtp_end, std::string* error) const;
+  /// Asks the page pool to back the rows EnsureKv() would, without waiting.
+  void MapKvAhead(Session& session, std::uint32_t trunk_end,
+                  std::uint32_t mtp_end) const;
+  /// Before rows [first, end) of the trunk's K/V and blocks [first_block,
+  /// end_block) of its pooled keys (the predictor's with `draft`) are
+  /// written: pages of them that a checkpoint or another session shares
+  /// become the session's own, copied where they hold rows below `kept`
+  /// (blocks below `kept_block`) and cleared otherwise
+  /// (mem::Region::PrepareWrite). One atomic read per buffer when nothing
+  /// in it can be shared.
+  [[nodiscard]] bool UnshareKv(Session& session, bool draft,
+                               std::uint32_t first, std::uint32_t end,
+                               std::uint32_t kept, std::uint32_t first_block,
+                               std::uint32_t end_block,
+                               std::uint32_t kept_block,
+                               std::string* error) const;
 
   enum class ForwardMode { kDecode, kVerify, kPrefill };
   /// Commits checkpoint slot 0 on first use. False when the device lacks

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "src/core/hip/copy_engine.hpp"
+#include "src/mem/remap_barrier.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -66,6 +67,17 @@ struct TransferLease {
   bool event_recorded{};
   bool event_settled{};
   bool event_failed{};
+  // Device work of this lease may be in flight: a remap barrier on another
+  // thread waits for it and holds new work back (mem::RemapBarrier).
+  std::atomic<bool> working{false};
+  void Enter() noexcept {
+    if (!working.exchange(true, std::memory_order_acq_rel))
+      mem::RemapBarrier::Enter();
+  }
+  void Leave() noexcept {
+    if (working.exchange(false, std::memory_order_acq_rel))
+      mem::RemapBarrier::Leave();
+  }
   std::mutex drain_mutex;
   hipStream_t bound_stream{};
   std::shared_ptr<void> bound_owner;
@@ -144,6 +156,8 @@ struct TransferLease {
           event_settled = true;
       }
     }
+    // Drained: nothing of this lease runs until its next submission.
+    Leave();
     return Failed() ? cache::TransferResult::kFailed
                     : cache::TransferResult::kSucceeded;
   }
@@ -153,6 +167,7 @@ struct TransferLease {
     if (!claimed)
       return;
     (void)Drain();
+    Leave();
     const std::lock_guard lock(state->mutex);
     Slot().failed = failed;
     Slot().busy = false;
@@ -207,6 +222,7 @@ hipStream_t TransferStream::Native() const {
   if (lease_->sealed || lease_->Failed())
     throw std::logic_error("transfer stream is sealed or failed");
   lease_->native_used = true;
+  lease_->Enter();
   // A previous manual Synchronize settled its recording before Native could
   // resume. A future synchronization must cover these new submissions too.
   lease_->event_recorded = false;
@@ -242,6 +258,11 @@ cache::Completion TransferStream::Complete() {
     Check(status);
   }
   lease_->event_recorded = true;
+  // Submitted: the barrier's own wait for the device covers what is queued
+  // on a stream. Engine copies it cannot wait for stay counted until the
+  // lease drains.
+  if (!lease_->engine_used)
+    lease_->Leave();
   return cache::Completion(std::move(signal));
 }
 cache::Completion TransferStream::Copy(void* destination, const void* source,
@@ -294,6 +315,7 @@ bool TransferStream::EngineCopy(void* destination, const void* source,
     lease_->bound_drained = true;
   }
   lease_->engine_used = true;
+  lease_->Enter();
   if (!bytes || lease_->state->engine->Copy(destination, source, bytes,
                                             lease_->Slot().fence))
     return true;

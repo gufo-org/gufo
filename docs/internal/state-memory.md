@@ -128,6 +128,151 @@ the cache until Flash-Next's graph instantiation ran out of heap (18 MB free);
 the same host on main kept 14 GB free. Install's
 [memory settings](../install.md#memory-settings) set the limit to cover RAM.
 
+## Shared pages
+
+Rows that grow with the context are append-only: once written, a row never
+changes. A page full of written rows can therefore serve several users at
+once (`mem::SharedPage`, `src/core/hip/state_shared_page.hpp`):
+
+- the session that wrote it, which keeps appending to the last page;
+- the RAM cache, which retains the rows for a checkpoint;
+- other sessions that restore that checkpoint.
+
+**The checkpoint keeps the page, not a copy.** When a capture retains rows
+that live in a region, the cache maps their page a second time in the
+**park** (`mem::PagePark`), an address range of its own, and the checkpoint's
+payload points there. The capture copies nothing and commits no cache
+backing; the ledger charges the payload to the cache budget as it charges a
+copy. The park address stays valid whatever the session does next, so these
+rows need no borrow, guard or preservation copy.
+
+**A session takes a page of its own only when it writes shared rows.**
+Before every write the model calls
+`Region::PrepareWrite(first_row, end_row, kept_rows)`. With no shared page in
+the region it costs one atomic read. Otherwise each page of those rows that
+someone else uses is replaced: by a copy when it holds rows the session still
+needs (the rows before an append or a rewind; every row when rewriting in
+place), by a cleared page otherwise. The copy and the clear run in
+`Region::SettleRemaps`, after the [remap barrier](#remapped-addresses).
+
+**A restore maps the pages.** `Adapter::BeginSharedRestore` gets the park
+addresses of the checkpoint's chunks. For every page they fill completely,
+`Region::Restore(plan)` maps that page into the session; the cache loads only
+the rest (the page the checkpoint ends in, tails, private state). Pages the
+session already maps stay as they are.
+
+**A session given to another conversation copies nothing.** It keeps the old
+conversation's shared pages mapped past what the new one writes, as it keeps
+its own pages, and replaces them page by page as its writes reach them. If
+the old conversation returns to that session, its restore finds most pages in
+place.
+
+Rules:
+
+- Call `PrepareWrite` at the choke point where you call `Ensure`, with the
+  rows the write covers and the rows it keeps. A missing call lets a write
+  land in a page a checkpoint still reads.
+- Call `Restore` before a cache restore loads rows, with an empty plan when
+  there is nothing to map: it releases the pages the loads would overwrite.
+- After `PrepareWrite` or `Restore` on every region of the write or the
+  restore, call `SettleRemaps` once, before the device uses those rows. It
+  costs two atomic reads when no page was remapped.
+- All three unmap pages or wait for the device: call them on the thread that
+  runs the model, between its launches. Mapping never waits.
+- A released park address keeps its mapping until `PagePark::Sweep`, which
+  the cache calls before prefill steps and while idle
+  (`ComponentCacheResources::settle`).
+- A region shares pages when each page belongs to one segment (it has one
+  segment, or its segments start on a page), for an adapter that sets
+  `Capabilities::shared_restore`. A payload is shared only when it lies
+  within one page. Everything else is copied or borrowed as before.
+
+The state ledger counts a shared page once: as mapped while any session maps
+it, else as cache memory while a checkpoint holds it. A session's account is
+charged for every page it maps, shared or not.
+
+Pages are shared where the cache may hold device pages
+(`StateLedger::LendingEnabled()`: demand-mapped regions and a GPU heap that
+covers host memory). Elsewhere the park does not exist and rows are copied or
+borrowed as before.
+
+Measured on gfx1151 in November 2026 (`hipMemMap`, `hipMemSetAccess` and
+`hipMemUnmap` on 2 MiB pages; evidence in
+[state-memory-shared-pages](state-memory-shared-pages.md)):
+
+| | Cost |
+| --- | --- |
+| Map a page a second time | 2.1-2.6 us idle, 18-21 us beside running kernels; never waits |
+| Make a mapped range accessible (mandatory) | 2.9 us per page, one call per range |
+| Unmap a range, idle | 1.2 us per page in one call |
+| Unmap, one call per page, beside running kernels | 1.3-2.3 s per page |
+| Read through a second mapping | same bandwidth as the first |
+
+The cost is per page handle, not per byte, and threads do not help (two to
+eight threads mapped no faster than one).
+
+## Remapped addresses
+
+`hipMemUnmap` followed by `hipMemMap` with another page returns at once, but
+the device keeps the translation it cached for an address it has used.
+Kernels, runtime copies and copy-engine copies through that address go on
+reading and writing the **old** page, with no error, until the process's
+device work has been idle for a moment. Measured on gfx1151 in November 2026
+(ROCm 10.1, Linux 7.3.3, `amdgpu` with the MES scheduler; probes and logs in
+[state-memory-shared-pages](state-memory-shared-pages.md)):
+
+| After the remap | Addresses that reach the new page |
+| --- | --- |
+| Used at once | 15% (44 of 300 batches) |
+| Device idle 100 us first | 300 of 300; 3,000 of 3,000 at 150 us |
+| Copy engine, device idle 200 us first | 400 of 400 (28 of 30 at 100 us) |
+| Another thread runs kernels back to back | still the old page after 200 ms |
+
+A second unmap, an access change, `hipDeviceSynchronize`, a busy kernel, or
+freeing and reserving the address change nothing. An idle moment between the
+last use and the unmap works as well as one after the remap. An address the
+device never used since its last idle moment can be mapped and used at once.
+
+So an address that loses a mapping is **dirty** until the device has been
+idle, and memory mapped at a dirty address needs the **remap barrier**
+(`mem::RemapBarrier::Settle`, `src/mem/remap_barrier.hpp`) before the device
+uses it: wait for the device's work, keep the device idle for 400 us. Every
+address unmapped before the barrier began is clean afterwards.
+
+- Regions, the park and the cache's lendable range stamp each address when
+  it loses a mapping (`RemapBarrier::Stamp`) and ask `RemapBarrier::Clean`
+  before mapping there again. A clean address costs nothing.
+- `Region::Ensure` runs the barrier itself when it maps a dirty address (a
+  session that was trimmed and grows again). The page pool's thread never
+  maps a dirty address: it leaves it to the writer.
+- `PrepareWrite` and `Restore` remap many pages in many regions. They leave
+  the barrier, and the copies and clears that must follow it, to one
+  `Region::SettleRemaps` call per write or restore.
+- The park uses an address again only once it is clean, so a parked page is
+  readable as soon as it is parked.
+- Pass scratch (`ScratchArena::MapTransient`) and a region created where
+  another gave its address range back run the barrier themselves. Releasing
+  the old page does not help: without the idle moment, 50 of 50 writes
+  through the address reached the page the driver had already freed.
+- Threads that submit device work on their own (transfer streams, the copy
+  engine, the page pool's clears) bracket it with `RemapBarrier::Enter` and
+  `Leave`. A barrier waits for open brackets and holds new ones back, for at
+  most 25 ms. Device work it cannot see (another model's thread in the same
+  process) is detected only while it runs; `event=remap_barrier` at shutdown
+  counts the barriers that gave up as `unquiet`.
+- The hold starts before the unmaps (`RemapBarrier::Hold`): an unmap waits
+  for device work in flight, and a disk write's copies beside a request that
+  replaced one page per buffer stalled that request for 290 ms.
+
+A barrier costs about 0.4 ms with every decoder paused. One runs per restore
+that maps or drops pages, per write that replaces shared pages (the first
+pass of a request that takes over a session, then once per page the session
+crosses), per wide prefill pass and per `Ensure` over dirty addresses. The
+rotation run of the evidence page ran 29 in 12 requests, 11.7 ms in all.
+
+> **Warning:** check a remapped address with a kernel. A `hipMemcpy` read
+> can disagree with what kernels see through the same address.
+
 ## Shared session state
 
 When the configured sessions do not all fit at full context, they may share
@@ -161,7 +306,8 @@ The scheduler drives it:
    conversation), then drops idle sessions' live frontiers, cheapest to lose
    first (cold admission's order) and never the one the request continues.
    Dropping takes the slot through cold reassignment, which copies rows that
-   RAM checkpoints still borrow before they are unmapped. A session without a
+   RAM checkpoints still borrow before they are unmapped; pages a checkpoint
+   shares stay with it and are not copied. A session without a
    live frontier may still lend rows past its need, so only busy sessions and
    those with a frontier lose tails without reassignment. Unmapping waits for
    the device, so this runs on the scheduler thread between work units.
@@ -257,7 +403,7 @@ segments each.
 
 | Model | State in regions | Choke points |
 | --- | --- | --- |
-| Qwen3.8 Flash-Next | Trunk and MTP K/V, one region per buffer | `Executor::EnsureKv`: forward, batch, MTP, snapshot and cache restore |
+| Qwen3.8 Flash-Next | Trunk and MTP K/V and pooled indexer keys, one region per buffer; checkpoints share their pages | `Executor::EnsureKv` and `UnshareKv`: forward, batch, MTP, snapshot and cache restore |
 | Qwen 27B | Attention K/V planes, one region per session | `QwenGpuArena::EnsureKvRows`: decode, batch, prefill chunk, verification commit, snapshot and cache restore |
 | DeepSeek V4 Flash | Compressed attention, mirror and indexer rows, and the indexer score scratch, charged to the session's account | `rocm_graph_reserve_compressed_rows` and `rocm_graph_reserve_indexer_scores` grow them in place, before every write and restore |
 

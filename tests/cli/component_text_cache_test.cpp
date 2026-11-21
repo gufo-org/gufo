@@ -1070,6 +1070,183 @@ void RestoreFromBusyBorrowedSource() {
              cache::ResourceCategory::kBackingAssigned)] == 0);
   assert(runner->adapter->RecurrentHash(restored.slot) == hash);
 }
+// A provider that shares row storage instead of copying it: a checkpoint's
+// rows take no pool backing and no borrow, stay valid when their slot moves
+// on, and a restore takes them in place without a load.
+void SharedRowsNeedNoBackingAndRestoreInPlace() {
+  struct SharingAdapter final : FakeAdapter {
+    using FakeAdapter::FakeAdapter;
+    std::size_t taken_rows{}, loaded_rows{};
+    cache::Capabilities GetCapabilities() const override {
+      auto capabilities = FakeAdapter::GetCapabilities();
+      capabilities.shared_restore = true;
+      return capabilities;
+    }
+    std::vector<cache::RestoredRows> BeginSharedRestore(
+        cache::Slot& slot, std::span<const cache::ComponentPosition> positions,
+        std::span<const cache::RestoreSource> sources) override {
+      BeginRestore(slot, positions);
+      std::vector<cache::RestoredRows> taken;
+      cache::testing::FakeStream stream;
+      for (const auto& source : sources) {
+        // "Mapping" the storage: the rows are in place when this returns.
+        auto load =
+            FakeAdapter::CopyRowsIn(slot, source.component, source.first,
+                                    source.end, source.bytes, stream);
+        assert(load.Wait() == cache::TransferResult::kSucceeded);
+        if (!taken.empty() && taken.back().component == source.component &&
+            taken.back().end == source.first)
+          taken.back().end = source.end;
+        else
+          taken.push_back({source.component, source.first, source.end});
+        taken_rows += source.end - source.first;
+      }
+      return taken;
+    }
+    cache::Completion CopyRowsIn(cache::Slot& slot, cache::ComponentId id,
+                                 cache::Rows first, cache::Rows end,
+                                 std::span<const std::byte> bytes,
+                                 cache::Stream& stream) override {
+      loaded_rows += end - first;
+      return FakeAdapter::CopyRowsIn(slot, id, first, end, bytes, stream);
+    }
+  };
+  struct SharingRunner final : Runner {
+    mutable SharingAdapter* sharing{};
+    // Shared storage, by address, as the park is for device pages.
+    std::shared_ptr<std::vector<std::shared_ptr<std::vector<std::byte>>>>
+        storage{std::make_shared<
+            std::vector<std::shared_ptr<std::vector<std::byte>>>>()};
+    mutable std::size_t observed_copies{};
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t) const override {
+      auto owned = std::make_unique<SharingAdapter>(rows_per_chunk);
+      adapter = sharing = owned.get();
+      auto resources = server::testing::MakeFakeCacheResources(
+          ledger, std::move(owned), {.captures = &captures});
+      resources->share = [&ledger, storage = storage](
+                             const cache::PayloadRequest& request,
+                             std::span<const std::byte> view)
+          -> std::optional<cache::Payload> {
+        auto rows =
+            std::make_shared<std::vector<std::byte>>(view.begin(), view.end());
+        storage->push_back(rows);
+        return cache::Payload::Committed(
+            ledger.ReserveShared(request.bytes).Convert(),
+            std::shared_ptr<const void>(rows, rows->data()));
+      };
+      resources->device_only = [storage = storage](const void* address) {
+        return std::ranges::any_of(*storage, [&](const auto& rows) {
+          return address == rows->data();
+        });
+      };
+      const auto copy = resources->copy_observed_rows;
+      resources->copy_observed_rows =
+          [this, copy](auto source, auto destination, cache::Stream& stream) {
+            ++observed_copies;
+            return copy(source, destination, stream);
+          };
+      return resources;
+    }
+  };
+  auto runner = std::make_shared<SharingRunner>();
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  std::vector<TextRunnerToken> prompt(40);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto source = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(source->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  const auto hash = runner->adapter->RecurrentHash(state.slot);
+  assert(source->TryReserveSnapshot(source->CaptureBytes(), prompt.size(),
+                                    false, SnapshotPurpose::kContinuation, {}));
+  std::shared_ptr<const ContinuationSnapshot> snapshot = source->Capture();
+  assert(source->PublishSnapshot(prompt, snapshot, false));
+  // Two row components of 40 four-byte rows: all shared, none borrowed, and
+  // charged to the budget like copies.
+  auto metrics = source->Metrics();
+  assert(metrics.shared_payload_bytes == 320);
+  assert(metrics.borrowed_capacity_bytes == 320);
+  const auto assigned =
+      static_cast<unsigned>(cache::ResourceCategory::kBackingAssigned);
+  const auto chunks =
+      static_cast<unsigned>(cache::ResourceCategory::kBackingMaterialized);
+  assert(metrics.ledger.bytes[assigned] == 0);
+  assert(metrics.ledger.bytes[chunks] == 320);
+  // The slot moves on at once: nothing to preserve, the checkpoint intact.
+  const std::array<cache::Token, 1> next{999};
+  runner->adapter->Append(state.slot, next, next);
+  assert(source->Metrics().spill.foreground_bytes == 0);
+  // A second session restores it: every chunk is taken in place.
+  auto peer = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(peer->cached_tokens() == prompt.size());
+  auto& restored = dynamic_cast<State&>(peer->state());
+  assert(runner->adapter->RecurrentHash(restored.slot) == hash);
+  assert(runner->sharing->taken_rows == 80 &&
+         runner->sharing->loaded_rows == 0);
+  metrics = peer->Metrics();
+  assert(metrics.restored_bytes == 320 + 32 && metrics.remapped_bytes == 320);
+  // A checkpoint shorter than one chunk has no rows to take in place: its
+  // restore loads everything from the tails, and is still a restore.
+  {
+    auto short_runner = std::make_shared<SharingRunner>();
+    ComponentTextCache small(short_runner, 2, 1 << 22, {});
+    std::vector<TextRunnerToken> few(3);
+    std::iota(few.begin(), few.end(), 10);
+    auto first = small.Acquire(few, {}, {}, true, 0, true);
+    auto& first_state = dynamic_cast<State&>(first->state());
+    short_runner->adapter->Append(first_state.slot, few, few);
+    assert(first->TryReserveSnapshot(first->CaptureBytes(), few.size(), false,
+                                     SnapshotPurpose::kContinuation, {}));
+    std::shared_ptr<const ContinuationSnapshot> kept = first->Capture();
+    assert(first->PublishSnapshot(few, kept, false));
+    assert(first->Metrics().shared_payload_bytes == 0);
+    auto second = small.Acquire(few, {}, {}, true, 0, true);
+    assert(second->cached_tokens() == few.size());
+    assert(short_runner->sharing->taken_rows == 0);
+  }
+  // The disk writer reads shared rows through a stream, never the address:
+  // a device page has no host view. A restart restores what it wrote.
+  const TemporaryDirectory temp("gufo-component-shared-disk-test");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                        .capacity_bytes = 1 << 30,
+                                        .min_checkpoint_step_tokens = 1};
+  auto disk_runner = std::make_shared<SharingRunner>();
+  TextRunnerToken expected{};
+  {
+    TextRunnerPool pool(disk_runner, 1, disk);
+    auto first = pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, true,
+                              prompt.size() - 4);
+    Prefill(first);
+    expected = Generate(first);
+    (void)first.Commit();
+  }
+  assert(disk_runner->observed_copies > 0);
+  TextRunnerPool restarted(disk_runner, 1, disk);
+  auto again = restarted.Acquire(prompt, sampling::SamplingConfig{}, {}, {},
+                                 true, prompt.size() - 4);
+  assert(again.cache_disk_hit() && again.cached_prompt_tokens() != 0);
+  Prefill(again);
+  assert(Generate(again) == expected);
+  again.Invalidate();
+}
+
+// An adapter that cannot take an in-pass checkpoint at a boundary says so by
+// throwing; that sizes nothing and fails no request (#1240).
+void UnsupportedInPassBoundaryIsNotAnError() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  std::vector<TextRunnerToken> prompt(40);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(lease->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  // The session is already at 40 tokens: no checkpoint inside a pass there.
+  assert(!lease->CaptureBytes(std::size_t{40}));
+  assert(!lease->CaptureBytes(std::size_t{12}));
+  assert(lease->CaptureBytes(std::size_t{44}));
+  assert(dynamic_cast<State&>(lease->state()).slot.IsValid());
+}
+
 void ColdAssignmentPrefersPreservedSlot() {
   auto runner = std::make_shared<Runner>();
   runner->defer_idle = true;
@@ -4634,6 +4811,8 @@ int main() {
   ColdAssignmentKeepsLiveFrontiers();
   ColdSideRequestsKeepPreservedDeepFrontier();
   ReuseAndBranches();
+  SharedRowsNeedNoBackingAndRestoreInPlace();
+  UnsupportedInPassBoundaryIsNotAnError();
   EditBoundariesSurviveActualBackingPressure();
   ReusedConversationOutlivesOneUseRequests();
   RestartAndCorruption();
