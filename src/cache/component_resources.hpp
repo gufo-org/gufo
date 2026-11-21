@@ -42,6 +42,13 @@ struct ComponentCacheResources {
   // its checkpoint's bytes plus those of restores not captured yet, since
   // the capture after each one needs its whole checkpoint.
   std::function<void(std::size_t)> prepare_capture;
+  // Optional: returns once the backing `prepare_capture` asked for is free,
+  // or will not be. A disk restore whose copies run beside decoders
+  // (RestoreCopyRunner) calls it after them, on their thread: a restore can
+  // outrun the backing, and its capture would then wait for the rest on the
+  // serving thread, with every decoder. Any thread may call it while others
+  // capture.
+  std::function<void()> await_capture;
   // Optional capacity bound before assigning a complete capture. False takes
   // the ordinary reclamation path; true still requires every allocation.
   std::function<bool(std::span<const PayloadRequest>)> can_capture;

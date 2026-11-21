@@ -666,6 +666,7 @@ void CommittedBackingPool::GrowAhead(std::size_t reserve_bytes) {
   // the join below never waits for growth.
   if (free_bytes(*state_) >= target_bytes) {
     state_->growing_ahead.store(false);
+    state_->growing_ahead.notify_all();
     return;
   }
   state_->ahead_target.store(target_bytes);
@@ -688,6 +689,7 @@ void CommittedBackingPool::GrowAhead(std::size_t reserve_bytes) {
           exhausted = true;
         }
         state->growing_ahead.store(false);
+        state->growing_ahead.notify_all();
         if (exhausted || free_bytes(*state) >= state->ahead_target.load() ||
             state->growing_ahead.exchange(true))
           return;
@@ -695,12 +697,17 @@ void CommittedBackingPool::GrowAhead(std::size_t reserve_bytes) {
     });
   } catch (...) {
     state_->growing_ahead.store(false);
+    state_->growing_ahead.notify_all();
   }
 }
 void CommittedBackingPool::WaitForGrowth() {
   const std::lock_guard lock(ahead_mutex_);
   if (ahead_.joinable())
     ahead_.join();
+}
+void CommittedBackingPool::WaitWhileGrowingAhead() const {
+  while (state_->growing_ahead.load())
+    state_->growing_ahead.wait(true);
 }
 std::size_t CommittedBackingPool::BlockCount() const noexcept {
   return state_->committed.load(std::memory_order_acquire);

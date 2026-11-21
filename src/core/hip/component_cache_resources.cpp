@@ -282,6 +282,7 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
   result->prepare_capture = [backing](std::size_t bytes) {
     backing->pool->GrowAhead(bytes);
   };
+  result->await_capture = [backing] { backing->pool->WaitWhileGrowingAhead(); };
   result->can_capture = [backing](auto payloads) {
     return backing->pool->CanFit(payloads);
   };

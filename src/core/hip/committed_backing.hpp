@@ -143,6 +143,12 @@ public:
   // zero does nothing and oversized reserves are bounded by capacity.
   void GrowAhead(std::size_t reserve_bytes);
   void WaitForGrowth();
+  // Returns once no thread grows ahead: the reserve asked for is free, or
+  // growth stopped short of it. Unlike WaitForGrowth it takes no lock, so
+  // other threads keep calling GrowAhead and TryAcquire meanwhile. A reserve
+  // raised while it waits may hand growth to a new thread, which it does not
+  // wait for.
+  void WaitWhileGrowingAhead() const;
   // Committed blocks and bytes; both grow with on-demand segments.
   [[nodiscard]] std::size_t BlockCount() const noexcept;
   [[nodiscard]] std::size_t CommittedBytes() const noexcept;
