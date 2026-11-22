@@ -148,6 +148,41 @@ void TestSplitGgufDiscovery() {
   std::filesystem::remove_all(temp_dir);
 }
 
+void TestZeroSplitCountIsSingleFile() {
+  // Some writers record split.count = 0 for a one-file model. llama.cpp reads
+  // that as "not split", and so does the reader: the file opens whole rather
+  // than being rejected before any provider can probe it.
+  const auto temp_dir =
+      std::filesystem::temp_directory_path() /
+      ("gufo-gguf-zero-split-" + std::to_string(static_cast<long>(getpid())));
+  std::filesystem::create_directories(temp_dir);
+  const auto path = temp_dir / "model.gguf";
+
+  GgufBuilder single;
+  single.AddMetadataString("general.architecture", "qwen4exp");
+  single.AddMetadataUint32("split.count", 0);
+  single.AddTensor("token_embd.weight", {32, 4}, gufo::core::GgmlType::kF32, 0);
+  WriteBinaryFile(path, single.Build(32));
+
+  std::string err;
+  const auto reader = gufo::core::GgufReader::OpenFile(path, &err);
+  Expect(reader != nullptr, "split.count = 0 opens as a single file: " + err);
+  Expect(reader != nullptr && reader->GetTensorCount() == 1,
+         "single file keeps its tensor");
+  Expect(reader != nullptr && reader->GetMappedRegions().size() == 1,
+         "single file maps one region");
+
+  GgufBuilder bogus;
+  bogus.AddMetadataUint32("split.count", 65536);
+  bogus.AddTensor("token_embd.weight", {32, 4}, gufo::core::GgmlType::kF32, 0);
+  WriteBinaryFile(path, bogus.Build(32));
+  err.clear();
+  Expect(gufo::core::GgufReader::OpenFile(path, &err) == nullptr,
+         "split.count above 65535 is still rejected");
+
+  std::filesystem::remove_all(temp_dir);
+}
+
 void TestTensorlessFirstShard() {
   // Unsloth's engram repack stores only metadata in shard 1 and ends it right
   // after the header, without padding to the data alignment.
@@ -545,6 +580,7 @@ int main() {
   std::cout << "Running GgufReader unit tests...\n";
   TestBasicGgufParsing();
   TestSplitGgufDiscovery();
+  TestZeroSplitCountIsSingleFile();
   TestTensorlessFirstShard();
   TestQuantizationLabel();
   TestMalformedGgufRejection();
