@@ -13,15 +13,6 @@
 
 namespace gufo::ext {
 
-std::optional<std::uint64_t> MeminfoAvailableBytes(std::string_view meminfo) {
-  const auto sample = MeminfoSample(meminfo);
-  if (!sample)
-    return std::nullopt;
-  return sample->available > sample->cma_free
-             ? sample->available - sample->cma_free
-             : 0;
-}
-
 std::uint64_t CgroupAvailableBytes(const std::filesystem::path& root,
                                    std::string_view membership_text,
                                    std::uint64_t host_available) {
@@ -75,9 +66,15 @@ std::uint64_t CgroupAvailableBytes(const std::filesystem::path& root,
   return available;
 }
 
-std::optional<HostMemorySample> MeminfoSample(std::string_view meminfo) {
-  std::optional<std::uint64_t> available_kib;
-  std::uint64_t cma_free_kib = 0;
+namespace {
+
+struct MeminfoKiB {
+  std::optional<std::uint64_t> available;
+  std::uint64_t cma_free = 0;
+};
+
+MeminfoKiB ParseMeminfoKiB(std::string_view meminfo) {
+  MeminfoKiB result;
   std::istringstream lines{std::string(meminfo)};
   for (std::string line; std::getline(lines, line);) {
     std::istringstream fields(line);
@@ -86,14 +83,38 @@ std::optional<HostMemorySample> MeminfoSample(std::string_view meminfo) {
     if (!(fields >> key >> kib))
       continue;
     if (key == "MemAvailable:")
-      available_kib = kib;
+      result.available = kib;
     else if (key == "CmaFree:")
-      cma_free_kib = kib;
+      result.cma_free = kib;
   }
-  if (!available_kib)
+  return result;
+}
+
+std::uint64_t KiBToBytes(std::uint64_t kib) {
+  constexpr auto max_bytes = std::numeric_limits<std::uint64_t>::max();
+  return kib > max_bytes / 1024 ? max_bytes : kib * 1024;
+}
+
+std::uint64_t SaturatingSubtract(std::uint64_t value, std::uint64_t amount) {
+  return value > amount ? value - amount : 0;
+}
+
+}  // namespace
+
+std::optional<std::uint64_t> MeminfoAvailableBytes(std::string_view meminfo) {
+  const auto kib = ParseMeminfoKiB(meminfo);
+  if (!kib.available)
     return std::nullopt;
-  return HostMemorySample{.available = *available_kib * 1024,
-                          .cma_free = cma_free_kib * 1024};
+  // Both fields can exceed the byte range while their difference still fits.
+  return KiBToBytes(SaturatingSubtract(*kib.available, kib.cma_free));
+}
+
+std::optional<HostMemorySample> MeminfoSample(std::string_view meminfo) {
+  const auto kib = ParseMeminfoKiB(meminfo);
+  if (!kib.available)
+    return std::nullopt;
+  return HostMemorySample{.available = KiBToBytes(*kib.available),
+                          .cma_free = KiBToBytes(kib.cma_free)};
 }
 
 HostMemorySample SampleHostMemory() {
@@ -114,10 +135,6 @@ HostMemorySample SampleHostMemory() {
 }
 
 namespace {
-
-std::uint64_t SaturatingSubtract(std::uint64_t value, std::uint64_t amount) {
-  return value > amount ? value - amount : 0;
-}
 
 std::size_t ClampToSize(std::uint64_t bytes) {
   return static_cast<std::size_t>(
