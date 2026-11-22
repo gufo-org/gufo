@@ -635,12 +635,6 @@ bool SamplerState::AllowsToken(TokenId token) const {
                                                 constraint_state_, token);
 }
 
-std::shared_ptr<const TokenBitmask> SamplerState::ConstraintBitmask() const {
-  if (!config_.constraint || ForcedToken())
-    return nullptr;
-  return config_.constraint->AllowedBitmask(constraint_state_);
-}
-
 std::shared_ptr<const TokenBitmask> SamplerState::CachedConstraintBitmask()
     const {
   if (!config_.constraint || ForcedToken())

@@ -2993,10 +2993,13 @@ TokenConstraint::MaskEntry TokenConstraint::LookupOrBuild(
     lru_.splice(lru_.begin(), lru_, found->second.lru);
     return found->second.entry;
   }
-  if (masks_.size() >= 512) {
+  // Each entry holds a byte and a bit mask of the whole vocabulary (about
+  // 280 KiB for a 248K-token model). Long tool calls revisit at most a few
+  // dozen canonical states, so 128 entries keep them without unbounded RAM.
+  if (masks_.size() >= kMaskCacheEntries) {
     // Every request needs the initial mask, even when the model state is
-    // cached. Keep it within the 512-entry LRU budget instead of rebuilding
-    // the entire vocabulary mask after each completed native call.
+    // cached. Keep it within the LRU budget instead of rebuilding the entire
+    // vocabulary mask after each completed native call.
     auto victim = std::prev(lru_.end());
     if (*victim == initial_state_ && victim != lru_.begin())
       --victim;
@@ -3014,11 +3017,6 @@ TokenConstraint::MaskEntry TokenConstraint::LookupOrBuild(
 std::shared_ptr<const std::vector<std::uint8_t>> TokenConstraint::Allowed(
     const JsonConstraint::State& state) const {
   return LookupOrBuild(state).bytes;
-}
-
-std::shared_ptr<const TokenBitmask> TokenConstraint::AllowedBitmask(
-    const JsonConstraint::State& state) const {
-  return LookupOrBuild(state).bits;
 }
 
 std::shared_ptr<const TokenBitmask> TokenConstraint::LookupCachedBitmask(

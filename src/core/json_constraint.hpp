@@ -250,6 +250,8 @@ private:
   std::size_t max_token_bytes_{0};
 };
 
+/// A vocabulary mask packed 32 tokens per word (bit `t % 32` of word
+/// `t / 32` admits token t). `restricts` is false when every token is allowed.
 struct TokenBitmask {
   std::vector<std::uint32_t> words;
   bool restricts{false};
@@ -260,12 +262,13 @@ struct TokenConstraint {
   std::shared_ptr<const ConstraintVocabulary> vocabulary;
   [[nodiscard]] std::shared_ptr<const std::vector<std::uint8_t>> Allowed(
       const JsonConstraint::State& state) const;
-  [[nodiscard]] std::shared_ptr<const TokenBitmask> AllowedBitmask(
-      const JsonConstraint::State& state) const;
+  /// The packed mask of a state whose mask is already cached, without
+  /// building one; null when it is not cached.
   [[nodiscard]] std::shared_ptr<const TokenBitmask> LookupCachedBitmask(
       const JsonConstraint::State& state) const;
 
 private:
+  static constexpr std::size_t kMaskCacheEntries = 128;
   struct MaskEntry {
     std::shared_ptr<const std::vector<std::uint8_t>> bytes;
     std::shared_ptr<const TokenBitmask> bits;

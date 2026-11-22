@@ -2307,7 +2307,7 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
       Q8Input q;
       if (!Quantize(x, n_tokens, w.cols, &q, error_msg))
         return false;
-      if (qfn_mmq_q4_K_dense_vec_preq(w.data, nullptr, q.data, out,
+      if (qfn_mmq_q4_K_dense_vec_preq(w.data, q.data, out,
                                       static_cast<int>(w.rows),
                                       static_cast<int>(n_tokens),
                                       static_cast<int>(w.cols), stream_) != 0) {

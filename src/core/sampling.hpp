@@ -160,8 +160,11 @@ public:
   [[nodiscard]] bool HasConstraint() const noexcept {
     return config_.constraint != nullptr;
   }
+  /// Whether the next sampled token may be `token`: the forced token, or
+  /// one the grammar admits in its current state.
   [[nodiscard]] bool AllowsToken(TokenId token) const;
-  [[nodiscard]] std::shared_ptr<const TokenBitmask> ConstraintBitmask() const;
+  /// The current state's packed grammar mask if it is already cached; null
+  /// without a constraint, while a token is forced or before it is built.
   [[nodiscard]] std::shared_ptr<const TokenBitmask> CachedConstraintBitmask()
       const;
   [[nodiscard]] std::span<const TokenId> history() const noexcept;
@@ -206,6 +209,11 @@ public:
   /// Retains the full-row sampler's FP64 filtering and normalization.
   [[nodiscard]] SamplingDistribution DistributionFromCandidates(
       std::span<const LogitCandidate> logits) const;
+  /// DistributionFromCandidates that also accepts a grammar. The first
+  /// `unpenalized_count` candidates are the largest raw logits (an invalid ID
+  /// or a non-finite value marks fewer); every penalized token follows.
+  /// Returns nullopt when those candidates cannot prove the full-row top-k,
+  /// for example when too few of them are allowed.
   [[nodiscard]] std::optional<SamplingDistribution>
   TryDistributionFromCandidates(std::span<const LogitCandidate> logits,
                                 std::size_t unpenalized_count) const;
