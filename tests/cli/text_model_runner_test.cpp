@@ -691,6 +691,36 @@ void TestMeminfoAvailableExcludesFreeCma() {
          "missing MemAvailable keeps the caller's fallback");
 }
 
+void TestMeminfoByteRange() {
+  constexpr std::uint64_t first_overflow = std::uint64_t{1} << 54;
+  constexpr auto max_bytes = std::numeric_limits<std::uint64_t>::max();
+  const auto meminfo = [](std::uint64_t available, std::uint64_t cma_free) {
+    return "MemAvailable: " + std::to_string(available) +
+           " kB\nCmaFree: " + std::to_string(cma_free) + " kB\n";
+  };
+
+  const auto boundary = meminfo(first_overflow, first_overflow - 1);
+  const auto sample = gufo::ext::MeminfoSample(boundary);
+  Expect(sample && sample->available == max_bytes &&
+             sample->cma_free == max_bytes - 1023,
+         "only the unrepresentable byte count saturates");
+  Expect(gufo::ext::MeminfoAvailableBytes(boundary) == 1024,
+         "preserve a KiB of usable memory across the byte limit");
+
+  const auto above = meminfo(first_overflow + 1, first_overflow);
+  const auto large = gufo::ext::MeminfoSample(above);
+  Expect(large && large->available == max_bytes && large->cma_free == max_bytes,
+         "both oversized sample fields saturate");
+  Expect(gufo::ext::MeminfoAvailableBytes(above) == 1024,
+         "subtract free CMA before converting the difference to bytes");
+  Expect(
+      gufo::ext::MeminfoAvailableBytes(meminfo(first_overflow, 0)) == max_bytes,
+      "an unrepresentable difference saturates");
+  Expect(gufo::ext::MeminfoAvailableBytes(
+             meminfo(first_overflow - 1, first_overflow)) == 0,
+         "free CMA above available memory leaves zero usable bytes");
+}
+
 /// The host reserve and free CMA pages overlap (#1198): the OS keeps its
 /// reserve in pages pins cannot take, so the ceiling subtracts the larger of
 /// the two, never their sum, and still never counts CMA pages as pinnable.
@@ -1492,6 +1522,7 @@ int main() {
   TestResourceClaimsAreValidatedBeforeAllocation();
   TestRamCacheOptionParsing();
   TestMeminfoAvailableExcludesFreeCma();
+  TestMeminfoByteRange();
   TestSnapshotCeilingOverlapsCmaWithReserve();
   TestCgroupAvailableCountsReclaimableCache();
   std::cout << "All text model runner tests passed\n";
