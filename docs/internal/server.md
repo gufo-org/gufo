@@ -21,7 +21,11 @@ The C++20 runtime serves bounded HTTP/1.1 requests with one connection worker
 per connection and a separate inference scheduler. The CLI keeps HTTP/1.1
 connections open for sequential requests, bounded by 5 seconds of idle time and
 100 requests; HTTP/1.0 requests and `Connection: close` close after the
-response, and embedded callers retain close-per-response by default. Request
+response, and embedded callers retain close-per-response by default. A
+connection waiting for its next request does not count toward
+`--max-connections`: at the limit the server closes the oldest waiting one to
+admit a new client. A stream that ends without its final chunk closes its
+connection. Request
 heads are parsed in Rust by httparse as RFC 9112 defines
 them: a token method, single spaces in the request line, an origin-form target
 without control bytes in UTF-8, HTTP/1.0 or HTTP/1.1, and header fields without

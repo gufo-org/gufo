@@ -935,7 +935,7 @@ void TestLlamaSlotsAndMetrics() {
           .budget_bytes = 4096,
           .used_bytes = 1024,
           .available_bytes = 3072,
-  };
+      };
   const auto budget_metrics = get("/metrics");
   assert(budget_metrics.find("gufo_prompt_state_budget_bytes 4096\n") !=
          std::string::npos);
@@ -2903,41 +2903,82 @@ void TestKeepAlive() {
   net::CloseSocket(idle);
 }
 
-// A parked keep-alive worker holds a connection slot like any other idle
-// connection: it still owns a thread and a descriptor. The idle timeout
-// bounds that hold, and the slot is available again once it closes.
-void TestKeepAliveIdleReleasesSlot() {
+// Read until the peer closes; false if the receive timeout expires first.
+bool ReadsToClose(int fd, std::string& received) {
+  char buffer[256];
+  for (;;) {
+    const auto count = ::read(fd, buffer, sizeof(buffer));
+    if (count == 0)
+      return true;
+    if (count < 0)
+      return false;
+    received.append(buffer, static_cast<std::size_t>(count));
+  }
+}
+
+// A parked keep-alive connection holds no request, so it never refuses a new
+// client: at the limit the listener closes it to admit the new connection.
+// The idle timeout is long, so only that eviction can close it in time.
+void TestKeepAliveParkedConnectionYieldsSlot() {
+  RunningServer server({.max_connections = 1,
+                        .keep_alive = true,
+                        .keep_alive_idle_timeout = std::chrono::seconds(30)});
+  const int parked = server.Connect();
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  assert(net::SendNoSignal(parked, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  std::string buffered;
+  const auto first = ReadFramedResponse(parked, buffered);
+  ExpectStatus(first, 200);
+  assert(first.find("Connection: keep-alive") != std::string::npos);
+
+  const int next = server.Connect();
+  assert(net::SendNoSignal(next, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  ExpectStatus(ReadFramedResponse(next), 200);
+  net::CloseSocket(next);
+
+  (void)net::SetSocketTimeouts(parked, 5'000);
+  std::string after;
+  assert(ReadsToClose(parked, after));
+  assert(after.empty());
+  net::CloseSocket(parked);
+}
+
+// Without competition, the idle timeout closes a parked connection.
+void TestKeepAliveIdleTimeoutCloses() {
   RunningServer server(
-      {.max_connections = 1,
-       .keep_alive = true,
+      {.keep_alive = true,
        .keep_alive_idle_timeout = std::chrono::milliseconds(100)});
   const int fd = server.Connect();
   const std::string health = "GET /health HTTP/1.1\r\n\r\n";
   assert(net::SendNoSignal(fd, health.data(), health.size()) ==
          static_cast<ssize_t>(health.size()));
   std::string buffered;
-  const auto first = ReadFramedResponse(fd, buffered);
-  ExpectStatus(first, 200);
-  assert(first.find("Connection: keep-alive") != std::string::npos);
-  // The server closes the parked connection when the idle timeout expires.
-  char byte = 0;
-  assert(::read(fd, &byte, 1) == 0);
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  (void)net::SetSocketTimeouts(fd, 5'000);
+  std::string after;
+  assert(ReadsToClose(fd, after));
+  assert(after.empty());
   net::CloseSocket(fd);
+}
 
-  // The worker may still be finishing when the next connection arrives, so
-  // retry until it is reaped instead of racing the slot release.
-  bool served = false;
-  for (int attempt = 0; attempt < 200 && !served; ++attempt) {
-    const int next = server.Connect();
-    assert(net::SendNoSignal(next, health.data(), health.size()) ==
-           static_cast<ssize_t>(health.size()));
-    const auto response = ReadFramedResponse(next);
-    net::CloseSocket(next);
-    served = response.starts_with("HTTP/1.1 200");
-    if (!served)
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-  assert(served);
+// A stream that fails without a protocol error stays unterminated, so the
+// connection must close at once instead of waiting for the idle timeout.
+void TestKeepAliveClosesUnterminatedStream() {
+  RunningServer server({.keep_alive = true,
+                        .keep_alive_idle_timeout = std::chrono::seconds(30)});
+  const int fd = server.Connect();
+  const std::string failing =
+      "POST /stream HTTP/1.1\r\nContent-Length: 1\r\n\r\nx";
+  assert(net::SendNoSignal(fd, failing.data(), failing.size()) ==
+         static_cast<ssize_t>(failing.size()));
+  (void)net::SetSocketTimeouts(fd, 5'000);
+  std::string streamed;
+  assert(ReadsToClose(fd, streamed));
+  ExpectStatus(streamed, 200);
+  assert(!streamed.ends_with("0\r\n\r\n"));
+  net::CloseSocket(fd);
 }
 
 void TestKeepAliveRequestLimit() {
@@ -3852,7 +3893,9 @@ int main() {
   TestPeerDisconnect();
   TestConnectionLimitIgnoresClosingConnections();
   TestKeepAlive();
-  TestKeepAliveIdleReleasesSlot();
+  TestKeepAliveParkedConnectionYieldsSlot();
+  TestKeepAliveIdleTimeoutCloses();
+  TestKeepAliveClosesUnterminatedStream();
   TestKeepAliveRequestLimit();
   TestStreamingFraming();
   TestSseHeartbeat();

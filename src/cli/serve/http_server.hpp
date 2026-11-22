@@ -155,7 +155,8 @@ private:
 
   HttpResponse handle_request(const HttpRequest& req);
   bool device_lost();
-  void handle_connection(int client_fd, std::atomic<bool>& response_sent);
+  void handle_connection(int client_fd, std::atomic<bool>& response_sent,
+                         std::atomic<bool>& parked);
   void reap_workers();
   void register_routes();
 

@@ -2003,6 +2003,11 @@ struct HttpServer::ConnectionWorker {
   // so the connection only logs and closes and no longer counts toward the
   // limit.
   std::atomic<bool> response_sent{false};
+  // Set while a kept-alive connection waits for its next request. A parked
+  // connection holds no request, so it does not count toward the limit and
+  // the listener may close it to admit a new connection. Changed only under
+  // workers_mutex_.
+  std::atomic<bool> parked{false};
   std::atomic<bool> done{false};
   std::jthread thread;
 };
@@ -2223,12 +2228,31 @@ void HttpServer::run(bool handle_signals) {
           workers_, [](const std::unique_ptr<ConnectionWorker>& existing) {
             return !existing->response_sent.load(std::memory_order_acquire);
           }));
+      const auto parked = static_cast<std::size_t>(std::ranges::count_if(
+          workers_, [](const std::unique_ptr<ConnectionWorker>& existing) {
+            return existing->parked.load(std::memory_order_acquire);
+          }));
       overloaded = stopped_.load(std::memory_order_acquire) ||
                    serving >= options_.max_connections;
+      // Parked keep-alive connections are bounded by the same limit, but they
+      // never refuse a new client: the oldest is closed to make room. Its
+      // worker sees the shutdown as an idle close.
+      if (!overloaded && serving + parked >= options_.max_connections) {
+        for (const auto& existing : workers_) {
+          if (existing->parked.load(std::memory_order_acquire) &&
+              existing->fd >= 0) {
+            existing->parked.store(false, std::memory_order_release);
+            (void)net::ShutdownSocket(existing->fd,
+                                      net::ShutdownHow::kReadWrite);
+            break;
+          }
+        }
+      }
       if (!overloaded) {
         worker_ptr->fd = client_fd;
         worker_ptr->thread = std::jthread([this, worker_ptr, client_fd] {
-          handle_connection(client_fd, worker_ptr->response_sent);
+          handle_connection(client_fd, worker_ptr->response_sent,
+                            worker_ptr->parked);
           {
             const std::lock_guard<std::mutex> lock(workers_mutex_);
             net::CloseSocket(worker_ptr->fd);
@@ -2475,7 +2499,8 @@ bool HttpServer::device_lost() {
 }
 
 void HttpServer::handle_connection(int client_fd,
-                                   std::atomic<bool>& response_sent) {
+                                   std::atomic<bool>& response_sent,
+                                   std::atomic<bool>& parked) {
   (void)net::SetSocketTimeouts(client_fd, 120'000);
   // SSE events are small writes and the WebSocket path already disables
   // Nagle for the same reason: waiting for a delayed acknowledgement turns
@@ -2487,12 +2512,11 @@ void HttpServer::handle_connection(int client_fd,
   // next request on a reused connection.
   std::string pending;
   std::size_t served = 0;
+  // Whether the previous response parked this connection; a parked flag
+  // cleared by someone else then means the listener evicted it.
+  bool was_parked = false;
   while (true) {
     if (served > 0) {
-      // A reused connection waiting for its next request is still a live
-      // worker, so count it until it closes. A connection parked after its
-      // last response (keep_alive off) was already marked finished.
-      response_sent.store(false, std::memory_order_release);
       (void)net::SetSocketTimeouts(
           client_fd,
           static_cast<int>(options_.keep_alive_idle_timeout.count()));
@@ -2540,6 +2564,19 @@ void HttpServer::handle_connection(int client_fd,
         // A connection that ends or times out before sending any request byte
         // closes quietly instead of answering 400 to nobody.
         idle_close = parsed == GUFO_HTTP_PARTIAL && buffer.empty();
+        if (served > 0) {
+          // Leave the parked state under the lock the listener evicts with, so
+          // an evicted connection never serves the request it raced in, and a
+          // served one is counted again before it does any work.
+          const std::lock_guard<std::mutex> lock(workers_mutex_);
+          if (was_parked && !parked.load(std::memory_order_acquire)) {
+            idle_close = true;  // Evicted by the listener.
+          } else {
+            parked.store(false, std::memory_order_release);
+            if (!idle_close)
+              response_sent.store(false, std::memory_order_release);
+          }
+        }
         too_many_fields = parsed == GUFO_HTTP_TOO_MANY_FIELDS;
         if (parsed == GUFO_HTTP_COMPLETE) {
           (void)net::SetSocketTimeouts(client_fd, 120'000);
@@ -2740,10 +2777,17 @@ void HttpServer::handle_connection(int client_fd,
           // An SSE error is a complete protocol response. A failed raw PCM
           // stream must remain incomplete, or it looks like valid shorter
           // audio.
+          bool terminated = false;
           if (connected && response_started && chunked &&
               (!resp.stream_log || resp.stream_log->error_code.empty() ||
-               resp.stream_log->error_event_sent))
+               resp.stream_log->error_event_sent)) {
             connected = SendAll(client_fd, "0\r\n\r\n");
+            terminated = connected;
+          }
+          // An unterminated body ends only when the connection closes, so a
+          // reused connection would leave the client waiting for the idle
+          // timeout before it sees the failure.
+          response_keep_alive = response_keep_alive && terminated;
         }
       } else {
         const auto payload = BuildResponse(resp, response_keep_alive);
@@ -2751,8 +2795,19 @@ void HttpServer::handle_connection(int client_fd,
         connected = SendAll(client_fd, payload);
       }
       // The response is on the wire. Mark it before logging or tracing, which
-      // can park this worker while another connection waits for a slot.
-      response_sent.store(true, std::memory_order_release);
+      // can park this worker while another connection waits for a slot. A
+      // connection kept for another request is parked from here: it holds no
+      // request, so it does not count toward the limit, and the listener may
+      // close it to admit a new client.
+      {
+        const std::lock_guard<std::mutex> lock(workers_mutex_);
+        // A pipelined request already read is not idle; it must not be
+        // dropped by an eviction.
+        was_parked = connected && response_started && response_keep_alive &&
+                     pending.empty();
+        parked.store(was_parked, std::memory_order_release);
+        response_sent.store(true, std::memory_order_release);
+      }
       std::string outcome = connected ? "completed" : "disconnected";
       if (resp.stream_log) {
         resp.log_details = resp.stream_log->details;
@@ -2841,6 +2896,10 @@ void HttpServer::handle_connection(int client_fd,
     if (close_connection) {
       break;
     }
+  }
+  {
+    const std::lock_guard<std::mutex> lock(workers_mutex_);
+    parked.store(false, std::memory_order_release);
   }
   response_sent.store(true, std::memory_order_release);
   // Act on a loss found by this request now, not at the next health probe.

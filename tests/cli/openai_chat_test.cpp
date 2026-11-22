@@ -588,6 +588,13 @@ void TestUtf8Output() {
     check({"\xF0", "\x9F"}, replacement, reasoning);
     check({"\x80", "ok"}, replacement + "ok", reasoning);
     check({"\xC0\xAF"}, replacement + replacement, reasoning);
+    // The stream writer escapes text itself rather than through a JSON DOM;
+    // every JSON-significant and control byte must survive the round trip.
+    std::string escapes = "quote\" back\\ slash/ \b\f\n\r\t";
+    for (char byte = 1; byte < 0x20; ++byte)
+      escapes += byte;
+    escapes += "\x7f";
+    check({escapes.substr(0, 9), escapes.substr(9)}, escapes, reasoning);
     check({"\xED", "\xA0\x80"}, replacement + replacement + replacement,
           reasoning);
     check({"\xF4\x90\x80\x80"},
