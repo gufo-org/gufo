@@ -470,6 +470,33 @@ static iree_status_t loom_text_embed_logits_layout(loom_text_embed_t* embed) {
   return iree_ok_status();
 }
 
+// The KV pool's token positions for `rows` rows of `row_context` (at most the
+// native context), rounded up to a multiple of the source's page size. Page
+// sizes are powers of two dividing the native context, so the largest such
+// divisor up to 4096 is one.
+static iree_status_t loom_text_embed_pool_tokens(
+    const loom_serve_text_configuration_t* text, uint32_t rows,
+    uint64_t row_context, iree_host_size_t* out_tokens) {
+  const uint64_t context = text->context_capacity;
+  uint64_t granule = context & (~context + 1);
+  if (granule > 4096 || granule == 0) granule = 4096;
+  const uint64_t per_row = row_context < context ? row_context : context;
+  uint64_t tokens = 0;
+  if (!iree_checked_mul_u64(per_row, rows, &tokens) ||
+      tokens > INT64_MAX - granule) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "KV pool of %u rows of %" PRIu64 " tokens", rows,
+                            per_row);
+  }
+  tokens = (tokens + granule - 1) / granule * granule;
+  if (tokens > IREE_HOST_SIZE_MAX) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "KV pool of %" PRIu64 " tokens", tokens);
+  }
+  *out_tokens = (iree_host_size_t)tokens;
+  return iree_ok_status();
+}
+
 static iree_status_t loom_text_embed_open_model(
     loom_text_embed_t* embed, const loom_text_embed_options_ex_t* ex) {
   const loom_text_embed_options_t* options = &ex->base;
@@ -529,16 +556,27 @@ static iree_status_t loom_text_embed_open_model(
   loom_serve_text_default_shapes(text->prefill_capacity, embed->shapes);
   loom_runtime_memory_pool_t* memory_pool = loom_runtime_pool_memory(
       loom_runtime_device_group_pool_at(embed->group, 0));
+  iree_host_size_t pool_tokens = 0;
+  if (ex->struct_size >= offsetof(loom_text_embed_options_ex_t, row_context) +
+                             sizeof(ex->row_context) &&
+      ex->row_context) {
+    IREE_RETURN_IF_ERROR(loom_text_embed_pool_tokens(
+        text, embed->rows, ex->row_context, &pool_tokens));
+  }
   const loom_serve_text_options_t model_options = {
       .mode = LOOM_SERVE_TEXT_MODE_GENERATE,
       .sources = configuration->sources,
       .prefill_capacity = text->prefill_capacity,
       .context_capacity = text->context_capacity,
-      // As loom-serve registers a text model: an elastic pool sizes the cache
-      // from its byte budget; a fixed one holds one native context.
-      .pool_capacity = memory_pool ? 0 : text->context_capacity,
-      .cache_limit_bytes =
-          memory_pool ? loom_runtime_memory_pool_limit(memory_pool) : 0,
+      // The positions the caller asked for; else as loom-serve registers a
+      // text model: an elastic pool sizes the cache from its byte budget, a
+      // fixed one holds one native context.
+      .pool_capacity = pool_tokens   ? pool_tokens
+                       : memory_pool ? 0
+                                     : text->context_capacity,
+      .cache_limit_bytes = !pool_tokens && memory_pool
+                               ? loom_runtime_memory_pool_limit(memory_pool)
+                               : 0,
       .epoch_count = embed->shape_count,
       .epoch_shapes = embed->shapes,
       .draft_depth = text->draft_depth,

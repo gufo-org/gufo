@@ -147,22 +147,43 @@ void TestFetchedLayout() {
   fs::remove_all(root);
 }
 
-void TestOriginOptions() {
+void TestGroupOverrides() {
+  // --mmproj and the draft model replace their group's file, even one the
+  // package already holds at its card path.
   const auto root = TempDir();
   const auto elsewhere = TempDir();
   Write(root / "model.json", kCard);
-  Write(elsewhere / "sub" / "model-Q4_K_M.gguf", "weights");
-  Write(elsewhere / "draft.gguf", "draft");
-  const auto resolved = package::Resolve(
-      root.string(),
-      {{"checkpoint", elsewhere}, {"drafter", elsewhere / "draft.gguf"}},
-      {"gfx1151", 128ull << 30});
-  CHECK(fs::equivalent(resolved.overlay / "parameter" / "model-Q4_K_M.gguf",
-                       elsewhere / "sub" / "model-Q4_K_M.gguf"),
-        "--loom-checkpoint directory");
-  CHECK(fs::equivalent(resolved.overlay / "parameter" / "draft.gguf",
-                       elsewhere / "draft.gguf"),
-        "--loom-drafter file");
+  Write(root / "sub" / "model-Q4_K_M.gguf", "weights");
+  Write(root / "parameter" / "draft.gguf", "packaged draft");
+  Write(elsewhere / "my-draft.gguf", "draft");
+  {
+    const auto resolved = package::Resolve(
+        root.string(),
+        {{"draft", {elsewhere / "my-draft.gguf", "--mtp-model"}}},
+        {"gfx1151", 128ull << 30});
+    CHECK(fs::equivalent(resolved.overlay / "parameter" / "draft.gguf",
+                         elsewhere / "my-draft.gguf"),
+          "the draft model replaces the packaged one");
+    CHECK(fs::equivalent(resolved.overlay / "parameter" / "model-Q4_K_M.gguf",
+                         root / "sub" / "model-Q4_K_M.gguf"),
+          "the checkpoint is still found by origin");
+  }
+  const auto refused =
+      [&](const std::map<std::string, package::Override>& overrides) {
+        try {
+          package::Resolve(root.string(), overrides, {"gfx1151", 128ull << 30});
+        } catch (const std::exception& error) {
+          return std::string(error.what());
+        }
+        return std::string();
+      };
+  CHECK(refused({{"vision", {elsewhere / "my-draft.gguf", "--mmproj"}}})
+                .find("--mmproj replaces the package's vision file, but this "
+                      "preset has none") != std::string::npos,
+        "a group the preset lacks is refused");
+  CHECK(refused({{"draft", {elsewhere / "missing.gguf", "--mtp-model"}}})
+                .find("is not a file") != std::string::npos,
+        "a missing override is refused");
   fs::remove_all(root);
   fs::remove_all(elsewhere);
 }
@@ -350,9 +371,9 @@ void TestSource() {
                 std::vector<std::string>({"a.gguf", "mmproj.gguf"}) &&
             model.components[1].entry == ".",
         "the checkpoint origin, at the revision the card pins");
-  CHECK(model.components[2].option == "--loom-drafter" &&
+  CHECK(model.components[2].option.empty() &&
             model.components[2].entry == "sub/d.gguf",
-        "a one-file origin's option names the file");
+        "the runner finds every origin in the model directory");
   CHECK(model.license == "apache-2.0; drafter (org/Draft): mit",
         "the checkpoint's license first");
   // A v<sdk> tag wins over the default branch.
@@ -398,7 +419,7 @@ int main() {
   TestPresets();
   TestInstalledLayout();
   TestFetchedLayout();
-  TestOriginOptions();
+  TestGroupOverrides();
   TestMissing();
   TestUnsafePaths();
   TestSdk();

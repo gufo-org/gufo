@@ -256,6 +256,10 @@ typedef struct loom_text_embed_options_ex_t {
   // (checkpoint images need it). Zero: a fixed pool, committed at load, unless
   // memory_bytes sets a budget (which needs elastic backing).
   uint32_t elastic;
+  // Nonzero sizes the shared KV pool for every row at this context (at most
+  // the package's), so each row can reach it at once. Zero keeps memory_bytes'
+  // share of an elastic pool, else one native context shared by all rows.
+  uint64_t row_context;
 } loom_text_embed_options_ex_t;
 
 int loom_text_embed_open_ex(const loom_text_embed_options_ex_t* options,

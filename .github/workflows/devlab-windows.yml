@@ -263,7 +263,7 @@ jobs:
             'asr-npu' = @('asr', '--model', $assets.asr, '--npu')
             'tts-npu' = @('tts', '--model', $assets.'tts-base', '--asr-model', $assets.asr, '--npu')
             qwen27    = @('llm', '--model', (Join-Path $assets.qwen27 'Qwen3.8-27B-UD-Q4_K_XL.gguf'))
-            loom      = @('loom', '--model', $assets.'loom-qwen35-2b', '--loom-checkpoint', $assets.'loom-qwen35-2b-gguf')
+            loom      = @('loom', '--model', $assets.'loom-qwen35-2b', '--checkpoint', $assets.'loom-qwen35-2b-gguf')
           }
           $failed = @()
           foreach ($name in $checks.Keys) {

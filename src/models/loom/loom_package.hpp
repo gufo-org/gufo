@@ -169,15 +169,17 @@ inline bool SafeRelative(std::string_view path) {
   return true;
 }
 
-// A parameter file the card names: its path in the package and, when the card
-// says where it comes from, its origin ("checkpoint") and repository path.
+// A parameter file the card names: its group ("model", "draft", "vision"),
+// its path in the package and, when the card says where it comes from, its
+// origin ("checkpoint") and repository path.
 struct ParameterFile {
+  std::string group;
   std::string path;
   std::string origin;
   std::string origin_path;
 };
 
-inline void CollectFiles(const json::Value& files,
+inline void CollectFiles(const json::Value& files, const std::string& group,
                          std::vector<ParameterFile>& out) {
   if (!files.is_array())
     return;
@@ -185,6 +187,7 @@ inline void CollectFiles(const json::Value& files,
     if (!item.is_object())
       continue;
     ParameterFile file;
+    file.group = group;
     file.path = item.member_str("path");
     const auto origin = item.member_str("origin");
     if (origin.size() > 1 && origin[0] == '@') {
@@ -230,31 +233,20 @@ inline std::vector<ParameterFile> ParameterFiles(const json::Value& card,
       if (parameters == nullptr || !parameters->is_object())
         continue;
       for (const auto& [group, parameter] : parameters->members()) {
-        (void)group;
         if (const auto* list = parameter.find("files"))
-          CollectFiles(*list, files);
+          CollectFiles(*list, group, files);
       }
     }
   }
   return files;
 }
 
-// Where an origin's files come from: --loom-<origin> (a file, or a directory
-// holding them at their repository paths), else the package directory.
-inline std::optional<fs::path> Locate(
-    const ParameterFile& file, const fs::path& root,
-    const std::map<std::string, fs::path>& origins) {
+// Where a parameter file is found when it is not at its card path: at its
+// origin's repository path in the package directory, where `gufo model
+// install` puts it.
+inline std::optional<fs::path> Locate(const ParameterFile& file,
+                                      const fs::path& root) {
   std::error_code error;
-  if (const auto found = origins.find(file.origin); found != origins.end()) {
-    const auto& given = found->second;
-    if (fs::is_directory(given, error)) {
-      if (fs::is_regular_file(given / file.origin_path, error))
-        return given / file.origin_path;
-    } else if (fs::is_regular_file(given, error) &&
-               given.filename() == fs::path(file.origin_path).filename()) {
-      return given;
-    }
-  }
   if (!file.origin_path.empty() &&
       fs::is_regular_file(root / file.origin_path, error))
     return root / file.origin_path;
@@ -375,8 +367,16 @@ inline void Link(const fs::path& target, const fs::path& at) {
       "a folder on the model's drive (hard links)");
 }
 
+// Files given for a card group with Gufo's own options (--mmproj for
+// "vision", the draft model for "draft"), each replacing that group's only
+// file. The option names say which one, for errors.
+struct Override {
+  fs::path file;
+  std::string option;
+};
+
 inline Resolved Resolve(const std::string& path,
-                        const std::map<std::string, fs::path>& origins,
+                        const std::map<std::string, Override>& overrides,
                         const Gpu& gpu, std::string_view runtime_sdk = {}) {
   Resolved resolved;
   resolved.load_path = path;
@@ -388,14 +388,32 @@ inline Resolved Resolve(const std::string& path,
   std::vector<std::pair<std::string, fs::path>> links;
   std::vector<std::string> missing;
   std::error_code error;
-  for (const auto& file : ParameterFiles(card, resolved.preset)) {
+  const auto files = ParameterFiles(card, resolved.preset);
+  for (const auto& [group, given] : overrides) {
+    const auto count = std::ranges::count(files, group, &ParameterFile::group);
+    if (count != 1)
+      throw std::runtime_error("loom: " + given.option +
+                               " replaces the package's " + group +
+                               " file, but this preset has " +
+                               (count == 0 ? std::string("none")
+                                           : std::to_string(count) + " files"));
+    if (!fs::is_regular_file(given.file, error))
+      throw std::runtime_error("loom: " + given.option + " " +
+                               given.file.string() + " is not a file");
+  }
+  for (const auto& file : files) {
     if (!SafeRelative(file.path) ||
         (!file.origin_path.empty() && !SafeRelative(file.origin_path)))
       throw std::runtime_error(
           "loom: the card names an invalid parameter path '" + file.path + "'");
+    if (const auto given = overrides.find(file.group);
+        given != overrides.end()) {
+      links.emplace_back(file.path, fs::absolute(given->second.file, error));
+      continue;
+    }
     if (fs::exists(root / file.path, error))
       continue;
-    if (const auto found = Locate(file, root, origins))
+    if (const auto found = Locate(file, root))
       links.emplace_back(file.path, fs::absolute(*found, error));
     else
       missing.push_back(file.path + (file.origin.empty()
@@ -410,8 +428,8 @@ inline Resolved Resolve(const std::string& path,
     throw std::runtime_error(
         "loom: the package's parameter files are missing:" + list +
         "\nInstall the model with `gufo model install`, fetch the package with "
-        "loom-fetch, "
-        "or point --loom-<origin> at the files.");
+        "loom-fetch, or download each origin's files into the package "
+        "directory at their repository paths.");
   }
   if (links.empty())
     return resolved;
@@ -467,9 +485,10 @@ inline Resolved Resolve(const std::string& path,
     }
   }
   for (const auto& [card_path, target] : links) {
+    // An override replaces the package's own file there.
     const auto at = resolved.overlay / card_path;
-    if (!fs::exists(fs::symlink_status(at)))
-      link(target, at);
+    fs::remove(at, error);
+    link(target, at);
   }
   resolved.load_path = resolved.overlay.string();
   return resolved;

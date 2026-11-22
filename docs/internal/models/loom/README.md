@@ -64,9 +64,10 @@ All sessions share one KV pool, which Loom allocates and pages. A request
 reserves the pages its prompt and output reach. When the pool is short, the
 runner releases the oldest prefix-cache checkpoints and tries again.
 
-- **Fixed pool (default).** Holds one full context, committed at load.
-- **Elastic pool.** Sized by `--loom-memory-bytes`. Checkpoint images for
-  `--cache-disk` need it.
+The pool holds `--sessions` full contexts (`--context`, the package's own by
+default), so every session can reach its context at once. It is fixed and
+committed at load, except with `--cache-disk`, whose checkpoint images need
+elastic backing.
 
 At load the runner logs the device memory, the KV pool's share of it and the
 tokens the pool holds (`loom_text_embed_memory`). It claims no per-session

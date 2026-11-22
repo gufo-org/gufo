@@ -12,7 +12,7 @@ sampling from the package's logits). Devlab runs it on Linux and Windows for
 `loom-qwen3.5-2b` when `src/models/loom` changes; it has no timing arms.
 
 ```sh
-python3 tests/functional/family_smoke.py loom --binary build/release/gufo   --model <loom-fun/unsloth-Qwen3.5-2B-loom snapshot>   --loom-checkpoint <unsloth/Qwen3.5-2B-GGUF snapshot>
+python3 tests/functional/family_smoke.py loom --binary build/release/gufo   --model <loom-fun/unsloth-Qwen3.5-2B-loom snapshot>   --checkpoint <unsloth/Qwen3.5-2B-GGUF snapshot>
 ```
 
 ## Embedding, ASR, TTS and image service checks

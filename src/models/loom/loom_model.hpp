@@ -94,29 +94,41 @@ inline bool ProbeLoomText(std::string_view model_root) {
 
 // ---------------------------------------------------------------- model ---
 
+// The option that gave the draft model, for errors.
+inline std::string DraftOption(const ext::TextSpeculativeConfig& speculative) {
+  switch (speculative.backend) {
+    case ext::TextSpeculativeBackend::kDFlash:
+      return "--dflash-model";
+    case ext::TextSpeculativeBackend::kDSpark:
+      return "--dspark-model";
+    default:
+      return "--mtp-model";
+  }
+}
+
 // One opened package; every Loom call is serialized on its mutex (recursive:
 // releasing a cache entry can release a checkpoint inside a runner call).
 class LoomModel {
 public:
-  LoomModel(const std::string& path, const ext::ParsedOptions& options,
-            std::size_t sessions, bool checkpoint_images) {
+  // Gufo's own options size and complete the package: --sessions rows, each
+  // able to reach --context (the package's context by default) at once, and
+  // --mmproj or the draft model in place of the card's vision or draft file.
+  // Only the device URI is Loom's own option.
+  explicit LoomModel(const ext::TextRunnerOptions& options) {
+    const std::string& path = options.model_path;
+    const bool checkpoint_images = !options.disk_cache.directory.empty();
     std::string device;
-    std::uint64_t memory = 0;
-    if (const auto* value =
-            ext::FindOption<std::string>(options, "--loom-device"))
+    if (const auto* value = ext::FindOption<std::string>(
+            options.provider_options, "--loom-device"))
       device = *value;
-    if (const auto* value =
-            ext::FindOption<std::int64_t>(options, "--loom-memory-bytes"))
-      memory = static_cast<std::uint64_t>(*value);
-    // The package as published (a loom-fun repository from `gufo model
-    // install`) or as loom-fetch writes it: the preset for this GPU, and
-    // parameter files found by their origin.
-    std::map<std::string, fs::path> origins;
-    for (const char* origin : {"checkpoint", "drafter", "vision"}) {
-      if (const auto* value = ext::FindOption<std::string>(
-              options, std::string("--loom-") + origin))
-        origins.emplace(origin, *value);
-    }
+    std::map<std::string, package::Override> overrides;
+    if (!options.vision_model_path.empty())
+      overrides.emplace(
+          "vision", package::Override{options.vision_model_path, "--mmproj"});
+    if (!options.speculative.draft_model_path.empty())
+      overrides.emplace("draft",
+                        package::Override{options.speculative.draft_model_path,
+                                          DraftOption(options.speculative)});
     // The preset follows the GPU Loom opens by default, as its driver reports
     // it on Linux and Windows alike.
     package::Gpu gpu;
@@ -130,7 +142,7 @@ public:
     if (package::NamesDevice(device))
       Warn("--loom-device names a device; the preset follows the first GPU (" +
            (gpu.target.empty() ? std::string("unknown") : gpu.target) + ")");
-    package_ = package::Resolve(path, origins, gpu, kRuntimeSdk);
+    package_ = package::Resolve(path, overrides, gpu, kRuntimeSdk);
     const std::string preset = package_.preset;
     if (!package_.note.empty())
       std::fprintf(stderr, "loom: %s\n", package_.note.c_str());
@@ -146,10 +158,16 @@ public:
         .model_path = package_.load_path.c_str(),
         .preset = preset.c_str(),
         .device_uri = device.empty() ? nullptr : device.c_str(),
-        .memory_bytes = memory,
-        .rows = static_cast<std::uint32_t>(std::max<std::size_t>(sessions, 1)),
+        // Gufo sizes the pool in tokens (row_context), not bytes.
+        .memory_bytes = 0,
+        .rows = static_cast<std::uint32_t>(
+            std::max<std::size_t>(options.session_count, 1)),
         .checkpoints = kCheckpoints,
     };
+    // Every row's full context, committed at load: Gufo admits requests per
+    // session, so the pool never refuses one it admitted.
+    embed_options.row_context =
+        options.max_context ? options.max_context : UINT32_MAX;
     // The logits capability whenever the package declares it.
     embed_options.logits = DeclaresLogits(path);
     // A disk tier stores checkpoint images, which need elastic state.

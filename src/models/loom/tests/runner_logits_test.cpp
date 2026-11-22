@@ -50,9 +50,11 @@ public:
       std::ofstream(dir_ / "llm_config.json")
           << R"({"sdk":{"hrx_loom":")" LOOM_TEXT_EMBED_HRX_LOOM R"("},"chat":)"
           << (chat.empty() ? R"({"call_format":"hermes"})" : chat) << "}";
-    ext::ParsedOptions options;
     fake::state().epochs.clear();
-    model = std::make_shared<LoomModel>(dir_.string(), options, rows, false);
+    ext::TextRunnerOptions options;
+    options.model_path = dir_.string();
+    options.session_count = rows;
+    model = std::make_shared<LoomModel>(options);
     runner = std::make_unique<LoomRunner>(model, 0, false, 0);
     pool = std::make_shared<RowPool>();
     pool->used.assign(rows, false);

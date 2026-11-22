@@ -27,11 +27,6 @@ inline const std::vector<std::string> kPackageExclude = {
     "README.md", "REPORT.md", "info.json", ".gitattributes",
     "*.png",     "*.jpg",     "*.svg"};
 
-inline const std::map<std::string, std::string> kOptions = {
-    {"checkpoint", "--loom-checkpoint"},
-    {"drafter", "--loom-drafter"},
-    {"vision", "--loom-vision"}};
-
 // The package revision for `sdk`: its v<sdk> tag, else the default branch.
 inline std::string SdkRevision(std::string_view repo, std::string_view sdk,
                                const ext::ModelSourceHub& hub) {
@@ -155,8 +150,7 @@ inline ext::ModelSourceModel Resolve(std::string_view repo,
   std::string licenses;
   for (const auto& [origin, paths] : origins) {
     // Any Hugging Face origin installs: the runner finds its files in the
-    // model directory. Only the ones with a --loom-<origin> option name it.
-    const auto option = kOptions.find(origin);
+    // model directory, so none fills an option.
     const auto* entry = declared ? declared->find(origin) : nullptr;
     if (entry == nullptr || entry->member_str("kind") != "hf")
       throw std::runtime_error("loom: " + std::string(repo) + ": origin " +
@@ -168,7 +162,7 @@ inline ext::ModelSourceModel Resolve(std::string_view repo,
                                origin + " is not pinned to a revision");
     model.components.push_back(
         {.role = origin,
-         .option = option == kOptions.end() ? std::string() : option->second,
+         .option = {},
          .repo = source,
          .revision = pinned,
          .entry = paths.size() == 1 ? paths.front() : ".",

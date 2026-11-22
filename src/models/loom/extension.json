@@ -39,62 +39,6 @@
         "loom-text"
       ],
       "help": "Loom device URI (default: amdgpu://?completion_spin_ns=4294967295)"
-    },
-    {
-      "name": "--loom-memory-bytes",
-      "type": "integer",
-      "commands": [
-        "serve",
-        "prompt",
-        "chat",
-        "bench"
-      ],
-      "providers": [
-        "loom-text"
-      ],
-      "help": "Budget for an elastic Loom memory pool (weights and state); default: none, a fixed pool committed at load"
-    },
-    {
-      "name": "--loom-checkpoint",
-      "type": "path",
-      "commands": [
-        "serve",
-        "prompt",
-        "chat",
-        "bench"
-      ],
-      "providers": [
-        "loom-text"
-      ],
-      "help": "The package's GGUF checkpoint files when they are not in the model directory: a file, or a directory holding them at their repository paths (default: the model directory, where gufo model install puts them)"
-    },
-    {
-      "name": "--loom-drafter",
-      "type": "path",
-      "commands": [
-        "serve",
-        "prompt",
-        "chat",
-        "bench"
-      ],
-      "providers": [
-        "loom-text"
-      ],
-      "help": "The package's draft model files when they are not in the model directory: a file, or a directory holding them at their repository paths (default: the model directory, where gufo model install puts them)"
-    },
-    {
-      "name": "--loom-vision",
-      "type": "path",
-      "commands": [
-        "serve",
-        "prompt",
-        "chat",
-        "bench"
-      ],
-      "providers": [
-        "loom-text"
-      ],
-      "help": "The package's vision projector files when they are not in the model directory: a file, or a directory holding them at their repository paths (default: the model directory, where gufo model install puts them)"
     }
   ],
   "targets": {

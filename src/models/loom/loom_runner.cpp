@@ -147,9 +147,8 @@ public:
     if (close_tokens_.empty())
       ProbeReasoningClose();
     std::lock_guard lock(model_->mutex());
-    // Every session's KV comes from one pool that Loom pages itself: a
-    // request reserves what its prompt and output reach, so the sessions
-    // share the pool rather than each holding a full context.
+    // Every session's KV comes from one pool that Loom pages itself, sized
+    // for each session's full context (LoomModel).
     loom_text_embed_memory(model_->embed(), &memory_);
     const auto gib = [](std::uint64_t bytes) {
       return static_cast<double>(bytes) / static_cast<double>(1ull << 30);
@@ -240,21 +239,28 @@ public:
   }
 
   [[nodiscard]] ext::TextRunnerResourceClaim ResourceClaim() const override {
-    // Loom admits each request against its shared KV pool (see the
-    // constructor), which a per-session claim would count once per session;
-    // the host cache holds only checkpoint names and its own metadata.
+    // From what Loom committed (loom_text_embed_memory): the pool holds every
+    // session's full context, so each claims its share of the KV; the host
+    // cache holds only checkpoint names and its own metadata.
     return {
         .resident_weights_bytes =
             memory_.device_bytes - std::min(memory_.device_bytes, KvBytes()),
-        .per_request_state_bytes = 0,
+        .per_request_state_bytes = KvBytes() / rows_,
         .temporary_scratch_bytes = 0,
         // Image blocks fill ImageCacheBytes; the cache's own metadata,
         // restore bookkeeping and staging take the rest.
         .retained_snapshot_capacity_bytes =
-            images_ ? ImageCacheBytes() + kHostCacheBytes * 8 : kHostCacheBytes,
+            images_ ? ImageCacheBytes() + MetadataBytes() * 8 : MetadataBytes(),
         .retained_snapshot_ceiling_bytes =
-            images_ ? ImageCacheBytes() + kHostCacheBytes * 8
-                    : kHostCacheBytes};
+            images_ ? ImageCacheBytes() + MetadataBytes() * 8
+                    : MetadataBytes()};
+  }
+
+  // The host cache's metadata: its fixed share, and the token history each
+  // retained checkpoint keeps (Gufo charges about four bytes per token), so
+  // long contexts in every session do not exhaust it.
+  [[nodiscard]] std::size_t MetadataBytes() const {
+    return kHostCacheBytes + kCheckpoints * std::size_t{max_context_} * 8;
   }
 
   [[nodiscard]] std::vector<ext::TextExecutionPlan> SupportedPlans()
@@ -1582,9 +1588,7 @@ private:
 std::shared_ptr<ext::TextModelRunner> CreateLoomRunner(
     const ext::TextRunnerOptions& options, std::string* error) {
   try {
-    auto model = std::make_shared<LoomModel>(
-        options.model_path, options.provider_options, options.session_count,
-        !options.disk_cache.directory.empty());
+    auto model = std::make_shared<LoomModel>(options);
     return std::make_shared<LoomRunner>(
         std::move(model), options.max_context,
         !options.disk_cache.directory.empty(),

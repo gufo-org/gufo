@@ -20,7 +20,9 @@ import base64
 import io
 import json
 import math
+import os
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -241,12 +243,31 @@ def check_llm(args):
     return "greedy 6 x 7 = 42"
 
 
+def link_tree(source, dest):
+    """Links every file under `source` at the same path under `dest`, keeping
+    files already there: hard links where the volume allows, else symbolic."""
+    for path in sorted(source.rglob("*")):
+        target = dest / path.relative_to(source)
+        if path.is_dir() or target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(path.resolve(), target)
+        except OSError:
+            os.symlink(path.resolve(), target)
+
+
 def check_loom(args):
-    # The package and its GGUF as downloaded separately; --loom-checkpoint
-    # finds the GGUF by its origin path.
-    extra = ["--served-model-name", "loom", "--loom-checkpoint", str(args.loom_checkpoint)]
+    # The package and its GGUF as downloaded separately, linked into the
+    # layout `gufo model install` writes: each origin's files at their
+    # repository paths in the package directory.
+    package = args.log_dir / "loom-package"
+    shutil.rmtree(package, ignore_errors=True)
+    link_tree(args.model, package)
+    link_tree(args.checkpoint, package)
+    extra = ["--served-model-name", "loom"]
     thinking_off = {"chat_template_kwargs": {"enable_thinking": False}}
-    with server(args.binary, "llm", args.model, extra,
+    with server(args.binary, "llm", package, extra,
                 args.log_dir / "loom-server.log", args.startup_timeout) as url:
         answer = request(url + "/v1/chat/completions", {
             "model": "loom", "temperature": 0, "max_tokens": 32, **thinking_off,
@@ -282,8 +303,9 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True,
                         help="Model directory, the GGUF file for llm, or the package for loom")
-    parser.add_argument("--loom-checkpoint", type=Path,
-                        help="loom: directory holding the package's GGUF files")
+    parser.add_argument("--checkpoint", type=Path,
+                        help="loom: directory holding the package's GGUF files at their "
+                             "repository paths")
     parser.add_argument("--asr-model", type=Path, help="tts: Qwen3-ASR directory for a round trip")
     parser.add_argument("--npu", action="store_true", help="Run embedding, ASR or TTS on the NPU")
     parser.add_argument("--startup-timeout", type=int, default=900)
@@ -291,8 +313,8 @@ def main():
     args = parser.parse_args()
     if args.npu and args.family in ("llm", "loom"):
         parser.error("--npu is supported only for embedding, asr and tts")
-    if (args.family == "loom") != (args.loom_checkpoint is not None):
-        parser.error("--loom-checkpoint is required for loom, and only for it")
+    if (args.family == "loom") != (args.checkpoint is not None):
+        parser.error("--checkpoint is required for loom, and only for it")
     args.log_dir.mkdir(parents=True, exist_ok=True)
 
     started = time.perf_counter()

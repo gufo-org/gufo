@@ -30,21 +30,21 @@ and `bench`, take the same repository. Requests name the model by its card
 ID (`Qwen/Qwen3.5-2B` here; `/v1/models` lists it), unless
 `--served-model-name` sets another.
 
-Files you download yourself work too. Pass the package directory to
-`--model` and each origin's files with `--loom-checkpoint`, `--loom-drafter`
-or `--loom-vision` (a file, or a directory holding them at their repository
-paths):
+Files you download yourself work too: download the package and each origin's
+files into one directory, at their repository paths (the layout `gufo model
+install` writes), and pass it to `--model`:
 
 ```sh
 hf download loom-fun/ggml-org-Qwen3-4B-loom --local-dir models/qwen3-4b-loom
-hf download ggml-org/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models/qwen3-4b-gguf
-gufo serve llm --model models/qwen3-4b-loom --loom-checkpoint models/qwen3-4b-gguf
+hf download ggml-org/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models/qwen3-4b-loom
+gufo serve llm --model models/qwen3-4b-loom
 ```
 
-Without these options Gufo also looks for the files in the package
-directory, at their origin paths (`hf download` both repositories into one
-directory), and a package fetched with `loom-fetch`, which places them itself,
-needs none. A package built for another Loom SDK release is refused at load
+A package fetched with
+`loom-fetch`, which places the files at their card paths, works as it is.
+`--mmproj` and the draft model option (`--mtp-model`, `--dflash-model` or
+`--dspark-model` with its `--speculative`) replace the package's vision or
+draft file. A package built for another Loom SDK release is refused at load
 with the revision to fetch.
 
 The package's preset for your GPU is chosen automatically, on Linux and
@@ -53,13 +53,11 @@ no preset for serves the gfx1151 preset `chat`, with a warning. Grammars,
 `logprobs`, `min_p` and penalties use the package's logits whenever it
 declares them.
 
-| Option | Use |
-| --- | --- |
-| `--loom-memory-bytes N` | Elastic memory pool with that budget, instead of a fixed pool committed at load |
-| `--loom-device URI` | Loom device URI |
-
-`--cache-disk DIR` keeps the prompt cache across restarts; its checkpoint
-images need the elastic pool, which Gufo then uses.
+Loom commits the KV of `--sessions` full contexts at load (`--context`, the
+package's own by default), shared by all sessions; the startup log reports
+the device memory and the tokens the pool holds. `--loom-device URI` selects
+another Loom device. `--cache-disk DIR` keeps the prompt cache across
+restarts; its checkpoint images back the pool elastically instead.
 
 ## Platforms
 

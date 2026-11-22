@@ -137,7 +137,7 @@ def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=
                 # the package's logits) through `gufo serve llm`.
                 command = [sys.executable, str(HERE / 'family_smoke.py'), 'loom', '--binary', str(checked),
                            '--model', assets[model['asset']],
-                           '--loom-checkpoint', assets[model['checkpoint_asset']],
+                           '--checkpoint', assets[model['checkpoint_asset']],
                            '--log-dir', str(output / key)]
                 with (output / (key + '.log')).open('w') as log:
                     result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=900)
