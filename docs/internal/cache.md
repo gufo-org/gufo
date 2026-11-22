@@ -112,6 +112,12 @@ just prompt tokens. A request that continues no live frontier takes the least
 recently used idle session (Flash-Next prefers one without a frontier), so
 it does not replace the frontier of a conversation that has just replied.
 
+Indexing the frontier is optional. When its index record cannot be allocated,
+for example because the cache's metadata has filled its byte budget, the
+cache reclaims one retained record and retries once. If that fails too, the
+reply still completes: the session stays unindexed, the server logs
+`event=live_frontier_refused`, and the next turn restores from a checkpoint.
+
 A client replays the previous answer as text, and the next prompt can tokenize
 it differently from the sampled tokens (#1154). At admission, after earlier
 requests have committed their frontiers, a text-only prompt whose text repeats

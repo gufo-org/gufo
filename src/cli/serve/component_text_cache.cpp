@@ -2963,6 +2963,21 @@ std::size_t ComponentTextCache::Lease::Commit(
       impl_->cache->resources->adapter->Positions(impl_->slot.Execution());
   const auto location = impl_->slot.Location();
   impl_->slot.Commit();
+  // The live frontier's index record is optional: a session without one
+  // restores from a checkpoint. A failed allocation, such as a full ledger,
+  // reclaims one record and retries once, then leaves the frontier unindexed
+  // rather than failing the reply.
+  const auto index_live = [&] {
+    try {
+      impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
+          location, impl_->entry->live_tokens, impl_->cache->identity,
+          impl_->entry->live_input, positions});
+      return true;
+    } catch (const std::bad_alloc&) {
+      return false;
+    }
+  };
+  bool indexed;
   {
     const std::lock_guard lock(impl_->cache->mutex);
     auto& starts = impl_->entry->reply_starts;
@@ -2979,10 +2994,31 @@ std::size_t ComponentTextCache::Lease::Commit(
     if (impl_->account)
       (void)impl_->account->SetNeed(live.size());
     impl_->entry->live_input = At(impl_->input, impl_->prompt.size());
-    impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
-        location, std::move(live), impl_->cache->identity,
-        At(impl_->input, impl_->prompt.size()), std::move(positions)});
-    impl_->entry->busy = false;
+    indexed = index_live();
+    if (indexed)
+      impl_->entry->busy = false;
+  }
+  if (!indexed) {
+    auto& cache = *impl_->cache;
+    bool reclaimed = false;
+    try {
+      cache.DiscardUnusedFrontierWrites();
+      const std::lock_guard lock(cache.mutex);
+      reclaimed = cache.retention.Reclaim(cache::RetentionRequest{});
+    } catch (const std::exception&) {
+      // The reply stands; only the frontier's index record is lost.
+    }
+    cache.DrainDemotion();
+    {
+      const std::lock_guard lock(cache.mutex);
+      indexed = reclaimed && index_live();
+      impl_->entry->busy = false;
+    }
+    if (!indexed)
+      Logger::Info("cache",
+                   "schema=component-cache-v1 event=live_frontier_refused "
+                   "reason=allocation tokens=" +
+                       std::to_string(live.size()));
   }
   impl_->active = false;
   if (async_frontier) {

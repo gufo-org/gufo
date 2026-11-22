@@ -53,6 +53,7 @@ struct State final : TextRunnerState {
 class Runner : public TextModelRunner {
 public:
   mutable FakeAdapter* adapter{};
+  mutable cache::ResourceLedger* ledger{};
   mutable std::size_t captures{};
   std::function<void()> on_bind;
   // Installed as the resources' release_host when set (#932).
@@ -118,6 +119,7 @@ public:
                                    window_rows, ring_rows, private_state)
                              : std::make_unique<FakeAdapter>(rows_per_chunk);
     adapter = owned.get();
+    this->ledger = &ledger;
     auto resources = server::testing::MakeFakeCacheResources(
         ledger, std::move(owned),
         {.private_blocks = private_blocks,
@@ -2196,6 +2198,50 @@ void IdleFrontierSetupRefusalKeepsTheCompletedLiveExecution() {
       throw cache::ResourceExhausted();
   };
   (void)lease->Commit({}, {}, frontier);
+  auto next = cache.Acquire(frontier, {}, {}, true, 0, true);
+  assert(next->cached_tokens() == frontier.size());
+  assert(next->restored_snapshot_bytes() == 0);
+  assert(runner->adapter->RecurrentHash(
+             dynamic_cast<State&>(next->state()).slot) == expected);
+  next->Invalidate();
+}
+// A full ledger at the end of a turn costs the session its live record, not
+// the reply: Commit returns, and the next turn restores from a checkpoint.
+void FullLedgerLeavesTheFrontierUnindexed() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3};
+  const std::vector<TextRunnerToken> frontier{1, 2, 3, 4};
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(lease->state());
+  runner->adapter->Append(state.slot, frontier, frontier);
+  // Nothing is retained, so the reclaim finds nothing to free.
+  runner->ledger->FailAfter(cache::LedgerStep::kReserve, 0);
+  (void)lease->Commit({}, {}, frontier);
+  runner->ledger->ClearFaults();
+  auto next = cache.Acquire(frontier, {}, {}, true, 0, true);
+  assert(next->cached_tokens() == frontier.size());
+  assert(next->restored_snapshot_bytes() != 0);
+  next->Invalidate();
+}
+// When the reclaim frees a record, the retried insert keeps the frontier live.
+void FullLedgerReclaimsForTheLiveFrontier() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3};
+  const std::vector<TextRunnerToken> frontier{1, 2, 3, 4};
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(lease->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(), false,
+                                   SnapshotPurpose::kContinuation, {}));
+  assert(lease->PublishSnapshot(prompt, lease->Capture(), false));
+  const auto tail = std::span(frontier).subspan(prompt.size());
+  runner->adapter->Append(state.slot, tail, tail);
+  const auto expected = runner->adapter->RecurrentHash(state.slot);
+  runner->ledger->FailAfter(cache::LedgerStep::kReserve, 0);
+  (void)lease->Commit({}, {}, frontier);
+  runner->ledger->ClearFaults();
   auto next = cache.Acquire(frontier, {}, {}, true, 0, true);
   assert(next->cached_tokens() == frontier.size());
   assert(next->restored_snapshot_bytes() == 0);
@@ -4798,6 +4844,8 @@ int main() {
   OptionalFrontiersLeaveTheNextPromptACompleteCapture();
   PromptCaptureReclaimsUnusedGeneratedStateFirst();
   IdleFrontierSetupRefusalKeepsTheCompletedLiveExecution();
+  FullLedgerLeavesTheFrontierUnindexed();
+  FullLedgerReclaimsForTheLiveFrontier();
   IdleFrontierCaptureReturnsBeforeCopyAndAdmissionWaits();
   GeneratedFrontierSurvivesReassignmentAndRestart();
   FullChatCheckpointRestoresWithoutSuffixPrefill();
