@@ -224,3 +224,7 @@ because loading and reading the disk cache take a while.
 Gufo never logs prompts or replies, and never runs tool calls, commands or
 generated code. Only the opt-in [`--trace`](troubleshooting.md#content-trace)
 file records content.
+
+Gufo keeps HTTP/1.1 connections open for sequential requests, so a reverse
+proxy can reuse upstream connections. An HTTP/1.0 request or `Connection: close`
+closes the connection after its response.

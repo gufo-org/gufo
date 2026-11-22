@@ -36,8 +36,10 @@ struct TextSchedulerPolicy {
   /// Internal cadence; idle monitoring performs no work during inference.
   std::chrono::milliseconds device_probe_interval{std::chrono::seconds(5)};
   /// Internal bound after which a still-queued stream reports its start, so
-  /// transports can keep the connection alive while it waits.
-  std::chrono::milliseconds stream_start_delay{std::chrono::seconds(5)};
+  /// transports can keep the connection alive while it waits. Short enough
+  /// that a congested queue does not look like a stalled client; failures
+  /// that survive this window arrive as a terminal SSE error.
+  std::chrono::milliseconds stream_start_delay{std::chrono::milliseconds(500)};
   std::size_t max_pending_requests{16};
   std::size_t max_pending_requests_per_client{4};
   std::size_t max_output_bytes_per_request{kDefaultMaxOutputBytes};

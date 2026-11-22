@@ -1924,6 +1924,7 @@ int RunServe(std::span<const char* const> args) {
       server::HttpServerOptions{
           .max_request_body_bytes = max_request_body_bytes,
           .max_connections = max_connections,
+          .keep_alive = true,
           .on_device_lost =
               [&device_lost] {
                 device_lost.store(true);

@@ -935,7 +935,7 @@ void TestLlamaSlotsAndMetrics() {
           .budget_bytes = 4096,
           .used_bytes = 1024,
           .available_bytes = 3072,
-      };
+  };
   const auto budget_metrics = get("/metrics");
   assert(budget_metrics.find("gufo_prompt_state_budget_bytes 4096\n") !=
          std::string::npos);
@@ -2757,24 +2757,39 @@ private:
   std::binary_semaphore released_{0};
 };
 
-std::string ReadFramedResponse(int fd) {
-  std::string response;
-  char buffer[4096];
+// Reads one Content-Length framed response. A read can return several
+// responses from a kept-alive connection, so bytes past the first stay in
+// `buffered` for the next call instead of being dropped.
+std::string ReadFramedResponse(int fd, std::string& buffered) {
   std::size_t total = std::string::npos;
   for (;;) {
-    const auto head = response.find("\r\n\r\n");
-    if (head != std::string::npos && total == std::string::npos) {
-      const auto length = response.find("Content-Length: ");
-      assert(length != std::string::npos && length < head);
-      total = head + 4 + std::stoul(response.substr(length + 16));
+    if (total == std::string::npos) {
+      const auto head = buffered.find("\r\n\r\n");
+      if (head != std::string::npos) {
+        const auto length = buffered.find("Content-Length: ");
+        assert(length != std::string::npos && length < head);
+        total = head + 4 + std::stoul(buffered.substr(length + 16));
+      }
     }
-    if (total != std::string::npos && response.size() >= total)
+    if (total != std::string::npos && buffered.size() >= total) {
+      std::string response = buffered.substr(0, total);
+      buffered.erase(0, total);
       return response;
+    }
+    char buffer[4096];
     const auto count = ::read(fd, buffer, sizeof(buffer));
-    if (count <= 0)
+    if (count <= 0) {
+      std::string response = std::move(buffered);
+      buffered.clear();
       return response;
-    response.append(buffer, static_cast<std::size_t>(count));
+    }
+    buffered.append(buffer, static_cast<std::size_t>(count));
   }
+}
+
+std::string ReadFramedResponse(int fd) {
+  std::string buffered;
+  return ReadFramedResponse(fd, buffered);
 }
 
 void TestConnectionLimitIgnoresClosingConnections() {
@@ -2814,6 +2829,137 @@ void TestConnectionLimitIgnoresClosingConnections() {
     net::CloseSocket(idle);
   }
   std::clog.rdbuf(previous_sink);
+}
+
+void TestKeepAlive() {
+  RunningServer server(
+      {.keep_alive = true,
+       .keep_alive_idle_timeout = std::chrono::milliseconds(200)});
+  const int fd = server.Connect();
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  // One read can carry several kept-alive responses, so keep the surplus
+  // between reads instead of letting it go with the first response.
+  std::string buffered;
+  for (int request = 0; request < 2; ++request) {
+    assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+           static_cast<ssize_t>(health.size()));
+    const auto response = ReadFramedResponse(fd, buffered);
+    ExpectStatus(response, 200);
+    assert(response.find("Connection: keep-alive") != std::string::npos);
+  }
+  // A pipelined pair proves bytes after the first body are carried into the
+  // next request instead of being dropped with the body.
+  const std::string pair = health + health;
+  assert(net::SendNoSignal(fd, pair.data(), pair.size()) ==
+         static_cast<ssize_t>(pair.size()));
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  // A request body is consumed exactly: bytes past Content-Length belong to
+  // the next pipelined request.
+  const std::string pipelined_post =
+      "POST /echo HTTP/1.1\r\nContent-Length: 4\r\n\r\nping" + health;
+  assert(net::SendNoSignal(fd, pipelined_post.data(), pipelined_post.size()) ==
+         static_cast<ssize_t>(pipelined_post.size()));
+  assert(ReadFramedResponse(fd, buffered).ends_with("ping"));
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  // A chunked streaming response ends at its zero-length chunk without closing
+  // the connection, so the next request runs on the same socket.
+  const std::string streaming =
+      "POST /stream HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+  assert(net::SendNoSignal(fd, streaming.data(), streaming.size()) ==
+         static_cast<ssize_t>(streaming.size()));
+  std::string streamed;
+  char stream_buffer[256];
+  while (!streamed.ends_with("0\r\n\r\n")) {
+    const auto count = ::read(fd, stream_buffer, sizeof(stream_buffer));
+    assert(count > 0);
+    streamed.append(stream_buffer, static_cast<std::size_t>(count));
+  }
+  ExpectStatus(streamed, 200);
+  assert(streamed.find("Transfer-Encoding: chunked") != std::string::npos);
+  assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  // The close token wins even when the header also lists keep-alive.
+  const std::string closing =
+      "GET /health HTTP/1.1\r\nConnection: keep-alive, close\r\n\r\n";
+  assert(net::SendNoSignal(fd, closing.data(), closing.size()) ==
+         static_cast<ssize_t>(closing.size()));
+  const auto last = ReadFramedResponse(fd, buffered);
+  ExpectStatus(last, 200);
+  assert(last.find("Connection: close") != std::string::npos);
+  char byte = 0;
+  assert(::read(fd, &byte, 1) == 0);
+  net::CloseSocket(fd);
+
+  // A stale idle connection is closed without a malformed-request answer.
+  const int idle = server.Connect();
+  const std::string idle_health = "GET /health HTTP/1.1\r\n\r\n";
+  assert(net::SendNoSignal(idle, idle_health.data(), idle_health.size()) ==
+         static_cast<ssize_t>(idle_health.size()));
+  ExpectStatus(ReadFramedResponse(idle), 200);
+  char idle_byte = 0;
+  assert(::read(idle, &idle_byte, 1) == 0);
+  net::CloseSocket(idle);
+}
+
+// A parked keep-alive worker holds a connection slot like any other idle
+// connection: it still owns a thread and a descriptor. The idle timeout
+// bounds that hold, and the slot is available again once it closes.
+void TestKeepAliveIdleReleasesSlot() {
+  RunningServer server(
+      {.max_connections = 1,
+       .keep_alive = true,
+       .keep_alive_idle_timeout = std::chrono::milliseconds(100)});
+  const int fd = server.Connect();
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  std::string buffered;
+  const auto first = ReadFramedResponse(fd, buffered);
+  ExpectStatus(first, 200);
+  assert(first.find("Connection: keep-alive") != std::string::npos);
+  // The server closes the parked connection when the idle timeout expires.
+  char byte = 0;
+  assert(::read(fd, &byte, 1) == 0);
+  net::CloseSocket(fd);
+
+  // The worker may still be finishing when the next connection arrives, so
+  // retry until it is reaped instead of racing the slot release.
+  bool served = false;
+  for (int attempt = 0; attempt < 200 && !served; ++attempt) {
+    const int next = server.Connect();
+    assert(net::SendNoSignal(next, health.data(), health.size()) ==
+           static_cast<ssize_t>(health.size()));
+    const auto response = ReadFramedResponse(next);
+    net::CloseSocket(next);
+    served = response.starts_with("HTTP/1.1 200");
+    if (!served)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  assert(served);
+}
+
+void TestKeepAliveRequestLimit() {
+  RunningServer server({.keep_alive = true, .max_requests_per_connection = 2});
+  const int fd = server.Connect();
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  std::string buffered;
+  for (int request = 0; request < 2; ++request) {
+    assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+           static_cast<ssize_t>(health.size()));
+    const auto response = ReadFramedResponse(fd, buffered);
+    ExpectStatus(response, 200);
+    // The second response is the last one this connection may serve, so it
+    // closes instead of promising a third.
+    const bool keep_alive = request == 0;
+    assert(response.find(keep_alive
+                             ? "Connection: keep-alive"
+                             : "Connection: close") != std::string::npos);
+  }
+  char byte = 0;
+  assert(::read(fd, &byte, 1) == 0);
+  net::CloseSocket(fd);
 }
 
 void TestPeerDisconnect() {
@@ -3705,6 +3851,9 @@ int main() {
   TestCompatibilityUtf8();
   TestPeerDisconnect();
   TestConnectionLimitIgnoresClosingConnections();
+  TestKeepAlive();
+  TestKeepAliveIdleReleasesSlot();
+  TestKeepAliveRequestLimit();
   TestStreamingFraming();
   TestSseHeartbeat();
   TestSseHeartbeatShutdown();
