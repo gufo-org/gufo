@@ -194,7 +194,8 @@ private:
   }
 
   // Links a matching blob of the Hugging Face cache instead of downloading
-  // it; it is verified like a download.
+  // it (a reflink where no hard link reaches it, as across btrfs subvolumes;
+  // a copy only where neither can); it is verified like a download.
   bool Reuse(Job& job) {
     const auto hub = HubCache();
     if (hub.empty())
@@ -212,7 +213,7 @@ private:
     fs::remove(job.part, ec);
     fs::remove(job.progress, ec);
     fs::create_hard_link(cached, job.part, ec);
-    if (ec) {
+    if (ec && !platform::CloneFile(cached, job.part, ec)) {
       ec.clear();
       fs::copy_file(cached, job.part, ec);
       if (ec)

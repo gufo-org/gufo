@@ -406,6 +406,12 @@ std::filesystem::path UserDataDirectory() noexcept {
   return UserCacheDirectory();
 }
 
+bool CloneFile(const std::filesystem::path&, const std::filesystem::path&,
+               std::error_code& ec) noexcept {
+  ec = std::make_error_code(std::errc::operation_not_supported);
+  return false;
+}
+
 std::size_t Write(PlatformFile file, const void* data, std::size_t bytes,
                   std::error_code& ec) noexcept {
   ec.clear();

@@ -23,12 +23,16 @@ std::string ReadText(const fs::path& path) {
   return text.str();
 }
 
-// Links `target` to `blob`, copying where the file system has no hard links.
+// Links `target` to `blob`; where the file system has no hard link between
+// them, a reflink shares the data, and only then is it copied.
 void Link(const fs::path& blob, const fs::path& target) {
   fs::create_directories(target.parent_path());
   std::error_code ec;
   fs::create_hard_link(blob, target, ec);
-  if (ec)
+  if (!ec)
+    return;
+  fs::remove(target, ec);
+  if (!platform::CloneFile(blob, target, ec))
     fs::copy_file(blob, target, fs::copy_options::overwrite_existing);
 }
 }  // namespace
