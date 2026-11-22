@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -323,6 +324,20 @@ void TestLogLevelNames() {
 
 void TestFramingAndMetrics() {
   RunningServer server({.max_request_body_bytes = 8192});
+  const auto lowercase_head = [](const std::string& response) {
+    const auto end = response.find("\r\n\r\n");
+    assert(end != std::string::npos);
+    auto head = response.substr(0, end + 2);
+    for (char& c : head)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return head;
+  };
+  const auto preflight =
+      server.Send("OPTIONS /v1/models HTTP/1.1\r\nHost: x\r\n\r\n");
+  ExpectStatus(preflight, 204);
+  assert(preflight.find("\r\n\r\n") == preflight.size() - 4);
+  assert(lowercase_head(preflight).find("\r\ncontent-length:") ==
+         std::string::npos);
   ExpectStatus(server.Send("GET /health HTTP/1.1\r\n\r\n"), 200);
   // The root path answers like /health so llama-swap Load and preload
   // succeed (#957).
@@ -376,6 +391,8 @@ void TestFramingAndMetrics() {
       "5000\r\n\r\n" +
       payload);
   ExpectStatus(echo, 200);
+  assert(lowercase_head(echo).find("\r\ncontent-length: 5000\r\n") !=
+         std::string::npos);
   assert(echo.substr(echo.find("\r\n\r\n") + 4) == payload);
 
   const std::string body = R"({"prompt":"hi","n_predict":1})";
