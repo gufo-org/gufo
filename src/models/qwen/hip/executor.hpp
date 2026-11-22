@@ -374,8 +374,16 @@ public:
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
   [[nodiscard]] static std::size_t RecurrentStateBytes(
       const core::ModelConfig& config, QwenExecutionPolicy policy);
-  /// Attention K/V bytes at `max_context`: the demand-mapped part of
-  /// EstimateMemoryUsage().
+  /// The state of one arena the core allocates (mem::SessionState): the
+  /// attention K/V, one region whose segments are FP16 planes
+  /// [layer][position][width] or FP32 planes [layer][head][position][dim],
+  /// buffer 0. Recurrent state stays the arena's own: it swaps between two
+  /// buffers for replay (RecurrentStateBytes).
+  [[nodiscard]] static gufo::mem::StateDeclaration DeclareState(
+      const core::ModelConfig& config, std::uint32_t max_context,
+      QwenExecutionPolicy policy);
+  /// Attention K/V bytes at `max_context` (DeclareState): the demand-mapped
+  /// part of EstimateMemoryUsage().
   [[nodiscard]] static std::size_t KvBytes(const core::ModelConfig& config,
                                            std::uint32_t max_context,
                                            QwenExecutionPolicy policy);
@@ -412,6 +420,8 @@ private:
   [[nodiscard]] bool AllocateSsmReplayLog();
 
   core::ModelConfig config_;
+  /// The declared state (DeclareState); account_ and kv_region_ are its.
+  std::unique_ptr<gufo::mem::SessionState> state_;
   std::shared_ptr<gufo::mem::StateAccount> account_;
   std::shared_ptr<gufo::mem::Region> kv_region_;
   std::uint32_t max_context_;

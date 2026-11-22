@@ -127,7 +127,7 @@ public:
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
   /// Worst-case private device state, including the configured rollback cap.
   [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
-                                         std::uint32_t context) const noexcept;
+                                         std::uint32_t context) const;
   /// The part of SessionBytes() a session maps only as it writes it (K/V
   /// regions); zero without demand mapping.
   [[nodiscard]] std::size_t DemandMappedBytes(core::SessionMode mode,

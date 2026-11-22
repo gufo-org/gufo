@@ -879,34 +879,47 @@ extern "C" ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes) {
 
 using Ds4RegionHolder = std::shared_ptr<gufo::mem::Region>;
 
-ds4_gpu_tensor *ds4_gpu_tensor_alloc_rows(
-        uint64_t row_bytes, uint64_t max_rows, uint64_t initial_rows,
-        const std::shared_ptr<gufo::mem::StateAccount> &account,
-        uint64_t tokens_per_row) {
-    if (row_bytes == 0 || max_rows == 0) return NULL;
+std::shared_ptr<gufo::mem::SessionState> ds4_gpu_session_state_create(
+        const gufo::mem::StateDeclaration &declaration, bool charged) {
+    if (!gufo::mem::DemandMapped()) return nullptr;
     std::string error;
-    auto region = gufo::mem::Region::Create(
-        {.row_bytes = (size_t)row_bytes, .rows = (size_t)max_rows}, &error,
-        account, (size_t)(tokens_per_row ? tokens_per_row : 1));
-    if (!region || !region->demand_mapped()) return NULL;
+    std::shared_ptr<gufo::mem::SessionState> state =
+        gufo::mem::SessionState::Create(declaration, &error, charged);
+    if (!state) return nullptr;
+    /* A region that could not reserve its range allocated its whole size:
+     * at a long context that is far more than the rows a session writes, so
+     * give the state up and let the session allocate its rows whole, as
+     * without demand mapping. */
+    for (gufo::mem::StateBufferId id = 0; id < declaration.buffers().size(); ++id) {
+        const auto &region = state->region(id);
+        if (region && !region->demand_mapped()) return nullptr;
+    }
+    return state;
+}
+
+std::shared_ptr<gufo::mem::StateAccount> ds4_gpu_session_state_account(
+        const std::shared_ptr<gufo::mem::SessionState> &state) {
+    return state ? state->account() : nullptr;
+}
+
+ds4_gpu_tensor *ds4_gpu_tensor_from_state(
+        const std::shared_ptr<gufo::mem::SessionState> &state,
+        gufo::mem::StateBufferId buffer, uint64_t initial_rows) {
+    if (!state) return NULL;
+    const auto &region = state->region(buffer);
+    if (!region) return NULL;
     ds4_gpu_tensor *t = (ds4_gpu_tensor *)calloc(1, sizeof(*t));
     if (!t) return NULL;
     t->ptr = region->data();
     t->owner = 0;
-    t->row_bytes = row_bytes;
-    t->region = new (std::nothrow) Ds4RegionHolder(std::move(region));
+    t->row_bytes = region->shape().row_bytes;
+    t->region = new (std::nothrow) Ds4RegionHolder(region);
     if (!t->region || !ds4_gpu_tensor_ensure_rows(t, initial_rows ? initial_rows : 1)) {
         delete static_cast<Ds4RegionHolder *>(t->region);
         free(t);
         return NULL;
     }
     return t;
-}
-
-std::shared_ptr<gufo::mem::StateAccount> ds4_gpu_state_account_create(
-        uint64_t margin_tokens) {
-    if (!gufo::mem::DemandMapped()) return nullptr;
-    return std::make_shared<gufo::mem::StateAccount>((size_t)margin_tokens);
 }
 
 extern "C" int ds4_gpu_demand_mapped(void) {

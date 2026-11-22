@@ -337,7 +337,7 @@ std::size_t Model::ResidentBytes() const noexcept {
 }
 
 std::size_t Model::SessionBytes(core::SessionMode mode,
-                                std::uint32_t context) const noexcept {
+                                std::uint32_t context) const {
   const std::size_t vision =
       vision_ ? std::size_t{context} * (config().hidden_size * sizeof(float) +
                                         3 * sizeof(std::int32_t)) +
@@ -352,7 +352,7 @@ std::size_t Model::SessionBytes(core::SessionMode mode,
 
 std::size_t Model::DemandMappedBytes(core::SessionMode mode,
                                      std::uint32_t context) const {
-  return mem::DemandMapped() ? executor_->DemandMappedBytes(mode, context) : 0;
+  return executor_->DemandMappedBytes(mode, context);
 }
 
 std::size_t Model::DeferredScratchBytes() const {

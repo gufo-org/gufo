@@ -14,6 +14,7 @@
 #include <gufo/ext/session_mode.hpp>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <tuple>
@@ -222,7 +223,9 @@ private:
   /// once (the GEMM tier's arena must be grown before capture).
   std::unordered_map<std::uint64_t, hipGraphExec_t> graphs_;
   std::unordered_set<std::uint64_t> warmed_;
-  std::vector<void*> allocations_;
+  /// The session's declared state (Executor::DeclareSessionState); the
+  /// pointers above and the regions below point into it.
+  std::unique_ptr<gufo::mem::SessionState> state_;
   /// Charges the K/V regions' pages to the shared state budget.
   std::shared_ptr<gufo::mem::StateAccount> account_;
   /// Trunk and MTP K/V, one region per buffer, backed as rows are written.
@@ -313,12 +316,17 @@ public:
       std::string* error_msg = nullptr) const;
   [[nodiscard]] bool EnsureRollback(Session& session, std::uint32_t depth,
                                     std::string* error_msg) const;
-  [[nodiscard]] std::size_t SessionBytes(
-      core::SessionMode mode, std::uint32_t max_context,
-      std::uint32_t rollback_depth) const noexcept;
-  /// The K/V part of SessionBytes(), in demand-mapped regions.
-  [[nodiscard]] std::size_t DemandMappedBytes(
-      core::SessionMode mode, std::uint32_t max_context) const noexcept;
+  /// Bytes one session's state takes: its declared state
+  /// (DeclareSessionState) plus `rollback_depth` rollback rows.
+  [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
+                                         std::uint32_t max_context,
+                                         std::uint32_t rollback_depth) const;
+  /// Bytes of `depth` rollback rows of a session (EnsureRollback).
+  [[nodiscard]] std::size_t RollbackBytes(std::uint32_t depth) const noexcept;
+  /// The part of SessionBytes() a session maps only as it writes it: its
+  /// K/V regions, zero without demand mapping.
+  [[nodiscard]] std::size_t DemandMappedBytes(core::SessionMode mode,
+                                              std::uint32_t max_context) const;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
   /// Backs the K/V rows of trunk positions below `trunk_end` and MTP
   /// positions below `mtp_end`, plus a tile of rows past each, before they
@@ -600,6 +608,36 @@ public:
 private:
   friend struct ExecutorTestAccess;  // capture failure injection in GPU tests
   Executor() = default;
+
+  /// One session's state as the core allocates it (mem::SessionState), and
+  /// the buffer each of the session's pointers takes. Linear layers use
+  /// `conv` and `state`, attention layers the others.
+  struct SessionStateLayout {
+    struct Layer {
+      gufo::mem::StateBufferId conv{0};
+      gufo::mem::StateBufferId state{0};
+      gufo::mem::StateBufferId k{0};
+      gufo::mem::StateBufferId v{0};
+      gufo::mem::StateBufferId index_k{0};
+      gufo::mem::StateBufferId block_k{0};
+    };
+    explicit SessionStateLayout(std::size_t margin_tokens)
+        : state(margin_tokens) {}
+    gufo::mem::StateDeclaration state;
+    std::vector<Layer> layers;
+    std::optional<gufo::mem::StateBufferId> ple_history;
+    gufo::mem::StateBufferId control{0};
+    /// MTP sessions only: `mtp` holds k, v, index_k and block_k.
+    std::optional<Layer> mtp;
+    gufo::mem::StateBufferId mtp_target_hidden{0};
+    gufo::mem::StateBufferId mtp_h{0};
+    std::optional<gufo::mem::StateBufferId> mtp_draft_rows;
+    gufo::mem::StateBufferId mtp_draft_ids{0};
+  };
+  /// The state CreateSession() allocates and SessionBytes() and
+  /// DemandMappedBytes() count.
+  [[nodiscard]] SessionStateLayout DeclareSessionState(
+      core::SessionMode mode, std::uint32_t max_context) const;
 
   /// Visits every device region of a snapshot in payload order with
   /// (device pointer or null when sizing, payload offset, bytes, name).

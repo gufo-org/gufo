@@ -14,6 +14,7 @@
 
 #include "../kernels/rocm/resident_api.h"
 #include "src/mem/account.hpp"
+#include "src/mem/state_declaration.hpp"
 #include <gufo/ext/host.hpp>
 #include <gufo/ext/platform/fs.hpp>
 #include "dspark_internal.h"
@@ -115,6 +116,10 @@ struct ds4_rocm_graph {
     /* Heap-held std::shared_ptr<gufo::mem::StateAccount> charging the
      * demand-mapped rows to this session; null without demand mapping. */
     void *state_account;
+    /* Heap-held std::shared_ptr<gufo::mem::SessionState>: the declared
+     * state (rocm_graph_declare_state) whose regions hold the rows; null
+     * without demand mapping. */
+    void *session_state;
     /* Per-layer work tensors.  They are reused in place by every layer instead
      * of allocating a generic graph arena.  This is why the code is verbose but
      * predictable: each pointer names an actual DS4 stage. */
@@ -309,6 +314,7 @@ struct ds4_rocm_graph {
 
 typedef struct ds4_rocm_graph ds4_gpu_graph;
 using Ds4StateAccount = std::shared_ptr<gufo::mem::StateAccount>;
+using Ds4SessionState = std::shared_ptr<gufo::mem::SessionState>;
 
 /* Tokens past a frontier the compressed rows are backed for: reservations
  * cover the next raw window plus two rows of the widest ratio. */
@@ -345,6 +351,71 @@ static uint64_t rocm_graph_indexer_scores_max_bytes(uint32_t comp_cap,
   return std::min<uint64_t>(
       (uint64_t)comp_cap * prefill_cap * sizeof(float),
       kIndexerScoreBudgetBytes + (uint64_t)comp_cap * 31u * sizeof(float));
+}
+
+/* No buffer: a layer without compressed rows, or without their ratio-4
+ * mirror and indexer rows. */
+static constexpr gufo::mem::StateBufferId kDs4NoBuffer = SIZE_MAX;
+
+/* The state of a session the core allocates (gufo::mem::SessionState) where
+ * rows are demand-mapped: per compressed layer its attention rows, and at
+ * ratio 4 their F16 mirror and indexer rows, one row per `ratio` tokens up
+ * to the layer's capacity; then the indexer score scratch, rows of one
+ * prefill chunk of floats up to the largest score matrix
+ * (rocm_graph_indexer_scores_max_bytes), one row per `min_ratio` tokens.
+ * The account backs the margin past a frontier
+ * (ds4_rocm_graph_state_margin_tokens). The same declaration gives the
+ * demand-mapped bytes a runner claims (ds4_rocm_graph_demand_mapped_bytes). */
+struct Ds4StateLayout {
+  gufo::mem::StateDeclaration state{ds4_rocm_graph_state_margin_tokens()};
+  std::array<gufo::mem::StateBufferId, DS4_MAX_LAYER> attn;
+  std::array<gufo::mem::StateBufferId, DS4_MAX_LAYER> attn_f16;
+  std::array<gufo::mem::StateBufferId, DS4_MAX_LAYER> index;
+  gufo::mem::StateBufferId scores{kDs4NoBuffer};
+};
+
+/* `ctx_size` and `prefill_cap` as rocm_graph_alloc_raw_cap normalizes them.
+ * Without `scores` the score scratch is not declared: a session that claims
+ * no state allocates it whole. */
+static Ds4StateLayout rocm_graph_declare_state(uint32_t ctx_size,
+                                               uint32_t prefill_cap,
+                                               bool scores) {
+  Ds4StateLayout layout;
+  layout.attn.fill(kDs4NoBuffer);
+  layout.attn_f16.fill(kDs4NoBuffer);
+  layout.index.fill(kDs4NoBuffer);
+  auto &state = layout.state;
+  uint32_t min_ratio = UINT32_MAX;
+  for (uint32_t il = 0; il < DS4_N_LAYER; ++il) {
+    const uint32_t ratio = ds4_layer_compress_ratio(il);
+    if (ratio == 0)
+      continue;
+    min_ratio = std::min(min_ratio, ratio);
+    const std::size_t rows = std::max<uint32_t>(ctx_size / ratio + 2u, 2u);
+    layout.attn[il] = state.Context(
+        {.row_bytes = DS4_N_HEAD_DIM * sizeof(float), .rows = rows}, ratio);
+    if (ratio == 4) {
+      layout.attn_f16[il] = state.Context(
+          {.row_bytes = DS4_N_HEAD_DIM * sizeof(uint16_t), .rows = rows},
+          ratio);
+      layout.index[il] = state.Context(
+          {.row_bytes = DS4_N_INDEXER_HEAD_DIM * sizeof(float), .rows = rows},
+          ratio);
+    }
+  }
+  if (!scores)
+    return layout;
+  if (min_ratio == UINT32_MAX) min_ratio = ctx_size ? ctx_size : 1u;
+  const uint32_t comp_cap = std::max<uint32_t>(ctx_size / min_ratio + 2u, 2u);
+  const uint64_t row_bytes = (uint64_t)prefill_cap * sizeof(float);
+  layout.scores = state.Context(
+      {.row_bytes = (std::size_t)row_bytes,
+       .rows = (std::size_t)((rocm_graph_indexer_scores_max_bytes(
+                                  comp_cap, prefill_cap) +
+                              row_bytes - 1) /
+                             row_bytes)},
+      min_ratio);
+  return layout;
 }
 
 /* DSpark feature capture, defined with the drafting code below. Both are no-ops
@@ -647,6 +718,7 @@ static void rocm_graph_free(ds4_gpu_graph *g) {
     ds4_gpu_tensor_free(g->hc_mix);
     ds4_gpu_tensor_free(g->cur_hc);
     delete static_cast<Ds4StateAccount *>(g->state_account);
+    delete static_cast<Ds4SessionState *>(g->session_state);
     memset(g, 0, sizeof(*g));
 }
 
@@ -705,15 +777,21 @@ static const Ds4StateAccount &rocm_graph_account(const ds4_gpu_graph *g) {
                           : none;
 }
 
+static const Ds4SessionState &rocm_graph_session_state(const ds4_gpu_graph *g) {
+  static const Ds4SessionState none;
+  return g->session_state ? *static_cast<Ds4SessionState *>(g->session_state)
+                          : none;
+}
+
+/* Buffer `buffer` of the declared state (rocm_graph_declare_state), or,
+ * without one, `initial_rows` of `row_bytes` allocated whole. */
 static ds4_gpu_tensor *rocm_graph_alloc_comp_rows(const ds4_gpu_graph *g,
                                                   uint64_t row_bytes,
-                                                  uint64_t max_rows,
                                                   uint64_t initial_rows,
-                                                  uint32_t tokens_per_row) {
-    if (!g->managed_kv_cache) {
-        if (ds4_gpu_tensor *rows = ds4_gpu_tensor_alloc_rows(
-                row_bytes, max_rows, initial_rows, rocm_graph_account(g),
-                tokens_per_row))
+                                                  gufo::mem::StateBufferId buffer) {
+    if (g->session_state) {
+        if (ds4_gpu_tensor *rows = ds4_gpu_tensor_from_state(
+                rocm_graph_session_state(g), buffer, initial_rows))
             return rows;
     }
     return rocm_graph_alloc_kv_cache_tensor(g->managed_kv_cache,
@@ -1009,13 +1087,23 @@ static bool rocm_graph_alloc_raw_cap(
             "contexts",
             ctx_size, (double)kv_cache_bytes / 1073741824.0,
             (double)context_bytes / 1073741824.0);
-    } else if (auto account = state_regions
-                                  ? ds4_gpu_state_account_create(
-                                        ds4_rocm_graph_state_margin_tokens())
-                                  : nullptr) {
-        g->state_account =
-            new (std::nothrow) Ds4StateAccount(std::move(account));
-        if (!g->state_account) return false;
+    }
+    // Outside the managed policy the rows are the declared state's regions.
+    // Only with state regions on does the session claim them: otherwise
+    // (state_unclaimed) its regions charge no account.
+    const Ds4StateLayout layout =
+        rocm_graph_declare_state(ctx_size, prefill_cap, state_regions);
+    if (!managed_kv_cache) {
+        if (auto state = ds4_gpu_session_state_create(layout.state, state_regions)) {
+            if (state_regions) {
+                g->state_account = new (std::nothrow) Ds4StateAccount(
+                    ds4_gpu_session_state_account(state));
+                if (!g->state_account) return false;
+            }
+            g->session_state =
+                new (std::nothrow) Ds4SessionState(std::move(state));
+            if (!g->session_state) return false;
+        }
     }
 
     g->cur_hc = ds4_gpu_tensor_alloc(hc_dim * sizeof(float));
@@ -1052,12 +1140,12 @@ static bool rocm_graph_alloc_raw_cap(
           const uint64_t attn_width = (uint64_t)coff * DS4_N_HEAD_DIM;
           const uint64_t attn_rows = (uint64_t)coff * ratio;
           g->layer_attn_comp_cache[il] = rocm_graph_alloc_comp_rows(
-              g, DS4_N_HEAD_DIM * sizeof(float), g->layer_comp_cap[il],
-              initial_comp_cap, ratio);
+              g, DS4_N_HEAD_DIM * sizeof(float), initial_comp_cap,
+              layout.attn[il]);
           if (ratio == 4) {
             g->layer_attn_comp_cache_f16[il] = rocm_graph_alloc_comp_rows(
-                g, DS4_N_HEAD_DIM * sizeof(uint16_t), g->layer_comp_cap[il],
-                initial_comp_cap, ratio);
+                g, DS4_N_HEAD_DIM * sizeof(uint16_t), initial_comp_cap,
+                layout.attn_f16[il]);
           }
             g->layer_attn_state_kv[il] = ds4_gpu_tensor_alloc(attn_width * attn_rows * sizeof(float));
             g->layer_attn_state_score[il] = ds4_gpu_tensor_alloc(attn_width * attn_rows * sizeof(float));
@@ -1075,7 +1163,7 @@ static bool rocm_graph_alloc_raw_cap(
                 const uint64_t index_rows = (uint64_t)coff * ratio;
                 g->layer_index_comp_cache[il] = rocm_graph_alloc_comp_rows(
                     g, DS4_N_INDEXER_HEAD_DIM * sizeof(float),
-                    g->layer_comp_cap[il], initial_comp_cap, ratio);
+                    initial_comp_cap, layout.index[il]);
                 g->layer_index_state_kv[il] = ds4_gpu_tensor_alloc(index_width * index_rows * sizeof(float));
                 g->layer_index_state_score[il] = ds4_gpu_tensor_alloc(index_width * index_rows * sizeof(float));
                 if (g->layer_index_state_kv[il]) {
@@ -1107,17 +1195,14 @@ static bool rocm_graph_alloc_raw_cap(
     // charges the session's compressed rows (one row per `min_ratio` tokens). A reclaim's trim
     // releases them like K/V; scores are rewritten before every read.
     if (g->state_account) {
-      const uint64_t row_bytes = pc * sizeof(float);
-      const uint64_t max_rows =
-          (rocm_graph_indexer_scores_max_bytes(g->comp_cap, prefill_cap) +
-           row_bytes - 1) /
-          row_bytes;
-      g->indexer_scores = ds4_gpu_tensor_alloc_rows(
-          row_bytes, max_rows,
+      const auto &shape = layout.state.buffer(layout.scores).shape;
+      const uint64_t row_bytes = shape.row_bytes;
+      const uint64_t max_rows = shape.rows;
+      g->indexer_scores = ds4_gpu_tensor_from_state(
+          rocm_graph_session_state(g), layout.scores,
           std::min<uint64_t>(
               max_rows,
-              (initial_score_count * sizeof(float) + row_bytes - 1) / row_bytes),
-          rocm_graph_account(g), min_ratio);
+              (initial_score_count * sizeof(float) + row_bytes - 1) / row_bytes));
       if (g->indexer_scores)
         g->indexer_score_row_bytes = row_bytes;
     }
@@ -7283,42 +7368,10 @@ std::shared_ptr<gufo::mem::StateAccount> ds4_rocm_graph_state_account(
 uint64_t ds4_rocm_graph_demand_mapped_bytes(int context_size) {
   if (context_size <= 0)
     return 0;
-  const auto pages = [](uint64_t row_bytes, uint64_t rows) {
-    return static_cast<uint64_t>(gufo::mem::RegionPageBytes(
-        {.row_bytes = static_cast<std::size_t>(row_bytes),
-         .rows = static_cast<std::size_t>(rows)},
-        static_cast<std::size_t>(rows)));
-  };
-  uint64_t bytes = 0;
-  for (uint32_t il = 0; il < DS4_N_LAYER; ++il) {
-    const uint32_t ratio = ds4_layer_compress_ratio(il);
-    if (ratio == 0)
-      continue;
-    const uint64_t rows = (uint64_t)context_size / ratio + 2u;
-    bytes += pages(DS4_N_HEAD_DIM * sizeof(float), rows);
-    if (ratio == 4)
-      bytes += pages(DS4_N_HEAD_DIM * sizeof(uint16_t), rows) +
-               pages(DS4_N_INDEXER_HEAD_DIM * sizeof(float), rows);
-  }
-  // The indexer score scratch region (rocm_graph_alloc_raw_cap): rows of
-  // one prefill chunk of floats, up to the largest score matrix.
-  uint32_t min_ratio = UINT32_MAX;
-  for (uint32_t il = 0; il < DS4_N_LAYER; ++il) {
-    const uint32_t ratio = ds4_layer_compress_ratio(il);
-    if (ratio != 0 && ratio < min_ratio)
-      min_ratio = ratio;
-  }
-  if (min_ratio != UINT32_MAX) {
-    const uint32_t prefill_cap = ds4_rocm_graph_prefill_capacity(context_size);
-    const uint32_t comp_cap =
-        std::max<uint32_t>((uint32_t)context_size / min_ratio + 2u, 2u);
-    const uint64_t row_bytes = (uint64_t)std::max(prefill_cap, 1u) * sizeof(float);
-    bytes += pages(row_bytes,
-                   (rocm_graph_indexer_scores_max_bytes(comp_cap, prefill_cap) +
-                    row_bytes - 1) /
-                       row_bytes);
-  }
-  return bytes;
+  const uint32_t prefill_cap =
+      std::max(ds4_rocm_graph_prefill_capacity(context_size), 1u);
+  return rocm_graph_declare_state((uint32_t)context_size, prefill_cap, true)
+      .state.ContextBytes(gufo::mem::StateBytes::kPages);
 }
 
 uint32_t ds4_rocm_graph_resume_prefill_min_tokens(void) {
