@@ -138,12 +138,14 @@ std::vector<std::uint8_t> EncodePng(const ext::ImageBuffer& image) {
 void ValidateImageRequest(const ext::ImageRequest& request) {
   if (request.prompt.size() > (64U << 10U))
     throw std::invalid_argument("image prompt exceeds 64 KiB");
+  // 4.5 MiP admits every Qwen-Image-2.1 recommended size; the largest,
+  // 2400 x 1792, is 4.1 MiP (#1324).
   if (request.width < 32 || request.height < 32 || request.width % 32 ||
       request.height % 32 || request.width > 4096 || request.height > 4096 ||
-      static_cast<std::uint64_t>(request.width) * request.height > 4194304)
+      static_cast<std::uint64_t>(request.width) * request.height > 4718592)
     throw std::invalid_argument(
-        "image size must be multiples of 32, at most 4096 per side and 4 "
-        "megapixels");
+        "image size must be multiples of 32, at most 4096 per side and "
+        "4.5 megapixels");
   if (request.steps != 0 && (request.steps < 2 || request.steps > 100))
     throw std::invalid_argument("image steps must be between 2 and 100");
   if (request.images.size() > 10)

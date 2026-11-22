@@ -117,9 +117,9 @@ ext::ImageBuffer InitImage(const json::Value& value) {
 }
 
 /// The init image's canvas on the 32-pixel grid, scaled down to fit the
-/// 4096-pixel side and 4-megapixel limits.
+/// 4096-pixel side and 4.5-megapixel limits.
 std::pair<int, int> InitCanvas(int width, int height) {
-  constexpr double kMaxPixels = 4194304, kMaxSide = 4096;
+  constexpr double kMaxPixels = 4718592, kMaxSide = 4096;
   const double scale = std::min({1.0, std::sqrt(kMaxPixels / width / height),
                                  kMaxSide / width, kMaxSide / height});
   const auto grid = [&](int side, bool down) {

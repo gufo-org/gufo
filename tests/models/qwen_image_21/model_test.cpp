@@ -145,10 +145,24 @@ int main(int argc, char** argv) {
     assert(rejected);
   }
   ValidateRequest(Request{.prompt = "a red cube", .images = {}});
+  // Every recommended Qwen-Image-2.1 size is accepted (#1324).
+  for (const auto& [width, height] :
+       {std::pair{2048, 2048}, std::pair{2400, 1792}, std::pair{2528, 1696},
+        std::pair{2752, 1536}}) {
+    ValidateRequest(Request{.prompt = "a red cube",
+                            .images = {},
+                            .width = width,
+                            .height = height});
+    ValidateRequest(Request{.prompt = "a red cube",
+                            .images = {},
+                            .width = height,
+                            .height = width});
+  }
   for (const auto& invalid :
        {Request{.prompt = "", .images = {}, .width = 31},
         Request{.prompt = "", .images = {}, .steps = 1},
-        Request{.prompt = "", .images = {}, .height = 8192}}) {
+        Request{.prompt = "", .images = {}, .height = 8192},
+        Request{.prompt = "", .images = {}, .width = 2432, .height = 1952}}) {
     bool rejected = false;
     try {
       ValidateRequest(invalid);

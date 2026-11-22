@@ -736,7 +736,7 @@ processing defaults; `null` counts as omitted.
 | `cfg_scale` | Forwarded as given (A1111 clients send 7), 0 to 100. Omitted uses the model default (1, unguided, for Qwen-Image-2.1 and Turbo, so a negative prompt alone has no effect) |
 | `steps` | 2 to 100; omitted uses the checkpoint default (40; Turbo accepts only 8) |
 | `seed` | Integer; negative or omitted is random. Batch images use consecutive seeds |
-| `width`, `height` | Positive; multiples of 32, at most 4096 per side and 4 megapixels. `txt2img` default 1024 × 1024 |
+| `width`, `height` | Positive; multiples of 32, at most 4096 per side and 4.5 megapixels. `txt2img` default 1024 × 1024 |
 | `batch_size` | Image count, 1 to 10 (default 1). `n_iter` is ignored |
 | `lora` | Adapter list; see below |
 | `init_images` | `img2img` only, required: the first entry, as base64 or a base64 data URL; URLs are not fetched |

@@ -200,6 +200,9 @@ void TestTxt2Img() {
                "width and height must be positive");
   RequireError(Post(service, "txt2img", R"({"prompt":"p","width":500})"), 400,
                "multiples of 32");
+  RequireError(
+      Post(service, "txt2img", R"({"prompt":"p","width":2432,"height":1952})"),
+      400, "4.5 megapixels");
   RequireError(Post(service, "txt2img", R"({"prompt":"p","steps":1})"), 400,
                "steps");
   RequireError(Post(service, "txt2img", R"({"prompt":"p","steps":"20"})"), 400,
@@ -270,6 +273,12 @@ void TestImg2Img() {
   Require(response.status == 200 && recorder.seen.back().width == 256 &&
               recorder.seen.back().height == 512,
           "explicit size");
+  // Qwen-Image-2.1's largest recommended size fits the limits (#1324).
+  response =
+      Post(service, "txt2img", R"({"prompt":"p","width":2400,"height":1792})");
+  Require(response.status == 200 && recorder.seen.back().width == 2400 &&
+              recorder.seen.back().height == 1792,
+          "recommended size" + response.body);
   // A canvas over the size limits scales down to fit.
   response = Post(
       service, "img2img",
