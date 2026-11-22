@@ -437,6 +437,10 @@ std::string DiskFileName(DiskFileId id) {
   }
   return name + ".bin";
 }
+// An index slot also pays for its entry's shared manifest object: the
+// DiskManifest header and the shared_ptr control block beside it.
+constexpr std::size_t kEntrySlotBytes =
+    sizeof(DurableEntry) + sizeof(DiskManifest) + 64;
 struct DiskStore::Impl {
   ResourceLedger* ledger;
   ResourceCharge metadata, entry_capacity;
@@ -555,7 +559,7 @@ struct DiskStore::Impl {
     if (manifest_count) {
       auto entry_reservation =
           ledger->Reserve(ResourceCategory::kMetadata,
-                          Multiply(manifest_count, sizeof(DurableEntry)));
+                          Multiply(manifest_count, kEntrySlotBytes));
       std::vector<DurableEntry> allocated;
       allocated.reserve(manifest_count);
       if (allocated.capacity() != manifest_count)
@@ -1289,7 +1293,7 @@ struct DiskStore::Impl {
     if (entries.size() == entries.capacity()) {
       auto reserve =
           ledger->Reserve(ResourceCategory::kMetadata,
-                          Multiply(entries.size() + 1, sizeof(DurableEntry)));
+                          Multiply(entries.size() + 1, kEntrySlotBytes));
       std::vector<DurableEntry> replacement;
       replacement.reserve(entries.size() + 1);
       auto charge = reserve.Convert();
