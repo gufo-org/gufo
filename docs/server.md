@@ -227,4 +227,7 @@ file records content.
 
 Gufo keeps HTTP/1.1 connections open for sequential requests, so a reverse
 proxy can reuse upstream connections. An HTTP/1.0 request or `Connection: close`
-closes the connection after its response.
+closes the connection after its response. An idle connection closes after 5
+seconds, after 100 requests, or earlier when a new client needs its slot, so a
+pooled client should retry a request that fails on a reused connection before
+any response arrives.

@@ -23,7 +23,7 @@ connections open for sequential requests, bounded by 5 seconds of idle time and
 100 requests; HTTP/1.0 requests and `Connection: close` close after the
 response, and embedded callers retain close-per-response by default. A
 connection waiting for its next request does not count toward
-`--max-connections`: at the limit the server closes the oldest waiting one to
+`--max-connections`: at the limit the server closes the one idle longest to
 admit a new client. A stream that ends without its final chunk closes its
 connection. Request
 heads are parsed in Rust by httparse as RFC 9112 defines

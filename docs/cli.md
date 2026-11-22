@@ -49,7 +49,7 @@ These server options work with every modality:
 | --- | --- | --- |
 | `--host`, `-i` | `127.0.0.1` | Address to listen on. Use `0.0.0.0` inside a container, or `::` for IPv6 and IPv4. |
 | `--port`, `-p` | `8080` | Port to listen on. |
-| `--max-connections` | 16 | Open HTTP connections; more wait or are refused. |
+| `--max-connections` | 16 | HTTP connections serving a request; more are refused. Idle kept-alive connections are closed to admit new ones. |
 | `--max-request-bytes` | 8 MiB | Largest request body. Raise it for audio and image uploads. |
 | `--log-level` | `info` | `error`, `warn`, `info` or `debug`; `-v` means `debug`. |
 | `--served-model-name` | per model | The model ID clients send. Repeat it to accept aliases. |

@@ -559,8 +559,13 @@ void TestUtf8Output() {
     stream.streaming_body([&](std::string_view chunk) {
       if (chunk == "data: [DONE]\n\n")
         return true;
-      Expect(chunk.starts_with("data: "), "SSE has a data prefix");
+      Expect(chunk.starts_with("data: ") && chunk.ends_with("\n\n"),
+             "SSE has a data prefix and terminator");
       const auto event = gufo::json::parse(chunk.substr(6));
+      // The stream writer serializes frames by hand; they must be the exact
+      // bytes the JSON library would have written for the same value.
+      Expect(event.dump() == chunk.substr(6, chunk.size() - 8),
+             "Streamed frames match canonical JSON serialization");
       for (const auto& choice : event.find("choices")->items()) {
         const auto* delta = choice.find("delta");
         if (delta)

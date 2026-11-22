@@ -172,16 +172,26 @@ bool SendChunk(int fd, std::string_view data, std::string_view prefix = {}) {
       std::to_chars(header, header + sizeof(header) - 2, data.size(), 16);
   *length.ptr = '\r';
   *(length.ptr + 1) = '\n';
+  const std::string_view chunk_header(header, length.ptr + 2 - header);
+  // A large payload (audio, images) already fills segments; copying it into
+  // a frame would only cost a memcpy and keep the buffer's high-water size
+  // for the life of the connection.
+  constexpr std::size_t kCoalesceLimit = 16 * 1024;
+  if (data.size() > kCoalesceLimit) {
+    std::string lead;
+    lead.reserve(prefix.size() + chunk_header.size());
+    lead.append(prefix);
+    lead.append(chunk_header);
+    return SendAll(fd, lead) && SendAll(fd, data) && SendAll(fd, "\r\n");
+  }
   // One frame, one send. Deferred headers, the chunk header, payload and
   // terminator used to be separate writes; keeping them together stops a
   // single SSE event from becoming three segments and three syscalls.
   thread_local std::string frame;
   frame.clear();
-  frame.reserve(prefix.size() +
-                static_cast<std::size_t>(length.ptr + 2 - header) +
-                data.size() + 2);
+  frame.reserve(prefix.size() + chunk_header.size() + data.size() + 2);
   frame.append(prefix);
-  frame.append(header, length.ptr + 2);
+  frame.append(chunk_header);
   frame.append(data);
   frame.append("\r\n");
   return SendAll(fd, frame);
@@ -2008,6 +2018,8 @@ struct HttpServer::ConnectionWorker {
   // the listener may close it to admit a new connection. Changed only under
   // workers_mutex_.
   std::atomic<bool> parked{false};
+  // When `parked` was last set; protected by workers_mutex_.
+  std::chrono::steady_clock::time_point parked_since{};
   std::atomic<bool> done{false};
   std::jthread thread;
 };
@@ -2235,24 +2247,27 @@ void HttpServer::run(bool handle_signals) {
       overloaded = stopped_.load(std::memory_order_acquire) ||
                    serving >= options_.max_connections;
       // Parked keep-alive connections are bounded by the same limit, but they
-      // never refuse a new client: the oldest is closed to make room. Its
-      // worker sees the shutdown as an idle close.
+      // never refuse a new client: the one idle longest is closed to make
+      // room. Its worker sees the shutdown as an idle close.
       if (!overloaded && serving + parked >= options_.max_connections) {
+        ConnectionWorker* idlest = nullptr;
         for (const auto& existing : workers_) {
           if (existing->parked.load(std::memory_order_acquire) &&
-              existing->fd >= 0) {
-            existing->parked.store(false, std::memory_order_release);
-            (void)net::ShutdownSocket(existing->fd,
-                                      net::ShutdownHow::kReadWrite);
-            break;
-          }
+              existing->fd >= 0 &&
+              (idlest == nullptr ||
+               existing->parked_since < idlest->parked_since))
+            idlest = existing.get();
+        }
+        if (idlest != nullptr) {
+          idlest->parked.store(false, std::memory_order_release);
+          (void)net::ShutdownSocket(idlest->fd, net::ShutdownHow::kReadWrite);
         }
       }
       if (!overloaded) {
         worker_ptr->fd = client_fd;
         worker_ptr->thread = std::jthread([this, worker_ptr, client_fd] {
           handle_connection(client_fd, worker_ptr->response_sent,
-                            worker_ptr->parked);
+                            worker_ptr->parked, worker_ptr->parked_since);
           {
             const std::lock_guard<std::mutex> lock(workers_mutex_);
             net::CloseSocket(worker_ptr->fd);
@@ -2498,9 +2513,9 @@ bool HttpServer::device_lost() {
   return true;
 }
 
-void HttpServer::handle_connection(int client_fd,
-                                   std::atomic<bool>& response_sent,
-                                   std::atomic<bool>& parked) {
+void HttpServer::handle_connection(
+    int client_fd, std::atomic<bool>& response_sent, std::atomic<bool>& parked,
+    std::chrono::steady_clock::time_point& parked_since) {
   (void)net::SetSocketTimeouts(client_fd, 120'000);
   // SSE events are small writes and the WebSocket path already disables
   // Nagle for the same reason: waiting for a delayed acknowledgement turns
@@ -2534,6 +2549,9 @@ void HttpServer::handle_connection(int client_fd,
     bool http11 = false;
     int response_status = 0;
     bool keep_request = false;
+    // An upgrade request keeps its trailing bytes for the WebSocket, so a
+    // route that declines the upgrade cannot hand them to a next request.
+    bool upgrade_request = false;
     bool close_connection = true;
     const auto elapsed_ms = [&] {
       return std::chrono::duration<double, std::milli>(
@@ -2596,7 +2614,8 @@ void HttpServer::handle_connection(int client_fd,
           keep_request = options_.keep_alive &&
                          (http11 ? !HasToken(connection, "close")
                                  : HasToken(connection, "keep-alive"));
-          const bool websocket = IsWebSocketUpgrade(req);
+          upgrade_request = IsWebSocketUpgrade(req);
+          const bool websocket = upgrade_request;
 
           const bool framing_valid =
               head.framing_valid != 0 &&
@@ -2690,7 +2709,13 @@ void HttpServer::handle_connection(int client_fd,
 
       resp.headers.emplace_back("X-Request-ID", req.request_id);
       response_status = resp.status;
-      bool response_keep_alive = keep_request && !resp.websocket;
+      bool response_keep_alive =
+          keep_request && !resp.websocket && !upgrade_request;
+      // A HEAD response carries no body, so a streamed one cannot be framed
+      // for reuse.
+      const bool head_request = req.method == "HEAD";
+      if (head_request && resp.streaming_body)
+        response_keep_alive = false;
       // The slot budget is part of the promise: the response that reaches the
       // request limit says close, so a pooled client does not send a request
       // the server has already decided to drop.
@@ -2790,7 +2815,13 @@ void HttpServer::handle_connection(int client_fd,
           response_keep_alive = response_keep_alive && terminated;
         }
       } else {
-        const auto payload = BuildResponse(resp, response_keep_alive);
+        // HEAD gets the headers, including the body's Content-Length, but
+        // never the body: on a reused connection those bytes would be read
+        // as the start of the next response.
+        const auto payload =
+            head_request
+                ? BuildResponseHead(resp, resp.body.size(), response_keep_alive)
+                : BuildResponse(resp, response_keep_alive);
         response_started = true;
         connected = SendAll(client_fd, payload);
       }
@@ -2801,12 +2832,16 @@ void HttpServer::handle_connection(int client_fd,
       // close it to admit a new client.
       {
         const std::lock_guard<std::mutex> lock(workers_mutex_);
-        // A pipelined request already read is not idle; it must not be
-        // dropped by an eviction.
-        was_parked = connected && response_started && response_keep_alive &&
-                     pending.empty();
+        // A pipelined request already read is not idle: it stays counted as
+        // serving and is never evicted.
+        const bool continues =
+            connected && response_started && response_keep_alive;
+        was_parked = continues && pending.empty();
+        if (was_parked)
+          parked_since = std::chrono::steady_clock::now();
         parked.store(was_parked, std::memory_order_release);
-        response_sent.store(true, std::memory_order_release);
+        response_sent.store(!continues || was_parked,
+                            std::memory_order_release);
       }
       std::string outcome = connected ? "completed" : "disconnected";
       if (resp.stream_log) {

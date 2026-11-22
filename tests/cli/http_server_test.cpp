@@ -2847,7 +2847,7 @@ void TestKeepAlive() {
     ExpectStatus(response, 200);
     assert(response.find("Connection: keep-alive") != std::string::npos);
   }
-  // A pipelined pair proves bytes after the first body are carried into the
+  // A pipelined pair proves bytes after the first head are carried into the
   // next request instead of being dropped with the body.
   const std::string pair = health + health;
   assert(net::SendNoSignal(fd, pair.data(), pair.size()) ==
@@ -2932,11 +2932,22 @@ void TestKeepAliveParkedConnectionYieldsSlot() {
   ExpectStatus(first, 200);
   assert(first.find("Connection: keep-alive") != std::string::npos);
 
-  const int next = server.Connect();
-  assert(net::SendNoSignal(next, health.data(), health.size()) ==
-         static_cast<ssize_t>(health.size()));
-  ExpectStatus(ReadFramedResponse(next), 200);
-  net::CloseSocket(next);
+  // The worker parks just after its write, so a client that reconnects
+  // within that instant can still meet the limit; retry instead of racing.
+  bool admitted = false;
+  for (int attempt = 0; attempt < 200 && !admitted; ++attempt) {
+    const int next = server.Connect();
+    assert(net::SendNoSignal(next, health.data(), health.size()) ==
+           static_cast<ssize_t>(health.size()));
+    const auto response = ReadFramedResponse(next);
+    net::CloseSocket(next);
+    admitted = response.starts_with("HTTP/1.1 200");
+    if (!admitted) {
+      ExpectStatus(response, 503);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  }
+  assert(admitted);
 
   (void)net::SetSocketTimeouts(parked, 5'000);
   std::string after;
@@ -2979,6 +2990,108 @@ void TestKeepAliveClosesUnterminatedStream() {
   ExpectStatus(streamed, 200);
   assert(!streamed.ends_with("0\r\n\r\n"));
   net::CloseSocket(fd);
+}
+
+// A connection holding a pipelined request is serving, not idle: it counts
+// toward the limit and is never evicted for a new client.
+void TestKeepAlivePipelinedConnectionCounts() {
+  RunningServer server({.max_connections = 1,
+                        .keep_alive = true,
+                        .keep_alive_idle_timeout = std::chrono::seconds(30)});
+  const int fd = server.Connect();
+  const std::string pipelined = "GET /health HTTP/1.1\r\n\r\nGET /hea";
+  assert(net::SendNoSignal(fd, pipelined.data(), pipelined.size()) ==
+         static_cast<ssize_t>(pipelined.size()));
+  std::string buffered;
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  const int next = server.Connect();
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  assert(net::SendNoSignal(next, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  ExpectStatus(ReadFramedResponse(next), 503);
+  net::CloseSocket(next);
+  const std::string rest = "lth HTTP/1.1\r\nConnection: close\r\n\r\n";
+  assert(net::SendNoSignal(fd, rest.data(), rest.size()) ==
+         static_cast<ssize_t>(rest.size()));
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  net::CloseSocket(fd);
+}
+
+// Responses that cannot be followed on the same socket close it: a HEAD
+// answer never carries its body, an upgrade request the route declines keeps
+// its trailing bytes, and a malformed request may leave unread bytes. An SSE
+// error event and HTTP/1.0 keep-alive leave the connection reusable.
+void TestKeepAliveCloseDecisions() {
+  RunningServer server({.keep_alive = true,
+                        .keep_alive_idle_timeout = std::chrono::seconds(30)});
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  const auto reusable = [&](const std::string& first) {
+    const int fd = server.Connect();
+    assert(net::SendNoSignal(fd, first.data(), first.size()) ==
+           static_cast<ssize_t>(first.size()));
+    std::string buffered;
+    if (first.starts_with("POST /stream")) {
+      // Chunked: the zero-length chunk ends the response.
+      char byte = 0;
+      while (!buffered.ends_with("0\r\n\r\n")) {
+        assert(::read(fd, &byte, 1) == 1);
+        buffered += byte;
+      }
+      buffered.clear();
+    } else {
+      (void)ReadFramedResponse(fd, buffered);
+    }
+    assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+           static_cast<ssize_t>(health.size()));
+    const auto next = ReadFramedResponse(fd, buffered);
+    net::CloseSocket(fd);
+    return next.starts_with("HTTP/1.1 200");
+  };
+  const auto closes = [&](const std::string& first) {
+    const int fd = server.Connect();
+    assert(net::SendNoSignal(fd, first.data(), first.size()) ==
+           static_cast<ssize_t>(first.size()));
+    (void)net::SetSocketTimeouts(fd, 5'000);
+    std::string received;
+    const bool closed = ReadsToClose(fd, received);
+    net::CloseSocket(fd);
+    return std::pair{closed, received};
+  };
+
+  // HEAD keeps the connection and sends headers only; the next response
+  // starts cleanly instead of after a stray body.
+  {
+    const int fd = server.Connect();
+    const std::string head = "HEAD /missing HTTP/1.1\r\n\r\n";
+    assert(net::SendNoSignal(fd, head.data(), head.size()) ==
+           static_cast<ssize_t>(head.size()));
+    std::string headers;
+    char byte = 0;
+    while (!headers.ends_with("\r\n\r\n")) {
+      assert(::read(fd, &byte, 1) == 1);
+      headers += byte;
+    }
+    // An unknown route answers with an error body; HEAD must omit it.
+    assert(headers.starts_with("HTTP/1.1 4"));
+    assert(headers.find("Content-Length: ") != std::string::npos);
+    assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+           static_cast<ssize_t>(health.size()));
+    std::string buffered;
+    ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+    net::CloseSocket(fd);
+  }
+  const auto [upgrade_closed, upgrade] = closes(
+      "GET /health HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: "
+      "websocket\r\n\r\n");
+  assert(upgrade_closed);
+  assert(upgrade.find("Connection: close") != std::string::npos);
+  const auto [bad_closed, bad] = closes("POST /echo HTTP/1.1 extra\r\n\r\n");
+  assert(bad_closed);
+  ExpectStatus(bad, 400);
+  assert(
+      reusable("POST /stream HTTP/1.1\r\nContent-Length: 8\r\n\r\nreported"));
+  // HTTP/1.0 asks for reuse explicitly; its response is length-delimited.
+  assert(reusable("GET /health HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"));
 }
 
 void TestKeepAliveRequestLimit() {
@@ -3896,6 +4009,8 @@ int main() {
   TestKeepAliveParkedConnectionYieldsSlot();
   TestKeepAliveIdleTimeoutCloses();
   TestKeepAliveClosesUnterminatedStream();
+  TestKeepAlivePipelinedConnectionCounts();
+  TestKeepAliveCloseDecisions();
   TestKeepAliveRequestLimit();
   TestStreamingFraming();
   TestSseHeartbeat();
