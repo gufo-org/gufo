@@ -691,9 +691,6 @@ Session::~Session() {
     std::lock_guard lock(snapshots_->mutex);
     snapshots_->failure = std::current_exception();
   }
-  if (owner_ != nullptr) {
-    owner_->InvalidateBatchGraphs();
-  }
   TrimRollback(0);
   for (auto& [key, exec] : graphs_) {
     (void)hipGraphExecDestroy(exec);
@@ -711,9 +708,6 @@ void Session::RestoreVisionLayout(const qwen::vision::RopeLayout& layout,
   for (auto& attention : attention_)
     attention.rope = vision_input_.rope();
   if (previous != vision_input_.rope()) {
-    if (owner_ != nullptr) {
-      owner_->InvalidateBatchGraphs();
-    }
     for (const auto& [key, graph] : graphs_)
       (void)hipGraphExecDestroy(graph);
     graphs_.clear();
@@ -942,12 +936,8 @@ void Session::Reset(bool reuse_mtp) {
   // addresses also retains the graphs; freeing it at every cache reassignment
   // makes later MTP requests allocate and record those shapes again. Its full
   // bound is already included in speculative SessionBytes and AllocatedBytes.
-  if (!reuse_mtp || !mtp_enabled_) {
-    if (owner_ != nullptr) {
-      owner_->InvalidateBatchGraphs();
-    }
+  if (!reuse_mtp || !mtp_enabled_)
     TrimRollback(0);
-  }
   snapshot_lineage_.reset();
   position_ = 0;
   spec_tokens_ = 0;
@@ -978,88 +968,7 @@ void Session::Reset(bool reuse_mtp) {
   }
 }
 
-void Executor::InvalidateBatchGraphs() const noexcept {
-  if (batch_graphs_.empty() && batch_warmed_.empty())
-    return;
-  if (!batch_graphs_.empty()) {
-    if (stream_ != nullptr)
-      (void)hipStreamSynchronize(stream_);
-    for (auto& [key, exec] : batch_graphs_) {
-      (void)hipGraphExecDestroy(exec);
-    }
-    batch_graphs_.clear();
-  }
-  batch_warmed_.clear();
-}
-
-bool Executor::RunBatchGraph(const BatchGraphKey& key, bool enable_graph,
-                             const std::function<bool()>& body,
-                             std::string* error, bool synchronize) const {
-  if (!enable_graph) {
-    return body() && (!synchronize || Check(hipStreamSynchronize(stream_),
-                                            "batched forward", error));
-  }
-  if (batch_warmed_.contains(key)) {
-    hipGraphExec_t exec = nullptr;
-    bool enqueued = false;
-    if (const auto it = batch_graphs_.find(key); it != batch_graphs_.end()) {
-      exec = it->second;
-    } else {
-      if (batch_graphs_.size() >= 48) {
-        InvalidateBatchGraphs();
-        batch_warmed_.insert(key);
-      }
-      if (synchronize && key.kind == 2) {
-        auto dispatch = std::tie(
-            moe_pending_, defer_residual_, res_deferred_, shexp_half_ready_,
-            q8t_src_, q8t_rows_, q8t_cols_, half_src_, half_rows_, half_cols_,
-            half_bf16_, xn_half_, inject_parts_, inject_fused_, q8_slot_,
-            xn_q8_ready_, mixed_q8_ready_, pending_combine_);
-        const auto before = std::apply(
-            [](const auto&... fields) { return std::make_tuple(fields...); },
-            dispatch);
-        if (!body())
-          return false;
-        dispatch = before;
-        enqueued = true;
-      }
-      hipGraph_t captured = nullptr;
-      if (!Check(
-              hipStreamBeginCapture(stream_, hipStreamCaptureModeThreadLocal),
-              "batch graph capture", error)) {
-        return false;
-      }
-      const bool ok = body();
-      if (!Check(hipStreamEndCapture(stream_, &captured),
-                 "batch graph capture end", error) ||
-          !ok) {
-        if (captured != nullptr)
-          (void)hipGraphDestroy(captured);
-        return false;
-      }
-      const bool instantiated =
-          Check(hipGraphInstantiate(&exec, captured, nullptr, nullptr, 0),
-                "batch graph instantiate", error);
-      (void)hipGraphDestroy(captured);
-      if (!instantiated)
-        return false;
-      batch_graphs_.emplace(key, exec);
-    }
-    if (!enqueued &&
-        !Check(hipGraphLaunch(exec, stream_), "batch graph launch", error)) {
-      return false;
-    }
-  } else {
-    if (!body())
-      return false;
-    batch_warmed_.insert(key);
-  }
-  return !synchronize ||
-         Check(hipStreamSynchronize(stream_), "batched forward", error);
-}
-
 Executor::~Executor() {
-  InvalidateBatchGraphs();
   // Readers write pinned staging memory; drain them before freeing it,
   // including when a forward failed before reaching PLE.
   if (ple_pending_ || prefetch_.pending) {
@@ -2162,7 +2071,6 @@ bool Executor::SetYarnFactor(Session& s, float factor, std::string* error_msg) {
     return false;
   }
   // Captured decode graphs carry the old constants by value.
-  InvalidateBatchGraphs();
   for (auto& [key, exec] : s.graphs_)
     (void)hipGraphExecDestroy(exec);
   s.graphs_.clear();
@@ -2195,7 +2103,6 @@ void Executor::AdoptYarnFactor(Session& s, float factor) {
     rope = MakeYarnRope(scaling, c.rotary_dim, c.rope_theta);
   }
   if (factor != s.yarn_factor_) {
-    InvalidateBatchGraphs();
     for (auto& [key, exec] : s.graphs_)
       (void)hipGraphExecDestroy(exec);
     s.graphs_.clear();

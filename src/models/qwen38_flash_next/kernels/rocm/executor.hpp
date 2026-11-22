@@ -261,8 +261,6 @@ struct PrefillCheckpoint {
 /// Runs the trunk graph on the GPU for one session at a time. Buffers are
 /// sized once for `max_batch` tokens; longer prompts are fed in chunks.
 class Executor {
-  friend class Session;
-
 public:
   /// Dynamic YaRN (with a configured YaRN factor): a session runs unscaled
   /// while it fits the native context and takes the smallest whole factor
@@ -946,37 +944,6 @@ private:
   sampling::LogitCandidate* verification_candidates_{nullptr};
   sampling::LogitCandidate* verification_candidates_host_{nullptr};
   mutable std::vector<sampling::TokenPenalty> verification_penalty_host_;
-  struct BatchGraphKey {
-    std::uint8_t kind{0};
-    std::uint8_t count{0};
-    std::uint32_t flags{0};
-    std::array<const Session*, 8> sessions{};
-    std::array<std::uint8_t, 8> tokens{};
-    std::array<std::uint32_t, 8> yarn_bits{};
-    bool operator==(const BatchGraphKey&) const noexcept = default;
-  };
-  struct BatchGraphKeyHash {
-    std::size_t operator()(const BatchGraphKey& k) const noexcept {
-      std::size_t h =
-          (std::size_t{k.kind} << 40) ^ (std::size_t{k.count} << 32) ^ k.flags;
-      for (std::size_t i = 0; i < k.count; ++i) {
-        h ^= std::hash<const void*>{}(k.sessions[i]) + 0x9e3779b97f4a7c15ULL +
-             (h << 6) + (h >> 2);
-        h ^= std::size_t{k.tokens[i]} + 0x9e3779b97f4a7c15ULL + (h << 6) +
-             (h >> 2);
-        h ^= std::size_t{k.yarn_bits[i]} + 0x9e3779b97f4a7c15ULL + (h << 6) +
-             (h >> 2);
-      }
-      return h;
-    }
-  };
-  bool RunBatchGraph(const BatchGraphKey& key, bool enable_graph,
-                     const std::function<bool()>& body, std::string* error,
-                     bool synchronize = true) const;
-  void InvalidateBatchGraphs() const noexcept;
-  mutable std::unordered_map<BatchGraphKey, hipGraphExec_t, BatchGraphKeyHash>
-      batch_graphs_;
-  mutable std::unordered_set<BatchGraphKey, BatchGraphKeyHash> batch_warmed_;
   /// Allocated only when concurrent decoding is first requested.
   mutable float* batch_logits_{nullptr};
   mutable Session::Control* batch_controls_{nullptr};

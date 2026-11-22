@@ -1124,124 +1124,60 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
   }
 
   const Scratch base = s_;
-  const auto& layers = model_->layers();
-  bool can_graph =
-      !wide && items.size() >= 2 && batch_gdn && hook_layers_.empty();
-  BatchGraphKey suffix_key{};
-  suffix_key.kind = 2;
-  suffix_key.count = static_cast<std::uint8_t>(items.size());
-  suffix_key.flags = (batch_gdn ? (std::uint32_t{1} << 24) : 0U) |
-                     (c.ple_layer > 0 ? (std::uint32_t{1} << 25) : 0U);
-  std::array<std::uint32_t, kBatchSessions> pool_arr{};
-  std::array<std::uint32_t, kBatchSessions> graph_pool_arr{};
-  for (std::size_t i = 0; i < items.size(); ++i) {
-    const auto& item = items[i];
-    auto& session = *item.session;
-    pool_arr[i] = sparse[i] && complete[i] > session.blocks_
-                      ? complete[i] - session.blocks_
-                      : 0U;
-    if (can_graph) {
-      if (!session.CheckCancellation(nullptr) ||
-          session.vision_input_.rope() != nullptr || pool_arr[i] > 1U) {
-        can_graph = false;
-      } else {
-        suffix_key.sessions[i] = &session;
-        suffix_key.tokens[i] = static_cast<std::uint8_t>(item.tokens.size());
-        suffix_key.yarn_bits[i] =
-            std::bit_cast<std::uint32_t>(session.yarn_factor_);
-        if (item.speculative)
-          suffix_key.flags |= (std::uint32_t{1} << i);
-        if (sparse[i])
-          suffix_key.flags |= (std::uint32_t{1} << (8 + i));
-        if (pool_arr[i] != 0U)
-          suffix_key.flags |= (std::uint32_t{1} << (16 + i));
-        graph_pool_arr[i] = pool_arr[i];
-      }
-    }
-  }
-  if (can_graph) {
-    for (std::uint32_t il = 0; il < c.num_layers; ++il) {
-      const auto& l = layers[il];
-      if (!l.linear)
-        continue;
-      for (std::size_t i = 0; i < items.size(); ++i) {
-        const auto& item = items[i];
-        auto& session = *item.session;
-        auto view = RowScratch(base, offsets[i]);
-        const auto& state = session.linear_[il];
-        batch_gdn_host_[il * kBatchSessions + i] = {
-            l.ssm_in.empty() ? view.qkv : view.qkvz,
-            l.ssm_in.empty() ? view.z : view.qkvz + c.SsmConvChannels(),
-            view.alpha_beta,
-            state.conv_state,
-            base.conv_scratch + std::size_t{offsets[i]} * c.SsmConvChannels(),
-            view.qn,
-            view.kn,
-            view.gdn_raw,
-            state.state,
-            view.gdn_out,
-            item.speculative ? state.state_snapshots : RollbackRows{},
-            item.speculative ? state.conv_snapshots : RollbackRows{},
-            static_cast<std::uint32_t>(item.tokens.size())};
-      }
-    }
-  }
-
   // Every exit restores the ordinary single-session scratch view. Enqueued
   // work is drained before a caller can reuse its pinned staging buffers.
-  const auto run_layers = [&](std::uint32_t first_layer,
-                              std::uint32_t end_layer, bool& normed) -> bool {
-    if (first_layer == 0) {
-      if (!can_graph && !AnyActive(items))
-        return true;
-      for (std::size_t i = 0; i < items.size(); ++i) {
-        if (!Check(hipMemcpyAsync(items[i].session->control_,
-                                  batch_controls_ + i, sizeof(Session::Control),
-                                  hipMemcpyHostToDevice, stream_),
-                   error)) {
-          return false;
-        }
-      }
-      if (wide) {
-        // Later segments read their own positions; their controls stage in
-        // the batch slots a single-session pass leaves unused.
-        const auto segs = segments_of(0);
-        for (std::size_t s = 1; s < segs.size(); ++s) {
-          batch_controls_[s] = batch_controls_[0];
-          batch_controls_[s].position = segs[s].start;
-          batch_controls_[s].blocks = segs[s].blocks;
-          if (!Check(hipMemcpyAsync(wide_controls_ + s, batch_controls_ + s,
-                                    sizeof(Session::Control),
-                                    hipMemcpyHostToDevice, stream_),
-                     error))
-            return false;
-        }
-      }
-      if (!Check(hipMemcpyAsync(base.tokens, tokens_host_,
-                                rows * sizeof(std::int32_t),
-                                hipMemcpyHostToDevice, stream_),
+  const auto body = [&]() -> bool {
+    if (!AnyActive(items))
+      return true;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      if (!Check(hipMemcpyAsync(items[i].session->control_, batch_controls_ + i,
+                                sizeof(Session::Control), hipMemcpyHostToDevice,
+                                stream_),
                  error)) {
         return false;
       }
-      EmbedTokens(model_->token_embd().data,
-                  EmbeddingType(model_->token_embd().type), base.tokens,
-                  base.res, rows, c.hidden_size, c.hc_count, stream_);
-      for (std::size_t i = 0; i < items.size(); ++i) {
-        items[i].session->vision_input_.Inject(
-            base.res + std::size_t{offsets[i]} * c.HcDim(),
-            items[i].session->position_, items[i].tokens.size(), c.hidden_size,
-            c.hc_count, stream_);
+    }
+    if (wide) {
+      // Later segments read their own positions; their controls stage in
+      // the batch slots a single-session pass leaves unused.
+      const auto segs = segments_of(0);
+      for (std::size_t s = 1; s < segs.size(); ++s) {
+        batch_controls_[s] = batch_controls_[0];
+        batch_controls_[s].position = segs[s].start;
+        batch_controls_[s].blocks = segs[s].blocks;
+        if (!Check(hipMemcpyAsync(wide_controls_ + s, batch_controls_ + s,
+                                  sizeof(Session::Control),
+                                  hipMemcpyHostToDevice, stream_),
+                   error))
+          return false;
       }
     }
-    for (std::uint32_t il = first_layer; il < end_layer; ++il) {
-      if (!can_graph && !AnyActive(items))
+    if (!Check(hipMemcpyAsync(base.tokens, tokens_host_,
+                              rows * sizeof(std::int32_t),
+                              hipMemcpyHostToDevice, stream_),
+               error)) {
+      return false;
+    }
+    EmbedTokens(model_->token_embd().data,
+                EmbeddingType(model_->token_embd().type), base.tokens, base.res,
+                rows, c.hidden_size, c.hc_count, stream_);
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      items[i].session->vision_input_.Inject(
+          base.res + std::size_t{offsets[i]} * c.HcDim(),
+          items[i].session->position_, items[i].tokens.size(), c.hidden_size,
+          c.hc_count, stream_);
+    }
+    const auto& layers = model_->layers();
+    bool normed = false;
+    for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+      if (!AnyActive(items))
         return true;
       const auto& l = layers[il];
-      if (c.IsPleLayer(il) && !can_graph && !WaitPle(error))
+      if (c.IsPleLayer(il) && !WaitPle(error))
         return false;
       for (std::size_t i = 0; i < items.size(); ++i) {
         const auto& item = items[i];
-        if ((!can_graph && item.session->Cancelled()) || !c.IsPleLayer(il))
+        if (item.session->Cancelled() || !c.IsPleLayer(il))
           continue;
         auto& session = *item.session;
         const auto segs = segments_of(i);
@@ -1307,7 +1243,7 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
                                   c.AttentionQDim();
         }
         UseScratch(view);
-        if (!can_graph && !session.CheckCancellation(nullptr)) {
+        if (!session.CheckCancellation(nullptr)) {
           auto* output = l.linear ? s_.gdn_out : s_.ctx;
           const auto width = l.linear ? c.SsmValueDim() : c.AttentionQDim();
           if (!Check(hipMemsetAsync(output, 0,
@@ -1349,20 +1285,18 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
           }
         } else if (l.linear) {
           if (batch_gdn) {
-            if (!can_graph) {
-              const auto& state = session.linear_[il];
-              batch_gdn_host_[il * kBatchSessions + i] = {
-                  l.ssm_in.empty() ? view.qkv : view.qkvz,
-                  l.ssm_in.empty() ? view.z : view.qkvz + c.SsmConvChannels(),
-                  view.alpha_beta, state.conv_state,
-                  // Short convolution saves history in registers, so each
-                  // request needs only its own token rows of staging.
-                  base.conv_scratch +
-                      std::size_t{offsets[i]} * c.SsmConvChannels(),
-                  view.qn, view.kn, view.gdn_raw, state.state, view.gdn_out,
-                  item.speculative ? state.state_snapshots : RollbackRows{},
-                  item.speculative ? state.conv_snapshots : RollbackRows{}, n};
-            }
+            const auto& state = session.linear_[il];
+            batch_gdn_host_[il * kBatchSessions + i] = {
+                l.ssm_in.empty() ? view.qkv : view.qkvz,
+                l.ssm_in.empty() ? view.z : view.qkvz + c.SsmConvChannels(),
+                view.alpha_beta, state.conv_state,
+                // Short convolution saves history in registers, so each
+                // request needs only its own token rows of staging.
+                base.conv_scratch +
+                    std::size_t{offsets[i]} * c.SsmConvChannels(),
+                view.qn, view.kn, view.gdn_raw, state.state, view.gdn_out,
+                item.speculative ? state.state_snapshots : RollbackRows{},
+                item.speculative ? state.conv_snapshots : RollbackRows{}, n};
             gdn_active |= 1U << i;
           } else if (!LinearAttention(l, session.linear_[il], s_.mixed,
                                       s_.block_out, n, item.speculative, error,
@@ -1387,7 +1321,9 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
               return false;
           }
         } else {
-          const auto pool = can_graph ? graph_pool_arr[i] : pool_arr[i];
+          const auto pool = sparse[i] && complete[i] > session.blocks_
+                                ? complete[i] - session.blocks_
+                                : 0;
           UseYarn(session);
           if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out, n,
                          &session.control_->position, &session.control_->blocks,
@@ -1442,84 +1378,34 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
       CombineBatch(base.res, next_norm, rows);
       normed = next_norm != nullptr;
     }
-    if (end_layer == c.num_layers) {
-      for (std::size_t i = 0; i < items.size(); ++i) {
-        const auto n = static_cast<std::uint32_t>(items[i].tokens.size());
-        UseScratch(RowScratch(base, offsets[i]));
-        if ((can_graph || !items[i].session->Cancelled()) &&
-            items[i].session->mtp_enabled_ &&
-            !Check(hipMemcpyAsync(
-                       items[i].session->mtp_.target_hidden, s_.res,
-                       static_cast<std::size_t>(n) * c.HcDim() * sizeof(float),
-                       hipMemcpyDeviceToDevice, stream_),
-                   error)) {
-          return false;
-        }
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      const auto n = static_cast<std::uint32_t>(items[i].tokens.size());
+      UseScratch(RowScratch(base, offsets[i]));
+      if (!items[i].session->Cancelled() && items[i].session->mtp_enabled_ &&
+          !Check(hipMemcpyAsync(
+                     items[i].session->mtp_.target_hidden, s_.res,
+                     static_cast<std::size_t>(n) * c.HcDim() * sizeof(float),
+                     hipMemcpyDeviceToDevice, stream_),
+                 error)) {
+        return false;
       }
-      UseScratch(base);
-      return HcMixBatch(model_->hc_head(), base.res, false, base.mixed, nullptr,
-                        rows, error) &&
-             DenseBatch(model_->output(), base.mixed, batch_logits_, rows,
-                        error);
     }
-    return true;
+    UseScratch(base);
+    return HcMixBatch(model_->hc_head(), base.res, false, base.mixed, nullptr,
+                      rows, error) &&
+           DenseBatch(model_->output(), base.mixed, batch_logits_, rows, error);
   };
   bool ok = false;
   try {
-    if (can_graph) {
-      const std::uint32_t first_layer =
-          c.ple_layer > 0 ? static_cast<std::uint32_t>(c.ple_layer) : 0U;
-      if (first_layer > 0) {
-        BatchGraphKey prefix_key = suffix_key;
-        prefix_key.kind = 1;
-        if (!RunBatchGraph(
-                prefix_key, true,
-                [&]() {
-                  bool normed = false;
-                  return run_layers(0, first_layer, normed);
-                },
-                error, false)) {
-          (void)hipStreamSynchronize(stream_);
-          UseScratch(base);
-          return false;
-        }
-        if (ple_pending_ && !WaitPle(error)) {
-          (void)hipStreamSynchronize(stream_);
-          UseScratch(base);
-          return false;
-        }
-        ok = RunBatchGraph(
-            suffix_key, true,
-            [&]() {
-              bool normed = false;
-              return run_layers(first_layer, c.num_layers, normed);
-            },
-            error, true);
-      } else {
-        if (c.ple_layer == 0 && ple_pending_ && !WaitPle(error)) {
-          UseScratch(base);
-          return false;
-        }
-        ok = RunBatchGraph(
-            suffix_key, true,
-            [&]() {
-              bool normed = false;
-              return run_layers(0, c.num_layers, normed);
-            },
-            error, true);
-      }
-    } else {
-      bool normed = false;
-      ok = run_layers(0, c.num_layers, normed) &&
-           Check(hipStreamSynchronize(stream_), error);
-    }
+    ok = body();
   } catch (...) {
     (void)hipStreamSynchronize(stream_);
     UseScratch(base);
     throw;
   }
+  const auto status = hipStreamSynchronize(stream_);
   UseScratch(base);
-  if (!ok) {
+  if (!ok || !Check(status, error)) {
     return false;
   }
   for (std::size_t i = 0; i < items.size(); ++i) {
