@@ -235,7 +235,8 @@ concurrency decisions.
 
 Use the interface harness against the same server to separate transport and
 HTTP framing from model speed. It reports connect, first byte, client TTFT,
-token-arrival gaps, reads per event, and fresh versus reused connections:
+token-arrival gaps and events per read, and compares fresh with reused
+connections on a small overhead request:
 
 ```sh
 tools/serving/gufo-interface-bench.py \

@@ -12,12 +12,14 @@ keeps those stages apart:
 
 * connect_ms: TCP connect (and TLS handshake when enabled)
 * ttfb_ms: request written -> first response byte
-* first_event_ms: request written -> first useful SSE event
-* client_ttft_ms: request written -> first useful token event
-* gap_ms: useful-token event arrival intervals, including p99 and >threshold
+* first_event_ms: request written -> first SSE data event of any kind
+* client_ttft_ms: request written -> first token event (content, reasoning
+  or tool call)
+* gap_ms: token event arrival intervals, including p99 and >threshold
   counts, so Nagle/delayed-ACK stalls are visible instead of averaged away
-* events_per_read / bytes_per_read: whether the server's writes coalesce
-* server_ttft_ms - client_ttft_ms: transport and HTTP overhead when the server
+* events_per_read / bytes_per_read: whether the server's writes coalesce,
+  over the reads that carried body bytes
+* client_ttft_ms - server_ttft_ms: transport and HTTP overhead when the server
   reports its own timings in the terminal `usage.gufo` object
 
 Reports omit endpoint hosts, prompts, generated text, raw token IDs and
@@ -29,7 +31,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
-import os
+import math
 import socket
 import ssl
 import statistics
@@ -37,9 +39,12 @@ import sys
 import threading
 import time
 import urllib.parse
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+from gufo.serving_bench import _authorization_headers
+from gufo.serving_bench import distribution as serving_distribution
 
 BENCHMARK_SCHEMA = "gufo.interface-benchmark.v1"
 DEFAULT_PROMPT = (
@@ -50,40 +55,18 @@ DEFAULT_PROMPT = (
 GAP_THRESHOLDS_MS = (10.0, 30.0, 100.0)
 
 
-def percentile(values: Iterable[float], quantile: float) -> float:
-    ordered = sorted(values)
-    if not ordered:
-        raise ValueError("percentile requires at least one value")
-    if not 0.0 <= quantile <= 1.0:
-        raise ValueError("quantile must be between zero and one")
-    position = (len(ordered) - 1) * quantile
-    lower = int(position)
-    upper = min(lower + 1, len(ordered) - 1)
-    if lower == upper:
-        return ordered[lower]
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * (
-        position - lower
-    )
-
-
 def distribution(values: Iterable[float | None]) -> dict[str, float | None]:
-    finite = [float(value) for value in values if value is not None]
-    if not finite:
-        return {"count": 0, "mean": None, "p50": None, "p95": None,
-                "p99": None, "max": None}
+    """The serving benchmark's distribution, plus a sample count and mean."""
+    finite = [
+        float(value)
+        for value in values
+        if value is not None and math.isfinite(value)
+    ]
     return {
         "count": len(finite),
-        "mean": statistics.fmean(finite),
-        "p50": percentile(finite, 0.50),
-        "p95": percentile(finite, 0.95),
-        "p99": percentile(finite, 0.99),
-        "max": max(finite),
+        "mean": statistics.fmean(finite) if finite else None,
+        **serving_distribution(finite),
     }
-
-
-def _authorization_headers() -> dict[str, str]:
-    key = os.environ.get("OPENAI_API_KEY", "")
-    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 @dataclass(frozen=True)
@@ -164,6 +147,8 @@ class HttpConnection:
         self.read_sizes: list[int] = []
         self.last_read_time = 0.0
         self.last_read_index = -1
+        # Reads that carried only the response head, not body bytes.
+        self.head_only_reads = 0
         self.connect_ms = 0.0
 
     def connect(self) -> None:
@@ -199,7 +184,10 @@ class HttpConnection:
         self.last_read_index = -1
         self.last_read_time = 0.0
         lines = [f"{method} {path} HTTP/1.1"]
-        lines.append(f"Host: {self.endpoint.host}:{self.endpoint.port}")
+        host = self.endpoint.host
+        if ":" in host:
+            host = f"[{host}]"
+        lines.append(f"Host: {host}:{self.endpoint.port}")
         for name, value in headers.items():
             lines.append(f"{name}: {value}")
         if body:
@@ -244,6 +232,9 @@ class HttpConnection:
         first_byte = self.read_times[0] if self.read_times else self.clock()
         raw = bytes(self.buffer[:end])
         del self.buffer[:end + 4]
+        self.head_only_reads = max(
+            len(self.read_times) - (1 if self.buffer else 0), 0
+        )
         lines = raw.split(b"\r\n")
         try:
             status = int(lines[0].split(b" ", 2)[1])
@@ -348,6 +339,11 @@ def _useful_event(payload: str) -> tuple[bool, dict[str, Any] | None]:
         return False, None
     if not isinstance(chunk, dict):
         return False, None
+    if "error" in chunk:
+        raise RuntimeError(
+            "serving stream failed: "
+            + json.dumps(chunk["error"], sort_keys=True)
+        )
     choices = chunk.get("choices")
     if not isinstance(choices, list) or not choices:
         return False, chunk
@@ -356,8 +352,13 @@ def _useful_event(payload: str) -> tuple[bool, dict[str, Any] | None]:
         return False, chunk
     delta = choice.get("delta")
     if isinstance(delta, dict):
-        content = delta.get("content")
-        if (isinstance(content, str) and content) or delta.get("tool_calls"):
+        # The server's ttft_ms stops at its first selected token, which is a
+        # reasoning token for thinking models, so reasoning deltas count too.
+        for key in ("content", "reasoning_content"):
+            text = delta.get(key)
+            if isinstance(text, str) and text:
+                return True, chunk
+        if delta.get("tool_calls"):
             return True, chunk
     return False, chunk
 
@@ -381,6 +382,8 @@ def measure_overhead(
     clock: Callable[[], float] = time.perf_counter,
 ) -> dict[str, Any]:
     samples: list[OverheadSample] = []
+    request_path = endpoint.base_path + path
+    headers = {**_authorization_headers(), "Accept": "application/json"}
     reused = False
     connections = 0
     connection = HttpConnection(endpoint, timeout, clock)
@@ -392,27 +395,25 @@ def measure_overhead(
                 connection.connect()
                 connections += 1
                 reused = False
-            sent_at = connection.send_request(
-                "GET", path,
-                {**_authorization_headers(), "Accept": "application/json"},
-                b"",
-            )
             try:
+                sent_at = connection.send_request("GET", request_path, headers, b"")
                 head, first_byte = connection.read_head()
                 body = connection.read_content_length(head)
-            except (ConnectionError, OSError, RuntimeError):
-                # A server that closes after each response cannot be reused.
-                if not reuse or index == 0:
+            except TimeoutError:
+                # A slow server is not a closed one; retrying would send the
+                # request twice.
+                raise
+            except (ConnectionError, OSError):
+                # A server that closes without `Connection: close` cannot be
+                # reused; only a socket that already served a response retries.
+                if fresh:
                     raise
                 connection.close()
                 connection.connect()
                 connections += 1
                 fresh = True
-                sent_at = connection.send_request(
-                    "GET", path,
-                    {**_authorization_headers(), "Accept": "application/json"},
-                    b"",
-                )
+                reused = False
+                sent_at = connection.send_request("GET", request_path, headers, b"")
                 head, first_byte = connection.read_head()
                 body = connection.read_content_length(head)
             finished = clock()
@@ -502,21 +503,16 @@ def measure_stream(
         completion_tokens = None
 
         saw_done = False
-        while not saw_done:
+        body_complete = False
+        while not saw_done and not body_complete:
             if reader is not None:
                 data = reader.read()
                 if not data:
                     break
             elif "content-length" in head.headers:
-                length = int(head.headers["content-length"])
-                if length == 0:
-                    break
-                while len(connection.buffer) < length:
-                    if not connection._fill():
-                        raise ConnectionError(
-                            "connection closed inside response body"
-                        )
+                # A length-delimited body arrives whole; there is no more.
                 data = connection.read_content_length(head)
+                body_complete = True
             else:
                 # HTTP/1.0 and other close-delimited streams carry no length.
                 if not connection._fill():
@@ -529,36 +525,32 @@ def measure_stream(
                 data, read_index, read_time
             ):
                 event_count += 1
+                if first_event is None and event != "[DONE]":
+                    first_event = event_time
                 useful, chunk = _useful_event(event)
                 candidate_usage = _usage_metrics(chunk)
                 if candidate_usage is not None:
                     usage = candidate_usage
                 if useful:
                     useful_times.append(event_time)
-                    if first_event is None:
-                        first_event = event_time
                 if event == "[DONE]":
                     finished_at = event_time
                     saw_done = True
                     break
             if not saw_done:
                 finished_at = read_time
-        if reader is not None and not reader.finished:
-            # The last chunk (and its terminator) was consumed; drain the
-            # trailer so a reused connection starts clean.
-            while reader.read():
-                pass
+        # Streams never reuse their connection, so the terminal chunk and
+        # trailer after [DONE] are not drained.
 
         gaps = [
             (current - previous) * 1000.0
             for previous, current in zip(useful_times, useful_times[1:])
         ]
-        reads = len(connection.read_sizes)
-        events_per_read = len(useful_times) / reads if reads else 0.0
-        bytes_per_read = (
-            statistics.fmean(connection.read_sizes)
-            if connection.read_sizes else 0.0
-        )
+        # Reads that carried only the response head say nothing about how the
+        # server's event writes coalesce.
+        body_reads = connection.read_sizes[connection.head_only_reads:]
+        events_per_read = event_count / len(body_reads) if body_reads else 0.0
+        bytes_per_read = statistics.fmean(body_reads) if body_reads else 0.0
         if usage is not None:
             metrics = usage.get("gufo")
             if isinstance(metrics, dict):
@@ -704,7 +696,6 @@ def run_benchmark(
             "requests": requests,
             "concurrency": concurrency,
             "maxTokens": max_tokens if mode != "overhead" else None,
-            "promptTokens": None,
         },
     }
     if mode in ("overhead", "both"):
@@ -755,12 +746,20 @@ def run_benchmark(
             max_workers=concurrency
         ) as pool:
             futures = [pool.submit(worker, index) for index in range(requests)]
-            with started_condition:
-                if not started_condition.wait_for(
-                    lambda: started >= target, timeout=timeout
-                ):
-                    raise RuntimeError("stream workers did not start in time")
-            start.set()
+            try:
+                with started_condition:
+                    if not started_condition.wait_for(
+                        lambda: started >= target, timeout=timeout
+                    ):
+                        for future in futures:
+                            future.cancel()
+                        raise RuntimeError(
+                            "stream workers did not start in time"
+                        )
+            finally:
+                # Release blocked workers even on failure, or the pool's exit
+                # would wait for them forever.
+                start.set()
             for future in futures:
                 samples.append(future.result())
         report["stream"] = _stream_report(samples)
@@ -783,9 +782,9 @@ def _print_report(report: dict[str, Any]) -> None:
 
             print(
                 f"  {name:<9} {result['requests']:>8}  "
-                f"{value(connect, 'p50'):>11}  "
-                f"{value(ttfb, 'p50'):>5}/{value(ttfb, 'p95'):<7}  "
-                f"{value(total, 'p50'):>9}  "
+                f"{value(connect, 'median'):>11}  "
+                f"{value(ttfb, 'median'):>5}/{value(ttfb, 'p95'):<7}  "
+                f"{value(total, 'median'):>9}  "
                 f"{str(result['connectionReused']):<5}"
             )
     if "stream" in report:
@@ -801,8 +800,8 @@ def _print_report(report: dict[str, Any]) -> None:
                 continue
             print(
                 f"  {key:<27} "
-                f"p50 {item['p50']:>7.2f}  p95 {item['p95']:>7.2f}  "
-                f"p99 {item['p99']:>7.2f}  max {item['max']:>7.2f}"
+                f"p50 {item['median']:>7.2f}  p95 {item['p95']:>7.2f}  "
+                f"p99 {item['p99']:>7.2f}  max {item['maximum']:>7.2f}"
             )
         thresholds = ", ".join(
             f"{name}={count}"
@@ -810,8 +809,8 @@ def _print_report(report: dict[str, Any]) -> None:
         )
         print(f"  token gaps: {thresholds}")
         print(
-            f"  events/read p50: {stream['eventsPerRead']['p50']:.2f}, "
-            f"bytes/read p50: {stream['bytesPerRead']['p50']:.0f}"
+            f"  events/read p50: {stream['eventsPerRead']['median']:.2f}, "
+            f"bytes/read p50: {stream['bytesPerRead']['median']:.0f}"
         )
 
 

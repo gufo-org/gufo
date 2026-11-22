@@ -35,13 +35,29 @@ class FakeServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, force_close=False, token_delay=0.035, chunked=True):
+    def __init__(self, force_close=False, token_delay=0.035, chunked=True,
+                 silent_close=False, base_path="", delta_key="content",
+                 error=False, content_length=False):
         super().__init__(("127.0.0.1", 0), FakeHandler)
         self.accepts = 0
         self.force_close = force_close
+        # Close after each response without announcing `Connection: close`.
+        self.silent_close = silent_close
         self.token_delay = token_delay
         self.chunked = chunked
+        self.base_path = base_path
+        self.delta_key = delta_key
+        self.error = error
+        self.content_length = content_length
+        self.paths = []
         self.lock = threading.Lock()
+
+    def handle_error(self, request, client_address):
+        # Clients close streams after [DONE] or an error event; the peer
+        # reset that follows is expected, not a server failure.
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
 
 class FakeHandler(socketserver.BaseRequestHandler):
@@ -60,6 +76,8 @@ class FakeHandler(socketserver.BaseRequestHandler):
             head = bytes(buffer[:end])
             del buffer[:end + 4]
             path, headers = _head_fields(head)
+            with self.server.lock:
+                self.server.paths.append(path)
             length = int(headers.get("content-length", "0"))
             while len(buffer) < length:
                 chunk = self.request.recv(65536)
@@ -71,13 +89,14 @@ class FakeHandler(socketserver.BaseRequestHandler):
                 self.server.force_close
                 or headers.get("connection", "").lower() == "close"
             )
-            if path == "/v1/models":
+            base = self.server.base_path
+            if path == base + "/v1/models":
                 self._models(close)
-            elif path == "/v1/chat/completions":
+            elif path == base + "/v1/chat/completions":
                 self._stream(close)
             else:
                 self._error(close)
-            if close:
+            if close or self.server.silent_close:
                 return
 
     def _models(self, close):
@@ -104,6 +123,9 @@ class FakeHandler(socketserver.BaseRequestHandler):
 
     def _stream(self, close):
         connection = "close" if close else "keep-alive"
+        if self.server.content_length:
+            self._length_stream(connection)
+            return
         chunked = self.server.chunked
         head = (
             "HTTP/1.1 200 OK\r\n"
@@ -123,11 +145,15 @@ class FakeHandler(socketserver.BaseRequestHandler):
                 self.request.sendall(data)
 
         event('data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n')
+        if self.server.error:
+            event('data: {"error":{"message":"overloaded"}}\n\n')
         for index in range(3):
             if index:
                 threading.Event().wait(self.server.token_delay)
             event(
-                'data: {"choices":[{"delta":{"content":"'
+                'data: {"choices":[{"delta":{"'
+                + self.server.delta_key
+                + '":"'
                 + chr(ord("a") + index)
                 + '"}}]}\n\n'
             )
@@ -141,6 +167,21 @@ class FakeHandler(socketserver.BaseRequestHandler):
         event("data: [DONE]\n\n")
         if chunked:
             self.request.sendall(b"0\r\n\r\n")
+
+    def _length_stream(self, connection):
+        # A whole SSE body with a length and no [DONE]: the client must stop
+        # at the length instead of waiting for more.
+        body = (
+            'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"b"}}]}\n\n'
+        ).encode("utf-8")
+        head = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            f"Connection: {connection}\r\n\r\n"
+        ).encode("ascii")
+        self.request.sendall(head + body)
 
 
 def start(server):
@@ -187,17 +228,17 @@ with FakeServer() as server:
         "connect time must be measured for every request",
     )
     check(
-        overhead["reusedConnection"]["ttfb_ms"]["p50"] >= 0,
+        overhead["reusedConnection"]["ttfb_ms"]["minimum"] > 0,
         "reused TTFT used a previous response's read time",
     )
     stream = report["stream"]
     check(stream["requests"] == 3, "stream request count")
     check(
-        stream["eventCount"]["p50"] == 6,
+        stream["eventCount"]["median"] == 6,
         f"unexpected SSE event count: {stream['eventCount']}",
     )
     check(
-        stream["gap_ms"]["max"] >= 25.0,
+        stream["gap_ms"]["maximum"] >= 25.0,
         f"token delay was not measured: {stream['gap_ms']}",
     )
     check(
@@ -205,16 +246,15 @@ with FakeServer() as server:
         f"gap threshold count is wrong: {stream['gapThresholds']}",
     )
     check(
-        stream["server_ttft_ms"]["p50"] == 10.0,
+        stream["server_ttft_ms"]["median"] == 10.0,
         "server TTFT was not read from terminal usage",
     )
     check(
         stream["interfaceOverhead_ms"]["count"] == 3,
         "client/server TTFT delta was not computed",
     )
-    # Reuse across requests: three overhead requests in each mode plus three
-    # streams, with the reused mode needing one connection instead of three.
-    check(server.accepts <= 9, f"unexpected connection count: {server.accepts}")
+    # Three fresh overhead connections, one reused, and one per stream.
+    check(server.accepts == 7, f"unexpected connection count: {server.accepts}")
 
 with FakeServer(force_close=True) as server:
     start(server)
@@ -228,6 +268,74 @@ with FakeServer(force_close=True) as server:
     )
     check(not result["connectionReused"], "close-per-response was not detected")
     check(result["reconnects"] == 2, f"reconnect count: {result['reconnects']}")
+
+def endpoint(server, base_path=""):
+    return interface_bench.Endpoint.parse(
+        f"http://127.0.0.1:{server.server_address[1]}{base_path}"
+    )
+
+
+def stream_sample(server, base_path=""):
+    return interface_bench.measure_stream(
+        endpoint(server, base_path),
+        model="test-model",
+        prompt="hello",
+        max_tokens=3,
+        timeout=5.0,
+        request_index=0,
+    )
+
+
+# A server that closes without `Connection: close` is retried on a fresh socket
+# and must not be reported as reused.
+with FakeServer(silent_close=True) as server:
+    start(server)
+    result = interface_bench.measure_overhead(
+        endpoint(server), path="/v1/models", requests=3, reuse=True,
+        timeout=5.0,
+    )
+    check(not result["connectionReused"], f"silent close reused: {result}")
+    check(result["reconnects"] == 2, f"silent reconnects: {result}")
+
+# A base URL path prefixes both the overhead probe and the stream.
+with FakeServer(base_path="/proxy") as server:
+    start(server)
+    interface_bench.measure_overhead(
+        endpoint(server, "/proxy"), path="/v1/models", requests=1,
+        reuse=False, timeout=5.0,
+    )
+    stream_sample(server, "/proxy")
+    check(
+        server.paths == ["/proxy/v1/models", "/proxy/v1/chat/completions"],
+        f"base path was not applied: {server.paths}",
+    )
+
+# Thinking models stream reasoning first; the server's TTFT counts it.
+with FakeServer(delta_key="reasoning_content") as server:
+    start(server)
+    sample = stream_sample(server)
+    check(sample.client_ttft_ms is not None, "reasoning TTFT missing")
+    check(len(sample.gap_ms) == 2, f"reasoning gaps: {sample.gap_ms}")
+    check(
+        sample.first_event_ms <= sample.client_ttft_ms,
+        "the role event must arrive no later than the first token",
+    )
+
+# An error event fails the request instead of yielding a truncated sample.
+with FakeServer(error=True) as server:
+    start(server)
+    try:
+        stream_sample(server)
+    except RuntimeError as exception:
+        check("overloaded" in str(exception), f"error text: {exception}")
+    else:
+        raise AssertionError("an SSE error event was ignored")
+
+# A length-delimited body without [DONE] ends at its length, not the timeout.
+with FakeServer(content_length=True) as server:
+    start(server)
+    sample = stream_sample(server)
+    check(sample.event_count == 2, f"length-delimited events: {sample}")
 
 # HTTP/1.0-style streams have no length or chunk framing: the close ends them.
 with FakeServer(force_close=True, chunked=False) as server:
@@ -246,10 +354,6 @@ with FakeServer(force_close=True, chunked=False) as server:
     check(sample.client_ttft_ms is not None, "close-delimited TTFT missing")
     check(sample.gap_ms[-1] >= 25.0, f"close-delimited gaps: {sample.gap_ms}")
 
-check(
-    interface_bench.percentile([1.0, 2.0, 3.0, 4.0], 0.5) == 2.5,
-    "percentile",
-)
 check(
     interface_bench.distribution([])["count"] == 0,
     "empty distribution",
