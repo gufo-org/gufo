@@ -397,6 +397,7 @@ void ManifestChargedOnce() {
     return ledger.Snapshot()
         .bytes[static_cast<std::size_t>(ResourceCategory::kMetadata)];
   };
+  const auto baseline = metadata();
   std::shared_ptr<const DiskDescription> description;
   {
     DiskStore store(ledger, d.path, UINT64_MAX);
@@ -417,6 +418,8 @@ void ManifestChargedOnce() {
   assert(description->Manifest().tokens == m.tokens);
   assert(metadata() >= ManifestStorage(m) + sizeof(DiskDescription) + 64);
   description.reset();
+  // The last holder releases the shared charge.
+  assert(metadata() == baseline);
 }
 void Conflicts() {
   Directory d;
