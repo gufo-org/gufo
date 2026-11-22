@@ -149,7 +149,8 @@ privacy-safe scheduler and stage metrics used by
 `tools/serving/gufo-serving-bench.py`: queue, prefill, decode, TTFT and ITL timing;
 actual prefill work; cache use; logical concurrency; physical execution width;
 and the executed plan. Prompts, generated text, local paths, request IDs, and
-token IDs are excluded.
+token IDs are excluded. `tools/serving/gufo-interface-bench.py` reads the same
+metrics to separate connection, framing and token-arrival cost from generation.
 
 DeepSeek V4 Flash batches up to eight active requests. Each request owns its
 attention caches, compressor state, position, and sampling state. Dense and
