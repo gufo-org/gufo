@@ -1,14 +1,19 @@
 # Loom packages
 
-Gufo serves [loom-fun](https://huggingface.co/loom-fun) packages: open GGUF
-models, from Qwen3 0.6B to Qwen3.6 35B-A3B, gemma 4, gpt-oss 20B and Llama
-3.2, on the package's own [AMD Loom](https://github.com/ROCm/hrx-system)
-kernels, behind Gufo's usual APIs, scheduler, prompt cache and parsers.
+Gufo serves every text package of the
+[loom-fun](https://huggingface.co/loom-fun) Hugging Face organization on its
+own [AMD Loom](https://github.com/ROCm/hrx-system) kernels, behind Gufo's
+usual APIs, scheduler, prompt cache and parsers.
 
-A **package** is a loom-fun repository: a model card (`model.json`), its
-Loom programs and tokenizer, for an unmodified GGUF checkpoint that it names
-by origin (`@checkpoint/<file>`), plus a drafter or a vision projector where
-it uses one.
+## Supported models
+
+Any loom-fun text package works, with no Gufo update: browse them at
+[huggingface.co/loom-fun](https://huggingface.co/loom-fun). As of November
+2026, 51 packages pass Gufo's API checks on Strix Halo, among them Qwen2.5,
+Qwen3, Qwen3.5, Qwen3.6 and Qwen3.8 (text and vision), gemma 3 and 4,
+gpt-oss 20B, Llama 3.2, LFM and Nemotron; see the
+[quality report](../internal/models/loom/QUALITY.md). Image generation
+packages aren't supported.
 
 ## Run
 
@@ -21,18 +26,13 @@ curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3.5-2B","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-Any loom-fun text package works, with no Gufo update. `gufo model install`
-takes the package revision built for Gufo's Loom SDK (the `v<SDK>` tag, else
-the default branch) and the GGUF files its card names, at the revisions the
-card pins, and checks each file's SHA-256 from Hugging Face. `gufo model
-update`, `remove` and `verify`, and `--model` in `serve`, `prompt`, `chat`
-and `bench`, take the same repository. Requests name the model by its card
-ID (`Qwen/Qwen3.5-2B` here; `/v1/models` lists it), unless
-`--served-model-name` sets another.
+`gufo model install` fetches the package revision built for Gufo's Loom SDK
+and the GGUF files its card names, and checks each file's SHA-256. `gufo model
+update`, `remove`, `verify` and `--model` take the same repository. Requests
+name the model by its card ID (`/v1/models` lists it).
 
-Files you download yourself work too: download the package and each origin's
-files into one directory, at their repository paths (the layout `gufo model
-install` writes), and pass it to `--model`:
+To use files you downloaded yourself, put the package and each GGUF origin's
+files in one directory at their repository paths and pass it to `--model`:
 
 ```sh
 hf download loom-fun/ggml-org-Qwen3-4B-loom --local-dir models/qwen3-4b-loom
@@ -40,44 +40,34 @@ hf download ggml-org/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models/qwen3
 gufo serve llm --model models/qwen3-4b-loom
 ```
 
-A package fetched with
-`loom-fetch`, which places the files at their card paths, works as it is.
-`--mmproj` and the draft model option (`--mtp-model`, `--dflash-model` or
-`--dspark-model` with its `--speculative`) replace the package's vision or
-draft file. A package built for another Loom SDK release is refused at load
-with the revision to fetch.
+## Options
 
-The package's preset for your GPU is chosen automatically, on Linux and
-Windows (`loom: preset chat for gfx1151` in the log). A GPU the package has
-no preset for serves the gfx1151 preset `chat`, with a warning. Grammars,
-`logprobs`, `min_p` and penalties use the package's logits whenever it
-declares them.
+Loom packages take Gufo's own options:
 
-Loom commits the KV of `--sessions` full contexts at load (`--context`, the
-package's own by default), shared by all sessions; the startup log reports
-the device memory and the tokens the pool holds. `--loom-device URI` selects
-another Loom device. `--cache-disk DIR` keeps the prompt cache across
-restarts; its checkpoint images back the pool elastically instead.
+- `--sessions N` and `--context N` size the KV pool, which holds N full
+  contexts (the package's own context by default) and is committed at load.
+  The startup log reports the device memory and the tokens the pool holds.
+- `--mmproj`, and the draft model option with `--speculative`, replace the
+  package's vision projector or draft model.
+- `--cache-disk DIR` keeps the prompt cache across restarts.
+- `--loom-device URI` selects another Loom device.
+
+The package's preset for your GPU is chosen automatically (`loom: preset chat
+for gfx1151` in the log).
 
 ## Platforms
 
-Every install method includes Loom: the container, the Debian package, Nix,
-a build from source and the Windows ZIP. Loom drives the GPU through its own
-driver and needs no ROCm.
+Every install method includes Loom, on Linux and Windows. Loom drives the GPU
+through its own driver and needs no ROCm.
 
-- A build from source compiles the Loom runtime from its pinned release,
-  which needs CMake 3.26 (4.2 on Windows), Python 3.12 and network access at
-  build time. Leave it out with `-DGUFO_EXTENSIONS=<list>`.
-- In a container, add `--security-opt seccomp=unconfined`: Loom's GPU memory
-  reservation fails under the default profile.
-- Loom streams weights through pinned buffers, which need a locked-memory
-  limit of at least 64 MiB (`--ulimit memlock=-1`). Below it, the weights are
-  read into host memory at load.
-- On Windows, turn on Developer Mode, or keep the
-  temporary folder (`TMP`) on the models' drive, so Gufo can link the
-  package's files.
-- A Loom package runs in its own process: on Linux, Loom and HIP can't share
-  the GPU in one process. Serve a HIP model from another `gufo serve`.
+- A build from source compiles the Loom runtime, which needs CMake 3.26 (4.2
+  on Windows), Python 3.12 and network access. Leave it out with
+  `-DGUFO_EXTENSIONS=<list>`.
+- In a container, add `--security-opt seccomp=unconfined`. Add
+  `--ulimit memlock=-1` too, or the weights load through host memory.
+- On Windows, turn on Developer Mode, or keep `TMP` on the models' drive.
+- Loom and HIP can't share the GPU in one process: serve a HIP model from
+  another `gufo serve`.
 
 ## Limits
 
@@ -85,14 +75,7 @@ driver and needs no ROCm.
   `response_format`, `logprobs`, `min_p`, penalties) sample on the host and
   run without drafting, so they decode somewhat slower.
 - gpt-oss and Glimmer: automatic tool choice isn't grammar-constrained.
-- Greedy outputs can differ from loom-serve at near-ties: Loom's results
-  depend on batch shape.
+- Greedy outputs can differ from loom-serve at near-ties.
 
-## Quality and performance
-
-As of November 2026, on Strix Halo, 51 loom-fun packages passed Gufo's API
-conformance checks through `gufo model install`: 44 of 51 pass all 29, the
-rest miss checks for model behavior. Loom decodes faster than llama.cpp ROCm
-on 45 of the 50 measured packages. See the
-[quality report](../internal/models/loom/QUALITY.md) and
+Implementation notes and benchmarks are in the
 [design notes](../internal/models/loom/README.md).
