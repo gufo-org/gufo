@@ -2223,16 +2223,19 @@ void FullLedgerLeavesTheFrontierUnindexed() {
   runner->ledger->FailAfter(cache::LedgerStep::kReserve, 0);
   (void)lease->Commit({}, {}, frontier);
   runner->ledger->ClearFaults();
+  // Acquire waits for the idle frontier worker, which may log too.
+  auto next = cache.Acquire(frontier, {}, {}, true, 0, true);
   std::clog.rdbuf(previous_sink);
   Logger::SetLevel(previous_level);
   assert(output.str().find("event=live_frontier_refused reason=allocation "
                            "tokens=4") != std::string::npos);
-  auto next = cache.Acquire(frontier, {}, {}, true, 0, true);
   assert(next->cached_tokens() == frontier.size());
   assert(next->restored_snapshot_bytes() != 0);
   next->Invalidate();
 }
-// When the reclaim frees a record, the retried insert keeps the frontier live.
+// When the reclaim frees a record, the insert is retried and the frontier
+// stays live. The injected fault is one-shot, so this checks the retry, not
+// how many bytes the reclaim freed.
 void FullLedgerReclaimsForTheLiveFrontier() {
   auto runner = std::make_shared<Runner>();
   ComponentTextCache cache(runner, 1, 1 << 22, {});
@@ -2258,7 +2261,9 @@ void FullLedgerReclaimsForTheLiveFrontier() {
   next->Invalidate();
 }
 // A capture larger than the RAM budget goes to disk only. A full ledger when
-// it is published refuses the disk write, not the reply.
+// it is published refuses the disk write, not the reply. In this fake the
+// frontier's tokens cost as many bytes as its rows, so the live record and the
+// idle worker's frontier write are refused too, and the next turn prefills.
 void FullLedgerRefusesTheDiskWriteNotTheReply() {
   const TemporaryDirectory temp("gufo-full-ledger-persist");
   const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
@@ -2291,11 +2296,15 @@ void FullLedgerRefusesTheDiskWriteNotTheReply() {
   runner->ledger->FailAfter(cache::LedgerStep::kReserve, 0);
   (void)lease->Commit(prompt, std::move(snapshot), frontier);
   runner->ledger->ClearFaults();
+  auto next = cache.Acquire(frontier, {}, {}, true, 0, true);
   std::clog.rdbuf(previous_sink);
   Logger::SetLevel(previous_level);
-  assert(output.str().find("event=persistence_refused reason=allocation "
-                           "tokens=65536") != std::string::npos);
-  auto next = cache.Acquire(frontier, {}, {}, true, 0, true);
+  const auto log = output.str();
+  assert(log.find("event=persistence_refused reason=allocation "
+                  "tokens=65536") != std::string::npos);
+  assert(log.find("event=live_frontier_refused reason=allocation "
+                  "tokens=65537") != std::string::npos);
+  assert(next->cached_tokens() == 0);
   next->Invalidate();
 }
 void GeneratedFrontierSurvivesReassignmentAndRestart() {

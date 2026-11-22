@@ -2977,9 +2977,9 @@ std::size_t ComponentTextCache::Lease::Commit(
   const auto location = impl_->slot.Location();
   impl_->slot.Commit();
   // The live frontier's index record is optional: a session without one
-  // restores from a checkpoint. A failed allocation, such as a full ledger,
-  // reclaims one record and retries once, then leaves the frontier unindexed
-  // rather than failing the reply.
+  // restores from a retained checkpoint, if any. A failed allocation, such as
+  // a full ledger, reclaims retained records until the record fits, then
+  // leaves the frontier unindexed rather than failing the reply.
   const auto index_live = [&] {
     try {
       impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
@@ -3013,18 +3013,22 @@ std::size_t ComponentTextCache::Lease::Commit(
   }
   if (!indexed) {
     auto& cache = *impl_->cache;
-    bool reclaimed = false;
-    try {
-      cache.DiscardUnusedFrontierWrites();
-      const std::lock_guard lock(cache.mutex);
-      reclaimed = cache.retention.Reclaim(cache::RetentionRequest{});
-    } catch (const std::exception&) {
-      // The reply stands; only the frontier's index record is lost.
+    // Retry under the reclaim's lock, before draining its demotion: the
+    // demotion's disk job charges the metadata the reclaim just freed. Queued
+    // disk writes are kept, since one may be this turn's frontier checkpoint.
+    for (bool reclaimed = true; !indexed && reclaimed;) {
+      try {
+        const std::lock_guard lock(cache.mutex);
+        reclaimed = cache.retention.Reclaim(cache::RetentionRequest{});
+        indexed = reclaimed && index_live();
+      } catch (const std::exception&) {
+        // The reply stands; only the frontier's index record is lost.
+        reclaimed = false;
+      }
+      cache.DrainDemotion();
     }
-    cache.DrainDemotion();
     {
       const std::lock_guard lock(cache.mutex);
-      indexed = reclaimed && index_live();
       impl_->entry->busy = false;
     }
     if (!indexed)
