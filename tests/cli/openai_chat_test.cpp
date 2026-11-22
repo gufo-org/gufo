@@ -559,8 +559,13 @@ void TestUtf8Output() {
     stream.streaming_body([&](std::string_view chunk) {
       if (chunk == "data: [DONE]\n\n")
         return true;
-      Expect(chunk.starts_with("data: "), "SSE has a data prefix");
+      Expect(chunk.starts_with("data: ") && chunk.ends_with("\n\n"),
+             "SSE has a data prefix and terminator");
       const auto event = gufo::json::parse(chunk.substr(6));
+      // The stream writer serializes frames by hand; they must be the exact
+      // bytes the JSON library would have written for the same value.
+      Expect(event.dump() == chunk.substr(6, chunk.size() - 8),
+             "Streamed frames match canonical JSON serialization");
       for (const auto& choice : event.find("choices")->items()) {
         const auto* delta = choice.find("delta");
         if (delta)
@@ -588,6 +593,13 @@ void TestUtf8Output() {
     check({"\xF0", "\x9F"}, replacement, reasoning);
     check({"\x80", "ok"}, replacement + "ok", reasoning);
     check({"\xC0\xAF"}, replacement + replacement, reasoning);
+    // The stream writer escapes text itself rather than through a JSON DOM;
+    // every JSON-significant and control byte must survive the round trip.
+    std::string escapes = "quote\" back\\ slash/ \b\f\n\r\t";
+    for (char byte = 1; byte < 0x20; ++byte)
+      escapes += byte;
+    escapes += "\x7f";
+    check({escapes.substr(0, 9), escapes.substr(9)}, escapes, reasoning);
     check({"\xED", "\xA0\x80"}, replacement + replacement + replacement,
           reasoning);
     check({"\xF4\x90\x80\x80"},

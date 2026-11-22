@@ -106,9 +106,22 @@ GufoHttpParse ReadHead(std::string& out, int fd, HttpRequest& request,
       return 0;
     });
   };
-  char buf[4096];
+  char buf[64 * 1024];
   std::size_t known_partial = 0;
   while (true) {
+    // A pipelined request already read with the previous body needs no new
+    // syscall before parsing.
+    if (!out.empty()) {
+      const GufoHttpParse parsed = gufo_http_parse_head(
+          reinterpret_cast<const std::uint8_t*>(out.data()), out.size(),
+          known_partial, &head, add_field, &context);
+      context.failure.Rethrow();
+      if (parsed == GUFO_HTTP_INTERNAL)
+        throw std::runtime_error("Rust HTTP request parser failed internally");
+      if (parsed != GUFO_HTTP_PARTIAL)
+        return parsed;
+      known_partial = out.size();
+    }
     const std::intptr_t n = net::Receive(fd, buf, sizeof(buf), 0);
     if (n < 0 && net::IsSocketInterrupted())
       continue;
@@ -117,22 +130,13 @@ GufoHttpParse ReadHead(std::string& out, int fd, HttpRequest& request,
     out.append(buf, static_cast<std::size_t>(n));
     if (out.size() > (static_cast<std::size_t>(16) * 1024 * 1024))
       return GUFO_HTTP_PARTIAL;
-    const GufoHttpParse parsed = gufo_http_parse_head(
-        reinterpret_cast<const std::uint8_t*>(out.data()), out.size(),
-        known_partial, &head, add_field, &context);
-    context.failure.Rethrow();
-    if (parsed == GUFO_HTTP_INTERNAL)
-      throw std::runtime_error("Rust HTTP request parser failed internally");
-    if (parsed != GUFO_HTTP_PARTIAL)
-      return parsed;
-    known_partial = out.size();
   }
 }
 
 bool ReadN(std::string& out, int fd, std::size_t n) {
-  out.reserve(n);
+  out.reserve(out.size() + n);
   std::size_t got = 0;
-  char buf[4096];
+  char buf[64 * 1024];
   while (got < n) {
     const std::size_t want = std::min(sizeof(buf), n - got);
     const std::intptr_t r = net::Receive(fd, buf, want, 0);
@@ -168,19 +172,29 @@ bool SendChunk(int fd, std::string_view data, std::string_view prefix = {}) {
       std::to_chars(header, header + sizeof(header) - 2, data.size(), 16);
   *length.ptr = '\r';
   *(length.ptr + 1) = '\n';
-  if (!prefix.empty()) {
-    // Deferred headers and the first event travel in one send, avoiding a
-    // separate small packet before the client can start parsing the stream.
-    std::string first;
-    first.reserve(prefix.size() + data.size() + sizeof(header) + 2);
-    first.append(prefix);
-    first.append(header, length.ptr + 2);
-    first.append(data);
-    first.append("\r\n");
-    return SendAll(fd, first);
+  const std::string_view chunk_header(header, length.ptr + 2 - header);
+  // A large payload (audio, images) already fills segments; copying it into
+  // a frame would only cost a memcpy and keep the buffer's high-water size
+  // for the life of the connection.
+  constexpr std::size_t kCoalesceLimit = 16 * 1024;
+  if (data.size() > kCoalesceLimit) {
+    std::string lead;
+    lead.reserve(prefix.size() + chunk_header.size());
+    lead.append(prefix);
+    lead.append(chunk_header);
+    return SendAll(fd, lead) && SendAll(fd, data) && SendAll(fd, "\r\n");
   }
-  return SendAll(fd, std::string_view(header, length.ptr + 2 - header)) &&
-         SendAll(fd, data) && SendAll(fd, "\r\n");
+  // One frame, one send. Deferred headers, the chunk header, payload and
+  // terminator used to be separate writes; keeping them together stops a
+  // single SSE event from becoming three segments and three syscalls.
+  thread_local std::string frame;
+  frame.clear();
+  frame.reserve(prefix.size() + chunk_header.size() + data.size() + 2);
+  frame.append(prefix);
+  frame.append(chunk_header);
+  frame.append(data);
+  frame.append("\r\n");
+  return SendAll(fd, frame);
 }
 
 bool IsPeerDisconnected(int fd) noexcept {
@@ -242,7 +256,8 @@ bool IsEventStream(const HttpResponse& response) {
 }
 
 std::string BuildResponseHead(const HttpResponse& resp,
-                              std::optional<std::size_t> content_length) {
+                              std::optional<std::size_t> content_length,
+                              bool keep_alive = false) {
   std::string out;
   out.reserve(256);
   out += "HTTP/1.1 ";
@@ -268,13 +283,13 @@ std::string BuildResponseHead(const HttpResponse& resp,
     out += "\r\n";
   }
   if (!HasHeader(resp, "connection"))
-    out += "Connection: close\r\n";
+    out += keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
   out += "\r\n";
   return out;
 }
 
-std::string BuildResponse(const HttpResponse& resp) {
-  std::string out = BuildResponseHead(resp, resp.body.size());
+std::string BuildResponse(const HttpResponse& resp, bool keep_alive = false) {
+  std::string out = BuildResponseHead(resp, resp.body.size(), keep_alive);
   out += resp.body;
   return out;
 }
@@ -1829,6 +1844,15 @@ std::string PeerAddress(int client_fd) {
 
 }  // namespace
 
+bool HasToken(std::string_view value, std::string_view token) {
+  const int found = gufo_http_has_token(
+      reinterpret_cast<const std::uint8_t*>(value.data()), value.size(),
+      reinterpret_cast<const std::uint8_t*>(token.data()), token.size());
+  if (found < 0)
+    throw std::logic_error("Rust HTTP token check failed internally");
+  return found != 0;
+}
+
 LoadingResponder::LoadingResponder(const std::string& host, int port) {
   net::EnsureSocketRuntimeStarted();
   sockaddr_storage addr{};
@@ -1989,6 +2013,13 @@ struct HttpServer::ConnectionWorker {
   // so the connection only logs and closes and no longer counts toward the
   // limit.
   std::atomic<bool> response_sent{false};
+  // Set while a kept-alive connection waits for its next request. A parked
+  // connection holds no request, so it does not count toward the limit and
+  // the listener may close it to admit a new connection. Changed only under
+  // workers_mutex_.
+  std::atomic<bool> parked{false};
+  // When `parked` was last set; protected by workers_mutex_.
+  std::chrono::steady_clock::time_point parked_since{};
   std::atomic<bool> done{false};
   std::jthread thread;
 };
@@ -2209,12 +2240,34 @@ void HttpServer::run(bool handle_signals) {
           workers_, [](const std::unique_ptr<ConnectionWorker>& existing) {
             return !existing->response_sent.load(std::memory_order_acquire);
           }));
+      const auto parked = static_cast<std::size_t>(std::ranges::count_if(
+          workers_, [](const std::unique_ptr<ConnectionWorker>& existing) {
+            return existing->parked.load(std::memory_order_acquire);
+          }));
       overloaded = stopped_.load(std::memory_order_acquire) ||
                    serving >= options_.max_connections;
+      // Parked keep-alive connections are bounded by the same limit, but they
+      // never refuse a new client: the one idle longest is closed to make
+      // room. Its worker sees the shutdown as an idle close.
+      if (!overloaded && serving + parked >= options_.max_connections) {
+        ConnectionWorker* idlest = nullptr;
+        for (const auto& existing : workers_) {
+          if (existing->parked.load(std::memory_order_acquire) &&
+              existing->fd >= 0 &&
+              (idlest == nullptr ||
+               existing->parked_since < idlest->parked_since))
+            idlest = existing.get();
+        }
+        if (idlest != nullptr) {
+          idlest->parked.store(false, std::memory_order_release);
+          (void)net::ShutdownSocket(idlest->fd, net::ShutdownHow::kReadWrite);
+        }
+      }
       if (!overloaded) {
         worker_ptr->fd = client_fd;
         worker_ptr->thread = std::jthread([this, worker_ptr, client_fd] {
-          handle_connection(client_fd, worker_ptr->response_sent);
+          handle_connection(client_fd, worker_ptr->response_sent,
+                            worker_ptr->parked, worker_ptr->parked_since);
           {
             const std::lock_guard<std::mutex> lock(workers_mutex_);
             net::CloseSocket(worker_ptr->fd);
@@ -2460,307 +2513,430 @@ bool HttpServer::device_lost() {
   return true;
 }
 
-void HttpServer::handle_connection(int client_fd,
-                                   std::atomic<bool>& response_sent) {
+void HttpServer::handle_connection(
+    int client_fd, std::atomic<bool>& response_sent, std::atomic<bool>& parked,
+    std::chrono::steady_clock::time_point& parked_since) {
   (void)net::SetSocketTimeouts(client_fd, 120'000);
+  // SSE events are small writes and the WebSocket path already disables
+  // Nagle for the same reason: waiting for a delayed acknowledgement turns
+  // token arrivals into 40 ms bursts on some clients.
+  (void)net::SetNoDelay(client_fd);
 
-  const auto start_time = std::chrono::steady_clock::now();
-  HttpRequest req;
   static std::atomic<std::uint64_t> next_request{0};
-  if (auto peer = PeerAddress(client_fd); !peer.empty())
-    req.client_id = std::move(peer);
-  req.request_id = "r" + std::to_string(next_request.fetch_add(1) + 1);
-  // Set for routes `--trace` records; `traced_stream` collects the body bytes
-  // a streaming reply delivered.
-  bool traced = false;
-  std::string traced_stream;
-  bool response_started = false;
-  bool http11 = false;
-  int response_status = 0;
-  const auto elapsed_ms = [&] {
-    return std::chrono::duration<double, std::milli>(
-               std::chrono::steady_clock::now() - start_time)
-        .count();
-  };
-  // A failure after a stream started keeps the bytes it already delivered.
-  const auto trace_failure = [&](const HttpResponse& error) {
-    if (traced)
-      TraceResponse(
-          req.request_id, response_started ? response_status : error.status,
-          response_started ? "stream_error" : "failed", response_started,
-          response_started ? traced_stream : error.body);
-  };
-  // Generation submitted on this thread, by the handler or by a stream body
-  // that defers it, names this request in its trace record.
-  const Trace::RequestScope trace_scope(req.request_id);
-  try {
-    bool ok = false;
-    bool payload_too_large = false;
-    bool too_many_fields = false;
-    {
-      std::string buffer;
-      GufoHttpHead head{};
-      const GufoHttpParse parsed = ReadHead(buffer, client_fd, req, head);
-      too_many_fields = parsed == GUFO_HTTP_TOO_MANY_FIELDS;
-      if (parsed == GUFO_HTTP_COMPLETE) {
-        // ReadHead over-reads: `buffer` holds the head and possibly some body
-        // bytes already. Carry those forward so we only read the remainder
-        // from the socket.
-        std::string body = buffer.substr(head.len);
-        const auto text = [](GufoHttpSlice slice) {
-          return std::string(reinterpret_cast<const char*>(slice.data),
-                             slice.len);
-        };
-        req.method = text(head.method);
-        req.path = text(head.path);
-        req.query = text(head.query);
-        http11 = head.http11 != 0;
+  // Bytes a previous request read past its body, which already belong to the
+  // next request on a reused connection.
+  std::string pending;
+  std::size_t served = 0;
+  // Whether the previous response parked this connection; a parked flag
+  // cleared by someone else then means the listener evicted it.
+  bool was_parked = false;
+  while (true) {
+    if (served > 0) {
+      (void)net::SetSocketTimeouts(
+          client_fd,
+          static_cast<int>(options_.keep_alive_idle_timeout.count()));
+    }
+    const auto start_time = std::chrono::steady_clock::now();
+    HttpRequest req;
+    if (auto peer = PeerAddress(client_fd); !peer.empty())
+      req.client_id = std::move(peer);
+    req.request_id = "r" + std::to_string(next_request.fetch_add(1) + 1);
+    // Set for routes `--trace` records; `traced_stream` collects the body
+    // bytes a streaming reply delivered.
+    bool traced = false;
+    std::string traced_stream;
+    bool response_started = false;
+    bool http11 = false;
+    int response_status = 0;
+    bool keep_request = false;
+    // An upgrade request keeps its trailing bytes for the WebSocket, so a
+    // route that declines the upgrade cannot hand them to a next request.
+    bool upgrade_request = false;
+    bool close_connection = true;
+    const auto elapsed_ms = [&] {
+      return std::chrono::duration<double, std::milli>(
+                 std::chrono::steady_clock::now() - start_time)
+          .count();
+    };
+    // A failure after a stream started keeps the bytes it already delivered.
+    const auto trace_failure = [&](const HttpResponse& error) {
+      if (traced)
+        TraceResponse(
+            req.request_id, response_started ? response_status : error.status,
+            response_started ? "stream_error" : "failed", response_started,
+            response_started ? traced_stream : error.body);
+    };
+    // Generation submitted on this thread, by the handler or by a stream body
+    // that defers it, names this request in its trace record.
+    const Trace::RequestScope trace_scope(req.request_id);
+    try {
+      bool idle_close = false;
+      bool ok = false;
+      bool payload_too_large = false;
+      bool too_many_fields = false;
+      {
+        std::string buffer = std::move(pending);
+        pending.clear();
+        GufoHttpHead head{};
+        const GufoHttpParse parsed = ReadHead(buffer, client_fd, req, head);
+        // A connection that ends or times out before sending any request byte
+        // closes quietly instead of answering 400 to nobody.
+        idle_close = parsed == GUFO_HTTP_PARTIAL && buffer.empty();
+        if (served > 0) {
+          // Leave the parked state under the lock the listener evicts with, so
+          // an evicted connection never serves the request it raced in, and a
+          // served one is counted again before it does any work.
+          const std::lock_guard<std::mutex> lock(workers_mutex_);
+          if (was_parked && !parked.load(std::memory_order_acquire)) {
+            idle_close = true;  // Evicted by the listener.
+          } else {
+            parked.store(false, std::memory_order_release);
+            if (!idle_close)
+              response_sent.store(false, std::memory_order_release);
+          }
+        }
+        too_many_fields = parsed == GUFO_HTTP_TOO_MANY_FIELDS;
+        if (parsed == GUFO_HTTP_COMPLETE) {
+          (void)net::SetSocketTimeouts(client_fd, 120'000);
+          // ReadHead over-reads: `buffer` holds the head and possibly some body
+          // bytes already. Carry those forward so we only read the remainder
+          // from the socket.
+          std::string body = buffer.substr(head.len);
+          const auto text = [](GufoHttpSlice slice) {
+            return std::string(reinterpret_cast<const char*>(slice.data),
+                               slice.len);
+          };
+          req.method = text(head.method);
+          req.path = text(head.path);
+          req.query = text(head.query);
+          http11 = head.http11 != 0;
+          const std::string connection = req.header("connection");
+          keep_request = options_.keep_alive &&
+                         (http11 ? !HasToken(connection, "close")
+                                 : HasToken(connection, "keep-alive"));
+          upgrade_request = IsWebSocketUpgrade(req);
+          const bool websocket = upgrade_request;
 
-        const bool framing_valid =
-            head.framing_valid != 0 &&
-            std::in_range<std::size_t>(head.content_length);
-        const std::size_t content_length =
-            framing_valid ? static_cast<std::size_t>(head.content_length) : 0;
-        const std::size_t remaining =
-            content_length > body.size() ? content_length - body.size() : 0;
-        if (!framing_valid) {
-          ok = false;
-        } else if (content_length > options_.max_request_body_bytes) {
-          payload_too_large = true;
-        } else if (content_length > 0) {
-          if (remaining > 0) {
-            // A HTTP/1.0 request's expectation is ignored (RFC 9110 10.1.1).
-            ok = (!http11 || head.expect_continue == 0 ||
-                  SendAll(client_fd, "HTTP/1.1 100 Continue\r\n\r\n")) &&
-                 ReadN(body, client_fd, remaining);
+          const bool framing_valid =
+              head.framing_valid != 0 &&
+              std::in_range<std::size_t>(head.content_length);
+          const std::size_t content_length =
+              framing_valid ? static_cast<std::size_t>(head.content_length) : 0;
+          const std::size_t remaining =
+              content_length > body.size() ? content_length - body.size() : 0;
+          if (!framing_valid) {
+            ok = false;
+          } else if (content_length > options_.max_request_body_bytes) {
+            payload_too_large = true;
+          } else if (content_length > 0) {
+            if (remaining > 0) {
+              // A HTTP/1.0 request's expectation is ignored (RFC 9110 10.1.1).
+              ok = (!http11 || head.expect_continue == 0 ||
+                    SendAll(client_fd, "HTTP/1.1 100 Continue\r\n\r\n")) &&
+                   ReadN(body, client_fd, remaining);
+            } else {
+              ok = true;
+            }
+            if (body.size() > content_length) {
+              pending.assign(body.data() + content_length,
+                             body.size() - content_length);
+              body.resize(content_length);
+            }
           } else {
             ok = true;
-          }
-          if (body.size() > content_length) {
-            body.resize(content_length);
-          }
-        } else {
-          ok = true;
-          if (!IsWebSocketUpgrade(req))
-            body.clear();
-        }
-        if (ok) {
-          req.body = std::move(body);
-          req.is_cancelled = [client_fd] {
-            return IsPeerDisconnected(client_fd);
-          };
-        }
-      }
-    }
-
-    // Successful health/metrics polling and video status polling stay quiet at
-    // the default level. Under --log-level=debug they become visible, because
-    // "is anything actually arriving?" is the first question an operator asks
-    // when a client reports a hang.
-    const bool log_request =
-        req.method == "POST" || req.method == "DELETE" ||
-        req.path == "/v1/models" || req.path.ends_with("/content") ||
-        req.path == "/v1/realtime" || req.path == "/v1/audio/speech/stream";
-    const LogLevel request_level =
-        log_request ? LogLevel::kInfo : LogLevel::kDebug;
-    // The tier check subsumes the method test: receipt lines are kInfo for
-    // the methods above and kDebug otherwise, so a quiet tier that discards
-    // the line also skips the concatenation that would build it.
-    if (ok && Logger::Enabled(request_level)) {
-      Logger::Log(request_level, "http",
-                  "request=" + req.request_id + " event=received method=" +
-                      req.method + " path=" + req.path +
-                      " body_bytes=" + std::to_string(req.body.size()));
-    }
-
-    HttpResponse resp;
-    if (payload_too_large) {
-      resp = Err(413, "Payload Too Large", "request body is too large",
-                 "invalid_request_error", "payload_too_large");
-    } else if (too_many_fields) {
-      resp = Err(431, "Request Header Fields Too Large",
-                 "request has more than 100 header fields",
-                 "invalid_request_error", "request_header_fields_too_large");
-    } else if (!ok) {
-      resp = Err(400, "Bad Request", "malformed request",
-                 "invalid_request_error", "bad_request");
-    } else if (req.method == "OPTIONS") {
-      resp = {.status = 204, .reason = "No Content"};
-    } else {
-      traced = Trace::Enabled() && IsTracedRoute(req);
-      if (traced) {
-        TraceRequest(req);
-      }
-      resp = handle_request(req);
-    }
-
-    resp.headers.emplace_back("X-Request-ID", req.request_id);
-    response_status = resp.status;
-    bool connected = true;
-    if (resp.websocket) {
-      response_started = true;
-      connected = SendAll(client_fd, BuildResponseHead(resp, std::nullopt));
-      if (connected) {
-        WebSocket socket(client_fd, std::move(req.body));
-        resp.websocket(socket);
-      }
-    } else if (resp.streaming_body) {
-      const bool chunked = http11 && !HasHeader(resp, "content-length");
-      if (chunked)
-        resp.headers.emplace_back("Transfer-Encoding", "chunked");
-      const auto head = BuildResponseHead(resp, std::nullopt);
-      if (!resp.defer_stream_headers) {
-        response_started = true;
-        connected = SendAll(client_fd, head);
-      }
-      if (connected) {
-        std::mutex write_mutex;
-        std::condition_variable_any write_cv;
-        auto last_write = std::chrono::steady_clock::now();
-        const auto send_body = [&](std::string_view chunk) {
-          const std::lock_guard lock(write_mutex);
-          if (!connected)
-            return false;
-          if (!response_started) {
-            response_started = true;
-            connected = chunked ? SendChunk(client_fd, chunk, head)
-                                : SendAll(client_fd, head + std::string(chunk));
-            write_cv.notify_all();
-          } else {
-            connected = chunked ? SendChunk(client_fd, chunk)
-                                : SendAll(client_fd, chunk);
-          }
-          if (connected && !chunk.empty()) {
-            last_write = std::chrono::steady_clock::now();
-            if (traced)
-              traced_stream.append(chunk);
-          }
-          return connected;
-        };
-        std::jthread heartbeat;
-        if (IsEventStream(resp) &&
-            options_.sse_heartbeat_interval.count() > 0) {
-          heartbeat = std::jthread([&](std::stop_token stop) {
-            std::unique_lock lock(write_mutex);
-            write_cv.wait(lock, stop,
-                          [&] { return response_started || !connected; });
-            while (!stop.stop_requested() && connected) {
-              const auto deadline =
-                  last_write + options_.sse_heartbeat_interval;
-              // Stop-aware waiting cannot miss a stop requested just before
-              // sleeping. Ordinary writes only move the deadline; they need
-              // not wake a second thread for every generated token.
-              write_cv.wait_until(lock, stop, deadline,
-                                  [&] { return !connected; });
-              if (!stop.stop_requested() && connected &&
-                  std::chrono::steady_clock::now() >=
-                      last_write + options_.sse_heartbeat_interval) {
-                // SSE comments carry bytes without changing the API event
-                // stream.
-                connected = chunked ? SendChunk(client_fd, ": ping\n\n")
-                                    : SendAll(client_fd, ": ping\n\n");
-                last_write = std::chrono::steady_clock::now();
-                if (traced && connected)
-                  traced_stream.append(": ping\n\n");
-              }
+            if (!websocket) {
+              // Everything after the head is the next pipelined request.
+              pending = std::move(body);
+              body.clear();
             }
-          });
+          }
+          if (ok) {
+            req.body = std::move(body);
+            req.is_cancelled = [client_fd] {
+              return IsPeerDisconnected(client_fd);
+            };
+          }
         }
-        resp.streaming_body(send_body);
-        heartbeat.request_stop();
-        if (heartbeat.joinable())
-          heartbeat.join();
-        // An SSE error is a complete protocol response. A failed raw PCM
-        // stream must remain incomplete, or it looks like valid shorter audio.
-        if (connected && response_started && chunked &&
-            (!resp.stream_log || resp.stream_log->error_code.empty() ||
-             resp.stream_log->error_event_sent))
-          connected = SendAll(client_fd, "0\r\n\r\n");
       }
-    } else {
-      const auto payload = BuildResponse(resp);
-      response_started = true;
-      connected = SendAll(client_fd, payload);
-    }
-    response_sent.store(true, std::memory_order_release);
-    std::string outcome = connected ? "completed" : "disconnected";
-    if (resp.stream_log) {
-      resp.log_details = resp.stream_log->details;
-      if (!resp.stream_log->error_code.empty()) {
-        outcome = "stream_error";
-        resp.log_details += " error_code=" + resp.stream_log->error_code;
+      if (idle_close) {
+        break;
       }
-    }
-    if (resp.status >= 400) {
-      try {
-        const auto body = json::parse(resp.body);
-        if (const auto* error = body.find("error"))
-          resp.log_details += " error_code=" + error->member_str("code");
-      } catch (const std::exception&) {
-        // The status remains useful for an endpoint returning a non-JSON error.
+      if (!ok || payload_too_large || too_many_fields) {
+        // A framing failure may leave unread bytes on the socket.
+        keep_request = false;
       }
+
+      // Successful health/metrics polling and video status polling stay quiet
+      // at the default level. Under --log-level=debug they become visible,
+      // because "is anything actually arriving?" is the first question an
+      // operator asks when a client reports a hang.
+      const bool log_request =
+          req.method == "POST" || req.method == "DELETE" ||
+          req.path == "/v1/models" || req.path.ends_with("/content") ||
+          req.path == "/v1/realtime" || req.path == "/v1/audio/speech/stream";
+      const LogLevel request_level =
+          log_request ? LogLevel::kInfo : LogLevel::kDebug;
+      // The tier check subsumes the method test: receipt lines are kInfo for
+      // the methods above and kDebug otherwise, so a quiet tier that discards
+      // the line also skips the concatenation that would build it.
+      if (ok && Logger::Enabled(request_level)) {
+        Logger::Log(request_level, "http",
+                    "request=" + req.request_id + " event=received method=" +
+                        req.method + " path=" + req.path +
+                        " body_bytes=" + std::to_string(req.body.size()));
+      }
+
+      HttpResponse resp;
+      if (payload_too_large) {
+        resp = Err(413, "Payload Too Large", "request body is too large",
+                   "invalid_request_error", "payload_too_large");
+      } else if (too_many_fields) {
+        resp = Err(431, "Request Header Fields Too Large",
+                   "request has more than 100 header fields",
+                   "invalid_request_error", "request_header_fields_too_large");
+      } else if (!ok) {
+        resp = Err(400, "Bad Request", "malformed request",
+                   "invalid_request_error", "bad_request");
+      } else if (req.method == "OPTIONS") {
+        resp = {.status = 204, .reason = "No Content"};
+      } else {
+        traced = Trace::Enabled() && IsTracedRoute(req);
+        if (traced) {
+          TraceRequest(req);
+        }
+        resp = handle_request(req);
+      }
+
+      resp.headers.emplace_back("X-Request-ID", req.request_id);
+      response_status = resp.status;
+      bool response_keep_alive =
+          keep_request && !resp.websocket && !upgrade_request;
+      // A HEAD response carries no body, so a streamed one cannot be framed
+      // for reuse.
+      const bool head_request = req.method == "HEAD";
+      if (head_request && resp.streaming_body)
+        response_keep_alive = false;
+      // The slot budget is part of the promise: the response that reaches the
+      // request limit says close, so a pooled client does not send a request
+      // the server has already decided to drop.
+      response_keep_alive = response_keep_alive &&
+                            served + 1 < options_.max_requests_per_connection;
+      bool connected = true;
+      if (resp.websocket) {
+        response_started = true;
+        connected = SendAll(client_fd, BuildResponseHead(resp, std::nullopt));
+        if (connected) {
+          WebSocket socket(client_fd, std::move(req.body));
+          resp.websocket(socket);
+        }
+      } else if (resp.streaming_body) {
+        const bool chunked = http11 && !HasHeader(resp, "content-length");
+        // Without chunked framing only the connection close marks the end.
+        response_keep_alive = response_keep_alive && chunked;
+        if (chunked)
+          resp.headers.emplace_back("Transfer-Encoding", "chunked");
+        const auto head =
+            BuildResponseHead(resp, std::nullopt, response_keep_alive);
+        if (!resp.defer_stream_headers) {
+          response_started = true;
+          connected = SendAll(client_fd, head);
+        }
+        if (connected) {
+          std::mutex write_mutex;
+          std::condition_variable_any write_cv;
+          auto last_write = std::chrono::steady_clock::now();
+          const auto send_body = [&](std::string_view chunk) {
+            const std::lock_guard lock(write_mutex);
+            if (!connected)
+              return false;
+            if (!response_started) {
+              response_started = true;
+              connected = chunked
+                              ? SendChunk(client_fd, chunk, head)
+                              : SendAll(client_fd, head + std::string(chunk));
+              write_cv.notify_all();
+            } else {
+              connected = chunked ? SendChunk(client_fd, chunk)
+                                  : SendAll(client_fd, chunk);
+            }
+            if (connected && !chunk.empty()) {
+              last_write = std::chrono::steady_clock::now();
+              if (traced)
+                traced_stream.append(chunk);
+            }
+            return connected;
+          };
+          std::jthread heartbeat;
+          if (IsEventStream(resp) &&
+              options_.sse_heartbeat_interval.count() > 0) {
+            heartbeat = std::jthread([&](std::stop_token stop) {
+              std::unique_lock lock(write_mutex);
+              write_cv.wait(lock, stop,
+                            [&] { return response_started || !connected; });
+              while (!stop.stop_requested() && connected) {
+                const auto deadline =
+                    last_write + options_.sse_heartbeat_interval;
+                // Stop-aware waiting cannot miss a stop requested just before
+                // sleeping. Ordinary writes only move the deadline; they need
+                // not wake a second thread for every generated token.
+                write_cv.wait_until(lock, stop, deadline,
+                                    [&] { return !connected; });
+                if (!stop.stop_requested() && connected &&
+                    std::chrono::steady_clock::now() >=
+                        last_write + options_.sse_heartbeat_interval) {
+                  // SSE comments carry bytes without changing the API event
+                  // stream.
+                  connected = chunked ? SendChunk(client_fd, ": ping\n\n")
+                                      : SendAll(client_fd, ": ping\n\n");
+                  last_write = std::chrono::steady_clock::now();
+                  if (traced && connected)
+                    traced_stream.append(": ping\n\n");
+                }
+              }
+            });
+          }
+          resp.streaming_body(send_body);
+          heartbeat.request_stop();
+          if (heartbeat.joinable())
+            heartbeat.join();
+          // An SSE error is a complete protocol response. A failed raw PCM
+          // stream must remain incomplete, or it looks like valid shorter
+          // audio.
+          bool terminated = false;
+          if (connected && response_started && chunked &&
+              (!resp.stream_log || resp.stream_log->error_code.empty() ||
+               resp.stream_log->error_event_sent)) {
+            connected = SendAll(client_fd, "0\r\n\r\n");
+            terminated = connected;
+          }
+          // An unterminated body ends only when the connection closes, so a
+          // reused connection would leave the client waiting for the idle
+          // timeout before it sees the failure.
+          response_keep_alive = response_keep_alive && terminated;
+        }
+      } else {
+        // HEAD gets the headers, including the body's Content-Length, but
+        // never the body: on a reused connection those bytes would be read
+        // as the start of the next response.
+        const auto payload =
+            head_request
+                ? BuildResponseHead(resp, resp.body.size(), response_keep_alive)
+                : BuildResponse(resp, response_keep_alive);
+        response_started = true;
+        connected = SendAll(client_fd, payload);
+      }
+      // The response is on the wire. Mark it before logging or tracing, which
+      // can park this worker while another connection waits for a slot. A
+      // connection kept for another request is parked from here: it holds no
+      // request, so it does not count toward the limit, and the listener may
+      // close it to admit a new client.
+      {
+        const std::lock_guard<std::mutex> lock(workers_mutex_);
+        // A pipelined request already read is not idle: it stays counted as
+        // serving and is never evicted.
+        const bool continues =
+            connected && response_started && response_keep_alive;
+        was_parked = continues && pending.empty();
+        if (was_parked)
+          parked_since = std::chrono::steady_clock::now();
+        parked.store(was_parked, std::memory_order_release);
+        response_sent.store(!continues || was_parked,
+                            std::memory_order_release);
+      }
+      std::string outcome = connected ? "completed" : "disconnected";
+      if (resp.stream_log) {
+        resp.log_details = resp.stream_log->details;
+        if (!resp.stream_log->error_code.empty()) {
+          outcome = "stream_error";
+          resp.log_details += " error_code=" + resp.stream_log->error_code;
+        }
+      }
+      if (resp.status >= 400) {
+        try {
+          const auto body = json::parse(resp.body);
+          if (const auto* error = body.find("error"))
+            resp.log_details += " error_code=" + error->member_str("code");
+        } catch (const std::exception&) {
+          // The status remains useful for an endpoint returning a non-JSON
+          // error.
+        }
+      }
+      if (Logger::Enabled(request_level) || resp.status >= 400 || !connected) {
+        Logger::LogRequest(req.request_id, req.method, req.path, resp.status,
+                           elapsed_ms(), resp.log_details, outcome,
+                           request_level);
+      }
+      if (traced) {
+        const bool stream = static_cast<bool>(resp.streaming_body);
+        TraceResponse(req.request_id, resp.status, outcome, stream,
+                      stream ? traced_stream : resp.body);
+      }
+      ++served;
+      close_connection =
+          !connected || !response_keep_alive || !response_started;
+    } catch (const TextGenerationError& exception) {
+      const auto duration_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - start_time)
+              .count();
+      HttpResponse resp = TextGenerationErrorResponse(exception);
+      resp.headers.emplace_back("X-Request-ID", req.request_id);
+      Logger::LogRequest(req.request_id, req.method, req.path,
+                         response_started ? response_status : resp.status,
+                         duration_ms,
+                         std::string("error_code=") + exception.stable_code(),
+                         response_started ? "stream_error" : "failed");
+      trace_failure(resp);
+      if (!response_started)
+        (void)SendAll(client_fd, BuildResponse(resp));
+      response_sent.store(true, std::memory_order_release);
+    } catch (const std::exception& e) {
+      const auto duration_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - start_time)
+              .count();
+      const char* message = *e.what() ? e.what() : "generation failed";
+      // Retain the cause in logs alongside the client's stable code.
+      Logger::Error("http", "request=" + req.request_id +
+                                " event=server_exception reason=" + message);
+      HttpResponse resp = Err(500, "Internal Server Error", message,
+                              "internal_error", "server_exception");
+      resp.headers.emplace_back("X-Request-ID", req.request_id);
+      Logger::LogRequest(req.request_id, req.method, req.path,
+                         response_started ? response_status : resp.status,
+                         duration_ms, "error_code=server_exception",
+                         response_started ? "stream_error" : "failed");
+      trace_failure(resp);
+      if (!response_started)
+        (void)SendAll(client_fd, BuildResponse(resp));
+      response_sent.store(true, std::memory_order_release);
+    } catch (...) {
+      const auto duration_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - start_time)
+              .count();
+      HttpResponse resp =
+          Err(500, "Internal Server Error", "unknown server error",
+              "internal_error", "server_exception");
+      resp.headers.emplace_back("X-Request-ID", req.request_id);
+      Logger::LogRequest(req.request_id, req.method, req.path,
+                         response_started ? response_status : resp.status,
+                         duration_ms, "error_code=server_exception",
+                         response_started ? "stream_error" : "failed");
+      trace_failure(resp);
+      if (!response_started)
+        (void)SendAll(client_fd, BuildResponse(resp));
+      response_sent.store(true, std::memory_order_release);
     }
-    if (Logger::Enabled(request_level) || resp.status >= 400 || !connected) {
-      Logger::LogRequest(req.request_id, req.method, req.path, resp.status,
-                         elapsed_ms(), resp.log_details, outcome,
-                         request_level);
+    if (close_connection) {
+      break;
     }
-    if (traced) {
-      const bool stream = static_cast<bool>(resp.streaming_body);
-      TraceResponse(req.request_id, resp.status, outcome, stream,
-                    stream ? traced_stream : resp.body);
-    }
-  } catch (const TextGenerationError& exception) {
-    const auto duration_ms = std::chrono::duration<double, std::milli>(
-                                 std::chrono::steady_clock::now() - start_time)
-                                 .count();
-    HttpResponse resp = TextGenerationErrorResponse(exception);
-    resp.headers.emplace_back("X-Request-ID", req.request_id);
-    Logger::LogRequest(req.request_id, req.method, req.path,
-                       response_started ? response_status : resp.status,
-                       duration_ms,
-                       std::string("error_code=") + exception.stable_code(),
-                       response_started ? "stream_error" : "failed");
-    trace_failure(resp);
-    if (!response_started)
-      (void)SendAll(client_fd, BuildResponse(resp));
-    response_sent.store(true, std::memory_order_release);
-  } catch (const std::exception& e) {
-    const auto duration_ms = std::chrono::duration<double, std::milli>(
-                                 std::chrono::steady_clock::now() - start_time)
-                                 .count();
-    const char* message = *e.what() ? e.what() : "generation failed";
-    // Retain the cause in logs alongside the client's stable code.
-    Logger::Error("http", "request=" + req.request_id +
-                              " event=server_exception reason=" + message);
-    HttpResponse resp = Err(500, "Internal Server Error", message,
-                            "internal_error", "server_exception");
-    resp.headers.emplace_back("X-Request-ID", req.request_id);
-    Logger::LogRequest(req.request_id, req.method, req.path,
-                       response_started ? response_status : resp.status,
-                       duration_ms, "error_code=server_exception",
-                       response_started ? "stream_error" : "failed");
-    trace_failure(resp);
-    if (!response_started)
-      (void)SendAll(client_fd, BuildResponse(resp));
-    response_sent.store(true, std::memory_order_release);
-  } catch (...) {
-    const auto duration_ms = std::chrono::duration<double, std::milli>(
-                                 std::chrono::steady_clock::now() - start_time)
-                                 .count();
-    HttpResponse resp =
-        Err(500, "Internal Server Error", "unknown server error",
-            "internal_error", "server_exception");
-    resp.headers.emplace_back("X-Request-ID", req.request_id);
-    Logger::LogRequest(req.request_id, req.method, req.path,
-                       response_started ? response_status : resp.status,
-                       duration_ms, "error_code=server_exception",
-                       response_started ? "stream_error" : "failed");
-    trace_failure(resp);
-    if (!response_started)
-      (void)SendAll(client_fd, BuildResponse(resp));
-    response_sent.store(true, std::memory_order_release);
   }
+  {
+    const std::lock_guard<std::mutex> lock(workers_mutex_);
+    parked.store(false, std::memory_order_release);
+  }
+  response_sent.store(true, std::memory_order_release);
   // Act on a loss found by this request now, not at the next health probe.
   (void)device_lost();
 }
