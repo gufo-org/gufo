@@ -939,6 +939,8 @@ private:
   static constexpr std::size_t kCompactPenaltyLimit = 4096;
   std::uint32_t* verification_ids_{nullptr};
   std::uint32_t* verification_scratch_ids_{nullptr};
+  std::uint32_t* verification_allowed_masks_{nullptr};
+  std::uint32_t* verification_allowed_masks_host_{nullptr};
   sampling::LogitCandidate* verification_candidates_{nullptr};
   sampling::LogitCandidate* verification_candidates_host_{nullptr};
   mutable std::vector<sampling::TokenPenalty> verification_penalty_host_;

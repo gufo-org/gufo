@@ -48,13 +48,11 @@ if (ENGINE_ENABLE_HIP)
     ${QFN_MMQ_DIR}/qfn_mmq.hip.cpp
     ${QFN_MMQ_DIR}/mmid.hip.cpp
     ${QFN_MMQ_DIR}/mmvq.hip.cpp
-    ${QFN_MMQ_DIR}/moe_wave64.hip.cpp
+    ${QFN_MMQ_DIR}/moe_wave32.hip.cpp
     ${QFN_MMQ_DIR}/quantize.hip.cpp)
 
   add_library(gufo_qwen38_flash_next_mmq STATIC ${QFN_MMQ_SOURCES})
   set_source_files_properties(${QFN_MMQ_SOURCES} PROPERTIES LANGUAGE HIP)
-  set_source_files_properties(${QFN_MMQ_DIR}/moe_wave64.hip.cpp
-    PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
   set_target_properties(gufo_qwen38_flash_next_mmq PROPERTIES
     HIP_STANDARD 17
     HIP_STANDARD_REQUIRED ON

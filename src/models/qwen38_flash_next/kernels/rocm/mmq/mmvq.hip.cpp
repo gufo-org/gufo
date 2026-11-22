@@ -39,8 +39,8 @@ __launch_bounds__(32 * token_waves, 1) static __global__
           weights, input + token * stride_col_y + kbx,
           row_offset + kbx, kqs);
       if constexpr (has_gate) {
-        gate_sum[j] += vec_dot_q8_0_q8_1(gate, input + j * stride_col_y + kbx,
-                                         row_offset + kbx, kqs);
+        gate_sum[j] += vec_dot_q8_0_q8_1(
+            gate, input + token * stride_col_y + kbx, row_offset + kbx, kqs);
       }
     }
   }
@@ -548,18 +548,22 @@ __launch_bounds__(64) static __global__
 }
 
 // Group equal experts across the complete request batch. Each distinct token
-// appears once; its mask retains duplicate output slots. The append order
-// affects scheduling only: no two groups write the same output element.
-static __global__ void group_moe_batch(const int32_t* ids, int32_t* storage,
-                                       int tokens, int experts_used) {
+// appears once; its mask retains duplicate output slots. Experts shared by
+// 2..8 tokens append a multi-token group, experts one token uses append a
+// single-token group. The append order affects scheduling only: no two groups
+// write the same output element.
+static __global__ void group_moe_batch_split(const int32_t* ids,
+                                             int32_t* storage, int tokens,
+                                             int experts_used) {
   const int anchor = blockIdx.x * blockDim.x + threadIdx.x;
   if (anchor >= tokens * experts_used)
     return;
   const int expert = ids[anchor];
   const int first = anchor / experts_used;
-  auto* groups = reinterpret_cast<MoeBatchGroup*>(storage + 1);
+  auto* multi_groups = reinterpret_cast<MoeBatchGroup*>(storage + 2);
+  auto* single_groups = multi_groups + tokens * experts_used;
   if (expert < 0) {
-    auto& group = groups[atomicAdd(storage, 1)];
+    auto& group = multi_groups[atomicAdd(storage, 1)];
     group.expert = -2;
     group.anchor = anchor;
     return;
@@ -576,9 +580,9 @@ static __global__ void group_moe_batch(const int32_t* ids, int32_t* storage,
   }
   if (before % MMVQ_MAX_BATCH_SIZE != 0)
     return;
-  auto& group = groups[atomicAdd(storage, 1)];
-  group.expert = expert;
-  group.anchor = anchor;
+  MoeBatchGroup g;
+  g.expert = expert;
+  g.anchor = anchor;
   int count = 0;
   for (int t = first; t < tokens && count < MMVQ_MAX_BATCH_SIZE; ++t) {
     uint32_t mask = 0;
@@ -586,14 +590,23 @@ static __global__ void group_moe_batch(const int32_t* ids, int32_t* storage,
       if (ids[t * experts_used + j] == expert)
         mask |= uint32_t{1} << j;
     if (mask) {
-      group.token[count] = t;
-      group.slots[count++] = mask;
+      g.token[count] = t;
+      g.slots[count++] = mask;
     }
   }
-  for (; count < MMVQ_MAX_BATCH_SIZE; ++count) {
-    group.token[count] = 0;
-    group.slots[count] = 0;
+  if (count == 1) {
+    auto& group = single_groups[atomicAdd(storage + 1, 1)];
+    group.expert = expert;
+    group.anchor = anchor;
+    group.token[0] = g.token[0];
+    group.slots[0] = g.slots[0];
+    return;
   }
+  for (int i = count; i < MMVQ_MAX_BATCH_SIZE; ++i) {
+    g.token[i] = 0;
+    g.slots[i] = 0;
+  }
+  multi_groups[atomicAdd(storage, 1)] = g;
 }
 
 
@@ -653,16 +666,18 @@ static void launch_q8(const void* weights, const void* gate, const block_q8_1* i
     }
 }
 
-template<int waves>
-static void launch_q8_batch(const void* weights, const block_q8_1* input,
-                            float* output, int k, int rows, int tokens,
-                            int input_stride, hipStream_t stream) {
+template<int waves, bool has_gate = false>
+static void launch_q8_batch(const void* weights, const void* gate,
+                            const block_q8_1* input, float* output, int k,
+                            int rows, int tokens, int input_stride,
+                            hipStream_t stream) {
   if (tokens % 8 != 0) {
-    mul_mat_vec_q8<8, false, waves, true><<<rows, 32 * waves, 0, stream>>>(
-        weights, nullptr, input, output, k, rows, input_stride, tokens);
+    mul_mat_vec_q8<8, has_gate, waves, true>
+        <<<rows, 32 * waves, 0, stream>>>(weights, gate, input, output, k, rows,
+                                          input_stride, tokens);
   } else {
-    mul_mat_vec_q8<8, false, waves><<<rows, 32 * waves, 0, stream>>>(
-        weights, nullptr, input, output, k, rows, input_stride, tokens);
+    mul_mat_vec_q8<8, has_gate, waves><<<rows, 32 * waves, 0, stream>>>(
+        weights, gate, input, output, k, rows, input_stride, tokens);
   }
 }
 
@@ -692,12 +707,89 @@ int prepare_q8_decode() {
              : -2;
 }
 
+// Q4_K dense projection (the MTP draft head) of 1..8 rows: each wave reads a
+// weight row once and keeps the routed-expert Q4MoeFragment dot and 32-lane
+// reduction per input, so a row's logits do not depend on the batch width.
+template<int ncols_dst>
+__launch_bounds__(32, 1) static __global__
+    void mul_mat_vec_q4k_dense(const void* __restrict__ weights,
+                               const block_q8_1* __restrict__ input,
+                               float* __restrict__ output,
+                               const uint32_t ncols_x, const uint32_t nrows_x,
+                               const uint32_t stride_col_y) {
+  constexpr int qi = QI4_K;
+  constexpr int vdr = VDR_Q4_K_Q8_1_MMVQ;
+  constexpr int blocks_per_iter = vdr * 32 / qi;
+  const int lane = threadIdx.x;
+  const int row = blockIdx.x;
+  const int blocks_per_row = ncols_x / QK_K;
+  const int row_offset = row * blocks_per_row;
+  const int kqs = vdr * (lane % (qi / vdr));
+  float sum[ncols_dst] = {};
+  for (int kbx = lane / (qi / vdr); kbx < blocks_per_row;
+       kbx += blocks_per_iter) {
+    const int kby = kbx * (QK_K / QK8_1);
+    const Q4MoeFragment w(weights, row_offset + kbx, kqs);
+#pragma unroll
+    for (int j = 0; j < ncols_dst; ++j)
+      sum[j] += w.Dot(input + j * stride_col_y + kby, kqs);
+  }
+#pragma unroll
+  for (int j = 0; j < ncols_dst; ++j) {
+    sum[j] = warp_reduce_sum<32>(sum[j]);
+    if (lane == 0)
+      output[j * nrows_x + row] = sum[j];
+  }
+}
+
+template<int tokens>
+static void launch_q4k(const void* weights, const block_q8_1* input,
+                       float* output, int k, int rows, int input_stride,
+                       hipStream_t stream) {
+  mul_mat_vec_q4k_dense<tokens><<<rows, 32, 0, stream>>>(
+      weights, input, output, k, rows, input_stride);
+}
+
+void mul_mat_vec_q4k_dense_dispatch(const void* weights,
+                                    const block_q8_1* input, float* output,
+                                    int k, int rows, int tokens,
+                                    int input_stride, hipStream_t stream) {
+  GGML_ASSERT(k % QK_K == 0 && rows > 0 && tokens >= 1 && tokens <= 8);
+  switch (tokens) {
+    case 1:
+      launch_q4k<1>(weights, input, output, k, rows, input_stride, stream);
+      break;
+    case 2:
+      launch_q4k<2>(weights, input, output, k, rows, input_stride, stream);
+      break;
+    case 3:
+      launch_q4k<3>(weights, input, output, k, rows, input_stride, stream);
+      break;
+    case 4:
+      launch_q4k<4>(weights, input, output, k, rows, input_stride, stream);
+      break;
+    case 5:
+      launch_q4k<5>(weights, input, output, k, rows, input_stride, stream);
+      break;
+    case 6:
+      launch_q4k<6>(weights, input, output, k, rows, input_stride, stream);
+      break;
+    case 7:
+      launch_q4k<7>(weights, input, output, k, rows, input_stride, stream);
+      break;
+    case 8:
+      launch_q4k<8>(weights, input, output, k, rows, input_stride, stream);
+      break;
+  }
+}
+
 void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
                              const block_q8_1* input, float* output, int k,
                              int rows, int tokens, int input_stride,
                              hipStream_t stream) {
-  const bool matrix_shape =
-      (k == 2560 && rows >= 1024) || (k == 320 && rows == 10240);
+  // Every ungated projection of at least 256 rows (k is a multiple of QK8_0)
+  // keeps the eight-row vector arithmetic in the integer matrix tiles.
+  const bool matrix_shape = rows >= 256 && k % QK8_0 == 0;
   if (!gate && matrix_shape && tokens > 48 && tokens % 32 == 0) {
     // Independent 32-row tiles retain the cache-invariant arithmetic.
     // Put the tile loop in the grid instead of launching once per tile.
@@ -721,18 +813,31 @@ void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
   }
   GGML_ASSERT(k % QK8_0 == 0 && rows > 0);
   if (tokens > 8) {
-    GGML_ASSERT(tokens <= 32 && !gate);
+    GGML_ASSERT(tokens <= 32);
     // Each wave retains the eight-row arithmetic. Adjacent waves work
     // on the same weight row, reusing cache lines across requests.
-    if (tokens <= 16) {
-      launch_q8_batch<2>(weights, input, output, k, rows, tokens, input_stride,
-                          stream);
-    } else if (tokens <= 24) {
-      launch_q8_batch<3>(weights, input, output, k, rows, tokens, input_stride,
-                          stream);
+    if (gate) {
+      if (tokens <= 16) {
+        launch_q8_batch<2, true>(weights, gate, input, output, k, rows, tokens,
+                                 input_stride, stream);
+      } else if (tokens <= 24) {
+        launch_q8_batch<3, true>(weights, gate, input, output, k, rows, tokens,
+                                 input_stride, stream);
+      } else {
+        launch_q8_batch<4, true>(weights, gate, input, output, k, rows, tokens,
+                                 input_stride, stream);
+      }
     } else {
-      launch_q8_batch<4>(weights, input, output, k, rows, tokens, input_stride,
-                          stream);
+      if (tokens <= 16) {
+        launch_q8_batch<2, false>(weights, nullptr, input, output, k, rows,
+                                  tokens, input_stride, stream);
+      } else if (tokens <= 24) {
+        launch_q8_batch<3, false>(weights, nullptr, input, output, k, rows,
+                                  tokens, input_stride, stream);
+      } else {
+        launch_q8_batch<4, false>(weights, nullptr, input, output, k, rows,
+                                  tokens, input_stride, stream);
+      }
     }
     return;
   }
@@ -845,10 +950,11 @@ void mul_mat_vec_moe_gated(const void* gate, const void* up, ggml_type type,
   GGML_ASSERT(tokens > 0 && tokens <= MMVQ_MAX_ROUTED_BATCH);
   if (tokens > MMVQ_MAX_BATCH_SIZE) {
     GGML_ASSERT(type == GGML_TYPE_Q4_K && groups && experts_used <= 32);
-    group_moe_batch<<<(tokens * experts_used + 127) / 128, 128, 0, stream>>>(
-        ids, groups, tokens, experts_used);
-    mul_mat_vec_moe_batch_wave64(gate, up, input, groups, output, k, rows,
-                                 experts_used, input_stride, stream);
+    group_moe_batch_split<<<(tokens * experts_used + 127) / 128, 128, 0,
+                            stream>>>(ids, groups, tokens, experts_used);
+    mul_mat_vec_moe_batch_wave32_split(gate, up, input, groups, output, k, rows,
+                                       tokens, experts_used, input_stride,
+                                       stream);
     return;
   }
   if (tokens > 1) {

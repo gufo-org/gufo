@@ -691,7 +691,10 @@ void GatherArgmaxCandidates(const float* logits, const std::uint32_t* ids,
 void VerificationCandidates(const float* logits, GreedyPenaltyRows penalties,
                             std::uint32_t* ids, std::uint32_t* scratch_ids,
                             sampling::LogitCandidate* out, std::uint32_t rows,
-                            std::uint32_t vocab, hipStream_t stream);
+                            std::uint32_t vocab, hipStream_t stream,
+                            const std::uint32_t* allowed_masks = nullptr,
+                            std::uint32_t mask_stride = 0,
+                            std::uint32_t mask_active = 0);
 
 /// GGML Q4_K bytes for Q8_0 rows (cols a multiple of 256), computed with
 /// ggml's reference quantize_row_q4_K_ref arithmetic on the dequantized

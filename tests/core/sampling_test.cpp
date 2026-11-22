@@ -548,7 +548,132 @@ void TestRawLogprobs() {
   }
 }
 
+// The constrained top-k fast path and the compact-candidate path must equal
+// masking the full row and sampling it without the constraint.
+void TestConstrainedTopKMatchesMaskedRow() {
+  using gufo::sampling::LogitCandidate;
+  std::uint64_t rng = 0x1234567;
+  const auto next = [&] {
+    rng ^= rng << 13;
+    rng ^= rng >> 7;
+    rng ^= rng << 17;
+    return rng;
+  };
+  const std::vector<std::string> fragments{
+      "{",     "}", "\"x\"", ":",        "1",       "2",       "true",
+      "false", ",", " ",     "\"",       "a",       "{\"x\":", "null",
+      "[",     "]", "prose", "</think>", "thinking"};
+  std::size_t compared = 0, compact = 0;
+  for (int trial = 0; trial < 600; ++trial) {
+    const std::size_t vocab = 64 + next() % 3000;
+    std::vector<std::string> pieces(vocab);
+    for (std::size_t i = 0; i + 1 < vocab; ++i)
+      pieces[i] = fragments[next() % fragments.size()];
+    auto binding = std::make_shared<TokenConstraint>();
+    binding->grammar =
+        trial % 2 == 0
+            ? JsonConstraint::Object()
+            : JsonConstraint::WithReasoning(JsonConstraint::Object());
+    binding->vocabulary =
+        std::make_shared<ConstraintVocabulary>(vocab, [&](std::uint32_t i) {
+          return ConstraintVocabulary::Piece{pieces[i], i + 1 == vocab};
+        });
+    SamplingConfig config;
+    config.temperature = 0.2F + static_cast<float>(next() % 100) / 100.0F;
+    config.top_k = static_cast<std::int32_t>(1 + next() % 80);
+    if (next() % 2)
+      config.top_p = 0.5F + static_cast<float>(next() % 50) / 100.0F;
+    if (next() % 3 == 0)
+      config.min_p = static_cast<float>(next() % 20) / 100.0F;
+    config.min_keep = next() % 4;
+    if (next() % 2)
+      config.presence_penalty = static_cast<float>(next() % 41) / 10.0F - 2.0F;
+    if (next() % 2)
+      config.frequency_penalty = static_cast<float>(next() % 41) / 10.0F - 2.0F;
+    if (next() % 3 == 0)
+      config.repeat_penalty = 1.0F + static_cast<float>(next() % 5) / 10.0F;
+    config.constraint = binding;
+    std::vector<TokenId> prompt(next() % 40);
+    for (auto& token : prompt)
+      token = static_cast<TokenId>(next() % vocab);
+    SamplerState sampler(config, prompt);
+    // Walk a few grammar steps through allowed tokens.
+    const std::size_t steps = next() % 6;
+    for (std::size_t step = 0; step < steps; ++step) {
+      std::vector<TokenId> allowed;
+      for (TokenId t = 0; t < vocab; ++t)
+        if (sampler.AllowsToken(t))
+          allowed.push_back(t);
+      if (allowed.empty())
+        break;
+      sampler.Accept(allowed[next() % allowed.size()]);
+    }
+    std::vector<float> logits(vocab);
+    const bool ties = next() % 2;
+    for (auto& v : logits)
+      v = ties ? static_cast<float>(next() % 16) / 4.0F - 2.0F
+               : static_cast<float>(
+                     static_cast<double>(next() % 100000) / 10000.0 - 5.0);
+    if (next() % 4 == 0)
+      logits[next() % vocab] = -std::numeric_limits<float>::infinity();
+    std::vector<float> masked(logits);
+    bool any = false;
+    for (TokenId t = 0; t < vocab; ++t) {
+      if (!sampler.AllowsToken(t))
+        masked[t] = -std::numeric_limits<float>::infinity();
+      else
+        any = any || std::isfinite(masked[t]);
+    }
+    if (!any || sampler.ForcedToken())
+      continue;
+    const auto expected = sampler.WithoutConstraint().Distribution(masked);
+    const auto same = [&](const gufo::sampling::SamplingDistribution& actual,
+                          std::string_view what) {
+      Expect(expected.entries().size() == actual.entries().size(), what);
+      for (std::size_t i = 0; i < expected.entries().size(); ++i)
+        Expect(expected.entries()[i].token == actual.entries()[i].token &&
+                   std::bit_cast<std::uint64_t>(expected.entries()[i].value) ==
+                       std::bit_cast<std::uint64_t>(actual.entries()[i].value),
+               what);
+    };
+    same(sampler.Distribution(logits), "constrained top-k equals masked row");
+    ++compared;
+    // GPU candidate layout: the top 64 unpenalized logits (optionally only
+    // allowed ones), then every penalized token with its raw logit.
+    std::vector<bool> penalized(vocab, false);
+    for (const auto& penalty : sampler.penalties())
+      penalized[penalty.token] = true;
+    const bool gpu_mask = next() % 2;
+    std::vector<LogitCandidate> pool;
+    for (TokenId t = 0; t < vocab; ++t)
+      if (!penalized[t] && (!gpu_mask || sampler.AllowsToken(t)))
+        pool.push_back({t, std::isfinite(logits[t])
+                               ? logits[t]
+                               : -std::numeric_limits<float>::infinity()});
+    std::stable_sort(pool.begin(), pool.end(),
+                     [](auto a, auto b) { return a.value > b.value; });
+    std::vector<LogitCandidate> candidates;
+    for (std::size_t i = 0; i < 64; ++i)
+      candidates.push_back(
+          i < pool.size() && std::isfinite(pool[i].value)
+              ? pool[i]
+              : LogitCandidate{UINT32_MAX,
+                               -std::numeric_limits<float>::infinity()});
+    for (const auto& penalty : sampler.penalties())
+      candidates.push_back({penalty.token, logits[penalty.token]});
+    if (const auto actual =
+            sampler.TryDistributionFromCandidates(candidates, 64)) {
+      same(*actual, "constrained compact candidates equal masked row");
+      ++compact;
+    }
+  }
+  std::cout << "constrained fuzz: " << compared << " rows, " << compact
+            << " compact\n";
+  Expect(compared > 300 && compact > 50, "fuzz covered both paths");
+}
+
 int main() {
+  TestConstrainedTopKMatchesMaskedRow();
   TestBlockMaximum();
   TestRawLogprobs();
   TestReasoningBudgetForcesTheEnd();

@@ -19,6 +19,11 @@ constexpr std::uint32_t kDecodeRows = 8;
 static_assert(kBatchSessions * kDecodeRows <= Executor::kHookParkedRows,
               "a batched decode inside a layer hook must fit the parked rows");
 
+bool UnpaddedQ8(std::uint32_t k) noexcept {
+  return k % 32 == 0 &&
+         qfn_mmq_q8_1_bytes(1, static_cast<int>(k)) == k / 32 * 36;
+}
+
 bool Fail(std::string* error, const std::string& message) {
   if (error != nullptr) {
     *error = message;
@@ -143,34 +148,76 @@ bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
                           std::string* error) const {
   const auto& c = config();
   xn_half_ = false;
-  DropReadyQ8();  // the batched route rewrites xn and mixed unfused
-  if (!normed)
+  mixed_q8_ready_ = {};
+  if (!normed) {
+    xn_q8_ready_ = {};
+    q8t_src_ = nullptr;
     RmsNormRows(res, m.norm.f32(), s_.xn, rows, c.HcDim(), c.hc_count,
                 c.rms_eps, stream_);
+  }
   if (!DenseBatch(m.down, s_.xn, s_.lo, rows, error))
     return false;
-  SiluScale(s_.lo, 1.0F / static_cast<float>(c.hc_count),
-            std::size_t{rows} * c.hc_low_rank, stream_);
-  if (!DenseBatch(m.up, s_.lo, s_.hc_gate, rows, error))
-    return false;
+  const float scale = 1.0F / static_cast<float>(c.hc_count);
+  const std::uint32_t lo_q8_cols = static_cast<std::uint32_t>(
+      qfn_mmq_q8_1_bytes(1, static_cast<int>(c.hc_low_rank)) / 36 * 32);
+  bool up_done = false;
+  if (m.up.type == core::GgmlType::kQ8_0 && m.up.cols == c.hc_low_rank) {
+    if (rows <= kDecodeRows && SiluScaleQ8_1(s_.lo, scale, rows, c.hc_low_rank,
+                                             lo_q8_cols, s_.lo_q8_1, stream_)) {
+      if (!Dense(m.up, Q8Input{s_.lo, s_.lo_q8_1, rows, c.hc_low_rank},
+                 s_.hc_gate, error))
+        return false;
+      up_done = true;
+    } else if (rows > kDecodeRows) {
+      const auto padded = (rows + kDecodeRows - 1) / kDecodeRows * kDecodeRows;
+      if (qfn_mmq_q8_1_bytes(padded, c.hc_low_rank) <=
+              Q8TiledBytes(scratch_rows_, model_->max_q8_cols()) &&
+          SiluScaleQ8_1(s_.lo, scale, rows, c.hc_low_rank, lo_q8_cols, s_.x_q8t,
+                        stream_)) {
+        q8t_src_ = s_.lo;
+        q8t_rows_ = rows;
+        q8t_cols_ = c.hc_low_rank;
+        if (!DenseBatch(m.up, s_.lo, s_.hc_gate, rows, error))
+          return false;
+        up_done = true;
+      }
+    }
+  }
+  if (!up_done) {
+    SiluScale(s_.lo, scale, std::size_t{rows} * c.hc_low_rank, stream_);
+    if (!DenseBatch(m.up, s_.lo, s_.hc_gate, rows, error))
+      return false;
+  }
   const bool fused_inject = inject != nullptr && !m.inject.empty() &&
                             m.inject.type == core::GgmlType::kF32;
+  const bool separate_inject =
+      inject != nullptr && !m.inject.empty() && !fused_inject;
   q8t_src_ = nullptr;
   half_src_ = nullptr;
-  // Keep each row's scalar epilogue/reduction independently of the total
-  // row count, including prompt replay and concatenated decode batches.
-  // Decode-sized projections can consume the epilogue's exact Q8_1 rows.
-  // Wider batches retain their existing tiled/padded quantization route.
-  const bool q8 = rows <= kDecodeRows && c.hidden_size % 32 == 0 &&
-                  qfn_mmq_q8_1_bytes(1, static_cast<int>(c.hidden_size)) ==
-                      c.hidden_size / 32 * 36;
+  void* mixed_q8 = nullptr;
+  if (UnpaddedQ8(c.hidden_size)) {
+    if (rows <= kDecodeRows) {
+      mixed_q8 = s_.mixed_q8_1;
+    } else if (!separate_inject) {
+      const auto padded = (rows + kDecodeRows - 1) / kDecodeRows * kDecodeRows;
+      if (qfn_mmq_q8_1_bytes(padded, c.hidden_size) <=
+          Q8TiledBytes(scratch_rows_, model_->max_q8_cols())) {
+        mixed_q8 = s_.x_q8t;
+      }
+    }
+  }
   HcMixEpilogue(s_.xn, s_.hc_gate, fused_inject ? m.inject.f32() : nullptr,
                 mixed, inject, rows, c.hidden_size, c.hc_count, stream_,
-                q8 ? s_.mixed_q8_1 : nullptr);
-  if (q8)
+                mixed_q8);
+  if (mixed_q8 == s_.mixed_q8_1) {
     mixed_q8_ready_ = {mixed, s_.mixed_q8_1, rows, c.hidden_size};
+  } else if (mixed_q8 == s_.x_q8t) {
+    q8t_src_ = mixed;
+    q8t_rows_ = rows;
+    q8t_cols_ = c.hidden_size;
+  }
   inject_parts_ = fused_inject ? HcInjectParts(c.hidden_size) : 1;
-  if (inject != nullptr && !m.inject.empty() && !fused_inject) {
+  if (separate_inject) {
     if (!DenseBatch(m.inject, s_.xn, inject, rows, error))
       return false;
   }
@@ -181,6 +228,28 @@ void Executor::CombineBatch(float* res, const float* gamma,
                             std::uint32_t rows) const {
   const auto& c = config();
   DropReadyQ8();
+  q8t_src_ = nullptr;
+  if (gamma != nullptr && UnpaddedQ8(c.HcDim())) {
+    if (rows <= kDecodeRows &&
+        HcCombineQ8_1(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn,
+                      s_.xn_q8_1, rows, c.hidden_size, c.hc_count, c.rms_eps,
+                      stream_)) {
+      xn_q8_ready_ = {s_.xn, s_.xn_q8_1, rows, c.HcDim()};
+      return;
+    }
+    const auto padded = (rows + kDecodeRows - 1) / kDecodeRows * kDecodeRows;
+    if (rows > kDecodeRows &&
+        qfn_mmq_q8_1_bytes(padded, c.HcDim()) <=
+            Q8TiledBytes(scratch_rows_, model_->max_q8_cols()) &&
+        HcCombineQ8_1(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn,
+                      s_.x_q8t, rows, c.hidden_size, c.hc_count, c.rms_eps,
+                      stream_)) {
+      q8t_src_ = s_.xn;
+      q8t_rows_ = rows;
+      q8t_cols_ = c.HcDim();
+      return;
+    }
+  }
   HcCombine(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn, rows,
             c.hidden_size, c.hc_count, c.rms_eps, stream_, true);
 }
@@ -699,6 +768,9 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
 
 bool Executor::QuantizeBatch(const float* x, std::uint32_t rows,
                              std::uint32_t cols, std::string* error) const {
+  if (q8t_src_ == x && q8t_rows_ == rows && q8t_cols_ == cols) {
+    return true;
+  }
   // Quantize once for all independent rows. The prefill staging allocation
   // is idle during batch decoding; borrow it without adding another buffer.
   const auto padded = (rows + kDecodeRows - 1) / kDecodeRows * kDecodeRows;
@@ -707,15 +779,12 @@ bool Executor::QuantizeBatch(const float* x, std::uint32_t rows,
     return Fail(error, "batched projection exceeds activation scratch");
   void* quantized = s_.x_q8t;
   q8t_src_ = nullptr;
-  if (padded != rows &&
-      !Check(
-          hipMemsetAsync(static_cast<std::uint8_t*>(quantized) +
-                             qfn_mmq_q8_1_bytes(rows, cols),
-                         0, qfn_mmq_q8_1_bytes(padded - rows, cols), stream_),
-          error))
-    return false;
-  return qfn_mmq_quantize_q8_1(x, quantized, rows, cols, stream_) == 0 ||
-         Fail(error, "batched activation quantization failed");
+  if (qfn_mmq_quantize_q8_1(x, quantized, rows, cols, stream_) != 0)
+    return Fail(error, "batched activation quantization failed");
+  q8t_src_ = x;
+  q8t_rows_ = rows;
+  q8t_cols_ = cols;
+  return true;
 }
 
 bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
@@ -807,17 +876,26 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
     return false;
   if (l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
       l.ffn_up_exps.type == core::GgmlType::kQ4_K) {
+    const bool reuse_q8 =
+        q8t_src_ == x && q8t_rows_ == rows && q8t_cols_ == c.hidden_size;
     // Share expert weights across request boundaries while retaining the
     // scalar Q8 activation quantization and dot-product reduction.
-    if (qfn_mmq_moe_gated_vec(static_cast<int>(l.ffn_gate_exps.type),
-                              l.ffn_gate_exps.data, l.ffn_up_exps.data, x,
-                              base.ids, base.gate_e, c.expert_ff, c.hidden_size,
-                              rows, c.num_experts, c.num_experts_used,
-                              stream_) != 0 ||
-        qfn_mmq_moe_vec(
-            static_cast<int>(l.ffn_down_exps.type), l.ffn_down_exps.data,
-            base.gate_e, base.ids, base.down_e, c.hidden_size, c.expert_ff,
-            rows * c.num_experts_used, c.num_experts, 1, stream_) != 0)
+    const int gu_rc =
+        reuse_q8 ? qfn_mmq_moe_gated_vec_preq(
+                       static_cast<int>(l.ffn_gate_exps.type),
+                       l.ffn_gate_exps.data, l.ffn_up_exps.data, base.x_q8t,
+                       base.ids, base.gate_e, c.expert_ff, c.hidden_size, rows,
+                       c.num_experts, c.num_experts_used, stream_)
+                 : qfn_mmq_moe_gated_vec(
+                       static_cast<int>(l.ffn_gate_exps.type),
+                       l.ffn_gate_exps.data, l.ffn_up_exps.data, x, base.ids,
+                       base.gate_e, c.expert_ff, c.hidden_size, rows,
+                       c.num_experts, c.num_experts_used, stream_);
+    if (gu_rc != 0 || qfn_mmq_moe_vec(static_cast<int>(l.ffn_down_exps.type),
+                                      l.ffn_down_exps.data, base.gate_e,
+                                      base.ids, base.down_e, c.hidden_size,
+                                      c.expert_ff, rows * c.num_experts_used,
+                                      c.num_experts, 1, stream_) != 0)
       return Fail(error, "batched routed vector projection failed");
     MoeEpilogue(base.down_e, base.weights, base.shexp_out,
                 base.router + c.num_experts, c.num_experts + 1, out, rows,

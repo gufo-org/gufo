@@ -2963,7 +2963,7 @@ bool ConstraintVocabulary::Allows(const JsonConstraint& grammar,
   return true;
 }
 
-std::shared_ptr<const std::vector<std::uint8_t>> TokenConstraint::Allowed(
+TokenConstraint::MaskEntry TokenConstraint::LookupOrBuild(
     const JsonConstraint::State& state) const {
   auto canonical =
       grammar->CanonicalMaskState(state, vocabulary->max_token_bytes_);
@@ -2972,23 +2972,62 @@ std::shared_ptr<const std::vector<std::uint8_t>> TokenConstraint::Allowed(
     if (initial_state_.empty())
       initial_state_ = grammar->CanonicalMaskState(
           grammar->Start(), vocabulary->max_token_bytes_);
-    if (const auto found = masks_.find(canonical); found != masks_.end())
-      return found->second;
+    if (const auto found = masks_.find(canonical); found != masks_.end()) {
+      lru_.splice(lru_.begin(), lru_, found->second.lru);
+      return found->second.entry;
+    }
   }
-  auto mask = std::make_shared<const std::vector<std::uint8_t>>(
+  auto bytes = std::make_shared<std::vector<std::uint8_t>>(
       vocabulary->Allowed(*grammar, canonical));
-  const std::lock_guard lock(mutex_);
-  if (const auto found = masks_.find(canonical); found != masks_.end())
-    return found->second;
-  if (masks_.size() >= 16) {
-    // Every request needs the initial mask, even when the model state is
-    // cached. Keep it within the same 16-entry budget instead of rebuilding
-    // the entire vocabulary mask after each completed native call.
-    auto victim = masks_.begin();
-    if (victim->first == initial_state_)
-      ++victim;
-    masks_.erase(victim);
+  auto bits = std::make_shared<TokenBitmask>();
+  bits->words.assign((bytes->size() + 31U) / 32U, 0U);
+  for (std::size_t i = 0; i < bytes->size(); ++i) {
+    if ((*bytes)[i] != 0)
+      bits->words[i >> 5] |= (std::uint32_t{1} << (i & 31U));
+    else
+      bits->restricts = true;
   }
-  return masks_.emplace(std::move(canonical), std::move(mask)).first->second;
+  MaskEntry entry{std::move(bytes), std::move(bits)};
+  const std::lock_guard lock(mutex_);
+  if (const auto found = masks_.find(canonical); found != masks_.end()) {
+    lru_.splice(lru_.begin(), lru_, found->second.lru);
+    return found->second.entry;
+  }
+  // Each entry holds a byte and a bit mask of the whole vocabulary (about
+  // 280 KiB for a 248K-token model). Long tool calls revisit at most a few
+  // dozen canonical states, so 128 entries keep them without unbounded RAM.
+  if (masks_.size() >= kMaskCacheEntries) {
+    // Every request needs the initial mask, even when the model state is
+    // cached. Keep it within the LRU budget instead of rebuilding the entire
+    // vocabulary mask after each completed native call.
+    auto victim = std::prev(lru_.end());
+    if (*victim == initial_state_ && victim != lru_.begin())
+      --victim;
+    masks_.erase(*victim);
+    lru_.erase(victim);
+  }
+  auto [slot, inserted] =
+      masks_.emplace(std::move(canonical), CacheSlot{std::move(entry), {}});
+  (void)inserted;
+  lru_.push_front(slot->first);
+  slot->second.lru = lru_.begin();
+  return slot->second.entry;
+}
+
+std::shared_ptr<const std::vector<std::uint8_t>> TokenConstraint::Allowed(
+    const JsonConstraint::State& state) const {
+  return LookupOrBuild(state).bytes;
+}
+
+std::shared_ptr<const TokenBitmask> TokenConstraint::LookupCachedBitmask(
+    const JsonConstraint::State& state) const {
+  auto canonical =
+      grammar->CanonicalMaskState(state, vocabulary->max_token_bytes_);
+  const std::lock_guard lock(mutex_);
+  const auto found = masks_.find(canonical);
+  if (found == masks_.end())
+    return nullptr;
+  lru_.splice(lru_.begin(), lru_, found->second.lru);
+  return found->second.entry.bits;
 }
 }  // namespace gufo::sampling

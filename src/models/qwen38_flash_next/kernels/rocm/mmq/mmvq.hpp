@@ -25,6 +25,11 @@ void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
                             const block_q8_1* input, float* output,
                             int k, int rows, int tokens, int input_stride,
                             hipStream_t stream);
+// Q4_K dense rows for 1..8 tokens (the MTP draft head).
+void mul_mat_vec_q4k_dense_dispatch(const void* weights,
+                                    const block_q8_1* input, float* output,
+                                    int k, int rows, int tokens,
+                                    int input_stride, hipStream_t stream);
 void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
                              const block_q8_1* input, const int32_t* ids, float* output,
                              int k, int rows, int tokens, int experts_used,
@@ -42,8 +47,13 @@ void mul_mat_vec_moe_gated(const void* gate, const void* up, ggml_type type,
                            int tokens, int experts_used, int input_stride,
                            hipStream_t stream);
 
-void mul_mat_vec_moe_batch_wave64(const void* gate, const void* up,
-                                 const block_q8_1* input, const int32_t* groups,
-                                 float* output, int k, int rows,
-                                 int experts_used, int input_stride,
-                                 hipStream_t stream);
+// Rows over MMVQ_MAX_BATCH_SIZE: experts shared by 2..8 rows read their
+// weights once; experts a single row uses take one wave32 per four rows. Both
+// keep each slot's 32-lane dot reduction, so a row's result does not depend on
+// the batch it shares.
+void mul_mat_vec_moe_batch_wave32_split(const void* gate, const void* up,
+                                       const block_q8_1* input,
+                                       const int32_t* storage, float* output,
+                                       int k, int rows, int tokens,
+                                       int experts_used, int input_stride,
+                                       hipStream_t stream);

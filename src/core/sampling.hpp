@@ -157,6 +157,16 @@ public:
   /// Retain ordinary CPU/GPU sampling while its mask makes no restriction.
   /// Also true while ForcedToken() is set, so GPU samplers defer to the host.
   [[nodiscard]] bool NeedsConstraintMask() const;
+  [[nodiscard]] bool HasConstraint() const noexcept {
+    return config_.constraint != nullptr;
+  }
+  /// Whether the next sampled token may be `token`: the forced token, or
+  /// one the grammar admits in its current state.
+  [[nodiscard]] bool AllowsToken(TokenId token) const;
+  /// The current state's packed grammar mask if it is already cached; null
+  /// without a constraint, while a token is forced or before it is built.
+  [[nodiscard]] std::shared_ptr<const TokenBitmask> CachedConstraintBitmask()
+      const;
   [[nodiscard]] std::span<const TokenId> history() const noexcept;
   /// The token every sampling path returns next, if any: an exhausted
   /// reasoning budget forces its end sequence.
@@ -199,6 +209,14 @@ public:
   /// Retains the full-row sampler's FP64 filtering and normalization.
   [[nodiscard]] SamplingDistribution DistributionFromCandidates(
       std::span<const LogitCandidate> logits) const;
+  /// DistributionFromCandidates that also accepts a grammar. The first
+  /// `unpenalized_count` candidates are the largest raw logits (an invalid ID
+  /// or a non-finite value marks fewer); every penalized token follows.
+  /// Returns nullopt when those candidates cannot prove the full-row top-k,
+  /// for example when too few of them are allowed.
+  [[nodiscard]] std::optional<SamplingDistribution>
+  TryDistributionFromCandidates(std::span<const LogitCandidate> logits,
+                                std::size_t unpenalized_count) const;
   /// Retain a speculative residual draw for the next Sample call. Copies
   /// preserve this draw along with the RNG; resetting history discards it.
   void DeferSample(TokenId token);
@@ -223,6 +241,8 @@ private:
   void PrepareSelected(std::span<const float> logits);
   void FilterSelected(std::optional<std::size_t> top_p_keep = std::nullopt);
   [[nodiscard]] SamplingDistribution SelectedDistribution();
+  [[nodiscard]] SamplingDistribution DistributionConstrainedTopK(
+      std::span<const float> logits) const;
   void StartReasoning();
   void OpenReasoning();
   void AdvanceReasoning(TokenId token);
