@@ -383,6 +383,44 @@ void Index() {
     assert(store.Stats().manifest_bytes_read == encoded_size * 2);
   }
 }
+// Descriptions and snapshots share the entry's manifest and its charge, so a
+// checkpoint's manifest is stored and charged once however many hold it.
+void ManifestChargedOnce() {
+  Directory d;
+  {
+    DiskStore layout(ledger, d.path, UINT64_MAX);
+  }
+  const auto m = Manifest();
+  Payloads(d.path, m);
+  Put(d.path, m);
+  const auto metadata = [] {
+    return ledger.Snapshot()
+        .bytes[static_cast<std::size_t>(ResourceCategory::kMetadata)];
+  };
+  const auto baseline = metadata();
+  std::shared_ptr<const DiskDescription> description;
+  {
+    DiskStore store(ledger, d.path, UINT64_MAX);
+    const auto& entry = store.Entries()[0];
+    const auto indexed = metadata();
+    description = store.Describe({7});
+    assert(&description->Manifest() == &entry.Manifest());
+    assert(metadata() == indexed + sizeof(DiskDescription) + 64);
+    {
+      const auto snapshot = store.Open({7});
+      assert(&snapshot->Manifest() == &entry.Manifest());
+      assert(metadata() == indexed + sizeof(DiskDescription) + 64);
+    }
+    assert(store.TryRetire({7}, entry.Epoch()) == DiskRetireResult::kRetired);
+    assert(store.Entries().empty());
+  }
+  // The description keeps the retired manifest, and its charge, alive.
+  assert(description->Manifest().tokens == m.tokens);
+  assert(metadata() >= ManifestStorage(m) + sizeof(DiskDescription) + 64);
+  description.reset();
+  // The last holder releases the shared charge.
+  assert(metadata() == baseline);
+}
 void Conflicts() {
   Directory d;
   {
@@ -1207,6 +1245,7 @@ int main() {
   LargePieceReadAndCorruption();
   Ownership();
   Index();
+  ManifestChargedOnce();
   Conflicts();
   AllConflictOwners();
   MissingDependenciesAndRestart();

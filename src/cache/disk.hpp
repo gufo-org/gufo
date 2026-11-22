@@ -70,7 +70,7 @@ public:
   DurableEntry& operator=(const DurableEntry&) = delete;
   ~DurableEntry() = default;
   [[nodiscard]] DiskFileId File() const { return file_; }
-  [[nodiscard]] const DiskManifest& Manifest() const { return manifest_; }
+  [[nodiscard]] const DiskManifest& Manifest() const { return *manifest_; }
   // Startup attests metadata and dependency sizes only. Streaming restore must
   // validate payload checksums before making a destination executable.
   [[nodiscard]] bool Durable() const { return durable_; }
@@ -82,7 +82,9 @@ private:
   ResourceCharge metadata_;
   std::shared_ptr<const ResourceCharge> pin_;
   DiskFileId file_{};
-  DiskManifest manifest_;
+  // Immutable once durable, then shared by descriptions and snapshots, which
+  // also share metadata_: the manifest is stored and charged once.
+  std::shared_ptr<DiskManifest> manifest_;
   bool durable_{true};
   bool payload_verified_{false};
   bool available_{true};
@@ -148,7 +150,7 @@ class DiskStore;
 // description from acquiring a replacement publication with the same ID.
 class DiskDescription {
 public:
-  [[nodiscard]] const DiskManifest& Manifest() const { return manifest_; }
+  [[nodiscard]] const DiskManifest& Manifest() const { return *manifest_; }
   [[nodiscard]] std::uint64_t Epoch() const { return epoch_; }
   [[nodiscard]] DiskStore& Store() const { return *store_; }
   [[nodiscard]] DiskReadPin Pin() const;
@@ -159,7 +161,9 @@ public:
 private:
   friend class DiskStore;
   ResourceCharge metadata_;
-  DiskManifest manifest_;
+  // The entry's manifest charge, released after the shared manifest.
+  ResourceCharge manifest_metadata_;
+  std::shared_ptr<const DiskManifest> manifest_;
   std::shared_ptr<detail::DiskAvailability> availability_;
   DiskStore* store_{};
   std::uint64_t epoch_{};
@@ -174,21 +178,22 @@ public:
   DiskFileId file;
 };
 enum class DiskRetireResult { kRetired, kMissing, kPinned, kBusy };
-// Owned metadata plus a dependency pin. The store must outlive this snapshot
-// and every read using it. It remains stable across concurrent index changes.
+// The entry's manifest, shared with its charge, plus a dependency pin. The
+// store must outlive this snapshot and every read using it. It remains stable
+// across concurrent index changes.
 class DiskSnapshot {
 public:
   DiskSnapshot(DiskSnapshot&&) noexcept = default;
   DiskSnapshot& operator=(DiskSnapshot&&) = delete;
   DiskSnapshot(const DiskSnapshot&) = delete;
-  [[nodiscard]] const DiskManifest& Manifest() const { return manifest_; }
+  [[nodiscard]] const DiskManifest& Manifest() const { return *manifest_; }
 
 private:
   friend class DiskStore;
   DiskSnapshot() = default;
   ResourceCharge metadata_;
   DiskReadPin pin_;
-  DiskManifest manifest_;
+  std::shared_ptr<const DiskManifest> manifest_;
   const void* store_{};
 };
 #ifdef GUFO_CACHE_TESTING
