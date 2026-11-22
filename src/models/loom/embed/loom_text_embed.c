@@ -1994,8 +1994,11 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_prefill_request(
 
 // libamdf, the driver under Loom's amdgpu devices, reads the same endpoints on
 // Linux (KFD) and Windows (WDDM). The default device URI opens the first GPU
-// endpoint; local memory is known once a device exists, so one is created and
-// destroyed here.
+// endpoint. On Windows local memory is known once a device exists, so one is
+// created and destroyed here. On Linux a device binds this process's KFD VM to
+// its own render file for good (KFD has no inverse of ACQUIRE_VM), so the
+// serving device would then fail with EBUSY: memory comes from the render
+// node's sysfs instead.
 static amdf_status_t loom_text_embed_query_endpoint(
     const amdf_api_t* api, const amdf_gpu_api_t* gpu_api,
     amdf_instance_t* instance, loom_text_embed_gpu_t* out_gpu) {
@@ -2039,6 +2042,28 @@ static amdf_status_t loom_text_embed_query_endpoint(
   {
     snprintf(out_gpu->target, sizeof(out_gpu->target), "gfx%u%u%x",
              info.gfx_ip.major, info.gfx_ip.minor, info.gfx_ip.stepping);
+#if !defined(_WIN32)
+    amdf_endpoint_info_t endpoint_info = {
+        .type = AMDF_STRUCTURE_TYPE_ENDPOINT_INFO,
+        .structure_size = sizeof(endpoint_info),
+    };
+    // Memory is a refinement: the target stands without it.
+    if (amdf_status_is_ok(api->endpoint_query_info(endpoint, &endpoint_info)) &&
+        endpoint_info.native_identity.type ==
+            AMDF_ENDPOINT_NATIVE_IDENTITY_TYPE_LINUX_DEVICE) {
+      char path[96];
+      snprintf(path, sizeof(path),
+               "/sys/dev/char/%u:%u/device/mem_info_vram_total",
+               endpoint_info.native_identity.value.linux_device.major,
+               endpoint_info.native_identity.value.linux_device.minor);
+      FILE* file = fopen(path, "r");
+      if (file) {
+        unsigned long long bytes = 0;
+        if (fscanf(file, "%llu", &bytes) == 1) out_gpu->memory_bytes = bytes;
+        fclose(file);
+      }
+    }
+#else
     const amdf_gpu_device_create_info_t create_info = {
         .type = AMDF_STRUCTURE_TYPE_GPU_DEVICE_CREATE_INFO,
         .structure_size = sizeof(create_info),
@@ -2070,6 +2095,7 @@ static amdf_status_t loom_text_embed_query_endpoint(
       }
       api->device_destroy(device);
     }
+#endif
   }
   api->endpoint_close(endpoint);
   return status;

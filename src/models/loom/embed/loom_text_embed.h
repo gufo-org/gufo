@@ -319,8 +319,9 @@ void loom_text_embed_memory(const loom_text_embed_t* embed,
 typedef struct loom_text_embed_gpu_t {
   // Compiler target, e.g. "gfx1151"; empty when there is no AMD GPU.
   char target[32];
-  // Device-local memory in bytes (system RAM on an APU, whose local memory
-  // the driver reports as system-backed); zero when it does not report it.
+  // Device-local memory in bytes (on an APU: system RAM on Windows, whose
+  // local memory the driver reports as system-backed; the VRAM carve-out on
+  // Linux); zero when it is not reported.
   uint64_t memory_bytes;
 } loom_text_embed_gpu_t;
 int loom_text_embed_query_gpu(loom_text_embed_gpu_t* out_gpu, char* error,

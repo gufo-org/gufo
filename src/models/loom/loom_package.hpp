@@ -40,7 +40,8 @@ inline std::string ReadText(const fs::path& path) {
 
 // The GPU Loom opens by default, as its driver reports it
 // (loom_text_embed_query_gpu): its target ("gfx1151"; empty when unknown) and
-// device-local memory (system RAM on an APU; zero when unknown).
+// device-local memory (on an APU, system RAM on Windows and the VRAM carve-out
+// on Linux; zero when unknown).
 struct Gpu {
   std::string target;
   std::uint64_t memory_bytes = 0;
