@@ -8,7 +8,9 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1074,9 +1076,20 @@ struct ComponentTextCache::Impl {
       capture->sources.clear();
       return 0;
     }
-    auto job = cache::PersistenceJob(
-        ledger, File(1, capture->manifest.checkpoint.value), capture->manifest,
-        std::move(capture->sources));
+    // The job's metadata is optional too: a full ledger refuses the write,
+    // not the request that captured it.
+    std::optional<cache::PersistenceJob> job;
+    try {
+      job.emplace(ledger, File(1, capture->manifest.checkpoint.value),
+                  capture->manifest, std::move(capture->sources));
+    } catch (const std::bad_alloc&) {
+      capture->sources.clear();
+      Logger::Info("cache",
+                   "schema=component-cache-v1 event=persistence_refused "
+                   "reason=allocation tokens=" +
+                       std::to_string(capture->manifest.tokens.size()));
+      return 0;
+    }
     std::size_t pending_slot;
     {
       const std::lock_guard lock(mutex);
@@ -1089,7 +1102,7 @@ struct ComponentTextCache::Impl {
       pending_slot = position - pending_durable.begin();
       *position = capture;
     }
-    if (!queue->TrySubmit(std::move(job))) {
+    if (!queue->TrySubmit(std::move(*job))) {
       const std::lock_guard lock(mutex);
       if (pending_durable[pending_slot] == capture)
         pending_durable[pending_slot].reset();
@@ -2963,6 +2976,21 @@ std::size_t ComponentTextCache::Lease::Commit(
       impl_->cache->resources->adapter->Positions(impl_->slot.Execution());
   const auto location = impl_->slot.Location();
   impl_->slot.Commit();
+  // The live frontier's index record is optional: a session without one
+  // restores from a retained checkpoint, if any. A failed allocation, such as
+  // a full ledger, reclaims retained records until the record fits, then
+  // leaves the frontier unindexed rather than failing the reply.
+  const auto index_live = [&] {
+    try {
+      impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
+          location, impl_->entry->live_tokens, impl_->cache->identity,
+          impl_->entry->live_input, positions});
+      return true;
+    } catch (const std::bad_alloc&) {
+      return false;
+    }
+  };
+  bool indexed;
   {
     const std::lock_guard lock(impl_->cache->mutex);
     auto& starts = impl_->entry->reply_starts;
@@ -2979,10 +3007,35 @@ std::size_t ComponentTextCache::Lease::Commit(
     if (impl_->account)
       (void)impl_->account->SetNeed(live.size());
     impl_->entry->live_input = At(impl_->input, impl_->prompt.size());
-    impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
-        location, std::move(live), impl_->cache->identity,
-        At(impl_->input, impl_->prompt.size()), std::move(positions)});
-    impl_->entry->busy = false;
+    indexed = index_live();
+    if (indexed)
+      impl_->entry->busy = false;
+  }
+  if (!indexed) {
+    auto& cache = *impl_->cache;
+    // Retry under the reclaim's lock, before draining its demotion: the
+    // demotion's disk job charges the metadata the reclaim just freed. Queued
+    // disk writes are kept, since one may be this turn's frontier checkpoint.
+    for (bool reclaimed = true; !indexed && reclaimed;) {
+      try {
+        const std::lock_guard lock(cache.mutex);
+        reclaimed = cache.retention.Reclaim(cache::RetentionRequest{});
+        indexed = reclaimed && index_live();
+      } catch (const std::exception&) {
+        // The reply stands; only the frontier's index record is lost.
+        reclaimed = false;
+      }
+      cache.DrainDemotion();
+    }
+    {
+      const std::lock_guard lock(cache.mutex);
+      impl_->entry->busy = false;
+    }
+    if (!indexed)
+      Logger::Info("cache",
+                   "schema=component-cache-v1 event=live_frontier_refused "
+                   "reason=allocation tokens=" +
+                       std::to_string(live.size()));
   }
   impl_->active = false;
   if (async_frontier) {

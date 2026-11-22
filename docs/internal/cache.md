@@ -112,6 +112,13 @@ just prompt tokens. A request that continues no live frontier takes the least
 recently used idle session (Flash-Next prefers one without a frontier), so
 it does not replace the frontier of a conversation that has just replied.
 
+Indexing the frontier is optional. When its index record cannot be allocated,
+for example because the cache's metadata has filled its byte budget, the
+cache reclaims retained records and retries until the record fits or nothing
+is left to reclaim. If it still does not fit, the reply completes anyway: the
+session stays unindexed, the server logs `event=live_frontier_refused`, and
+the next turn restores from a retained checkpoint, if any, or prefills.
+
 A client replays the previous answer as text, and the next prompt can tokenize
 it differently from the sampled tokens (#1154). At admission, after earlier
 requests have committed their frontiers, a text-only prompt whose text repeats
@@ -813,6 +820,8 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | `schema=component-cache-v1 event=disk_warm` | A request admitted while another prompt prefilled, or while others ran, found its checkpoint only on disk; a worker read its `bytes` into the page cache in `ms`. `skipped=floor` when free pages would drop below the host floor; `skipped=beside` when nothing else waited and the restore copies beside the running requests instead |
 | `event=disk_warm_wait` | The request waited `wait_ms` for that read (`read=1`) or for the scheduler to go idle (`read=0`) before restoring |
 | `schema=component-cache-v1 event=persistence_refused reason=min_step` | A captured checkpoint is too close to an existing publication; includes `checkpoint_id` and `tokens` |
+| `schema=component-cache-v1 event=persistence_refused reason=allocation` | The disk write's job metadata could not be allocated, for example because metadata filled the byte budget; the reply completes without that checkpoint |
+| `schema=component-cache-v1 event=live_frontier_refused reason=allocation` | The live frontier's index record could not be allocated even after reclaiming; the reply completes and the next turn restores from a retained checkpoint, if any, or prefills |
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
 | `event=snapshot action=skipped reason=entry_capacity` | no checkpoint record could be replaced safely for this capture |
 | `event=snapshot action=skipped reason=byte_capacity` | a checkpoint did not fit the RAM budget |
