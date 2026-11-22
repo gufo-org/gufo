@@ -49,6 +49,13 @@ uses:
 provider with a runner but no drivers of its own gets `prompt`, `chat` and
 `bench` through the server's backend.
 
+## Session state
+
+Declare a session's buffers in a `mem::StateDeclaration` (`gufo/ext/state.hpp`)
+and allocate them with `mem::SessionState::Create`; return its account from
+`state_account()`, claim the declaration's `Bytes` and `ContextBytes`, and call
+`Ensure` before each write ([state memory](internal/state-memory.md)).
+
 ## Continuation
 
 Every text runner supports continuation through the component cache. The cache

@@ -35,6 +35,32 @@ dedicated carve-out, so holding outstanding state back from host budgets would
 shrink them for nothing), a region allocates its full size with `hipMalloc`,
 zeroed like new pages, and `Ensure` only checks bounds.
 
+## Declaring session state
+
+A model declares the state one session holds (`mem::StateDeclaration`,
+`gufo/ext/state.hpp`) and the core allocates it (`mem::SessionState`). Each
+buffer has a **kind**:
+
+| Kind | Holds | Memory |
+| --- | --- | --- |
+| `kContext` | K/V, compressed K/V, MTP K/V, depth-sized scratch | A region charged to the session's account, `tokens_per_row` tokens per row |
+| `kWhole` | Small row buffers checkpoints share (Flash-Next pooled keys) | A region backed whole at creation |
+| `kFixed` | Recurrent and convolution state, control blocks, draft rows | A zeroed `hip::AllocateDevice` allocation |
+
+The declaration's margin is the account's: the tokens the model backs past
+its frontier. The same declaration gives the runner's claim, so the bytes a
+claim counts cannot drift from what a session allocates: `Bytes()` for
+`per_request_state_bytes` and `ContextBytes()` for
+`demand_mapped_state_bytes` where `mem::DemandMapped()`. `StateBytes::kPages`
+counts what the ledger charges; Flash-Next and Qwen 27B claim `kSize`, as they
+did before declarations, and DeepSeek V4 Flash `kPages`.
+
+What a declaration leaves to the model: state it allocates lazily or swaps
+(Flash-Next rollback rows, Qwen 27B's two recurrent buffers, DeepSeek V4
+Flash's raw window and compressor state), whose bytes the model adds to its
+claim, and every `Ensure`, `MapAhead`, `PrepareWrite` and `Restore` call,
+which stay at the model's write choke point.
+
 ## Page pool
 
 One pool per device (`mem::PagePool`) creates the pages, never frees them while
@@ -401,11 +427,11 @@ segments each.
 
 ## Users
 
-| Model | State in regions | Choke points |
-| --- | --- | --- |
-| Qwen3.8 Flash-Next | Trunk and MTP K/V and pooled indexer keys, one region per buffer; checkpoints share their pages | `Executor::EnsureKv` and `UnshareKv`: forward, batch, MTP, snapshot and cache restore |
-| Qwen 27B | Attention K/V planes, one region per session | `QwenGpuArena::EnsureKvRows`: decode, batch, prefill chunk, verification commit, snapshot and cache restore |
-| DeepSeek V4 Flash | Compressed attention, mirror and indexer rows, and the indexer score scratch, charged to the session's account | `rocm_graph_reserve_compressed_rows` and `rocm_graph_reserve_indexer_scores` grow them in place, before every write and restore |
+| Model | Declared state | State in regions | Choke points |
+| --- | --- | --- | --- |
+| Qwen3.8 Flash-Next | `Executor::DeclareSessionState`: every buffer of a session | Trunk and MTP K/V and pooled indexer keys, one region per buffer; checkpoints share their pages | `Executor::EnsureKv` and `UnshareKv`: forward, batch, MTP, snapshot and cache restore |
+| Qwen 27B | `QwenGpuArena::DeclareState`: the attention K/V | Attention K/V planes, one region per session | `QwenGpuArena::EnsureKvRows`: decode, batch, prefill chunk, verification commit, snapshot and cache restore |
+| DeepSeek V4 Flash | `rocm_graph_declare_state`: the demand-mapped rows | Compressed attention, mirror and indexer rows, and the indexer score scratch, charged to the session's account | `rocm_graph_reserve_compressed_rows` and `rocm_graph_reserve_indexer_scores` grow them in place, before every write and restore |
 
 DeepSeek V4 Flash no longer uses its managed-memory KV policy where state is
 demand-mapped: at the default 1M context, regions decode as fast as managed

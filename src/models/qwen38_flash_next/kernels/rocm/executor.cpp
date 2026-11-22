@@ -695,9 +695,7 @@ Session::~Session() {
   for (auto& [key, exec] : graphs_) {
     (void)hipGraphExecDestroy(exec);
   }
-  for (void* p : allocations_) {
-    (void)hipFree(p);
-  }
+  state_.reset();
 }
 
 void Session::RestoreVisionLayout(const qwen::vision::RopeLayout& layout,
@@ -922,10 +920,7 @@ void Session::TrimRollback(std::uint32_t depth) noexcept {
   }
   rollback_allocations_.resize(depth);
   rollback_depth_ = depth;
-  rollback_bytes_ =
-      owner_->SessionBytes(core::SessionMode::kAutoregressive, max_context_,
-                           depth) -
-      owner_->SessionBytes(core::SessionMode::kAutoregressive, max_context_, 0);
+  rollback_bytes_ = owner_->RollbackBytes(depth);
   ngram_snapshots_.resize(depth);
 }
 
@@ -1520,101 +1515,52 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
   s->index_capacity_ = IndexerCapacity(c, options_.max_batch, max_context);
   s->linear_.resize(c.num_layers);
   s->attention_.resize(c.num_layers);
-  auto& a = s->allocations_;
-  const std::size_t kv_row = c.AttentionKvDim();
-  const std::size_t conv_elems =
-      static_cast<std::size_t>(c.ssm_conv_kernel - 1) * c.SsmConvChannels();
-  const std::size_t state_elems = static_cast<std::size_t>(c.ssm_num_v_heads) *
-                                  c.ssm_head_dim * c.ssm_head_dim;
   // K/V keeps a fixed address for the whole context, backed by pages as
-  // positions are written (EnsureKv). The session still accounts its full
-  // size, and the state ledger keeps the unwritten rows promised to it. A
-  // failed reservation leaves a null entry. The account charges the pages
-  // to the shared state budget (#715); EnsureKv backs a tile past the
-  // frontier, which its margin covers.
-  s->account_ = std::make_shared<gufo::mem::StateAccount>(kKvTileRows);
-  const auto grow =
-      [&](std::vector<std::shared_ptr<gufo::mem::Region>>& regions) {
-        auto region = gufo::mem::Region::Create(
-            {.row_bytes = kv_row * sizeof(__half), .rows = max_context},
-            error_msg, s->account_);
-        if (!region) {
-          a.push_back(nullptr);
-          return static_cast<__half*>(nullptr);
-        }
-        s->allocated_bytes_ += region->bytes();
-        auto* data = static_cast<__half*>(region->data());
-        regions.push_back(std::move(region));
-        return data;
-      };
-  // Pooled keys: one row per compressed block, backed whole from the start.
-  const auto pooled =
-      [&](std::vector<std::shared_ptr<gufo::mem::Region>>& regions) {
-        const std::size_t rows = max_context / c.compress_ratio + 1;
-        auto region = gufo::mem::Region::Create(
-            {.row_bytes = c.indexer_head_dim * sizeof(__half), .rows = rows},
-            error_msg);
-        if (!region || !region->Ensure(rows, error_msg)) {
-          a.push_back(nullptr);
-          return static_cast<__half*>(nullptr);
-        }
-        s->allocated_bytes_ += region->bytes();
-        auto* data = static_cast<__half*>(region->data());
-        regions.push_back(std::move(region));
-        return data;
-      };
+  // positions are written (EnsureKv); the account charges them to the
+  // shared state budget (#715), and its margin covers the tile EnsureKv
+  // backs past the frontier. Pooled keys are regions backed whole, so
+  // checkpoints share their pages like the K/V's.
+  const SessionStateLayout layout = DeclareSessionState(mode, max_context);
+  s->state_ = gufo::mem::SessionState::Create(layout.state, error_msg);
+  if (!s->state_)
+    return nullptr;
+  const auto& state = *s->state_;
+  s->account_ = state.account();
+  s->allocated_bytes_ = state.allocated_bytes();
   for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    const auto& ids = layout.layers[il];
     if (c.IsLinearLayer(il)) {
       auto& l = s->linear_[il];
-      l.conv_state =
-          Alloc<float>(a, conv_elems, error_msg, &s->allocated_bytes_);
-      l.state = Alloc<float>(a, state_elems, error_msg, &s->allocated_bytes_);
+      l.conv_state = state.data<float>(ids.conv);
+      l.state = state.data<float>(ids.state);
     } else {
       auto& at = s->attention_[il];
-      at.k_cache = grow(s->kv_regions_);
-      at.v_cache = grow(s->kv_regions_);
-      at.index_k = Alloc<float>(
-          a, static_cast<std::size_t>(s->index_capacity_) * c.indexer_head_dim,
-          error_msg, &s->allocated_bytes_);
-      at.block_k = pooled(s->pooled_regions_);
+      at.k_cache = state.data<__half>(ids.k);
+      at.v_cache = state.data<__half>(ids.v);
+      at.index_k = state.data<float>(ids.index_k);
+      at.block_k = state.data<__half>(ids.block_k);
+      s->kv_regions_.push_back(state.region(ids.k));
+      s->kv_regions_.push_back(state.region(ids.v));
+      s->pooled_regions_.push_back(state.region(ids.block_k));
     }
   }
-  if (c.ple_layer >= 0) {
-    const std::size_t hist =
-        static_cast<std::size_t>(c.PleConvHistory()) * c.HcDim();
-    s->ple_history_ = Alloc<float>(a, hist, error_msg, &s->allocated_bytes_);
-  }
-  s->control_ = Alloc<Session::Control>(a, 1, error_msg, &s->allocated_bytes_);
-  if (s->mtp_enabled_) {
-    // Wide copy verification keeps every row for the draft catch-up.
-    s->mtp_.target_hidden =
-        Alloc<float>(a,
-                     static_cast<std::size_t>(
-                         std::max(options_.max_speculative, max_copy_rows())) *
-                         c.HcDim(),
-                     error_msg, &s->allocated_bytes_);
-    s->mtp_.k_cache = grow(s->mtp_kv_regions_);
-    s->mtp_.v_cache = grow(s->mtp_kv_regions_);
-    s->mtp_.index_k =
-        Alloc<float>(a, std::size_t{s->index_capacity_} * c.indexer_head_dim,
-                     error_msg, &s->allocated_bytes_);
-    s->mtp_.block_k = pooled(s->mtp_pooled_regions_);
-    s->mtp_.h = Alloc<float>(a, c.HcDim(), error_msg, &s->allocated_bytes_);
-    if (!model_->draft_output().empty()) {
-      s->mtp_.draft_rows =
-          Alloc<std::uint8_t>(a,
-                              std::size_t{speculative::kDraftVocabExtraRows} *
-                                      model_->output_row_bytes() +
-                                  4096,
-                              error_msg, &s->allocated_bytes_);
-      s->mtp_.draft_ids =
-          Alloc<std::int32_t>(a, speculative::kDraftVocabExtraRows, error_msg,
-                              &s->allocated_bytes_);
-    }
-  }
-  for (void* p : a) {
-    if (p == nullptr) {
-      return nullptr;
+  if (layout.ple_history)
+    s->ple_history_ = state.data<float>(*layout.ple_history);
+  s->control_ = state.data<Session::Control>(layout.control);
+  if (layout.mtp) {
+    const auto& ids = *layout.mtp;
+    s->mtp_.target_hidden = state.data<float>(layout.mtp_target_hidden);
+    s->mtp_.k_cache = state.data<__half>(ids.k);
+    s->mtp_.v_cache = state.data<__half>(ids.v);
+    s->mtp_.index_k = state.data<float>(ids.index_k);
+    s->mtp_.block_k = state.data<__half>(ids.block_k);
+    s->mtp_.h = state.data<float>(layout.mtp_h);
+    s->mtp_kv_regions_.push_back(state.region(ids.k));
+    s->mtp_kv_regions_.push_back(state.region(ids.v));
+    s->mtp_pooled_regions_.push_back(state.region(ids.block_k));
+    if (layout.mtp_draft_rows) {
+      s->mtp_.draft_rows = state.data<std::uint8_t>(*layout.mtp_draft_rows);
+      s->mtp_.draft_ids = state.data<std::int32_t>(layout.mtp_draft_ids);
     }
   }
   // The zero fills above run on the null stream; nothing may read the new
@@ -1871,19 +1817,70 @@ bool Executor::UnshareKv(Session& session, bool draft, std::uint32_t first,
   return regions.empty() || regions.front()->SettleRemaps(error);
 }
 
-std::size_t Executor::DemandMappedBytes(
-    core::SessionMode mode, std::uint32_t max_context) const noexcept {
-  const auto& c = config();
-  const std::size_t kv =
-      2 * std::size_t{max_context} * c.AttentionKvDim() * sizeof(__half);
-  const std::size_t buffers = c.num_layers / c.full_attention_interval +
-                              (mode == core::SessionMode::kSpeculative);
-  return buffers * kv;
+Executor::SessionStateLayout Executor::DeclareSessionState(
+    core::SessionMode mode, std::uint32_t max_context) const {
+  const Config& c = config();
+  SessionStateLayout layout(kKvTileRows);
+  auto& state = layout.state;
+  const std::size_t kv_row = c.AttentionKvDim() * sizeof(__half);
+  const std::size_t index_bytes =
+      std::size_t{IndexerCapacity(c, options_.max_batch, max_context)} *
+      c.indexer_head_dim * sizeof(float);
+  // Before sparse attention starts, pooling can lag by indexer_top_k rows
+  // (the raw ring, index_k). Afterwards only an incomplete block precedes
+  // the current batch; completed block keys stay in block_k, one row per
+  // compressed block.
+  const gufo::mem::RegionShape pooled{
+      .row_bytes = c.indexer_head_dim * sizeof(__half),
+      .rows = std::size_t{max_context} / c.compress_ratio + 1};
+  const auto attention = [&] {
+    SessionStateLayout::Layer ids;
+    ids.k = state.Context({.row_bytes = kv_row, .rows = max_context});
+    ids.v = state.Context({.row_bytes = kv_row, .rows = max_context});
+    ids.index_k = state.Fixed(index_bytes);
+    ids.block_k = state.Whole(pooled);
+    return ids;
+  };
+  layout.layers.resize(c.num_layers);
+  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    auto& ids = layout.layers[il];
+    if (c.IsLinearLayer(il)) {
+      ids.conv = state.Fixed(std::size_t{c.ssm_conv_kernel - 1} *
+                             c.SsmConvChannels() * sizeof(float));
+      ids.state = state.Fixed(std::size_t{c.ssm_num_v_heads} * c.ssm_head_dim *
+                              c.ssm_head_dim * sizeof(float));
+    } else {
+      ids = attention();
+    }
+  }
+  if (c.ple_layer >= 0)
+    layout.ple_history = state.Fixed(std::size_t{c.PleConvHistory()} *
+                                     c.HcDim() * sizeof(float));
+  layout.control = state.Fixed(sizeof(Session::Control));
+  if (mode == core::SessionMode::kSpeculative) {
+    // Wide copy verification keeps every verified trunk hidden row for the
+    // draft catch-up (target_hidden); h is the draft block's own row.
+    layout.mtp_target_hidden = state.Fixed(
+        std::size_t{std::max(options_.max_speculative, max_copy_rows())} *
+        c.HcDim() * sizeof(float));
+    layout.mtp = attention();
+    layout.mtp_h = state.Fixed(std::size_t{c.HcDim()} * sizeof(float));
+    if (!model_->draft_output().empty()) {
+      layout.mtp_draft_rows =
+          state.Fixed(std::size_t{speculative::kDraftVocabExtraRows} *
+                          model_->output_row_bytes() +
+                      4096);
+      layout.mtp_draft_ids =
+          state.Fixed(std::size_t{speculative::kDraftVocabExtraRows} *
+                      sizeof(std::int32_t));
+    }
+  }
+  return layout;
 }
 
-std::size_t Executor::SessionBytes(
-    core::SessionMode mode, std::uint32_t max_context,
-    std::uint32_t rollback_depth) const noexcept {
+std::size_t Executor::RollbackBytes(std::uint32_t depth) const noexcept {
+  if (depth == 0)
+    return 0;
   const auto& c = config();
   const std::size_t attention = c.num_layers / c.full_attention_interval;
   const std::size_t linear = c.num_layers - attention;
@@ -1893,36 +1890,28 @@ std::size_t Executor::SessionBytes(
       std::size_t{c.ssm_num_v_heads} * c.ssm_head_dim * c.ssm_head_dim;
   const std::size_t ple =
       c.ple_layer >= 0 ? std::size_t{c.PleConvHistory()} * c.HcDim() : 0;
-  const std::size_t kv =
-      2 * std::size_t{max_context} * c.AttentionKvDim() * sizeof(__half);
-  const std::size_t index =
-      std::size_t{IndexerCapacity(c, options_.max_batch, max_context)} *
-          c.indexer_head_dim * sizeof(float) +
-      std::size_t{max_context / c.compress_ratio + 1} * c.indexer_head_dim *
-          sizeof(__half);
-  const auto rollback_state =
-      rollback_depth == 0
-          ? 0
-          : state + (rollback_depth - 1) *
-                        GdnRollbackRowFloats(1, c.ssm_num_k_heads,
-                                             c.ssm_num_v_heads, c.ssm_head_dim);
-  // MTP keeps every verified trunk hidden row (target_hidden: the verifier
-  // width, or a wide copy's) plus the draft block's own row (h).
-  const std::size_t hidden_rows =
-      std::size_t{std::max(options_.max_speculative, max_copy_rows())} + 1;
-  return ((linear * conv + ple) * (rollback_depth + 1) +
-          linear * (state + rollback_state)) *
-             sizeof(float) +
-         attention * (kv + index) + sizeof(Session::Control) +
-         (mode == core::SessionMode::kSpeculative
-              ? kv + index + hidden_rows * c.HcDim() * sizeof(float) +
-                    (model_->draft_output().empty()
-                         ? 0
-                         : std::size_t{speculative::kDraftVocabExtraRows} *
-                                   (model_->output_row_bytes() +
-                                    sizeof(std::int32_t)) +
-                               4096)
-              : 0);
+  const std::size_t rollback_state =
+      state + (depth - 1) * GdnRollbackRowFloats(1, c.ssm_num_k_heads,
+                                                 c.ssm_num_v_heads,
+                                                 c.ssm_head_dim);
+  return ((linear * conv + ple) * depth + linear * rollback_state) *
+         sizeof(float);
+}
+
+std::size_t Executor::DemandMappedBytes(core::SessionMode mode,
+                                        std::uint32_t max_context) const {
+  if (!gufo::mem::DemandMapped())
+    return 0;
+  return DeclareSessionState(mode, max_context)
+      .state.ContextBytes(gufo::mem::StateBytes::kSize);
+}
+
+std::size_t Executor::SessionBytes(core::SessionMode mode,
+                                   std::uint32_t max_context,
+                                   std::uint32_t rollback_depth) const {
+  return DeclareSessionState(mode, max_context)
+             .state.Bytes(gufo::mem::StateBytes::kSize) +
+         RollbackBytes(rollback_depth);
 }
 
 std::size_t Executor::DeferredScratchBytes() const {

@@ -279,8 +279,12 @@ add_subdirectory(src/mem)
 if (ENGINE_ENABLE_HIP)
   add_library(gufo_mem_hip STATIC src/core/hip/state_page_pool.cpp
     src/core/hip/state_lendable_range.cpp src/core/hip/state_region.cpp
-    src/core/hip/state_shared_page.cpp src/core/hip/scratch_arena.cpp)
+    src/core/hip/state_shared_page.cpp src/core/hip/scratch_arena.cpp
+    src/core/hip/session_state.cpp)
   target_link_libraries(gufo_mem_hip PUBLIC gufo_mem hip::host Threads::Threads)
+  # SessionState places fixed buffers like other session state
+  # (src/core/hip/managed_alloc.hpp, HIP builds only).
+  target_compile_definitions(gufo_mem_hip PRIVATE ENGINE_ENABLE_HIP=1)
   if (BUILD_TESTING)
     target_compile_options(gufo_mem_hip PRIVATE -UNDEBUG)
   endif()
