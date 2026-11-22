@@ -2216,9 +2216,17 @@ void FullLedgerLeavesTheFrontierUnindexed() {
   auto& state = dynamic_cast<State&>(lease->state());
   runner->adapter->Append(state.slot, frontier, frontier);
   // Nothing is retained, so the reclaim finds nothing to free.
+  const auto previous_level = Logger::Level();
+  Logger::SetLevel(LogLevel::kInfo);
+  std::ostringstream output;
+  auto* previous_sink = std::clog.rdbuf(output.rdbuf());
   runner->ledger->FailAfter(cache::LedgerStep::kReserve, 0);
   (void)lease->Commit({}, {}, frontier);
   runner->ledger->ClearFaults();
+  std::clog.rdbuf(previous_sink);
+  Logger::SetLevel(previous_level);
+  assert(output.str().find("event=live_frontier_refused reason=allocation "
+                           "tokens=4") != std::string::npos);
   auto next = cache.Acquire(frontier, {}, {}, true, 0, true);
   assert(next->cached_tokens() == frontier.size());
   assert(next->restored_snapshot_bytes() != 0);
@@ -2276,9 +2284,17 @@ void FullLedgerRefusesTheDiskWriteNotTheReply() {
   assert(snapshot);
   const auto tail = std::span(frontier).subspan(prompt.size());
   runner->adapter->Append(state.slot, tail, tail);
+  const auto previous_level = Logger::Level();
+  Logger::SetLevel(LogLevel::kInfo);
+  std::ostringstream output;
+  auto* previous_sink = std::clog.rdbuf(output.rdbuf());
   runner->ledger->FailAfter(cache::LedgerStep::kReserve, 0);
   (void)lease->Commit(prompt, std::move(snapshot), frontier);
   runner->ledger->ClearFaults();
+  std::clog.rdbuf(previous_sink);
+  Logger::SetLevel(previous_level);
+  assert(output.str().find("event=persistence_refused reason=allocation "
+                           "tokens=65536") != std::string::npos);
   auto next = cache.Acquire(frontier, {}, {}, true, 0, true);
   next->Invalidate();
 }
