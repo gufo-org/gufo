@@ -90,11 +90,15 @@ hide work. See [serving benchmark commands](performance.md) for invocation.
 than the model. It speaks raw HTTP/1.1 to report connect, first response byte,
 first SSE event, client TTFT, inter-token gaps with p99 and >10/30/100 ms
 counts, events and bytes per read, and the delta between client TTFT and the
-server's `usage.gufo.ttft_ms`. A small overhead request compares fresh and
-reused connections; each stream opens its own. A client-visible stall can then
-be attributed to transport or framing before it is treated as a model
-regression. The artifact records the served model ID and
-omits hosts, prompts, generated text, token IDs and timestamps.
+server's `usage.gufo.ttft_ms`. That server clock runs from backend entry to
+the first selected token, so the delta also holds request parsing, admission
+and SSE emission. A small overhead request compares fresh and reused
+connections; each stream opens its own. A client-visible stall can then be
+attributed to the interface before it is treated as a model regression. It
+uses the serving benchmark's prompt, sampling, cache policy and concurrency
+levels. The artifact records the served model ID, the source revision and a
+prompt SHA-256, and omits hosts, base paths, prompts, generated text, token
+IDs and timestamps.
 
 `tools/bench/speculative-corpus.py` compares direct autoregressive and
 speculative token traces. Request correctness, acceptance, and end-to-end

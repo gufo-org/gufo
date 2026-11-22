@@ -243,9 +243,12 @@ tools/serving/gufo-interface-bench.py \
   --base-url http://127.0.0.1:8080 \
   --model "$MODEL" \
   --requests 20 \
+  --concurrency 1,2,4 \
   --max-tokens 128 \
   --output artifacts/serving/interface.json
 ```
+
+Add `--no-cache-prompt` when prompt-cache hits would hide prefill in TTFT.
 
 Compare it with the server's `usage.gufo.ttft_ms` before attributing a stall to
 generation.

@@ -19,22 +19,26 @@ keeps those stages apart:
   counts, so Nagle/delayed-ACK stalls are visible instead of averaged away
 * events_per_read / bytes_per_read: whether the server's writes coalesce,
   over the reads that carried body bytes
-* client_ttft_ms - server_ttft_ms: transport and HTTP overhead when the server
-  reports its own timings in the terminal `usage.gufo` object
+* client_minus_server_ttft_ms: client TTFT minus the server's `usage.gufo`
+  ttft_ms. The server clock starts at backend entry and stops when it selects
+  the first token, so the delta covers HTTP parsing and admission before the
+  backend, SSE emission and transport, not transport alone.
 
-Reports omit endpoint hosts, prompts, generated text, raw token IDs and
-timestamps.
+Reports omit endpoint hosts and paths, prompts (only a SHA-256 is kept),
+generated text, raw token IDs and timestamps.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import math
 import socket
 import ssl
 import statistics
+import subprocess
 import sys
 import threading
 import time
@@ -43,15 +47,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from gufo.serving_bench import _authorization_headers
+from gufo.serving_bench import (
+    DEFAULT_PROMPT,
+    ENDPOINT_PROFILES,
+    _authorization_headers,
+    atomic_json,
+    benchmark_sampling,
+    discover_model,
+    parse_concurrency_levels,
+    source_identity,
+)
 from gufo.serving_bench import distribution as serving_distribution
 
 BENCHMARK_SCHEMA = "gufo.interface-benchmark.v1"
-DEFAULT_PROMPT = (
-    "Explain how a bounded continuous-serving scheduler keeps a single "
-    "request responsive while several independent requests make progress. "
-    "Continue until the output limit is reached."
-)
 GAP_THRESHOLDS_MS = (10.0, 30.0, 100.0)
 
 
@@ -92,8 +100,9 @@ class Endpoint:
         )
 
     def public(self) -> dict[str, Any]:
-        # The artifact never records where the server runs.
-        return {"tls": self.tls, "basePath": self.base_path or "/"}
+        # The artifact never records where the server runs; a base path can
+        # carry a proxy route or token, so only its presence is kept.
+        return {"tls": self.tls, "hasBasePath": bool(self.base_path)}
 
 
 @dataclass(frozen=True)
@@ -104,7 +113,7 @@ class ResponseHead:
 
 @dataclass(frozen=True)
 class OverheadSample:
-    connect_ms: float
+    connect_ms: float | None
     ttfb_ms: float
     total_ms: float
     bytes: int
@@ -130,7 +139,8 @@ class StreamSample:
     decode_ms: float | None
     prompt_tokens: int | None
     completion_tokens: int | None
-    interface_overhead_ms: float | None
+    cached_prompt_tokens: int | None
+    client_minus_server_ttft_ms: float | None
 
 
 class HttpConnection:
@@ -149,6 +159,7 @@ class HttpConnection:
         self.last_read_index = -1
         # Reads that carried only the response head, not body bytes.
         self.head_only_reads = 0
+        self.head_body_bytes = 0
         self.connect_ms = 0.0
 
     def connect(self) -> None:
@@ -235,6 +246,9 @@ class HttpConnection:
         self.head_only_reads = max(
             len(self.read_times) - (1 if self.buffer else 0), 0
         )
+        # The read that completed the head may also carry body bytes; only
+        # those count toward body read sizes.
+        self.head_body_bytes = len(self.buffer)
         lines = raw.split(b"\r\n")
         try:
             status = int(lines[0].split(b" ", 2)[1])
@@ -249,17 +263,40 @@ class HttpConnection:
                 )
         return ResponseHead(status=status, headers=headers), first_byte
 
-    def read_content_length(self, head: ResponseHead) -> bytes:
-        length = int(head.headers.get("content-length", "0"))
-        while len(self.buffer) < length:
-            if not self._fill():
-                raise ConnectionError("connection closed inside response body")
-        body = bytes(self.buffer[:length])
-        del self.buffer[:length]
-        return body
+    def body_read_sizes(self) -> list[int]:
+        """Bytes of response body delivered by each read after the head."""
+        sizes = self.read_sizes[self.head_only_reads:]
+        if sizes and self.head_body_bytes:
+            sizes = [self.head_body_bytes, *sizes[1:]]
+        return sizes
 
-    def chunk_reader(self) -> "ChunkReader":
-        return ChunkReader(self)
+    def read_body(self, head: ResponseHead) -> tuple[bytes, bool]:
+        """Read a whole response body; return it and whether it ended at
+        connection close, which makes the connection unusable."""
+        if "chunked" in head.headers.get("transfer-encoding", "").lower():
+            reader = ChunkReader(self)
+            parts = []
+            while fragment := reader.read():
+                parts.append(fragment)
+            return b"".join(parts), False
+        if "content-length" in head.headers:
+            length = int(head.headers["content-length"])
+            while len(self.buffer) < length:
+                if not self._fill():
+                    raise ConnectionError(
+                        "connection closed inside response body"
+                    )
+            body = bytes(self.buffer[:length])
+            del self.buffer[:length]
+            return body, False
+        if head.status in (204, 304) or 100 <= head.status < 200:
+            return b"", False
+        # Close-delimited: the body ends when the server closes.
+        while self._fill():
+            pass
+        body = bytes(self.buffer)
+        self.buffer.clear()
+        return body, True
 
 
 class ChunkReader:
@@ -274,6 +311,7 @@ class ChunkReader:
         """Return the next payload fragment, or b"" at the last chunk."""
         if self.finished:
             return b""
+        buffer = self.connection.buffer
         if self.remaining == 0:
             size_line = self.connection._take_line()
             try:
@@ -287,12 +325,22 @@ class ChunkReader:
                 self.finished = True
                 return b""
             self.remaining = size
-        while len(self.connection.buffer) < self.remaining + 2:
+        # Return what has arrived rather than waiting for the whole chunk, so
+        # events inside a large chunk keep their own read times.
+        while not buffer:
             if not self.connection._fill():
                 raise ConnectionError("connection closed inside chunk")
-        payload = bytes(self.connection.buffer[:self.remaining])
-        del self.connection.buffer[:self.remaining + 2]
-        self.remaining = 0
+        take = min(len(buffer), self.remaining)
+        payload = bytes(buffer[:take])
+        del buffer[:take]
+        self.remaining -= take
+        if self.remaining == 0:
+            while len(buffer) < 2:
+                if not self.connection._fill():
+                    raise ConnectionError("connection closed inside chunk")
+            if buffer[:2] != b"\r\n":
+                raise RuntimeError("malformed chunk terminator")
+            del buffer[:2]
         return payload
 
 
@@ -301,23 +349,27 @@ class SseAccumulator:
 
     def __init__(self) -> None:
         self.pending = bytearray()
-        self.event_read_index: list[int] = []
-        self.event_read_time: list[float] = []
 
     def feed(self, data: bytes, read_index: int, read_time: float
              ) -> list[tuple[str, int, float]]:
         self.pending.extend(data)
+        # SSE lines end in CRLF, LF or CR. Normalize to LF so mixed endings
+        # split at the first blank line; a trailing CR may begin a CRLF split
+        # across reads, so it waits for the next read.
+        tail = self.pending.endswith(b"\r")
+        if tail:
+            del self.pending[-1:]
+        normalized = bytes(self.pending).replace(b"\r\n", b"\n").replace(
+            b"\r", b"\n"
+        )
+        self.pending[:] = normalized + (b"\r" if tail else b"")
         events: list[tuple[str, int, float]] = []
         while True:
             end = self.pending.find(b"\n\n")
-            separator = 2
-            if end < 0:
-                end = self.pending.find(b"\r\n\r\n")
-                separator = 4
             if end < 0:
                 return events
             raw = bytes(self.pending[:end])
-            del self.pending[:end + separator]
+            del self.pending[:end + 2]
             data_lines = []
             for line in raw.splitlines():
                 if line.startswith(b"data:"):
@@ -398,7 +450,7 @@ def measure_overhead(
             try:
                 sent_at = connection.send_request("GET", request_path, headers, b"")
                 head, first_byte = connection.read_head()
-                body = connection.read_content_length(head)
+                body, closed = connection.read_body(head)
             except TimeoutError:
                 # A slow server is not a closed one; retrying would send the
                 # request twice.
@@ -415,17 +467,19 @@ def measure_overhead(
                 reused = False
                 sent_at = connection.send_request("GET", request_path, headers, b"")
                 head, first_byte = connection.read_head()
-                body = connection.read_content_length(head)
+                body, closed = connection.read_body(head)
             finished = clock()
             samples.append(OverheadSample(
-                connect_ms=connection.connect_ms if fresh else 0.0,
+                # A reused socket has no connect; a zero would pull the
+                # distribution toward it.
+                connect_ms=connection.connect_ms if fresh else None,
                 ttfb_ms=(first_byte - sent_at) * 1000.0,
                 total_ms=(finished - sent_at) * 1000.0,
                 bytes=len(body),
                 reused=reused,
             ))
             reused = True
-            if head.headers.get("connection", "").lower() == "close":
+            if closed or head.headers.get("connection", "").lower() == "close":
                 connection.close()
                 reused = False
     finally:
@@ -452,20 +506,21 @@ def measure_stream(
     max_tokens: int,
     timeout: float,
     request_index: int,
-    extra_body: dict[str, Any] | None = None,
+    temperature: float = 0.0,
+    endpoint_profile: str = "gufo",
+    cache_prompt: bool | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> StreamSample:
     payload: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
-        "temperature": 0.0,
-        "top_p": 1.0,
+        **benchmark_sampling(temperature, endpoint_profile),
         "stream": True,
         "stream_options": {"include_usage": True},
     }
-    if extra_body:
-        payload.update(extra_body)
+    if cache_prompt is not None:
+        payload["cache_prompt"] = cache_prompt
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     connection = HttpConnection(endpoint, timeout, clock)
     connection.connect()
@@ -487,6 +542,12 @@ def measure_stream(
             "transfer-encoding", ""
         ).lower()
         reader = ChunkReader(connection) if chunked else None
+        # Bytes left in a length-delimited body; None when close-delimited.
+        remaining = (
+            int(head.headers["content-length"])
+            if reader is None and "content-length" in head.headers
+            else None
+        )
         accumulator = SseAccumulator()
         useful_times: list[float] = []
         usage: dict[str, Any] | None = None
@@ -501,24 +562,32 @@ def measure_stream(
         server_max_inter_token_ms = None
         prompt_tokens = None
         completion_tokens = None
+        cached_prompt_tokens = None
 
         saw_done = False
-        body_complete = False
-        while not saw_done and not body_complete:
+        while not saw_done:
             if reader is not None:
                 data = reader.read()
                 if not data:
                     break
-            elif "content-length" in head.headers:
-                # A length-delimited body arrives whole; there is no more.
-                data = connection.read_content_length(head)
-                body_complete = True
             else:
-                # HTTP/1.0 and other close-delimited streams carry no length.
-                if not connection._fill():
+                # Length- and close-delimited bodies: consume what has arrived
+                # (including bytes that came with the head) before reading
+                # more, so each event keeps the time of the read carrying it.
+                if remaining == 0:
                     break
-                data = bytes(connection.buffer)
-                connection.buffer.clear()
+                if not connection.buffer and not connection._fill():
+                    if remaining is not None:
+                        raise ConnectionError(
+                            "connection closed inside response body"
+                        )
+                    break
+                take = len(connection.buffer)
+                if remaining is not None:
+                    take = min(take, remaining)
+                    remaining -= take
+                data = bytes(connection.buffer[:take])
+                del connection.buffer[:take]
             read_index = connection.last_read_index
             read_time = connection.last_read_time
             for event, _, event_time in accumulator.feed(
@@ -548,7 +617,7 @@ def measure_stream(
         ]
         # Reads that carried only the response head say nothing about how the
         # server's event writes coalesce.
-        body_reads = connection.read_sizes[connection.head_only_reads:]
+        body_reads = connection.body_read_sizes()
         events_per_read = event_count / len(body_reads) if body_reads else 0.0
         bytes_per_read = statistics.fmean(body_reads) if body_reads else 0.0
         if usage is not None:
@@ -566,12 +635,15 @@ def measure_stream(
                 )
             prompt_tokens = _integer(usage.get("prompt_tokens"))
             completion_tokens = _integer(usage.get("completion_tokens"))
+            details = usage.get("prompt_tokens_details")
+            if isinstance(details, dict):
+                cached_prompt_tokens = _integer(details.get("cached_tokens"))
         client_ttft_ms = (
             (useful_times[0] - sent_at) * 1000.0 if useful_times else None
         )
-        interface_overhead = None
+        client_minus_server_ttft = None
         if client_ttft_ms is not None and server_ttft_ms is not None:
-            interface_overhead = client_ttft_ms - server_ttft_ms
+            client_minus_server_ttft = client_ttft_ms - server_ttft_ms
         return StreamSample(
             connect_ms=connection.connect_ms,
             ttfb_ms=(first_byte - sent_at) * 1000.0,
@@ -593,7 +665,8 @@ def measure_stream(
             decode_ms=decode_ms,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            interface_overhead_ms=interface_overhead,
+            cached_prompt_tokens=cached_prompt_tokens,
+            client_minus_server_ttft_ms=client_minus_server_ttft,
         )
     finally:
         connection.close()
@@ -649,8 +722,8 @@ def _stream_report(samples: list[StreamSample]) -> dict[str, Any]:
         "server_max_inter_token_ms": distribution(
             sample.server_max_inter_token_ms for sample in samples
         ),
-        "interfaceOverhead_ms": distribution(
-            sample.interface_overhead_ms for sample in samples
+        "client_minus_server_ttft_ms": distribution(
+            sample.client_minus_server_ttft_ms for sample in samples
         ),
         "queue_ms": distribution(sample.queue_ms for sample in samples),
         "prefill_ms": distribution(sample.prefill_ms for sample in samples),
@@ -661,7 +734,72 @@ def _stream_report(samples: list[StreamSample]) -> dict[str, Any]:
         "completionTokens": distribution(
             sample.completion_tokens for sample in samples
         ),
+        "cachedPromptTokens": distribution(
+            sample.cached_prompt_tokens for sample in samples
+        ),
     }
+
+
+def _stream_round(
+    endpoint: Endpoint,
+    *,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    timeout: float,
+    requests: int,
+    concurrency: int,
+    temperature: float,
+    endpoint_profile: str,
+    cache_prompt: bool | None,
+    clock: Callable[[], float],
+) -> list[StreamSample]:
+    start = threading.Event()
+    started_condition = threading.Condition()
+    started = 0
+    target = min(concurrency, requests)
+
+    def worker(index: int) -> StreamSample:
+        nonlocal started
+        with started_condition:
+            started += 1
+            started_condition.notify_all()
+        start.wait()
+        return measure_stream(
+            endpoint,
+            model=model,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            request_index=index,
+            temperature=temperature,
+            endpoint_profile=endpoint_profile,
+            cache_prompt=cache_prompt,
+            clock=clock,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=concurrency
+    ) as pool:
+        futures = [pool.submit(worker, index) for index in range(requests)]
+        try:
+            with started_condition:
+                if not started_condition.wait_for(
+                    lambda: started >= target, timeout=timeout
+                ):
+                    raise RuntimeError("stream workers did not start in time")
+            start.set()
+            return [future.result() for future in futures]
+        except BaseException:
+            # Queued requests would otherwise each run to completion, up to
+            # the timeout, before the failure is reported.
+            for future in futures:
+                future.cancel()
+            raise
+        finally:
+            # Release blocked workers even on failure, or the pool's exit
+            # would wait for them forever.
+            start.set()
 
 
 def run_benchmark(
@@ -671,32 +809,56 @@ def run_benchmark(
     mode: str,
     overhead_path: str,
     requests: int,
-    concurrency: int,
+    concurrency_levels: list[int],
     max_tokens: int,
     prompt: str,
     timeout: float,
-    extra_body: dict[str, Any] | None = None,
+    temperature: float = 0.0,
+    prompt_repeat: int = 1,
+    endpoint_profile: str = "gufo",
+    cache_prompt: bool | None = None,
+    source_revision: str | None = None,
+    source_dirty: bool | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> dict[str, Any]:
     if mode not in ("overhead", "stream", "both"):
         raise ValueError("mode must be overhead, stream or both")
     if requests <= 0:
         raise ValueError("requests must be positive")
-    if concurrency <= 0:
-        raise ValueError("concurrency must be positive")
-    if mode in ("stream", "both") and not model:
+    if not concurrency_levels or any(level <= 0 for level in concurrency_levels):
+        raise ValueError("concurrency levels must be positive")
+    streams = mode in ("stream", "both")
+    if streams and not model:
         raise ValueError("--model is required for streaming measurements")
+    if endpoint_profile not in ENDPOINT_PROFILES:
+        raise ValueError(f"unknown endpoint profile: {endpoint_profile}")
     endpoint = Endpoint.parse(base_url)
+    workload: dict[str, Any] = {
+        "mode": mode,
+        "transport": "openai-chat-completions-sse",
+        "requests": requests,
+    }
+    if mode in ("overhead", "both"):
+        workload["overheadPath"] = overhead_path
+    if streams:
+        workload.update({
+            "maxOutputTokens": max_tokens,
+            "temperature": temperature,
+            "promptRepeat": prompt_repeat,
+            # Identifies the prompt without recording its text.
+            "promptSha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "concurrency": list(concurrency_levels),
+            "endpointProfile": endpoint_profile,
+            "cachePrompt": cache_prompt,
+        })
     report: dict[str, Any] = {
-        "schema": BENCHMARK_SCHEMA,
+        "schemaVersion": "1.0.0",
+        "artifactType": "interfaceBenchmark",
+        "benchmarkSchema": BENCHMARK_SCHEMA,
+        "source": {"revision": source_revision, "dirty": source_dirty},
+        "model": {"id": model},
         "endpoint": endpoint.public(),
-        "workload": {
-            "mode": mode,
-            "model": model,
-            "requests": requests,
-            "concurrency": concurrency,
-            "maxTokens": max_tokens if mode != "overhead" else None,
-        },
+        "workload": workload,
     }
     if mode in ("overhead", "both"):
         report["overhead"] = {
@@ -717,57 +879,32 @@ def run_benchmark(
                 clock=clock,
             ),
         }
-    if mode in ("stream", "both"):
+    if streams:
         assert model is not None
-        start = threading.Event()
-        started_condition = threading.Condition()
-        started = 0
-        target = min(concurrency, requests)
-        samples: list[StreamSample] = []
-
-        def worker(index: int) -> StreamSample:
-            nonlocal started
-            with started_condition:
-                started += 1
-                started_condition.notify_all()
-            start.wait()
-            return measure_stream(
-                endpoint,
-                model=model,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                timeout=timeout,
-                request_index=index,
-                extra_body=extra_body,
-                clock=clock,
-            )
-
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=concurrency
-        ) as pool:
-            futures = [pool.submit(worker, index) for index in range(requests)]
-            try:
-                with started_condition:
-                    if not started_condition.wait_for(
-                        lambda: started >= target, timeout=timeout
-                    ):
-                        for future in futures:
-                            future.cancel()
-                        raise RuntimeError(
-                            "stream workers did not start in time"
-                        )
-            finally:
-                # Release blocked workers even on failure, or the pool's exit
-                # would wait for them forever.
-                start.set()
-            for future in futures:
-                samples.append(future.result())
-        report["stream"] = _stream_report(samples)
+        report["streams"] = [
+            {
+                "concurrency": concurrency,
+                **_stream_report(_stream_round(
+                    endpoint,
+                    model=model,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                    requests=requests,
+                    concurrency=concurrency,
+                    temperature=temperature,
+                    endpoint_profile=endpoint_profile,
+                    cache_prompt=cache_prompt,
+                    clock=clock,
+                )),
+            }
+            for concurrency in concurrency_levels
+        ]
     return report
 
 
 def _print_report(report: dict[str, Any]) -> None:
-    print(f"schema: {report['schema']}")
+    print(f"schema: {report['benchmarkSchema']}")
     if "overhead" in report:
         print("\nHTTP request overhead")
         print("  mode      requests  connect p50  ttfb p50/p95  total p50  reuse")
@@ -787,13 +924,13 @@ def _print_report(report: dict[str, Any]) -> None:
                 f"{value(total, 'median'):>9}  "
                 f"{str(result['connectionReused']):<5}"
             )
-    if "stream" in report:
-        stream = report["stream"]
-        print("\nToken arrival")
+    for stream in report.get("streams", []):
+        print(f"\nToken arrival, concurrency {stream['concurrency']}")
         print(f"  requests: {stream['requests']}")
         for key in (
             "connect_ms", "ttfb_ms", "client_ttft_ms", "server_ttft_ms",
-            "interfaceOverhead_ms", "gap_ms", "server_max_inter_token_ms",
+            "client_minus_server_ttft_ms", "gap_ms",
+            "server_max_inter_token_ms",
         ):
             item = stream[key]
             if item["count"] == 0:
@@ -827,7 +964,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="http://127.0.0.1:8080",
         help="Server base URL (never written to the artifact)",
     )
-    parser.add_argument("--model", help="Served OpenAI model ID")
+    parser.add_argument(
+        "--model",
+        help="Served OpenAI model ID (default: the one served text model)",
+    )
     parser.add_argument(
         "--mode", choices=("overhead", "stream", "both"), default="both",
         help="Measure request overhead, streaming, or both (default: both)",
@@ -837,53 +977,86 @@ def build_parser() -> argparse.ArgumentParser:
         help="Small response used for connection-overhead measurement",
     )
     parser.add_argument("--requests", type=int, default=20)
-    parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument(
+        "--concurrency",
+        type=parse_concurrency_levels,
+        default=parse_concurrency_levels("1,2,4"),
+        help="Comma-separated stream concurrency levels (default: 1,2,4)",
+    )
     parser.add_argument("--max-tokens", type=int, default=128)
     prompt = parser.add_mutually_exclusive_group()
     prompt.add_argument("--prompt", help="Streaming prompt text")
     prompt.add_argument("--prompt-file", type=Path)
-    parser.add_argument("--prompt-repeat", type=int, default=1)
+    parser.add_argument(
+        "--prompt-repeat", type=int, default=8,
+        help="Repeat the canonical/custom prompt N times (default: 8)",
+    )
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--endpoint-profile",
+        choices=ENDPOINT_PROFILES,
+        default="gufo",
+        help=(
+            "gufo: pin Gufo sampling extensions; openai: send only OpenAI "
+            "sampling fields"
+        ),
+    )
+    parser.add_argument(
+        "--no-cache-prompt",
+        action="store_true",
+        help="Disable prompt reuse for every request",
+    )
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--output", type=Path, help="Write the JSON artifact")
     parser.add_argument("--json", action="store_true")
     return parser
 
 
+def _source_identity() -> tuple[str | None, bool | None]:
+    try:
+        return source_identity(Path(__file__).resolve().parents[2])
+    except (OSError, subprocess.CalledProcessError):
+        # An installed copy outside a checkout has no revision to record.
+        return None, None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.requests <= 0:
         raise SystemExit("--requests must be positive")
-    if args.concurrency <= 0:
-        raise SystemExit("--concurrency must be positive")
     if args.prompt_repeat <= 0:
         raise SystemExit("--prompt-repeat must be positive")
     prompt = args.prompt or DEFAULT_PROMPT
     if args.prompt_file:
         prompt = args.prompt_file.read_text(encoding="utf-8")
-    prompt = "\n\n".join([prompt] * args.prompt_repeat)
-    extra_body = {"temperature": args.temperature}
+    prompt = "\n\n".join(prompt for _ in range(args.prompt_repeat))
+    revision, dirty = _source_identity()
     try:
+        model = args.model
+        if model is None and args.mode != "overhead":
+            model = discover_model(args.base_url, args.timeout)
         report = run_benchmark(
             base_url=args.base_url,
-            model=args.model,
+            model=model,
             mode=args.mode,
             overhead_path=args.overhead_path,
             requests=args.requests,
-            concurrency=args.concurrency,
+            concurrency_levels=args.concurrency,
             max_tokens=args.max_tokens,
             prompt=prompt,
             timeout=args.timeout,
-            extra_body=extra_body,
+            temperature=args.temperature,
+            prompt_repeat=args.prompt_repeat,
+            endpoint_profile=args.endpoint_profile,
+            cache_prompt=False if args.no_cache_prompt else None,
+            source_revision=revision,
+            source_dirty=dirty,
         )
+        if args.output:
+            atomic_json(args.output, report)
     except (OSError, ValueError, RuntimeError) as exception:
         print(f"interface benchmark failed: {exception}", file=sys.stderr)
         return 1
-    if args.output:
-        args.output.write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
