@@ -1,6 +1,8 @@
 // libjpeg-turbo JPEG decoding as DecodeImage did before the Rust port, frozen
 // as the reference for jpeg_decode_test. It includes EXIF orientation.
 
+#include <cstdio>
+// jpeglib.h uses FILE but doesn't include <stdio.h>.
 #include <jpeglib.h>
 
 #include <algorithm>

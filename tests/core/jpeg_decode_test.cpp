@@ -8,6 +8,8 @@
 //   jpeg_decode_test --corpus DIR... [--repeat N]
 //                                             compare and time real files
 
+#include <cstdio>
+// jpeglib.h uses FILE but doesn't include <stdio.h>.
 #include <jpeglib.h>
 
 #include <algorithm>
