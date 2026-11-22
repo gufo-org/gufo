@@ -39,10 +39,12 @@
   X(loom_text_embed_info)                \
   X(loom_text_embed_is_stop_token)       \
   X(loom_text_embed_logits_info)         \
+  X(loom_text_embed_memory)              \
   X(loom_text_embed_open_ex)             \
   X(loom_text_embed_output_close)        \
   X(loom_text_embed_output_feed)         \
   X(loom_text_embed_output_tools)        \
+  X(loom_text_embed_query_gpu)           \
   X(loom_text_embed_request_free)        \
   X(loom_text_embed_request_logits)      \
   X(loom_text_embed_request_media)       \
@@ -169,10 +171,12 @@ inline const Api& LoadApi() {
 #define loom_text_embed_info (::gufo::loom::LoadApi().loom_text_embed_info)
 #define loom_text_embed_is_stop_token (::gufo::loom::LoadApi().loom_text_embed_is_stop_token)
 #define loom_text_embed_logits_info (::gufo::loom::LoadApi().loom_text_embed_logits_info)
+#define loom_text_embed_memory (::gufo::loom::LoadApi().loom_text_embed_memory)
 #define loom_text_embed_open_ex (::gufo::loom::LoadApi().loom_text_embed_open_ex)
 #define loom_text_embed_output_close (::gufo::loom::LoadApi().loom_text_embed_output_close)
 #define loom_text_embed_output_feed (::gufo::loom::LoadApi().loom_text_embed_output_feed)
 #define loom_text_embed_output_tools (::gufo::loom::LoadApi().loom_text_embed_output_tools)
+#define loom_text_embed_query_gpu (::gufo::loom::LoadApi().loom_text_embed_query_gpu)
 #define loom_text_embed_request_free (::gufo::loom::LoadApi().loom_text_embed_request_free)
 #define loom_text_embed_request_logits (::gufo::loom::LoadApi().loom_text_embed_request_logits)
 #define loom_text_embed_request_media (::gufo::loom::LoadApi().loom_text_embed_request_media)

@@ -297,6 +297,35 @@ int loom_text_embed_decode_batch_tokens(loom_text_embed_t* embed,
 int loom_text_embed_is_stop_token(const loom_text_embed_t* embed,
                                   int32_t token);
 
+// Device memory the open model holds. Its state (KV) is one paged pool that
+// every row and checkpoint shares; reservations take pages from it as
+// requests grow and give them back when rows reset.
+typedef struct loom_text_embed_memory_t {
+  // Device bytes the model's pool holds: weights, state and workspace.
+  uint64_t device_bytes;
+  // Token positions the state pool holds, page-rounded, and those in pages
+  // nothing owns; zero for dense storage.
+  uint64_t state_tokens;
+  uint64_t free_tokens;
+  // Bytes of one state page (every cache plane for block_size tokens).
+  uint64_t page_bytes;
+  uint32_t block_size;
+} loom_text_embed_memory_t;
+void loom_text_embed_memory(const loom_text_embed_t* embed,
+                            loom_text_embed_memory_t* out_memory);
+
+// The GPU a default device URI opens (the first AMD GPU endpoint), as the
+// driver reports it on every platform, before any package is opened.
+typedef struct loom_text_embed_gpu_t {
+  // Compiler target, e.g. "gfx1151"; empty when there is no AMD GPU.
+  char target[32];
+  // Device-local memory in bytes (system RAM on an APU, whose local memory
+  // the driver reports as system-backed); zero when it does not report it.
+  uint64_t memory_bytes;
+} loom_text_embed_gpu_t;
+int loom_text_embed_query_gpu(loom_text_embed_gpu_t* out_gpu, char* error,
+                              size_t error_size);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

@@ -46,6 +46,9 @@
 #include "loom/serve/service/text/tool_calls.h"
 #include "loomc/target/amdgpu/iree_hal.h"
 #include "loomc/target/configured.h"
+#include "amdf/api.h"
+#include "amdf/gpu.h"
+#include "amdf/memory.h"
 
 #if defined(_WIN32)
 // exports.def names the exported functions.
@@ -1571,6 +1574,31 @@ LOOM_TEXT_EMBED_EXPORT void loom_text_embed_image_layout(
   out_layout->supported = state->memory.buffers[1] != NULL;
 }
 
+LOOM_TEXT_EMBED_EXPORT void loom_text_embed_memory(
+    const loom_text_embed_t* embed, loom_text_embed_memory_t* out_memory) {
+  memset(out_memory, 0, sizeof(*out_memory));
+  // A fixed pool's backing is all native; an elastic one's is its committed
+  // virtual memory.
+  const loom_runtime_pool_t* pool =
+      loom_runtime_device_group_pool_at(embed->group, 0);
+  const loom_runtime_pool_statistics_t pool_statistics =
+      loom_runtime_pool_statistics(pool);
+  out_memory->device_bytes =
+      loom_runtime_pool_memory(pool)
+          ? pool_statistics.retained.committed_bytes
+          : (uint64_t)pool_statistics.storage.bytes_reserved;
+  const loom_serve_text_pool_usage_t usage =
+      loom_serve_text_model_pool_usage(embed->model);
+  out_memory->state_tokens = usage.capacity;
+  out_memory->free_tokens = usage.available;
+  out_memory->block_size = (uint32_t)usage.block_size;
+  const loom_serve_text_storage_t* storage = &embed->model->state.storage;
+  for (iree_host_size_t r = 0; r < storage->region_count; ++r) {
+    out_memory->page_bytes += (uint64_t)storage->regions[r].blocks.count *
+                              storage->regions[r].blocks.block_bytes;
+  }
+}
+
 // recurrent_slot UINT32_MAX plans a suspended checkpoint: only lengths and
 // the image side are meaningful then.
 static iree_status_t loom_text_embed_image_plan(
@@ -1962,4 +1990,121 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_prefill_request(
     status = loom_text_embed_collect_logits(embed, &row, 1);
   }
   EMBED_RETURN(embed, status);
+}
+
+// libamdf, the driver under Loom's amdgpu devices, reads the same endpoints on
+// Linux (KFD) and Windows (WDDM). The default device URI opens the first GPU
+// endpoint; local memory is known once a device exists, so one is created and
+// destroyed here.
+static amdf_status_t loom_text_embed_query_endpoint(
+    const amdf_api_t* api, const amdf_gpu_api_t* gpu_api,
+    amdf_instance_t* instance, loom_text_embed_gpu_t* out_gpu) {
+  uint32_t count = 0;
+  amdf_status_t status = api->endpoint_enumerate(instance, 0, NULL, &count);
+  if (amdf_status_code(status) == AMDF_STATUS_CODE_BUFFER_TOO_SMALL) {
+    status = AMDF_STATUS_OK;
+  }
+  if (!amdf_status_is_ok(status) || count == 0) return status;
+  amdf_endpoint_summary_t* summaries =
+      (amdf_endpoint_summary_t*)calloc(count, sizeof(*summaries));
+  if (!summaries) {
+    return amdf_make_api_status(AMDF_STATUS_CODE_RESOURCE_EXHAUSTED);
+  }
+  status = api->endpoint_enumerate(instance, count, summaries, &count);
+  // The first endpoint that answers as a GPU; a summary may not know its
+  // engine yet.
+  amdf_endpoint_t* endpoint = NULL;
+  amdf_gpu_endpoint_info_t info = {
+      .type = AMDF_STRUCTURE_TYPE_GPU_ENDPOINT_INFO,
+      .structure_size = sizeof(info),
+  };
+  for (uint32_t i = 0; amdf_status_is_ok(status) && i < count && !endpoint;
+       ++i) {
+    if (summaries[i].engine_kind != AMDF_ENGINE_KIND_GPU &&
+        summaries[i].engine_kind != AMDF_ENGINE_KIND_UNKNOWN) {
+      continue;
+    }
+    if (!amdf_status_is_ok(
+            api->endpoint_open(instance, &summaries[i].id, &endpoint))) {
+      endpoint = NULL;
+      continue;
+    }
+    if (!amdf_status_is_ok(gpu_api->endpoint_query_info(endpoint, &info))) {
+      api->endpoint_close(endpoint);
+      endpoint = NULL;
+    }
+  }
+  free(summaries);
+  if (!endpoint) return status;
+  {
+    snprintf(out_gpu->target, sizeof(out_gpu->target), "gfx%u%u%x",
+             info.gfx_ip.major, info.gfx_ip.minor, info.gfx_ip.stepping);
+    const amdf_gpu_device_create_info_t create_info = {
+        .type = AMDF_STRUCTURE_TYPE_GPU_DEVICE_CREATE_INFO,
+        .structure_size = sizeof(create_info),
+    };
+    amdf_device_t* device = NULL;
+    // Memory is a refinement: the target stands without it.
+    if (amdf_status_is_ok(
+            gpu_api->device_create(endpoint, &create_info, &device))) {
+      amdf_memory_scope_t* scopes[8] = {0};
+      uint32_t scope_count = 0;
+      amdf_status_t scope_status = api->device_enumerate_memory_scopes(
+          device, 8, scopes, &scope_count);
+      if (amdf_status_code(scope_status) ==
+          AMDF_STATUS_CODE_BUFFER_TOO_SMALL) {
+        scope_status = AMDF_STATUS_OK;
+        if (scope_count > 8) scope_count = 8;
+      }
+      for (uint32_t i = 0; amdf_status_is_ok(scope_status) && i < scope_count;
+           ++i) {
+        amdf_memory_scope_info_t scope = {
+            .type = AMDF_STRUCTURE_TYPE_MEMORY_SCOPE_INFO,
+            .structure_size = sizeof(scope),
+        };
+        if (amdf_status_is_ok(api->memory_scope_query_info(scopes[i], &scope)) &&
+            scope.kind == AMDF_MEMORY_SCOPE_KIND_LOCAL &&
+            scope.capacity_byte_length > out_gpu->memory_bytes) {
+          out_gpu->memory_bytes = scope.capacity_byte_length;
+        }
+      }
+      api->device_destroy(device);
+    }
+  }
+  api->endpoint_close(endpoint);
+  return status;
+}
+
+LOOM_TEXT_EMBED_EXPORT int loom_text_embed_query_gpu(
+    loom_text_embed_gpu_t* out_gpu, char* error, size_t error_size) {
+  memset(out_gpu, 0, sizeof(*out_gpu));
+  const amdf_api_t* api = NULL;
+  const void* extension = NULL;
+  amdf_instance_t* instance = NULL;
+  amdf_status_t status =
+      amdf_query_api(AMDF_ABI_VERSION_LATEST, AMDF_ABI_VERSION_LATEST, &api);
+  if (amdf_status_is_ok(status)) {
+    status = api->query_extension(AMDF_EXTENSION_GPU,
+                                  AMDF_GPU_EXTENSION_VERSION_1,
+                                  AMDF_GPU_EXTENSION_VERSION_LATEST, &extension);
+  }
+  if (amdf_status_is_ok(status)) {
+    const amdf_instance_create_info_t create_info = {
+        .type = AMDF_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .structure_size = sizeof(create_info),
+    };
+    status = api->instance_create(&create_info, &instance);
+  }
+  if (amdf_status_is_ok(status)) {
+    status = loom_text_embed_query_endpoint(
+        api, (const amdf_gpu_api_t*)extension, instance, out_gpu);
+    api->instance_destroy(instance);
+  }
+  if (amdf_status_is_ok(status)) return 0;
+  if (error && error_size) {
+    snprintf(error, error_size, "libamdf status domain %u code %u",
+             (unsigned)amdf_status_domain(status),
+             (unsigned)amdf_status_code(status));
+  }
+  return 2;
 }

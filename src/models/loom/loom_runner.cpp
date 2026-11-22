@@ -20,7 +20,7 @@
 // Sampling runs on device with the package's sampler (temperature, top-k,
 // top-p, seed). Gufo's grammar constraints, logprobs, min-p and penalties need
 // the logit row, which a package that declares "llm.logits" returns when it is
-// loaded with the capability (--loom-logits, default auto): a request that
+// loaded with the capability (always, when it declares it): a request that
 // needs them is marked "logits": true for the package, every selection of its
 // row leaves the full row, and the token is chosen here with Gufo's
 // SamplerState and fed back through the epoch (decode_batch_tokens). Every
@@ -147,6 +147,19 @@ public:
     if (close_tokens_.empty())
       ProbeReasoningClose();
     std::lock_guard lock(model_->mutex());
+    // Every session's KV comes from one pool that Loom pages itself: a
+    // request reserves what its prompt and output reach, so the sessions
+    // share the pool rather than each holding a full context.
+    loom_text_embed_memory(model_->embed(), &memory_);
+    const auto gib = [](std::uint64_t bytes) {
+      return static_cast<double>(bytes) / static_cast<double>(1ull << 30);
+    };
+    std::fprintf(
+        stderr,
+        "loom: device memory %.1f GiB, KV pool %.1f GiB of it (%llu tokens "
+        "shared by %u sessions)\n",
+        gib(memory_.device_bytes), gib(KvBytes()),
+        static_cast<unsigned long long>(memory_.state_tokens), rows_);
     std::fprintf(stderr, "loom: reasoning close %s (%s)\n",
                  close_tokens_.empty()
                      ? "unknown; reasoning budgets are not enforced"
@@ -227,9 +240,12 @@ public:
   }
 
   [[nodiscard]] ext::TextRunnerResourceClaim ResourceClaim() const override {
-    // Loom accounts device memory itself; the host cache holds only
-    // checkpoint names and its own metadata.
+    // Loom admits each request against its shared KV pool (see the
+    // constructor), which a per-session claim would count once per session;
+    // the host cache holds only checkpoint names and its own metadata.
     return {
+        .resident_weights_bytes =
+            memory_.device_bytes - std::min(memory_.device_bytes, KvBytes()),
         .per_request_state_bytes = 0,
         .temporary_scratch_bytes = 0,
         // Image blocks fill ImageCacheBytes; the cache's own metadata,
@@ -440,7 +456,14 @@ public:
   // counts reasoning from a prompt-opened reasoning block.
   [[nodiscard]] ext::InitialOutputState InitialOutputState(
       const ext::ChatRequest& request) const override {
-    const auto prepared = PreparePrompt(request);
+    // Gufo also asks with no messages (its defaults at load); some chat
+    // programs refuse a chat without a user turn, so render a placeholder.
+    std::optional<ext::ChatRequest> placeholder;
+    if (request.messages.empty()) {
+      placeholder = request;
+      placeholder->messages.emplace_back(ext::ChatRole::kUser, ".");
+    }
+    const auto prepared = PreparePrompt(placeholder ? *placeholder : request);
     const auto* context =
         prepared
             ? dynamic_cast<const LoomPromptContext*>(prepared->context.get())
@@ -1529,10 +1552,18 @@ private:
   mutable std::vector<std::int32_t> close_tokens_;
   std::size_t ram_cache_bytes_{0};
   std::optional<ImageLayout> images_;
+  loom_text_embed_memory_t memory_{};
   // Logits load only: the model's own call syntax and reasoning markers, and
   // whether grammars may run around its reasoning at all.
   NativeDialect native_;
   bool reasoning_ok_{false};
+
+  // Device bytes of the KV pool's pages.
+  [[nodiscard]] std::uint64_t KvBytes() const {
+    return memory_.block_size
+               ? memory_.state_tokens / memory_.block_size * memory_.page_bytes
+               : 0;
+  }
 
   // Host bytes the RAM tier may hold as images: --ram-cache, or room for a
   // few full-context images.

@@ -354,6 +354,15 @@ int loom_text_embed_row_is_logit(loom_text_embed_t* e, uint32_t row) {
 int loom_text_embed_is_stop_token(const loom_text_embed_t*, int32_t token) {
   return token == fake::kEos;
 }
+void loom_text_embed_memory(const loom_text_embed_t*,
+                            loom_text_embed_memory_t* memory) {
+  *memory = {};
+}
+int loom_text_embed_query_gpu(loom_text_embed_gpu_t* gpu, char*, size_t) {
+  *gpu = {};
+  std::snprintf(gpu->target, sizeof(gpu->target), "gfx1151");
+  return 0;
+}
 int loom_text_embed_row_pin(loom_text_embed_t*, uint32_t,
                             loom_text_embed_checkpoint_t**) {
   return 1;

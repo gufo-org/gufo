@@ -26,7 +26,8 @@ struct ModelSourceHub {
 struct ModelSourceComponent {
   std::string role;
   /// The command option the component's path fills; `--model` for the one
-  /// the model is served from.
+  /// the model is served from, empty when the runner finds the component in
+  /// the model directory on its own.
   std::string option;
   std::string repo;
   /// 40-hex commit.

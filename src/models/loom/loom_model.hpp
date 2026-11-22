@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gufo/ext/generated/loom_constants.hpp>
+#include <gufo/ext/host.hpp>
 #include <gufo/ext/json.hpp>
 #include <gufo/ext/registry.hpp>
 #include <gufo/ext/sha256.hpp>
@@ -99,25 +100,14 @@ class LoomModel {
 public:
   LoomModel(const std::string& path, const ext::ParsedOptions& options,
             std::size_t sessions, bool checkpoint_images) {
-    std::string preset, device;
+    std::string device;
     std::uint64_t memory = 0;
-    if (const auto* value =
-            ext::FindOption<std::string>(options, "--loom-preset"))
-      preset = *value;
     if (const auto* value =
             ext::FindOption<std::string>(options, "--loom-device"))
       device = *value;
     if (const auto* value =
             ext::FindOption<std::int64_t>(options, "--loom-memory-bytes"))
       memory = static_cast<std::uint64_t>(*value);
-    // --loom-logits: auto (default) opens with the logits capability when the
-    // package declares it; on requires it; off never uses it.
-    std::string logits_mode = "auto";
-    if (const auto* value =
-            ext::FindOption<std::string>(options, "--loom-logits"))
-      logits_mode = *value;
-    if (logits_mode != "auto" && logits_mode != "on" && logits_mode != "off")
-      throw std::invalid_argument("--loom-logits must be auto, on or off");
     // The package as published (a loom-fun repository from `gufo model
     // install`) or as loom-fetch writes it: the preset for this GPU, and
     // parameter files found by their origin.
@@ -127,15 +117,25 @@ public:
               options, std::string("--loom-") + origin))
         origins.emplace(origin, *value);
     }
-    // The preset follows the GPU Loom opens by default (the first KFD GPU); a
-    // named --loom-device needs --loom-preset when the card has several.
-    auto gpu = package::FirstGpu();
+    // The preset follows the GPU Loom opens by default, as its driver reports
+    // it on Linux and Windows alike.
+    package::Gpu gpu;
+    loom_text_embed_gpu_t found{};
+    char gpu_error[512] = {};
+    if (loom_text_embed_query_gpu(&found, gpu_error, sizeof(gpu_error)) == 0)
+      gpu = {.target = found.target, .memory_bytes = found.memory_bytes};
+    else
+      Warn(std::string("cannot read the GPU from the Loom driver (") +
+           gpu_error + ")");
     if (package::NamesDevice(device))
-      gpu = {.named_device = true};
-    package_ = package::Resolve(path, preset, origins, gpu, kRuntimeSdk);
-    preset = package_.preset;
+      Warn("--loom-device names a device; the preset follows the first GPU (" +
+           (gpu.target.empty() ? std::string("unknown") : gpu.target) + ")");
+    package_ = package::Resolve(path, origins, gpu, kRuntimeSdk);
+    const std::string preset = package_.preset;
     if (!package_.note.empty())
       std::fprintf(stderr, "loom: %s\n", package_.note.c_str());
+    if (!package_.warning.empty())
+      Warn(package_.warning);
     if (!package_.overlay.empty())
       std::fprintf(stderr,
                    "loom: parameter files found by origin in the model "
@@ -150,14 +150,14 @@ public:
         .rows = static_cast<std::uint32_t>(std::max<std::size_t>(sessions, 1)),
         .checkpoints = kCheckpoints,
     };
-    embed_options.logits =
-        logits_mode == "on" || (logits_mode == "auto" && DeclaresLogits(path));
+    // The logits capability whenever the package declares it.
+    embed_options.logits = DeclaresLogits(path);
     // A disk tier stores checkpoint images, which need elastic state.
     embed_options.elastic = checkpoint_images;
     char error[2048] = {};
     if (loom_text_embed_open_ex(&embed_options, &embed_, error,
                                 sizeof(error))) {
-      if (embed_options.logits && logits_mode == "auto") {
+      if (embed_options.logits) {
         // A package whose state cannot return rows still serves, as before.
         std::fprintf(stderr,
                      "loom: logits unavailable (%s); sampling stays on the "
@@ -275,6 +275,10 @@ private:
   }
 
   // The card declares "llm.logits" (the package carries the readback).
+  static void Warn(const std::string& message) {
+    ext::Host{}.Log(ext::LogLevel::kWarn, "loom", message);
+  }
+
   static bool DeclaresLogits(const std::string& path) {
     const auto manifest = ManifestPath(path);
     if (!manifest)

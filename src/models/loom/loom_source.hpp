@@ -149,14 +149,18 @@ inline ext::ModelSourceModel Resolve(std::string_view repo,
       found->second.push_back(file.origin_path);
   }
   const auto* declared = card.find("origins");
+  std::string primary = origins.empty() ? "" : origins.front().first;
+  for (const auto& [origin, paths] : origins)
+    primary = origin == "checkpoint" ? origin : primary;
   std::string licenses;
   for (const auto& [origin, paths] : origins) {
+    // Any Hugging Face origin installs: the runner finds its files in the
+    // model directory. Only the ones with a --loom-<origin> option name it.
     const auto option = kOptions.find(origin);
     const auto* entry = declared ? declared->find(origin) : nullptr;
-    if (option == kOptions.end() || entry == nullptr ||
-        entry->member_str("kind") != "hf")
+    if (entry == nullptr || entry->member_str("kind") != "hf")
       throw std::runtime_error("loom: " + std::string(repo) + ": origin " +
-                               origin + " is not supported");
+                               origin + " is not on Hugging Face");
     const auto source = entry->member_str("repository");
     const auto pinned = entry->member_str("revision");
     if (source.find('/') == std::string::npos || pinned.size() != 40)
@@ -164,7 +168,7 @@ inline ext::ModelSourceModel Resolve(std::string_view repo,
                                origin + " is not pinned to a revision");
     model.components.push_back(
         {.role = origin,
-         .option = option->second,
+         .option = option == kOptions.end() ? std::string() : option->second,
          .repo = source,
          .revision = pinned,
          .entry = paths.size() == 1 ? paths.front() : ".",
@@ -173,7 +177,9 @@ inline ext::ModelSourceModel Resolve(std::string_view repo,
     auto license = License(source, hub);
     if (license.empty())
       license = "no license stated";
-    if (origin == "checkpoint")
+    // The checkpoint's license comes first, else the first origin's (the
+    // weights of a card without a checkpoint origin, such as "quantized").
+    if (origin == primary)
       licenses = license + (licenses.empty() ? "" : "; " + licenses);
     else if (licenses.find(license) == std::string::npos)
       licenses += (licenses.empty() ? "" : "; ") + origin + " (" + source +

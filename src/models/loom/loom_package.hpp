@@ -38,13 +38,12 @@ inline std::string ReadText(const fs::path& path) {
   return {std::istreambuf_iterator<char>(in), {}};
 }
 
-// The first GPU's target as KFD reports it (gfx_target_version 110501 is
-// gfx1151) and its memory, or {0, 0} without KFD (Windows).
+// The GPU Loom opens by default, as its driver reports it
+// (loom_text_embed_query_gpu): its target ("gfx1151"; empty when unknown) and
+// device-local memory (system RAM on an APU; zero when unknown).
 struct Gpu {
-  unsigned target = 0;
+  std::string target;
   std::uint64_t memory_bytes = 0;
-  // --loom-device names a device: which KFD node it is is not known here.
-  bool named_device = false;
 };
 
 // A --loom-device URI that names a device (anything between "amdgpu://" and
@@ -57,55 +56,14 @@ inline bool NamesDevice(std::string_view uri) {
   return !rest.empty() && rest.front() != '?';
 }
 
-inline Gpu FirstGpu(
-    const fs::path& topology = "/sys/class/kfd/kfd/topology/nodes") {
-  std::error_code error;
-  std::vector<fs::path> nodes;
-  for (const auto& entry : fs::directory_iterator(topology, error))
-    nodes.push_back(entry.path());
-  std::sort(nodes.begin(), nodes.end(),
-            [](const fs::path& a, const fs::path& b) {
-              return std::strtoul(a.filename().string().c_str(), nullptr, 10) <
-                     std::strtoul(b.filename().string().c_str(), nullptr, 10);
-            });
-  for (const auto& node : nodes) {
-    std::ifstream in(node / "properties");
-    std::string key;
-    std::uint64_t value = 0;
-    Gpu gpu;
-    while (in >> key >> value)
-      if (key == "gfx_target_version")
-        gpu.target = static_cast<unsigned>(value);
-    if (gpu.target == 0)
-      continue;
-    std::ifstream bank(node / "mem_banks" / "0" / "properties");
-    while (bank >> key >> value)
-      if (key == "size_in_bytes")
-        gpu.memory_bytes = value;
-    return gpu;
-  }
-  return {};
-}
-
-inline std::string GpuName(unsigned target) {
-  if (target == 0)
-    return "unknown GPU";
-  char name[32];
-  std::snprintf(name, sizeof(name), "gfx%u%u%x", target / 10000,
-                target / 100 % 100, target % 100);
-  return name;
-}
-
-// The preset to serve: the requested one, the card's only one, or the one
-// loom-fun cards publish for this GPU: `chat` for Strix Halo (gfx1151),
-// `chat-gfx1150` (else `chat`) for gfx1150, `chat-r9700` for a gfx1201 with
-// 24 GB or more (else `chat-16gb`). Without KFD, `chat`. Any other GPU needs
-// --loom-preset. Empty lets Loom decide (one preset).
-inline std::string ChoosePreset(const json::Value& card,
-                                const std::string& requested, const Gpu& gpu,
-                                std::string* note) {
-  if (!requested.empty())
-    return requested;
+// The preset to serve: the card's only one, or the one loom-fun cards publish
+// for this GPU: `chat` for Strix Halo (gfx1151), `chat-gfx1150` or
+// `chat-gfx1152` (else `chat`) for those APUs, `chat-r9700` for a gfx1201 with
+// 24 GB or more (else `chat-16gb`). Any other GPU, or a card without the GPU's
+// preset, serves gfx1151's `chat`, and `warning` says so. Empty lets Loom
+// decide (one preset).
+inline std::string ChoosePreset(const json::Value& card, const Gpu& gpu,
+                                std::string* note, std::string* warning) {
   const auto* presets = card.find("presets");
   if (presets == nullptr || !presets->is_object() ||
       presets->members().size() < 2)
@@ -116,33 +74,31 @@ inline std::string ChoosePreset(const json::Value& card,
   std::string names;
   for (const auto& [name, value] : presets->members())
     names += (names.empty() ? "" : ", ") + name;
-  if (gpu.named_device)
-    throw std::runtime_error(
-        "loom: --loom-device names a device: pass --loom-preset too "
-        "(presets: " +
-        names + ")");
+  const std::string gpu_name = gpu.target.empty() ? "unknown GPU" : gpu.target;
   std::vector<std::string> wanted;
-  if (gpu.target == 0 || gpu.target == 110501)
+  if (gpu.target == "gfx1151")
     wanted = {"chat"};
-  else if (gpu.target == 110500)
-    wanted = {"chat-gfx1150", "chat"};
-  else if (gpu.target == 120001)
+  else if (gpu.target == "gfx1150" || gpu.target == "gfx1152")
+    wanted = {"chat-" + gpu.target, "chat"};
+  else if (gpu.target == "gfx1201")
     wanted = gpu.memory_bytes >= (std::uint64_t{24} << 30)
                  ? std::vector<std::string>{"chat-r9700", "chat-16gb"}
                  : std::vector<std::string>{"chat-16gb"};
   for (const auto& name : wanted) {
     if (has(name)) {
       if (note)
-        *note = "preset " + name + " for " +
-                (gpu.target == 0 ? std::string("Strix Halo (no KFD to ask)")
-                                 : GpuName(gpu.target)) +
-                " (--loom-preset selects another)";
+        *note = "preset " + name + " for " + gpu_name;
       return name;
     }
   }
-  throw std::runtime_error("loom: this package has no preset for " +
-                           GpuName(gpu.target) + " (presets: " + names +
-                           "); pass --loom-preset");
+  if (!has("chat"))
+    throw std::runtime_error("loom: this package has no preset for " +
+                             gpu_name +
+                             " and no gfx1151 preset (presets: " + names + ")");
+  if (warning)
+    *warning = "this package has no preset for " + gpu_name +
+               "; serving the gfx1151 preset chat (presets: " + names + ")";
+  return "chat";
 }
 
 // The Loom SDK release a package was built for: its llm_config.json's
@@ -314,6 +270,8 @@ struct Resolved {
   // Held locked while the overlay is in use (see RemoveStale).
   platform::PlatformFile owner = platform::kInvalidFile;
   std::string note;
+  // Said once at load, as a warning.
+  std::string warning;
 
   Resolved() = default;
   Resolved(const Resolved&) = delete;
@@ -327,6 +285,7 @@ struct Resolved {
       overlay = std::exchange(other.overlay, {});
       owner = std::exchange(other.owner, platform::kInvalidFile);
       note = std::move(other.note);
+      warning = std::move(other.warning);
     }
     return *this;
   }
@@ -416,7 +375,6 @@ inline void Link(const fs::path& target, const fs::path& at) {
 }
 
 inline Resolved Resolve(const std::string& path,
-                        const std::string& requested_preset,
                         const std::map<std::string, fs::path>& origins,
                         const Gpu& gpu, std::string_view runtime_sdk = {}) {
   Resolved resolved;
@@ -425,7 +383,7 @@ inline Resolved Resolve(const std::string& path,
       fs::is_directory(path) ? fs::path(path) : fs::path(path).parent_path();
   CheckSdk(root, runtime_sdk);
   const auto card = json::parse(ReadText(root / "model.json"));
-  resolved.preset = ChoosePreset(card, requested_preset, gpu, &resolved.note);
+  resolved.preset = ChoosePreset(card, gpu, &resolved.note, &resolved.warning);
   std::vector<std::pair<std::string, fs::path>> links;
   std::vector<std::string> missing;
   std::error_code error;

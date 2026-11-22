@@ -17,11 +17,13 @@ EXPORTS
   loom_text_embed_info
   loom_text_embed_is_stop_token
   loom_text_embed_logits_info
+  loom_text_embed_memory
   loom_text_embed_open
   loom_text_embed_open_ex
   loom_text_embed_output_close
   loom_text_embed_output_feed
   loom_text_embed_output_tools
+  loom_text_embed_query_gpu
   loom_text_embed_request_free
   loom_text_embed_request_logits
   loom_text_embed_request_media

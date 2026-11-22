@@ -50,49 +50,44 @@ const char* kCard = R"({
               "drafter": {"kind": "hf", "repository": "c/d", "revision": "y"}}
 })";
 
-std::string Preset(const json::Value& card, unsigned target, std::uint64_t gib,
-                   const std::string& requested = "") {
-  return package::ChoosePreset(card, requested, {target, gib << 30}, nullptr);
+std::string Preset(const json::Value& card, const std::string& target,
+                   std::uint64_t gib, std::string* warning = nullptr) {
+  return package::ChoosePreset(card, {target, gib << 30}, nullptr, warning);
 }
 
 void TestPresets() {
   const auto card = json::parse(kCard);
-  CHECK(Preset(card, 110501, 128) == "chat", "Strix Halo serves chat");
-  CHECK(Preset(card, 120001, 32) == "chat-r9700", "R9700 serves chat-r9700");
-  CHECK(Preset(card, 120001, 16) == "chat-16gb",
+  CHECK(Preset(card, "gfx1151", 128) == "chat", "Strix Halo serves chat");
+  CHECK(Preset(card, "gfx1201", 32) == "chat-r9700", "R9700 serves chat-r9700");
+  CHECK(Preset(card, "gfx1201", 16) == "chat-16gb",
         "16 GB gfx1201 serves chat-16gb");
-  CHECK(Preset(card, 120001, 16, "chat") == "chat", "--loom-preset wins");
-  CHECK(Preset(card, 0, 0) == "chat", "no KFD: chat");
-  const auto strix_only = json::parse(
-      R"({"presets": {"chat": {"variant": "gguf"}, "chat-gfx1150": {"variant": "gguf"}}})");
-  CHECK(Preset(strix_only, 110500, 64) == "chat-gfx1150", "gfx1150 preset");
+  const auto apus = json::parse(
+      R"({"presets": {"chat": {"variant": "gguf"}, "chat-gfx1150": {"variant": "gguf"},)"
+      R"("chat-gfx1152": {"variant": "gguf"}}})");
+  CHECK(Preset(apus, "gfx1150", 64) == "chat-gfx1150", "gfx1150 preset");
+  CHECK(Preset(apus, "gfx1152", 32) == "chat-gfx1152", "gfx1152 preset");
+  std::string warning;
+  CHECK(Preset(card, "gfx1152", 32, &warning) == "chat" && warning.empty(),
+        "gfx1152 without its preset serves chat, as published");
+  for (const std::string target : {"gfx1200", "gfx90a", ""}) {
+    warning.clear();
+    CHECK(Preset(card, target, 16, &warning) == "chat" &&
+              warning.find("no preset for " +
+                           (target.empty() ? std::string("unknown GPU")
+                                           : target)) != std::string::npos,
+          "an unmatched GPU (" + target + ") serves gfx1151's chat, warned");
+  }
+  warning.clear();
+  CHECK(Preset(apus, "gfx1201", 32, &warning) == "chat" && !warning.empty(),
+        "a package without the GPU's preset serves chat, warned");
   bool threw = false;
   try {
-    Preset(strix_only, 120001, 32);
+    Preset(json::parse(R"({"presets": {"a": {}, "b": {}}})"), "gfx1200", 16);
   } catch (const std::exception& error) {
-    threw = std::string(error.what()).find("no preset for gfx1201") !=
+    threw = std::string(error.what()).find("no gfx1151 preset") !=
             std::string::npos;
   }
-  CHECK(threw, "a package without a gfx1201 preset says so");
-  threw = false;
-  try {
-    Preset(card, 120000, 16);
-  } catch (const std::exception& error) {
-    threw = std::string(error.what()).find("no preset for gfx1200") !=
-            std::string::npos;
-  }
-  CHECK(threw, "gfx1200 gets no gfx1201 preset");
-  threw = false;
-  try {
-    package::ChoosePreset(card, "", {.named_device = true}, nullptr);
-  } catch (const std::exception& error) {
-    threw = std::string(error.what()).find("--loom-device names a device") !=
-            std::string::npos;
-  }
-  CHECK(threw, "a named --loom-device needs --loom-preset");
-  CHECK(package::ChoosePreset(card, "chat-r9700", {.named_device = true},
-                              nullptr) == "chat-r9700",
-        "a named device with --loom-preset");
+  CHECK(threw, "no match and no chat preset is an error");
   CHECK(!package::NamesDevice("amdgpu://?completion_spin_ns=1") &&
             !package::NamesDevice(""),
         "Loom's default device");
@@ -101,10 +96,7 @@ void TestPresets() {
         "a named device");
   const auto single =
       json::parse(R"({"presets": {"chat": {"variant": "gguf"}}})");
-  CHECK(Preset(single, 120001, 32).empty(), "one preset: Loom picks it");
-  CHECK(package::GpuName(110501) == "gfx1151", "gfx1151 name");
-  CHECK(package::GpuName(120001) == "gfx1201", "gfx1201 name");
-  CHECK(package::GpuName(90010) == "gfx90a", "gfx90a name");
+  CHECK(Preset(single, "gfx1201", 32).empty(), "one preset: Loom picks it");
 }
 
 fs::path TempDir() {
@@ -126,7 +118,7 @@ void TestInstalledLayout() {
   fs::path overlay;
   {
     const auto resolved =
-        package::Resolve(root.string(), "", {}, {110501, 128ull << 30});
+        package::Resolve(root.string(), {}, {"gfx1151", 128ull << 30});
     CHECK(resolved.preset == "chat", "preset chosen");
     overlay = resolved.overlay;
     CHECK(!overlay.empty() && resolved.load_path == overlay.string(),
@@ -149,7 +141,7 @@ void TestFetchedLayout() {
   Write(root / "model.json", kCard);
   Write(root / "parameter" / "model-Q4_K_M.gguf", "weights");
   Write(root / "parameter" / "draft.gguf", "draft");
-  const auto resolved = package::Resolve(root.string(), "chat", {}, {});
+  const auto resolved = package::Resolve(root.string(), {}, {});
   CHECK(resolved.overlay.empty() && resolved.load_path == root.string(),
         "loom-fetch layout opens in place");
   fs::remove_all(root);
@@ -162,9 +154,9 @@ void TestOriginOptions() {
   Write(elsewhere / "sub" / "model-Q4_K_M.gguf", "weights");
   Write(elsewhere / "draft.gguf", "draft");
   const auto resolved = package::Resolve(
-      root.string(), "",
+      root.string(),
       {{"checkpoint", elsewhere}, {"drafter", elsewhere / "draft.gguf"}},
-      {110501, 128ull << 30});
+      {"gfx1151", 128ull << 30});
   CHECK(fs::equivalent(resolved.overlay / "parameter" / "model-Q4_K_M.gguf",
                        elsewhere / "sub" / "model-Q4_K_M.gguf"),
         "--loom-checkpoint directory");
@@ -181,7 +173,7 @@ void TestMissing() {
   Write(root / "sub" / "model-Q4_K_M.gguf", "weights");
   std::string message;
   try {
-    package::Resolve(root.string(), "", {}, {110501, 128ull << 30});
+    package::Resolve(root.string(), {}, {"gfx1151", 128ull << 30});
   } catch (const std::exception& error) {
     message = error.what();
   }
@@ -224,7 +216,7 @@ void TestStaleAndLayouts() {
   }
   {
     const auto resolved =
-        package::Resolve(root.string(), "", {}, {110501, 128ull << 30});
+        package::Resolve(root.string(), {}, {"gfx1151", 128ull << 30});
     CHECK(!fs::exists(stale), "a dead process's directory is removed");
     CHECK(fs::exists(live), "a live process's directory is kept");
     CHECK(fs::exists(resolved.overlay / "parameter" / "extra.bin"),
@@ -240,7 +232,7 @@ void TestStaleAndLayouts() {
   Write(root / "parameter", "a file");
   bool threw = false;
   try {
-    package::Resolve(root.string(), "", {}, {110501, 128ull << 30});
+    package::Resolve(root.string(), {}, {"gfx1151", 128ull << 30});
   } catch (const std::exception& error) {
     threw = std::string(error.what()).find("expects a directory") !=
             std::string::npos;
@@ -257,7 +249,7 @@ void TestSdk() {
   Write(root / "draft.gguf", "draft");
   auto refused = [&](std::string_view runtime) {
     try {
-      package::Resolve(root.string(), "chat", {}, {}, runtime);
+      package::Resolve(root.string(), {}, {}, runtime);
     } catch (const std::exception& error) {
       return std::string(error.what()).find("built for Loom SDK") !=
              std::string::npos;
@@ -293,7 +285,7 @@ void TestUnsafePaths() {
   Write(root / "draft.gguf", "draft");
   bool threw = false;
   try {
-    package::Resolve(root.string(), "", {}, {110501, 128ull << 30});
+    package::Resolve(root.string(), {}, {"gfx1151", 128ull << 30});
   } catch (const std::exception& error) {
     threw = std::string(error.what()).find("invalid parameter path") !=
             std::string::npos;
@@ -307,7 +299,8 @@ void TestUnsafePaths() {
 // A Hub that serves one package: `sdk` in its llm_config.json, `tags` in its
 // refs, and a card with a checkpoint and a drafter origin.
 ext::ModelSourceHub FakeHub(const std::string& sdk, const std::string& tags,
-                            const std::string& kind = "text") {
+                            const std::string& kind = "text",
+                            const std::string& drafter = "drafter") {
   const std::string head(40, 'a'), tagged(40, 'b'), weights(40, 'c');
   return {
       .api = [=](std::string_view path) -> std::string {
@@ -327,13 +320,14 @@ ext::ModelSourceHub FakeHub(const std::string& sdk, const std::string& tags,
                    R"({"schema_version":1,"programs":{},"model":{"id":"Org/Test"},)") +
                R"("services":{"chat":{"kind":")" + kind + R"("}},)" +
                R"("origins":{"checkpoint":{"kind":"hf","repository":"org/Test-GGUF","revision":")" +
-               weights +
-               R"("},"drafter":{"kind":"hf","repository":"org/Draft","revision":")" +
+               weights + R"("},")" + drafter +
+               R"(":{"kind":"hf","repository":"org/Draft","revision":")" +
                weights +
                R"("}},"variants":{"v":{"services":{"chat":{"parameters":{)" +
                R"("m":{"files":[{"path":"parameter/a.gguf","origin":"@checkpoint/a.gguf"},)" +
                R"({"path":"parameter/mmproj.gguf","origin":"@checkpoint/mmproj.gguf"}]},)" +
-               R"("d":{"files":[{"path":"parameter/d.gguf","origin":"@drafter/sub/d.gguf"}]}}}}}}})" +
+               R"("d":{"files":[{"path":"parameter/d.gguf","origin":"@)" +
+               drafter + R"(/sub/d.gguf"}]}}}}}}})" +
                (revision.empty() ? "" : "");
       },
   };
@@ -368,6 +362,16 @@ void TestSource() {
                                            std::string(40, 'b') + R"("})"),
                       "0.2.0");
   CHECK(model.components[0].revision == std::string(40, 'b'), "the SDK's tag");
+  // An origin without a --loom-<origin> option (Flash-Next's "quantized").
+  model = source::Resolve("loom-fun/Test-loom",
+                          FakeHub("0.2.0", "", "text", "quantized"), "0.2.0");
+  CHECK(model.components.size() == 3 &&
+            model.components[2].role == "quantized" &&
+            model.components[2].option.empty() &&
+            model.components[2].repo == "org/Draft" &&
+            model.components[2].include ==
+                std::vector<std::string>({"sub/d.gguf"}),
+        "any Hugging Face origin installs, without an option");
   for (const auto& [hub, what] :
        {std::pair{FakeHub("0.3.0", ""), "a package for another SDK"},
         std::pair{FakeHub("0.2.0", "", "image"), "an image package"}}) {

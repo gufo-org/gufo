@@ -4,7 +4,7 @@
 Usage: conformance.py BASE_URL OUT.json [--logits]
 Each check records pass/fail/gap and evidence. "gap" marks a Gufo feature the
 Loom path cannot honor without the package's logits (the package was not built
-with llm.logits, or the server runs --loom-logits=off); the checks then only
+with llm.logits); the checks then only
 look for graceful behavior. With --logits (the server runs a logits-capable
 package with the capability on) the same checks must really hold: a miss is a
 "fail", not a "gap".

@@ -47,13 +47,14 @@ directory), and a package fetched with `loom-fetch`, which places them itself,
 needs none. A package built for another Loom SDK release is refused at load
 with the revision to fetch.
 
-The package's preset for your GPU is chosen automatically (`loom: preset chat
-for gfx1151` in the log); `--loom-preset` picks another.
+The package's preset for your GPU is chosen automatically, on Linux and
+Windows (`loom: preset chat for gfx1151` in the log). A GPU the package has
+no preset for serves the gfx1151 preset `chat`, with a warning. Grammars,
+`logprobs`, `min_p` and penalties use the package's logits whenever it
+declares them.
 
 | Option | Use |
 | --- | --- |
-| `--loom-preset NAME` | Preset of a package with several |
-| `--loom-logits auto\|on\|off` | Logits readback for grammars, `logprobs`, `min_p` and penalties (default `auto`: on when the package declares it) |
 | `--loom-memory-bytes N` | Elastic memory pool with that budget, instead of a fixed pool committed at load |
 | `--loom-device URI` | Loom device URI |
 
@@ -74,8 +75,7 @@ driver and needs no ROCm.
 - Loom streams weights through pinned buffers, which need a locked-memory
   limit of at least 64 MiB (`--ulimit memlock=-1`). Below it, the weights are
   read into host memory at load.
-- On Windows, a package with several presets serves `chat` (Strix Halo)
-  unless `--loom-preset` names another. Turn on Developer Mode, or keep the
+- On Windows, turn on Developer Mode, or keep the
   temporary folder (`TMP`) on the models' drive, so Gufo can link the
   package's files.
 - A Loom package runs in its own process: on Linux, Loom and HIP can't share

@@ -26,6 +26,8 @@ target_link_libraries(loom_text_embed PRIVATE
   loom::service::finite::component
   loom::binding::c::target::configured
   loom::binding::c::target::amdgpu::iree_hal
+  # loom_text_embed_query_gpu asks the driver for the default GPU.
+  amdf::amdf_static
 )
 set_target_properties(loom_text_embed PROPERTIES
   C_VISIBILITY_PRESET hidden

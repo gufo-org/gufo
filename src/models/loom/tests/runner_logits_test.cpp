@@ -39,9 +39,11 @@ public:
     dir_ = std::filesystem::temp_directory_path() /
            ("loom_runner_test_" + std::to_string(gufo::platform::ProcessId()));
     std::filesystem::create_directories(dir_);
+    // A package without "llm.logits" samples on the device.
     std::ofstream(dir_ / "model.json")
         << R"({"schema_version":1,"programs":{},"services":{"chat":{"kind":"text"}},)"
-           R"("variants":{"v":{"services":{"chat":{"config":{"llm.card":true,"llm.logits":false}}}}}})";
+           R"("variants":{"v":{"services":{"chat":{"config":{"llm.card":true)"
+        << (logits ? R"(,"llm.logits":false)" : "") << "}}}}}}";
     // The package's dialect (llm_config.json "chat", in a package built for
     // this SDK); Hermes JSON by default, no llm_config.json at all for "{}".
     if (chat != "{}")
@@ -49,8 +51,6 @@ public:
           << R"({"sdk":{"hrx_loom":")" LOOM_TEXT_EMBED_HRX_LOOM R"("},"chat":)"
           << (chat.empty() ? R"({"call_format":"hermes"})" : chat) << "}";
     ext::ParsedOptions options;
-    if (!logits)
-      options["--loom-logits"] = std::string("off");
     fake::state().epochs.clear();
     model = std::make_shared<LoomModel>(dir_.string(), options, rows, false);
     runner = std::make_unique<LoomRunner>(model, 0, false, 0);

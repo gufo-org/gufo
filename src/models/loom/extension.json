@@ -55,34 +55,6 @@
       "help": "Budget for an elastic Loom memory pool (weights and state); default: none, a fixed pool committed at load"
     },
     {
-      "name": "--loom-logits",
-      "type": "string",
-      "commands": [
-        "serve",
-        "prompt",
-        "chat",
-        "bench"
-      ],
-      "providers": [
-        "loom-text"
-      ],
-      "help": "Logits readback for host sampling (grammars, logprobs, min-p, penalties): auto, on or off (default: auto, on when the package declares it)"
-    },
-    {
-      "name": "--loom-preset",
-      "type": "string",
-      "commands": [
-        "serve",
-        "prompt",
-        "chat",
-        "bench"
-      ],
-      "providers": [
-        "loom-text"
-      ],
-      "help": "Preset of the Loom package to serve (default: the one the package publishes for this GPU)"
-    },
-    {
       "name": "--loom-checkpoint",
       "type": "path",
       "commands": [
