@@ -62,6 +62,8 @@ let
   # The CI timing baseline builds an older revision with this definition;
   # before the Rust audio decoder, EmbeddingGemma 2 linked libsndfile and soxr.
   hasRustAudio = builtins.pathExists (sourceRoot + "/src/core/audio_decode/Cargo.toml");
+  # Before the Rust JPEG decoder, every build linked libjpeg-turbo.
+  hasRustJpeg = builtins.pathExists (sourceRoot + "/src/core/jpeg_decode/Cargo.toml");
   # A store path has no Git metadata. A flake input or fetcher result still
   # names its commit (`dirtyRev` ends in "-dirty") or at least the hash of its
   # tree; a plain path names nothing.
@@ -167,7 +169,6 @@ stdenv.mkDerivation ({
     icu
     curl
     libpng
-    libjpeg
     libwebp
     libopus
     openssl
@@ -179,7 +180,10 @@ stdenv.mkDerivation ({
     rocmPackages.rocprim
     rocmPackages.rocwmma
     rocmPackages.rocblas
-  ] ++ lib.optionals (!hasRustAudio) [
+  ]
+  # The JPEG decoder test writes its cases and checks them with libjpeg-turbo.
+  ++ lib.optional (checked || !hasRustJpeg) libjpeg
+  ++ lib.optionals (!hasRustAudio) [
     libsndfile
     soxr
   ] ++ lib.optionals (xrt != null) [

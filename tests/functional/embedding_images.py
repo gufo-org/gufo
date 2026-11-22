@@ -25,6 +25,11 @@ from PIL import Image
 # must agree (batching, truncation, encodings). Backends with lower-precision
 # arithmetic (--npu) pass measured values on the command line.
 THRESHOLDS = {"reference": 0.9999, "consistency": 0.99999}
+# Gufo decodes JPEG with zune-jpeg, whose IDCT and chroma upsampling round
+# unlike Pillow's libjpeg-turbo. Against libjpeg-turbo's default IDCT, its
+# own fast IDCT measured 0.99974 on this fixture and 0.99915 on photos, and
+# zune-jpeg 0.99982 (0.99970 under --npu).
+JPEG_DECODER_COSINE = 0.9995
 
 def picture(spec, mode="RGB", encoding="PNG"):
     y, x, c = np.indices((spec["height"], spec["width"], 3), dtype=np.int64)
@@ -196,7 +201,7 @@ def main():
             assert len(body["data"][0]["embedding"]) == 768
             assert cosine(body["data"][0]["embedding"], fixture["cases"][0]["embedding"]) >= THRESHOLDS["reference"]
         # Compare the HTTP JPEG decoder with an independently Pillow-decoded
-        # lossless copy of exactly the same JPEG pixels.
+        # lossless copy of the same JPEG, within IDCT rounding.
         jpeg_url = picture(fixture["cases"][0]["images"][0], encoding="JPEG")
         decoded = Image.open(io.BytesIO(base64.b64decode(jpeg_url.split(",", 1)[1]))).convert("RGB")
         output = io.BytesIO()
@@ -205,7 +210,7 @@ def main():
         status, body = post([{"content": [{"type": "image_url", "image_url": {"url": url}}]}
                              for url in (jpeg_url, png_url)])
         assert status == 200, body
-        assert cosine(body["data"][0]["embedding"], body["data"][1]["embedding"]) >= THRESHOLDS["consistency"]
+        assert cosine(body["data"][0]["embedding"], body["data"][1]["embedding"]) >= JPEG_DECODER_COSINE
         for url in ["file:///etc/passwd", "http://127.0.0.1/test.png", "https://127.0.0.1/test.png", "data:image/png;base64,AAAA"]:
             status, body = post([{"content": [{"type": "image_url", "image_url": {"url": url}}]}])
             assert status == 400 and body["error"]["code"] == "invalid_image_input", body

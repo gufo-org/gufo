@@ -335,7 +335,6 @@
               pkgsSys.icu
               pkgsSys.curl
               pkgsSys.libpng
-              pkgsSys.libjpeg
               pkgsSys.libwebp
               pkgsSys.libopus
               rustToolchain
@@ -816,6 +815,9 @@
               pkgs.${system}.sox
               pkgs.${system}.rocmPackages.gfx1151.rocprofiler-sdk
               pkgs.${system}.sqlite
+              # The test presets build jpeg_decode_test, whose cases and
+              # reference decoder use libjpeg-turbo; the package does not.
+              pkgs.${system}.libjpeg
               # Debugging and repository work. The test presets build
               # RelWithDebInfo with assertions, and contributors commit with
               pkgs.${system}.gdb

@@ -896,7 +896,8 @@ resolved by these endpoints.
 `top_logprobs`, and the shared
 sampling controls. Message content supports
 `input_text` and `input_image` with an `image_url` (HTTPS or a data URL).
-Image uploads accept PNG, JPEG and WebP. Base64 data URLs also accept
+Image uploads accept PNG, JPEG and WebP. JPEG excludes arithmetic coding,
+lossless JPEG and DNL markers, which are rejected with 400. Base64 data URLs also accept
 `image/jpg`, mixed-case media types/`base64`, and parameters such as `name=`.
 Clients supply the complete conversation, including prior Gufo `output` items
 when retaining reasoning. Replay `function_call` items with their `call_id`,
