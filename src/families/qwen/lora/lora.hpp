@@ -78,6 +78,11 @@ public:
 
   /// The patch for the model tensor named `name`, or null.
   [[nodiscard]] const LoraPatch* Find(std::string_view name) const;
+  /// Every patch, by model tensor name.
+  [[nodiscard]] const std::map<std::string, LoraPatch, std::less<>>& patches()
+      const noexcept {
+    return patches_;
+  }
   [[nodiscard]] std::size_t size() const noexcept { return patches_.size(); }
   [[nodiscard]] const std::string& label() const noexcept { return label_; }
   /// SHA-256 of the adapter file bytes that were validated.

@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "src/families/qwen/hip_common/continuation_hooks.hpp"
+#include "src/families/qwen/lora/lora.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/state.hpp"
@@ -93,7 +94,8 @@ public:
                models::QwenModelWeights weights,
                std::shared_ptr<const tokenization::QwenTokenizer> tokenizer,
                std::vector<QwenGpuWeightRegion> weight_regions,
-               std::shared_ptr<models::qwen::vision::Encoder> vision = {});
+               std::shared_ptr<models::qwen::vision::Encoder> vision = {},
+               std::string adapter_identity = "none");
   ~QwenGpuModel();
 
   QwenGpuModel(const QwenGpuModel&) = delete;
@@ -101,10 +103,14 @@ public:
   QwenGpuModel(QwenGpuModel&&) = delete;
   QwenGpuModel& operator=(QwenGpuModel&&) = delete;
 
+  /// With `lora.path`, the adapter is validated against the bound trunk
+  /// before any device allocation, and each tensor it patches is merged into
+  /// that tensor's final placement in its stock format and size.
   [[nodiscard]] static std::shared_ptr<const QwenGpuModel> CreateFromGguf(
       std::shared_ptr<const core::GgufReader> reader,
       std::string* error_msg = nullptr,
-      std::shared_ptr<models::qwen::vision::Encoder> vision = {});
+      std::shared_ptr<models::qwen::vision::Encoder> vision = {},
+      const models::qwen::lora::LoraSelection& lora = {});
 
   [[nodiscard]] const std::shared_ptr<models::qwen::vision::Encoder>&
   VisionEncoder() const noexcept {
@@ -124,6 +130,11 @@ public:
     return weight_regions_.size();
   }
   [[nodiscard]] std::size_t GetResidentBytes() const noexcept;
+  /// The `adapters=` value of the disk cache identity: "none", or the merged
+  /// LoRA's `LoraAdapter::CacheIdentity()`.
+  [[nodiscard]] const std::string& AdapterIdentity() const noexcept {
+    return adapter_identity_;
+  }
 
 private:
   // Keep the mapped GGUF storage alive until every registered region is
@@ -133,6 +144,7 @@ private:
   std::shared_ptr<const tokenization::QwenTokenizer> tokenizer_;
   std::vector<QwenGpuWeightRegion> weight_regions_;
   std::shared_ptr<models::qwen::vision::Encoder> vision_;
+  std::string adapter_identity_;
 };
 
 class QwenGpuSnapshot final {
@@ -471,7 +483,8 @@ public:
   [[nodiscard]] static std::unique_ptr<QwenGpuExecutor> CreateFromGguf(
       std::shared_ptr<const core::GgufReader> reader,
       std::string* error_msg = nullptr, std::uint32_t max_context = 4096,
-      QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+      QwenExecutionPolicy policy = QwenExecutionPolicy::Production(),
+      const models::qwen::lora::LoraSelection& lora = {});
 
   /// Generates tokens auto-regressively on GPU with streaming callback.
   std::vector<tokenization::TokenId> Generate(

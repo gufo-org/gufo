@@ -65,7 +65,7 @@ These server options work with every modality:
 
 - `--model`, `-m`: the GGUF file. For sharded files, pass the first shard.
   An extension's provider can also accept a model directory.
-- `--lora`, `--lora-scale` (Qwen3.8 Flash-Next): merge a llama.cpp GGUF LoRA adapter into the weights at load; see [LoRA adapter](models/qwen3.8-flash-next.md#lora-adapter).
+- `--lora`, `--lora-scale` (Qwen3.8 Flash-Next and 27B): merge a llama.cpp GGUF LoRA adapter into the weights at load; see LoRA adapter for [Flash-Next](models/qwen3.8-flash-next.md#lora-adapter) and [27B](models/qwen3.8-27b.md#lora-adapter).
 - `--context`, `-c`: tokens per request. The default is the model's native
   context; lower it to fit more sessions in memory.
 - `--sessions`, `-j` (server only): requests that compute at the same time,

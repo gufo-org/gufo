@@ -22,6 +22,8 @@ struct Tensor {
   std::vector<std::uint64_t> dims;
   GgmlType type{GgmlType::kF32};
   std::vector<std::uint8_t> bytes;
+  /// Placed at the previous tensor's offset, sharing its bytes.
+  bool shares_previous{false};
 };
 
 template<typename T>
@@ -37,6 +39,11 @@ inline std::vector<std::uint8_t> Build(gufo::test_fixture::GgufBuilder builder,
   std::uint64_t offset = 0;
   std::vector<std::uint64_t> offsets;
   for (const auto& t : tensors) {
+    if (t.shares_previous) {
+      builder.AddTensor(t.name, t.dims, t.type, offsets.back());
+      offsets.push_back(offsets.back());
+      continue;
+    }
     builder.AddTensor(t.name, t.dims, t.type, offset);
     offsets.push_back(offset);
     offset += (t.bytes.size() + 31) / 32 * 32;
@@ -44,6 +51,9 @@ inline std::vector<std::uint8_t> Build(gufo::test_fixture::GgufBuilder builder,
   auto bytes = builder.Build(offset);
   const std::size_t start = bytes.size() - offset;
   for (std::size_t i = 0; i < tensors.size(); ++i) {
+    if (tensors[i].shares_previous) {
+      continue;
+    }
     std::memcpy(bytes.data() + start + offsets[i], tensors[i].bytes.data(),
                 tensors[i].bytes.size());
   }

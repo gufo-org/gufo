@@ -34,6 +34,7 @@
 #include "src/families/qwen/config/qwen_config.hpp"
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/hip_common/execution_policy.hpp"
+#include "src/families/qwen/lora/lora.hpp"
 #include "src/models/qwen/continuation_adapter.hpp"
 #include "src/models/qwen/continuation_identity.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
@@ -660,7 +661,8 @@ public:
       const bool speculative = dflash_model_ != nullptr;
       component_identity_ = QwenCompatibilityIdentity(
           artifact_fingerprint, draft_artifact_fingerprint, max_context_,
-          execution_policy_, speculative, speculative_options_, dflash_policy_);
+          execution_policy_, speculative, speculative_options_, dflash_policy_,
+          model_->AdapterIdentity());
     } else {
       component_identity_ =
           QwenProcessIdentity(model_.get(), dflash_model_.get(), max_context_);
@@ -1369,6 +1371,11 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
 
 std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
     const ext::TextRunnerOptions& options, std::string* error) {
+  models::qwen::lora::LoraSelection lora;
+  if (!models::qwen::lora::ResolveLoraOptions(options.provider_options, &lora,
+                                              error)) {
+    return nullptr;
+  }
   std::shared_ptr<const core::GgufReader> reader = options.reader;
   if (!reader) {
     std::string load_error;
@@ -1397,8 +1404,8 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
     return nullptr;
   }
   std::string load_error;
-  auto model =
-      hip::QwenGpuModel::CreateFromGguf(reader, &load_error, std::move(vision));
+  auto model = hip::QwenGpuModel::CreateFromGguf(reader, &load_error,
+                                                 std::move(vision), lora);
   if (!model) {
     if (error)
       *error = "Failed to create GPU model: " + load_error;

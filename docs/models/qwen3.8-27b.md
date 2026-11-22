@@ -50,6 +50,21 @@ both modes follow the same distribution, but the same seed gives different
 text. Thinking and sampling defaults are set per request; see
 [reasoning controls](../server.md#reasoning-controls).
 
+## LoRA adapter
+
+Gufo can merge a llama.cpp GGUF **LoRA adapter**, a small file of low-rank weight updates, into the Q8 target while it loads. You serve a fine-tune from the stock files and the adapter, with no merged copy of the model on disk:
+
+```sh
+gufo serve llm --model qwen27-q8 --lora adapter.gguf
+```
+
+- The adapter may update the `ssm_out`, `attn_output` and `ffn_down` weights of the 64 trunk layers, and each weight it updates must be Q8_0 in the target. All of them are in the Q8 target. The Q4 target stores most of them in other formats, so Gufo refuses an adapter that updates any of those and names the first such weight and its format. Gufo checks every adapter tensor before it allocates GPU memory. The MTP block stays unchanged.
+- The adapter's factors may be F32, F16 or BF16. Each updated weight is the stock weight plus `--lora-scale` × alpha / rank × B·A, computed in float32 and stored as Q8_0 in place of the stock weight, so memory and kernels match the stock model. `--lora-scale` defaults to 1.
+- `serve llm`, `chat`, `prompt` and `bench` accept both options. One adapter applies to every request. The CPU generator (`--cpu`) refuses an adapter.
+- DFlash2 drafts for the merged model: the draft model shares only the target's token embedding and output head, which an adapter never updates, and the merged target checks every draft, so greedy DFlash2 output still equals greedy AR output. The share of drafts accepted, and with it the decode speed, can differ from the stock model's.
+- The log names the adapter, its SHA-256, the scale, the number of updated weights and the merge time.
+- The [disk cache](../cache.md) keeps entries per adapter file contents and scale: a server never restores prompts cached with another adapter, another scale or none.
+
 ## Images
 
 Gufo finds `mmproj-BF16.gguf` next to the target; pass `--mmproj PATH` to use

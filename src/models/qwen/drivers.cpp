@@ -30,11 +30,13 @@
 #include "gufo/ext/text.hpp"
 #include "src/families/qwen/config/qwen_config.hpp"
 #include "src/families/qwen/hip_common/execution_policy.hpp"
+#include "src/families/qwen/lora/lora.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen/hip/qwen_speculative_verifier.hpp"
+#include "src/models/qwen/lora.hpp"
 #include "src/testing/compare/logit_comparator.hpp"
 
 namespace gufo::models::qwen {
@@ -380,8 +382,15 @@ int RunQwenBenchmarkImpl(
   const std::size_t required_context =
       std::max<std::size_t>(4096, max_depth + max_test_tokens);
 
+  lora::LoraSelection lora;
+  if (!lora::ResolveLoraOptions(opt.provider_options, &lora, &err)) {
+    std::cerr << "Error: " << err << '\n';
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
   auto gpu_exec = hip::QwenGpuExecutor::CreateFromGguf(
-      reader, &err, static_cast<std::uint32_t>(required_context));
+      reader, &err, static_cast<std::uint32_t>(required_context),
+      hip::QwenExecutionPolicy::Production(), lora);
   if (!gpu_exec) {
     std::cerr << "Error creating Qwen GPU executor: " << err << "\n";
     PrintModelLoadTime(model_load_start, false);
@@ -808,11 +817,17 @@ int RunQwenPromptImpl(const ext::TextPromptOptions& opt,
         {});
   };
 
+  lora::LoraSelection lora;
+  if (!lora::ResolveLoraOptions(opt.provider_options, &lora, &err)) {
+    std::cerr << "Error: " << err << '\n';
+    return 1;
+  }
 #if defined(ENGINE_ENABLE_HIP)
   int dev_count = 0;
   if (!opt.force_cpu && hipGetDeviceCount(&dev_count) == hipSuccess &&
       dev_count > 0) {
-    auto gpu_exec = gufo::hip::QwenGpuExecutor::CreateFromGguf(reader, &err);
+    auto gpu_exec = gufo::hip::QwenGpuExecutor::CreateFromGguf(
+        reader, &err, 4096, hip::QwenExecutionPolicy::Production(), lora);
     if (gpu_exec) {
       PrintModelLoadTime(model_load_start);
       auto prompt_tokens = encode_prompt(gpu_exec->GetTokenizer());
@@ -870,6 +885,10 @@ int RunQwenPromptImpl(const ext::TextPromptOptions& opt,
   }
   if (!opt.speculative_backend.empty()) {
     std::cerr << "Qwen speculative decoding requires the ROCm backend\n";
+    return 1;
+  }
+  if (!ValidateCpuLoraOptions(opt.provider_options, &err)) {
+    std::cerr << "Error: " << err << '\n';
     return 1;
   }
   auto generator = models::QwenGenerator::CreateFromGguf(*reader, &err);
@@ -930,6 +949,12 @@ int RunQwenChatImpl(const ext::TextPromptOptions& opt,
   const tokenization::QwenTokenizer* tokenizer = nullptr;
   std::string architecture;
   std::unique_ptr<models::QwenGenerator> generator;
+  lora::LoraSelection lora;
+  if (std::string err;
+      !lora::ResolveLoraOptions(opt.provider_options, &lora, &err)) {
+    std::cerr << "Error: " << err << '\n';
+    return 1;
+  }
 #if defined(ENGINE_ENABLE_HIP)
   std::unique_ptr<hip::QwenGpuExecutor> gpu_executor;
   std::shared_ptr<models::qwen::vision::Encoder> vision_encoder;
@@ -940,7 +965,8 @@ int RunQwenChatImpl(const ext::TextPromptOptions& opt,
     std::string err;
     auto reader_ptr = std::shared_ptr<const core::GgufReader>(
         std::shared_ptr<const core::GgufReader>{}, &reader);
-    gpu_executor = hip::QwenGpuExecutor::CreateFromGguf(reader_ptr, &err);
+    gpu_executor = hip::QwenGpuExecutor::CreateFromGguf(
+        reader_ptr, &err, 4096, hip::QwenExecutionPolicy::Production(), lora);
     if (!gpu_executor) {
       std::cerr << "Error creating Qwen GPU executor: " << err << '\n';
       PrintModelLoadTime(model_load_start, false);
@@ -972,6 +998,10 @@ int RunQwenChatImpl(const ext::TextPromptOptions& opt,
       return 1;
     }
     std::string err;
+    if (!ValidateCpuLoraOptions(opt.provider_options, &err)) {
+      std::cerr << "Error: " << err << '\n';
+      return 1;
+    }
     generator = models::QwenGenerator::CreateFromGguf(reader, &err);
     if (!generator) {
       std::cerr << "Error creating Qwen generator: " << err << '\n';

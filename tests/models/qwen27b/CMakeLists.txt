@@ -31,6 +31,11 @@ endfunction()
 add_qwen27b_test(qwen27b_vision_test vision_test.cpp "cpu;vision;correctness")
 add_qwen27b_test(qwen27b_continuation_layout_test continuation_layout_test.cpp
   "cpu;correctness")
+add_qwen27b_test(qwen27b_lora_test lora_test.cpp "cpu;lora;correctness")
+# Real-weight LoRA oracle against an offline merge; reads multi-GiB
+# checkpoints, so it is built and run explicitly (usage in lora_oracle.cpp).
+add_executable(qwen27b_lora_oracle EXCLUDE_FROM_ALL lora_oracle.cpp)
+target_link_libraries(qwen27b_lora_oracle PRIVATE gufo_core ${GUFO_QWEN_LIBRARIES})
 
 add_qwen27b_test(qwen_mtp_reference_test mtp_reference_test.cpp
   "cpu;mtp;external-model")

@@ -24,6 +24,7 @@ gufo_extension_target(
     dflash_weights.cpp
     probe.cpp
     continuation_identity.cpp
+    lora.cpp
     extension.cpp
   LINK_LIBRARIES
     gufo_ext_runtime
@@ -31,6 +32,7 @@ gufo_extension_target(
     gufo_qwen_config
     gufo_qwen_control_tokens
     gufo_qwen_hip_common
+    gufo_qwen_lora
     gufo_qwen_text
 )
 
@@ -103,6 +105,7 @@ set(GUFO_QWEN_LIBRARIES
   gufo_qwen_control_tokens
   gufo_qwen_draft_vocab
   gufo_qwen_hip_common
+  gufo_qwen_lora
   gufo_qwen_text
   gufo_qwen_vision
   CACHE INTERNAL "Qwen libraries a test or tool links")
