@@ -289,6 +289,9 @@ std::string BuildResponseHead(const HttpResponse& resp,
 }
 
 std::string BuildResponse(const HttpResponse& resp, bool keep_alive = false) {
+  // RFC 9110 section 8.6 forbids Content-Length even when the value is zero.
+  if ((resp.status >= 100 && resp.status < 200) || resp.status == 204)
+    return BuildResponseHead(resp, std::nullopt, keep_alive);
   std::string out = BuildResponseHead(resp, resp.body.size(), keep_alive);
   out += resp.body;
   return out;
