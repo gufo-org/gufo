@@ -8,7 +8,9 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1074,9 +1076,20 @@ struct ComponentTextCache::Impl {
       capture->sources.clear();
       return 0;
     }
-    auto job = cache::PersistenceJob(
-        ledger, File(1, capture->manifest.checkpoint.value), capture->manifest,
-        std::move(capture->sources));
+    // The job's metadata is optional too: a full ledger refuses the write,
+    // not the request that captured it.
+    std::optional<cache::PersistenceJob> job;
+    try {
+      job.emplace(ledger, File(1, capture->manifest.checkpoint.value),
+                  capture->manifest, std::move(capture->sources));
+    } catch (const std::bad_alloc&) {
+      capture->sources.clear();
+      Logger::Info("cache",
+                   "schema=component-cache-v1 event=persistence_refused "
+                   "reason=allocation tokens=" +
+                       std::to_string(capture->manifest.tokens.size()));
+      return 0;
+    }
     std::size_t pending_slot;
     {
       const std::lock_guard lock(mutex);
@@ -1089,7 +1102,7 @@ struct ComponentTextCache::Impl {
       pending_slot = position - pending_durable.begin();
       *position = capture;
     }
-    if (!queue->TrySubmit(std::move(job))) {
+    if (!queue->TrySubmit(std::move(*job))) {
       const std::lock_guard lock(mutex);
       if (pending_durable[pending_slot] == capture)
         pending_durable[pending_slot].reset();

@@ -2249,6 +2249,39 @@ void FullLedgerReclaimsForTheLiveFrontier() {
              dynamic_cast<State&>(next->state()).slot) == expected);
   next->Invalidate();
 }
+// A capture larger than the RAM budget goes to disk only. A full ledger when
+// it is published refuses the disk write, not the reply.
+void FullLedgerRefusesTheDiskWriteNotTheReply() {
+  const TemporaryDirectory temp("gufo-full-ledger-persist");
+  const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .min_checkpoint_step_tokens = 1};
+  auto runner = std::make_shared<Runner>();
+  runner->private_blocks = 2;
+  runner->rows_per_chunk = 4096;
+  constexpr std::size_t kRam = 448 << 10;
+  ComponentTextCache cache(runner, 1, kRam, disk);
+  std::vector<TextRunnerToken> prompt(65536);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto frontier = prompt;
+  frontier.push_back(7);
+  auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(lease->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  const auto bytes = lease->CaptureBytes();
+  assert(bytes > kRam);
+  assert(lease->TryReserveSnapshot(bytes, prompt.size(), false,
+                                   SnapshotPurpose::kContinuation, prompt));
+  auto snapshot = lease->Capture();
+  assert(snapshot);
+  const auto tail = std::span(frontier).subspan(prompt.size());
+  runner->adapter->Append(state.slot, tail, tail);
+  runner->ledger->FailAfter(cache::LedgerStep::kReserve, 0);
+  (void)lease->Commit(prompt, std::move(snapshot), frontier);
+  runner->ledger->ClearFaults();
+  auto next = cache.Acquire(frontier, {}, {}, true, 0, true);
+  next->Invalidate();
+}
 void GeneratedFrontierSurvivesReassignmentAndRestart() {
   for (const bool disk_on : {false, true}) {
     const TemporaryDirectory temp("gufo-generated-frontier");
@@ -4846,6 +4879,7 @@ int main() {
   IdleFrontierSetupRefusalKeepsTheCompletedLiveExecution();
   FullLedgerLeavesTheFrontierUnindexed();
   FullLedgerReclaimsForTheLiveFrontier();
+  FullLedgerRefusesTheDiskWriteNotTheReply();
   IdleFrontierCaptureReturnsBeforeCopyAndAdmissionWaits();
   GeneratedFrontierSurvivesReassignmentAndRestart();
   FullChatCheckpointRestoresWithoutSuffixPrefill();
