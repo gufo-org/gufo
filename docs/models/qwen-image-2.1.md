@@ -44,7 +44,7 @@ curl --fail-with-body http://127.0.0.1:8080/v1/images/edits \
 
 | Setting | Behavior |
 | --- | --- |
-| `size` | `auto` (the default) gives 1024 × 1024, or the reference's aspect ratio when editing. Sides must be multiples of 32, at most 4096, and 4 megapixels in total. |
+| `size` | `auto` (the default) gives 1024 × 1024, or the reference's aspect ratio when editing. Sides must be multiples of 32, at most 4096, and 4.5 megapixels in total, which covers every [recommended aspect ratio](https://huggingface.co/Qwen/Qwen-Image-2.1#supported-aspect-ratios). |
 | `steps` | 40 by default, from 2 to 100. Fewer steps are faster and lower quality. |
 | `seed` | The same seed, settings and build give the same image, also after a restart. |
 | `n` | 1 to 10 images, each with its own seed, made one after another. |
