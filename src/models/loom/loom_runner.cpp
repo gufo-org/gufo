@@ -331,8 +331,19 @@ public:
   // reader travels with it to the state (SetPromptContext).
   [[nodiscard]] std::optional<ext::TextPreparedPrompt> PreparePrompt(
       const ext::ChatRequest& request) const override {
+    return PrepareWith(request, true);
+  }
+
+  // Renders `request` with the package's chat program; with `next_turn`, also
+  // renders the next turn to find the stable cache prefix. Gufo asks for the
+  // initial output state right after preparing the same request, so the
+  // prompt's reasoning state is remembered by body: each render of a long
+  // conversation tokenizes all of it under the model mutex.
+  [[nodiscard]] std::optional<ext::TextPreparedPrompt> PrepareWith(
+      const ext::ChatRequest& request, bool next_turn) const {
     std::string body = ChatBody(model_->info().model_id, request);
-    std::lock_guard lock(model_->mutex());
+    const auto key = BodyKey(body);
+    std::unique_lock lock(model_->mutex());
     std::vector<std::int32_t> tokens(model_->info().context_capacity);
     std::size_t count = 0;
     loom_text_embed_request_t* handle = nullptr;
@@ -353,6 +364,7 @@ public:
     auto context = std::make_shared<LoomPromptContext>(model_, handle);
     tokens.resize(count);
     context->opens_reasoning = OpensReasoningLocked(tokens);
+    RememberReasoningLocked(key, context->opens_reasoning);
     // Automatic tool use stays on the device where a lazy grammar cannot
     // follow the model: Glimmer's call header (" to=NAME") starts like its
     // answer header (" to=user"), and gpt-oss may write a harmony call with the
@@ -402,13 +414,17 @@ public:
     // framing begins: Gufo checkpoints before it so the next turn reuses all
     // earlier work, whatever the package's template.
     std::size_t stable = 0;
-    if (!request.messages.empty()) {
+    // Other sessions decode between the two renders: each of a long
+    // conversation holds the model mutex for tens of milliseconds.
+    lock.unlock();
+    if (next_turn && !request.messages.empty()) {
       ext::ChatRequest next = request;
       next.messages.emplace_back(ext::ChatRole::kAssistant, "\x01");
       next.messages.emplace_back(ext::ChatRole::kUser, "\x01");
       const std::string next_body = ChatBody(model_->info().model_id, next);
       std::vector<std::int32_t> next_tokens(model_->info().context_capacity);
       std::size_t next_count = 0;
+      lock.lock();
       if (loom_text_embed_chat_prepare(model_->embed(), next_body.data(),
                                        next_body.size(), next_tokens.data(),
                                        next_tokens.size(), &next_count,
@@ -469,11 +485,17 @@ public:
       placeholder = request;
       placeholder->messages.emplace_back(ext::ChatRole::kUser, ".");
     }
-    const auto prepared = PreparePrompt(placeholder ? *placeholder : request);
-    const auto* context =
-        prepared
-            ? dynamic_cast<const LoomPromptContext*>(prepared->context.get())
-            : nullptr;
+    const auto& rendered = placeholder ? *placeholder : request;
+    std::optional<bool> opens =
+        RecalledReasoning(BodyKey(ChatBody(model_->info().model_id, rendered)));
+    if (!opens) {
+      const auto prepared = PrepareWith(rendered, false);
+      const auto* context =
+          prepared
+              ? dynamic_cast<const LoomPromptContext*>(prepared->context.get())
+              : nullptr;
+      opens = context != nullptr && context->opens_reasoning;
+    }
     // A model that always reasons starts in reasoning even when the request
     // turned it off: a grammar must leave it room to reason and frame its
     // answer (harmony's final channel) instead of forcing the answer first.
@@ -486,9 +508,34 @@ public:
     const bool always = model_->logits().enabled && native_.known &&
                         native_.always_reasons &&
                         !native_.reasoning_open.empty() && constrained;
-    return context != nullptr && (context->opens_reasoning || always)
-               ? ext::InitialOutputState::kThought
-               : ext::InitialOutputState::kAuto;
+    return *opens || always ? ext::InitialOutputState::kThought
+                            : ext::InitialOutputState::kAuto;
+  }
+
+  using BodyDigest = std::array<std::uint8_t, 32>;
+
+  static BodyDigest BodyKey(std::string_view body) {
+    crypto::Sha256Hasher hasher;
+    hasher.Update(std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
+    return hasher.Finish();
+  }
+
+  void RememberReasoningLocked(const BodyDigest& key, bool opens) const {
+    std::erase_if(recent_reasoning_,
+                  [&](const auto& entry) { return entry.first == key; });
+    if (recent_reasoning_.size() >= kRecentPrompts)
+      recent_reasoning_.erase(recent_reasoning_.begin());
+    recent_reasoning_.emplace_back(key, opens);
+  }
+
+  std::optional<bool> RecalledReasoning(const BodyDigest& key) const {
+    std::lock_guard lock(model_->mutex());
+    for (const auto& [digest, opens] : recent_reasoning_) {
+      if (digest == key)
+        return opens;
+    }
+    return std::nullopt;
   }
 
   // Whether the prompt ends inside an open "<think>" block.
@@ -1563,6 +1610,10 @@ private:
   // whether grammars may run around its reasoning at all.
   NativeDialect native_;
   bool reasoning_ok_{false};
+  // Guarded by the model mutex: whether recently prepared prompts end inside
+  // reasoning, by the SHA-256 of their chat body (InitialOutputState).
+  static constexpr std::size_t kRecentPrompts = 32;
+  mutable std::vector<std::pair<BodyDigest, bool>> recent_reasoning_;
 
   // Device bytes of the KV pool's pages.
   [[nodiscard]] std::uint64_t KvBytes() const {
