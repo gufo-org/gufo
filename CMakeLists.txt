@@ -1372,6 +1372,12 @@ endfunction()
   set_tests_properties(serving_bench_test PROPERTIES
     LABELS "cpu;tools;server;benchmarks;statistics;json")
 
+  add_test(NAME interface_bench_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/interface_bench_test.py)
+  set_tests_properties(interface_bench_test PROPERTIES
+    LABELS "cpu;tools;server;benchmarks;statistics;json")
+
   add_test(NAME functional_runner_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/test_runner.py)
