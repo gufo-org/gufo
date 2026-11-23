@@ -3123,6 +3123,68 @@ __global__ void __launch_bounds__(256)
   for (int i = 0; i < 3; ++i)
     st[i] = seq[keep + i];
 }
+__global__ void __launch_bounds__(256)
+    k_rows_argmax1(const float* x, int n, float* ws) {
+  const int r = blockIdx.y;
+  const float* xr = x + (size_t)r * n;
+  float v = -INFINITY;
+  int ix = 0x7fffffff;
+  for (int i = blockIdx.x * 256 + threadIdx.x; i < n; i += gridDim.x * 256) {
+    const float y = xr[i];
+    if (y > v) {  // NaN and -inf never win, as in the greedy sampler
+      v = y;
+      ix = i;
+    }
+  }
+  __shared__ float bv[8];
+  __shared__ int bi[8];
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) {
+    const float ov = __shfl_xor(v, o, 32);
+    const int oi = __shfl_xor(ix, o, 32);
+    if (ov > v || (ov == v && oi < ix)) {
+      v = ov;
+      ix = oi;
+    }
+  }
+  if (threadIdx.x % 32 == 0) {
+    bv[threadIdx.x / 32] = v;
+    bi[threadIdx.x / 32] = ix;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    for (int w = 1; w < 8; ++w)
+      if (bv[w] > v || (bv[w] == v && bi[w] < ix)) {
+        v = bv[w];
+        ix = bi[w];
+      }
+    float* o = ws + ((size_t)r * gridDim.x + blockIdx.x) * 2;
+    o[0] = v;
+    o[1] = __int_as_float(ix);
+  }
+}
+__global__ void k_rows_argmax2(const float* ws, int nb, int* out) {
+  const int r = threadIdx.x;
+  float v = -INFINITY;
+  int ix = 0x7fffffff;
+  for (int b = 0; b < nb; ++b) {
+    const float y = ws[((size_t)r * nb + b) * 2];
+    const int i = __float_as_int(ws[((size_t)r * nb + b) * 2 + 1]);
+    if (y > v || (y == v && i < ix)) {
+      v = y;
+      ix = i;
+    }
+  }
+  out[r] = ix == 0x7fffffff ? 0 : ix;
+}
+void RowsArgmax(hipStream_t s, const float* x, int rows, int n, float* ws,
+                int* out) {
+  constexpr int nb = 64;
+  k_rows_argmax1<<<dim3(nb, rows), 256, 0, s>>>(x, n, ws);
+  k_rows_argmax2<<<1, rows, 0, s>>>(ws, nb, out);
+  Chk("rows_argmax");
+}
+
 void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
                       int keep) {
   k_conv_commit<<<dim3(26, 48), 256, 0, s>>>(tbl, cap, keep);

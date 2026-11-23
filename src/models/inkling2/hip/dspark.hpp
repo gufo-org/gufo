@@ -64,6 +64,7 @@ struct AttnArgs {
   int cap;
   const int* pos;  // device: anchor position
   int window;      // 0: global
+  int first;       // first injected context position
   float* ws;       // split workspace
   _Float16* out16;
 };

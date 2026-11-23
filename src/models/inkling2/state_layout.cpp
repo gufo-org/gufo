@@ -167,7 +167,10 @@ void SessionStateAccess::RowsOut(const Session& s, std::uint32_t visit,
 void SessionStateAccess::RowsIn(Session& s, std::uint32_t visit, bool value,
                                 cache::Rows first, cache::Rows end,
                                 const std::byte* src) {
-  s.draft_.valid = 0;  // the drafter context is not part of the state
+  // The drafter context is not part of the state: it restarts with the next
+  // injection after the restored frontier.
+  s.draft_.valid = 0;
+  s.draft_.first = 0;
   auto& sl = s.slots_.at(visit);
   auto* base = static_cast<std::byte*>(value ? sl.v : sl.k);
   const bool ring = !sl.global;
@@ -221,7 +224,10 @@ void SessionStateAccess::ConvVisitOut(const Session& s, std::uint32_t visit,
 void SessionStateAccess::ConvVisitIn(Session& s, std::uint32_t visit,
                                      std::size_t inner, std::size_t n,
                                      const std::byte* src) {
-  s.draft_.valid = 0;  // the drafter context is not part of the state
+  // The drafter context is not part of the state: it restarts with the next
+  // injection after the restored frontier.
+  s.draft_.valid = 0;
+  s.draft_.first = 0;
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
   Check(hipMemcpy(reinterpret_cast<std::byte*>(s.slots_.at(visit).conv) + inner,
                   src, n, hipMemcpyHostToDevice),

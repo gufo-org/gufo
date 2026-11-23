@@ -257,6 +257,10 @@ struct Engine::Impl {
   std::map<int, hipGraphExec_t> vgraphs;
   bool verify_mode = false;
   float* d_vcap = nullptr;  // [48][6656][kVerifyRows] conv inputs of a step
+  // device argmax of the rows of a verification (greedy requests)
+  float* d_amax_ws = nullptr;
+  int* d_amax = nullptr;
+  int* h_amax = nullptr;  // pinned
   /// The verification capture of slot `slot_idx` (null outside verification).
   float* VCap(int slot_idx) const {
     return verify_mode ? d_vcap + static_cast<std::size_t>(slot_idx) *
@@ -408,6 +412,8 @@ struct Engine::Impl {
       (void)hipStreamDestroy(ds);
     if (ps)
       (void)hipStreamDestroy(ps);
+    if (h_amax)
+      (void)hipHostFree(h_amax);
     if (ev_fork)
       (void)hipEventDestroy(ev_fork);
     if (ev_join)
@@ -589,6 +595,10 @@ struct Engine::Impl {
     d_vcap =
         NewBuf(static_cast<std::size_t>(48) * kConvChannels * fs::kVerifyRows);
     d_feat = NewBuf(B * Drafter::kFeatureFloats);
+    d_amax_ws = NewBuf(B * 64 * 2);
+    d_amax = NewInts(B);
+    Check(hipHostMalloc(reinterpret_cast<void**>(&h_amax), B * sizeof(int)),
+          "pinned");
     d_counter = reinterpret_cast<unsigned*>(NewInts(B));
     Check(hipMemset(d_counter, 0, B * 4), "counter");
     d_tbl = static_cast<fs::SlotEntry*>(
@@ -1642,7 +1652,7 @@ struct Engine::Impl {
   /// its position (the caller keeps the rows inside one attention bucket).
   /// The session does not advance; CommitVerify keeps a prefix of the rows.
   void VerifyN(Session& ss, const std::int32_t* tokens, int n,
-               std::vector<float>* out) {
+               std::vector<float>* out, std::int32_t* argmax) {
     nb = n;
     std::int32_t step[2 * kMaxB] = {};
     const int pos = static_cast<int>(ss.pos_);
@@ -1678,11 +1688,21 @@ struct Engine::Impl {
     else
       BuildDecode(ctx);
     const std::size_t V = cfg->n_vocab_text;
-    out->resize(static_cast<std::size_t>(n) * V);
-    Check(hipMemcpyAsync(out->data(), logits_d, out->size() * 4,
-                         hipMemcpyDeviceToHost, ds),
-          "logits copy");
+    if (out != nullptr) {
+      out->resize(static_cast<std::size_t>(n) * V);
+      Check(hipMemcpyAsync(out->data(), logits_d, out->size() * 4,
+                           hipMemcpyDeviceToHost, ds),
+            "logits copy");
+    }
+    if (argmax != nullptr) {
+      fs::RowsArgmax(ds, logits_d, n, static_cast<int>(V), d_amax_ws, d_amax);
+      Check(hipMemcpyAsync(h_amax, d_amax, static_cast<std::size_t>(n) * 4,
+                           hipMemcpyDeviceToHost, ds),
+            "argmax copy");
+    }
     Check(hipStreamSynchronize(ds), "verify sync");
+    if (argmax != nullptr)
+      std::memcpy(argmax, h_amax, static_cast<std::size_t>(n) * 4);
     nb = 1;
   }
 
@@ -2028,6 +2048,7 @@ void Engine::Reset(Session& s) {
   s.pos_ = 0;
   s.logits_.clear();
   s.draft_.valid = 0;
+  s.draft_.first = 0;
   s.draft_.f_pos = static_cast<std::size_t>(-1);
 }
 
@@ -2087,7 +2108,7 @@ std::size_t Engine::VerifyRows(const Session& s) const {
 }
 
 void Engine::Verify(Session& s, std::span<const std::int32_t> tokens,
-                    std::vector<float>* logits) {
+                    std::vector<float>* logits, std::int32_t* argmax) {
   const std::lock_guard lock(mutex_);
   if (tokens.empty() || tokens.size() > VerifyRows(s))
     throw std::runtime_error("inkling2: bad verification width");
@@ -2097,7 +2118,8 @@ void Engine::Verify(Session& s, std::span<const std::int32_t> tokens,
   if (s.hooks_ != nullptr)
     s.hooks_->BeforeWrite(s.pos_, s.pos_ + tokens.size());  // M2 hook
   s.BackRows(s.pos_, s.pos_ + tokens.size());
-  impl_->VerifyN(s, tokens.data(), static_cast<int>(tokens.size()), logits);
+  impl_->VerifyN(s, tokens.data(), static_cast<int>(tokens.size()), logits,
+                 argmax);
   s.verify_rows_ = tokens.size();
 }
 
@@ -2105,11 +2127,20 @@ void Engine::CommitVerify(Session& s, std::size_t keep,
                           std::span<const float> logits) {
   const std::lock_guard lock(mutex_);
   const std::size_t V = weights_.config.n_vocab_text;
-  if (keep == 0 || keep > s.verify_rows_ || logits.size() < keep * V)
+  if (keep == 0 || keep > s.verify_rows_ ||
+      (!logits.empty() && logits.size() < keep * V))
     throw std::runtime_error("inkling2: bad verification commit");
+  if (logits.empty()) {
+    s.logits_.resize(V);
+    Check(hipMemcpyAsync(s.logits_.data(), impl_->logits_d + (keep - 1) * V,
+                         V * 4, hipMemcpyDeviceToHost, impl_->ds),
+          "logits copy");
+  } else {
+    s.logits_.assign(
+        logits.begin() + static_cast<std::ptrdiff_t>((keep - 1) * V),
+        logits.begin() + static_cast<std::ptrdiff_t>(keep * V));
+  }
   impl_->CommitVerify(s, static_cast<int>(keep));
-  s.logits_.assign(logits.begin() + static_cast<std::ptrdiff_t>((keep - 1) * V),
-                   logits.begin() + static_cast<std::ptrdiff_t>(keep * V));
   s.verify_rows_ = 0;
 }
 
@@ -2158,8 +2189,8 @@ bool Engine::DraftReady(const Session& s) const {
   return impl_->dsp != nullptr && Drafter::Ready(s.draft_, s.pos_);
 }
 
-void Engine::Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
-                     float* confidence) {
+int Engine::Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
+                    float* confidence, const Drafter::More& more) {
   const std::lock_guard lock(mutex_);
   if (!DraftReady(s))
     throw std::runtime_error("inkling2: no draft context at this position");
@@ -2167,7 +2198,8 @@ void Engine::Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
       static_cast<std::uint32_t>(anchor) >= weights_.config.n_vocab_text)
     throw std::runtime_error("inkling2: token id out of range");
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
-  impl_->dsp->Propose(impl_->ds, s.draft_, anchor, s.pos_, n, out, confidence);
+  return impl_->dsp->Propose(impl_->ds, s.draft_, anchor, s.pos_, n, out,
+                             confidence, more);
 }
 
 void Engine::Synchronize() {

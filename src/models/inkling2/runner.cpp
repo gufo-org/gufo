@@ -791,8 +791,13 @@ public:
     if (budget > 0 && engine_->DraftReady(ss) && st.backoff.Draft()) {
       n = static_cast<int>(std::min<std::size_t>(
           {std::size_t{3}, budget, engine_->VerifyRows(ss) - 1}));
-      if (n > 0)
-        engine_->Propose(ss, static_cast<std::int32_t>(a), n, drafts, conf);
+      if (n > 0)  // stop once the width policy would not verify another
+        n = engine_->Propose(ss, static_cast<std::int32_t>(a), n, drafts, conf,
+                             [&](int i, const float* p) {
+                               const std::lock_guard lock(dsp_mutex_);
+                               return ChooseDsparkWidth(p, i, cal_, costs_) ==
+                                      i;
+                             });
     }
     const auto t1 = Clock::now();
     int width = 0;
@@ -805,16 +810,33 @@ public:
     }
     std::vector<std::int32_t> rows{static_cast<std::int32_t>(a)};
     rows.insert(rows.end(), drafts, drafts + width);
+    // Plain greedy requests take each row's argmax from the device (the token
+    // Select would pick) and copy only the kept row's logits.
+    const auto& cfg = working.config();
+    const bool greedy = cfg.can_use_unmodified_argmax() && !cfg.logprobs &&
+                        !working.ForcedToken() && !st.reasoning_off &&
+                        !st.call_required;
     std::vector<float> out;
-    engine_->Verify(ss, rows, &out);
+    std::int32_t amax[Engine::kMaxDecodeBatch] = {};
+    engine_->Verify(ss, rows, greedy ? nullptr : &out, greedy ? amax : nullptr);
     const auto t2 = Clock::now();
     const std::size_t V = engine_->config().n_vocab_text;
     const std::size_t pos = ss.position();
     std::size_t keep = 1;
     for (int j = 0; j <= width; ++j) {
-      const std::span<const float> row(out.data() + j * V, V);
-      auto sel =
-          Select(st, working, row, pos + static_cast<std::size_t>(j) + 1);
+      const std::size_t at = pos + static_cast<std::size_t>(j) + 1;
+      g::TextDecodeSelection sel;
+      if (greedy) {
+        const auto tk = static_cast<g::TextRunnerToken>(amax[j]);
+        const bool stop = at >= max_context_ || st.answer_done ||
+                          (st.stop_at_eos() && tok_->IsStop(tk));
+        sel = {.stop = stop,
+               .token = tk,
+               .piece = stop ? std::string{} : Piece(st.block, tk)};
+      } else {
+        const std::span<const float> row(out.data() + j * V, V);
+        sel = Select(st, working, row, at);
+      }
       if (sel.stop) {
         step.stop = true;
         step.terminal_logprobs = std::move(sel.logprobs);

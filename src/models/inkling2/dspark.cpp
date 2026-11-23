@@ -56,6 +56,11 @@ struct Drafter::Impl {
   _Float16 *h16, *o16, *a16, *mix16;
   float* ikv;  // injection K | V [n][2048]
   int *d_anchor, *d_pos, *d_prev, *d_tokens;
+  // pinned host staging: [anchor, pos] in, [tokens 8 | confidences 8] out
+  int* h_in = nullptr;
+  float* h_out = nullptr;
+  // work items of n = 1 .. 8 rows (one item each) for injections
+  int* small_items = nullptr;
   int *it_n, *it_e, *it_s, *it_c;  // GEMM work items (n rows)
   int* blk_items;                  // the 8-row block: one item
   static constexpr int kMaxInject = 2048;
@@ -70,6 +75,10 @@ struct Drafter::Impl {
   ~Impl() {
     for (void* p : allocs)
       (void)hipFree(p);
+    if (h_in)
+      (void)hipHostFree(h_in);
+    if (h_out)
+      (void)hipHostFree(h_out);
   }
 
   const GgufTensorInfo& Need(std::string_view name, GgmlType type,
@@ -271,6 +280,22 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     I.it_s = I.Alloc<int>(Impl::kMaxInject / 64);
     I.it_c = I.Alloc<int>(Impl::kMaxInject / 64);
     I.blk_items = I.Alloc<int>(4);
+    Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_in), 4 * sizeof(int)),
+          "pinned");
+    Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_out), 16 * sizeof(float)),
+          "pinned");
+    I.small_items = I.Alloc<int>(8 * 4);
+    {
+      int host[8 * 4];
+      for (int r = 0; r < 8; ++r) {
+        host[r * 4] = 1;
+        host[r * 4 + 1] = 0;
+        host[r * 4 + 2] = 0;
+        host[r * 4 + 3] = r + 1;
+      }
+      Check(hipMemcpy(I.small_items, host, sizeof host, hipMemcpyHostToDevice),
+            "items");
+    }
     {
       const int host[4] = {1, 0, 0, B};
       Check(hipMemcpy(I.blk_items, host, sizeof host, hipMemcpyHostToDevice),
@@ -294,14 +319,21 @@ Drafter::~Drafter() = default;
 void Drafter::Inject(hipStream_t s, State& st, const float* feats,
                      std::size_t pos0, int n) {
   Impl& I = *impl_;
-  if (pos0 > st.valid || n <= 0)
-    return;  // a gap: the context before pos0 is missing
+  if (n <= 0)
+    return;
+  if (pos0 > st.valid || pos0 < st.first)
+    st.first = pos0;  // a gap: the context before pos0 is missing
   for (int done = 0; done < n; done += Impl::kMaxInject) {
     const int m = std::min(n - done, Impl::kMaxInject);
     const float* f = feats + static_cast<std::size_t>(done) * kFeatureFloats;
     const std::size_t p0 = pos0 + static_cast<std::size_t>(done);
-    // work items of m rows (tile 64)
-    {
+    // work items of m rows (tile 64): preset for the few rows of a decode
+    // step, uploaded for a prefill chunk
+    fs::GemmItems it{};
+    if (m <= 8) {
+      int* b = I.small_items + (m - 1) * 4;
+      it = I.Items(b, b + 1, b + 2, b + 3, m);
+    } else {
       const int ni = (m + 63) / 64;
       std::vector<int> host(1 + 2 * ni);
       host[0] = ni;
@@ -317,8 +349,10 @@ void Drafter::Inject(hipStream_t s, State& st, const float* feats,
       Check(hipMemcpyAsync(I.it_c, host.data() + 1 + ni, ni * 4,
                            hipMemcpyHostToDevice, s),
             "items");
+      // the pageable copies above are staged: wait before `host` goes away
+      Check(hipStreamSynchronize(s), "items");
+      it = I.Items(I.it_n, I.it_e, I.it_s, I.it_c, m);
     }
-    const fs::GemmItems it = I.Items(I.it_n, I.it_e, I.it_s, I.it_c, m);
     dsp::MixArgs ma{};
     ma.feat = f;
     std::memcpy(ma.alpha, I.alpha, sizeof ma.alpha);
@@ -357,22 +391,24 @@ void Drafter::Inject(hipStream_t s, State& st, const float* feats,
           "markov context");
     st.f_pos = p0 + static_cast<std::size_t>(m) - 1;
   }
-  st.valid = std::max(st.valid, pos0 + static_cast<std::size_t>(n));
+  st.valid = pos0 + static_cast<std::size_t>(n);
 }
 
-void Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
-                      std::size_t pos, int n, std::int32_t* out,
-                      float* confidence) {
+int Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
+                     std::size_t pos, int n, std::int32_t* out,
+                     float* confidence, const More& more) {
   Impl& I = *impl_;
   if (n <= 0)
-    return;
+    return 0;
   n = std::min(n, kMaxDraft);
   constexpr int B = dsp::kBlock;
-  const int hp[2] = {anchor, static_cast<int>(pos)};
-  Check(hipMemcpyAsync(I.d_anchor, &hp[0], 4, hipMemcpyHostToDevice, s),
+  I.h_in[0] = anchor;
+  I.h_in[1] = static_cast<int>(pos);
+  Check(hipMemcpyAsync(I.d_anchor, I.h_in, 4, hipMemcpyHostToDevice, s),
         "anchor");
-  Check(hipMemcpyAsync(I.d_pos, &hp[1], 4, hipMemcpyHostToDevice, s), "pos");
-  Check(hipMemcpyAsync(I.d_prev, &hp[0], 4, hipMemcpyHostToDevice, s), "prev");
+  Check(hipMemcpyAsync(I.d_pos, I.h_in + 1, 4, hipMemcpyHostToDevice, s),
+        "pos");
+  Check(hipMemcpyAsync(I.d_prev, I.h_in, 4, hipMemcpyHostToDevice, s), "prev");
   const fs::GemmItems it = I.Items(I.blk_items, I.blk_items + 1,
                                    I.blk_items + 2, I.blk_items + 3, B);
   dsp::Embed(s, I.target.token_embd, I.target.token_embd_norm, I.d_anchor,
@@ -392,6 +428,7 @@ void Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
     aa.cap = static_cast<int>(st.cap[l]);
     aa.pos = I.d_pos;
     aa.window = WindowLayer(l) ? static_cast<int>(kWindow) : 0;
+    aa.first = static_cast<int>(st.first);
     aa.ws = I.wsa;
     aa.out16 = I.o16;
     dsp::Attn(s, aa);
@@ -417,21 +454,35 @@ void Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
   ma.joint = I.joint;
   ma.heff = I.heff;
   ma.prev = I.d_prev;
+  int done = 0;
   for (int i = 1; i <= n; ++i) {
     ma.row = i;
     dsp::MarkovStep(s, ma);
     fs::GemvQ8(s, kE, I.head, I.heff, I.logits, Impl::kHeadRows, 0.f, 1);
     dsp::Argmax(s, I.logits, Impl::kHeadRows, I.head_ids, I.ws, I.d_tokens,
                 i - 1, I.d_prev, I.d_conf);
+    done = i;
+    if (i < n && more) {  // read this step's probability to decide on the next
+      Check(hipMemcpyAsync(I.h_out + 8 + (i - 1), I.d_conf + (i - 1), 4,
+                           hipMemcpyDeviceToHost, s),
+            "confidence");
+      Check(hipStreamSynchronize(s), "propose step");
+      if (!more(i, I.h_out + 8))
+        break;
+    }
   }
-  Check(hipMemcpyAsync(out, I.d_tokens, static_cast<std::size_t>(n) * 4,
+  Check(hipMemcpyAsync(I.h_out, I.d_tokens, static_cast<std::size_t>(done) * 4,
                        hipMemcpyDeviceToHost, s),
         "drafts");
-  if (confidence != nullptr)
-    Check(hipMemcpyAsync(confidence, I.d_conf, static_cast<std::size_t>(n) * 4,
-                         hipMemcpyDeviceToHost, s),
-          "confidence");
+  Check(
+      hipMemcpyAsync(I.h_out + 8, I.d_conf, static_cast<std::size_t>(done) * 4,
+                     hipMemcpyDeviceToHost, s),
+      "confidence");
   Check(hipStreamSynchronize(s), "propose sync");
+  std::memcpy(out, I.h_out, static_cast<std::size_t>(done) * 4);
+  if (confidence != nullptr)
+    std::memcpy(confidence, I.h_out + 8, static_cast<std::size_t>(done) * 4);
+  return done;
 }
 
 }  // namespace gufo::models::inkling2

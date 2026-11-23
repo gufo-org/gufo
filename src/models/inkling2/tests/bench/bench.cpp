@@ -168,21 +168,29 @@ int main(int argc, char** argv) {
       // calibration: [bin of the draft probability] -> (seen, accepted), for
       // drafts whose predecessors were all accepted
       long cal[10][2] = {};
+      double t_prop = 0, t_ver = 0, t_com = 0;
+      using SC = std::chrono::steady_clock;
+      auto ms = [](SC::time_point a, SC::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+      };
       const auto s0 = std::chrono::steady_clock::now();
       while (static_cast<int>(got.size()) < decode) {
         const std::int32_t anchor = got.back();
         std::int32_t d[8] = {};
         float conf[8] = {};
         int n = 0;
+        const auto c0 = SC::now();
         if (engine->DraftReady(*sp)) {
           n = std::min<int>(depth,
                             static_cast<int>(engine->VerifyRows(*sp)) - 1);
           if (n > 0)
             engine->Propose(*sp, anchor, n, d, conf);
         }
+        const auto c1 = SC::now();
         std::vector<std::int32_t> rows{anchor};
         rows.insert(rows.end(), d, d + n);
         engine->Verify(*sp, rows, &out);
+        const auto c2 = SC::now();
         int j = 0;
         while (j < n &&
                amax(std::span<const float>(out.data() + j * V, V)) == d[j])
@@ -196,6 +204,10 @@ int main(int argc, char** argv) {
         }
         got.push_back(amax(std::span<const float>(out.data() + j * V, V)));
         engine->CommitVerify(*sp, static_cast<std::size_t>(j + 1), out);
+        const auto c3 = SC::now();
+        t_prop += ms(c0, c1);
+        t_ver += ms(c1, c2);
+        t_com += ms(c2, c3);
         drafted += n;
         accepted += j;
         ++cycles;
@@ -214,6 +226,9 @@ int main(int argc, char** argv) {
           drafted ? 100.0 * accepted / drafted : 0.0,
           static_cast<double>(got.size() - 1) / cycles, (got.size() - 1) / st,
           1.0 / ar);
+      std::printf(
+          "  per cycle: propose %.2f ms, verify %.2f ms, commit %.2f ms\n",
+          t_prop / cycles, t_ver / cycles, t_com / cycles);
       std::printf("  calibration (draft p -> accepted):");
       for (int b = 0; b < 10; ++b)
         if (cal[b][0])

@@ -202,8 +202,12 @@ public:
   /// other rows are past the frontier) and takes row keep - 1 of `logits`
   /// (Verify's output) as the session's logits.
   [[nodiscard]] std::size_t VerifyRows(const Session& s) const;
+  /// `logits` (may be null) receives the rows, `argmax` (may be null) each
+  /// row's first maximum (as the greedy sampler picks it) without copying
+  /// them.
   void Verify(Session& s, std::span<const std::int32_t> tokens,
-              std::vector<float>* logits);
+              std::vector<float>* logits, std::int32_t* argmax = nullptr);
+  /// Empty `logits`: row keep - 1 comes from the device.
   void CommitVerify(Session& s, std::size_t keep,
                     std::span<const float> logits);
 
@@ -216,8 +220,8 @@ public:
   [[nodiscard]] bool AttachDrafter(const std::string& path, std::string* error);
   [[nodiscard]] bool has_drafter() const;
   [[nodiscard]] bool DraftReady(const Session& s) const;
-  void Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
-               float* confidence = nullptr);
+  int Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
+              float* confidence = nullptr, const Drafter::More& more = {});
 
   /// Optional per-visit hidden-state tap for bisecting against llama.cpp:
   /// called with the visit index (0..47), a label ("l_out" or "ffn_inp") and

@@ -102,6 +102,10 @@ void ConvResid(hipStream_t s, const ConvResidArgs& a, int nb = 1);
 /// `cap` is [48][6656][kVerifyRows].
 void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
                       int keep);
+/// out[r] = the first maximum of the finite values of row r of x [rows][n]
+/// (ws: rows * 64 * 2 floats).
+void RowsArgmax(hipStream_t s, const float* x, int rows, int n, float* ws,
+                int* out);
 
 /// Attention-residual mix: states (<= 8 vectors of 2304) RMS-normalised,
 /// softmax of query . state / sqrt(2304), out[q] = sum_j p_j S_j / rms_j. One

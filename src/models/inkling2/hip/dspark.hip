@@ -189,7 +189,7 @@ __global__ void __launch_bounds__(256) k_attn(AttnArgs a) {
   const int h = blockIdx.x, kvh = h / 3, split = blockIdx.y,
             w = threadIdx.x / 32, l = threadIdx.x % 32;
   const int pos = *a.pos;
-  const int lo = a.window ? max(0, pos - a.window) : 0;
+  const int lo = max(a.first, a.window ? max(0, pos - a.window) : 0);
   const int nctx = pos - lo, nkeys = nctx + kBlock;
   const int per = (nkeys + kAttnSplits - 1) / kAttnSplits;
   const int k0 = split * per, k1 = min(nkeys, k0 + per);
@@ -327,27 +327,31 @@ __global__ void __launch_bounds__(256)
 
 // ---- Markov RNN
 // ---------------------------------------------------------------- joint (768
-// rows of BF16 [5120]) = W_j [state, w1[prev], h_i, f] + b: one wave per row,
-// the 5120 inputs gathered on the fly.
+// rows of BF16 [5120]) = W_j [state, w1[prev], h_i, f] + b: the 5120 inputs
+// gathered into LDS once per block, then one wave per row reading two BF16 per
+// lane and step.
 __global__ void __launch_bounds__(256) k_joint(MarkovArgs a) {
+  __shared__ float in[kJoint];
+  {
+    const uint16_t* w1 = a.w1 + (size_t)(*a.prev) * kRank;
+    const float* hi = a.h + (size_t)a.row * kEmbd;
+    for (int c = threadIdx.x; c < kJoint; c += 256)
+      in[c] = c < kRank               ? a.state[c]
+              : c < 2 * kRank         ? bf16f(w1[c - kRank])
+              : c < 2 * kRank + kEmbd ? hi[c - 2 * kRank]
+                                      : a.f[c - 2 * kRank - kEmbd];
+  }
+  __syncthreads();
   const int row = blockIdx.x * 8 + threadIdx.x / 32, l = threadIdx.x % 32;
   if (row >= 3 * kRank)
     return;
-  const uint16_t* wr = a.wj + (size_t)row * kJoint;
-  const uint16_t* w1 = a.w1 + (size_t)(*a.prev) * kRank;
-  const float* hi = a.h + (size_t)a.row * kEmbd;
+  const uint32_t* wr =
+      reinterpret_cast<const uint32_t*>(a.wj + (size_t)row * kJoint);
   float acc = 0.f;
-  for (int c = l; c < kJoint; c += 32) {
-    float x;
-    if (c < kRank)
-      x = a.state[c];
-    else if (c < 2 * kRank)
-      x = bf16f(w1[c - kRank]);
-    else if (c < 2 * kRank + kEmbd)
-      x = hi[c - 2 * kRank];
-    else
-      x = a.f[c - 2 * kRank - kEmbd];
-    acc += bf16f(wr[c]) * x;
+  for (int c = l; c < kJoint / 2; c += 32) {
+    const uint32_t w = wr[c];
+    acc += __uint_as_float(w << 16) * in[2 * c] +
+           __uint_as_float(w & 0xFFFF0000u) * in[2 * c + 1];
   }
   acc = wsum(acc);
   if (l == 0)

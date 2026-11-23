@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -35,14 +36,15 @@ public:
     float eps;
   };
   /// Per-session state (buffers declared with the session). Context rows of
-  /// positions [0, valid) are injected; `f` is the Markov context of position
-  /// f_pos.
+  /// positions [first, valid) are injected (after a restore the context
+  /// starts again at the restored position, and drafts attend to what there
+  /// is); `f` is the Markov context of position f_pos.
   struct State {
     void* k[3] = {};
     void* v[3] = {};
     std::size_t cap[3] = {};  // rows (window layers: rings)
     float* f = nullptr;       // [2304]
-    std::size_t valid = 0;
+    std::size_t first = 0, valid = 0;
     std::size_t f_pos = static_cast<std::size_t>(-1);
   };
   static constexpr int kMaxDraft = 7;
@@ -61,19 +63,23 @@ public:
   /// Whether layer l keeps only a window (a ring of `ring` rows).
   [[nodiscard]] static bool WindowLayer(int l) { return l != 1; }
 
-  /// Injects the features [n][4][2304] of positions [pos0, pos0 + n). Only a
-  /// continuation of the injected rows (pos0 <= valid) is kept.
+  /// Injects the features [n][4][2304] of positions [pos0, pos0 + n). After a
+  /// gap (pos0 > valid) the context restarts at pos0.
   void Inject(hipStream_t s, State& st, const float* feats, std::size_t pos0,
               int n);
   /// Whether Propose can run at `pos` (context and Markov state present).
   [[nodiscard]] static bool Ready(const State& st, std::size_t pos) {
     return pos > 0 && st.valid == pos && st.f_pos == pos - 1;
   }
+  /// After proposal i (1-based) with the probabilities so far: whether to
+  /// draft the next one.
+  using More = std::function<bool(int, const float*)>;
   /// Up to `n` (<= kMaxDraft) greedy proposals after `anchor` at `pos`, and
   /// optionally each one's draft probability (the softmax maximum over the
-  /// proposal head).
-  void Propose(hipStream_t s, State& st, std::int32_t anchor, std::size_t pos,
-               int n, std::int32_t* out, float* confidence = nullptr);
+  /// proposal head). Returns how many were drafted.
+  int Propose(hipStream_t s, State& st, std::int32_t anchor, std::size_t pos,
+              int n, std::int32_t* out, float* confidence = nullptr,
+              const More& more = {});
 
 private:
   Drafter() = default;
