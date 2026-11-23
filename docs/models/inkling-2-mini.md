@@ -41,7 +41,7 @@ the same weights:
 
 | Workload | Gufo | llama.cpp HIP |
 | --- | --- | --- |
-| Prefill, 2,048-token prompt | 2,041 tokens/s | 383 tokens/s |
+| Prefill, 2,048-token prompt | 2,210 tokens/s | 383 tokens/s |
 | Decode, one user, short context | 47.0 tokens/s | 24.3 tokens/s |
 | Decode, 4 users, short context | 93.4 tokens/s in total | not measured |
 

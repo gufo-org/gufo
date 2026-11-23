@@ -12,9 +12,9 @@ same weights).
 
 | Workload | Gufo | llama.cpp HIP |
 | --- | --- | --- |
-| pp512 | 1,483 tokens/s | not measured |
-| pp2048 | 2,041 tokens/s | 383.5 tokens/s |
-| pp8192 | 1,960 tokens/s | not measured |
+| pp512 | 1,618 tokens/s | not measured |
+| pp2048 | 2,210 tokens/s | 383.5 tokens/s |
+| pp8192 | 2,156 tokens/s | not measured |
 | tg128 after 64 tokens | 47.0 tokens/s | 24.3 tokens/s (tg128) |
 | tg128 after 2,048 tokens | 43.9 tokens/s | |
 | tg128 after 8,192 tokens | 42.0 tokens/s | |
@@ -51,6 +51,28 @@ pp2048 progression, each step measured with the previous one in place:
 The generic attention-residual mix (`mix_k`) dropped from 72 to 46 ms per
 pp2048 by unrolling its loops, which issues loads ahead without reordering the
 additions.
+
+Second round (November 23), `inkling2_bench` pp2048 after a warm-up prefill
+(`gufo bench` measured 2,036 before and 2,210 after; pp512 1,483 → 1,618,
+pp8192 1,960 → 2,156). Outside the GEMMs nearly every prefill kernel streams
+19 MB F32 activation buffers at the DRAM ceiling, so the gains come from
+removing passes and from overlapping bandwidth-bound work with the
+compute-bound GEMMs:
+
+| Change | pp2048 |
+| --- | --- |
+| Before (PR head) | 1,990 |
+| Down and K = 2304 dense GEMMs: one straight-line WMMA body per live-tile count (no per-tile branches between the LDS loads and the WMMAs); skinny sink / conv-tap projections with float4 LDS reads and a prefetched k-chunk | 2,029 |
+| F16 GEMM operands written by the norm, mix and attention kernels that produce them (no separate F32 → F16 passes); 64 x 64 tiled gate for the single-job FFN controller | 2,077 |
+| Attention post-conv and residual add in one pass (as the MoE tail) | 2,085 |
+| Relative-bias table rows a key tile meets staged in LDS | 2,095 |
+| K/V short convolutions evaluated inside the KV-cache write; unread F32 window-layer norm outputs skipped | 2,108 |
+| k, v, rel and the skinny projections on a side stream beside q and gate | 2,126 |
+| The next layer's messages mixed on the side stream beside the MoE gate/up GEMM | 2,143 |
+| That mix also writes the messages' inverse RMS, so the controller gates skip half their prologue (ubatches of 1,024+ tokens) | 2,162 |
+
+Decode is unchanged (45.9 tokens/s after 64 tokens, 44.0 after 2,048) and
+batched decode still matches single-session decode bit for bit.
 
 Rejected variants are in [Experiments](EXPERIMENTS.md).
 
