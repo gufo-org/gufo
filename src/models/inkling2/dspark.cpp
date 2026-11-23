@@ -51,8 +51,9 @@ struct Drafter::Impl {
   float *x, *h, *q, *k, *v, *y, *g, *u, *logits, *state, *joint, *ws, *wsa,
       *mix, *d_conf;
   // Low-rank Markov correction of the proposal head: pt = (W_U W_o)^T
-  // [256][kHeadRows] F16, cb = W_U b_o, base = W_U h_i [8][kHeadRows].
-  _Float16* pt = nullptr;
+  // [256][kHeadRows] int8, cb = W_U b_o, base = W_U h_i [8][kHeadRows].
+  std::int8_t* pt = nullptr;  // int8, one scale per row (ps)
+  float* ps = nullptr;
   float *cb = nullptr, *base = nullptr;
   // Proposal head: the target LM head's rows of the kHeadRows tokens with the
   // largest markov_w1 norms (the Loom package's choice), as a Q8_0 copy.
@@ -299,19 +300,20 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
       Check(hipMemcpy(dx, xt.data(), xt.size() * 4, hipMemcpyHostToDevice),
             "lr in");
       kk::Gemm(nullptr, kk::kTQ8_0, I.head, R, kE, dx, kE, dout, R, 257);
-      I.pt = I.Alloc<_Float16>(static_cast<std::size_t>(256) * R);
+      I.pt = I.Alloc<std::int8_t>(static_cast<std::size_t>(256) * R);
+      I.ps = I.Alloc<float>(static_cast<std::size_t>(R));
       I.cb = I.Alloc<float>(static_cast<std::size_t>(R));
       I.base = I.Alloc<float>(static_cast<std::size_t>(kMaxSessions) *
                               dsp::kBlock * R);
-      dsp::ToHalf(nullptr, dout, static_cast<std::size_t>(256) * R, I.pt);
+      dsp::QuantPt(nullptr, dout, R, I.pt, I.ps);
       Check(hipMemcpy(I.cb, dout + static_cast<std::size_t>(256) * R,
                       static_cast<std::size_t>(R) * 4, hipMemcpyDeviceToDevice),
             "lr bias");
       Check(hipDeviceSynchronize(), "lr tables");
       (void)hipFree(dx);
       (void)hipFree(dout);
-      tot += static_cast<std::size_t>(256) * R * 2 +
-             static_cast<std::size_t>(R) * 4;
+      tot += static_cast<std::size_t>(256) * R +
+             static_cast<std::size_t>(R) * 4 + static_cast<std::size_t>(R) * 4;
     }
     I.wsa = I.Alloc<float>(static_cast<std::size_t>(dsp::kHeads) *
                            dsp::kAttnSplits * B * (128 + 2));
@@ -481,8 +483,12 @@ void Drafter::InjectRows(hipStream_t s, std::span<const Rows> rows) {
   float* vraw = I.ikv + static_cast<std::size_t>(B) * 1024;
   for (int l = 0; l < 3; ++l) {
     const _Float16* a = I.mix16 + static_cast<std::size_t>(l) * B * kE;
-    dsp::Gemv8(s, I.layer[l].wk_ctx, 1024, kE, a, kraw);
-    dsp::Gemv8(s, I.layer[l].wv_ctx, 1024, kE, a, vraw);
+    {
+      const void* w[2] = {I.layer[l].wk_ctx, I.layer[l].wv_ctx};
+      const int m[2] = {1024, 1024};
+      float* y[2] = {kraw, vraw};
+      dsp::Gemv8N(s, 2, w, m, kE, a, y);
+    }
     off = 0;
     for (const auto& r : rows) {
       if (r.n <= 0)
@@ -574,9 +580,12 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
                I.h16 + static_cast<std::size_t>(g) * B * kE, I.eps);
   for (int l = 0; l < 3; ++l) {
     const auto& L = I.layer[l];
-    dsp::Gemv8(s, L.wq, 3072, kE, I.h16, I.q, S);
-    dsp::Gemv8(s, L.wk, 1024, kE, I.h16, I.k, S);
-    dsp::Gemv8(s, L.wv, 1024, kE, I.h16, I.v, S);
+    {
+      const void* w[3] = {L.wq, L.wk, L.wv};
+      const int m[3] = {3072, 1024, 1024};
+      float* y[3] = {I.q, I.k, I.v};
+      dsp::Gemv8N(s, 3, w, m, kE, I.h16, y, S);
+    }
     for (int g = 0; g < S; ++g) {
       State& st = *req[g].st;
       float* q = I.q + static_cast<std::size_t>(g) * B * 3072;
@@ -599,8 +608,12 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
     }
     dsp::Gemv8(s, L.wo, kE, 3072, I.o16, I.y, S);
     dsp::AddNorm(s, I.x, I.y, L.ffn_norm, I.h, I.h16, B * S, I.eps);
-    dsp::Gemv8(s, L.wg, 9216, kE, I.h16, I.g, S);
-    dsp::Gemv8(s, L.wu, 9216, kE, I.h16, I.u, S);
+    {
+      const void* w[2] = {L.wg, L.wu};
+      const int m[2] = {9216, 9216};
+      float* y[2] = {I.g, I.u};
+      dsp::Gemv8N(s, 2, w, m, kE, I.h16, y, S);
+    }
     dsp::Swiglu(s, I.g, I.u, I.a16, B * S * 9216);
     dsp::Gemv8(s, L.wd, kE, 9216, I.a16, I.y, S);
     dsp::AddNorm(s, I.x, I.y, l < 2 ? I.layer[l + 1].attn_norm : I.out_norm,
@@ -632,9 +645,9 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
       dsp::MarkovStep(s, ma);
       float* logits = I.logits + static_cast<std::size_t>(g) * R;
       float* ws = I.ws + g * (3 * 128 + 1);
-      dsp::LrLogits(s, I.pt, I.cb,
-                    I.base + (static_cast<std::size_t>(g) * B + i) * R,
-                    ma.joint + 3 * dsp::kRank, logits, static_cast<int>(R));
+      dsp::LrLogits8(s, I.pt, I.ps, I.cb,
+                     I.base + (static_cast<std::size_t>(g) * B + i) * R,
+                     ma.joint + 3 * dsp::kRank, logits, static_cast<int>(R));
       if (rq.coupled != nullptr)
         dsp::CoupledSample(
             s, logits, static_cast<int>(R), I.head_ids, I.target.softcap,

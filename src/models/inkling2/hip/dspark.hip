@@ -392,16 +392,69 @@ __global__ void __launch_bounds__(256)
   out[r] = base[r] + a0 + cb[r];
   out[r + 1] = base[r + 1] + a1 + cb[r + 1];
 }
+struct Gemv8Set {  // up to three matrices of the same input, one launch
+  const uint8_t* w[3];
+  float* y[3];
+  int m[3];
+  int blocks[3];  // row blocks of 32 of each
+  int n;
+};
+// int8 table with one scale per row r (over the 256 ranks)
+__global__ void __launch_bounds__(256)
+    k_quant_pt(const float* __restrict__ src, int n, int8_t* __restrict__ q,
+               float* __restrict__ scale) {
+  const int r = blockIdx.x * 256 + threadIdx.x;
+  if (r >= n)
+    return;
+  float mx = 0.f;
+  for (int j = 0; j < kRank; ++j)
+    mx = fmaxf(mx, fabsf(src[(size_t)j * n + r]));
+  const float sc = mx > 0.f ? mx / 127.f : 1.f;
+  for (int j = 0; j < kRank; ++j)
+    q[(size_t)j * n + r] = (int8_t)__float2int_rn(src[(size_t)j * n + r] / sc);
+  scale[r] = sc;
+}
+// k_lr_logits from the int8 table: four rows per thread
+__global__ void __launch_bounds__(256)
+    k_lr_logits8(const int8_t* __restrict__ pt, const float* __restrict__ ps,
+                 const float* __restrict__ cb, const float* __restrict__ base,
+                 const float* __restrict__ lat, float* __restrict__ out,
+                 int n) {
+  __shared__ float sl[kRank];
+  sl[threadIdx.x] = lat[threadIdx.x];
+  __syncthreads();
+  const int r = (blockIdx.x * 256 + threadIdx.x) * 4;
+  if (r >= n)
+    return;
+  float a[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll 16
+  for (int j = 0; j < kRank; ++j) {
+    const char4 p = *(const char4*)(pt + (size_t)j * n + r);
+    const float l = sl[j];
+    a[0] += (float)p.x * l;
+    a[1] += (float)p.y * l;
+    a[2] += (float)p.z * l;
+    a[3] += (float)p.w * l;
+  }
+#pragma unroll
+  for (int i = 0; i < 4; ++i)
+    out[r + i] = base[r + i] + ps[r + i] * a[i] + cb[r + i];
+}
 template<int KC>
 __global__ void __launch_bounds__(256)
-    k_gemv8(const uint8_t* __restrict__ W, int M, int K,
-            const _Float16* __restrict__ x, float* __restrict__ y) {
+    k_gemv8(Gemv8Set set, int K, const _Float16* __restrict__ x) {
   constexpr int NBK = KC / 32, RW = 4;
   __shared__ __attribute__((aligned(16))) _Float16 xs[kBlock][KC];
   const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
+  int by = blockIdx.y, mi = 0;
+  while (mi + 1 < set.n && by >= set.blocks[mi])
+    by -= set.blocks[mi++];
+  const uint8_t* __restrict__ W = set.w[mi];
+  const int M = set.m[mi];
+  float* __restrict__ y = set.y[mi];
   // blockIdx.x: the session (its 8 rows of x and y); the sessions of one
   // weight block run next to each other, so the later ones read it from L2.
-  const int r0 = (blockIdx.y * 8 + wave) * RW;
+  const int r0 = (by * 8 + wave) * RW;
   x += (size_t)blockIdx.x * kBlock * K;
   y += (size_t)blockIdx.x * kBlock * M;
   const size_t rb = (size_t)(K / 32) * 34;
@@ -733,6 +786,17 @@ void LrLogits(hipStream_t s, const _Float16* pt, const float* cb,
   k_lr_logits<<<(n / 2 + 255) / 256, 256, 0, s>>>(pt, cb, base, lat, logits, n);
   Chk("lr logits");
 }
+void QuantPt(hipStream_t s, const float* src, int n, int8_t* q, float* scale) {
+  k_quant_pt<<<(n + 255) / 256, 256, 0, s>>>(src, n, q, scale);
+  Chk("quant pt");
+}
+void LrLogits8(hipStream_t s, const int8_t* pt, const float* ps,
+               const float* cb, const float* base, const float* lat,
+               float* logits, int n) {
+  k_lr_logits8<<<(n / 4 + 255) / 256, 256, 0, s>>>(pt, ps, cb, base, lat,
+                                                   logits, n);
+  Chk("lr logits");
+}
 void Argmax(hipStream_t s, const float* logits, int n, const int* map,
             float* ws, int* tokens, int row, int* prev, float* conf) {
   constexpr int nb = 128;
@@ -740,18 +804,31 @@ void Argmax(hipStream_t s, const float* logits, int n, const int* map,
   k_argmax2<<<1, 32, 0, s>>>(ws, nb, map, tokens, row, prev, conf);
   Chk("argmax");
 }
-void Gemv8(hipStream_t s, const void* w, int m, int k, const _Float16* x,
-           float* y, int sessions) {
-  const auto* W = static_cast<const uint8_t*>(w);
-  if (m % 32)
-    throw std::runtime_error("inkling2 dspark: gemv8 shape");
+void Gemv8N(hipStream_t s, int n, const void* const* w, const int* m, int k,
+            const _Float16* x, float* const* y, int sessions) {
+  Gemv8Set set{};
+  set.n = n;
+  int blocks = 0;
+  for (int i = 0; i < n; ++i) {
+    if (m[i] % 32)
+      throw std::runtime_error("inkling2 dspark: gemv8 shape");
+    set.w[i] = static_cast<const uint8_t*>(w[i]);
+    set.y[i] = y[i];
+    set.m[i] = m[i];
+    set.blocks[i] = m[i] / 32;
+    blocks += m[i] / 32;
+  }
   if (k % 2304 == 0)
-    k_gemv8<2304><<<dim3(sessions, m / 32), 256, 0, s>>>(W, m, k, x, y);
+    k_gemv8<2304><<<dim3(sessions, blocks), 256, 0, s>>>(set, k, x);
   else if (k == 3072)
-    k_gemv8<3072><<<dim3(sessions, m / 32), 256, 0, s>>>(W, m, k, x, y);
+    k_gemv8<3072><<<dim3(sessions, blocks), 256, 0, s>>>(set, k, x);
   else
     throw std::runtime_error("inkling2 dspark: gemv8 shape");
   Chk("gemv8");
+}
+void Gemv8(hipStream_t s, const void* w, int m, int k, const _Float16* x,
+           float* y, int sessions) {
+  Gemv8N(s, 1, &w, &m, k, x, &y, sessions);
 }
 void CoupledSample(hipStream_t s, const float* logits, int n, const int* map,
                    float softcap, float temperature, float min_p, float u,

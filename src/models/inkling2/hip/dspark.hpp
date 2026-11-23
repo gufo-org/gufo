@@ -103,6 +103,13 @@ void MarkovStep(hipStream_t s, const MarkovArgs& a);
 void LrLogits(hipStream_t s, const _Float16* pt, const float* cb,
               const float* base, const float* lat, float* logits, int n);
 
+/// LrLogits from an int8 table pt [256][n] with one scale per row (n % 4 ==
+/// 0), as QuantPt makes from the F32 table.
+void LrLogits8(hipStream_t s, const int8_t* pt, const float* ps,
+               const float* cb, const float* base, const float* lat,
+               float* logits, int n);
+void QuantPt(hipStream_t s, const float* src, int n, int8_t* q, float* scale);
+
 /// tokens[row] = map[argmax(logits[0, n))] (first maximum; map null: the
 /// index itself), also *prev; conf[row] = the softmax probability of that
 /// maximum.
@@ -113,6 +120,9 @@ void Argmax(hipStream_t s, const float* logits, int n, const int* map,
 /// (K a multiple of 2304 or 3072, M of 32).
 void Gemv8(hipStream_t s, const void* w, int m, int k, const _Float16* x,
            float* y, int sessions = 1);
+/// Gemv8 of n (<= 3) matrices of the same input in one launch.
+void Gemv8N(hipStream_t s, int n, const void* const* w, const int* m, int k,
+            const _Float16* x, float* const* y, int sessions = 1);
 
 /// Coupled sampling of one proposal: p over the n proposal-head rows (in
 /// token order) = softmax(softcap(logits) / temperature), rows below the
