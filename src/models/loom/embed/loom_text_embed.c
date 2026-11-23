@@ -14,7 +14,6 @@
 #include <process.h>
 #include <windows.h>
 #else
-#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -22,7 +21,6 @@
 #include "iree/base/api.h"
 #include "iree/base/internal/json.h"
 #include "iree/base/internal/path.h"
-#include "iree/base/tooling/flags.h"
 #include "iree/tokenizer/tokenizer.h"
 #include "iree/tokenizer/vocab/vocab.h"
 #include "iree/tooling/device_util.h"
@@ -217,54 +215,9 @@ static int loom_text_embed_fail(char* error, size_t error_size,
 #define EMBED_RETURN(embed, expr) \
   return loom_text_embed_fail((embed)->error, sizeof((embed)->error), (expr))
 
-// Loom streams weights through io_uring with pinned staging buffers, which
-// need more locked memory than a stock Linux host allows (RLIMIT_MEMLOCK of
-// 8 MiB; ROCm/hrx-system#3332). Raises the soft limit to the hard one; when
-// that is still below 64 MiB, loads parameters as loom-serve's
-// --parameter_mode=preload does (whole files read into host memory) instead.
-#define LOOM_TEXT_EMBED_MEMLOCK_BYTES (64ull << 20)
-
-static iree_status_t loom_text_embed_select_parameter_mode(void) {
-#if defined(_WIN32)
-  // Windows has no locked-memory limit to raise.
-  return iree_ok_status();
-#else
-  struct rlimit limit;
-  if (getrlimit(RLIMIT_MEMLOCK, &limit) != 0) return iree_ok_status();
-  if (limit.rlim_cur != RLIM_INFINITY &&
-      limit.rlim_cur < LOOM_TEXT_EMBED_MEMLOCK_BYTES &&
-      limit.rlim_cur < limit.rlim_max) {
-    limit.rlim_cur = limit.rlim_max;
-    if (setrlimit(RLIMIT_MEMLOCK, &limit) != 0) getrlimit(RLIMIT_MEMLOCK, &limit);
-  }
-  if (limit.rlim_cur == RLIM_INFINITY ||
-      limit.rlim_cur >= LOOM_TEXT_EMBED_MEMLOCK_BYTES) {
-    return iree_ok_status();
-  }
-  static bool reported = false;
-  if (!reported) {
-    reported = true;
-    fprintf(stderr,
-            "loom: locked-memory limit %llu KiB is below %llu MiB: weights are "
-            "read into host memory at load (raise `ulimit -l` to stream them "
-            "from disk)\n",
-            (unsigned long long)(limit.rlim_cur >> 10),
-            (unsigned long long)(LOOM_TEXT_EMBED_MEMLOCK_BYTES >> 20));
-  }
-  // String flags keep pointers into argv: static storage.
-  static char program[] = "loom_text_embed";
-  static char flag[] = "--parameter_mode=preload";
-  char* argv[] = {program, flag, NULL};
-  int argc = 2;
-  char** args = argv;
-  return iree_flags_parse(IREE_FLAGS_PARSE_MODE_DEFAULT, &argc, &args);
-#endif
-}
-
 static iree_status_t loom_text_embed_open_devices(
     loom_text_embed_t* embed, const loom_text_embed_options_t* options,
     bool elastic) {
-  IREE_RETURN_IF_ERROR(loom_text_embed_select_parameter_mode());
   static const loomc_iree_hal_target_provider_t* providers[1];
   providers[0] = loomc_amdgpu_iree_hal_target_provider();
   static loom_runtime_compiler_options_t compiler_options;
