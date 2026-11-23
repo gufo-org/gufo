@@ -69,6 +69,35 @@ void MoeGu(hipStream_t s, int fmt, const void* w, const float* escale,
 /// weighted partial outputs that the next ConvResid adds in slot order
 /// (ConvResidArgs::nsum = 8). Smaller blocks (one expert's activations to
 /// quantise).
+/// Pairs of a step grouped by expert (MoeRouteGroup), for MoeGuGrouped /
+/// MoeDownGrouped: the same outputs as MoeGu / MoeDownE, each expert's
+/// weights read once for its pairs.
+/// Wide steps (9 to 64 tokens) through int8 WMMA, with the outputs of
+/// ProjMulti / GemvQ8 (k = 2304 or 3072): the inputs are first quantized by
+/// QuantRows (`per` inputs a token, token stride ldt floats) into qa
+/// (kQaBytesPerVector each) and qs (kQsFloatsPerVector each).
+inline constexpr std::size_t kQaBytesPerVector = 2 * 3072 / 32 * 2 * 16;
+inline constexpr std::size_t kQsFloatsPerVector = 2 * 3072 / 16;
+void QuantRows(hipStream_t s, int k, const float* x, int per, int ldt, int nb,
+               void* qa, float* qs);
+bool ProjMma(hipStream_t s, const ProjSpec& p, const void* qa, const float* qs,
+             int per, float* y, int nb, int ldx, int ldy, const float* x);
+void GemvMma(hipStream_t s, int k, const void* w, const void* qa,
+             const float* qs, float* y, int m, float softcap, int nb);
+struct MoeGroups {
+  int* sorted;  // [pairs]
+  int* ue;      // [128] used experts
+  int* ub;      // [128] start of each one's pairs in `sorted`
+  int* un;      // [128] its pair count
+  int* nd;      // [1] used experts
+};
+void MoeRouteGroup(hipStream_t s, const int* ids, int pairs, MoeGroups g);
+void MoeGuGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
+                  const float* x, MoeGroups g, int slots, float* a, int ff,
+                  float beta, float lb);
+void MoeDownGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
+                    const float* a, MoeGroups g, int slots, const float* wts,
+                    float* yp, int d);
 void MoeDownE(hipStream_t s, int fmt, const void* w, const float* escale,
               const float* a, const int* ids, const float* wts, float* yp,
               int d, int nb = 1);
@@ -97,7 +126,7 @@ struct ConvResidArgs {
   const int* ri = nullptr;
 };
 /// Rows of one verification step (Engine::kMaxVerifyRows).
-inline constexpr int kVerifyRows = 8;
+inline constexpr int kVerifyRows = 64;
 /// Batched (nb tokens): x, cur, blk are [nb][2304]; token b uses slot[b * 48].
 void ConvResid(hipStream_t s, const ConvResidArgs& a, int nb = 1);
 /// After a verification step: every history of the session's 48 slots

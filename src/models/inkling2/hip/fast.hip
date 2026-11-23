@@ -255,7 +255,8 @@ __device__ __forceinline__ float wsum(float v) {
 template<int NB>
 __device__ __forceinline__ void tiny_row(const MultiP& P,
                                          const float* __restrict__ x, int row,
-                                         int lane) {
+                                         int lane, int b0 = 0,
+                                         int nvalid = NB) {
   int m = 0;
   while (m < P.tn - 1 && row >= P.trows[m]) {
     row -= P.trows[m];
@@ -323,8 +324,8 @@ __device__ __forceinline__ void tiny_row(const MultiP& P,
 #pragma unroll
   for (int b = 0; b < NB; ++b) {
     const float v = wsum(acc[b]);
-    if (lane == 0)
-      P.ty[m][(size_t)b * P.tys[m] + row] = v;
+    if (lane == 0 && b < nvalid)
+      P.ty[m][(size_t)(b0 + b) * P.tys[m] + row] = v;
   }
 }
 
@@ -430,6 +431,156 @@ __global__ void __launch_bounds__(BW* WS)
 #pragma unroll
       for (int b = 0; b < NB; ++b)
         y[(size_t)b * P.ldy + yo + lr] = acc[b];
+  }
+}
+
+// The tiny matrices of a wide step (k_gemv_multi's first blocks), CB tokens
+// at a time: their own launch, so they do not raise k_gemv_wide's registers.
+template<int BW, int CB>
+__global__ void __launch_bounds__(BW* WS)
+    k_tiny_wide(MultiP P, const float* __restrict__ x, int nb) {
+  for (int c0 = 0; c0 < nb; c0 += CB)
+    tiny_row<CB>(P, x + (size_t)c0 * P.ldx, blockIdx.x * BW + threadIdx.x / WS,
+                 threadIdx.x % WS, c0, min(CB, nb - c0));
+}
+// ---------------- exact int8 WMMA GEMV (wide steps) ----------------
+// Each 16-element integer dot product of q8_unit / nv_unit is one entry of a
+// 16 x 16 x 16 int8 WMMA (integer sums are exact in any order). The float
+// work around them is replayed per output in the GEMV's own order: lane
+// `lir` of a row group accumulates units lir, lir + LPR, ... (plane 0, then
+// plane 1, per unit) and the lanes are combined by the xor butterfly whose
+// lane-0 value the GEMV writes. So every output is bit for bit the GEMV's.
+typedef int v4i __attribute__((ext_vector_type(4)));
+typedef int v8i __attribute__((ext_vector_type(8)));
+struct F8 {
+  float v[8];
+};
+// Quantized activations in global memory for the WMMA kernels: vector v
+// (input v % per of token v / per, at x + (v / per) * ldt + (v % per) * K) as
+// quant_act writes it for one vector: qa[v][2 planes][CPU * NU], qs[v][2][K /
+// 16].
+template<int K, int UEL>
+__global__ void __launch_bounds__(256)
+    k_quant_rows(const float* __restrict__ x, int per, int ldt, v4u* qa,
+                 float* qs, int res) {
+  constexpr int NG = K / 16, NU = K / UEL, CPU = UEL / 16;
+  const int v = blockIdx.x;
+  quant_act<K, 1, UEL>(x + (size_t)(v / per) * ldt + (size_t)(v % per) * K,
+                       qa + (size_t)v * 2 * CPU * NU, qs + (size_t)v * 2 * NG,
+                       res);
+}
+
+// The leaf of one output tile: Q8_0 units l, l + lpr, ... of the lane's
+// weight row `wrow` against the A rows `av` (quantized vectors), scales in
+// `ssc` ([2][16][K / 16]); q8_unit's arithmetic per entry.
+template<int K>
+__device__ __forceinline__ F8 mma_leaf(int l, int lpr, const uint8_t* wrow,
+                                       const v4u* av, const float* ssc,
+                                       int half, int res) {
+  constexpr int NU = K / 32, NG = K / 16;
+  F8 acc;
+#pragma unroll
+  for (int i = 0; i < 8; ++i)
+    acc.v[i] = 0.f;
+#pragma unroll 1
+  for (int u = l; u < NU; u += lpr) {
+    const v8i z = {0, 0, 0, 0, 0, 0, 0, 0};
+    const uint8_t* pu = wrow + (size_t)u * 34;
+    const v4u w0 = *(const v4u_a2*)(pu + 2);
+    const v4u w1 = *(const v4u_a2*)(pu + 18);
+    const float d = __half2float(*(const __half*)pu);
+#pragma unroll 1
+    for (int pl = 0; pl <= res; ++pl) {
+      const v4u a0 = av[pl * 2 * NU + u], a1 = av[pl * 2 * NU + NU + u];
+      const v8i c0 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+          true, (v4i)a0, true, (v4i)w0, z, false);
+      const v8i c1 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+          true, (v4i)a1, true, (v4i)w1, z, false);
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const float* sc = ssc + (pl * 16 + 2 * i + half) * NG + 2 * u;
+        acc.v[i] += d * (sc[0] * (float)c0[i] + sc[1] * (float)c1[i]);
+      }
+    }
+  }
+  return acc;
+}
+
+// Q8_0 rows (P's matrices, one input per block) x 16-token tiles. Block
+// (tile, rbk) takes weight rows rbk * 16 + 0..15 (lane c16's B column) for the
+// tile's tokens (A rows; C entry i of a lane is token 2 i + half). Its NW
+// waves compute the LPR leaves (wave w: leaves w, w + NW, ...) into LDS, and
+// the block combines them in the butterfly's order.
+template<int K, int LPR, int NW>
+__global__ void __launch_bounds__(NW * 32)
+    k_gemv_mma(MultiP P, const v4u* __restrict__ qa,
+               const float* __restrict__ qs, int per, float* __restrict__ y,
+               int Mtot, int nb, float softcap) {
+  constexpr int NU = K / 32, NG = K / 16, QV = 2 * 2 * NU;
+  __shared__ float ssc[2][16][NG];
+  __shared__ float lv[LPR][8][32];
+  const int t0 = blockIdx.x * 16, brow = blockIdx.y * 16;
+  int bin = P.in[0];
+#pragma unroll
+  for (int i = 1; i < 5; i++)
+    if (i < P.n && brow >= P.cum[i])
+      bin = P.in[i];
+  for (int i = threadIdx.x; i < 2 * 16 * NG; i += NW * 32) {
+    const int pl = i / (16 * NG), r = (i / NG) % 16, g = i % NG;
+    const int tok = min(t0 + r, nb - 1);
+    ssc[pl][r][g] = qs[(size_t)(tok * per + bin) * 2 * NG + pl * NG + g];
+  }
+  __syncthreads();
+  const int w = threadIdx.x / 32, lane = threadIdx.x % 32, c16 = lane & 15,
+            half = lane >> 4;
+  const int row = brow + c16;
+  const int rr = row < Mtot ? row : Mtot - 1;
+  int m = 0;
+#pragma unroll
+  for (int i = 1; i < 5; i++)
+    if (i < P.n && rr >= P.cum[i])
+      m = i;
+  const uint8_t* Wm = P.W[0];
+  int yo = P.yoff[0], cm = P.cum[0];
+#pragma unroll
+  for (int i = 1; i < 5; i++)
+    if (i == m) {
+      Wm = P.W[i];
+      yo = P.yoff[i];
+      cm = P.cum[i];
+    }
+  const int lr = rr - cm;
+  const uint8_t* wrow = Wm + (size_t)lr * NU * 34;
+  const int tokA = min(t0 + c16, nb - 1);
+  const v4u* av = qa + (size_t)(tokA * per + bin) * QV;
+  for (int l = w; l < LPR; l += NW) {
+    const F8 a = mma_leaf<K>(l, LPR, wrow, av, &ssc[0][0][0], half, P.res);
+#pragma unroll
+    for (int i = 0; i < 8; ++i)
+      lv[l][i][lane] = a.v[i];
+  }
+  __syncthreads();
+  // the butterfly's steps for lane 0 (offsets LPR / 2 .. 1): leaf l += leaf
+  // l + off for l < off, every entry by the block's threads in turn
+  for (int off = LPR / 2; off >= 1; off >>= 1) {
+    for (int idx = threadIdx.x; idx < off * 8 * 32; idx += NW * 32) {
+      const int l = idx / 256, i = (idx / 32) % 8, ln = idx % 32;
+      lv[l][i][ln] += lv[l + off][i][ln];
+    }
+    __syncthreads();
+  }
+  if (w != 0)
+    return;
+  F8 r;
+#pragma unroll
+  for (int i = 0; i < 8; ++i)
+    r.v[i] = lv[0][i][lane];
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    const int tok = t0 + 2 * i + half;
+    if (tok < nb && row < Mtot)
+      y[(size_t)tok * P.ldy + yo + lr] =
+          softcap > 0.f ? softcap * tanhf(r.v[i] / softcap) : r.v[i];
   }
 }
 
@@ -626,6 +777,256 @@ __global__ void __launch_bounds__(BW* WS)
                             K / 16, res, 0, lir, acc);
     if (row < D && lir == 0)
       yp[(size_t)p * D + row] = ew * acc[0];
+  }
+}
+
+// ---------------- MoE of many rows, grouped by expert ----------------
+// Wide verification steps route 9 to 64 rows: (row, slot) pairs that chose
+// the same expert are processed by one block row, which reads each weight
+// unit once for up to kGrp pairs. Every pair's dot products are k_moe_gu's /
+// k_moe_down_e's (row_dot over the same units, lanes and shuffles), so each
+// output is the one the per-pair kernels write.
+constexpr int kGrp = 4;
+// Pairs sorted by expert: ue[k] / ub[k] / un[k] = the k-th used expert, the
+// start of its pairs in `sorted` and their count; *nd = used experts.
+__global__ void __launch_bounds__(256)
+    k_route_group(const int* __restrict__ ids, int P, int* __restrict__ sorted,
+                  int* __restrict__ ue, int* __restrict__ ub,
+                  int* __restrict__ un, int* __restrict__ nd) {
+  __shared__ int cnt[128], off[129], cur[128];
+  const int t = threadIdx.x;
+  if (t < 128)
+    cnt[t] = 0;
+  __syncthreads();
+  for (int p = t; p < P; p += blockDim.x)
+    atomicAdd(&cnt[ids[p]], 1);
+  __syncthreads();
+  if (t == 0) {
+    int run = 0, k = 0;
+    for (int e = 0; e < 128; ++e) {
+      off[e] = run;
+      cur[e] = run;
+      if (cnt[e] > 0) {
+        ue[k] = e;
+        ub[k] = run;
+        un[k] = cnt[e];
+        ++k;
+      }
+      run += cnt[e];
+    }
+    *nd = k;
+  }
+  __syncthreads();
+  for (int p = t; p < P; p += blockDim.x)
+    sorted[atomicAdd(&cur[ids[p]], 1)] = p;
+}
+
+// quant_act of NV gathered vectors: vector v at xs[v] (K floats).
+template<int K, int NV, int UEL>
+__device__ __forceinline__ void quant_act_g(const float* const* xs, int nv,
+                                            v4u* aq, float* asc, int res) {
+  constexpr int NG = K / 16, NU = K / UEL, CPU = UEL / 16, PLQ = NV * CPU * NU,
+                PLS = NV * NG;
+  for (int it = threadIdx.x; it < nv * NG; it += blockDim.x) {
+    int v = it / NG, g = it % NG;
+    const float4* xp = (const float4*)(xs[v] + g * 16);
+    float f[16];
+    float amax = 0.f;
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      const float4 t = xp[i];
+      f[4 * i] = t.x;
+      f[4 * i + 1] = t.y;
+      f[4 * i + 2] = t.z;
+      f[4 * i + 3] = t.w;
+      amax = fmaxf(amax, fmaxf(fmaxf(fabsf(t.x), fabsf(t.y)),
+                               fmaxf(fabsf(t.z), fabsf(t.w))));
+    }
+    const float sc = amax / 127.f, id = amax > 0.f ? 127.f / amax : 0.f;
+    float r[16];
+    uint32_t q[4];
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      float q0 = rintf(f[4 * i] * id), q1 = rintf(f[4 * i + 1] * id),
+            q2 = rintf(f[4 * i + 2] * id), q3 = rintf(f[4 * i + 3] * id);
+      q[i] = pack4(q0, q1, q2, q3);
+      r[4 * i] = f[4 * i] - q0 * sc;
+      r[4 * i + 1] = f[4 * i + 1] - q1 * sc;
+      r[4 * i + 2] = f[4 * i + 2] - q2 * sc;
+      r[4 * i + 3] = f[4 * i + 3] - q3 * sc;
+    }
+    asc[v * NG + g] = sc;
+    const int idx = (v * CPU + g % CPU) * NU + g / CPU;
+    aq[idx] = v4u{q[0], q[1], q[2], q[3]};
+    if (res) {
+      const float sc2 = sc * (1.0f / 254.0f),
+                  id2 = sc > 0.f ? 254.0f / sc : 0.f;
+      uint32_t q2p[4];
+#pragma unroll
+      for (int i = 0; i < 4; i++)
+        q2p[i] = pack4(r[4 * i] * id2, r[4 * i + 1] * id2, r[4 * i + 2] * id2,
+                       r[4 * i + 3] * id2);
+      asc[PLS + v * NG + g] = sc2;
+      aq[PLQ + idx] = v4u{q2p[0], q2p[1], q2p[2], q2p[3]};
+    }
+  }
+  __syncthreads();
+}
+
+// row_dot of the first n (1..kGrp) LDS vectors, B fixed at compile time.
+template<int FMT, int K, int LPR, class F>
+__device__ __forceinline__ void with_rows(int n, F&& f) {
+  if constexpr (kGrp >= 8) {
+    if (n >= 8) {
+      f(std::integral_constant<int, 8>{});
+      return;
+    }
+  }
+  if constexpr (kGrp >= 7) {
+    if (n == 7) {
+      f(std::integral_constant<int, 7>{});
+      return;
+    }
+  }
+  if constexpr (kGrp >= 6) {
+    if (n == 6) {
+      f(std::integral_constant<int, 6>{});
+      return;
+    }
+  }
+  if constexpr (kGrp >= 5) {
+    if (n == 5) {
+      f(std::integral_constant<int, 5>{});
+      return;
+    }
+  }
+  if constexpr (kGrp >= 4) {
+    if (n == 4) {
+      f(std::integral_constant<int, 4>{});
+      return;
+    }
+  }
+  if constexpr (kGrp >= 3) {
+    if (n == 3) {
+      f(std::integral_constant<int, 3>{});
+      return;
+    }
+  }
+  if constexpr (kGrp >= 2) {
+    if (n == 2) {
+      f(std::integral_constant<int, 2>{});
+      return;
+    }
+  }
+  f(std::integral_constant<int, 1>{});
+}
+
+template<int FMT, int K, int LPR, int NIT, int BW>
+__global__ void __launch_bounds__(BW* WS)
+    k_moe_gu_g(const uint8_t* __restrict__ W, const float* __restrict__ escale,
+               const float* __restrict__ x, const int* __restrict__ sorted,
+               const int* __restrict__ ue, const int* __restrict__ ub,
+               const int* __restrict__ un, const int* __restrict__ nd,
+               float* __restrict__ a, int FF, float beta, float lb, int res) {
+  constexpr int NU = K / Fm<FMT>::UEL, CPU = Fm<FMT>::UEL / 16,
+                RPP = WS / LPR / 2;
+  __shared__ v4u aq[2 * kGrp * CPU * NU];
+  __shared__ float asc[2 * kGrp * (K / 16)];
+  __shared__ const float* xs[kGrp];
+  __shared__ int ps[kGrp];
+  const int k = blockIdx.x, rbk = blockIdx.y;
+  if (k >= *nd)
+    return;
+  const int e = ue[k], b0 = ub[k], n = un[k];
+  const float sc = escale ? escale[e] : 1.f;
+  size_t rb = (size_t)NU * Fm<FMT>::BYTES;
+  const uint8_t* We = W + (size_t)e * 2 * FF * rb;
+  int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
+      lir = lane % LPR, isup = g & 1, pg = g >> 1;
+  int base = (rbk * BW + wave) * RPP * NIT;
+  for (int c0 = 0; c0 < n; c0 += kGrp) {
+    const int cn = min(kGrp, n - c0);
+    if (c0 > 0)
+      __syncthreads();  // the previous group's LDS reads are done
+    if (threadIdx.x < cn) {
+      const int p = sorted[b0 + c0 + threadIdx.x];
+      ps[threadIdx.x] = p;
+      xs[threadIdx.x] = x + (size_t)(p >> 3) * K;
+    }
+    __syncthreads();
+    quant_act_g<K, kGrp, Fm<FMT>::UEL>(xs, cn, aq, asc, res);
+    with_rows<FMT, K, LPR>(cn, [&](auto nb_) {
+      constexpr int B = decltype(nb_)::value;
+#pragma unroll
+      for (int it = 0; it < NIT; it++) {
+        int j = base + it * RPP + pg;
+        int jj = j < FF ? j : FF - 1;
+        float acc[B];
+        row_dot<FMT, K, LPR, B>(We + rb * (isup ? FF + jj : jj), aq, asc,
+                                kGrp * CPU * NU, kGrp * (K / 16), res, 0, lir,
+                                acc);
+#pragma unroll
+        for (int b = 0; b < B; ++b) {
+          float other = __shfl_xor(acc[b], LPR, WS);
+          if (!isup && lir == 0 && j < FF)
+            a[(size_t)ps[b] * FF + j] = situ(acc[b] * sc, other * sc, beta, lb);
+        }
+      }
+    });
+  }
+}
+
+template<int FMT, int K, int LPR, int NIT, int BW>
+__global__ void __launch_bounds__(BW* WS)
+    k_moe_down_g(const uint8_t* __restrict__ W,
+                 const float* __restrict__ escale, const float* __restrict__ a,
+                 const int* __restrict__ sorted, const int* __restrict__ ue,
+                 const int* __restrict__ ub, const int* __restrict__ un,
+                 const int* __restrict__ nd, const float* __restrict__ wts,
+                 float* __restrict__ yp, int D, int res) {
+  constexpr int NU = K / Fm<FMT>::UEL, CPU = Fm<FMT>::UEL / 16, RPW = WS / LPR;
+  __shared__ v4u aq[2 * kGrp * CPU * NU];
+  __shared__ float asc[2 * kGrp * (K / 16)];
+  __shared__ const float* xs[kGrp];
+  __shared__ int ps[kGrp];
+  const int k = blockIdx.x, rbk = blockIdx.y;
+  if (k >= *nd)
+    return;
+  const int e = ue[k], b0 = ub[k], n = un[k];
+  const float es = escale ? escale[e] : 1.f;
+  size_t rb = (size_t)NU * Fm<FMT>::BYTES;
+  int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
+      lir = lane % LPR;
+  int base = (rbk * BW + wave) * RPW * NIT;
+  for (int c0 = 0; c0 < n; c0 += kGrp) {
+    const int cn = min(kGrp, n - c0);
+    if (c0 > 0)
+      __syncthreads();
+    if (threadIdx.x < cn) {
+      const int p = sorted[b0 + c0 + threadIdx.x];
+      ps[threadIdx.x] = p;
+      xs[threadIdx.x] = a + (size_t)p * K;
+    }
+    __syncthreads();
+    quant_act_g<K, kGrp, Fm<FMT>::UEL>(xs, cn, aq, asc, res);
+    with_rows<FMT, K, LPR>(cn, [&](auto nb_) {
+      constexpr int B = decltype(nb_)::value;
+#pragma unroll 1
+      for (int it = 0; it < NIT; it++) {
+        int row = base + it * RPW + g;
+        int rr = row < D ? row : D - 1;
+        float acc[B];
+        row_dot<FMT, K, LPR, B>(W + ((size_t)e * D + rr) * rb, aq, asc,
+                                kGrp * CPU * NU, kGrp * (K / 16), res, 0, lir,
+                                acc);
+        if (row < D && lir == 0)
+#pragma unroll
+          for (int b = 0; b < B; ++b) {
+            const int p = ps[b];
+            yp[(size_t)p * D + row] = (wts[p] * es) * acc[b];
+          }
+      }
+    });
   }
 }
 
@@ -3579,6 +3980,127 @@ void MoeGu(hipStream_t s, int fmt, const void* w, const float* escale,
   Chk("moe_gu");
 }
 
+void QuantRows(hipStream_t s, int k, const float* x, int per, int ldt, int nb,
+               void* qa, float* qs) {
+  if (k == 2304)
+    k_quant_rows<2304, 32><<<nb * per, 256, 0, s>>>(
+        x, per, ldt, static_cast<v4u*>(qa), qs, g_res);
+  else
+    k_quant_rows<3072, 32><<<nb * per, 256, 0, s>>>(
+        x, per, ldt, static_cast<v4u*>(qa), qs, g_res);
+  Chk("quant_rows");
+}
+namespace {
+constexpr int kMmaWaves = 8;
+MultiP OneMatrix(const void* w, int m, int ldy) {
+  MultiP mp{};
+  mp.W[0] = static_cast<const uint8_t*>(w);
+  mp.M[0] = m;
+  mp.n = 1;
+  mp.cum[1] = m;
+  mp.res = g_res;
+  mp.ldy = ldy;
+  return mp;
+}
+}  // namespace
+bool ProjMma(hipStream_t s, const ProjSpec& p, const void* qa, const float* qs,
+             int per, float* y, int nb, int ldx, int ldy, const float* x) {
+  constexpr int RPB = 16;
+  MultiP mp{};
+  mp.ldx = ldx;
+  mp.ldy = ldy;
+  int cum = 0;
+  for (int i = 0; i < p.n; ++i) {
+    mp.W[i] = static_cast<const uint8_t*>(p.w[i]);
+    mp.M[i] = p.m[i];
+    mp.in[i] = p.in[i];
+    mp.yoff[i] = cum;
+    mp.cum[i] = cum;
+    cum += p.m[i];
+  }
+  mp.cum[p.n] = cum;
+  mp.n = p.n;
+  mp.res = g_res;
+  for (int i = 1; i < mp.n; ++i)
+    if (mp.in[i] != mp.in[i - 1] && mp.cum[i] % RPB != 0)
+      return false;
+  int trows_total = 0;
+  mp.tn = p.tn;
+  for (int i = 0; i < p.tn; ++i) {
+    mp.tw[i] = p.tw[i];
+    mp.ttype[i] = p.ttype[i] == 0 ? 0 : (p.ttype[i] == 1 ? 1 : 2);
+    mp.trows[i] = p.trows[i];
+    mp.tin[i] = p.tin[i];
+    mp.ty[i] = p.ty[i];
+    mp.tys[i] = p.tys[i];
+    trows_total += p.trows[i];
+  }
+  if (mp.tn > 0) {
+    constexpr int BW = 16;
+    mp.ntb = (trows_total + BW - 1) / BW;
+    k_tiny_wide<BW, 8><<<dim3(mp.ntb), BW * WS, 0, s>>>(mp, x, nb);
+  }
+  k_gemv_mma<2304, 16, kMmaWaves>
+      <<<dim3((nb + 15) / 16, (cum + RPB - 1) / RPB), kMmaWaves * 32, 0, s>>>(
+          mp, static_cast<const v4u*>(qa), qs, per, y, cum, nb, 0.f);
+  Chk("proj_mma");
+  return true;
+}
+void GemvMma(hipStream_t s, int k, const void* w, const void* qa,
+             const float* qs, float* y, int m, float softcap, int nb) {
+  constexpr int RPB = 16;
+  const MultiP mp = OneMatrix(w, m, m);
+  const dim3 grid((nb + 15) / 16, (m + RPB - 1) / RPB);
+  if (k == 2304)
+    k_gemv_mma<2304, 32, kMmaWaves><<<grid, kMmaWaves * 32, 0, s>>>(
+        mp, static_cast<const v4u*>(qa), qs, 1, y, m, nb, softcap);
+  else
+    k_gemv_mma<3072, 16, kMmaWaves><<<grid, kMmaWaves * 32, 0, s>>>(
+        mp, static_cast<const v4u*>(qa), qs, 1, y, m, nb, softcap);
+  Chk("gemv_mma");
+}
+void MoeRouteGroup(hipStream_t s, const int* ids, int pairs, MoeGroups g) {
+  k_route_group<<<1, 256, 0, s>>>(ids, pairs, g.sorted, g.ue, g.ub, g.un, g.nd);
+  Chk("route_group");
+}
+void MoeGuGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
+                  const float* x, MoeGroups g, int slots, float* a, int ff,
+                  float beta, float lb) {
+  const uint8_t* W = static_cast<const uint8_t*>(w);
+  auto run = [&](auto fm, auto lpr, auto nit, auto bw) {
+    constexpr int FM = decltype(fm)::value, LPR = decltype(lpr)::value,
+                  NIT = decltype(nit)::value, BW = decltype(bw)::value;
+    constexpr int RPB = BW * (WS / LPR / 2) * NIT;
+    k_moe_gu_g<FM, 2304, LPR, NIT, BW>
+        <<<dim3(slots, (ff + RPB - 1) / RPB), BW * WS, 0, s>>>(
+            W, escale, x, g.sorted, g.ue, g.ub, g.un, g.nd, a, ff, beta, lb,
+            g_res);
+  };
+  if (fmt == kFmtNvfp4)
+    run(I<FMT_NVFP4>{}, I<16>{}, I<1>{}, I<8>{});
+  else
+    run(I<FMT_Q8>{}, I<16>{}, I<1>{}, I<4>{});
+  Chk("moe_gu_grouped");
+}
+void MoeDownGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
+                    const float* a, MoeGroups g, int slots, const float* wts,
+                    float* yp, int d) {
+  const uint8_t* W = static_cast<const uint8_t*>(w);
+  auto run = [&](auto fm, auto lpr, auto nit, auto bw) {
+    constexpr int FM = decltype(fm)::value, LPR = decltype(lpr)::value,
+                  NIT = decltype(nit)::value, BW = decltype(bw)::value;
+    constexpr int RPB = BW * (WS / LPR) * NIT;
+    k_moe_down_g<FM, 1152, LPR, NIT, BW>
+        <<<dim3(slots, (d + RPB - 1) / RPB), BW * WS, 0, s>>>(
+            W, escale, a, g.sorted, g.ue, g.ub, g.un, g.nd, wts, yp, d, g_res);
+  };
+  if (fmt == kFmtNvfp4)
+    run(I<FMT_NVFP4>{}, I<8>{}, I<1>{}, I<8>{});
+  else
+    run(I<FMT_Q8>{}, I<8>{}, I<4>{}, I<4>{});
+  Chk("moe_down_grouped");
+}
+
 void MoeDownE(hipStream_t s, int fmt, const void* w, const float* escale,
               const float* a, const int* ids, const float* wts, float* yp,
               int d, int nb) {
@@ -3708,13 +4230,14 @@ __global__ void __launch_bounds__(256)
     return;
   float* st = tbl[slot].conv + (size_t)ch * 3;
   const float* cp = cap + ((size_t)slot * 6656 + ch) * kVerifyRows + row0;
-  float seq[3 + kVerifyRows];
+  // the last three of [st[0..3), cp[0..keep)]
+  float v[3];
+  for (int i = 0; i < 3; ++i) {
+    const int j = keep + i;
+    v[i] = j < 3 ? st[j] : cp[j - 3];
+  }
   for (int i = 0; i < 3; ++i)
-    seq[i] = st[i];
-  for (int i = 0; i < keep; ++i)
-    seq[3 + i] = cp[i];
-  for (int i = 0; i < 3; ++i)
-    st[i] = seq[keep + i];
+    st[i] = v[i];
 }
 __global__ void __launch_bounds__(256)
     k_rows_argmax1(const float* x, int n, float* ws) {

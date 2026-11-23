@@ -292,7 +292,7 @@ int main(int argc, char** argv) {
       std::vector<std::vector<float>> lg;
       toks.push_back(amax(ref->logits()));
       const auto r0 = std::chrono::steady_clock::now();
-      for (int i = 0; i < decode + 8; ++i) {
+      for (int i = 0; i < decode + 64; ++i) {
         engine->Forward(*ref, std::span<const std::int32_t>(&toks.back(), 1));
         lg.push_back(ref->logits());
         toks.push_back(amax(ref->logits()));
@@ -300,7 +300,7 @@ int main(int argc, char** argv) {
       const double ar =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - r0)
               .count() /
-          (decode + 8);
+          (decode + 64);
       for (int R : rs) {
         auto sp = engine->NewSession();
         engine->Forward(*sp, prompt);
@@ -344,7 +344,7 @@ int main(int argc, char** argv) {
         {
           auto s2 = engine->NewSession();
           engine->Forward(*s2, prompt);
-          std::int32_t am[8];
+          std::int32_t am[64];
           for (int k = 0; k < 16; ++k) {
             const int n2 =
                 std::min<int>(R, static_cast<int>(engine->VerifyRows(*s2)));

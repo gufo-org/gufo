@@ -466,3 +466,60 @@ steps of the same request count and tolerates no loss, so DSpark matches AR
 there. At eight requests no row is left to draft in and DSpark trails AR by
 the draft-context injection (about 1.5%).
 
+## Round 7: wide copy verification (November 23)
+
+A request decoding alone verifies up to 64 rows in one step when the rows
+after the drafter's proposals are copied from its context (prompt lookup).
+Every row keeps the arithmetic of a one-token decode, so the output is still
+byte-identical to plain decoding (`inkling2_spec_test` at 2 to 64 rows, the
+oracle on both paths, `inkling2_cache_test`, HTTP hashes).
+
+Steps of 9 to 64 rows read each weight once for all rows:
+
+- The dense Q8_0 projections and the LM head use int8 WMMA. Each 16-element
+  integer dot product of the GEMV is one WMMA entry; the float scaling and the
+  lanes' butterfly are replayed in the GEMV's order (the leaves are spread
+  over a block's eight waves and combined from LDS).
+- The MoE groups a step's (row, slot) pairs by expert. A block reads each
+  expert row once for up to four pairs; the per-pair dot products are
+  unchanged.
+- Attention runs in groups of eight rows.
+
+`inkling2_bench --spec`, context 64, ms per verification step:
+
+| Rows | 8 | 9 | 16 | 32 | 64 |
+| --- | --- | --- | --- | --- | --- |
+| Before (8-row steps one after another) | 55.6 | n/a | n/a | n/a | n/a |
+| Grouped MoE + 8-row GEMV launches | 55.6 | 74.8 | 96.4 | 177.9 | 344.9 |
+| Final | 55.6 | 62.5 | 80.9 | 133.6 | 245.4 |
+| Per row, final | 6.95 | 6.94 | 5.06 | 4.18 | 3.83 |
+
+At context 20,000: 16 rows 93.0 ms, 64 rows 292.7 ms.
+
+The width starts at eight rows and doubles after two whole copies of that
+width, up to 64; any rejected copy returns it to eight. Greedy requests append
+a copy to the drafter's proposals when the context they extend continues an
+earlier stretch; while a copy keeps being kept, the next cycle copies first
+without drafting.
+
+HTTP, one request, DSpark, outputs identical to before:
+
+| Request | Before | After |
+| --- | --- | --- |
+| Rewrite a file, greedy, 1,500 tokens | 103.2 tok/s | 118.1 tok/s |
+| Rewrite a file, sampled, 1,500 tokens | 100.1 tok/s | 117.9 tok/s |
+| Rename in a file, greedy (801 tokens) | 98.5 tok/s | 116.4 tok/s |
+| Rewrite, sampled, 400 tokens | 82.7 tok/s | 94.2 tok/s |
+| Code from scratch, greedy, 400 tokens | 77.8 tok/s | 76.4 tok/s |
+
+AR and batched requests are unchanged (C = 1, 4, 8 within noise, same hashes).
+
+Rejected (all exact):
+
+| Variant | Result |
+| --- | --- |
+| Expert pairs grouped 8 per block (LDS for 8 inputs) | 64 rows 324 ms vs 272 with 4 (one block per CU) |
+| Wide dp4a GEMVs looping 8-token groups in one launch | spilled (8 rows of LPR 16 need > 256 VGPRs); with 4-token groups 64 rows 264 ms vs 245 with WMMA |
+| MoE by int8 WMMA (pairs of an expert as A rows, NVFP4 decoded to int8) | 64 rows 241 ms vs 245, 16 rows 117 vs 81: a 16-row tile has about four live pairs |
+| Dense WMMA from 4 rows (DSpark and batched steps) | 8 rows 61.4 vs 55.6 ms: half-empty tiles |
+

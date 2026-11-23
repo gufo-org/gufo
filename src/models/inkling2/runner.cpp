@@ -111,6 +111,14 @@ public:
   bool history_ok{false};
   speculative::PromptLookup<std::int32_t> lookup;
   CopyBackoff copy_backoff;
+  /// Wide copies (a request decoding alone): `copy_run` when the last cycle's
+  /// copied proposals were all kept (the next cycle copies first);
+  /// `copy_rows` the rows a copy may verify (kNarrowRows, doubling to
+  /// Engine::kMaxVerifyRows after two whole copies of that width in a row,
+  /// back to kNarrowRows after any rejected copy).
+  bool copy_run{false};
+  int copy_rows{0};
+  int copy_streak{0};
   [[nodiscard]] std::shared_ptr<mem::StateAccount> state_account()
       const override {
     return session_->account();
@@ -642,6 +650,9 @@ public:
     st.pending.reset();
     st.backoff = {};
     st.copy_backoff = {};
+    st.copy_run = false;
+    st.copy_rows = 0;
+    st.copy_streak = 0;
     st.history_ok = c != nullptr && !c->tokens.empty();
     if (st.history_ok)
       st.history = c->tokens;
@@ -904,6 +915,8 @@ public:
   /// ms a row; a selection thread woken for one row takes about 1 ms);
   /// more are spread over the selection threads.
   static constexpr std::size_t kSerialRows = 3;
+  /// Rows of an ordinary DSpark verification (the anchor and seven drafts).
+  static constexpr int kNarrowRows = Drafter::kMaxDraft + 1;
   template<class F>
   void ForEachLane(std::size_t n, std::size_t sampled, F&& f) const {
     if (sampled <= kSerialRows) {
@@ -981,6 +994,38 @@ public:
       drafts[n] = t;
       // an established match, or the shorter one that resumes a copy
       conf[n] = m.length >= minimum ? 0.95F : 0.85F;
+    }
+    *start = m.start;
+    return n;
+  }
+
+  /// Rows a wide copy may verify now (the anchor included).
+  static int CopyRows(const Inkling2State& st) {
+    return std::max(st.copy_rows, kNarrowRows);
+  }
+
+  /// Copied proposals that continue the request's context plus `tail` (the
+  /// cycle's drafts after the committed anchor), up to `limit`, written to
+  /// `drafts`: speculative::PromptLookup's match rules (greedy requests).
+  /// Returns their count; `start` is the index of their source. Called
+  /// after the anchor was committed and lookup.Step / Extend ran.
+  int CopyAfter(Inkling2State& st, std::span<const std::int32_t> tail,
+                std::size_t limit, std::int32_t* drafts,
+                std::size_t* start) const {
+    using Lookup = speculative::PromptLookup<std::int32_t>;
+    if (limit == 0 || !st.copy_backoff.Copy())
+      return 0;
+    const auto m = st.lookup.Find(st.history, tail, Lookup::kMinMatch);
+    if (m.length == 0)
+      return 0;
+    const std::size_t have =
+        std::min(limit, st.lookup.IndexedTokens() - m.start);
+    int n = 0;
+    for (; static_cast<std::size_t>(n) < have; ++n) {
+      const std::int32_t t = st.history[m.start + static_cast<std::size_t>(n)];
+      if (tok_->IsStop(static_cast<g::TextRunnerToken>(t)))
+        break;
+      drafts[n] = t;
     }
     *start = m.start;
     return n;
@@ -1144,38 +1189,63 @@ public:
 
     using Clock = std::chrono::steady_clock;
     const auto t0 = Clock::now();
-    std::int32_t drafts[Drafter::kMaxDraft] = {};
-    float conf[Drafter::kMaxDraft] = {};
+    std::int32_t drafts[Engine::kMaxVerifyRows] = {};
+    float conf[Engine::kMaxVerifyRows] = {};
     int n = 0;
     const RowMode mode = ModeOf(st, working);
     const bool greedy = mode.greedy;
-    // Copied proposals first: they cost nothing, and where the output repeats
-    // its context they outlast the drafter's.
-    std::size_t copy_start = 0;
-    int copy_width = 0;
     const bool sampled = working.config().temperature > 0;
-    if (budget > 0 && max_draft_ > 0) {
-      const int c =
-          ProposeCopy(st, sampled,
-                      std::min<std::size_t>(
-                          {max_draft_, budget, engine_->VerifyRows(ss) - 1}),
-                      drafts, conf, &copy_start);
+    const std::size_t rows_room = engine_->VerifyRows(ss) - 1;
+    // Copies of earlier context (prompt lookup). While a copy keeps being
+    // accepted, the next cycle copies first, up to CopyRows() rows in one
+    // wide verification (this request decodes alone). Otherwise sampled
+    // requests copy first within the drafter's width, and greedy ones append
+    // a copy to the drafter's proposals when the context they extend
+    // continues an earlier stretch.
+    std::size_t copy_start = 0;
+    int copy_width = 0;   // copied proposals verified
+    int draft_width = 0;  // the drafter's proposals before them
+    bool copy_only = false;
+    bool copy_conf = false;  // conf[] holds the copied proposals' bins
+    bool lookup_ready = false;
+    if (budget > 0 && max_draft_ > 0 && st.history_ok &&
+        st.history.size() == ss.position() + 1 &&
+        st.lookup.Step(ss.position())) {
+      st.lookup.Extend(st.history, sampled);
+      lookup_ready = true;
+    }
+    if (lookup_ready && st.copy_run) {
+      const int c = CopyAfter(
+          st, {},
+          std::min<std::size_t>(
+              {static_cast<std::size_t>(CopyRows(st) - 1), budget, rows_room}),
+          drafts, &copy_start);
+      if (c > 0) {
+        copy_width = c;
+        copy_only = true;
+      }
+    }
+    if (copy_width == 0 && lookup_ready && sampled) {
+      const int c = ProposeCopy(
+          st, sampled,
+          std::min<std::size_t>(
+              {static_cast<std::size_t>(max_draft_), budget, rows_room}),
+          drafts, conf, &copy_start);
       if (c > 0) {
         const std::lock_guard lock(dsp_mutex_);
-        copy_width = ChooseDsparkWidth(
-            conf, c, sampled ? cal_copy_sampled_ : cal_copy_, costs_, 0.0);
-        if (copy_width > 0)
-          n = c;
+        copy_width = ChooseDsparkWidth(conf, c, cal_copy_sampled_, costs_, 0.0);
+        copy_only = copy_width > 0;
+        copy_conf = copy_only;
       }
     }
     const bool copied = copy_width > 0;
-    DsparkCalibration& cal = copied ? (sampled ? cal_copy_sampled_ : cal_copy_)
-                             : mode.coupled ? cal_coupled_
-                                            : cal_;
+    DsparkCalibration& cal = copy_only && sampled ? cal_copy_sampled_
+                             : mode.coupled       ? cal_coupled_
+                                                  : cal_;
     if (!copied && budget > 0 && engine_->DraftReady(ss) &&
         st.backoff.Draft()) {
       n = static_cast<int>(std::min<std::size_t>(
-          {max_draft_, budget, engine_->VerifyRows(ss) - 1}));
+          {static_cast<std::size_t>(max_draft_), budget, rows_room}));
       if (n > 0)  // stop once the width policy would not verify another
         n = engine_->Propose(
             ss, static_cast<std::int32_t>(a), n, drafts, conf,
@@ -1195,6 +1265,24 @@ public:
       width = copied  ? copy_width
               : n > 0 ? ChooseDsparkWidth(conf, n, cal, costs_)
                       : 0;
+    }
+    if (!copied && lookup_ready && greedy) {
+      // the drafter's proposals, then the copy their context continues
+      const std::size_t cap = std::min<std::size_t>(
+          {static_cast<std::size_t>(CopyRows(st) - 1), budget, rows_room});
+      if (cap > static_cast<std::size_t>(width)) {
+        // (the anchor is already in the history)
+        std::int32_t tail[Engine::kMaxVerifyRows];
+        std::copy(drafts, drafts + width, tail);
+        const int c = CopyAfter(st, std::span<const std::int32_t>(tail, width),
+                                cap - static_cast<std::size_t>(width),
+                                drafts + width, &copy_start);
+        if (c > 0) {
+          draft_width = width;
+          copy_width = c;
+          width += c;
+        }
+      }
     }
     std::vector<std::int32_t> rows{static_cast<std::int32_t>(a)};
     rows.insert(rows.end(), drafts, drafts + width);
@@ -1228,20 +1316,24 @@ public:
       engine_->CommitVerify(ss, keep, out);  // empty: from the device
     sampler.CopyDrawStateFrom(working);
     const auto t3 = Clock::now();
+    const int kept = static_cast<int>(keep) - 1;  // proposals kept
+    const int drafted = copied ? 0 : width - copy_width;
     {
       const std::lock_guard lock(dsp_mutex_);
-      costs_.ObserveVerify(
-          static_cast<int>(rows.size()),
-          std::chrono::duration<double, std::milli>(t2 - t1).count());
-      for (int j = 0; j < width && j < static_cast<int>(keep); ++j)
-        cal.Observe(conf[j], j + 1 < static_cast<int>(keep));
+      if (rows.size() <= static_cast<std::size_t>(DsparkCosts::kMaxRows))
+        costs_.ObserveVerify(
+            static_cast<int>(rows.size()),
+            std::chrono::duration<double, std::milli>(t2 - t1).count());
+      const int binned = copy_only ? (copy_conf ? width : 0) : drafted;
+      for (int j = 0; j < binned && j <= kept; ++j)
+        cal.Observe(conf[j], j + 1 <= kept);
       const double cycle =
           std::chrono::duration<double, std::milli>(t3 - t0).count();
       // what a plain step costs requests of this kind (host sampling included)
       double& plain = greedy ? plain_greedy_ms_ : plain_sampled_ms_;
-      if (n == 0)
+      if (n == 0 && !copied)
         plain += 0.1 * (cycle - plain);
-      else if (!copied)
+      else if (!copied && copy_width == 0)
         st.backoff.Observe(static_cast<int>(keep), cycle, plain);
     }
     if (width > 0) {
@@ -1249,11 +1341,26 @@ public:
       step.draft_tokens = static_cast<std::size_t>(width);
       step.draft_accepted_tokens = keep - 1;
     }
-    if (copied) {
-      step.lookup_tokens = static_cast<std::size_t>(width);
-      step.lookup_accepted_tokens = keep - 1;
-      st.lookup.Observe(copy_start, static_cast<std::size_t>(width), keep - 1);
-      st.copy_backoff.Observe(width, static_cast<int>(keep) - 1);
+    if (copy_width > 0) {
+      const int copy_kept = std::max(0, kept - draft_width);
+      step.lookup_tokens = static_cast<std::size_t>(copy_width);
+      step.lookup_accepted_tokens = static_cast<std::size_t>(copy_kept);
+      st.lookup.Observe(copy_start, static_cast<std::size_t>(copy_width),
+                        static_cast<std::size_t>(copy_kept));
+      st.copy_backoff.Observe(copy_width, copy_kept);
+      const bool whole = kept == width;
+      st.copy_run = whole && !step.stop;
+      if (!whole) {
+        st.copy_rows = kNarrowRows;
+        st.copy_streak = 0;
+      } else if (copy_only && width + 1 >= CopyRows(st) &&
+                 ++st.copy_streak >= 2) {
+        st.copy_rows = std::min(2 * CopyRows(st),
+                                static_cast<int>(Engine::kMaxVerifyRows));
+        st.copy_streak = 0;
+      }
+    } else {
+      st.copy_run = false;
     }
     return step;
   }
@@ -1340,7 +1447,7 @@ public:
           l.sampled = working[l.i].config().temperature > 0;
           if (l.budget == 0)
             continue;
-          const int room = static_cast<int>(Engine::kMaxVerifyRows) - B;
+          const int room = static_cast<int>(Engine::kMaxBatchVerifyRows) - B;
           const int limit = static_cast<int>(std::min<std::size_t>(
               {max_draft_, l.budget, engine_->VerifyRows(*l.ss) - 1,
                static_cast<std::size_t>(std::max(room, 0))}));

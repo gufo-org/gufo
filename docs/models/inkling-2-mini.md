@@ -42,6 +42,12 @@ depends on how predictable the text is. Requests decoding at the same time
 gives each request its share of the rows where its drafts are likely to be
 kept; their output is the same as when each runs alone.
 
+DSpark also proposes copies of earlier text from the same conversation, which
+speeds up answers that repeat code, a file being edited or a quoted passage. A
+request decoding alone checks up to 64 copied tokens in one step; the width
+grows while whole copies are kept and drops back after a miss. The `timings`
+object in a response reports copies as `lookup_n` and `lookup_n_accepted`.
+
 ## Sampling
 
 The defaults are the upstream `generation_config.json`'s: temperature 1 and no

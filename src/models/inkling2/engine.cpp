@@ -313,7 +313,13 @@ struct Engine::Impl {
       *d_moe, *d_rlog, *d_wts8, *d_act8, *d_ws_o, *d_ws_m, *d_ws_l;
   // rows per decode step: sessions of a batch (up to kMaxDecodeBatch) or one
   // session's verification rows (up to kMaxVerifyRows)
-  static constexpr int kMaxB = 8;
+  static constexpr int kMaxB = 64;
+  // rows a weight GEMV or attention launch takes; wider steps run as
+  // consecutive launches of at most this many rows (same per-row arithmetic)
+  static constexpr int kChunk = 8;
+  // steps of at least this many rows run the dense Q8 GEMVs through int8
+  // WMMA (same outputs; slower for fewer rows, whose tiles are half empty)
+  static constexpr int kMmaRows = kChunk + 1;
   static constexpr int kMsgInvTokens = 1024;
   static constexpr int kWideTileTokens =
       256;  // ubatches at least this long use 128-token GEMM tiles
@@ -326,6 +332,9 @@ struct Engine::Impl {
   float* d_blk[16];
   int nblk_alloc = 0;
   int* d_ids8;
+  fs::MoeGroups d_groups{};  // wide steps: pairs grouped by expert
+  void* d_qa = nullptr;      // wide steps: quantized GEMV inputs
+  float* d_qs = nullptr;
   int* d_step;  // {token, position, row within its session}
   unsigned* d_counter;
   unsigned* d_acnt;  // fused decode attention: [kMaxB][8] split counters
@@ -650,13 +659,21 @@ struct Engine::Impl {
     d_rlog = NewBuf(B * 128);
     d_wts8 = NewBuf(B * 8);
     d_act8 = NewBuf(B * 8 * 1152);
-    d_ws_o = NewBuf(B * kMaxSplit * 8 * 12 * 128);
-    d_ws_m = NewBuf(B * kMaxSplit * 8 * 12);
-    d_ws_l = NewBuf(B * kMaxSplit * 8 * 12);
+    // attention split workspaces: one launch's rows (kChunk)
+    d_ws_o = NewBuf(kChunk * kMaxSplit * 8 * 12 * 128);
+    d_ws_m = NewBuf(kChunk * kMaxSplit * 8 * 12);
+    d_ws_l = NewBuf(kChunk * kMaxSplit * 8 * 12);
     for (auto& b : d_blk)
       b = NewBuf(B * kEmbd);
     d_moe_part = NewBuf(B * 8 * kEmbd);
     d_ids8 = NewInts(B * 8);
+    d_qa = NewRaw(B * 3 * fs::kQaBytesPerVector);
+    d_qs = NewBuf(B * 3 * fs::kQsFloatsPerVector);
+    d_groups.sorted = NewInts(B * 8);
+    d_groups.ue = NewInts(128);
+    d_groups.ub = NewInts(128);
+    d_groups.un = NewInts(128);
+    d_groups.nd = NewInts(1);
     d_step = NewInts(3 * B);  // tokens [B], positions [B], row in session [B]
     d_vcap =
         NewBuf(static_cast<std::size_t>(48) * kConvChannels * fs::kVerifyRows);
@@ -747,7 +764,7 @@ struct Engine::Impl {
     // thread exists).
     if (BatchCapable()) {
       for (nb = 1; nb <= static_cast<int>(Engine::kMaxDecodeBatch); ++nb)
-        (void)CaptureGraph(2048, 2048 * 8 + nb);
+        (void)CaptureGraph(2048, 2048 * 128 + nb);
       nb = 1;
     }
   }
@@ -1332,7 +1349,23 @@ struct Engine::Impl {
           add(L.attn_v_conv_proj, three ? 2 : 0, d_dyn + 32, 32, 64);
         }
       }
-      fs::ProjMulti(ds, ps, d_in, three ? 3 : 1, d_proj, nb, kSIn, kSProj);
+      const int ni = three ? 3 : 1;
+      if (nb >= kMmaRows) {
+        // one weight read for all rows, int8 WMMA
+        fs::QuantRows(ds, kEmbd, d_in, ni, kSIn, nb, d_qa, d_qs);
+        if (!fs::ProjMma(ds, ps, d_qa, d_qs, ni, d_proj, nb, kSIn, kSProj,
+                         d_in))
+          throw std::runtime_error("inkling2: projection layout");
+      } else
+        for (int c0 = 0; c0 < nb; c0 += kChunk) {
+          fs::ProjSpec pc = ps;
+          for (int i = 0; i < pc.tn; ++i)
+            pc.ty[i] += static_cast<std::size_t>(c0) * pc.tys[i];
+          fs::ProjMulti(ds, pc, d_in + static_cast<std::size_t>(c0) * kSIn,
+                        three ? 3 : 1,
+                        d_proj + static_cast<std::size_t>(c0) * kSProj,
+                        std::min(kChunk, nb - c0), kSIn, kSProj);
+        }
     } else {
       GenericG(L.attn_q, iq, Qb);
       GenericG(L.attn_gate, iq, Gb);
@@ -1434,15 +1467,37 @@ struct Engine::Impl {
       aa.ldp = kSProj;
       aa.ws_tok = static_cast<int>(kMaxSplit * 8 * 12);
       aa.cnt = d_acnt;
-      if (!verify_mode)
+      if (!verify_mode) {
         fs::KvAttnDecode(ds, ka, aa, nb);
-      else if (verify_one_session && !swa && nb > 1)
-        fs::AttnDecodeRows(ds, aa, nb);
-      else
-        fs::AttnDecode(ds, aa, nb);
+      } else {
+        for (int c0 = 0; c0 < nb; c0 += kChunk) {
+          const int cn = std::min(kChunk, nb - c0);
+          const std::size_t o = static_cast<std::size_t>(c0);
+          fs::AttnArgs ac = aa;
+          ac.slot = aa.slot + o * 48;
+          ac.pos = aa.pos + o;
+          ac.q = aa.q + o * kSProj;
+          ac.r = aa.r + o * kSProj;
+          ac.gate = aa.gate + o * kSProj;
+          ac.sink = aa.sink + o * 24;
+          ac.out = aa.out + o * kQ;
+          if (verify_one_session && !swa && cn > 1)
+            fs::AttnDecodeRows(ds, ac, cn);
+          else
+            fs::AttnDecode(ds, ac, cn);
+        }
+      }
     }
     if (F.oproj)
-      fs::GemvQ8(ds, kQ, D(L.attn_output), d_ob, d_ao, kEmbd, 0.f, nb);
+      if (nb >= kMmaRows) {
+        fs::QuantRows(ds, kQ, d_ob, 1, kQ, nb, d_qa, d_qs);
+        fs::GemvMma(ds, kQ, D(L.attn_output), d_qa, d_qs, d_ao, kEmbd, 0.f, nb);
+      } else
+        for (int c0 = 0; c0 < nb; c0 += kChunk)
+          fs::GemvQ8(ds, kQ, D(L.attn_output),
+                     d_ob + static_cast<std::size_t>(c0) * kQ,
+                     d_ao + static_cast<std::size_t>(c0) * kEmbd, kEmbd, 0.f,
+                     std::min(kChunk, nb - c0));
     else
       GenericG(L.attn_output, d_ob, d_ao);
     {
@@ -1502,7 +1557,18 @@ struct Engine::Impl {
     fs::Router(ds, HW(L.ffn_gate_inp), DS(L.exp_probs_b), d_h, d_rlog,
                d_counter, d_ids8, d_wts8, cfg->expert_weights_scale, nb,
                ctl_half);
-    if (F.moe >= 0) {
+    if (F.moe >= 0 && nb > kChunk) {
+      // many rows: each used expert's weights read once for all its pairs
+      const int slots = std::min(E, 8 * nb);
+      fs::MoeRouteGroup(ds, d_ids8, 8 * nb, d_groups);
+      fs::MoeGuGrouped(ds, F.moe, D(L.ffn_gate_up_exps),
+                       L.ffn_gate_up_scale ? DS(L.ffn_gate_up_scale) : nullptr,
+                       d_h, d_groups, slots, d_act8, nff, cfg->situ_beta,
+                       cfg->situ_linear_beta);
+      fs::MoeDownGrouped(ds, F.moe, D(L.ffn_down_exps),
+                         L.ffn_down_scale ? DS(L.ffn_down_scale) : nullptr,
+                         d_act8, d_groups, slots, d_wts8, d_moe_part, kEmbd);
+    } else if (F.moe >= 0) {
       fs::MoeGu(ds, F.moe, D(L.ffn_gate_up_exps),
                 L.ffn_gate_up_scale ? DS(L.ffn_gate_up_scale) : nullptr, d_h,
                 d_ids8, d_act8, nff, cfg->situ_beta, cfg->situ_linear_beta, nb);
@@ -1613,8 +1679,16 @@ struct Engine::Impl {
     PrefetchJoin();
     const int V = static_cast<int>(cfg->n_vocab_text);
     if (head_fast) {
-      fs::GemvQ8(ds, kEmbd, D(w->output), d_hn, logits_d, V, cfg->logit_softcap,
-                 nb);
+      if (nb >= kMmaRows) {
+        fs::QuantRows(ds, kEmbd, d_hn, 1, kEmbd, nb, d_qa, d_qs);
+        fs::GemvMma(ds, kEmbd, D(w->output), d_qa, d_qs, logits_d, V,
+                    cfg->logit_softcap, nb);
+      } else
+        for (int c0 = 0; c0 < nb; c0 += kChunk)
+          fs::GemvQ8(ds, kEmbd, D(w->output),
+                     d_hn + static_cast<std::size_t>(c0) * kEmbd,
+                     logits_d + static_cast<std::size_t>(c0) * V, V,
+                     cfg->logit_softcap, std::min(kChunk, nb - c0));
     } else {
       kk::Gemm(ds, static_cast<int>(w->output.type), D(w->output), V, kEmbd,
                d_hn, kEmbd, logits_d, V, 1);
@@ -1647,7 +1721,7 @@ struct Engine::Impl {
             stderr,
             "inkling2: decode graph capture could not start for context bucket "
             "%d, width %d; those steps run without a graph\n",
-            ctx, key % 8);
+            ctx, key % 128);
       return map.end();
     }
     bool ok = true;
@@ -1670,7 +1744,7 @@ struct Engine::Impl {
         std::fprintf(stderr,
                      "inkling2: decode graph capture failed for context bucket "
                      "%d, width %d; those steps run without a graph\n",
-                     ctx, key % 8);
+                     ctx, key % 128);
       return map.end();
     }
     return map.emplace(key, ex).first;
@@ -1719,7 +1793,7 @@ struct Engine::Impl {
                            48 * sizeof(fs::SlotEntry), hipMemcpyDeviceToDevice,
                            ds),
             "slot table");
-    const int key = ctx * 8 + n + (decode_prefetch ? (1 << 29) : 0);
+    const int key = ctx * 128 + n + (decode_prefetch ? (1 << 29) : 0);
     auto it = graphs.find(key);
     if (it == graphs.end() && failed_graphs.count(key) == 0)
       it = CaptureGraph(ctx, key);
@@ -1817,7 +1891,7 @@ struct Engine::Impl {
       }
     } off{&verify_mode, &verify_one_session};
     // Several sessions take the per-row attention kernel: their own graphs.
-    const int key = ctx * 8 + n + (ng > 1 ? (1 << 28) : 0) +
+    const int key = ctx * 128 + n + (ng > 1 ? (1 << 28) : 0) +
                     (decode_prefetch ? (1 << 29) : 0);
     const int fkey = -key;  // failed verification captures
     auto it = vgraphs.find(key);
@@ -2381,7 +2455,8 @@ void Engine::VerifyBatch(std::span<Session* const> sessions,
       throw std::runtime_error("inkling2: bad verification width");
     total += counts[g];
   }
-  if (total != tokens.size() || total > kMaxVerifyRows)
+  if (total != tokens.size() ||
+      total > (sessions.size() == 1 ? kMaxVerifyRows : kMaxBatchVerifyRows))
     throw std::runtime_error("inkling2: bad verification width");
   for (auto t : tokens)
     if (t < 0 || static_cast<std::uint32_t>(t) >= weights_.config.n_vocab_text)

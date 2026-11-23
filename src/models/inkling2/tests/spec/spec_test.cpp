@@ -4,7 +4,7 @@
 //                      [--prompt 600] [--tokens 48]
 //
 // 1. A reference session decodes --tokens greedy tokens one at a time. Another
-//    replays them through Engine::Verify in steps of 2 to 8 rows whose
+//    replays them through Engine::Verify in steps of 2 to 64 rows whose
 //    proposals are the reference tokens with one corrupted per step, and keeps
 //    the rows up to it (CommitVerify). Every kept row's logits, and those of a
 //    one-token decode after the last commit, must equal the reference's byte
@@ -103,14 +103,16 @@ int main(int argc, char** argv) {
   engine->Forward(*ref, p);
   std::vector<std::int32_t> want{Argmax(ref->logits())};
   std::vector<std::vector<float>> lg;
-  for (int i = 0; i < tokens + 8; ++i) {
+  for (int i = 0; i < tokens + 64; ++i) {
     engine->Forward(*ref, std::span<const std::int32_t>(&want.back(), 1));
     lg.push_back(ref->logits());
     want.push_back(Argmax(ref->logits()));
   }
 
   int failures = 0;
-  for (int R = 2; R <= 8; ++R) {
+  // 2 to 8 rows (DSpark), and the wide copy steps (int8 WMMA projections,
+  // grouped MoE, chunked attention)
+  for (int R : {2, 3, 4, 5, 6, 7, 8, 9, 16, 33, 64}) {
     auto sp = engine->NewSession();
     engine->Forward(*sp, p);
     std::uint32_t rng = 12345u + static_cast<std::uint32_t>(R);
@@ -204,7 +206,7 @@ int main(int argc, char** argv) {
           rng = rng * 1664525u + 1013904223u;
           if (at[g] >= tokens || (rng >> 28) == 0)
             continue;  // sometimes a session sits a step out
-          const std::size_t room = Engine::kMaxVerifyRows - total;
+          const std::size_t room = Engine::kMaxBatchVerifyRows - total;
           if (room == 0)
             break;
           rng = rng * 1664525u + 1013904223u;
