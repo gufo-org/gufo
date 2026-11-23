@@ -299,6 +299,8 @@ struct CtlPJob {
   // optional [T] inverse RMS of each msg row (from hip::Mix), else computed
   // here
   const float* minv = nullptr;
+  // optional [T] inverse RMS of each x row, summed as the gate prologue sums it
+  const float* xinv = nullptr;
 };
 struct CtlPJobs {
   CtlPJob j[3];

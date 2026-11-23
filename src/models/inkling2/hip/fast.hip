@@ -1101,6 +1101,7 @@ struct GateP {
   int ldo;
   int rows;  // valid output rows of the tile range (<= 64 per tile; 0 = all)
   const float* inv2 = nullptr;  // precomputed per-token msg inverse RMS
+  const float* inv1 = nullptr;  // precomputed per-token x inverse RMS
 };
 struct GateJobs {
   GateP j[3];
@@ -1202,10 +1203,11 @@ __global__ void __launch_bounds__(256)
     float s1 = 1.f, s2 = 1.f;
     if (p.rms) {
       float a = 0.f, b = 0.f;
-      for (int i = lane; i < p.k1; i += 32) {
-        float v = p.x[(size_t)t * p.ldx + i];
-        a += v * v;
-      }
+      if (!p.inv1)
+        for (int i = lane; i < p.k1; i += 32) {
+          float v = p.x[(size_t)t * p.ldx + i];
+          a += v * v;
+        }
       if (!p.inv2)
         for (int i = lane; i < p.k2; i += 32) {
           float v = p.msg[(size_t)t * p.ldm + i];
@@ -1213,7 +1215,7 @@ __global__ void __launch_bounds__(256)
         }
       a = wsum(a);
       b = wsum(b);
-      s1 = rsqrtf(a / p.k1 + eps);
+      s1 = p.inv1 ? p.inv1[t] : rsqrtf(a / p.k1 + eps);
       s2 = p.inv2 ? p.inv2[t] : p.k2 ? rsqrtf(b / p.k2 + eps) : 1.f;
     }
     if (lane == 0) {
@@ -1313,12 +1315,13 @@ __global__ void __launch_bounds__(256)
       a[q] = b[q] = 0.f;
     }
     if (p.rms) {
-      for (int i = lane; i < p.k1; i += 32)
+      if (!p.inv1)
+        for (int i = lane; i < p.k1; i += 32)
 #pragma unroll
-        for (int q = 0; q < TW; ++q) {
-          float v = xr[q][i];
-          a[q] += v * v;
-        }
+          for (int q = 0; q < TW; ++q) {
+            float v = xr[q][i];
+            a[q] += v * v;
+          }
       if (!p.inv2)
         for (int i = lane; i < p.k2; i += 32)
 #pragma unroll
@@ -1332,7 +1335,8 @@ __global__ void __launch_bounds__(256)
       float s1 = 1.f, s2 = 1.f;
       if (p.rms) {
         const float sa = wsum(a[q]), sb = wsum(b[q]);
-        s1 = rsqrtf(sa / p.k1 + eps);
+        s1 = p.inv1 ? p.inv1[min(t0 + wave * TW + q, T - 1)]
+                    : rsqrtf(sa / p.k1 + eps);
         s2 = p.inv2 ? p.inv2[min(t0 + wave * TW + q, T - 1)]
              : p.k2 ? rsqrtf(sb / p.k2 + eps)
                     : 1.f;
@@ -1449,56 +1453,62 @@ __global__ void __launch_bounds__(256)
 }
 
 // Same products as k_ctl_apply_p, register-tiled over 64 tokens x 64 channels
-// (each thread 4 x 4), in the same k order.
-__global__ void __launch_bounds__(256) k_ctl_apply_p64(CtlPJobs jobs, int T) {
+// (each thread 4 x 4) in the same k order (ascending, the same fused
+// multiply-adds; same epilogue). The operands are read from LDS as float4 along
+// k (three reads per four k-steps feed 32 multiply-adds per thread), and the
+// epilogue's inputs load before the products.
+__global__ void __launch_bounds__(256) k_ctl_apply_v4(CtlPJobs jobs, int T) {
+  constexpr int LS = 68;
   const CtlPJob& p = jobs.j[blockIdx.z];
-  __shared__ float wg[64][65], wf[64][65];
-  __shared__ float gs[64][65];
-  const int tid = threadIdx.x, t0 = blockIdx.y * 64,
-            c0 =
-                blockIdx.x * 64;  // channel blocks of a token tile run together
+  __shared__ float wg[64 * LS], wf[64 * LS], gs[64 * LS];
+  const int tid = threadIdx.x, t0 = blockIdx.y * 64, c0 = blockIdx.x * 64;
   for (int i = tid; i < 64 * 16; i += 256) {
     const int row = i >> 4, c4 = i & 15;
-    const float4 a =
+    *(float4*)&wg[row * LS + c4 * 4] =
         *(const float4*)(p.gain + (size_t)(c0 + row) * 64 + c4 * 4);
-    const float4 b =
+    *(float4*)&wf[row * LS + c4 * 4] =
         *(const float4*)(p.forget + (size_t)(c0 + row) * 64 + c4 * 4);
-    wg[row][c4 * 4] = a.x;
-    wg[row][c4 * 4 + 1] = a.y;
-    wg[row][c4 * 4 + 2] = a.z;
-    wg[row][c4 * 4 + 3] = a.w;
-    wf[row][c4 * 4] = b.x;
-    wf[row][c4 * 4 + 1] = b.y;
-    wf[row][c4 * 4 + 2] = b.z;
-    wf[row][c4 * 4 + 3] = b.w;
     const int t = min(t0 + row, T - 1);
-    const float4 v = *(const float4*)(p.g64 + (size_t)t * 64 + c4 * 4);
-    gs[row][c4 * 4] = v.x;
-    gs[row][c4 * 4 + 1] = v.y;
-    gs[row][c4 * 4 + 2] = v.z;
-    gs[row][c4 * 4 + 3] = v.w;
+    *(float4*)&gs[row * LS + c4 * 4] =
+        *(const float4*)(p.g64 + (size_t)t * 64 + c4 * 4);
   }
-  __syncthreads();
   const int tr = tid & 15, tt = tid >> 4;
-  float ga[4][4] = {}, fo[4][4] = {};
-#pragma unroll 4
-  for (int k = 0; k < 64; ++k) {
-    float a[4], b[4], g[4];
+  // The epilogue's inputs load while the products run.
+  float cv[4][4], mv[4][4];
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    const int t = min(t0 + tt + 16 * j, T - 1);
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
-      a[i] = wg[tr + 16 * i][k];
-      b[i] = wf[tr + 16 * i][k];
+      const int c = c0 + tr + 16 * i;
+      cv[i][j] = p.x[(size_t)t * p.ldx + c];
+      mv[i][j] = p.msg[(size_t)t * p.ldm + c];
+    }
+  }
+  __syncthreads();
+  float ga[4][4] = {}, fo[4][4] = {};
+#pragma unroll 2
+  for (int k4 = 0; k4 < 64; k4 += 4) {
+    float4 a[4], b[4], g[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      a[i] = *(const float4*)&wg[(tr + 16 * i) * LS + k4];
+      b[i] = *(const float4*)&wf[(tr + 16 * i) * LS + k4];
     }
 #pragma unroll
     for (int j = 0; j < 4; ++j)
-      g[j] = gs[tt + 16 * j][k];
-#pragma unroll
-    for (int i = 0; i < 4; ++i)
-#pragma unroll
-      for (int j = 0; j < 4; ++j) {
-        ga[i][j] += a[i] * g[j];
-        fo[i][j] += b[i] * g[j];
-      }
+      g[j] = *(const float4*)&gs[(tt + 16 * j) * LS + k4];
+#define CTL_STEP(F)                                   \
+  _Pragma("unroll") for (int i = 0; i < 4; ++i)       \
+      _Pragma("unroll") for (int j = 0; j < 4; ++j) { \
+    ga[i][j] += a[i].F * g[j].F;                      \
+    fo[i][j] += b[i].F * g[j].F;                      \
+  }
+    CTL_STEP(x)
+    CTL_STEP(y)
+    CTL_STEP(z)
+    CTL_STEP(w)
+#undef CTL_STEP
   }
 #pragma unroll
   for (int j = 0; j < 4; ++j) {
@@ -1508,10 +1518,8 @@ __global__ void __launch_bounds__(256) k_ctl_apply_p64(CtlPJobs jobs, int T) {
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       const int c = c0 + tr + 16 * i;
-      const float cv = p.x[(size_t)t * p.ldx + c];
       p.out[(size_t)t * 2304 + c] =
-          cv - tanhf(fo[i][j]) * cv +
-          tanhf(ga[i][j]) * p.msg[(size_t)t * p.ldm + c];
+          cv[i][j] - tanhf(fo[i][j]) * cv[i][j] + tanhf(ga[i][j]) * mv[i][j];
     }
   }
 }
@@ -3826,8 +3834,8 @@ void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
   GateJobs g{};
   for (int i = 0; i < jobs.n; ++i) {
     const CtlPJob& c = jobs.j[i];
-    g.j[i] = {c.x,  c.ldx, c.msg, c.ldm, c.down, 4608,  2304,
-              2304, 1,     c.g64, 64,    0,      c.minv};
+    g.j[i] = {c.x,  c.ldx, c.msg, c.ldm, c.down, 4608,   2304,
+              2304, 1,     c.g64, 64,    0,      c.minv, c.xinv};
   }
   // One job has too few token blocks for k_gate_p64's serial chunks; three
   // jobs keep the GPU busy and k_gate_p64 moves fewer bytes.
@@ -3835,7 +3843,7 @@ void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
     k_gate_v2<64, 64><<<dim3((t + 63) / 64, 1, 1), 256, 0, s>>>(g, t, eps);
   else
     k_gate_p64<<<dim3((t + 63) / 64, 1, jobs.n), 256, 0, s>>>(g, t, eps);
-  k_ctl_apply_p64<<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs, t);
+  k_ctl_apply_v4<<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs, t);
   Chk("ctl_prefill");
 }
 

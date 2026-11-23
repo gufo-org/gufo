@@ -180,8 +180,8 @@ struct Engine::Impl {
   float *cur, *prelude, *bankout, *tau;
   float* blocks[6];
   float* bank[4];
-  float *mixed, *ctl[3], *in[3], *msgs, *msgs_next, *minv[2], *gbuf, *gate64,
-      *gainb, *forgetb;
+  float *mixed, *ctl[3], *in[3], *msgs, *msgs_next, *minv[2], *xinv, *gbuf,
+      *gate64, *gainb, *forgetb;
   float *Qb, *Kb, *Vb, *Rb, *Gb, *Sb, *Ob, *AOp, *AO, *h, *hn, *mixf, *rlog,
       *wts;
   float *dynK, *dynV, *gu, *act, *ye, *moe;
@@ -456,6 +456,7 @@ struct Engine::Impl {
     msgs_next = NewBuf(u * 4 * kEmbd);
     minv[0] = NewBuf(u * 4);
     minv[1] = NewBuf(u * 4);
+    xinv = NewBuf(u * 3);
     gbuf = NewBuf(u * 2 * kEmbd);
     gate64 = NewBuf(u * 64 * 3);
     gainb = NewBuf(u * kEmbd);
@@ -702,8 +703,9 @@ struct Engine::Impl {
 
   /// Attention-residual mix of the ubatch's states with `nq` queries into out
   /// [T][nq][2304].
-  void FMix(const kk::MixStates& st, const float* query, int nq, float* out) {
-    kk::Mix(s, st, query, nq, kEmbd, T, out, cfg->rms_eps);
+  void FMix(const kk::MixStates& st, const float* query, int nq, float* out,
+            float* inv_out = nullptr) {
+    kk::Mix(s, st, query, nq, kEmbd, T, out, cfg->rms_eps, inv_out);
   }
 
   kk::MixStates States(const float* last, int extra_blocks_from = 0) {
@@ -768,7 +770,10 @@ struct Engine::Impl {
         normed = true;
         have16 = F.proj;
       } else {
-        FMix(States(cur), DF(L.attn_res_query), nq, mixed);
+        // The controllers that follow read the mixes' inverse RMS (summed as
+        // their gate prologue would) instead of re-reading the rows.
+        FMix(States(cur), DF(L.attn_res_query), nq, mixed,
+             msg ? xinv : nullptr);
         for (int j = 0; j < 3; ++j)
           inp[j] = {mixed + (is_swa ? 0 : j) * kEmbd, nq * kEmbd};
       }
@@ -788,7 +793,8 @@ struct Engine::Impl {
             DF(c.forget),
             gate64 + static_cast<std::size_t>(j) * U * 64,
             ctl[j],
-            msg_inv ? msg_inv + static_cast<std::size_t>(j) * T : nullptr};
+            msg_inv ? msg_inv + static_cast<std::size_t>(j) * T : nullptr,
+            xinv + static_cast<std::size_t>(is_swa ? 0 : j) * T};
       }
       fs::CtlPrefill(s, cj, T, cfg->rms_eps);
       for (int j = 0; j < 3; ++j)
@@ -967,7 +973,7 @@ struct Engine::Impl {
       fs::Mix(s, mj, cfg->rms_eps);
       h_done = true;
     } else {
-      FMix(States(cur), DF(L.ffn_res_query), 1, mixf);
+      FMix(States(cur), DF(L.ffn_res_query), 1, mixf, msg ? xinv : nullptr);
     }
     if (msg) {
       const LoopController& c = L.loop[kStreamFfn];
@@ -982,7 +988,8 @@ struct Engine::Impl {
                  DF(c.forget),
                  gate64,
                  ctl[0],
-                 msg_inv ? msg_inv + 3 * static_cast<std::size_t>(T) : nullptr};
+                 msg_inv ? msg_inv + 3 * static_cast<std::size_t>(T) : nullptr,
+                 xinv};
       fs::CtlPrefill(s, cj, T, cfg->rms_eps);
       hin = ctl[0];
     }
