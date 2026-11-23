@@ -254,6 +254,11 @@ template<typename T>
   return pointer == nullptr ? nullptr : pointer + offset;
 }
 
+/// Queue a pitched Qwen KV transfer within each operand's backing pages.
+void CopyKvRows(void* destination, std::size_t dst_pitch, const void* source,
+                std::size_t src_pitch, std::size_t width, std::size_t rows,
+                hipMemcpyKind kind, hipStream_t stream);
+
 /// Preallocated, zero-allocation GPU execution arena on gfx1151.
 class QwenGpuArena {
 public:
