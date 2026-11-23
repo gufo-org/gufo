@@ -1100,9 +1100,15 @@ public:
       if (greedy) {
         engine_->Step(ss, static_cast<std::int32_t>(a), amax);
       } else {
+        // the row's logits through the pinned buffer (the session keeps its
+        // copy on the device)
         const std::int32_t id = static_cast<std::int32_t>(a);
-        engine_->Forward(ss, std::span<const std::int32_t>(&id, 1));
-        out = ss.logits();
+        Session* const sp = &ss;
+        const bool host = true;
+        engine_->DecodeBatchRows(std::span<Session* const>(&sp, 1),
+                                 std::span<const std::int32_t>(&id, 1),
+                                 std::span<const bool>(&host, 1), &out,
+                                 nullptr);
       }
     } else {
       engine_->Verify(ss, rows, greedy ? nullptr : &out,
