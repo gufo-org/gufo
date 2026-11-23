@@ -26,6 +26,7 @@ Extensions have a separate version; see the
 | Channel | Tags | Contents |
 | --- | --- | --- |
 | [GitHub releases](https://github.com/gufo-org/gufo/releases) | `vX.Y.Z` | Source, the Debian package and the Windows ZIP |
+| [APT repository](https://github.com/gufo-org/apt#install) | `X.Y.Z-1` | Releases, as the `gufo` Debian package for Debian 13 |
 | Container images | `X.Y.Z`, `X.Y`, `latest` | Releases; `latest` is the newest |
 | Container images | `edge`, `sha-<revision>` | Development builds, updated continuously |
 | Nix flake | `github:gufo-org/gufo/vX.Y.Z` | Any release or revision |
