@@ -39,6 +39,8 @@ def asset_keys(plan, data):
         keys.add(model['asset'])
         if 'draft_asset' in model:
             keys.add(model['draft_asset'])
+        if 'checkpoint_asset' in model:
+            keys.add(model['checkpoint_asset'])
         if model['category'] == 'tts':
             keys.add('asr')  # The main binary is the fixed intelligibility evaluator.
     return sorted(keys)

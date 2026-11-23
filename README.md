@@ -35,6 +35,7 @@ that resend long conversations, and extensions let you bring your own model.
 | [Qwen-Image-2.1](docs/models/qwen-image-2.1.md) | Image generation and editing | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE), non-commercial |
 | [Qwen-Image-2.1-Turbo](docs/models/qwen-image-2.1.md#qwen-image-21-turbo) | Eight-step image generation and editing | [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE), non-commercial |
 | [MiniMax H3](docs/models/minimax-h3.md) | Video with sound | [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) |
+| [Loom packages](docs/models/loom.md) | Every [loom-fun](https://huggingface.co/loom-fun) text package on AMD Loom kernels | Each model's own |
 
 Each model page lists the files to download, the modes and the measured speed.
 Gufo's own code is MIT; the weights keep their publishers' terms.

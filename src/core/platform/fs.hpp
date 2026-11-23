@@ -211,6 +211,13 @@ std::filesystem::path UserCacheDirectory() noexcept;
 /// cannot determine one.
 std::filesystem::path UserDataDirectory() noexcept;
 
+/// Creates `to` (which must not exist) sharing the data of `from`, with no
+/// copy: a reflink (Linux FICLONE, on btrfs and XFS, across subvolumes of one
+/// file system). Returns false and sets `ec`, leaving no `to`, where the file
+/// system or platform cannot; callers then copy.
+bool CloneFile(const std::filesystem::path& from,
+               const std::filesystem::path& to, std::error_code& ec) noexcept;
+
 /// Writes to the current file position. Clamps to INT_MAX bytes per call so
 /// multi-gigabyte spans cannot truncate on 32-bit length limits. Returns the
 /// bytes written; 0 with `ec` set on failure, including EINTR.

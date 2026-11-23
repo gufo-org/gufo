@@ -194,7 +194,8 @@ private:
   }
 
   // Links a matching blob of the Hugging Face cache instead of downloading
-  // it; it is verified like a download.
+  // it (a reflink where no hard link reaches it, as across btrfs subvolumes;
+  // a copy only where neither can); it is verified like a download.
   bool Reuse(Job& job) {
     const auto hub = HubCache();
     if (hub.empty())
@@ -212,7 +213,7 @@ private:
     fs::remove(job.part, ec);
     fs::remove(job.progress, ec);
     fs::create_hard_link(cached, job.part, ec);
-    if (ec) {
+    if (ec && !platform::CloneFile(cached, job.part, ec)) {
       ec.clear();
       fs::copy_file(cached, job.part, ec);
       if (ec)
@@ -701,6 +702,63 @@ fs::path HubCache() {
     return cache;
   const auto home = HfHome();
   return home.empty() ? fs::path{} : home / "hub";
+}
+
+std::string Get(const std::string& url, std::uint64_t limit) {
+  std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(),
+                                                           curl_easy_cleanup);
+  if (!curl)
+    throw std::runtime_error("cannot initialize libcurl");
+  struct Body {
+    std::string text;
+    std::uint64_t limit;
+  } body{{}, limit};
+  const auto write = +[](char* data, std::size_t size, std::size_t count,
+                         void* user) -> std::size_t {
+    auto* out = static_cast<Body*>(user);
+    if (out->text.size() + size * count > out->limit)
+      return 0;
+    out->text.append(data, size * count);
+    return size * count;
+  };
+  const std::string protocols =
+      Endpoint().starts_with("http://") ? "http,https" : "https";
+  std::array<char, CURL_ERROR_SIZE> error{};
+  curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, protocols.c_str());
+  curl_easy_setopt(curl.get(), CURLOPT_REDIR_PROTOCOLS_STR, protocols.c_str());
+  curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, "gufo-model");
+  curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 30L);
+  curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 300L);
+  curl_easy_setopt(curl.get(), CURLOPT_ERRORBUFFER, error.data());
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, write);
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &body);
+  // libcurl sends the bearer token to the first host only.
+  const auto token = Token();
+  if (!token.empty()) {
+    curl_easy_setopt(curl.get(), CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
+    curl_easy_setopt(curl.get(), CURLOPT_XOAUTH2_BEARER, token.c_str());
+  }
+  const auto result = curl_easy_perform(curl.get());
+  if (result != CURLE_OK)
+    throw std::runtime_error("cannot read " + url + ": " +
+                             (error[0] != 0 ? std::string(error.data())
+                                            : curl_easy_strerror(result)));
+  long status = 0;
+  curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
+  if (status >= 400)
+    throw std::runtime_error("cannot read " + url + ": HTTP " +
+                             std::to_string(status));
+  return std::move(body.text);
+}
+
+std::string EscapePath(std::string_view path) {
+  std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(),
+                                                           curl_easy_cleanup);
+  if (!curl)
+    throw std::runtime_error("cannot initialize libcurl");
+  return Escape(curl.get(), path);
 }
 
 void Fetch(const std::vector<Item>& items, const fs::path& store,

@@ -306,4 +306,29 @@ const DecisionProvider* ProbeDecisionProvider(std::string_view model_root) {
 void Registry::AddDecisionProvider(DecisionProvider provider) {
   RegisterDecisionProvider(std::move(provider));
 }
+
+static std::vector<ModelSource> g_model_sources;
+
+void Registry::AddModelSource(ModelSource source) {
+  for (auto& existing : g_model_sources) {
+    if (existing.owner == source.owner) {
+      existing = std::move(source);
+      return;
+    }
+  }
+  g_model_sources.push_back(std::move(source));
+}
+
+const std::vector<ModelSource>& ModelSources() {
+  return g_model_sources;
+}
+
+const ModelSource* FindModelSource(std::string_view owner) {
+  for (const auto& source : g_model_sources) {
+    if (source.owner == owner) {
+      return &source;
+    }
+  }
+  return nullptr;
+}
 }  // namespace gufo::ext

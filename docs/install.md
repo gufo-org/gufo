@@ -138,6 +138,7 @@ toolchain: GCC 16.2 and ROCm 10.1.0. Without Nix, install these first:
 | ICU, libcurl, OpenSSL, libpng, libwebp | Tokenization, HTTPS, hashing, images |
 | Rust 1.88 or newer, libopus | PNG, JPEG, WAV and audio decoding |
 | FFmpeg libraries | EmbeddingGemma 2 only |
+| CMake 3.26+ (4.2+ on Windows), Python 3.12+, network access | Building the [Loom runtime](models/loom.md#platforms) from its pinned release |
 | `ffmpeg` and `ffprobe` | Video and audio output |
 
 On Debian or Ubuntu, with
@@ -190,6 +191,7 @@ Extensions can pin weights by Hugging Face revision, file size and SHA-256.
 ```sh
 gufo model list                   # every model and the extension that offers it
 gufo model install qwen3-asr      # download it
+gufo model install loom-fun/<name>   # an extension resolves the repository
 gufo transcribe --model qwen3-asr --audio speech.wav
 gufo model update                 # move to the files extensions pin now
 gufo model remove qwen3-asr

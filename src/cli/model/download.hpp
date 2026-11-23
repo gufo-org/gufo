@@ -31,6 +31,12 @@ struct Options {
 void Fetch(const std::vector<Item>& items, const std::filesystem::path& store,
            const Options& options);
 
+// The body of a GET of a Hugging Face Hub `url`, at most `limit` bytes; the
+// token goes to the Hub only, never to a host it redirects to. Throws on a
+// transfer or HTTP error.
+std::string Get(const std::string& url, std::uint64_t limit = 64ULL << 20U);
+// `path` with each '/'-separated part URL-escaped.
+std::string EscapePath(std::string_view path);
 // HF_ENDPOINT, else https://huggingface.co.
 std::string Endpoint();
 // HF_TOKEN, else the token `hf auth login` saved; empty when there is none.

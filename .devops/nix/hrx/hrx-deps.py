@@ -48,14 +48,38 @@ def store_name(sha256, url):
     return f"{sha256}-{base}"
 
 
+RAW_GITHUB = re.compile(
+    r"https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([0-9a-f]{40})/(.+)")
+
+
+def mirrors(url):
+    """The same file at the same commit from mirrors of raw GitHub files.
+
+    raw.githubusercontent.com rate limits shared CI addresses; every download
+    is still checked against its pinned SHA-256."""
+    match = RAW_GITHUB.fullmatch(url)
+    if not match:
+        return []
+    owner, repo, commit, path = match.groups()
+    found = [f"https://cdn.jsdelivr.net/gh/{owner}/{repo}@{commit}/{path}"]
+    if (owner, repo) == ("torvalds", "linux"):
+        found.append("https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/"
+                     f"linux.git/plain/{path}?id={commit}")
+    return found
+
+
 def fetch(source, out):
     os.makedirs(out, exist_ok=True)
     for sha256, urls in pinned_downloads(source):
         target = os.path.join(out, store_name(sha256, urls[0]))
-        for url in urls:
+        candidates = urls + [mirror for url in urls for mirror in mirrors(url)]
+        for url in candidates:
             partial = target + ".partial"
             result = subprocess.run(
-                ["curl", "-fsSL", "--retry", "3", "-o", partial, url])
+                # Transient failures, such as rate limiting (HTTP 429), back
+                # off exponentially, or as Retry-After says, before a mirror.
+                ["curl", "-fsSL", "--retry", "5", "--retry-max-time", "120",
+                 "-o", partial, url])
             if result.returncode != 0:
                 continue
             with open(partial, "rb") as f:
@@ -65,7 +89,7 @@ def fetch(source, out):
                 break
             os.remove(partial)
         else:
-            sys.exit(f"no URL matched {sha256}: {urls}")
+            sys.exit(f"no URL matched {sha256}: {candidates}")
 
 
 def rewrite(source, deps):

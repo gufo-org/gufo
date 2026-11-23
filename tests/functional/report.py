@@ -271,10 +271,15 @@ def render_models(args, plan, summary):
     expected_groups = {(row['profile'], row['configuration']): row['suites'] for row in plan['groups']}
     observed_groups = {(row['profile'], row['configuration']): row['suites'] for row in rows}
     phases = {key: load_json(args.results / (key + '.phases.json')) for key in expected}
-    speeds = {key: timing_state(phases[key]) if phases[key] and phases[key].get('revisions') == {
-        'base': plan['base'], 'head': plan['head']} else 'missing' for key in expected}
+    # Models the plan runs without timing arms (Loom packages: a smoke check only).
+    parts = [part for row in plan.get('shards', []) for part in row['parts']]
+    timed = {part['model'] for part in parts if part['timing']}
+    untimed = {part['model'] for part in parts} - timed
+    speeds = {key: 'not timed' if key in untimed else timing_state(phases[key])
+              if phases[key] and phases[key].get('revisions') == {
+                  'base': plan['base'], 'head': plan['head']} else 'missing' for key in expected}
     state, description = 'success', f'{len(expected)} selected models passed correctness and speed checks'
-    if speeds and all(speed == 'observations' for speed in speeds.values()):
+    if expected - untimed and all(speeds[key] == 'observations' for key in expected - untimed):
         description = f'{len(expected)} selected models passed; timing observations retained'
     if args.authorize != 'success':
         state, description = 'error', 'Authorization or planning failed'
@@ -286,7 +291,8 @@ def render_models(args, plan, summary):
         state, description = 'error', 'Selected model results are missing or incomplete'
     elif any(row['status'] != 'passed' for row in rows) or any(item['correctness'] == 'failed' for item in items.values()):
         state, description = 'failure', 'Selected model correctness checks failed'
-    elif any(item['correctness'] != 'passed' or item['timing'] != 'passed' for item in items.values()):
+    elif any(item['correctness'] != 'passed' or item['timing'] != ('skipped' if key in untimed else 'passed')
+             for key, item in items.items()):
         state, description = 'error', 'Selected model correctness or timing evidence is incomplete'
     elif any(speed == 'slower' for speed in speeds.values()):
         state, description = 'failure', f'Server phases slower in every paired repeat (>{SLOWDOWN * 100:g}% and >{NOISE_MS} ms)'
@@ -321,7 +327,9 @@ def render_models(args, plan, summary):
             lines += ['', '⚠️ ' + short(limitation, 500)]
         if item.get('error'):
             lines += ['', 'Runner: ' + short(item['error'], ERROR_CHARS)]
-        if phases[key] and phases[key].get('phases'):
+        if key in untimed:
+            lines += ['', 'Speed is not compared for this model: its checks have no timing arms.']
+        elif phases[key] and phases[key].get('phases'):
             checks = phases[key].get('timing_checks')
             if checks is not None:
                 lines += ['', 'Speed gates: ' + (', '.join(f'`{key}`' for key in checks) if checks else

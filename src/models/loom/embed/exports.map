@@ -1,0 +1,4 @@
+{
+  global: loom_text_embed_*;
+  local: *;
+};

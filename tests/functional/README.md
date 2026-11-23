@@ -4,6 +4,17 @@ The runners start isolated local servers and check real HTTP responses. Manual
 suites use production binaries and local weights. Devlab CI downloads only its
 selected models from pinned revisions.
 
+## Loom package smoke check
+
+`family_smoke.py loom` serves a Loom package with its GGUF downloaded
+separately and checks one greedy answer and one required tool call (host
+sampling from the package's logits). Devlab runs it on Linux and Windows for
+`loom-qwen3.5-2b` when `src/models/loom` changes; it has no timing arms.
+
+```sh
+python3 tests/functional/family_smoke.py loom --binary build/release/gufo   --model <loom-fun/unsloth-Qwen3.5-2B-loom snapshot>   --checkpoint <unsloth/Qwen3.5-2B-GGUF snapshot>
+```
+
 ## Embedding, ASR, TTS and image service checks
 
 `model_services.py` starts an isolated loopback production server, checks readiness

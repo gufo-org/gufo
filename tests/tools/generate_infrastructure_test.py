@@ -29,6 +29,7 @@ class GenerateInfrastructureTest(unittest.TestCase):
         expected = [
             "deepseek_v4_flash",
             "embedding_gemma2",
+            "loom",
             "minimax_h3",
             "qwen",
             "qwen38_flash_next",

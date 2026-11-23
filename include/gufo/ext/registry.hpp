@@ -10,6 +10,7 @@
 #include "gufo/ext/decision.hpp"
 #include "gufo/ext/embeddings.hpp"
 #include "gufo/ext/image.hpp"
+#include "gufo/ext/model_source.hpp"
 #include "gufo/ext/options.hpp"
 #include "gufo/ext/text.hpp"
 #include "gufo/ext/tts.hpp"
@@ -60,6 +61,11 @@ struct ProviderInfo {
   /// modality's default. The server still clamps it to the device budget, and
   /// an operator's GPU_MAX_HW_QUEUES always wins.
   std::uint32_t hardware_queues = 0;
+  /// False when the provider drives the GPU through its own runtime instead
+  /// of HIP, from `serving.hip` in its metadata. A server running it makes no
+  /// HIP call: on Linux, a process's GPU address space belongs to the first
+  /// runtime that opens it.
+  bool uses_hip = true;
 };
 class Registry {
 public:
@@ -73,6 +79,9 @@ public:
   void AddVideoProvider(VideoProvider provider);
   void AddDecisionProvider(DecisionProvider provider);
   void AddTextProvider(TextProvider provider);
+  /// Registers the source of one Hugging Face owner's models; a later source
+  /// for the same owner replaces it.
+  void AddModelSource(ModelSource source);
   std::span<const ExcludedExtension> Excluded() const { return excluded_; }
   // Empty means the key was not found among excluded extensions.
   std::string ExcludedKeyDiagnostic(std::string_view key) const;
