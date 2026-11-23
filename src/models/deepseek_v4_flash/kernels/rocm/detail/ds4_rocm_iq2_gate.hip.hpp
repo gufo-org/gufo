@@ -56,10 +56,8 @@ __device__ static int32_t dev_dot_iq2_pair_16(uint8_t grid0, uint32_t sign0,
                                               uint8_t grid1, uint32_t sign1,
                                               const int8_t* q8) {
   int32_t sum = 0;
-  sum =
-      dev_iq2_dp4a_8(hip_iq2xxs_grid[grid0], hip_ksigns_iq2xs[sign0], q8, sum);
-  sum = dev_iq2_dp4a_8(hip_iq2xxs_grid[grid1], hip_ksigns_iq2xs[sign1], q8 + 8,
-                       sum);
+  sum = dev_iq2_dp4a_8(hip_iq2xxs_grid[grid0], sign0, q8, sum);
+  sum = dev_iq2_dp4a_8(hip_iq2xxs_grid[grid1], sign1, q8 + 8, sum);
   return sum;
 }
 
