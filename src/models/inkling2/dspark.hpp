@@ -93,7 +93,7 @@ public:
   /// Proposals of several sessions at once (up to kMaxSessions): each
   /// request's drafts are those a lone Propose gives, and every weight row is
   /// read once for all of them.
-  static constexpr int kMaxSessions = 4;
+  static constexpr int kMaxSessions = 8;
   struct Request {
     State* st = nullptr;
     std::int32_t anchor = 0;

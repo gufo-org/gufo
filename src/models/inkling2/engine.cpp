@@ -298,6 +298,8 @@ struct Engine::Impl {
   int* d_ids8;
   int* d_step;  // {token, position, row within its session}
   unsigned* d_counter;
+  unsigned* d_acnt;  // fused decode attention: [kMaxB][8] split counters
+  unsigned* d_ccnt;  // fused controller apply + norm: [kMaxB][4]
   fs::SlotEntry* d_tbl;
   const float* d_states[16];
   int d_ns = 0;
@@ -618,6 +620,10 @@ struct Engine::Impl {
           "pinned");
     d_counter = reinterpret_cast<unsigned*>(NewInts(B));
     Check(hipMemset(d_counter, 0, B * 4), "counter");
+    d_acnt = reinterpret_cast<unsigned*>(NewInts(B * 8));
+    Check(hipMemset(d_acnt, 0, B * 8 * 4), "attention counters");
+    d_ccnt = reinterpret_cast<unsigned*>(NewInts(B * 4));
+    Check(hipMemset(d_ccnt, 0, B * 4 * 4), "controller counters");
     d_tbl = static_cast<fs::SlotEntry*>(
         AllocDevice(B * 48 * sizeof(fs::SlotEntry), "slot table"));
     scratch_allocs.push_back(d_tbl);
@@ -1195,8 +1201,8 @@ struct Engine::Impl {
     // deferred residual.
     if (dsp && FeatureIndex(slot_idx) >= 0)
       CaptureFeature(ds, cur, nb, FeatureIndex(slot_idx), d_feat);
+    fs::CtlJobs cj{};
     if (msg) {
-      fs::CtlJobs cj{};
       cj.n = 3;
       for (int j = 0; j < 3; ++j) {
         const LoopController& c = L.loop[kStreamQ + j];
@@ -1215,7 +1221,6 @@ struct Engine::Impl {
         inp[j] = cj.out[j];
       }
       fs::CtlGate(ds, cj, cfg->rms_eps, nb);
-      fs::CtlApply(ds, cj, nb);
     }
     if (!normed) {
       fs::NormJobs nj{};
@@ -1230,7 +1235,10 @@ struct Engine::Impl {
                            : j == 1 ? L.attn_k_inp_norm
                                     : L.attn_v_inp_norm);
       }
-      fs::Rms(ds, nj, cfg->rms_eps, nb);
+      if (msg)  // the controllers' outputs, normed in the same launch
+        fs::CtlApplyRms(ds, cj, nj, d_ccnt, cfg->rms_eps, nb);
+      else
+        fs::Rms(ds, nj, cfg->rms_eps, nb);
     }
     const float* iq = d_in;
     const float* ik = three ? d_in + kEmbd : d_in;
@@ -1311,9 +1319,10 @@ struct Engine::Impl {
       }
     }
 
-    // C. conv + clip + KV write
+    // C. conv + clip + KV write (in the attention launch for distinct
+    // sessions' rows)
+    fs::KvPrepArgs ka{};
     {
-      fs::KvPrepArgs ka{};
       ka.k = Kb;
       ka.v = Vb;
       ka.dk = swa ? nullptr : dynK;
@@ -1331,7 +1340,8 @@ struct Engine::Impl {
       ka.ldd = 64;
       ka.cap = VCap(slot_idx);
       ka.ri = VRows();
-      fs::KvPrep(ds, ka, nb);
+      if (verify_mode)
+        fs::KvPrep(ds, ka, nb);
     }
 
     // D. attention + gate
@@ -1366,7 +1376,10 @@ struct Engine::Impl {
       aa.tau_alpha = cfg->log_scale_alpha;
       aa.ldp = kSProj;
       aa.ws_tok = static_cast<int>(kMaxSplit * 8 * 12);
-      if (verify_mode && verify_one_session && !swa && nb > 1)
+      aa.cnt = d_acnt;
+      if (!verify_mode)
+        fs::KvAttnDecode(ds, ka, aa, nb);
+      else if (verify_one_session && !swa && nb > 1)
         fs::AttnDecodeRows(ds, aa, nb);
       else
         fs::AttnDecode(ds, aa, nb);
@@ -1416,7 +1429,6 @@ struct Engine::Impl {
       cj.gs[0] = 4 * 64;
       cj.os[0] = kSCtl;
       fs::CtlGate(ds, cj, cfg->rms_eps, nb);
-      fs::CtlApply(ds, cj, nb);
       fs::NormJobs nj{};
       nj.n = 1;
       nj.x[0] = d_ctl;
@@ -1424,7 +1436,7 @@ struct Engine::Impl {
       nj.out[0] = d_h;
       nj.xs[0] = kSCtl;
       nj.os[0] = kEmbd;
-      fs::Rms(ds, nj, cfg->rms_eps, nb);
+      fs::CtlApplyRms(ds, cj, nj, d_ccnt, cfg->rms_eps, nb);
     }
 
     // G. MoE

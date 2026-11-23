@@ -160,6 +160,10 @@ struct CtlJobs {  // loop controllers of up to 4 streams
 };
 void CtlGate(hipStream_t s, const CtlJobs& j, float eps, int nb = 1);
 void CtlApply(hipStream_t s, const CtlJobs& j, int nb = 1);
+/// CtlApply, then Rms of norm job i on stream i's output (nj.n == j.n) in the
+/// same launch. cnt: [nb][4] zero, self-resetting.
+void CtlApplyRms(hipStream_t s, const CtlJobs& j, const NormJobs& nj,
+                 unsigned* cnt, float eps, int nb = 1);
 
 struct TinyJobs {  // y = W x for matrices with 32..64 rows of K = 2304, F32 /
                    // F16 / BF16
@@ -213,8 +217,13 @@ struct AttnArgs {
                    // [nb][3072], sink [nb][24]
   int ws_tok = 0;  // token stride of ws_m / ws_l (floats); ws_o is ws_tok * 128
   int nrows = 0;   // attn_decode_rows: rows of the step (groups of NB per z)
+  unsigned* cnt = nullptr;  // KvAttnDecode: [nb][8] zero, self-resetting
 };
 void AttnDecode(hipStream_t s, const AttnArgs& a, int nb = 1);
+/// KvPrep then AttnDecode in one launch, for rows of distinct sessions (no
+/// verification capture): the same arithmetic.
+void KvAttnDecode(hipStream_t s, const KvPrepArgs& kv, const AttnArgs& a,
+                  int nb = 1);
 /// AttnDecode of nb (2 to 4) rows of one session at consecutive positions
 /// (a verification step) on a global visit: one block reads each K/V tile for
 /// all rows; every row's result is AttnDecode's.

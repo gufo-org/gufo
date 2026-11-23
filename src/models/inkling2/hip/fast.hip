@@ -887,9 +887,8 @@ __global__ void __launch_bounds__(512) k_mix(MixJob j, float eps) {
 struct NormP {
   NormJobs j;
 };
-__global__ void __launch_bounds__(256) k_rms(NormJobs j, float eps) {
-  __shared__ float red[32];
-  const int r = blockIdx.x, tk = blockIdx.y;
+__device__ __forceinline__ void rms_job(const NormJobs& j, int r, int tk,
+                                        float eps, float* red /*[32]*/) {
   const float* x = j.x[r] + (size_t)tk * j.xs[r];
   const float* w = j.w[r];
   float* o = j.out[r] + (size_t)tk * j.os[r];
@@ -900,6 +899,10 @@ __global__ void __launch_bounds__(256) k_rms(NormJobs j, float eps) {
   const float inv = rsqrtf(tot * (1.0f / 2304.0f) + eps);
   for (int i = threadIdx.x; i < 2304; i += blockDim.x)
     o[i] = x[i] * inv * (w ? w[i] : 1.0f);
+}
+__global__ void __launch_bounds__(256) k_rms(NormJobs j, float eps) {
+  __shared__ float red[32];
+  rms_job(j, blockIdx.x, blockIdx.y, eps, red);
 }
 
 // Loop controller gate: g64[row] = down[row] . [x/rms(x); msg/rms(msg)]. One
@@ -956,10 +959,8 @@ __global__ void __launch_bounds__(256) k_ctl_gate(CtlJobs j, float eps) {
   }
 }
 template<bool H>
-__global__ void __launch_bounds__(256) k_ctl_apply(CtlJobs j) {
-  const int i = blockIdx.x * 256 + threadIdx.x, s = blockIdx.y, tk = blockIdx.z;
-  if (i >= 2304)
-    return;
+__device__ __forceinline__ void ctl_apply_elem(const CtlJobs& j, int i, int s,
+                                               int tk) {
   const float4* g = (const float4*)(j.g64[s] + (size_t)tk * j.gs[s]);
   float ga = 0.f, fo = 0.f;
 #pragma unroll
@@ -972,6 +973,34 @@ __global__ void __launch_bounds__(256) k_ctl_apply(CtlJobs j) {
   const float cv = j.x[s][(size_t)tk * j.xs[s] + i];
   j.out[s][(size_t)tk * j.os[s] + i] =
       cv - tanhf(fo) * cv + tanhf(ga) * j.msg[s][(size_t)tk * j.ms[s] + i];
+}
+template<bool H>
+__global__ void __launch_bounds__(256) k_ctl_apply(CtlJobs j) {
+  const int i = blockIdx.x * 256 + threadIdx.x;
+  if (i < 2304)
+    ctl_apply_elem<H>(j, i, blockIdx.y, blockIdx.z);
+}
+// k_ctl_apply, then (last block of a stream and token) k_rms of norm job s.
+template<bool H>
+__global__ void __launch_bounds__(256)
+    k_ctl_apply_rms(CtlJobs j, NormJobs nj, unsigned* cnt, float eps) {
+  __shared__ float red[32];
+  __shared__ unsigned last;
+  const int i = blockIdx.x * 256 + threadIdx.x, s = blockIdx.y, tk = blockIdx.z;
+  if (i < 2304)
+    ctl_apply_elem<H>(j, i, s, tk);
+  __threadfence();
+  __syncthreads();
+  unsigned* c = cnt + (size_t)tk * 4 + s;
+  if (threadIdx.x == 0)
+    last = atomicAdd(c, 1u) == gridDim.x - 1;
+  __syncthreads();
+  if (!last)
+    return;
+  __threadfence();
+  if (threadIdx.x == 0)
+    *c = 0;
+  rms_job(nj, s, tk, eps, red);
 }
 
 // y[r] = W[r] . x for a few small matrices (K = 2304). One wave per row.
@@ -1003,12 +1032,11 @@ __global__ void __launch_bounds__(256) k_tiny(TinyJobs j) {
     j.y[m][(size_t)blockIdx.y * j.ys[m] + row] = s;
 }
 
-// K/V conv (+ conv-state update), K clip / V rms, f16 KV write. One block per
-// kv head.
-__global__ void __launch_bounds__(128) k_kvprep(KvPrepArgs a) {
-  __shared__ float red[32];
-  const int kvh = blockIdx.x, d = threadIdx.x, c = kvh * 128 + d;
-  const int tk = blockIdx.z;
+// K/V conv (+ conv-state update), K clip / V rms, f16 KV write of kv head
+// `kvh`, token `tk`, by a block of 128 threads.
+__device__ __forceinline__ void kvprep_block(const KvPrepArgs& a, int kvh,
+                                             int tk, float* red /*[32]*/) {
+  const int d = threadIdx.x, c = kvh * 128 + d;
   const int pos = a.pos[tk];
   const SlotEntry* slot = a.slot + tk * 48;
   const float* ak = a.k + (size_t)tk * a.ld;
@@ -1062,6 +1090,11 @@ __global__ void __launch_bounds__(128) k_kvprep(KvPrepArgs a) {
   const int cell = pos % slot->cap;
   ((__half*)slot->k)[(size_t)cell * 1024 + c] = __float2half(kc * kf);
   ((__half*)slot->v)[(size_t)cell * 1024 + c] = __float2half(vc * vf);
+}
+// One block per kv head.
+__global__ void __launch_bounds__(128) k_kvprep(KvPrepArgs a) {
+  __shared__ float red[32];
+  kvprep_block(a, blockIdx.x, blockIdx.z, red);
 }
 
 // single-block counting sort of (token, slot) pairs by expert
@@ -1708,7 +1741,7 @@ __device__ __forceinline__ int row_chunk(int chunk, int swa, int p) {
 
 // NQ = 1 (3 rows: the 3 q heads of one kv head)
 template<int NW>
-__global__ __launch_bounds__(NW * 32) void attn_decode(AttnArgs a) {
+__device__ __forceinline__ void attn_decode_body(const AttnArgs& a) {
   constexpr int NR = 3;
   __shared__ __attribute__((aligned(16))) __half sQ[16][HD + 8];
   __shared__ float sR[16][16];
@@ -1909,6 +1942,11 @@ __global__ __launch_bounds__(NW * 32) void attn_decode(AttnArgs a) {
     ws_m[base + tid] = M;
     ws_l[base + tid] = L;
   }
+}
+
+template<int NW>
+__global__ __launch_bounds__(NW * 32) void attn_decode(AttnArgs a) {
+  attn_decode_body<NW>(a);
 }
 
 // The rows of one verification step (consecutive positions of one session) in
@@ -2135,11 +2173,11 @@ __global__ __launch_bounds__(NW * 32) void attn_decode_rows(AttnArgs a) {
   }
 }
 
-__global__ __launch_bounds__(128) void decode_reduce(AttnArgs a) {
-  __shared__ float sc[1024];
-  __shared__ float sred[4];
-  const int h = blockIdx.x, kvh = h / 3, r = h % 3, dim = threadIdx.x,
-            tk = blockIdx.z;
+// Combines the splits of head h, token tk (128 threads): the sink, the gate.
+__device__ __forceinline__ void reduce_head(const AttnArgs& a, int h, int tk,
+                                            float* sc /*[1024]*/,
+                                            float* sred /*[4]*/) {
+  const int kvh = h / 3, r = h % 3, dim = threadIdx.x;
   const float* ws_o = a.ws_o + (size_t)tk * a.ws_tok * 128;
   const float* ws_m = a.ws_m + (size_t)tk * a.ws_tok;
   const float* ws_l = a.ws_l + (size_t)tk * a.ws_tok;
@@ -2181,6 +2219,48 @@ __global__ __launch_bounds__(128) void decode_reduce(AttnArgs a) {
     o *= 1.0f /
          (1.0f + __expf(-a.gate[(size_t)tk * a.ldp + (size_t)h * HD + dim]));
   a.out[(size_t)tk * 3072 + (size_t)h * HD + dim] = o;
+}
+__global__ __launch_bounds__(128) void decode_reduce(AttnArgs a) {
+  __shared__ float sc[1024];
+  __shared__ float sred[4];
+  reduce_head(a, blockIdx.x, blockIdx.z, sc, sred);
+}
+
+// attn_decode of distinct sessions' rows with its neighbours folded in: the
+// block of the split holding the row's position first writes the kv head's
+// K/V row (k_kvprep), and the last split block of a kv head to finish
+// combines its three heads (decode_reduce). Same arithmetic as the three
+// launches.
+template<int NW>
+__global__ __launch_bounds__(NW * 32) void attn_decode_fused(AttnArgs a,
+                                                             KvPrepArgs kv) {
+  __shared__ float red[32];
+  __shared__ unsigned last;
+  const int kvh = blockIdx.x, split = blockIdx.y, tk = blockIdx.z;
+  {
+    const int p0 = a.pos[tk];
+    const int kb = a.swa ? max(0, p0 - (WIN - 1)) : 0;
+    if ((p0 - kb) / row_chunk(a.chunk, a.swa, p0) == split) {
+      kvprep_block(kv, kvh, tk, red);
+      __syncthreads();
+    }
+  }
+  attn_decode_body<NW>(a);
+  __threadfence();
+  __syncthreads();
+  if (threadIdx.x == 0)
+    last = atomicAdd(&a.cnt[tk * NKV + kvh], 1u) == gridDim.y - 1;
+  __syncthreads();
+  if (!last)
+    return;
+  __threadfence();
+  if (threadIdx.x == 0)
+    a.cnt[tk * NKV + kvh] = 0;
+  __shared__ float sc[1024];
+  for (int r = 0; r < 3; ++r) {
+    reduce_head(a, kvh * 3 + r, tk, sc, red);
+    __syncthreads();
+  }
 }
 }  // namespace ia
 
@@ -3515,6 +3595,14 @@ void CtlGate(hipStream_t s, const CtlJobs& j, float eps, int nb) {
     k_ctl_gate<false><<<dim3(64, j.n, nb), 256, 0, s>>>(j, eps);
   Chk("ctl_gate");
 }
+void CtlApplyRms(hipStream_t s, const CtlJobs& j, const NormJobs& nj,
+                 unsigned* cnt, float eps, int nb) {
+  if (j.half)
+    k_ctl_apply_rms<true><<<dim3(9, j.n, nb), 256, 0, s>>>(j, nj, cnt, eps);
+  else
+    k_ctl_apply_rms<false><<<dim3(9, j.n, nb), 256, 0, s>>>(j, nj, cnt, eps);
+  Chk("ctl apply rms");
+}
 void CtlApply(hipStream_t s, const CtlJobs& j, int nb) {
   if (j.half)
     k_ctl_apply<true><<<dim3(9, j.n, nb), 256, 0, s>>>(j);
@@ -3537,6 +3625,11 @@ void AttnDecode(hipStream_t s, const AttnArgs& a, int nb) {
   ia::attn_decode<4><<<dim3(8, a.nsplit, nb), 128, 0, s>>>(a);
   ia::decode_reduce<<<dim3(24, 1, nb), 128, 0, s>>>(a);
   Chk("attn_decode");
+}
+void KvAttnDecode(hipStream_t s, const KvPrepArgs& kv, const AttnArgs& a,
+                  int nb) {
+  ia::attn_decode_fused<4><<<dim3(8, a.nsplit, nb), 128, 0, s>>>(a, kv);
+  Chk("attn_decode_fused");
 }
 void AttnDecodeRows(hipStream_t s, const AttnArgs& a0, int nb) {
   AttnArgs a = a0;
