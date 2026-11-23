@@ -129,9 +129,8 @@ list what changed.
 ## Contributing
 
 Contributions are welcome: Gufo needs the Strix Halo community to keep
-improving. Start with [development](docs/internal/development.md) and
-[testing](docs/internal/testing.md); [AGENTS.md](AGENTS.md) holds the rules
-that people and coding agents follow. To add a model without changing Gufo,
+improving. [CONTRIBUTING.md](CONTRIBUTING.md) explains what belongs in Gufo
+and what belongs in an extension. To add a model without changing Gufo,
 [write an extension](docs/writing-extensions.md).
 
 Community projects built on Gufo include

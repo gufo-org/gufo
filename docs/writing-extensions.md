@@ -27,6 +27,30 @@ capability. A provider has:
   says whether this provider runs it;
 - a **factory** that builds the running model once the probe says yes.
 
+## Core or extension
+
+Gufo's maintainers spend their time on the core: the parts every model relies
+on to serve well. Models live in extensions.
+
+- **Core** is everything Gufo owns above, plus shared building blocks such as
+  GGUF loading, sampling, quantization helpers and the extension runtime.
+  Change the core when the change helps more than one model, or when your
+  extension needs something the [extension API](extension-api.md) doesn't offer
+  yet. Add it as a general contract, not a hook for one model.
+- **An extension** is everything about one model: its engine, kernels,
+  loaders, templates, tests and quality evidence. A new model, or a new variant
+  of one, starts as an extension in your own repository, and you maintain it.
+
+Gufo ships one or two **official** models per use case. They live in Gufo's
+repository and come with the default build; every other extension is
+installed separately. Each official model needs its own optimizations to be
+the fastest and most accurate on Strix Halo, and maintainer time is limited,
+so a model becomes official only when it fills or improves a use case and
+someone commits to maintaining it. A model that works well isn't enough on its
+own. An official model stays until a better one arrives for the same use case;
+it then moves to its own repository as a community extension. A community
+extension gets the same runtime, cache and scheduler as an official one.
+
 ## Start from the template
 
 Copy [examples/extension_template](../examples/extension_template/README.md)
@@ -166,8 +190,7 @@ For each Gufo update:
 5. Bump your version and update the quality notes, keeping failed results
    visible.
 
-If your model fits Gufo's goal, the best model for each use case on Strix
-Halo, you can ask for it to become official. That needs a named maintainer and
-the evidence above; the
+If your model fits [Gufo's goal](#core-or-extension), you can ask for it to
+become official. That needs a named maintainer and the evidence above; the
 [support policy](internal/extension-distribution.md#support-states)
 describes the process.
