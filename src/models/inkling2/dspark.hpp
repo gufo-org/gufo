@@ -69,6 +69,16 @@ public:
   /// gap (pos0 > valid) the context restarts at pos0.
   void Inject(hipStream_t s, State& st, const float* feats, std::size_t pos0,
               int n);
+  /// Inject for several sessions' rows (kMaxRows in all) at once: every
+  /// context weight is read once for all of them.
+  static constexpr int kMaxRows = 8;
+  struct Rows {
+    State* st = nullptr;
+    const float* feats = nullptr;  // [n][4][2304]
+    std::size_t pos0 = 0;
+    int n = 0;
+  };
+  void InjectRows(hipStream_t s, std::span<const Rows> rows);
   /// Whether Propose can run at `pos` (context and Markov state present).
   [[nodiscard]] static bool Ready(const State& st, std::size_t pos) {
     return pos > 0 && st.valid == pos && st.f_pos == pos - 1;

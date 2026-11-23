@@ -20,9 +20,10 @@ struct MixArgs {
   float alpha[4][4];
   const float* w[4];
   float* out;       // [n][4][2304]
-  _Float16* out16;  // [3][n][2304]
+  _Float16* out16;  // [3][ld16][2304]
   int n;
   float eps;
+  int ld16 = 0;  // rows between out16's layers (0: n)
 };
 void Mix(hipStream_t s, const MixArgs& a);
 

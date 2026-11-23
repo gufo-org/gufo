@@ -242,6 +242,10 @@ public:
   /// Empty `logits`: row keep - 1 comes from the device.
   void CommitVerify(Session& s, std::size_t keep,
                     std::span<const float> logits);
+  /// CommitVerify of several sessions of one verification step at once.
+  void CommitVerifyBatch(std::span<Session* const> sessions,
+                         std::span<const std::size_t> keeps,
+                         std::span<const std::span<const float>> logits);
 
   /// DSpark drafting. AttachDrafter loads the draft GGUF; call it before the
   /// first NewSession (sessions then also hold the draft context, which every

@@ -1315,13 +1315,31 @@ public:
             steps[l.i].failure = std::current_exception();
           }
         });
-        for (std::size_t k = 0; k < lanes.size(); ++k) {
+        // one commit for every lane that resolved (failed lanes keep 0)
+        std::vector<Session*> cs;
+        std::vector<std::size_t> ck;
+        std::vector<std::span<const float>> cl;
+        for (std::size_t k = 0; k < lanes.size(); ++k)
+          if (keeps[k] > 0) {
+            cs.push_back(lanes[k].ss);
+            ck.push_back(keeps[k]);
+            cl.push_back(rows_of(k));
+          }
+        bool committed = true;
+        try {
+          engine_->CommitVerifyBatch(cs, ck, cl);
+        } catch (...) {
+          committed = false;
+          for (std::size_t k = 0; k < lanes.size(); ++k)
+            if (keeps[k] > 0)
+              steps[lanes[k].i].failure = std::current_exception();
+        }
+        for (std::size_t k = 0; k < lanes.size() && committed; ++k) {
           auto& l = lanes[k];
           const std::size_t keep = keeps[k];
           if (keep == 0)
             continue;  // failed above
           try {
-            engine_->CommitVerify(*l.ss, keep, rows_of(k));
             emitted += static_cast<int>(keep);
             if (l.width > 0) {
               steps[l.i].draft_rounds = 1;

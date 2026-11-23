@@ -444,6 +444,85 @@ void Drafter::Inject(hipStream_t s, State& st, const float* feats,
   st.valid = pos0 + static_cast<std::size_t>(n);
 }
 
+void Drafter::InjectRows(hipStream_t s, std::span<const Rows> rows) {
+  Impl& I = *impl_;
+  int m = 0;
+  for (const auto& r : rows)
+    m += std::max(r.n, 0);
+  if (m == 0)
+    return;
+  if (m > kMaxRows) {
+    for (const auto& r : rows)
+      Inject(s, *r.st, r.feats, r.pos0, r.n);
+    return;
+  }
+  // mix of each request's rows into rows [off, off + n) of the step;
+  // F16 layers 8 rows apart, the GEMV operand
+  constexpr int B = dsp::kBlock;
+  int off = 0;
+  for (const auto& r : rows) {
+    if (r.n <= 0)
+      continue;
+    dsp::MixArgs ma{};
+    ma.feat = r.feats;
+    std::memcpy(ma.alpha, I.alpha, sizeof ma.alpha);
+    for (int l = 0; l < 3; ++l)
+      ma.w[l] = I.layer[l].ctx_norm;
+    ma.w[3] = I.markov_norm;
+    ma.out = I.mix + static_cast<std::size_t>(off) * 4 * kE;
+    ma.out16 = I.mix16 + static_cast<std::size_t>(off) * kE;
+    ma.n = r.n;
+    ma.ld16 = B;
+    ma.eps = I.eps;
+    dsp::Mix(s, ma);
+    off += r.n;
+  }
+  float* kraw = I.ikv;
+  float* vraw = I.ikv + static_cast<std::size_t>(B) * 1024;
+  for (int l = 0; l < 3; ++l) {
+    const _Float16* a = I.mix16 + static_cast<std::size_t>(l) * B * kE;
+    dsp::Gemv8(s, I.layer[l].wk_ctx, 1024, kE, a, kraw);
+    dsp::Gemv8(s, I.layer[l].wv_ctx, 1024, kE, a, vraw);
+    off = 0;
+    for (const auto& r : rows) {
+      if (r.n <= 0)
+        continue;
+      State& st = *r.st;
+      dsp::KvStoreArgs ka{};
+      ka.k = kraw + static_cast<std::size_t>(off) * 1024;
+      ka.v = vraw + static_cast<std::size_t>(off) * 1024;
+      ka.ldk = ka.ldv = 1024;
+      ka.knorm = I.layer[l].k_ctx_norm;
+      ka.kc = static_cast<_Float16*>(st.k[l]);
+      ka.vc = static_cast<_Float16*>(st.v[l]);
+      ka.cap = static_cast<int>(st.cap[l]);
+      ka.pos0 = static_cast<int>(r.pos0);
+      ka.n = r.n;
+      ka.theta = I.theta;
+      ka.eps = I.eps;
+      dsp::KvStore(s, ka);
+      off += r.n;
+    }
+  }
+  off = 0;
+  for (const auto& r : rows) {
+    if (r.n <= 0)
+      continue;
+    State& st = *r.st;
+    if (r.pos0 > st.valid || r.pos0 < st.first)
+      st.first = r.pos0;  // a gap: the context before pos0 is missing
+    // the Markov context of the request's last row
+    Check(hipMemcpyAsync(
+              st.f,
+              I.mix + (static_cast<std::size_t>(off + r.n - 1) * 4 + 3) * kE,
+              kE * 4, hipMemcpyDeviceToDevice, s),
+          "markov context");
+    st.f_pos = r.pos0 + static_cast<std::size_t>(r.n) - 1;
+    st.valid = r.pos0 + static_cast<std::size_t>(r.n);
+    off += r.n;
+  }
+}
+
 int Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
                      std::size_t pos, int n, std::int32_t* out,
                      float* confidence, const More& more,

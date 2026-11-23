@@ -70,7 +70,8 @@ __global__ void __launch_bounds__(256) k_mix(MixArgs a) {
     const float y = v[t] * inv * a.w[j][c];
     o[c] = y;
     if (j < 3)
-      a.out16[((size_t)j * a.n + r) * kEmbd + c] = (_Float16)y;
+      a.out16[((size_t)j * (a.ld16 ? a.ld16 : a.n) + r) * kEmbd + c] =
+          (_Float16)y;
   }
 }
 

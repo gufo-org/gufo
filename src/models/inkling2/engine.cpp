@@ -1696,12 +1696,16 @@ struct Engine::Impl {
                            hipMemcpyDeviceToHost, ds),
             "argmax copy");
     }
-    if (dsp)
+    if (dsp) {
+      Drafter::Rows rows[kMaxB];
       for (int b = 0; b < n; ++b)
-        dsp->Inject(
-            ds, sess[b]->draft_,
-            d_feat + static_cast<std::size_t>(b) * Drafter::kFeatureFloats,
-            sess[b]->pos_, 1);
+        rows[b] = {.st = &sess[b]->draft_,
+                   .feats = d_feat + static_cast<std::size_t>(b) *
+                                         Drafter::kFeatureFloats,
+                   .pos0 = sess[b]->pos_,
+                   .n = 1};
+      dsp->InjectRows(ds, std::span<const Drafter::Rows>(rows, n));
+    }
     Check(hipStreamSynchronize(ds), "decode sync");
     if (step_argmax != nullptr)
       std::memcpy(step_argmax, h_amax, static_cast<std::size_t>(n) * 4);
@@ -1789,16 +1793,25 @@ struct Engine::Impl {
 
   /// Keeps the first `keep` rows of the session's verification rows, which
   /// start at step row `row0`.
-  void CommitVerify(Session& ss, int keep, int row0) {
-    fs::CommitVerifyConv(ds, static_cast<const fs::SlotEntry*>(ss.tbl_), d_vcap,
-                         keep, row0);
+  /// Keeps the first keep[g] rows of session g's verification rows, which
+  /// start at step row row0[g].
+  void CommitVerify(Session* const* ss, const int* keep, const int* row0,
+                    int ng) {
+    Drafter::Rows rows[kMaxB];
+    for (int g = 0; g < ng; ++g) {
+      fs::CommitVerifyConv(ds, static_cast<const fs::SlotEntry*>(ss[g]->tbl_),
+                           d_vcap, keep[g], row0[g]);
+      rows[g] = {.st = &ss[g]->draft_,
+                 .feats = d_feat + static_cast<std::size_t>(row0[g]) *
+                                       Drafter::kFeatureFloats,
+                 .pos0 = ss[g]->pos_,
+                 .n = keep[g]};
+    }
     if (dsp)
-      dsp->Inject(
-          ds, ss.draft_,
-          d_feat + static_cast<std::size_t>(row0) * Drafter::kFeatureFloats,
-          ss.pos_, keep);
+      dsp->InjectRows(ds, std::span<const Drafter::Rows>(rows, ng));
     Check(hipStreamSynchronize(ds), "commit sync");
-    ss.pos_ += static_cast<std::size_t>(keep);
+    for (int g = 0; g < ng; ++g)
+      ss[g]->pos_ += static_cast<std::size_t>(keep[g]);
   }
 
   void Tap(int visit, const char* what) {
@@ -2297,27 +2310,55 @@ void Engine::VerifyBatch(std::span<Session* const> sessions,
 
 void Engine::CommitVerify(Session& s, std::size_t keep,
                           std::span<const float> logits) {
+  Session* sp = &s;
+  CommitVerifyBatch(std::span<Session* const>(&sp, 1),
+                    std::span<const std::size_t>(&keep, 1),
+                    std::span<const std::span<const float>>(&logits, 1));
+}
+
+void Engine::CommitVerifyBatch(std::span<Session* const> sessions,
+                               std::span<const std::size_t> keeps,
+                               std::span<const std::span<const float>> logits) {
   const std::lock_guard lock(mutex_);
   const std::size_t V = weights_.config.n_vocab_text;
-  if (keep == 0 || keep > s.verify_rows_ ||
-      (!logits.empty() && logits.size() < keep * V))
+  if (sessions.size() != keeps.size() || sessions.size() != logits.size() ||
+      sessions.size() > kMaxVerifyRows)
     throw std::runtime_error("inkling2: bad verification commit");
-  if (logits.empty()) {
-    Check(hipMemcpyAsync(s.dlogits_,
-                         impl_->logits_d + (s.verify_row0_ + keep - 1) * V,
-                         V * 4, hipMemcpyDeviceToDevice, impl_->ds),
-          "logits copy");
-    s.logits_stale_ = true;
-  } else {
-    s.logits_stale_ = false;
-    s.logits_.assign(
-        logits.begin() + static_cast<std::ptrdiff_t>((keep - 1) * V),
-        logits.begin() + static_cast<std::ptrdiff_t>(keep * V));
+  int keep_i[kMaxVerifyRows], row0_i[kMaxVerifyRows];
+  for (std::size_t g = 0; g < sessions.size(); ++g) {
+    Session& s = *sessions[g];
+    const std::size_t keep = keeps[g];
+    if (keep == 0 || keep > s.verify_rows_ ||
+        (!logits[g].empty() && logits[g].size() < keep * V))
+      throw std::runtime_error("inkling2: bad verification commit");
+    for (std::size_t h = 0; h < g; ++h)
+      if (sessions[h] == &s)
+        throw std::runtime_error("inkling2: bad verification commit");
   }
-  impl_->CommitVerify(s, static_cast<int>(keep),
-                      static_cast<int>(s.verify_row0_));
-  s.verify_rows_ = 0;
-  s.verify_row0_ = 0;
+  for (std::size_t g = 0; g < sessions.size(); ++g) {
+    Session& s = *sessions[g];
+    const std::size_t keep = keeps[g];
+    const auto& lg = logits[g];
+    if (lg.empty()) {
+      Check(hipMemcpyAsync(s.dlogits_,
+                           impl_->logits_d + (s.verify_row0_ + keep - 1) * V,
+                           V * 4, hipMemcpyDeviceToDevice, impl_->ds),
+            "logits copy");
+      s.logits_stale_ = true;
+    } else {
+      s.logits_stale_ = false;
+      s.logits_.assign(lg.begin() + static_cast<std::ptrdiff_t>((keep - 1) * V),
+                       lg.begin() + static_cast<std::ptrdiff_t>(keep * V));
+    }
+    keep_i[g] = static_cast<int>(keep);
+    row0_i[g] = static_cast<int>(s.verify_row0_);
+  }
+  impl_->CommitVerify(sessions.data(), keep_i, row0_i,
+                      static_cast<int>(sessions.size()));
+  for (auto* s : sessions) {
+    s->verify_rows_ = 0;
+    s->verify_row0_ = 0;
+  }
 }
 
 bool Engine::AttachDrafter(const std::string& path, std::string* error) {
