@@ -3971,6 +3971,254 @@ __global__ __launch_bounds__(NTT * 96) void attn_prefill(PfArgs a) {
     }
 }
 
+namespace ia {
+// shfl_xor(v, 16) across the half-waves without LDS.
+__device__ __forceinline__ uint32_t xor16u(uint32_t v) {
+  return __builtin_amdgcn_permlanex16(v, v, 0x76543210u, 0xfedcba98u, false,
+                                      false);
+}
+__device__ __forceinline__ float xor16f(float v) {
+  return __builtin_bit_cast(float, xor16u(__builtin_bit_cast(uint32_t, v)));
+}
+}  // namespace ia
+
+// attn_prefill for global layers at depth: blocks of 8 query tiles (24 waves)
+// share each K/V tile, the next tile's rows are loaded while this one computes
+// (double-buffered LDS, one barrier per 32 keys), and the probability exchange
+// between half-waves uses permlanex16 / v_perm instead of LDS shuffles. Every
+// row runs attn_prefill's arithmetic in its order: the same 16-key steps of
+// the online softmax (global keys start at 0 for every block, so the steps
+// are the same keys), the same WMMAs and the same bias products.
+template<int NTT, int KT>
+__global__ __launch_bounds__(NTT * 96) void attn_prefill_db(PfArgs a) {
+  using namespace ia;
+  constexpr int PF_KT = KT, PF_VS = KT + 8;
+  constexpr int NT = NTT * 96;
+  __shared__ __attribute__((aligned(16))) __half sK2[2][PF_KT][PF_KS];
+  __shared__ __attribute__((aligned(16))) __half sVt2[2][HD][PF_VS];
+  // Rows d0 .. d0 + BTR - 1 of the relative-bias table: every distance a key
+  // tile meets (the same values bias_dot reads from global memory).
+  constexpr int BTR = 16 * NTT + PF_KT;
+  __shared__ __attribute__((aligned(16))) __half sB2[2][BTR][RD];
+  const int tid = threadIdx.x, lane = tid & 31, w = tid >> 5;
+  const int kvh = blockIdx.y;
+  const int hh = w % 3, tt = w / 3, h = kvh * 3 + hh;
+  const int q16 = lane & 15, half = lane >> 4;
+  const int tbase = blockIdx.x * 16 * NTT;
+  const int tb = tbase + tt * 16;
+  const int t = tb + q16;
+  const bool rowvalid = t < a.U;
+  const int tcl = min(t, a.U - 1);
+  const int posq = rowvalid ? a.p0 + t : -1;
+
+  v16h bq[8];
+  {
+    const uint4* qp = (const uint4*)(a.qn + ((size_t)tcl * NH + h) * HD);
+#pragma unroll
+    for (int s = 0; s < 8; s++)
+      bq[s] = cat16(qp[2 * s], qp[2 * s + 1]);
+  }
+  v2h rp[8];
+  {
+    const float2* rq = (const float2*)(a.rn + ((size_t)tcl * NH + h) * RD);
+#pragma unroll
+    for (int c = 0; c < 8; c++) {
+      float2 f = rq[c];
+      rp[c][0] = (h16)f.x;
+      rp[c][1] = (h16)f.y;
+    }
+  }
+  float m = rowvalid ? a.sink[(size_t)t * NH + h] : 0.f;
+  float l = (half == 0) ? 1.f : 0.f;
+  v8f acc[8];
+#pragma unroll
+  for (int d = 0; d < 8; d++)
+    acc[d] = (v8f){0, 0, 0, 0, 0, 0, 0, 0};
+
+  const uint32_t sel_lo = half ? 0x01000504u : 0x05040100u;
+  const uint32_t sel_hi = half ? 0x03020706u : 0x07060302u;
+  const int pfirst = a.p0 + tbase;
+  const int plast = min(a.p0 + a.U - 1, a.p0 + tbase + 16 * NTT - 1);
+  const int kfirst = a.swa ? max(0, pfirst - (WIN - 1)) : 0;
+  const int ntiles = (plast - kfirst + PF_KT) / PF_KT;
+  const int wmin = a.p0 + tb, wmax = a.p0 + tb + 15;
+
+  // Tile t + 1's K / V / bias rows are loaded into registers while tile t
+  // computes, and written to the other LDS buffer after it: one barrier per
+  // tile.
+  constexpr int NK = (PF_KT * 16 + NT - 1) / NT, NV = (PF_KT * 8 + NT - 1) / NT;
+  uint4 rk[NK], rv[NV][2], rb;
+  auto gload = [&](int tile) {
+    const int kbase = kfirst + tile * PF_KT;
+    const int d0 = pfirst - (kbase + PF_KT - 1);
+#pragma unroll
+    for (int j = 0; j < NK; j++) {
+      const int idx = tid + j * NT;
+      if (idx < PF_KT * 16) {
+        const int key = idx >> 4, c = idx & 15;
+        const int pos = min(kbase + key, plast);
+        rk[j] = *(const uint4*)(a.kc + (size_t)(pos % a.cap) * CELL + kvh * HD +
+                                c * 8);
+      }
+    }
+#pragma unroll
+    for (int j = 0; j < NV; j++) {
+      const int idx = tid + j * NT;
+      if (idx < (PF_KT / 2) * 16) {
+        const int kp = idx >> 4, c = idx & 15;
+        const int p0_ = min(kbase + 2 * kp, plast),
+                  p1_ = min(kbase + 2 * kp + 1, plast);
+        rv[j][0] = *(const uint4*)(a.vc + (size_t)(p0_ % a.cap) * CELL +
+                                   kvh * HD + c * 8);
+        rv[j][1] = *(const uint4*)(a.vc + (size_t)(p1_ % a.cap) * CELL +
+                                   kvh * HD + c * 8);
+      }
+    }
+    if (tid < BTR * 2) {
+      const int row = tid >> 1, hf = tid & 1, d = d0 + row;
+      if (d >= 0 && d < WIN)
+        rb = *(const uint4*)(a.bt + (size_t)d * RD + hf * 8);
+    }
+  };
+  auto store = [&](int tile, int b) {
+    const int kbase = kfirst + tile * PF_KT;
+    const int d0 = pfirst - (kbase + PF_KT - 1);
+    if (tid < BTR * 2) {
+      const int row = tid >> 1, hf = tid & 1, d = d0 + row;
+      if (d >= 0 && d < WIN)
+        *(uint4*)&sB2[b][row][hf * 8] = rb;
+    }
+#pragma unroll
+    for (int j = 0; j < NK; j++) {
+      const int idx = tid + j * NT;
+      if (idx < PF_KT * 16) {
+        const int key = idx >> 4, c = idx & 15;
+        *(uint4*)&sK2[b][key][c * 8] = rk[j];
+      }
+    }
+#pragma unroll
+    for (int j = 0; j < NV; j++) {
+      const int idx = tid + j * NT;
+      if (idx < (PF_KT / 2) * 16) {
+        const int kp = idx >> 4, c = idx & 15;
+        uint4 v0 = rv[j][0], v1 = rv[j][1];
+        uint32_t* dst = (uint32_t*)&sVt2[b][c * 8][2 * kp];
+        constexpr int RS = PF_VS / 2;
+        uint32_t x0[4] = {v0.x, v0.y, v0.z, v0.w},
+                 x1[4] = {v1.x, v1.y, v1.z, v1.w};
+#pragma unroll
+        for (int e = 0; e < 4; e++) {
+          dst[(2 * e) * RS] = (x0[e] & 0xffffu) | (x1[e] << 16);
+          dst[(2 * e + 1) * RS] = (x0[e] >> 16) | (x1[e] & 0xffff0000u);
+        }
+      }
+    }
+  };
+  gload(0);
+  store(0, 0);
+  __syncthreads();
+  if (ntiles > 1)
+    gload(1);
+  for (int tile = 0; tile < ntiles; tile++) {
+    const int b = tile & 1;
+    const int kbase = kfirst + tile * PF_KT;
+    const int d0 = pfirst - (kbase + PF_KT - 1);
+    __half(*sK)[PF_KS] = sK2[b];
+    __half(*sVt)[PF_VS] = sVt2[b];
+    __half(*sB)[RD] = sB2[b];
+#pragma unroll
+    for (int kt = 0; kt < PF_KT / 16; kt++) {
+      const int pos0 = kbase + kt * 16;
+      if (pos0 > wmax)
+        continue;
+      if (a.swa && (wmin - (pos0 + 15)) >= WIN)
+        continue;
+      v8f c = {0, 0, 0, 0, 0, 0, 0, 0};
+#pragma unroll
+      for (int s = 0; s < 8; s++)
+        c = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+            cat16(*(const uint4*)&sK[kt * 16 + q16][s * 16],
+                  *(const uint4*)&sK[kt * 16 + q16][s * 16 + 8]),
+            bq[s], c);
+      float sv[8], mx = -INFINITY;
+      const bool needb = rowvalid && (posq - (pos0 + 15) < WIN);
+      const bool anyb = __any(needb);
+#pragma unroll
+      for (int i = 0; i < 8; i++) {
+        const int pos = pos0 + 2 * i + half, d = posq - pos;
+        const bool ok = (d >= 0) && (pos <= plast) && (!a.swa || d < WIN);
+        float s = c[i];
+        if (anyb && ok && d < WIN)
+          s += bias_dot(rp, &sB[0][0], d - d0);
+        sv[i] = ok ? s : -INFINITY;
+        mx = fmaxf(mx, sv[i]);
+      }
+      mx = fmaxf(mx, xor16f(mx));
+      const float mn = fmaxf(m, mx);
+      const float alpha = __expf(m - mn);
+      float p[8], ps = 0.f;
+#pragma unroll
+      for (int i = 0; i < 8; i++) {
+        p[i] = __expf(sv[i] - mn);
+        ps += p[i];
+      }
+      l = l * alpha + ps;
+      m = mn;
+      uint32_t mine[4], theirs[4];
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        v2h pr;
+        pr[0] = (h16)p[2 * i];
+        pr[1] = (h16)p[2 * i + 1];
+        mine[i] = as_u32(pr);
+        theirs[i] = xor16u(mine[i]);
+      }
+      v16h pf;
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        const v2h lo =
+            as_v2h(__builtin_amdgcn_perm(theirs[i], mine[i], sel_lo));
+        const v2h hi =
+            as_v2h(__builtin_amdgcn_perm(theirs[i], mine[i], sel_hi));
+        pf[4 * i + 0] = lo[0];
+        pf[4 * i + 1] = lo[1];
+        pf[4 * i + 2] = hi[0];
+        pf[4 * i + 3] = hi[1];
+      }
+#pragma unroll
+      for (int dt = 0; dt < 8; dt++) {
+        acc[dt] *= alpha;
+        const __half* vp = &sVt[dt * 16 + q16][kt * 16];
+        acc[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+            cat16(*(const uint4*)vp, *(const uint4*)(vp + 8)), pf, acc[dt]);
+      }
+    }
+    if (tile + 1 < ntiles)
+      store(tile + 1, b ^ 1);
+    __syncthreads();
+    if (tile + 2 < ntiles)
+      gload(tile + 2);
+  }
+  if (!rowvalid)
+    return;
+  const float inv = 1.0f / (l + xor16f(l));
+  const size_t ob = ((size_t)t * NH + h) * HD;
+  const float* gp = a.gate ? a.gate + (size_t)t * (NH * HD) + h * HD : nullptr;
+#pragma unroll
+  for (int dt = 0; dt < 8; dt++)
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      const int dim = dt * 16 + 2 * i + half;
+      float o = acc[dt][i] * inv;
+      if (gp)
+        o *= 1.0f / (1.0f + __expf(-gp[dim]));
+      if (a.out16)
+        a.out16[ob + dim] = (_Float16)o;
+      else
+        a.out[ob + dim] = o;
+    }
+}
+
 template<int N>
 using I = std::integral_constant<int, N>;
 void Chk(const char* what) {
@@ -4820,7 +5068,14 @@ void AttnPrefill(hipStream_t s, const PrefillAttn& a) {
   pa.bt = static_cast<const __half*>(a.bt);
   pa.out = a.out;
   pa.out16 = static_cast<_Float16*>(a.out16);
-  attn_prefill<4><<<dim3((a.n + 63) / 64, 8), 384, 0, s>>>(pa);
+  // Global visits past 1K keys with enough query blocks to fill the GPU take
+  // the double-buffered kernel (pp32K attention 33.6 -> 27.4 ms per visit).
+  // Window visits keep attn_prefill: their first key follows the block's first
+  // query, so a larger block would regroup their softmax steps.
+  if (!a.swa && a.pos0 >= 1024 && a.n >= 512)
+    attn_prefill_db<8, 32><<<dim3((a.n + 127) / 128, 8), 768, 0, s>>>(pa);
+  else
+    attn_prefill<4><<<dim3((a.n + 63) / 64, 8), 384, 0, s>>>(pa);
   Chk("attn_prefill");
 }
 
