@@ -3331,42 +3331,51 @@ void GemvQ8(hipStream_t s, int k, const void* w, const float* x, float* y,
             int m, float softcap, int nb) {
   const uint8_t* W = static_cast<const uint8_t*>(w);
   if (k == 2304) {
-    constexpr int LPR = 32, NIT = 1, BW = 8, RPB = BW * (WS / LPR) * NIT;
-    const dim3 grid((m + RPB - 1) / RPB);
-    switch (nb) {
-      case 1:
-        k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 1>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      case 2:
-        k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 2>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      case 3:
-        k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 3>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      case 4:
-        k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 4>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      case 5:
-        k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 5>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      case 6:
-        k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 6>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      case 7:
-        k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 7>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      default:
-        k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 8>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-    }
+    // several tokens: two rows per wave (more loads in flight at the lower
+    // occupancy); each row's dot product is the same
+    auto run = [&](auto nit) {
+      constexpr int LPR = 32, NIT = decltype(nit)::value, BW = 8,
+                    RPB = BW * (WS / LPR) * NIT;
+      const dim3 grid((m + RPB - 1) / RPB);
+      switch (nb) {
+        case 1:
+          k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 1>
+              <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+          break;
+        case 2:
+          k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 2>
+              <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+          break;
+        case 3:
+          k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 3>
+              <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+          break;
+        case 4:
+          k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 4>
+              <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+          break;
+        case 5:
+          k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 5>
+              <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+          break;
+        case 6:
+          k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 6>
+              <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+          break;
+        case 7:
+          k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 7>
+              <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+          break;
+        default:
+          k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 8>
+              <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+          break;
+      }
+    };
+    if (nb == 1)
+      run(I<1>{});
+    else
+      run(I<2>{});
   } else if (k == 3072) {
     constexpr int LPR = 16, NIT = 1, BW = 8, RPB = BW * (WS / LPR) * NIT;
     const dim3 grid((m + RPB - 1) / RPB);
