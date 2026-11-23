@@ -276,7 +276,9 @@ __device__ __forceinline__ void tiny_row(const MultiP& P,
 #pragma unroll
     for (int i = 0; i < 18; ++i)
       wv[i] = wp[lane + 32 * i];
-#pragma unroll
+    // the token loop stays rolled (unrolled, all tokens' input loads are
+    // hoisted and the kernel spills); each token's sum is the same
+#pragma unroll 1
     for (int b = 0; b < NB; ++b) {
       const float4* xp = (const float4*)(xv + (size_t)b * P.ldx);
 #pragma unroll
@@ -293,7 +295,7 @@ __device__ __forceinline__ void tiny_row(const MultiP& P,
 #pragma unroll
     for (int i = 0; i < 9; ++i)
       wv[i] = wp[lane + 32 * i];
-#pragma unroll
+#pragma unroll 1
     for (int b = 0; b < NB; ++b) {
       const float4* xp = (const float4*)(xv + (size_t)b * P.ldx);
 #pragma unroll
@@ -367,6 +369,63 @@ __global__ void __launch_bounds__(BW* WS)
     float acc[NB];
     row_dot<FMT_Q8, K, LPR, NB, NI>(Wm + rb * lr, aq, asc, NB * NI * 2 * NU,
                                     NB * NI * (K / 16), P.res, inm, lir, acc);
+    if (row < Mtot && lir == 0)
+#pragma unroll
+      for (int b = 0; b < NB; ++b)
+        y[(size_t)b * P.ldy + yo + lr] = acc[b];
+  }
+}
+
+// k_gemv_multi for several inputs per token where every block's rows belong
+// to matrices of one input (the matrix boundaries are multiples of a block's
+// rows): a block quantizes only that input of its NB tokens, so up to 8 tokens
+// fit in LDS and one launch reads the weights once. Each row's quantized input
+// and dot product are k_gemv_multi's.
+template<int K, int LPR, int NIT, int BW, int NB>
+__global__ void __launch_bounds__(BW* WS)
+    k_gemv_multi1(MultiP P, const float* __restrict__ x, float* __restrict__ y,
+                  int Mtot) {
+  if (blockIdx.x < P.ntb) {
+    tiny_row<NB>(P, x, blockIdx.x * BW + threadIdx.x / WS, threadIdx.x % WS);
+    return;
+  }
+  const int bx = blockIdx.x - P.ntb;
+  constexpr int NU = K / 32, RPW = WS / LPR;
+  __shared__ v4u aq[2 * NB * 2 * NU];
+  __shared__ float asc[2 * NB * (K / 16)];
+  const int brow = min(bx * BW * RPW * NIT, Mtot - 1);
+  int bin = P.in[0];
+#pragma unroll
+  for (int i = 1; i < 5; i++)
+    if (i < P.n && brow >= P.cum[i])
+      bin = P.in[i];
+  quant_act<K, NB, 32, 1>(x + (size_t)bin * K, aq, asc, P.res, P.ldx);
+  int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
+      lir = lane % LPR;
+  size_t rb = (size_t)NU * 34;
+  int base = (bx * BW + wave) * RPW * NIT;
+#pragma unroll
+  for (int it = 0; it < NIT; it++) {
+    int row = base + it * RPW + g;
+    int rr = row < Mtot ? row : Mtot - 1;
+    int m = 0;
+#pragma unroll
+    for (int i = 1; i < 5; i++)
+      if (i < P.n && rr >= P.cum[i])
+        m = i;
+    const uint8_t* Wm = P.W[0];
+    int yo = P.yoff[0], c0 = P.cum[0];
+#pragma unroll
+    for (int i = 1; i < 5; i++)
+      if (i == m) {
+        Wm = P.W[i];
+        yo = P.yoff[i];
+        c0 = P.cum[i];
+      }
+    int lr = rr - c0;
+    float acc[NB];
+    row_dot<FMT_Q8, K, LPR, NB>(Wm + rb * lr, aq, asc, NB * 2 * NU,
+                                NB * (K / 16), P.res, 0, lir, acc);
     if (row < Mtot && lir == 0)
 #pragma unroll
       for (int b = 0; b < NB; ++b)
@@ -1836,6 +1895,18 @@ __global__ __launch_bounds__(NW * 32) void attn_decode(AttnArgs a) {
 template<int NW, int NB>
 __global__ __launch_bounds__(NW * 32) void attn_decode_rows(AttnArgs a) {
   constexpr int NR = 3 * NB;
+  // blockIdx.x = kv head * groups + group: a step's groups of up to NB rows
+  // are adjacent blocks, which run at the same time and share the K/V tiles
+  // through L2 (read once from memory)
+  const int groups = (a.nrows + NB - 1) / NB;
+  const int g0 = (blockIdx.x % groups) * NB, nrow = min(NB, a.nrows - g0);
+  a.q += (size_t)g0 * a.ldp;
+  a.r += (size_t)g0 * a.ldp;
+  a.pos += g0;
+  a.ws_o += (size_t)g0 * a.ws_tok * 128;
+  a.ws_m += (size_t)g0 * a.ws_tok;
+  a.ws_l += (size_t)g0 * a.ws_tok;
+  const int nr = 3 * nrow;
   __shared__ __attribute__((aligned(16))) __half sQ[16][HD + 8];
   __shared__ float sR[16][16];
   __shared__ __attribute__((aligned(16))) float sP[NW][16][16];
@@ -1843,8 +1914,8 @@ __global__ __launch_bounds__(NW * 32) void attn_decode_rows(AttnArgs a) {
   __shared__ __attribute__((aligned(16))) float sO[NW][NR][HD];
   __shared__ float sM[NW][16], sL[NW][16];
   const int tid = threadIdx.x, lane = tid & 31, w = tid >> 5;
-  const int kvh = blockIdx.x, split = blockIdx.y;
-  const int plast = a.pos[NB - 1];
+  const int kvh = blockIdx.x / groups, split = blockIdx.y;
+  const int plast = a.pos[nrow - 1];
   const SlotEntry* slot = a.slot;  // every row is the same session
   const __half* kc = (const __half*)slot->k;
   const __half* vc = (const __half*)slot->v;
@@ -1854,7 +1925,7 @@ __global__ __launch_bounds__(NW * 32) void attn_decode_rows(AttnArgs a) {
   const __half* bt = (const __half*)a.bt;
 
   for (int r = w; r < 16; r += NW) {
-    if (r < NR) {
+    if (r < nr) {
       const int tk = r / 3, h = kvh * 3 + r % 3;
       const float* aq_ = a.q + (size_t)tk * a.ldp;
       const float* ar_ = a.r + (size_t)tk * a.ldp;
@@ -1899,7 +1970,7 @@ __global__ __launch_bounds__(NW * 32) void attn_decode_rows(AttnArgs a) {
     rp[c][0] = (h16)sR[q16][2 * c];
     rp[c][1] = (h16)sR[q16][2 * c + 1];
   }
-  const int posq = (q16 < NR) ? a.pos[q16 / 3] : -1;
+  const int posq = (q16 < nr) ? a.pos[q16 / 3] : -1;
 
   float m = -INFINITY, l = 0.f;
   float acc[NR][4];
@@ -1974,10 +2045,15 @@ __global__ __launch_bounds__(NW * 32) void attn_decode_rows(AttnArgs a) {
 #pragma unroll
     for (int k = 0; k < 16; k++) {
       float2 v01 = h2_to_f2(vr[k].x), v23 = h2_to_f2(vr[k].y);
-      float p[NR];
+      float p[(NR + 3) / 4 * 4];
 #pragma unroll
-      for (int r = 0; r < NR; r++)
-        p[r] = sP[w][k][r];
+      for (int r4 = 0; r4 < (NR + 3) / 4; r4++) {
+        const float4 t4 = *(const float4*)&sP[w][k][4 * r4];
+        p[4 * r4] = t4.x;
+        p[4 * r4 + 1] = t4.y;
+        p[4 * r4 + 2] = t4.z;
+        p[4 * r4 + 3] = t4.w;
+      }
 #pragma unroll
       for (int r = 0; r < NR; r++) {
         acc[r][0] = fmaf(p[r], v01.x, acc[r][0]);
@@ -1999,7 +2075,7 @@ __global__ __launch_bounds__(NW * 32) void attn_decode_rows(AttnArgs a) {
         make_float4(acc[r][0], acc[r][1], acc[r][2], acc[r][3]);
   __syncthreads();
   const size_t base = ((size_t)split * NKV + kvh) * 12;
-  for (int idx = tid; idx < NR * HD; idx += NW * 32) {
+  for (int idx = tid; idx < nr * HD; idx += NW * 32) {
     const int r = idx / HD, dim = idx % HD;
     float* ws_o = a.ws_o + (size_t)(r / 3) * a.ws_tok * 128;
     float M = -INFINITY;
@@ -2014,7 +2090,7 @@ __global__ __launch_bounds__(NW * 32) void attn_decode_rows(AttnArgs a) {
     }
     ws_o[(base + r % 3) * HD + dim] = o;
   }
-  if (tid < NR) {
+  if (tid < nr) {
     float* ws_m = a.ws_m + (size_t)(tid / 3) * a.ws_tok;
     float* ws_l = a.ws_l + (size_t)(tid / 3) * a.ws_tok;
     float M = -INFINITY;
@@ -3126,9 +3202,18 @@ void ProjMulti(hipStream_t s, const ProjSpec& p, const float* x, int ni,
     constexpr int RPB = BW * (WS / LPR) * NIT;
     mp.ntb = (trows_total + BW - 1) / BW;
     const dim3 grid((cum + RPB - 1) / RPB + mp.ntb);
+    // several inputs: blocks of one input each when every change of input
+    // falls on a block boundary
+    bool one_input_blocks = ni > 1;
+    for (int i = 1; i < mp.n; ++i)
+      if (mp.in[i] != mp.in[i - 1] && mp.cum[i] % RPB != 0)
+        one_input_blocks = false;
     if (nb == 1) {
       if (ni == 1)
         k_gemv_multi<2304, LPR, NIT, BW, 1>
+            <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
+      else if (one_input_blocks)
+        k_gemv_multi1<2304, LPR, NIT, BW, 1>
             <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
       else
         k_gemv_multi<2304, LPR, NIT, BW, 3>
@@ -3159,18 +3244,43 @@ void ProjMulti(hipStream_t s, const ProjSpec& p, const float* x, int ni,
           k_gemv_multi<2304, LPR, NIT, BW, 1, 7>
               <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
           break;
-        default: {
-          // eight: two launches of four (the eight-token instance needs so
-          // much scratch that every launch stalls)
-          MultiP mp2 = mp;
-          for (int i = 0; i < mp2.tn; ++i)
-            mp2.ty[i] += 4 * (size_t)mp2.tys[i];
-          k_gemv_multi<2304, LPR, NIT, BW, 1, 4>
+        default:
+          k_gemv_multi<2304, LPR, NIT, BW, 1, 8>
               <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
-          k_gemv_multi<2304, LPR, NIT, BW, 1, 4><<<grid, BW * WS, 0, s>>>(
-              mp2, x + 4 * (size_t)ldx, y + 4 * (size_t)ldy, cum);
           break;
+      }
+    } else if (one_input_blocks) {
+      // up to 5 tokens in one launch; 6 to 8 as two halves (more tokens fill
+      // the LDS and leave one block per CU)
+      auto launch = [&](int n, const float* xx, float* yy, const MultiP& m) {
+        switch (n) {
+          case 2:
+            k_gemv_multi1<2304, LPR, NIT, BW, 2>
+                <<<grid, BW * WS, 0, s>>>(m, xx, yy, cum);
+            break;
+          case 3:
+            k_gemv_multi1<2304, LPR, NIT, BW, 3>
+                <<<grid, BW * WS, 0, s>>>(m, xx, yy, cum);
+            break;
+          case 4:
+            k_gemv_multi1<2304, LPR, NIT, BW, 4>
+                <<<grid, BW * WS, 0, s>>>(m, xx, yy, cum);
+            break;
+          default:
+            k_gemv_multi1<2304, LPR, NIT, BW, 5>
+                <<<grid, BW * WS, 0, s>>>(m, xx, yy, cum);
+            break;
         }
+      };
+      if (nb <= 5) {
+        launch(nb, x, y, mp);
+      } else {
+        const int h = (nb + 1) / 2;
+        MultiP mp2 = mp;
+        for (int i = 0; i < mp2.tn; ++i)
+          mp2.ty[i] += h * (size_t)mp2.tys[i];
+        launch(h, x, y, mp);
+        launch(nb - h, x + h * (size_t)ldx, y + h * (size_t)ldy, mp2);
       }
     } else if (nb > 4) {
       // three inputs per token: groups of three rows (and a last group of one
@@ -3392,42 +3502,26 @@ void AttnDecode(hipStream_t s, const AttnArgs& a, int nb) {
   ia::decode_reduce<<<dim3(24, 1, nb), 128, 0, s>>>(a);
   Chk("attn_decode");
 }
-void AttnDecodeRows(hipStream_t s, const AttnArgs& a, int nb) {
-  const dim3 grid(8, a.nsplit, 1);
-  // up to 5 rows (15 query slots of 16) per launch: 6 to 8 rows as two groups
-  auto launch = [&](const AttnArgs& g, int n) {
-    switch (n) {
-      case 1:
-        ia::attn_decode<4><<<dim3(8, g.nsplit, 1), 128, 0, s>>>(g);
-        break;
-      case 2:
-        ia::attn_decode_rows<4, 2><<<grid, 128, 0, s>>>(g);
-        break;
-      case 3:
-        ia::attn_decode_rows<4, 3><<<grid, 128, 0, s>>>(g);
-        break;
-      case 4:
-        ia::attn_decode_rows<4, 4><<<grid, 128, 0, s>>>(g);
-        break;
-      default:
-        ia::attn_decode_rows<4, 5><<<grid, 128, 0, s>>>(g);
-        break;
-    }
-  };
-  if (nb <= 5) {
-    launch(a, nb);
-  } else {
-    const int first = (nb + 1) / 2;
-    launch(a, first);
-    AttnArgs b = a;
-    b.q += (size_t)first * a.ldp;
-    b.r += (size_t)first * a.ldp;
-    b.pos += first;
-    b.slot += (size_t)first * 48;
-    b.ws_o += (size_t)first * a.ws_tok * 128;
-    b.ws_m += (size_t)first * a.ws_tok;
-    b.ws_l += (size_t)first * a.ws_tok;
-    launch(b, nb - first);
+void AttnDecodeRows(hipStream_t s, const AttnArgs& a0, int nb) {
+  AttnArgs a = a0;
+  a.nrows = nb;
+  // up to 5 rows (15 of the 16 query slots) per block; 6 to 8 rows as two
+  // groups in the same launch
+  const int groups = nb <= 5 ? 1 : 2, per = (nb + groups - 1) / groups;
+  const dim3 grid(8 * groups, a.nsplit, 1);
+  switch (per) {
+    case 2:
+      ia::attn_decode_rows<4, 2><<<grid, 128, 0, s>>>(a);
+      break;
+    case 3:
+      ia::attn_decode_rows<4, 3><<<grid, 128, 0, s>>>(a);
+      break;
+    case 4:
+      ia::attn_decode_rows<4, 4><<<grid, 128, 0, s>>>(a);
+      break;
+    default:
+      ia::attn_decode_rows<4, 5><<<grid, 128, 0, s>>>(a);
+      break;
   }
   ia::decode_reduce<<<dim3(24, 1, nb), 128, 0, s>>>(a);
   Chk("attn_decode_rows");

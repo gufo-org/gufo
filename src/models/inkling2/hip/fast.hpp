@@ -207,6 +207,7 @@ struct AttnArgs {
   int ldp = 0;     // token stride of q / r / gate (decode batches); out is
                    // [nb][3072], sink [nb][24]
   int ws_tok = 0;  // token stride of ws_m / ws_l (floats); ws_o is ws_tok * 128
+  int nrows = 0;   // attn_decode_rows: rows of the step (groups of NB per z)
 };
 void AttnDecode(hipStream_t s, const AttnArgs& a, int nb = 1);
 /// AttnDecode of nb (2 to 4) rows of one session at consecutive positions
