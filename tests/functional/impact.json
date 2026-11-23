@@ -58,6 +58,11 @@
       "mode": "dspark",
       "vision": false
     },
+    "inkling-2-mini/dspark": {
+      "model": "inkling-2-mini",
+      "mode": "dspark",
+      "vision": true
+    },
     "inkling-2-mini/off": {
       "model": "inkling-2-mini",
       "mode": "off",
@@ -1643,7 +1648,8 @@
       ],
       "priority": 10,
       "profiles": [
-        "inkling-2-mini/off"
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "*"
