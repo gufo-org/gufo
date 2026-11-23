@@ -156,12 +156,13 @@ struct Engine::Impl {
   hipStream_t dps = nullptr;
   hipEvent_t ev_pf = nullptr, ev_pfj = nullptr;
   bool pf_open = false;
-  void Prefetch(const void* p, std::size_t bytes) {
-    if (bytes == 0)
+  void Prefetch(const void* p, std::size_t bytes, const void* p2 = nullptr,
+                std::size_t bytes2 = 0) {
+    if (bytes + bytes2 == 0)
       return;
     Check(hipEventRecord(ev_pf, ds), "prefetch fork");
     Check(hipStreamWaitEvent(dps, ev_pf, 0), "prefetch fork");
-    fs::Touch(dps, p, bytes, kPrefetchBlocks);
+    fs::Touch(dps, p, bytes, kPrefetchBlocks, p2, bytes2);
     pf_open = true;
   }
   void PrefetchJoin() {
@@ -1352,8 +1353,11 @@ struct Engine::Impl {
       }
     }
 
-    if (F.oproj)  // the output projection, read during the attention
-      Prefetch(D(L.attn_output), L.attn_output.size_bytes);
+    if (F.oproj)  // the output projection and the router, read during the
+                  // attention
+      Prefetch(D(L.attn_output), L.attn_output.size_bytes,
+               ctl_half ? HW(L.ffn_gate_inp) : nullptr,
+               ctl_half ? L.ffn_gate_inp.size_bytes / 2 : 0);
     // C. conv + clip + KV write (in the attention launch for distinct
     // sessions' rows)
     fs::KvPrepArgs ka{};
