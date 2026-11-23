@@ -3223,6 +3223,43 @@ void TestSnapshotDoesNotBlockOtherRequests() {
   }
 }
 
+// A speculative runner that batches only plain advances defers a published
+// token while its snapshot captures. When that request later decodes alone,
+// the multi-token step must advance the deferred token first instead of
+// failing with a pending token.
+void TestDeferredAdvanceResumesMultiTokenDecode() {
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 4096;
+  control->multi_token_decode = true;
+  control->batched_multi_token_decode = false;
+  control->supports_batched_advance = true;
+  control->block_prefill_label = 1;
+  std::binary_semaphore entered(0), release(0);
+  std::atomic<unsigned> captures{0};
+  control->snapshot_callback = [&] {
+    if (captures.fetch_add(1) == 0) {
+      entered.release();
+      release.acquire();
+    }
+  };
+  auto scheduler = MakeScheduler(control, 2, 2);
+  auto first = scheduler->Submit({1, 10}, 7, 0.0F);
+  control->WaitForPrefill(1);
+  auto second = scheduler->Submit({2, 20}, 2, 0.0F);
+  control->ReleasePrefill();
+  const bool started = entered.try_acquire_for(kTestTimeout);
+  // The peer finishes while the first request still captures, so the first
+  // returns to decoding alone with its published token not yet advanced.
+  const auto second_result = second.Wait();
+  release.release();
+  Expect(started, "the first capture starts");
+  Expect(second_result.tokens == ExpectedTokens(2, 2),
+         "peer finishes during the capture");
+  const auto first_result = first.Wait();
+  Expect(first_result.tokens == ExpectedTokens(1, 7),
+         "deferred advance resumes multi-token decode exactly");
+}
+
 // A restore's copies run beside a running decoder instead of stopping it, but
 // only where they run on a copy engine: without one they would wait behind
 // decode work, so the restore stops the decoder as before. A restore shorter
@@ -4366,6 +4403,7 @@ int main() {
   TestCapturesAtCapacityAllowQueuedProgress();
   TestShutdownCancelsRunnerAcquisition();
   TestSnapshotDoesNotBlockOtherRequests();
+  TestDeferredAdvanceResumesMultiTokenDecode();
   TestFirstTokenPrecedesSnapshotAndPreservesBudget();
   TestIdlePrefillUsesBulkWorkUnit();
   TestConcurrentSharedPrefixesPrefillOnce();
