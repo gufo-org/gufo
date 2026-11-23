@@ -30,10 +30,21 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/models/qwen38_flash_next/stages.hpp"
+
+namespace gufo::models::qwen38_flash_next::rocm {
+class Executor;
+}  // namespace gufo::models::qwen38_flash_next::rocm
+
+namespace gufo::ext::qwen::flash_next {
+/// The executor behind DefaultStages.
+struct DefaultStagesImpl {
+  const models::qwen38_flash_next::rocm::Executor* executor{nullptr};
+};
+}  // namespace gufo::ext::qwen::flash_next
 
 namespace gufo::models::qwen38_flash_next::rocm {
 
-class Executor;
 class SnapshotAllocator;
 struct ArgmaxCandidate;
 struct SnapshotHeader;
@@ -152,6 +163,8 @@ private:
   friend struct ExecutorTestAccess;  // eager/replay checks in GPU tests
   friend struct PrefillCheckpoint;
   friend class gufo::models::qwen38_flash_next::ContinuationAdapter;
+  friend struct ext::qwen::flash_next::AttentionArgs;
+  friend struct ext::qwen::flash_next::LinearAttentionArgs;
   Session() = default;
 
   struct LinearState {
@@ -300,6 +313,9 @@ public:
     /// Largest session context. Zero selects the native context; values
     /// above it require YaRN (Config::MaxContextLength()).
     std::uint32_t max_context{0};
+    /// Per-layer stages (stages.hpp); null runs the GGUF defaults. Must
+    /// outlive the executor.
+    ext::qwen::flash_next::Stages* stages{nullptr};
   };
 
   ~Executor();
@@ -607,6 +623,7 @@ public:
 
 private:
   friend struct ExecutorTestAccess;  // capture failure injection in GPU tests
+  friend class ext::qwen::flash_next::DefaultStages;
   Executor() = default;
 
   /// One session's state as the core allocates it (mem::SessionState), and
@@ -683,6 +700,8 @@ private:
   /// Reads the routing of the current batch back and derives the tile
   /// hints for its expert GEMMs (tiled batches only).
   bool RouteHints(std::uint32_t n_tokens, std::string* error_msg) const;
+  /// The host wait of RouteHints alone (expert counts of a wide pass).
+  bool WaitCounts(std::uint32_t n_tokens, std::string* error_msg) const;
   /// Routed gate/up projections followed by SwiGLU.
   bool GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
                     const float* x, const std::int32_t* ids, float* out,
@@ -730,12 +749,21 @@ private:
            bool speculative, std::string* error_msg,
            bool embeddings_ready = false,
            std::span<PrefillCheckpoint* const> checkpoints = {}) const;
+  /// The LinearAttention stage (stages_); DefaultLinearAttention is its
+  /// GGUF default.
   bool LinearAttention(const DeviceLayer& l, Session::LinearState& s,
                        const float* x, float* out, std::uint32_t n_tokens,
                        bool speculative, std::string* error_msg,
                        bool projections_ready = false,
                        bool project_output = true,
                        GdnCheckpoint checkpoint = {}) const;
+  bool DefaultLinearAttention(const DeviceLayer& l, Session::LinearState& s,
+                              const float* x, float* out,
+                              std::uint32_t n_tokens, bool speculative,
+                              std::string* error_msg, bool projections_ready,
+                              bool project_output,
+                              GdnCheckpoint checkpoint) const;
+  /// The Attention stage (stages_); DefaultAttention is its GGUF default.
   /// `pos`/`first_block` are device values; `start_pos` and `pool_grid`
   /// are their host-side counterparts for the eager-only decisions.
   bool Attention(const DeviceLayer& l, Session::AttentionState& s,
@@ -746,11 +774,34 @@ private:
                  bool last_only = false, bool projections_ready = false,
                  bool project_output = true,
                  PassCheckpoints checkpoints = {}) const;
+  bool DefaultAttention(const DeviceLayer& l, Session::AttentionState& s,
+                        const float* x, float* out, std::uint32_t n_tokens,
+                        const std::uint32_t* pos,
+                        const std::uint32_t* first_block,
+                        std::uint32_t start_pos, std::uint32_t pool_grid,
+                        std::uint32_t max_context, bool sparse,
+                        std::string* error_msg, bool last_only,
+                        bool projections_ready, bool project_output,
+                        PassCheckpoints checkpoints) const;
   /// Orders the main stream after the work queued on side_stream_.
   bool JoinSide(std::string* error_msg) const;
+  /// Routing, then the MoeFfn stage (stages_).
   bool Moe(const DeviceLayer& l, const float* x, float* out,
            std::uint32_t n_tokens, std::string* error_msg,
            bool last_only = false) const;
+  /// The GGUF MoeFfn: shared expert (overlapped when routing.overlap),
+  /// routed experts and epilogue.
+  bool DefaultMoeFfn(const DeviceLayer& l,
+                     const ext::qwen::flash_next::MoeRouting& routing,
+                     const float* x, float* out, std::uint32_t n_tokens,
+                     std::string* error_msg) const;
+  /// The shared expert's rows into s_.shexp_out, on stream_.
+  bool SharedExpertRows(const DeviceLayer& l, const float* x,
+                        std::uint32_t n_tokens, std::string* error_msg) const;
+  /// The MoE epilogue into `out` (MoeExperts' tail): F16 down rows leave it
+  /// to the following combine when `out` is s_.block_out.
+  void MoeEpilogueRows(float* out, std::uint32_t n_tokens,
+                       bool half_down) const;
   /// Whether MoeExperts takes the routed F16 WMMA route, whose epilogue the
   /// following combine absorbs (see Moe).
   bool WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const;
@@ -777,6 +828,9 @@ private:
   bool MtpHead(const DeviceMixer& head, const float* res, bool token,
                bool candidates, const Session* draft,
                std::string* error_msg) const;
+  bool DefaultMtpHead(const DeviceMixer& head, const float* res, bool token,
+                      bool candidates, const Session* draft,
+                      std::string* error_msg) const;
   /// Enqueues one trunk batch (control and token upload through logits).
   bool ForwardBody(Session& session, std::uint32_t n, std::uint32_t n_logits,
                    bool download_logits, bool speculative, bool sparse,
@@ -819,6 +873,34 @@ private:
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
   Options options_;
+
+  // Stages (stages.hpp). GGUF projections never reach them; tensors with a
+  // format_state go through Linear / LinearGroup.
+  ext::qwen::flash_next::Stages* stages_{nullptr};
+  ext::qwen::flash_next::DefaultStagesImpl stage_impl_{};
+  ext::qwen::flash_next::DefaultStages stage_defaults_{&stage_impl_};
+  void* stage_scratch_{nullptr};
+  std::vector<ext::qwen::flash_next::Layer> stage_layers_;
+  /// Stages::Hooks() has kPromptLayers: prompt passes run prompt_layers_.
+  bool prompt_layer_hook_{false};
+  mutable std::vector<DeviceLayer> prompt_layers_;
+  /// The handle stages see of `l` (a trunk layer, its prompt view, or the
+  /// draft block).
+  [[nodiscard]] ext::qwen::flash_next::Layer LayerHandle(
+      const DeviceLayer& l) const noexcept;
+  [[nodiscard]] ext::qwen::flash_next::StageContext StageCtx(
+      const DeviceLayer* l, std::uint32_t n_tokens,
+      std::string* error_msg) const noexcept;
+  /// Linear / LinearGroup stage calls for tensors with a format_state.
+  bool StageLinear(const DeviceTensor& w,
+                   const ext::qwen::flash_next::LinearInput& in, float* out,
+                   std::uint32_t n_tokens, std::string* error_msg) const;
+  bool StageGroup(std::span<const ext::qwen::flash_next::LinearJob> jobs,
+                  const ext::qwen::flash_next::LinearInput& in,
+                  std::uint32_t n_tokens, std::string* error_msg) const;
+  /// kPromptLayers: the layer prompt pass rows of layer `il` run on.
+  bool PromptLayer(std::uint32_t il, std::uint32_t n_tokens,
+                   const DeviceLayer** layer, std::string* error_msg) const;
   [[nodiscard]] std::shared_ptr<SnapshotAllocator> GetSnapshotAllocator() const;
   mutable std::once_flag snapshot_allocator_once_;
   mutable std::shared_ptr<SnapshotAllocator> snapshot_allocator_;
@@ -1069,6 +1151,7 @@ private:
   std::int32_t* tokens_host_{nullptr};
   std::uint32_t* counts_host_{nullptr};
   std::int32_t* tiles_host_{nullptr};           ///< routed tile map staging
+  std::size_t tiles_host_capacity_{0};          ///< entries of tiles_host_
   mutable std::uint32_t routed_max_rows_{0};    ///< 0 = no readback yet
   mutable std::uint32_t routed_n_tiles_{0};     ///< routed_tile_rows_ tiles
   mutable std::uint32_t routed_wide_tiles_{0};  ///< prefill 128-row tiles
@@ -1143,5 +1226,73 @@ private:
 };
 
 }  // namespace gufo::models::qwen38_flash_next::rocm
+
+namespace gufo::ext::qwen::flash_next {
+
+/// Layer and LayerEdit over device layers.
+struct LayerAccess {
+  [[nodiscard]] static Layer Make(
+      const models::qwen38_flash_next::rocm::DeviceLayer* layer,
+      std::uint32_t index) noexcept {
+    Layer handle;
+    handle.impl_ = layer;
+    handle.index_ = index;
+    return handle;
+  }
+  [[nodiscard]] static LayerEdit MakeEdit(
+      models::qwen38_flash_next::rocm::DeviceLayer* layer,
+      std::uint32_t index) noexcept {
+    LayerEdit edit;
+    edit.impl_ = layer;
+    edit.index_ = index;
+    return edit;
+  }
+  [[nodiscard]] static const models::qwen38_flash_next::rocm::DeviceLayer&
+  Device(const Layer& layer) noexcept {
+    return *static_cast<const models::qwen38_flash_next::rocm::DeviceLayer*>(
+        layer.impl_);
+  }
+  [[nodiscard]] static models::qwen38_flash_next::rocm::DeviceLayer& Device(
+      const LayerEdit& edit) noexcept {
+    return *static_cast<models::qwen38_flash_next::rocm::DeviceLayer*>(
+        edit.impl_);
+  }
+};
+
+struct AttentionArgs {
+  using Session = models::qwen38_flash_next::rocm::Session;
+  Session::AttentionState& state;
+  std::uint32_t n_tokens;
+  const std::uint32_t* pos;
+  const std::uint32_t* first_block;
+  std::uint32_t start_pos;
+  std::uint32_t pool_grid;
+  std::uint32_t max_context;
+  bool sparse;
+  bool last_only;
+  bool projections_ready;
+  bool project_output;
+  models::qwen38_flash_next::rocm::PassCheckpoints checkpoints;
+};
+
+struct LinearAttentionArgs {
+  using Session = models::qwen38_flash_next::rocm::Session;
+  Session::LinearState& state;
+  std::uint32_t n_tokens;
+  bool speculative;
+  bool projections_ready;
+  bool project_output;
+  models::qwen38_flash_next::rocm::GdnCheckpoint checkpoint;
+};
+
+struct MtpHeadArgs {
+  const models::qwen38_flash_next::rocm::DeviceMixer& head;
+  const float* res;
+  bool token;
+  bool candidates;
+  const models::qwen38_flash_next::rocm::Session* draft;
+};
+
+}  // namespace gufo::ext::qwen::flash_next
 
 #endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_KERNELS_ROCM_EXECUTOR_HPP_
