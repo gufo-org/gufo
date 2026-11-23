@@ -70,13 +70,15 @@ memory fragments), then keeps 256-512 free pages. It never holds more free
 pages than regions may still map.
 
 Creating a 2 MiB page with a few GiB free forces compaction, and compaction
-that touches GPU-visible pages evicts all of the process's GPU queues. So
-while serving, the pool makes pages only from free 2 MiB blocks
-(`/proc/buddyinfo`) above the **free floor** (see the RAM cache section).
-Below it, it borrows pages from the RAM cache first. It makes pages by reclaim
-only when there is nothing to borrow and writers would otherwise make them on
-their own threads, and never while `MemAvailable` is below the **background
-floor** (one sixteenth of RAM, 4-8 GiB).
+that touches GPU-visible pages evicts all of the process's GPU queues. So the
+pool makes pages only from free 2 MiB blocks (`/proc/buddyinfo`) above the
+**free floor** (see the RAM cache section), and never by reclaim: `MemAvailable`
+counts the page cache, which holds the files a model reads every token. Below
+the floor, it borrows pages from the RAM cache first; writers that still find
+it empty make their own pages. Warm-up pages beyond the 512 free pages need
+twice the free floor: a model that leaves 25 GB of a 128 GiB host free gets
+almost none, since an 8 GiB warm-up there kept serving under memory pressure
+(PSI full 28%) and compaction.
 
 A page recycled from a released region is zeroed before reuse, as new pages
 are: tile reads masked past a frontier must never meet NaN patterns.

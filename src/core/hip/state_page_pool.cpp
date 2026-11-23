@@ -108,23 +108,16 @@ std::shared_ptr<PagePool> PagePool::ForDevice(int device) {
     (*unsupported)[device] = true;
     return nullptr;
   }
-  const auto memory = platform::QueryHostMemory();
-  auto pool = std::make_shared<PagePool>(
-      device,
-      [](std::uint64_t bytes) { return CanCreatePagesWithoutReclaim(bytes); },
-      [] { return HostAvailableBytes(); },
-      BackgroundFloorBytes(memory ? memory->total_bytes : 0));
+  auto pool = std::make_shared<PagePool>(device, [](std::uint64_t bytes) {
+    return CanCreatePagesWithoutReclaim(bytes);
+  });
   (*pools)[device] = pool;
   return pool;
 }
 
-PagePool::PagePool(int device, std::function<bool(std::uint64_t)> may_create,
-                   std::function<std::uint64_t()> host_available,
-                   std::uint64_t floor_bytes)
+PagePool::PagePool(int device, std::function<bool(std::uint64_t)> may_create)
     : device_(device),
       may_create_(std::move(may_create)),
-      host_available_(std::move(host_available)),
-      floor_bytes_(floor_bytes),
       prop_(DeviceProp(device)) {
   // Lend only where borrowed pages do not compete for a GPU heap smaller
   // than host memory; otherwise the cache keeps pinned host pages, as
@@ -244,8 +237,12 @@ bool PagePool::AcquireForLender(hipMemGenericAllocationHandle_t* handle,
   // Always a new page: the free pages are the regions' working set, and a
   // restore right after load that found them gone made its pages on the
   // scheduler thread (+40 ms for 3,143 Qwen 27B rows).
-  if (!may_create_(kPageBytes) &&
-      !(may_reclaim && host_available_() >= floor_bytes_ + kPageBytes))
+  // Never from reclaim: MemAvailable counts the page cache, which on a
+  // near-full host holds the files the model reads every token (pages made
+  // past it at load evicted 18 GB of cache and stalled compaction 1,800
+  // times). `may_reclaim` no longer widens this.
+  (void)may_reclaim;
+  if (!may_create_(kPageBytes))
     return false;
   return CreatePage(handle);
 }
@@ -542,8 +539,13 @@ void PagePool::Run() {
     }
     if (free_.size() + recycled_.size() < TargetFreePages()) {
       // Free 2 MiB blocks first: a page made from them costs no reclaim.
-      bool create = may_create_(kPageBytes);
+      // Warm-up pages past the high watermark also leave the free floor
+      // free a second time: on a 128 GiB host whose model left 25 GB free,
+      // an 8 GiB warm-up from free blocks alone brought memory pressure
+      // (PSI full 28%) and compaction stalls into serving.
       const std::size_t free = free_.size() + recycled_.size();
+      bool create = may_create_(
+          free >= kHighPages ? kPageBytes + HostFreeFloorBytes() : kPageBytes);
       if (!create && free < kLowPages) {
         // Otherwise take pages the RAM cache borrowed from the promised
         // state: a map, no new memory. Only up to the low watermark: pages
@@ -557,12 +559,8 @@ void PagePool::Run() {
         if (borrowed || free_.size() + recycled_.size() > free)
           continue;
       }
-      // Pages from reclaim (possibly compaction) only for the warm-up at
-      // load, or when writers would otherwise make them on their own
-      // threads, and never below the floor of MemAvailable.
-      if (!create)
-        create = (warm_bytes_ > 0 || free < kLowPages) &&
-                 host_available_() >= floor_bytes_ + kPageBytes;
+      // Never pages from reclaim (see AcquireForLender): writers that find
+      // the pool empty make their own, as without a pool.
       if (!create) {
         // Writers take pooled or on-demand pages. Look again once memory
         // may have freed.
