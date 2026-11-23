@@ -284,8 +284,19 @@ share one weight pass.
 | K/V preparation and the split reduction inside the decode attention launch; the controllers' norm inside their apply launch (649 → 505 launches per token) | 21.76 | 41.73 | 66.1 |
 | A norm's nine loads per thread issued together (explicit FMAs keep each sum) | 21.65 | | |
 | 16-wave blocks for GEMVs of 4+ rows (their quantized inputs fill a CU's LDS, so 8-wave blocks left one block per CU) | | 41.78 | 64.6 |
+| A visit's q (7.5 MB) read on a side stream while its inputs are mixed, its output projection and router while it attends (20 blocks; the DRAM is mostly idle during those latency-bound kernels, and the GEMVs then find the weights in the last-level cache) | 20.68 | 40.83 | 63.9 |
 
-Verification of 6 / 8 rows of one session: 46.1 / 57.5 → 45.1 / 55.9 ms.
+Verification of 2 / 4 / 6 / 8 rows of one session: 27.3 / 35.9 / 46.1 /
+57.5 → 26.2 / 35.1 / 45.1 / 54.5 ms. Decode after 4,096 / 16,384 / 32,000
+tokens: 23.18 / 25.11 / 27.49 → 22.10 / 24.11 / 26.58 ms per token (at 32K
+the eight global visits read about 1 GB of K/V per token, near the DRAM
+ceiling).
+
+Prefetch variants (decode step at ctx 64): more of the projections (q and
+part of gate) 20.79 → 20.82–21.20 ms; 40 / 80 / 160 blocks instead of 20
+21.29 / 21.53 / 21.66; the controllers' weights before q 21.16; the next
+visit's q beside this visit's experts 21.25 (competes with, or is evicted
+by, the expert stream).
 
 ### Drafting
 
@@ -311,10 +322,10 @@ builds, AR and DSpark, and C:
 
 | C | AR before | AR after | DSpark before | DSpark after |
 | --- | --- | --- | --- | --- |
-| 1 | 45.6 | 45.8 | 67.9 | 69.9 |
-| 2 | 62.0 | 62.8 | 67.0 | 69.9 |
-| 4 | 86.1 | 86.7 | 84.3 | 87.4 |
-| 8 | 87.2 | 112.2 | 90.3 | 110.7 |
+| 1 | 45.6 | 48.1 | 67.9 | 71.8 |
+| 2 | 62.0 | 66.6 (65.5–68.3, three runs) | 67.0 | 71.0 |
+| 4 | 86.1 | 87.9 | 84.3 | 89.1 |
+| 8 | 87.2 | 112.4 | 90.3 | 111.1 |
 
 At C = 8 the step is bound by expert weights: the MoE kernels take 70% of it
 and stream about 250 GB/s over the 50 or so distinct experts its 64
@@ -324,7 +335,7 @@ verification row costs about 4.7 ms (the experts it adds) and survives about
 the plain eight-row step, so the policy does not draft at C = 8 and DSpark
 trails AR by the context injection (about 1.4%).
 
-Where a C = 1 step goes now (21.5 ms span): weight GEMVs about 16.8 ms at
+Where a C = 1 step went before the prefetch (21.5 ms span): weight GEMVs about 16.8 ms at
 86–98% of the DRAM ceiling, 505 launches of which the latency-bound small
 kernels (mixes, attention, router, controllers) take about 3.6 ms and the
 launch gaps about 1 ms. A C = 1 DSpark cycle (36.5 ms at three rows) keeps
