@@ -51,6 +51,32 @@ against the build they modified. Every variant was exact unless noted.
 | Router and loop-controller decode copies in F16 (the extension's choice) | changes 100% / 99% of the values; KL against llama.cpp CPU 1.416e-3 vs 1.451e-3 with exact BF16, the same within noise; kept BF16 |
 | Fused MoE tail with the compiler free to contract `cur + (x + y) * scale` | not byte-identical (one FMA instead of two roundings); contraction turned off |
 
+## Ideas from another Inkling port (mikealanni/gufo, 2026-11-23)
+
+That port's plain decode is 29.7 ms per step (here 22) and its 2K prefill 1,692
+tokens/s (here 2,210); its notes say greedy speculation can differ from plain
+decoding near ties. Of its retained ideas, these are exact and were taken or
+were already here:
+
+| Idea | Here |
+| --- | --- |
+| Confidence-gated draft width up to 7 | taken: verification up to 8 rows (coding +5% greedy) |
+| Proposal vocabulary ranked by `markov_w1` row norms | already (65,536 rows, Q8_0) |
+| Device argmax per verify row, lazy logits | already |
+| Packed few-row attention per KV group | already for global visits (`attn_decode_rows`) |
+| Skip drafter work after the first weak slot | already (the width policy's early stop) |
+
+Not exact, so not taken: expert layers 20 to 23 converted from Q8_0 to NVFP4 at
+load (KL 0.0013), expert pruning for few-row steps, block-sparse attention
+from 32K, int8 decode activations shared across projections, NPU block-float
+projections in prefill. Larger prefill batches (4,096) change the chunking the
+byte comparison is defined on.
+
+Open: every multi-row instance of the projection GEMV (`k_gemv_multi`, NB 2 to
+8) reaches 256 VGPRs and spills (232 to 3,672 bytes per lane); the lane split
+(LPR 16) cannot change without changing the rows' reduction order, so a fix
+has to restructure the unit loop.
+
 ## Not exact, not taken
 
 Ideas that would change the arithmetic and therefore the logits; each needs

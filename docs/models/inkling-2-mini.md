@@ -32,7 +32,7 @@ takes 32 KiB per token and is mapped only as a conversation grows.
 | Mode | Options | What happens |
 | --- | --- | --- |
 | AR | none | The model produces one token per step. |
-| DSpark | `--dspark-model PATH` | The model's own drafter proposes up to three tokens; one step checks them and keeps those the model agrees with. |
+| DSpark | `--dspark-model PATH` | The model's own drafter proposes up to seven tokens (fewer when it is unsure); one step checks them and keeps those the model agrees with. |
 
 `gufo model install` fetches the DSpark file, so `--model inkling-2-mini`
 decodes with DSpark. DSpark returns exactly the tokens AR returns, for greedy

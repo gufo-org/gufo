@@ -58,8 +58,13 @@ and `THIRD_PARTY.md` carry its license and attributions. Changes made here:
   (instead of the LM head of each term), and proposals come from the 65,536
   LM-head rows with the largest `markov_w1` norms (a Q8_0 copy, 160 MB per
   step instead of 490 MB; the acceptance counts did not change).
-- **Verification.** `Engine::Verify` evaluates the anchor and up to three
-  proposals of one session in one batched-decode graph. Every row has the
+- **Verification.** `Engine::Verify` evaluates the anchor and up to seven
+  proposals of one session in one batched-decode graph (decode steps are 8
+  rows wide; batches of sessions stay at 4). On global visits up to five rows
+  share one attention launch (15 of its 16 query slots), more run as two
+  groups; the three-input projections run in groups of three rows, and eight
+  single-input rows as two launches of four (the eight-row instance spills
+  enough scratch to stall every launch). Every row has the
   arithmetic of a one-token decode at its position: the conv kernels read the
   history of rows 0..b-1 from the step itself (the stored history before row
   0), write no history, and capture their inputs; `CommitVerify` sets each
@@ -116,5 +121,5 @@ single-session decode.
 | `inkling2_cache_test --model GGUF --ids IDS` | GPU: checkpoint capture and restore, restore into a used slot, layered prefill; all bit-exact |
 | `inkling2_oracle` | Teacher-forced dumps; `tests/oracle/compare_dumps.py` scores KL and top-1 against a reference dump |
 | `tests/oracle/llama_dump.cpp` | The llama.cpp side of the same dump (CPU backend, or `NGL` layers on the GPU) |
-| `inkling2_spec_test --model GGUF [--dspark DRAFT]` | GPU: verification rows of 2 to 4 tokens (one proposal corrupted per step) byte-identical to one-token decoding, and greedy DSpark decoding equal to plain decoding |
+| `inkling2_spec_test --model GGUF [--dspark DRAFT]` | GPU: verification rows of 2 to 8 tokens (one proposal corrupted per step) byte-identical to one-token decoding, and greedy DSpark decoding equal to plain decoding |
 | `inkling2_bench` | Prefill and decode speed, batched decode, `--verify`; `--spec R` verification timing, `--dspark` speculative speed, acceptance and calibration |

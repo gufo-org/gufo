@@ -149,3 +149,29 @@ one-row kernel's: `inkling2_spec_test` and `--spec` report 0 mismatched rows.
 | R = 2, ctx 64 / 4,000 / 32,000 | 27.7 / 29.5 / 38.2 ms | 27.8 / 29.4 / 34.6 ms |
 | R = 4, ctx 64 / 4,000 / 32,000 | 37.5 / 39.8 / 57.7 ms | 37.5 / 39.4 / 43.6 ms |
 | DSpark depth 3, ctx 32,000 (AR 36.1 tok/s) | 34.8 tok/s | 44.2 tok/s |
+
+### Wider verification (up to seven drafts)
+
+The drafter's block holds seven proposals; the width policy now chooses among
+all of them (the same expected-tokens-per-cost rule, verify costs below as its
+prior). Every row is still exact (`inkling2_spec_test`: 0 mismatched rows for
+2 to 8 rows).
+
+| `inkling2_bench --spec` rows | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| ctx 64 (ms) | 27.7 | 32.9 | 37.6 | 43.1 | 47.8 | 53.6 | 58.9 |
+| ctx 32,000 (ms) | 34.6 | | 43.8 | 50.2 | 60.6 | 66.7 | 77.0 (before the 4 + 4 split) |
+
+Over HTTP (one session, all responses byte-identical to plain decoding):
+
+| Workload | AR | up to 3 drafts | up to 7 drafts |
+| --- | --- | --- | --- |
+| Six coding tasks, 1,024 tokens, greedy | 46.0 tok/s | 70.7 | 74.3 |
+| The same, default sampling (T = 1, seeded) | 43.4 tok/s | 61.2 | 62.8 |
+| Primes list (greedy) | 46.1 | 83.8 | 87.5 |
+| Explanation (greedy) | 46.1 | 56.9 | 55.4 |
+| Translation (T = 0.7) | 43.3 | 51.6 | 50.2 |
+
+A replay of the coding runs drafting seven tokens every cycle accepted all
+seven in 15% of the cycles and none in 24% (mean 2.6).
+
