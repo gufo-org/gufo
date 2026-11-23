@@ -23,6 +23,7 @@
 #include <gufo/ext/gguf_identity.hpp>
 #include <gufo/ext/gguf_reader.hpp>
 #include <gufo/ext/host_budget.hpp>
+#include <gufo/ext/prompt_lookup.hpp>
 #include <gufo/ext/sampling.hpp>
 #include <gufo/ext/sha256.hpp>
 #include <gufo/ext/transfer_pool.hpp>
@@ -101,6 +102,13 @@ public:
   /// and SelectNext returns it. Per request.
   std::optional<g::TextDecodeSelection> pending;
   DsparkBackoff backoff;
+  /// Copy drafts: the request's committed tokens (prompt and generated, valid
+  /// when `history_ok`) and their index. They only propose: every token is
+  /// still the one verification selects. Per request.
+  std::vector<std::int32_t> history;
+  bool history_ok{false};
+  speculative::PromptLookup<std::int32_t> lookup;
+  CopyBackoff copy_backoff;
   [[nodiscard]] std::shared_ptr<mem::StateAccount> state_account()
       const override {
     return session_->account();
@@ -162,6 +170,9 @@ struct Inkling2PromptContext final : g::TextPromptContext {
   bool answer_only{false};
   std::vector<std::vector<g::TextRunnerToken>> call_names;
   std::vector<std::unique_ptr<ImageEntry>> images;
+  /// The prompt's tokens, for copy drafts (a request whose whole prompt is
+  /// restored from the cache never prefills).
+  std::vector<std::int32_t> tokens;
 };
 
 std::vector<std::int32_t> ToIds(std::span<const g::TextRunnerToken> t) {
@@ -435,6 +446,8 @@ public:
     const std::size_t prefix =
         framing != 0 && tokens->size() > framing ? tokens->size() - framing : 0;
     auto context = std::make_shared<Inkling2PromptContext>();
+    if (max_draft_ > 0)
+      context->tokens.assign(tokens->begin(), tokens->end());
     context->reasoning_off = ga::ReasoningOff(request);
     context->call_required =
         context->reasoning_off && ga::CallRequired(request);
@@ -524,6 +537,14 @@ public:
     st.call_prefix.clear();
     st.pending.reset();
     st.backoff = {};
+    st.copy_backoff = {};
+    st.history_ok = c != nullptr && !c->tokens.empty();
+    if (st.history_ok)
+      st.history = c->tokens;
+    else
+      st.history.clear();
+    st.lookup.Clear();
+    st.lookup.BeginRequest();
   }
   [[nodiscard]] g::InitialOutputState InitialOutputState(
       const g::ChatRequest& r) const override {
@@ -636,6 +657,10 @@ public:
     // text token).
     st.block = Block::kIdle;
     const auto done = offset + consumed;
+    if (done == prompt.size() && max_draft_ > 0) {
+      st.history.assign(prompt.begin(), prompt.end());
+      st.history_ok = true;
+    }
     if (done == prompt.size()) {
       if (done >= 1 && prompt[done - 1] == t_header_)
         st.block = Block::kAfterHeader;
@@ -726,6 +751,8 @@ public:
     CommitToken(st, token);
   }
   void CommitToken(Inkling2State& st, g::TextRunnerToken token) const {
+    if (st.history_ok)
+      st.history.push_back(static_cast<std::int32_t>(token));
     if (st.answer_only && st.block == Block::kText && token == t_end_message_)
       st.answer_done = true;
     if (token == t_header_)
@@ -807,6 +834,49 @@ public:
         u = static_cast<float>(peek.Uniform());
     }
     return m;
+  }
+
+  /// Copy drafts (prompt lookup): when the request's last tokens repeat an
+  /// earlier stretch of its context (speculative::PromptLookup's rules: 12
+  /// matching generated tokens, 24 for sampled requests, 5 where the last
+  /// accepted copy left off), up to `limit` of the tokens that followed that
+  /// stretch are proposed in place of the drafter's. Called after the anchor
+  /// was committed. Returns the number of proposals; `start` is the index of
+  /// their source and `conf` their calibration bins.
+  int ProposeCopy(Inkling2State& st, bool sampled, std::size_t limit,
+                  std::int32_t* drafts, float* conf, std::size_t* start) const {
+    using Lookup = speculative::PromptLookup<std::int32_t>;
+    const std::size_t pos = st.session().position();
+    // Sampled requests only: the drafter's coupled draw misses about a fifth
+    // of the tokens of a copied stretch, the copied token almost none. Greedy
+    // requests gain nothing (the drafter copies as well) and lose where a
+    // match's continuation differs.
+    if (!sampled || limit == 0 || !st.history_ok ||
+        st.history.size() != pos + 1)
+      return 0;
+    if (!st.lookup.Step(pos))
+      return 0;  // a request's first cycle copies nothing
+    st.lookup.Extend(st.history, sampled);
+    if (!st.copy_backoff.Copy())
+      return 0;
+    const std::size_t minimum =
+        sampled ? Lookup::kSampledMinMatch : Lookup::kMinMatch;
+    const auto m = st.lookup.Find(st.history, {}, minimum);
+    if (m.length == 0)
+      return 0;
+    const std::size_t have =
+        std::min(limit, st.lookup.IndexedTokens() - m.start);
+    int n = 0;
+    for (; static_cast<std::size_t>(n) < have; ++n) {
+      const std::int32_t t = st.history[m.start + static_cast<std::size_t>(n)];
+      if (tok_->IsStop(static_cast<g::TextRunnerToken>(t)))
+        break;  // a stop is never kept as a draft
+      drafts[n] = t;
+      // an established match, or the shorter one that resumes a copy
+      conf[n] = m.length >= minimum ? 0.95F : 0.85F;
+    }
+    *start = m.start;
+    return n;
   }
 
   /// The anchor of a cycle: the pending token, or a selection from the
@@ -972,8 +1042,31 @@ public:
     int n = 0;
     const RowMode mode = ModeOf(st, working);
     const bool greedy = mode.greedy;
-    DsparkCalibration& cal = mode.coupled ? cal_coupled_ : cal_;
-    if (budget > 0 && engine_->DraftReady(ss) && st.backoff.Draft()) {
+    // Copied proposals first: they cost nothing, and where the output repeats
+    // its context they outlast the drafter's.
+    std::size_t copy_start = 0;
+    int copy_width = 0;
+    const bool sampled = working.config().temperature > 0;
+    if (budget > 0 && max_draft_ > 0) {
+      const int c =
+          ProposeCopy(st, sampled,
+                      std::min<std::size_t>(
+                          {max_draft_, budget, engine_->VerifyRows(ss) - 1}),
+                      drafts, conf, &copy_start);
+      if (c > 0) {
+        const std::lock_guard lock(dsp_mutex_);
+        copy_width = ChooseDsparkWidth(
+            conf, c, sampled ? cal_copy_sampled_ : cal_copy_, costs_, 0.0);
+        if (copy_width > 0)
+          n = c;
+      }
+    }
+    const bool copied = copy_width > 0;
+    DsparkCalibration& cal = copied ? (sampled ? cal_copy_sampled_ : cal_copy_)
+                             : mode.coupled ? cal_coupled_
+                                            : cal_;
+    if (!copied && budget > 0 && engine_->DraftReady(ss) &&
+        st.backoff.Draft()) {
       n = static_cast<int>(std::min<std::size_t>(
           {max_draft_, budget, engine_->VerifyRows(ss) - 1}));
       if (n > 0)  // stop once the width policy would not verify another
@@ -989,10 +1082,12 @@ public:
     int width = 0;
     {
       const std::lock_guard lock(dsp_mutex_);
-      if (n > 0)
+      if (n > 0 && !copied)
         costs_.ObserveDraft(
             n, std::chrono::duration<double, std::milli>(t1 - t0).count());
-      width = n > 0 ? ChooseDsparkWidth(conf, n, cal, costs_) : 0;
+      width = copied  ? copy_width
+              : n > 0 ? ChooseDsparkWidth(conf, n, cal, costs_)
+                      : 0;
     }
     std::vector<std::int32_t> rows{static_cast<std::int32_t>(a)};
     rows.insert(rows.end(), drafts, drafts + width);
@@ -1033,13 +1128,19 @@ public:
       double& plain = greedy ? plain_greedy_ms_ : plain_sampled_ms_;
       if (n == 0)
         plain += 0.1 * (cycle - plain);
-      else
+      else if (!copied)
         st.backoff.Observe(static_cast<int>(keep), cycle, plain);
     }
     if (width > 0) {
       step.draft_rounds = 1;
       step.draft_tokens = static_cast<std::size_t>(width);
       step.draft_accepted_tokens = keep - 1;
+    }
+    if (copied) {
+      step.lookup_tokens = static_cast<std::size_t>(width);
+      step.lookup_accepted_tokens = keep - 1;
+      st.lookup.Observe(copy_start, static_cast<std::size_t>(width), keep - 1);
+      st.copy_backoff.Observe(width, static_cast<int>(keep) - 1);
     }
     return step;
   }
@@ -1074,8 +1175,15 @@ public:
       int n = 0, width = 0;
       std::int32_t drafts[Drafter::kMaxDraft] = {};
       float conf[Drafter::kMaxDraft] = {};
+      bool copied = false, sampled = false;  // proposals copied (prompt lookup)
+      std::size_t copy_start = 0;
     };
     std::vector<Lane> lanes;
+    const auto cal_of = [this](const Lane& l) -> DsparkCalibration* {
+      return l.copied         ? (l.sampled ? &cal_copy_sampled_ : &cal_copy_)
+             : l.mode.coupled ? &cal_coupled_
+                              : &cal_;
+    };
     for (std::size_t i = 0; i < decodes.size(); ++i) {
       working.emplace_back(decodes[i].sampler.get());
       auto& step = steps[i];
@@ -1103,7 +1211,7 @@ public:
     const int B = static_cast<int>(lanes.size());
     // Drafting: each lane proposes after its anchor, stopping once a further
     // row would cost more of the step than the tokens it is expected to add.
-    bool drafted = false;
+    bool drafted = false, neural = false;
     double draft_ms = 0;
     if (B >= 2 && engine_->has_drafter()) {
       bool draft = false;
@@ -1114,20 +1222,28 @@ public:
       std::vector<Engine::ProposeRequest> reqs;
       std::vector<Lane*> owners;
       for (auto& l : lanes) {
-        if (!draft)
-          break;
         try {
           l.mode = ModeOf(*l.st, working[l.i]);
-          if (l.budget == 0 || !engine_->DraftReady(*l.ss))
+          l.sampled = working[l.i].config().temperature > 0;
+          if (l.budget == 0)
             continue;
           const int room = static_cast<int>(Engine::kMaxVerifyRows) - B;
-          l.n = static_cast<int>(std::min<std::size_t>(
+          const int limit = static_cast<int>(std::min<std::size_t>(
               {max_draft_, l.budget, engine_->VerifyRows(*l.ss) - 1,
                static_cast<std::size_t>(std::max(room, 0))}));
-          if (l.n <= 0) {
-            l.n = 0;
+          if (limit <= 0)
+            continue;
+          // copied proposals first (they cost nothing)
+          l.n = ProposeCopy(*l.st, l.sampled, static_cast<std::size_t>(limit),
+                            l.drafts, l.conf, &l.copy_start);
+          if (l.n > 0) {
+            l.copied = true;
+            drafted = true;
             continue;
           }
+          if (!draft || !engine_->DraftReady(*l.ss))
+            continue;
+          l.n = limit;
           const DsparkCalibration* cal = l.mode.coupled ? &cal_coupled_ : &cal_;
           reqs.push_back({.session = l.ss,
                           .anchor = l.anchor,
@@ -1163,6 +1279,7 @@ public:
           for (std::size_t k = 0; k < reqs.size(); ++k) {
             owners[k]->n = reqs[k].done;
             drafted = drafted || reqs[k].done > 0;
+            neural = neural || reqs[k].done > 0;
           }
         } catch (...) {
           for (auto* o : owners)
@@ -1182,7 +1299,7 @@ public:
       for (int k = 0; k < nl; ++k) {
         p[k] = lanes[k].conf;
         n[k] = lanes[k].n;
-        c[k] = lanes[k].mode.coupled ? &cal_coupled_ : &cal_;
+        c[k] = cal_of(lanes[k]);
       }
       ChooseDsparkBatchWidths(nl, p, n, c, costs_batch_, draft_ms, w);
       for (int k = 0; k < nl; ++k)
@@ -1259,7 +1376,7 @@ public:
         const std::lock_guard lock(dsp_mutex_);
         if (nl >= 2)
           costs_batch_.ObserveVerify(nl, ms);
-        if (drafted)  // drafting that bought nothing
+        if (neural)  // drafting that bought nothing
           batch_backoff_[B].Observe(
               nl, ms + draft_ms,
               costs_batch_.Verify(std::max(nl, 1)) / std::max(nl, 1));
@@ -1346,8 +1463,15 @@ public:
               steps[l.i].draft_tokens = static_cast<std::size_t>(l.width);
               steps[l.i].draft_accepted_tokens = keep - 1;
             }
+            if (l.copied && l.width > 0) {
+              steps[l.i].lookup_tokens = static_cast<std::size_t>(l.width);
+              steps[l.i].lookup_accepted_tokens = keep - 1;
+              l.st->lookup.Observe(l.copy_start,
+                                   static_cast<std::size_t>(l.width), keep - 1);
+              l.st->copy_backoff.Observe(l.width, static_cast<int>(keep) - 1);
+            }
             const std::lock_guard lock(dsp_mutex_);
-            DsparkCalibration& cal = l.mode.coupled ? cal_coupled_ : cal_;
+            DsparkCalibration& cal = *cal_of(l);
             for (int j = 0; j < l.width && j < static_cast<int>(keep); ++j)
               cal.Observe(l.conf[j], j + 1 < static_cast<int>(keep));
           } catch (...) {
@@ -1441,6 +1565,8 @@ private:
   // DSpark width policy, shared by the requests
   mutable std::mutex dsp_mutex_;
   mutable DsparkCalibration cal_, cal_coupled_;
+  // copied proposals (prompt lookup) of greedy and of sampled requests
+  mutable DsparkCalibration cal_copy_, cal_copy_sampled_;
   mutable double plain_greedy_ms_ = 22.0, plain_sampled_ms_ = 23.5;
   mutable DsparkCosts costs_;
   // batched cycles: costs by total rows (several sessions' rows; plain batched

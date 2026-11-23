@@ -86,16 +86,21 @@ private:
 /// The number of drafts (0 .. n) to verify after drafting n, given each
 /// draft's probability: argmax over W of E[emitted] / cost, with E = 1 + the
 /// survival of each prefix and cost = the drafting already spent + Verify(W+1).
+/// `draft_ms` is what the proposals cost (negative: the drafter's measured
+/// cost of n tokens; copied proposals cost nothing).
 [[nodiscard]] inline int ChooseDsparkWidth(const float* p, int n,
                                            const DsparkCalibration& cal,
-                                           const DsparkCosts& cost) {
+                                           const DsparkCosts& cost,
+                                           double draft_ms = -1) {
+  if (draft_ms < 0)
+    draft_ms = cost.Draft(n);
   double survive = 1, expect = 1;
   int best = 0;
-  double best_rate = 1 / (cost.Draft(n) + cost.Verify(1));
+  double best_rate = 1 / (draft_ms + cost.Verify(1));
   for (int w = 1; w <= n && w + 1 <= DsparkCosts::kMaxRows; ++w) {
     survive *= cal.Estimate(p[w - 1]);
     expect += survive;
-    const double rate = expect / (cost.Draft(n) + cost.Verify(w + 1));
+    const double rate = expect / (draft_ms + cost.Verify(w + 1));
     if (rate > best_rate) {
       best_rate = rate;
       best = w;
@@ -156,6 +161,29 @@ inline void ChooseDsparkBatchWidths(int sessions, const float* const* p,
   for (int r = sessions; r < best_rows; ++r)
     ++w[order[r]];
 }
+
+/// Copy drafts (prompt lookup): per-request back-off. A copy that kept fewer
+/// than half of its tokens skips the next copy opportunities (4, doubling to
+/// 64; the drafter proposes meanwhile); a copy that kept at least half
+/// clears it.
+struct CopyBackoff {
+  int skip = 0, penalty = 0;
+  [[nodiscard]] bool Copy() {
+    if (skip > 0) {
+      --skip;
+      return false;
+    }
+    return true;
+  }
+  void Observe(int proposed, int accepted) {
+    if (2 * accepted < proposed) {
+      penalty = std::clamp(penalty ? 2 * penalty : 4, 4, 64);
+      skip = penalty;
+    } else {
+      penalty = 0;
+    }
+  }
+};
 
 /// Per-request back-off: every eight drafted cycles, when they emitted fewer
 /// tokens per millisecond than plain decoding steps of the request's kind
