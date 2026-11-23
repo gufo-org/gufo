@@ -99,12 +99,12 @@ podman run --rm \
 
 ## Debian package
 
-Each release attaches `gufo_<version>-1_amd64.deb` to its
-[GitHub release](https://github.com/gufo-org/gufo/releases), built for Debian
-13 (trixie) with AMD's ROCm 10.1 packages:
+[`apt.gufo.blog`](https://github.com/gufo-org/apt#install) serves every release
+for Debian 13 (trixie), and `apt upgrade` installs new ones. With [AMD's ROCm 10.1 repository](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/) set up:
 
 ```sh
-sudo apt install ./gufo_<version>-1_amd64.deb
+curl -fsSLo /tmp/gufo-keyring.deb https://apt.gufo.blog/gufo-archive-keyring.deb
+sudo apt install /tmp/gufo-keyring.deb && sudo apt update && sudo apt install gufo
 gufo diagnose
 ```
 
