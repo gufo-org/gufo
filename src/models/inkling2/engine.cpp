@@ -148,6 +148,29 @@ struct Engine::Impl {
   // Prefill side stream for projections that run beside larger ones.
   hipStream_t ps = nullptr;
   hipEvent_t ev_fork = nullptr, ev_join = nullptr, ev_bank = nullptr;
+  // Decode steps: a visit's q and output-projection weights are read on a
+  // side stream while the latency-bound mixes and attention run (the DRAM is
+  // mostly idle then), so their GEMVs find them in the last-level cache.
+  // Twenty blocks: more take CUs from the main chain.
+  static constexpr int kPrefetchBlocks = 20;
+  hipStream_t dps = nullptr;
+  hipEvent_t ev_pf = nullptr, ev_pfj = nullptr;
+  bool pf_open = false;
+  void Prefetch(const void* p, std::size_t bytes) {
+    if (bytes == 0)
+      return;
+    Check(hipEventRecord(ev_pf, ds), "prefetch fork");
+    Check(hipStreamWaitEvent(dps, ev_pf, 0), "prefetch fork");
+    fs::Touch(dps, p, bytes, kPrefetchBlocks);
+    pf_open = true;
+  }
+  void PrefetchJoin() {
+    if (!pf_open)
+      return;
+    Check(hipEventRecord(ev_pfj, dps), "prefetch join");
+    Check(hipStreamWaitEvent(ds, ev_pfj, 0), "prefetch join");
+    pf_open = false;
+  }
   hipEvent_t ev_msg[2] = {};
   // DSpark drafter (Engine::AttachDrafter) and the target features it reads:
   // the inputs of visit slots 5, 29 and 47 and the final normed output, [row]
@@ -425,6 +448,11 @@ struct Engine::Impl {
       (void)hipStreamDestroy(ds);
     if (ps)
       (void)hipStreamDestroy(ps);
+    if (dps)
+      (void)hipStreamDestroy(dps);
+    for (hipEvent_t e : {ev_pf, ev_pfj})
+      if (e)
+        (void)hipEventDestroy(e);
     if (h_amax)
       (void)hipHostFree(h_amax);
     if (h_rows)
@@ -574,6 +602,9 @@ struct Engine::Impl {
     Check(hipStreamCreateWithFlags(&ds, hipStreamNonBlocking), "decode stream");
     Check(hipStreamCreateWithFlags(&ps, hipStreamNonBlocking), "side stream");
     Check(hipEventCreateWithFlags(&ev_fork, hipEventDisableTiming), "event");
+    Check(hipStreamCreateWithFlags(&dps, hipStreamNonBlocking), "prefetch");
+    Check(hipEventCreateWithFlags(&ev_pf, hipEventDisableTiming), "event");
+    Check(hipEventCreateWithFlags(&ev_pfj, hipEventDisableTiming), "event");
     Check(hipEventCreateWithFlags(&ev_join, hipEventDisableTiming), "event");
     for (hipEvent_t* e : {&ev_bank, &ev_msg[0], &ev_msg[1]})
       Check(hipEventCreateWithFlags(e, hipEventDisableTiming), "event");
@@ -1173,6 +1204,8 @@ struct Engine::Impl {
     const fs::SlotEntry* slot = d_tbl + slot_idx;
     const int* pos = d_step + kMaxB;
 
+    if (F.proj)  // q, read while the inputs are mixed
+      Prefetch(D(L.attn_q), L.attn_q.size_bytes);
     // A. attention inputs
     const float* inp[3] = {cur, cur, cur};
     const bool three = msg || !swa;  // separate q / k / v inputs
@@ -1319,6 +1352,8 @@ struct Engine::Impl {
       }
     }
 
+    if (F.oproj)  // the output projection, read during the attention
+      Prefetch(D(L.attn_output), L.attn_output.size_bytes);
     // C. conv + clip + KV write (in the attention launch for distinct
     // sessions' rows)
     fs::KvPrepArgs ka{};
@@ -1553,6 +1588,7 @@ struct Engine::Impl {
                 cfg->rms_eps);
     if (dsp)
       CaptureFeature(ds, d_hn, nb, 3, d_feat);
+    PrefetchJoin();
     const int V = static_cast<int>(cfg->n_vocab_text);
     if (head_fast) {
       fs::GemvQ8(ds, kEmbd, D(w->output), d_hn, logits_d, V, cfg->logit_softcap,

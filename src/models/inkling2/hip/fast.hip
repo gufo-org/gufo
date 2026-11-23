@@ -3600,6 +3600,25 @@ void MoeDownE(hipStream_t s, int fmt, const void* w, const float* escale,
   Chk("moe_down_e");
 }
 
+// Reads [p, p + n16 * 16) so that a later kernel finds it in the last-level
+// cache; the loaded values only feed a store that never happens.
+__global__ void __launch_bounds__(256)
+    k_touch(const uint4* __restrict__ p, size_t n16, unsigned* sink) {
+  uint32_t acc = 0;
+  for (size_t i = (size_t)blockIdx.x * 256 + threadIdx.x; i < n16;
+       i += (size_t)gridDim.x * 256) {
+    const uint4 v = p[i];
+    acc ^= v.x ^ v.y ^ v.z ^ v.w;
+  }
+  if (acc == 0x9e3779b9u && sink)
+    *sink = acc;
+}
+void Touch(hipStream_t s, const void* p, size_t bytes, int blocks) {
+  k_touch<<<blocks, 256, 0, s>>>(static_cast<const uint4*>(p), bytes / 16,
+                                 nullptr);
+  Chk("touch");
+}
+
 void Mix(hipStream_t s, const MixJob& j, float eps) {
   k_mix<<<dim3(j.nq, j.ntok), 512, 0, s>>>(j, eps);
   Chk("mix");

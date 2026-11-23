@@ -132,6 +132,8 @@ struct MixJob {
   ConvResidArgs cr;
   int ostride = 0;  // token stride of `out` (0: nq * 2304); decode batches
 };
+/// Reads `bytes` from p (a cache prefetch: nothing is written).
+void Touch(hipStream_t s, const void* p, size_t bytes, int blocks);
 void Mix(hipStream_t s, const MixJob& j, float eps);
 
 /// Several RMS norms of 2304 rows in one launch.
