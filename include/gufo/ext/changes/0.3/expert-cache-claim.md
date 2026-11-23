@@ -13,11 +13,12 @@ with the RAM prompt cache.
   prepares before readiness, at most; `ComponentCacheResources::
   committed_backing_bytes` (optional, set by the HIP resources) reports what
   it committed.
-- Once the sessions exist and the prompt cache committed its prepared
-  backing, serving grants the store what it holds plus the host memory
-  available, less the headroom and the prompt-cache budget beyond the
-  prepared backing, calls `Store::Fit(grant)`, and logs both budgets with
-  the backing actually committed.
+- Once the sessions exist, serving commits the prompt cache's whole backing
+  (beyond `kPreparedBackingBytes` through `prepare_capture`, where the
+  resources provide it), then grants the store what it holds plus the host
+  memory available, less the headroom and any budget still to commit, calls
+  `Store::Fit(grant)`, and logs both budgets with the backing actually
+  committed.
 - Host pressure (#1275) is measured against the store's floor
   (`Store::FloorBytes()`, the larger of it and the free CMA pages) instead of
   the host reserve while experts stream: the expert cache fills the host down

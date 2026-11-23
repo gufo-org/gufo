@@ -379,20 +379,33 @@ struct ComponentTextCache::Impl {
   cache::ResourceCharge metadata;
 
   // Sizes a streamed model's expert cache once the sessions exist and the
-  // prompt cache committed its prepared backing: what the cache holds plus
-  // the host memory available now, less the runner's headroom and the
-  // prompt-cache budget still to commit (`backing_bytes` beyond what
-  // commit_backing prepares). The backing may hold less than it prepares:
-  // the log reports what it committed.
+  // prompt cache committed its backing: what the cache holds plus the host
+  // memory available now, less the runner's headroom and the prompt-cache
+  // budget still to commit (`backing_bytes` beyond what was prepared). The
+  // backing may hold less than it prepares: the log reports what it
+  // committed.
   void FitExpertCache(const TextRunnerExpertCacheClaim& claim,
                       std::size_t backing_bytes) const {
     if (!claim.store)
       return;
 #if defined(ENGINE_ENABLE_HIP)
-    const std::size_t prepared =
-        resources->commit_backing
-            ? std::min(backing_bytes, cache::kPreparedBackingBytes)
-            : 0;
+    // Commit the whole budget before the grant. Where registered pages are
+    // charged to the device heap, later growth must also leave the heap's
+    // dispatch reserve, which the filled expert cache does not leave: a
+    // budget kept back for that growth would stay unused by either cache.
+    const bool whole = resources->commit_backing &&
+                       resources->prepare_capture &&
+                       backing_bytes > cache::kPreparedBackingBytes;
+    if (whole) {
+      resources->prepare_capture(backing_bytes);
+      if (resources->await_capture)
+        resources->await_capture();
+    }
+    std::size_t prepared = 0;
+    if (whole)
+      prepared = backing_bytes;
+    else if (resources->commit_backing)
+      prepared = std::min(backing_bytes, cache::kPreparedBackingBytes);
     const std::uint64_t pending = backing_bytes - prepared;
     const std::uint64_t committed = resources->committed_backing_bytes
                                         ? resources->committed_backing_bytes()
