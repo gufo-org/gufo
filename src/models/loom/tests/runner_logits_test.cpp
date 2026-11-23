@@ -597,6 +597,12 @@ void TestDialects() {
        R"({"call_format":"pythonic","calls_open":"<|tool_call_start|>[","call_separator":", ","calls_close":"]<|tool_call_end|>","think_open":"<think>","think_end":"</think>","thinking":"always"})",
        "<|tool_call_start|>[get_weather(city='Paris')]<|tool_call_end|>",
        "<|tool_call_start|>["},
+      {"inkling2",
+       R"({"call_format":"inkling2","call_marker":"<|content_invoke_tool_json|>","think_open":"<|message_model|><|content_thinking|>","think_end":"<|end_message|>","thinking":"toggle"})",
+       "<|message_model|>get_weather<|content_invoke_tool_json|>"
+       "{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"}}"
+       "<|end_message|>",
+       "<|message_model|>"},
       {"atem",
        R"({"call_format":"atem","think_open":"<|start|>assistant to=self<|message|>","think_end":"<|start|>assistant to=user<|message|>","thinking":"always"})",
        " to=get_weather<|message|><atem:function_calls>\n<atem:invoke "
@@ -606,6 +612,12 @@ void TestDialects() {
        " to="},
   };
   for (const auto& c : cases) {
+    // Automatic tool use stays on the device only where a lazy grammar cannot
+    // tell a call from other output by its start.
+    const std::string format = c.format;
+    CHECK(NativeDialectOf(json::parse(c.chat)).auto_on_device ==
+              (format == "harmony" || format == "atem" || format == "inkling2"),
+          format + ": auto tool use on the device");
     fake::reset();
     fake::state().script = PeakScript;
     Fixture f(true, 2, c.chat);
