@@ -6,7 +6,7 @@ mod frames;
 use gufo_ffi::guard;
 use std::ffi::{c_int, c_void};
 
-use frames::{Event, Reader};
+pub use frames::{Event, Reader};
 
 /// The frame reader of one connection.
 pub struct GufoWsReader(Reader);

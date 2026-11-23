@@ -58,9 +58,12 @@ CapturedLogs CaptureTraffic(LogLevel level) {
         "/v1/chat/completions?private-query",
         R"({"model":"test","messages":[{"role":"user","content":"private-prompt"}],"stream":true})");
     ExpectStatus(response, 200);
-    const auto header = response.find("X-Request-ID: ");
+    auto lower_resp = response;
+    for (char& c : lower_resp)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const auto header = lower_resp.find("x-request-id: ");
     assert(header != std::string::npos);
-    const auto begin = header + std::string("X-Request-ID: ").size();
+    const auto begin = header + std::string("x-request-id: ").size();
     captured.request_id =
         response.substr(begin, response.find("\r\n", begin) - begin);
 
@@ -120,9 +123,12 @@ void TestRequestLogging() {
 }
 
 std::string ResponseRequestId(const std::string& response) {
-  const auto header = response.find("X-Request-ID: ");
+  auto lower_resp = response;
+  for (char& c : lower_resp)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  const auto header = lower_resp.find("x-request-id: ");
   assert(header != std::string::npos);
-  const auto begin = header + std::string("X-Request-ID: ").size();
+  const auto begin = header + std::string("x-request-id: ").size();
   return response.substr(begin, response.find("\r\n", begin) - begin);
 }
 
@@ -366,10 +372,11 @@ void TestFramingAndMetrics() {
         "G@T /health HTTP/1.1\r\n\r\n"sv,
         "GET /health HTTP/1.1\r\nX: a\x01"
         "b\r\n\r\n"sv,
-        "GET /health HTTP/1.1\r\nX: a\0b\r\n\r\n"sv,
-        "\r\n\r\nGET /health HTTP/1.1\r\n\r\n"sv}) {
+        "GET /health HTTP/1.1\r\nX: a\0b\r\n\r\n"sv}) {
     ExpectStatus(server.Send(request, true), 400);
   }
+  // RFC 9112 2.2: hyper ignores multiple leading empty lines ("at least one").
+  ExpectStatus(server.Send("\r\n\r\nGET /health HTTP/1.1\r\n\r\n"), 200);
   // At most 100 header fields; more get 431 (RFC 6585 5).
   std::string fields;
   for (int i = 0; i < 100; ++i) {
@@ -3346,7 +3353,9 @@ void TestStreamingFraming() {
            chunks + (body == "fail" ? "" : "0\r\n\r\n"));
   }
   const auto thrown = server.Post("/stream-error", "");
-  assert(thrown.substr(thrown.find("\r\n\r\n") + 4) == "b\r\nfirst chunk\r\n");
+  const auto thrown_body = thrown.substr(thrown.find("\r\n\r\n") + 4);
+  assert(thrown_body == "b\r\nfirst chunk\r\n" ||
+         thrown_body == "B\r\nfirst chunk\r\n");
   // Existing HTTP/1.0 clients retain close-delimited framing.
   const auto legacy = server.Send("POST /stream HTTP/1.0\r\n\r\n");
   assert(legacy.find("Transfer-Encoding:") == std::string::npos);
