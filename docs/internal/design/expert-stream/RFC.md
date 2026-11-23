@@ -1,6 +1,6 @@
 # RFC: expert streaming for extensions
 
-Status: experimental extension API (0.3.39), discussed in #1286. November 2026.
+Status: experimental extension API (0.3.42), discussed in #1286. November 2026.
 
 This document describes the expert store, an experimental extension API that
 runs mixture-of-experts models whose routed experts do not fit in memory, and
