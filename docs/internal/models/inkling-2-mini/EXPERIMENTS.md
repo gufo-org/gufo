@@ -26,6 +26,13 @@ against the build they modified. Every variant was exact unless noted.
 | Next layer's messages mixed before the layer (beside its own input mixes) | no change: both are bandwidth-bound; moved beside the gate/up GEMM |
 | Messages' inverse RMS as its own side-stream launch | pp2048 +0.2%, pp512 −1.5%; folded into the message mix and limited to ubatches of 1,024+ tokens |
 
+## DSpark
+
+| Variant | Result |
+| --- | --- |
+| The full 200,058-row LM head for proposals | depth 3, context 64: 62.4 vs 68.2 tokens/s with the 65,536-row head, same acceptance counts |
+| Verification MoE grouped by expert (one block row per distinct expert; all its pairs at once, or one after another) | 4 rows: 43.4 / 39.1 vs 37.8 ms: the pair-per-block grid already reads a shared expert once through L2 |
+
 ## Decode (tg128 after 64 tokens)
 
 | Variant | Result |
@@ -53,3 +60,4 @@ its own quality qualification before it could replace the exact path.
 | A fast prefill `k_mix` for the message passes (one pass over the states) | measured 1,718 vs 1,658 tokens/s in the first round; different reduction order |
 | F16 (or BF16) MoE slot rows instead of F32 `pairs` | halves the 302 MB written and read per visit by the down GEMM and the MoE tail (about 45 ms per pp2048) |
 | Inverse RMS of the controller inputs computed by the mixes that produce them, in their own reduction order | drops the remaining half of the controller gates' prologue reads |
+| Rejection sampling of sampled requests' proposals (the drafter's distribution as q) | more accepted proposals at temperature > 0; the output is then distributed as AR's, not equal to it |

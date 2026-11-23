@@ -67,3 +67,22 @@ documented by the extension: with thinking off, the model often deliberates in
 its answer, so `reasoning-separator` (thinking-off copy case), `tools`
 (`auto-tools` with thinking off) and `batch` fail on their exact-text
 assertions. No request fails at the HTTP level.
+
+## DSpark
+
+DSpark only changes how many tokens a step produces; the tokens are those of
+plain decoding:
+
+- `inkling2_bench --spec 2,3,4` replays a greedy reference through
+  `Engine::Verify` with one proposal corrupted at random per step: every kept
+  row's logits equal the one-token decode's byte for byte (0 mismatches of
+  about 65 rows per width at contexts 64 and 2,040), and so does a plain decode
+  after the last commit.
+- `inkling2_bench --dspark` decodes 128 to 256 greedy tokens with real
+  proposals: the token sequence equals plain decoding in every run (contexts
+  64 to 12,000, depths 1 to 3).
+- Over HTTP, three greedy and two seeded sampled requests (temperature 0.7 and
+  0.8, top-p 0.95) return the same reasoning and content with and without
+  `--dspark-model`.
+- `inkling2_bench --batch 2,4 --verify` and the oracle dumps (batched and
+  one-token paths) are unchanged.

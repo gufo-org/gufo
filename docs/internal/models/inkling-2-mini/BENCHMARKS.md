@@ -90,3 +90,33 @@ tg128 after 64 tokens, alternating A/B on one build each:
 At 47 tokens/s a step takes 21.3 ms: about 16.8 ms of weight GEMVs at 87–98%
 of the DRAM ceiling (the LM head reads 492 MB in 2.1 ms), about 3.4 ms of small
 kernels and under 1 ms of gaps. Rejected variants are in [Experiments](EXPERIMENTS.md).
+
+## DSpark
+
+Greedy speculative decoding against plain decoding of the same prompt
+(`inkling2_bench --dspark ... --depth D`, WikiText-2, 256 tokens; output
+identical in every run). Fixed depths, before the adaptive width:
+
+| Context | Depth 1 | Depth 2 | Depth 3 | AR |
+| --- | --- | --- | --- | --- |
+| 64 | 57.6 (87% accepted) | 64.0 (75%) | 68.2 (70%) | 45.0 |
+| 2,000 | 44.8 (48%) | 43.6 (35%) | 39.2 (26%) | 43.1 |
+| 6,000 | 53.4 (80%) | 59.0 (67%) | 57.9 (57%) | 41.9 |
+
+A depth-3 cycle at short context: propose 4.7 ms, verify 38.2 ms, commit
+2.2 ms (`inkling2_bench` host timings). Verifying 2/3/4 rows of one session
+(`--spec`) takes 27.8/32.9/37.8 ms against 22.1 ms for one decode step; the
+extra rows mostly cost the distinct experts they route to (a 4-row step
+streams about 22 experts per visit instead of 8).
+
+HTTP, one session, default settings (`gufo serve llm --model ...
+--dspark-model ...`), 400 tokens, thinking on; the text equals the AR
+server's for all five requests:
+
+| Request | AR | DSpark (adaptive) |
+| --- | --- | --- |
+| Python function, greedy | 45.9 | 66.2 |
+| Why the sky is blue, greedy | 46.1 | 54.8 |
+| First 15 primes, greedy | 46.1 | 83.1 |
+| Haiku, temperature 0.8, seed | 46.0 | 57.8 |
+| Translation, temperature 0.7, seed | 43.3 | 49.8 |

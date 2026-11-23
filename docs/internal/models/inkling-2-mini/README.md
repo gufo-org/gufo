@@ -36,7 +36,48 @@ and `THIRD_PARTY.md` carry its license and attributions. Changes made here:
   changes every router value and 99% of the controller values).
 - Faster exact prefill and decode kernels; see [Benchmarks](BENCHMARKS.md).
 
-Not supported: DSpark speculative decoding (no implementation exists to port).
+## DSpark
+
+`dspark.{hpp,cpp}` and `hip/dspark.{hpp,hip}` run Unsloth's
+`dspark-Inkling-2-Mini-Q8_0.gguf` (architecture `dflash`): the checkpoint's
+3-layer block drafter, written from llama.cpp PR #32218's description of it.
+
+- **Context.** After every prefill ubatch, decode step and verification
+  commit, the engine copies the target's hidden states at visit slots 5, 29
+  and 47 (the inputs of visits 5, 23 and 41) and the final normed output into
+  a feature buffer; `Drafter::Inject` mixes them per drafter layer (softmax of
+  `dspark_fuse`) into context K/V rows (K normed per head and rotated, NeoX
+  RoPE, theta 1e6) and the Markov context `f` of the last token. Sessions
+  declare the drafter's rings (layers 0 and 2, 1,024-token windows) and its
+  global layer (a demand-mapped region) with the rest of their state. A cache
+  restore drops the context; it restarts at the restored position.
+- **Proposals.** `Drafter::Propose` runs the 8-row block [anchor, mask x 7]
+  through the three layers (non-causal over the block plus the context), then
+  the gated RNN Markov head proposes greedily, one row at a time. Two ideas
+  from the Loom package: the head reads `h_i + W_o latent + b_o` in one GEMV
+  (instead of the LM head of each term), and proposals come from the 65,536
+  LM-head rows with the largest `markov_w1` norms (a Q8_0 copy, 160 MB per
+  step instead of 490 MB; the acceptance counts did not change).
+- **Verification.** `Engine::Verify` evaluates the anchor and up to three
+  proposals of one session in one batched-decode graph. Every row has the
+  arithmetic of a one-token decode at its position: the conv kernels read the
+  history of rows 0..b-1 from the step itself (the stored history before row
+  0), write no history, and capture their inputs; `CommitVerify` sets each
+  history to the last three inputs of the kept rows. A verification never
+  crosses an attention-split bucket (`VerifyRows`).
+- **Selection.** `Inkling2Runner::DecodeStep` selects each verified row's
+  token exactly as `SelectNext` would after the tokens before it (masks, the
+  request's sampler on a working copy; plain greedy requests take the device
+  argmax) and keeps a proposal while it equals that selection. The first
+  selection that differs becomes the next cycle's anchor (`pending`). The
+  emitted tokens and draws are therefore those of AR decoding.
+- **Width.** `dspark_policy.hpp`: the drafter's probability for each proposal,
+  through a calibration of acceptance per probability bin that keeps learning,
+  gives the survival of each prefix; the width maximises expected tokens per
+  measured cycle cost (verifying 2/3/4 rows costs about 28/33/38 ms against
+  22 ms for one). Drafting stops early once a longer width cannot pay, and a
+  request whose cycles stop paying decodes plainly for a while (4 to 32
+  steps) before probing again.
 
 ## Numerical contract
 
