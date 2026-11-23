@@ -4,6 +4,88 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/internal/releasing.md).
 
+## [0.36.0](https://github.com/gufo-org/gufo/compare/v0.35.0...v0.36.0) (2026-11-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** decode JPEG images in Rust ([#1312](https://github.com/gufo-org/gufo/issues/1312))
+
+### Features
+
+* **asr:** accept FLAC, MP3 and Ogg uploads ([#1259](https://github.com/gufo-org/gufo/issues/1259)) ([10c578a](https://github.com/gufo-org/gufo/commit/10c578aa32a74c4d59f1ca50ccd2de6bc485b729))
+* **ext:** directory models and grammar hooks for out-of-tree text providers ([#1303](https://github.com/gufo-org/gufo/issues/1303)) ([ec6d3d0](https://github.com/gufo-org/gufo/commit/ec6d3d0724381585307d98ac760d75d2f8f325b8))
+* **ext:** let speech providers declare their hardware queue cap ([#1268](https://github.com/gufo-org/gufo/issues/1268)) ([e210aaa](https://github.com/gufo-org/gufo/commit/e210aaa54e108fcb412bdcd1c7ae5fd7599f0a43))
+* **loom:** build the Loom extension into Gufo ([#1315](https://github.com/gufo-org/gufo/issues/1315)) ([6a205ee](https://github.com/gufo-org/gufo/commit/6a205eec28eb78baf408caeff49aefe06ef6004e))
+* **mem:** declare session state and let the core allocate it ([#1333](https://github.com/gufo-org/gufo/issues/1333)) ([7314f1d](https://github.com/gufo-org/gufo/commit/7314f1d2dad16aa2f2f1c489e861bed8a8d6e4b0))
+* **nix:** add timer-only model sync and registry model discovery ([#1287](https://github.com/gufo-org/gufo/issues/1287)) ([6753dda](https://github.com/gufo-org/gufo/commit/6753dda1c9cdae0af8fae24946e0639e3548dd32))
+* **serve:** report the load stage as progress in the loading reply ([#957](https://github.com/gufo-org/gufo/issues/957)) ([#1298](https://github.com/gufo-org/gufo/issues/1298)) ([b510014](https://github.com/gufo-org/gufo/commit/b51001436af83bc00131a2732944578c4b5cbe7b))
+* **server:** give RAM-cache memory back to the host under memory pressure ([#1275](https://github.com/gufo-org/gufo/issues/1275)) ([e4a6856](https://github.com/gufo-org/gufo/commit/e4a6856f1fbe1d0db0e7c0702aaaa0bd8f5e3a88))
+* **server:** share session state when more sessions are configured than fit ([#1258](https://github.com/gufo-org/gufo/issues/1258)) ([f634686](https://github.com/gufo-org/gufo/commit/f63468643a5c841ac032c1b90e72dd267625b405))
+* **tools:** add raw HTTP interface benchmark ([#1331](https://github.com/gufo-org/gufo/issues/1331)) ([177a915](https://github.com/gufo-org/gufo/commit/177a915dee88e50c87ce7642e7b31e4a935d9b9f))
+
+
+### Bug Fixes
+
+* **asr:** return 400 invalid_audio_input for undecodable WAV ([#1256](https://github.com/gufo-org/gufo/issues/1256)) ([d409c26](https://github.com/gufo-org/gufo/commit/d409c2688dcebabba1e41e8d0e9cf7abf808732b))
+* **cache:** keep a conversation's edit history when an unchanged retry copies its prompt ([#1290](https://github.com/gufo-org/gufo/issues/1290)) ([cc40533](https://github.com/gufo-org/gufo/commit/cc40533789ae6170cf9864d6115f906357d2433c))
+* **cache:** keep a new short conversation's checkpoint until it ages out of its grace window ([#1288](https://github.com/gufo-org/gufo/issues/1288)) ([0a473eb](https://github.com/gufo-org/gufo/commit/0a473ebfca668dbf9e41265b8082239a1935d719))
+* **cache:** keep queued turn ends until the persistence queue is full ([#1283](https://github.com/gufo-org/gufo/issues/1283)) ([ba0cb3b](https://github.com/gufo-org/gufo/commit/ba0cb3b6bffcd7215dc708a9ac72204cf6ab6cb8))
+* **cache:** keep the reply when a full ledger refuses end-of-turn bookkeeping ([#1326](https://github.com/gufo-org/gufo/issues/1326)) ([24cd17b](https://github.com/gufo-org/gufo/commit/24cd17b5c632982eff33a97091bd9fa018b487d1))
+* **cache:** keep writing disk-only checkpoints while sessions sit idle or capture together ([#1272](https://github.com/gufo-org/gufo/issues/1272)) ([1b0e492](https://github.com/gufo-org/gufo/commit/1b0e492611ae29543c4401647f5d521b6fb129fc))
+* **cache:** persist one grid checkpoint so another question about a long document restores it from disk ([#1269](https://github.com/gufo-org/gufo/issues/1269)) ([ab68f0d](https://github.com/gufo-org/gufo/commit/ab68f0de63e948f85ba93a0ff6791d813e69991e))
+* **cache:** reserve large private-state backing runs in linear time ([#1319](https://github.com/gufo-org/gufo/issues/1319)) ([93a1d23](https://github.com/gufo-org/gufo/commit/93a1d230de5d9bf196d7b9be54c488a6a7dc86cc))
+* **cache:** store and charge each disk manifest once ([#1327](https://github.com/gufo-org/gufo/issues/1327)) ([e7e3841](https://github.com/gufo-org/gufo/commit/e7e3841151bde82bcc89c91dd549ba7b80a4f7ed))
+* **core:** name the descriptor budget when a GGUF header exceeds it ([#1266](https://github.com/gufo-org/gufo/issues/1266)) ([f055766](https://github.com/gufo-org/gufo/commit/f055766f6d97e871f4ed4cbe685fcbf0ab57bda1))
+* **core:** read a writer's split.count = 0 as a single file ([#1313](https://github.com/gufo-org/gufo/issues/1313)) ([d479cc1](https://github.com/gufo-org/gufo/commit/d479cc14fd0517a115cb02401a06a9cf555b4188))
+* **diagnose:** report gfx1151 compute units from KFD, not HIP's WGP count ([#1267](https://github.com/gufo-org/gufo/issues/1267)) ([afaca7d](https://github.com/gufo-org/gufo/commit/afaca7d2f547ce4006c8093d051f7085b67503b5))
+* **embedding-gemma2:** embed short NPU inputs the same alone and in a batch ([#1282](https://github.com/gufo-org/gufo/issues/1282)) ([cee5076](https://github.com/gufo-org/gufo/commit/cee507679c6e6743e2b1de5d48c2c5c497b5d924))
+* **ext:** preserve available memory when meminfo byte counts overflow ([#1335](https://github.com/gufo-org/gufo/issues/1335)) ([bcb05bc](https://github.com/gufo-org/gufo/commit/bcb05bc5ba2017af8adfb70bb1b888f8dd797bc4))
+* **mem:** avoid overflow when checking state segment strides ([#1341](https://github.com/gufo-org/gufo/issues/1341)) ([a4d3970](https://github.com/gufo-org/gufo/commit/a4d3970d5de0b7c8457e720e0297bd9c6834805b))
+* **mem:** finish eager HIP clears before publishing state regions ([#1311](https://github.com/gufo-org/gufo/issues/1311)) ([9cde650](https://github.com/gufo-org/gufo/commit/9cde650fa7e514b45ebcd756f9d02f3fdd2b06c4))
+* **nix:** declare Qwen3-TTS and MiniMax H3 model installs ([#1300](https://github.com/gufo-org/gufo/issues/1300)) ([9a6e01a](https://github.com/gufo-org/gufo/commit/9a6e01ad7088e80adbbc0e61b5cb62c5a0d71756))
+* **qwen-image:** accept every recommended Qwen-Image-2.1 size ([#1330](https://github.com/gufo-org/gufo/issues/1330)) ([dff44d2](https://github.com/gufo-org/gufo/commit/dff44d2b8aa8e70886fe4340692d22b723d6a1e6))
+* **qwen38-flash-next:** release wide prefill scratch when the server goes idle ([#1274](https://github.com/gufo-org/gufo/issues/1274)) ([425e351](https://github.com/gufo-org/gufo/commit/425e3513cfe62d99646f0222c471b24506223505))
+* **serve:** bound the gap before a required tagged call and count reasoning in emitted text ([#1302](https://github.com/gufo-org/gufo/issues/1302)) ([5afa525](https://github.com/gufo-org/gufo/commit/5afa525909c688f63fc1d808c4fbe62d08c1a692))
+* **serve:** execute a capped reply's final token when its state is retained ([#1248](https://github.com/gufo-org/gufo/issues/1248)) ([2e13e68](https://github.com/gufo-org/gufo/commit/2e13e68c602b819c0ce7a13794a364d85c8e108f))
+* **serve:** keep the host reserve inside free CMA pages instead of subtracting both ([#1273](https://github.com/gufo-org/gufo/issues/1273)) ([390639b](https://github.com/gufo-org/gufo/commit/390639b3ec32122b9b90caa58826d1604c62f1d6))
+* **serve:** omit Content-Length from 204 responses ([#1336](https://github.com/gufo-org/gufo/issues/1336)) ([4a74354](https://github.com/gufo-org/gufo/commit/4a743543795ed75450ba7fd836aefc15f43150d1))
+* **windows:** pass -O3 to HIP device code through clang-cl ([#1246](https://github.com/gufo-org/gufo/issues/1246)) ([d6fc549](https://github.com/gufo-org/gufo/commit/d6fc5495ac71f499286f3058ce4263c7e3d36527))
+
+
+### Performance
+
+* **cache:** commit backing for a disk restore's capture before the restore ([#1285](https://github.com/gufo-org/gufo/issues/1285)) ([11a51d2](https://github.com/gufo-org/gufo/commit/11a51d2f124477cf6082c732b9b13660b412f1a5))
+* **cache:** keep session pages for checkpoints and restore them by mapping ([#1308](https://github.com/gufo-org/gufo/issues/1308)) ([c3018d6](https://github.com/gufo-org/gufo/commit/c3018d642eeb8986fa450bcf0ba0b3337417fd39))
+* **cache:** learn a shared branch point after 192 common tokens ([#1270](https://github.com/gufo-org/gufo/issues/1270)) ([fdbc654](https://github.com/gufo-org/gufo/commit/fdbc654eb03ceb0d02477166877c51e80ff72a99))
+* **cache:** read disk checkpoints in parallel and ahead of admission ([#1271](https://github.com/gufo-org/gufo/issues/1271)) ([f5c0b20](https://github.com/gufo-org/gufo/commit/f5c0b20b144638cfa9bd7d5b158cdbfe4456925a))
+* **core:** map session state on demand and lend it to the RAM cache ([#1251](https://github.com/gufo-org/gufo/issues/1251)) ([842295e](https://github.com/gufo-org/gufo/commit/842295e45ba31a7462a1bc0fc0c9fb83fb93b044))
+* **ds4:** apply IQ2/IQ3 signs with SWAR __vcmpne4 and __vsub4 ([#1295](https://github.com/gufo-org/gufo/issues/1295)) ([8327275](https://github.com/gufo-org/gufo/commit/8327275cc4d43bb5bb5473e04dac59ed6e789999))
+* **ds4:** keep DeepSeek V4 Flash compressed KV in shared demand-mapped state ([#1264](https://github.com/gufo-org/gufo/issues/1264)) ([eb9dea3](https://github.com/gufo-org/gufo/commit/eb9dea37e1d9da71a61b68da50514c002f021b3c))
+* **qwen38-flash-next:** add wave32 MoE, packed-K16 Q8 WMMA, batch HIP graphs, and cached GPU grammar bitmasks ([#1321](https://github.com/gufo-org/gufo/issues/1321)) ([0ec80e5](https://github.com/gufo-org/gufo/commit/0ec80e5a7e38ca11408d0c5784ed1359bde9b0bf))
+* **qwen38-flash-next:** run lone prompts in 14K-row passes on transient scratch ([#1265](https://github.com/gufo-org/gufo/issues/1265)) ([2e50748](https://github.com/gufo-org/gufo/commit/2e50748fdace17f4a0fd5a23c014f91abbf490d7))
+* **serve:** keep decoders stepping through a restore's capture backing and deep short prefill passes ([#1299](https://github.com/gufo-org/gufo/issues/1299)) ([46500f8](https://github.com/gufo-org/gufo/commit/46500f82614b75f59c1514b7ed49ac9399a71a4e))
+* **serve:** reduce HTTP and SSE client-visible latency ([#1332](https://github.com/gufo-org/gufo/issues/1332)) ([48d28b0](https://github.com/gufo-org/gufo/commit/48d28b0834d7c343ea622fe3f2ea1c0507d45446))
+* **serve:** restore checkpoints beside running decoders on the GPU's copy engine ([#1291](https://github.com/gufo-org/gufo/issues/1291)) ([49e5ae8](https://github.com/gufo-org/gufo/commit/49e5ae81613fe6d259632197ee7c9f8313a1354e))
+
+
+### Documentation
+
+* explain core vs extension, add contributing, conduct and security policies ([#1344](https://github.com/gufo-org/gufo/issues/1344)) ([f7e35dd](https://github.com/gufo-org/gufo/commit/f7e35ddeb215dddee9c1cd6a76d8014a8dad546b))
+
+
+### Code Refactoring
+
+* **cache:** encode disk manifests and compute CRC-64 in Rust ([#1305](https://github.com/gufo-org/gufo/issues/1305)) ([029a156](https://github.com/gufo-org/gufo/commit/029a156976867ba25021fd934636cfafe29149f6))
+* **core:** compile JSON Schema patterns and lexemes in Rust ([#1304](https://github.com/gufo-org/gufo/issues/1304)) ([8a4068f](https://github.com/gufo-org/gufo/commit/8a4068f951af054d7324a0b75b03aaa7b5d6c88e))
+* **core:** parse GGUF headers in Rust ([#1261](https://github.com/gufo-org/gufo/issues/1261)) ([1b4bc1c](https://github.com/gufo-org/gufo/commit/1b4bc1c2348bed62e9a4c9daee7ffa6b9e25f59c))
+* **core:** parse JSON in Rust ([#1294](https://github.com/gufo-org/gufo/issues/1294)) ([75575e5](https://github.com/gufo-org/gufo/commit/75575e5f7e8f455cf6f9af4181b8b32d0d98a617))
+
+
+### Build System
+
+* **core:** decode JPEG images in Rust ([#1312](https://github.com/gufo-org/gufo/issues/1312)) ([99b91dc](https://github.com/gufo-org/gufo/commit/99b91dc2765595a587b32a7c799566d61d8f9cbd))
+
 ## [0.35.0](https://github.com/gufo-org/gufo/compare/v0.34.0...v0.35.0) (2026-11-17)
 
 
