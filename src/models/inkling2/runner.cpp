@@ -758,26 +758,39 @@ public:
     for (std::size_t i = 0; i < advances.size(); ++i)
       CommitToken(*states[i], advances[i].token);
   }
-  /// DSpark cycle: the anchor (the pending token, or a selection from the
-  /// session's logits) is emitted, the drafter proposes up to three tokens
-  /// after it, and one Engine::Verify step evaluates the anchor and the first
-  /// W proposals (W from ChooseDsparkWidth). Each verified row's token is
-  /// then selected exactly as SelectNext would select it after the tokens
-  /// before it (same masks, the request's sampler on a working copy), and a
-  /// proposal is kept while it equals that selection. The first selection
-  /// that differs, or follows the last kept row, becomes the next anchor. So
-  /// every emitted token and draw is the one plain decoding gives.
-  [[nodiscard]] g::TextDecodeStep DecodeStep(
-      g::TextRunnerState& state, std::size_t max_tokens,
-      sampling::SamplerState& sampler) const override {
-    if (!engine_->batch_capable())
-      return g::TextModelRunner::DecodeStep(state, max_tokens, sampler);
-    g::TextDecodeStep step;
-    if (max_tokens == 0)
-      return step;
-    auto& st = Require(state);
+  /// How a request's verified rows are selected and its drafts proposed.
+  /// Plain greedy requests take each row's argmax from the device (the token
+  /// Select would pick) and copy only the kept row's logits. Requests that
+  /// sample with temperature only get coupled proposals: the drafter draws
+  /// each with the uniform the request's sampler will use for that row.
+  struct RowMode {
+    bool greedy = false, coupled = false;
+    Drafter::Coupled cp;
+  };
+  [[nodiscard]] RowMode ModeOf(const Inkling2State& st,
+                               const sampling::SamplerState& working) const {
+    RowMode m;
+    const auto& cfg = working.config();
+    m.greedy = cfg.can_use_unmodified_argmax() && !cfg.logprobs &&
+               !working.ForcedToken() && !st.reasoning_off && !st.call_required;
+    m.coupled = !m.greedy && cfg.temperature > 0 && !cfg.constraint &&
+                !working.ForcedToken() && cfg.top_k == 0 && cfg.top_p == 1 &&
+                !(cfg.min_p > 0 && cfg.min_keep > 1);
+    if (m.coupled) {
+      m.cp.temperature = cfg.temperature;
+      m.cp.min_p = cfg.min_p;
+      auto peek = working;  // the draws the rows' selections will make
+      for (float& u : m.cp.u)
+        u = static_cast<float>(peek.Uniform());
+    }
+    return m;
+  }
+
+  /// The anchor of a cycle: the pending token, or a selection from the
+  /// session's logits. A non-stop anchor is accepted and committed.
+  [[nodiscard]] g::TextDecodeSelection TakeAnchor(
+      Inkling2State& st, sampling::SamplerState& working) const {
     Session& ss = st.session();
-    sampling::SamplerState working(sampler);
     g::TextDecodeSelection anchor;
     if (st.pending) {
       anchor = std::move(*st.pending);
@@ -789,85 +802,27 @@ public:
             "Inkling 2 Mini token selection has no logits");
       anchor = Select(st, working, ss.logits(), ss.position());
     }
-    if (anchor.stop) {
-      step.stop = true;
-      step.terminal_logprobs = std::move(anchor.logprobs);
-      sampler.CopyDrawStateFrom(working);
-      return step;
+    if (!anchor.stop) {
+      working.Accept(anchor.token);
+      CommitToken(st, anchor.token);
     }
-    const auto a = anchor.token;
-    working.Accept(a);
-    CommitToken(st, a);
-    step.selections.push_back(std::move(anchor));
-    std::size_t budget = max_tokens - 1;
+    return anchor;
+  }
 
-    using Clock = std::chrono::steady_clock;
-    const auto t0 = Clock::now();
-    std::int32_t drafts[Drafter::kMaxDraft] = {};
-    float conf[Drafter::kMaxDraft] = {};
-    int n = 0;
-    // Plain greedy requests take each row's argmax from the device (the token
-    // Select would pick) and copy only the kept row's logits. Requests that
-    // sample with temperature only get coupled proposals: the drafter draws
-    // each with the uniform the request's sampler will use for that row.
+  /// Selects a session's verified rows (the anchor's row and `width` draft
+  /// rows from position `pos`; `out` its rows' logits when not greedy, `amax`
+  /// its rows' device argmax when greedy). Each row's token is selected
+  /// exactly as SelectNext would select it after the tokens before it (same
+  /// masks, the request's sampler on `working`), and a proposal is kept while
+  /// it equals that selection; the first selection that differs, or follows
+  /// the last kept row, becomes the next anchor (`st.pending`). Returns the
+  /// rows kept (at least 1).
+  std::size_t Resolve(Inkling2State& st, sampling::SamplerState& working,
+                      g::TextDecodeStep& step, std::size_t& budget,
+                      std::size_t pos, int width, const std::int32_t* drafts,
+                      std::span<const float> out, const std::int32_t* amax,
+                      bool greedy) const {
     const auto& cfg = working.config();
-    const bool greedy = cfg.can_use_unmodified_argmax() && !cfg.logprobs &&
-                        !working.ForcedToken() && !st.reasoning_off &&
-                        !st.call_required;
-    const bool coupled = !greedy && cfg.temperature > 0 && !cfg.constraint &&
-                         !working.ForcedToken() && cfg.top_k == 0 &&
-                         cfg.top_p == 1 && !(cfg.min_p > 0 && cfg.min_keep > 1);
-    Drafter::Coupled cp;
-    if (coupled) {
-      cp.temperature = cfg.temperature;
-      cp.min_p = cfg.min_p;
-      auto peek = working;  // the draws the rows' selections will make
-      for (float& u : cp.u)
-        u = static_cast<float>(peek.Uniform());
-    }
-    DsparkCalibration& cal = coupled ? cal_coupled_ : cal_;
-    if (budget > 0 && engine_->DraftReady(ss) && st.backoff.Draft()) {
-      n = static_cast<int>(
-          std::min<std::size_t>({std::size_t{Drafter::kMaxDraft}, budget,
-                                 engine_->VerifyRows(ss) - 1}));
-      if (n > 0)  // stop once the width policy would not verify another
-        n = engine_->Propose(
-            ss, static_cast<std::int32_t>(a), n, drafts, conf,
-            [&](int i, const float* p) {
-              const std::lock_guard lock(dsp_mutex_);
-              return ChooseDsparkWidth(p, i, cal, costs_) == i;
-            },
-            coupled ? &cp : nullptr);
-    }
-    const auto t1 = Clock::now();
-    int width = 0;
-    {
-      const std::lock_guard lock(dsp_mutex_);
-      if (n > 0)
-        costs_.ObserveDraft(
-            n, std::chrono::duration<double, std::milli>(t1 - t0).count());
-      width = n > 0 ? ChooseDsparkWidth(conf, n, cal, costs_) : 0;
-    }
-    std::vector<std::int32_t> rows{static_cast<std::int32_t>(a)};
-    rows.insert(rows.end(), drafts, drafts + width);
-    std::span<const float> out;
-    std::int32_t amax[Engine::kMaxVerifyRows] = {};
-    const std::size_t pos = ss.position();
-    if (width == 0) {
-      // Nothing to verify: a plain decode step (logits left on the device
-      // when greedy).
-      if (greedy) {
-        engine_->Step(ss, static_cast<std::int32_t>(a), amax);
-      } else {
-        const std::int32_t id = static_cast<std::int32_t>(a);
-        engine_->Forward(ss, std::span<const std::int32_t>(&id, 1));
-        out = ss.logits();
-      }
-    } else {
-      engine_->Verify(ss, rows, greedy ? nullptr : &out,
-                      greedy ? amax : nullptr);
-    }
-    const auto t2 = Clock::now();
     const std::size_t V = engine_->config().n_vocab_text;
     std::size_t keep = 1;
     // Sampling with temperature only (no min-p, T >= 0.1) draws exactly one
@@ -949,6 +904,89 @@ public:
     }
     if (parallel)
       working.SetRngState(draws[used]);
+    return keep;
+  }
+
+  /// DSpark cycle: the anchor (the pending token, or a selection from the
+  /// session's logits) is emitted, the drafter proposes up to seven tokens
+  /// after it, and one Engine::Verify step evaluates the anchor and the first
+  /// W proposals (W from ChooseDsparkWidth); Resolve keeps the proposals the
+  /// request's own selections confirm. So every emitted token and draw is the
+  /// one plain decoding gives.
+  [[nodiscard]] g::TextDecodeStep DecodeStep(
+      g::TextRunnerState& state, std::size_t max_tokens,
+      sampling::SamplerState& sampler) const override {
+    if (!engine_->batch_capable())
+      return g::TextModelRunner::DecodeStep(state, max_tokens, sampler);
+    g::TextDecodeStep step;
+    if (max_tokens == 0)
+      return step;
+    auto& st = Require(state);
+    Session& ss = st.session();
+    sampling::SamplerState working(sampler);
+    g::TextDecodeSelection anchor = TakeAnchor(st, working);
+    if (anchor.stop) {
+      step.stop = true;
+      step.terminal_logprobs = std::move(anchor.logprobs);
+      sampler.CopyDrawStateFrom(working);
+      return step;
+    }
+    const auto a = anchor.token;
+    step.selections.push_back(std::move(anchor));
+    std::size_t budget = max_tokens - 1;
+
+    using Clock = std::chrono::steady_clock;
+    const auto t0 = Clock::now();
+    std::int32_t drafts[Drafter::kMaxDraft] = {};
+    float conf[Drafter::kMaxDraft] = {};
+    int n = 0;
+    const RowMode mode = ModeOf(st, working);
+    const bool greedy = mode.greedy;
+    DsparkCalibration& cal = mode.coupled ? cal_coupled_ : cal_;
+    if (budget > 0 && engine_->DraftReady(ss) && st.backoff.Draft()) {
+      n = static_cast<int>(
+          std::min<std::size_t>({std::size_t{Drafter::kMaxDraft}, budget,
+                                 engine_->VerifyRows(ss) - 1}));
+      if (n > 0)  // stop once the width policy would not verify another
+        n = engine_->Propose(
+            ss, static_cast<std::int32_t>(a), n, drafts, conf,
+            [&](int i, const float* p) {
+              const std::lock_guard lock(dsp_mutex_);
+              return ChooseDsparkWidth(p, i, cal, costs_) == i;
+            },
+            mode.coupled ? &mode.cp : nullptr);
+    }
+    const auto t1 = Clock::now();
+    int width = 0;
+    {
+      const std::lock_guard lock(dsp_mutex_);
+      if (n > 0)
+        costs_.ObserveDraft(
+            n, std::chrono::duration<double, std::milli>(t1 - t0).count());
+      width = n > 0 ? ChooseDsparkWidth(conf, n, cal, costs_) : 0;
+    }
+    std::vector<std::int32_t> rows{static_cast<std::int32_t>(a)};
+    rows.insert(rows.end(), drafts, drafts + width);
+    std::span<const float> out;
+    std::int32_t amax[Engine::kMaxVerifyRows] = {};
+    const std::size_t pos = ss.position();
+    if (width == 0) {
+      // Nothing to verify: a plain decode step (logits left on the device
+      // when greedy).
+      if (greedy) {
+        engine_->Step(ss, static_cast<std::int32_t>(a), amax);
+      } else {
+        const std::int32_t id = static_cast<std::int32_t>(a);
+        engine_->Forward(ss, std::span<const std::int32_t>(&id, 1));
+        out = ss.logits();
+      }
+    } else {
+      engine_->Verify(ss, rows, greedy ? nullptr : &out,
+                      greedy ? amax : nullptr);
+    }
+    const auto t2 = Clock::now();
+    const std::size_t keep = Resolve(st, working, step, budget, pos, width,
+                                     drafts, out, amax, greedy);
     if (width > 0)
       engine_->CommitVerify(ss, keep, out);  // empty: from the device
     sampler.CopyDrawStateFrom(working);
@@ -977,21 +1015,38 @@ public:
     return step;
   }
 
-  /// Several requests: one batched decode step of their anchors (the
-  /// pending token, or a selection from the session's logits, emitted), then
-  /// each one's next token is selected from its new logits and kept as the
-  /// next anchor, exactly as DecodeStep does without proposals.
+  /// Several requests: their anchors (the pending token, or a selection from
+  /// the session's logits) are emitted, each drafts after its anchor, and one
+  /// Engine::VerifyBatch step evaluates every anchor and the proposals the
+  /// joint width policy keeps (ChooseDsparkBatchWidths: rows go to the
+  /// drafts most likely to survive while they pay for their share of the
+  /// step); Resolve then keeps, per request, the proposals its own
+  /// selections confirm. Without proposals the step is a batched one-token
+  /// decode. Every row has the arithmetic of the request's lone one-token
+  /// decode, so each request's tokens and draws are those of plain decoding.
   [[nodiscard]] std::vector<g::TextDecodeStep> DecodeBatch(
       std::span<const g::TextRunnerDecode> decodes) const override {
     if (decodes.size() < 2 || decodes.size() > Engine::kMaxDecodeBatch ||
         !engine_->batch_capable())
       return g::TextModelRunner::DecodeBatch(decodes);
+    using Clock = std::chrono::steady_clock;
+    const auto t0 = Clock::now();
     std::vector<g::TextDecodeStep> steps(decodes.size());
     std::vector<sampling::SamplerState> working;
     working.reserve(decodes.size());
-    std::vector<std::size_t> live;
-    std::vector<Session*> sessions;
-    std::vector<std::int32_t> ids;
+    struct Lane {
+      std::size_t i;  // index into decodes
+      Inkling2State* st;
+      Session* ss;
+      std::int32_t anchor;
+      std::size_t budget;
+      std::size_t pos = 0;
+      RowMode mode;
+      int n = 0, width = 0;
+      std::int32_t drafts[Drafter::kMaxDraft] = {};
+      float conf[Drafter::kMaxDraft] = {};
+    };
+    std::vector<Lane> lanes;
     for (std::size_t i = 0; i < decodes.size(); ++i) {
       working.emplace_back(decodes[i].sampler.get());
       auto& step = steps[i];
@@ -999,49 +1054,205 @@ public:
                              .physical_width = decodes.size()};
       try {
         auto& st = Require(decodes[i].state.get());
-        Session& ss = st.session();
-        g::TextDecodeSelection anchor;
-        if (st.pending) {
-          anchor = std::move(*st.pending);
-          st.pending.reset();
-        } else {
-          anchor = Select(st, working[i], ss.logits(), ss.position());
-        }
+        g::TextDecodeSelection anchor = TakeAnchor(st, working[i]);
         if (anchor.stop || decodes[i].max_tokens == 0) {
           step.stop = anchor.stop;
           step.terminal_logprobs = std::move(anchor.logprobs);
           continue;
         }
-        working[i].Accept(anchor.token);
-        CommitToken(st, anchor.token);
-        ids.push_back(static_cast<std::int32_t>(anchor.token));
+        Lane l{.i = i,
+               .st = &st,
+               .ss = &st.session(),
+               .anchor = static_cast<std::int32_t>(anchor.token),
+               .budget = decodes[i].max_tokens - 1};
         step.selections.push_back(std::move(anchor));
-        sessions.push_back(&ss);
-        live.push_back(i);
+        lanes.push_back(l);
       } catch (...) {
         step.failure = std::current_exception();
       }
     }
-    if (!sessions.empty()) {
-      try {
-        if (sessions.size() == 1)
-          engine_->Forward(*sessions[0], std::span<const std::int32_t>(ids));
-        else
-          engine_->DecodeBatch(sessions, ids);
-      } catch (...) {
-        for (const auto i : live)
-          steps[i].failure = std::current_exception();
-        live.clear();
+    const int B = static_cast<int>(lanes.size());
+    // Drafting: each lane proposes after its anchor, stopping once a further
+    // row would cost more of the step than the tokens it is expected to add.
+    bool drafted = false;
+    double draft_ms = 0;
+    if (B >= 2 && engine_->has_drafter()) {
+      bool draft = false;
+      {
+        const std::lock_guard lock(dsp_mutex_);
+        draft = batch_backoff_[B].Draft();
       }
+      for (auto& l : lanes) {
+        if (!draft)
+          break;
+        try {
+          l.mode = ModeOf(*l.st, working[l.i]);
+          if (l.budget == 0 || !engine_->DraftReady(*l.ss))
+            continue;
+          const int room = static_cast<int>(Engine::kMaxVerifyRows) - B;
+          l.n = static_cast<int>(std::min<std::size_t>(
+              {std::size_t{Drafter::kMaxDraft}, l.budget,
+               engine_->VerifyRows(*l.ss) - 1,
+               static_cast<std::size_t>(std::max(room, 0))}));
+          if (l.n <= 0) {
+            l.n = 0;
+            continue;
+          }
+          const DsparkCalibration& cal = l.mode.coupled ? cal_coupled_ : cal_;
+          const auto ts = Clock::now();
+          l.n = engine_->Propose(
+              *l.ss, l.anchor, l.n, l.drafts, l.conf,
+              [&](int i, const float* p) {
+                // the survival of the first i drafts against the share of a
+                // plain step's tokens the extra rows would cost
+                const std::lock_guard lock(dsp_mutex_);
+                double sv = 1;
+                for (int k = 0; k < i; ++k)
+                  sv *= cal.Estimate(p[k]);
+                const double per_token = costs_batch_.Verify(B) / B;
+                const double extra =
+                    costs_batch_.Verify(std::min(B + i, 8)) -
+                    costs_batch_.Verify(std::min(B + i - 1, 8));
+                return sv * per_token > extra;
+              },
+              l.mode.coupled ? &l.mode.cp : nullptr);
+          draft_ms +=
+              std::chrono::duration<double, std::milli>(Clock::now() - ts)
+                  .count();
+          drafted = drafted || l.n > 0;
+        } catch (...) {
+          steps[l.i].failure = std::current_exception();
+          l.n = -1;  // dropped below
+        }
+      }
+      std::erase_if(lanes, [](const Lane& l) { return l.n < 0; });
     }
-    for (const auto i : live) {
+    const int nl = static_cast<int>(lanes.size());
+    if (drafted && nl >= 1) {
+      const std::lock_guard lock(dsp_mutex_);
+      const float* p[Engine::kMaxDecodeBatch];
+      int n[Engine::kMaxDecodeBatch], w[Engine::kMaxDecodeBatch];
+      const DsparkCalibration* c[Engine::kMaxDecodeBatch];
+      for (int k = 0; k < nl; ++k) {
+        p[k] = lanes[k].conf;
+        n[k] = lanes[k].n;
+        c[k] = lanes[k].mode.coupled ? &cal_coupled_ : &cal_;
+      }
+      ChooseDsparkBatchWidths(nl, p, n, c, costs_batch_, draft_ms, w);
+      for (int k = 0; k < nl; ++k)
+        lanes[k].width = w[k];
+    }
+    int extra = 0;
+    for (const auto& l : lanes)
+      extra += l.width;
+    const auto t1 = Clock::now();
+    if (extra == 0) {
+      // A batched one-token decode of the anchors; each request's next token
+      // is selected from its new logits and kept as the next anchor.
+      std::vector<Session*> sessions;
+      std::vector<std::int32_t> ids;
+      for (const auto& l : lanes) {
+        sessions.push_back(l.ss);
+        ids.push_back(l.anchor);
+      }
+      bool ok = !sessions.empty();
+      if (ok) {
+        try {
+          if (sessions.size() == 1)
+            engine_->Forward(*sessions[0], std::span<const std::int32_t>(ids));
+          else
+            engine_->DecodeBatch(sessions, ids);
+        } catch (...) {
+          for (const auto& l : lanes)
+            steps[l.i].failure = std::current_exception();
+          ok = false;
+        }
+      }
+      if (ok) {
+        for (const auto& l : lanes) {
+          try {
+            auto next =
+                Select(*l.st, working[l.i], l.ss->logits(), l.ss->position());
+            l.st->pending = std::move(next);
+          } catch (...) {
+            steps[l.i].failure = std::current_exception();
+          }
+        }
+        const double ms =
+            std::chrono::duration<double, std::milli>(Clock::now() - t1)
+                .count();
+        const std::lock_guard lock(dsp_mutex_);
+        if (nl >= 2)
+          costs_batch_.ObserveVerify(nl, ms);
+        if (drafted)  // drafting that bought nothing
+          batch_backoff_[B].Observe(
+              nl, ms + draft_ms,
+              costs_batch_.Verify(std::max(nl, 1)) / std::max(nl, 1));
+      }
+    } else {
+      std::vector<Session*> sessions;
+      std::vector<std::size_t> counts;
+      std::vector<std::int32_t> rows;
+      bool any_greedy = false, any_host = false;
+      for (auto& l : lanes) {
+        sessions.push_back(l.ss);
+        counts.push_back(static_cast<std::size_t>(1 + l.width));
+        rows.push_back(l.anchor);
+        rows.insert(rows.end(), l.drafts, l.drafts + l.width);
+        l.pos = l.ss->position();
+        (l.mode.greedy ? any_greedy : any_host) = true;
+      }
+      std::span<const float> out;
+      std::int32_t amax[Engine::kMaxVerifyRows] = {};
+      bool ok = true;
       try {
-        auto& st = Require(decodes[i].state.get());
-        Session& ss = st.session();
-        auto next = Select(st, working[i], ss.logits(), ss.position());
-        st.pending = std::move(next);
+        engine_->VerifyBatch(sessions, counts, rows, any_host ? &out : nullptr,
+                             any_greedy ? amax : nullptr);
       } catch (...) {
-        steps[i].failure = std::current_exception();
+        for (const auto& l : lanes)
+          steps[l.i].failure = std::current_exception();
+        ok = false;
+      }
+      const std::size_t V = engine_->config().n_vocab_text;
+      std::size_t r0 = 0;
+      int emitted = 0;
+      for (auto& l : lanes) {
+        const std::size_t nr = static_cast<std::size_t>(1 + l.width);
+        if (!ok)
+          break;
+        try {
+          const auto mine = l.mode.greedy ? std::span<const float>{}
+                                          : out.subspan(r0 * V, nr * V);
+          const std::size_t keep =
+              Resolve(*l.st, working[l.i], steps[l.i], l.budget, l.pos, l.width,
+                      l.drafts, mine, amax + r0, l.mode.greedy);
+          engine_->CommitVerify(*l.ss, keep, mine);
+          emitted += static_cast<int>(keep);
+          if (l.width > 0) {
+            steps[l.i].draft_rounds = 1;
+            steps[l.i].draft_tokens = static_cast<std::size_t>(l.width);
+            steps[l.i].draft_accepted_tokens = keep - 1;
+          }
+          const std::lock_guard lock(dsp_mutex_);
+          DsparkCalibration& cal = l.mode.coupled ? cal_coupled_ : cal_;
+          for (int j = 0; j < l.width && j < static_cast<int>(keep); ++j)
+            cal.Observe(l.conf[j], j + 1 < static_cast<int>(keep));
+        } catch (...) {
+          steps[l.i].failure = std::current_exception();
+        }
+        r0 += nr;
+      }
+      if (ok) {
+        const double ms =
+            std::chrono::duration<double, std::milli>(Clock::now() - t1)
+                .count();
+        const std::lock_guard lock(dsp_mutex_);
+        costs_batch_.ObserveVerify(static_cast<int>(rows.size()), ms);
+        batch_backoff_[B].Observe(
+            emitted,
+            std::chrono::duration<double, std::milli>(Clock::now() - t0)
+                .count(),
+            costs_batch_.Verify(nl) / nl);
       }
     }
     for (std::size_t i = 0; i < decodes.size(); ++i)
@@ -1118,6 +1329,11 @@ private:
   mutable DsparkCalibration cal_, cal_coupled_;
   mutable double plain_greedy_ms_ = 22.0, plain_sampled_ms_ = 23.5;
   mutable DsparkCosts costs_;
+  // batched cycles: costs by total rows (several sessions' rows; plain batched
+  // steps too) and a back-off per batch width
+  mutable DsparkCosts costs_batch_ = DsparkCosts::Batched();
+  mutable std::array<DsparkBackoff, Engine::kMaxDecodeBatch + 1>
+      batch_backoff_{};
 };
 
 /// The layout of the identity text (schema line, artifact id,

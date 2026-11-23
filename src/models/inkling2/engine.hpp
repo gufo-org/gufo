@@ -124,6 +124,7 @@ private:
   SessionHooks* hooks_ = nullptr;  // M2 hook
   std::size_t pos_ = 0;
   std::size_t verify_rows_ = 0;  // rows of an uncommitted verification
+  std::size_t verify_row0_ = 0;  // its first row in the verification step
   Drafter::State draft_;         // DSpark context (Engine::AttachDrafter)
   std::size_t bytes_ = 0;
   mutable std::vector<float> logits_;
@@ -220,6 +221,16 @@ public:
   /// greedy sampler picks it) without copying the rows.
   void Verify(Session& s, std::span<const std::int32_t> tokens,
               std::span<const float>* logits, std::int32_t* argmax = nullptr);
+  /// Verification of several distinct sessions in one step: counts[g] rows
+  /// of sessions[g] (each within VerifyRows of its session), tokens laid out
+  /// session after session, at most kMaxVerifyRows in all; `logits` /
+  /// `argmax` cover every row in that order. Each session is then committed
+  /// with its own CommitVerify (logits: its rows' subspan) before the next
+  /// step. Every row's result is the one a lone Verify of its session gives.
+  void VerifyBatch(std::span<Session* const> sessions,
+                   std::span<const std::size_t> counts,
+                   std::span<const std::int32_t> tokens,
+                   std::span<const float>* logits, std::int32_t* argmax);
   /// Empty `logits`: row keep - 1 comes from the device.
   void CommitVerify(Session& s, std::size_t keep,
                     std::span<const float> logits);

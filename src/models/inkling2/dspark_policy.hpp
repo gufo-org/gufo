@@ -57,6 +57,13 @@ class DsparkCosts {
 public:
   static constexpr int kMaxRows = 8;
   [[nodiscard]] double Verify(int rows) const { return verify_[rows]; }
+  /// Starting costs of steps whose rows belong to several sessions (their
+  /// rows route to more distinct experts than one session's).
+  static DsparkCosts Batched() {
+    DsparkCosts c;
+    c.verify_ = {0, 21.9, 29.3, 35.5, 42.8, 47.8, 53.0, 58.0, 63.0};
+    return c;
+  }
   [[nodiscard]] double Draft(int tokens) const {
     return draft_base_ + draft_step_ * tokens;
   }
@@ -95,6 +102,59 @@ private:
     }
   }
   return best;
+}
+
+/// Widths of a batched cycle (several sessions in one verification step):
+/// session i drafted n[i] tokens whose calibrated survivals are given by
+/// `cal[i]` from the drafter's probabilities p[i][..]. Rows are added one at a
+/// time to the session whose next draft is the most likely to survive (each
+/// session's survival only falls along its drafts, so for every row count
+/// that is the best allocation), and the count that maximises
+/// E[emitted] / (drafting already spent + Verify(rows)) is kept. w[i]
+/// receives each session's width (its rows minus the anchor).
+inline void ChooseDsparkBatchWidths(int sessions, const float* const* p,
+                                    const int* n,
+                                    const DsparkCalibration* const* cal,
+                                    const DsparkCosts& cost, double draft_ms,
+                                    int* w) {
+  double survive[DsparkCosts::kMaxRows] = {};
+  int at[DsparkCosts::kMaxRows] = {};
+  for (int i = 0; i < sessions; ++i) {
+    survive[i] = 1;
+    w[i] = 0;
+  }
+  int rows = sessions;
+  double expect = sessions;
+  double best_rate = expect / (draft_ms + cost.Verify(rows));
+  int best_rows = rows;
+  int order[DsparkCosts::kMaxRows] = {};  // the session each added row took
+  while (rows < DsparkCosts::kMaxRows) {
+    int pick = -1;
+    double gain = 0;
+    for (int i = 0; i < sessions; ++i) {
+      if (at[i] >= n[i])
+        continue;
+      const double g = survive[i] * cal[i]->Estimate(p[i][at[i]]);
+      if (pick < 0 || g > gain) {
+        pick = i;
+        gain = g;
+      }
+    }
+    if (pick < 0)
+      break;
+    survive[pick] *= cal[pick]->Estimate(p[pick][at[pick]]);
+    ++at[pick];
+    order[rows] = pick;
+    ++rows;
+    expect += gain;
+    const double rate = expect / (draft_ms + cost.Verify(rows));
+    if (rate > best_rate) {
+      best_rate = rate;
+      best_rows = rows;
+    }
+  }
+  for (int r = sessions; r < best_rows; ++r)
+    ++w[order[r]];
 }
 
 /// Per-request back-off: every eight drafted cycles, when they emitted fewer

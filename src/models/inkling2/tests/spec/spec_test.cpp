@@ -11,6 +11,10 @@
 //    for byte.
 // 2. With --dspark: greedy speculative decoding with the drafter's proposals
 //    must produce the reference's tokens.
+// 3. Several sessions at different positions (different attention buckets)
+//    in one step: Engine::DecodeBatch, and Engine::VerifyBatch with mixed
+//    widths and corruptions; every kept row must equal that session's lone
+//    one-token decode byte for byte.
 // Exit 0 on success, 1 on a mismatch, 77 (skip) without a model.
 #include <algorithm>
 #include <cstdint>
@@ -134,6 +138,125 @@ int main(int argc, char** argv) {
     bad += std::memcmp(sp->logits().data(), lg[i].data(), V * 4) != 0;
     std::printf("verify R=%d: %ld rows, %ld mismatched\n", R, rows, bad);
     failures += bad != 0;
+  }
+
+  {
+    // Session 0 is `ref`'s prompt; the others are longer filler prompts.
+    constexpr int kS = 3;
+    const int lens[kS] = {prompt, prompt + 1700, prompt + 3900};
+    std::vector<std::vector<std::int32_t>> pr(kS), wt(kS);
+    std::vector<std::vector<std::vector<float>>> rl(kS);
+    for (int g = 0; g < kS; ++g) {
+      pr[g] = ids;
+      for (int i = prompt; i < lens[g]; ++i)
+        pr[g].push_back(2000 + (i * 104729 + g * 31) % 60000);
+      auto r = engine->NewSession();
+      engine->Forward(*r, pr[g]);
+      wt[g].push_back(Argmax(r->logits()));
+      for (int i = 0; i < tokens + 8; ++i) {
+        engine->Forward(*r, std::span<const std::int32_t>(&wt[g].back(), 1));
+        rl[g].push_back(r->logits());
+        wt[g].push_back(Argmax(r->logits()));
+      }
+    }
+    // plain batched decode
+    {
+      std::vector<std::unique_ptr<gufo::models::inkling2::Session>> ss;
+      std::vector<gufo::models::inkling2::Session*> sp;
+      for (int g = 0; g < kS; ++g) {
+        ss.push_back(engine->NewSession());
+        engine->Forward(*ss.back(), pr[g]);
+        sp.push_back(ss.back().get());
+      }
+      long rows = 0, bad = 0;
+      for (int i = 0; i < 12; ++i) {
+        std::int32_t t[kS];
+        for (int g = 0; g < kS; ++g)
+          t[g] = wt[g][i];
+        engine->DecodeBatch(sp, t);
+        for (int g = 0; g < kS; ++g) {
+          ++rows;
+          bad +=
+              std::memcmp(sp[g]->logits().data(), rl[g][i].data(), V * 4) != 0;
+        }
+      }
+      std::printf("decode batch: %ld rows, %ld mismatched\n", rows, bad);
+      failures += bad != 0;
+    }
+    // batched verification, widths and corruptions per session
+    {
+      std::vector<std::unique_ptr<gufo::models::inkling2::Session>> ss;
+      for (int g = 0; g < kS; ++g) {
+        ss.push_back(engine->NewSession());
+        engine->Forward(*ss.back(), pr[g]);
+      }
+      std::uint32_t rng = 777u;
+      int at[kS] = {};
+      long rows = 0, bad = 0, steps = 0;
+      std::span<const float> out;
+      while (*std::min_element(at, at + kS) < tokens) {
+        std::vector<gufo::models::inkling2::Session*> sp;
+        std::vector<std::size_t> cnt;
+        std::vector<int> who, wrong;
+        std::vector<std::int32_t> t;
+        std::size_t total = 0;
+        for (int g = 0; g < kS; ++g) {
+          rng = rng * 1664525u + 1013904223u;
+          if (at[g] >= tokens || (rng >> 28) == 0)
+            continue;  // sometimes a session sits a step out
+          const std::size_t room = Engine::kMaxVerifyRows - total;
+          if (room == 0)
+            break;
+          rng = rng * 1664525u + 1013904223u;
+          const int n = static_cast<int>(std::min<std::size_t>(
+              {1 + (rng >> 8) % 4, room, engine->VerifyRows(*ss[g])}));
+          rng = rng * 1664525u + 1013904223u;
+          const int w = n > 1 ? 1 + static_cast<int>((rng >> 8) % n) : n;
+          for (int j = 0; j < n; ++j)
+            t.push_back(j == w ? (wt[g][at[g] + j] + 1) %
+                                     static_cast<std::int32_t>(V)
+                               : wt[g][at[g] + j]);
+          sp.push_back(ss[g].get());
+          cnt.push_back(static_cast<std::size_t>(n));
+          who.push_back(g);
+          wrong.push_back(w);
+          total += static_cast<std::size_t>(n);
+        }
+        if (sp.empty())
+          continue;
+        engine->VerifyBatch(sp, cnt, t, &out, nullptr);
+        ++steps;
+        std::size_t r0 = 0;
+        for (std::size_t k = 0; k < sp.size(); ++k) {
+          const int g = who[k];
+          for (int j = 0; j < wrong[k]; ++j) {
+            ++rows;
+            bad += std::memcmp(out.data() + (r0 + j) * V,
+                               rl[g][at[g] + j].data(), V * 4) != 0;
+          }
+          r0 += cnt[k];
+        }
+        // the device copy for the first session, host rows for the others
+        r0 = 0;
+        for (std::size_t k = 0; k < sp.size(); ++k) {
+          const auto mine = out.subspan(r0 * V, cnt[k] * V);
+          engine->CommitVerify(*sp[k], static_cast<std::size_t>(wrong[k]),
+                               k == 0 ? std::span<const float>{} : mine);
+          at[who[k]] += wrong[k];
+          r0 += cnt[k];
+        }
+      }
+      for (int g = 0; g < kS; ++g) {
+        engine->Forward(*ss[g],
+                        std::span<const std::int32_t>(&wt[g][at[g]], 1));
+        ++rows;
+        bad += std::memcmp(ss[g]->logits().data(), rl[g][at[g]].data(),
+                           V * 4) != 0;
+      }
+      std::printf("verify batch: %ld steps, %ld rows, %ld mismatched\n", steps,
+                  rows, bad);
+      failures += bad != 0;
+    }
   }
 
   if (!dspark.empty()) {

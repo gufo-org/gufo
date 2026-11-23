@@ -256,6 +256,9 @@ struct Engine::Impl {
   // `graphs`; the conv kernels read in-step history and capture their inputs.
   std::map<int, hipGraphExec_t> vgraphs;
   bool verify_mode = false;
+  // all rows of the verification are one session's (else several sessions'
+  // rows, each run through the per-row attention kernel)
+  bool verify_one_session = true;
   float* d_vcap = nullptr;  // [48][6656][kVerifyRows] conv inputs of a step
   // device argmax of the rows of a verification (greedy requests)
   float* d_amax_ws = nullptr;
@@ -267,6 +270,11 @@ struct Engine::Impl {
     return verify_mode ? d_vcap + static_cast<std::size_t>(slot_idx) *
                                       kConvChannels * fs::kVerifyRows
                        : nullptr;
+  }
+  /// Each verification row's index within its session's rows (d_step's third
+  /// plane; null outside verification).
+  const int* VRows() const {
+    return verify_mode ? d_step + 2 * kMaxB : nullptr;
   }
   std::set<int> failed_graphs;  // keys whose capture failed: those steps run
                                 // eagerly, no retry
@@ -288,7 +296,7 @@ struct Engine::Impl {
   float* d_blk[16];
   int nblk_alloc = 0;
   int* d_ids8;
-  int* d_step;  // {token, position}
+  int* d_step;  // {token, position, row within its session}
   unsigned* d_counter;
   fs::SlotEntry* d_tbl;
   const float* d_states[16];
@@ -597,7 +605,7 @@ struct Engine::Impl {
       b = NewBuf(B * kEmbd);
     d_moe_part = NewBuf(B * 8 * kEmbd);
     d_ids8 = NewInts(B * 8);
-    d_step = NewInts(2 * B);  // tokens [B], positions [B]
+    d_step = NewInts(3 * B);  // tokens [B], positions [B], row in session [B]
     d_vcap =
         NewBuf(static_cast<std::size_t>(48) * kConvChannels * fs::kVerifyRows);
     d_feat = NewBuf(B * Drafter::kFeatureFloats);
@@ -1322,6 +1330,7 @@ struct Engine::Impl {
       ka.ld = kSProj;
       ka.ldd = 64;
       ka.cap = VCap(slot_idx);
+      ka.ri = VRows();
       fs::KvPrep(ds, ka, nb);
     }
 
@@ -1357,7 +1366,7 @@ struct Engine::Impl {
       aa.tau_alpha = cfg->log_scale_alpha;
       aa.ldp = kSProj;
       aa.ws_tok = static_cast<int>(kMaxSplit * 8 * 12);
-      if (verify_mode && !swa && nb > 1)
+      if (verify_mode && verify_one_session && !swa && nb > 1)
         fs::AttnDecodeRows(ds, aa, nb);
       else
         fs::AttnDecode(ds, aa, nb);
@@ -1376,6 +1385,7 @@ struct Engine::Impl {
       ca.cur = cur;
       ca.blk = nullptr;
       ca.cap = VCap(slot_idx);
+      ca.ri = VRows();
       if (ip % static_cast<int>(cfg->attn_res_block) == 0) {
         ca.blk = NewBlock();
         d_states[d_ns++] = ca.blk;
@@ -1454,6 +1464,7 @@ struct Engine::Impl {
       ca.cur = cur;
       ca.blk = nullptr;
       ca.cap = VCap(slot_idx);
+      ca.ri = VRows();
       pend.on = true;
       pend.a = ca;
     }
@@ -1682,35 +1693,52 @@ struct Engine::Impl {
     nb = 1;
   }
 
-  /// One verification step: `n` (<= kMaxB) tokens of one session at its
-  /// next positions, every row with the arithmetic of a one-token decode at
-  /// its position (the caller keeps the rows inside one attention bucket).
-  /// The session does not advance; CommitVerify keeps a prefix of the rows.
-  void VerifyN(Session& ss, const std::int32_t* tokens, int n,
-               std::span<const float>* out, std::int32_t* argmax) {
-    nb = n;
-    std::int32_t step[2 * kMaxB] = {};
-    const int pos = static_cast<int>(ss.pos_);
-    for (int b = 0; b < n; ++b) {
-      step[b] = tokens[b];
-      step[kMaxB + b] = pos + b;
+  /// One verification step: for each of `ng` distinct sessions, counts[g]
+  /// tokens at its next positions (rows of a session consecutive, sessions in
+  /// order; at most kMaxB rows in all), every row with the arithmetic of a
+  /// one-token decode at its position (the caller keeps each session's rows
+  /// inside one attention bucket). No session advances; CommitVerify keeps a
+  /// prefix of a session's rows.
+  void VerifyN(Session* const* sess, const int* counts, int ng,
+               const std::int32_t* tokens, std::span<const float>* out,
+               std::int32_t* argmax) {
+    int n = 0;
+    std::int32_t step[3 * kMaxB] = {};
+    int maxpos = 0;
+    for (int g = 0; g < ng; ++g) {
+      const int pos = static_cast<int>(sess[g]->pos_);
+      if (BucketCtx(pos + counts[g] - 1) != BucketCtx(pos))
+        throw std::runtime_error("inkling2: verification crosses a bucket");
+      for (int j = 0; j < counts[g]; ++j, ++n) {
+        step[n] = tokens[n];
+        step[kMaxB + n] = pos + j;
+        step[2 * kMaxB + n] = j;
+      }
+      maxpos = std::max(maxpos, pos + counts[g] - 1);
     }
-    const int ctx = BucketCtx(pos);
-    if (BucketCtx(pos + n - 1) != ctx)
-      throw std::runtime_error("inkling2: verification crosses a bucket");
+    nb = n;
+    const int ctx = BucketCtx(maxpos);
     Check(hipStreamSynchronize(s), "pre-verify sync");
     Check(hipMemcpyAsync(d_step, step, sizeof step, hipMemcpyHostToDevice, ds),
           "step");
-    for (int b = 0; b < n; ++b)
-      Check(hipMemcpyAsync(d_tbl + b * 48, ss.tbl_, 48 * sizeof(fs::SlotEntry),
-                           hipMemcpyDeviceToDevice, ds),
-            "slot table");
+    for (int g = 0, b = 0; g < ng; ++g)
+      for (int j = 0; j < counts[g]; ++j, ++b)
+        Check(hipMemcpyAsync(d_tbl + b * 48, sess[g]->tbl_,
+                             48 * sizeof(fs::SlotEntry),
+                             hipMemcpyDeviceToDevice, ds),
+              "slot table");
     verify_mode = true;
+    verify_one_session = ng == 1;
     struct Off {
       bool* f;
-      ~Off() { *f = false; }
-    } off{&verify_mode};
-    const int key = ctx * 8 + n;
+      bool* one;
+      ~Off() {
+        *f = false;
+        *one = true;
+      }
+    } off{&verify_mode, &verify_one_session};
+    // Several sessions take the per-row attention kernel: their own graphs.
+    const int key = ctx * 8 + n + (ng > 1 ? (1 << 28) : 0);
     const int fkey = -key;  // failed verification captures
     auto it = vgraphs.find(key);
     if (it == vgraphs.end() && failed_graphs.count(fkey) == 0) {
@@ -1742,11 +1770,16 @@ struct Engine::Impl {
     nb = 1;
   }
 
-  void CommitVerify(Session& ss, int keep) {
+  /// Keeps the first `keep` rows of the session's verification rows, which
+  /// start at step row `row0`.
+  void CommitVerify(Session& ss, int keep, int row0) {
     fs::CommitVerifyConv(ds, static_cast<const fs::SlotEntry*>(ss.tbl_), d_vcap,
-                         keep);
+                         keep, row0);
     if (dsp)
-      dsp->Inject(ds, ss.draft_, d_feat, ss.pos_, keep);
+      dsp->Inject(
+          ds, ss.draft_,
+          d_feat + static_cast<std::size_t>(row0) * Drafter::kFeatureFloats,
+          ss.pos_, keep);
     Check(hipStreamSynchronize(ds), "commit sync");
     ss.pos_ += static_cast<std::size_t>(keep);
   }
@@ -2164,18 +2197,48 @@ std::size_t Engine::VerifyRows(const Session& s) const {
 
 void Engine::Verify(Session& s, std::span<const std::int32_t> tokens,
                     std::span<const float>* logits, std::int32_t* argmax) {
+  Session* sp = &s;
+  const std::size_t n = tokens.size();
+  VerifyBatch(std::span<Session* const>(&sp, 1),
+              std::span<const std::size_t>(&n, 1), tokens, logits, argmax);
+}
+
+void Engine::VerifyBatch(std::span<Session* const> sessions,
+                         std::span<const std::size_t> counts,
+                         std::span<const std::int32_t> tokens,
+                         std::span<const float>* logits, std::int32_t* argmax) {
   const std::lock_guard lock(mutex_);
-  if (tokens.empty() || tokens.size() > VerifyRows(s))
+  std::size_t total = 0;
+  if (sessions.empty() || sessions.size() != counts.size())
+    throw std::runtime_error("inkling2: bad verification batch");
+  for (std::size_t g = 0; g < sessions.size(); ++g) {
+    for (std::size_t h = 0; h < g; ++h)
+      if (sessions[h] == sessions[g])
+        throw std::runtime_error(
+            "inkling2: duplicate session in verification batch");
+    if (counts[g] == 0 || counts[g] > VerifyRows(*sessions[g]))
+      throw std::runtime_error("inkling2: bad verification width");
+    total += counts[g];
+  }
+  if (total != tokens.size() || total > kMaxVerifyRows)
     throw std::runtime_error("inkling2: bad verification width");
   for (auto t : tokens)
     if (t < 0 || static_cast<std::uint32_t>(t) >= weights_.config.n_vocab_text)
       throw std::runtime_error("inkling2: token id out of range");
-  if (s.hooks_ != nullptr)
-    s.hooks_->BeforeWrite(s.pos_, s.pos_ + tokens.size());  // M2 hook
-  s.BackRows(s.pos_, s.pos_ + tokens.size());
-  impl_->VerifyN(s, tokens.data(), static_cast<int>(tokens.size()), logits,
-                 argmax);
-  s.verify_rows_ = tokens.size();
+  int cnt[kMaxVerifyRows] = {};
+  std::size_t row0 = 0;
+  for (std::size_t g = 0; g < sessions.size(); ++g) {
+    Session& s = *sessions[g];
+    if (s.hooks_ != nullptr)
+      s.hooks_->BeforeWrite(s.pos_, s.pos_ + counts[g]);  // M2 hook
+    s.BackRows(s.pos_, s.pos_ + counts[g]);
+    cnt[g] = static_cast<int>(counts[g]);
+    s.verify_rows_ = counts[g];
+    s.verify_row0_ = row0;
+    row0 += counts[g];
+  }
+  impl_->VerifyN(sessions.data(), cnt, static_cast<int>(sessions.size()),
+                 tokens.data(), logits, argmax);
 }
 
 void Engine::CommitVerify(Session& s, std::size_t keep,
@@ -2186,8 +2249,9 @@ void Engine::CommitVerify(Session& s, std::size_t keep,
       (!logits.empty() && logits.size() < keep * V))
     throw std::runtime_error("inkling2: bad verification commit");
   if (logits.empty()) {
-    Check(hipMemcpyAsync(s.dlogits_, impl_->logits_d + (keep - 1) * V, V * 4,
-                         hipMemcpyDeviceToDevice, impl_->ds),
+    Check(hipMemcpyAsync(s.dlogits_,
+                         impl_->logits_d + (s.verify_row0_ + keep - 1) * V,
+                         V * 4, hipMemcpyDeviceToDevice, impl_->ds),
           "logits copy");
     s.logits_stale_ = true;
   } else {
@@ -2196,8 +2260,10 @@ void Engine::CommitVerify(Session& s, std::size_t keep,
         logits.begin() + static_cast<std::ptrdiff_t>((keep - 1) * V),
         logits.begin() + static_cast<std::ptrdiff_t>(keep * V));
   }
-  impl_->CommitVerify(s, static_cast<int>(keep));
+  impl_->CommitVerify(s, static_cast<int>(keep),
+                      static_cast<int>(s.verify_row0_));
   s.verify_rows_ = 0;
+  s.verify_row0_ = 0;
 }
 
 bool Engine::AttachDrafter(const std::string& path, std::string* error) {

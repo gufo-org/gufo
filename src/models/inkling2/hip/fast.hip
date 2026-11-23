@@ -673,11 +673,12 @@ __device__ __forceinline__ void conv_resid_elem(const ConvResidArgs& a, int c,
   const float xc = input(tok);
   float xin[4] = {st[0], st[1], st[2], xc};
   if (a.cap) {
-    for (int l = 1; l <= 3 && l <= tok; ++l)
+    const int j = a.ri ? a.ri[tok] : tok;  // rows of this session before tok
+    for (int l = 1; l <= 3 && l <= j; ++l)
       xin[3 - l] = input(tok - l);
-    if (tok < 3)
-      for (int l = tok + 1; l <= 3; ++l)
-        xin[3 - l] = st[3 - l + tok];
+    if (j < 3)
+      for (int l = j + 1; l <= 3; ++l)
+        xin[3 - l] = st[3 - l + j];
     a.cap[((size_t)a.conv_off + c) * kVerifyRows + tok] = xc;
   }
   float y = 0.f;
@@ -734,11 +735,12 @@ __device__ __forceinline__ void conv_resid_block(const ConvResidArgs& a,
       const float xc = input(tok);
       xin[r][3] = xc;
       if (a.cap) {
-        for (int l = 1; l <= 3 && l <= tok; ++l)
+        const int j = a.ri ? a.ri[tok] : tok;
+        for (int l = 1; l <= 3 && l <= j; ++l)
           xin[r][3 - l] = input(tok - l);
-        if (tok < 3)
-          for (int l = tok + 1; l <= 3; ++l)
-            xin[r][3 - l] = st[3 - l + tok];
+        if (j < 3)
+          for (int l = j + 1; l <= 3; ++l)
+            xin[r][3 - l] = st[3 - l + j];
         a.cap[((size_t)a.conv_off + c) * kVerifyRows + tok] = xc;
       }
 #pragma unroll
@@ -1016,14 +1018,15 @@ __global__ void __launch_bounds__(128) k_kvprep(KvPrepArgs a) {
   float kx[4] = {sk[0], sk[1], sk[2], ak[c]};
   float vx[4] = {sv[0], sv[1], sv[2], av[c]};
   if (a.cap) {
-    for (int l = 1; l <= 3 && l <= tk; ++l) {
+    const int j = a.ri ? a.ri[tk] : tk;
+    for (int l = 1; l <= 3 && l <= j; ++l) {
       kx[3 - l] = a.k[(size_t)(tk - l) * a.ld + c];
       vx[3 - l] = a.v[(size_t)(tk - l) * a.ld + c];
     }
-    if (tk < 3)
-      for (int l = tk + 1; l <= 3; ++l) {
-        kx[3 - l] = sk[3 - l + tk];
-        vx[3 - l] = sv[3 - l + tk];
+    if (j < 3)
+      for (int l = j + 1; l <= 3; ++l) {
+        kx[3 - l] = sk[3 - l + j];
+        vx[3 - l] = sv[3 - l + j];
       }
     a.cap[((size_t)a.conv_off_k + c) * kVerifyRows + tk] = kx[3];
     a.cap[((size_t)a.conv_off_v + c) * kVerifyRows + tk] = vx[3];
@@ -1689,6 +1692,20 @@ __device__ __forceinline__ float bias_dot(const v2h* rp, const __half* bt,
   return s;
 }
 
+// Split length of a global-attention decode row at position p: the engine's
+// bucket for p alone (Impl::BucketCtx; chunk as DLayer sets it), so a row's
+// arithmetic never depends on the other rows of its step. Window layers use
+// the fixed chunk of the arguments.
+__device__ __forceinline__ int row_chunk(int chunk, int swa, int p) {
+  if (swa)
+    return chunk;
+  int b = 2048;
+  while (b < p + 1)
+    b *= 2;
+  int c = min(max(b / 32, 128), 2048);
+  return max(c, (b / 256 + 63) / 64 * 64);
+}
+
 // NQ = 1 (3 rows: the 3 q heads of one kv head)
 template<int NW>
 __global__ __launch_bounds__(NW * 32) void attn_decode(AttnArgs a) {
@@ -1712,8 +1729,9 @@ __global__ __launch_bounds__(NW * 32) void attn_decode(AttnArgs a) {
   const __half* vc = (const __half*)slot->v;
   const int cap = slot->cap;
   const int kb = a.swa ? max(0, p0 - (WIN - 1)) : 0;
-  const int lo = kb + split * a.chunk;
-  const int hi = min(lo + a.chunk, p0 + 1);
+  const int chunk = row_chunk(a.chunk, a.swa, p0);
+  const int lo = kb + split * chunk;
+  const int hi = min(lo + chunk, p0 + 1);
   const __half* bt = (const __half*)a.bt;
 
   for (int r = w; r < 16; r += NW) {
@@ -1928,8 +1946,9 @@ __global__ __launch_bounds__(NW * 32) void attn_decode_rows(AttnArgs a) {
   const __half* kc = (const __half*)slot->k;
   const __half* vc = (const __half*)slot->v;
   const int cap = slot->cap;
-  const int lo = split * a.chunk;
-  const int hi = min(lo + a.chunk, plast + 1);
+  const int chunk = row_chunk(a.chunk, 0, a.pos[0]);  // one bucket per step
+  const int lo = split * chunk;
+  const int hi = min(lo + chunk, plast + 1);
   const __half* bt = (const __half*)a.bt;
 
   for (int r = w; r < 16; r += NW) {
@@ -3548,12 +3567,12 @@ void ConvResid(hipStream_t s, const ConvResidArgs& a, int nb) {
   Chk("conv_resid");
 }
 __global__ void __launch_bounds__(256)
-    k_conv_commit(const SlotEntry* tbl, const float* cap, int keep) {
+    k_conv_commit(const SlotEntry* tbl, const float* cap, int keep, int row0) {
   const int ch = blockIdx.x * 256 + threadIdx.x, slot = blockIdx.y;
   if (ch >= 6656)
     return;
   float* st = tbl[slot].conv + (size_t)ch * 3;
-  const float* cp = cap + ((size_t)slot * 6656 + ch) * kVerifyRows;
+  const float* cp = cap + ((size_t)slot * 6656 + ch) * kVerifyRows + row0;
   float seq[3 + kVerifyRows];
   for (int i = 0; i < 3; ++i)
     seq[i] = st[i];
@@ -3625,8 +3644,8 @@ void RowsArgmax(hipStream_t s, const float* x, int rows, int n, float* ws,
 }
 
 void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
-                      int keep) {
-  k_conv_commit<<<dim3(26, 48), 256, 0, s>>>(tbl, cap, keep);
+                      int keep, int row0) {
+  k_conv_commit<<<dim3(26, 48), 256, 0, s>>>(tbl, cap, keep, row0);
   Chk("conv_commit");
 }
 void RouteBuild(hipStream_t s, const int* ids, int p, int e, int* off,

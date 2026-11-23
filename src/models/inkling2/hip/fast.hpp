@@ -92,16 +92,20 @@ struct ConvResidArgs {
   // row 0), the history is not written, and each row's input goes to
   // cap[(conv_off + c) * kVerifyRows + b] (CommitVerifyConv applies it).
   float* cap = nullptr;
+  // With `cap`: each row's index within its session's rows (a step may verify
+  // several sessions, each one's rows consecutive); null: all rows one session.
+  const int* ri = nullptr;
 };
 /// Rows of one verification step (Engine::kMaxVerifyRows).
 inline constexpr int kVerifyRows = 8;
 /// Batched (nb tokens): x, cur, blk are [nb][2304]; token b uses slot[b * 48].
 void ConvResid(hipStream_t s, const ConvResidArgs& a, int nb = 1);
-/// After a verification step of one session: every history of the 48 slots
-/// becomes the last 3 inputs of (history, the first `keep` captured rows).
+/// After a verification step: every history of the session's 48 slots
+/// becomes the last 3 inputs of (history, the first `keep` of its captured
+/// rows, which start at step row `row0`).
 /// `cap` is [48][6656][kVerifyRows].
 void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
-                      int keep);
+                      int keep, int row0 = 0);
 /// out[r] = the first maximum of the finite values of row r of x [rows][n]
 /// (ws: rows * 64 * 2 floats).
 void RowsArgmax(hipStream_t s, const float* x, int rows, int n, float* ws,
@@ -181,9 +185,10 @@ struct KvPrepArgs {
       conv_off_v;  // float offsets of the conv history inside the slot
   const int* pos;
   float scale, qk_thr, eps;
-  int ld = 0, ldd = 0;   // token strides of k / v and of dk / dv (decode
-                         // batches); slot advances 48 entries per token
-  float* cap = nullptr;  // verification capture (see ConvResidArgs::cap)
+  int ld = 0, ldd = 0;      // token strides of k / v and of dk / dv (decode
+                            // batches); slot advances 48 entries per token
+  float* cap = nullptr;     // verification capture (see ConvResidArgs::cap)
+  const int* ri = nullptr;  // see ConvResidArgs::ri
 };
 void KvPrep(hipStream_t s, const KvPrepArgs& a, int nb = 1);
 
