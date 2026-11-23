@@ -383,7 +383,8 @@ __device__ __forceinline__ float wave_sum(float v) {
 
 __global__ void rmsnorm_k(const float* __restrict__ x, int ldx,
                           const float* __restrict__ w, float* __restrict__ out,
-                          int ldo, int dim, float eps) {
+                          int ldo, int dim, float eps,
+                          _Float16* __restrict__ out16) {
   const int row = blockIdx.x;
   const float* xr = x + static_cast<size_t>(row) * ldx;
   __shared__ float red[32];
@@ -400,8 +401,13 @@ __global__ void rmsnorm_k(const float* __restrict__ x, int ldx,
     tot += red[i];
   const float inv = rsqrtf(tot / static_cast<float>(dim) + eps);
   float* orow = out + static_cast<size_t>(row) * ldo;
-  for (int i = threadIdx.x; i < dim; i += blockDim.x)
-    orow[i] = xr[i] * inv * (w ? w[i] : 1.0f);
+  _Float16* hrow = out16 ? out16 + static_cast<size_t>(row) * dim : nullptr;
+  for (int i = threadIdx.x; i < dim; i += blockDim.x) {
+    const float o = xr[i] * inv * (w ? w[i] : 1.0f);
+    orow[i] = o;
+    if (hrow)
+      hrow[i] = (_Float16)o;
+  }
 }
 
 __global__ void mix_k(MixStates st, const float* __restrict__ query, int nq,
@@ -691,10 +697,11 @@ void EmbedRows(hipStream_t s, int type, const void* w, int k, const int* ids,
 }
 
 void RmsNorm(hipStream_t s, const float* x, int ldx, const float* w, float* out,
-             int ldo, int dim, int rows, float eps) {
+             int ldo, int dim, int rows, float eps, void* out16) {
   if (rows <= 0)
     return;
-  rmsnorm_k<<<rows, 256, 0, s>>>(x, ldx, w, out, ldo, dim, eps);
+  rmsnorm_k<<<rows, 256, 0, s>>>(x, ldx, w, out, ldo, dim, eps,
+                                 static_cast<_Float16*>(out16));
   Check(hipGetLastError(), "rmsnorm");
 }
 

@@ -640,8 +640,12 @@ struct Engine::Impl {
   void Layer(Session& ss, int ip, int slot_idx,
              const float* msg /*[T][4][2304] or null*/) {
     const LayerWeights& L = w->layers[ip];
+    const LayerFast& F = lf[ip];
     const bool is_swa = !L.is_global;
     Session::Slot& slot = ss.slots_[slot_idx];
+    // The producers of the projection inputs also write their F16 copies.
+    void* const in16[3] = {p_iq16, p_ik16, p_iv16};
+    bool have16 = false;
 
     // A. attention inputs
     In inp[3] = {{cur, kEmbd}, {cur, kEmbd}, {cur, kEmbd}};
@@ -659,6 +663,7 @@ struct Engine::Impl {
         mj.ntok = T;
         for (int j = 0; j < nq; ++j) {
           mj.outq[j] = in[j];
+          mj.outh[j] = F.proj ? in16[j] : nullptr;
           mj.nw[j] = is_swa ? DF(L.attn_norm)
                             : DF(j == 0   ? L.attn_q_inp_norm
                                  : j == 1 ? L.attn_k_inp_norm
@@ -666,6 +671,7 @@ struct Engine::Impl {
         }
         fs::Mix(s, mj, cfg->rms_eps);
         normed = true;
+        have16 = F.proj;
       } else {
         FMix(States(cur), DF(L.attn_res_query), nq, mixed);
         for (int j = 0; j < 3; ++j)
@@ -700,37 +706,41 @@ struct Engine::Impl {
       if (msg) {
         for (int j = 0; j < 3; ++j)
           kk::RmsNorm(s, inp[j].p, inp[j].ld, nw, in[j], kEmbd, kEmbd, T,
-                      cfg->rms_eps);
+                      cfg->rms_eps, F.proj ? in16[j] : nullptr);
+        have16 = F.proj;
         iq = in[0];
         ik = in[1];
         iv = in[2];
       } else {
         kk::RmsNorm(s, inp[0].p, inp[0].ld, nw, in[0], kEmbd, kEmbd, T,
-                    cfg->rms_eps);
+                    cfg->rms_eps, F.proj ? in16[0] : nullptr);
+        have16 = F.proj;
         iq = ik = iv = in[0];
       }
     } else {
       kk::RmsNorm(s, inp[0].p, inp[0].ld, DF(L.attn_q_inp_norm), in[0], kEmbd,
-                  kEmbd, T, cfg->rms_eps);
+                  kEmbd, T, cfg->rms_eps, F.proj ? in16[0] : nullptr);
       kk::RmsNorm(s, inp[1].p, inp[1].ld, DF(L.attn_k_inp_norm), in[1], kEmbd,
-                  kEmbd, T, cfg->rms_eps);
+                  kEmbd, T, cfg->rms_eps, F.proj ? in16[1] : nullptr);
       kk::RmsNorm(s, inp[2].p, inp[2].ld, DF(L.attn_v_inp_norm), in[2], kEmbd,
-                  kEmbd, T, cfg->rms_eps);
+                  kEmbd, T, cfg->rms_eps, F.proj ? in16[2] : nullptr);
+      have16 = F.proj;
       iq = in[0];
       ik = in[1];
       iv = in[2];
     }
 
     // B. projections
-    const LayerFast& F = lf[ip];
     const bool fp = F.proj;
     if (fp) {
       const std::size_t n = static_cast<std::size_t>(T) * kEmbd;
-      fs::CvtF16(s, iq, p_iq16, n);
-      if (ik != iq)
-        fs::CvtF16(s, ik, p_ik16, n);
-      if (iv != iq && iv != ik)
-        fs::CvtF16(s, iv, p_iv16, n);
+      if (!have16) {
+        fs::CvtF16(s, iq, p_iq16, n);
+        if (ik != iq)
+          fs::CvtF16(s, ik, p_ik16, n);
+        if (iv != iq && iv != ik)
+          fs::CvtF16(s, iv, p_iv16, n);
+      }
       const void* a_q = p_iq16;
       const void* a_k = ik != iq ? p_ik16 : p_iq16;
       const void* a_v = iv == iq ? p_iq16 : (iv == ik ? a_k : p_iv16);
@@ -800,6 +810,7 @@ struct Engine::Impl {
       pa.sink = Sb;
       pa.gate = Gb;
       pa.out = Ob;
+      pa.out16 = F.oproj ? p_ob16 : nullptr;
       pa.qk_thr = cfg->qk_clip;
       pa.r_thr = cfg->rel_clip;
       pa.eps = cfg->rms_eps;
@@ -808,24 +819,23 @@ struct Engine::Impl {
       fs::AttnPrefill(s, pa);
     }
     if (F.oproj) {
-      fs::CvtF16(s, Ob, p_ob16, static_cast<std::size_t>(T) * kQ);
       fs::GemmDense(s, D(L.attn_output), kEmbd, kQ, p_ob16, AOp, DenseItems());
     } else {
       G(L.attn_output, Ob, kQ, AOp, kEmbd, T);
     }
-    kk::Conv(s, AOp, cs + kConvOffAttn * 3, DF(L.attn_post_conv), nullptr, AO,
-             T, kEmbd, 128, 1.0f / std::sqrt(5.0f));
-    kk::ConvStateUpdate(s, AOp, cs + kConvOffAttn * 3, T, kEmbd);
-
     // E. residual / block bookkeeping
-    if (ip % cfg->attn_res_block == 0) {
+    if (ip % cfg->attn_res_block != 0) {
+      fs::ConvAdd(s, AOp, cs + kConvOffAttn * 3, DF(L.attn_post_conv), cur, T,
+                  kEmbd, 1.0f / std::sqrt(5.0f));
+    } else {
+      kk::Conv(s, AOp, cs + kConvOffAttn * 3, DF(L.attn_post_conv), nullptr, AO,
+               T, kEmbd, 128, 1.0f / std::sqrt(5.0f));
+      kk::ConvStateUpdate(s, AOp, cs + kConvOffAttn * 3, T, kEmbd);
       // The partial sum so far becomes a finished block; the next one starts at
       // the attention output. Nothing before this point writes `cur`, so
       // swapping buffers replaces two copies.
       std::swap(cur, blocks[nblocks++]);
       std::swap(cur, AO);
-    } else {
-      kk::Add(s, cur, AO, cur, T * kEmbd);
     }
     // ffn_inp = cur
 
@@ -841,6 +851,7 @@ struct Engine::Impl {
       mj.nq = 1;
       mj.ntok = T;
       mj.outq[0] = h;
+      mj.outh[0] = F.moe >= 0 ? p_h16 : nullptr;
       mj.nw[0] = DF(L.ffn_norm);
       fs::Mix(s, mj, cfg->rms_eps);
       h_done = true;
@@ -859,7 +870,7 @@ struct Engine::Impl {
     }
     if (!h_done)
       kk::RmsNorm(s, hin, kEmbd, DF(L.ffn_norm), h, kEmbd, kEmbd, T,
-                  cfg->rms_eps);
+                  cfg->rms_eps, F.moe >= 0 ? p_h16 : nullptr);
 
     // G. MoE
     if (Moe(L, lf[ip])) {
@@ -924,8 +935,7 @@ struct Engine::Impl {
     if (F.moe >= 0) {
       const int tile = T >= kWideTileTokens ? 128 : T >= 1024 ? 64 : 32;
       const int max_items = (P + tile - 1) / tile + E;
-      fs::MoeRoute(s, ids_d, wts, P, tile, mws);
-      fs::CvtF16(s, h, p_h16, static_cast<std::size_t>(T) * kEmbd);
+      fs::MoeRoute(s, ids_d, wts, P, tile, mws);  // h's F16 copy is in p_h16
       fs::MoeGuPrefill(s, F.moe, tile, D(L.ffn_gate_up_exps),
                        L.ffn_gate_up_scale ? DF(L.ffn_gate_up_scale) : nullptr,
                        p_h16, p_act16, mws, max_items, cfg->situ_beta,

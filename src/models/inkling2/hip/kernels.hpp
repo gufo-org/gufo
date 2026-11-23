@@ -54,7 +54,7 @@ void EmbedRows(hipStream_t s, int type, const void* w, int k, const int* ids,
 
 /// out = x / sqrt(mean(x^2) + eps) * w (w may be null). Rows of `dim` elements.
 void RmsNorm(hipStream_t s, const float* x, int ldx, const float* w, float* out,
-             int ldo, int dim, int rows, float eps);
+             int ldo, int dim, int rows, float eps, void* out16 = nullptr);
 
 /// Attention-residual mix. `states` (up to 8 device row-major [t][dim] buffers)
 /// are RMS-normalised per token; for every query row q: p = softmax_j(query[q]

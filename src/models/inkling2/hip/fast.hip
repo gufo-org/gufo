@@ -784,6 +784,13 @@ __global__ void __launch_bounds__(512) k_mix(MixJob j, float eps) {
                                        : (size_t)tok * j.nq * 2304) +
                             (size_t)q * 2304;
       ((float4*)ob)[i] = o;
+      if (q < 4 && j.outh[q]) {
+        _Float16* hb = static_cast<_Float16*>(j.outh[q]) + toff + 4 * i;
+        hb[0] = (_Float16)o.x;
+        hb[1] = (_Float16)o.y;
+        hb[2] = (_Float16)o.z;
+        hb[3] = (_Float16)o.w;
+      }
     }
   }
 }
@@ -1161,6 +1168,168 @@ __global__ void __launch_bounds__(256)
       continue;
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
+      const int t = t0 + tt + 16 * j;
+      if (t < T)
+        p.out[(size_t)t * p.ldo + r] = acc[i][j];
+    }
+  }
+}
+
+// Same products as k_gate_p64 (every output accumulates k in ascending order
+// with the same fused multiply-adds, inputs scaled by the same inverse RMS), so
+// the results are identical. Faster: a thread keeps TT/16 tokens x RB/16 rows
+// and reads each operand as a float4 along k from LDS (one read per four
+// k-steps instead of four), the next 32-k chunk is fetched into registers
+// while the current one is consumed from the other LDS buffer (one barrier per
+// chunk), and a wave computes the inverse RMS of its tokens interleaved.
+template<int TT, int RB>
+__global__ void __launch_bounds__(256)
+    k_gate_v2(GateJobs jobs, int T, float eps) {
+  constexpr int KC = 32, LS = KC + 4, NT = TT / 16, NR = RB / 16;
+  constexpr int WL = RB * KC / 4 / 256, XL = TT * KC / 4 / 256;
+  static_assert(WL >= 1 && XL >= 1, "tile too small");
+  const GateP& p = jobs.j[blockIdx.z];
+  __shared__ float Ws[2][RB * LS];
+  __shared__ float Xs[2][TT * LS];
+  __shared__ float inv[2][TT];
+  const int tid = threadIdx.x, t0 = blockIdx.x * TT, r0 = blockIdx.y * RB;
+  const int wave = tid / 32, lane = tid % 32;
+  {
+    constexpr int TW = TT / 8;
+    float a[TW], b[TW];
+    const float* xr[TW];
+    const float* mr[TW];
+#pragma unroll
+    for (int q = 0; q < TW; ++q) {
+      const int t = min(t0 + wave * TW + q, T - 1);
+      xr[q] = p.x + (size_t)t * p.ldx;
+      mr[q] = p.msg + (size_t)t * p.ldm;
+      a[q] = b[q] = 0.f;
+    }
+    if (p.rms) {
+      for (int i = lane; i < p.k1; i += 32)
+#pragma unroll
+        for (int q = 0; q < TW; ++q) {
+          float v = xr[q][i];
+          a[q] += v * v;
+        }
+      for (int i = lane; i < p.k2; i += 32)
+#pragma unroll
+        for (int q = 0; q < TW; ++q) {
+          float v = mr[q][i];
+          b[q] += v * v;
+        }
+    }
+#pragma unroll
+    for (int q = 0; q < TW; ++q) {
+      float s1 = 1.f, s2 = 1.f;
+      if (p.rms) {
+        const float sa = wsum(a[q]), sb = wsum(b[q]);
+        s1 = rsqrtf(sa / p.k1 + eps);
+        s2 = p.k2 ? rsqrtf(sb / p.k2 + eps) : 1.f;
+      }
+      if (lane == 0) {
+        inv[0][wave * TW + q] = s1;
+        inv[1][wave * TW + q] = s2;
+      }
+    }
+  }
+  __syncthreads();
+  const int ktot = p.k1 + p.k2, nc = ktot / KC;
+  float4 wr[WL], xv[XL];
+  auto gload = [&](int c) {
+    const int kc = c * KC;
+#pragma unroll
+    for (int m = 0; m < WL; ++m) {
+      const int i = tid + 256 * m, row = i >> 3, c4 = i & 7;
+      wr[m] = *(const float4*)(p.W + (size_t)(r0 + row) * p.ldw + kc + c4 * 4);
+    }
+    const bool seg2 = kc >= p.k1;
+    const float* src = seg2 ? p.msg : p.x;
+    const int ld = seg2 ? p.ldm : p.ldx, kk = seg2 ? kc - p.k1 : kc;
+#pragma unroll
+    for (int m = 0; m < XL; ++m) {
+      const int i = tid + 256 * m, tk = i >> 3, c4 = i & 7;
+      const int t = min(t0 + tk, T - 1);
+      xv[m] = *(const float4*)(src + (size_t)t * ld + kk + c4 * 4);
+    }
+  };
+  auto sstore = [&](int c, int buf) {
+    const bool seg2 = c * KC >= p.k1;
+#pragma unroll
+    for (int m = 0; m < WL; ++m) {
+      const int i = tid + 256 * m, row = i >> 3, c4 = i & 7;
+      *(float4*)&Ws[buf][row * LS + c4 * 4] = wr[m];
+    }
+#pragma unroll
+    for (int m = 0; m < XL; ++m) {
+      const int i = tid + 256 * m, tk = i >> 3, c4 = i & 7;
+      const float sc = inv[seg2 ? 1 : 0][tk];
+      float4 v = xv[m];
+      v.x = v.x * sc;
+      v.y = v.y * sc;
+      v.z = v.z * sc;
+      v.w = v.w * sc;
+      *(float4*)&Xs[buf][tk * LS + c4 * 4] = v;
+    }
+  };
+  const int tr = tid & 15, tt = tid >> 4;
+  float acc[NR][NT];
+#pragma unroll
+  for (int i = 0; i < NR; ++i)
+#pragma unroll
+    for (int j = 0; j < NT; ++j)
+      acc[i][j] = 0.f;
+  gload(0);
+  sstore(0, 0);
+  __syncthreads();
+  for (int c = 0; c < nc; ++c) {
+    const int buf = c & 1;
+    if (c + 1 < nc)
+      gload(c + 1);
+    const float* wb = Ws[buf];
+    const float* xb = Xs[buf];
+#pragma unroll 2
+    for (int k4 = 0; k4 < KC; k4 += 4) {
+      float4 w4[NR], x4[NT];
+#pragma unroll
+      for (int i = 0; i < NR; ++i)
+        w4[i] = *(const float4*)&wb[(tr + 16 * i) * LS + k4];
+#pragma unroll
+      for (int j = 0; j < NT; ++j)
+        x4[j] = *(const float4*)&xb[(tt + 16 * j) * LS + k4];
+#pragma unroll
+      for (int i = 0; i < NR; ++i)
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+          acc[i][j] += w4[i].x * x4[j].x;
+#pragma unroll
+      for (int i = 0; i < NR; ++i)
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+          acc[i][j] += w4[i].y * x4[j].y;
+#pragma unroll
+      for (int i = 0; i < NR; ++i)
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+          acc[i][j] += w4[i].z * x4[j].z;
+#pragma unroll
+      for (int i = 0; i < NR; ++i)
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+          acc[i][j] += w4[i].w * x4[j].w;
+    }
+    if (c + 1 < nc)
+      sstore(c + 1, buf ^ 1);
+    __syncthreads();
+  }
+#pragma unroll
+  for (int i = 0; i < NR; ++i) {
+    const int r = r0 + tr + 16 * i;
+    if (p.rows && r >= p.rows)
+      continue;
+#pragma unroll
+    for (int j = 0; j < NT; ++j) {
       const int t = t0 + tt + 16 * j;
       if (t < T)
         p.out[(size_t)t * p.ldo + r] = acc[i][j];
@@ -2117,11 +2286,15 @@ __device__ __forceinline__ void g128_unit(const GP3& p, int unit, int rgn,
     // 16-token tiles wholly past the item's end are padding: their WMMAs are
     // skipped.
     const bool live[2] = {tg * 32 < n, tg * 32 + 16 < n};
-    for (int kb = 0; kb < NK; kb++) {
-      v16h a[2][4];
+    // The live tiles are wave-uniform: one straight-line body per count, so the
+    // LDS loads of the next k-step overlap the WMMAs of this one.
+    // NTC 1 or 2: that many live tiles, no checks; 0: check each tile.
+    auto step = [&](int kb, auto ntc, const bool* lv) {
+      constexpr int NTC = decltype(ntc)::value, NTL = NTC ? NTC : 2;
+      v16h a[NTL][4];
 #pragma unroll
-      for (int t = 0; t < 2; t++)
-        if (live[t])
+      for (int t = 0; t < NTL; t++)
+        if (NTC || lv[t])
 #pragma unroll
           for (int ks = 0; ks < 4; ks++)
             a[t][ks] = *(const v16h_a16*)(arow[t] + kb * 64 + ks * 16);
@@ -2135,13 +2308,25 @@ __device__ __forceinline__ void g128_unit(const GP3& p, int unit, int rgn,
           bf[r] =
               *(const v16h_a16*)&Ws[(cg * 64 + 16 * r + ln) * STR + ks * 16];
 #pragma unroll
-        for (int t = 0; t < 2; t++)
-          if (live[t])
+        for (int t = 0; t < NTL; t++)
+          if (NTC || lv[t])
 #pragma unroll
             for (int r = 0; r < 4; r++)
               facc[t][r] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
                   a[t][ks], bf[r], facc[t][r]);
       }
+    };
+    // K = 3072 measured faster with the per-tile checks inside one body.
+    constexpr bool kSplit = K != 3072;
+    for (int kb = 0; kb < NK; kb++) {
+      if (!kSplit)
+        step(kb, std::integral_constant<int, 0>{}, live);
+      else if (live[1])
+        step(kb, std::integral_constant<int, 2>{}, live);
+      else if (live[0])
+        step(kb, std::integral_constant<int, 1>{}, live);
+      else if (kb + 1 < NK)
+        gload(kb + 1);
       __syncthreads();
       if (kb + 1 < NK) {
         sstore();
@@ -2184,6 +2369,9 @@ __global__ void __launch_bounds__(256) k_g128(GP3 p, int rgn) {
 // token t (slot order, as the old per-token sum), y = post conv of x with the
 // history `state` (as hip::conv_k), cur[t] += y (as hip::add_k). A block takes
 // 16 tokens of 256 channels and keeps the 4-token window in registers.
+// SL = 1: the same with the input rows themselves (hip::conv_k + hip::add_k of
+// the attention output).
+template<int SL>
 __global__ void __launch_bounds__(256)
     k_moe_tail(const float* __restrict__ pairs, const float* __restrict__ state,
                const float* __restrict__ w, float* __restrict__ cur, int T,
@@ -2192,10 +2380,10 @@ __global__ void __launch_bounds__(256)
   if (c >= C)
     return;
   auto slot_sum = [&](int t) {
-    float a = pairs[((size_t)t * 8) * C + c];
+    float a = pairs[((size_t)t * SL) * C + c];
 #pragma unroll
-    for (int k = 1; k < 8; k++)
-      a += pairs[((size_t)t * 8 + k) * C + c];
+    for (int k = 1; k < SL; k++)
+      a += pairs[((size_t)t * SL + k) * C + c];
     return a;
   };
   float xin[4];
@@ -2230,6 +2418,7 @@ __global__ void __launch_bounds__(256)
 
 // The convolution history after the ubatch: its last 3 inputs (as
 // hip::conv_state_k), the inputs being the slot sums of k_moe_tail.
+template<int SL>
 __global__ void k_moe_tail_state(const float* __restrict__ pairs,
                                  float* __restrict__ state, int T, int C) {
   const int c = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2244,10 +2433,10 @@ __global__ void k_moe_tail_state(const float* __restrict__ pairs,
       nw[j] = old[idx];
     } else {
       const size_t t = idx - 3;
-      float a = pairs[(t * 8) * C + c];
+      float a = pairs[(t * SL) * C + c];
 #pragma unroll
-      for (int k = 1; k < 8; k++)
-        a += pairs[(t * 8 + k) * C + c];
+      for (int k = 1; k < SL; k++)
+        a += pairs[(t * SL + k) * C + c];
       nw[j] = a;
     }
   }
@@ -2388,6 +2577,7 @@ struct PfArgs {
   const float* gate;
   const __half* bt;
   float* out;
+  _Float16* out16;
 };
 namespace ia {
 constexpr int PF_KT = 64, PF_KS = HD + 8, PF_VS = PF_KT + 8;
@@ -2539,7 +2729,7 @@ __global__ __launch_bounds__(NTT * 96) void attn_prefill(PfArgs a) {
   if (!rowvalid)
     return;
   const float inv = 1.0f / (l + __shfl_xor(l, 16, 32));
-  float* op = a.out + ((size_t)t * NH + h) * HD;
+  const size_t ob = ((size_t)t * NH + h) * HD;
   const float* gp = a.gate ? a.gate + (size_t)t * (NH * HD) + h * HD : nullptr;
 #pragma unroll
   for (int dt = 0; dt < 8; dt++)
@@ -2549,7 +2739,10 @@ __global__ __launch_bounds__(NTT * 96) void attn_prefill(PfArgs a) {
       float o = acc[dt][i] * inv;
       if (gp)
         o *= 1.0f / (1.0f + __expf(-gp[dim]));
-      op[dim] = o;
+      if (a.out16)
+        a.out16[ob + dim] = (_Float16)o;
+      else
+        a.out[ob + dim] = o;
     }
 }
 
@@ -2943,10 +3136,18 @@ void MoeDownPrefill(hipStream_t s, int fmt, int tile, const void* w,
 
 void MoeTail(hipStream_t s, const float* pairs, float* state, const float* w,
              float* cur, int t, int c, float scale) {
-  k_moe_tail<<<dim3((c + 255) / 256, (t + 15) / 16), 256, 0, s>>>(
+  k_moe_tail<8><<<dim3((c + 255) / 256, (t + 15) / 16), 256, 0, s>>>(
       pairs, state, w, cur, t, c, scale);
-  k_moe_tail_state<<<(c + 127) / 128, 128, 0, s>>>(pairs, state, t, c);
+  k_moe_tail_state<8><<<(c + 127) / 128, 128, 0, s>>>(pairs, state, t, c);
   Chk("moe_tail");
+}
+
+void ConvAdd(hipStream_t s, const float* x, float* state, const float* w,
+             float* cur, int t, int c, float scale) {
+  k_moe_tail<1><<<dim3((c + 255) / 256, (t + 15) / 16), 256, 0, s>>>(
+      x, state, w, cur, t, c, scale);
+  k_moe_tail_state<1><<<(c + 127) / 128, 128, 0, s>>>(x, state, t, c);
+  Chk("conv_add");
 }
 
 void AttnPrefill(hipStream_t s, const PrefillAttn& a) {
@@ -2969,6 +3170,7 @@ void AttnPrefill(hipStream_t s, const PrefillAttn& a) {
   pa.gate = a.gate;
   pa.bt = static_cast<const __half*>(a.bt);
   pa.out = a.out;
+  pa.out16 = static_cast<_Float16*>(a.out16);
   attn_prefill<4><<<dim3((a.n + 63) / 64, 8), 384, 0, s>>>(pa);
   Chk("attn_prefill");
 }
@@ -2980,7 +3182,12 @@ void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
     g.j[i] = {c.x,  c.ldx, c.msg, c.ldm, c.down, 4608,
               2304, 2304,  1,     c.g64, 64,     0};
   }
-  k_gate_p64<<<dim3((t + 63) / 64, 1, jobs.n), 256, 0, s>>>(g, t, eps);
+  // One job has too few token blocks for k_gate_p64's serial chunks; three
+  // jobs keep the GPU busy and k_gate_p64 moves fewer bytes.
+  if (jobs.n == 1)
+    k_gate_v2<64, 64><<<dim3((t + 63) / 64, 1, 1), 256, 0, s>>>(g, t, eps);
+  else
+    k_gate_p64<<<dim3((t + 63) / 64, 1, jobs.n), 256, 0, s>>>(g, t, eps);
   k_ctl_apply_p64<<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs, t);
   Chk("ctl_prefill");
 }
@@ -3003,7 +3210,7 @@ void SkinnyPrefill(hipStream_t s, const float* x, int ldx, const float* w,
                    int rows, float* out, int ldo, int t) {
   GateJobs g{};
   g.j[0] = {x, ldx, nullptr, 0, w, 2304, 2304, 0, 0, out, ldo, rows};
-  k_gate_p64<<<dim3((t + 63) / 64, 1, 1), 256, 0, s>>>(g, t, 0.f);
+  k_gate_v2<64, 32><<<dim3((t + 63) / 64, 1, 1), 256, 0, s>>>(g, t, 0.f);
   Chk("skinny_prefill");
 }
 

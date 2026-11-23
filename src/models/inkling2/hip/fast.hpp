@@ -106,6 +106,7 @@ struct MixJob {
       outq[4];  // optional per-query output matrices [ntok][2304] (else `out`)
   const float* nw[4];  // when non-null: out rows are additionally
                        // RMS-normalised with this weight
+  void* outh[4] = {};  // optional F16 copies of the outq rows [ntok][2304]
   int has_cr;  // nq == 1 only: apply `cr` (post-conv + residual of the previous
                // op) first
   ConvResidArgs cr;
@@ -240,7 +241,8 @@ struct PrefillAttn {
   float* rn;      // f32 [n][384] scratch
   const void* bt;
   const float *sink, *gate;
-  float* out;  // [n][24][128]
+  float* out;   // [n][24][128]
+  void* out16;  // when set: F16 [n][24][128] instead of `out`
   float qk_thr, r_thr, eps, tau_floor, tau_alpha;
 };
 /// kv_write + Q/R prologue + WMMA flash attention (gate fused when `gate` is
@@ -250,6 +252,10 @@ void AttnPrefill(hipStream_t s, const PrefillAttn& a);
 /// `pairs`, with the convolution history `state` [c][3], which is then advanced
 /// by the t inputs.
 void MoeTail(hipStream_t s, const float* pairs, float* state, const float* w,
+             float* cur, int t, int c, float scale);
+/// cur[t] += post conv of x with the history `state`, which is then advanced
+/// (hip::Conv + ConvStateUpdate + Add in one pass).
+void ConvAdd(hipStream_t s, const float* x, float* state, const float* w,
              float* cur, int t, int c, float scale);
 
 /// Prefill loop controller and router over T tokens (F32 weights, tiled SIMT).
