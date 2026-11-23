@@ -299,9 +299,29 @@ int Update(const std::vector<std::string>& names,
     if (!ids.empty() && std::ranges::find(ids, current.id) == ids.end())
       continue;
     if (!current.source.empty()) {
-      const auto resolved = model_source::Resolve(current.source, directory);
+      // Like a declared model no extension offers any more, a repository that
+      // cannot be resolved keeps its files while the others update.
+      catalog::Model resolved;
+      try {
+        resolved = model_source::Resolve(current.source, directory);
+      } catch (const std::exception& error) {
+        std::cerr << current.source << ": " << error.what()
+                  << "; keeping the installed files\n";
+        status = 1;
+        continue;
+      }
       if (Current(current, resolved)) {
         std::cout << current.source << " is up to date\n";
+        continue;
+      }
+      // The repository's card may now name another ID; it must not take over
+      // a model installed from elsewhere.
+      if (const auto* existing = FindInstalled(installed, resolved.id);
+          resolved.id != current.id && existing != nullptr) {
+        std::cerr << current.source << " now resolves to " << resolved.id
+                  << ", which is already installed; keeping the installed "
+                     "files\n";
+        status = 1;
         continue;
       }
       std::vector<const catalog::Component*> selected;
@@ -309,6 +329,14 @@ int Update(const std::vector<std::string>& names,
         selected.push_back(&component);
       std::cout << "Updating " << current.source << "\n" << std::flush;
       Apply(directory, resolved, selected, installed, options, current.source);
+      if (resolved.id != current.id) {
+        // Apply recorded the new ID; the old record would shadow it.
+        std::erase_if(installed,
+                      [&](const auto& m) { return m.id == current.id; });
+        store::Write(directory, installed);
+        fs::remove_all(store::ModelDirectory(directory, current.id));
+        store::CollectGarbage(directory, installed);
+      }
       std::cout << "Updated " << current.source << "\n";
       continue;
     }
