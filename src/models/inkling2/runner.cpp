@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <future>
 #include <gufo/ext/component_cache_resources.hpp>
 #include <gufo/ext/experimental/admission_query.hpp>
 #include <gufo/ext/experimental/state_memory.hpp>
@@ -210,6 +211,9 @@ public:
     // step; greedy rows' argmax on the device); concurrent ones keep batched
     // one-token steps.
     d.capabilities.multi_token_decode = engine_->batch_capable();
+    d.capabilities.batched_multi_token_decode = engine_->batch_capable();
+    d.capabilities.batched_multi_token_decode_max_width =
+        Engine::kMaxDecodeBatch;
     sampling::TextSamplingValues
         v;  // Unsloth/OpenAI defaults: temperature 1, no truncation
     v.temperature = 1.0F;
@@ -852,10 +856,57 @@ public:
     const auto t2 = Clock::now();
     const std::size_t V = engine_->config().n_vocab_text;
     std::size_t keep = 1;
+    // Sampling with temperature only (no min-p, T >= 0.1) draws exactly one
+    // uniform per token: every capped weight is positive, so there are always
+    // several entries. The rows' draws are then known in advance and the
+    // host sampler runs on all rows at once; tokens, draws and the published
+    // RNG state are those of the rows one after another.
+    const bool parallel =
+        !greedy && width > 0 && cfg.temperature >= 0.1F && !cfg.constraint &&
+        !working.ForcedToken() && !cfg.penalties_enabled() && cfg.top_k == 0 &&
+        cfg.top_p == 1 && cfg.min_p == 0 && !st.reasoning_off &&
+        !st.call_required &&
+        pos + static_cast<std::size_t>(width) + 1 < max_context_;
+    std::array<std::uint64_t, Engine::kMaxDecodeBatch + 1> draws{};
+    std::array<g::TextRunnerToken, Engine::kMaxDecodeBatch> sampled{};
+    if (parallel) {
+      auto ahead = working;
+      for (int j = 0; j <= width; ++j) {
+        draws[j] = ahead.rng_state();
+        (void)ahead.Uniform();
+      }
+      draws[width + 1] = ahead.rng_state();
+      const auto sample_row = [&](int j) {
+        sampling::SamplerState s = working;
+        s.SetRngState(draws[j]);
+        return static_cast<g::TextRunnerToken>(
+            s.Sample(out.subspan(static_cast<std::size_t>(j) * V, V)));
+      };
+      std::vector<std::future<g::TextRunnerToken>> rest;
+      for (int j = 1; j <= width; ++j)
+        rest.push_back(std::async(std::launch::async, sample_row, j));
+      sampled[0] = sample_row(0);
+      for (int j = 1; j <= width; ++j)
+        sampled[j] = rest[j - 1].get();
+    }
+    int used = 0;  // rows whose selection drew (parallel)
     for (int j = 0; j <= width; ++j) {
       const std::size_t at = pos + static_cast<std::size_t>(j) + 1;
       g::TextDecodeSelection sel;
-      if (greedy) {
+      if (parallel) {
+        if (st.answer_done) {
+          sel = {.stop = true, .piece = {}};
+        } else {
+          const auto tk = sampled[j];
+          const auto row = out.subspan(static_cast<std::size_t>(j) * V, V);
+          const bool stop = st.stop_at_eos() && tok_->IsStop(tk);
+          sel = {.stop = stop,
+                 .token = tk,
+                 .piece = stop ? std::string{} : Piece(st.block, tk),
+                 .logprobs = sampling::CollectLogprobs(row, tk, cfg.logprobs)};
+          used = j + 1;
+        }
+      } else if (greedy) {
         const auto tk = static_cast<g::TextRunnerToken>(amax[j]);
         const bool stop = at >= max_context_ || st.answer_done ||
                           (st.stop_at_eos() && tok_->IsStop(tk));
@@ -882,6 +933,8 @@ public:
       st.pending = std::move(sel);
       break;
     }
+    if (parallel)
+      working.SetRngState(draws[used]);
     if (width > 0)
       engine_->CommitVerify(ss, keep, out);  // empty: from the device
     sampler.CopyDrawStateFrom(working);
@@ -908,6 +961,78 @@ public:
       step.draft_accepted_tokens = keep - 1;
     }
     return step;
+  }
+
+  /// Several requests: one batched decode step of their anchors (the
+  /// pending token, or a selection from the session's logits, emitted), then
+  /// each one's next token is selected from its new logits and kept as the
+  /// next anchor, exactly as DecodeStep does without proposals.
+  [[nodiscard]] std::vector<g::TextDecodeStep> DecodeBatch(
+      std::span<const g::TextRunnerDecode> decodes) const override {
+    if (decodes.size() < 2 || decodes.size() > Engine::kMaxDecodeBatch ||
+        !engine_->batch_capable())
+      return g::TextModelRunner::DecodeBatch(decodes);
+    std::vector<g::TextDecodeStep> steps(decodes.size());
+    std::vector<sampling::SamplerState> working;
+    working.reserve(decodes.size());
+    std::vector<std::size_t> live;
+    std::vector<Session*> sessions;
+    std::vector<std::int32_t> ids;
+    for (std::size_t i = 0; i < decodes.size(); ++i) {
+      working.emplace_back(decodes[i].sampler.get());
+      auto& step = steps[i];
+      step.execution_plan = {.kind = g::TextExecutionPlanKind::kBatched,
+                             .physical_width = decodes.size()};
+      try {
+        auto& st = Require(decodes[i].state.get());
+        Session& ss = st.session();
+        g::TextDecodeSelection anchor;
+        if (st.pending) {
+          anchor = std::move(*st.pending);
+          st.pending.reset();
+        } else {
+          anchor = Select(st, working[i], ss.logits(), ss.position());
+        }
+        if (anchor.stop || decodes[i].max_tokens == 0) {
+          step.stop = anchor.stop;
+          step.terminal_logprobs = std::move(anchor.logprobs);
+          continue;
+        }
+        working[i].Accept(anchor.token);
+        CommitToken(st, anchor.token);
+        ids.push_back(static_cast<std::int32_t>(anchor.token));
+        step.selections.push_back(std::move(anchor));
+        sessions.push_back(&ss);
+        live.push_back(i);
+      } catch (...) {
+        step.failure = std::current_exception();
+      }
+    }
+    if (!sessions.empty()) {
+      try {
+        if (sessions.size() == 1)
+          engine_->Forward(*sessions[0], std::span<const std::int32_t>(ids));
+        else
+          engine_->DecodeBatch(sessions, ids);
+      } catch (...) {
+        for (const auto i : live)
+          steps[i].failure = std::current_exception();
+        live.clear();
+      }
+    }
+    for (const auto i : live) {
+      try {
+        auto& st = Require(decodes[i].state.get());
+        Session& ss = st.session();
+        auto next = Select(st, working[i], ss.logits(), ss.position());
+        st.pending = std::move(next);
+      } catch (...) {
+        steps[i].failure = std::current_exception();
+      }
+    }
+    for (std::size_t i = 0; i < decodes.size(); ++i)
+      decodes[i].sampler.get().CopyDrawStateFrom(working[i]);
+    return steps;
   }
 
   [[nodiscard]] std::optional<g::TextDecodeSelection> PreviewFirstToken(

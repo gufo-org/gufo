@@ -92,6 +92,13 @@ gufo_extension_target(
     gufo_inkling2_hip
 )
 gufo_extension_target(
+  NAME inkling2_spec_test
+  SOURCES
+    tests/spec/spec_test.cpp
+  LINK_LIBRARIES
+    gufo_inkling2_hip
+)
+gufo_extension_target(
   NAME inkling2_cache_test
   SOURCES
     tests/cache/cache_test.cpp

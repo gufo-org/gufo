@@ -128,6 +128,13 @@
       ],
       "role": "test"
     },
+    "inkling2_spec_test": {
+      "requires": [
+        "hip",
+        "testing"
+      ],
+      "role": "test"
+    },
     "inkling2_cache_test": {
       "requires": [
         "hip",

@@ -196,11 +196,13 @@
       "revision": "45fd08764f2b0bf16b03a5483a80e5c7aaec8772",
       "patterns": [
         "Inkling-2-Mini-UD-Q4_K_XL.gguf",
-        "mmproj-BF16.gguf"
+        "mmproj-BF16.gguf",
+        "dspark-Inkling-2-Mini-Q8_0.gguf"
       ],
       "required": [
         "Inkling-2-Mini-UD-Q4_K_XL.gguf",
-        "mmproj-BF16.gguf"
+        "mmproj-BF16.gguf",
+        "dspark-Inkling-2-Mini-Q8_0.gguf"
       ]
     },
     "loom-qwen35-2b": {
@@ -407,7 +409,10 @@
       "asset": "inkling2",
       "target": "Inkling-2-Mini-UD-Q4_K_XL.gguf",
       "projector": "mmproj-BF16.gguf",
-      "mode": "off",
+      "draft_asset": "inkling2",
+      "draft": "dspark-Inkling-2-Mini-Q8_0.gguf",
+      "draft_option": "--dspark-model",
+      "mode": "dspark",
       "sampling": "provider"
     },
     "loom-qwen3.5-2b": {
