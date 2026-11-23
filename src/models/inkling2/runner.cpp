@@ -13,10 +13,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
-#include <future>
 #include <gufo/ext/component_cache_resources.hpp>
 #include <gufo/ext/experimental/admission_query.hpp>
 #include <gufo/ext/experimental/state_memory.hpp>
@@ -37,6 +38,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "src/core/image.hpp"
@@ -123,6 +125,108 @@ private:
   Inkling2Slot* slot_;
   Session* session_;
   cache::Adapter* adapter_;
+};
+
+/// Threads that stay up between decode steps for the requests' token
+/// selections (a host sampler pass over the vocabulary per sampled row).
+/// Run(n, f) calls f(0 .. n - 1) once each: the caller starts at once and the
+/// workers take the indices left as they wake, so short work never waits for
+/// a thread. One Run at a time; a second caller runs its indices alone.
+class LanePool {
+public:
+  explicit LanePool(unsigned threads) {
+    for (unsigned i = 0; i < threads; ++i)
+      threads_.emplace_back([this] { Work(); });
+  }
+  ~LanePool() {
+    {
+      const std::lock_guard lock(mutex_);
+      stop_ = true;
+    }
+    wake_.notify_all();
+    for (auto& t : threads_)
+      t.join();
+  }
+  LanePool(const LanePool&) = delete;
+  LanePool& operator=(const LanePool&) = delete;
+
+  template<class F>
+  void Run(std::size_t n, F&& f) {
+    std::unique_lock owner(owner_, std::try_to_lock);
+    if (n < 2 || !owner.owns_lock() || threads_.empty()) {
+      for (std::size_t k = 0; k < n; ++k)
+        f(k);
+      return;
+    }
+    struct alignas(128) Cursor {
+      std::atomic<std::size_t> next{0};
+    } cursor;
+    std::exception_ptr failure;
+    std::mutex failure_mutex;
+    const auto share = [&] {
+      for (;;) {
+        const std::size_t k = cursor.next.fetch_add(1);
+        if (k >= n)
+          return;
+        try {
+          f(k);
+        } catch (...) {
+          const std::lock_guard lock(failure_mutex);
+          if (!failure)
+            failure = std::current_exception();
+        }
+      }
+    };
+    using Share = decltype(share);
+    {
+      const std::lock_guard lock(mutex_);
+      invoke_ = [](const void* self) { (*static_cast<const Share*>(self))(); };
+      argument_ = &share;
+      open_ = true;
+      ++generation_;
+    }
+    wake_.notify_all();
+    share();
+    {
+      // workers that wake from here on find the run closed
+      std::unique_lock lock(mutex_);
+      open_ = false;
+      done_.wait(lock, [&] { return active_ == 0; });
+    }
+    if (failure)
+      std::rethrow_exception(failure);
+  }
+
+private:
+  void Work() {
+    std::uint64_t seen = 0;
+    std::unique_lock lock(mutex_);
+    for (;;) {
+      wake_.wait(lock, [&] { return stop_ || generation_ != seen; });
+      if (stop_)
+        return;
+      seen = generation_;
+      if (!open_)
+        continue;
+      const auto invoke = invoke_;
+      const void* argument = argument_;
+      ++active_;
+      lock.unlock();
+      invoke(argument);
+      lock.lock();
+      if (--active_ == 0)
+        done_.notify_one();
+    }
+  }
+
+  std::mutex owner_, mutex_;
+  std::condition_variable wake_, done_;
+  std::vector<std::thread> threads_;
+  void (*invoke_)(const void*){nullptr};
+  const void* argument_{nullptr};
+  std::size_t active_{0};
+  std::uint64_t generation_{0};
+  bool open_{false}, stop_{false};
 };
 
 Inkling2State& Require(g::TextRunnerState& s) {
@@ -794,17 +898,20 @@ public:
     for (std::size_t i = 0; i < advances.size(); ++i)
       CommitToken(*states[i], advances[i].token);
   }
-  /// Runs f(0 .. n - 1), the first on this thread and the others each on
-  /// their own.
+  /// Runs f(0 .. n - 1), of which `sampled` make a host sampler pass over
+  /// the vocabulary. Up to kSerialRows of those run one after another on this
+  /// thread, which is warm and has the sampler's own threads to itself (0.4
+  /// ms a row; a selection thread woken for one row takes about 1 ms);
+  /// more are spread over the selection threads.
+  static constexpr std::size_t kSerialRows = 3;
   template<class F>
-  static void ForEachLane(std::size_t n, F&& f) {
-    std::vector<std::future<void>> rest;
-    for (std::size_t k = 1; k < n; ++k)
-      rest.push_back(std::async(std::launch::async, [&f, k] { f(k); }));
-    if (n > 0)
-      f(0);
-    for (auto& r : rest)
-      r.get();
+  void ForEachLane(std::size_t n, std::size_t sampled, F&& f) const {
+    if (sampled <= kSerialRows) {
+      for (std::size_t k = 0; k < n; ++k)
+        f(k);
+      return;
+    }
+    lane_pool_.Run(n, f);
   }
 
   /// How a request's verified rows are selected and its drafts proposed.
@@ -945,12 +1052,12 @@ public:
         return static_cast<g::TextRunnerToken>(
             s.Sample(out.subspan(static_cast<std::size_t>(j) * V, V)));
       };
-      std::vector<std::future<g::TextRunnerToken>> rest;
-      for (int j = 1; j <= width; ++j)
-        rest.push_back(std::async(std::launch::async, sample_row, j));
-      sampled[0] = sample_row(0);
-      for (int j = 1; j <= width; ++j)
-        sampled[j] = rest[j - 1].get();
+      // (rows of a request that is itself one of ForEachLane's lanes run
+      // here, one after another: the pool takes one Run at a time)
+      ForEachLane(static_cast<std::size_t>(width) + 1,
+                  static_cast<std::size_t>(width) + 1, [&](std::size_t j) {
+                    sampled[j] = sample_row(static_cast<int>(j));
+                  });
     }
     int used = 0;  // rows whose selection drew (parallel)
     for (int j = 0; j <= width; ++j) {
@@ -1350,7 +1457,10 @@ public:
       if (ok) {
         // each request's selection on its own thread (host sampling over the
         // vocabulary; the requests' states are disjoint)
-        ForEachLane(lanes.size(), [&](std::size_t k) {
+        std::size_t host_rows = 0;
+        for (std::size_t k = 0; k < lanes.size(); ++k)
+          host_rows += host[k] ? 1 : 0;
+        ForEachLane(lanes.size(), host_rows, [&](std::size_t k) {
           const auto& l = lanes[k];
           try {
             const std::size_t at = l.ss->position();
@@ -1428,7 +1538,11 @@ public:
       if (ok) {
         // selections on a thread per request (disjoint states), then the
         // commits in order
-        ForEachLane(lanes.size(), [&](std::size_t k) {
+        std::size_t host_rows = 0;
+        for (const auto& l : lanes)
+          host_rows +=
+              l.mode.greedy ? 0 : static_cast<std::size_t>(1 + l.width);
+        ForEachLane(lanes.size(), host_rows, [&](std::size_t k) {
           auto& l = lanes[k];
           try {
             keeps[k] = Resolve(*l.st, working[l.i], steps[l.i], l.budget, l.pos,
@@ -1564,6 +1678,9 @@ private:
   std::unique_ptr<vision::VisionEncoder> vision_;
   std::string vision_identity_;
   std::size_t max_draft_ = 0;  // proposals per request and cycle
+  // threads for the requests' selections (up to eight rows a step)
+  mutable LanePool lane_pool_{
+      std::min(7U, std::max(1U, std::thread::hardware_concurrency()) - 1)};
   mutable std::mutex vision_mutex_;
   mutable hipStream_t vision_stream_ = nullptr;
   g::TextRunnerToken t_header_{}, t_text_{}, t_thinking_{}, t_end_message_{},
