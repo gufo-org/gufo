@@ -1,0 +1,39 @@
+name: Task
+description: A specific piece of agreed work, such as a refactor, CI or docs change, or a tracking list.
+type: Task
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use a task for work whose outcome is already clear. To propose
+        something new, file a **Feature** or **Enhancement**.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What this work achieves and why it's needed.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What's included, as steps or a checklist, and what's left out.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: What must not change, such as output, speed or public API.
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+    validations:
+      required: true
+  - type: textarea
+    id: related
+    attributes:
+      label: Related
+      description: Linked issues, pull requests or discussions.

@@ -1,0 +1,36 @@
+name: Enhancement
+description: Improve something Gufo already does, such as its speed, memory use, quality or usability.
+type: Enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the current behavior is wrong, file a **Bug**. If it doesn't exist
+        yet, file a **Feature**.
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behavior
+      description: What Gufo does today, with the command or request that shows it.
+    validations:
+      required: true
+  - type: textarea
+    id: improvement
+    attributes:
+      label: Improvement
+      description: What should change, and why it's better.
+    validations:
+      required: true
+  - type: textarea
+    id: measurements
+    attributes:
+      label: Measurements
+      description: |
+        For speed, memory or quality: today's numbers and the target, with the
+        Gufo version, model file and settings. Comparisons with another engine
+        need the same weights.
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: The measurement or behavior that shows the enhancement landed.
