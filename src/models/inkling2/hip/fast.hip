@@ -1826,9 +1826,215 @@ __global__ __launch_bounds__(NW * 32) void attn_decode(AttnArgs a) {
   }
 }
 
+// The rows of one verification step (consecutive positions of one session) in
+// one block per (kv head, split): their 3 heads each are query slots
+// 3 * row + head of the WMMA attn_decode fills with 3, so every K/V tile is
+// read once for all rows. Global visits only (the split partition starts at key
+// 0 for every row); keys past a row's position are masked, which leaves its
+// sums exactly as attn_decode computes them, so each row's result is
+// attn_decode's.
+template<int NW, int NB>
+__global__ __launch_bounds__(NW * 32) void attn_decode_rows(AttnArgs a) {
+  constexpr int NR = 3 * NB;
+  __shared__ __attribute__((aligned(16))) __half sQ[16][HD + 8];
+  __shared__ float sR[16][16];
+  __shared__ __attribute__((aligned(16))) float sP[NW][16][16];
+  __shared__ float sA[NW][16];
+  __shared__ __attribute__((aligned(16))) float sO[NW][NR][HD];
+  __shared__ float sM[NW][16], sL[NW][16];
+  const int tid = threadIdx.x, lane = tid & 31, w = tid >> 5;
+  const int kvh = blockIdx.x, split = blockIdx.y;
+  const int plast = a.pos[NB - 1];
+  const SlotEntry* slot = a.slot;  // every row is the same session
+  const __half* kc = (const __half*)slot->k;
+  const __half* vc = (const __half*)slot->v;
+  const int cap = slot->cap;
+  const int lo = split * a.chunk;
+  const int hi = min(lo + a.chunk, plast + 1);
+  const __half* bt = (const __half*)a.bt;
+
+  for (int r = w; r < 16; r += NW) {
+    if (r < NR) {
+      const int tk = r / 3, h = kvh * 3 + r % 3;
+      const float* aq_ = a.q + (size_t)tk * a.ldp;
+      const float* ar_ = a.r + (size_t)tk * a.ldp;
+      const float tau = tau_of(a.pos[tk], a.tau_floor, a.tau_alpha);
+      float4 x = ((const float4*)(aq_ + (size_t)h * HD))[lane];
+      float4 s = ((const float4*)(a.qscale + h * HD))[lane];
+      x.x *= s.x;
+      x.y *= s.y;
+      x.z *= s.z;
+      x.w *= s.w;
+      float ss = wsum(x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w);
+      float sc = fminf(1.0f, a.qk_thr / (sqrtf(ss) + 1e-6f)) * tau *
+                 0.08838834764831845f;
+      __half2* qp = (__half2*)&sQ[r][lane * 4];
+      qp[0] = __floats2half2_rn(x.x * sc, x.y * sc);
+      qp[1] = __floats2half2_rn(x.z * sc, x.w * sc);
+      float rv = 0.f;
+      if (lane < RD)
+        rv = ar_[(size_t)h * RD + lane] * a.rclip[h * RD + lane];
+      float rs = wsum(rv * rv);
+      float rf = fminf(1.0f, a.r_thr / (sqrtf(rs) + 1e-6f)) * tau;
+      if (lane < RD)
+        sR[r][lane] = rv * rf;
+    } else {
+      __half2* qp = (__half2*)&sQ[r][lane * 4];
+      qp[0] = __floats2half2_rn(0.f, 0.f);
+      qp[1] = __floats2half2_rn(0.f, 0.f);
+      if (lane < RD)
+        sR[r][lane] = 0.f;
+    }
+  }
+  __syncthreads();
+  const int q16 = lane & 15, half = lane >> 4;
+  v16h bq[8];
+#pragma unroll
+  for (int s = 0; s < 8; s++)
+    bq[s] = cat16(*(const uint4*)&sQ[q16][s * 16],
+                  *(const uint4*)&sQ[q16][s * 16 + 8]);
+  v2h rp[8];
+#pragma unroll
+  for (int c = 0; c < 8; c++) {
+    rp[c][0] = (h16)sR[q16][2 * c];
+    rp[c][1] = (h16)sR[q16][2 * c + 1];
+  }
+  const int posq = (q16 < NR) ? a.pos[q16 / 3] : -1;
+
+  float m = -INFINITY, l = 0.f;
+  float acc[NR][4];
+#pragma unroll
+  for (int r = 0; r < NR; r++)
+    acc[r][0] = acc[r][1] = acc[r][2] = acc[r][3] = 0.f;
+
+  for (int jt = lo + w * 16; jt < hi; jt += NW * 16) {
+    const int pk = min(jt + q16, hi - 1);
+    const uint4* kp = (const uint4*)(kc + (size_t)(pk % cap) * CELL + kvh * HD);
+    uint4 kr[16];
+#pragma unroll
+    for (int u = 0; u < 16; u++)
+      kr[u] = kp[u];
+    uint2 vr[16];
+#pragma unroll
+    for (int k = 0; k < 16; k++) {
+      const int pv = min(jt + k, hi - 1);
+      vr[k] =
+          *(const uint2*)(vc + (size_t)(pv % cap) * CELL + kvh * HD + lane * 4);
+    }
+    v8f c = {0, 0, 0, 0, 0, 0, 0, 0};
+#pragma unroll
+    for (int s = 0; s < 8; s++)
+      c = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+          cat16(kr[2 * s], kr[2 * s + 1]), bq[s], c);
+
+    float sv[8], mx = -INFINITY;
+    const bool needb = (posq >= 0) && (posq - (jt + 15) < WIN);
+    const bool anyb = __any(needb);
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+      const int pos = jt + 2 * i + half, d = posq - pos;
+      const bool ok = (d >= 0) && (pos < hi);
+      float s = c[i];
+      if (anyb && ok && d < WIN)
+        s += bias_dot(rp, bt, d);
+      sv[i] = ok ? s : -INFINITY;
+      mx = fmaxf(mx, sv[i]);
+    }
+    mx = fmaxf(mx, __shfl_xor(mx, 16, 32));
+    const float mn = fmaxf(m, mx);
+    float alpha = 1.f, ps = 0.f;
+    if (mn != -INFINITY) {
+      alpha = __expf(m - mn);
+#pragma unroll
+      for (int i = 0; i < 8; i++) {
+        float p = __expf(sv[i] - mn);
+        ps += p;
+        sP[w][2 * i + half][q16] = p;
+      }
+    } else {
+#pragma unroll
+      for (int i = 0; i < 8; i++)
+        sP[w][2 * i + half][q16] = 0.f;
+    }
+    l = l * alpha + ps;
+    m = mn;
+    sA[w][q16] = alpha;
+    cbar();
+    float al[NR];
+#pragma unroll
+    for (int r = 0; r < NR; r++)
+      al[r] = sA[w][r];
+#pragma unroll
+    for (int r = 0; r < NR; r++) {
+      acc[r][0] *= al[r];
+      acc[r][1] *= al[r];
+      acc[r][2] *= al[r];
+      acc[r][3] *= al[r];
+    }
+#pragma unroll
+    for (int k = 0; k < 16; k++) {
+      float2 v01 = h2_to_f2(vr[k].x), v23 = h2_to_f2(vr[k].y);
+      float p[NR];
+#pragma unroll
+      for (int r = 0; r < NR; r++)
+        p[r] = sP[w][k][r];
+#pragma unroll
+      for (int r = 0; r < NR; r++) {
+        acc[r][0] = fmaf(p[r], v01.x, acc[r][0]);
+        acc[r][1] = fmaf(p[r], v01.y, acc[r][1]);
+        acc[r][2] = fmaf(p[r], v23.x, acc[r][2]);
+        acc[r][3] = fmaf(p[r], v23.y, acc[r][3]);
+      }
+    }
+    cbar();
+  }
+  const float ltot = l + __shfl_xor(l, 16, 32);
+  if (lane < 16) {
+    sM[w][lane] = m;
+    sL[w][lane] = ltot;
+  }
+#pragma unroll
+  for (int r = 0; r < NR; r++)
+    *(float4*)&sO[w][r][lane * 4] =
+        make_float4(acc[r][0], acc[r][1], acc[r][2], acc[r][3]);
+  __syncthreads();
+  const size_t base = ((size_t)split * NKV + kvh) * 12;
+  for (int idx = tid; idx < NR * HD; idx += NW * 32) {
+    const int r = idx / HD, dim = idx % HD;
+    float* ws_o = a.ws_o + (size_t)(r / 3) * a.ws_tok * 128;
+    float M = -INFINITY;
+#pragma unroll
+    for (int w2 = 0; w2 < NW; w2++)
+      M = fmaxf(M, sM[w2][r]);
+    float o = 0.f;
+    if (M != -INFINITY) {
+#pragma unroll
+      for (int w2 = 0; w2 < NW; w2++)
+        o += __expf(sM[w2][r] - M) * sO[w2][r][dim];
+    }
+    ws_o[(base + r % 3) * HD + dim] = o;
+  }
+  if (tid < NR) {
+    float* ws_m = a.ws_m + (size_t)(tid / 3) * a.ws_tok;
+    float* ws_l = a.ws_l + (size_t)(tid / 3) * a.ws_tok;
+    float M = -INFINITY;
+#pragma unroll
+    for (int w2 = 0; w2 < NW; w2++)
+      M = fmaxf(M, sM[w2][tid]);
+    float L = 0.f;
+    if (M != -INFINITY) {
+#pragma unroll
+      for (int w2 = 0; w2 < NW; w2++)
+        L += __expf(sM[w2][tid] - M) * sL[w2][tid];
+    }
+    ws_m[base + tid % 3] = M;
+    ws_l[base + tid % 3] = L;
+  }
+}
+
 __global__ __launch_bounds__(128) void decode_reduce(AttnArgs a) {
   __shared__ float sc[1024];
-  __shared__ float sred[4], sZ;
+  __shared__ float sred[4];
   const int h = blockIdx.x, kvh = h / 3, r = h % 3, dim = threadIdx.x,
             tk = blockIdx.z;
   const float* ws_o = a.ws_o + (size_t)tk * a.ws_tok * 128;
@@ -3103,6 +3309,22 @@ void AttnDecode(hipStream_t s, const AttnArgs& a, int nb) {
   ia::attn_decode<4><<<dim3(8, a.nsplit, nb), 128, 0, s>>>(a);
   ia::decode_reduce<<<dim3(24, 1, nb), 128, 0, s>>>(a);
   Chk("attn_decode");
+}
+void AttnDecodeRows(hipStream_t s, const AttnArgs& a, int nb) {
+  const dim3 grid(8, a.nsplit, 1);
+  switch (nb) {
+    case 2:
+      ia::attn_decode_rows<4, 2><<<grid, 128, 0, s>>>(a);
+      break;
+    case 3:
+      ia::attn_decode_rows<4, 3><<<grid, 128, 0, s>>>(a);
+      break;
+    default:
+      ia::attn_decode_rows<4, 4><<<grid, 128, 0, s>>>(a);
+      break;
+  }
+  ia::decode_reduce<<<dim3(24, 1, nb), 128, 0, s>>>(a);
+  Chk("attn_decode_rows");
 }
 void ConvResid(hipStream_t s, const ConvResidArgs& a, int nb) {
   k_conv_resid<<<dim3(9, 1, nb), 256, 0, s>>>(a);

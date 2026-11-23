@@ -135,3 +135,17 @@ proposals), seeded, 400 tokens; identical text again:
 At temperature 1 about 60% of the coupled proposals are accepted; the host
 sampler's pass over 200K logits (about 1.5 ms per selected token, AR too) is
 the larger cost of those cycles.
+
+### Verification at depth (multi-row global attention)
+
+A verification step's rows are consecutive positions of one session, so on
+global visits one block per (KV head, split) now reads each K/V tile once for
+all rows (their 3 heads each fill the WMMA query slots one row used to leave
+empty). Keys past a row's position are masked, so every row's result is the
+one-row kernel's: `inkling2_spec_test` and `--spec` report 0 mismatched rows.
+
+| `inkling2_bench --spec` | before | after |
+| --- | --- | --- |
+| R = 2, ctx 64 / 4,000 / 32,000 | 27.7 / 29.5 / 38.2 ms | 27.8 / 29.4 / 34.6 ms |
+| R = 4, ctx 64 / 4,000 / 32,000 | 37.5 / 39.8 / 57.7 ms | 37.5 / 39.4 / 43.6 ms |
+| DSpark depth 3, ctx 32,000 (AR 36.1 tok/s) | 34.8 tok/s | 44.2 tok/s |

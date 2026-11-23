@@ -1348,7 +1348,10 @@ struct Engine::Impl {
       aa.tau_alpha = cfg->log_scale_alpha;
       aa.ldp = kSProj;
       aa.ws_tok = static_cast<int>(kMaxSplit * 8 * 12);
-      fs::AttnDecode(ds, aa, nb);
+      if (verify_mode && !swa && nb > 1)
+        fs::AttnDecodeRows(ds, aa, nb);
+      else
+        fs::AttnDecode(ds, aa, nb);
     }
     if (F.oproj)
       fs::GemvQ8(ds, kQ, D(L.attn_output), d_ob, d_ao, kEmbd, 0.f, nb);

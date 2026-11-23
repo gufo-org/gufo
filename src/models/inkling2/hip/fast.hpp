@@ -209,6 +209,10 @@ struct AttnArgs {
   int ws_tok = 0;  // token stride of ws_m / ws_l (floats); ws_o is ws_tok * 128
 };
 void AttnDecode(hipStream_t s, const AttnArgs& a, int nb = 1);
+/// AttnDecode of nb (2 to 4) rows of one session at consecutive positions
+/// (a verification step) on a global visit: one block reads each K/V tile for
+/// all rows; every row's result is AttnDecode's.
+void AttnDecodeRows(hipStream_t s, const AttnArgs& a, int nb);
 
 /// Counting sort of pair -> expert (P <= 4096): offsets [E+1], sorted pair ids.
 void RouteBuild(hipStream_t s, const int* ids, int p, int e, int* off,
