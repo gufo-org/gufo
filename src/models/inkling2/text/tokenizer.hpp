@@ -32,6 +32,9 @@ public:
       const TokenizerData& data, std::string* error = nullptr);
   [[nodiscard]] static std::unique_ptr<Tokenizer> CreateFromGguf(
       const std::string& path, std::string* error = nullptr);
+  /// The tokenizer of an opened GGUF.
+  [[nodiscard]] static std::unique_ptr<Tokenizer> CreateFromGguf(
+      const gufo::core::GgufReader& reader, std::string* error);
 
   /// Text to ids. With `parse_special`, spellings of control tokens in `text`
   /// (leftmost, longest) become those tokens; otherwise they are plain text.

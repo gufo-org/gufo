@@ -1714,14 +1714,14 @@ private:
 /// (disk cache) it is stable across processes; otherwise it names this
 /// process's engine, so a RAM-only cache can never leak across loads.
 cache::Identity BuildIdentity(const ext::TextRunnerOptions& options,
+                              const core::GgufReader& reader,
                               const Engine& engine,
                               const std::string& fingerprint,
                               std::string* error) {
   const auto& c = engine.config();
   ::inkling2::text::TokenizerData tokenizer;
   std::string why;
-  if (!::inkling2::text::ReadTokenizerDataFromGguf(options.model_path,
-                                                   &tokenizer, &why)) {
+  if (!::inkling2::text::ReadTokenizerData(reader, &tokenizer, &why)) {
     if (error)
       *error = "inkling2: tokenizer metadata: " + why;
     return {};
@@ -1812,8 +1812,7 @@ std::shared_ptr<ext::TextModelRunner> CreateInkling2TextRunner(
     const std::uint32_t max_context =
         options.max_context ? options.max_context : NativeContext(*reader);
     std::string why;
-    auto tok =
-        ::inkling2::text::Tokenizer::CreateFromGguf(options.model_path, &why);
+    auto tok = ::inkling2::text::Tokenizer::CreateFromGguf(*reader, &why);
     if (!tok) {
       if (error)
         *error = "inkling2: tokenizer: " + why;
@@ -1850,7 +1849,8 @@ std::shared_ptr<ext::TextModelRunner> CreateInkling2TextRunner(
         return nullptr;
       }
     }
-    const auto identity = BuildIdentity(options, *engine, fingerprint, &why);
+    const auto identity =
+        BuildIdentity(options, *reader, *engine, fingerprint, &why);
     if (identity.empty()) {
       if (error)
         *error = why;

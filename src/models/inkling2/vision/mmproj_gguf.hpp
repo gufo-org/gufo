@@ -1,13 +1,16 @@
-// Minimal, self-contained GGUF (v2/v3) reader for the Inkling 2 mmproj file.
-// MIT. Maps the file read-only; tensor data pointers stay valid while the
-// object lives.
+// The Inkling 2 mmproj file, read through core::GgufReader. Tensor data
+// pointers stay valid while the object lives.
 #pragma once
 
 #include <cstdint>
-#include <gufo/ext/platform/mapped_file.hpp>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
+
+namespace gufo::core {
+class GgufReader;
+}
 
 namespace gufo::models::inkling2::vision {
 
@@ -28,7 +31,8 @@ struct MmprojTensor {
 
 class MmprojGguf {
 public:
-  MmprojGguf() = default;
+  MmprojGguf();
+  ~MmprojGguf();
   MmprojGguf(const MmprojGguf&) = delete;
   MmprojGguf& operator=(const MmprojGguf&) = delete;
 
@@ -42,13 +46,8 @@ public:
   bool GetF32Array(const std::string& key, std::vector<float>* v) const;
 
 private:
-  gufo::platform::ReadOnlyMappedFile file_;
-  std::map<std::string, MmprojTensor> tensors_;
-  // scalar kv stored as double/string/array of double (enough for the clip.*
-  // keys)
-  std::map<std::string, double> num_;
-  std::map<std::string, std::string> str_;
-  std::map<std::string, std::vector<double>> arr_;
+  std::unique_ptr<core::GgufReader> reader_;
+  std::map<std::string, MmprojTensor, std::less<>> tensors_;
 };
 
 }  // namespace gufo::models::inkling2::vision

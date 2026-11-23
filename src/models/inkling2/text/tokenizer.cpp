@@ -146,6 +146,14 @@ std::unique_ptr<Tokenizer> Tokenizer::CreateFromGguf(const std::string& path,
   return Create(data, error);
 }
 
+std::unique_ptr<Tokenizer> Tokenizer::CreateFromGguf(
+    const gufo::core::GgufReader& reader, std::string* error) {
+  TokenizerData data;
+  if (!ReadTokenizerData(reader, &data, error))
+    return nullptr;
+  return Create(data, error);
+}
+
 std::optional<TokenId> Tokenizer::FindSpecial(std::string_view text) const {
   for (const auto& [s, id] : specials_)
     if (s == text)

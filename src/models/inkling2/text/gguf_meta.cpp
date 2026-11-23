@@ -1,225 +1,109 @@
 #include "src/models/inkling2/text/gguf_meta.hpp"
 
-#include <cstdio>
-#include <cstring>
-#include <memory>
+#include <gufo/ext/gguf_reader.hpp>
+#include <limits>
+#include <string_view>
+#include <variant>
 
 namespace inkling2::text {
 
 namespace {
 
-enum Type : std::uint32_t {
-  kU8 = 0,
-  kI8,
-  kU16,
-  kI16,
-  kU32,
-  kI32,
-  kF32,
-  kBool,
-  kString,
-  kArray,
-  kU64,
-  kI64,
-  kF64
-};
-
-struct File {
-  std::FILE* f{nullptr};
-  explicit File(const std::string& p) : f(std::fopen(p.c_str(), "rb")) {}
-  ~File() {
-    if (f != nullptr)
-      std::fclose(f);
-  }
-  bool Read(void* dst, std::size_t n) { return std::fread(dst, 1, n, f) == n; }
-  bool Skip(std::uint64_t n) {
-#if defined(_WIN32)
-    return _fseeki64(f, static_cast<__int64>(n), SEEK_CUR) == 0;
-#else
-    return fseeko(f, static_cast<off_t>(n), SEEK_CUR) == 0;
-#endif
-  }
-  template<typename T>
-  bool Get(T* v) {
-    return Read(v, sizeof(T));
-  }  // little-endian host
-  bool GetString(std::string* s) {
-    std::uint64_t n;
-    if (!Get(&n) || n > (1ULL << 32))
-      return false;
-    s->resize(n);
-    return n == 0 || Read(s->data(), n);
-  }
-};
-
-std::size_t ScalarSize(std::uint32_t t) {
-  switch (t) {
-    case kU8:
-    case kI8:
-    case kBool:
-      return 1;
-    case kU16:
-    case kI16:
-      return 2;
-    case kU32:
-    case kI32:
-    case kF32:
-      return 4;
-    case kU64:
-    case kI64:
-    case kF64:
-      return 8;
-    default:
-      return 0;
-  }
-}
-
-bool SkipValue(File& f, std::uint32_t type) {
-  if (type == kString) {
-    std::uint64_t n;
-    return f.Get(&n) && f.Skip(n);
-  }
-  if (type == kArray) {
-    std::uint32_t et;
-    std::uint64_t n;
-    if (!f.Get(&et) || !f.Get(&n))
-      return false;
-    if (et == kString || et == kArray) {
-      for (std::uint64_t i = 0; i < n; ++i)
-        if (!SkipValue(f, et))
-          return false;
-      return true;
-    }
-    return f.Skip(n * ScalarSize(et));
-  }
-  return f.Skip(ScalarSize(type));
-}
-
-bool ReadUint(File& f, std::uint32_t type, std::uint64_t* v) {
-  switch (type) {
-    case kU8: {
-      std::uint8_t x;
-      if (!f.Get(&x))
-        return false;
-      *v = x;
-      return true;
-    }
-    case kU16: {
-      std::uint16_t x;
-      if (!f.Get(&x))
-        return false;
-      *v = x;
-      return true;
-    }
-    case kU32: {
-      std::uint32_t x;
-      if (!f.Get(&x))
-        return false;
-      *v = x;
-      return true;
-    }
-    case kI32: {
-      std::int32_t x;
-      if (!f.Get(&x))
-        return false;
-      *v = static_cast<std::uint64_t>(x);
-      return true;
-    }
-    case kU64: {
-      std::uint64_t x;
-      if (!f.Get(&x))
-        return false;
-      *v = x;
-      return true;
-    }
-    default:
-      return false;
-  }
-}
-
-bool ReadStringArray(File& f, std::vector<std::string>* out) {
-  std::uint32_t et;
-  std::uint64_t n;
-  if (!f.Get(&et) || !f.Get(&n) || et != kString)
-    return false;
-  out->resize(n);
-  for (auto& s : *out)
-    if (!f.GetString(&s))
-      return false;
-  return true;
+// An integer id stored as any GGUF integer type; false when the key is
+// present but not an id.
+bool ReadId(const gufo::core::GgufReader& reader, std::string_view key,
+            std::optional<std::uint32_t>* out) {
+  if (reader.FindMetadata(key) == nullptr)
+    return true;
+  *out = reader.GetMetadataUint32(key);
+  return out->has_value();
 }
 
 }  // namespace
 
-bool ReadTokenizerDataFromGguf(const std::string& path, TokenizerData* out,
-                               std::string* error) {
-  const auto fail = [&](const char* m) {
+bool ReadTokenizerData(const gufo::core::GgufReader& reader, TokenizerData* out,
+                       std::string* error) {
+  const auto fail = [&](std::string_view m) {
     if (error != nullptr)
-      *error = std::string(m) + ": " + path;
+      *error = std::string(m);
     return false;
   };
-  File f(path);
-  if (f.f == nullptr)
-    return fail("cannot open");
-  char magic[4];
-  std::uint32_t version;
-  std::uint64_t n_tensors, n_kv;
-  if (!f.Read(magic, 4) || std::memcmp(magic, "GGUF", 4) != 0)
-    return fail("not a GGUF file");
-  if (!f.Get(&version) || version < 2 || !f.Get(&n_tensors) || !f.Get(&n_kv))
-    return fail("bad GGUF header");
-  for (std::uint64_t i = 0; i < n_kv; ++i) {
-    std::string key;
-    std::uint32_t type;
-    if (!f.GetString(&key) || !f.Get(&type))
-      return fail("truncated metadata");
-    bool ok = true;
-    std::uint64_t u = 0;
-    if (key == "tokenizer.ggml.model")
-      ok = type == kString && f.GetString(&out->model);
-    else if (key == "tokenizer.ggml.pre")
-      ok = type == kString && f.GetString(&out->pre);
-    else if (key == "tokenizer.chat_template")
-      ok = type == kString && f.GetString(&out->chat_template);
-    else if (key == "tokenizer.ggml.tokens")
-      ok = type == kArray && ReadStringArray(f, &out->tokens);
-    else if (key == "tokenizer.ggml.merges")
-      ok = type == kArray && ReadStringArray(f, &out->merges);
-    else if (key == "tokenizer.ggml.token_type") {
-      std::uint32_t et;
-      std::uint64_t n;
-      ok = type == kArray && f.Get(&et) && f.Get(&n) && et == kI32;
-      if (ok) {
-        out->token_types.resize(n);
-        ok = n == 0 || f.Read(out->token_types.data(), n * 4);
-      }
-    } else if (key == "tokenizer.ggml.eos_token_id") {
-      ok = ReadUint(f, type, &u);
-      out->eos_id = static_cast<std::uint32_t>(u);
-    } else if (key == "tokenizer.ggml.eot_token_id") {
-      ok = ReadUint(f, type, &u);
-      out->eot_id = static_cast<std::uint32_t>(u);
-    } else if (key == "tokenizer.ggml.bos_token_id") {
-      ok = ReadUint(f, type, &u);
-      out->bos_id = static_cast<std::uint32_t>(u);
-    } else if (key == "tokenizer.ggml.padding_token_id") {
-      ok = ReadUint(f, type, &u);
-      out->pad_id = static_cast<std::uint32_t>(u);
-    } else if (key == "tokenizer.ggml.add_bos_token" && type == kBool) {
-      std::uint8_t b;
-      ok = f.Get(&b);
-      out->add_bos = b != 0;
-    } else if (key == "tokenizer.ggml.add_eos_token" && type == kBool) {
-      std::uint8_t b;
-      ok = f.Get(&b);
-      out->add_eos = b != 0;
-    } else
-      ok = SkipValue(f, type);
-    if (!ok)
-      return fail(("bad metadata value for " + key).c_str());
+  const auto str = [&](std::string_view key, std::string* v) {
+    const auto* meta = reader.FindMetadata(key);
+    if (meta == nullptr)
+      return true;
+    const auto* s = std::get_if<std::string_view>(&meta->value);
+    if (s == nullptr)
+      return false;
+    v->assign(*s);
+    return true;
+  };
+  const auto strings = [&](std::string_view key, std::vector<std::string>* v) {
+    const auto* meta = reader.FindMetadata(key);
+    if (meta == nullptr)
+      return true;
+    const auto* s = std::get_if<std::vector<std::string_view>>(&meta->value);
+    if (s == nullptr)
+      return false;
+    v->assign(s->begin(), s->end());
+    return true;
+  };
+  if (!str("tokenizer.ggml.model", &out->model))
+    return fail("bad metadata value for tokenizer.ggml.model");
+  if (!str("tokenizer.ggml.pre", &out->pre))
+    return fail("bad metadata value for tokenizer.ggml.pre");
+  if (!str("tokenizer.chat_template", &out->chat_template))
+    return fail("bad metadata value for tokenizer.chat_template");
+  if (!strings("tokenizer.ggml.tokens", &out->tokens))
+    return fail("bad metadata value for tokenizer.ggml.tokens");
+  if (!strings("tokenizer.ggml.merges", &out->merges))
+    return fail("bad metadata value for tokenizer.ggml.merges");
+  if (const auto* meta = reader.FindMetadata("tokenizer.ggml.token_type")) {
+    const auto* v = std::get_if<std::vector<std::int64_t>>(&meta->value);
+    if (meta->type != gufo::core::GgufValueType::kArray || v == nullptr)
+      return fail("bad metadata value for tokenizer.ggml.token_type");
+    out->token_types.clear();
+    out->token_types.reserve(v->size());
+    for (const auto t : *v) {
+      if (t < std::numeric_limits<std::int32_t>::min() ||
+          t > std::numeric_limits<std::int32_t>::max())
+        return fail("bad metadata value for tokenizer.ggml.token_type");
+      out->token_types.push_back(static_cast<std::int32_t>(t));
+    }
   }
+  if (!ReadId(reader, "tokenizer.ggml.eos_token_id", &out->eos_id))
+    return fail("bad metadata value for tokenizer.ggml.eos_token_id");
+  if (!ReadId(reader, "tokenizer.ggml.eot_token_id", &out->eot_id))
+    return fail("bad metadata value for tokenizer.ggml.eot_token_id");
+  if (!ReadId(reader, "tokenizer.ggml.bos_token_id", &out->bos_id))
+    return fail("bad metadata value for tokenizer.ggml.bos_token_id");
+  if (!ReadId(reader, "tokenizer.ggml.padding_token_id", &out->pad_id))
+    return fail("bad metadata value for tokenizer.ggml.padding_token_id");
+  out->add_bos =
+      reader.GetMetadataBool("tokenizer.ggml.add_bos_token").value_or(false);
+  out->add_eos =
+      reader.GetMetadataBool("tokenizer.ggml.add_eos_token").value_or(false);
   if (out->tokens.empty())
     return fail("no tokenizer.ggml.tokens");
+  return true;
+}
+
+bool ReadTokenizerDataFromGguf(const std::string& path, TokenizerData* out,
+                               std::string* error) {
+  std::string why;
+  // Unsized tensors (NVFP4 experts) do not matter for the metadata.
+  const auto reader = gufo::core::GgufReader::OpenFile(
+      path, &why, {.allow_unsized_tensors = true});
+  if (reader == nullptr) {
+    if (error != nullptr)
+      *error = why + ": " + path;
+    return false;
+  }
+  if (!ReadTokenizerData(*reader, out, error)) {
+    if (error != nullptr)
+      *error += ": " + path;
+    return false;
+  }
   return true;
 }
 
