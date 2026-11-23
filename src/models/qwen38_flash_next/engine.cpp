@@ -347,6 +347,10 @@ std::string Model::ArtifactIdentity() const {
   return source_->Identity();
 }
 
+std::string Model::DraftIdentity() const {
+  return source_->DraftIdentity();
+}
+
 const Config& Model::config() const noexcept {
   return weights_->config;
 }

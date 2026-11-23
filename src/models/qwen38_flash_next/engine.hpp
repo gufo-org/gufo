@@ -135,6 +135,8 @@ public:
   /// Cache identity the weight source reports; empty for GGUF artifacts,
   /// whose callers hash the reader.
   [[nodiscard]] std::string ArtifactIdentity() const;
+  /// WeightSource::DraftIdentity: the bound MTP block's cache identity.
+  [[nodiscard]] std::string DraftIdentity() const;
   [[nodiscard]] const Config& config() const noexcept;
   [[nodiscard]] const tokenization::QwenTokenizer& tokenizer() const noexcept {
     return *tokenizer_;

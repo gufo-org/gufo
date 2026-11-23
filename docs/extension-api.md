@@ -17,12 +17,12 @@ prints the exact version.
   equal the host's, so `">= 0.1.12"` doesn't build against 0.2.
 - Headers under `include/gufo/ext/experimental/` and `families/`, and what only
   they include, carry no promise and change without a record; check them when
-  you update. Family headers never include `models/`; no model includes another.
+  you update. Family headers reach no model and models no other model; a model
+  forwards only to its directory in `MODEL_SOURCES` (check-extension-api.py).
 
 The promise is source compatibility: rebuild against a new Gufo and your
 extension compiles. Binaries built for one Gufo don't load into another.
-Every change to the API adds a record under
-[`include/gufo/ext/changes/`](../include/gufo/ext/changes/README.md), and the
+Every change to the API adds a record under [`include/gufo/ext/changes/`](../include/gufo/ext/changes/README.md), and the
 revision is the number of records, so the records are the changelog.
 
 ## The boundary

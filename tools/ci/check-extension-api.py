@@ -58,7 +58,7 @@ HEADER_SUFFIXES = (".h", ".hh", ".hpp", ".hxx", ".inc", ".def")
 FAMILIES = "include/gufo/ext/families"
 # Public model layers and the one src/models/ directory each may forward to.
 # A model layer without an entry may not reach src/models/ at all.
-MODEL_SOURCES = {}
+MODEL_SOURCES = {("qwen", "flash_next"): "src/models/qwen38_flash_next"}
 COMMENT_OR_STRING = re.compile(r'R"(?P<raw>[^ ()\\\t\r\n]{0,16})\([\s\S]*?\)(?P=raw)"|'
                                r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'')
 DIRECTIVE = re.compile(r'^[ \t]*#[ \t]*include(?:_next)?\b[ \t]*(.*)$', re.M)

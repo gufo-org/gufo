@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <gufo/ext/gguf_reader.hpp>
 #include <memory>
 #include <mutex>
@@ -71,6 +72,14 @@ struct NgramGatherOwner {
   NgramCounters* counters{nullptr};
 };
 
+/// Decodes the rows of an n-gram table in a format other than GGUF's (a
+/// WeightSource's own encoding, such as EXL3's trellis rows): `src` holds
+/// RowBytes() encoded bytes of table row `row`, `dst` receives RowDim()
+/// floats. Called concurrently from the table's reader threads, so it must
+/// be thread-safe and must not throw; the row cache keeps the encoded bytes.
+using NgramRowDecoder =
+    std::function<void(const std::uint8_t* src, std::uint32_t row, float* dst)>;
+
 /// Reads n-gram embedding rows from the GGUF shard with direct I/O and a
 /// bounded cache of compressed rows. The table stays out of the page cache.
 /// Rows are dequantized to F32 and laid out [token][head][ple_head_dim].
@@ -87,6 +96,12 @@ public:
       platform::PlatformFile file, std::uint64_t file_offset,
       std::uint64_t rows, std::uint32_t row_dim, core::GgmlType type,
       std::string* error_msg = nullptr);
+  /// The same reader over rows of `row_bytes` encoded bytes each, which
+  /// `decoder` turns into row_dim floats.
+  [[nodiscard]] static std::unique_ptr<NgramTable> OpenEncoded(
+      platform::PlatformFile file, std::uint64_t file_offset,
+      std::uint64_t rows, std::uint32_t row_dim, std::size_t row_bytes,
+      NgramRowDecoder decode, std::string* error_msg = nullptr);
 
   /// Gathers `rows.size()` rows into `out` (rows.size() * row_dim floats).
   /// Duplicate ids are read once. Returns false on any failed read.
@@ -124,7 +139,11 @@ private:
   // Reuse deduplication storage across gathers. Entries index the first
   // occurrence in the current input, so no row-cache state is retained here.
   std::vector<std::size_t> first_rows_;
-  void DecodeRow(const std::uint8_t* src, float* dst) const;
+  void DecodeRow(const std::uint8_t* src, float* dst, std::uint32_t row) const;
+  [[nodiscard]] static std::unique_ptr<NgramTable> OpenRows(
+      platform::PlatformFile file, std::uint64_t file_offset,
+      std::uint64_t rows, std::uint32_t row_dim, std::size_t row_bytes,
+      core::GgmlType type, std::string* error_msg);
   bool ReadCached(std::uint32_t row, float* dst);
   bool ReadOne(std::uint32_t row, float* dst, std::vector<std::uint8_t>& buf,
                NgramCounters* owner);
@@ -146,6 +165,8 @@ private:
   std::uint32_t row_dim_{0};
   std::size_t row_bytes_{0};
   core::GgmlType type_{core::GgmlType::kIQ4_NL};
+  /// OpenEncoded's decoder; empty for GGUF rows.
+  NgramRowDecoder decode_;
 
   // A small resident pool keeps decode-time reads from paying thread
   // creation; prefill batches fan out over the same workers.
