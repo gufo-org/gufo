@@ -50,7 +50,6 @@ Loom packages take Gufo's own options:
 - `--mmproj`, and the draft model option with `--speculative`, replace the
   package's vision projector or draft model.
 - `--cache-disk DIR` keeps the prompt cache across restarts.
-- `--loom-device URI` selects another Loom device.
 
 The package's preset for your GPU is chosen automatically (`loom: preset chat
 for gfx1151` in the log).

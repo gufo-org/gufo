@@ -25,22 +25,6 @@
       }
     }
   ],
-  "options": [
-    {
-      "name": "--loom-device",
-      "type": "string",
-      "commands": [
-        "serve",
-        "prompt",
-        "chat",
-        "bench"
-      ],
-      "providers": [
-        "loom-text"
-      ],
-      "help": "Loom device URI (default: amdgpu://?completion_spin_ns=4294967295)"
-    }
-  ],
   "targets": {
     "gufo_loom": {
       "requires": []

@@ -88,12 +88,6 @@ void TestPresets() {
             std::string::npos;
   }
   CHECK(threw, "no match and no chat preset is an error");
-  CHECK(!package::NamesDevice("amdgpu://?completion_spin_ns=1") &&
-            !package::NamesDevice(""),
-        "Loom's default device");
-  CHECK(package::NamesDevice("amdgpu://1") &&
-            package::NamesDevice("amdgpu://1?x=2"),
-        "a named device");
   const auto single =
       json::parse(R"({"presets": {"chat": {"variant": "gguf"}}})");
   CHECK(Preset(single, "gfx1201", 32).empty(), "one preset: Loom picks it");

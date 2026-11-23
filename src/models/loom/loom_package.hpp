@@ -47,16 +47,6 @@ struct Gpu {
   std::uint64_t memory_bytes = 0;
 };
 
-// A --loom-device URI that names a device (anything between "amdgpu://" and
-// its options), rather than Loom's default one.
-inline bool NamesDevice(std::string_view uri) {
-  const auto scheme = uri.find("://");
-  if (scheme == std::string_view::npos)
-    return !uri.empty();
-  const auto rest = uri.substr(scheme + 3);
-  return !rest.empty() && rest.front() != '?';
-}
-
 // The preset to serve: the card's only one, or the one loom-fun cards publish
 // for this GPU: `chat` for Strix Halo (gfx1151), `chat-gfx1150` or
 // `chat-gfx1152` (else `chat`) for those APUs, `chat-r9700` for a gfx1201 with

@@ -113,14 +113,10 @@ public:
   // Gufo's own options size and complete the package: --sessions rows, each
   // able to reach --context (the package's context by default) at once, and
   // --mmproj or the draft model in place of the card's vision or draft file.
-  // Only the device URI is Loom's own option.
+  // Loom opens its default device, the first AMD GPU.
   explicit LoomModel(const ext::TextRunnerOptions& options) {
     const std::string& path = options.model_path;
     const bool checkpoint_images = !options.disk_cache.directory.empty();
-    std::string device;
-    if (const auto* value = ext::FindOption<std::string>(
-            options.provider_options, "--loom-device"))
-      device = *value;
     std::map<std::string, package::Override> overrides;
     if (!options.vision_model_path.empty())
       overrides.emplace(
@@ -139,9 +135,6 @@ public:
     else
       Warn(std::string("cannot read the GPU from the Loom driver (") +
            gpu_error + ")");
-    if (package::NamesDevice(device))
-      Warn("--loom-device names a device; the preset follows the first GPU (" +
-           (gpu.target.empty() ? std::string("unknown") : gpu.target) + ")");
     package_ = package::Resolve(path, overrides, gpu, kRuntimeSdk);
     const std::string preset = package_.preset;
     if (!package_.note.empty())
@@ -157,7 +150,7 @@ public:
     embed_options.base = {
         .model_path = package_.load_path.c_str(),
         .preset = preset.c_str(),
-        .device_uri = device.empty() ? nullptr : device.c_str(),
+        .device_uri = nullptr,
         // Gufo sizes the pool in tokens (row_context), not bytes.
         .memory_bytes = 0,
         .rows = static_cast<std::uint32_t>(
