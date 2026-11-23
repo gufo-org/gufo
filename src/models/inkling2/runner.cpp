@@ -1,7 +1,8 @@
 // Gufo text runner for Inkling 2 Mini: component cache (cache_adapter.*,
 // state_layout.*) with prefix reuse, RAM and disk cache, --sessions N with
 // per-session memory claims, layered prefill, batched decode across sessions.
-// Speculative decoding is not implemented and is refused at load time.
+// Speculative decoding: DSpark (--dspark-model), verified exactly (see
+// DecodeStep).
 //
 // M5: image input. The mmproj (--mmproj) is encoded by VisionEncoder; the
 // prompt carries <|content_image|>, one placeholder token per image row,
@@ -38,6 +39,7 @@
 
 #include "src/core/image.hpp"
 #include "src/models/inkling2/cache_adapter.hpp"
+#include "src/models/inkling2/dspark_policy.hpp"
 #include "src/models/inkling2/engine.hpp"
 #include "src/models/inkling2/text/gguf_meta.hpp"
 #include "src/models/inkling2/text/gufo_adapter.hpp"
@@ -90,6 +92,11 @@ public:
   /// The request's images (set by SetPromptContext; null for a text-only
   /// prompt).
   std::shared_ptr<const Inkling2PromptContext> prompt;
+  /// DSpark: the token a cycle selected after its last kept row (drawing from
+  /// the request's sampler) but did not emit; the next cycle emits it first,
+  /// and SelectNext returns it. Per request.
+  std::optional<g::TextDecodeSelection> pending;
+  DsparkBackoff backoff;
   [[nodiscard]] std::shared_ptr<mem::StateAccount> state_account()
       const override {
     return session_->account();
@@ -199,6 +206,9 @@ public:
     d.capabilities.prefix_reuse = true;
     d.capabilities.in_pass_checkpoint =
         false;  // checkpoints are taken between prefill passes
+    // DSpark: a lone decoding request runs DecodeStep (several tokens a step);
+    // concurrent ones keep batched one-token steps.
+    d.capabilities.multi_token_decode = engine_->has_drafter();
     sampling::TextSamplingValues
         v;  // Unsloth/OpenAI defaults: temperature 1, no truncation
     v.temperature = 1.0F;
@@ -488,6 +498,8 @@ public:
     st.answer_done = false;
     st.call_names = c != nullptr ? c->call_names : decltype(st.call_names){};
     st.call_prefix.clear();
+    st.pending.reset();
+    st.backoff = {};
   }
   [[nodiscard]] g::InitialOutputState InitialOutputState(
       const g::ChatRequest& r) const override {
@@ -615,11 +627,25 @@ public:
       g::TextRunnerState& state,
       sampling::SamplerState& sampler) const override {
     auto& st = Require(state);
-    if (st.session().position() >= max_context_ || st.answer_done)
-      return {.stop = true, .piece = {}};
+    if (st.pending) {  // a DSpark cycle drew it already
+      auto sel = std::move(*st.pending);
+      st.pending.reset();
+      return sel;
+    }
     const auto& raw = st.session().logits();
-    if (raw.empty())
+    if (raw.empty() && st.session().position() < max_context_ &&
+        !st.answer_done)
       throw std::runtime_error("Inkling 2 Mini token selection has no logits");
+    return Select(st, sampler, raw, st.session().position());
+  }
+  /// SelectNext's choice from the logits `raw` of the token before
+  /// `position`, for the block state the committed tokens left.
+  [[nodiscard]] g::TextDecodeSelection Select(Inkling2State& st,
+                                              sampling::SamplerState& sampler,
+                                              std::span<const float> raw,
+                                              std::size_t position) const {
+    if (position >= max_context_ || st.answer_done)
+      return {.stop = true, .piece = {}};
     // Reasoning off: the template's effort level 0 does not stop the model from
     // opening a thinking block, so the thinking token cannot follow a header.
     // With a call required the block is the call: after the header one declared
@@ -654,9 +680,10 @@ public:
             masked[t] = raw[t];
       }
     }
-    const auto& logits = masked.empty() ? raw : masked;
+    const std::span<const float> logits =
+        masked.empty() ? raw : std::span<const float>(masked);
     const auto token = static_cast<g::TextRunnerToken>(sampler.Sample(logits));
-    const bool stop = state.stop_at_eos() && tok_->IsStop(token);
+    const bool stop = st.stop_at_eos() && tok_->IsStop(token);
     return {.stop = stop,
             .token = token,
             .piece = stop ? std::string{} : Piece(st.block, token),
@@ -713,6 +740,122 @@ public:
     for (std::size_t i = 0; i < advances.size(); ++i)
       CommitToken(*states[i], advances[i].token);
   }
+  /// DSpark cycle: the anchor (the pending token, or a selection from the
+  /// session's logits) is emitted, the drafter proposes up to three tokens
+  /// after it, and one Engine::Verify step evaluates the anchor and the first
+  /// W proposals (W from ChooseDsparkWidth). Each verified row's token is
+  /// then selected exactly as SelectNext would select it after the tokens
+  /// before it (same masks, the request's sampler on a working copy), and a
+  /// proposal is kept while it equals that selection. The first selection
+  /// that differs, or follows the last kept row, becomes the next anchor. So
+  /// every emitted token and draw is the one plain decoding gives.
+  [[nodiscard]] g::TextDecodeStep DecodeStep(
+      g::TextRunnerState& state, std::size_t max_tokens,
+      sampling::SamplerState& sampler) const override {
+    if (!engine_->has_drafter())
+      return g::TextModelRunner::DecodeStep(state, max_tokens, sampler);
+    g::TextDecodeStep step;
+    if (max_tokens == 0)
+      return step;
+    auto& st = Require(state);
+    Session& ss = st.session();
+    sampling::SamplerState working(sampler);
+    g::TextDecodeSelection anchor;
+    if (st.pending) {
+      anchor = std::move(*st.pending);
+      st.pending.reset();
+    } else {
+      if (ss.logits().empty() && ss.position() < max_context_ &&
+          !st.answer_done)
+        throw std::runtime_error(
+            "Inkling 2 Mini token selection has no logits");
+      anchor = Select(st, working, ss.logits(), ss.position());
+    }
+    if (anchor.stop) {
+      step.stop = true;
+      step.terminal_logprobs = std::move(anchor.logprobs);
+      sampler.CopyDrawStateFrom(working);
+      return step;
+    }
+    const auto a = anchor.token;
+    working.Accept(a);
+    CommitToken(st, a);
+    step.selections.push_back(std::move(anchor));
+    std::size_t budget = max_tokens - 1;
+
+    using Clock = std::chrono::steady_clock;
+    const auto t0 = Clock::now();
+    std::int32_t drafts[Drafter::kMaxDraft] = {};
+    float conf[Drafter::kMaxDraft] = {};
+    int n = 0;
+    if (budget > 0 && engine_->DraftReady(ss) && st.backoff.Draft()) {
+      n = static_cast<int>(std::min<std::size_t>(
+          {std::size_t{3}, budget, engine_->VerifyRows(ss) - 1}));
+      if (n > 0)
+        engine_->Propose(ss, static_cast<std::int32_t>(a), n, drafts, conf);
+    }
+    const auto t1 = Clock::now();
+    int width = 0;
+    {
+      const std::lock_guard lock(dsp_mutex_);
+      if (n > 0)
+        costs_.ObserveDraft(
+            n, std::chrono::duration<double, std::milli>(t1 - t0).count());
+      width = n > 0 ? ChooseDsparkWidth(conf, n, cal_, costs_) : 0;
+    }
+    std::vector<std::int32_t> rows{static_cast<std::int32_t>(a)};
+    rows.insert(rows.end(), drafts, drafts + width);
+    std::vector<float> out;
+    engine_->Verify(ss, rows, &out);
+    const auto t2 = Clock::now();
+    const std::size_t V = engine_->config().n_vocab_text;
+    const std::size_t pos = ss.position();
+    std::size_t keep = 1;
+    for (int j = 0; j <= width; ++j) {
+      const std::span<const float> row(out.data() + j * V, V);
+      auto sel =
+          Select(st, working, row, pos + static_cast<std::size_t>(j) + 1);
+      if (sel.stop) {
+        step.stop = true;
+        step.terminal_logprobs = std::move(sel.logprobs);
+        break;
+      }
+      if (j < width && budget > 0 &&
+          sel.token == static_cast<g::TextRunnerToken>(drafts[j])) {
+        working.Accept(sel.token);
+        CommitToken(st, sel.token);
+        step.selections.push_back(std::move(sel));
+        --budget;
+        ++keep;
+        continue;
+      }
+      st.pending = std::move(sel);
+      break;
+    }
+    engine_->CommitVerify(ss, keep, out);
+    sampler.CopyDrawStateFrom(working);
+    const auto t3 = Clock::now();
+    {
+      const std::lock_guard lock(dsp_mutex_);
+      costs_.ObserveVerify(
+          static_cast<int>(rows.size()),
+          std::chrono::duration<double, std::milli>(t2 - t1).count());
+      for (int j = 0; j < width && j < static_cast<int>(keep); ++j)
+        cal_.Observe(conf[j], j + 1 < static_cast<int>(keep));
+      if (n > 0)
+        st.backoff.Observe(
+            static_cast<int>(keep),
+            std::chrono::duration<double, std::milli>(t3 - t0).count(),
+            costs_.Verify(1));
+    }
+    if (width > 0) {
+      step.draft_rounds = 1;
+      step.draft_tokens = static_cast<std::size_t>(width);
+      step.draft_accepted_tokens = keep - 1;
+    }
+    return step;
+  }
+
   [[nodiscard]] std::optional<g::TextDecodeSelection> PreviewFirstToken(
       g::TextRunnerState& state,
       sampling::SamplerState& sampler) const override {
@@ -777,6 +920,10 @@ private:
   mutable hipStream_t vision_stream_ = nullptr;
   g::TextRunnerToken t_header_{}, t_text_{}, t_thinking_{}, t_end_message_{},
       t_invoke_{};
+  // DSpark width policy, shared by the requests
+  mutable std::mutex dsp_mutex_;
+  mutable DsparkCalibration cal_;
+  mutable DsparkCosts costs_;
 };
 
 /// The layout of the identity text (schema line, artifact id,
@@ -870,10 +1017,17 @@ std::shared_ptr<ext::TextModelRunner> CreateInkling2TextRunner(
       }
       reader = std::move(opened);
     }
-    if (options.speculative.backend != ext::TextSpeculativeBackend::kDisabled) {
+    const bool dspark =
+        options.speculative.backend == ext::TextSpeculativeBackend::kDSpark;
+    if (options.speculative.backend != ext::TextSpeculativeBackend::kDisabled &&
+        !dspark) {
       if (error)
-        *error =
-            "inkling2: speculative decoding is not supported by this extension";
+        *error = "inkling2: the only speculative backend is dspark";
+      return nullptr;
+    }
+    if (dspark && options.speculative.draft_model_path.empty()) {
+      if (error)
+        *error = "inkling2: DSpark needs --dspark-model";
       return nullptr;
     }
     const std::uint32_t max_context =
@@ -890,6 +1044,12 @@ std::shared_ptr<ext::TextModelRunner> CreateInkling2TextRunner(
     if (!engine) {
       if (error)
         *error = why;
+      return nullptr;
+    }
+    if (dspark &&
+        !engine->AttachDrafter(options.speculative.draft_model_path, &why)) {
+      if (error)
+        *error = "inkling2: " + why;
       return nullptr;
     }
     if (max_context > engine->config().n_ctx_train)

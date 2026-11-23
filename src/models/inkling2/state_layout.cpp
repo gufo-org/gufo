@@ -167,6 +167,7 @@ void SessionStateAccess::RowsOut(const Session& s, std::uint32_t visit,
 void SessionStateAccess::RowsIn(Session& s, std::uint32_t visit, bool value,
                                 cache::Rows first, cache::Rows end,
                                 const std::byte* src) {
+  s.draft_.valid = 0;  // the drafter context is not part of the state
   auto& sl = s.slots_.at(visit);
   auto* base = static_cast<std::byte*>(value ? sl.v : sl.k);
   const bool ring = !sl.global;
@@ -220,6 +221,7 @@ void SessionStateAccess::ConvVisitOut(const Session& s, std::uint32_t visit,
 void SessionStateAccess::ConvVisitIn(Session& s, std::uint32_t visit,
                                      std::size_t inner, std::size_t n,
                                      const std::byte* src) {
+  s.draft_.valid = 0;  // the drafter context is not part of the state
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
   Check(hipMemcpy(reinterpret_cast<std::byte*>(s.slots_.at(visit).conv) + inner,
                   src, n, hipMemcpyHostToDevice),
@@ -228,6 +230,9 @@ void SessionStateAccess::ConvVisitIn(Session& s, std::uint32_t visit,
 void SessionStateAccess::SetFrontier(Session& s, std::size_t position,
                                      const float* logits, std::size_t n) {
   s.pos_ = position;
+  // The DSpark context of a shorter prefix stays valid; a restore (RowsIn /
+  // ConvVisitIn) already dropped it.
+  s.draft_.valid = std::min(s.draft_.valid, position);
   if (logits != nullptr)
     s.logits_.assign(logits, logits + n);
   else

@@ -34,6 +34,7 @@ gufo_extension_target(
     cache_adapter.cpp
     runner.cpp
     provider.cpp
+    dspark.cpp
     vision/vision_image.cpp
     vision/mmproj_gguf.cpp
   LINK_LIBRARIES
@@ -48,6 +49,7 @@ if(TARGET gufo_inkling2_hip)
     SOURCES
       hip/kernels.hip
       hip/fast.hip
+      hip/dspark.hip
       vision/vision_encoder.hip
   )
   target_compile_options(gufo_inkling2_hip PRIVATE

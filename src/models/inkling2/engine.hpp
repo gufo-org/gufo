@@ -27,6 +27,7 @@ class StateAccount;
 }  // namespace gufo::mem
 
 #include "src/models/inkling2/config.hpp"
+#include "src/models/inkling2/dspark.hpp"
 #include "src/models/inkling2/weights.hpp"
 
 namespace gufo::models::inkling2 {
@@ -118,6 +119,7 @@ private:
   SessionHooks* hooks_ = nullptr;  // M2 hook
   std::size_t pos_ = 0;
   std::size_t verify_rows_ = 0;  // rows of an uncommitted verification
+  Drafter::State draft_;         // DSpark context (Engine::AttachDrafter)
   std::size_t bytes_ = 0;
   std::vector<float> logits_;
   struct Slot {
@@ -205,6 +207,18 @@ public:
   void CommitVerify(Session& s, std::size_t keep,
                     std::span<const float> logits);
 
+  /// DSpark drafting. AttachDrafter loads the draft GGUF; call it before the
+  /// first NewSession (sessions then also hold the draft context, which every
+  /// Forward, DecodeBatch and CommitVerify extends). DraftReady: whether
+  /// Propose can run at the session position; Propose writes up to `n`
+  /// greedy proposals that follow `anchor` (the token at the session
+  /// position).
+  [[nodiscard]] bool AttachDrafter(const std::string& path, std::string* error);
+  [[nodiscard]] bool has_drafter() const;
+  [[nodiscard]] bool DraftReady(const Session& s) const;
+  void Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
+               float* confidence = nullptr);
+
   /// Optional per-visit hidden-state tap for bisecting against llama.cpp:
   /// called with the visit index (0..47), a label ("l_out" or "ffn_inp") and
   /// the first token's [2304] row.
@@ -220,6 +234,8 @@ private:
     mem::StateDeclaration state{Session::kKvMarginRows};
     std::array<mem::StateBufferId, 48> k{}, v{}, conv{};
     mem::StateBufferId table{};
+    std::array<mem::StateBufferId, 3> dk{}, dv{};  // with a drafter
+    mem::StateBufferId df{};
   };
   [[nodiscard]] StateLayout DeclareState() const;
   struct Impl;

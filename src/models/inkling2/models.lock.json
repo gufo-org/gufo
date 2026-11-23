@@ -35,6 +35,23 @@
             "sha256": "2c165c78790e78a3f45a2d1e9e931083e52ee69d45ff2a0dc9c281fdf1a666e7"
           }
         ]
+      },
+      "dspark": {
+        "source": {
+          "hf": "unsloth/Inkling-2-Mini-GGUF",
+          "revision": "45fd08764f2b0bf16b03a5483a80e5c7aaec8772"
+        },
+        "include": [
+          "dspark-Inkling-2-Mini-Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "dspark-Inkling-2-Mini-Q8_0.gguf",
+            "size": 402278560,
+            "sha256": "2ec78510da837e8fc3be54a14757a0c5fbd2d8d9e85a0d92853fafdf674f3773"
+          }
+        ]
       }
     }
   }

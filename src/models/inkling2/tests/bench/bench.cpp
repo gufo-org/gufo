@@ -39,7 +39,8 @@
 #include "src/models/inkling2/text/tokenizer.hpp"
 
 int main(int argc, char** argv) {
-  std::string model, text, ids_in, ctxs = "64,4096", batches, specs;
+  std::string model, text, ids_in, ctxs = "64,4096", batches, specs, dspark;
+  int depth = 3;
   bool verify = false, same = false;
   int decode = 64;
   unsigned ctx = 32768;
@@ -62,6 +63,10 @@ int main(int argc, char** argv) {
       verify = true;
     else if (k == "--spec")
       specs = next();
+    else if (k == "--dspark")
+      dspark = next();
+    else if (k == "--depth")
+      depth = std::atoi(next().c_str());
     else if (k == "--same")
       same = true;  // identical prompts in all sessions (debug)
     else if (k == "--ctx")
@@ -128,8 +133,96 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "engine: %s\n", err.c_str());
     return 1;
   }
+  if (!dspark.empty() && !engine->AttachDrafter(dspark, &err)) {
+    std::fprintf(stderr, "dspark: %s\n", err.c_str());
+    return 1;
+  }
   auto session = engine->NewSession();
   const std::size_t V = engine->config().n_vocab_text;
+  // ---- DSpark greedy speculative decoding vs plain greedy decoding ----
+  if (!dspark.empty()) {
+    auto amax = [](std::span<const float> l) {
+      return static_cast<std::int32_t>(std::max_element(l.begin(), l.end()) -
+                                       l.begin());
+    };
+    for (int C : lens) {
+      const std::span<const std::int32_t> prompt(ids.data(),
+                                                 static_cast<std::size_t>(C));
+      auto ref = engine->NewSession();
+      engine->Forward(*ref, prompt);
+      std::vector<std::int32_t> want{amax(ref->logits())};
+      const auto r0 = std::chrono::steady_clock::now();
+      while (static_cast<int>(want.size()) < decode + 8) {
+        engine->Forward(*ref, std::span<const std::int32_t>(&want.back(), 1));
+        want.push_back(amax(ref->logits()));
+      }
+      const double ar =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - r0)
+              .count() /
+          (decode + 7);
+      auto sp = engine->NewSession();
+      engine->Forward(*sp, prompt);
+      std::vector<std::int32_t> got{amax(sp->logits())};
+      std::vector<float> out;
+      long drafted = 0, accepted = 0, cycles = 0;
+      // calibration: [bin of the draft probability] -> (seen, accepted), for
+      // drafts whose predecessors were all accepted
+      long cal[10][2] = {};
+      const auto s0 = std::chrono::steady_clock::now();
+      while (static_cast<int>(got.size()) < decode) {
+        const std::int32_t anchor = got.back();
+        std::int32_t d[8] = {};
+        float conf[8] = {};
+        int n = 0;
+        if (engine->DraftReady(*sp)) {
+          n = std::min<int>(depth,
+                            static_cast<int>(engine->VerifyRows(*sp)) - 1);
+          if (n > 0)
+            engine->Propose(*sp, anchor, n, d, conf);
+        }
+        std::vector<std::int32_t> rows{anchor};
+        rows.insert(rows.end(), d, d + n);
+        engine->Verify(*sp, rows, &out);
+        int j = 0;
+        while (j < n &&
+               amax(std::span<const float>(out.data() + j * V, V)) == d[j])
+          ++j;
+        for (int i = 0; i < j; ++i)
+          got.push_back(d[i]);
+        for (int i = 0; i <= j && i < n; ++i) {
+          const int b = std::clamp(static_cast<int>(conf[i] * 10), 0, 9);
+          ++cal[b][0];
+          cal[b][1] += i < j;
+        }
+        got.push_back(amax(std::span<const float>(out.data() + j * V, V)));
+        engine->CommitVerify(*sp, static_cast<std::size_t>(j + 1), out);
+        drafted += n;
+        accepted += j;
+        ++cycles;
+      }
+      const double st =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - s0)
+              .count();
+      int same = 0;
+      while (same < static_cast<int>(got.size()) &&
+             same < static_cast<int>(want.size()) && got[same] == want[same])
+        ++same;
+      std::printf(
+          "dspark ctx %6d depth %d  tokens %zu identical-prefix %d  accepted "
+          "%ld/%ld (%.1f%%), %.2f tokens/cycle  %.2f tok/s (AR %.2f)\n",
+          C, depth, got.size(), same, accepted, drafted,
+          drafted ? 100.0 * accepted / drafted : 0.0,
+          static_cast<double>(got.size() - 1) / cycles, (got.size() - 1) / st,
+          1.0 / ar);
+      std::printf("  calibration (draft p -> accepted):");
+      for (int b = 0; b < 10; ++b)
+        if (cal[b][0])
+          std::printf(" %.1f:%ld/%ld", b / 10.0, cal[b][1], cal[b][0]);
+      std::printf("\n");
+      std::fflush(stdout);
+    }
+    return 0;
+  }
   for (int C : (batches.empty() || !verify) ? lens : std::vector<int>{}) {
     engine->Reset(*session);
     const auto t0 = std::chrono::steady_clock::now();

@@ -21,7 +21,15 @@
         "inkling-2-mini"
       ],
       "target": "gufo_inkling2_hip",
-      "entry": "inkling2_provider_register"
+      "entry": "inkling2_provider_register",
+      "speculative": [
+        "dspark"
+      ],
+      "serving": {
+        "draft_options": {
+          "dspark": "--dspark-model"
+        }
+      }
     }
   ],
   "models": [
@@ -54,8 +62,35 @@
           "include": [
             "mmproj-BF16.gguf"
           ]
+        },
+        {
+          "role": "dspark",
+          "option": "--dspark-model",
+          "install": "default",
+          "source": {
+            "hf": "unsloth/Inkling-2-Mini-GGUF",
+            "revision": "45fd08764f2b0bf16b03a5483a80e5c7aaec8772"
+          },
+          "include": [
+            "dspark-Inkling-2-Mini-Q8_0.gguf"
+          ]
         }
       ]
+    }
+  ],
+  "options": [
+    {
+      "name": "--dspark-model",
+      "type": "path",
+      "commands": [
+        "serve",
+        "bench",
+        "prompt"
+      ],
+      "providers": [
+        "inkling2"
+      ],
+      "help": "DSpark draft model path for speculative decoding"
     }
   ],
   "targets": {

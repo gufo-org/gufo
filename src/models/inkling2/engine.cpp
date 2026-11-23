@@ -149,6 +149,23 @@ struct Engine::Impl {
   hipStream_t ps = nullptr;
   hipEvent_t ev_fork = nullptr, ev_join = nullptr, ev_bank = nullptr;
   hipEvent_t ev_msg[2] = {};
+  // DSpark drafter (Engine::AttachDrafter) and the target features it reads:
+  // the inputs of visit slots 5, 29 and 47 and the final normed output, [row]
+  // [4][2304] (decode steps: d_feat; prefill ubatches: p_feat).
+  std::unique_ptr<Drafter> dsp;
+  float* d_feat = nullptr;
+  float* p_feat = nullptr;
+  static int FeatureIndex(int slot_idx) {
+    return slot_idx == 5 ? 0 : slot_idx == 29 ? 1 : slot_idx == 47 ? 2 : -1;
+  }
+  void CaptureFeature(hipStream_t st, const float* src, int rows, int f,
+                      float* dst) {
+    Check(hipMemcpy2DAsync(dst + static_cast<std::size_t>(f) * kEmbd,
+                           Drafter::kFeatureFloats * 4, src, kEmbd * 4,
+                           kEmbd * 4, static_cast<std::size_t>(rows),
+                           hipMemcpyDeviceToDevice, st),
+          "feature copy");
+  }
   const float* msg_inv = nullptr;  // [4][T] inverse RMS of the visit's msgs
   DeviceWeights dw;
   std::vector<void*> scratch_allocs;
@@ -571,6 +588,7 @@ struct Engine::Impl {
     d_step = NewInts(2 * B);  // tokens [B], positions [B]
     d_vcap =
         NewBuf(static_cast<std::size_t>(48) * kConvChannels * fs::kVerifyRows);
+    d_feat = NewBuf(B * Drafter::kFeatureFloats);
     d_counter = reinterpret_cast<unsigned*>(NewInts(B));
     Check(hipMemset(d_counter, 0, B * 4), "counter");
     d_tbl = static_cast<fs::SlotEntry*>(
@@ -700,6 +718,8 @@ struct Engine::Impl {
     const LayerFast& F = lf[ip];
     const bool is_swa = !L.is_global;
     Session::Slot& slot = ss.slots_[slot_idx];
+    if (dsp && FeatureIndex(slot_idx) >= 0)
+      CaptureFeature(s, cur, T, FeatureIndex(slot_idx), p_feat);
     // The producers of the projection inputs also write their F16 copies.
     void* const in16[3] = {p_iq16, p_ik16, p_iv16};
     bool have16 = false;
@@ -1138,6 +1158,10 @@ struct Engine::Impl {
     } else {
       FlushPending();
     }
+    // The input of this visit, now that the mix applied the previous visit's
+    // deferred residual.
+    if (dsp && FeatureIndex(slot_idx) >= 0)
+      CaptureFeature(ds, cur, nb, FeatureIndex(slot_idx), d_feat);
     if (msg) {
       fs::CtlJobs cj{};
       cj.n = 3;
@@ -1476,6 +1500,8 @@ struct Engine::Impl {
     DMix(cur, DS(w->output_res_query), 1, d_mixf);
     kk::RmsNorm(ds, d_mixf, kEmbd, DS(w->output_norm), d_hn, kEmbd, kEmbd, nb,
                 cfg->rms_eps);
+    if (dsp)
+      CaptureFeature(ds, d_hn, nb, 3, d_feat);
     const int V = static_cast<int>(cfg->n_vocab_text);
     if (head_fast) {
       fs::GemvQ8(ds, kEmbd, D(w->output), d_hn, logits_d, V, cfg->logit_softcap,
@@ -1599,6 +1625,12 @@ struct Engine::Impl {
                            hipMemcpyDeviceToHost, ds),
             "logits copy");
     }
+    if (dsp)
+      for (int b = 0; b < n; ++b)
+        dsp->Inject(
+            ds, sess[b]->draft_,
+            d_feat + static_cast<std::size_t>(b) * Drafter::kFeatureFloats,
+            sess[b]->pos_, 1);
     Check(hipStreamSynchronize(ds), "decode sync");
     for (int b = 0; b < n; ++b)
       sess[b]->pos_ += 1;
@@ -1657,6 +1689,8 @@ struct Engine::Impl {
   void CommitVerify(Session& ss, int keep) {
     fs::CommitVerifyConv(ds, static_cast<const fs::SlotEntry*>(ss.tbl_), d_vcap,
                          keep);
+    if (dsp)
+      dsp->Inject(ds, ss.draft_, d_feat, ss.pos_, keep);
     Check(hipStreamSynchronize(ds), "commit sync");
     ss.pos_ += static_cast<std::size_t>(keep);
   }
@@ -1775,13 +1809,19 @@ struct Engine::Impl {
                    true);  // M2 hook (the last visit is followed by the head)
     }
     ss.pos_ += T;
-    if (!last_ubatch && !sink)
+    if (!last_ubatch && !sink && !dsp)
       return;
 
     // output: attention-residual mix, norm, lm head, soft cap, crop
     FMix(States(cur), DF(w->output_res_query), 1, mixf);
     kk::RmsNorm(s, mixf, kEmbd, DF(w->output_norm), hn, kEmbd, kEmbd, T,
                 cfg->rms_eps);
+    if (dsp) {
+      CaptureFeature(s, hn, T, 3, p_feat);
+      dsp->Inject(s, ss.draft_, p_feat, static_cast<std::size_t>(pos0), T);
+      if (!last_ubatch && !sink)
+        return;
+    }
     const int V = static_cast<int>(cfg->n_vocab_text);
     auto chunk = [&](int a, int n, std::vector<float>* host) {
       G(w->output, hn + static_cast<std::size_t>(a) * kEmbd, kEmbd, logits_d, V,
@@ -1902,6 +1942,20 @@ Engine::StateLayout Engine::DeclareState() const {
         state.Fixed(static_cast<std::size_t>(kConvChannels) * 3 * 4);
   }
   layout.table = state.Fixed(48 * sizeof(fs::SlotEntry));
+  if (impl_ != nullptr && impl_->dsp) {
+    for (int l = 0; l < 3; ++l) {
+      if (Drafter::WindowLayer(l)) {
+        layout.dk[l] = state.Fixed(kv_row * ring);
+        layout.dv[l] = state.Fixed(kv_row * ring);
+      } else {
+        layout.dk[l] =
+            state.Context({.row_bytes = kv_row, .rows = max_context_});
+        layout.dv[l] =
+            state.Context({.row_bytes = kv_row, .rows = max_context_});
+      }
+    }
+    layout.df = state.Fixed(2304 * 4);
+  }
   return layout;
 }
 
@@ -1944,6 +1998,18 @@ std::unique_ptr<Session> Engine::NewSession() {
     host[i] = {sl.k, sl.v, sl.conv, static_cast<int>(sl.rows), 0};
   }
   s->tbl_ = state.data(layout.table);
+  if (impl_->dsp) {
+    for (int l = 0; l < 3; ++l) {
+      s->draft_.k[l] = state.data(layout.dk[l]);
+      s->draft_.v[l] = state.data(layout.dv[l]);
+      s->draft_.cap[l] = Drafter::WindowLayer(l) ? ring : max_context_;
+      if (!Drafter::WindowLayer(l)) {
+        s->regions_.push_back(state.region(layout.dk[l]));
+        s->regions_.push_back(state.region(layout.dv[l]));
+      }
+    }
+    s->draft_.f = state.data<float>(layout.df);
+  }
   {
     const std::shared_lock<std::shared_mutex> gate(CaptureGate());
     Check(hipMemcpy(s->tbl_, host, sizeof host, hipMemcpyHostToDevice),
@@ -1961,6 +2027,8 @@ void Engine::Reset(Session& s) {
   }
   s.pos_ = 0;
   s.logits_.clear();
+  s.draft_.valid = 0;
+  s.draft_.f_pos = static_cast<std::size_t>(-1);
 }
 
 bool Engine::batch_capable() const {
@@ -2043,6 +2111,63 @@ void Engine::CommitVerify(Session& s, std::size_t keep,
   s.logits_.assign(logits.begin() + static_cast<std::ptrdiff_t>((keep - 1) * V),
                    logits.begin() + static_cast<std::ptrdiff_t>(keep * V));
   s.verify_rows_ = 0;
+}
+
+bool Engine::AttachDrafter(const std::string& path, std::string* error) {
+  const std::lock_guard lock(mutex_);
+  Impl& I = *impl_;
+  const auto& w = weights_;
+  if (static_cast<int>(w.token_embd.type) != kk::kTQ8_0 || !I.head_fast) {
+    if (error)
+      *error = "DSpark needs the Q8_0 token embedding and LM head";
+    return false;
+  }
+  Drafter::Target t{};
+  t.token_embd = I.D(w.token_embd);
+  t.token_embd_norm = I.DF(w.token_embd_norm);
+  t.output = I.D(w.output);
+  t.vocab = static_cast<int>(w.config.n_vocab_text);
+  t.eps = w.config.rms_eps;
+  auto d = Drafter::Open(path, t, error);
+  if (!d)
+    return false;
+  {
+    const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+    if (I.p_feat == nullptr)
+      I.p_feat =
+          I.NewBuf(static_cast<std::size_t>(ubatch_) * Drafter::kFeatureFloats);
+  }
+  // the decode graphs gain the feature copies: capture them again
+  for (auto& g : I.graphs)
+    (void)hipGraphExecDestroy(g.second);
+  I.graphs.clear();
+  for (auto& g : I.vgraphs)
+    (void)hipGraphExecDestroy(g.second);
+  I.vgraphs.clear();
+  I.failed_graphs.clear();
+  I.dsp = std::move(d);
+  weight_bytes_ += I.dsp->weight_bytes();
+  return true;
+}
+
+bool Engine::has_drafter() const {
+  return impl_->dsp != nullptr;
+}
+
+bool Engine::DraftReady(const Session& s) const {
+  return impl_->dsp != nullptr && Drafter::Ready(s.draft_, s.pos_);
+}
+
+void Engine::Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
+                     float* confidence) {
+  const std::lock_guard lock(mutex_);
+  if (!DraftReady(s))
+    throw std::runtime_error("inkling2: no draft context at this position");
+  if (anchor < 0 ||
+      static_cast<std::uint32_t>(anchor) >= weights_.config.n_vocab_text)
+    throw std::runtime_error("inkling2: token id out of range");
+  const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+  impl_->dsp->Propose(impl_->ds, s.draft_, anchor, s.pos_, n, out, confidence);
 }
 
 void Engine::Synchronize() {

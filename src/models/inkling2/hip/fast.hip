@@ -3176,6 +3176,8 @@ void GemmDense(hipStream_t s, const void* w, int m, int k, const void* ah,
     k_gemm4<FMT_Q8, 0, 64, 2304, RG><<<grid, 64 * RG, 0, s>>>(p, rgn);
   else if (k == 3072)
     k_gemm4<FMT_Q8, 0, 64, 3072, RG><<<grid, 64 * RG, 0, s>>>(p, rgn);
+  else if (k == 9216)  // the DSpark drafter's FFN down projection
+    k_gemm4<FMT_Q8, 0, 64, 9216, RG><<<grid, 64 * RG, 0, s>>>(p, rgn);
   else
     throw std::runtime_error("inkling2 fast: unsupported dense gemm K");
   Chk("gemm_dense");
