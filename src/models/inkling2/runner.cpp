@@ -758,6 +758,19 @@ public:
     for (std::size_t i = 0; i < advances.size(); ++i)
       CommitToken(*states[i], advances[i].token);
   }
+  /// Runs f(0 .. n - 1), the first on this thread and the others each on
+  /// their own.
+  template<class F>
+  static void ForEachLane(std::size_t n, F&& f) {
+    std::vector<std::future<void>> rest;
+    for (std::size_t k = 1; k < n; ++k)
+      rest.push_back(std::async(std::launch::async, [&f, k] { f(k); }));
+    if (n > 0)
+      f(0);
+    for (auto& r : rest)
+      r.get();
+  }
+
   /// How a request's verified rows are selected and its drafts proposed.
   /// Plain greedy requests take each row's argmax from the device (the token
   /// Select would pick) and copy only the kept row's logits. Requests that
@@ -1187,7 +1200,10 @@ public:
         }
       }
       if (ok) {
-        for (const auto& l : lanes) {
+        // each request's selection on its own thread (host sampling over the
+        // vocabulary; the requests' states are disjoint)
+        ForEachLane(lanes.size(), [&](std::size_t k) {
+          const auto& l = lanes[k];
           try {
             auto next =
                 Select(*l.st, working[l.i], l.ss->logits(), l.ss->position());
@@ -1195,7 +1211,7 @@ public:
           } catch (...) {
             steps[l.i].failure = std::current_exception();
           }
-        }
+        });
         const double ms =
             std::chrono::duration<double, std::milli>(Clock::now() - t1)
                 .count();
@@ -1232,33 +1248,53 @@ public:
         ok = false;
       }
       const std::size_t V = engine_->config().n_vocab_text;
-      std::size_t r0 = 0;
+      std::vector<std::size_t> first(lanes.size()), keeps(lanes.size(), 0);
+      for (std::size_t k = 0, r0 = 0; k < lanes.size(); ++k) {
+        first[k] = r0;
+        r0 += static_cast<std::size_t>(1 + lanes[k].width);
+      }
+      const auto rows_of = [&](std::size_t k) {
+        const auto& l = lanes[k];
+        return l.mode.greedy
+                   ? std::span<const float>{}
+                   : out.subspan(first[k] * V,
+                                 static_cast<std::size_t>(1 + l.width) * V);
+      };
       int emitted = 0;
-      for (auto& l : lanes) {
-        const std::size_t nr = static_cast<std::size_t>(1 + l.width);
-        if (!ok)
-          break;
-        try {
-          const auto mine = l.mode.greedy ? std::span<const float>{}
-                                          : out.subspan(r0 * V, nr * V);
-          const std::size_t keep =
-              Resolve(*l.st, working[l.i], steps[l.i], l.budget, l.pos, l.width,
-                      l.drafts, mine, amax + r0, l.mode.greedy);
-          engine_->CommitVerify(*l.ss, keep, mine);
-          emitted += static_cast<int>(keep);
-          if (l.width > 0) {
-            steps[l.i].draft_rounds = 1;
-            steps[l.i].draft_tokens = static_cast<std::size_t>(l.width);
-            steps[l.i].draft_accepted_tokens = keep - 1;
+      if (ok) {
+        // selections on a thread per request (disjoint states), then the
+        // commits in order
+        ForEachLane(lanes.size(), [&](std::size_t k) {
+          auto& l = lanes[k];
+          try {
+            keeps[k] = Resolve(*l.st, working[l.i], steps[l.i], l.budget, l.pos,
+                               l.width, l.drafts, rows_of(k), amax + first[k],
+                               l.mode.greedy);
+          } catch (...) {
+            steps[l.i].failure = std::current_exception();
           }
-          const std::lock_guard lock(dsp_mutex_);
-          DsparkCalibration& cal = l.mode.coupled ? cal_coupled_ : cal_;
-          for (int j = 0; j < l.width && j < static_cast<int>(keep); ++j)
-            cal.Observe(l.conf[j], j + 1 < static_cast<int>(keep));
-        } catch (...) {
-          steps[l.i].failure = std::current_exception();
+        });
+        for (std::size_t k = 0; k < lanes.size(); ++k) {
+          auto& l = lanes[k];
+          const std::size_t keep = keeps[k];
+          if (keep == 0)
+            continue;  // failed above
+          try {
+            engine_->CommitVerify(*l.ss, keep, rows_of(k));
+            emitted += static_cast<int>(keep);
+            if (l.width > 0) {
+              steps[l.i].draft_rounds = 1;
+              steps[l.i].draft_tokens = static_cast<std::size_t>(l.width);
+              steps[l.i].draft_accepted_tokens = keep - 1;
+            }
+            const std::lock_guard lock(dsp_mutex_);
+            DsparkCalibration& cal = l.mode.coupled ? cal_coupled_ : cal_;
+            for (int j = 0; j < l.width && j < static_cast<int>(keep); ++j)
+              cal.Observe(l.conf[j], j + 1 < static_cast<int>(keep));
+          } catch (...) {
+            steps[l.i].failure = std::current_exception();
+          }
         }
-        r0 += nr;
       }
       if (ok) {
         const double ms =
