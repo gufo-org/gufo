@@ -10,8 +10,9 @@ namespace {
 void CheckShape(const RegionShape& shape) {
   if (shape.row_bytes == 0 || shape.rows == 0 || shape.segments == 0)
     throw std::invalid_argument("state buffer without rows");
+  // Compare in rows to avoid overflowing rows * row_bytes.
   if (shape.segment_stride != 0 &&
-      shape.segment_stride < shape.rows * shape.row_bytes)
+      shape.rows > shape.segment_stride / shape.row_bytes)
     throw std::invalid_argument("state buffer segments overlap");
 }
 
