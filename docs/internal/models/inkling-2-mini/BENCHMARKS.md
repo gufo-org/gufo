@@ -605,3 +605,49 @@ the F16 WMMA ceiling) and is 2.1 of the 17.3 s; the window visits take 1.25 s.
 Decode at 32,000 tokens (26.6 ms per token, 63.6 ms per step for four
 sessions) reads the global visits' K/V at 216 to 218 GB/s, about 90% of the
 DRAM ceiling, for one and for four sessions.
+
+## Round 9: prefill attention (November 23)
+
+Every output byte-identical: the oracle dumps of both paths equal the
+baselines, `inkling2_cache_test` passes with a maximum logit difference of 0,
+and a standalone replay of the attention kernel (random K/V caches, 37 to
+2,048 queries, positions 0 to 126,976, window and global visits) matches the
+previous kernel bit for bit.
+
+At 32K the global visits' flash attention ran at 23.7 TFLOPS (43% of the WMMA
+ceiling). On the replay, skipping every K/V tile load after the first made it
+30% faster, so the loads and their two barriers per tile were exposed. With
+the softmax also removed it reached 43.5 TFLOPS, which is the bound set by the
+WMMAs and the LDS reads.
+
+| Change (global visit, 2,048 queries after 30,720 keys) | ms |
+| --- | --- |
+| Before (64-query blocks, 64-key tiles, two barriers per tile) | 33.6 |
+| 128-query blocks (24 waves share each K/V tile), next tile in registers, 32-key tiles (64-key tiles spill) | 28.3 |
+| Double-buffered LDS: one barrier per tile | 27.6 |
+| Half-wave probability exchange by `v_perm` instead of selects | 27.4 |
+
+At 126,976 keys the visit takes 108.8 ms instead of 137.7. The softmax still
+steps over 16 keys from key 0, so the larger blocks group the keys exactly as
+before. Window visits keep 64-query blocks because their first key follows
+the block's first query, and larger blocks would regroup their steps (the
+replay differs). They still gain from the double buffering: 2.06 → 1.95 ms at
+30K. Global visits before 1K keys, or with fewer than 512 queries, also stay on
+64-query blocks.
+
+`inkling2_bench` (prefill from scratch):
+
+| Prompt | Before | After |
+| --- | --- | --- |
+| 2,048 | 2,196 tok/s | 2,213 tok/s |
+| 32,768 | 1,874 tok/s | 1,922 tok/s |
+| 65,536 | 1,649 tok/s | 1,737 tok/s |
+
+Rejected on the replay (all exact): skipping the rescale when every
+row's maximum is unchanged, and a mask-free path for far tiles (both raise
+VGPRs to occupancy 6 and gain under 1%); `permlanex16` for the remaining
+`shfl_xor`s (no change); 10- and 6-tile blocks (slower). Decode: the router
+over 32 blocks of 4 waves instead of 16 of 8 left the step at 20.8 ms. The
+small decode kernels (mixes, attention, controllers, router: 3.3 ms, plus
+1.0 ms between 505 launches) are latency-bound chains, and the weight GEMVs
+stay at 85–95% of the DRAM ceiling.
