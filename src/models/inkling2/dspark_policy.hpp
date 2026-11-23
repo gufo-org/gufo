@@ -78,8 +78,8 @@ public:
 private:
   static void Ema(double& v, double x) { v += 0.05 * (x - v); }
   // Strix Halo, short context (inkling2_bench --spec / --dspark)
-  std::array<double, kMaxRows + 1> verify_{0,    21.9, 27.3, 32.0, 36.2,
-                                           41.3, 46.1, 51.2, 58.2};
+  std::array<double, kMaxRows + 1> verify_{0,    20.2, 26.2, 31.0, 35.5,
+                                           40.5, 45.3, 50.0, 54.9};
   double draft_base_ = 2.8, draft_step_ = 0.25;
 };
 
@@ -187,8 +187,10 @@ struct CopyBackoff {
 
 /// Per-request back-off: every eight drafted cycles, when they emitted fewer
 /// tokens per millisecond than plain decoding steps of the request's kind
-/// would, skip drafting for a while (8 steps, doubling to 64), then probe
-/// again.
+/// would (times `min_gain`), skip drafting for a while (8 steps, doubling to
+/// 64), then probe again. A lone request tolerates 3%: its eight-cycle rate is
+/// noisy and drafting gains much more on average. Batched steps tolerate
+/// nothing: with few rows left to draft in, the gain is small either way.
 struct DsparkBackoff {
   int skip = 0;     // plain steps left before the next drafted cycle
   int penalty = 0;  // the last back-off length
@@ -202,7 +204,8 @@ struct DsparkBackoff {
     }
     return true;
   }
-  void Observe(int emitted, double cycle_ms, double plain_ms) {
+  void Observe(int emitted, double cycle_ms, double plain_ms,
+               double min_gain = 0.97) {
     tokens += emitted;
     ms += cycle_ms;
     if (++cycles < 8)
@@ -210,7 +213,7 @@ struct DsparkBackoff {
     const double gain = tokens * plain_ms / std::max(ms, 1e-3);
     tokens = ms = 0;
     cycles = 0;
-    if (gain < 0.97) {
+    if (gain < min_gain) {
       penalty = std::clamp(penalty ? 2 * penalty : 8, 8, 64);
       skip = penalty;
     } else {

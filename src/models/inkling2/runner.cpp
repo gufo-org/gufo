@@ -1492,10 +1492,13 @@ public:
         const std::lock_guard lock(dsp_mutex_);
         if (nl >= 2)
           costs_batch_.ObserveVerify(nl, ms);
+        // what a plain step of nl requests costs (verification steps of nl
+        // rows from fewer requests are cheaper and share costs_batch_)
+        double& plain = plain_batch_ms_[static_cast<std::size_t>(nl)];
+        plain = plain > 0 ? plain + 0.1 * (ms - plain) : ms;
         if (neural)  // drafting that bought nothing
-          batch_backoff_[B].Observe(
-              nl, ms + draft_ms,
-              costs_batch_.Verify(std::max(nl, 1)) / std::max(nl, 1));
+          batch_backoff_[B].Observe(nl, ms + draft_ms, plain / std::max(nl, 1),
+                                    1.0);
       }
     } else {
       std::vector<Session*> sessions;
@@ -1605,11 +1608,12 @@ public:
                 .count();
         const std::lock_guard lock(dsp_mutex_);
         costs_batch_.ObserveVerify(static_cast<int>(rows.size()), ms);
+        const double plain = plain_batch_ms_[static_cast<std::size_t>(nl)];
         batch_backoff_[B].Observe(
             emitted,
             std::chrono::duration<double, std::milli>(Clock::now() - t0)
                 .count(),
-            costs_batch_.Verify(nl) / nl);
+            (plain > 0 ? plain : costs_batch_.Verify(nl)) / nl, 1.0);
       }
     }
     for (std::size_t i = 0; i < decodes.size(); ++i)
@@ -1690,13 +1694,15 @@ private:
   mutable DsparkCalibration cal_, cal_coupled_;
   // copied proposals (prompt lookup) of greedy and of sampled requests
   mutable DsparkCalibration cal_copy_, cal_copy_sampled_;
-  mutable double plain_greedy_ms_ = 22.0, plain_sampled_ms_ = 23.5;
+  mutable double plain_greedy_ms_ = 20.2, plain_sampled_ms_ = 20.8;
   mutable DsparkCosts costs_;
   // batched cycles: costs by total rows (several sessions' rows; plain batched
   // steps too) and a back-off per batch width
   mutable DsparkCosts costs_batch_ = DsparkCosts::Batched();
   mutable std::array<DsparkBackoff, Engine::kMaxDecodeBatch + 1>
       batch_backoff_{};
+  // measured plain batched steps by request count (0: none yet)
+  mutable std::array<double, Engine::kMaxDecodeBatch + 1> plain_batch_ms_{};
 };
 
 /// The layout of the identity text (schema line, artifact id,
