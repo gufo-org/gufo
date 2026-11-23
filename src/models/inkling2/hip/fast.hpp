@@ -233,7 +233,12 @@ void MoeDownPrefill(hipStream_t s, int fmt, int tile, const void* w,
 
 struct PrefillAttn {
   int n, pos0, cap, swa;
-  const float *k, *v;  // [n][1024] post-conv
+  const float *k, *v;  // [n][1024] post-conv (when kraw is null)
+  // When set: raw K/V projections, convolved here (histories, static taps,
+  // optional dynamic taps, scale) instead of k / v.
+  const float *kraw = nullptr, *vraw = nullptr, *kst = nullptr, *vst = nullptr;
+  const float *kw = nullptr, *vw = nullptr, *kdyn = nullptr, *vdyn = nullptr;
+  float conv_scale = 1.f;
   const float *q, *r;  // [n][24][128], [n][24][16] raw
   const float *qscale, *rclip;
   void *kc, *vc;  // f16 caches

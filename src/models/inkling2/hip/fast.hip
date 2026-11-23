@@ -2535,6 +2535,66 @@ __global__ __launch_bounds__(128) void k_kv_write(const float* __restrict__ k,
   vp[1] = __floats2half2_rn(vx.z * vf, vx.w * vf);
 }
 
+// k_kv_write of the short-convolved K and V: the convolution (hip::conv_k with
+// the same products and order) is evaluated here from the raw projections, so
+// the convolved rows never go through memory.
+struct KvConv {
+  const float *k, *v;        // raw [n][1024]
+  const float *kst, *vst;    // histories [1024][3]
+  const float *kw, *vw;      // static taps [1024][4]
+  const float *kdyn, *vdyn;  // dynamic taps [n][8][4] or null
+  float scale;
+};
+__device__ __forceinline__ float conv_elem(const float* x, const float* st,
+                                           const float* w, const float* dyn,
+                                           int t, int c, float scale) {
+  float xin[4];
+  for (int i = 0; i < 4; ++i) {
+    const int idx = t - 3 + i;
+    xin[i] = idx >= 0 ? x[(size_t)idx * 1024 + c] : st[(size_t)c * 3 + idx + 3];
+  }
+  float y = 0.f;
+  for (int i = 0; i < 4; ++i)
+    y += w[(size_t)c * 4 + i] * xin[i];
+  if (dyn) {
+    const float* d = dyn + (size_t)t * 8 * 4 + (c / 128) * 4;
+    for (int lag = 0; lag < 4; ++lag)
+      y += d[lag] * xin[3 - lag];
+  }
+  return (xin[3] + y) * scale;
+}
+__global__ __launch_bounds__(128) void k_kv_conv_write(KvConv cv, int n,
+                                                       int pos0, int cap,
+                                                       __half* kc, __half* vc,
+                                                       float qk_thr,
+                                                       float eps) {
+  using namespace ia;
+  const int lane = threadIdx.x & 31, gw = blockIdx.x * 4 + (threadIdx.x >> 5);
+  if (gw >= n * NKV)
+    return;
+  const int t = gw / NKV, kvh = gw % NKV, c0 = kvh * HD + lane * 4;
+  float4 kx, vx;
+  kx.x = conv_elem(cv.k, cv.kst, cv.kw, cv.kdyn, t, c0, cv.scale);
+  kx.y = conv_elem(cv.k, cv.kst, cv.kw, cv.kdyn, t, c0 + 1, cv.scale);
+  kx.z = conv_elem(cv.k, cv.kst, cv.kw, cv.kdyn, t, c0 + 2, cv.scale);
+  kx.w = conv_elem(cv.k, cv.kst, cv.kw, cv.kdyn, t, c0 + 3, cv.scale);
+  vx.x = conv_elem(cv.v, cv.vst, cv.vw, cv.vdyn, t, c0, cv.scale);
+  vx.y = conv_elem(cv.v, cv.vst, cv.vw, cv.vdyn, t, c0 + 1, cv.scale);
+  vx.z = conv_elem(cv.v, cv.vst, cv.vw, cv.vdyn, t, c0 + 2, cv.scale);
+  vx.w = conv_elem(cv.v, cv.vst, cv.vw, cv.vdyn, t, c0 + 3, cv.scale);
+  float ks = wsum(kx.x * kx.x + kx.y * kx.y + kx.z * kx.z + kx.w * kx.w);
+  float vs = wsum(vx.x * vx.x + vx.y * vx.y + vx.z * vx.z + vx.w * vx.w);
+  float kf = fminf(1.0f, qk_thr / (sqrtf(ks) + 1e-6f));
+  float vf = rsqrtf(vs * (1.0f / HD) + eps);
+  int cell = (pos0 + t) % cap;
+  __half2* kp = (__half2*)(kc + (size_t)cell * CELL + kvh * HD + lane * 4);
+  __half2* vp = (__half2*)(vc + (size_t)cell * CELL + kvh * HD + lane * 4);
+  kp[0] = __floats2half2_rn(kx.x * kf, kx.y * kf);
+  kp[1] = __floats2half2_rn(kx.z * kf, kx.w * kf);
+  vp[0] = __floats2half2_rn(vx.x * vf, vx.y * vf);
+  vp[1] = __floats2half2_rn(vx.z * vf, vx.w * vf);
+}
+
 __global__ __launch_bounds__(128) void k_qr_prep(
     const float* __restrict__ q, const float* __restrict__ r,
     const float* __restrict__ qscale, const float* __restrict__ rclip, int n,
@@ -2592,6 +2652,10 @@ __global__ __launch_bounds__(NTT * 96) void attn_prefill(PfArgs a) {
   constexpr int NT = NTT * 96;
   __shared__ __attribute__((aligned(16))) __half sK[PF_KT][PF_KS];
   __shared__ __attribute__((aligned(16))) __half sVt[HD][PF_VS];
+  // Rows d0 .. d0 + 127 of the relative-bias table: every distance a key tile
+  // meets (the same values bias_dot reads from global memory).
+  constexpr int BTR = 16 * NTT + PF_KT;
+  __shared__ __attribute__((aligned(16))) __half sB[BTR][RD];
   const int tid = threadIdx.x, lane = tid & 31, w = tid >> 5;
   const int kvh = blockIdx.y;
   const int hh = w % 3, tt = w / 3, h = kvh * 3 + hh;
@@ -2635,7 +2699,15 @@ __global__ __launch_bounds__(NTT * 96) void attn_prefill(PfArgs a) {
 
   for (int tile = 0; tile < ntiles; tile++) {
     const int kbase = kfirst + tile * PF_KT;
+    // smallest distance of this tile: first query of the block, last key
+    const int d0 = pfirst - (kbase + PF_KT - 1);
     __syncthreads();
+    for (int idx = tid; idx < BTR * 2; idx += NT) {
+      const int row = idx >> 1, hf = idx & 1, d = d0 + row;
+      if (d >= 0 && d < WIN)
+        *(uint4*)&sB[row][hf * 8] =
+            *(const uint4*)(a.bt + (size_t)d * RD + hf * 8);
+    }
     for (int idx = tid; idx < PF_KT * 16; idx += NT) {
       const int key = idx >> 4, c = idx & 15;
       const int pos = min(kbase + key, plast);
@@ -2684,7 +2756,7 @@ __global__ __launch_bounds__(NTT * 96) void attn_prefill(PfArgs a) {
         const bool ok = (d >= 0) && (pos <= plast) && (!a.swa || d < WIN);
         float s = c[i];
         if (anyb && ok && d < WIN)
-          s += bias_dot(rp, a.bt, d);
+          s += bias_dot(rp, &sB[0][0], d - d0);
         sv[i] = ok ? s : -INFINITY;
         mx = fmaxf(mx, sv[i]);
       }
@@ -3151,9 +3223,17 @@ void ConvAdd(hipStream_t s, const float* x, float* state, const float* w,
 }
 
 void AttnPrefill(hipStream_t s, const PrefillAttn& a) {
-  k_kv_write<<<(a.n * 8 + 3) / 4, 128, 0, s>>>(
-      a.k, a.v, a.n, a.pos0, a.cap, static_cast<__half*>(a.kc),
-      static_cast<__half*>(a.vc), a.qk_thr, a.eps);
+  if (a.kraw) {
+    const KvConv cv{a.kraw, a.vraw, a.kst,  a.vst,       a.kw,
+                    a.vw,   a.kdyn, a.vdyn, a.conv_scale};
+    k_kv_conv_write<<<(a.n * 8 + 3) / 4, 128, 0, s>>>(
+        cv, a.n, a.pos0, a.cap, static_cast<__half*>(a.kc),
+        static_cast<__half*>(a.vc), a.qk_thr, a.eps);
+  } else {
+    k_kv_write<<<(a.n * 8 + 3) / 4, 128, 0, s>>>(
+        a.k, a.v, a.n, a.pos0, a.cap, static_cast<__half*>(a.kc),
+        static_cast<__half*>(a.vc), a.qk_thr, a.eps);
+  }
   k_qr_prep<<<(a.n * 24 + 3) / 4, 128, 0, s>>>(
       a.q, a.r, a.qscale, a.rclip, a.n, a.pos0, a.swa, a.qk_thr, a.r_thr,
       a.tau_floor, a.tau_alpha, static_cast<__half*>(a.qn), a.rn);

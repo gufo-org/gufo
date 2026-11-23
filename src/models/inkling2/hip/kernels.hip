@@ -400,11 +400,12 @@ __global__ void rmsnorm_k(const float* __restrict__ x, int ldx,
   for (int i = 0; i < blockDim.x / kWave; ++i)
     tot += red[i];
   const float inv = rsqrtf(tot / static_cast<float>(dim) + eps);
-  float* orow = out + static_cast<size_t>(row) * ldo;
+  float* orow = out ? out + static_cast<size_t>(row) * ldo : nullptr;
   _Float16* hrow = out16 ? out16 + static_cast<size_t>(row) * dim : nullptr;
   for (int i = threadIdx.x; i < dim; i += blockDim.x) {
     const float o = xr[i] * inv * (w ? w[i] : 1.0f);
-    orow[i] = o;
+    if (out)
+      orow[i] = o;
     if (hrow)
       hrow[i] = (_Float16)o;
   }

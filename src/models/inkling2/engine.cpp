@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <gufo/ext/experimental/state_memory.hpp>
 #include <map>
 #include <set>
@@ -144,6 +145,10 @@ struct Engine::Impl {
   const Inkling2Config* cfg = nullptr;
   const Inkling2Weights* w = nullptr;
   hipStream_t s = nullptr;
+  // Prefill side stream for projections that run beside larger ones.
+  hipStream_t ps = nullptr;
+  hipEvent_t ev_fork = nullptr, ev_join = nullptr, ev_bank = nullptr;
+  hipEvent_t ev_msg[2] = {};
   DeviceWeights dw;
   std::vector<void*> scratch_allocs;
   std::array<float*, 24> msgq{};
@@ -157,9 +162,10 @@ struct Engine::Impl {
   float *cur, *prelude, *bankout, *tau;
   float* blocks[6];
   float* bank[4];
-  float *mixed, *ctl[3], *in[3], *msgs, *gbuf, *gate64, *gainb, *forgetb;
-  float *Qb, *Kb, *Vb, *Kc, *Vc, *Rb, *Gb, *Sb, *Ob, *AOp, *AO, *h, *hn, *mixf,
-      *rlog, *wts;
+  float *mixed, *ctl[3], *in[3], *msgs, *msgs_next, *gbuf, *gate64, *gainb,
+      *forgetb;
+  float *Qb, *Kb, *Vb, *Rb, *Gb, *Sb, *Ob, *AOp, *AO, *h, *hn, *mixf, *rlog,
+      *wts;
   float *dynK, *dynV, *gu, *act, *ye, *moe;
   int* ids_d;
   int* tok_d;
@@ -304,15 +310,17 @@ struct Engine::Impl {
   /// Called after every visit unit; yields at the group boundaries. `mid`:
   /// transient activations are live (inside a ubatch), so they are spilled
   /// around the yield.
-  void MaybeYield(YieldRun* y, bool mid) {
+  /// Returns true when it yielded (other sessions may then have used every
+  /// scratch buffer that is not spilled).
+  bool MaybeYield(YieldRun* y, bool mid) {
     if (y == nullptr || y->spec == nullptr)
-      return;
+      return false;
     ++y->done;
     const std::size_t g = y->spec->groups;
     if (y->done >= y->total || y->k >= g)
-      return;
+      return false;
     if (y->done < (y->k * y->total + g - 1) / g)
-      return;
+      return false;
     while (y->k < g && (y->k * y->total + g - 1) / g <= y->done)
       ++y->k;
     const int saved_T = T, saved_pos0 = pos0, saved_nblocks = nblocks;
@@ -322,6 +330,7 @@ struct Engine::Impl {
     // (expert routing, logits) with this stream: drain it before the lock is
     // released.
     Check(hipStreamSynchronize(s), "yield sync");
+    Check(hipStreamSynchronize(ps), "yield sync");
     y->lock->unlock();  // the decode round of other sessions takes the engine
                         // mutex
     try {
@@ -340,6 +349,7 @@ struct Engine::Impl {
       // Forward replaced them.
       UploadDenseItems();
     }
+    return true;
   }
   // ---- end M2 hook ----
 
@@ -364,6 +374,15 @@ struct Engine::Impl {
       (void)hipGraphExecDestroy(g.second);
     if (ds)
       (void)hipStreamDestroy(ds);
+    if (ps)
+      (void)hipStreamDestroy(ps);
+    if (ev_fork)
+      (void)hipEventDestroy(ev_fork);
+    if (ev_join)
+      (void)hipEventDestroy(ev_join);
+    for (hipEvent_t e : {ev_bank, ev_msg[0], ev_msg[1]})
+      if (e)
+        (void)hipEventDestroy(e);
     for (void* p : scratch_allocs)
       (void)hipFree(p);
   }
@@ -391,6 +410,7 @@ struct Engine::Impl {
     for (auto& b : in)
       b = NewBuf(u * kEmbd);
     msgs = NewBuf(u * 4 * kEmbd);
+    msgs_next = NewBuf(u * 4 * kEmbd);
     gbuf = NewBuf(u * 2 * kEmbd);
     gate64 = NewBuf(u * 64 * 3);
     gainb = NewBuf(u * kEmbd);
@@ -398,8 +418,6 @@ struct Engine::Impl {
     Qb = NewBuf(u * kQ);
     Kb = NewBuf(u * kKV);
     Vb = NewBuf(u * kKV);
-    Kc = NewBuf(u * kKV);
-    Vc = NewBuf(u * kKV);
     Rb = NewBuf(u * kRel);
     Gb = NewBuf(u * kQ);
     Sb = NewBuf(u * 24);
@@ -498,6 +516,11 @@ struct Engine::Impl {
       }
     }
     Check(hipStreamCreateWithFlags(&ds, hipStreamNonBlocking), "decode stream");
+    Check(hipStreamCreateWithFlags(&ps, hipStreamNonBlocking), "side stream");
+    Check(hipEventCreateWithFlags(&ev_fork, hipEventDisableTiming), "event");
+    Check(hipEventCreateWithFlags(&ev_join, hipEventDisableTiming), "event");
+    for (hipEvent_t* e : {&ev_bank, &ev_msg[0], &ev_msg[1]})
+      Check(hipEventCreateWithFlags(e, hipEventDisableTiming), "event");
     // Decode buffers are kMaxB tokens wide ([token][...]); a step of nb tokens
     // uses the first nb rows.
     constexpr std::size_t B = kMaxB;
@@ -636,9 +659,24 @@ struct Engine::Impl {
     return st;
   }
 
+  /// Sink and (global layers) dynamic conv-tap projections from the padded
+  /// F32 copies.
+  void SkinnyProj(hipStream_t st, const LayerWeights& L, const LayerFast& F,
+                  bool is_swa, const float* iq, const float* ik,
+                  const float* iv) {
+    (void)L;
+    fs::SkinnyPrefill(st, iq, kEmbd, F.sink_f, 24, Sb, 24, T);
+    if (!is_swa) {
+      fs::SkinnyPrefill(st, ik, kEmbd, F.kconv_f, 32, dynK, 32, T);
+      fs::SkinnyPrefill(st, iv, kEmbd, F.vconv_f, 32, dynV, 32, T);
+    }
+  }
+
   // ---- one layer visit ----
+  /// `side`: work for the side stream, enqueued beside the MoE gate/up GEMM.
   void Layer(Session& ss, int ip, int slot_idx,
-             const float* msg /*[T][4][2304] or null*/) {
+             const float* msg /*[T][4][2304] or null*/,
+             const std::function<void()>& side = {}) {
     const LayerWeights& L = w->layers[ip];
     const LayerFast& F = lf[ip];
     const bool is_swa = !L.is_global;
@@ -704,9 +742,11 @@ struct Engine::Impl {
     } else if (is_swa) {
       const float* nw = DF(L.attn_norm);
       if (msg) {
+        // Only the sink projection reads an F32 window-layer input (q's).
         for (int j = 0; j < 3; ++j)
-          kk::RmsNorm(s, inp[j].p, inp[j].ld, nw, in[j], kEmbd, kEmbd, T,
-                      cfg->rms_eps, F.proj ? in16[j] : nullptr);
+          kk::RmsNorm(s, inp[j].p, inp[j].ld, nw, F.proj && j ? nullptr : in[j],
+                      kEmbd, kEmbd, T, cfg->rms_eps,
+                      F.proj ? in16[j] : nullptr);
         have16 = F.proj;
         iq = in[0];
         ik = in[1];
@@ -744,15 +784,24 @@ struct Engine::Impl {
       const void* a_q = p_iq16;
       const void* a_k = ik != iq ? p_ik16 : p_iq16;
       const void* a_v = iv == iq ? p_iq16 : (iv == ik ? a_k : p_iv16);
-      auto mm = [&](const TensorRef& wt, const void* a, float* out) {
-        fs::GemmDense(s, D(wt), static_cast<int>(wt.ne[1]),
+      auto mm = [&](hipStream_t st, const TensorRef& wt, const void* a,
+                    float* out) {
+        fs::GemmDense(st, D(wt), static_cast<int>(wt.ne[1]),
                       static_cast<int>(wt.ne[0]), a, out, DenseItems());
       };
-      mm(L.attn_q, a_q, Qb);
-      mm(L.attn_k, a_k, Kb);
-      mm(L.attn_v, a_v, Vb);
-      mm(L.attn_rel, a_q, Rb);
-      mm(L.attn_gate, a_q, Gb);
+      // q and gate fill the GPU; k, v, rel and the skinny projections have
+      // few blocks each and run beside them on the side stream.
+      Check(hipEventRecord(ev_fork, s), "fork");
+      Check(hipStreamWaitEvent(ps, ev_fork, 0), "fork");
+      mm(ps, L.attn_k, a_k, Kb);
+      mm(ps, L.attn_v, a_v, Vb);
+      mm(ps, L.attn_rel, a_q, Rb);
+      if (F.tiny_pad)
+        SkinnyProj(ps, L, F, is_swa, iq, ik, iv);
+      Check(hipEventRecord(ev_join, ps), "join");
+      mm(s, L.attn_q, a_q, Qb);
+      mm(s, L.attn_gate, a_q, Gb);
+      Check(hipStreamWaitEvent(s, ev_join, 0), "join");
     } else {
       G(L.attn_q, iq, kEmbd, Qb, kQ, T);
       G(L.attn_k, ik, kEmbd, Kb, kKV, T);
@@ -760,16 +809,11 @@ struct Engine::Impl {
       G(L.attn_rel, iq, kEmbd, Rb, kRel, T);
       G(L.attn_gate, iq, kEmbd, Gb, kQ, T);
     }
-    const float* dk = nullptr;
-    const float* dv = nullptr;
+    const float* dk = is_swa ? nullptr : dynK;
+    const float* dv = is_swa ? nullptr : dynV;
     if (F.tiny_pad) {
-      fs::SkinnyPrefill(s, iq, kEmbd, F.sink_f, 24, Sb, 24, T);
-      if (!is_swa) {
-        fs::SkinnyPrefill(s, ik, kEmbd, F.kconv_f, 32, dynK, 32, T);
-        fs::SkinnyPrefill(s, iv, kEmbd, F.vconv_f, 32, dynV, 32, T);
-        dk = dynK;
-        dv = dynV;
-      }
+      if (!fp)
+        SkinnyProj(s, L, F, is_swa, iq, ik, iv);
     } else {
       G(L.attn_sink_proj, iq, kEmbd, Sb, 24, T);
       if (!is_swa) {
@@ -782,12 +826,6 @@ struct Engine::Impl {
     const float conv_scale =
         1.0f / std::sqrt(static_cast<float>((is_swa ? 1 : 2) * 4 + 1));
     float* cs = slot.conv;
-    kk::Conv(s, Kb, cs + kConvOffK * 3, DF(L.attn_k_conv), dk, Kc, T, kKV, 128,
-             conv_scale);
-    kk::Conv(s, Vb, cs + kConvOffV * 3, DF(L.attn_v_conv), dv, Vc, T, kKV, 128,
-             conv_scale);
-    kk::ConvStateUpdate(s, Kb, cs + kConvOffK * 3, T, kKV);
-    kk::ConvStateUpdate(s, Vb, cs + kConvOffV * 3, T, kKV);
 
     // C/D. clips, KV write, attention
     {
@@ -796,8 +834,17 @@ struct Engine::Impl {
       pa.pos0 = pos0;
       pa.cap = static_cast<int>(slot.rows);
       pa.swa = is_swa ? 1 : 0;
-      pa.k = Kc;
-      pa.v = Vc;
+      // The K/V short convolutions run inside the cache write; the histories
+      // advance after it.
+      pa.kraw = Kb;
+      pa.vraw = Vb;
+      pa.kst = cs + kConvOffK * 3;
+      pa.vst = cs + kConvOffV * 3;
+      pa.kw = DF(L.attn_k_conv);
+      pa.vw = DF(L.attn_v_conv);
+      pa.kdyn = dk;
+      pa.vdyn = dv;
+      pa.conv_scale = conv_scale;
       pa.q = Qb;
       pa.r = Rb;
       pa.qscale = DF(L.attn_q_clip);
@@ -817,6 +864,8 @@ struct Engine::Impl {
       pa.tau_floor = static_cast<float>(cfg->log_scale_floor);
       pa.tau_alpha = cfg->log_scale_alpha;
       fs::AttnPrefill(s, pa);
+      kk::ConvStateUpdate(s, Kb, cs + kConvOffK * 3, T, kKV);
+      kk::ConvStateUpdate(s, Vb, cs + kConvOffV * 3, T, kKV);
     }
     if (F.oproj) {
       fs::GemmDense(s, D(L.attn_output), kEmbd, kQ, p_ob16, AOp, DenseItems());
@@ -873,7 +922,7 @@ struct Engine::Impl {
                   cfg->rms_eps, F.moe >= 0 ? p_h16 : nullptr);
 
     // G. MoE
-    if (Moe(L, lf[ip])) {
+    if (Moe(L, lf[ip], side)) {
       fs::MoeTail(s, ye, cs + kConvOffFfn * 3, DF(L.ffn_post_conv), cur, T,
                   kEmbd, 1.0f / std::sqrt(5.0f));
     } else {
@@ -920,7 +969,8 @@ struct Engine::Impl {
   /// The routed experts of the ubatch. True: the fast kernels left the per-slot
   /// rows in `ye` (the caller fuses their sum into the tail, MoeTail); false:
   /// the sum is in `moe`.
-  bool Moe(const LayerWeights& L, const LayerFast& F) {
+  bool Moe(const LayerWeights& L, const LayerFast& F,
+           const std::function<void()>& side) {
     const int E = static_cast<int>(cfg->n_expert),
               K = static_cast<int>(cfg->n_expert_used);
     const int nff = static_cast<int>(cfg->n_ff_expert);
@@ -936,6 +986,8 @@ struct Engine::Impl {
       const int tile = T >= kWideTileTokens ? 128 : T >= 1024 ? 64 : 32;
       const int max_items = (P + tile - 1) / tile + E;
       fs::MoeRoute(s, ids_d, wts, P, tile, mws);  // h's F16 copy is in p_h16
+      if (side)
+        side();
       fs::MoeGuPrefill(s, F.moe, tile, D(L.ffn_gate_up_exps),
                        L.ffn_gate_up_scale ? DF(L.ffn_gate_up_scale) : nullptr,
                        p_h16, p_act16, mws, max_items, cfg->situ_beta,
@@ -1578,23 +1630,44 @@ struct Engine::Impl {
         kk::Copy(s, prelude, cur, T * kEmbd);
         nblocks = prelude_n;
       }
+      // A layer's messages depend only on the bank: the next layer's are
+      // mixed on the side stream while this layer runs (two buffers).
+      float* mbuf[2] = {msgs, msgs_next};
+      auto launch_msgs = [&](int il) {
+        const int b = (il - static_cast<int>(cfg->core_start)) & 1;
+        Check(hipEventRecord(ev_bank, s), "msgs");
+        Check(hipStreamWaitEvent(ps, ev_bank, 0), "msgs");
+        kk::MixStates st{};
+        for (int i = 0; i < bank_n; ++i)
+          st.ptr[st.n++] = bank[i];
+        st.ptr[st.n++] = bankout;
+        kk::Mix(ps, st, msgq[il], 4, kEmbd, T, mbuf[b], cfg->rms_eps);
+        Check(hipEventRecord(ev_msg[b], ps), "msgs");
+      };
+      if (pass > 0)
+        launch_msgs(static_cast<int>(cfg->core_start));
       for (int ip = static_cast<int>(cfg->core_start);
            ip < static_cast<int>(cfg->core_end); ++ip) {
+        const int b = (ip - static_cast<int>(cfg->core_start)) & 1;
+        const bool more = ip + 1 < static_cast<int>(cfg->core_end);
         if (pass == 0) {
           Layer(ss, ip, ip, nullptr);
         } else {
-          kk::MixStates st{};
-          for (int i = 0; i < bank_n; ++i)
-            st.ptr[st.n++] = bank[i];
-          st.ptr[st.n++] = bankout;
-          FMix(st, msgq[ip], 4, msgs);
+          Check(hipStreamWaitEvent(s, ev_msg[b], 0), "msgs");
+          // The other buffer was read by the previous layer, which is queued
+          // on `s` before this point.
           const int slot = static_cast<int>(cfg->n_phys) +
                            (pass - 1) * core_len +
                            (ip - static_cast<int>(cfg->core_start));
-          Layer(ss, ip, slot, msgs);
+          Layer(ss, ip, slot, mbuf[b], [&] {
+            if (more)
+              launch_msgs(ip + 1);
+          });
         }
         Tap(visit++, "l_out");
-        MaybeYield(yr, true);  // M2 hook
+        // A yield lets other sessions reuse the message buffers.
+        if (MaybeYield(yr, true) && pass > 0 && more)
+          launch_msgs(ip + 1);
       }
     }
     for (int ip = static_cast<int>(cfg->core_end);
