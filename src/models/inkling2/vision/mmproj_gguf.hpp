@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <gufo/ext/platform/mapped_file.hpp>
 #include <map>
 #include <string>
 #include <vector>
@@ -28,7 +29,6 @@ struct MmprojTensor {
 class MmprojGguf {
 public:
   MmprojGguf() = default;
-  ~MmprojGguf();
   MmprojGguf(const MmprojGguf&) = delete;
   MmprojGguf& operator=(const MmprojGguf&) = delete;
 
@@ -42,8 +42,7 @@ public:
   bool GetF32Array(const std::string& key, std::vector<float>* v) const;
 
 private:
-  void* map_ = nullptr;
-  uint64_t size_ = 0;
+  gufo::platform::ReadOnlyMappedFile file_;
   std::map<std::string, MmprojTensor> tensors_;
   // scalar kv stored as double/string/array of double (enough for the clip.*
   // keys)

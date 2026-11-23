@@ -151,14 +151,21 @@ struct Engine::Impl {
   // Decode steps: a visit's q and output-projection weights are read on a
   // side stream while the latency-bound mixes and attention run (the DRAM is
   // mostly idle then), so their GEMVs find them in the last-level cache.
-  // Twenty blocks: more take CUs from the main chain.
+  // Twenty blocks: more take CUs from the main chain. Not on Windows: there
+  // the side stream's cross-queue waits in the replayed graph cost more than
+  // the prefetch saves (decode 39.4 -> 46.0 tok/s at C = 1 without it).
   static constexpr int kPrefetchBlocks = 20;
+#if defined(_WIN32)
+  static constexpr bool kDecodePrefetch = false;
+#else
+  static constexpr bool kDecodePrefetch = true;
+#endif
   hipStream_t dps = nullptr;
   hipEvent_t ev_pf = nullptr, ev_pfj = nullptr;
   bool pf_open = false;
   void Prefetch(const void* p, std::size_t bytes, const void* p2 = nullptr,
                 std::size_t bytes2 = 0) {
-    if (bytes + bytes2 == 0)
+    if (!kDecodePrefetch || bytes + bytes2 == 0)
       return;
     Check(hipEventRecord(ev_pf, ds), "prefetch fork");
     Check(hipStreamWaitEvent(dps, ev_pf, 0), "prefetch fork");
@@ -1985,7 +1992,8 @@ struct Engine::Impl {
     auto chunk = [&](int a, int n, std::vector<float>* host) {
       G(w->output, hn + static_cast<std::size_t>(a) * kEmbd, kEmbd, logits_d, V,
         n, V);
-      kk::Softcap(s, logits_d, static_cast<long>(n) * V, cfg->logit_softcap);
+      kk::Softcap(s, logits_d, static_cast<std::int64_t>(n) * V,
+                  cfg->logit_softcap);
       host->resize(static_cast<std::size_t>(n) * V);
       Check(hipMemcpyAsync(host->data(), logits_d, host->size() * 4,
                            hipMemcpyDeviceToHost, s),

@@ -33,7 +33,11 @@ struct File {
   }
   bool Read(void* dst, std::size_t n) { return std::fread(dst, 1, n, f) == n; }
   bool Skip(std::uint64_t n) {
+#if defined(_WIN32)
+    return _fseeki64(f, static_cast<__int64>(n), SEEK_CUR) == 0;
+#else
     return fseeko(f, static_cast<off_t>(n), SEEK_CUR) == 0;
+#endif
   }
   template<typename T>
   bool Get(T* v) {

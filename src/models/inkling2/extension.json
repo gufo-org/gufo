@@ -7,7 +7,8 @@
   "registration_target": "gufo_inkling2",
   "depends": [],
   "platforms": [
-    "linux"
+    "linux",
+    "windows"
   ],
   "providers": [
     {
@@ -172,13 +173,13 @@
       "target": "inkling2_probe_test",
       "ctest": "inkling2\\.probe",
       "check_pr": true,
-      "windows_build": false
+      "windows_build": true
     },
     {
       "target": "inkling2_text_test",
       "ctest": "inkling2\\.text",
       "check_pr": true,
-      "windows_build": false
+      "windows_build": true
     }
   ],
   "test_labels": [

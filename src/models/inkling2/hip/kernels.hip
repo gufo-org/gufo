@@ -616,8 +616,9 @@ __global__ void moe_comb_k(const float* y, const float* wts, float* out,
   out[i] = a;
 }
 
-__global__ void softcap_k(float* x, long n, float cap) {
-  const long i = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
+__global__ void softcap_k(float* x, std::int64_t n, float cap) {
+  const std::int64_t i =
+      static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i < n)
     x[i] = cap * tanhf(x[i] / cap);
 }
@@ -785,7 +786,7 @@ void MoeCombine(hipStream_t s, const float* y, const float* wts, float* out,
   moe_comb_k<<<(n + 255) / 256, 256, 0, s>>>(y, wts, out, dim, t_count, n_used);
   Check(hipGetLastError(), "moe_combine");
 }
-void Softcap(hipStream_t s, float* x, long n, float cap) {
+void Softcap(hipStream_t s, float* x, std::int64_t n, float cap) {
   softcap_k<<<(n + 255) / 256, 256, 0, s>>>(x, n, cap);
   Check(hipGetLastError(), "softcap");
 }

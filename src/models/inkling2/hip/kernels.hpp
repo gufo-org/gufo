@@ -90,6 +90,6 @@ void Situ(hipStream_t s, const float* gu, float* out, int n_ff, int rows,
           float beta, float lb);
 void MoeCombine(hipStream_t s, const float* y, const float* wts, float* out,
                 int dim, int t_count, int n_used);
-void Softcap(hipStream_t s, float* x, long n, float cap);
+void Softcap(hipStream_t s, float* x, std::int64_t n, float cap);
 
 }  // namespace gufo::models::inkling2::hip

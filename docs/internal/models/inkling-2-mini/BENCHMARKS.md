@@ -31,6 +31,25 @@ The imported extension measured 44.7 / 86.2 tokens/s (1 / 4 sessions, short
 context) and 1,366 tokens/s at a 4K prompt on Gufo 0.35.0; on this build its
 kernels gave 1,395 tokens/s at pp2048 and 45.7 tokens/s decode.
 
+### Windows
+
+Same machine, Windows 11, TheRock 10.0.0, 96 GB Variable Graphics Memory,
+`gufo bench -r 2`:
+
+| Workload | Gufo (Windows) |
+| --- | --- |
+| pp512 / pp2048 / pp8192 | 1,648 / 2,271 / 2,199 tokens/s |
+| tg128 after 512 / 2,048 / 8,192 tokens | 46.0 / 44.8 / 42.8 tokens/s |
+
+Decode has no weight prefetch on Windows: its side-stream waits in the
+replayed graph cost more than it saves there (ABBA, C = 1: 39.4 tokens/s with
+it, 46.0 without; `inkling2_bench` at a 2,048-token context, 2 / 4 / 8
+sessions: 56.4 / 81.3 / 104.3 with it, 64.5 / 88.0 / 109.7 without). The
+prefetch only warms the cache, so the logits are unchanged. `inkling2_spec_test`,
+`inkling2_cache_test` and `inkling2_bench --verify` (2, 4 and 8 sessions) pass
+bit for bit, and six HTTP requests (greedy, seeded, a tool call and an image)
+return identical responses with and without DSpark.
+
 ## Prefill changes (all byte-identical)
 
 pp2048 progression, each step measured with the previous one in place:
