@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 
 #include "src/mem/account.hpp"
@@ -123,7 +124,20 @@ void TestInvalidShapes() {
     (void)state.Context(
         {.row_bytes = 64, .rows = 64, .segments = 2, .segment_stride = 64});
   }));
+  // With two bytes per row, these spans wrap to zero and to the stride.
+  constexpr auto first_overflow =
+      std::numeric_limits<std::size_t>::max() / 2 + 1;
+  for (const auto rows : {first_overflow, first_overflow + 1}) {
+    const RegionShape shape{
+        .row_bytes = 2, .rows = rows, .segments = 2, .segment_stride = 2};
+    assert(Throws([&] { (void)state.Context(shape); }));
+    assert(Throws([&] { (void)state.Whole(shape); }));
+  }
   assert(state.buffers().empty());
+
+  const auto adjacent = state.Whole(
+      {.row_bytes = 3, .rows = 2, .segments = 2, .segment_stride = 6});
+  assert(state.Bytes(adjacent, StateBytes::kSize) == 12);
 }
 
 }  // namespace
