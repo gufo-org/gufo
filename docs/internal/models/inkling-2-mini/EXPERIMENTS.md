@@ -133,6 +133,7 @@ Not exact or outside the model, not taken:
 | Sampler exps split in equal parts over 4 or 8 threads (waiting for all of them) | 1.1 ms per draw in the server, as slow as before: the threads sleep between steps, and the slowest wake-up is paid on every draw; replaced by chunks taken as the threads wake |
 | The chunk cursor on the caller's stack beside the captured variables | 0.60 vs 0.50 ms: every chunk taken invalidates the line the other threads read |
 | Every sampled row on its own persistent thread | DSpark verification, 2.5 rows: 1.25 ms against 1.0 ms one after another on the calling thread; kept for four or more rows |
+| The previous token's first experts read into the cache while the MoE input is mixed and routed (one-row steps; per visit a token keeps 3.5 of the previous token's 8 experts, and the previous first, second and third choices are chosen again 60%, 53% and 49% of the time) | two experts (three on controller visits): 20.73 to 20.76 ms per token against 20.62 to 20.64; one (two): 20.74 to 20.93. The guess is right often enough, but the reads compete with the latency-bound kernels they run beside |
 | Back-off tolerance 0 for a lone request (as for batches) | C = 1 greedy 70.2 vs 72.9 tok/s: eight-cycle rates are noisy, and a back-off skips drafting that pays on average; a lone request keeps 3% |
 
 Analysed, not built:

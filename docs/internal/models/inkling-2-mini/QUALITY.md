@@ -169,3 +169,25 @@ The engine is unchanged; the host side is checked against the round-5 build:
   1, 2, 4, 8), 28 single requests (greedy and seeded) and 8 copy requests
   are byte-identical between the builds and between AR and DSpark.
 
+### Open: a stall with eight sessions and RAM checkpoints
+
+`tests/functional/run.py --suite cache-concurrency` with `--sessions 8
+--context 32768` does not finish: after its groups of four concurrent
+requests that share a prefix, an uncached repeat of one of them (a lone cold
+prefill of 1,868 or 7,343 tokens) never completes, and every later request
+waits behind it. The scheduler thread waits for device work that never
+finishes (seen in `hipStreamSynchronize` on the default stream and in the
+fence of a device-to-host copy); every other thread is idle and nothing is
+logged. Under a debugger it reproduces at the same request each time.
+
+- With `--sessions 4` the suite passes (58 s); with `--sessions 8
+  --cache-ram-bytes off` every request completes (the suite then fails only
+  its sharing assertions), so the stall needs RAM checkpoints, whose K/V
+  pages the sessions share.
+- It does not depend on DSpark (it stalls without `--dspark-model`), on the
+  round-5 weight prefetch or on round 6 (the round-4 build stalls the same
+  way), and `state-edges` at eight sessions passes on its own (its earlier
+  time-out followed this stall in the same server).
+- Not investigated further: the kernel log (device faults) could not be read
+  from this account.
+
