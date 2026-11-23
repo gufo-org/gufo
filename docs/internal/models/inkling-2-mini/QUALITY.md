@@ -94,4 +94,8 @@ plain decoding:
   cache-depth, logprobs, sampling-ranges, batch and cache. AR and DSpark pass
   the same suites (batch fails for both: with thinking off the model argues
   instead of calling the tool), and all 432 recorded responses have the same
-  output hash, with 2,062 drafted cycles in the DSpark run.
+  output hash, with 2,062 drafted cycles in the DSpark run. Repeated after the
+  verification widening and round 3 (8-row verification, low-rank proposal
+  logits): 428 of 428 matched responses identical (1,836 drafted cycles), and
+  identical to the first run's baseline; the only unmatched requests are the
+  failing `batch` suite's concurrent ones, whose indices follow arrival order.

@@ -56,15 +56,20 @@ and `THIRD_PARTY.md` carry its license and attributions. Changes made here:
   the gated RNN Markov head proposes greedily, one row at a time. Two ideas
   from the Loom package: the head reads `h_i + W_o latent + b_o` in one GEMV
   (instead of the LM head of each term), and proposals come from the 65,536
-  LM-head rows with the largest `markov_w1` norms (a Q8_0 copy, 160 MB per
-  step instead of 490 MB; the acceptance counts did not change).
+  LM-head rows with the largest `markov_w1` norms (a Q8_0 copy; the
+  acceptance counts did not change). The head is linear, so W_U (h_i + W_o
+  lat + b_o) = W_U h_i + (W_U W_o) lat + W_U b_o: one 8-row pass over the head
+  per draft gives every W_U h_i, and each Markov step reads only the
+  precomputed 65,536 x 256 table (W_U W_o, F16, 32 MB) instead of the 160 MB
+  head.
 - **Verification.** `Engine::Verify` evaluates the anchor and up to seven
   proposals of one session in one batched-decode graph (decode steps are 8
   rows wide; batches of sessions stay at 4). On global visits up to five rows
   share one attention launch (15 of its 16 query slots), more run as two
-  groups; the three-input projections run in groups of three rows, and eight
-  single-input rows as two launches of four (the eight-row instance spills
-  enough scratch to stall every launch). Every row has the
+  interleaved groups (adjacent blocks share the K/V tiles through L2). The
+  three-input projections (q / gate, k, v) give each block the rows of one
+  input, so up to five tokens take one weight pass (six to eight: two).
+  Every row has the
   arithmetic of a one-token decode at its position: the conv kernels read the
   history of rows 0..b-1 from the step itself (the stored history before row
   0), write no history, and capture their inputs; `CommitVerify` sets each

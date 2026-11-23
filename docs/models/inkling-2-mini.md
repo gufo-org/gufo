@@ -57,7 +57,8 @@ the same weights:
 | --- | --- | --- |
 | Prefill, 2,048-token prompt | 2,210 tokens/s | 383 tokens/s |
 | Decode, one user, short context | 47.0 tokens/s | 24.3 tokens/s |
-| Decode, one user, DSpark | 55 to 83 tokens/s | not measured |
+| Decode, one user, DSpark, code (greedy / default sampling) | 78.0 / 65.7 tokens/s | not measured |
+| Decode, one user, DSpark, prose | 48 to 92 tokens/s | not measured |
 | Decode, 4 users, short context | 93.4 tokens/s in total | not measured |
 
 The [benchmarks](../internal/models/inkling-2-mini/BENCHMARKS.md) give every

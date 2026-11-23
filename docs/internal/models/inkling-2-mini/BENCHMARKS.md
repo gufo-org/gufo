@@ -175,3 +175,31 @@ Over HTTP (one session, all responses byte-identical to plain decoding):
 A replay of the coding runs drafting seven tokens every cycle accepted all
 seven in 15% of the cycles and none in 24% (mean 2.6).
 
+### Verification and drafting, round 3
+
+Exact changes (every row still byte-identical; oracle dumps unchanged):
+multi-row projections no longer spill (the tiny-matrix rows' token loop was
+unrolled and hoisted every token's loads: 232 to 3,672 bytes of scratch per
+lane), the three-input projections read their weights once for up to five
+tokens, the attention row groups of 6 to 8 rows run interleaved, and the
+multi-row LM head takes two rows per wave. Drafting uses the low-rank
+proposal logits (the drafter's rounding only; acceptance unchanged on the
+replays).
+
+| `inkling2_bench --spec` rows | 2 | 4 | 5 | 6 | 7 | 8 |
+| --- | --- | --- | --- | --- | --- | --- |
+| ctx 64, before (ms) | 27.7 | 37.6 | 43.1 | 47.8 | 53.6 | 58.9 |
+| ctx 64, after (ms) | 27.4 | 36.1 | 41.3 | 45.8 | 51.2 | 57.2 |
+| ctx 32,000, after (ms) | 33.4 | 43.2 | 49.1 | 55.4 | 60.9 | 68.2 |
+
+Plain decode: 21.9 ms per token (22.0). DSpark propose at depth 7: 4.66 ms
+per cycle (7.62).
+
+| HTTP, all outputs byte-identical to AR | AR | before | after |
+| --- | --- | --- | --- |
+| Six coding tasks, greedy | 46.0 tok/s | 74.3 | 78.0 |
+| Six coding tasks, default sampling | 43.4 tok/s | 62.8 | 65.7 |
+| Primes (greedy) | 46.1 | 87.5 | 91.9 |
+| Explanation (greedy) | 46.1 | 55.4 | 57.7 |
+| Translation (T = 0.7) | 43.3 | 50.2 | 52.2 |
+

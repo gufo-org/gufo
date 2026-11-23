@@ -43,6 +43,10 @@ against the build they modified. Every variant was exact unless noted.
 | Two row iterations per wave in the expert GEMVs | 45.1 vs 46.0 tokens/s |
 | 16 waves per block in every weight GEMV | 47.04 vs 47.09 tokens/s |
 | More lanes per row in MoE down (its 18 NVFP4 units split unevenly over 8 lanes) | not tried: changes the reduction tree |
+| MoE expert weights loaded into registers before the block quantizes its input (overlapping the two) | 22.43 vs 21.86 ms per token: the held units cost occupancy |
+| MoE inputs quantized once per token into global memory, expert blocks reading them from L2 instead of LDS | 22.30 vs 21.9 ms per token; the expert GEMVs already stream about 219 GB/s (8 x 3 MB in 109 us) |
+| DSpark block weights in 4 bits (the Loom package's choice; drafter only, the output cannot change) | propose 4.35 vs 4.59 ms at depth 7, accepted 1,084 vs 1,089 of the coding replays' proposals: the unpacking eats most of the saved bandwidth |
+| Our width policy against fixed confidence gates (replay of 1,694 coding cycles, measured costs) | policy 75.0 tok/s, best gate (0.85) 76.0, per-cycle oracle 89.6: the gap is the drafter's accuracy, not the width choice |
 
 ## Numerics
 
@@ -72,10 +76,8 @@ from 32K, int8 decode activations shared across projections, NPU block-float
 projections in prefill. Larger prefill batches (4,096) change the chunking the
 byte comparison is defined on.
 
-Open: every multi-row instance of the projection GEMV (`k_gemv_multi`, NB 2 to
-8) reaches 256 VGPRs and spills (232 to 3,672 bytes per lane); the lane split
-(LPR 16) cannot change without changing the rows' reduction order, so a fix
-has to restructure the unit loop.
+The multi-row projection spill noted then is fixed (the tiny-matrix token
+loop, not the unit loop, held the registers).
 
 ## Not exact, not taken
 
