@@ -523,3 +523,85 @@ Rejected (all exact):
 | MoE by int8 WMMA (pairs of an expert as A rows, NVFP4 decoded to int8) | 64 rows 241 ms vs 245, 16 rows 117 vs 81: a 16-row tile has about four live pairs |
 | Dense WMMA from 4 rows (DSpark and batched steps) | 8 rows 61.4 vs 55.6 ms: half-empty tiles |
 
+
+## Round 8: wide-step expert layers and WMMA GEMVs (November 23)
+
+Engine changes only; every output is byte-identical. `inkling2_spec_test`
+passes at 2 to 64 rows (and its batched checks),
+`inkling2_bench --spec` reports 0 mismatched rows, `inkling2_bench --batch 4,8
+--verify` 0 differences, and every HTTP response below has the PR head's hash.
+
+### Where the wide steps went
+
+A 64-row step at context 64 routes its 512 (row, slot) pairs to only about 59
+distinct experts per visit (consecutive tokens choose alike), so its expert
+weights are about 178 MB (gate/up) and 89 MB (down) per NVFP4 visit, 0.74 and
+0.37 ms at the DRAM ceiling. The grouped kernels took 2.42 and 1.05 ms. A
+standalone replay of the kernels on the step's real routing (exact against the
+per-pair decode kernels) showed why: with every weight read removed the
+gate/up kernel still took 1.83 of its 2.0 ms. It was bound by instructions and
+latency, not by memory: each block re-quantized ~37 KB of inputs for 20 KB of
+weights, waited for them behind two barriers per group of four pairs, and ran
+the SITU activation once per pair in every lane.
+
+Kernel trace of the step (`rocprofv3`), gate/up and down per NVFP4 visit:
+2.42 and 1.05 ms before, 1.36 and 0.73 ms after. The steps between, on the
+replay (whose kernels time within 1% of the trace's):
+
+| Change (64-row step, per NVFP4 visit) | gate/up | down |
+| --- | --- | --- |
+| Inputs quantized once per step (`MoeQuantGrouped`) instead of in every block; a lane's weight units loaded into registers before its pairs are staged and kept for all of them (trace) | 1.95 ms | 0.87 ms |
+| NVFP4 units decoded once per block instead of once per group of four pairs | 2.00 (2.08 without) | 0.89 (0.92) |
+| The units left after the full lane passes (4 of 16 lanes, 2 of 8) split over the idle lanes, the partial sums moved there and back by shuffles (same terms, same order) | 1.85 | 0.86 |
+| Inputs read from global memory (vector caches) instead of LDS: no staging or barriers, a wave runs all its expert's pairs; 16-wave blocks | 1.58 | 0.77 |
+| One SITU per pair (every lane of a row holds the butterfly's sum; gate lane b takes pair b) | 1.37 | 0.73 |
+
+The Q8_0 visits (layers 20 to 23) take the same kernels: gate/up 3.20 → 1.69
+ms, down 1.18 → 0.88 ms (trace). Gate/up is still issue-bound: the products
+alone (four `v_dot4` and three float operations per 16 weights, pair and
+plane) are about 75 M wave instructions per visit; before the SITU change the
+counters showed 181 M VALU instructions at about half the issue rate. Eight consecutive rows of one session (DSpark's widest
+cycle) now take the grouped kernels too (0.63 vs 0.72 ms per visit); rows of
+different sessions share fewer experts and stay on the per-pair kernels
+(batched decode of 3 to 8 sessions was 1 to 2% slower grouped).
+
+The int8 WMMA GEMVs of the dense projections and the LM head loaded each
+unit's weights and inputs only when they were needed (`#pragma unroll 1`) and
+kept 16 to 32 KB of per-leaf sums in LDS, which left about 3 waves per SIMD.
+Each leaf now loads all its units first, and the butterfly steps that pair two
+leaves of the same wave run in registers (8 leaves go to LDS).
+
+`inkling2_bench --spec`, ms per verification step:
+
+| Rows | 8 | 9 | 16 | 32 | 64 |
+| --- | --- | --- | --- | --- | --- |
+| Context 64, before | 54.9 | 62.5 | 81.6 | 134.3 | 249.2 |
+| Context 64, after | 53.3 | 58.4 | 73.8 | 106.6 | 167.7 |
+| Per row, after | 6.67 | 6.49 | 4.61 | 3.33 | 2.62 |
+| Context 20,000, before / after | | | 93.0 / 86.1 | | 292.7 / 218.5 |
+
+HTTP, `--sessions 8 --context 32768`, DSpark, one request at a time
+(`copy2.py`), PR head against this round on the same build tree (only the
+inkling2 sources swapped); every hash identical:
+
+| Request | Before | After |
+| --- | --- | --- |
+| Rewrite a file, greedy, 1,500 tokens | 118.7 tok/s | 124.0 tok/s |
+| Rewrite a file, sampled, 1,500 tokens | 117.2 tok/s | 122.2 tok/s |
+| Rename in a file, greedy (801 tokens) | 120.9 tok/s | 129.3 tok/s |
+| Rewrite, sampled, 400 tokens | 94.9 tok/s | 98.2 tok/s |
+| Rename, sampled, 400 tokens | 79.2 tok/s | 81.5 tok/s |
+| Code from scratch, greedy, 400 tokens | 76.7 to 77.9 tok/s | 76.3 to 78.0 tok/s |
+
+The eight-prompt concurrency workload (`conc.py`, 256 tokens) is unchanged:
+C = 1 greedy 71.0 to 74.3 tok/s before and 71.6 to 73.3 after (four runs
+each), C = 2 / 4 / 8 73.9 / 90.3 / 112.2 against 73.3 / 90.7 / 112.8.
+
+### Long context
+
+Prefill of 32,768 tokens runs at 1,892 tokens/s (2,207 at 2,048): the global
+visits' attention grows to 34 ms per 2,048-token ubatch at 30K (about 43% of
+the F16 WMMA ceiling) and is 2.1 of the 17.3 s; the window visits take 1.25 s.
+Decode at 32,000 tokens (26.6 ms per token, 63.6 ms per step for four
+sessions) reads the global visits' K/V at 216 to 218 GB/s, about 90% of the
+DRAM ceiling, for one and for four sessions.

@@ -146,3 +146,30 @@ Analysed, not built:
 | A smaller drafter block for batched cycles (the drafter computes eight rows per request even when one proposal fits) | Changes the proposals (the block is non-causal), so it needs an acceptance study; about 2 ms of a 62 ms cycle at four requests |
 | More than eight rows a step (drafts at five to eight requests) | Marginal rows get cheaper as the rows' experts overlap (about 2 ms a row past 16), but every row kernel, the slot tables and the conv captures are eight wide |
 
+
+## Round 8 (November 23)
+
+Grouped expert kernels, measured on a standalone replay of a 64-row step's
+real routing (64 experts per visit, NVFP4 gate/up and down per visit; the
+kept version is 1.37 / 0.73 ms):
+
+| Variant | Result |
+| --- | --- |
+| Four or eight row pairs per wave (more rows per block) | 64-row step 244 → 305 / 329 ms: fewer, longer blocks |
+| Work items of four pairs of one expert (big experts spread over blocks) | 215 → 225 ms: the extra weight reads and decodes cost more than the imbalance |
+| Eight pairs per pass (registers) | 2.71 / 0.96 ms; fixed eight with masked pairs 3.29 ms (spills) |
+| A fixed four-pair pass instead of one per pair count (smaller code) | 1.55 vs 1.45 ms: the padded pairs cost more than the code size |
+| Gate and up rows of a channel in the same lanes (half the input loads) | 256 VGPRs and spills, 1.80 ms |
+| The expert's first eight pairs staged in LDS once per block, the rest from global memory | 1.52 ms |
+| VGPR caps for 10 or 12 waves per SIMD | 2.34 / 1.93 ms (spills) |
+| 8, 12 or 24 waves per block | 1.48, 1.46, 1.45 ms against 1.37 with 16 |
+| Lane moves by DPP and `permlane16` instead of LDS permutes | no faster (1.376 ms) and not exact as written; dropped |
+| Grouped kernels from 3 rows | DSpark verification of 4 rows 35.9 → 36.5 ms, batched decode of 3 to 8 sessions 1 to 2% slower; kept for 8 rows of one session and wider |
+| Dense int8 WMMA from 8 rows | 8-row verification 53.4 → 53.2 ms, eight-session decode 64.0 → 64.1 ms: within noise, not taken |
+
+Prefill attention at long context (exact variants only):
+
+| Variant | Result |
+| --- | --- |
+| The next key tile's K, V and bias rows loaded into registers while this one is computed | 243 VGPRs and spills, 5 waves per SIMD: a 12-wave block no longer fits a CU; pp32768 1,892 → 1,791 tokens/s |
+| 32-query blocks (two per CU) | not byte-identical (the window visits' key tiles start at the block's first query) and pp32768 1,682 tokens/s |
