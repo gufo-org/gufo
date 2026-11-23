@@ -13,12 +13,12 @@
 
 include_guard(GLOBAL)
 
-# hrx-system v0.2.0 (hrx-loom 0.2.0). Keep in step with
+# hrx-system v0.3.0 (hrx-loom 0.3.0). Keep in step with
 # LOOM_TEXT_EMBED_HRX_LOOM in embed/loom_text_embed.h and
 # .devops/nix/hrx/loom-runtime.nix.
-set(GUFO_LOOM_HRX_VERSION 0.2.0)
-set(GUFO_LOOM_HRX_REVISION 0cd370f2baaa0cfef47cc23007f1a109906f8a52)
-set(GUFO_LOOM_HRX_SHA256 2bdf75bc99d530054dc7457ec68df0269f7fd23675115faa361702981cc51fa9)
+set(GUFO_LOOM_HRX_VERSION 0.3.0)
+set(GUFO_LOOM_HRX_REVISION e2c41a720363911c04606ce0f4417e2d55630352)
+set(GUFO_LOOM_HRX_SHA256 3b02486d07d32d03901f41915605a21840211db4e93b040dfa55283d68d27fd8)
 file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/embed/loom_text_embed.h" _gufo_loom_sdk
   REGEX "^#define LOOM_TEXT_EMBED_HRX_LOOM ")
 if(NOT _gufo_loom_sdk STREQUAL "#define LOOM_TEXT_EMBED_HRX_LOOM \"${GUFO_LOOM_HRX_VERSION}\"")

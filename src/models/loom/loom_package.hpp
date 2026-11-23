@@ -121,12 +121,20 @@ inline std::string_view SdkSeries(std::string_view version) {
   return version.substr(0, second);
 }
 
+// SDK 0.3 retains the controller ABI used by the published 0.2 cards.
+inline bool SdkCompatible(std::string_view built, std::string_view runtime) {
+  const auto built_series = SdkSeries(built);
+  const auto runtime_series = SdkSeries(runtime);
+  return built_series == runtime_series ||
+         (built_series == "0.2" && runtime_series == "0.3");
+}
+
 // A package built for another Loom SDK release fails inside Loom in ways that
 // do not say why: refuse it here with what to fetch instead.
 inline void CheckSdk(const fs::path& root, std::string_view runtime) {
   const auto built = PackageSdk(root);
   if (built.empty() || runtime.empty() ||
-      SdkSeries(built) == SdkSeries(runtime))
+      SdkCompatible(built, runtime))
     return;
   throw std::runtime_error(
       "loom: this package is built for Loom SDK " + built +

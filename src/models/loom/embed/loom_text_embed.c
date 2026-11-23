@@ -42,7 +42,6 @@
 #include "loom/runtime/storage/snapshot.h"
 #include "loom/runtime/storage/memory.h"
 #include "loom/runtime/execution/execution.h"
-#include "loom/serve/service/text/schedule.h"
 #include "loom/serve/service/text/tool_calls.h"
 #include "loomc/target/amdgpu/iree_hal.h"
 #include "loomc/target/configured.h"
@@ -139,8 +138,6 @@ struct loom_text_embed_t {
   // The package's image component and its projector, when it has vision.
   loom_service_finite_component_t* image;
   loom_serve_text_media_projector_t* projector;
-  iree_host_size_t shape_count;
-  loom_serve_packing_shape_t* shapes;
   iree_host_size_t prefill_capacity;
   uint32_t rows;
   uint32_t draft_depth;
@@ -422,21 +419,10 @@ static void loom_text_embed_remove_card(loom_text_embed_t* embed) {
   }
 }
 
-// Widest epoch shape's span capacity (the storage program sizes its per-span
-// regions by it).
-static iree_host_size_t loom_text_embed_span_capacity(
-    const loom_text_embed_t* embed) {
-  iree_host_size_t spans = 0;
-  for (iree_host_size_t i = 0; i < embed->shape_count; ++i) {
-    spans = iree_max(spans, embed->shapes[i].span_capacity);
-  }
-  return spans;
-}
-
 // The export region of the epoch outputs allocation, as the package's storage
 // program sizes it (starter kit, LOGITS.md): slot 0 starts at byte
 // LOOM_TEXT_EMBED_LOGITS_OFFSET (after the 8192 span tokens), and each of the
-// min(widest epoch's spans, resident rows) slots is ceil(vocab / 128) * 512
+// admitted span slots is ceil(vocab / 128) * 512
 // bytes. The stride is derived from the allocation's size and checked.
 #define LOOM_TEXT_EMBED_LOGITS_OFFSET 32768
 
@@ -452,7 +438,7 @@ static iree_status_t loom_text_embed_logits_layout(loom_text_embed_t* embed) {
                                         LOOM_TEXT_EMBED_OUTPUTS_ALLOCATION);
   const uint64_t length = outputs ? iree_hal_buffer_byte_length(outputs) : 0;
   const uint64_t slots =
-      iree_min(loom_text_embed_span_capacity(embed), embed->rows);
+      loom_serve_text_model_span_capacity(embed->model);
   const uint64_t offset = LOOM_TEXT_EMBED_LOGITS_OFFSET;
   if (!slots || length <= offset || (length - offset) % slots ||
       ((length - offset) / slots) % 512) {
@@ -548,12 +534,6 @@ static iree_status_t loom_text_embed_open_model(
       embed->allocator, sizeof(uint64_t) * embed->rows,
       (void**)&embed->extents));
   memset(embed->extents, 0, sizeof(uint64_t) * embed->rows);
-  embed->shape_count =
-      loom_serve_text_default_shapes(text->prefill_capacity, NULL);
-  IREE_RETURN_IF_ERROR(iree_allocator_malloc_array(
-      embed->allocator, embed->shape_count, sizeof(*embed->shapes),
-      (void**)&embed->shapes));
-  loom_serve_text_default_shapes(text->prefill_capacity, embed->shapes);
   loom_runtime_memory_pool_t* memory_pool = loom_runtime_pool_memory(
       loom_runtime_device_group_pool_at(embed->group, 0));
   iree_host_size_t pool_tokens = 0;
@@ -577,8 +557,7 @@ static iree_status_t loom_text_embed_open_model(
       .cache_limit_bytes = !pool_tokens && memory_pool
                                ? loom_runtime_memory_pool_limit(memory_pool)
                                : 0,
-      .epoch_count = embed->shape_count,
-      .epoch_shapes = embed->shapes,
+      .span_capacity = iree_min(text->prefill_capacity, embed->rows),
       .draft_depth = text->draft_depth,
       .kernel_sanitizer = {.type = LOOMC_STRUCTURE_TYPE_SANITIZER_OPTIONS,
                            .structure_size = sizeof(loomc_sanitizer_options_t)},
@@ -690,7 +669,6 @@ LOOM_TEXT_EMBED_EXPORT void loom_text_embed_close(loom_text_embed_t* embed) {
   iree_allocator_free(embed->allocator, embed->logit_rows);
   iree_allocator_free(embed->allocator, embed->logit_flag);
   iree_allocator_free(embed->allocator, embed->extents);
-  iree_allocator_free(embed->allocator, embed->shapes);
   if (embed->has_resolved) {
     loom_serve_model_configuration_deinitialize(&embed->resolved);
   }
@@ -708,11 +686,7 @@ LOOM_TEXT_EMBED_EXPORT const char* loom_text_embed_error(
 
 static iree_host_size_t loom_text_embed_max_spans(
     const loom_text_embed_t* embed) {
-  iree_host_size_t spans = 0;
-  for (iree_host_size_t i = 0; i < embed->shape_count; ++i) {
-    spans = iree_max(spans, embed->shapes[i].span_capacity);
-  }
-  return iree_min(spans, (iree_host_size_t)embed->rows);
+  return loom_serve_text_model_span_capacity(embed->model);
 }
 
 LOOM_TEXT_EMBED_EXPORT void loom_text_embed_info(
@@ -1002,6 +976,7 @@ static iree_status_t loom_text_embed_collect_logits(loom_text_embed_t* embed,
       *loom_serve_text_state_allocation(state,
                                         LOOM_TEXT_EMBED_OUTPUTS_ALLOCATION);
   iree_hal_transfer_operation_t operations[64];
+  iree_hal_transfer_region_t regions[IREE_ARRAYSIZE(operations)];
   uint32_t targets[64];
   iree_host_size_t pending = 0;
   iree_status_t status = iree_ok_status();
@@ -1031,13 +1006,15 @@ static iree_status_t loom_text_embed_collect_logits(loom_text_embed_t* embed,
       if (!iree_status_is_ok(status)) break;
     }
     embed->logit_valid[row] = 0;
+    regions[pending] = (iree_hal_transfer_region_t){
+        .row_length = embed->logits_stride, .row_count = 1, .slice_count = 1};
     operations[pending] = (iree_hal_transfer_operation_t){
         .type = IREE_HAL_TRANSFER_OPERATION_TYPE_DOWNLOAD,
         .download = {.source_buffer = outputs,
                      .source_offset = embed->logits_offset +
                                       (uint64_t)i * embed->logits_stride,
                      .target = (uint8_t*)embed->logit_rows[row],
-                     .length = embed->logits_stride}};
+                     .region = &regions[pending]}};
     targets[pending++] = row;
     if (pending == IREE_ARRAYSIZE(operations)) {
       uint64_t completion = 0;
@@ -1212,40 +1189,12 @@ loom_text_embed_row_position(loom_text_embed_t* embed, uint32_t row) {
   return loom_serve_text_row_position(loom_text_embed_row(embed, row));
 }
 
-// Smallest prepared shape admitting the spans and tokens.
-static bool loom_text_embed_shape(const loom_text_embed_t* embed,
-                                  iree_host_size_t spans,
-                                  iree_host_size_t tokens,
-                                  iree_host_size_t* out_index) {
-  bool found = false;
-  for (iree_host_size_t i = 0; i < embed->shape_count; ++i) {
-    const loom_serve_packing_shape_t* shape = &embed->shapes[i];
-    if (shape->span_capacity < spans || shape->token_capacity < tokens) {
-      continue;
-    }
-    if (!found ||
-        shape->token_capacity < embed->shapes[*out_index].token_capacity ||
-        (shape->token_capacity == embed->shapes[*out_index].token_capacity &&
-         shape->span_capacity < embed->shapes[*out_index].span_capacity)) {
-      *out_index = i;
-      found = true;
-    }
-  }
-  return found;
-}
-
 LOOM_TEXT_EMBED_EXPORT int loom_text_embed_decode_batch(
     loom_text_embed_t* embed, const uint32_t* rows, size_t count) {
   if (count == 1) return loom_text_embed_row_decode(embed, rows[0]);
   if (count > LOOM_TEXT_EMBED_MAX_BATCH) {
     EMBED_RETURN(embed, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                                          "decode batch too wide"));
-  }
-  iree_host_size_t shape = 0;
-  if (!loom_text_embed_shape(embed, count, count, &shape)) {
-    EMBED_RETURN(embed, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
-                                         "no shape for %zu decode spans",
-                                         count));
   }
   int32_t pending[LOOM_TEXT_EMBED_MAX_BATCH];
   loom_serve_text_span_t spans[LOOM_TEXT_EMBED_MAX_BATCH];
@@ -1259,7 +1208,7 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_decode_batch(
     };
   }
   iree_status_t status =
-      loom_serve_text_model_epoch(embed->model, shape, count, spans);
+      loom_serve_text_model_epoch(embed->model, count, spans);
   if (iree_status_is_ok(status)) {
     status = loom_text_embed_collect_logits(embed, rows, count);
   }
@@ -1273,12 +1222,6 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_decode_batch_tokens(
     EMBED_RETURN(embed, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                                          "decode batch of %zu rows", count));
   }
-  iree_host_size_t shape = 0;
-  if (!loom_text_embed_shape(embed, count, count, &shape)) {
-    EMBED_RETURN(embed, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
-                                         "no shape for %zu decode spans",
-                                         count));
-  }
   int32_t input[LOOM_TEXT_EMBED_MAX_BATCH];
   loom_serve_text_span_t spans[LOOM_TEXT_EMBED_MAX_BATCH];
   for (size_t i = 0; i < count; ++i) {
@@ -1291,7 +1234,7 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_decode_batch_tokens(
     };
   }
   iree_status_t status =
-      loom_serve_text_model_epoch(embed->model, shape, count, spans);
+      loom_serve_text_model_epoch(embed->model, count, spans);
   if (iree_status_is_ok(status)) {
     status = loom_text_embed_collect_logits(embed, rows, count);
   }
@@ -1314,14 +1257,6 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_verify_batch(
     EMBED_RETURN(embed, iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
                                          "drafting is unavailable"));
   }
-  iree_host_size_t shape = 0;
-  iree_host_size_t total = 0;
-  for (size_t i = 0; i < count; ++i) total += limits[i] ? width : 1;
-  if (!loom_text_embed_shape(embed, count, total, &shape)) {
-    EMBED_RETURN(embed, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
-                                         "no shape for %zu drafted spans",
-                                         count));
-  }
   int32_t pending[LOOM_TEXT_EMBED_MAX_BATCH];
   loom_serve_text_span_t spans[LOOM_TEXT_EMBED_MAX_BATCH];
   loom_serve_text_result_t results[LOOM_TEXT_EMBED_MAX_BATCH];
@@ -1337,7 +1272,7 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_verify_batch(
   }
   memset(results, 0, sizeof(results[0]) * count);
   iree_status_t status = loom_serve_text_model_verify(
-      embed->model, shape, count, spans, limits, NULL, results);
+      embed->model, count, spans, limits, NULL, results);
   if (iree_status_is_ok(status)) {
     for (size_t i = 0; i < count; ++i) {
       counts[i] = results[i].output_count;
@@ -1656,9 +1591,11 @@ static iree_status_t loom_text_embed_image_plan(
   // range per block and plane: the image layout must not depend on page IDs.
   iree_host_size_t merged_count = 0;
   loom_runtime_snapshot_range_t* merged = NULL;
+  const loom_serve_text_storage_blocks_t span = {
+      .count = block_count, .values = blocks};
   IREE_RETURN_IF_ERROR(loom_serve_text_storage_plan_snapshot(
-      storage, state->row_count + checkpoint_index, views, true, block_count,
-      blocks, state->host_allocator, &merged_count, &merged));
+      storage, state->row_count + checkpoint_index, views, true, 1,
+      &span, state->host_allocator, &merged_count, &merged));
   const iree_host_size_t fixed_count =
       (views[TEXT_RECURRENT - TEXT_CONTROL] ? 1 : 0) +
       (storage->carry_stride ? 1 : 0);
@@ -1750,6 +1687,7 @@ static iree_status_t loom_text_embed_image_transfer(
     buffers[i] = *loom_serve_text_state_allocation(state, i);
   }
   iree_hal_transfer_operation_t operations[64];
+  iree_hal_transfer_region_t regions[IREE_ARRAYSIZE(operations)];
   iree_host_size_t operation_count = 0;
   uint64_t completion = 0;
   iree_status_t status = loom_runtime_execution_drain(state->execution);
@@ -1757,19 +1695,22 @@ static iree_status_t loom_text_embed_image_transfer(
        ++i) {
     const loom_runtime_snapshot_range_t* device = &plan->device[i];
     uint8_t* bytes = image + plan->image[i].offset;
-    operations[operation_count++] =
+    regions[operation_count] = (iree_hal_transfer_region_t){
+        .row_length = device->length, .row_count = 1, .slice_count = 1};
+    operations[operation_count] =
         upload ? (iree_hal_transfer_operation_t){
                      .type = IREE_HAL_TRANSFER_OPERATION_TYPE_UPLOAD,
                      .upload = {.source = bytes,
                                 .target_buffer = buffers[device->buffer_index],
                                 .target_offset = device->offset,
-                                .length = device->length}}
+                                .region = &regions[operation_count]}}
                : (iree_hal_transfer_operation_t){
                      .type = IREE_HAL_TRANSFER_OPERATION_TYPE_DOWNLOAD,
                      .download = {.source_buffer = buffers[device->buffer_index],
                                   .source_offset = device->offset,
                                   .target = bytes,
-                                  .length = device->length}};
+                                  .region = &regions[operation_count]}};
+    ++operation_count;
     if (operation_count == IREE_ARRAYSIZE(operations)) {
       status = loom_runtime_execution_transfer(state->execution, operation_count,
                                              operations, &completion);
@@ -2003,12 +1944,6 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_prefill_request(
     EMBED_RETURN(embed, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                                          "request input range"));
   }
-  iree_host_size_t shape = 0;
-  if (!loom_text_embed_shape(embed, 1, count, &shape)) {
-    EMBED_RETURN(embed, iree_make_status(IREE_STATUS_OUT_OF_RANGE,
-                                         "no shape for %zu input tokens",
-                                         count));
-  }
   const loom_serve_text_span_t span = {
       .row_index = row,
       .token_count = count,
@@ -2020,7 +1955,7 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_row_prefill_request(
                    : NULL,
   };
   iree_status_t status =
-      loom_serve_text_model_epoch(embed->model, shape, 1, &span);
+      loom_serve_text_model_epoch(embed->model, 1, &span);
   if (iree_status_is_ok(status) && request->media) {
     loom_serve_text_media_request_consume(request->media, offset + count);
   }

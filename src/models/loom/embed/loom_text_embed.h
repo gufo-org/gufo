@@ -26,7 +26,7 @@ extern "C" {
 // packages must be built for it (their llm_config.json "sdk": {"hrx_loom":
 // ...}). ../runtime.cmake (which checks this) and
 // .devops/nix/hrx/loom-runtime.nix pin the same release.
-#define LOOM_TEXT_EMBED_HRX_LOOM "0.2.0"
+#define LOOM_TEXT_EMBED_HRX_LOOM "0.3.0"
 
 typedef struct loom_text_embed_t loom_text_embed_t;
 typedef struct loom_text_embed_request_t loom_text_embed_request_t;

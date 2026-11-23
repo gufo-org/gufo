@@ -102,13 +102,13 @@ inline ext::ModelSourceModel Resolve(std::string_view repo,
     throw std::runtime_error("loom: " + std::string(repo) +
                              " is not a text model package; Gufo serves "
                              "Loom text packages only");
-  // A package for another SDK series fails inside Loom: refuse it here.
+  // Check that the installed revision is supported by this runtime.
   const auto config = json::parse(hub.file(repo, revision, "llm_config.json"));
   std::string built = "0.1.0";
   if (const auto* field = config.find("sdk");
       field && field->is_object() && !field->member_str("hrx_loom").empty())
     built = field->member_str("hrx_loom");
-  if (package::SdkSeries(built) != package::SdkSeries(sdk))
+  if (!package::SdkCompatible(built, sdk))
     throw std::runtime_error("loom: " + std::string(repo) + "@" +
                              revision.substr(0, 8) + " is built for Loom SDK " +
                              built + ", and this Gufo runs Loom SDK " +

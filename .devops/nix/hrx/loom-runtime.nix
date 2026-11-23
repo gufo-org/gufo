@@ -1,6 +1,6 @@
 # The Loom runtime of the loom extension (src/models/loom): libloom_text_embed,
 # Loom's text model layer behind the C API in src/models/loom/embed, built from
-# the hrx-system release that loom-fun packages target (hrx-loom 0.2.0). It
+# the hrx-system release that loom-fun packages target (hrx-loom 0.3.0). It
 # drives AMD GPUs through Loom's own driver (libamdf): no ROCm runtime or
 # device toolchain is involved, and no HIP library is installed.
 #
@@ -21,15 +21,15 @@
 }:
 
 let
-  # hrx-system v0.2.0.
-  version = "0.2.0";
-  revision = "0cd370f2baaa0cfef47cc23007f1a109906f8a52";
+  # hrx-system v0.3.0.
+  version = "0.3.0";
+  revision = "e2c41a720363911c04606ce0f4417e2d55630352";
 
   src = fetchFromGitHub {
     owner = "ROCm";
     repo = "hrx-system";
     rev = revision;
-    hash = "sha256-t/R1Qq00lpeS/elqLIltGJgHstNsWdgQWmpBMS3axkw=";
+    hash = "sha256-x2eu2g3QopK3OOX4SmeiTGgUhRE4llkC+HvyMny7fQc=";
   };
 
   embed = ../../../src/models/loom/embed;
@@ -54,7 +54,7 @@ let
     dontFixup = true;
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-kUc4b7acjbrnrG6KHIpJPTRkRvZHJKeRX7WnyAUR7ug=";
+    outputHash = "sha256-eeC2UsCLc/YnFjla0q2FXIM0uXOLPkjBdrbkxG5HU1Q=";
   };
 in
 clangStdenv.mkDerivation {
