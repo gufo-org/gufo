@@ -35,7 +35,7 @@ endif()
 
 find_package(PkgConfig QUIET)
 if(PKG_CONFIG_FOUND)
-  pkg_check_modules(GUFO_LOOM_PC QUIET loom-text-embed)
+  pkg_check_modules(GUFO_LOOM_PC QUIET loom-text-embed=${GUFO_LOOM_HRX_VERSION})
 endif()
 
 if(GUFO_LOOM_PC_FOUND)

@@ -133,8 +133,7 @@ inline bool SdkCompatible(std::string_view built, std::string_view runtime) {
 // do not say why: refuse it here with what to fetch instead.
 inline void CheckSdk(const fs::path& root, std::string_view runtime) {
   const auto built = PackageSdk(root);
-  if (built.empty() || runtime.empty() ||
-      SdkCompatible(built, runtime))
+  if (built.empty() || runtime.empty() || SdkCompatible(built, runtime))
     return;
   throw std::runtime_error(
       "loom: this package is built for Loom SDK " + built +
