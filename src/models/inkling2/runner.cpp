@@ -175,14 +175,16 @@ public:
                  std::uint32_t max_context, cache::Identity identity,
                  bool durable,
                  std::unique_ptr<vision::VisionEncoder> vision = nullptr,
-                 std::string vision_identity = {})
+                 std::string vision_identity = {}, int max_draft = 0)
       : engine_(std::move(engine)),
         tok_(std::move(tok)),
         max_context_(max_context),
         identity_(std::move(identity)),
         durable_(durable),
         vision_(std::move(vision)),
-        vision_identity_(std::move(vision_identity)) {
+        vision_identity_(std::move(vision_identity)),
+        max_draft_(static_cast<std::size_t>(
+            std::clamp(max_draft, 0, Drafter::kMaxDraft))) {
     namespace d = ::inkling2::text::dialect;
     const auto id = [&](std::string_view spelling) {
       const auto t = tok_->FindSpecial(spelling);
@@ -972,9 +974,8 @@ public:
     const bool greedy = mode.greedy;
     DsparkCalibration& cal = mode.coupled ? cal_coupled_ : cal_;
     if (budget > 0 && engine_->DraftReady(ss) && st.backoff.Draft()) {
-      n = static_cast<int>(
-          std::min<std::size_t>({std::size_t{Drafter::kMaxDraft}, budget,
-                                 engine_->VerifyRows(ss) - 1}));
+      n = static_cast<int>(std::min<std::size_t>(
+          {max_draft_, budget, engine_->VerifyRows(ss) - 1}));
       if (n > 0)  // stop once the width policy would not verify another
         n = engine_->Propose(
             ss, static_cast<std::int32_t>(a), n, drafts, conf,
@@ -1121,8 +1122,7 @@ public:
             continue;
           const int room = static_cast<int>(Engine::kMaxVerifyRows) - B;
           l.n = static_cast<int>(std::min<std::size_t>(
-              {std::size_t{Drafter::kMaxDraft}, l.budget,
-               engine_->VerifyRows(*l.ss) - 1,
+              {max_draft_, l.budget, engine_->VerifyRows(*l.ss) - 1,
                static_cast<std::size_t>(std::max(room, 0))}));
           if (l.n <= 0) {
             l.n = 0;
@@ -1433,6 +1433,7 @@ private:
   bool durable_;
   std::unique_ptr<vision::VisionEncoder> vision_;
   std::string vision_identity_;
+  std::size_t max_draft_ = 0;  // proposals per request and cycle
   mutable std::mutex vision_mutex_;
   mutable hipStream_t vision_stream_ = nullptr;
   g::TextRunnerToken t_header_{}, t_text_{}, t_thinking_{}, t_end_message_{},
@@ -1613,9 +1614,13 @@ std::shared_ptr<ext::TextModelRunner> CreateInkling2TextRunner(
       vision_identity = "inkling2-vision-v1:" +
                         crypto::Sha256FileHex(options.vision_model_path);
     }
+    // --draft-tokens (the provider's default: the drafter's whole block)
+    const int max_draft =
+        dspark ? static_cast<int>(options.speculative.max_draft_tokens) : 0;
     return std::make_shared<Inkling2Runner>(
         std::shared_ptr<Engine>(std::move(engine)), std::move(tok), max_context,
-        identity, durable, std::move(vision), std::move(vision_identity));
+        identity, durable, std::move(vision), std::move(vision_identity),
+        max_draft);
   } catch (const std::exception& e) {
     if (error)
       *error = std::string("inkling2: ") + e.what();

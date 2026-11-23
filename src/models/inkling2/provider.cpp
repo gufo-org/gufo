@@ -16,9 +16,10 @@ void inkling2_provider_register(gufo::ext::Registry& registry) {
       .create = &gufo::models::inkling2::CreateInkling2TextRunner,
       // NVFP4 (ggml type 40) is unsized to core; the extension sizes it.
       .accepts_unsized_tensors = true,
-      // The verification width is the runner's own (adaptive) choice.
+      // The verification width is the runner's own (adaptive) choice, up to
+      // the drafter's block of seven proposals.
       .speculative_defaults = {{.backend = "dspark",
-                                .max_draft_tokens = 3,
+                                .max_draft_tokens = 7,
                                 .min_draft_tokens = 1}},
   });
 #endif
