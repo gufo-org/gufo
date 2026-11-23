@@ -4,7 +4,7 @@
 //                      [--prompt 600] [--tokens 48]
 //
 // 1. A reference session decodes --tokens greedy tokens one at a time. Another
-//    replays them through Engine::Verify in steps of 2, 3 and 4 rows whose
+//    replays them through Engine::Verify in steps of 2 to 8 rows whose
 //    proposals are the reference tokens with one corrupted per step, and keeps
 //    the rows up to it (CommitVerify). Every kept row's logits, and those of a
 //    one-token decode after the last commit, must equal the reference's byte
@@ -106,7 +106,7 @@ int main(int argc, char** argv) {
   }
 
   int failures = 0;
-  for (int R = 2; R <= 4; ++R) {
+  for (int R = 2; R <= 8; ++R) {
     auto sp = engine->NewSession();
     engine->Forward(*sp, p);
     std::uint32_t rng = 12345u + static_cast<std::uint32_t>(R);
@@ -146,7 +146,7 @@ int main(int argc, char** argv) {
       std::int32_t d[8] = {};
       int n = 0;
       if (engine->DraftReady(*sp)) {
-        n = std::min<int>(3, static_cast<int>(engine->VerifyRows(*sp)) - 1);
+        n = std::min<int>(7, static_cast<int>(engine->VerifyRows(*sp)) - 1);
         if (n > 0)
           n = engine->Propose(*sp, got.back(), n, d);
       }

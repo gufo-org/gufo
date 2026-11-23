@@ -273,7 +273,9 @@ struct Engine::Impl {
   float *d_cur, *d_prelude, *d_bankout, *d_msgs, *d_mixed, *d_ctl, *d_in,
       *d_g64, *d_proj, *d_sink, *d_dyn, *d_ob, *d_ao, *d_h, *d_mixf, *d_hn,
       *d_moe, *d_rlog, *d_wts8, *d_act8, *d_ws_o, *d_ws_m, *d_ws_l;
-  static constexpr int kMaxB = 4;  // sessions per decode batch
+  // rows per decode step: sessions of a batch (up to kMaxDecodeBatch) or one
+  // session's verification rows (up to kMaxVerifyRows)
+  static constexpr int kMaxB = 8;
   static constexpr int kMsgInvTokens = 1024;
   static constexpr int kWideTileTokens =
       256;  // ubatches at least this long use 128-token GEMM tiles
@@ -679,7 +681,7 @@ struct Engine::Impl {
     // Capture the short-context graphs now (single-threaded, before any cache
     // thread exists).
     if (BatchCapable()) {
-      for (nb = 1; nb <= kMaxB; ++nb)
+      for (nb = 1; nb <= static_cast<int>(Engine::kMaxDecodeBatch); ++nb)
         (void)CaptureGraph(2048, 2048 * 8 + nb);
       nb = 1;
     }
@@ -2105,8 +2107,7 @@ bool Engine::batch_capable() const {
 
 void Engine::DecodeBatch(std::span<Session* const> sessions,
                          std::span<const std::int32_t> tokens) {
-  if (sessions.size() != tokens.size() ||
-      sessions.size() > static_cast<std::size_t>(Impl::kMaxB))
+  if (sessions.size() != tokens.size() || sessions.size() > kMaxDecodeBatch)
     throw std::runtime_error("inkling2: bad decode batch");
   const std::lock_guard lock(mutex_);
   for (std::size_t i = 0; i < sessions.size(); ++i) {
@@ -2148,7 +2149,7 @@ std::size_t Engine::VerifyRows(const Session& s) const {
     return c;
   };
   std::size_t n = 1;
-  while (n < kMaxDecodeBatch && s.pos_ + n < max_context_ &&
+  while (n < kMaxVerifyRows && s.pos_ + n < max_context_ &&
          bucket(s.pos_ + n) == bucket(s.pos_))
     ++n;
   return n;

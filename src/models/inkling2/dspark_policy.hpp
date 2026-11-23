@@ -1,8 +1,9 @@
 // Adaptive DSpark verification width for Inkling 2 Mini (host only).
 //
-// A cycle drafts up to three tokens (cheap: about a tenth of a decode step for
-// the block and a twentieth per chained token), then verifies the anchor plus
-// the first W of them in one Engine::Verify step, whose cost grows with W.
+// A cycle drafts up to seven tokens (the drafter's block; cheap: about a tenth
+// of a decode step for the block and a twentieth per chained token, stopping
+// once a longer width cannot pay), then verifies the anchor plus the first W
+// of them in one Engine::Verify step, whose cost grows with W.
 // The width maximises the expected emitted tokens per cost: the drafter's own
 // probability for each proposal, mapped through an acceptance calibration
 // that keeps learning from the outcomes, gives the chance that a prefix
@@ -54,7 +55,7 @@ private:
 /// Cycle costs in milliseconds, as running averages of the measured times.
 class DsparkCosts {
 public:
-  static constexpr int kMaxRows = 4;
+  static constexpr int kMaxRows = 8;
   [[nodiscard]] double Verify(int rows) const { return verify_[rows]; }
   [[nodiscard]] double Draft(int tokens) const {
     return draft_base_ + draft_step_ * tokens;
@@ -70,7 +71,8 @@ public:
 private:
   static void Ema(double& v, double x) { v += 0.05 * (x - v); }
   // Strix Halo, short context (inkling2_bench --spec / --dspark)
-  std::array<double, kMaxRows + 1> verify_{0, 22.0, 27.8, 32.9, 37.8};
+  std::array<double, kMaxRows + 1> verify_{0,    22.0, 27.8, 32.9, 37.8,
+                                           43.1, 47.8, 53.6, 58.9};
   double draft_base_ = 3.0, draft_step_ = 1.5;
 };
 

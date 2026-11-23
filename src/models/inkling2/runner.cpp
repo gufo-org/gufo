@@ -827,8 +827,9 @@ public:
     }
     DsparkCalibration& cal = coupled ? cal_coupled_ : cal_;
     if (budget > 0 && engine_->DraftReady(ss) && st.backoff.Draft()) {
-      n = static_cast<int>(std::min<std::size_t>(
-          {std::size_t{3}, budget, engine_->VerifyRows(ss) - 1}));
+      n = static_cast<int>(
+          std::min<std::size_t>({std::size_t{Drafter::kMaxDraft}, budget,
+                                 engine_->VerifyRows(ss) - 1}));
       if (n > 0)  // stop once the width policy would not verify another
         n = engine_->Propose(
             ss, static_cast<std::int32_t>(a), n, drafts, conf,
@@ -850,7 +851,7 @@ public:
     std::vector<std::int32_t> rows{static_cast<std::int32_t>(a)};
     rows.insert(rows.end(), drafts, drafts + width);
     std::span<const float> out;
-    std::int32_t amax[Engine::kMaxDecodeBatch] = {};
+    std::int32_t amax[Engine::kMaxVerifyRows] = {};
     const std::size_t pos = ss.position();
     if (width == 0) {
       // Nothing to verify: a plain decode step (logits left on the device
@@ -880,8 +881,8 @@ public:
         cfg.top_p == 1 && cfg.min_p == 0 && !st.reasoning_off &&
         !st.call_required &&
         pos + static_cast<std::size_t>(width) + 1 < max_context_;
-    std::array<std::uint64_t, Engine::kMaxDecodeBatch + 1> draws{};
-    std::array<g::TextRunnerToken, Engine::kMaxDecodeBatch> sampled{};
+    std::array<std::uint64_t, Engine::kMaxVerifyRows + 1> draws{};
+    std::array<g::TextRunnerToken, Engine::kMaxVerifyRows> sampled{};
     if (parallel) {
       auto ahead = working;
       for (int j = 0; j <= width; ++j) {

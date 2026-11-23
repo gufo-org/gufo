@@ -93,8 +93,8 @@ struct ConvResidArgs {
   // cap[(conv_off + c) * kVerifyRows + b] (CommitVerifyConv applies it).
   float* cap = nullptr;
 };
-/// Rows of one verification step (Engine::kMaxDecodeBatch).
-inline constexpr int kVerifyRows = 4;
+/// Rows of one verification step (Engine::kMaxVerifyRows).
+inline constexpr int kVerifyRows = 8;
 /// Batched (nb tokens): x, cur, blk are [nb][2304]; token b uses slot[b * 48].
 void ConvResid(hipStream_t s, const ConvResidArgs& a, int nb = 1);
 /// After a verification step of one session: every history of the 48 slots

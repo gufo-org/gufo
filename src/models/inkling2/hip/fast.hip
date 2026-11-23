@@ -3134,15 +3134,65 @@ void ProjMulti(hipStream_t s, const ProjSpec& p, const float* x, int ni,
         k_gemv_multi<2304, LPR, NIT, BW, 3>
             <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
     } else if (ni == 1) {
-      if (nb == 2)
-        k_gemv_multi<2304, LPR, NIT, BW, 1, 2>
-            <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
-      else if (nb == 3)
-        k_gemv_multi<2304, LPR, NIT, BW, 1, 3>
-            <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
-      else
-        k_gemv_multi<2304, LPR, NIT, BW, 1, 4>
-            <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
+      switch (nb) {
+        case 2:
+          k_gemv_multi<2304, LPR, NIT, BW, 1, 2>
+              <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
+          break;
+        case 3:
+          k_gemv_multi<2304, LPR, NIT, BW, 1, 3>
+              <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
+          break;
+        case 4:
+          k_gemv_multi<2304, LPR, NIT, BW, 1, 4>
+              <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
+          break;
+        case 5:
+          k_gemv_multi<2304, LPR, NIT, BW, 1, 5>
+              <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
+          break;
+        case 6:
+          k_gemv_multi<2304, LPR, NIT, BW, 1, 6>
+              <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
+          break;
+        case 7:
+          k_gemv_multi<2304, LPR, NIT, BW, 1, 7>
+              <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
+          break;
+        default: {
+          // eight: two launches of four (the eight-token instance needs so
+          // much scratch that every launch stalls)
+          MultiP mp2 = mp;
+          for (int i = 0; i < mp2.tn; ++i)
+            mp2.ty[i] += 4 * (size_t)mp2.tys[i];
+          k_gemv_multi<2304, LPR, NIT, BW, 1, 4>
+              <<<grid, BW * WS, 0, s>>>(mp, x, y, cum);
+          k_gemv_multi<2304, LPR, NIT, BW, 1, 4><<<grid, BW * WS, 0, s>>>(
+              mp2, x + 4 * (size_t)ldx, y + 4 * (size_t)ldy, cum);
+          break;
+        }
+      }
+    } else if (nb > 4) {
+      // three inputs per token: groups of three rows (and a last group of one
+      // or two), every row with its own arithmetic
+      for (int r0 = 0; r0 < nb;) {
+        const int g = nb - r0 >= 3 ? (nb - r0 == 4 ? 2 : 3) : nb - r0;
+        MultiP mg = mp;
+        for (int i = 0; i < mg.tn; ++i)
+          mg.ty[i] += r0 * (size_t)mg.tys[i];
+        const float* xg = x + r0 * (size_t)ldx;
+        float* yg = y + r0 * (size_t)ldy;
+        if (g == 3)
+          k_gemv_multi<2304, LPR, NIT, BW, 3, 3>
+              <<<grid, BW * WS, 0, s>>>(mg, xg, yg, cum);
+        else if (g == 2)
+          k_gemv_multi<2304, LPR, NIT, BW, 3, 2>
+              <<<grid, BW * WS, 0, s>>>(mg, xg, yg, cum);
+        else
+          k_gemv_multi<2304, LPR, NIT, BW, 3>
+              <<<grid, BW * WS, 0, s>>>(mg, xg, yg, cum);
+        r0 += g;
+      }
     } else {
       // three inputs per token: 4 tokens would need more than 64 KiB of LDS, so
       // they run as two pairs
@@ -3186,8 +3236,24 @@ void GemvQ8(hipStream_t s, int k, const void* w, const float* x, float* y,
         k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 3>
             <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
         break;
-      default:
+      case 4:
         k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 4>
+            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+        break;
+      case 5:
+        k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 5>
+            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+        break;
+      case 6:
+        k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 6>
+            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+        break;
+      case 7:
+        k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 7>
+            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+        break;
+      default:
+        k_gemv<FMT_Q8, 2304, LPR, NIT, BW, 8>
             <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
         break;
     }
@@ -3207,8 +3273,24 @@ void GemvQ8(hipStream_t s, int k, const void* w, const float* x, float* y,
         k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 3>
             <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
         break;
-      default:
+      case 4:
         k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 4>
+            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+        break;
+      case 5:
+        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 5>
+            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+        break;
+      case 6:
+        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 6>
+            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+        break;
+      case 7:
+        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 7>
+            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
+        break;
+      default:
+        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 8>
             <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
         break;
     }
@@ -3312,16 +3394,40 @@ void AttnDecode(hipStream_t s, const AttnArgs& a, int nb) {
 }
 void AttnDecodeRows(hipStream_t s, const AttnArgs& a, int nb) {
   const dim3 grid(8, a.nsplit, 1);
-  switch (nb) {
-    case 2:
-      ia::attn_decode_rows<4, 2><<<grid, 128, 0, s>>>(a);
-      break;
-    case 3:
-      ia::attn_decode_rows<4, 3><<<grid, 128, 0, s>>>(a);
-      break;
-    default:
-      ia::attn_decode_rows<4, 4><<<grid, 128, 0, s>>>(a);
-      break;
+  // up to 5 rows (15 query slots of 16) per launch: 6 to 8 rows as two groups
+  auto launch = [&](const AttnArgs& g, int n) {
+    switch (n) {
+      case 1:
+        ia::attn_decode<4><<<dim3(8, g.nsplit, 1), 128, 0, s>>>(g);
+        break;
+      case 2:
+        ia::attn_decode_rows<4, 2><<<grid, 128, 0, s>>>(g);
+        break;
+      case 3:
+        ia::attn_decode_rows<4, 3><<<grid, 128, 0, s>>>(g);
+        break;
+      case 4:
+        ia::attn_decode_rows<4, 4><<<grid, 128, 0, s>>>(g);
+        break;
+      default:
+        ia::attn_decode_rows<4, 5><<<grid, 128, 0, s>>>(g);
+        break;
+    }
+  };
+  if (nb <= 5) {
+    launch(a, nb);
+  } else {
+    const int first = (nb + 1) / 2;
+    launch(a, first);
+    AttnArgs b = a;
+    b.q += (size_t)first * a.ldp;
+    b.r += (size_t)first * a.ldp;
+    b.pos += first;
+    b.slot += (size_t)first * 48;
+    b.ws_o += (size_t)first * a.ws_tok * 128;
+    b.ws_m += (size_t)first * a.ws_tok;
+    b.ws_l += (size_t)first * a.ws_tok;
+    launch(b, nb - first);
   }
   ia::decode_reduce<<<dim3(24, 1, nb), 128, 0, s>>>(a);
   Chk("attn_decode_rows");

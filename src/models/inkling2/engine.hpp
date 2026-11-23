@@ -192,6 +192,8 @@ public:
   void Synchronize();
 
   static constexpr std::size_t kMaxDecodeBatch = 4;
+  /// Rows of one verification step (the anchor and up to 7 drafts).
+  static constexpr std::size_t kMaxVerifyRows = 8;
   /// One decode step (one token each) for up to 4 distinct sessions under a
   /// single lock. The runner's `AdvanceBatch` calls it. M3: one graph launch
   /// reads the weights once for all tokens (GEMV -> small GEMM over the tokens,
