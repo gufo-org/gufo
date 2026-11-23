@@ -3439,7 +3439,12 @@ void ProjMulti(hipStream_t s, const ProjSpec& p, const float* x, int ni,
       }
     }
   };
-  run(I<16>{}, I<4>{}, I<8>{});
+  // 4+ tokens: each block's quantized inputs take most of a CU's LDS, so
+  // blocks of 16 waves keep twice the loads in flight (rows' sums unchanged)
+  if (nb >= 4)
+    run(I<16>{}, I<4>{}, I<16>{});
+  else
+    run(I<16>{}, I<4>{}, I<8>{});
   Chk("proj_multi");
 }
 
@@ -3449,9 +3454,9 @@ void GemvQ8(hipStream_t s, int k, const void* w, const float* x, float* y,
   if (k == 2304) {
     // several tokens: two rows per wave (more loads in flight at the lower
     // occupancy); each row's dot product is the same
-    auto run = [&](auto nit) {
-      constexpr int LPR = 32, NIT = decltype(nit)::value, BW = 8,
-                    RPB = BW * (WS / LPR) * NIT;
+    auto run = [&](auto nit, auto bw) {
+      constexpr int LPR = 32, NIT = decltype(nit)::value,
+                    BW = decltype(bw)::value, RPB = BW * (WS / LPR) * NIT;
       const dim3 grid((m + RPB - 1) / RPB);
       switch (nb) {
         case 1:
@@ -3489,46 +3494,52 @@ void GemvQ8(hipStream_t s, int k, const void* w, const float* x, float* y,
       }
     };
     if (nb == 1)
-      run(I<1>{});
+      run(I<1>{}, I<8>{});
+    else if (nb < 4)
+      run(I<2>{}, I<8>{});
     else
-      run(I<2>{});
+      run(I<2>{}, I<16>{});
   } else if (k == 3072) {
-    constexpr int LPR = 16, NIT = 1, BW = 8, RPB = BW * (WS / LPR) * NIT;
-    const dim3 grid((m + RPB - 1) / RPB);
-    switch (nb) {
-      case 1:
-        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 1>
+    auto run = [&](auto bw) {
+      constexpr int LPR = 16, NIT = 1, BW = decltype(bw)::value,
+                    RPB = BW * (WS / LPR) * NIT;
+      const dim3 grid((m + RPB - 1) / RPB);
+      auto go = [&](auto nbc) {
+        constexpr int NB = decltype(nbc)::value;
+        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, NB>
             <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      case 2:
-        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 2>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      case 3:
-        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 3>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      case 4:
-        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 4>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      case 5:
-        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 5>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      case 6:
-        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 6>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      case 7:
-        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 7>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-      default:
-        k_gemv<FMT_Q8, 3072, LPR, NIT, BW, 8>
-            <<<grid, BW * WS, 0, s>>>(W, x, y, m, softcap, g_res);
-        break;
-    }
+      };
+      switch (nb) {
+        case 1:
+          go(I<1>{});
+          break;
+        case 2:
+          go(I<2>{});
+          break;
+        case 3:
+          go(I<3>{});
+          break;
+        case 4:
+          go(I<4>{});
+          break;
+        case 5:
+          go(I<5>{});
+          break;
+        case 6:
+          go(I<6>{});
+          break;
+        case 7:
+          go(I<7>{});
+          break;
+        default:
+          go(I<8>{});
+          break;
+      }
+    };
+    if (nb < 4)
+      run(I<8>{});
+    else
+      run(I<16>{});
   } else {
     throw std::runtime_error("inkling2 fast: unsupported gemv K");
   }
