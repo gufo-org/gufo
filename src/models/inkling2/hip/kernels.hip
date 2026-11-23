@@ -412,7 +412,8 @@ __global__ void rmsnorm_k(const float* __restrict__ x, int ldx,
 }
 
 __global__ void mix_k(MixStates st, const float* __restrict__ query, int nq,
-                      int dim, float* __restrict__ out, float eps) {
+                      int dim, float* __restrict__ out, float eps,
+                      float* __restrict__ inv_out, int t_count) {
   const int t = blockIdx.x;
   const int wid = threadIdx.x / kWave, lane = threadIdx.x % kWave;
   constexpr int kWaves = 8;
@@ -473,6 +474,23 @@ __global__ void mix_k(MixStates st, const float* __restrict__ query, int nq,
         if (j < st.n)
           a += score[q][j] * inv[j] * x[j];
       out[(static_cast<size_t>(t) * nq + q) * dim + i] = a;
+    }
+  }
+  if (inv_out) {
+    // inv_out[q][t]: the inverse RMS of output row q, summed as the loop
+    // controllers' gate prologue sums it (lane-strided, then a wave sum).
+    __threadfence_block();
+    __syncthreads();
+    if (wid < nq) {
+      const float* o = out + (static_cast<size_t>(t) * nq + wid) * dim;
+      float b = 0.f;
+      for (int i = lane; i < dim; i += kWave) {
+        float v = o[i];
+        b += v * v;
+      }
+      b = wave_sum(b);
+      if (lane == 0)
+        inv_out[static_cast<size_t>(wid) * t_count + t] = rsqrtf(b / dim + eps);
     }
   }
 }
@@ -723,10 +741,11 @@ void Conv(hipStream_t s, const float* x, const float* state, const float* w,
 }
 
 void Mix(hipStream_t s, const MixStates& states, const float* query, int nq,
-         int dim, int t_count, float* out, float eps) {
+         int dim, int t_count, float* out, float eps, float* inv_out) {
   if (nq > 4 || states.n > 8)
     throw std::runtime_error("inkling2: mix too large");
-  mix_k<<<t_count, 256, 0, s>>>(states, query, nq, dim, out, eps);
+  mix_k<<<t_count, 256, 0, s>>>(states, query, nq, dim, out, eps, inv_out,
+                                t_count);
   Check(hipGetLastError(), "mix");
 }
 void ConvStateUpdate(hipStream_t s, const float* x, float* state, int t_count,

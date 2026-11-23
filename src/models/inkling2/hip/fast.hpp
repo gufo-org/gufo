@@ -274,6 +274,9 @@ struct CtlPJob {
   const float* forget;  // [2304][64]
   float* g64;           // [T][64] scratch
   float* out;           // [T][2304]
+  // optional [T] inverse RMS of each msg row (from hip::Mix), else computed
+  // here
+  const float* minv = nullptr;
 };
 struct CtlPJobs {
   CtlPJob j[3];

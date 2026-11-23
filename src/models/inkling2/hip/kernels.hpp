@@ -64,7 +64,7 @@ struct MixStates {
   int n;
 };
 void Mix(hipStream_t s, const MixStates& states, const float* query, int nq,
-         int dim, int t_count, float* out, float eps);
+         int dim, int t_count, float* out, float eps, float* inv_out = nullptr);
 
 /// tau[t] = 1 + alpha * ln(max(1, (pos0 + t + 1) / floor)).
 void LogScale(hipStream_t s, float* tau, int pos0, int t_count, float floor_,

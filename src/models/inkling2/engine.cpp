@@ -149,6 +149,7 @@ struct Engine::Impl {
   hipStream_t ps = nullptr;
   hipEvent_t ev_fork = nullptr, ev_join = nullptr, ev_bank = nullptr;
   hipEvent_t ev_msg[2] = {};
+  const float* msg_inv = nullptr;  // [4][T] inverse RMS of the visit's msgs
   DeviceWeights dw;
   std::vector<void*> scratch_allocs;
   std::array<float*, 24> msgq{};
@@ -162,8 +163,8 @@ struct Engine::Impl {
   float *cur, *prelude, *bankout, *tau;
   float* blocks[6];
   float* bank[4];
-  float *mixed, *ctl[3], *in[3], *msgs, *msgs_next, *gbuf, *gate64, *gainb,
-      *forgetb;
+  float *mixed, *ctl[3], *in[3], *msgs, *msgs_next, *minv[2], *gbuf, *gate64,
+      *gainb, *forgetb;
   float *Qb, *Kb, *Vb, *Rb, *Gb, *Sb, *Ob, *AOp, *AO, *h, *hn, *mixf, *rlog,
       *wts;
   float *dynK, *dynV, *gu, *act, *ye, *moe;
@@ -240,6 +241,7 @@ struct Engine::Impl {
       *d_g64, *d_proj, *d_sink, *d_dyn, *d_ob, *d_ao, *d_h, *d_mixf, *d_hn,
       *d_moe, *d_rlog, *d_wts8, *d_act8, *d_ws_o, *d_ws_m, *d_ws_l;
   static constexpr int kMaxB = 4;  // sessions per decode batch
+  static constexpr int kMsgInvTokens = 1024;
   static constexpr int kWideTileTokens =
       256;  // ubatches at least this long use 128-token GEMM tiles
   // token strides (floats) of the decode buffers
@@ -411,6 +413,8 @@ struct Engine::Impl {
       b = NewBuf(u * kEmbd);
     msgs = NewBuf(u * 4 * kEmbd);
     msgs_next = NewBuf(u * 4 * kEmbd);
+    minv[0] = NewBuf(u * 4);
+    minv[1] = NewBuf(u * 4);
     gbuf = NewBuf(u * 2 * kEmbd);
     gate64 = NewBuf(u * 64 * 3);
     gainb = NewBuf(u * kEmbd);
@@ -722,11 +726,16 @@ struct Engine::Impl {
       for (int j = 0; j < 3; ++j) {
         const LoopController& c = L.loop[kStreamQ + j];
         cj.j[j] = {
-            inp[j].p,        inp[j].ld,
-            msg + j * kEmbd, 4 * kEmbd,
-            DF(c.down),      DF(c.gain),
-            DF(c.forget),    gate64 + static_cast<std::size_t>(j) * U * 64,
-            ctl[j]};
+            inp[j].p,
+            inp[j].ld,
+            msg + j * kEmbd,
+            4 * kEmbd,
+            DF(c.down),
+            DF(c.gain),
+            DF(c.forget),
+            gate64 + static_cast<std::size_t>(j) * U * 64,
+            ctl[j],
+            msg_inv ? msg_inv + static_cast<std::size_t>(j) * T : nullptr};
       }
       fs::CtlPrefill(s, cj, T, cfg->rms_eps);
       for (int j = 0; j < 3; ++j)
@@ -911,9 +920,16 @@ struct Engine::Impl {
       const LoopController& c = L.loop[kStreamFfn];
       fs::CtlPJobs cj{};
       cj.n = 1;
-      cj.j[0] = {mixf,         kEmbd,      msg + 3 * kEmbd,
-                 4 * kEmbd,    DF(c.down), DF(c.gain),
-                 DF(c.forget), gate64,     ctl[0]};
+      cj.j[0] = {mixf,
+                 kEmbd,
+                 msg + 3 * kEmbd,
+                 4 * kEmbd,
+                 DF(c.down),
+                 DF(c.gain),
+                 DF(c.forget),
+                 gate64,
+                 ctl[0],
+                 msg_inv ? msg_inv + 3 * static_cast<std::size_t>(T) : nullptr};
       fs::CtlPrefill(s, cj, T, cfg->rms_eps);
       hin = ctl[0];
     }
@@ -1641,7 +1657,11 @@ struct Engine::Impl {
         for (int i = 0; i < bank_n; ++i)
           st.ptr[st.n++] = bank[i];
         st.ptr[st.n++] = bankout;
-        kk::Mix(ps, st, msgq[il], 4, kEmbd, T, mbuf[b], cfg->rms_eps);
+        // Long ubatches also take the messages' inverse RMS from the mix
+        // (the controllers' gates then skip that half of their prologue); on
+        // short ones the longer side-stream chain would delay the next layer.
+        kk::Mix(ps, st, msgq[il], 4, kEmbd, T, mbuf[b], cfg->rms_eps,
+                T >= kMsgInvTokens ? minv[b] : nullptr);
         Check(hipEventRecord(ev_msg[b], ps), "msgs");
       };
       if (pass > 0)
@@ -1659,6 +1679,7 @@ struct Engine::Impl {
           const int slot = static_cast<int>(cfg->n_phys) +
                            (pass - 1) * core_len +
                            (ip - static_cast<int>(cfg->core_start));
+          msg_inv = T >= kMsgInvTokens ? minv[b] : nullptr;
           Layer(ss, ip, slot, mbuf[b], [&] {
             if (more)
               launch_msgs(ip + 1);

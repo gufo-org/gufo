@@ -998,6 +998,7 @@ struct GateP {
   float* out;
   int ldo;
   int rows;  // valid output rows of the tile range (<= 64 per tile; 0 = all)
+  const float* inv2 = nullptr;  // precomputed per-token msg inverse RMS
 };
 struct GateJobs {
   GateP j[3];
@@ -1103,14 +1104,15 @@ __global__ void __launch_bounds__(256)
         float v = p.x[(size_t)t * p.ldx + i];
         a += v * v;
       }
-      for (int i = lane; i < p.k2; i += 32) {
-        float v = p.msg[(size_t)t * p.ldm + i];
-        b += v * v;
-      }
+      if (!p.inv2)
+        for (int i = lane; i < p.k2; i += 32) {
+          float v = p.msg[(size_t)t * p.ldm + i];
+          b += v * v;
+        }
       a = wsum(a);
       b = wsum(b);
       s1 = rsqrtf(a / p.k1 + eps);
-      s2 = p.k2 ? rsqrtf(b / p.k2 + eps) : 1.f;
+      s2 = p.inv2 ? p.inv2[t] : p.k2 ? rsqrtf(b / p.k2 + eps) : 1.f;
     }
     if (lane == 0) {
       inv[0][tk] = s1;
@@ -1186,8 +1188,10 @@ template<int TT, int RB>
 __global__ void __launch_bounds__(256)
     k_gate_v2(GateJobs jobs, int T, float eps) {
   constexpr int KC = 32, LS = KC + 4, NT = TT / 16, NR = RB / 16;
-  constexpr int WL = RB * KC / 4 / 256, XL = TT * KC / 4 / 256;
-  static_assert(WL >= 1 && XL >= 1, "tile too small");
+  // float4 loads per thread and chunk (XL = 1 with TT = 16: half the threads)
+  constexpr int WL = RB * KC / 4 / 256,
+                XL = TT * KC / 4 >= 256 ? TT * KC / 4 / 256 : 1;
+  static_assert(WL >= 1, "tile too small");
   const GateP& p = jobs.j[blockIdx.z];
   __shared__ float Ws[2][RB * LS];
   __shared__ float Xs[2][TT * LS];
@@ -1213,12 +1217,13 @@ __global__ void __launch_bounds__(256)
           float v = xr[q][i];
           a[q] += v * v;
         }
-      for (int i = lane; i < p.k2; i += 32)
+      if (!p.inv2)
+        for (int i = lane; i < p.k2; i += 32)
 #pragma unroll
-        for (int q = 0; q < TW; ++q) {
-          float v = mr[q][i];
-          b[q] += v * v;
-        }
+          for (int q = 0; q < TW; ++q) {
+            float v = mr[q][i];
+            b[q] += v * v;
+          }
     }
 #pragma unroll
     for (int q = 0; q < TW; ++q) {
@@ -1226,7 +1231,9 @@ __global__ void __launch_bounds__(256)
       if (p.rms) {
         const float sa = wsum(a[q]), sb = wsum(b[q]);
         s1 = rsqrtf(sa / p.k1 + eps);
-        s2 = p.k2 ? rsqrtf(sb / p.k2 + eps) : 1.f;
+        s2 = p.inv2 ? p.inv2[min(t0 + wave * TW + q, T - 1)]
+             : p.k2 ? rsqrtf(sb / p.k2 + eps)
+                    : 1.f;
       }
       if (lane == 0) {
         inv[0][wave * TW + q] = s1;
@@ -1250,7 +1257,7 @@ __global__ void __launch_bounds__(256)
 #pragma unroll
     for (int m = 0; m < XL; ++m) {
       const int i = tid + 256 * m, tk = i >> 3, c4 = i & 7;
-      const int t = min(t0 + tk, T - 1);
+      const int t = min(t0 + min(tk, TT - 1), T - 1);
       xv[m] = *(const float4*)(src + (size_t)t * ld + kk + c4 * 4);
     }
   };
@@ -1264,6 +1271,8 @@ __global__ void __launch_bounds__(256)
 #pragma unroll
     for (int m = 0; m < XL; ++m) {
       const int i = tid + 256 * m, tk = i >> 3, c4 = i & 7;
+      if (tk >= TT)
+        break;
       const float sc = inv[seg2 ? 1 : 0][tk];
       float4 v = xv[m];
       v.x = v.x * sc;
@@ -3259,8 +3268,8 @@ void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
   GateJobs g{};
   for (int i = 0; i < jobs.n; ++i) {
     const CtlPJob& c = jobs.j[i];
-    g.j[i] = {c.x,  c.ldx, c.msg, c.ldm, c.down, 4608,
-              2304, 2304,  1,     c.g64, 64,     0};
+    g.j[i] = {c.x,  c.ldx, c.msg, c.ldm, c.down, 4608,  2304,
+              2304, 1,     c.g64, 64,    0,      c.minv};
   }
   // One job has too few token blocks for k_gate_p64's serial chunks; three
   // jobs keep the GPU busy and k_gate_p64 moves fewer bytes.
