@@ -1,0 +1,47 @@
+name: Feature
+description: Propose something Gufo can't do today, such as a new API, command or cache capability.
+type: Feature
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Models and model-specific features belong in extensions; see
+        [core or extension](https://github.com/gufo-org/gufo/blob/main/docs/writing-extensions.md#core-or-extension).
+        To make existing behavior faster or better, use **Enhancement** instead.
+        For a large change, consider starting in
+        [Discussions](https://github.com/gufo-org/gufo/discussions/categories/ideas)
+        to gather feedback first.
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Where does it belong?
+      options:
+        - Core, used by more than one model
+        - Extension API, needed by an extension
+        - An official model
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you want to do and why you can't today. Who needs it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What Gufo should do from the user's side, such as commands, flags or API fields.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Workarounds you use today, or how other engines solve it.
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: The behavior or test that shows the feature is complete.

@@ -1,0 +1,60 @@
+name: Bug report
+description: Gufo crashes, returns a wrong result, or behaves unlike its documentation.
+type: Bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search [open issues](https://github.com/gufo-org/gufo/issues) first. For a
+        community extension, report to its author instead.
+  - type: input
+    id: version
+    attributes:
+      label: Gufo version
+      description: Output of `gufo --version`.
+      placeholder: gufo version 0.36.0 (abc1234)
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model and file
+      description: Model name and the exact GGUF or weight file, if a model is involved.
+      placeholder: qwen3.8-flash-next, Qwen3.8-Flash-Next-UD-Q4_K_XL.gguf
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The command you ran and the request you sent, small enough for us to run.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The server or command output around the failure.
+      render: text
+  - type: textarea
+    id: diagnose
+    attributes:
+      label: Diagnostics
+      description: Output of `gufo diagnose`. Remove anything you consider private.
+      render: text
+    validations:
+      required: true

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or performance help
+    url: https://github.com/gufo-org/gufo/discussions/categories/q-a
+    about: Ask how to run, tune or measure Gufo in Discussions.
+  - name: Model request or new model
+    url: https://github.com/gufo-org/gufo/blob/main/docs/writing-extensions.md#core-or-extension
+    about: New models start as extensions. Read the guide, then propose it in Discussions (Ideas).
+  - name: Security vulnerability
+    url: https://github.com/gufo-org/gufo/security/advisories/new
+    about: Report vulnerabilities privately, as SECURITY.md describes.
