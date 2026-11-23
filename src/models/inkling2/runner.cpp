@@ -24,6 +24,7 @@
 #include <gufo/ext/gguf_identity.hpp>
 #include <gufo/ext/gguf_reader.hpp>
 #include <gufo/ext/host_budget.hpp>
+#include <gufo/ext/image.hpp>
 #include <gufo/ext/prompt_lookup.hpp>
 #include <gufo/ext/sampling.hpp>
 #include <gufo/ext/sha256.hpp>
@@ -41,7 +42,6 @@
 #include <thread>
 #include <vector>
 
-#include "src/core/image.hpp"
 #include "src/models/inkling2/cache_adapter.hpp"
 #include "src/models/inkling2/dspark_policy.hpp"
 #include "src/models/inkling2/engine.hpp"

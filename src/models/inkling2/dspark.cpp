@@ -4,10 +4,10 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <gufo/ext/gguf_reader.hpp>
 #include <stdexcept>
 #include <string_view>
 
-#include "src/core/gguf_reader.hpp"
 #include "src/models/inkling2/hip/dspark.hpp"
 #include "src/models/inkling2/hip/fast.hpp"
 #include "src/models/inkling2/hip/kernels.hpp"

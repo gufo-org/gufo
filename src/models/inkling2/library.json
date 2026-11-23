@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "inkling2",
+  "target": "gufo_inkling2",
+  "kind": "static",
+  "purpose": "Inkling 2 Mini host tier (configuration, probe, weight table, tokenizer, chat template and tool dialect) under its ROCm runtime gufo_inkling2_hip.",
+  "consumers": []
+}
