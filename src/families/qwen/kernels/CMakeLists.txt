@@ -77,3 +77,13 @@ set_property(
     ${CMAKE_CURRENT_SOURCE_DIR}/prefill_quant_wave64.hip
   TARGET_DIRECTORY gufo_qwen_kernels
   APPEND PROPERTY COMPILE_OPTIONS ${GUFO_CLANG_OPTION}-fno-slp-vectorize)
+# gfx11 true16 codegen copies the high half of every 16-bit WMMA operand
+# register onto itself before each use in the FP16 prefill GEMMs (a
+# v_lshrrev_b32 + v_mov_b16 pair per word, ~128 VALU per 64 WMMA). Without
+# true16 the same loads and WMMAs run without them; arithmetic is unchanged.
+# The host compile ignores the AMDGPU-only feature with a warning.
+set_property(
+  SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill_fp16.hip
+  TARGET_DIRECTORY gufo_qwen_kernels
+  APPEND PROPERTY COMPILE_OPTIONS
+  "-Xclang=-target-feature;-Xclang=-real-true16")
