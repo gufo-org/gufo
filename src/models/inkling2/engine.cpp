@@ -2326,6 +2326,37 @@ int Engine::Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
                              confidence, more, coupled);
 }
 
+void Engine::ProposeBatch(std::span<ProposeRequest> requests) {
+  const std::lock_guard lock(mutex_);
+  if (requests.size() > static_cast<std::size_t>(Drafter::kMaxSessions))
+    throw std::runtime_error("inkling2: proposal batch too large");
+  std::array<Drafter::Request, Drafter::kMaxSessions> r{};
+  for (std::size_t g = 0; g < requests.size(); ++g) {
+    ProposeRequest& q = requests[g];
+    if (!DraftReady(*q.session))
+      throw std::runtime_error("inkling2: no draft context at this position");
+    if (q.anchor < 0 ||
+        static_cast<std::uint32_t>(q.anchor) >= weights_.config.n_vocab_text)
+      throw std::runtime_error("inkling2: token id out of range");
+    for (std::size_t h = 0; h < g; ++h)
+      if (requests[h].session == q.session)
+        throw std::runtime_error("inkling2: duplicate session in proposals");
+    r[g] = {.st = &q.session->draft_,
+            .anchor = q.anchor,
+            .pos = q.session->pos_,
+            .n = q.n,
+            .out = q.out,
+            .confidence = q.confidence,
+            .more = q.more ? &q.more : nullptr,
+            .coupled = q.coupled};
+  }
+  const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+  impl_->dsp->ProposeBatch(
+      impl_->ds, std::span<Drafter::Request>(r.data(), requests.size()));
+  for (std::size_t g = 0; g < requests.size(); ++g)
+    requests[g].done = r[g].done;
+}
+
 void Engine::Step(Session& s, std::int32_t token, std::int32_t* argmax) {
   const std::lock_guard lock(mutex_);
   if (s.pos_ + 1 > max_context_)

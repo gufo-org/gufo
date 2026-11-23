@@ -111,7 +111,7 @@ void Argmax(hipStream_t s, const float* logits, int n, const int* map,
 /// y[r][m] = W[m] . x[r] for the 8 block rows: W Q8_0 [M][K], x F16 [8][K]
 /// (K a multiple of 2304 or 3072, M of 32).
 void Gemv8(hipStream_t s, const void* w, int m, int k, const _Float16* x,
-           float* y);
+           float* y, int sessions = 1);
 
 /// Coupled sampling of one proposal: p over the n proposal-head rows (in
 /// token order) = softmax(softcap(logits) / temperature), rows below the

@@ -296,6 +296,40 @@ int main(int argc, char** argv) {
         got.size(), same, accepted, drafted);
     failures += same != static_cast<int>(got.size());
   }
+  if (!dspark.empty()) {
+    // proposals of several sessions in one drafter pass equal lone ones
+    std::vector<std::unique_ptr<gufo::models::inkling2::Session>> ss;
+    std::vector<std::int32_t> anchors;
+    for (int g = 0; g < 3; ++g) {
+      std::vector<std::int32_t> q = ids;
+      for (int i = 0; i < 300 * g; ++i)
+        q.push_back(ids[static_cast<std::size_t>(i) % ids.size()]);
+      ss.push_back(engine->NewSession());
+      engine->Forward(*ss.back(), q);
+      anchors.push_back(Argmax(ss.back()->logits()));
+    }
+    std::int32_t solo[3][8] = {}, both[3][8] = {};
+    float csolo[3][8] = {}, cboth[3][8] = {};
+    int nsolo[3] = {};
+    for (int g = 0; g < 3; ++g)
+      nsolo[g] = engine->Propose(*ss[g], anchors[g], 7, solo[g], csolo[g]);
+    std::vector<Engine::ProposeRequest> rq(3);
+    for (int g = 0; g < 3; ++g)
+      rq[g] = {.session = ss[g].get(),
+               .anchor = anchors[g],
+               .n = 7,
+               .out = both[g],
+               .confidence = cboth[g]};
+    engine->ProposeBatch(rq);
+    int bad = 0;
+    for (int g = 0; g < 3; ++g)
+      bad += rq[g].done != nsolo[g] ||
+             std::memcmp(solo[g], both[g], sizeof solo[g]) != 0 ||
+             std::memcmp(csolo[g], cboth[g], sizeof csolo[g]) != 0;
+    std::printf("propose batch: 3 sessions, %d differ from lone proposals\n",
+                bad);
+    failures += bad != 0;
+  }
   std::printf(failures ? "FAIL\n" : "ALL PASS\n");
   return failures ? 1 : 0;
 }

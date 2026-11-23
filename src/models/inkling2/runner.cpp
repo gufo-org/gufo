@@ -1082,6 +1082,8 @@ public:
         const std::lock_guard lock(dsp_mutex_);
         draft = batch_backoff_[B].Draft();
       }
+      std::vector<Engine::ProposeRequest> reqs;
+      std::vector<Lane*> owners;
       for (auto& l : lanes) {
         if (!draft)
           break;
@@ -1098,32 +1100,48 @@ public:
             l.n = 0;
             continue;
           }
-          const DsparkCalibration& cal = l.mode.coupled ? cal_coupled_ : cal_;
-          const auto ts = Clock::now();
-          l.n = engine_->Propose(
-              *l.ss, l.anchor, l.n, l.drafts, l.conf,
-              [&](int i, const float* p) {
-                // the survival of the first i drafts against the share of a
-                // plain step's tokens the extra rows would cost
-                const std::lock_guard lock(dsp_mutex_);
-                double sv = 1;
-                for (int k = 0; k < i; ++k)
-                  sv *= cal.Estimate(p[k]);
-                const double per_token = costs_batch_.Verify(B) / B;
-                const double extra =
-                    costs_batch_.Verify(std::min(B + i, 8)) -
-                    costs_batch_.Verify(std::min(B + i - 1, 8));
-                return sv * per_token > extra;
-              },
-              l.mode.coupled ? &l.mode.cp : nullptr);
-          draft_ms +=
-              std::chrono::duration<double, std::milli>(Clock::now() - ts)
-                  .count();
-          drafted = drafted || l.n > 0;
+          const DsparkCalibration* cal = l.mode.coupled ? &cal_coupled_ : &cal_;
+          reqs.push_back({.session = l.ss,
+                          .anchor = l.anchor,
+                          .n = l.n,
+                          .out = l.drafts,
+                          .confidence = l.conf,
+                          // keep drafting while the first i drafts' survival
+                          // pays for the extra rows' share of a plain step
+                          .more =
+                              [this, cal, B](int i, const float* p) {
+                                const std::lock_guard lock(dsp_mutex_);
+                                double sv = 1;
+                                for (int k = 0; k < i; ++k)
+                                  sv *= cal->Estimate(p[k]);
+                                const double per_token =
+                                    costs_batch_.Verify(B) / B;
+                                const double extra =
+                                    costs_batch_.Verify(std::min(B + i, 8)) -
+                                    costs_batch_.Verify(std::min(B + i - 1, 8));
+                                return sv * per_token > extra;
+                              },
+                          .coupled = l.mode.coupled ? &l.mode.cp : nullptr});
+          owners.push_back(&l);
         } catch (...) {
           steps[l.i].failure = std::current_exception();
           l.n = -1;  // dropped below
         }
+      }
+      if (!reqs.empty()) {
+        const auto ts = Clock::now();
+        try {
+          engine_->ProposeBatch(reqs);
+          for (std::size_t k = 0; k < reqs.size(); ++k) {
+            owners[k]->n = reqs[k].done;
+            drafted = drafted || reqs[k].done > 0;
+          }
+        } catch (...) {
+          for (auto* o : owners)
+            o->n = 0;  // decode without drafts
+        }
+        draft_ms = std::chrono::duration<double, std::milli>(Clock::now() - ts)
+                       .count();
       }
       std::erase_if(lanes, [](const Lane& l) { return l.n < 0; });
     }

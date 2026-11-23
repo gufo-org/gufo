@@ -398,7 +398,11 @@ __global__ void __launch_bounds__(256)
   constexpr int NBK = KC / 32, RW = 4;
   __shared__ __attribute__((aligned(16))) _Float16 xs[kBlock][KC];
   const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
-  const int r0 = (blockIdx.x * 8 + wave) * RW;
+  // blockIdx.x: the session (its 8 rows of x and y); the sessions of one
+  // weight block run next to each other, so the later ones read it from L2.
+  const int r0 = (blockIdx.y * 8 + wave) * RW;
+  x += (size_t)blockIdx.x * kBlock * K;
+  y += (size_t)blockIdx.x * kBlock * M;
   const size_t rb = (size_t)(K / 32) * 34;
   float acc[RW][kBlock];
 #pragma unroll
@@ -725,8 +729,7 @@ void MarkovStep(hipStream_t s, const MarkovArgs& a) {
 }
 void LrLogits(hipStream_t s, const _Float16* pt, const float* cb,
               const float* base, const float* lat, float* logits, int n) {
-  k_lr_logits<<<(n / 2 + 255) / 256, 256, 0, s>>>(pt, cb, base, lat, logits,
-                                                  n);
+  k_lr_logits<<<(n / 2 + 255) / 256, 256, 0, s>>>(pt, cb, base, lat, logits, n);
   Chk("lr logits");
 }
 void Argmax(hipStream_t s, const float* logits, int n, const int* map,
@@ -737,14 +740,14 @@ void Argmax(hipStream_t s, const float* logits, int n, const int* map,
   Chk("argmax");
 }
 void Gemv8(hipStream_t s, const void* w, int m, int k, const _Float16* x,
-           float* y) {
+           float* y, int sessions) {
   const auto* W = static_cast<const uint8_t*>(w);
   if (m % 32)
     throw std::runtime_error("inkling2 dspark: gemv8 shape");
   if (k % 2304 == 0)
-    k_gemv8<2304><<<m / 32, 256, 0, s>>>(W, m, k, x, y);
+    k_gemv8<2304><<<dim3(sessions, m / 32), 256, 0, s>>>(W, m, k, x, y);
   else if (k == 3072)
-    k_gemv8<3072><<<m / 32, 256, 0, s>>>(W, m, k, x, y);
+    k_gemv8<3072><<<dim3(sessions, m / 32), 256, 0, s>>>(W, m, k, x, y);
   else
     throw std::runtime_error("inkling2 dspark: gemv8 shape");
   Chk("gemv8");

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -89,6 +90,22 @@ public:
   int Propose(hipStream_t s, State& st, std::int32_t anchor, std::size_t pos,
               int n, std::int32_t* out, float* confidence = nullptr,
               const More& more = {}, const Coupled* coupled = nullptr);
+  /// Proposals of several sessions at once (up to kMaxSessions): each
+  /// request's drafts are those a lone Propose gives, and every weight row is
+  /// read once for all of them.
+  static constexpr int kMaxSessions = 4;
+  struct Request {
+    State* st = nullptr;
+    std::int32_t anchor = 0;
+    std::size_t pos = 0;
+    int n = 0;
+    std::int32_t* out = nullptr;
+    float* confidence = nullptr;
+    const More* more = nullptr;
+    const Coupled* coupled = nullptr;
+    int done = 0;  // out: drafts written
+  };
+  void ProposeBatch(hipStream_t s, std::span<Request> requests);
 
 private:
   Drafter() = default;

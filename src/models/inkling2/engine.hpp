@@ -251,6 +251,19 @@ public:
   /// One decode step of `token` that leaves the logits on the device (the
   /// session copies them when read) and writes their argmax (the greedy
   /// sampler's choice): Forward of one token without the copy.
+  /// Proposals of several distinct sessions in one drafter pass (up to
+  /// Drafter::kMaxSessions); each one's drafts are those Propose gives it.
+  struct ProposeRequest {
+    Session* session = nullptr;
+    std::int32_t anchor = 0;
+    int n = 0;
+    std::int32_t* out = nullptr;
+    float* confidence = nullptr;
+    Drafter::More more;
+    const Drafter::Coupled* coupled = nullptr;
+    int done = 0;  // out
+  };
+  void ProposeBatch(std::span<ProposeRequest> requests);
   void Step(Session& s, std::int32_t token, std::int32_t* argmax);
 
   /// Optional per-visit hidden-state tap for bisecting against llama.cpp:

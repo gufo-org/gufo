@@ -213,22 +213,23 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     }
     d->weight_bytes_ = tot;
     constexpr int B = dsp::kBlock;
-    I.x = I.Alloc<float>(B * kE);
-    I.h = I.Alloc<float>(B * kE);
-    I.h16 = I.Alloc<_Float16>(B * kE);
-    I.q = I.Alloc<float>(B * 3072);
-    I.k = I.Alloc<float>(B * 1024);
-    I.v = I.Alloc<float>(B * 1024);
-    I.o16 = I.Alloc<_Float16>(B * 3072);
-    I.y = I.Alloc<float>(B * kE);
-    I.g = I.Alloc<float>(B * 9216);
-    I.u = I.Alloc<float>(B * 9216);
-    I.a16 = I.Alloc<_Float16>(B * 9216);
-    I.logits = I.Alloc<float>(static_cast<std::size_t>(target.vocab));
-    I.state = I.Alloc<float>(256);
-    I.joint = I.Alloc<float>(1024);
-    I.ws = I.Alloc<float>(3 * 128 + 1);
-    I.d_conf = I.Alloc<float>(8);
+    constexpr int S = kMaxSessions;  // ProposeBatch: a slice per session
+    I.x = I.Alloc<float>(S * B * kE);
+    I.h = I.Alloc<float>(S * B * kE);
+    I.h16 = I.Alloc<_Float16>(S * B * kE);
+    I.q = I.Alloc<float>(S * B * 3072);
+    I.k = I.Alloc<float>(S * B * 1024);
+    I.v = I.Alloc<float>(S * B * 1024);
+    I.o16 = I.Alloc<_Float16>(S * B * 3072);
+    I.y = I.Alloc<float>(S * B * kE);
+    I.g = I.Alloc<float>(S * B * 9216);
+    I.u = I.Alloc<float>(S * B * 9216);
+    I.a16 = I.Alloc<_Float16>(S * B * 9216);
+    I.logits = I.Alloc<float>(static_cast<std::size_t>(S) * Impl::kHeadRows);
+    I.state = I.Alloc<float>(S * 256);
+    I.joint = I.Alloc<float>(S * 1024);
+    I.ws = I.Alloc<float>(S * (3 * 128 + 1));
+    I.d_conf = I.Alloc<float>(S * 8);
     {
       // the kHeadRows text tokens with the largest markov_w1 rows
       const auto& w1t =
@@ -300,7 +301,8 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
       kk::Gemm(nullptr, kk::kTQ8_0, I.head, R, kE, dx, kE, dout, R, 257);
       I.pt = I.Alloc<_Float16>(static_cast<std::size_t>(256) * R);
       I.cb = I.Alloc<float>(static_cast<std::size_t>(R));
-      I.base = I.Alloc<float>(static_cast<std::size_t>(dsp::kBlock) * R);
+      I.base = I.Alloc<float>(static_cast<std::size_t>(kMaxSessions) *
+                              dsp::kBlock * R);
       dsp::ToHalf(nullptr, dout, static_cast<std::size_t>(256) * R, I.pt);
       Check(hipMemcpy(I.cb, dout + static_cast<std::size_t>(256) * R,
                       static_cast<std::size_t>(R) * 4, hipMemcpyDeviceToDevice),
@@ -317,18 +319,20 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     I.mix16 =
         I.Alloc<_Float16>(static_cast<std::size_t>(Impl::kMaxInject) * 3 * kE);
     I.ikv = I.Alloc<float>(static_cast<std::size_t>(Impl::kMaxInject) * 2048);
-    I.d_anchor = I.Alloc<int>(1);
-    I.d_pos = I.Alloc<int>(1);
-    I.d_prev = I.Alloc<int>(1);
-    I.d_tokens = I.Alloc<int>(8);
+    I.d_anchor = I.Alloc<int>(kMaxSessions);
+    I.d_pos = I.Alloc<int>(kMaxSessions);
+    I.d_prev = I.Alloc<int>(kMaxSessions);
+    I.d_tokens = I.Alloc<int>(kMaxSessions * 8);
     I.it_n = I.Alloc<int>(1);
     I.it_e = I.Alloc<int>(Impl::kMaxInject / 64);
     I.it_s = I.Alloc<int>(Impl::kMaxInject / 64);
     I.it_c = I.Alloc<int>(Impl::kMaxInject / 64);
     I.blk_items = I.Alloc<int>(4);
-    Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_in), 4 * sizeof(int)),
+    Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_in),
+                        2 * kMaxSessions * sizeof(int)),
           "pinned");
-    Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_out), 16 * sizeof(float)),
+    Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_out),
+                        16 * kMaxSessions * sizeof(float)),
           "pinned");
     I.small_items = I.Alloc<int>(8 * 4);
     {
@@ -444,97 +448,160 @@ int Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
                      std::size_t pos, int n, std::int32_t* out,
                      float* confidence, const More& more,
                      const Coupled* coupled) {
+  Request r{.st = &st,
+            .anchor = anchor,
+            .pos = pos,
+            .n = n,
+            .out = out,
+            .confidence = confidence,
+            .more = more ? &more : nullptr,
+            .coupled = coupled};
+  ProposeBatch(s, std::span<Request>(&r, 1));
+  return r.done;
+}
+
+void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
   Impl& I = *impl_;
-  if (n <= 0)
-    return 0;
-  n = std::min(n, kMaxDraft);
+  const int S = static_cast<int>(req.size());
+  if (S < 1 || S > kMaxSessions)
+    throw std::runtime_error("inkling2 dspark: bad proposal batch");
   constexpr int B = dsp::kBlock;
-  I.h_in[0] = anchor;
-  I.h_in[1] = static_cast<int>(pos);
-  Check(hipMemcpyAsync(I.d_anchor, I.h_in, 4, hipMemcpyHostToDevice, s),
+  constexpr std::size_t R = Impl::kHeadRows;
+  int nmax = 0;
+  for (int g = 0; g < S; ++g) {
+    req[g].n = std::clamp(req[g].n, 0, kMaxDraft);
+    req[g].done = 0;
+    nmax = std::max(nmax, req[g].n);
+    I.h_in[g] = req[g].anchor;
+    I.h_in[kMaxSessions + g] = static_cast<int>(req[g].pos);
+  }
+  if (nmax == 0)
+    return;
+  Check(hipMemcpyAsync(I.d_anchor, I.h_in, 4 * S, hipMemcpyHostToDevice, s),
         "anchor");
-  Check(hipMemcpyAsync(I.d_pos, I.h_in + 1, 4, hipMemcpyHostToDevice, s),
+  Check(hipMemcpyAsync(I.d_pos, I.h_in + kMaxSessions, 4 * S,
+                       hipMemcpyHostToDevice, s),
         "pos");
-  Check(hipMemcpyAsync(I.d_prev, I.h_in, 4, hipMemcpyHostToDevice, s), "prev");
-  dsp::Embed(s, I.target.token_embd, I.target.token_embd_norm, I.d_anchor,
-             I.mask, I.layer[0].attn_norm, I.x, I.h, I.h16, I.eps);
+  Check(hipMemcpyAsync(I.d_prev, I.h_in, 4 * S, hipMemcpyHostToDevice, s),
+        "prev");
+  // The block rows of session g are rows [8g, 8g + 8) of every buffer; the
+  // weight GEMVs read each weight row once for all sessions (their blocks run
+  // next to each other), everything else runs per session.
+  for (int g = 0; g < S; ++g)
+    dsp::Embed(s, I.target.token_embd, I.target.token_embd_norm, I.d_anchor + g,
+               I.mask, I.layer[0].attn_norm,
+               I.x + static_cast<std::size_t>(g) * B * kE,
+               I.h + static_cast<std::size_t>(g) * B * kE,
+               I.h16 + static_cast<std::size_t>(g) * B * kE, I.eps);
   for (int l = 0; l < 3; ++l) {
     const auto& L = I.layer[l];
-    dsp::Gemv8(s, L.wq, 3072, kE, I.h16, I.q);
-    dsp::Gemv8(s, L.wk, 1024, kE, I.h16, I.k);
-    dsp::Gemv8(s, L.wv, 1024, kE, I.h16, I.v);
-    dsp::QkNormRope(s, I.q, I.k, L.q_norm, L.k_norm, I.d_pos, I.theta, I.eps);
-    dsp::AttnArgs aa{};
-    aa.q = I.q;
-    aa.k = I.k;
-    aa.v = I.v;
-    aa.kc = static_cast<const _Float16*>(st.k[l]);
-    aa.vc = static_cast<const _Float16*>(st.v[l]);
-    aa.cap = static_cast<int>(st.cap[l]);
-    aa.pos = I.d_pos;
-    aa.window = WindowLayer(l) ? static_cast<int>(kWindow) : 0;
-    aa.first = static_cast<int>(st.first);
-    aa.ws = I.wsa;
-    aa.out16 = I.o16;
-    dsp::Attn(s, aa);
-    dsp::Gemv8(s, L.wo, kE, 3072, I.o16, I.y);
-    dsp::AddNorm(s, I.x, I.y, L.ffn_norm, I.h, I.h16, B, I.eps);
-    dsp::Gemv8(s, L.wg, 9216, kE, I.h16, I.g);
-    dsp::Gemv8(s, L.wu, 9216, kE, I.h16, I.u);
-    dsp::Swiglu(s, I.g, I.u, I.a16, B * 9216);
-    dsp::Gemv8(s, L.wd, kE, 9216, I.a16, I.y);
+    dsp::Gemv8(s, L.wq, 3072, kE, I.h16, I.q, S);
+    dsp::Gemv8(s, L.wk, 1024, kE, I.h16, I.k, S);
+    dsp::Gemv8(s, L.wv, 1024, kE, I.h16, I.v, S);
+    for (int g = 0; g < S; ++g) {
+      State& st = *req[g].st;
+      float* q = I.q + static_cast<std::size_t>(g) * B * 3072;
+      float* k = I.k + static_cast<std::size_t>(g) * B * 1024;
+      float* v = I.v + static_cast<std::size_t>(g) * B * 1024;
+      dsp::QkNormRope(s, q, k, L.q_norm, L.k_norm, I.d_pos + g, I.theta, I.eps);
+      dsp::AttnArgs aa{};
+      aa.q = q;
+      aa.k = k;
+      aa.v = v;
+      aa.kc = static_cast<const _Float16*>(st.k[l]);
+      aa.vc = static_cast<const _Float16*>(st.v[l]);
+      aa.cap = static_cast<int>(st.cap[l]);
+      aa.pos = I.d_pos + g;
+      aa.window = WindowLayer(l) ? static_cast<int>(kWindow) : 0;
+      aa.first = static_cast<int>(st.first);
+      aa.ws = I.wsa;
+      aa.out16 = I.o16 + static_cast<std::size_t>(g) * B * 3072;
+      dsp::Attn(s, aa);
+    }
+    dsp::Gemv8(s, L.wo, kE, 3072, I.o16, I.y, S);
+    dsp::AddNorm(s, I.x, I.y, L.ffn_norm, I.h, I.h16, B * S, I.eps);
+    dsp::Gemv8(s, L.wg, 9216, kE, I.h16, I.g, S);
+    dsp::Gemv8(s, L.wu, 9216, kE, I.h16, I.u, S);
+    dsp::Swiglu(s, I.g, I.u, I.a16, B * S * 9216);
+    dsp::Gemv8(s, L.wd, kE, 9216, I.a16, I.y, S);
     dsp::AddNorm(s, I.x, I.y, l < 2 ? I.layer[l + 1].attn_norm : I.out_norm,
-                 I.h, I.h16, B, I.eps);
+                 I.h, I.h16, B * S, I.eps);
   }
   // W_U h_i of every block row, one pass over the proposal head
-  dsp::Gemv8(s, I.head, Impl::kHeadRows, kE, I.h16, I.base);
-  Check(hipMemsetAsync(I.state, 0, 256 * 4, s), "rnn state");
-  dsp::MarkovArgs ma{};
-  ma.w1 = I.w1;
-  ma.wj = I.wj;
-  ma.bj = I.bj;
-  ma.h = I.h;
-  ma.f = st.f;
-  ma.state = I.state;
-  ma.joint = I.joint;
-  ma.prev = I.d_prev;
-  int done = 0;
-  for (int i = 1; i <= n; ++i) {
-    ma.row = i;
-    dsp::MarkovStep(s, ma);
-    dsp::LrLogits(s, I.pt, I.cb,
-                  I.base + static_cast<std::size_t>(i) * Impl::kHeadRows,
-                  I.joint + 3 * dsp::kRank, I.logits, Impl::kHeadRows);
-    if (coupled != nullptr)
-      dsp::CoupledSample(s, I.logits, Impl::kHeadRows, I.head_ids,
-                         I.target.softcap, coupled->temperature, coupled->min_p,
-                         coupled->u[i - 1], I.ws, I.d_tokens, i - 1, I.d_prev,
-                         I.d_conf);
-    else
-      dsp::Argmax(s, I.logits, Impl::kHeadRows, I.head_ids, I.ws, I.d_tokens,
-                  i - 1, I.d_prev, I.d_conf);
-    done = i;
-    if (i < n && more) {  // read this step's probability to decide on the next
-      Check(hipMemcpyAsync(I.h_out + 8 + (i - 1), I.d_conf + (i - 1), 4,
-                           hipMemcpyDeviceToHost, s),
-            "confidence");
-      Check(hipStreamSynchronize(s), "propose step");
-      if (!more(i, I.h_out + 8))
-        break;
+  dsp::Gemv8(s, I.head, static_cast<int>(R), kE, I.h16, I.base, S);
+  Check(hipMemsetAsync(I.state, 0, static_cast<std::size_t>(S) * 256 * 4, s),
+        "rnn state");
+  std::array<bool, kMaxSessions> live{};
+  for (int g = 0; g < S; ++g)
+    live[g] = req[g].n > 0;
+  for (int i = 1; i <= nmax; ++i) {
+    bool any_more = false;
+    for (int g = 0; g < S; ++g) {
+      if (!live[g])
+        continue;
+      Request& rq = req[g];
+      dsp::MarkovArgs ma{};
+      ma.w1 = I.w1;
+      ma.wj = I.wj;
+      ma.bj = I.bj;
+      ma.h = I.h + static_cast<std::size_t>(g) * B * kE;
+      ma.f = rq.st->f;
+      ma.state = I.state + g * 256;
+      ma.joint = I.joint + g * 1024;
+      ma.prev = I.d_prev + g;
+      ma.row = i;
+      dsp::MarkovStep(s, ma);
+      float* logits = I.logits + static_cast<std::size_t>(g) * R;
+      float* ws = I.ws + g * (3 * 128 + 1);
+      dsp::LrLogits(s, I.pt, I.cb,
+                    I.base + (static_cast<std::size_t>(g) * B + i) * R,
+                    ma.joint + 3 * dsp::kRank, logits, static_cast<int>(R));
+      if (rq.coupled != nullptr)
+        dsp::CoupledSample(
+            s, logits, static_cast<int>(R), I.head_ids, I.target.softcap,
+            rq.coupled->temperature, rq.coupled->min_p, rq.coupled->u[i - 1],
+            ws, I.d_tokens + g * 8, i - 1, I.d_prev + g, I.d_conf + g * 8);
+      else
+        dsp::Argmax(s, logits, static_cast<int>(R), I.head_ids, ws,
+                    I.d_tokens + g * 8, i - 1, I.d_prev + g, I.d_conf + g * 8);
+      rq.done = i;
+      if (i >= rq.n)
+        live[g] = false;
+      else if (rq.more != nullptr)
+        any_more = true;
     }
+    if (any_more) {  // read this step's probabilities to decide on the next
+      for (int g = 0; g < S; ++g)
+        if (live[g] && req[g].more != nullptr)
+          Check(hipMemcpyAsync(I.h_out + 16 * g + 8, I.d_conf + g * 8,
+                               static_cast<std::size_t>(i) * 4,
+                               hipMemcpyDeviceToHost, s),
+                "confidence");
+      Check(hipStreamSynchronize(s), "propose step");
+      for (int g = 0; g < S; ++g)
+        if (live[g] && req[g].more != nullptr &&
+            !(*req[g].more)(i, I.h_out + 16 * g + 8))
+          live[g] = false;
+    }
+    if (std::none_of(live.begin(), live.begin() + S, [](bool b) { return b; }))
+      break;
   }
-  Check(hipMemcpyAsync(I.h_out, I.d_tokens, static_cast<std::size_t>(done) * 4,
-                       hipMemcpyDeviceToHost, s),
-        "drafts");
-  Check(
-      hipMemcpyAsync(I.h_out + 8, I.d_conf, static_cast<std::size_t>(done) * 4,
-                     hipMemcpyDeviceToHost, s),
-      "confidence");
+  for (int g = 0; g < S; ++g) {
+    const std::size_t d = static_cast<std::size_t>(req[g].done);
+    Check(hipMemcpyAsync(I.h_out + 16 * g, I.d_tokens + g * 8, d * 4,
+                         hipMemcpyDeviceToHost, s),
+          "drafts");
+    Check(hipMemcpyAsync(I.h_out + 16 * g + 8, I.d_conf + g * 8, d * 4,
+                         hipMemcpyDeviceToHost, s),
+          "confidence");
+  }
   Check(hipStreamSynchronize(s), "propose sync");
-  std::memcpy(out, I.h_out, static_cast<std::size_t>(done) * 4);
-  if (confidence != nullptr)
-    std::memcpy(confidence, I.h_out + 8, static_cast<std::size_t>(done) * 4);
-  return done;
+  for (int g = 0; g < S; ++g) {
+    const std::size_t d = static_cast<std::size_t>(req[g].done);
+    std::memcpy(req[g].out, I.h_out + 16 * g, d * 4);
+    if (req[g].confidence != nullptr)
+      std::memcpy(req[g].confidence, I.h_out + 16 * g + 8, d * 4);
+  }
 }
 
 }  // namespace gufo::models::inkling2
