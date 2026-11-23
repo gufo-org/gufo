@@ -264,3 +264,70 @@ change the arithmetic and need their own quality qualification first: F16 MoE
 slot rows instead of F32 (about 45 ms per pp2048), the relative-position bias
 as a WMMA product, a one-pass prefill mix, and the controller inputs' inverse
 RMS in the mixes' own reduction order (listed under "Not exact, not taken").
+
+## Round 5: up to eight concurrent requests, decode overheads (November 23)
+
+All changes exact: oracle dumps of both paths byte-identical, `inkling2_bench
+--verify` 0 differences for batches of 4 and 8 (192 of 192 rows),
+`inkling2_spec_test` all pass, and every HTTP response below byte-identical
+to the baseline's.
+
+### Eight sessions in one step
+
+Batched decode and the drafter now take up to eight sessions (they took four;
+the decode kernels were already eight rows wide). Steps of 5 to 8 sessions
+share one weight pass.
+
+| Change | 1 row | 4 rows | 8 rows |
+| --- | --- | --- | --- |
+| Before (decode step, ctx 64) | 21.85 ms | 41.88 ms | (two steps of 4) |
+| K/V preparation and the split reduction inside the decode attention launch; the controllers' norm inside their apply launch (649 → 505 launches per token) | 21.76 | 41.73 | 66.1 |
+| A norm's nine loads per thread issued together (explicit FMAs keep each sum) | 21.65 | | |
+| 16-wave blocks for GEMVs of 4+ rows (their quantized inputs fill a CU's LDS, so 8-wave blocks left one block per CU) | | 41.78 | 64.6 |
+
+Verification of 6 / 8 rows of one session: 46.1 / 57.5 → 45.1 / 55.9 ms.
+
+### Drafting
+
+| Change | per cycle |
+| --- | --- |
+| The draft context of every session in a step injected in one pass (one GEMV per weight for all rows instead of a WMMA GEMM per session) | commit 2.09 → 1.96 ms |
+| Drafter GEMVs of one input in one launch (q/k/v, gate/up, context k/v) | propose 3.47 → 3.37 ms (depth 3) |
+| Low-rank proposal table in int8 with one scale per token (16.8 MB per chain step instead of 33.5) | propose at depth 7 4.31 → 3.32 ms |
+
+Acceptance is unchanged on the replays (79 of 153 at depth 3, 191 of 469 and
+114 of 962 at depth 7, contexts 64 and 2,000).
+
+`--draft-tokens` is now honoured (it was ignored) and defaults to the
+drafter's seven proposals (the provider declared 3, which the runner never
+applied).
+
+### HTTP
+
+`gufo serve --sessions 8 --context 32768`, eight prompts (coding and prose),
+256 tokens each, even requests greedy and odd ones seeded with the default
+sampling (T = 1), aggregate tokens/s. Every response is byte-identical across
+builds, AR and DSpark, and C:
+
+| C | AR before | AR after | DSpark before | DSpark after |
+| --- | --- | --- | --- | --- |
+| 1 | 45.6 | 45.8 | 67.9 | 69.9 |
+| 2 | 62.0 | 62.8 | 67.0 | 69.9 |
+| 4 | 86.1 | 86.7 | 84.3 | 87.4 |
+| 8 | 87.2 | 112.2 | 90.3 | 110.7 |
+
+At C = 8 the step is bound by expert weights: the MoE kernels take 70% of it
+and stream about 250 GB/s over the 50 or so distinct experts its 64
+(token, slot) pairs route to. Drafting cannot pay there: each extra
+verification row costs about 4.7 ms (the experts it adds) and survives about
+60% of the time, roughly 8 ms per drafted token against 8.3 ms per token for
+the plain eight-row step, so the policy does not draft at C = 8 and DSpark
+trails AR by the context injection (about 1.4%).
+
+Where a C = 1 step goes now (21.5 ms span): weight GEMVs about 16.8 ms at
+86–98% of the DRAM ceiling, 505 launches of which the latency-bound small
+kernels (mixes, attention, router, controllers) take about 3.6 ms and the
+launch gaps about 1 ms. A C = 1 DSpark cycle (36.5 ms at three rows) keeps
+the GPU 96% busy: verification 31.9 ms, drafter 3.1 ms. The host sampler
+(temperature 1: a double-precision exp per vocabulary entry, in token order)
+costs about 1.5 ms per sampled token outside the GPU.

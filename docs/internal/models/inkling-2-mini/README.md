@@ -114,7 +114,7 @@ fused MoE tail turns off FMA contraction where the kernels it replaced could
 not contract). The checks are byte comparisons of `inkling2_oracle` dumps
 (logsumexp and top-64 of all 9,300 positions) against the pre-optimisation
 build, for the batched prefill path and the one-token decode path, and
-`inkling2_bench --verify`, which compares batched decode of 2 to 4 sessions with
+`inkling2_bench --verify`, which compares batched decode of 2 to 8 sessions with
 single-session decode.
 
 ## Tests and tools

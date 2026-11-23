@@ -104,3 +104,22 @@ its own quality qualification before it could replace the exact path.
 | F16 (or BF16) MoE slot rows instead of F32 `pairs` | halves the 302 MB written and read per visit by the down GEMM and the MoE tail (about 45 ms per pp2048) |
 | Inverse RMS of the controller inputs computed by the mixes that produce them, in their own reduction order | drops the remaining half of the controller gates' prologue reads |
 | Rejection sampling of sampled requests' proposals (the drafter's distribution as q) | more accepted proposals at temperature > 0; the output is then distributed as AR's, not equal to it |
+
+## Round 5 (November 23)
+
+| Variant | Result |
+| --- | --- |
+| Attention-residual mix with the states its prologue does not write processed first and the prologue's outputs read from LDS | 10.6 → 12.8 µs per launch: the mix is not bound by load latency |
+| The mix's weighted sum with all states' loads issued first (unrolled to 8) | decode 21.67 → 21.75 ms |
+| The norm's unrolled loads with `ss += v * v` | not byte-identical: that form was not contracted to the FMAs the rolled loop produced; written with explicit FMAs it is (kept) |
+| MoE gate/up and down in one launch (down blocks wait on per-assignment counters) | 1 row 21.65 → 21.60 ms, 4 rows 41.73 → 41.90, 8 rows 66.1 → 67.3 |
+| Three-input projections of 6 to 8 rows in one launch instead of two | 8 rows 55.9 → 59.0 ms (register pressure) |
+| Drafter GEMVs of up to 4,096 rows with one row per wave (more blocks) | propose 3.47 → 3.93 ms: every block stages the 8 input rows |
+| LM head pruned for greedy rows (a 4-bit proxy head, exact rows only for the rows whose bound reaches the best) | not built: a rigorous per-row bound (Cauchy–Schwarz on the proxy's residual) is about 10% of the logit scale, which leaves thousands of candidates; the sessions' cached logits would also need lazy materialisation |
+
+Not exact or outside the model, not taken:
+
+| Idea | Expected effect |
+| --- | --- |
+| Host sampler: the temperature-only distribution's exps on parallel threads (the same values, then the same sequential sum) | about 1 ms per sampled token at C = 1 (core sampling code, all models) |
+| Rejection sampling of sampled requests' proposals | more accepted proposals at T > 0; the output is distributed as AR's, not equal to it |
