@@ -6,9 +6,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/families/qwen/hip_common/rope.hpp>
 #include <gufo/ext/sampling.hpp>
 
-#include "src/families/qwen/hip_common/rope.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 /// Model-private HIP launchers for everything outside the quantized GEMM

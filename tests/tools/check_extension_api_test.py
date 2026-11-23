@@ -288,5 +288,147 @@ target_include_directories(identity PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
                 "src/core/platform/fs.hpp",
             ])
 
+    def no_promise_fixture(self):
+        surface = ["include/gufo/ext/experimental/x.hpp", "include/gufo/ext/families/qwen/t.hpp",
+                   "include/gufo/ext/v.hpp", "src/core/only.hpp", "src/core/shared.hpp"]
+        free = ["include/gufo/ext/experimental/x.hpp", "include/gufo/ext/families/qwen/t.hpp",
+                "src/core/only.hpp"]
+        return {api.SURFACE: "# generated\n" + "".join(p + "\n" for p in surface),
+                api.NO_PROMISE: "# generated\n" + "".join(p + "\n" for p in free),
+                api.SERIES: json.dumps({"major": 0, "minor": 1, "revision_base": 0}),
+                "include/gufo/ext/experimental/x.hpp": '#include "src/core/only.hpp"\n#include "src/core/shared.hpp"\n',
+                "include/gufo/ext/families/qwen/t.hpp": '#include "src/core/only.hpp"\n',
+                "include/gufo/ext/v.hpp": '#include "src/core/shared.hpp"\n',
+                "src/core/only.hpp": "struct Only { int x; };",
+                "src/core/shared.hpp": "struct Shared { int x; };"}
+
+    def assertGated(self, errors):
+        self.assertIn("extension API changes require the ext-api PR label", errors)
+        self.assertIn("extension API changes require a new permanent change record", errors)
+
+    def diff_errors(self, edit, labels=()):
+        old = self.no_promise_fixture(); new = old.copy(); edit(new)
+        return api.check_diff(lambda p: old.get(p, ""), lambda p: new.get(p, ""), list(labels))
+
+    def test_no_promise_path_changes_need_no_record(self):
+        def edit(files):
+            files["src/core/only.hpp"] = "struct Only { long x; };"
+            files["include/gufo/ext/experimental/x.hpp"] += "int added();\n"
+            files["include/gufo/ext/families/qwen/t.hpp"] += "int added();\n"
+        self.assertEqual(self.diff_errors(edit), [])
+
+    def test_no_promise_paths_added_and_removed_need_no_record(self):
+        def edit(files):
+            files[api.SURFACE] += "src/core/new_only.hpp\n"
+            files[api.NO_PROMISE] += "src/core/new_only.hpp\n"
+            files["src/core/new_only.hpp"] = "struct New {};"
+            files["include/gufo/ext/experimental/x.hpp"] += '#include "src/core/new_only.hpp"\n'
+        self.assertEqual(self.diff_errors(edit), [])
+
+    def test_shared_path_change_needs_record(self):
+        def edit(files):
+            files["src/core/shared.hpp"] = "struct Shared { long x; };"
+        self.assertGated(self.diff_errors(edit))
+
+    def test_versioned_header_change_needs_record(self):
+        def edit(files):
+            files["include/gufo/ext/v.hpp"] += "int added();\n"
+        self.assertGated(self.diff_errors(edit))
+        records = {f"{api.RECORDS}/0.1/test-change.md": "Describe the API change.\n"}
+        old = self.no_promise_fixture(); new = old.copy(); edit(new)
+        self.assertEqual(api.check_diff(lambda p: old.get(p, ""), lambda p: new.get(p, ""), ["ext-api"],
+                                        {}, records), [])
+
+    def test_promoting_a_no_promise_path_needs_record(self):
+        def edit(files):
+            files["include/gufo/ext/v.hpp"] += '#include "src/core/only.hpp"\n'
+            files[api.NO_PROMISE] = files[api.NO_PROMISE].replace("src/core/only.hpp\n", "")
+        self.assertGated(self.diff_errors(edit))
+
+    def test_no_promise_inventory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for path, text in self.no_promise_fixture().items():
+                if path.endswith(".hpp"):
+                    (root / path).parent.mkdir(parents=True, exist_ok=True)
+                    (root / path).write_text(text)
+            self.assertEqual(api.no_promise(root), ["include/gufo/ext/experimental/x.hpp",
+                                                    "include/gufo/ext/families/qwen/t.hpp",
+                                                    "src/core/only.hpp"])
+
+    def layer_fixture(self, files, sources=None):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for path, text in files.items():
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_text(text)
+            saved = api.MODEL_SOURCES
+            api.MODEL_SOURCES = sources or {}
+            try:
+                return api.layer_errors(root)
+            finally:
+                api.MODEL_SOURCES = saved
+
+    def test_family_layers(self):
+        family = "include/gufo/ext/families/qwen"
+        files = {
+            f"{family}/text/tokenizer.hpp": '#include "src/families/qwen/text/tokenizer.hpp"\n',
+            "src/families/qwen/text/tokenizer.hpp": "namespace gufo::tokenization {}\n",
+            f"{family}/models/a/model.hpp": '#include "gufo/ext/families/qwen/text/tokenizer.hpp"\n',
+            f"{family}/models/b/model.hpp": '#include "../a/model.hpp"\n',
+            f"{family}/vision/prompt.hpp": '#include "src/families/qwen/vision/prompt.hpp"\n',
+            "src/families/qwen/vision/prompt.hpp":
+                '#include "gufo/ext/families/qwen/models/a/model.hpp"\n#include "src/models/qwen/runner.hpp"\n',
+            "src/models/qwen/runner.hpp": "",
+        }
+        self.assertEqual(self.layer_fixture(files), [
+            f"{family}/models/b/model.hpp: model qwen/b reaches another model's header {family}/models/a/model.hpp",
+            f"{family}/vision/prompt.hpp: the qwen family layer reaches model header {family}/models/a/model.hpp",
+            f"{family}/vision/prompt.hpp: the qwen family layer reaches model header src/models/qwen/runner.hpp",
+        ])
+        files["src/families/qwen/vision/prompt.hpp"] = '#include "src/families/qwen/text/tokenizer.hpp"\n'
+        files[f"{family}/models/b/model.hpp"] = '#include "gufo/ext/families/qwen/vision/prompt.hpp"\n'
+        self.assertEqual(self.layer_fixture(files), [])
+
+    def test_family_layer_models_and_sources(self):
+        root = "include/gufo/ext/families"
+        model = f"{root}/qwen/models/a/model.hpp"
+        reach = {model: '#include "src/models/qwen38_flash_next/engine.hpp"\n',
+                 "src/models/qwen38_flash_next/engine.hpp": ""}
+        self.assertEqual(self.layer_fixture(reach), [
+            f"{model}: model qwen/a reaches src/models/qwen38_flash_next/engine.hpp, outside its "
+            "declared source directory (MODEL_SOURCES)"])
+        self.assertEqual(self.layer_fixture(reach, {("qwen", "a"): "src/models/qwen38_flash_next"}), [])
+        self.assertEqual(len(self.layer_fixture(reach, {("qwen", "b"): "src/models/qwen38_flash_next"})), 1)
+        cross = {model: '#include "gufo/ext/families/gemma/models/a/model.hpp"\n',
+                 f"{root}/gemma/models/a/model.hpp": ""}
+        self.assertEqual(self.layer_fixture(cross), [
+            f"{model}: model qwen/a reaches another model's header {root}/gemma/models/a/model.hpp"])
+        source_model = {f"{root}/qwen/text/t.hpp": '#include "src/families/qwen/models/x.hpp"\n',
+                        "src/families/qwen/models/x.hpp": ""}
+        self.assertEqual(self.layer_fixture(source_model), [
+            f"{root}/qwen/text/t.hpp: the qwen family layer reaches model header src/families/qwen/models/x.hpp"])
+
+    def test_family_layer_misplaced_headers(self):
+        root = "include/gufo/ext/families"
+        self.assertEqual(self.layer_fixture({f"{root}/common.hpp": ""}), [
+            f"{root}/common.hpp: a family header belongs in families/<family>/"])
+        self.assertEqual(self.layer_fixture({f"{root}/qwen/models/m.hpp": ""}), [
+            f"{root}/qwen/models/m.hpp: a model header belongs in families/<family>/models/<model>/"])
+
+    def test_include_scanner(self):
+        text = ('/**/ #include "a.hpp"\n// #include "b.hpp"\n/* #include "c.hpp" */\n'
+                '#include_next <d.hpp>\n#  include "e.hpp" // note\n#include H\n'
+                'auto s = "#include \\"f.hpp\\"";\n')
+        self.assertEqual(list(api.includes(text)),
+                         [(True, "a.hpp"), (False, "d.hpp"), (True, "e.hpp"), (None, "H")])
+        family = "include/gufo/ext/families/qwen/text/t.hpp"
+        self.assertEqual(self.layer_fixture({family: '#include "src/models/qwen/generated.hpp"\n#include <vector>\n'}),
+                         [f'{family}: unresolved include "src/models/qwen/generated.hpp"'])
+        self.assertEqual(self.layer_fixture({family: '#define H "x.hpp"\n#include H\n'}),
+                         [f"{family}: macro include H cannot be audited; spell the path"])
+        self.assertEqual(self.layer_fixture({family: '/**/ #include "src/models/qwen/r.hpp"\n',
+                                             "src/models/qwen/r.hpp": ""}),
+                         [f"{family}: the qwen family layer reaches model header src/models/qwen/r.hpp"])
 
 if __name__ == "__main__": unittest.main()

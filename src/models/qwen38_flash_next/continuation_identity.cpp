@@ -5,7 +5,7 @@
 #include <stdexcept>
 
 #include "gufo/ext/continuation.hpp"
-#include "src/families/qwen/text/chat_template.hpp"
+#include "gufo/ext/families/qwen/text/chat_template.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 
 namespace gufo::models::qwen38_flash_next {

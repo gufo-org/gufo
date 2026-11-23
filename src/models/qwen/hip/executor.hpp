@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <gufo/ext/families/qwen/text/tokenizer.hpp>
 #include <gufo/ext/model_config.hpp>
 #include <memory>
 #include <optional>
@@ -16,7 +17,6 @@
 #include <vector>
 
 #include "src/families/qwen/hip_common/continuation_hooks.hpp"
-#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/state.hpp"
@@ -28,12 +28,12 @@
 
 #include <gufo/ext/experimental/hip_graph_decode_executor.hpp>
 #include <gufo/ext/experimental/state_memory.hpp>
+#include <gufo/ext/families/qwen/kernels/ops/token.hpp>
+#include <gufo/ext/families/qwen/vision/device_input.hpp>
 
 #include "src/families/qwen/hip_common/execution_policy.hpp"
 #include "src/families/qwen/kernels/ops/gemm.hpp"
 #include "src/families/qwen/kernels/ops/ssm.hpp"
-#include "src/families/qwen/kernels/ops/token.hpp"
-#include "src/families/qwen/vision/device_input.hpp"
 #include "src/models/qwen/hip/prompt_hidden_buffer.hpp"
 
 namespace gufo::hip {
