@@ -37,8 +37,15 @@ takes 32 KiB per token and is mapped only as a conversation grows.
 `gufo model install` fetches the DSpark file, so `--model inkling-2-mini`
 decodes with DSpark. DSpark returns exactly the tokens AR returns, for greedy
 and sampled requests alike; it only changes the speed. How much it helps
-depends on how predictable the text is. Several requests decoding at once
-share batched AR steps instead.
+depends on how predictable the text is. Requests decoding at the same time
+(`--sessions` above 1) draft together and are checked in one shared step, which
+gives each request its share of the rows where its drafts are likely to be
+kept; their output is the same as when each runs alone.
+
+## Sampling
+
+The defaults are the upstream `generation_config.json`'s: temperature 1 and no
+top-k, top-p or min-p truncation. Requests can override each value.
 
 ## Thinking
 
@@ -55,10 +62,11 @@ the same weights:
 
 | Workload | Gufo | llama.cpp HIP |
 | --- | --- | --- |
-| Prefill, 2,048-token prompt | 2,210 tokens/s | 383 tokens/s |
+| Prefill, 2,048-token prompt | 2,268 tokens/s | 383 tokens/s |
 | Decode, one user, short context | 47.0 tokens/s | 24.3 tokens/s |
 | Decode, one user, DSpark, code (greedy / default sampling) | 78.0 / 65.7 tokens/s | not measured |
 | Decode, one user, DSpark, prose | 48 to 92 tokens/s | not measured |
+| Decode, 2 users, DSpark, mixed greedy and sampled | 77.7 tokens/s in total (AR 65.5) | not measured |
 | Decode, 4 users, short context | 93.4 tokens/s in total | not measured |
 
 The [benchmarks](../internal/models/inkling-2-mini/BENCHMARKS.md) give every

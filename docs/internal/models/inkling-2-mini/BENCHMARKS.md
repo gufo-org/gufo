@@ -12,9 +12,9 @@ same weights).
 
 | Workload | Gufo | llama.cpp HIP |
 | --- | --- | --- |
-| pp512 | 1,618 tokens/s | not measured |
-| pp2048 | 2,210 tokens/s | 383.5 tokens/s |
-| pp8192 | 2,156 tokens/s | not measured |
+| pp512 | 1,626 tokens/s | not measured |
+| pp2048 | 2,268 tokens/s | 383.5 tokens/s |
+| pp8192 | 2,209 tokens/s | not measured |
 | tg128 after 64 tokens | 47.0 tokens/s | 24.3 tokens/s (tg128) |
 | tg128 after 2,048 tokens | 43.9 tokens/s | |
 | tg128 after 8,192 tokens | 42.0 tokens/s | |
@@ -203,3 +203,64 @@ per cycle (7.62).
 | Explanation (greedy) | 46.1 | 55.4 | 57.7 |
 | Translation (T = 0.7) | 43.3 | 50.2 | 52.2 |
 
+
+### Concurrent requests (November 23, round 4)
+
+Requests decoding at the same time draft together (one drafter pass reads
+each weight row once for all of them: `Engine::ProposeBatch`) and are checked
+in one `Engine::VerifyBatch` step of up to eight rows from several sessions.
+Rows go to the drafts most likely to survive while they pay for their share
+of the step (`ChooseDsparkBatchWidths`); the costs by total rows are learnt
+online, and a back-off per batch width stops drafting that buys nothing.
+Greedy and sampled requests share a step: greedy rows take the device
+argmax, sampled rows the host logits (temperature-only requests with coupled
+proposals), and the requests' selections run on parallel threads.
+
+Global-attention decode rows now take the split length of their own
+position's bucket instead of the batch's largest. Before, a request batched
+with one past 4K tokens got a different split, so its logits depended on
+what ran beside it (`inkling2_spec_test`: 24 of 36 batched decode rows and 37
+of 54 batched verification rows differed from lone decoding; 0 now).
+
+HTTP, `--sessions 4`, eight requests of 400 tokens (four greedy, four with
+the default sampling and a seed; coding and prose), aggregate tokens/s. All
+48 outputs are byte-identical across AR and DSpark and across C:
+
+| C | AR | DSpark, sessions drafting one after another | DSpark, one drafter pass and parallel selection |
+| --- | --- | --- | --- |
+| 1 | 44.8 | 60.7 | 60.8 |
+| 2 | 65.5 | 75.8 | 77.7 |
+| 4 | 88.0 | 86.9 | 90.1 |
+
+Before this round, concurrent requests decoded AR (the AR column).
+
+With four requests the eight-row step leaves four draft rows, and each must
+beat a plain step's 10.8 ms per token; the policy drafts mostly for the
+greedy coding requests there.
+
+### Prefill, round 3
+
+`inkling2_bench` pp2048 2,170 → 2,210 tokens/s (pp512 1,500 → 1,515, pp8192
+2,075 → 2,115); `gufo bench` pp2048 2,210 → 2,268, pp512 1,618 → 1,626,
+pp8192 2,156 → 2,209. Oracle dumps byte-identical:
+
+| Change | Kernel time per pp2048 (serialized) |
+| --- | --- |
+| Controller apply: float4 LDS reads, epilogue inputs loaded before the products | 43.8 → 35.0 ms |
+| Controller inputs' inverse RMS from the attention-residual mix (summed in the gate prologue's order), so the gates no longer re-read them | gates 37.9 → 32.8 ms |
+
+Under the counter profiler (kernels serialized) the pp2048 kernels sum to
+about the parallel wall time: MoE gate/up 5.0 ms and down 3.7 ms per visit
+(about 70% and 47% of the WMMA ceiling for the live 16-token tiles), dense
+projections 161 ms, attention 62 ms, attention-residual mixes 64 ms, MoE
+tails 54 ms. The gate/up kernel's loop alone (dequantisation, weight and
+activation loads removed) runs at 65% of the WMMA ceiling.
+
+The exact changes left are small: every remaining kernel is either at its
+DRAM floor (mixes, MoE tails, norms) or a WMMA loop already near its own
+ceiling, and none of the tried restructurings beat it (see
+[Experiments](EXPERIMENTS.md)). The ideas that would reach about 2,400 tokens/s
+change the arithmetic and need their own quality qualification first: F16 MoE
+slot rows instead of F32 (about 45 ms per pp2048), the relative-position bias
+as a WMMA product, a one-pass prefill mix, and the controller inputs' inverse
+RMS in the mixes' own reduction order (listed under "Not exact, not taken").

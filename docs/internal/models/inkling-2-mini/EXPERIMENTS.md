@@ -26,6 +26,19 @@ against the build they modified. Every variant was exact unless noted.
 | Next layer's messages mixed before the layer (beside its own input mixes) | no change: both are bandwidth-bound; moved beside the gate/up GEMM |
 | Messages' inverse RMS as its own side-stream launch | pp2048 +0.2%, pp512 −1.5%; folded into the message mix and limited to ubatches of 1,024+ tokens |
 
+## Prefill, round 3 (November 23)
+
+| Variant | Result |
+| --- | --- |
+| MoE gate/up: weights fetched two k-steps ahead (two register sets) | 6.12 → 6.38 ms per visit: the weight latency was already hidden |
+| MoE gate/up: activation operands through a three-step register ring (load for step q + 2 before step q's WMMAs) | 6.41 ms |
+| MoE gate/up: B operands of the next 16-k step loaded during this step's WMMAs, wave-uniform live flags | 6.42 ms |
+| MoE gate/up with 4 waves of 64 tokens x 64 channels (16 WMMAs per 8 operand loads) | 7.47 ms |
+| Diagnostics (not exact, measurement only): no per-step dequantisation; no activation streaming; neither and no weight loads | 5.42 / 5.46 / 5.35 ms: the WMMA + LDS loop itself is the bound |
+| Attention: later query tiles dispatched first (all KV heads of a tile together, or per head) | 62.3 → 67.4 / 67.8 ms |
+| Attention-residual mix: each state's inverse RMS and query dots from one read of the row (same orders) | 44.6 → 73.9 ms: only n of the 8 waves work |
+| q and gate projections in one launch (a token tile's q row tiles, then its gate row tiles) | pp2048 2,215 → 2,198 tokens/s |
+
 ## DSpark
 
 | Variant | Result |
