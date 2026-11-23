@@ -12,6 +12,7 @@ benchmark/tuning executables; Python tools run from this source tree.
 | `prof/` | rocprofv3 capture, stage summaries, and ISA inspection |
 | `serving/` | HTTP serving benchmarks |
 | `ds4/` | DeepSeek-specific validation and experiments |
+| `expert_stream/` | Offline replay of the experimental expert store's routing traces |
 | `qwen27b/` | Qwen27B/DFlash2 kernels, reference checks, and vision validation |
 | `qwen-flash/` | Flash-Next projection and MoE microbenchmarks |
 | `h3/` | MiniMax inventory and quality-artifact commands |

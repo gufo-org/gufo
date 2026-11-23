@@ -26,6 +26,7 @@
 
 namespace gufo::server {
 
+using ext::AutomaticRetainedBytes;
 using ext::CgroupAvailableBytes;
 using ext::ComponentCacheResources;
 using ext::HipTextModelRunner;
@@ -51,6 +52,7 @@ using ext::TextRunnerCapabilities;
 using ext::TextRunnerDecode;
 using ext::TextRunnerDescriptor;
 using ext::TextRunnerDiskCacheOptions;
+using ext::TextRunnerExpertCacheClaim;
 using ext::TextRunnerMeasuredResources;
 using ext::TextRunnerNgramRows;
 using ext::TextRunnerRamCacheOptions;
@@ -175,13 +177,17 @@ public:
   /// thread when it goes idle and about once a second while it stays idle,
   /// to return memory only running work holds (TextModelRunner::Idle()),
   /// and, when other processes leave the host short of its reserve, RAM-cache
-  /// memory (ComponentTextCache::RelieveHostPressure).
+  /// memory (ComponentTextCache::RelieveHostPressure). A runner that streams
+  /// experts fills the host down to its expert store's floor, which then
+  /// replaces the reserve: below it, the expert cache gives memory back
+  /// first (Store::Release), and is restored once memory is back.
   void Idle() const;
   /// The host's shortfall below its reserve (ext::HostReserveShortfallBytes)
   /// when it is too short to admit new work: more than
   /// kAdmissionShortfallBytes (#932), so MemAvailable below 2 GiB without
   /// free CMA pages. Running work then finishes, the scheduler goes
-  /// idle and the RAM cache gives memory back.
+  /// idle and the RAM cache gives memory back. A runner that streams experts
+  /// refuses below half its expert store's floor instead.
   [[nodiscard]] std::optional<std::uint64_t> AdmissionShortfall() const;
   static constexpr std::uint64_t kAdmissionShortfallBytes =
       ext::kHostSnapshotHeadroomBytes / 2;

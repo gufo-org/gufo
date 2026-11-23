@@ -14,6 +14,7 @@ include/gufo/ext/draft_backend.hpp
 include/gufo/ext/embeddings.hpp
 include/gufo/ext/experimental/admission_query.hpp
 include/gufo/ext/experimental/dispatch_telemetry.hpp
+include/gufo/ext/experimental/expert_stream.hpp
 include/gufo/ext/experimental/gemv_dispatcher.hpp
 include/gufo/ext/experimental/ggml_dequant.hpp
 include/gufo/ext/experimental/ggml_gemm.hpp
@@ -89,6 +90,7 @@ src/core/hip/detail/dispatch_telemetry.hpp
 src/core/hip/detail/gemv_dispatcher.hpp
 src/core/hip/detail/hip_graph_decode_executor.hpp
 src/core/hip/detail/hipblaslt_plan_database.hpp
+src/core/hip/expert_stream/store.hpp
 src/core/hip/heap_placement.hpp
 src/core/hip/hip_utils.hpp
 src/core/hip/host_allocations.hpp

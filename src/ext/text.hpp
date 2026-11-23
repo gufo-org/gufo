@@ -7,6 +7,7 @@
 #include <exception>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -36,6 +37,9 @@
 namespace gufo::mem {
 class StateAccount;
 }  // namespace gufo::mem
+namespace gufo::expert_stream {
+class Store;
+}  // namespace gufo::expert_stream
 
 namespace gufo::ext {
 
@@ -195,6 +199,26 @@ struct TextRunnerDescriptor {
   TextSchedulingProfile scheduling{};
 };
 
+/// Experimental: a runner that streams mixture-of-experts weights through
+/// `expert_stream::Store` lets serving size its expert cache together with
+/// the prompt cache. Once the sessions and the prompt cache's backing exist,
+/// serving grants the store what it holds plus the host memory available,
+/// less `headroom_bytes` and the prompt-cache budget still to commit, and
+/// calls `Store::Fit` with it.
+struct TextRunnerExpertCacheClaim {
+  /// The store to size; it must outlive the runner's sessions. Null: the
+  /// runner does not stream experts and the other fields are ignored.
+  expert_stream::Store* store{nullptr};
+  /// Host memory left free after the expert cache: buffers the first prompt
+  /// still allocates, transient prefill peaks and margin against swap.
+  std::size_t headroom_bytes{0};
+  /// The automatic RAM prompt-cache budget per session while experts stream:
+  /// it bounds `retained_snapshot_capacity_bytes` times the sessions. An
+  /// explicit --cache-ram-bytes replaces it. Missing keeps the automatic
+  /// budget as without streaming.
+  std::optional<std::size_t> prompt_cache_share_per_session_bytes;
+};
+
 struct TextRunnerResourceClaim {
   std::optional<std::size_t> resident_weights_bytes;
   std::optional<std::size_t> state_capacity_bytes;
@@ -219,10 +243,29 @@ struct TextRunnerResourceClaim {
   /// sessions do not all fit at full context, the host lets them share this
   /// memory instead of refusing the configuration (mem::FitSessions), and
   /// admits each request against its own tokens. Missing or zero keeps the
-  /// full-context check. Declared last, so positional initializers of the
-  /// earlier fields keep their meaning.
+  /// full-context check. Declared after the fields above, so their
+  /// positional initializers keep their meaning.
   std::optional<std::size_t> demand_mapped_state_bytes;
+  /// Experimental: the expert cache serving sizes with the prompt cache.
+  /// Declared last for the same reason.
+  TextRunnerExpertCacheClaim expert_cache{};
 };
+
+/// The automatic RAM prompt-cache budget the claim allows for `sessions`:
+/// `retained_snapshot_capacity_bytes`, bounded by the expert-cache claim's
+/// share per session when it streams experts.
+[[nodiscard]] inline std::size_t AutomaticRetainedBytes(
+    const TextRunnerResourceClaim& claim, std::size_t sessions) {
+  const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
+  const auto& experts = claim.expert_cache;
+  if (!experts.store || !experts.prompt_cache_share_per_session_bytes)
+    return measured;
+  const auto share = *experts.prompt_cache_share_per_session_bytes;
+  const auto most = std::numeric_limits<std::size_t>::max();
+  const auto total =
+      sessions && share > most / sessions ? most : share * sessions;
+  return std::min(measured, total);
+}
 
 struct TextRunnerMeasuredResources {
   std::optional<std::size_t> per_request_state_bytes;
