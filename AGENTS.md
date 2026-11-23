@@ -122,6 +122,9 @@ quality; successful optimizations become the default, without extra switches.
   forwarded core/cache headers), the metadata schema and public CMake contracts
   require an `ext-api` PR label and one new, uniquely named Markdown record under
   `include/gufo/ext/changes/<major>.<minor>/` when declarations/contracts change.
+  Paths reachable only through the no-promise `experimental/` and `families/`
+  headers (generated `include/gufo/ext/NO_PROMISE`) stay in `SURFACE` and the
+  build ID but need no label or record; shared paths keep the rule.
   Records are permanent and immutable. CMake derives the API revision from the
   active series in `include/gufo/ext/api-series.json` plus its revision-record
   count. The `baseline.md` record documents the initial contracts without advancing

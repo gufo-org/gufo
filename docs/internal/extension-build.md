@@ -91,10 +91,15 @@ are written only when they change.
 
 External extensions see only the public headers: their targets are checked
 against the include and link allowlist (`gufo_ext_runtime`, `gufo_ext_core`,
-`gufo_ext_cache`, `gufo_ext_hip`). An in-tree extension's `gufo::` export is
-audited like those: the check stops there, so its usage requirements, private
-include paths included, reach the dependent. An external extension's export
-is checked like any other external target.
+`gufo_ext_cache`, `gufo_ext_hip` and the experimental `gufo::qwen_family`).
+Like `gufo_ext_core`, `gufo::qwen_family` links its implementation only
+(`gufo_qwen_config`, `gufo_qwen_text`, `gufo_qwen_vision` and, with HIP,
+`gufo_qwen_kernels`) and adds no include path. A module may not link it yet:
+the configure step fails, because the family and `gufo_core` would be linked
+into the module beside the host's copy. An in-tree extension's `gufo::` export
+is audited like those: the check stops there, so its usage requirements,
+private include paths included, reach the dependent. An external extension's
+export is checked like any other external target.
 
 ## Modules
 

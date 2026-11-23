@@ -14,6 +14,7 @@
 #include <gufo/ext/experimental/managed_alloc.hpp>
 #include <gufo/ext/experimental/snapshot_transfer.hpp>
 #include <gufo/ext/experimental/state_memory.hpp>
+#include <gufo/ext/families/qwen/draft_vocab/draft_vocab.hpp>
 #include <gufo/ext/platform/pages.hpp>
 #include <limits>
 #include <memory>
@@ -25,7 +26,6 @@
 #include <vector>
 
 #include "qfn_mmq.h"
-#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {

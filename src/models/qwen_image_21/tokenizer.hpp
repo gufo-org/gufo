@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-#include "src/families/qwen/text/tokenizer.hpp"
+#include "gufo/ext/families/qwen/text/tokenizer.hpp"
 
 namespace gufo::models::qwen_image_21 {
 

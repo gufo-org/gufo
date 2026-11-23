@@ -552,6 +552,11 @@ function(gufo_extension_target)
     foreach(dependency IN LISTS ARG_LINK_LIBRARIES)
       if(dependency MATCHES "^(gufo_ext_runtime|gufo_ext_core|gufo_ext_cache|gufo_ext_hip)$")
         list(APPEND links "$<COMPILE_ONLY:${dependency}>")
+      elseif(dependency MATCHES "^(gufo::qwen_family|gufo_qwen_family)$")
+        # The family implementation would be linked into the module beside the
+        # host's copy; loadable modules cannot use the family library yet.
+        message(FATAL_ERROR "extension target ${ARG_NAME} links ${dependency}, which loadable "
+          "extension modules do not support yet; build ${owner} into gufo instead")
       else()
         list(APPEND links "${dependency}")
       endif()

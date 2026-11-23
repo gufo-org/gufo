@@ -44,6 +44,16 @@ if(NOT GUFO_EXTENSION_FIXTURE)
     gufo_ext_cache $<$<TARGET_EXISTS:gufo_ext_hip>:gufo_ext_hip>)
   add_test(NAME ext_public_link_test COMMAND ext_public_link_test)
   set_tests_properties(ext_public_link_test PROPERTIES LABELS "cpu;extensions")
+  # The same view of the experimental Qwen family library. Gufo always defines
+  # it; the discovery fixture projects that reuse this list do not.
+  if(TARGET gufo::qwen_family)
+    add_executable(qwen_family_public_link_test qwen_family_public_link_test.cpp)
+    set_property(TARGET qwen_family_public_link_test PROPERTY INCLUDE_DIRECTORIES "")
+    target_link_libraries(qwen_family_public_link_test PRIVATE gufo_ext_runtime gufo::qwen_family
+      $<$<TARGET_EXISTS:gufo_ext_hip>:gufo_ext_hip>)
+    add_test(NAME qwen_family_public_link_test COMMAND qwen_family_public_link_test)
+    set_tests_properties(qwen_family_public_link_test PROPERTIES LABELS "cpu;extensions")
+  endif()
   if(Python3_EXECUTABLE)
     add_test(NAME extension_cli_provenance_test COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_LIST_DIR}/cli_provenance_test.py $<TARGET_FILE:gufo>)

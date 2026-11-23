@@ -4,6 +4,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <gufo/ext/families/qwen/control_tokens/control_tokens.hpp>
 #include <gufo/ext/host.hpp>
 #include <map>
 #include <mutex>
@@ -14,7 +15,6 @@
 #include <string>
 #include <utility>
 
-#include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/models/qwen_image_21/hip/memory.hpp"
 #include "src/models/qwen_image_21/hip/runtime.hpp"
 #include "src/models/qwen_image_21/tokenizer.hpp"

@@ -27,6 +27,18 @@ control_tokens   hip_common
    (Qwen 27B model, src/models/qwen)
 ```
 
+## Public extension library
+
+`gufo::qwen_family` (`gufo_qwen_family`) links these libraries for extensions,
+in-tree or outside the tree. Its experimental headers are the forwards under
+[`include/gufo/ext/families/qwen/`](../../../include/gufo/ext/families/qwen/),
+which mirror the paths here and keep the namespaces; their transitive closure
+joins the extension `SURFACE`. Add a forward when an extension needs another
+family header, then run `python3 tools/ci/check-extension-api.py --write`.
+Family forwards never reach `families/qwen/models/` or `src/models/`, and a
+model under `models/<m>/` never reaches another model; the same script enforces
+both.
+
 ## Manifests
 
 `<library>/library.json` is the manifest:

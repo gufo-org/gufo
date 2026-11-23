@@ -69,9 +69,7 @@ gufo_extension_target(
   LINK_LIBRARIES
     gufo_qwen
     gufo_cache_hip
-    gufo_qwen_kernels
-    gufo_qwen_vision
-    gufo_qwen_draft_vocab
+    gufo::qwen_family
     gufo_compare
     hip::host
 )

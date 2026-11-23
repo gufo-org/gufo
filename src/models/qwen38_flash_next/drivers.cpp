@@ -23,12 +23,12 @@
 #include <vector>
 
 #include "gufo/ext/crypto.hpp"
+#include "gufo/ext/families/qwen/control_tokens/control_tokens.hpp"
+#include "gufo/ext/families/qwen/text/chat_template.hpp"
+#include "gufo/ext/families/qwen/text/tokenizer.hpp"
+#include "gufo/ext/families/qwen/vision/encoder.hpp"
+#include "gufo/ext/families/qwen/vision/prompt.hpp"
 #include "gufo/ext/text.hpp"
-#include "src/families/qwen/control_tokens/control_tokens.hpp"
-#include "src/families/qwen/text/chat_template.hpp"
-#include "src/families/qwen/text/tokenizer.hpp"
-#include "src/families/qwen/vision/encoder.hpp"
-#include "src/families/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/bench_yarn.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
