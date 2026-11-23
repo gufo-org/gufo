@@ -206,6 +206,27 @@ constexpr size_t kVictims = 32;
 constexpr uint64_t kVictimsTicks = 512;
 constexpr uint32_t kNoLayer = std::numeric_limits<uint32_t>::max();
 
+/* A prediction window: the layer the next prepare handles (low 32 bits) and
+ * the count of windows opened before it (high 32 bits). Its parity picks the
+ * prefetch half its jobs write, so consecutive windows use different halves
+ * whatever the layer count: where an odd number of layers wraps to layer 0,
+ * layer parity would give the last layer and the first the same half. */
+constexpr uint64_t window_of(uint64_t sequence, uint32_t layer) {
+  return sequence << 32 | layer;
+}
+constexpr uint32_t window_layer(uint64_t window) {
+  return static_cast<uint32_t>(window);
+}
+constexpr uint32_t window_half(uint64_t window) {
+  return static_cast<uint32_t>(window >> 32) & 1;
+}
+/* The window after `window`, for `layer`. */
+constexpr uint64_t window_next(uint64_t window, uint32_t layer) {
+  return window_of((window >> 32) + 1, layer);
+}
+/* Matches no job: jobs target layers below kNoLayer. */
+constexpr uint64_t kNoWindow = ~0ull;
+
 struct Entry {
   /* Atomic: the prefetch submission thread reads the target layer's slots
    * while the evaluation thread promotes or evicts entries. */
@@ -295,6 +316,7 @@ struct PrefetchJob {
   std::atomic<uint64_t> bytes{0};
   std::atomic<bool> failed{false};
   uint32_t layer = 0;
+  uint64_t window = 0;  // the prediction window it was built for
   /* A prefill-scale prediction; only a batch-scale prepare adopts it, so a
    * decode step never inherits a whole-prompt expert set. */
   bool wide = false;
@@ -397,8 +419,11 @@ public:
    * assignment to build the weight table, which is why this is separate
    * from RunPhase. A job submitted between Resolve and RunPhase runs as
    * background after the phase and is simply double-read if it targeted
-   * this layer — harmless, and rarer than the prediction it loses. */
-  std::shared_ptr<PrefetchJob> Resolve(uint32_t layer, bool adopt_wide,
+   * this layer — harmless, and rarer than the prediction it loses. Jobs are
+   * matched by prediction window: `window` is the phase's own (kNoWindow
+   * when nothing may be adopted), `next` the one its prepare opened. */
+  std::shared_ptr<PrefetchJob> Resolve(uint64_t window, uint64_t next,
+                                       bool adopt_wide,
                                        uint64_t* dropped_bytes) {
     std::unique_lock lock(mutex_);
     // One thread stops the background job at a time: a submission that is
@@ -417,11 +442,11 @@ public:
     pf_stop_ = false;
     resolving_ = false;
     pf_->taken = pf_next_;
-    if (pf_->layer == layer && !pf_->failed.load() &&
+    if (pf_->window == window && !pf_->failed.load() &&
         (adopt_wide || !pf_->wide))
       job = pf_;  // its un-run, routed tasks join the phase
-    else if (pf_->layer == layer + 1 && !pf_->failed.load())
-      parked_ = pf_;  // the next layer's parity half is free; resume after
+    else if (pf_->window == next && !pf_->failed.load())
+      parked_ = pf_;  // the next window's half is free; resume after
     else
       *dropped_bytes += pf_->bytes.load();
     pf_.reset();
@@ -429,7 +454,7 @@ public:
     return job;
   }
 
-  bool RunPhase(uint32_t layer, const std::vector<ReadTask>& tasks,
+  bool RunPhase(uint64_t next, const std::vector<ReadTask>& tasks,
                 bool (*overlap)(void*, const Overlap*), void* overlap_context,
                 const Overlap& info) {
     {
@@ -452,17 +477,17 @@ public:
       demand_ = nullptr;
       parked_workers_ = 0;
       /* After the phase: a job submitted mid-phase runs next; otherwise the
-       * parked next-layer job resumes. Both target layer + 1; anything else
+       * parked next-window job resumes. Both target `next`; anything else
        * was overtaken by events and is not queued in the first place. */
-      std::shared_ptr<PrefetchJob> next;
-      if (pending_ && pending_->layer == layer + 1)
-        next = std::move(pending_);
-      else if (parked_ && parked_->layer == layer + 1)
-        next = std::move(parked_);
+      std::shared_ptr<PrefetchJob> resume;
+      if (pending_ && pending_->window == next)
+        resume = std::move(pending_);
+      else if (parked_ && parked_->window == next)
+        resume = std::move(parked_);
       pending_.reset();
       parked_.reset();
-      if (next) {
-        pf_ = std::move(next);
+      if (resume) {
+        pf_ = std::move(resume);
         pf_next_ = pf_->taken;  // a parked job resumes where it stopped
         pf_run_ = true;
         ++wake_;
@@ -475,17 +500,17 @@ public:
   /* Time the last phase blocked on its reads after the overlapped work. */
   uint64_t last_wait_ns() const { return last_wait_ns_; }
 
-  /* `expected` is the layer the next prepare handles. Checked under the
-   * lock a prepare's Resolve takes after advancing it, so a job that an
-   * evaluation overtook while it was built never starts: its parity half
-   * may hold the rows the current layer's kernels are reading. */
+  /* `expected` is the prediction window of the next prepare. Checked under
+   * the lock a prepare's Resolve takes after advancing it, so a job that an
+   * evaluation overtook while it was built never starts: its half may hold
+   * the rows the current layer's kernels are reading. */
   bool SubmitPrefetch(std::shared_ptr<PrefetchJob> job,
-                      const std::atomic<uint32_t>& expected) {
+                      const std::atomic<uint64_t>& expected) {
     std::unique_lock lock(mutex_);
     // A submission racing a phase's job resolution is simply dropped: the
     // prediction is best effort, and adopting half-resolved state is unsound.
     if (stopping_ || resolving_ || !job || job->tasks.empty() ||
-        job->layer != expected.load(std::memory_order_acquire))
+        job->window != expected.load(std::memory_order_acquire))
       return false;
     if (demand_) {
       // Submitted mid-phase: run right after it, replacing any queued job
@@ -508,6 +533,31 @@ public:
     start_.notify_all();
     pf_idle_.notify_all();  // a Resolve may wait for this replacement
     return true;
+  }
+
+  /* Stops and drops the background job, queued or running, so the caller
+   * may move slots while no phase runs (Store::Release); prefetch is best
+   * effort. Its bytes count as displaced (TakeOrphaned). No submission may
+   * race it. */
+  void Cancel() {
+    std::unique_lock lock(mutex_);
+    pf_idle_.wait(lock, [this] { return !resolving_; });
+    if (pf_run_) {
+      pf_stop_ = true;
+      resolving_ = true;
+      pf_idle_.wait(lock, [this] { return pf_inflight_ == 0; });
+      pf_run_ = false;
+      pf_stop_ = false;
+      resolving_ = false;
+    }
+    for (const auto* job : {&pf_, &pending_, &parked_})
+      if (*job)
+        orphaned_.fetch_add((*job)->bytes.load());
+    pf_.reset();
+    pending_.reset();
+    parked_.reset();
+    pf_next_ = 0;
+    pf_idle_.notify_all();
   }
 
   /* Bytes of jobs displaced before any phase consumed them; the store folds
@@ -705,9 +755,10 @@ struct Store::Impl {
    * smaller ones (the builds mix 50- to 82-byte block types). */
   std::array<uint64_t, kMaxPieces> stage_stride{};
   bool stage_pairs = false;
-  /* The only layer a concurrent prefetch submission may target: the next
-   * prepare call's. Set by that call before its reads begin. */
-  std::atomic<uint32_t> pf_expected{kNoLayer};
+  /* The only prediction window a concurrent prefetch submission may target:
+   * the next prepare call's (window_of). Set by that call before its reads
+   * begin. */
+  std::atomic<uint64_t> pf_window{window_of(0, kNoLayer)};
   /* Router-predicted prefetch: the caller records predictions with the
    * device event that signals their ids, and this thread submits each read
    * job when the event lands, so reads start during the layer the caller
@@ -769,7 +820,8 @@ struct Store::Impl {
   std::vector<std::vector<uint32_t>> spare_slots;  // per class
   std::vector<uint32_t> borrowed;
   /* Rows for such misses when no slot can be lent (a cache smaller than a
-   * batch's misses): allocated on demand, one expert each, kept. */
+   * batch's misses): allocated on demand, one expert each, kept until
+   * Release or Fit (free_emergency_rows). */
   std::vector<uint8_t*> emergency_rows;
   uint64_t emergency_row_bytes = 0;
   uint64_t read_margin = 0;            // Layout::read_margin_bytes
@@ -801,8 +853,10 @@ struct Store::Impl {
   uint64_t released = 0;         // freed by Release since Fit or Restore
   uint64_t tick = 0;
   uint64_t logged_tokens = 0;
-  /* Policy::trace_path: binary routing trace (Store::Tracing), opened at
-   * the first prepare (after seeding). */
+  /* Policy::trace_path: binary routing trace (Store::Tracing). The next
+   * prepare writes a snapshot of the cache when trace_started is false: the
+   * first one, and the first after Fit, Release or Restore changed the
+   * cache outside a prepare. */
   std::FILE* trace = nullptr;
   bool trace_started = false;
   bool seeding = false;  // seed prepares stay out of the trace
@@ -896,6 +950,24 @@ struct Store::Impl {
   // Free memory the cache never grows into at this moment.
   uint64_t live_floor() const { return policy.live_floor_bytes; }
 
+  /* Frees the emergency rows; no prepare may be running and the device
+   * must reach none of them again (Release, Fit). Returns their bytes. */
+  uint64_t free_emergency_rows() {
+    if (emergency_rows.empty())
+      return 0;
+    if (hipDeviceSynchronize() != hipSuccess) {
+      (void)hipGetLastError();
+      return 0;
+    }
+    for (void* row : emergency_rows)
+      (void)hipFree(row);
+    (void)hipGetLastError();
+    const uint64_t bytes =
+        emergency_rows.size() * (emergency_row_bytes + read_margin);
+    emergency_rows.clear();
+    return bytes;
+  }
+
   bool grow(uint32_t size_class) {
     const uint64_t free_bytes = available_memory();
     const uint64_t floor = live_floor();
@@ -906,7 +978,9 @@ struct Store::Impl {
       return false;
     available = std::min(available, cache_limit - stats.cache_bytes);
     const uint64_t slot_bytes = class_bytes[size_class];
-    uint64_t count = std::min(available, kChunkBytes) / slot_bytes;
+    // A chunk holds at least one slot, even of an expert above kChunkBytes.
+    uint64_t count =
+        std::min(available, std::max(kChunkBytes, slot_bytes)) / slot_bytes;
     if (!count)
       return false;
     Chunk chunk;
@@ -1047,7 +1121,9 @@ struct Store::Impl {
   /* Frees the newest chunks until the cache fits `limit`, keeping the
    * highest keep values of each size class: survivors in the freed chunks
    * move into the kept slots of the lowest, which are evicted.
-   * No prepare or prefetch may be running (Fit, or Release). */
+   * No prepare or prefetch may be running (Fit, or Release). A survivor
+   * whose copy fails is evicted instead, so the cache stays consistent and
+   * fits `limit` even then; false reports the failure. */
   bool shrink_to(uint64_t limit) {
     if (stats.cache_bytes <= limit || chunks.empty())
       return true;
@@ -1061,8 +1137,11 @@ struct Store::Impl {
       freed += uint64_t(end - first) * class_bytes[slots[first].size_class];
     }
     const uint32_t cut = chunk_first[drop];
-    if (hipDeviceSynchronize() != hipSuccess)
+    if (hipDeviceSynchronize() != hipSuccess) {
+      (void)hipGetLastError();
       return false;
+    }
+    bool copied = true;
     for (uint32_t c = 0; c < class_bytes.size(); ++c) {
       // Occupied slots of this class, kept region and freed region.
       std::vector<uint32_t> kept, moving;
@@ -1105,11 +1184,15 @@ struct Store::Impl {
         Entry& moved = entry(from.layer, from.expert);
         if (!keep[i] || next >= open.size()) {
           moved.slot = kNoSlot;
+        } else if (Slot& to = slots[open[next]];
+                   hipMemcpy(to.data, from.data, class_bytes[c],
+                             hipMemcpyDeviceToDevice) != hipSuccess) {
+          // `to` stays open and rejoins the free list below.
+          (void)hipGetLastError();
+          copied = false;
+          moved.slot = kNoSlot;
         } else {
-          Slot& to = slots[open[next++]];
-          if (hipMemcpy(to.data, from.data, class_bytes[c],
-                        hipMemcpyDeviceToDevice) != hipSuccess)
-            return false;
+          ++next;
           to.layer = from.layer;
           to.expert = from.expert;
           moved.slot = static_cast<uint32_t>(&to - slots.data());
@@ -1141,7 +1224,7 @@ struct Store::Impl {
     // Uploaded tables may name freed slots: force the next uploads.
     for (uint32_t p = 0; p < n_pieces; ++p)
       std::fill_n(table_host[p], uint64_t{n_layer} * table_stride, nullptr);
-    return true;
+    return copied;
   }
 
   void release(uint32_t slot_id) {
@@ -1287,6 +1370,10 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
                        uint64_t{n_layer} * store->table_stride *
                            sizeof(const uint8_t*)) == hipSuccess &&
          hipMalloc(reinterpret_cast<void**>(&store->table[p]),
+                   uint64_t{n_layer} * store->table_stride *
+                       sizeof(const uint8_t*)) == hipSuccess &&
+         // Prepare uploads `experts` entries: the rest stay null (Layout).
+         hipMemset(store->table[p], 0,
                    uint64_t{n_layer} * store->table_stride *
                        sizeof(const uint8_t*)) == hipSuccess;
   /* Null mirrors never match a weight base, so each layer's first prepare
@@ -1540,29 +1627,40 @@ static bool seed_cache(Store::Impl* store) {
     by_layer[ranked[i].layer].push_back(ranked[i]);
   bool ok = true;
   store->seeding = true;
-  for (uint32_t l = 0; l < n_layer && ok; ++l) {
-    std::vector<uint32_t> ids;
+  /* Seeded experts start with exactly the Policy::seed_uses value: the seed
+   * prepare's own uses and clock advance are undone after it. */
+  const auto seed = [&](uint32_t l) {
     for (const Ranked& item : by_layer[l]) {
-      ids.push_back(item.expert);
       Entry& seeded = store->entry(l, item.expert);
       seeded.uses =
           store->policy.seed_uses * std::min(8.0, std::log2(1.0 + item.count));
       seeded.protect = protect_of(seeded.uses, store->policy.max_class);
+      seeded.used_at = store->clock[l];
+    }
+  };
+  for (uint32_t l = 0; l < n_layer && ok; ++l) {
+    std::vector<int32_t> routes;
+    for (const Ranked& item : by_layer[l]) {
+      routes.push_back(static_cast<int32_t>(item.expert));
       selected[uint64_t{l} * store->n_expert + item.expert] = 1;
     }
-    if (ids.empty())
+    seed(l);
+    if (routes.empty())
       continue;
     if (store->available_memory() <= floor)
       break;
-    while (ids.size() % top_k)
-      ids.push_back(ids.back());
-    std::vector<int32_t> routes(ids.begin(), ids.end());
+    // Whole tokens: dropped rows pad the last one and count no use.
+    while (routes.size() % top_k)
+      routes.push_back(-1);
+    const uint64_t clock = store->clock[l];
     const void* tables[kMaxPieces] = {};
     ok = hipMemcpy(device_ids, routes.data(), routes.size() * sizeof(int32_t),
                    hipMemcpyHostToDevice) == hipSuccess &&
          prepare(store, l, device_ids,
                  static_cast<uint32_t>(routes.size() / top_k), tables, nullptr,
                  nullptr, nullptr, nullptr);
+    store->clock[l] = clock;
+    seed(l);
   }
   store->seeding = false;
   (void)hipFree(device_ids);
@@ -1613,6 +1711,18 @@ std::array<uint32_t, kMaxPieces> piece_order(const Store::Impl* store,
   return order;
 }
 
+/* Reads of `bytes` from `offset` of a file into dst, each at most kReadBytes:
+ * a worker reads a task whole into its pinned buffer of that size. */
+void append_reads(platform::PlatformFile file, platform::PlatformFile direct,
+                  uint64_t offset, uint64_t bytes, uint8_t* dst,
+                  std::vector<ReadTask>& tasks) {
+  for (uint64_t done = 0; done < bytes;) {
+    const uint64_t n = std::min(bytes - done, kReadBytes);
+    tasks.push_back({file, direct, offset + done, n, dst + done});
+    done += n;
+  }
+}
+
 /* Reads of one expert's piece p into dst: the whole span from the model
  * file, or with an expert-tails file its head from the model file and its
  * tail from the tails file, queued next to each other so the two drives read
@@ -1623,17 +1733,13 @@ void append_projection(const Store::Impl* store, uint32_t layer, uint32_t p,
   const uint64_t offset = src.offset + (uint64_t)e * src.bytes;
   const TailSource& t = store->tail[layer][p];
   if (!platform::FileValid(store->tail_file) || !t.stride) {
-    for (uint64_t done = 0; done < src.bytes;) {
-      const uint64_t bytes = std::min(src.bytes - done, kReadBytes);
-      tasks.push_back({src.file, src.direct, offset + done, bytes, dst + done});
-      done += bytes;
-    }
+    append_reads(src.file, src.direct, offset, src.bytes, dst, tasks);
     return;
   }
-  tasks.push_back({src.file, src.direct, offset, t.cut, dst});
-  tasks.push_back({store->tail_file, store->tail_direct,
-                   t.first + (uint64_t)e * t.stride, src.bytes - t.cut,
-                   dst + t.cut});
+  append_reads(src.file, src.direct, offset, t.cut, dst, tasks);
+  append_reads(store->tail_file, store->tail_direct,
+               t.first + (uint64_t)e * t.stride, src.bytes - t.cut, dst + t.cut,
+               tasks);
 }
 
 /* Demand read tasks. Experts with a stage row (`row_of`, assigned in
@@ -1731,22 +1837,24 @@ void append_expert_tasks(const Store::Impl* store, uint32_t layer, uint32_t row,
 }
 
 std::shared_ptr<PrefetchJob> build_prefetch_job(
-    const Store::Impl* store, uint32_t layer,
+    const Store::Impl* store, uint64_t window,
     const std::vector<uint32_t>& routed, bool wide) {
   if (!store->stage_pairs)
     return nullptr;
   const uint32_t n_expert = store->n_expert;
+  const uint32_t layer = window_layer(window);
   auto job = std::make_shared<PrefetchJob>();
   job->layer = layer;
+  job->window = window;
   job->wide = wide;
   job->task_begin.assign(n_expert, 0);
   job->task_count.assign(n_expert, 0);
   job->row_of.assign(n_expert, 0);
-  /* Tasks are grouped per expert at a compact row of the job's parity half,
-   * so a later prepare can adopt exactly the routed experts' reads; experts
+  /* Tasks are grouped per expert at a compact row of the window's half, so
+   * a later prepare can adopt exactly the routed experts' reads; experts
    * beyond the half simply stay demand reads. */
   const uint32_t half = store->policy.prefetch_stage_rows / 2;
-  const uint32_t base = (layer & 1) * half;
+  const uint32_t base = window_half(window) * half;
   /* A job wider than its half keeps the experts the most predicted routes
    * use; the kept experts still read in id order. */
   std::vector<uint8_t> wanted(n_expert, 0);
@@ -2003,11 +2111,17 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
   uint32_t misses = 0;
   for (uint32_t e = 0; e < n_expert; ++e)
     misses += missing[e] ? 1u : 0u;
-  /* From here predictions may target only the next layer, whose parity
-   * half no running kernel reads; after the last layer the next
-   * evaluation's first prepare reopens the window. */
-  store->pf_expected.store(layer + 1 < store->n_layer ? layer + 1 : 0,
-                           std::memory_order_release);
+  /* From here predictions may target only the next window, whose half no
+   * running kernel reads: this call's kernels read only the half of its own
+   * window, and the earlier calls' kernels ran before these routes existed.
+   * After the last layer the window wraps to layer 0. Jobs built for this
+   * call's window are adoptable only when it names this layer. */
+  const uint64_t own_window = store->pf_window.load(std::memory_order_relaxed);
+  const uint64_t window =
+      window_layer(own_window) == layer ? own_window : kNoWindow;
+  const uint64_t next_window =
+      window_next(own_window, layer + 1 < store->n_layer ? layer + 1 : 0);
+  store->pf_window.store(next_window, std::memory_order_release);
   const uint64_t orphaned = store->readers->TakeOrphaned();
   store->stats.bytes_read += orphaned;
   store->stats.prefetch_dropped_bytes += orphaned;
@@ -2016,8 +2130,8 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
   uint64_t trace_demand = 0, trace_adopted = 0, trace_read_wait = 0;
   const bool phase = misses || !store->readers->Idle();
   if (phase)
-    adopted = store->readers->Resolve(layer, n_tokens >= policy.sweep_tokens,
-                                      &dropped);
+    adopted = store->readers->Resolve(
+        window, next_window, n_tokens >= policy.sweep_tokens, &dropped);
   store->stats.bytes_read += dropped;
   store->stats.prefetch_dropped_bytes += dropped;
   /* The slots lent to the previous call are free of readers now: every
@@ -2045,6 +2159,7 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
     demand[e] = missing[e] && !(adopted && adopted->task_count[e]);
     demands += demand[e] ? 1u : 0u;
   }
+  std::vector<uint32_t> claimed;  // slots this call's reads fill
   const auto take = [&](uint32_t e, bool evict) {
     const uint32_t slot_id = store->acquire(layer, evict, hits);
     if (slot_id == kNoSlot)
@@ -2053,10 +2168,24 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
     slot.layer = layer;
     slot.expert = e;
     store->entry(layer, e).slot = slot_id;
+    claimed.push_back(slot_id);
     hits[e] = true;  // the table points at it: never a victim of this call
     direct[e] = slot.data;
     placed[e] = true;
     return true;
+  };
+  /* A failed call caches nothing its reads may not have filled, and leaves
+   * the layer's mirror null so the next call uploads its whole table. */
+  const auto abandon = [&] {
+    for (uint32_t slot_id : claimed) {
+      const Slot& slot = store->slots[slot_id];
+      store->entry(slot.layer, slot.expert).slot = kNoSlot;
+      store->release(slot_id);
+    }
+    for (uint32_t p = 0; p < n_pieces; ++p)
+      std::fill_n(store->table_host[p] + uint64_t{layer} * store->table_stride,
+                  n_expert, nullptr);
+    return false;
   };
   if (demands > stage_rows)
     for (uint32_t e = 0; e < store->n_expert; ++e)
@@ -2086,7 +2215,7 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
           hipSuccess) {
         gufo::server::Logger::LogFormatted(gufo::server::LogLevel::kError, tag,
                                            "unable to stage a missed expert");
-        return false;
+        return abandon();
       }
       store->emergency_rows.push_back(static_cast<uint8_t*>(row));
     }
@@ -2130,7 +2259,7 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
         hipMemcpyAsync(device_table[p], mirror[p],
                        store->n_expert * sizeof(uint8_t*),
                        hipMemcpyHostToDevice, stream) != hipSuccess)
-      return false;
+      return abandon();
   /* The hit and miss rows keep their route positions, each array holding -1
    * for the other's experts, so one launch over either array leaves exactly
    * the other launch's rows to fill. */
@@ -2161,7 +2290,7 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
       if (hipMemcpyAsync(store->split, store->split_host,
                          2 * n_routes * sizeof(int32_t), hipMemcpyHostToDevice,
                          stream) != hipSuccess)
-        return false;
+        return abandon();
     }
   }
   if (phase) {
@@ -2185,12 +2314,12 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
           tasks.push_back(adopted->tasks[i]);
       }
     }
-    if (!store->readers->RunPhase(layer, tasks, overlap, overlap_context,
+    if (!store->readers->RunPhase(next_window, tasks, overlap, overlap_context,
                                   info)) {
       gufo::server::Logger::LogFormatted(
           gufo::server::LogLevel::kError, tag,
           "failed to stage experts or run overlapped work");
-      return false;
+      return abandon();
     }
     store->stats.read_wait_ns += store->readers->last_wait_ns();
     store->stats.bytes_read += demand_bytes;
@@ -2203,7 +2332,7 @@ bool prepare(Store::Impl* store, uint32_t layer, const int32_t* routes,
       store->stats.prefetch_bytes += bytes;
     }
   } else if (overlap && !overlap(overlap_context, &info)) {
-    return false;
+    return abandon();
   }
   for (uint32_t e = 0; e < n_expert; ++e) {
     if (!missing[e] || placed[e])
@@ -2293,7 +2422,8 @@ bool prefetch(Store::Impl* store, uint32_t layer, const int32_t* experts,
   // prediction would never be adopted, and its parity half may hold rows in
   // compute. SubmitPrefetch repeats the check under the pool's lock, since
   // the first job also allocates the prefetch stage.
-  if (layer != store->pf_expected.load(std::memory_order_acquire))
+  const uint64_t window = store->pf_window.load(std::memory_order_acquire);
+  if (layer != window_layer(window))
     return false;
   // Predicted routes per uncached expert.
   std::vector<uint32_t> want(store->n_expert, 0);
@@ -2307,10 +2437,10 @@ bool prefetch(Store::Impl* store, uint32_t layer, const int32_t* experts,
   if (!ensure_stage_pairs(store))
     return false;
   std::shared_ptr<PrefetchJob> job =
-      build_prefetch_job(store, layer, want, wide);
+      build_prefetch_job(store, window, want, wide);
   if (!job)
     return false;
-  return store->readers->SubmitPrefetch(std::move(job), store->pf_expected);
+  return store->readers->SubmitPrefetch(std::move(job), store->pf_window);
 }
 
 }  // namespace
@@ -2345,8 +2475,12 @@ bool Store::Predict(uint32_t layer, hipEvent_t done, const int32_t* ids,
 }
 
 void Store::Expect(uint32_t layer) {
+  // The window keeps its half: the last prepare's kernels read the other.
   if (layer < impl_->n_layer)
-    impl_->pf_expected.store(layer, std::memory_order_release);
+    impl_->pf_window.store(
+        window_of(impl_->pf_window.load(std::memory_order_relaxed) >> 32,
+                  layer),
+        std::memory_order_release);
 }
 
 void Store::PredictFlush() {
@@ -2381,13 +2515,21 @@ uint64_t Store::Release(uint64_t bytes) {
   PredictFlush();
   // Held so no prediction starts a prefetch while slots move.
   std::lock_guard lock(store->pred_mutex);
-  if (!store->readers->Idle())
-    return 0;
+  // Prefetch is best effort: drop what the flush started rather than give up
+  // the release while it reads.
+  store->readers->Cancel();
   const uint64_t before = store->stats.cache_bytes;
+  // Consistent even when a move failed: the cache then holds less.
   (void)store->shrink_to(before > bytes ? before - bytes : 0);
-  store->cache_limit = std::min(store->cache_limit, store->stats.cache_bytes);
-  store->released += before - store->stats.cache_bytes;
-  return before - store->stats.cache_bytes;
+  const uint64_t freed =
+      before - store->stats.cache_bytes + store->free_emergency_rows();
+  const uint64_t limit = store->cache_limit;
+  store->cache_limit = std::min(limit, store->stats.cache_bytes);
+  store->released += freed;
+  // The trace's replay restarts from the cache as Release left it.
+  if (freed || store->cache_limit != limit)
+    store->trace_started = false;
+  return freed;
 }
 
 uint64_t Store::Restore() {
@@ -2398,6 +2540,7 @@ uint64_t Store::Restore() {
   const uint64_t raised = store->granted_limit - store->cache_limit;
   store->cache_limit = store->granted_limit;
   store->released = 0;
+  store->trace_started = false;
   return raised;
 }
 
@@ -2458,8 +2601,12 @@ bool Store::Fit(uint64_t grant_bytes) {
   store->cache_limit = limit;
   store->granted_limit = limit;
   store->released = 0;
+  (void)store->free_emergency_rows();
   const bool shrunk = store->shrink_to(limit);
-  return staged && shrunk && seed_cache(store);
+  const bool ok = staged && shrunk && seed_cache(store);
+  // The trace's replay starts from the cache as Fit left it.
+  store->trace_started = false;
+  return ok;
 }
 
 }  // namespace gufo::expert_stream

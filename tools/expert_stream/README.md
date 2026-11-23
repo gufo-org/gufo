@@ -32,7 +32,9 @@ top-k. Prefetch policies need router predictions in the trace
 Little-endian, packed. The file starts with the 8 bytes `GUFOXTRC` and a
 `u32` version (2). Records follow, each a one-byte tag:
 
-`S`, once, before the first prepare: the cache as seeded.
+`S`, before the first prepare: the cache as seeded. Another follows before
+the next prepare whenever `Fit`, `Release` or `Restore` changed the cache;
+the replay tools start from the last one and skip the prepares before it.
 
 | Field | Type |
 | --- | --- |

@@ -169,13 +169,14 @@ public:
    * first, until at least `bytes` went or the cache is empty, and holds the
    * cache at what is left until Restore. Each size class keeps the experts
    * eviction ranks highest: those in the freed chunks move into the slots
-   * of the lowest. Waits for queued predictions and
-   * returns 0 while prefetch reads run; call it only while no Prepare runs
-   * (serving does when idle). Returns the bytes freed. */
+   * of the lowest. Also frees the rows misses borrowed when no slot could
+   * be lent. Waits for queued predictions and drops any background
+   * prefetch; call it only while no Prepare runs (serving does when idle).
+   * Returns the bytes freed; the cache is held even when that is 0. */
   uint64_t Release(uint64_t bytes);
   /* Lets the cache grow back to its grant after Release; it regrows as
    * misses need it, while more than FloorBytes stay available. Returns the
-   * bytes the limit rose by. */
+   * bytes the limit rose by: 0 when Release held nothing back. */
   uint64_t Restore();
   /* Bytes Release freed since Fit or the last Restore. */
   uint64_t ReleasedBytes() const;
@@ -230,7 +231,8 @@ public:
   void PredictFlush();
 
   /* Policy::trace_path writes a binary routing trace (the layout, policy
-   * and seeded cache, then each Prepare's routes, hits and timing) for
+   * and seeded cache, then each Prepare's routes, hits and timing; a new
+   * snapshot of the cache after Fit, Release or Restore changed it) for
    * offline replay with tools/expert_stream/ (format in its README).
    * Callers add router predictions for later layers with TracePrediction
    * once the target layer's Prepare returned. Tracing is a measurement mode:

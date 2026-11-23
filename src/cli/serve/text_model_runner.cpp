@@ -416,6 +416,25 @@ struct TextRunnerPool::Impl {
     return std::nullopt;
   }
 
+  // The store also stops at its floor of room under the cgroup
+  // (ext::HostAvailableBytes), which MemAvailable does not see. Folds that
+  // room into `sample.available`, so that measured against `reserve` a
+  // cgroup below the floor is pressure, and one with room is required to
+  // restore. The cgroup has no CMA pages: it is held to the floor itself.
+  ext::HostMemorySample ExpertSample(ext::HostMemorySample sample,
+                                     std::uint64_t reserve) const {
+#if defined(ENGINE_ENABLE_HIP)
+    const auto floor = validated.resources.expert_cache.store->FloorBytes();
+    const auto extra = reserve - std::min(reserve, floor);
+    if (sample.cgroup_available <
+        sample.available - std::min(sample.available, extra))
+      sample.available = sample.cgroup_available + extra;
+#else
+    (void)reserve;
+#endif
+    return sample;
+  }
+
   // Under pressure the expert cache gives memory back first: its coldest
   // experts cost less than the prompt cache's checkpoints, and it is the
   // largest holder. It is restored to its grant once what it gave back is
@@ -444,13 +463,14 @@ struct TextRunnerPool::Impl {
                 ext::DescribeHostMemory(sample));
       expert_pressure_reported = true;
       if (released)
-        sample = HostSample();
+        sample = ExpertSample(HostSample(), reserve);
       return;
     }
     expert_pressure_reported = false;
+    // Restore also when Release held the cache without freeing anything (it
+    // was empty): Restore returns 0 when nothing is held back.
     const auto released = store->ReleasedBytes();
-    if (released &&
-        sample.available > reserve + released + kExpertRestoreMarginBytes)
+    if (sample.available > reserve + released + kExpertRestoreMarginBytes)
       if (const auto raised = store->Restore())
         Logger::Info("cache",
                      "schema=component-cache-v1 event=expert_cache_restore "
@@ -1713,8 +1733,10 @@ void TextRunnerPool::Idle() const {
   impl_->validated.runner->Idle();
   auto sample = impl_->HostSample();
   const auto reserve = impl_->ExpertReserve(sample);
-  if (reserve)
+  if (reserve) {
+    sample = impl_->ExpertSample(sample, *reserve);
     impl_->RelieveExperts(sample, *reserve);
+  }
   if (impl_->component_cache)
     (void)impl_->component_cache->RelieveHostPressure(sample, reserve);
 }
@@ -1722,8 +1744,8 @@ void TextRunnerPool::Idle() const {
 std::optional<std::uint64_t> TextRunnerPool::AdmissionShortfall() const {
   const auto sample = impl_->HostSample();
   if (const auto reserve = impl_->ExpertReserve(sample)) {
-    const auto shortfall =
-        sample.available < *reserve ? *reserve - sample.available : 0;
+    const auto available = impl_->ExpertSample(sample, *reserve).available;
+    const auto shortfall = available < *reserve ? *reserve - available : 0;
     if (shortfall <= *reserve / 2)
       return std::nullopt;
     return shortfall;

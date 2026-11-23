@@ -3,12 +3,15 @@
 // with layer sizes that differ, through the store's own API only.
 #include <hip/hip_runtime_api.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "src/core/hip/expert_stream/store.hpp"
@@ -446,6 +449,90 @@ void CallerStream(int32_t* routes) {
   (void)hipStreamDestroy(run.stream);
 }
 
+void FailedPrepareCachesNothing(int32_t* routes) {
+  // More misses than the demand stage holds, in a batch that admits them
+  // all: they are read straight into cache slots. When the call fails (here
+  // its overlapped work), none of them may stay cached.
+  Model m(100, 8, {{1280, 640}});
+  Check(m.ok, "failed-prepare fixture");
+  if (!m.ok)
+    return;
+  Policy policy;
+  policy.cache_limit_bytes = 128 * m.Slot(0);
+  policy.log_tag = "expert_stream_test";
+  auto store = Store::Create(m.layout, policy);
+  Check(store != nullptr, "failed-prepare create");
+  if (!store)
+    return;
+  Check(FitEmpty(*store), "failed-prepare fit, then empty");
+  Runner run{m, *store, routes};
+  std::vector<int32_t> ids(72);
+  for (int32_t e = 0; e < 72; ++e)
+    ids[e] = e;
+  const auto refuse = [](void*, const Overlap*) { return false; };
+  Check(!run.Run(0, ids, refuse), "failed-prepare fails");
+  const auto failed = store->GetStats();
+  Check(run.Run(0, ids) && store->GetStats().hits == failed.hits,
+        "failed-prepare caches none of its reads");
+  Check(run.Run(0, ids) && store->GetStats().hits == failed.hits + 72,
+        "failed-prepare then caches them");
+}
+
+bool WaitForPrefetch(const Store& store) {
+  const auto until =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (!store.PrefetchIdle()) {
+    if (std::chrono::steady_clock::now() > until)
+      return false;
+    std::this_thread::yield();
+  }
+  return true;
+}
+
+void PrefetchWindowWraps(int32_t* routes) {
+  // Three layers, so the last and the first share their parity: a prefetch
+  // for layer 0 submitted after the last layer's call must not write the
+  // stage rows that call's table names. Nothing is cached (no Fit), so the
+  // adopted experts stay in the prefetch stage. The table is wider than the
+  // experts; its extra entries stay null.
+  Model m(16, 2, {{3000}, {2000}, {3000}});
+  m.layout.table_experts = 32;
+  Check(m.ok, "prefetch-wrap fixture");
+  if (!m.ok)
+    return;
+  Policy policy;
+  policy.log_tag = "expert_stream_test";
+  auto store = Store::Create(m.layout, policy);
+  Check(store != nullptr, "prefetch-wrap create");
+  if (!store)
+    return;
+  Runner run{m, *store, routes};
+  Check(run.Run(0, {0, 1}) && run.Run(1, {0, 1}), "prefetch-wrap first layers");
+  const int32_t last[] = {4, 5};
+  Check(store->Prefetch(2, last, 2) && WaitForPrefetch(*store),
+        "prefetch-wrap last layer prefetch");
+  const auto before = store->GetStats();
+  Check(run.Run(2, {4, 5}) &&
+            store->GetStats().prefetch_bytes == before.prefetch_bytes + 6000,
+        "prefetch-wrap last layer adopts");
+  const void* const table = run.tables[0];
+  std::vector<const void*> wide(32, &run);
+  Check(hipMemcpy(wide.data(), table, wide.size() * sizeof(void*),
+                  hipMemcpyDeviceToHost) == hipSuccess &&
+            std::all_of(wide.begin() + 16, wide.end(),
+                        [](const void* p) { return p == nullptr; }),
+        "prefetch-wrap table entries past the experts are null");
+  const int32_t first[] = {6, 7};
+  Check(store->Prefetch(0, first, 2) && WaitForPrefetch(*store),
+        "prefetch-wrap first layer prefetch");
+  Check(CheckTables(m, 2, {4, 5}, &table),
+        "prefetch-wrap keeps the last layer's rows");
+  const auto wrapped = store->GetStats();
+  Check(run.Run(0, {6, 7}) &&
+            store->GetStats().prefetch_bytes == wrapped.prefetch_bytes + 6000,
+        "prefetch-wrap first layer adopts");
+}
+
 void InvalidLayouts() {
   Policy policy;
   policy.log_tag = "expert_stream_test";
@@ -478,6 +565,8 @@ int main() {
   OnePieceLayout(routes);
   ReleaseKeepsHottest(routes);
   CallerStream(routes);
+  FailedPrepareCachesNothing(routes);
+  PrefetchWindowWraps(routes);
   InvalidLayouts();
   (void)hipFree(routes);
   return ok ? 0 : 1;

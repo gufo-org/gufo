@@ -1,6 +1,6 @@
 # RFC: expert streaming for extensions
 
-Status: experimental extension API (0.3.42), discussed in #1286. November 2026.
+Status: experimental extension API, discussed in #1286. November 2026.
 
 This document describes the expert store, an experimental extension API that
 runs mixture-of-experts models whose routed experts do not fit in memory, and
@@ -265,8 +265,9 @@ the prompt cache at startup. While experts stream, serving therefore measures
 pressure against the floor (`Store::FloorBytes`), and below it the expert
 cache gives memory back first:
 
-- `Release(bytes)` frees the newest whole chunks and holds the cache there.
-  Each size class keeps the experts eviction ranks highest: those in the
+- `Release(bytes)` drops any background prefetch, frees the newest whole
+  chunks and the rows misses borrowed when no slot could be lent, and holds
+  the cache there, even when it freed nothing. Each size class keeps the experts eviction ranks highest: those in the
   freed chunks move into the slots of the lowest, as a shrinking `Fit` does.
   The moves are device copies of a few GB at most, since the device pages
   are never swapped; in the managed fallback they can read swapped memory
@@ -274,6 +275,7 @@ cache gives memory back first:
   prompts; the prompt cache gives memory only if that is not enough.
 - `Restore()` lets the cache regrow to its grant once what it released is
   free again (the floor, `ReleasedBytes()` and 256 MiB); misses refill it.
+  Room under the process's cgroup counts as available memory too.
 - New requests are refused below half the floor.
 
 `Release` runs on the idle scheduler, so no `Prepare` runs beside it.
@@ -296,9 +298,11 @@ prediction costs bandwidth, not latency.
   so the extension can free its buffers.
 
 The window is one layer: once `Prepare(L)` starts, only layer `L + 1` is
-accepted. The prefetch stage has two halves chosen by layer parity, so a
-prediction for `L + 1` fills one half while layer `L`'s kernels read the
-other. Only one extension has shaped these calls, so they are the part of the
+accepted, and after the last layer only layer 0. The prefetch stage has two
+halves, which consecutive windows alternate (counting windows, not layers,
+so an odd layer count does not give the last layer and the first the same
+half): a prediction for `L + 1` fills one half while layer `L`'s kernels
+read the other. Only one extension has shaped these calls, so they are the part of the
 API most likely to change.
 
 ### Reads and platforms

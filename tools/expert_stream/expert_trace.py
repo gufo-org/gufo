@@ -9,6 +9,7 @@ start with the snapshot record. The format is in README.md.
 from dataclasses import dataclass, field
 from pathlib import Path
 import struct
+import sys
 
 MAGIC = b"GUFOXTRC"
 VERSION = 2
@@ -146,6 +147,12 @@ def read_trace(path):
     snapshot, prepares = None, []
     for kind, body in records(path):
         if kind == "S":
+            if snapshot is not None:
+                # Fit, Release or Restore changed the cache outside a
+                # prepare: replay from the cache as it left it.
+                print(f"{path}: a later snapshot drops {len(prepares)} earlier prepares from "
+                      "the replay", file=sys.stderr)
+                prepares = []
             s = body
             n_layer, n_expert = s["n_layer"], s["n_expert"]
             flat = np.frombuffer(s["slots"], "<u4").reshape(-1, 3)
