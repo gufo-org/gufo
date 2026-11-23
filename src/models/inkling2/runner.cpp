@@ -1202,12 +1202,22 @@ public:
         ids.push_back(l.anchor);
       }
       bool ok = !sessions.empty();
+      // greedy rows take the device argmax; only sampled rows' logits come
+      // to the host
+      std::vector<RowMode> modes(lanes.size());
+      bool host[Engine::kMaxDecodeBatch] = {};
+      std::int32_t amax[Engine::kMaxDecodeBatch] = {};
+      std::span<const float> out;
+      const std::size_t V = engine_->config().n_vocab_text;
       if (ok) {
         try {
-          if (sessions.size() == 1)
-            engine_->Forward(*sessions[0], std::span<const std::int32_t>(ids));
-          else
-            engine_->DecodeBatch(sessions, ids);
+          for (std::size_t k = 0; k < lanes.size(); ++k) {
+            modes[k] = ModeOf(*lanes[k].st, working[lanes[k].i]);
+            host[k] = !modes[k].greedy;
+          }
+          engine_->DecodeBatchRows(sessions, ids,
+                                   std::span<const bool>(host, lanes.size()),
+                                   &out, amax);
         } catch (...) {
           for (const auto& l : lanes)
             steps[l.i].failure = std::current_exception();
@@ -1220,9 +1230,25 @@ public:
         ForEachLane(lanes.size(), [&](std::size_t k) {
           const auto& l = lanes[k];
           try {
-            auto next =
-                Select(*l.st, working[l.i], l.ss->logits(), l.ss->position());
-            l.st->pending = std::move(next);
+            const std::size_t at = l.ss->position();
+            if (modes[k].greedy) {
+              // as Resolve's greedy rows: a token the sampler forces (a
+              // reasoning budget's close) replaces the argmax, as Sample would
+              const auto forced = working[l.i].ForcedToken();
+              if (forced && l.st->block == Block::kThinking)
+                l.st->budget_closed = true;
+              const auto tk = forced ? static_cast<g::TextRunnerToken>(*forced)
+                                     : static_cast<g::TextRunnerToken>(amax[k]);
+              const bool stop = at >= max_context_ || l.st->answer_done ||
+                                (l.st->stop_at_eos() && tok_->IsStop(tk));
+              l.st->pending = g::TextDecodeSelection{
+                  .stop = stop,
+                  .token = tk,
+                  .piece = stop ? std::string{} : Piece(l.st->block, tk)};
+            } else {
+              l.st->pending =
+                  Select(*l.st, working[l.i], out.subspan(k * V, V), at);
+            }
           } catch (...) {
             steps[l.i].failure = std::current_exception();
           }

@@ -206,6 +206,14 @@ public:
   [[nodiscard]] bool batch_capable() const;
   void DecodeBatch(std::span<Session* const> sessions,
                    std::span<const std::int32_t> tokens);
+  /// DecodeBatch (batch_capable() only) whose logits stay on the device
+  /// (`logits()` reads them when asked): `argmax` (when non-null) receives
+  /// each row's argmax, and the rows with host[i] set are also copied to
+  /// `rows` ([sessions][vocab_text], valid until the next step).
+  void DecodeBatchRows(std::span<Session* const> sessions,
+                       std::span<const std::int32_t> tokens,
+                       std::span<const bool> host, std::span<const float>* rows,
+                       std::int32_t* argmax);
 
   /// Speculative verification. `Verify` evaluates up to VerifyRows() tokens
   /// at the session's next positions in one step; row i's logits (`tokens`

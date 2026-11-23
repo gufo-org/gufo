@@ -1639,7 +1639,8 @@ struct Engine::Impl {
   /// one graph launch: the weights are read once for all tokens.
   void DecodeN(Session* const* sess, const std::int32_t* tokens,
                std::vector<float>* const* outs, int n,
-               std::int32_t* step_argmax = nullptr) {
+               std::int32_t* step_argmax = nullptr,
+               const bool* pinned = nullptr) {
     nb = n;
     int maxpos = 0;
     std::int32_t step[2 * kMaxB] = {};
@@ -1677,6 +1678,10 @@ struct Engine::Impl {
                              hipMemcpyDeviceToDevice, ds),
               "logits copy");
         sess[b]->logits_stale_ = true;
+        if (pinned != nullptr && pinned[b])
+          Check(hipMemcpyAsync(h_rows + b * V, logits_d + b * V, V * 4,
+                               hipMemcpyDeviceToHost, ds),
+                "logits copy");
         continue;
       }
       outs[b]->resize(V);
@@ -2189,6 +2194,43 @@ void Engine::DecodeBatch(std::span<Session* const> sessions,
   }
   for (std::size_t i = 0; i < sessions.size(); ++i)
     impl_->Decode(*sessions[i], tokens[i], &sessions[i]->logits_);
+}
+
+void Engine::DecodeBatchRows(std::span<Session* const> sessions,
+                             std::span<const std::int32_t> tokens,
+                             std::span<const bool> host,
+                             std::span<const float>* rows,
+                             std::int32_t* argmax) {
+  if (!batch_capable() || sessions.empty() ||
+      sessions.size() != tokens.size() || host.size() != sessions.size() ||
+      sessions.size() > kMaxDecodeBatch)
+    throw std::runtime_error("inkling2: bad decode batch");
+  const std::lock_guard lock(mutex_);
+  for (std::size_t i = 0; i < sessions.size(); ++i) {
+    Session& s = *sessions[i];
+    for (std::size_t j = 0; j < i; ++j)
+      if (sessions[j] == &s)
+        throw std::runtime_error("inkling2: duplicate session in decode batch");
+    if (s.pos_ + 1 > max_context_)
+      throw std::runtime_error("inkling2: context exhausted");
+    if (tokens[i] < 0 ||
+        static_cast<std::uint32_t>(tokens[i]) >= weights_.config.n_vocab_text)
+      throw std::runtime_error("inkling2: token id out of range");
+  }
+  for (std::size_t i = 0; i < sessions.size(); ++i) {
+    Session& s = *sessions[i];
+    if (s.hooks_ != nullptr)
+      s.hooks_->BeforeWrite(s.pos_, s.pos_ + 1);  // M2 hook
+    s.BackRows(s.pos_, s.pos_ + 1);
+  }
+  std::vector<float>* outs[Impl::kMaxB] = {};
+  bool pinned[Impl::kMaxB] = {};
+  for (std::size_t i = 0; i < sessions.size(); ++i)
+    pinned[i] = host[i];
+  impl_->DecodeN(sessions.data(), tokens.data(), outs,
+                 static_cast<int>(sessions.size()), argmax, pinned);
+  if (rows != nullptr)
+    *rows = {impl_->h_rows, sessions.size() * weights_.config.n_vocab_text};
 }
 
 std::size_t Engine::VerifyRows(const Session& s) const {
