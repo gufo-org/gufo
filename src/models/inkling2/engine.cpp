@@ -260,7 +260,8 @@ struct Engine::Impl {
   // device argmax of the rows of a verification (greedy requests)
   float* d_amax_ws = nullptr;
   int* d_amax = nullptr;
-  int* h_amax = nullptr;  // pinned
+  int* h_amax = nullptr;    // pinned
+  float* h_rows = nullptr;  // pinned [kMaxB][vocab]: a verification's logits
   /// The verification capture of slot `slot_idx` (null outside verification).
   float* VCap(int slot_idx) const {
     return verify_mode ? d_vcap + static_cast<std::size_t>(slot_idx) *
@@ -414,6 +415,8 @@ struct Engine::Impl {
       (void)hipStreamDestroy(ps);
     if (h_amax)
       (void)hipHostFree(h_amax);
+    if (h_rows)
+      (void)hipHostFree(h_rows);
     if (ev_fork)
       (void)hipEventDestroy(ev_fork);
     if (ev_join)
@@ -598,6 +601,9 @@ struct Engine::Impl {
     d_amax_ws = NewBuf(B * 64 * 2);
     d_amax = NewInts(B);
     Check(hipHostMalloc(reinterpret_cast<void**>(&h_amax), B * sizeof(int)),
+          "pinned");
+    Check(hipHostMalloc(reinterpret_cast<void**>(&h_rows),
+                        B * cfg->n_vocab_text * sizeof(float)),
           "pinned");
     d_counter = reinterpret_cast<unsigned*>(NewInts(B));
     Check(hipMemset(d_counter, 0, B * 4), "counter");
@@ -1597,7 +1603,8 @@ struct Engine::Impl {
   /// One decode step of `n` (<= kMaxB) distinct sessions, one token each, as
   /// one graph launch: the weights are read once for all tokens.
   void DecodeN(Session* const* sess, const std::int32_t* tokens,
-               std::vector<float>* const* outs, int n) {
+               std::vector<float>* const* outs, int n,
+               std::int32_t* step_argmax = nullptr) {
     nb = n;
     int maxpos = 0;
     std::int32_t step[2 * kMaxB] = {};
@@ -1630,10 +1637,24 @@ struct Engine::Impl {
     }
     const std::size_t V = cfg->n_vocab_text;
     for (int b = 0; b < n; ++b) {
+      if (outs[b] == nullptr) {  // device logits (Engine::Step)
+        Check(hipMemcpyAsync(sess[b]->dlogits_, logits_d + b * V, V * 4,
+                             hipMemcpyDeviceToDevice, ds),
+              "logits copy");
+        sess[b]->logits_stale_ = true;
+        continue;
+      }
       outs[b]->resize(V);
       Check(hipMemcpyAsync(outs[b]->data(), logits_d + b * V, V * 4,
                            hipMemcpyDeviceToHost, ds),
             "logits copy");
+      sess[b]->logits_stale_ = false;
+    }
+    if (step_argmax != nullptr) {
+      fs::RowsArgmax(ds, logits_d, n, static_cast<int>(V), d_amax_ws, d_amax);
+      Check(hipMemcpyAsync(h_amax, d_amax, static_cast<std::size_t>(n) * 4,
+                           hipMemcpyDeviceToHost, ds),
+            "argmax copy");
     }
     if (dsp)
       for (int b = 0; b < n; ++b)
@@ -1642,6 +1663,8 @@ struct Engine::Impl {
             d_feat + static_cast<std::size_t>(b) * Drafter::kFeatureFloats,
             sess[b]->pos_, 1);
     Check(hipStreamSynchronize(ds), "decode sync");
+    if (step_argmax != nullptr)
+      std::memcpy(step_argmax, h_amax, static_cast<std::size_t>(n) * 4);
     for (int b = 0; b < n; ++b)
       sess[b]->pos_ += 1;
     nb = 1;
@@ -1652,7 +1675,7 @@ struct Engine::Impl {
   /// its position (the caller keeps the rows inside one attention bucket).
   /// The session does not advance; CommitVerify keeps a prefix of the rows.
   void VerifyN(Session& ss, const std::int32_t* tokens, int n,
-               std::vector<float>* out, std::int32_t* argmax) {
+               std::span<const float>* out, std::int32_t* argmax) {
     nb = n;
     std::int32_t step[2 * kMaxB] = {};
     const int pos = static_cast<int>(ss.pos_);
@@ -1689,10 +1712,11 @@ struct Engine::Impl {
       BuildDecode(ctx);
     const std::size_t V = cfg->n_vocab_text;
     if (out != nullptr) {
-      out->resize(static_cast<std::size_t>(n) * V);
-      Check(hipMemcpyAsync(out->data(), logits_d, out->size() * 4,
-                           hipMemcpyDeviceToHost, ds),
-            "logits copy");
+      Check(
+          hipMemcpyAsync(h_rows, logits_d, static_cast<std::size_t>(n) * V * 4,
+                         hipMemcpyDeviceToHost, ds),
+          "logits copy");
+      *out = {h_rows, static_cast<std::size_t>(n) * V};
     }
     if (argmax != nullptr) {
       fs::RowsArgmax(ds, logits_d, n, static_cast<int>(V), d_amax_ws, d_amax);
@@ -1861,16 +1885,31 @@ struct Engine::Impl {
         sink(static_cast<std::size_t>(first_idx + a), n, host.data());
         if (last_ubatch && a + n == T)
           ss.logits_.assign(host.end() - V, host.end());
+        ss.logits_stale_ = false;
       }
     } else {
       chunk(T - 1, 1, &host);
       ss.logits_ = std::move(host);
+      ss.logits_stale_ = false;
     }
   }
 };
 
 // ---------------------------------------------------------------------------------------------
 Session::~Session() = default;
+
+const std::vector<float>& Session::logits() const {
+  if (logits_stale_) {
+    // The step that left them synchronized its stream.
+    const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+    logits_.resize(vocab_);
+    Check(
+        hipMemcpy(logits_.data(), dlogits_, vocab_ * 4, hipMemcpyDeviceToHost),
+        "logits copy");
+    logits_stale_ = false;
+  }
+  return logits_;
+}
 
 std::shared_ptr<mem::StateAccount> Session::account() const {
   return state_ ? state_->account() : nullptr;
@@ -1962,6 +2001,8 @@ Engine::StateLayout Engine::DeclareState() const {
         state.Fixed(static_cast<std::size_t>(kConvChannels) * 3 * 4);
   }
   layout.table = state.Fixed(48 * sizeof(fs::SlotEntry));
+  layout.logits =
+      state.Fixed(static_cast<std::size_t>(weights_.config.n_vocab_text) * 4);
   if (impl_ != nullptr && impl_->dsp) {
     for (int l = 0; l < 3; ++l) {
       if (Drafter::WindowLayer(l)) {
@@ -2018,6 +2059,8 @@ std::unique_ptr<Session> Engine::NewSession() {
     host[i] = {sl.k, sl.v, sl.conv, static_cast<int>(sl.rows), 0};
   }
   s->tbl_ = state.data(layout.table);
+  s->dlogits_ = state.data<float>(layout.logits);
+  s->vocab_ = weights_.config.n_vocab_text;
   if (impl_->dsp) {
     for (int l = 0; l < 3; ++l) {
       s->draft_.k[l] = state.data(layout.dk[l]);
@@ -2047,6 +2090,7 @@ void Engine::Reset(Session& s) {
   }
   s.pos_ = 0;
   s.logits_.clear();
+  s.logits_stale_ = false;
   s.draft_.valid = 0;
   s.draft_.first = 0;
   s.draft_.f_pos = static_cast<std::size_t>(-1);
@@ -2108,7 +2152,7 @@ std::size_t Engine::VerifyRows(const Session& s) const {
 }
 
 void Engine::Verify(Session& s, std::span<const std::int32_t> tokens,
-                    std::vector<float>* logits, std::int32_t* argmax) {
+                    std::span<const float>* logits, std::int32_t* argmax) {
   const std::lock_guard lock(mutex_);
   if (tokens.empty() || tokens.size() > VerifyRows(s))
     throw std::runtime_error("inkling2: bad verification width");
@@ -2131,11 +2175,12 @@ void Engine::CommitVerify(Session& s, std::size_t keep,
       (!logits.empty() && logits.size() < keep * V))
     throw std::runtime_error("inkling2: bad verification commit");
   if (logits.empty()) {
-    s.logits_.resize(V);
-    Check(hipMemcpyAsync(s.logits_.data(), impl_->logits_d + (keep - 1) * V,
-                         V * 4, hipMemcpyDeviceToHost, impl_->ds),
+    Check(hipMemcpyAsync(s.dlogits_, impl_->logits_d + (keep - 1) * V, V * 4,
+                         hipMemcpyDeviceToDevice, impl_->ds),
           "logits copy");
+    s.logits_stale_ = true;
   } else {
+    s.logits_stale_ = false;
     s.logits_.assign(
         logits.begin() + static_cast<std::ptrdiff_t>((keep - 1) * V),
         logits.begin() + static_cast<std::ptrdiff_t>(keep * V));
@@ -2200,6 +2245,21 @@ int Engine::Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
   return impl_->dsp->Propose(impl_->ds, s.draft_, anchor, s.pos_, n, out,
                              confidence, more);
+}
+
+void Engine::Step(Session& s, std::int32_t token, std::int32_t* argmax) {
+  const std::lock_guard lock(mutex_);
+  if (s.pos_ + 1 > max_context_)
+    throw std::runtime_error("inkling2: context exhausted");
+  if (token < 0 ||
+      static_cast<std::uint32_t>(token) >= weights_.config.n_vocab_text)
+    throw std::runtime_error("inkling2: token id out of range");
+  if (s.hooks_ != nullptr)
+    s.hooks_->BeforeWrite(s.pos_, s.pos_ + 1);  // M2 hook
+  s.BackRows(s.pos_, s.pos_ + 1);
+  Session* sp = &s;
+  std::vector<float>* none = nullptr;
+  impl_->DecodeN(&sp, &token, &none, 1, argmax);
 }
 
 void Engine::Synchronize() {

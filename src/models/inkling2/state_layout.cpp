@@ -131,10 +131,11 @@ std::uint32_t SessionStateAccess::RingRows(const Session& s, std::uint32_t v) {
   return sl.global ? 0 : static_cast<std::uint32_t>(sl.rows);
 }
 bool SessionStateAccess::HasLogits(const Session& s) {
-  return !s.logits_.empty();
+  return s.logits_stale_ || !s.logits_.empty();
 }
 void SessionStateAccess::LogitsOut(const Session& s, std::byte* dst,
                                    std::size_t bytes) {
+  (void)s.logits();  // copies device-held logits
   if (s.logits_.size() * 4 != bytes) {
     std::memset(dst, 0, bytes);
     return;
@@ -243,6 +244,7 @@ void SessionStateAccess::SetFrontier(Session& s, std::size_t position,
     s.logits_.assign(logits, logits + n);
   else
     s.logits_.clear();
+  s.logits_stale_ = false;
 }
 void SessionStateAccess::SetHooks(Session& s, SessionHooks* h) {
   s.hooks_ = h;

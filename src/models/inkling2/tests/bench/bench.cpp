@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
       auto sp = engine->NewSession();
       engine->Forward(*sp, prompt);
       std::vector<std::int32_t> got{amax(sp->logits())};
-      std::vector<float> out;
+      std::span<const float> out;
       long drafted = 0, accepted = 0, cycles = 0;
       // calibration: [bin of the draft probability] -> (seen, accepted), for
       // drafts whose predecessors were all accepted
@@ -307,7 +307,7 @@ int main(int argc, char** argv) {
         std::uint32_t rng = 12345u + static_cast<std::uint32_t>(R);
         long rows = 0, bad = 0, steps = 0;
         double vt = 0;
-        std::vector<float> out;
+        std::span<const float> out;
         int i = 0;
         while (i < decode) {
           const int n =
@@ -339,10 +339,30 @@ int main(int argc, char** argv) {
         ++rows;
         if (std::memcmp(sp->logits().data(), lg[i].data(), V * 4) != 0)
           ++bad;
+        // the same steps without copying the rows (device argmax only)
+        double vt2 = 0;
+        {
+          auto s2 = engine->NewSession();
+          engine->Forward(*s2, prompt);
+          std::int32_t am[8];
+          for (int k = 0; k < 16; ++k) {
+            const int n2 =
+                std::min<int>(R, static_cast<int>(engine->VerifyRows(*s2)));
+            std::vector<std::int32_t> t2(toks.begin() + k,
+                                         toks.begin() + k + n2);
+            const auto w0 = std::chrono::steady_clock::now();
+            engine->Verify(*s2, t2, nullptr, am);
+            vt2 += std::chrono::duration<double>(
+                       std::chrono::steady_clock::now() - w0)
+                       .count();
+            engine->CommitVerify(*s2, 1, {});
+          }
+          vt2 /= 16;
+        }
         std::printf(
             "spec R=%d ctx %6d  rows %ld mismatched %ld  verify %.2f ms/step "
-            "(decode %.2f ms)\n",
-            R, C, rows, bad, vt * 1000 / steps, ar * 1000);
+            "(argmax only %.2f ms, decode %.2f ms)\n",
+            R, C, rows, bad, vt * 1000 / steps, vt2 * 1000, ar * 1000);
         std::fflush(stdout);
       }
     }

@@ -94,7 +94,12 @@ public:
   [[nodiscard]] std::size_t position() const { return pos_; }
   /// Logits (vocab_text floats, soft-capped) of the last evaluated token; empty
   /// before any.
-  [[nodiscard]] const std::vector<float>& logits() const { return logits_; }
+  /// (Kept on the device after a greedy step and copied here when read.)
+  [[nodiscard]] const std::vector<float>& logits() const;
+  /// Whether there are logits (without copying them).
+  [[nodiscard]] bool has_logits() const {
+    return logits_stale_ || !logits_.empty();
+  }
   [[nodiscard]] std::size_t allocated_bytes() const { return bytes_; }
   /// Charges the global-attention K/V pages (mem::SessionState); null when
   /// the session has no demand-mapped state.
@@ -121,7 +126,13 @@ private:
   std::size_t verify_rows_ = 0;  // rows of an uncommitted verification
   Drafter::State draft_;         // DSpark context (Engine::AttachDrafter)
   std::size_t bytes_ = 0;
-  std::vector<float> logits_;
+  mutable std::vector<float> logits_;
+  // The logits of the last token on the device (Engine::Step and
+  // CommitVerify without host rows); logits_ is refreshed from them when
+  // logits_stale_.
+  float* dlogits_ = nullptr;
+  mutable bool logits_stale_ = false;
+  std::size_t vocab_ = 0;
   struct Slot {
     void* k = nullptr;  // f16 [rows][1024]
     void* v = nullptr;
@@ -202,11 +213,11 @@ public:
   /// other rows are past the frontier) and takes row keep - 1 of `logits`
   /// (Verify's output) as the session's logits.
   [[nodiscard]] std::size_t VerifyRows(const Session& s) const;
-  /// `logits` (may be null) receives the rows, `argmax` (may be null) each
-  /// row's first maximum (as the greedy sampler picks it) without copying
-  /// them.
+  /// `logits` (may be null) receives the rows (engine memory, valid until the
+  /// next Verify), `argmax` (may be null) each row's first maximum (as the
+  /// greedy sampler picks it) without copying the rows.
   void Verify(Session& s, std::span<const std::int32_t> tokens,
-              std::vector<float>* logits, std::int32_t* argmax = nullptr);
+              std::span<const float>* logits, std::int32_t* argmax = nullptr);
   /// Empty `logits`: row keep - 1 comes from the device.
   void CommitVerify(Session& s, std::size_t keep,
                     std::span<const float> logits);
@@ -222,6 +233,11 @@ public:
   [[nodiscard]] bool DraftReady(const Session& s) const;
   int Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
               float* confidence = nullptr, const Drafter::More& more = {});
+
+  /// One decode step of `token` that leaves the logits on the device (the
+  /// session copies them when read) and writes their argmax (the greedy
+  /// sampler's choice): Forward of one token without the copy.
+  void Step(Session& s, std::int32_t token, std::int32_t* argmax);
 
   /// Optional per-visit hidden-state tap for bisecting against llama.cpp:
   /// called with the visit index (0..47), a label ("l_out" or "ffn_inp") and
@@ -240,6 +256,7 @@ private:
     mem::StateBufferId table{};
     std::array<mem::StateBufferId, 3> dk{}, dv{};  // with a drafter
     mem::StateBufferId df{};
+    mem::StateBufferId logits{};
   };
   [[nodiscard]] StateLayout DeclareState() const;
   struct Impl;

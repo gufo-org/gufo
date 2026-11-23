@@ -206,9 +206,10 @@ public:
     d.capabilities.prefix_reuse = true;
     d.capabilities.in_pass_checkpoint =
         false;  // checkpoints are taken between prefill passes
-    // DSpark: a lone decoding request runs DecodeStep (several tokens a step);
-    // concurrent ones keep batched one-token steps.
-    d.capabilities.multi_token_decode = engine_->has_drafter();
+    // A lone decoding request runs DecodeStep (with DSpark several tokens a
+    // step; greedy rows' argmax on the device); concurrent ones keep batched
+    // one-token steps.
+    d.capabilities.multi_token_decode = engine_->batch_capable();
     sampling::TextSamplingValues
         v;  // Unsloth/OpenAI defaults: temperature 1, no truncation
     v.temperature = 1.0F;
@@ -572,7 +573,7 @@ public:
   }
   [[nodiscard]] bool HasDecodeFrontier(
       const g::TextRunnerState& state) const override {
-    return !Require(state).session().logits().empty();
+    return Require(state).session().has_logits();
   }
 
   // ---- execution ----
@@ -752,7 +753,7 @@ public:
   [[nodiscard]] g::TextDecodeStep DecodeStep(
       g::TextRunnerState& state, std::size_t max_tokens,
       sampling::SamplerState& sampler) const override {
-    if (!engine_->has_drafter())
+    if (!engine_->batch_capable())
       return g::TextModelRunner::DecodeStep(state, max_tokens, sampler);
     g::TextDecodeStep step;
     if (max_tokens == 0)
@@ -816,12 +817,25 @@ public:
     const bool greedy = cfg.can_use_unmodified_argmax() && !cfg.logprobs &&
                         !working.ForcedToken() && !st.reasoning_off &&
                         !st.call_required;
-    std::vector<float> out;
+    std::span<const float> out;
     std::int32_t amax[Engine::kMaxDecodeBatch] = {};
-    engine_->Verify(ss, rows, greedy ? nullptr : &out, greedy ? amax : nullptr);
+    const std::size_t pos = ss.position();
+    if (width == 0) {
+      // Nothing to verify: a plain decode step (logits left on the device
+      // when greedy).
+      if (greedy) {
+        engine_->Step(ss, static_cast<std::int32_t>(a), amax);
+      } else {
+        const std::int32_t id = static_cast<std::int32_t>(a);
+        engine_->Forward(ss, std::span<const std::int32_t>(&id, 1));
+        out = ss.logits();
+      }
+    } else {
+      engine_->Verify(ss, rows, greedy ? nullptr : &out,
+                      greedy ? amax : nullptr);
+    }
     const auto t2 = Clock::now();
     const std::size_t V = engine_->config().n_vocab_text;
-    const std::size_t pos = ss.position();
     std::size_t keep = 1;
     for (int j = 0; j <= width; ++j) {
       const std::size_t at = pos + static_cast<std::size_t>(j) + 1;
@@ -834,8 +848,7 @@ public:
                .token = tk,
                .piece = stop ? std::string{} : Piece(st.block, tk)};
       } else {
-        const std::span<const float> row(out.data() + j * V, V);
-        sel = Select(st, working, row, at);
+        sel = Select(st, working, out.subspan(j * V, V), at);
       }
       if (sel.stop) {
         step.stop = true;
@@ -854,7 +867,8 @@ public:
       st.pending = std::move(sel);
       break;
     }
-    engine_->CommitVerify(ss, keep, out);
+    if (width > 0)
+      engine_->CommitVerify(ss, keep, out);  // empty: from the device
     sampler.CopyDrawStateFrom(working);
     const auto t3 = Clock::now();
     {
