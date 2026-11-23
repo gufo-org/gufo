@@ -10,9 +10,11 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/inkling2/hip/dspark.hpp"
 #include "src/models/inkling2/hip/fast.hpp"
+#include "src/models/inkling2/hip/kernels.hpp"
 
 namespace gufo::models::inkling2 {
 namespace fs = fast;
+namespace kk = hip;
 namespace {
 
 void Check(hipError_t e, const char* what) {
@@ -41,13 +43,17 @@ struct Drafter::Impl {
   };
   std::array<Layer, 3> layer{};
   const float *mask = nullptr, *out_norm = nullptr, *markov_norm = nullptr,
-              *bj = nullptr, *bo = nullptr;
-  const uint16_t *w1 = nullptr, *wj = nullptr, *wo = nullptr;
+              *bj = nullptr;
+  const uint16_t *w1 = nullptr, *wj = nullptr;
   float alpha[4][4]{};
 
   // scratch
-  float *x, *h, *q, *k, *v, *y, *g, *u, *heff, *logits, *state, *joint, *ws,
-      *wsa, *mix, *d_conf;
+  float *x, *h, *q, *k, *v, *y, *g, *u, *logits, *state, *joint, *ws, *wsa,
+      *mix, *d_conf;
+  // Low-rank Markov correction of the proposal head: pt = (W_U W_o)^T
+  // [256][kHeadRows] F16, cb = W_U b_o, base = W_U h_i [8][kHeadRows].
+  _Float16* pt = nullptr;
+  float *cb = nullptr, *base = nullptr;
   // Proposal head: the target LM head's rows of the kHeadRows tokens with the
   // largest markov_w1 norms (the Loom package's choice), as a Q8_0 copy.
   static constexpr int kHeadRows = 65536;
@@ -190,9 +196,7 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     I.out_norm = I.F32("output_norm.weight", kE, &tot);
     I.markov_norm = I.F32("dspark_norm.weight", kE, &tot);
     I.bj = I.F32("joint_proj.bias", 768, &tot);
-    I.bo = I.F32("dspark_hidden_out.bias", kE, &tot);
     I.wj = I.BF16("joint_proj.weight", 768ull * 5120, &tot);
-    I.wo = I.BF16("dspark_hidden_out.weight", 256ull * kE, &tot);
     I.w1 = I.BF16("markov_w1.weight", 256ull * 201024, &tot);
     {
       const auto& fuse = I.Need("dspark_fuse.weight", GgmlType::kF32, 16);
@@ -220,7 +224,6 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     I.g = I.Alloc<float>(B * 9216);
     I.u = I.Alloc<float>(B * 9216);
     I.a16 = I.Alloc<_Float16>(B * 9216);
-    I.heff = I.Alloc<float>(kE);
     I.logits = I.Alloc<float>(static_cast<std::size_t>(target.vocab));
     I.state = I.Alloc<float>(256);
     I.joint = I.Alloc<float>(1024);
@@ -264,6 +267,49 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
                         static_cast<int>(ids.size()), I.head);
       Check(hipDeviceSynchronize(), "head copy");
       tot += ids.size() * (2304 / 32) * 34;
+
+      // (W_U W_o)^T and W_U b_o in one GEMM: the head against the 256
+      // columns of W_o and b_o as 257 activation rows
+      const int R = static_cast<int>(ids.size());
+      const auto& wot =
+          I.Need("dspark_hidden_out.weight", GgmlType::kBF16, 256ull * kE);
+      const auto& bot = I.Need("dspark_hidden_out.bias", GgmlType::kF32, kE);
+      const auto* woh = static_cast<const std::uint16_t*>(wot.data);
+      const auto* boh = static_cast<const float*>(bot.data);
+      std::vector<float> xt(static_cast<std::size_t>(257) * kE);
+      for (int c = 0; c < kE; ++c) {
+        for (int j = 0; j < 256; ++j) {
+          const std::uint32_t u =
+              static_cast<std::uint32_t>(woh[static_cast<std::size_t>(c) * 256 +
+                                             static_cast<std::size_t>(j)])
+              << 16;
+          std::memcpy(&xt[static_cast<std::size_t>(j) * kE +
+                          static_cast<std::size_t>(c)],
+                      &u, 4);
+        }
+        xt[static_cast<std::size_t>(256) * kE + static_cast<std::size_t>(c)] =
+            boh[c];
+      }
+      float *dx = nullptr, *dout = nullptr;
+      Check(hipMalloc(reinterpret_cast<void**>(&dx), xt.size() * 4), "lr in");
+      Check(hipMalloc(reinterpret_cast<void**>(&dout),
+                      static_cast<std::size_t>(257) * R * 4),
+            "lr out");
+      Check(hipMemcpy(dx, xt.data(), xt.size() * 4, hipMemcpyHostToDevice),
+            "lr in");
+      kk::Gemm(nullptr, kk::kTQ8_0, I.head, R, kE, dx, kE, dout, R, 257);
+      I.pt = I.Alloc<_Float16>(static_cast<std::size_t>(256) * R);
+      I.cb = I.Alloc<float>(static_cast<std::size_t>(R));
+      I.base = I.Alloc<float>(static_cast<std::size_t>(dsp::kBlock) * R);
+      dsp::ToHalf(nullptr, dout, static_cast<std::size_t>(256) * R, I.pt);
+      Check(hipMemcpy(I.cb, dout + static_cast<std::size_t>(256) * R,
+                      static_cast<std::size_t>(R) * 4, hipMemcpyDeviceToDevice),
+            "lr bias");
+      Check(hipDeviceSynchronize(), "lr tables");
+      (void)hipFree(dx);
+      (void)hipFree(dout);
+      tot += static_cast<std::size_t>(256) * R * 2 +
+             static_cast<std::size_t>(R) * 4;
     }
     I.wsa = I.Alloc<float>(static_cast<std::size_t>(dsp::kHeads) *
                            dsp::kAttnSplits * B * (128 + 2));
@@ -438,26 +484,27 @@ int Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
     dsp::Swiglu(s, I.g, I.u, I.a16, B * 9216);
     dsp::Gemv8(s, L.wd, kE, 9216, I.a16, I.y);
     dsp::AddNorm(s, I.x, I.y, l < 2 ? I.layer[l + 1].attn_norm : I.out_norm,
-                 I.h, l < 2 ? I.h16 : nullptr, B, I.eps);
+                 I.h, I.h16, B, I.eps);
   }
+  // W_U h_i of every block row, one pass over the proposal head
+  dsp::Gemv8(s, I.head, Impl::kHeadRows, kE, I.h16, I.base);
   Check(hipMemsetAsync(I.state, 0, 256 * 4, s), "rnn state");
   dsp::MarkovArgs ma{};
   ma.w1 = I.w1;
   ma.wj = I.wj;
   ma.bj = I.bj;
-  ma.wo = I.wo;
-  ma.bo = I.bo;
   ma.h = I.h;
   ma.f = st.f;
   ma.state = I.state;
   ma.joint = I.joint;
-  ma.heff = I.heff;
   ma.prev = I.d_prev;
   int done = 0;
   for (int i = 1; i <= n; ++i) {
     ma.row = i;
     dsp::MarkovStep(s, ma);
-    fs::GemvQ8(s, kE, I.head, I.heff, I.logits, Impl::kHeadRows, 0.f, 1);
+    dsp::LrLogits(s, I.pt, I.cb,
+                  I.base + static_cast<std::size_t>(i) * Impl::kHeadRows,
+                  I.joint + 3 * dsp::kRank, I.logits, Impl::kHeadRows);
     if (coupled != nullptr)
       dsp::CoupledSample(s, I.logits, Impl::kHeadRows, I.head_ids,
                          I.target.softcap, coupled->temperature, coupled->min_p,

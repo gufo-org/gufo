@@ -71,9 +71,9 @@ public:
 private:
   static void Ema(double& v, double x) { v += 0.05 * (x - v); }
   // Strix Halo, short context (inkling2_bench --spec / --dspark)
-  std::array<double, kMaxRows + 1> verify_{0,    22.0, 27.8, 32.9, 37.8,
-                                           43.1, 47.8, 53.6, 58.9};
-  double draft_base_ = 3.0, draft_step_ = 1.5;
+  std::array<double, kMaxRows + 1> verify_{0,    21.9, 27.3, 32.0, 36.2,
+                                           41.3, 46.1, 51.2, 58.2};
+  double draft_base_ = 2.8, draft_step_ = 0.25;
 };
 
 /// The number of drafts (0 .. n) to verify after drafting n, given each

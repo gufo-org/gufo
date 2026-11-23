@@ -364,26 +364,33 @@ __global__ void __launch_bounds__(256) k_state(MarkovArgs a, float* lat) {
   a.state[i] = c + g * (a.state[i] - c);
   lat[i] = tanhf(a.joint[2 * kRank + i]);
 }
-// heff = h_i + W_o lat + b_o (2304 rows of BF16 [256]), wave per row
-__global__ void __launch_bounds__(256) k_heff(MarkovArgs a, const float* lat) {
-  const int row = blockIdx.x * 8 + threadIdx.x / 32, l = threadIdx.x % 32;
-  if (row >= kEmbd)
-    return;
-  const uint16_t* wr = a.wo + (size_t)row * kRank;
-  float acc = 0.f;
-#pragma unroll
-  for (int c = l; c < kRank; c += 32)
-    acc += bf16f(wr[c]) * lat[c];
-  acc = wsum(acc);
-  if (l == 0)
-    a.heff[row] = a.h[(size_t)a.row * kEmbd + row] + acc + a.bo[row];
-}
-
 // ---- 8-row Q8_0 GEMV
 // Block: 8 waves x 4 rows; the inputs [8][2304] of one K chunk in LDS as F16.
 // A lane takes Q8 blocks lane, lane + 32, lane + 64 of the chunk, holds the 4
 // rows' 32 codes as F16 pairs and accumulates every input with fdot2.
 typedef _Float16 h2 __attribute__((ext_vector_type(2)));
+// logits[r] = base[r] + sum_j pt[j][r] lat[j] + cb[r]: two rows per thread
+// (the [256][n] F16 table read once, coalesced across the rows)
+__global__ void __launch_bounds__(256)
+    k_lr_logits(const _Float16* __restrict__ pt, const float* __restrict__ cb,
+                const float* __restrict__ base, const float* __restrict__ lat,
+                float* __restrict__ out, int n) {
+  __shared__ float sl[kRank];
+  sl[threadIdx.x] = lat[threadIdx.x];
+  __syncthreads();
+  const int r = (blockIdx.x * 256 + threadIdx.x) * 2;
+  if (r >= n)
+    return;
+  float a0 = 0.f, a1 = 0.f;
+#pragma unroll 16
+  for (int j = 0; j < kRank; ++j) {
+    const h2 p = *(const h2*)(pt + (size_t)j * n + r);
+    a0 += (float)p[0] * sl[j];
+    a1 += (float)p[1] * sl[j];
+  }
+  out[r] = base[r] + a0 + cb[r];
+  out[r + 1] = base[r + 1] + a1 + cb[r + 1];
+}
 template<int KC>
 __global__ void __launch_bounds__(256)
     k_gemv8(const uint8_t* __restrict__ W, int M, int K,
@@ -714,8 +721,13 @@ void MarkovStep(hipStream_t s, const MarkovArgs& a) {
   float* lat = a.joint + 3 * kRank;
   k_joint<<<3 * kRank / 8, 256, 0, s>>>(a);
   k_state<<<1, 256, 0, s>>>(a, lat);
-  k_heff<<<kEmbd / 8, 256, 0, s>>>(a, lat);
   Chk("markov");
+}
+void LrLogits(hipStream_t s, const _Float16* pt, const float* cb,
+              const float* base, const float* lat, float* logits, int n) {
+  k_lr_logits<<<(n / 2 + 255) / 256, 256, 0, s>>>(pt, cb, base, lat, logits,
+                                                  n);
+  Chk("lr logits");
 }
 void Argmax(hipStream_t s, const float* logits, int n, const int* map,
             float* ws, int* tokens, int row, int* prev, float* conf) {
@@ -746,6 +758,16 @@ void CoupledSample(hipStream_t s, const float* logits, int n, const int* map,
   k_cs_pick<<<1, 256, 0, s>>>(logits, n, map, softcap, temperature, min_p, u,
                               ws, tokens, row, prev, conf);
   Chk("coupled sample");
+}
+__global__ void __launch_bounds__(256)
+    k_to_half(const float* __restrict__ x, std::size_t n, _Float16* y) {
+  const std::size_t i = (std::size_t)blockIdx.x * 256 + threadIdx.x;
+  if (i < n)
+    y[i] = (_Float16)x[i];
+}
+void ToHalf(hipStream_t s, const float* src, std::size_t n, _Float16* dst) {
+  k_to_half<<<(unsigned)((n + 255) / 256), 256, 0, s>>>(src, n, dst);
+  Chk("to half");
 }
 void GatherQ8Rows(hipStream_t s, const void* src, const int* ids, int n,
                   void* dst) {

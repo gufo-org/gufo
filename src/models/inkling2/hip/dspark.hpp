@@ -81,23 +81,26 @@ void Swiglu(hipStream_t s, const float* g, const float* u, _Float16* out16,
 
 /// One Markov RNN step of the chain (row `i` of the block):
 /// joint = W_j [state, w1[prev], h_i, f] + b; state = cand + sig(gate) (state -
-/// cand) with cand = tanh, lat = tanh; heff = h_i + W_o lat + b_o (the head's
-/// input: W_U (h_i + correction) instead of W_U h_i + W_U correction).
+/// cand) with cand = tanh; lat = tanh, at joint + 3 * 256 (LrLogits).
 struct MarkovArgs {
   const uint16_t* w1;  // BF16 [201024][256]
   const uint16_t* wj;  // BF16 [768][5120]
   const float* bj;     // [768]
-  const uint16_t* wo;  // BF16 [2304][256]
-  const float* bo;     // [2304]
   const float* h;      // [8][2304] block rows (output-normed)
   const float* f;      // [2304] Markov context of the token before the block
   float* state;        // [256]
   float* joint;        // [768] scratch
-  float* heff;         // [2304]
   const int* prev;     // device: previous token
   int row;
 };
 void MarkovStep(hipStream_t s, const MarkovArgs& a);
+
+/// The proposal logits of one Markov step without a head pass: W_U (h_i + W_o
+/// lat + b_o) = base + (W_U W_o) lat + W_U b_o, with base = W_U h_i (Gemv8 of
+/// the block, once per draft) and pt = (W_U W_o)^T [256][n] F16, cb = W_U b_o
+/// precomputed. logits[r] for r < n (n even).
+void LrLogits(hipStream_t s, const _Float16* pt, const float* cb,
+              const float* base, const float* lat, float* logits, int n);
 
 /// tokens[row] = map[argmax(logits[0, n))] (first maximum; map null: the
 /// index itself), also *prev; conf[row] = the softmax probability of that
@@ -119,6 +122,9 @@ void Gemv8(hipStream_t s, const void* w, int m, int k, const _Float16* x,
 void CoupledSample(hipStream_t s, const float* logits, int n, const int* map,
                    float softcap, float temperature, float min_p, float u,
                    float* ws, int* tokens, int row, int* prev, float* conf);
+
+/// dst[i] = F16(src[i]), i < n.
+void ToHalf(hipStream_t s, const float* src, std::size_t n, _Float16* dst);
 
 /// Copies the Q8_0 rows ids[0, n) of `src` (2304 columns) to `dst`.
 void GatherQ8Rows(hipStream_t s, const void* src, const int* ids, int n,
