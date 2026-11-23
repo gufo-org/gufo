@@ -9,23 +9,41 @@
 #include <string>
 #include <vector>
 
+#include "src/models/qwen38_flash_next/primitives.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
+
+namespace gufo::ext::qwen::flash_next {
+class WeightSource;
+}  // namespace gufo::ext::qwen::flash_next
 
 namespace gufo::models::qwen38_flash_next::rocm {
 
-/// One weight resident in device memory, still in its GGUF encoding.
+/// One weight resident in device memory, still in its GGUF encoding, or in
+/// the encoding its weight source describes by `format_state` (Tensor).
 struct DeviceTensor {
   void* data{nullptr};
   core::GgmlType type{core::GgmlType::kF32};
   std::uint32_t cols{0};
   std::uint32_t rows{0};
   std::uint32_t experts{1};
+  const void* format_state{nullptr};
 
   [[nodiscard]] bool empty() const noexcept { return data == nullptr; }
   [[nodiscard]] const float* f32() const noexcept {
     return static_cast<const float*>(data);
   }
 };
+
+/// The stage-facing handle of a device weight, and back.
+[[nodiscard]] inline ext::qwen::flash_next::Tensor ToTensor(
+    const DeviceTensor& d) noexcept {
+  return {d.data, d.type, d.cols, d.rows, d.experts, d.format_state};
+}
+[[nodiscard]] inline DeviceTensor FromTensor(
+    const ext::qwen::flash_next::Tensor& t) noexcept {
+  return {t.data(), t.type(),    t.cols(),
+          t.rows(), t.experts(), t.format_state()};
+}
 
 struct DeviceMixer {
   DeviceTensor norm;
@@ -99,6 +117,12 @@ public:
       const ModelWeights& weights, const core::GgufReader& reader,
       const MtpWeights* mtp, const core::GgufReader* mtp_reader,
       std::string* error_msg = nullptr);
+  /// Streams tensors from `source`'s regions; tensors with format_state go
+  /// through WeightSource::Upload.
+  [[nodiscard]] static std::unique_ptr<DeviceModel> Upload(
+      const ModelWeights& weights, const MtpWeights* mtp,
+      ext::qwen::flash_next::WeightSource& source,
+      std::string* error_msg = nullptr);
 
   const Config& config() const noexcept { return config_; }
   const DeviceTensor& token_embd() const noexcept { return token_embd_; }
@@ -112,10 +136,21 @@ public:
   std::span<const std::int32_t> draft_specials() const noexcept {
     return draft_specials_;
   }
-  /// Bytes of one output() row.
+  /// The head draft tables copy rows from: output(), or the GGUF copy a
+  /// weight source provided (UseDraftSource).
+  const DeviceTensor& draft_source() const noexcept {
+    return draft_source_.empty() ? output_ : draft_source_;
+  }
+  /// Bytes of one draft_source() row.
   std::size_t output_row_bytes() const noexcept {
+    if (!draft_source_.empty())
+      return draft_source_bytes_ / draft_source_.rows;
     return output_.rows == 0 ? 0 : output_bytes_ / output_.rows;
   }
+  /// Drafts copy rows of `head` (a GGUF matrix equal to output(), owned by
+  /// the caller) instead of output(). Before SetDraftVocab.
+  [[nodiscard]] bool UseDraftSource(const DeviceTensor& head,
+                                    std::string* error_msg);
   /// Drafts score output() rows [0, prefix_rows) plus a per-session table
   /// that starts with `specials`. The rows of a Q8_0 head are requantized
   /// to Q4_K once, here; the table keeps the head's format. Draft proposals
@@ -142,12 +177,20 @@ public:
 private:
   friend struct DeviceModelTestAccess;  // synthetic models in GPU tests
   DeviceModel() = default;
+  /// Uploads the trunk and the optional MTP block from `shards` (the trunk's
+  /// first `trunk_shards`, then the draft block's).
+  static std::unique_ptr<DeviceModel> UploadShards(
+      const ModelWeights& weights, const MtpWeights* mtp,
+      std::vector<core::GgufMappedRegion> shards, std::uint32_t trunk_shards,
+      ext::qwen::flash_next::WeightSource* source, std::string* error_msg);
 
   Config config_;
   DeviceTensor token_embd_;
   DeviceTensor output_;
   std::size_t output_bytes_{0};
   DeviceTensor draft_output_;
+  DeviceTensor draft_source_;
+  std::size_t draft_source_bytes_{0};
   std::vector<std::int32_t> draft_specials_;
   DeviceMixer hc_head_;
   std::vector<DeviceLayer> layers_;
