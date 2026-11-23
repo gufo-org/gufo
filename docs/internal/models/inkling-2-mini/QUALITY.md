@@ -149,3 +149,23 @@ plain decoding:
     192 output tokens, and the first of them is the model's thinking opener,
     so it counts 191 reasoning tokens; a 192-token budget correctly allows
     192.
+
+## Round 6: sampler, selection and copy drafts (November 23)
+
+The engine is unchanged; the host side is checked against the round-5 build:
+
+- `sampling_test`: the whole-row temperature draw equals
+  `Distribution(logits).Sample()` in token and RNG state for 1,200 rows
+  (penalties, min-p, masked entries, rows with a single surviving token,
+  200,058-entry rows).
+- Functional suites (DSpark, `--sessions 4`): responses, stops, conversation,
+  sampling-defaults, sampling-ranges, logprobs, batch, structured,
+  tool-history, state-edges, prefill-scheduling and cache-edits pass or fail
+  as before (`batch` fails on both builds, see above), and 446 of the 447
+  recorded requests return the same output; the last is a request the
+  harness sizes from the byte length of an earlier response (2,307 against
+  2,306 tokens asked).
+- HTTP: 64 concurrent-workload responses (eight prompts, AR and DSpark, C =
+  1, 2, 4, 8), 28 single requests (greedy and seeded) and 8 copy requests
+  are byte-identical between the builds and between AR and DSpark.
+

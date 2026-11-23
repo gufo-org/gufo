@@ -92,15 +92,26 @@ and `THIRD_PARTY.md` carry its license and attributions. Changes made here:
   proposals. When every draw takes exactly one uniform (temperature 0.1 or
   more, no min-p, penalties or constraint), the rows' host samplings run in
   parallel with their draws known in advance.
-- **Several requests.** `DecodeBatch` (2 to 4 requests) runs one batched
-  one-token step of their anchors and selects each next token as its next
-  anchor, so a request moves between single (DSpark) and batched steps with
-  the same draws; concurrent requests do not draft.
+- **Copy drafts.** A sampled request whose last generated tokens repeat an
+  earlier stretch of its context (`speculative::PromptLookup`: 24 tokens, 5
+  where the last accepted copy left off) proposes the tokens that followed
+  that stretch instead of the drafter's; a copy that keeps fewer than half
+  of its tokens skips the next opportunities. Greedy requests do not copy.
+- **Several requests.** `DecodeBatch` (2 to 8 requests) drafts for all of
+  them in one drafter pass and verifies their rows in one step of up to eight
+  rows; without proposals it runs one batched one-token step of their
+  anchors. Each next token is selected as the request's next anchor, so a
+  request moves between single and batched steps with the same draws. Every
+  eight drafted cycles, a batch width whose cycles emitted fewer tokens per
+  millisecond than its measured plain steps stops drafting for a while.
+- **Selection.** Greedy rows take the device argmax. Sampled rows come back
+  through a pinned buffer; up to three are selected one after another on the
+  calling thread, more on persistent threads.
 - **Width.** `dspark_policy.hpp`: the drafter's probability for each proposal,
   through a calibration of acceptance per probability bin that keeps learning,
   gives the survival of each prefix; the width maximises expected tokens per
-  measured cycle cost (verifying 2/3/4 rows costs about 28/33/38 ms against
-  22 ms for one); greedy and coupled proposals keep separate calibrations.
+  measured cycle cost (verifying 2/4/8 rows costs about 26/36/55 ms against
+  20 ms for one); greedy and coupled proposals keep separate calibrations.
   Drafting stops early once a longer width cannot pay. Every eight drafted
   cycles, a request whose cycles emitted fewer tokens per millisecond than
   its measured plain steps decodes plainly for a while (8 to 64 steps) before

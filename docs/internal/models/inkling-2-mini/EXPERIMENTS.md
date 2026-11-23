@@ -123,3 +123,25 @@ Not exact or outside the model, not taken:
 | --- | --- |
 | Host sampler: the temperature-only distribution's exps on parallel threads (the same values, then the same sequential sum) | about 1 ms per sampled token at C = 1 (core sampling code, all models) |
 | Rejection sampling of sampled requests' proposals | more accepted proposals at T > 0; the output is distributed as AR's, not equal to it |
+
+## Round 6 (November 23)
+
+| Variant | Result |
+| --- | --- |
+| Copy drafts for greedy requests too | rewrite 83.8 vs 84.2 tok/s (the drafter keeps 359 of 434 proposals there already), a function written from scratch 77.8 vs 81.4 (7 of 18 copied proposals kept); kept for sampled requests only |
+| Coupled proposals from a window of the drafter's cumulative sum (the token covering most of [u - d, u + d] instead of the one holding u; confidence = its share of the window) | d = 0.03: six sampled requests 57.8 vs 62.4 tok/s (1,047 of 2,175 proposals kept against 1,057 of 1,554: the same tokens accepted, a worse confidence); d = 0.01 with the old confidence: 62.4, 1,061 of 1,561. The misses are not at interval edges |
+| Sampler exps split in equal parts over 4 or 8 threads (waiting for all of them) | 1.1 ms per draw in the server, as slow as before: the threads sleep between steps, and the slowest wake-up is paid on every draw; replaced by chunks taken as the threads wake |
+| The chunk cursor on the caller's stack beside the captured variables | 0.60 vs 0.50 ms: every chunk taken invalidates the line the other threads read |
+| Every sampled row on its own persistent thread | DSpark verification, 2.5 rows: 1.25 ms against 1.0 ms one after another on the calling thread; kept for four or more rows |
+| Back-off tolerance 0 for a lone request (as for batches) | C = 1 greedy 70.2 vs 72.9 tok/s: eight-cycle rates are noisy, and a back-off skips drafting that pays on average; a lone request keeps 3% |
+
+Analysed, not built:
+
+| Idea | Why not |
+| --- | --- |
+| The gate projection on the side stream beside the attention kernel | The attention window (19 us) already carries the output projection's prefetch; real work there moves the same bytes into the same window |
+| Fewer launches (2.0 us of gap each) | Folding 144 launches into their neighbours in round 5 saved 0.09 ms: the fused kernels wait on counters |
+| Selecting sampled rows on the device | The host sampler's doubles (glibc `exp`, sum in token order) cannot be reproduced bit for bit by a device kernel |
+| A smaller drafter block for batched cycles (the drafter computes eight rows per request even when one proposal fits) | Changes the proposals (the block is non-causal), so it needs an acceptance study; about 2 ms of a 62 ms cycle at four requests |
+| More than eight rows a step (drafts at five to eight requests) | Marginal rows get cheaper as the rows' experts overlap (about 2 ms a row past 16), but every row kernel, the slot tables and the conv captures are eight wide |
+

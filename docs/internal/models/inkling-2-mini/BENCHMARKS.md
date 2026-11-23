@@ -342,3 +342,108 @@ launch gaps about 1 ms. A C = 1 DSpark cycle (36.5 ms at three rows) keeps
 the GPU 96% busy: verification 31.9 ms, drafter 3.1 ms. The host sampler
 (temperature 1: a double-precision exp per vocabulary entry, in token order)
 costs about 1.5 ms per sampled token outside the GPU.
+
+## Round 6: host-side selection, copy drafts, batched policy (November 23)
+
+Engine and kernels are unchanged, so every logit is the round-5 one. Every
+HTTP response below is byte-identical to the round-5 build's, AR and DSpark,
+at every C (8 prompts x 2 modes x 4 widths, 14 more single requests and 8
+copy requests), and the functional suites record the same outputs (see
+[Quality](QUALITY.md)).
+
+### Where a decode step's time goes
+
+`rocprofv3` kernel trace of plain decode at a 64-token context, weight prefetch
+off (the profiler hangs on the prefetch side stream): 21.7 ms per step, of
+which 17.3 ms are weight GEMVs at 85 to 95% of the DRAM ceiling, 3.3 ms the
+latency-bound kernels and 1.0 ms the gaps between 505 launches (2.0 us each,
+whatever the kernels).
+
+| Kernels (per step) | Time | Rate |
+| --- | --- | --- |
+| MoE gate/up, 48 visits x 8 experts | 5.74 ms | 215 GB/s (NVFP4 visits) |
+| Attention projections (q, gate, rel, k, v) | 4.66 ms | 216 GB/s |
+| MoE down | 3.03 ms | 202 GB/s |
+| LM head | 2.15 ms | 228 GB/s |
+| Attention output projection | 1.77 ms | 204 GB/s |
+| Attention-residual mixes (98) | 1.02 ms | 10.4 us each |
+| Attention (48) | 0.93 ms | 19.3 us each |
+| Loop controllers (gate and apply, 48 each) | 0.88 ms | 7.3 and 11.0 us |
+| Router (48) | 0.47 ms | 9.7 us |
+
+A four-row verification step (35.9 ms) spends 21.3 ms in the MoE kernels
+against 8.8 ms for one row: each extra row costs about 4.2 ms of expert
+weights (about half of its 8 experts per visit are new to the step) and
+0.5 ms elsewhere. Both steps are bound by the bytes of the distinct experts
+their rows route to.
+
+### Sampled requests
+
+A request that samples (the model's default: temperature 1, no truncation)
+paid 1.3 ms per token on the host that a greedy request does not: the logits
+row came back through a pageable buffer, and the sampler built a 3.2 MB list
+of candidates per token and passed over it four times.
+
+| Change | Sampled plain decode |
+| --- | --- |
+| Before | 21.35 ms per token (greedy 20.03) |
+| The whole-row temperature draw without the candidate list: the same weights from the same operands, summed in token order, the same quotients subtracted from the same uniform (`SamplerState::Sample`, all models); the exps shared with a few threads that take chunks as they wake | 20.78 |
+| The row's logits through the pinned buffer; the maximum taken on the floats and the widening folded into the threaded pass | 20.57 |
+
+`sampling_test` draws 1,200 rows both ways (penalties, min-p, masked entries,
+single-survivor rows, 200,058-entry rows): same token and RNG state every
+time. In the microbenchmark a 200,058-entry draw takes 0.36 ms against
+1.16 ms.
+
+Several sampled rows (a verification step's, or several requests') ran each
+on a new thread; a thread woken for one row takes about 1 ms where the
+calling thread takes 0.4 ms. Up to three rows now run one after another on
+the calling thread, more on persistent selection threads: four requests,
+two of them sampled, select in 0.84 ms instead of 1.6 ms.
+
+### Copy drafts
+
+A sampled request whose last 24 generated tokens repeat an earlier stretch of
+its context (5 where the last accepted copy left off; Gufo's
+`speculative::PromptLookup` rules) takes its proposals from the tokens that
+followed that stretch instead of from the drafter. The drafter's coupled draw
+misses about a fifth of the tokens of a copied stretch; the copied token
+misses almost none. Proposals only: the request's sampler still selects
+every token.
+
+| HTTP, one request, 500 tokens, default sampling, seeded | Before | After | Copied proposals kept |
+| --- | --- | --- | --- |
+| Rewrite a 60-line file with one command added | 75.7 tok/s | 90.1 | 267 of 268 |
+| Repeat a paragraph, then translate a sentence | 54.3 | 63.5 | 99 of 102 |
+| Rename a class throughout a file | 80.3 | 84.8 | 176 of 176 |
+| Write a function (nothing to copy) | 72.9 | 74.8 | none proposed |
+
+Greedy requests do not copy: the drafter already copies as well (rewrite
+84.0 tok/s, 357 of 433 proposals kept), and where a match's continuation
+differs the copied proposals displace better ones (a function written from
+scratch: 81.4 to 77.8 tok/s with copies).
+
+### HTTP, before and after
+
+`gufo serve --sessions 8 --context 32768`, the round-5 workload (eight
+prompts, 256 tokens, even requests greedy and odd ones seeded with the
+default sampling), aggregate tokens/s:
+
+| C | AR before | AR after | DSpark before | DSpark after |
+| --- | --- | --- | --- | --- |
+| 1 (greedy) | 48.3 | 48.0 | 71.7 | 72.7 |
+| 2 | 59.7 | 62.3 | 71.1 | 73.9 |
+| 4 | 88.0 | 91.1 | 88.5 | 91.1 |
+| 8 | 113.0 | 114.1 | 111.7 | 109.9 to 112.9 (four runs) |
+
+Six seeded requests with the default sampling, one at a time, 400 tokens:
+AR 46.6 to 48.4 tok/s, DSpark 59.3 to 61.1 (1,050 of 1,624 proposals kept,
+as before).
+
+With four requests drafting lost about 2% to plain batched steps (five of
+the eight rows are anchors, and the drafter's pass for four requests takes
+5.8 ms); the back-off for batched cycles now compares against measured plain
+steps of the same request count and tolerates no loss, so DSpark matches AR
+there. At eight requests no row is left to draft in and DSpark trails AR by
+the draft-context injection (about 1.5%).
+
