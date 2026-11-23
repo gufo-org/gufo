@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   const auto targets = qfn::LoraTargets(*weights);
-  const auto adapter = qfn::LoraAdapter::Open(
+  const auto adapter = qfn::OpenLoraAdapter(
       argv[2], scale,
       stock->GetMetadataString("general.architecture").value_or(""), targets,
       &error);

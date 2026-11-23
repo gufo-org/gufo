@@ -16,8 +16,11 @@ namespace gufo::ext::qwen::flash_next {
 class WeightSource;
 }  // namespace gufo::ext::qwen::flash_next
 
-namespace gufo::models::qwen38_flash_next {
+namespace gufo::models::qwen::lora {
 class LoraAdapter;
+}
+namespace gufo::models::qwen38_flash_next {
+using qwen::lora::LoraAdapter;
 }
 
 namespace gufo::models::qwen38_flash_next::rocm {

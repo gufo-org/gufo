@@ -200,6 +200,12 @@
       "windows_build": true
     },
     {
+      "target": "qwen_lora_test",
+      "ctest": "qwen_lora_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
       "target": "qwen38_flash_next_continuation_layout_test",
       "ctest": "qwen38_flash_next\\.continuation_layout",
       "check_pr": true,

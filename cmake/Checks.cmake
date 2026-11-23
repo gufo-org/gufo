@@ -45,7 +45,7 @@ set(gufo_pr_targets
   qwen38_flash_next_probe_test qwen38_flash_next_rope_scaling_test qwen38_flash_next_runner_options_test
   qwen3_asr_audio_api_test qwen3_asr_config_test qwen3_asr_decode_test qwen3_tts_audio_api_test
   qwen3_tts_config_test qwen_chat_template_test qwen_image_21_lora_test qwen_image_21_test
-  qwen_image_21_weights_test qwen_tokenizer_test video_api_test
+  qwen_image_21_weights_test qwen_lora_test qwen_tokenizer_test video_api_test
   # END GENERATED MODEL PR TARGETS
 )
 set(gufo_pr_tests ${gufo_pr_targets})

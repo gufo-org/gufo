@@ -16,6 +16,7 @@ gufo_extension_target(
   LINK_LIBRARIES
     gufo_ext_runtime
     gufo_core
+    gufo_qwen_lora
     Threads::Threads
 )
 
@@ -24,9 +25,6 @@ if(TARGET gufo_qwen38_flash_next)
     ${PROJECT_SOURCE_DIR}
     ${GUFO_EXTENSION_BUILD_ROOT}
   )
-  # LoRA merges must match offline merges bit for bit: no fused multiply-add.
-  set_source_files_properties(${GUFO_EXTENSION_BUILD_ROOT}/lora.cpp
-    PROPERTIES COMPILE_OPTIONS "${GUFO_CLANG_OPTION}-ffp-contract=off")
 endif()
 # Extensions that list qwen38_flash_next in `depends` link these: the host
 # library (config, weights, probes) and, in HIP builds, the runtime.

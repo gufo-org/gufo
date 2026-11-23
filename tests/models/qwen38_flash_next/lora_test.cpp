@@ -197,8 +197,8 @@ std::unique_ptr<qfn::LoraAdapter> Open(const std::vector<std::uint8_t>& bytes,
   auto reader =
       gufo::core::GgufReader::OpenMemory(bytes.data(), bytes.size(), error);
   Check(reader != nullptr, "synthetic adapter does not parse: " + *error);
-  return qfn::LoraAdapter::Open(std::move(reader), std::move(label), scale,
-                                "qwen4exp", targets, error);
+  return qfn::OpenLoraAdapter(std::move(reader), std::move(label), scale,
+                              "qwen4exp", targets, error);
 }
 
 // lora_a: rank rows of `cols`; lora_b: `rows` rows of rank. Values are
@@ -362,10 +362,12 @@ void CheckRejections() {
               error.find("Duplicate") != std::string::npos,
           "duplicate LoRA half accepted");
   }
+  // F16 and BF16 factors are accepted (tests/families/qwen/lora_test.cpp).
   spec = valid;
-  spec.tensors[0].type = GgmlType::kF16;
+  spec.tensors[0].type = GgmlType::kQ8_0;
   spec.tensors[0].values.resize(32);
-  Reject(spec, targets, "blk.0.ssm_out.weight.lora_a is F16, expected F32");
+  Reject(spec, targets,
+         "blk.0.ssm_out.weight.lora_a is Q8_0, expected F32, F16 or BF16");
   spec = valid;
   spec.tensors[0].dims = {32, 1};
   spec.tensors[0].values.resize(32);

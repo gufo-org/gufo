@@ -13,6 +13,7 @@
 #   hip_common       header-only execution/attention policy, RoPE layout,
 #                    recurrent state, GEMM routing, quant helpers, hooks
 #   config           CPU-only GGUF configuration extraction
+#   lora             CPU-only GGUF LoRA reader and Q8_0 merge
 #   text             tokenizer + chat template
 #   kernels          shared HIP operators (ENGINE_ENABLE_HIP only)
 #   vision           vision encoder, image prompt, image cache
@@ -23,6 +24,7 @@ add_subdirectory(control_tokens)
 add_subdirectory(draft_vocab)
 add_subdirectory(hip_common)
 add_subdirectory(config)
+add_subdirectory(lora)
 add_subdirectory(text)
 if (ENGINE_ENABLE_HIP)
   add_subdirectory(kernels)

@@ -151,9 +151,9 @@ std::shared_ptr<Model> Model::Load(
   // Validate the adapter against the bound trunk before any device work.
   std::unique_ptr<LoraAdapter> lora;
   if (!options.lora_path.empty()) {
-    lora = LoraAdapter::Open(options.lora_path, options.lora_scale,
-                             Config::kArchitecture, LoraTargets(*m->weights_),
-                             error_msg);
+    lora = OpenLoraAdapter(options.lora_path, options.lora_scale,
+                           Config::kArchitecture, LoraTargets(*m->weights_),
+                           error_msg);
     if (!lora) {
       return nullptr;
     }
