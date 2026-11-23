@@ -2,7 +2,7 @@
 //
 //   inkling2_bench --model GGUF --text FILE --ctxs 64,4096,16384,32000
 //   [--decode 64] [--ctx 32768]
-//                  [--batch 2,3,4] [--verify]
+//                  [--batch 2,3,4] [--verify] [--spec 2,3,4]
 //
 // --batch B...: after the single-session lines, for each B: B sessions
 // (different text slices), each prefilled with C tokens, then --decode steps of
@@ -10,6 +10,13 @@
 // aggregate and per-session tok/s. --verify also runs the same sessions through
 // single-token Forward calls and reports the largest logit difference and token
 // agreement.
+//
+// --spec R...: speculative verification. A reference session decodes --decode
+// greedy tokens one at a time; another replays them in Engine::Verify steps of
+// R rows whose drafts are the reference tokens, one of them corrupted at
+// random so that a prefix is kept (CommitVerify). Every kept row's logits are
+// compared byte for byte with the reference; prints the mismatches and the
+// verification step time.
 //
 // For every context length C: fresh session, timed prefill of C tokens (one
 // Forward call, only the last logits are read back), then --decode greedy
@@ -32,7 +39,7 @@
 #include "src/models/inkling2/text/tokenizer.hpp"
 
 int main(int argc, char** argv) {
-  std::string model, text, ids_in, ctxs = "64,4096", batches;
+  std::string model, text, ids_in, ctxs = "64,4096", batches, specs;
   bool verify = false, same = false;
   int decode = 64;
   unsigned ctx = 32768;
@@ -53,6 +60,8 @@ int main(int argc, char** argv) {
       batches = next();
     else if (k == "--verify")
       verify = true;
+    else if (k == "--spec")
+      specs = next();
     else if (k == "--same")
       same = true;  // identical prompts in all sessions (debug)
     else if (k == "--ctx")
@@ -152,6 +161,84 @@ int main(int argc, char** argv) {
         "ms/tok)  [V=%zu]\n",
         C, C / pf, pf, decode / dc, dc * 1000 / decode, V);
     std::fflush(stdout);
+  }
+  // ---- speculative verification ----
+  if (!specs.empty()) {
+    std::vector<int> rs;
+    {
+      std::stringstream ss(specs);
+      std::string t;
+      while (std::getline(ss, t, ','))
+        rs.push_back(std::atoi(t.c_str()));
+    }
+    auto amax = [](std::span<const float> l) {
+      return static_cast<std::int32_t>(std::max_element(l.begin(), l.end()) -
+                                       l.begin());
+    };
+    for (int C : lens) {
+      auto ref = engine->NewSession();
+      const std::span<const std::int32_t> prompt(ids.data(),
+                                                 static_cast<std::size_t>(C));
+      engine->Forward(*ref, prompt);
+      std::vector<std::int32_t> toks;
+      std::vector<std::vector<float>> lg;
+      toks.push_back(amax(ref->logits()));
+      const auto r0 = std::chrono::steady_clock::now();
+      for (int i = 0; i < decode + 8; ++i) {
+        engine->Forward(*ref, std::span<const std::int32_t>(&toks.back(), 1));
+        lg.push_back(ref->logits());
+        toks.push_back(amax(ref->logits()));
+      }
+      const double ar =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - r0)
+              .count() /
+          (decode + 8);
+      for (int R : rs) {
+        auto sp = engine->NewSession();
+        engine->Forward(*sp, prompt);
+        std::uint32_t rng = 12345u + static_cast<std::uint32_t>(R);
+        long rows = 0, bad = 0, steps = 0;
+        double vt = 0;
+        std::vector<float> out;
+        int i = 0;
+        while (i < decode) {
+          const int n =
+              std::min<int>(R, static_cast<int>(engine->VerifyRows(*sp)));
+          std::vector<std::int32_t> t(toks.begin() + i, toks.begin() + i + n);
+          rng = rng * 1664525u + 1013904223u;
+          // the first wrong draft (n: none)
+          const int wrong = n > 1 ? 1 + static_cast<int>((rng >> 8) % n) : n;
+          if (wrong < n)
+            t[wrong] = (t[wrong] + 1) % static_cast<std::int32_t>(V);
+          const auto v0 = std::chrono::steady_clock::now();
+          engine->Verify(*sp, t, &out);
+          vt += std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                              v0)
+                    .count();
+          ++steps;
+          const int keep = wrong;
+          for (int j = 0; j < keep; ++j) {
+            ++rows;
+            if (std::memcmp(out.data() + static_cast<std::size_t>(j) * V,
+                            lg[i + j].data(), V * 4) != 0)
+              ++bad;
+          }
+          engine->CommitVerify(*sp, static_cast<std::size_t>(keep), out);
+          i += keep;
+        }
+        // one more plain decode after the last commit must match too
+        engine->Forward(*sp, std::span<const std::int32_t>(&toks[i], 1));
+        ++rows;
+        if (std::memcmp(sp->logits().data(), lg[i].data(), V * 4) != 0)
+          ++bad;
+        std::printf(
+            "spec R=%d ctx %6d  rows %ld mismatched %ld  verify %.2f ms/step "
+            "(decode %.2f ms)\n",
+            R, C, rows, bad, vt * 1000 / steps, ar * 1000);
+        std::fflush(stdout);
+      }
+    }
+    return 0;
   }
   // ---- batched decode ----
   using gufo::models::inkling2::Session;

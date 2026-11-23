@@ -591,31 +591,45 @@ __device__ __forceinline__ void conv_resid_elem(const ConvResidArgs& a, int c,
                                                 int tok = 0) {
   const size_t to = (size_t)tok * 2304;
   float* st = a.slot[tok * 48].conv + (size_t)a.conv_off * 3 + (size_t)c * 3;
-  float xc;
-  if (a.nsum == 8) {
-    float v[8];
+  auto input = [&](int r) {
+    float xc;
+    if (a.nsum == 8) {
+      float v[8];
 #pragma unroll
-    for (int e = 0; e < 8; ++e)
-      v[e] = a.x[((size_t)tok * 8 + e) * 2304 + c];
-    xc = 0.f;
+      for (int e = 0; e < 8; ++e)
+        v[e] = a.x[((size_t)r * 8 + e) * 2304 + c];
+      xc = 0.f;
 #pragma unroll
-    for (int e = 0; e < 8; ++e)
-      xc += v[e];
-  } else if (a.nsum > 1) {
-    xc = 0.f;
-    for (int e = 0; e < a.nsum; ++e)
-      xc += a.x[((size_t)tok * a.nsum + e) * 2304 + c];
-  } else {
-    xc = a.x[to + c];
+      for (int e = 0; e < 8; ++e)
+        xc += v[e];
+    } else if (a.nsum > 1) {
+      xc = 0.f;
+      for (int e = 0; e < a.nsum; ++e)
+        xc += a.x[((size_t)r * a.nsum + e) * 2304 + c];
+    } else {
+      xc = a.x[(size_t)r * 2304 + c];
+    }
+    return xc;
+  };
+  const float xc = input(tok);
+  float xin[4] = {st[0], st[1], st[2], xc};
+  if (a.cap) {
+    for (int l = 1; l <= 3 && l <= tok; ++l)
+      xin[3 - l] = input(tok - l);
+    if (tok < 3)
+      for (int l = tok + 1; l <= 3; ++l)
+        xin[3 - l] = st[3 - l + tok];
+    a.cap[((size_t)a.conv_off + c) * kVerifyRows + tok] = xc;
   }
-  const float xin[4] = {st[0], st[1], st[2], xc};
   float y = 0.f;
 #pragma unroll
   for (int i = 0; i < 4; ++i)
     y += a.w[(size_t)c * 4 + i] * xin[i];
-  st[0] = xin[1];
-  st[1] = xin[2];
-  st[2] = xin[3];
+  if (!a.cap) {
+    st[0] = xin[1];
+    st[1] = xin[2];
+    st[2] = xin[3];
+  }
   const float o = (xin[3] + y) * a.scale;
   const float cv = a.cur[to + c];
   if (a.blk) {
@@ -642,20 +656,32 @@ __device__ __forceinline__ void conv_resid_block(const ConvResidArgs& a,
       xin[r][0] = st[0];
       xin[r][1] = st[1];
       xin[r][2] = st[2];
-      float xc;
-      if (a.nsum == 8) {
-        float v[8];
+      auto input = [&](int row) {
+        float xc;
+        if (a.nsum == 8) {
+          float v[8];
 #pragma unroll
-        for (int e = 0; e < 8; ++e)
-          v[e] = a.x[((size_t)tok * 8 + e) * 2304 + c];
-        xc = 0.f;
+          for (int e = 0; e < 8; ++e)
+            v[e] = a.x[((size_t)row * 8 + e) * 2304 + c];
+          xc = 0.f;
 #pragma unroll
-        for (int e = 0; e < 8; ++e)
-          xc += v[e];
-      } else {
-        xc = a.x[to + c];
-      }
+          for (int e = 0; e < 8; ++e)
+            xc += v[e];
+        } else {
+          xc = a.x[(size_t)row * 2304 + c];
+        }
+        return xc;
+      };
+      const float xc = input(tok);
       xin[r][3] = xc;
+      if (a.cap) {
+        for (int l = 1; l <= 3 && l <= tok; ++l)
+          xin[r][3 - l] = input(tok - l);
+        if (tok < 3)
+          for (int l = tok + 1; l <= 3; ++l)
+            xin[r][3 - l] = st[3 - l + tok];
+        a.cap[((size_t)a.conv_off + c) * kVerifyRows + tok] = xc;
+      }
 #pragma unroll
       for (int i = 0; i < 4; ++i)
         wv[r][i] = a.w[(size_t)c * 4 + i];
@@ -671,9 +697,11 @@ __device__ __forceinline__ void conv_resid_block(const ConvResidArgs& a,
 #pragma unroll
       for (int i = 0; i < 4; ++i)
         y += wv[r][i] * xin[r][i];
-      st[0] = xin[r][1];
-      st[1] = xin[r][2];
-      st[2] = xin[r][3];
+      if (!a.cap) {
+        st[0] = xin[r][1];
+        st[1] = xin[r][2];
+        st[2] = xin[r][3];
+      }
       const float o = (xin[r][3] + y) * a.scale;
       if (a.blk) {
         a.blk[to + c] = cv[r];
@@ -928,6 +956,19 @@ __global__ void __launch_bounds__(128) k_kvprep(KvPrepArgs a) {
   float* sv = slot->conv + (size_t)a.conv_off_v * 3 + (size_t)c * 3;
   float kx[4] = {sk[0], sk[1], sk[2], ak[c]};
   float vx[4] = {sv[0], sv[1], sv[2], av[c]};
+  if (a.cap) {
+    for (int l = 1; l <= 3 && l <= tk; ++l) {
+      kx[3 - l] = a.k[(size_t)(tk - l) * a.ld + c];
+      vx[3 - l] = a.v[(size_t)(tk - l) * a.ld + c];
+    }
+    if (tk < 3)
+      for (int l = tk + 1; l <= 3; ++l) {
+        kx[3 - l] = sk[3 - l + tk];
+        vx[3 - l] = sv[3 - l + tk];
+      }
+    a.cap[((size_t)a.conv_off_k + c) * kVerifyRows + tk] = kx[3];
+    a.cap[((size_t)a.conv_off_v + c) * kVerifyRows + tk] = vx[3];
+  }
   float ky = 0.f, vy = 0.f;
 #pragma unroll
   for (int i = 0; i < 4; ++i) {
@@ -943,12 +984,14 @@ __global__ void __launch_bounds__(128) k_kvprep(KvPrepArgs a) {
       vy += dv[kvh * 4 + lag] * vx[3 - lag];
     }
   }
-  sk[0] = kx[1];
-  sk[1] = kx[2];
-  sk[2] = kx[3];
-  sv[0] = vx[1];
-  sv[1] = vx[2];
-  sv[2] = vx[3];
+  if (!a.cap) {
+    sk[0] = kx[1];
+    sk[1] = kx[2];
+    sk[2] = kx[3];
+    sv[0] = vx[1];
+    sv[1] = vx[2];
+    sv[2] = vx[3];
+  }
   const float kc = (kx[3] + ky) * a.scale, vc = (vx[3] + vy) * a.scale;
   const float kss = block_sum(kc * kc, red);
   const float vss = block_sum(vc * vc, red);
@@ -3064,6 +3107,26 @@ void AttnDecode(hipStream_t s, const AttnArgs& a, int nb) {
 void ConvResid(hipStream_t s, const ConvResidArgs& a, int nb) {
   k_conv_resid<<<dim3(9, 1, nb), 256, 0, s>>>(a);
   Chk("conv_resid");
+}
+__global__ void __launch_bounds__(256)
+    k_conv_commit(const SlotEntry* tbl, const float* cap, int keep) {
+  const int ch = blockIdx.x * 256 + threadIdx.x, slot = blockIdx.y;
+  if (ch >= 6656)
+    return;
+  float* st = tbl[slot].conv + (size_t)ch * 3;
+  const float* cp = cap + ((size_t)slot * 6656 + ch) * kVerifyRows;
+  float seq[3 + kVerifyRows];
+  for (int i = 0; i < 3; ++i)
+    seq[i] = st[i];
+  for (int i = 0; i < keep; ++i)
+    seq[3 + i] = cp[i];
+  for (int i = 0; i < 3; ++i)
+    st[i] = seq[keep + i];
+}
+void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
+                      int keep) {
+  k_conv_commit<<<dim3(26, 48), 256, 0, s>>>(tbl, cap, keep);
+  Chk("conv_commit");
 }
 void RouteBuild(hipStream_t s, const int* ids, int p, int e, int* off,
                 int* sorted) {

@@ -117,6 +117,7 @@ private:
   Session() = default;
   SessionHooks* hooks_ = nullptr;  // M2 hook
   std::size_t pos_ = 0;
+  std::size_t verify_rows_ = 0;  // rows of an uncommitted verification
   std::size_t bytes_ = 0;
   std::vector<float> logits_;
   struct Slot {
@@ -189,6 +190,20 @@ public:
   [[nodiscard]] bool batch_capable() const;
   void DecodeBatch(std::span<Session* const> sessions,
                    std::span<const std::int32_t> tokens);
+
+  /// Speculative verification. `Verify` evaluates up to VerifyRows() tokens
+  /// at the session's next positions in one step; row i's logits (`tokens`
+  /// rows x vocab_text, soft-capped) are bit for bit those a one-token decode
+  /// of tokens[0..i] would give. The session does not advance until
+  /// `CommitVerify(s, keep)` keeps the first `keep` rows (its convolution
+  /// histories then equal those of decoding exactly them; the K/V of the
+  /// other rows are past the frontier) and takes row keep - 1 of `logits`
+  /// (Verify's output) as the session's logits.
+  [[nodiscard]] std::size_t VerifyRows(const Session& s) const;
+  void Verify(Session& s, std::span<const std::int32_t> tokens,
+              std::vector<float>* logits);
+  void CommitVerify(Session& s, std::size_t keep,
+                    std::span<const float> logits);
 
   /// Optional per-visit hidden-state tap for bisecting against llama.cpp:
   /// called with the visit index (0..47), a label ("l_out" or "ffn_inp") and

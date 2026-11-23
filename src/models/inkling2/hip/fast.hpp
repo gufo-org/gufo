@@ -87,9 +87,21 @@ struct ConvResidArgs {
   float* blk;    // may be null
   int nsum = 0;  // > 1: x holds [nb][nsum][2304] partial rows that are added in
                  // slot order first
+  // Verification (all nb rows are consecutive positions of one session): row
+  // b's history is rows b-3..b-1 of this step (the stored history before
+  // row 0), the history is not written, and each row's input goes to
+  // cap[(conv_off + c) * kVerifyRows + b] (CommitVerifyConv applies it).
+  float* cap = nullptr;
 };
+/// Rows of one verification step (Engine::kMaxDecodeBatch).
+inline constexpr int kVerifyRows = 4;
 /// Batched (nb tokens): x, cur, blk are [nb][2304]; token b uses slot[b * 48].
 void ConvResid(hipStream_t s, const ConvResidArgs& a, int nb = 1);
+/// After a verification step of one session: every history of the 48 slots
+/// becomes the last 3 inputs of (history, the first `keep` captured rows).
+/// `cap` is [48][6656][kVerifyRows].
+void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
+                      int keep);
 
 /// Attention-residual mix: states (<= 8 vectors of 2304) RMS-normalised,
 /// softmax of query . state / sqrt(2304), out[q] = sum_j p_j S_j / rms_j. One
@@ -165,8 +177,9 @@ struct KvPrepArgs {
       conv_off_v;  // float offsets of the conv history inside the slot
   const int* pos;
   float scale, qk_thr, eps;
-  int ld = 0, ldd = 0;  // token strides of k / v and of dk / dv (decode
-                        // batches); slot advances 48 entries per token
+  int ld = 0, ldd = 0;   // token strides of k / v and of dk / dv (decode
+                         // batches); slot advances 48 entries per token
+  float* cap = nullptr;  // verification capture (see ConvResidArgs::cap)
 };
 void KvPrep(hipStream_t s, const KvPrepArgs& a, int nb = 1);
 

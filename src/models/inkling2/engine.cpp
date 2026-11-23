@@ -235,6 +235,17 @@ struct Engine::Impl {
     half_of[t.data] = d;
   }
   std::map<int, hipGraphExec_t> graphs;
+  // Verification steps (one session, consecutive positions): keyed like
+  // `graphs`; the conv kernels read in-step history and capture their inputs.
+  std::map<int, hipGraphExec_t> vgraphs;
+  bool verify_mode = false;
+  float* d_vcap = nullptr;  // [48][6656][kVerifyRows] conv inputs of a step
+  /// The verification capture of slot `slot_idx` (null outside verification).
+  float* VCap(int slot_idx) const {
+    return verify_mode ? d_vcap + static_cast<std::size_t>(slot_idx) *
+                                      kConvChannels * fs::kVerifyRows
+                       : nullptr;
+  }
   std::set<int> failed_graphs;  // keys whose capture failed: those steps run
                                 // eagerly, no retry
   float *d_cur, *d_prelude, *d_bankout, *d_msgs, *d_mixed, *d_ctl, *d_in,
@@ -373,6 +384,8 @@ struct Engine::Impl {
 
   ~Impl() {
     for (auto& g : graphs)
+      (void)hipGraphExecDestroy(g.second);
+    for (auto& g : vgraphs)
       (void)hipGraphExecDestroy(g.second);
     if (ds)
       (void)hipStreamDestroy(ds);
@@ -556,6 +569,8 @@ struct Engine::Impl {
     d_moe_part = NewBuf(B * 8 * kEmbd);
     d_ids8 = NewInts(B * 8);
     d_step = NewInts(2 * B);  // tokens [B], positions [B]
+    d_vcap =
+        NewBuf(static_cast<std::size_t>(48) * kConvChannels * fs::kVerifyRows);
     d_counter = reinterpret_cast<unsigned*>(NewInts(B));
     Check(hipMemset(d_counter, 0, B * 4), "counter");
     d_tbl = static_cast<fs::SlotEntry*>(
@@ -1257,6 +1272,7 @@ struct Engine::Impl {
       ka.eps = cfg->rms_eps;
       ka.ld = kSProj;
       ka.ldd = 64;
+      ka.cap = VCap(slot_idx);
       fs::KvPrep(ds, ka, nb);
     }
 
@@ -1307,6 +1323,7 @@ struct Engine::Impl {
       ca.scale = 1.0f / std::sqrt(5.0f);
       ca.cur = cur;
       ca.blk = nullptr;
+      ca.cap = VCap(slot_idx);
       if (ip % static_cast<int>(cfg->attn_res_block) == 0) {
         ca.blk = NewBlock();
         d_states[d_ns++] = ca.blk;
@@ -1384,6 +1401,7 @@ struct Engine::Impl {
       ca.scale = 1.0f / std::sqrt(5.0f);
       ca.cur = cur;
       ca.blk = nullptr;
+      ca.cap = VCap(slot_idx);
       pend.on = true;
       pend.a = ca;
     }
@@ -1482,19 +1500,20 @@ struct Engine::Impl {
   /// engine mutex, and the runtime can refuse such a copy while a capture is
   /// open even in thread-local mode.
   std::map<int, hipGraphExec_t>::iterator CaptureGraph(int ctx, int key) {
+    auto& map = verify_mode ? vgraphs : graphs;
     // Exclusive: no cache or vision thread may issue a device call while the
     // capture is open.
     const std::unique_lock<std::shared_mutex> gate(CaptureGate());
     if (hipStreamBeginCapture(ds, hipStreamCaptureModeThreadLocal) !=
         hipSuccess) {
       (void)hipGetLastError();
-      if (failed_graphs.insert(key).second)
+      if (failed_graphs.insert(verify_mode ? -key : key).second)
         std::fprintf(
             stderr,
             "inkling2: decode graph capture could not start for context bucket "
             "%d, width %d; those steps run without a graph\n",
             ctx, key % 8);
-      return graphs.end();
+      return map.end();
     }
     bool ok = true;
     try {
@@ -1512,14 +1531,14 @@ struct Engine::Impl {
       (void)hipGraphDestroy(g);
     (void)hipGetLastError();
     if (!ok) {
-      if (failed_graphs.insert(key).second)
+      if (failed_graphs.insert(verify_mode ? -key : key).second)
         std::fprintf(stderr,
                      "inkling2: decode graph capture failed for context bucket "
                      "%d, width %d; those steps run without a graph\n",
                      ctx, key % 8);
-      return graphs.end();
+      return map.end();
     }
-    return graphs.emplace(key, ex).first;
+    return map.emplace(key, ex).first;
   }
 
   /// All 48 visits can run through the batched fast kernels (needed for nb >
@@ -1584,6 +1603,62 @@ struct Engine::Impl {
     for (int b = 0; b < n; ++b)
       sess[b]->pos_ += 1;
     nb = 1;
+  }
+
+  /// One verification step: `n` (<= kMaxB) tokens of one session at its
+  /// next positions, every row with the arithmetic of a one-token decode at
+  /// its position (the caller keeps the rows inside one attention bucket).
+  /// The session does not advance; CommitVerify keeps a prefix of the rows.
+  void VerifyN(Session& ss, const std::int32_t* tokens, int n,
+               std::vector<float>* out) {
+    nb = n;
+    std::int32_t step[2 * kMaxB] = {};
+    const int pos = static_cast<int>(ss.pos_);
+    for (int b = 0; b < n; ++b) {
+      step[b] = tokens[b];
+      step[kMaxB + b] = pos + b;
+    }
+    const int ctx = BucketCtx(pos);
+    if (BucketCtx(pos + n - 1) != ctx)
+      throw std::runtime_error("inkling2: verification crosses a bucket");
+    Check(hipStreamSynchronize(s), "pre-verify sync");
+    Check(hipMemcpyAsync(d_step, step, sizeof step, hipMemcpyHostToDevice, ds),
+          "step");
+    for (int b = 0; b < n; ++b)
+      Check(hipMemcpyAsync(d_tbl + b * 48, ss.tbl_, 48 * sizeof(fs::SlotEntry),
+                           hipMemcpyDeviceToDevice, ds),
+            "slot table");
+    verify_mode = true;
+    struct Off {
+      bool* f;
+      ~Off() { *f = false; }
+    } off{&verify_mode};
+    const int key = ctx * 8 + n;
+    const int fkey = -key;  // failed verification captures
+    auto it = vgraphs.find(key);
+    if (it == vgraphs.end() && failed_graphs.count(fkey) == 0) {
+      it = CaptureGraph(ctx, key);
+      if (it == vgraphs.end())
+        failed_graphs.insert(fkey);
+    }
+    if (it != vgraphs.end())
+      Check(hipGraphLaunch(it->second, ds), "graph launch");
+    else
+      BuildDecode(ctx);
+    const std::size_t V = cfg->n_vocab_text;
+    out->resize(static_cast<std::size_t>(n) * V);
+    Check(hipMemcpyAsync(out->data(), logits_d, out->size() * 4,
+                         hipMemcpyDeviceToHost, ds),
+          "logits copy");
+    Check(hipStreamSynchronize(ds), "verify sync");
+    nb = 1;
+  }
+
+  void CommitVerify(Session& ss, int keep) {
+    fs::CommitVerifyConv(ds, static_cast<const fs::SlotEntry*>(ss.tbl_), d_vcap,
+                         keep);
+    Check(hipStreamSynchronize(ds), "commit sync");
+    ss.pos_ += static_cast<std::size_t>(keep);
   }
 
   void Tap(int visit, const char* what) {
@@ -1925,6 +2000,49 @@ void Engine::DecodeBatch(std::span<Session* const> sessions,
   }
   for (std::size_t i = 0; i < sessions.size(); ++i)
     impl_->Decode(*sessions[i], tokens[i], &sessions[i]->logits_);
+}
+
+std::size_t Engine::VerifyRows(const Session& s) const {
+  if (!batch_capable())
+    return 1;
+  const auto bucket = [](std::size_t pos) {
+    std::size_t c = 2048;
+    while (c < pos + 1)
+      c *= 2;
+    return c;
+  };
+  std::size_t n = 1;
+  while (n < kMaxDecodeBatch && s.pos_ + n < max_context_ &&
+         bucket(s.pos_ + n) == bucket(s.pos_))
+    ++n;
+  return n;
+}
+
+void Engine::Verify(Session& s, std::span<const std::int32_t> tokens,
+                    std::vector<float>* logits) {
+  const std::lock_guard lock(mutex_);
+  if (tokens.empty() || tokens.size() > VerifyRows(s))
+    throw std::runtime_error("inkling2: bad verification width");
+  for (auto t : tokens)
+    if (t < 0 || static_cast<std::uint32_t>(t) >= weights_.config.n_vocab_text)
+      throw std::runtime_error("inkling2: token id out of range");
+  if (s.hooks_ != nullptr)
+    s.hooks_->BeforeWrite(s.pos_, s.pos_ + tokens.size());  // M2 hook
+  s.BackRows(s.pos_, s.pos_ + tokens.size());
+  impl_->VerifyN(s, tokens.data(), static_cast<int>(tokens.size()), logits);
+  s.verify_rows_ = tokens.size();
+}
+
+void Engine::CommitVerify(Session& s, std::size_t keep,
+                          std::span<const float> logits) {
+  const std::lock_guard lock(mutex_);
+  const std::size_t V = weights_.config.n_vocab_text;
+  if (keep == 0 || keep > s.verify_rows_ || logits.size() < keep * V)
+    throw std::runtime_error("inkling2: bad verification commit");
+  impl_->CommitVerify(s, static_cast<int>(keep));
+  s.logits_.assign(logits.begin() + static_cast<std::ptrdiff_t>((keep - 1) * V),
+                   logits.begin() + static_cast<std::ptrdiff_t>(keep * V));
+  s.verify_rows_ = 0;
 }
 
 void Engine::Synchronize() {
