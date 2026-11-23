@@ -95,7 +95,8 @@ public:
                std::shared_ptr<const tokenization::QwenTokenizer> tokenizer,
                std::vector<QwenGpuWeightRegion> weight_regions,
                std::shared_ptr<models::qwen::vision::Encoder> vision = {},
-               std::string adapter_identity = "none");
+               std::string adapter_identity = "none",
+               QwenGpuWeightRegion lora_factors = {});
   ~QwenGpuModel();
 
   QwenGpuModel(const QwenGpuModel&) = delete;
@@ -104,8 +105,11 @@ public:
   QwenGpuModel& operator=(QwenGpuModel&&) = delete;
 
   /// With `lora.path`, the adapter is validated against the bound trunk
-  /// before any device allocation, and each tensor it patches is merged into
-  /// that tensor's final placement in its stock format and size.
+  /// before any device allocation. When every tensor it patches is Q8_0, each
+  /// is merged into that tensor's final placement in its stock format and
+  /// size; otherwise the stock weights stay untouched and the factors are
+  /// uploaded for the side path (`QwenLayerWeights::output_lora`,
+  /// `ffn_down_lora`).
   [[nodiscard]] static std::shared_ptr<const QwenGpuModel> CreateFromGguf(
       std::shared_ptr<const core::GgufReader> reader,
       std::string* error_msg = nullptr,
@@ -130,8 +134,8 @@ public:
     return weight_regions_.size();
   }
   [[nodiscard]] std::size_t GetResidentBytes() const noexcept;
-  /// The `adapters=` value of the disk cache identity: "none", or the merged
-  /// LoRA's `LoraAdapter::CacheIdentity()`.
+  /// The `adapters=` value of the disk cache identity: "none", or the loaded
+  /// LoRA's `models::qwen::LoraAdapterIdentity()`.
   [[nodiscard]] const std::string& AdapterIdentity() const noexcept {
     return adapter_identity_;
   }
@@ -145,6 +149,8 @@ private:
   std::vector<QwenGpuWeightRegion> weight_regions_;
   std::shared_ptr<models::qwen::vision::Encoder> vision_;
   std::string adapter_identity_;
+  // One device allocation holding every side-path LoRA factor, or empty.
+  QwenGpuWeightRegion lora_factors_;
 };
 
 class QwenGpuSnapshot final {
@@ -676,6 +682,8 @@ public:
 
 private:
   friend class models::qwen::ContinuationAdapter;
+  // Real-weight test tools read the arena between prefill layers.
+  friend class QwenGpuExecutorTestAccess;
   models::qwen::ContinuationHooks* continuation_hooks_{nullptr};
   void CheckPrefillCancellation() const;
   void PrefillLayerCheckpoint(std::uint32_t layer);

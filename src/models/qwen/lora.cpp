@@ -1,6 +1,9 @@
 #include "src/models/qwen/lora.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <map>
 
 namespace gufo::models::qwen {
 namespace {
@@ -15,7 +18,7 @@ std::string Shape(const std::vector<std::uint64_t>& dimensions) {
 
 }  // namespace
 
-std::optional<std::vector<lora::LoraMatrix>> LoraTargets(
+std::optional<std::vector<LoraTarget>> LoraTargetsByLayer(
     const core::GgufReader& reader, const QwenModelWeights& weights,
     std::string* error) {
   const auto& c = weights.config;
@@ -23,15 +26,20 @@ std::optional<std::vector<lora::LoraMatrix>> LoraTargets(
     const QwenTensorRef QwenLayerWeights::* tensor;
     std::uint64_t cols;
     std::vector<std::string_view> names;  ///< As weights.cpp binds them.
+    bool ffn_down;
   };
   const Role roles[] = {
-      {&QwenLayerWeights::ssm_out, c.ssm_inner_size, {"ssm_out.weight"}},
+      {&QwenLayerWeights::ssm_out, c.ssm_inner_size, {"ssm_out.weight"}, false},
       {&QwenLayerWeights::attn_output,
        c.AttentionSize(),
-       {"attn_output.weight", "attn_out.weight", "wo.weight"}},
-      {&QwenLayerWeights::ffn_down, c.intermediate_size, {"ffn_down.weight"}},
+       {"attn_output.weight", "attn_out.weight", "wo.weight"},
+       false},
+      {&QwenLayerWeights::ffn_down,
+       c.intermediate_size,
+       {"ffn_down.weight"},
+       true},
   };
-  std::vector<lora::LoraMatrix> targets;
+  std::vector<LoraTarget> targets;
   for (std::size_t i = 0; i < weights.layers.size(); ++i) {
     const std::string prefix = "blk." + std::to_string(i) + ".";
     for (const auto& role : roles) {
@@ -63,10 +71,26 @@ std::optional<std::vector<lora::LoraMatrix>> LoraTargets(
         }
         return std::nullopt;
       }
-      targets.push_back({info->name, info->data, info->type, d[1], d[0]});
+      targets.push_back({{info->name, info->data, info->type, d[1], d[0]},
+                         static_cast<std::uint32_t>(i),
+                         role.ffn_down});
     }
   }
   return targets;
+}
+
+std::optional<std::vector<lora::LoraMatrix>> LoraTargets(
+    const core::GgufReader& reader, const QwenModelWeights& weights,
+    std::string* error) {
+  const auto targets = LoraTargetsByLayer(reader, weights, error);
+  if (!targets) {
+    return std::nullopt;
+  }
+  std::vector<lora::LoraMatrix> matrices;
+  for (const auto& target : *targets) {
+    matrices.push_back(target.matrix);
+  }
+  return matrices;
 }
 
 std::unique_ptr<lora::LoraAdapter> OpenLoraAdapter(
@@ -79,11 +103,94 @@ std::unique_ptr<lora::LoraAdapter> OpenLoraAdapter(
   auto adapter = lora::LoraAdapter::Open(
       selection.path, selection.scale,
       reader.GetMetadataString("general.architecture").value_or(""), *targets,
-      kLoraExpectedTargets, error);
-  if (adapter && !LoraPatchesOwnTheirBytes(reader, *adapter, error)) {
+      kLoraExpectedTargets, error, lora::LoraTargetFormats::kAny);
+  if (adapter && LoraMergesInPlace(*adapter) &&
+      !LoraPatchesOwnTheirBytes(reader, *adapter, error)) {
     return nullptr;
   }
   return adapter;
+}
+
+bool LoraMergesInPlace(const lora::LoraAdapter& adapter) {
+  for (const auto& [name, patch] : adapter.patches()) {
+    if (patch.target.type != core::GgmlType::kQ8_0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string LoraAdapterIdentity(const lora::LoraAdapter& adapter) {
+  return LoraMergesInPlace(adapter)
+             ? adapter.CacheIdentity()
+             : adapter.CacheIdentity(kLoraSidePathAlgorithm);
+}
+
+std::optional<LoraSidePath> PlanLoraSidePath(const core::GgufReader& reader,
+                                             const lora::LoraAdapter& adapter,
+                                             const QwenModelWeights& weights,
+                                             std::string* error) {
+  const auto fail = [&](const std::string& message) {
+    if (error != nullptr) {
+      *error = message;
+    }
+    return std::nullopt;
+  };
+  // Bind by tensor name: the side path allows projections that share bytes,
+  // so a data pointer can name more than one layer.
+  const auto targets = LoraTargetsByLayer(reader, weights, error);
+  if (!targets) {
+    return std::nullopt;
+  }
+  std::map<std::string_view, const LoraTarget*, std::less<>> by_name;
+  for (const auto& target : *targets) {
+    by_name.emplace(target.matrix.name, &target);
+  }
+  const auto padded = [](std::size_t n) { return (n + 15) / 16 * 16; };
+  LoraSidePath path;
+  std::size_t floats = 0;
+  for (const auto& [name, patch] : adapter.patches()) {
+    const auto found = by_name.find(name);
+    if (found == by_name.end()) {
+      return fail("LoRA target " + name + " is not a bound trunk projection");
+    }
+    LoraSidePathSlot slot;
+    slot.layer = found->second->layer;
+    slot.ffn_down = found->second->ffn_down;
+    if (patch.rank > kLoraSidePathMaxRank) {
+      return fail("LoRA target " + name + " has rank " +
+                  std::to_string(patch.rank) + ", the side path accepts " +
+                  std::to_string(kLoraSidePathMaxRank) + " at most");
+    }
+    if (patch.target.cols % 4 != 0) {
+      return fail("LoRA target " + name + " has " +
+                  std::to_string(patch.target.cols) +
+                  " columns, the side path needs a multiple of 4");
+    }
+    slot.in = static_cast<std::uint32_t>(patch.target.cols);
+    slot.out = static_cast<std::uint32_t>(patch.target.rows);
+    slot.rank = patch.rank;
+    slot.multiplier = adapter.Multiplier(patch);
+    // Scale and alpha are each finite; their product may not be.
+    if (!std::isfinite(slot.multiplier)) {
+      return fail("LoRA target " + name +
+                  " has a non-finite multiplier (scale * alpha / rank)");
+    }
+    slot.a = floats;
+    slot.b = floats + padded(patch.a.size());
+    floats = slot.b + padded(patch.b.size());
+    path.slots.push_back(slot);
+  }
+  path.factors.assign(floats, 0.0F);
+  std::size_t i = 0;
+  for (const auto& [name, patch] : adapter.patches()) {
+    const auto& slot = path.slots[i++];
+    std::copy(patch.a.begin(), patch.a.end(),
+              path.factors.begin() + static_cast<std::ptrdiff_t>(slot.a));
+    std::copy(patch.b.begin(), patch.b.end(),
+              path.factors.begin() + static_cast<std::ptrdiff_t>(slot.b));
+  }
+  return path;
 }
 
 bool LoraPatchesOwnTheirBytes(const core::GgufReader& reader,

@@ -5,6 +5,7 @@
 // family they use.
 #include "src/families/qwen/kernels/ops/attention.hpp"
 #include "src/families/qwen/kernels/ops/gemm.hpp"
+#include "src/families/qwen/kernels/ops/low_rank.hpp"
 #include "src/families/qwen/kernels/ops/norm_residual.hpp"
 #include "src/families/qwen/kernels/ops/ssm.hpp"
 #include "src/families/qwen/kernels/ops/swiglu.hpp"

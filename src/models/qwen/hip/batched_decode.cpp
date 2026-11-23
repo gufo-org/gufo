@@ -13,6 +13,7 @@
 #include "src/families/qwen/kernels/verify_gemm_27b.hpp"
 #include "src/models/qwen/hip/detail/decode_step.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/lora_side_path.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -356,6 +357,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
                        scratch.attention.output.data(), batch_size, hidden_size,
                        ssm_inner_size, arena.stream);
     }
+    AddLoraSidePath(layer.output_lora, scratch.ssm.out.data(),
+                    scratch.attention.output.data(), batch_size, arena.stream);
 
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.attention.output.data(),
@@ -370,6 +373,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
     LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                      scratch.ffn.out.data(), batch_size, hidden_size,
                      intermediate_size, arena.stream);
+    AddLoraSidePath(layer.ffn_down_lora, scratch.ffn.activation.data(),
+                    scratch.ffn.out.data(), batch_size, arena.stream);
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.ffn.out.data(),
         scratch.decode.hidden.data(), batch_size, hidden_size, arena.stream);
@@ -764,6 +769,8 @@ QwenGpuExecutor::ForwardVerificationBatch(
                        scratch.attention.output.data(), batch_size, hidden_size,
                        ssm_inner_size, arena_.stream);
     }
+    AddLoraSidePath(layer.output_lora, scratch.ssm.out.data(),
+                    scratch.attention.output.data(), batch_size, arena_.stream);
 
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.attention.output.data(),
@@ -778,6 +785,8 @@ QwenGpuExecutor::ForwardVerificationBatch(
     LaunchProjection(layer.ffn_down, scratch.ffn.activation.data(),
                      scratch.ffn.out.data(), batch_size, hidden_size,
                      intermediate_size, arena_.stream);
+    AddLoraSidePath(layer.ffn_down_lora, scratch.ffn.activation.data(),
+                    scratch.ffn.out.data(), batch_size, arena_.stream);
     LaunchBatchedResidualAdd(
         scratch.decode.hidden.data(), scratch.ffn.out.data(),
         scratch.decode.hidden.data(), batch_size, hidden_size, arena_.stream);

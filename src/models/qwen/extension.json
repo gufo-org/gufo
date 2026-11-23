@@ -148,7 +148,7 @@
       "providers": [
         "qwen27-q4"
       ],
-      "help": "llama.cpp GGUF LoRA adapter merged into the weights at load"
+      "help": "llama.cpp GGUF LoRA adapter applied to the weights at load"
     },
     {
       "name": "--lora-scale",

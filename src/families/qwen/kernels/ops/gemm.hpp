@@ -248,11 +248,13 @@ void LaunchQuantizeActivationQ8_1FromFp32(const float* fp32_x, void* q8_1_out,
                                                    std::size_t k);
 
 /// Fuses SwiGLU activation (SiLU(gate) * up) with Q8_1 quantization into one
-/// kernel
+/// kernel. A non-null `activation_out` also receives the FP32 activation
+/// [batch, k] that was quantized.
 void LaunchBatchedFusedSwiGLUQuantizeQ8_1(const float* gate, const float* up,
                                           void* q8_1_out, std::size_t batch,
                                           std::size_t k,
-                                          hipStream_t stream = nullptr);
+                                          hipStream_t stream = nullptr,
+                                          float* activation_out = nullptr);
 
 /// Directly computes Y[B, M] = X_q8_1[B, K] * W_q8_0[M, K]^T using LDS-staged
 /// Matrix Core (WMMA) operations with pre-quantized activation blocks.

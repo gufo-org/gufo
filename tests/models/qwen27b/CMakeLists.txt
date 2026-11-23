@@ -44,6 +44,12 @@ if (ENGINE_ENABLE_HIP)
     continuation_adapter_test.cpp continuation_fault.cpp)
   target_link_libraries(qwen27b_continuation_adapter_test PRIVATE
     gufo_core ${GUFO_QWEN_LIBRARIES} ${CMAKE_DL_LIBS})
+  # Real-weight LoRA side-path oracle; loads the 27B trunk, so it is built
+  # and run explicitly (usage in lora_side_path_oracle.cpp).
+  add_executable(qwen27b_lora_side_path_oracle EXCLUDE_FROM_ALL
+    lora_side_path_oracle.cpp)
+  target_link_libraries(qwen27b_lora_side_path_oracle PRIVATE
+    gufo_core ${GUFO_QWEN_LIBRARIES})
   add_qwen27b_test(qwen_sampling_hip_test sampling_test.hip
     "hip;gpu;sampling;correctness")
   target_link_libraries(qwen_sampling_hip_test PRIVATE hip::host)

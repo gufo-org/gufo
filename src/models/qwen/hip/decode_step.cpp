@@ -7,6 +7,7 @@
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/lora_side_path.hpp"
 #include "src/models/qwen/modules/modules.hpp"
 
 namespace gufo::hip {
@@ -210,6 +211,8 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
                  attention_scratch.output.data(), hidden_size, ssm_inner_size,
                  arena.stream);
     }
+    AddLoraSidePath(layer.output_lora, ssm_scratch.out.data(),
+                    attention_scratch.output.data(), 1, arena.stream);
 
     {
       gufo::models::qwen::ResidualAdd(module_ctx, decode_scratch.hidden,
@@ -235,6 +238,8 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
           module_ctx, ffn_view, decode_scratch.normed, ffn_scratch.activation,
           ffn_scratch.activation, ffn_scratch.activation, ffn_scratch.out);
     }
+    AddLoraSidePath(layer.ffn_down_lora, ffn_scratch.activation.data(),
+                    ffn_scratch.out.data(), 1, arena.stream);
 
     // Residual Add
     gufo::models::qwen::ResidualAdd(module_ctx, decode_scratch.hidden,

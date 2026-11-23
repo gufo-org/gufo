@@ -13,12 +13,14 @@
 #include <gufo/ext/platform/prefault.hpp>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "src/families/qwen/kernels/ops/gemm.hpp"
+#include "src/families/qwen/kernels/ops/low_rank.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/lora.hpp"
 
@@ -132,6 +134,42 @@ struct LoraPlacement {
     return true;
   }
 };
+
+/// Uploads the side path's factors into one device allocation and points
+/// each patched layer's descriptor at them.
+[[nodiscard]] bool UploadLoraSidePath(const models::qwen::LoraSidePath& path,
+                                      models::QwenModelWeights& weights,
+                                      QwenGpuWeightRegion& factors,
+                                      std::string* error_msg) {
+  static_assert(models::qwen::kLoraSidePathMaxRank == kLowRankMaxRank);
+  const std::size_t bytes = path.factors.size() * sizeof(float);
+  void* device = nullptr;
+  auto status = hipMalloc(&device, bytes);
+  if (status == hipSuccess) {
+    factors = {
+        .device_data = device, .size = bytes, .owns_device_allocation = true};
+    status =
+        hipMemcpy(device, path.factors.data(), bytes, hipMemcpyHostToDevice);
+  }
+  if (status != hipSuccess) {
+    if (error_msg != nullptr)
+      *error_msg = std::string("LoRA side-path factor upload failed: ") +
+                   hipGetErrorString(status);
+    return false;
+  }
+  const auto* base = static_cast<const float*>(device);
+  for (const auto& slot : path.slots) {
+    auto& layer = weights.layers[slot.layer];
+    (slot.ffn_down ? layer.ffn_down_lora : layer.output_lora) = {
+        .a = base + slot.a,
+        .b = base + slot.b,
+        .in = slot.in,
+        .out = slot.out,
+        .rank = slot.rank,
+        .multiplier = slot.multiplier};
+  }
+  return true;
+}
 
 [[nodiscard]] hipError_t MapRegisteredRegion(
     const core::GgufMappedRegion& source, QwenGpuWeightRegion& destination,
@@ -441,20 +479,24 @@ QwenGpuModel::QwenGpuModel(
     std::shared_ptr<const tokenization::QwenTokenizer> tokenizer,
     std::vector<QwenGpuWeightRegion> weight_regions,
     std::shared_ptr<models::qwen::vision::Encoder> vision,
-    std::string adapter_identity)
+    std::string adapter_identity, QwenGpuWeightRegion lora_factors)
     : reader_(std::move(reader)),
       weights_(std::move(weights)),
       tokenizer_(std::move(tokenizer)),
       weight_regions_(std::move(weight_regions)),
       vision_(std::move(vision)),
-      adapter_identity_(std::move(adapter_identity)) {}
+      adapter_identity_(std::move(adapter_identity)),
+      lora_factors_(lora_factors) {}
 
 QwenGpuModel::~QwenGpuModel() {
   ReleaseWeightRegions(weight_regions_);
+  if (lora_factors_.device_data != nullptr)
+    (void)hipFree(lora_factors_.device_data);
 }
 
 std::size_t QwenGpuModel::GetResidentBytes() const noexcept {
-  std::size_t total = vision_ ? vision_->ResidentBytes() : 0;
+  std::size_t total =
+      (vision_ ? vision_->ResidentBytes() : 0) + lora_factors_.size;
   for (const auto& region : weight_regions_) {
     if (region.size > std::numeric_limits<std::size_t>::max() - total) {
       return std::numeric_limits<std::size_t>::max();
@@ -502,8 +544,18 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
       *error_msg = "a LoRA scale requires a LoRA adapter";
     return nullptr;
   }
+  // An adapter whose patched tensors are all Q8_0 is merged; any other
+  // keeps the stock weights and applies the side path to every target.
+  const bool merge = adapter && models::qwen::LoraMergesInPlace(*adapter);
+  std::optional<models::qwen::LoraSidePath> side_path;
+  if (adapter && !merge) {
+    side_path = models::qwen::PlanLoraSidePath(*reader, *adapter, *weights_opt,
+                                               error_msg);
+    if (!side_path)
+      return nullptr;
+  }
   LoraPlacement placement;
-  placement.adapter = adapter.get();
+  placement.adapter = merge ? adapter.get() : nullptr;
   std::vector<QwenGpuWeightRegion> weight_regions;
   // Releases the regions on every exit until the model owns them; released
   // and moved-from regions are empty.
@@ -514,6 +566,19 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
   if (!CreateWeightRegions(*reader, weight_regions, placement, error_msg)) {
     return nullptr;
   }
+  QwenGpuWeightRegion lora_factors;
+  struct FactorGuard {
+    QwenGpuWeightRegion& factors;
+    ~FactorGuard() {
+      if (factors.device_data != nullptr)
+        (void)hipFree(factors.device_data);
+    }
+  } factor_guard{lora_factors};
+  if (side_path &&
+      !UploadLoraSidePath(*side_path, *weights_opt, lora_factors, error_msg)) {
+    return nullptr;
+  }
+  side_path.reset();
 
   const auto remap = [&](models::QwenTensorRef& tensor) {
     return RemapTensor(tensor, weight_regions);
@@ -542,21 +607,30 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
 
   std::string adapter_identity = "none";
   if (adapter) {
-    adapter_identity = adapter->CacheIdentity();
+    adapter_identity = models::qwen::LoraAdapterIdentity(*adapter);
     char numbers[64];
-    std::snprintf(numbers, sizeof(numbers),
-                  " scale=%.9g tensors=%zu merge=%.2fs",
-                  static_cast<double>(adapter->scale()), adapter->size(),
-                  std::chrono::duration<double>(placement.time).count());
+    if (merge)
+      std::snprintf(numbers, sizeof(numbers),
+                    " scale=%.9g tensors=%zu merge=%.2fs",
+                    static_cast<double>(adapter->scale()), adapter->size(),
+                    std::chrono::duration<double>(placement.time).count());
+    else
+      std::snprintf(numbers, sizeof(numbers),
+                    " scale=%.9g tensors=%zu side_path_bytes=%zu",
+                    static_cast<double>(adapter->scale()), adapter->size(),
+                    lora_factors.size);
     server::Logger::Info("model", "LoRA adapter " + adapter->label() +
                                       " sha256=" + adapter->sha256() + numbers);
   }
   std::shared_ptr<const tokenization::QwenTokenizer> shared_tokenizer(
       std::move(tokenizer));
-  return std::make_shared<const QwenGpuModel>(
+  auto model = std::make_shared<const QwenGpuModel>(
       std::move(reader), std::move(*weights_opt), std::move(shared_tokenizer),
-      std::move(weight_regions), std::move(vision),
-      std::move(adapter_identity));
+      std::move(weight_regions), std::move(vision), std::move(adapter_identity),
+      lora_factors);
+  // The model owns the factors now; until here the guard did.
+  lora_factors = {};
+  return model;
 }
 
 std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::Create(
