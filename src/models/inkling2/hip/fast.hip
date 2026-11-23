@@ -113,13 +113,10 @@ __device__ __forceinline__ void quant_act(const float* __restrict__ x, v4u* aq,
 }
 
 template<int B, int K, int VS = 1>
-__device__ __forceinline__ void q8_unit(const uint8_t* p, const v4u* aq,
-                                        const float* asc, int u, int vb,
-                                        float (&acc)[B]) {
+__device__ __forceinline__ void q8_unit_c(v4u w0, v4u w1, float d,
+                                          const v4u* aq, const float* asc,
+                                          int u, int vb, float (&acc)[B]) {
   constexpr int NU = K / 32;
-  v4u w0 = *(const v4u_a2*)(p + 2);
-  v4u w1 = *(const v4u_a2*)(p + 18);
-  float d = __half2float(*(const __half*)p);
 #pragma unroll
   for (int b = 0; b < B; b++) {
     v4u a0 = aq[((vb + b * VS) * 2 + 0) * NU + u],
@@ -136,23 +133,45 @@ __device__ __forceinline__ void q8_unit(const uint8_t* p, const v4u* aq,
     acc[b] += d * (sc[0] * (float)s0 + sc[1] * (float)s1);
   }
 }
-
 template<int B, int K, int VS = 1>
-__device__ __forceinline__ void nv_unit(const uint8_t* p, const v4u* aq,
+__device__ __forceinline__ void q8_unit(const uint8_t* p, const v4u* aq,
                                         const float* asc, int u, int vb,
                                         float (&acc)[B]) {
-  constexpr int NU = K / 64, NB16 = K / 16;
-  uint32_t sw = *(const uint32_t*)p;
-  v4u q0 = *(const v4u_a4*)(p + 4);
-  v4u q1 = *(const v4u_a4*)(p + 20);
+  v4u w0 = *(const v4u_a2*)(p + 2);
+  v4u w1 = *(const v4u_a2*)(p + 18);
+  float d = __half2float(*(const __half*)p);
+  q8_unit_c<B, K, VS>(w0, w1, d, aq, asc, u, vb, acc);
+}
+
+// A unit's 64 weights decoded to int8 (l0, l1, h0, h1 per 16-element block)
+// and its four block scales.
+struct NvDec {
+  uint32_t w[16];
+  float ds[4];
+};
+__device__ __forceinline__ void nv_decode(uint32_t sw, v4u q0, v4u q1,
+                                          NvDec& d) {
   uint32_t w[8] = {q0.x, q0.y, q0.z, q0.w, q1.x, q1.y, q1.z, q1.w};
 #pragma unroll
   for (int s = 0; s < 4; s++) {
     uint32_t w0 = w[2 * s], w1 = w[2 * s + 1];
-    uint32_t l0 = dec4(w0 & 0x0F0F0F0Fu), l1 = dec4(w1 & 0x0F0F0F0Fu);
-    uint32_t h0 = dec4((w0 >> 4) & 0x0F0F0F0Fu),
-             h1 = dec4((w1 >> 4) & 0x0F0F0F0Fu);
-    float ds = ue4m3((sw >> (8 * s)) & 0xFFu);
+    d.w[4 * s] = dec4(w0 & 0x0F0F0F0Fu);
+    d.w[4 * s + 1] = dec4(w1 & 0x0F0F0F0Fu);
+    d.w[4 * s + 2] = dec4((w0 >> 4) & 0x0F0F0F0Fu);
+    d.w[4 * s + 3] = dec4((w1 >> 4) & 0x0F0F0F0Fu);
+    d.ds[s] = ue4m3((sw >> (8 * s)) & 0xFFu);
+  }
+}
+template<int B, int K, int VS = 1>
+__device__ __forceinline__ void nv_unit_d(const NvDec& d, const v4u* aq,
+                                          const float* asc, int u, int vb,
+                                          float (&acc)[B]) {
+  constexpr int NU = K / 64, NB16 = K / 16;
+#pragma unroll
+  for (int s = 0; s < 4; s++) {
+    const uint32_t l0 = d.w[4 * s], l1 = d.w[4 * s + 1], h0 = d.w[4 * s + 2],
+                   h1 = d.w[4 * s + 3];
+    const float ds = d.ds[s];
 #pragma unroll
     for (int b = 0; b < B; b++) {
       v4u a = aq[((vb + b * VS) * 4 + s) * NU + u];
@@ -163,6 +182,73 @@ __device__ __forceinline__ void nv_unit(const uint8_t* p, const v4u* aq,
       acc[b] += ds * asc[(vb + b * VS) * NB16 + u * 4 + s] * (float)t;
     }
   }
+}
+template<int B, int K, int VS = 1>
+__device__ __forceinline__ void nv_unit_c(uint32_t sw, v4u q0, v4u q1,
+                                          const v4u* aq, const float* asc,
+                                          int u, int vb, float (&acc)[B]) {
+  NvDec d;
+  nv_decode(sw, q0, q1, d);
+  nv_unit_d<B, K, VS>(d, aq, asc, u, vb, acc);
+}
+template<int B, int K, int VS = 1>
+__device__ __forceinline__ void nv_unit(const uint8_t* p, const v4u* aq,
+                                        const float* asc, int u, int vb,
+                                        float (&acc)[B]) {
+  uint32_t sw = *(const uint32_t*)p;
+  v4u q0 = *(const v4u_a4*)(p + 4);
+  v4u q1 = *(const v4u_a4*)(p + 20);
+  nv_unit_c<B, K, VS>(sw, q0, q1, aq, asc, u, vb, acc);
+}
+
+// A lane's units of one weight row, loaded ahead of the products (the same
+// units, products and order as row_dot).
+template<int FMT, int K, int LPR>
+struct RowRegs {
+  static constexpr int NU = K / Fm<FMT>::UEL, NI = (NU + LPR - 1) / LPR;
+  uint32_t h[NI];  // NVFP4: scale word; Q8: the f16 scale's bits
+  v4u q0[NI], q1[NI];
+};
+// TS (tail split, row_dot_g): every lane loads a last unit, lane lir the
+// unit NFULL * LPR + lir % T of the T left over.
+template<int FMT, int K, int LPR, bool TS = false>
+__device__ __forceinline__ void row_load(const uint8_t* row, int lir,
+                                         RowRegs<FMT, K, LPR>& r) {
+  using R = RowRegs<FMT, K, LPR>;
+  constexpr int BY = Fm<FMT>::BYTES, T = R::NU % LPR;
+#pragma unroll
+  for (int i = 0; i < R::NI; ++i) {
+    const int u = (TS && T > 0 && i == R::NI - 1)
+                      ? (R::NU / LPR) * LPR + lir % (T > 0 ? T : 1)
+                      : i * LPR + lir;
+    if (TS || (R::NU % LPR == 0) || u < R::NU) {
+      const uint8_t* p = row + (size_t)u * BY;
+      if (FMT == FMT_Q8) {
+        r.h[i] = *(const uint16_t*)p;
+        r.q0[i] = *(const v4u_a2*)(p + 2);
+        r.q1[i] = *(const v4u_a2*)(p + 18);
+      } else {
+        r.h[i] = *(const uint32_t*)p;
+        r.q0[i] = *(const v4u_a4*)(p + 4);
+        r.q1[i] = *(const v4u_a4*)(p + 20);
+      }
+    }
+  }
+}
+// NVFP4 rows decoded once, for all the pairs that read them.
+template<int K, int LPR>
+struct RowDec {
+  static constexpr int NU = K / 64, NI = (NU + LPR - 1) / LPR;
+  NvDec d[NI];
+};
+template<int K, int LPR, bool TS = false>
+__device__ __forceinline__ void row_decode(const RowRegs<FMT_NVFP4, K, LPR>& r,
+                                           int lir, RowDec<K, LPR>& d) {
+  using R = RowDec<K, LPR>;
+#pragma unroll
+  for (int i = 0; i < R::NI; ++i)
+    if (TS || (R::NU % LPR == 0) || i * LPR + lir < R::NU)
+      nv_decode(r.h[i], r.q0[i], r.q1[i], d.d[i]);
 }
 
 template<int FMT, int K, int LPR, int B, int VS = 1>
@@ -781,12 +867,14 @@ __global__ void __launch_bounds__(BW* WS)
 }
 
 // ---------------- MoE of many rows, grouped by expert ----------------
-// Wide verification steps route 9 to 64 rows: (row, slot) pairs that chose
-// the same expert are processed by one block row, which reads each weight
-// unit once for up to kGrp pairs. Every pair's dot products are k_moe_gu's /
-// k_moe_down_e's (row_dot over the same units, lanes and shuffles), so each
-// output is the one the per-pair kernels write.
+// Verification steps of 8 (one session) to 64 rows: the (row, slot) pairs
+// that chose the same expert are processed by one block row, whose lanes keep
+// their weight units in registers for all those pairs, kGrp at a time. Every
+// pair's dot products are k_moe_gu's / k_moe_down_e's (row_dot over the same
+// units, lanes and shuffles), so each output is the one the per-pair kernels
+// write.
 constexpr int kGrp = 4;
+constexpr int kGgBw = 16;  // waves per grouped-kernel block
 // Pairs sorted by expert: ue[k] / ub[k] / un[k] = the k-th used expert, the
 // start of its pairs in `sorted` and their count; *nd = used experts.
 __global__ void __launch_bounds__(256)
@@ -821,98 +909,46 @@ __global__ void __launch_bounds__(256)
     sorted[atomicAdd(&cur[ids[p]], 1)] = p;
 }
 
-// quant_act of NV gathered vectors: vector v at xs[v] (K floats).
-template<int K, int NV, int UEL>
-__device__ __forceinline__ void quant_act_g(const float* const* xs, int nv,
-                                            v4u* aq, float* asc, int res) {
-  constexpr int NG = K / 16, NU = K / UEL, CPU = UEL / 16, PLQ = NV * CPU * NU,
-                PLS = NV * NG;
-  for (int it = threadIdx.x; it < nv * NG; it += blockDim.x) {
-    int v = it / NG, g = it % NG;
-    const float4* xp = (const float4*)(xs[v] + g * 16);
-    float f[16];
-    float amax = 0.f;
-#pragma unroll
-    for (int i = 0; i < 4; i++) {
-      const float4 t = xp[i];
-      f[4 * i] = t.x;
-      f[4 * i + 1] = t.y;
-      f[4 * i + 2] = t.z;
-      f[4 * i + 3] = t.w;
-      amax = fmaxf(amax, fmaxf(fmaxf(fabsf(t.x), fabsf(t.y)),
-                               fmaxf(fabsf(t.z), fabsf(t.w))));
-    }
-    const float sc = amax / 127.f, id = amax > 0.f ? 127.f / amax : 0.f;
-    float r[16];
-    uint32_t q[4];
-#pragma unroll
-    for (int i = 0; i < 4; i++) {
-      float q0 = rintf(f[4 * i] * id), q1 = rintf(f[4 * i + 1] * id),
-            q2 = rintf(f[4 * i + 2] * id), q3 = rintf(f[4 * i + 3] * id);
-      q[i] = pack4(q0, q1, q2, q3);
-      r[4 * i] = f[4 * i] - q0 * sc;
-      r[4 * i + 1] = f[4 * i + 1] - q1 * sc;
-      r[4 * i + 2] = f[4 * i + 2] - q2 * sc;
-      r[4 * i + 3] = f[4 * i + 3] - q3 * sc;
-    }
-    asc[v * NG + g] = sc;
-    const int idx = (v * CPU + g % CPU) * NU + g / CPU;
-    aq[idx] = v4u{q[0], q[1], q[2], q[3]};
-    if (res) {
-      const float sc2 = sc * (1.0f / 254.0f),
-                  id2 = sc > 0.f ? 254.0f / sc : 0.f;
-      uint32_t q2p[4];
-#pragma unroll
-      for (int i = 0; i < 4; i++)
-        q2p[i] = pack4(r[4 * i] * id2, r[4 * i + 1] * id2, r[4 * i + 2] * id2,
-                       r[4 * i + 3] * id2);
-      asc[PLS + v * NG + g] = sc2;
-      aq[PLQ + idx] = v4u{q2p[0], q2p[1], q2p[2], q2p[3]};
-    }
-  }
-  __syncthreads();
-}
-
-// row_dot of the first n (1..kGrp) LDS vectors, B fixed at compile time.
-template<int FMT, int K, int LPR, class F>
+// f(B) for the first n (1..MAXB) pairs, B fixed at compile time.
+template<int FMT, int K, int LPR, int MAXB, class F>
 __device__ __forceinline__ void with_rows(int n, F&& f) {
-  if constexpr (kGrp >= 8) {
+  if constexpr (MAXB >= 8) {
     if (n >= 8) {
       f(std::integral_constant<int, 8>{});
       return;
     }
   }
-  if constexpr (kGrp >= 7) {
+  if constexpr (MAXB >= 7) {
     if (n == 7) {
       f(std::integral_constant<int, 7>{});
       return;
     }
   }
-  if constexpr (kGrp >= 6) {
+  if constexpr (MAXB >= 6) {
     if (n == 6) {
       f(std::integral_constant<int, 6>{});
       return;
     }
   }
-  if constexpr (kGrp >= 5) {
+  if constexpr (MAXB >= 5) {
     if (n == 5) {
       f(std::integral_constant<int, 5>{});
       return;
     }
   }
-  if constexpr (kGrp >= 4) {
+  if constexpr (MAXB >= 4) {
     if (n == 4) {
       f(std::integral_constant<int, 4>{});
       return;
     }
   }
-  if constexpr (kGrp >= 3) {
+  if constexpr (MAXB >= 3) {
     if (n == 3) {
       f(std::integral_constant<int, 3>{});
       return;
     }
   }
-  if constexpr (kGrp >= 2) {
+  if constexpr (MAXB >= 2) {
     if (n == 2) {
       f(std::integral_constant<int, 2>{});
       return;
@@ -921,111 +957,346 @@ __device__ __forceinline__ void with_rows(int n, F&& f) {
   f(std::integral_constant<int, 1>{});
 }
 
-template<int FMT, int K, int LPR, int NIT, int BW>
+// Quantized inputs of the grouped kernels, once per step: vector v's int8
+// planes (quant_act's values, in its LDS order) and then its two planes'
+// scales at qx + v * kQB<K>.
+template<int K>
+constexpr int kQB = 2 * K + 2 * (K / 16) * 4;
+template<int K, int UEL>
+__global__ void __launch_bounds__(256)
+    k_quant_vec(const float* __restrict__ x, int nv, uint8_t* __restrict__ qx) {
+  constexpr int NG = K / 16, NU = K / UEL, CPU = UEL / 16;
+  const int it = blockIdx.x * blockDim.x + threadIdx.x;
+  if (it >= nv * NG)
+    return;
+  const int v = it / NG, g = it % NG;
+  const float4* xp = (const float4*)(x + (size_t)v * K + g * 16);
+  float f[16];
+  float amax = 0.f;
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    const float4 t = xp[i];
+    f[4 * i] = t.x;
+    f[4 * i + 1] = t.y;
+    f[4 * i + 2] = t.z;
+    f[4 * i + 3] = t.w;
+    amax = fmaxf(amax, fmaxf(fmaxf(fabsf(t.x), fabsf(t.y)),
+                             fmaxf(fabsf(t.z), fabsf(t.w))));
+  }
+  const float sc = amax / 127.f, id = amax > 0.f ? 127.f / amax : 0.f;
+  float r[16];
+  uint32_t q[4];
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    float q0 = rintf(f[4 * i] * id), q1 = rintf(f[4 * i + 1] * id),
+          q2 = rintf(f[4 * i + 2] * id), q3 = rintf(f[4 * i + 3] * id);
+    q[i] = pack4(q0, q1, q2, q3);
+    r[4 * i] = f[4 * i] - q0 * sc;
+    r[4 * i + 1] = f[4 * i + 1] - q1 * sc;
+    r[4 * i + 2] = f[4 * i + 2] - q2 * sc;
+    r[4 * i + 3] = f[4 * i + 3] - q3 * sc;
+  }
+  uint8_t* o = qx + (size_t)v * kQB<K>;
+  v4u* q0p = (v4u*)o;
+  v4u* q1p = (v4u*)(o + K);
+  float* s0 = (float*)(o + 2 * K);
+  const int idx = (g % CPU) * NU + g / CPU;
+  s0[g] = sc;
+  q0p[idx] = v4u{q[0], q[1], q[2], q[3]};
+  const float sc2 = sc * (1.0f / 254.0f), id2 = sc > 0.f ? 254.0f / sc : 0.f;
+  uint32_t q2p[4];
+#pragma unroll
+  for (int i = 0; i < 4; i++)
+    q2p[i] = pack4(r[4 * i] * id2, r[4 * i + 1] * id2, r[4 * i + 2] * id2,
+                   r[4 * i + 3] * id2);
+  s0[NG + g] = sc2;
+  q1p[idx] = v4u{q2p[0], q2p[1], q2p[2], q2p[3]};
+}
+
+// Products of the grouped kernels. Every pair's quantized input is read from
+// qx (through the vector caches): no LDS staging or barriers, and a wave runs
+// all its expert's pairs, B at a time, with its row's weights decoded once.
+// Each product and sum is nv_unit's / q8_unit's in row_dot's order.
+template<int B, int K>
+__device__ __forceinline__ void nv_unit_g(const NvDec& d,
+                                          const uint8_t* const (&qv)[B],
+                                          int plane, int u, float (&acc)[B]) {
+  constexpr int NU = K / 64, NG = K / 16;
+#pragma unroll
+  for (int s = 0; s < 4; s++) {
+    const uint32_t l0 = d.w[4 * s], l1 = d.w[4 * s + 1], h0 = d.w[4 * s + 2],
+                   h1 = d.w[4 * s + 3];
+    const float ds = d.ds[s];
+#pragma unroll
+    for (int b = 0; b < B; b++) {
+      const v4u a = ((const v4u*)(qv[b] + plane * K))[s * NU + u];
+      const float sc = ((const float*)(qv[b] + 2 * K))[plane * NG + u * 4 + s];
+      int t = dot4(l0, a.x, 0);
+      t = dot4(l1, a.y, t);
+      t = dot4(h0, a.z, t);
+      t = dot4(h1, a.w, t);
+      acc[b] += ds * sc * (float)t;
+    }
+  }
+}
+// row_dot for B pairs. The T units left after the full passes (only T of
+// the LPR lanes have one) are split over the lanes: lane lir continues pairs
+// lir / T + q * (LPR / T) of lane lir % T, its partial sums moved there and
+// back by shuffles, so every lane's sum takes the same terms in the same
+// order and the butterfly is row_dot's.
+template<int K, int LPR, int B>
+__device__ __forceinline__ void row_dot_g(const RowDec<K, LPR>& r,
+                                          const uint8_t* const (&qv)[B],
+                                          int res, int lir, float (&acc)[B]) {
+  using R = RowDec<K, LPR>;
+  constexpr int NF = R::NU / LPR, T = R::NU % LPR, PL = LPR / T,
+                TPL = (B + PL - 1) / PL;  // tail tasks per lane
+  static_assert(T > 0 && LPR % T == 0, "tail split");
+#pragma unroll
+  for (int b = 0; b < B; b++)
+    acc[b] = 0.f;
+#pragma unroll
+  for (int i = 0; i < NF; ++i) {
+    const int u = i * LPR + lir;
+    nv_unit_g<B, K>(r.d[i], qv, 0, u, acc);
+    if (res)
+      nv_unit_g<B, K>(r.d[i], qv, 1, u, acc);
+  }
+  // lane lir continues pairs lir / T + q * PL of lane lir % T
+  const int base = (threadIdx.x % WS) - lir, tl = lir % T, tb = lir / T;
+  float t1[TPL][1];
+  const uint8_t* q1[TPL][1];
+#pragma unroll
+  for (int q = 0; q < TPL; ++q) {
+    t1[q][0] = 0.f;
+    q1[q][0] = qv[0];
+  }
+#pragma unroll
+  for (int b = 0; b < B; b++) {
+    const float x = __shfl(acc[b], base + tl, WS);
+    if (tb == b % PL) {
+      t1[b / PL][0] = x;
+      q1[b / PL][0] = qv[b];
+    }
+  }
+  const int u = NF * LPR + tl;
+#pragma unroll
+  for (int q = 0; q < TPL; ++q)
+    if (tb + q * PL < B) {
+      nv_unit_g<1, K>(r.d[R::NI - 1], q1[q], 0, u, t1[q]);
+      if (res)
+        nv_unit_g<1, K>(r.d[R::NI - 1], q1[q], 1, u, t1[q]);
+    }
+#pragma unroll
+  for (int b = 0; b < B; b++) {
+    const float x = __shfl(t1[b / PL][0], base + (b % PL) * T + tl, WS);
+    if (lir < T)
+      acc[b] = x;
+  }
+#pragma unroll
+  for (int b = 0; b < B; b++)
+#pragma unroll
+    for (int off = LPR / 2; off > 0; off >>= 1)
+      acc[b] += __shfl_xor(acc[b], off, WS);
+}
+
+// Q8_0 counterpart of nv_unit_g / row_dot_g (q8_unit_c's products).
+template<int B, int K>
+__device__ __forceinline__ void q8_unit_g(v4u w0, v4u w1, float d,
+                                          const uint8_t* const (&qv)[B],
+                                          int plane, int u, float (&acc)[B]) {
+  constexpr int NU = K / 32, NG = K / 16;
+#pragma unroll
+  for (int b = 0; b < B; b++) {
+    const v4u* aq = (const v4u*)(qv[b] + plane * K);
+    const v4u a0 = aq[u], a1 = aq[NU + u];
+    const float* sc = (const float*)(qv[b] + 2 * K) + plane * NG + 2 * u;
+    int s0 = dot4(w0.x, a0.x, 0);
+    s0 = dot4(w0.y, a0.y, s0);
+    s0 = dot4(w0.z, a0.z, s0);
+    s0 = dot4(w0.w, a0.w, s0);
+    int s1 = dot4(w1.x, a1.x, 0);
+    s1 = dot4(w1.y, a1.y, s1);
+    s1 = dot4(w1.z, a1.z, s1);
+    s1 = dot4(w1.w, a1.w, s1);
+    acc[b] += d * (sc[0] * (float)s0 + sc[1] * (float)s1);
+  }
+}
+template<int K, int LPR, int B>
+__device__ __forceinline__ void row_dot_q8g(const RowRegs<FMT_Q8, K, LPR>& r,
+                                            const uint8_t* const (&qv)[B],
+                                            int res, int lir, float (&acc)[B]) {
+  using R = RowRegs<FMT_Q8, K, LPR>;
+  constexpr int NF = R::NU / LPR, T = R::NU % LPR, PL = LPR / T,
+                TPL = (B + PL - 1) / PL;
+  static_assert(T > 0 && LPR % T == 0, "tail split");
+  auto dq = [&](int i) {
+    return __half2float(__ushort_as_half((unsigned short)(r.h[i] & 0xFFFFu)));
+  };
+#pragma unroll
+  for (int b = 0; b < B; b++)
+    acc[b] = 0.f;
+#pragma unroll
+  for (int i = 0; i < NF; ++i) {
+    const int u = i * LPR + lir;
+    const float d = dq(i);
+    q8_unit_g<B, K>(r.q0[i], r.q1[i], d, qv, 0, u, acc);
+    if (res)
+      q8_unit_g<B, K>(r.q0[i], r.q1[i], d, qv, 1, u, acc);
+  }
+  const int base = (threadIdx.x % WS) - lir, tl = lir % T, tb = lir / T;
+  float t1[TPL][1];
+  const uint8_t* q1[TPL][1];
+#pragma unroll
+  for (int q = 0; q < TPL; ++q) {
+    t1[q][0] = 0.f;
+    q1[q][0] = qv[0];
+  }
+#pragma unroll
+  for (int b = 0; b < B; b++) {
+    const float x = __shfl(acc[b], base + tl, WS);
+    if (tb == b % PL) {
+      t1[b / PL][0] = x;
+      q1[b / PL][0] = qv[b];
+    }
+  }
+  const int u = NF * LPR + tl;
+  const float d = dq(R::NI - 1);
+#pragma unroll
+  for (int q = 0; q < TPL; ++q)
+    if (tb + q * PL < B) {
+      q8_unit_g<1, K>(r.q0[R::NI - 1], r.q1[R::NI - 1], d, q1[q], 0, u, t1[q]);
+      if (res)
+        q8_unit_g<1, K>(r.q0[R::NI - 1], r.q1[R::NI - 1], d, q1[q], 1, u,
+                        t1[q]);
+    }
+#pragma unroll
+  for (int b = 0; b < B; b++) {
+    const float x = __shfl(t1[b / PL][0], base + (b % PL) * T + tl, WS);
+    if (lir < T)
+      acc[b] = x;
+  }
+#pragma unroll
+  for (int b = 0; b < B; b++)
+#pragma unroll
+    for (int off = LPR / 2; off > 0; off >>= 1)
+      acc[b] += __shfl_xor(acc[b], off, WS);
+}
+
+template<int FMT, int K, int LPR, int BW>
 __global__ void __launch_bounds__(BW* WS)
-    k_moe_gu_g(const uint8_t* __restrict__ W, const float* __restrict__ escale,
-               const float* __restrict__ x, const int* __restrict__ sorted,
-               const int* __restrict__ ue, const int* __restrict__ ub,
-               const int* __restrict__ un, const int* __restrict__ nd,
-               float* __restrict__ a, int FF, float beta, float lb, int res) {
-  constexpr int NU = K / Fm<FMT>::UEL, CPU = Fm<FMT>::UEL / 16,
-                RPP = WS / LPR / 2;
-  __shared__ v4u aq[2 * kGrp * CPU * NU];
-  __shared__ float asc[2 * kGrp * (K / 16)];
-  __shared__ const float* xs[kGrp];
-  __shared__ int ps[kGrp];
+    k_moe_gu_gg(const uint8_t* __restrict__ W, const float* __restrict__ escale,
+                const uint8_t* __restrict__ qx, const int* __restrict__ sorted,
+                const int* __restrict__ ue, const int* __restrict__ ub,
+                const int* __restrict__ un, const int* __restrict__ nd,
+                float* __restrict__ a, int FF, float beta, float lb, int res) {
+  constexpr int NU = K / Fm<FMT>::UEL, RPP = WS / LPR / 2;
   const int k = blockIdx.x, rbk = blockIdx.y;
   if (k >= *nd)
     return;
-  const int e = ue[k], b0 = ub[k], n = un[k];
-  const float sc = escale ? escale[e] : 1.f;
-  size_t rb = (size_t)NU * Fm<FMT>::BYTES;
+  const int e = ue[k] & 127, b0 = ub[k], n = un[k];
+  const size_t rb = (size_t)NU * Fm<FMT>::BYTES;
   const uint8_t* We = W + (size_t)e * 2 * FF * rb;
-  int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
-      lir = lane % LPR, isup = g & 1, pg = g >> 1;
-  int base = (rbk * BW + wave) * RPP * NIT;
+  const int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
+            lir = lane % LPR, isup = g & 1, pg = g >> 1;
+  const int j = (rbk * BW + wave) * RPP + pg;
+  const int jj = j < FF ? j : FF - 1;
+  RowRegs<FMT, K, LPR> wr;
+  row_load<FMT, K, LPR, true>(We + rb * (isup ? FF + jj : jj), lir, wr);
+  [[maybe_unused]] RowDec<K, LPR> wd;
+  if constexpr (FMT == FMT_NVFP4)
+    row_decode<K, LPR, true>(wr, lir, wd);
+  const float sc = escale ? escale[e] : 1.f;
   for (int c0 = 0; c0 < n; c0 += kGrp) {
     const int cn = min(kGrp, n - c0);
-    if (c0 > 0)
-      __syncthreads();  // the previous group's LDS reads are done
-    if (threadIdx.x < cn) {
-      const int p = sorted[b0 + c0 + threadIdx.x];
-      ps[threadIdx.x] = p;
-      xs[threadIdx.x] = x + (size_t)(p >> 3) * K;
+    int ps[kGrp];
+    const uint8_t* qv[kGrp];
+#pragma unroll
+    for (int b = 0; b < kGrp; ++b) {
+      ps[b] = sorted[b0 + c0 + min(b, cn - 1)];
+      qv[b] = qx + (size_t)(ps[b] >> 3) * kQB<K>;
     }
-    __syncthreads();
-    quant_act_g<K, kGrp, Fm<FMT>::UEL>(xs, cn, aq, asc, res);
-    with_rows<FMT, K, LPR>(cn, [&](auto nb_) {
+    with_rows<FMT, K, LPR, kGrp>(cn, [&](auto nb_) {
       constexpr int B = decltype(nb_)::value;
+      const uint8_t* qb[B];
 #pragma unroll
-      for (int it = 0; it < NIT; it++) {
-        int j = base + it * RPP + pg;
-        int jj = j < FF ? j : FF - 1;
-        float acc[B];
-        row_dot<FMT, K, LPR, B>(We + rb * (isup ? FF + jj : jj), aq, asc,
-                                kGrp * CPU * NU, kGrp * (K / 16), res, 0, lir,
-                                acc);
+      for (int b = 0; b < B; ++b)
+        qb[b] = qv[b];
+      float acc[B];
+      if constexpr (FMT == FMT_NVFP4)
+        row_dot_g<K, LPR, B>(wd, qb, res, lir, acc);
+      else
+        row_dot_q8g<K, LPR, B>(wr, qb, res, lir, acc);
+      // after the butterfly every lane of a row holds its sums: gate lane b
+      // takes pair b (one SITU per pair instead of one per pair and lane)
+      float gv = acc[0], uv = __shfl_xor(acc[0], LPR, WS);
+      int pb = ps[0];
 #pragma unroll
-        for (int b = 0; b < B; ++b) {
-          float other = __shfl_xor(acc[b], LPR, WS);
-          if (!isup && lir == 0 && j < FF)
-            a[(size_t)ps[b] * FF + j] = situ(acc[b] * sc, other * sc, beta, lb);
+      for (int b = 1; b < B; ++b) {
+        const float o = __shfl_xor(acc[b], LPR, WS);
+        if (lir == b) {
+          gv = acc[b];
+          uv = o;
+          pb = ps[b];
         }
       }
+      if (!isup && lir < B && j < FF)
+        a[(size_t)pb * FF + j] = situ(gv * sc, uv * sc, beta, lb);
     });
   }
 }
 
-template<int FMT, int K, int LPR, int NIT, int BW>
+template<int FMT, int K, int LPR, int BW>
 __global__ void __launch_bounds__(BW* WS)
-    k_moe_down_g(const uint8_t* __restrict__ W,
-                 const float* __restrict__ escale, const float* __restrict__ a,
-                 const int* __restrict__ sorted, const int* __restrict__ ue,
-                 const int* __restrict__ ub, const int* __restrict__ un,
-                 const int* __restrict__ nd, const float* __restrict__ wts,
-                 float* __restrict__ yp, int D, int res) {
-  constexpr int NU = K / Fm<FMT>::UEL, CPU = Fm<FMT>::UEL / 16, RPW = WS / LPR;
-  __shared__ v4u aq[2 * kGrp * CPU * NU];
-  __shared__ float asc[2 * kGrp * (K / 16)];
-  __shared__ const float* xs[kGrp];
-  __shared__ int ps[kGrp];
+    k_moe_down_gg(const uint8_t* __restrict__ W,
+                  const float* __restrict__ escale,
+                  const uint8_t* __restrict__ qx,
+                  const int* __restrict__ sorted, const int* __restrict__ ue,
+                  const int* __restrict__ ub, const int* __restrict__ un,
+                  const int* __restrict__ nd, const float* __restrict__ wts,
+                  float* __restrict__ yp, int D, int res) {
+  constexpr int NU = K / Fm<FMT>::UEL, RPW = WS / LPR;
   const int k = blockIdx.x, rbk = blockIdx.y;
   if (k >= *nd)
     return;
-  const int e = ue[k], b0 = ub[k], n = un[k];
+  const int e = ue[k] & 127, b0 = ub[k], n = un[k];
+  const size_t rb = (size_t)NU * Fm<FMT>::BYTES;
+  const int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
+            lir = lane % LPR;
+  const int row = (rbk * BW + wave) * RPW + g;
+  const int rr = row < D ? row : D - 1;
+  RowRegs<FMT, K, LPR> wr;
+  row_load<FMT, K, LPR, true>(W + ((size_t)e * D + rr) * rb, lir, wr);
+  [[maybe_unused]] RowDec<K, LPR> wd;
+  if constexpr (FMT == FMT_NVFP4)
+    row_decode<K, LPR, true>(wr, lir, wd);
   const float es = escale ? escale[e] : 1.f;
-  size_t rb = (size_t)NU * Fm<FMT>::BYTES;
-  int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
-      lir = lane % LPR;
-  int base = (rbk * BW + wave) * RPW * NIT;
   for (int c0 = 0; c0 < n; c0 += kGrp) {
     const int cn = min(kGrp, n - c0);
-    if (c0 > 0)
-      __syncthreads();
-    if (threadIdx.x < cn) {
-      const int p = sorted[b0 + c0 + threadIdx.x];
-      ps[threadIdx.x] = p;
-      xs[threadIdx.x] = a + (size_t)p * K;
-    }
-    __syncthreads();
-    quant_act_g<K, kGrp, Fm<FMT>::UEL>(xs, cn, aq, asc, res);
-    with_rows<FMT, K, LPR>(cn, [&](auto nb_) {
-      constexpr int B = decltype(nb_)::value;
-#pragma unroll 1
-      for (int it = 0; it < NIT; it++) {
-        int row = base + it * RPW + g;
-        int rr = row < D ? row : D - 1;
-        float acc[B];
-        row_dot<FMT, K, LPR, B>(W + ((size_t)e * D + rr) * rb, aq, asc,
-                                kGrp * CPU * NU, kGrp * (K / 16), res, 0, lir,
-                                acc);
-        if (row < D && lir == 0)
+    int ps[kGrp];
+    const uint8_t* qv[kGrp];
 #pragma unroll
-          for (int b = 0; b < B; ++b) {
-            const int p = ps[b];
-            yp[(size_t)p * D + row] = (wts[p] * es) * acc[b];
-          }
-      }
+    for (int b = 0; b < kGrp; ++b) {
+      ps[b] = sorted[b0 + c0 + min(b, cn - 1)];
+      qv[b] = qx + (size_t)ps[b] * kQB<K>;
+    }
+    with_rows<FMT, K, LPR, kGrp>(cn, [&](auto nb_) {
+      constexpr int B = decltype(nb_)::value;
+      const uint8_t* qb[B];
+#pragma unroll
+      for (int b = 0; b < B; ++b)
+        qb[b] = qv[b];
+      float acc[B];
+      if constexpr (FMT == FMT_NVFP4)
+        row_dot_g<K, LPR, B>(wd, qb, res, lir, acc);
+      else
+        row_dot_q8g<K, LPR, B>(wr, qb, res, lir, acc);
+      if (row < D && lir == 0)
+#pragma unroll
+        for (int b = 0; b < B; ++b) {
+          const int p = ps[b];
+          yp[(size_t)p * D + row] = (wts[p] * es) * acc[b];
+        }
     });
   }
 }
@@ -4064,40 +4335,55 @@ void MoeRouteGroup(hipStream_t s, const int* ids, int pairs, MoeGroups g) {
   Chk("route_group");
 }
 void MoeGuGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
-                  const float* x, MoeGroups g, int slots, float* a, int ff,
-                  float beta, float lb) {
+                  MoeGroups g, int slots, float* a, int ff, float beta,
+                  float lb) {
   const uint8_t* W = static_cast<const uint8_t*>(w);
-  auto run = [&](auto fm, auto lpr, auto nit, auto bw) {
-    constexpr int FM = decltype(fm)::value, LPR = decltype(lpr)::value,
-                  NIT = decltype(nit)::value, BW = decltype(bw)::value;
-    constexpr int RPB = BW * (WS / LPR / 2) * NIT;
-    k_moe_gu_g<FM, 2304, LPR, NIT, BW>
-        <<<dim3(slots, (ff + RPB - 1) / RPB), BW * WS, 0, s>>>(
-            W, escale, x, g.sorted, g.ue, g.ub, g.un, g.nd, a, ff, beta, lb,
+  const uint8_t* qx = static_cast<const uint8_t*>(g.qx);
+  auto run = [&](auto fm) {
+    constexpr int FM = decltype(fm)::value, RPB = kGgBw * (WS / 16 / 2);
+    k_moe_gu_gg<FM, 2304, 16, kGgBw>
+        <<<dim3(slots, (ff + RPB - 1) / RPB), kGgBw * WS, 0, s>>>(
+            W, escale, qx, g.sorted, g.ue, g.ub, g.un, g.nd, a, ff, beta, lb,
             g_res);
   };
   if (fmt == kFmtNvfp4)
-    run(I<FMT_NVFP4>{}, I<16>{}, I<1>{}, I<8>{});
+    run(I<FMT_NVFP4>{});
   else
-    run(I<FMT_Q8>{}, I<16>{}, I<1>{}, I<4>{});
+    run(I<FMT_Q8>{});
   Chk("moe_gu_grouped");
 }
+void MoeQuantGrouped(hipStream_t s, int fmt, const float* x, int nv, int k,
+                     MoeGroups g) {
+  uint8_t* qx = static_cast<uint8_t*>(g.qx);
+  const dim3 grid((nv * (k / 16) + 255) / 256);
+  if (k == 2304) {
+    if (fmt == kFmtNvfp4)
+      k_quant_vec<2304, 64><<<grid, 256, 0, s>>>(x, nv, qx);
+    else
+      k_quant_vec<2304, 32><<<grid, 256, 0, s>>>(x, nv, qx);
+  } else {
+    if (fmt == kFmtNvfp4)
+      k_quant_vec<1152, 64><<<grid, 256, 0, s>>>(x, nv, qx);
+    else
+      k_quant_vec<1152, 32><<<grid, 256, 0, s>>>(x, nv, qx);
+  }
+  Chk("moe_quant_grouped");
+}
 void MoeDownGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
-                    const float* a, MoeGroups g, int slots, const float* wts,
-                    float* yp, int d) {
+                    MoeGroups g, int slots, const float* wts, float* yp,
+                    int d) {
   const uint8_t* W = static_cast<const uint8_t*>(w);
-  auto run = [&](auto fm, auto lpr, auto nit, auto bw) {
-    constexpr int FM = decltype(fm)::value, LPR = decltype(lpr)::value,
-                  NIT = decltype(nit)::value, BW = decltype(bw)::value;
-    constexpr int RPB = BW * (WS / LPR) * NIT;
-    k_moe_down_g<FM, 1152, LPR, NIT, BW>
-        <<<dim3(slots, (d + RPB - 1) / RPB), BW * WS, 0, s>>>(
-            W, escale, a, g.sorted, g.ue, g.ub, g.un, g.nd, wts, yp, d, g_res);
+  const uint8_t* qx = static_cast<const uint8_t*>(g.qx);
+  auto run = [&](auto fm) {
+    constexpr int FM = decltype(fm)::value, RPB = kGgBw * (WS / 8);
+    k_moe_down_gg<FM, 1152, 8, kGgBw>
+        <<<dim3(slots, (d + RPB - 1) / RPB), kGgBw * WS, 0, s>>>(
+            W, escale, qx, g.sorted, g.ue, g.ub, g.un, g.nd, wts, yp, d, g_res);
   };
   if (fmt == kFmtNvfp4)
-    run(I<FMT_NVFP4>{}, I<8>{}, I<1>{}, I<8>{});
+    run(I<FMT_NVFP4>{});
   else
-    run(I<FMT_Q8>{}, I<8>{}, I<4>{}, I<4>{});
+    run(I<FMT_Q8>{});
   Chk("moe_down_grouped");
 }
 

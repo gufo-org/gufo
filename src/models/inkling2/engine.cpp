@@ -674,6 +674,7 @@ struct Engine::Impl {
     d_groups.ub = NewInts(128);
     d_groups.un = NewInts(128);
     d_groups.nd = NewInts(1);
+    d_groups.qx = NewRaw(B * 8 * fs::kMoeQuantBytes);
     d_step = NewInts(3 * B);  // tokens [B], positions [B], row in session [B]
     d_vcap =
         NewBuf(static_cast<std::size_t>(48) * kConvChannels * fs::kVerifyRows);
@@ -1557,17 +1558,22 @@ struct Engine::Impl {
     fs::Router(ds, HW(L.ffn_gate_inp), DS(L.exp_probs_b), d_h, d_rlog,
                d_counter, d_ids8, d_wts8, cfg->expert_weights_scale, nb,
                ctl_half);
-    if (F.moe >= 0 && nb > kChunk) {
-      // many rows: each used expert's weights read once for all its pairs
+    // Many rows, or eight consecutive rows of one session (which share most
+    // experts): each used expert's weights read once for all its pairs.
+    // Other sessions' rows share fewer experts and run per pair.
+    if (F.moe >= 0 &&
+        (nb > kChunk || (verify_mode && verify_one_session && nb == kChunk))) {
       const int slots = std::min(E, 8 * nb);
       fs::MoeRouteGroup(ds, d_ids8, 8 * nb, d_groups);
+      fs::MoeQuantGrouped(ds, F.moe, d_h, nb, kEmbd, d_groups);
       fs::MoeGuGrouped(ds, F.moe, D(L.ffn_gate_up_exps),
                        L.ffn_gate_up_scale ? DS(L.ffn_gate_up_scale) : nullptr,
-                       d_h, d_groups, slots, d_act8, nff, cfg->situ_beta,
+                       d_groups, slots, d_act8, nff, cfg->situ_beta,
                        cfg->situ_linear_beta);
+      fs::MoeQuantGrouped(ds, F.moe, d_act8, 8 * nb, nff, d_groups);
       fs::MoeDownGrouped(ds, F.moe, D(L.ffn_down_exps),
                          L.ffn_down_scale ? DS(L.ffn_down_scale) : nullptr,
-                         d_act8, d_groups, slots, d_wts8, d_moe_part, kEmbd);
+                         d_groups, slots, d_wts8, d_moe_part, kEmbd);
     } else if (F.moe >= 0) {
       fs::MoeGu(ds, F.moe, D(L.ffn_gate_up_exps),
                 L.ffn_gate_up_scale ? DS(L.ffn_gate_up_scale) : nullptr, d_h,

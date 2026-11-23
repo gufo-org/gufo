@@ -69,9 +69,6 @@ void MoeGu(hipStream_t s, int fmt, const void* w, const float* escale,
 /// weighted partial outputs that the next ConvResid adds in slot order
 /// (ConvResidArgs::nsum = 8). Smaller blocks (one expert's activations to
 /// quantise).
-/// Pairs of a step grouped by expert (MoeRouteGroup), for MoeGuGrouped /
-/// MoeDownGrouped: the same outputs as MoeGu / MoeDownE, each expert's
-/// weights read once for its pairs.
 /// Wide steps (9 to 64 tokens) through int8 WMMA, with the outputs of
 /// ProjMulti / GemvQ8 (k = 2304 or 3072): the inputs are first quantized by
 /// QuantRows (`per` inputs a token, token stride ldt floats) into qa
@@ -84,20 +81,32 @@ bool ProjMma(hipStream_t s, const ProjSpec& p, const void* qa, const float* qs,
              int per, float* y, int nb, int ldx, int ldy, const float* x);
 void GemvMma(hipStream_t s, int k, const void* w, const void* qa,
              const float* qs, float* y, int m, float softcap, int nb);
+/// Pairs of a step grouped by expert (MoeRouteGroup), for MoeGuGrouped /
+/// MoeDownGrouped: the same outputs as MoeGu / MoeDownE, each expert's
+/// weights read once for all its pairs.
 struct MoeGroups {
   int* sorted;  // [pairs]
   int* ue;      // [128] used experts
   int* ub;      // [128] start of each one's pairs in `sorted`
   int* un;      // [128] its pair count
   int* nd;      // [1] used experts
+  void* qx;     // the next grouped kernel's quantized inputs (MoeQuantGrouped)
 };
 void MoeRouteGroup(hipStream_t s, const int* ids, int pairs, MoeGroups g);
+/// Quantizes the nv inputs x [nv][k] (k = 2304: the tokens' MoE inputs; 1152:
+/// the pairs' activations) of the next grouped kernel into g.qx, once for all
+/// the blocks that read them. g.qx holds kMoeQuantBytes per pair.
+inline constexpr std::size_t kMoeQuantBytes = 2 * 1152 + 2 * 72 * 4;
+void MoeQuantGrouped(hipStream_t s, int fmt, const float* x, int nv, int k,
+                     MoeGroups g);
+/// a [pair][ff]: SITU(gate, up) of every pair, inputs from MoeQuantGrouped(k
+/// = 2304); `slots` >= used experts.
 void MoeGuGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
-                  const float* x, MoeGroups g, int slots, float* a, int ff,
-                  float beta, float lb);
+                  MoeGroups g, int slots, float* a, int ff, float beta,
+                  float lb);
+/// yp [pair][d]: weighted outputs, inputs from MoeQuantGrouped(k = 1152).
 void MoeDownGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
-                    const float* a, MoeGroups g, int slots, const float* wts,
-                    float* yp, int d);
+                    MoeGroups g, int slots, const float* wts, float* yp, int d);
 void MoeDownE(hipStream_t s, int fmt, const void* w, const float* escale,
               const float* a, const int* ids, const float* wts, float* yp,
               int d, int nb = 1);
