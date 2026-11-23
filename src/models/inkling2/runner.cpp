@@ -371,6 +371,19 @@ public:
   /// appends when reasoning is off (<|message_model|><|content_text|> ...): the
   /// next turn writes those tokens as part of the assistant message, so a
   /// checkpoint that includes them can never be reused.
+  /// The chat template's text for /apply-template: the renderer PreparePrompt
+  /// tokenizes, control tokens spelled out.
+  [[nodiscard]] std::optional<std::string> RenderPrompt(
+      const g::ChatRequest& request) const override {
+    ::inkling2::text::Rendered rendered;
+    std::string err;
+    if (!::inkling2::text::RenderChat(
+            ga::ToMessages(request), ga::ToTools(request),
+            ga::ToRenderOptions(request), &rendered, &err))
+      throw std::invalid_argument(err);
+    return rendered.Text();
+  }
+
   [[nodiscard]] std::optional<g::TextPreparedPrompt> PreparePrompt(
       const g::ChatRequest& request) const override {
     // Images: decode them all first (the row count of each sets how many
