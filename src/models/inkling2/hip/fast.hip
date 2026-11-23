@@ -892,13 +892,22 @@ __device__ __forceinline__ void rms_job(const NormJobs& j, int r, int tk,
   const float* x = j.x[r] + (size_t)tk * j.xs[r];
   const float* w = j.w[r];
   float* o = j.out[r] + (size_t)tk * j.os[r];
-  float ss = 0.f;
-  for (int i = threadIdx.x; i < 2304; i += blockDim.x)
-    ss += x[i] * x[i];
+  // 256 threads (both launches): element i = threadIdx.x + 256 t, the
+  // loads issued together, each thread's sum in t order
+  float v[9], ss = 0.f;
+#pragma unroll
+  for (int t = 0; t < 9; ++t)
+    v[t] = x[threadIdx.x + 256 * t];
+#pragma unroll
+  for (int t = 0; t < 9; ++t)
+    ss = __fmaf_rn(v[t], v[t], ss);
   const float tot = block_sum(ss, red);
   const float inv = rsqrtf(tot * (1.0f / 2304.0f) + eps);
-  for (int i = threadIdx.x; i < 2304; i += blockDim.x)
-    o[i] = x[i] * inv * (w ? w[i] : 1.0f);
+#pragma unroll
+  for (int t = 0; t < 9; ++t) {
+    const int i = threadIdx.x + 256 * t;
+    o[i] = v[t] * inv * (w ? w[i] : 1.0f);
+  }
 }
 __global__ void __launch_bounds__(256) k_rms(NormJobs j, float eps) {
   __shared__ float red[32];
