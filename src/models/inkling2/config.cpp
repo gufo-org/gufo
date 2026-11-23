@@ -131,35 +131,25 @@ bool ParseConfig(const core::GgufReader& reader, Inkling2Config* out,
   if (!arch) {
     return fail("general.architecture is missing");
   }
-  Inkling2Config config;
-  if (*arch == "inkling2_loop") {
-    config.layout = Layout::kLoop;
-  } else if (*arch == "inkling2") {
-    config.layout = Layout::kRoot;
-  } else {
+  // The layout mainline llama.cpp loads: 24 physical blocks and the loop
+  // keys `loop.start/end/count/gate_rank/varying`.
+  if (*arch != "inkling2_loop") {
     return fail("architecture '" + std::string(*arch) +
-                "' is not inkling2 or inkling2_loop");
+                "' is not inkling2_loop");
   }
-  const bool root = config.layout == Layout::kRoot;
+  Inkling2Config config;
   Checker c(reader, std::string(*arch));
 
-  // Layer count and loop keys differ between the layouts; the rest is shared.
-  c.Expect("block_count", root ? config.n_visits : config.n_phys);
-  if (root) {
-    c.Expect("num_loops", config.n_passes);
-    c.Expect("loop.core_start", config.core_start);
-    c.Expect("loop.core_end", config.core_end);
-  } else {
-    c.Expect("loop.count", config.n_passes);
-    c.Expect("loop.start", config.core_start);
-    c.Expect("loop.end", config.core_end);
-    // `loop.varying` is absent from the Unsloth files and from older
-    // conversions; only a true value (variable pass count) is refused.
-    if (const auto varying = reader.GetMetadataBool(c.Key("loop.varying"))) {
-      if (*varying) {
-        c.Fail(c.Key("loop.varying") +
-               " is true; variable passes are not supported");
-      }
+  c.Expect("block_count", config.n_phys);
+  c.Expect("loop.count", config.n_passes);
+  c.Expect("loop.start", config.core_start);
+  c.Expect("loop.end", config.core_end);
+  // `loop.varying` is absent from older conversions; only a true value
+  // (variable pass count) is refused.
+  if (const auto varying = reader.GetMetadataBool(c.Key("loop.varying"))) {
+    if (*varying) {
+      c.Fail(c.Key("loop.varying") +
+             " is true; variable passes are not supported");
     }
   }
   c.Expect("loop.gate_rank", config.gate_rank);
@@ -191,8 +181,8 @@ bool ParseConfig(const core::GgufReader& reader, Inkling2Config* out,
   c.ExpectFloat("activation.situ_linear_beta", config.situ_linear_beta);
   c.ExpectFloat("final_logit_softcapping", config.logit_softcap);
 
-  // Per-layer arrays have one entry per block: 24 physical or 48 visits.
-  const std::size_t entries = root ? config.n_visits : config.n_phys;
+  // Per-layer arrays have one entry per physical block.
+  const std::size_t entries = config.n_phys;
   c.ExpectConstantArray("attention.head_count", entries, config.n_head);
   c.ExpectConstantArray("attention.head_count_kv", entries, config.n_head_kv);
   const auto pattern = c.Array("attention.sliding_window_pattern");
@@ -204,28 +194,22 @@ bool ParseConfig(const core::GgufReader& reader, Inkling2Config* out,
   if (!c.ok()) {
     return fail(c.why());
   }
-  // A visit must repeat the pattern of its physical layer; the pattern is
-  // true for sliding-window layers, so a global layer is `false`.
-  std::array<std::optional<bool>, Inkling2Config::kPhysLayers> global;
-  for (std::uint32_t v = 0; v < entries; ++v) {
-    const auto phys = root ? config.PhysOfVisit(v) : v;
-    const bool is_global = pattern[v] == 0;
-    if (global[phys] && *global[phys] != is_global) {
-      return fail(c.Key("attention.sliding_window_pattern") +
-                  " differs between visits of layer " + std::to_string(phys));
-    }
-    global[phys] = is_global;
+  // The pattern is true for sliding-window layers, so a global layer is
+  // `false`.
+  std::array<bool, Inkling2Config::kPhysLayers> global{};
+  for (std::uint32_t il = 0; il < entries; ++il) {
+    global[il] = pattern[il] == 0;
   }
   for (std::uint32_t il = 0; il < config.n_phys; ++il) {
     // Global attention at layers 5, 11, 17, 23: the last of every six.
     const bool expected = il % 6 == 5;
-    if (*global[il] != expected) {
+    if (global[il] != expected) {
       return fail(c.Key("attention.sliding_window_pattern") + " marks layer " +
                   std::to_string(il) +
                   (expected ? " as sliding-window" : " as global") +
                   "; expected global layers 5, 11, 17, 23");
     }
-    config.global_layer[il] = *global[il];
+    config.global_layer[il] = global[il];
   }
   if (out != nullptr) {
     *out = config;

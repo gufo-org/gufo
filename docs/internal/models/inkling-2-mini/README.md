@@ -3,11 +3,12 @@
 Developer detail behind the [public model page](../../../models/inkling-2-mini.md).
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Forward pass](FORWARD.md)
 
-Supported target: `unsloth/Inkling-2-Mini-GGUF` revision `45fd08764f2b`,
-`Inkling-2-Mini-UD-Q4_K_XL.gguf` (root layout, architecture `inkling2`, 48
-layer visits). The `Mainline_Support` copy (architecture `inkling2_loop`, 24
-physical blocks, the layout mainline llama.cpp loads) holds the same tensors
-and loads too. Optional vision projector: Unsloth's `mmproj-BF16.gguf`.
+Supported target: `unsloth/Inkling-2-Mini-GGUF` revision `8078d149286e`,
+`Inkling-2-Mini-UD-Q4_K_XL.gguf`, in the layout mainline llama.cpp loads
+(architecture `inkling2_loop`, 24 physical blocks). Unsloth's earlier layout
+of the same tensors (architecture `inkling2`, 48 layer visits; the root file
+before `8078d149`, now in `Old_Support/`) is not supported. Optional vision
+projector: Unsloth's `mmproj-BF16.gguf`.
 
 ## Origin
 
@@ -41,27 +42,31 @@ and `THIRD_PARTY.md` carry its license and attributions. Changes made here:
 `dspark.{hpp,cpp}` and `hip/dspark.{hpp,hip}` run Unsloth's
 `dspark-Inkling-2-Mini-Q8_0.gguf` (architecture `dflash`): the checkpoint's
 3-layer block drafter, written from llama.cpp PR #32218's description of it.
+It reads llama.cpp's layout of the drafter (the root file since `8078d149`):
+per-layer `ctx_mix` already softmaxed, `ctx_norm`, `markov_w1` over the
+200,058 tokenizer rows, and `markov_w2` plus bias, the Markov output folded
+through the BF16 unembedding in FP64. Unsloth's earlier layout of the same
+weights (`dspark_fuse`, `dflare_norm`, padded `markov_w1`, `hidden_out`; now
+`dspark-Inkling-2-Mini-Q8_0_Old.gguf`) is not supported.
 
 - **Context.** After every prefill ubatch, decode step and verification
   commit, the engine copies the target's hidden states at visit slots 5, 29
   and 47 (the inputs of visits 5, 23 and 41) and the final normed output into
-  a feature buffer; `Drafter::Inject` mixes them per drafter layer (softmax of
-  `dspark_fuse`) into context K/V rows (K normed per head and rotated, NeoX
+  a feature buffer; `Drafter::Inject` mixes them per drafter layer (`ctx_mix`)
+  into context K/V rows (K normed per head and rotated, NeoX
   RoPE, theta 1e6) and the Markov context `f` of the last token. Sessions
   declare the drafter's rings (layers 0 and 2, 1,024-token windows) and its
   global layer (a demand-mapped region) with the rest of their state. A cache
   restore drops the context; it restarts at the restored position.
 - **Proposals.** `Drafter::Propose` runs the 8-row block [anchor, mask x 7]
   through the three layers (non-causal over the block plus the context), then
-  the gated RNN Markov head proposes greedily, one row at a time. Two ideas
-  from the Loom package: the head reads `h_i + W_o latent + b_o` in one GEMV
-  (instead of the LM head of each term), and proposals come from the 65,536
-  LM-head rows with the largest `markov_w1` norms (a Q8_0 copy; the
-  acceptance counts did not change). The head is linear, so W_U (h_i + W_o
-  lat + b_o) = W_U h_i + (W_U W_o) lat + W_U b_o: one 8-row pass over the head
-  per draft gives every W_U h_i, and each Markov step reads only the
-  precomputed 65,536 x 256 table (W_U W_o, F16, 32 MB) instead of the 160 MB
-  head.
+  the gated RNN Markov head proposes greedily, one row at a time. Proposals
+  come from the 65,536 LM-head rows with the largest `markov_w1` norms (a
+  Q8_0 copy; the Loom package's choice; the acceptance counts did not
+  change). A row's logits are W_U h_i + `markov_w2` lat + bias: one 8-row
+  pass over the head per draft gives every W_U h_i, and each Markov step
+  reads only those tokens' 65,536 x 256 `markov_w2` rows (int8, one scale per
+  row, 16.8 MB) instead of the 160 MB head.
 - **Verification.** `Engine::Verify` evaluates the anchor and up to seven
   proposals of one session in one batched-decode graph (decode steps are 8
   rows wide; batches of sessions stay at 4). On global visits up to five rows

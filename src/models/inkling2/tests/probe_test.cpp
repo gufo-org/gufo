@@ -29,18 +29,12 @@ int g_failures = 0;
     }                                                                       \
   } while (false)
 
-std::vector<Kv> ValidMeta(Layout layout) {
-  const bool root = layout == Layout::kRoot;
-  const std::string p = root ? "inkling2" : "inkling2_loop";
-  const std::uint32_t n = root ? 48 : 24;
+std::vector<Kv> ValidMeta() {
+  const std::string p = "inkling2_loop";
+  const std::uint32_t n = 24;
   std::vector<bool> swa(n, true);
-  for (std::uint32_t v = 0; v < n; ++v) {
-    // Layers 5, 11, 17, 23 are global; visits repeat them in the root layout.
-    const std::uint32_t phys = !root ? v
-                                     : (v < 6    ? v
-                                        : v < 42 ? 6 + (v - 6) % 12
-                                                 : v - 36);
-    swa[v] = phys % 6 != 5;
+  for (std::uint32_t il = 0; il < n; ++il) {
+    swa[il] = il % 6 != 5;  // layers 5, 11, 17, 23 are global
   }
   std::vector<Kv> kv = {
       {"general.architecture", p},
@@ -79,16 +73,10 @@ std::vector<Kv> ValidMeta(Layout layout) {
       {p + ".attention.log_scale_floor", 8192U},
       {p + ".attention.log_scale_alpha", 0.1F},
   };
-  if (root) {
-    kv.push_back({p + ".num_loops", 3U});
-    kv.push_back({p + ".loop.core_start", 6U});
-    kv.push_back({p + ".loop.core_end", 18U});
-  } else {
-    kv.push_back({p + ".loop.count", 3U});
-    kv.push_back({p + ".loop.start", 6U});
-    kv.push_back({p + ".loop.end", 18U});
-    kv.push_back({p + ".loop.varying", false});
-  }
+  kv.push_back({p + ".loop.count", 3U});
+  kv.push_back({p + ".loop.start", 6U});
+  kv.push_back({p + ".loop.end", 18U});
+  kv.push_back({p + ".loop.varying", false});
   return kv;
 }
 
@@ -143,8 +131,8 @@ void TestNvfp4Layout() {
 }
 
 void TestConfig() {
-  for (const auto layout : {Layout::kLoop, Layout::kRoot}) {
-    const auto image = BuildGguf(ValidMeta(layout), {});
+  {
+    const auto image = BuildGguf(ValidMeta(), {});
     std::string error;
     const auto reader = gufo::core::GgufReader::OpenMemory(
         image.data(), image.size(), &error, {.allow_unsized_tensors = true});
@@ -152,7 +140,6 @@ void TestConfig() {
     Inkling2Config config;
     std::string why;
     CHECK(ParseConfig(*reader, &config, &why));
-    CHECK(config.layout == layout);
     CHECK(config.n_phys == 24 && config.n_visits == 48);
     for (std::uint32_t il = 0; il < 24; ++il) {
       CHECK(config.global_layer[il] ==
@@ -164,30 +151,28 @@ void TestConfig() {
     CHECK(config.PhysOfVisit(41) == 17 && config.PhysOfVisit(42) == 18);
     CHECK(config.PhysOfVisit(47) == 23);
     // With no tensors the probe stops at the first missing one.
-    CHECK(Has(Probe(ValidMeta(layout)), "missing tensor token_embd.weight"));
+    CHECK(Has(Probe(ValidMeta()), "missing tensor token_embd.weight"));
   }
 }
 
 void TestRefusals() {
-  const auto loop = ValidMeta(Layout::kLoop);
-  const auto root = ValidMeta(Layout::kRoot);
+  const auto loop = ValidMeta();
   CHECK(Has(Probe(With(loop, "general.architecture", std::string("qwen4exp"))),
-            "not inkling2 or inkling2_loop"));
+            "is not inkling2_loop"));
+  // Unsloth's earlier root layout of the same tensors is no longer read.
+  CHECK(Has(Probe(With(loop, "general.architecture", std::string("inkling2"))),
+            "is not inkling2_loop"));
   CHECK(Has(Probe(Without(loop, "general.architecture")),
             "general.architecture is missing"));
   CHECK(Has(Probe(With(loop, "inkling2_loop.block_count", 48U)),
             "block_count is 48, expected 24"));
-  CHECK(Has(Probe(With(root, "inkling2.block_count", 24U)),
-            "block_count is 24, expected 48"));
   CHECK(Has(Probe(With(loop, "inkling2_loop.loop.count", 2U)),
             "loop.count is 2"));
-  CHECK(Has(Probe(With(root, "inkling2.num_loops", 2U)), "num_loops is 2"));
-  CHECK(
-      Has(Probe(With(root, "inkling2.loop.core_end", 17U)), "core_end is 17"));
+  CHECK(Has(Probe(With(loop, "inkling2_loop.loop.end", 17U)), "end is 17"));
   CHECK(Has(Probe(With(loop, "inkling2_loop.loop.varying", true)),
             "variable passes"));
-  CHECK(Has(Probe(Without(root, "inkling2.loop.core_start")),
-            "core_start is missing"));
+  CHECK(Has(Probe(Without(loop, "inkling2_loop.loop.start")),
+            "start is missing"));
   CHECK(Has(Probe(With(loop, "inkling2_loop.expert_count", 256U)),
             "expert_count is 256"));
   CHECK(Has(Probe(With(loop, "inkling2_loop.attention.qk_clip", 11.0F)),
@@ -210,19 +195,10 @@ void TestRefusals() {
   CHECK(Has(Probe(With(loop, "inkling2_loop.attention.sliding_window_pattern",
                        BoolArray{swa})),
             "marks layer 4 as global"));
-  // A root-layout visit disagreeing with its physical layer.
-  std::vector<bool> visits(48, true);
-  for (const auto v : {5, 11, 17, 23, 29, 35, 41, 47}) {
-    visits[v] = false;
-  }
-  visits[23] = true;  // visit 23 is layer 11 on pass 2
-  CHECK(Has(Probe(With(root, "inkling2.attention.sliding_window_pattern",
-                       BoolArray{visits})),
-            "differs between visits of layer 11"));
 }
 
 void TestTensorRefusals() {
-  const auto meta = ValidMeta(Layout::kLoop);
+  const auto meta = ValidMeta();
   // token_embd: type is checked before the payload size matters.
   CHECK(Has(
       Probe(meta,

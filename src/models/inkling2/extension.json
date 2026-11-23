@@ -46,7 +46,7 @@
           "install": "required",
           "source": {
             "hf": "unsloth/Inkling-2-Mini-GGUF",
-            "revision": "45fd08764f2b0bf16b03a5483a80e5c7aaec8772"
+            "revision": "8078d149286eec7193795413b9e0643da6d11fa1"
           },
           "include": [
             "Inkling-2-Mini-UD-Q4_K_XL.gguf"
@@ -58,7 +58,7 @@
           "install": "default",
           "source": {
             "hf": "unsloth/Inkling-2-Mini-GGUF",
-            "revision": "45fd08764f2b0bf16b03a5483a80e5c7aaec8772"
+            "revision": "8078d149286eec7193795413b9e0643da6d11fa1"
           },
           "include": [
             "mmproj-BF16.gguf"
@@ -70,7 +70,7 @@
           "install": "default",
           "source": {
             "hf": "unsloth/Inkling-2-Mini-GGUF",
-            "revision": "45fd08764f2b0bf16b03a5483a80e5c7aaec8772"
+            "revision": "8078d149286eec7193795413b9e0643da6d11fa1"
           },
           "include": [
             "dspark-Inkling-2-Mini-Q8_0.gguf"

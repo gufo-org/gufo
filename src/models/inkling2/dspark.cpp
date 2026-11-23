@@ -144,6 +144,9 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     const GgufReader& r = *impl->reader;
     if (r.GetMetadataString("general.architecture").value_or("") != "dflash")
       throw std::runtime_error("not a DFlash/DSpark GGUF");
+    // llama.cpp's layout (#32218): per-layer ctx_mix (already softmaxed),
+    // ctx_norm, markov_w1 over the tokenizer rows, and markov_w2 plus bias,
+    // the Markov output folded through the BF16 unembedding.
     auto u32 = [&](const char* k) { return r.GetMetadataUint32(k); };
     if (u32("dflash.block_count") != 3u ||
         u32("dflash.embedding_length") != 2304u ||
@@ -151,8 +154,8 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
         u32("dflash.attention.head_count") != 24u ||
         u32("dflash.attention.head_count_kv") != 8u ||
         u32("dflash.block_size") != 8u ||
-        u32("dflash.dspark.markov_rank") != 256u ||
-        u32("dflash.attention.sliding_window") != 1024u)
+        // llama.cpp's n_swa: the block's 1024 previous positions plus 1
+        u32("dflash.attention.sliding_window") != 1025u)
       throw std::runtime_error("unsupported DSpark hyperparameters");
     {
       const auto* m = r.FindMetadata("dflash.target_layers");
@@ -182,7 +185,7 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
       L.q_norm = I.F32(b + "attn_q_norm.weight", 128, &tot);
       L.k_norm = I.F32(b + "attn_k_norm.weight", 128, &tot);
       L.k_ctx_norm = I.F32(b + "attn_k_ctx_norm.weight", 128, &tot);
-      L.ctx_norm = I.F32(b + "dflare_norm.weight", kE, &tot);
+      L.ctx_norm = I.F32(b + "ctx_norm.weight", kE, &tot);
       L.wq = I.Q8(b + "attn_q.weight", 2304ull * 3072, &tot);
       L.wk = I.Q8(b + "attn_k.weight", 2304ull * 1024, &tot);
       L.wv = I.Q8(b + "attn_v.weight", 2304ull * 1024, &tot);
@@ -193,24 +196,37 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
       L.wk_ctx = I.Q8(b + "attn_k_ctx.weight", 2304ull * 1024, &tot);
       L.wv_ctx = I.Q8(b + "attn_v_ctx.weight", 2304ull * 1024, &tot);
     }
-    I.mask = I.F32("mask_embd.weight", kE, &tot);
+    {
+      // one mask row per draft slot, all copies of the checkpoint's one row
+      constexpr int kSlots = dsp::kBlock - 1;
+      const auto& m = I.Need("mask_embd.weight", GgmlType::kF32,
+                             static_cast<std::uint64_t>(kE) * kSlots);
+      const auto* row = static_cast<const char*>(m.data);
+      for (int i = 1; i < kSlots; ++i)
+        if (std::memcmp(row, row + static_cast<std::size_t>(i) * kE * 4,
+                        static_cast<std::size_t>(kE) * 4) != 0)
+          throw std::runtime_error("per-slot DSpark mask embeddings");
+      void* p = I.Alloc<float>(kE);
+      Check(hipMemcpy(p, row, static_cast<std::size_t>(kE) * 4,
+                      hipMemcpyHostToDevice),
+            "weight upload");
+      tot += static_cast<std::size_t>(kE) * 4;
+      I.mask = static_cast<const float*>(p);
+    }
     I.out_norm = I.F32("output_norm.weight", kE, &tot);
-    I.markov_norm = I.F32("dspark_norm.weight", kE, &tot);
+    I.markov_norm = I.F32("markov_ctx_norm.weight", kE, &tot);
     I.bj = I.F32("joint_proj.bias", 768, &tot);
     I.wj = I.BF16("joint_proj.weight", 768ull * 5120, &tot);
-    I.w1 = I.BF16("markov_w1.weight", 256ull * 201024, &tot);
-    {
-      const auto& fuse = I.Need("dspark_fuse.weight", GgmlType::kF32, 16);
-      const float* f = static_cast<const float*>(fuse.data);
-      for (int j = 0; j < 4; ++j) {  // softmax of each row (as the converter)
-        float m = -INFINITY, z = 0.f;
-        for (int i = 0; i < 4; ++i)
-          m = std::max(m, f[j * 4 + i]);
-        for (int i = 0; i < 4; ++i)
-          z += std::exp(f[j * 4 + i] - m);
-        for (int i = 0; i < 4; ++i)
-          I.alpha[j][i] = std::exp(f[j * 4 + i] - m) / z;
-      }
+    // markov_w1: one row per tokenizer token
+    const auto w1_rows = static_cast<std::uint64_t>(target.vocab);
+    I.w1 = I.BF16("markov_w1.weight", 256ull * w1_rows, &tot);
+    // the converter's softmax of each fuse row: layers 0-2, then the head
+    for (int j = 0; j < 4; ++j) {
+      const std::string n = j < 3
+                                ? "blk." + std::to_string(j) + ".ctx_mix.weight"
+                                : std::string("markov_ctx_mix.weight");
+      std::memcpy(I.alpha[j], I.Need(n, GgmlType::kF32, 4).data,
+                  sizeof(I.alpha[j]));
     }
     d->weight_bytes_ = tot;
     constexpr int B = dsp::kBlock;
@@ -234,7 +250,7 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     {
       // the kHeadRows text tokens with the largest markov_w1 rows
       const auto& w1t =
-          I.Need("markov_w1.weight", GgmlType::kBF16, 256ull * 201024);
+          I.Need("markov_w1.weight", GgmlType::kBF16, 256ull * w1_rows);
       const auto* w1h = static_cast<const std::uint16_t*>(w1t.data);
       const int V = target.vocab;
       std::vector<std::pair<float, int>> norm(static_cast<std::size_t>(V));
@@ -270,36 +286,36 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
       Check(hipDeviceSynchronize(), "head copy");
       tot += ids.size() * (2304 / 32) * 34;
 
-      // (W_U W_o)^T and W_U b_o in one GEMM: the head against the 256
-      // columns of W_o and b_o as 257 activation rows
+      // (W_U W_o)^T and W_U b_o as [257][R]: the folded markov_w2 rows and
+      // bias of the selected tokens.
       const int R = static_cast<int>(ids.size());
-      const auto& wot =
-          I.Need("dspark_hidden_out.weight", GgmlType::kBF16, 256ull * kE);
-      const auto& bot = I.Need("dspark_hidden_out.bias", GgmlType::kF32, kE);
-      const auto* woh = static_cast<const std::uint16_t*>(wot.data);
-      const auto* boh = static_cast<const float*>(bot.data);
-      std::vector<float> xt(static_cast<std::size_t>(257) * kE);
-      for (int c = 0; c < kE; ++c) {
+      const auto& w2t = I.Need("markov_w2.weight", GgmlType::kBF16,
+                               256ull * static_cast<std::uint64_t>(V));
+      const auto& b2t = I.Need("markov_w2.bias", GgmlType::kF32,
+                               static_cast<std::uint64_t>(V));
+      const auto* w2h = static_cast<const std::uint16_t*>(w2t.data);
+      const auto* b2h = static_cast<const float*>(b2t.data);
+      std::vector<float> lr(static_cast<std::size_t>(257) * R);
+      for (int i = 0; i < R; ++i) {
+        const auto t =
+            static_cast<std::size_t>(ids[static_cast<std::size_t>(i)]);
         for (int j = 0; j < 256; ++j) {
           const std::uint32_t u =
-              static_cast<std::uint32_t>(woh[static_cast<std::size_t>(c) * 256 +
-                                             static_cast<std::size_t>(j)])
+              static_cast<std::uint32_t>(
+                  w2h[t * 256 + static_cast<std::size_t>(j)])
               << 16;
-          std::memcpy(&xt[static_cast<std::size_t>(j) * kE +
-                          static_cast<std::size_t>(c)],
+          std::memcpy(&lr[static_cast<std::size_t>(j) * R +
+                          static_cast<std::size_t>(i)],
                       &u, 4);
         }
-        xt[static_cast<std::size_t>(256) * kE + static_cast<std::size_t>(c)] =
-            boh[c];
+        lr[static_cast<std::size_t>(256) * R + static_cast<std::size_t>(i)] =
+            b2h[t];
       }
-      float *dx = nullptr, *dout = nullptr;
-      Check(hipMalloc(reinterpret_cast<void**>(&dx), xt.size() * 4), "lr in");
-      Check(hipMalloc(reinterpret_cast<void**>(&dout),
-                      static_cast<std::size_t>(257) * R * 4),
+      float* dout = nullptr;
+      Check(hipMalloc(reinterpret_cast<void**>(&dout), lr.size() * 4),
             "lr out");
-      Check(hipMemcpy(dx, xt.data(), xt.size() * 4, hipMemcpyHostToDevice),
-            "lr in");
-      kk::Gemm(nullptr, kk::kTQ8_0, I.head, R, kE, dx, kE, dout, R, 257);
+      Check(hipMemcpy(dout, lr.data(), lr.size() * 4, hipMemcpyHostToDevice),
+            "lr tables");
       I.pt = I.Alloc<std::int8_t>(static_cast<std::size_t>(256) * R);
       I.ps = I.Alloc<float>(static_cast<std::size_t>(R));
       I.cb = I.Alloc<float>(static_cast<std::size_t>(R));
@@ -310,7 +326,6 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
                       static_cast<std::size_t>(R) * 4, hipMemcpyDeviceToDevice),
             "lr bias");
       Check(hipDeviceSynchronize(), "lr tables");
-      (void)hipFree(dx);
       (void)hipFree(dout);
       tot += static_cast<std::size_t>(256) * R +
              static_cast<std::size_t>(R) * 4 + static_cast<std::size_t>(R) * 4;

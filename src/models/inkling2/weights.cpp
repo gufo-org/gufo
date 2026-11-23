@@ -107,10 +107,6 @@ const Field kScaleFields[] = {
 #undef SHAPE
 
 constexpr std::string_view kStreamNames[kStreams] = {"q", "k", "v", "ffn"};
-// Loop tensor stream names in the root layout (HF
-// `controllers.{attn,k,v,mlp}`).
-constexpr std::string_view kRootStreamNames[kStreams] = {"attn", "k", "v",
-                                                         "mlp"};
 constexpr std::string_view kLoopParts[] = {"down", "gain", "forget"};
 
 TensorRef LoopController::* PartMember(std::size_t part) {
@@ -278,33 +274,18 @@ bool BindLayer(Binder& b, const Inkling2Config& c, std::uint32_t il,
   return true;
 }
 
-/// Loop controllers and message queries of every core layer, from either
-/// layout's tensors.
+/// Loop controllers and message queries of every core layer.
 bool BindLoop(Binder& b, const Inkling2Config& c,
               std::array<LayerWeights, Inkling2Config::kPhysLayers>& layers) {
-  const bool root = c.layout == Layout::kRoot;
   const Dims shapes[] = {{2 * c.n_embd, c.gate_rank},
                          {c.gate_rank, c.n_embd},
                          {c.gate_rank, c.n_embd}};
-  TensorRef res_query;
-  TensorRef kv_res_query;
-  if (root) {
-    // Global (n_embd, 2 * core_len) tensors: rows (q, ffn) and (k, v) per
-    // layer.
-    const Dims ne = {c.n_embd, 2 * c.CoreLen()};
-    if (!b.Take(res_query, "loop_res_query.weight", Kind::kF32, ne) ||
-        !b.Take(kv_res_query, "loop_kv_res_query.weight", Kind::kF32, ne)) {
-      return false;
-    }
-  }
   for (auto il = c.core_start; il < c.core_end; ++il) {
     auto& layer = layers[il];
     for (std::size_t s = 0; s < kStreams; ++s) {
       for (std::size_t part = 0; part < 3; ++part) {
-        const auto name = root ? std::string(kRootStreamNames[s]) + "_" +
-                                     std::string(kLoopParts[part])
-                               : std::string(kStreamNames[s]) + "_ctrl_" +
-                                     std::string(kLoopParts[part]);
+        const auto name = std::string(kStreamNames[s]) + "_ctrl_" +
+                          std::string(kLoopParts[part]);
         if (!b.Take(layer.loop[s].*PartMember(part),
                     Blk(il, "loop_" + name + ".weight"), Kind::kF32,
                     shapes[part])) {
@@ -312,21 +293,13 @@ bool BindLoop(Binder& b, const Inkling2Config& c,
         }
       }
     }
-    if (root) {
-      // Checkpoint packing: query_i = (q[2i], kv[2i], kv[2i+1], q[2i+1]).
-      const auto i = il - c.core_start;
-      layer.msg_query = {Row(res_query, 2 * i), Row(kv_res_query, 2 * i),
-                         Row(kv_res_query, 2 * i + 1),
-                         Row(res_query, 2 * i + 1)};
-    } else {
-      TensorRef packed;
-      if (!b.Take(packed, Blk(il, "loop_msg_query.weight"), Kind::kF32,
-                  {c.n_embd, kStreams})) {
-        return false;
-      }
-      for (std::uint64_t s = 0; s < kStreams; ++s) {
-        layer.msg_query[s] = Row(packed, s);
-      }
+    TensorRef packed;
+    if (!b.Take(packed, Blk(il, "loop_msg_query.weight"), Kind::kF32,
+                {c.n_embd, kStreams})) {
+      return false;
+    }
+    for (std::uint64_t s = 0; s < kStreams; ++s) {
+      layer.msg_query[s] = Row(packed, s);
     }
   }
   return true;
@@ -423,9 +396,7 @@ std::string Summarize(const Inkling2Weights& w) {
     ++tensors;
   });
   std::ostringstream out;
-  out << (w.config.layout == Layout::kLoop ? "layout inkling2_loop (24 blocks)"
-                                           : "layout inkling2 (48 visits)")
-      << ", " << tensors << " tensors\n";
+  out << "layout inkling2_loop (24 blocks), " << tensors << " tensors\n";
   for (const auto& [type, total] : by_type) {
     out << "  " << type << ": " << total.count << " tensors, "
         << total.bytes / (1024.0 * 1024.0) << " MiB\n";

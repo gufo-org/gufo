@@ -7,23 +7,10 @@
 
 namespace gufo::models::inkling2 {
 
-/// The two GGUF layouts of Inkling 2 Mini. Both hold the same tensors.
-enum class Layout {
-  /// `general.architecture = inkling2_loop`: 24 physical blocks, loop keys
-  /// `loop.start/end/count/gate_rank/varying` (mainline llama.cpp).
-  kLoop,
-  /// `general.architecture = inkling2`: `block_count` counts the 48 layer
-  /// visits, loop keys `num_loops`, `loop.core_start/core_end/gate_rank`
-  /// (Unsloth root files). Tensors are still stored once per physical layer.
-  kRoot,
-};
-
 /// The one hyper-parameter set the extension serves. Defaults are the exact
 /// values of Inkling 2 Mini; `ParseConfig` refuses a file that differs.
 struct Inkling2Config {
   static constexpr std::uint32_t kPhysLayers = 24;
-
-  Layout layout = Layout::kLoop;
 
   // Trunk.
   std::uint32_t n_phys = kPhysLayers;

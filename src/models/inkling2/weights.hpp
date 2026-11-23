@@ -82,8 +82,7 @@ struct LayerWeights {
   // Loop (core layers 6..17).
   std::array<LoopController, kStreams> loop;
   /// Message query per stream, each (n_embd) F32. Points into
-  /// `blk.N.loop_msg_query` (loop layout) or into the global
-  /// `loop_res_query` / `loop_kv_res_query` (root layout).
+  /// `blk.N.loop_msg_query`.
   std::array<TensorRef, kStreams> msg_query;
 };
 

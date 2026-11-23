@@ -5,8 +5,8 @@ Measured November 22–23, 2026 on Strix Halo (gfx1151, ROCm 10.1).
 ## Logits against llama.cpp
 
 Reference: llama.cpp `94f3af3d0` (includes the Inkling 2 merges #32694,
-#32704 and #32799), CPU backend, the `Mainline_Support` UD-Q4_K_XL file (same
-tensors as the root file), teacher forcing over the first 9,300 tokens of the
+#32704 and #32799), CPU backend, the UD-Q4_K_XL file of revision `8078d149` (the
+same file Gufo reads), teacher forcing over the first 9,300 tokens of the
 WikiText-2 test set. KL is over the reference's top 64 plus a tail bucket.
 
 | Engine | mean KL | top-1 agreement |
@@ -23,6 +23,10 @@ Per position range, Gufo prefill / decode / llama.cpp HIP:
 | 1,024–4,095 | 1.497e-3 | 1.585e-3 | 1.602e-3 |
 | 4,096–8,191 | 1.514e-3 | 1.635e-3 | 2.001e-3 |
 | 8,192–9,299 | 2.232e-3 | 2.095e-3 | 2.181e-3 |
+
+Rerun on revision `8078d149` (llama.cpp's layout, read through the shared
+GGUF reader): the same numbers to every printed digit, for both paths and
+every range.
 
 Gufo stays closer to the CPU reference than llama.cpp's own GPU backend in
 every range. Positions past 8,192, where the global layers' log-scaled
