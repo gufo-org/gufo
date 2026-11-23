@@ -795,10 +795,10 @@ struct Store::Impl {
   std::unique_ptr<ReadPool> readers;
   uint64_t cache_limit = 0;
   uint64_t requested_limit = 0;  // Policy::cache_limit_bytes; 0: the grant
-  bool granted = false;  // Fit ran: the host sized the cache
-  uint64_t granted_limit = 0;  // the cache's limit from Fit; Release lowers
-                               // cache_limit below it until Restore
-  uint64_t released = 0;       // freed by Release since Fit or Restore
+  bool granted = false;          // Fit ran: the host sized the cache
+  uint64_t granted_limit = 0;    // the cache's limit from Fit; Release lowers
+                                 // cache_limit below it until Restore
+  uint64_t released = 0;         // freed by Release since Fit or Restore
   uint64_t tick = 0;
   uint64_t logged_tokens = 0;
   /* Policy::trace_path: binary routing trace (Store::Tracing), opened at
