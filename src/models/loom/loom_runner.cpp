@@ -732,8 +732,10 @@ public:
     const bool last = offset + count == prompt.size();
     std::lock_guard lock(model_->mutex());
     auto* embed = model_->embed();
-    const std::uint64_t extent = std::min<std::uint64_t>(
-        model_->info().context_capacity, prompt.size() + kExtentSlack);
+    // The pool holds sessions x --context tokens: a row's slack stays within
+    // its own share, or concurrent rows run the pool dry.
+    const std::uint64_t extent =
+        std::min<std::uint64_t>(max_context_, prompt.size() + kExtentSlack);
     if (offset == 0 || loom.slot->stale) {
       if (offset != 0)
         throw std::logic_error("loom row lost its state");
@@ -1398,7 +1400,7 @@ private:
     const std::uint64_t position =
         loom_text_embed_row_position(embed, loom.row()) +
         (loom.slot->deferred >= 0 ? 1 : 0);
-    const std::uint64_t context = model_->info().context_capacity;
+    const std::uint64_t context = max_context_;
     if (position + step <= loom_text_embed_row_extent(embed, loom.row()))
       return;
     const std::uint64_t extent =
