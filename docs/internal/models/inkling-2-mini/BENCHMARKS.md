@@ -7,8 +7,7 @@ GB/s DRAM read, 54.8 TFLOPS F16 WMMA.
 ## End to end
 
 `gufo bench -m Inkling-2-Mini-UD-Q4_K_XL.gguf -p N -n 128 -r 2` against
-llama.cpp `94f3af3d0` `llama-bench -fa 1` (HIP, `Mainline_Support` copy of the
-same weights).
+llama.cpp `94f3af3d0` `llama-bench -fa 1` (HIP, the same file).
 
 | Workload | Gufo | llama.cpp HIP |
 | --- | --- | --- |
@@ -41,10 +40,11 @@ Same machine, Windows 11, TheRock 10.0.0, 96 GB Variable Graphics Memory,
 | pp512 / pp2048 / pp8192 | 1,648 / 2,271 / 2,199 tokens/s |
 | tg128 after 512 / 2,048 / 8,192 tokens | 46.0 / 44.8 / 42.8 tokens/s |
 
-Decode has no weight prefetch on Windows: its side-stream waits in the
-replayed graph cost more than it saves there (ABBA, C = 1: 39.4 tokens/s with
+The decode weight prefetch costs more than it saves on Windows: its
+side-stream waits in the replayed graph (ABBA, C = 1: 39.4 tokens/s with
 it, 46.0 without; `inkling2_bench` at a 2,048-token context, 2 / 4 / 8
-sessions: 56.4 / 81.3 / 104.3 with it, 64.5 / 88.0 / 109.7 without). The
+sessions: 56.4 / 81.3 / 104.3 with it, 64.5 / 88.0 / 109.7 without). `Engine::Create` therefore times replayed one-session decode steps of a
+scratch session with and without it and keeps it only when it is faster. The
 prefetch only warms the cache, so the logits are unchanged. `inkling2_spec_test`,
 `inkling2_cache_test` and `inkling2_bench --verify` (2, 4 and 8 sessions) pass
 bit for bit, and six HTTP requests (greedy, seeded, a tool call and an image)

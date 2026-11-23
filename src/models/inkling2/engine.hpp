@@ -298,6 +298,9 @@ private:
     mem::StateBufferId logits{};
   };
   [[nodiscard]] StateLayout DeclareState() const;
+  /// Measures whether the decode weight prefetch pays on this device and
+  /// keeps it only then.
+  void CalibrateDecodePrefetch();
   struct Impl;
   std::unique_ptr<Impl> impl_;
   Inkling2Weights weights_;

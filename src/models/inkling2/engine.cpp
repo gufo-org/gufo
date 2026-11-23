@@ -5,12 +5,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <gufo/ext/experimental/state_memory.hpp>
+#include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -151,21 +153,18 @@ struct Engine::Impl {
   // Decode steps: a visit's q and output-projection weights are read on a
   // side stream while the latency-bound mixes and attention run (the DRAM is
   // mostly idle then), so their GEMVs find them in the last-level cache.
-  // Twenty blocks: more take CUs from the main chain. Not on Windows: there
-  // the side stream's cross-queue waits in the replayed graph cost more than
-  // the prefetch saves (decode 39.4 -> 46.0 tok/s at C = 1 without it).
+  // Twenty blocks: more take CUs from the main chain. Only where
+  // Engine::Create measured it to pay: on Windows/TheRock 10.0 the side
+  // stream's cross-queue waits in the replayed graph cost more than the
+  // prefetch saves (decode 39.4 tok/s with it, 46.0 without at C = 1).
   static constexpr int kPrefetchBlocks = 20;
-#if defined(_WIN32)
-  static constexpr bool kDecodePrefetch = false;
-#else
-  static constexpr bool kDecodePrefetch = true;
-#endif
+  bool decode_prefetch = false;
   hipStream_t dps = nullptr;
   hipEvent_t ev_pf = nullptr, ev_pfj = nullptr;
   bool pf_open = false;
   void Prefetch(const void* p, std::size_t bytes, const void* p2 = nullptr,
                 std::size_t bytes2 = 0) {
-    if (!kDecodePrefetch || bytes + bytes2 == 0)
+    if (!decode_prefetch || bytes + bytes2 == 0)
       return;
     Check(hipEventRecord(ev_pf, ds), "prefetch fork");
     Check(hipStreamWaitEvent(dps, ev_pf, 0), "prefetch fork");
@@ -445,6 +444,18 @@ struct Engine::Impl {
     auto* p = static_cast<int*>(AllocDevice(n * 4, "scratch"));
     scratch_allocs.push_back(p);
     return p;
+  }
+
+  /// Destroys every captured decode and verification graph; later steps
+  /// capture them again.
+  void DropGraphs() {
+    for (auto& g : graphs)
+      (void)hipGraphExecDestroy(g.second);
+    graphs.clear();
+    for (auto& g : vgraphs)
+      (void)hipGraphExecDestroy(g.second);
+    vgraphs.clear();
+    failed_graphs.clear();
   }
 
   ~Impl() {
@@ -1708,7 +1719,7 @@ struct Engine::Impl {
                            48 * sizeof(fs::SlotEntry), hipMemcpyDeviceToDevice,
                            ds),
             "slot table");
-    const int key = ctx * 8 + n;
+    const int key = ctx * 8 + n + (decode_prefetch ? (1 << 29) : 0);
     auto it = graphs.find(key);
     if (it == graphs.end() && failed_graphs.count(key) == 0)
       it = CaptureGraph(ctx, key);
@@ -1806,7 +1817,8 @@ struct Engine::Impl {
       }
     } off{&verify_mode, &verify_one_session};
     // Several sessions take the per-row attention kernel: their own graphs.
-    const int key = ctx * 8 + n + (ng > 1 ? (1 << 28) : 0);
+    const int key = ctx * 8 + n + (ng > 1 ? (1 << 28) : 0) +
+                    (decode_prefetch ? (1 << 29) : 0);
     const int fkey = -key;  // failed verification captures
     auto it = vgraphs.find(key);
     if (it == vgraphs.end() && failed_graphs.count(fkey) == 0) {
@@ -2096,12 +2108,46 @@ std::unique_ptr<Engine> Engine::Create(
     e->impl_->s = nullptr;
     e->impl_->dw.Upload(*e->reader_, e->weights_, &e->weight_bytes_);
     e->impl_->Init(e.get());
+    e->CalibrateDecodePrefetch();
     return e;
   } catch (const std::exception& ex) {
     if (error)
       *error = ex.what();
     return nullptr;
   }
+}
+
+void Engine::CalibrateDecodePrefetch() {
+  Impl& I = *impl_;
+  // Replayed one-session decode steps of a scratch session, as in serving:
+  // the prefetch's cost is its cross-stream waits inside the graph. Alternate
+  // the layouts and keep each one's fastest step; the first round captures
+  // the graphs and is not timed. The layouts' logits are identical (the
+  // prefetch only warms the cache), so the choice changes only speed.
+  auto session = NewSession();
+  double best[2] = {std::numeric_limits<double>::infinity(),
+                    std::numeric_limits<double>::infinity()};
+  std::int32_t token = 0;
+  for (int round = 0; round < 6; ++round) {
+    for (int layout = 0; layout < 2; ++layout) {
+      I.decode_prefetch = layout == 1;
+      std::int32_t argmax = 0;
+      const auto start = std::chrono::steady_clock::now();
+      Step(*session, token, &argmax);
+      const std::chrono::duration<double> elapsed =
+          std::chrono::steady_clock::now() - start;
+      token = argmax;
+      if (round > 0)
+        best[layout] = std::min(best[layout], elapsed.count());
+    }
+  }
+  // A tie keeps the plain layout.
+  I.decode_prefetch = best[1] < best[0];
+  I.DropGraphs();
+  std::fprintf(stderr,
+               "inkling2: decode weight prefetch %s (step %.2f ms with it, "
+               "%.2f ms without)\n",
+               I.decode_prefetch ? "on" : "off", best[1] * 1e3, best[0] * 1e3);
 }
 
 Engine::StateLayout Engine::DeclareState() const {
@@ -2435,13 +2481,7 @@ bool Engine::AttachDrafter(const std::string& path, std::string* error) {
           I.NewBuf(static_cast<std::size_t>(ubatch_) * Drafter::kFeatureFloats);
   }
   // the decode graphs gain the feature copies: capture them again
-  for (auto& g : I.graphs)
-    (void)hipGraphExecDestroy(g.second);
-  I.graphs.clear();
-  for (auto& g : I.vgraphs)
-    (void)hipGraphExecDestroy(g.second);
-  I.vgraphs.clear();
-  I.failed_graphs.clear();
+  I.DropGraphs();
   I.dsp = std::move(d);
   weight_bytes_ += I.dsp->weight_bytes();
   return true;
