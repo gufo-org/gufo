@@ -1,10 +1,10 @@
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
 
-#include "src/models/qwen_image_21/hip/bf16.hpp"
-#include "src/models/qwen_image_21/hip/runtime.hpp"
+#include "src/families/qwen/eager/attention.hpp"
+#include "src/families/qwen/eager/bf16.hpp"
 
-namespace gufo::models::qwen_image_21::hip {
+namespace gufo::qwen::eager {
 namespace {
 
 using Fragment = __attribute__((ext_vector_type(16))) short;
@@ -55,9 +55,9 @@ __device__ T Pick(int row, int end0, int end1, T a, T b, T c) {
 template<bool Value>
 __device__ const std::uint16_t* SegmentRow(const HeadSegments& h, int row) {
   const std::uint16_t* base =
-      Value ? Pick(row, h.end[0], h.end[1], h.values[0], h.values[1],
-                   h.values[2])
-            : Pick(row, h.end[0], h.end[1], h.keys[0], h.keys[1], h.keys[2]);
+      Value
+          ? Pick(row, h.end[0], h.end[1], h.values[0], h.values[1], h.values[2])
+          : Pick(row, h.end[0], h.end[1], h.keys[0], h.keys[1], h.keys[2]);
   const std::ptrdiff_t shift =
       Pick(row, h.end[0], h.end[1], h.shift[0], h.shift[1], h.shift[2]);
   return base + (shift + row) * 128;
@@ -80,25 +80,25 @@ __device__ const std::uint16_t* BlockRows(const HeadSegments& h, int row) {
 // a time. Split value staging into two halves to bound LDS usage.
 // Segmented reads keys and values from `segments` (cached condition rows
 // and the new rows) instead of one contiguous head-major copy.
-template<bool Masked, bool Segmented>
-__device__ __forceinline__ void
-FusedAttentionBody(const std::uint16_t* queries, const std::uint16_t* keys,
-                   const std::uint16_t* values, hip_bfloat16* output,
-                   int heads, int rows, int count, int query_start,
-                   int query_count, const int* limits,
-                   const KeySegments& segments) {
+template<bool Masked, bool Segmented, int Group>
+__device__ __forceinline__ void FusedAttentionBody(
+    const std::uint16_t* queries, const std::uint16_t* keys,
+    const std::uint16_t* values, hip_bfloat16* output, int heads, int rows,
+    int count, int query_start, int query_count, const int* limits,
+    const KeySegments& segments) {
   __shared__ float p[32][129], v[16][129], stats[128][3];
   __shared__ int last_key;
   const int tid = threadIdx.x, lane = tid % 32, wave = tid / 32;
   const int col = blockIdx.x * 128, head = blockIdx.y;
+  const int kv_head = head / Group;
   const int query_end = query_start + query_count;
   queries += static_cast<std::size_t>(head) * rows * 128;
   [[maybe_unused]] HeadSegments segs{};
   if constexpr (Segmented) {
-    segs = ForHead(segments, head);
+    segs = ForHead(segments, kv_head);
   } else {
-    keys += static_cast<std::size_t>(head) * count * 128;
-    values += static_cast<std::size_t>(head) * count * 128;
+    keys += static_cast<std::size_t>(kv_head) * count * 128;
+    values += static_cast<std::size_t>(kv_head) * count * 128;
   }
   // Segmented: stage value rows [first, first + 32) (first is uniform).
   const auto stage = [&](int first, int z) -> unsigned short {
@@ -289,59 +289,76 @@ FusedAttentionBody(const std::uint16_t* queries, const std::uint16_t* keys,
     }
 }
 
-template<bool Masked>
+template<bool Masked, int Group>
 __global__ void FusedAttention(const std::uint16_t* queries,
                                const std::uint16_t* keys,
                                const std::uint16_t* values,
                                hip_bfloat16* output, int heads, int rows,
                                int count, int query_start, int query_count,
                                const int* limits) {
-  FusedAttentionBody<Masked, false>(queries, keys, values, output, heads, rows,
-                                    count, query_start, query_count, limits,
-                                    {});
+  FusedAttentionBody<Masked, false, Group>(queries, keys, values, output, heads,
+                                           rows, count, query_start,
+                                           query_count, limits, {});
 }
 
 // The segment selection needs a few more registers; without the bound the
 // masked variant spills under the default 1024-thread budget.
-template<bool Masked>
+template<bool Masked, int Group>
 __global__ __launch_bounds__(256) void FusedAttentionSegmented(
     const std::uint16_t* queries, KeySegments segments, hip_bfloat16* output,
     int heads, int rows, int query_start, int query_count, const int* limits) {
-  FusedAttentionBody<Masked, true>(queries, nullptr, nullptr, output, heads,
-                                   rows, segments.end[2], query_start,
-                                   query_count, limits, segments);
+  FusedAttentionBody<Masked, true, Group>(
+      queries, nullptr, nullptr, output, heads, rows, segments.end[2],
+      query_start, query_count, limits, segments);
 }
 }  // namespace
 
 void FusedAttention128(const std::uint16_t* queries, const std::uint16_t* keys,
                        const std::uint16_t* values, std::uint16_t* output,
                        int heads, int rows, int count, int query_start,
-                       hipStream_t stream, int query_count, const int* limits) {
+                       hipStream_t stream, int query_count, const int* limits,
+                       int kv_group) {
   const dim3 grid((query_count + 127) / 128, heads);
-  if (limits)
-    FusedAttention<true><<<grid, 256, 0, stream>>>(
-        queries, keys, values, reinterpret_cast<hip_bfloat16*>(output), heads,
-        rows, count, query_start, query_count, limits);
-  else
-    FusedAttention<false><<<grid, 256, 0, stream>>>(
-        queries, keys, values, reinterpret_cast<hip_bfloat16*>(output), heads,
-        rows, count, query_start, query_count, nullptr);
+  auto* out = reinterpret_cast<hip_bfloat16*>(output);
+  const auto launch = [&]<bool Masked, int Group>() {
+    FusedAttention<Masked, Group>
+        <<<grid, 256, 0, stream>>>(queries, keys, values, out, heads, rows,
+                                   count, query_start, query_count, limits);
+  };
+  if (kv_group == 2) {
+    if (limits)
+      launch.template operator()<true, 2>();
+    else
+      launch.template operator()<false, 2>();
+  } else if (limits) {
+    launch.template operator()<true, 1>();
+  } else {
+    launch.template operator()<false, 1>();
+  }
 }
 
 void FusedAttention128Segmented(const std::uint16_t* queries,
                                 const KeySegments& segments,
                                 std::uint16_t* output, int heads, int rows,
                                 int query_start, int query_count,
-                                hipStream_t stream, const int* limits) {
+                                hipStream_t stream, const int* limits,
+                                int kv_group) {
   const dim3 grid((query_count + 127) / 128, heads);
-  if (limits)
-    FusedAttentionSegmented<true><<<grid, 256, 0, stream>>>(
-        queries, segments, reinterpret_cast<hip_bfloat16*>(output), heads,
-        rows, query_start, query_count, limits);
-  else
-    FusedAttentionSegmented<false><<<grid, 256, 0, stream>>>(
-        queries, segments, reinterpret_cast<hip_bfloat16*>(output), heads,
-        rows, query_start, query_count, nullptr);
+  auto* out = reinterpret_cast<hip_bfloat16*>(output);
+  const auto launch = [&]<bool Masked, int Group>() {
+    FusedAttentionSegmented<Masked, Group><<<grid, 256, 0, stream>>>(
+        queries, segments, out, heads, rows, query_start, query_count, limits);
+  };
+  if (kv_group == 2) {
+    if (limits)
+      launch.template operator()<true, 2>();
+    else
+      launch.template operator()<false, 2>();
+  } else if (limits) {
+    launch.template operator()<true, 1>();
+  } else {
+    launch.template operator()<false, 1>();
+  }
 }
 
-}  // namespace gufo::models::qwen_image_21::hip
+}  // namespace gufo::qwen::eager

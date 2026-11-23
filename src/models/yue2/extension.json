@@ -1,0 +1,156 @@
+{
+  "schema": 1,
+  "name": "yue2",
+  "version": "0.1.0",
+  "api_version": ">= 0.3.0",
+  "entry": "yue2_register",
+  "registration_target": "gufo_yue2",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "yue2",
+      "capability": "music_generation",
+      "keys": [
+        "safetensors:yue2",
+        "safetensors:YuE2ForCausalLM"
+      ],
+      "model_ids": [
+        "yue2-3b"
+      ],
+      "target": "gufo_yue2_hip",
+      "entry": "yue2_provider_register"
+    }
+  ],
+  "options": [
+    {
+      "name": "--vae-model",
+      "type": "path",
+      "commands": [
+        "serve music",
+        "music"
+      ],
+      "providers": [
+        "yue2"
+      ],
+      "help": "YuE2 audio decoder directory (default: YuE2-Vae beside the model)"
+    }
+  ],
+  "models": [
+    {
+      "id": "yue2-3b",
+      "provider": "yue2",
+      "license": "cc-by-nc-4.0",
+      "description": "YuE2 3B with the listening decoder, safetensors",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "entry": ".",
+          "source": {
+            "hf": "m-a-p/YuE2-3B",
+            "revision": "8f24312f187763b9854adeec87e437e2b03bbff1"
+          },
+          "exclude": [
+            "assets/*",
+            "*.whl"
+          ]
+        },
+        {
+          "role": "vae",
+          "option": "--vae-model",
+          "install": "required",
+          "entry": ".",
+          "source": {
+            "hf": "m-a-p/YuE2-Vae",
+            "revision": "152733a19ad43aa67e367f9b5503ef8075bb5126"
+          },
+          "exclude": [
+            "assets/*"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "yue2-3b-legacy",
+      "provider": "yue2",
+      "license": "cc-by-nc-4.0",
+      "description": "YuE2 3B with the decoder of the published WildSongBench scores",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "entry": ".",
+          "source": {
+            "hf": "m-a-p/YuE2-3B",
+            "revision": "8f24312f187763b9854adeec87e437e2b03bbff1"
+          },
+          "exclude": [
+            "assets/*",
+            "*.whl"
+          ]
+        },
+        {
+          "role": "vae",
+          "option": "--vae-model",
+          "install": "required",
+          "entry": ".",
+          "source": {
+            "hf": "m-a-p/YuE2-Vae-legacy",
+            "revision": "d0585a9cdbb36e8b6930046974500ad7078317ca"
+          },
+          "exclude": [
+            "assets/*"
+          ]
+        }
+      ]
+    }
+  ],
+  "targets": {
+    "gufo_yue2": {
+      "requires": []
+    },
+    "gufo_yue2_hip": {
+      "requires": [
+        "hip"
+      ]
+    }
+  },
+  "production_paths": {
+    "include": [
+      "**/*.cpp",
+      "**/*.h",
+      "**/*.hpp",
+      "**/*.hip",
+      "extension.*"
+    ],
+    "exclude": [
+      "tests/",
+      "functional/",
+      "tools/",
+      "fixtures/"
+    ]
+  },
+  "docs": {
+    "title": "YuE2 3B",
+    "inputs": "BF16 safetensors and an FP32 Oobleck decoder; style and lyrics to a 48 kHz stereo song with an ABC score",
+    "guide": "docs/models/yue2.md"
+  },
+  "tests": [
+    {
+      "target": "yue2_cpu_test",
+      "ctest": "yue2_cpu_test",
+      "check_pr": true,
+      "windows_build": true
+    }
+  ],
+  "test_labels": [
+    "yue2"
+  ],
+  "fixtures": "src/models/yue2/reference/"
+}

@@ -1,5 +1,5 @@
-#ifndef GUFO_MODELS_QWEN3_TTS_HIP_TALKER_OPS_HPP_
-#define GUFO_MODELS_QWEN3_TTS_HIP_TALKER_OPS_HPP_
+#ifndef GUFO_FAMILIES_QWEN_EAGER_OPS_HPP_
+#define GUFO_FAMILIES_QWEN_EAGER_OPS_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -7,7 +7,16 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
 
-namespace gufo::models::qwen3_tts::hip {
+namespace gufo::qwen::eager {
+
+/// How an RMSNorm applies its reciprocal root mean square. HF Qwen3 multiplies
+/// in FP32 (`kFloat`); modules written as
+/// `x * rsqrt(mean(x.float() ** 2) + eps).to(x.dtype) * weight` round the
+/// factor to BF16 first (`kBfloat16`).
+enum class RmsScale : std::uint8_t {
+  kFloat,
+  kBfloat16,
+};
 
 /// Causal attention with the eager checkpoint's BF16 QK, scaling, probability,
 /// and output boundaries; the softmax reduction itself remains FP32.
@@ -56,12 +65,66 @@ void LaunchBfloat16RoPEAndRoundV(float* query, float* key, float* value,
 /// Optionally adds `update` into `hidden`, then applies the checkpoint RMSNorm:
 /// round normalization to BF16 before multiplying its weight. A null update
 /// performs normalization alone, using the same reduction and rounding.
-void LaunchBfloat16ResidualAddRMSNorm(float* hidden, const float* update,
-                                      const float* weight,
-                                      void* output_bfloat16,
-                                      std::size_t batch_size,
-                                      std::size_t dimension, float epsilon,
-                                      hipStream_t stream);
+void LaunchBfloat16ResidualAddRMSNorm(
+    float* hidden, const float* update, const float* weight,
+    void* output_bfloat16, std::size_t batch_size, std::size_t dimension,
+    float epsilon, hipStream_t stream, RmsScale scale = RmsScale::kFloat);
+
+/// As `LaunchBfloat16ResidualAddRMSNorm` with a BF16 update (a projection that
+/// wrote its BF16 boundary directly); the results are identical.
+void LaunchBfloat16ResidualAddRMSNormFromBfloat16(
+    float* hidden, const void* update_bfloat16, const float* weight,
+    void* output_bfloat16, std::size_t batch_size, std::size_t dimension,
+    float epsilon, hipStream_t stream, RmsScale scale = RmsScale::kFloat);
+
+/// Fills `table` with the BF16 RoPE cosine and sine of every dimension pair
+/// (`[positions][head_dim / 2][2]` floats), as the fused norm kernels round
+/// them.
+void LaunchBfloat16RotaryTable(float* table, std::size_t positions,
+                               std::uint32_t head_dim, float rope_theta,
+                               hipStream_t stream);
+
+/// Per-head q/k RMSNorm, RoPE at `start_position + row` and V rounding, as
+/// `LaunchBfloat16QkNormRoPE`, writing BF16 head-major results instead of
+/// updating the inputs: query row r of head h goes to
+/// `query_out[(h * query_stride + query_row + r) * head_dim]`, key/value rows
+/// to `[(h * cache_stride + cache_row + r) * head_dim]`. Inputs are row-major
+/// `[rows][heads * head_dim]` FP32. `head_dim` must be 128. `rotary` is a
+/// `LaunchBfloat16RotaryTable` table covering every position.
+void LaunchBfloat16QkNormRoPEHeadMajor(
+    const float* query, const float* key, const float* value,
+    const float* query_weight, const float* key_weight, std::size_t rows,
+    std::uint32_t num_heads, std::uint32_t num_key_value_heads,
+    std::uint32_t head_dim, std::uint32_t start_position, const float* rotary,
+    float epsilon, RmsScale scale, void* query_out, std::size_t query_stride,
+    std::size_t query_row, void* key_out, void* value_out,
+    std::size_t cache_stride, std::size_t cache_row, hipStream_t stream);
+
+/// As `LaunchBfloat16QkNormRoPEHeadMajor` with BF16 query, key and value rows.
+void LaunchBfloat16QkNormRoPEHeadMajorFromBfloat16(
+    const void* query, const void* key, const void* value,
+    const float* query_weight, const float* key_weight, std::size_t rows,
+    std::uint32_t num_heads, std::uint32_t num_key_value_heads,
+    std::uint32_t head_dim, std::uint32_t start_position, const float* rotary,
+    float epsilon, RmsScale scale, void* query_out, std::size_t query_stride,
+    std::size_t query_row, void* key_out, void* value_out,
+    std::size_t cache_stride, std::size_t cache_row, hipStream_t stream);
+
+/// Scratch floats `LaunchBfloat16DecodeAttention` needs for `capacity` keys.
+[[nodiscard]] std::size_t DecodeAttentionScratch(std::size_t capacity,
+                                                 std::size_t heads);
+
+/// One query row against a BF16 head-major cache (`[kv_heads][stride][128]`,
+/// first `keys` rows visible). Splits the keys across workgroups and merges
+/// the partial softmax, so long contexts fill the GPU. Scores and the softmax
+/// stay FP32; probabilities are rounded to BF16 before the value product, as
+/// PyTorch's fused BF16 attention does. `query` is BF16 `[heads][128]`;
+/// `output` is BF16 `[heads * 128]`.
+void LaunchBfloat16DecodeAttention(const void* query, const void* key_cache,
+                                   const void* value_cache, std::size_t stride,
+                                   std::size_t keys, std::size_t heads,
+                                   std::size_t kv_heads, float* scratch,
+                                   void* output, hipStream_t stream);
 
 void LaunchRoundBfloat16InPlace(float* values, std::size_t count,
                                 hipStream_t stream);
@@ -76,6 +139,12 @@ void LaunchBfloat16ResidualAdd(const float* residual, const float* update,
 void LaunchBfloat16SwiGlu(const float* gate, const float* up, float* output,
                           void* output_bfloat16, std::size_t count,
                           hipStream_t stream);
+
+/// As `LaunchBfloat16SwiGlu` with BF16 gate and up, writing BF16 only.
+void LaunchBfloat16SwiGluFromBfloat16(const void* gate_bfloat16,
+                                      const void* up_bfloat16,
+                                      void* output_bfloat16, std::size_t count,
+                                      hipStream_t stream);
 
 void LaunchBfloat16BiasSilu(const float* input, const void* bias_bfloat16,
                             float* output, void* output_bfloat16,
@@ -147,7 +216,7 @@ constexpr std::size_t kBfloat16GemvMaxGroups = 3;
                                              std::size_t columns,
                                              hipStream_t stream);
 
-}  // namespace gufo::models::qwen3_tts::hip
+}  // namespace gufo::qwen::eager
 #endif
 
-#endif  // GUFO_MODELS_QWEN3_TTS_HIP_TALKER_OPS_HPP_
+#endif  // GUFO_FAMILIES_QWEN_EAGER_OPS_HPP_

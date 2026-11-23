@@ -44,6 +44,7 @@ gufo_extension_target(
   LINK_LIBRARIES
     gufo_qwen3_tts
     gufo_qwen_kernels
+    gufo_qwen_eager
     hip::host
     roc::hipblas
     roc::rocblas
@@ -54,7 +55,6 @@ if(TARGET gufo_qwen3_tts_hip)
     SOURCES
       hip/encoder_ops.hip
       hip/speech_decoder_ops.hip
-      hip/talker_ops.hip
   )
   target_compile_definitions(gufo_qwen3_tts_hip PUBLIC ENGINE_ENABLE_HIP=1)
   # The NPU runtimes' CPU operators: AVX2 + FMA, as src/core/npu/host_ops.

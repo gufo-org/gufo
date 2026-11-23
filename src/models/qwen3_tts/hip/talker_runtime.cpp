@@ -30,12 +30,15 @@
 #include <utility>
 #include <vector>
 
+#include "src/families/qwen/eager/ops.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
-#include "src/models/qwen3_tts/hip/talker_ops.hpp"
 #include "src/models/qwen3_tts/loader.hpp"
 
 namespace gufo::models::qwen3_tts::hip {
 namespace {
+
+// The talker is a Qwen3 decoder: its BF16 operators are the shared ones.
+using namespace ::gufo::qwen::eager;
 
 void SetError(std::string* error, std::string message) {
   if (error != nullptr) {

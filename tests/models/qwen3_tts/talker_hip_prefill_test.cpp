@@ -17,13 +17,14 @@
 #include <string_view>
 #include <vector>
 
-#include "src/models/qwen3_tts/hip/talker_ops.hpp"
+#include "src/families/qwen/eager/ops.hpp"
 #include "src/models/qwen3_tts/hip/talker_runtime.hpp"
 #include "src/models/qwen3_tts/tokenizer.hpp"
 
 namespace {
 
 namespace qwen3_tts_hip = gufo::models::qwen3_tts::hip;
+namespace eager_ops = gufo::qwen::eager;
 namespace qwen3_tts = gufo::models::qwen3_tts;
 
 constexpr std::string_view kText =
@@ -98,7 +99,7 @@ void CheckBfloat16Operators() {
   for (const bool residual : {false, true}) {
     DeviceArray<float> values(input);
     DeviceArray<std::uint16_t> output{std::vector<std::uint16_t>(width)};
-    qwen3_tts_hip::LaunchBfloat16ResidualAddRMSNorm(
+    eager_ops::LaunchBfloat16ResidualAddRMSNorm(
         values.data, residual ? device_update.data : nullptr,
         device_weight.data, output.data, 1, width, 1e-6F, nullptr);
     auto expected = input;
@@ -119,7 +120,7 @@ void CheckBfloat16Operators() {
       continue;
     }
     DeviceArray<float> query(input), key(input), value(input);
-    Check(qwen3_tts_hip::LaunchBfloat16QkNormRoPE(
+    Check(eager_ops::LaunchBfloat16QkNormRoPE(
               query.data, key.data, value.data, device_weight.data,
               device_weight.data, 1, 1, 1, width, 7, 10000, 1e-6F, nullptr,
               nullptr, 0, 0, nullptr),
@@ -149,9 +150,9 @@ void CheckBfloat16Operators() {
   DeviceArray<std::uint32_t> device_codes(codes);
   const std::array<float, 1> text{1.0F / 256};
   DeviceArray<float> device_text(text), result(text);
-  qwen3_tts_hip::LaunchBatchedCodecEmbeddingSum(tables.data, device_codes.data,
-                                                device_text.data, result.data,
-                                                1, 2, 1, nullptr);
+  eager_ops::LaunchBatchedCodecEmbeddingSum(tables.data, device_codes.data,
+                                            device_text.data, result.data, 1, 2,
+                                            1, nullptr);
   Check(result.Read().front() == 1, "BF16 codec sum before text addition");
 
   // Cover both dot-product dispatches and causal/cache offsets. Future rows
@@ -174,9 +175,9 @@ void CheckBfloat16Operators() {
   DeviceArray<float> kc{std::vector<float>(keys.size())};
   DeviceArray<float> vc{std::vector<float>(values.size())};
   DeviceArray<std::uint16_t> output{std::vector<std::uint16_t>(queries.size())};
-  qwen3_tts_hip::LaunchBfloat16Attention(
-      q.data, k.data, v.data, kc.data, vc.data, output.data, 0, 0, tokens,
-      tokens, heads, 1, width, nullptr, false);
+  eager_ops::LaunchBfloat16Attention(q.data, k.data, v.data, kc.data, vc.data,
+                                     output.data, 0, 0, tokens, tokens, heads,
+                                     1, width, nullptr, false);
   const auto actual = output.Read();
   for (std::size_t p = 0; p < tokens; ++p) {
     for (std::size_t h = 0; h < heads; ++h) {
@@ -208,7 +209,7 @@ void CheckBfloat16Operators() {
     }
   }
   DeviceArray<std::uint16_t> last{std::vector<std::uint16_t>(heads * width)};
-  qwen3_tts_hip::LaunchBfloat16Attention(
+  eager_ops::LaunchBfloat16Attention(
       q.data + (tokens - 1) * heads * width, k.data + (tokens - 1) * width,
       v.data + (tokens - 1) * width, kc.data, vc.data, last.data, 0, tokens - 1,
       1, tokens, heads, 1, width, nullptr, true);
@@ -216,7 +217,7 @@ void CheckBfloat16Operators() {
   Check(std::equal(cached.begin(), cached.end(), actual.end() - cached.size()),
         "BF16 cached attention agrees with causal prefill");
   for (const std::size_t position : {0, 1, 15, 31}) {
-    qwen3_tts_hip::LaunchBfloat16Attention(
+    eager_ops::LaunchBfloat16Attention(
         q.data + position * heads * width, k.data + position * width,
         v.data + position * width, kc.data, vc.data, last.data, 0, position, 1,
         tokens, heads, 1, width, nullptr, true);

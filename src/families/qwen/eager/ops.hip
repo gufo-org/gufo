@@ -10,9 +10,9 @@
 #include <limits>
 #include <stdexcept>
 
-#include "src/models/qwen3_tts/hip/talker_ops.hpp"
+#include "src/families/qwen/eager/ops.hpp"
 
-namespace gufo::models::qwen3_tts::hip {
+namespace gufo::qwen::eager {
 namespace {
 
 // Preserve the descending shared-memory sum tree. Once only the first wave
@@ -35,15 +35,33 @@ __device__ __forceinline__ void FinishNormSum(float* sums) {
 }
 
 __device__ __forceinline__ float2 RotateBfloat16(float first, float second,
-                                                 float angle) {
-  const float cosine = static_cast<float>(hip_bfloat16(cosf(angle)));
-  const float sine = static_cast<float>(hip_bfloat16(sinf(angle)));
+                                                 float cosine, float sine) {
   const float first_cos = static_cast<float>(hip_bfloat16(first * cosine));
   const float second_sin = static_cast<float>(hip_bfloat16(second * sine));
   const float second_cos = static_cast<float>(hip_bfloat16(second * cosine));
   const float first_sin = static_cast<float>(hip_bfloat16(first * sine));
   return make_float2(static_cast<float>(hip_bfloat16(first_cos - second_sin)),
                      static_cast<float>(hip_bfloat16(second_cos + first_sin)));
+}
+
+/// The BF16 cosine and sine of RoPE dimension `dimension` at `position`.
+__device__ __forceinline__ float2 RotaryAngle(std::uint32_t position,
+                                              std::uint32_t dimension,
+                                              std::uint32_t head_dim,
+                                              float rope_theta) {
+  const float frequency =
+      1.0F / powf(rope_theta, static_cast<float>(2 * dimension) /
+                                  static_cast<float>(head_dim));
+  const float angle = static_cast<float>(position) * frequency;
+  return make_float2(static_cast<float>(hip_bfloat16(cosf(angle))),
+                     static_cast<float>(hip_bfloat16(sinf(angle))));
+}
+
+__device__ __forceinline__ float2 RotateBfloat16(float first, float second,
+                                                 float angle) {
+  return RotateBfloat16(first, second,
+                        static_cast<float>(hip_bfloat16(cosf(angle))),
+                        static_cast<float>(hip_bfloat16(sinf(angle))));
 }
 
 __global__ void Bfloat16CacheWriteKernel(
@@ -243,6 +261,7 @@ __launch_bounds__(256, 4) __global__ void Bfloat16RoPEAndRoundVKernel(
 /// Normalizes one attention head and rotates it without a round trip through
 /// memory between the two steps. Reproduces the standalone per-head RMSNorm and
 /// RoPE kernels exactly, including every intermediate BF16 rounding.
+template<bool kRoundScale = false>
 __device__ void NormalizeAndRotateHead(float* head_values, const float* weight,
                                        std::uint32_t head_dim, float epsilon,
                                        std::uint32_t position, float rope_theta,
@@ -257,7 +276,9 @@ __device__ void NormalizeAndRotateHead(float* head_values, const float* weight,
   __syncthreads();
   FinishNormSum(shared_sum);
   const float mean_squared = shared_sum[0] / static_cast<float>(head_dim);
-  const float inverse_rms = rsqrtf(mean_squared + epsilon);
+  float inverse_rms = rsqrtf(mean_squared + epsilon);
+  if constexpr (kRoundScale)
+    inverse_rms = static_cast<float>(hip_bfloat16(inverse_rms));
   for (std::uint32_t index = thread; index < head_dim; index += blockDim.x) {
     const float value = static_cast<float>(hip_bfloat16(head_values[index]));
     const float scale = weight != nullptr ? weight[index] : 1.0F;
@@ -269,17 +290,26 @@ __device__ void NormalizeAndRotateHead(float* head_values, const float* weight,
   const std::uint32_t half_rotary = head_dim / 2;
   for (std::uint32_t dimension = thread; dimension < half_rotary;
        dimension += blockDim.x) {
-    const float frequency =
-        1.0F / powf(rope_theta, static_cast<float>(2 * dimension) /
-                                    static_cast<float>(head_dim));
-    const float angle = static_cast<float>(position) * frequency;
     const float first = normalized[dimension];
     const float second = normalized[dimension + half_rotary];
-    const float2 rotated = RotateBfloat16(first, second, angle);
+    const float2 angle = RotaryAngle(position, dimension, head_dim, rope_theta);
+    const float2 rotated = RotateBfloat16(first, second, angle.x, angle.y);
     head_values[dimension] = rotated.x;
     head_values[dimension + half_rotary] = rotated.y;
   }
   __syncthreads();
+}
+
+__global__ void Bfloat16RotaryTableKernel(float2* table, std::size_t count,
+                                          std::uint32_t head_dim,
+                                          float rope_theta) {
+  const std::size_t index =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::uint32_t half = head_dim / 2;
+  if (index < count)
+    table[index] = RotaryAngle(static_cast<std::uint32_t>(index / half),
+                               static_cast<std::uint32_t>(index % half),
+                               head_dim, rope_theta);
 }
 
 template<std::uint32_t ThreadsPerBlock>
@@ -335,10 +365,20 @@ __launch_bounds__(ThreadsPerBlock) __global__ void Bfloat16QkNormRoPEKernel(
   }
 }
 
+/// A projection output at its BF16 boundary: FP32 results are rounded, BF16
+/// GEMM outputs already sit there.
+__device__ __forceinline__ float RoundedInput(float value) {
+  return static_cast<float>(hip_bfloat16(value));
+}
+__device__ __forceinline__ float RoundedInput(hip_bfloat16 value) {
+  return static_cast<float>(value);
+}
+
 /// Fuses residual addition and RMSNorm while retaining the upstream BF16
 /// boundaries at the addition, normalized value and weighted output.
+template<bool kRoundScale, typename Input = float>
 __launch_bounds__(256) __global__ void Bfloat16ResidualAddRMSNormKernel(
-    float* __restrict__ hidden, const float* __restrict__ update,
+    float* __restrict__ hidden, const Input* __restrict__ update,
     const float* __restrict__ weight, hip_bfloat16* __restrict__ output,
     std::size_t batch_size, std::size_t dimension, float epsilon) {
   const std::size_t batch = blockIdx.x;
@@ -347,18 +387,17 @@ __launch_bounds__(256) __global__ void Bfloat16ResidualAddRMSNormKernel(
   }
   const std::size_t thread = threadIdx.x;
   float* row = hidden + (batch * dimension);
-  const float* update_row =
+  const Input* update_row =
       update == nullptr ? nullptr : update + (batch * dimension);
   hip_bfloat16* output_row = output + (batch * dimension);
 
   float sum_squared = 0.0F;
   for (std::size_t index = thread; index < dimension; index += blockDim.x) {
     const float left = static_cast<float>(hip_bfloat16(row[index]));
-    const float sum =
-        update_row == nullptr
-            ? left
-            : static_cast<float>(hip_bfloat16(
-                  left + static_cast<float>(hip_bfloat16(update_row[index]))));
+    const float sum = update_row == nullptr
+                          ? left
+                          : static_cast<float>(hip_bfloat16(
+                                left + RoundedInput(update_row[index])));
     row[index] = sum;
     sum_squared += sum * sum;
   }
@@ -368,12 +407,69 @@ __launch_bounds__(256) __global__ void Bfloat16ResidualAddRMSNormKernel(
   __syncthreads();
   FinishNormSum(shared_sum);
   const float mean_squared = shared_sum[0] / static_cast<float>(dimension);
-  const float inverse_rms = rsqrtf(mean_squared + epsilon);
+  float inverse_rms = rsqrtf(mean_squared + epsilon);
+  if constexpr (kRoundScale)
+    inverse_rms = static_cast<float>(hip_bfloat16(inverse_rms));
   for (std::size_t index = thread; index < dimension; index += blockDim.x) {
     const float scale = weight != nullptr ? weight[index] : 1.0F;
     const float unit =
         static_cast<float>(hip_bfloat16(row[index] * inverse_rms));
     output_row[index] = hip_bfloat16(unit * scale);
+  }
+}
+
+/// `Bfloat16ResidualAddRMSNormKernel` for rows of exactly `kPer * 256`
+/// values: the row and its weights stay in registers between the two passes,
+/// and the weights load before the reduction instead of after it. Each thread
+/// covers the same indices in the same order, so results are identical.
+template<bool kRoundScale, typename Input, unsigned int kPer>
+__launch_bounds__(256) __global__
+    void Bfloat16ResidualAddRMSNormRowKernel(float* __restrict__ hidden,
+                                             const Input* __restrict__ update,
+                                             const float* __restrict__ weight,
+                                             hip_bfloat16* __restrict__ output,
+                                             float epsilon) {
+  constexpr unsigned int kDimension = kPer * 256;
+  const std::size_t batch = blockIdx.x;
+  const unsigned int thread = threadIdx.x;
+  float* row = hidden + (batch * kDimension);
+  const Input* update_row =
+      update == nullptr ? nullptr : update + (batch * kDimension);
+  hip_bfloat16* output_row = output + (batch * kDimension);
+
+  float values[kPer];
+  float scales[kPer];
+  float sum_squared = 0.0F;
+#pragma unroll
+  for (unsigned int i = 0; i < kPer; ++i) {
+    const unsigned int index = thread + i * 256;
+    scales[i] = weight != nullptr ? weight[index] : 1.0F;
+    const float left = static_cast<float>(hip_bfloat16(row[index]));
+    const float sum = update_row == nullptr
+                          ? left
+                          : static_cast<float>(hip_bfloat16(
+                                left + RoundedInput(update_row[index])));
+    values[i] = sum;
+  }
+#pragma unroll
+  for (unsigned int i = 0; i < kPer; ++i) {
+    row[thread + i * 256] = values[i];
+    sum_squared += values[i] * values[i];
+  }
+
+  __shared__ float shared_sum[256];
+  shared_sum[thread] = sum_squared;
+  __syncthreads();
+  FinishNormSum(shared_sum);
+  const float mean_squared = shared_sum[0] / static_cast<float>(kDimension);
+  float inverse_rms = rsqrtf(mean_squared + epsilon);
+  if constexpr (kRoundScale)
+    inverse_rms = static_cast<float>(hip_bfloat16(inverse_rms));
+#pragma unroll
+  for (unsigned int i = 0; i < kPer; ++i) {
+    const float unit =
+        static_cast<float>(hip_bfloat16(values[i] * inverse_rms));
+    output_row[thread + i * 256] = hip_bfloat16(unit * scales[i]);
   }
 }
 
@@ -403,14 +499,15 @@ __global__ void Bfloat16ResidualAddKernel(const float* residual,
   }
 }
 
-__global__ void Bfloat16SwiGluKernel(const float* gate, const float* up,
+template<typename Input>
+__global__ void Bfloat16SwiGluKernel(const Input* gate, const Input* up,
                                      float* output,
                                      hip_bfloat16* output_bfloat16,
                                      std::size_t count) {
   const std::size_t index = (blockIdx.x * blockDim.x) + threadIdx.x;
   if (index < count) {
-    const float gate_bfloat16 = static_cast<float>(hip_bfloat16(gate[index]));
-    const float up_bfloat16 = static_cast<float>(hip_bfloat16(up[index]));
+    const float gate_bfloat16 = RoundedInput(gate[index]);
+    const float up_bfloat16 = RoundedInput(up[index]);
     const float activated = static_cast<float>(
         hip_bfloat16(gate_bfloat16 / (1.0F + expf(-gate_bfloat16))));
     const hip_bfloat16 result(activated * up_bfloat16);
@@ -632,6 +729,272 @@ __launch_bounds__(kGemvWaves* kGemvWavefront) __global__
   }
 }
 
+/// Per-head q/k RMSNorm and RoPE plus V rounding for 128-wide heads, with
+/// the boundaries of `NormalizeAndRotateHead`: one wave per (row, head) item
+/// and no barriers. Lane l holds channels l, l + 32, l + 64 and l + 96 and
+/// sums their squares in `FinishNormSum`'s 128-thread order, so the results
+/// equal the block-wide form. Items [0, num_heads) of a row are query
+/// heads, the next `num_key_value_heads` are key/value heads.
+template<bool kRoundScale, typename Input>
+__launch_bounds__(256) __global__ void Bfloat16QkNormRoPEHeadMajorKernel(
+    const Input* __restrict__ query, const Input* __restrict__ key,
+    const Input* __restrict__ value, const float* __restrict__ query_weight,
+    const float* __restrict__ key_weight, std::uint32_t rows,
+    std::uint32_t num_heads, std::uint32_t num_key_value_heads,
+    std::uint32_t start_position, const float2* __restrict__ rotary,
+    float epsilon, hip_bfloat16* __restrict__ query_out,
+    std::size_t query_stride, std::size_t query_row,
+    hip_bfloat16* __restrict__ key_out, hip_bfloat16* __restrict__ value_out,
+    std::size_t cache_stride, std::size_t cache_row) {
+  const unsigned int lane = threadIdx.x % 32;
+  const std::uint32_t items = num_heads + num_key_value_heads;
+  const std::size_t item =
+      static_cast<std::size_t>(blockIdx.x) * 8 + threadIdx.x / 32;
+  if (item >= static_cast<std::size_t>(rows) * items)
+    return;
+  const auto row = static_cast<std::uint32_t>(item / items);
+  const auto slot = static_cast<std::uint32_t>(item % items);
+  const bool is_query = slot < num_heads;
+  const std::uint32_t head = is_query ? slot : slot - num_heads;
+  const std::uint32_t heads = is_query ? num_heads : num_key_value_heads;
+  const std::size_t source =
+      (static_cast<std::size_t>(row) * heads + head) * 128;
+  const Input* input = (is_query ? query : key) + source;
+  const float* weight = is_query ? query_weight : key_weight;
+  hip_bfloat16* destination =
+      is_query ? query_out + (head * query_stride + query_row + row) * 128
+               : key_out + (head * cache_stride + cache_row + row) * 128;
+  float x[4];
+#pragma unroll
+  for (unsigned int i = 0; i < 4; ++i)
+    x[i] = static_cast<float>(
+        hip_bfloat16(static_cast<float>(input[lane + 32 * i])));
+  // FinishNormSum over 128 threads: s[t] + s[t + 64], then + s[t + 32]'s
+  // pair, then the 32-lane shuffle tree. The explicit roundings keep the
+  // squares out of fused multiply-adds, as the LDS round trip does.
+  float sum =
+      __fadd_rn(__fadd_rn(__fmul_rn(x[0], x[0]), __fmul_rn(x[2], x[2])),
+                __fadd_rn(__fmul_rn(x[1], x[1]), __fmul_rn(x[3], x[3])));
+  for (int offset = 16; offset != 0; offset /= 2)
+    sum += __shfl_down(sum, offset, 32);
+  sum = __shfl(sum, 0, 32);
+  float inverse_rms = rsqrtf(sum / 128.0F + epsilon);
+  if constexpr (kRoundScale)
+    inverse_rms = static_cast<float>(hip_bfloat16(inverse_rms));
+  float normalized[4];
+#pragma unroll
+  for (unsigned int i = 0; i < 4; ++i) {
+    const float scale = weight != nullptr ? weight[lane + 32 * i] : 1.0F;
+    const float unit = static_cast<float>(hip_bfloat16(x[i] * inverse_rms));
+    normalized[i] = static_cast<float>(hip_bfloat16(unit * scale));
+  }
+  const float2* angles =
+      rotary + static_cast<std::size_t>(start_position + row) * 64;
+#pragma unroll
+  for (unsigned int i = 0; i < 2; ++i) {
+    const unsigned int dimension = lane + 32 * i;
+    const float2 angle = angles[dimension];
+    const float2 rotated =
+        RotateBfloat16(normalized[i], normalized[i + 2], angle.x, angle.y);
+    destination[dimension] = hip_bfloat16(rotated.x);
+    destination[dimension + 64] = hip_bfloat16(rotated.y);
+  }
+  if (!is_query) {
+    hip_bfloat16* values =
+        value_out + (head * cache_stride + cache_row + row) * 128;
+#pragma unroll
+    for (unsigned int i = 0; i < 4; ++i)
+      values[lane + 32 * i] =
+          hip_bfloat16(RoundedInput(value[source + lane + 32 * i]));
+  }
+}
+
+constexpr unsigned int kDecodeKeys = 64;
+constexpr unsigned int kDecodeMaxGroup = 4;
+// Unnormalized output channels, then the split's maximum and sum.
+constexpr std::size_t kDecodePartial = 130;
+
+__device__ __forceinline__ float BfloatBits(unsigned short bits) {
+  return __uint_as_float(static_cast<unsigned int>(bits) << 16U);
+}
+
+__device__ __forceinline__ void AccumulatePacked(float* accumulator,
+                                                 float weight, uint4 packed) {
+  const unsigned int words[4] = {packed.x, packed.y, packed.z, packed.w};
+#pragma unroll
+  for (unsigned int w = 0; w < 4; ++w) {
+    accumulator[2 * w] =
+        fmaf(weight, __uint_as_float(words[w] << 16U), accumulator[2 * w]);
+    accumulator[2 * w + 1] =
+        fmaf(weight, __uint_as_float(words[w] & 0xFFFF0000U),
+             accumulator[2 * w + 1]);
+  }
+}
+
+/// One workgroup scores `kDecodeKeys` keys of one KV head for every query
+/// head sharing it and writes the unnormalized partial output with its
+/// maximum and sum, which `Bfloat16DecodeMergeKernel` combines. Four lanes
+/// share each key row and sixteen key rows feed the value product at once,
+/// so every load is a coalesced 16-byte vector.
+template<unsigned int kGroup>
+__launch_bounds__(256) __global__ void Bfloat16DecodeAttentionKernel(
+    const unsigned short* __restrict__ query,
+    const unsigned short* __restrict__ key_cache,
+    const unsigned short* __restrict__ value_cache, std::size_t stride,
+    std::uint32_t keys, std::uint32_t kv_heads, float* __restrict__ partial) {
+  const std::uint32_t kv_head = blockIdx.x;
+  const std::uint32_t split = blockIdx.y;
+  const std::uint32_t first = split * kDecodeKeys;
+  const std::uint32_t count = min(kDecodeKeys, keys - first);
+  const std::uint32_t heads = kv_heads * kGroup;
+  __shared__ float q[kGroup][128];
+  __shared__ float scores[kGroup][kDecodeKeys];
+  __shared__ float stats[kGroup][2];
+  __shared__ float reduced[16][kGroup][128];
+  for (unsigned int i = threadIdx.x; i < kGroup * 128; i += blockDim.x)
+    q[i / 128][i % 128] =
+        BfloatBits(query[(kv_head * kGroup + i / 128) * 128 + i % 128]);
+  __syncthreads();
+  const unsigned short* keys_base =
+      key_cache + (static_cast<std::size_t>(kv_head) * stride + first) * 128;
+  const unsigned short* values_base =
+      value_cache + (static_cast<std::size_t>(kv_head) * stride + first) * 128;
+  {
+    const unsigned int key = threadIdx.x / 4, part = threadIdx.x % 4;
+    float dot[kGroup] = {};
+    if (key < count) {
+      const auto* row = reinterpret_cast<const uint4*>(
+          keys_base + static_cast<std::size_t>(key) * 128 + part * 32);
+#pragma unroll
+      for (unsigned int chunk = 0; chunk < 4; ++chunk) {
+        const uint4 packed = row[chunk];
+        const unsigned int words[4] = {packed.x, packed.y, packed.z, packed.w};
+#pragma unroll
+        for (unsigned int w = 0; w < 4; ++w) {
+          const float low = __uint_as_float(words[w] << 16U);
+          const float high = __uint_as_float(words[w] & 0xFFFF0000U);
+          const unsigned int d = part * 32 + chunk * 8 + w * 2;
+#pragma unroll
+          for (unsigned int g = 0; g < kGroup; ++g)
+            dot[g] = fmaf(high, q[g][d + 1], fmaf(low, q[g][d], dot[g]));
+        }
+      }
+    }
+#pragma unroll
+    for (unsigned int g = 0; g < kGroup; ++g) {
+      dot[g] += __shfl_xor(dot[g], 1, 32);
+      dot[g] += __shfl_xor(dot[g], 2, 32);
+      if (part == 0 && key < count)
+        scores[g][key] = dot[g] * rsqrtf(128.0F);
+    }
+  }
+  __syncthreads();
+  // Wave g reduces query g's maximum and sum.
+  const unsigned int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
+  if (wave < kGroup) {
+    float maximum = -INFINITY;
+    for (unsigned int k = lane; k < count; k += 32)
+      maximum = fmaxf(maximum, scores[wave][k]);
+    for (int offset = 16; offset != 0; offset /= 2)
+      maximum = fmaxf(maximum, __shfl_xor(maximum, offset, 32));
+    float sum = 0.0F;
+    for (unsigned int k = lane; k < count; k += 32) {
+      const float e = expf(scores[wave][k] - maximum);
+      sum += e;
+      scores[wave][k] = static_cast<float>(hip_bfloat16(e));
+    }
+    for (int offset = 16; offset != 0; offset /= 2)
+      sum += __shfl_xor(sum, offset, 32);
+    if (lane == 0) {
+      stats[wave][0] = maximum;
+      stats[wave][1] = sum;
+    }
+  }
+  __syncthreads();
+  // Sixteen key rows at a time; each thread owns eight channels of one row.
+  const unsigned int row = threadIdx.x / 16, channel = (threadIdx.x % 16) * 8;
+  float accumulator[kGroup][8] = {};
+  for (unsigned int k = row; k < count; k += 16) {
+    const uint4 packed = *reinterpret_cast<const uint4*>(
+        values_base + static_cast<std::size_t>(k) * 128 + channel);
+#pragma unroll
+    for (unsigned int g = 0; g < kGroup; ++g)
+      AccumulatePacked(accumulator[g], scores[g][k], packed);
+  }
+#pragma unroll
+  for (unsigned int g = 0; g < kGroup; ++g)
+#pragma unroll
+    for (unsigned int i = 0; i < 8; ++i)
+      reduced[row][g][channel + i] = accumulator[g][i];
+  __syncthreads();
+  for (unsigned int i = threadIdx.x; i < kGroup * 128; i += blockDim.x) {
+    const unsigned int g = i / 128, d = i % 128;
+    float total = 0.0F;
+#pragma unroll
+    for (unsigned int r = 0; r < 16; ++r)
+      total += reduced[r][g][d];
+    const std::uint32_t head = kv_head * kGroup + g;
+    float* out = partial + (static_cast<std::size_t>(split) * heads + head) *
+                               kDecodePartial;
+    out[d] = total;
+    if (d == 0) {
+      out[128] = stats[g][0];
+      out[129] = stats[g][1];
+    }
+  }
+}
+
+constexpr unsigned int kDecodeMergeParts = 4;
+
+/// Combines the splits of one query head: four groups of 128 threads each
+/// fold every fourth split, then the groups combine through LDS.
+__launch_bounds__(128 * kDecodeMergeParts) __global__
+    void Bfloat16DecodeMergeKernel(const float* __restrict__ partial,
+                                   std::uint32_t splits, std::uint32_t heads,
+                                   hip_bfloat16* __restrict__ output) {
+  const std::uint32_t head = blockIdx.x;
+  const unsigned int d = threadIdx.x % 128, part = threadIdx.x / 128;
+  __shared__ float maxima[kDecodeMergeParts];
+  __shared__ float numerators[kDecodeMergeParts][128];
+  __shared__ float denominators[kDecodeMergeParts];
+  const auto at = [&](std::uint32_t s) {
+    return partial +
+           (static_cast<std::size_t>(s) * heads + head) * kDecodePartial;
+  };
+  float maximum = -INFINITY;
+  for (std::uint32_t s = part; s < splits; s += kDecodeMergeParts)
+    maximum = fmaxf(maximum, at(s)[128]);
+  if (d == 0)
+    maxima[part] = maximum;
+  __syncthreads();
+  maximum = maxima[0];
+#pragma unroll
+  for (unsigned int p = 1; p < kDecodeMergeParts; ++p)
+    maximum = fmaxf(maximum, maxima[p]);
+  float numerator = 0.0F;
+  float denominator = 0.0F;
+  for (std::uint32_t s = part; s < splits; s += kDecodeMergeParts) {
+    const float* p = at(s);
+    const float weight = expf(p[128] - maximum);
+    numerator = fmaf(weight, p[d], numerator);
+    denominator = fmaf(weight, p[129], denominator);
+  }
+  numerators[part][d] = numerator;
+  if (d == 0)
+    denominators[part] = denominator;
+  __syncthreads();
+  if (part != 0)
+    return;
+  numerator = numerators[0][d];
+  denominator = denominators[0];
+#pragma unroll
+  for (unsigned int p = 1; p < kDecodeMergeParts; ++p) {
+    numerator += numerators[p][d];
+    denominator += denominators[p];
+  }
+  output[head * 128 + d] = hip_bfloat16(numerator / denominator);
+}
+
 dim3 Grid(std::size_t count) {
   constexpr unsigned int block_size = 256;
   return dim3(static_cast<unsigned int>((count + block_size - 1) / block_size));
@@ -650,7 +1013,7 @@ void LaunchBfloat16Attention(const float* query, const float* key,
   if (tokens == 0 || position > capacity || tokens > capacity - position ||
       kv_heads == 0 || heads == 0 || heads % kv_heads != 0 || head_dim == 0 ||
       head_dim > 256 || head_dim % 4 != 0)
-    throw std::invalid_argument("unsupported Qwen3-TTS attention shape");
+    throw std::invalid_argument("unsupported eager attention shape");
   if (!cache_written)
     Bfloat16CacheWriteKernel<<<dim3(tokens, kv_heads), 256, 0, stream>>>(
         key, value, key_cache, value_cache, layer, position, capacity, kv_heads,
@@ -739,14 +1102,54 @@ void LaunchBfloat16ResidualAddRMSNorm(float* hidden, const float* update,
                                       void* output_bfloat16,
                                       std::size_t batch_size,
                                       std::size_t dimension, float epsilon,
-                                      hipStream_t stream) {
+                                      hipStream_t stream, RmsScale scale) {
   if (batch_size == 0 || dimension == 0) {
     return;
   }
-  Bfloat16ResidualAddRMSNormKernel<<<static_cast<unsigned int>(batch_size), 256,
-                                     0, stream>>>(
-      hidden, update, weight, static_cast<hip_bfloat16*>(output_bfloat16),
-      batch_size, dimension, epsilon);
+  const auto launch = [&]<bool kRoundScale>() {
+    if (dimension == 2048) {
+      Bfloat16ResidualAddRMSNormRowKernel<kRoundScale, float, 8>
+          <<<static_cast<unsigned int>(batch_size), 256, 0, stream>>>(
+              hidden, update, weight,
+              static_cast<hip_bfloat16*>(output_bfloat16), epsilon);
+      return;
+    }
+    Bfloat16ResidualAddRMSNormKernel<kRoundScale>
+        <<<static_cast<unsigned int>(batch_size), 256, 0, stream>>>(
+            hidden, update, weight, static_cast<hip_bfloat16*>(output_bfloat16),
+            batch_size, dimension, epsilon);
+  };
+  if (scale == RmsScale::kBfloat16)
+    launch.template operator()<true>();
+  else
+    launch.template operator()<false>();
+}
+
+void LaunchBfloat16ResidualAddRMSNormFromBfloat16(
+    float* hidden, const void* update_bfloat16, const float* weight,
+    void* output_bfloat16, std::size_t batch_size, std::size_t dimension,
+    float epsilon, hipStream_t stream, RmsScale scale) {
+  if (batch_size == 0 || dimension == 0) {
+    return;
+  }
+  const auto launch = [&]<bool kRoundScale>() {
+    if (dimension == 2048) {
+      Bfloat16ResidualAddRMSNormRowKernel<kRoundScale, hip_bfloat16, 8>
+          <<<static_cast<unsigned int>(batch_size), 256, 0, stream>>>(
+              hidden, static_cast<const hip_bfloat16*>(update_bfloat16), weight,
+              static_cast<hip_bfloat16*>(output_bfloat16), epsilon);
+      return;
+    }
+    Bfloat16ResidualAddRMSNormKernel<kRoundScale, hip_bfloat16>
+        <<<static_cast<unsigned int>(batch_size), 256, 0, stream>>>(
+            hidden, static_cast<const hip_bfloat16*>(update_bfloat16), weight,
+            static_cast<hip_bfloat16*>(output_bfloat16), batch_size, dimension,
+            epsilon);
+  };
+  if (scale == RmsScale::kBfloat16)
+    launch.template operator()<true>();
+  else
+    launch.template operator()<false>();
 }
 
 void LaunchRoundBfloat16InPlace(float* values, std::size_t count,
@@ -784,6 +1187,19 @@ void LaunchBfloat16SwiGlu(const float* gate, const float* up, float* output,
   }
   Bfloat16SwiGluKernel<<<Grid(count), 256, 0, stream>>>(
       gate, up, output, static_cast<hip_bfloat16*>(output_bfloat16), count);
+}
+
+void LaunchBfloat16SwiGluFromBfloat16(const void* gate_bfloat16,
+                                      const void* up_bfloat16,
+                                      void* output_bfloat16, std::size_t count,
+                                      hipStream_t stream) {
+  if (count == 0) {
+    return;
+  }
+  Bfloat16SwiGluKernel<<<Grid(count), 256, 0, stream>>>(
+      static_cast<const hip_bfloat16*>(gate_bfloat16),
+      static_cast<const hip_bfloat16*>(up_bfloat16), nullptr,
+      static_cast<hip_bfloat16*>(output_bfloat16), count);
 }
 
 void LaunchBfloat16BiasSilu(const float* input, const void* bias_bfloat16,
@@ -972,6 +1388,124 @@ bool LaunchBfloat16GemvGrouped(const Bfloat16GemvGroup* groups,
                     : dispatch_groups.template operator()<uint2>();
 }
 
-}  // namespace gufo::models::qwen3_tts::hip
+template<typename Input>
+void QkNormRoPEHeadMajor(
+    const Input* query, const Input* key, const Input* value,
+    const float* query_weight, const float* key_weight, std::size_t rows,
+    std::uint32_t num_heads, std::uint32_t num_key_value_heads,
+    std::uint32_t head_dim, std::uint32_t start_position, const float* rotary,
+    float epsilon, RmsScale scale, void* query_out, std::size_t query_stride,
+    std::size_t query_row, void* key_out, void* value_out,
+    std::size_t cache_stride, std::size_t cache_row, hipStream_t stream) {
+  if (rows == 0)
+    return;
+  if (head_dim != 128 || num_heads == 0 || num_key_value_heads == 0 ||
+      rows > std::numeric_limits<std::uint32_t>::max())
+    throw std::invalid_argument("unsupported eager head-major norm shape");
+  const std::size_t items = rows * (num_heads + num_key_value_heads);
+  const auto launch = [&]<bool kRoundScale>() {
+    Bfloat16QkNormRoPEHeadMajorKernel<kRoundScale, Input>
+        <<<static_cast<unsigned int>((items + 7) / 8), 256, 0, stream>>>(
+            query, key, value, query_weight, key_weight,
+            static_cast<std::uint32_t>(rows), num_heads, num_key_value_heads,
+            start_position, reinterpret_cast<const float2*>(rotary), epsilon,
+            static_cast<hip_bfloat16*>(query_out), query_stride, query_row,
+            static_cast<hip_bfloat16*>(key_out),
+            static_cast<hip_bfloat16*>(value_out), cache_stride, cache_row);
+  };
+  if (scale == RmsScale::kBfloat16)
+    launch.template operator()<true>();
+  else
+    launch.template operator()<false>();
+}
+
+void LaunchBfloat16QkNormRoPEHeadMajor(
+    const float* query, const float* key, const float* value,
+    const float* query_weight, const float* key_weight, std::size_t rows,
+    std::uint32_t num_heads, std::uint32_t num_key_value_heads,
+    std::uint32_t head_dim, std::uint32_t start_position, const float* rotary,
+    float epsilon, RmsScale scale, void* query_out, std::size_t query_stride,
+    std::size_t query_row, void* key_out, void* value_out,
+    std::size_t cache_stride, std::size_t cache_row, hipStream_t stream) {
+  QkNormRoPEHeadMajor(query, key, value, query_weight, key_weight, rows,
+                      num_heads, num_key_value_heads, head_dim, start_position,
+                      rotary, epsilon, scale, query_out, query_stride,
+                      query_row, key_out, value_out, cache_stride, cache_row,
+                      stream);
+}
+
+void LaunchBfloat16QkNormRoPEHeadMajorFromBfloat16(
+    const void* query, const void* key, const void* value,
+    const float* query_weight, const float* key_weight, std::size_t rows,
+    std::uint32_t num_heads, std::uint32_t num_key_value_heads,
+    std::uint32_t head_dim, std::uint32_t start_position, const float* rotary,
+    float epsilon, RmsScale scale, void* query_out, std::size_t query_stride,
+    std::size_t query_row, void* key_out, void* value_out,
+    std::size_t cache_stride, std::size_t cache_row, hipStream_t stream) {
+  QkNormRoPEHeadMajor(static_cast<const hip_bfloat16*>(query),
+                      static_cast<const hip_bfloat16*>(key),
+                      static_cast<const hip_bfloat16*>(value), query_weight,
+                      key_weight, rows, num_heads, num_key_value_heads,
+                      head_dim, start_position, rotary, epsilon, scale,
+                      query_out, query_stride, query_row, key_out, value_out,
+                      cache_stride, cache_row, stream);
+}
+
+std::size_t DecodeAttentionScratch(std::size_t capacity, std::size_t heads) {
+  const std::size_t splits = (capacity + kDecodeKeys - 1) / kDecodeKeys;
+  return splits * heads * kDecodePartial;
+}
+
+void LaunchBfloat16DecodeAttention(const void* query, const void* key_cache,
+                                   const void* value_cache, std::size_t stride,
+                                   std::size_t keys, std::size_t heads,
+                                   std::size_t kv_heads, float* scratch,
+                                   void* output, hipStream_t stream) {
+  if (keys == 0 || keys > stride || kv_heads == 0 || heads % kv_heads != 0 ||
+      heads / kv_heads > kDecodeMaxGroup ||
+      keys > std::numeric_limits<std::uint32_t>::max())
+    throw std::invalid_argument("unsupported eager decode attention shape");
+  const auto splits =
+      static_cast<unsigned int>((keys + kDecodeKeys - 1) / kDecodeKeys);
+  const dim3 grid(static_cast<unsigned int>(kv_heads), splits);
+  const auto* q = static_cast<const unsigned short*>(query);
+  const auto* k = static_cast<const unsigned short*>(key_cache);
+  const auto* v = static_cast<const unsigned short*>(value_cache);
+  const auto launch = [&]<unsigned int kGroup>() {
+    Bfloat16DecodeAttentionKernel<kGroup><<<grid, 256, 0, stream>>>(
+        q, k, v, stride, static_cast<std::uint32_t>(keys),
+        static_cast<std::uint32_t>(kv_heads), scratch);
+  };
+  switch (heads / kv_heads) {
+    case 1:
+      launch.template operator()<1>();
+      break;
+    case 2:
+      launch.template operator()<2>();
+      break;
+    case 3:
+      launch.template operator()<3>();
+      break;
+    default:
+      launch.template operator()<4>();
+      break;
+  }
+  Bfloat16DecodeMergeKernel<<<static_cast<unsigned int>(heads),
+                              128 * kDecodeMergeParts, 0, stream>>>(
+      scratch, splits, static_cast<std::uint32_t>(heads),
+      static_cast<hip_bfloat16*>(output));
+}
+
+void LaunchBfloat16RotaryTable(float* table, std::size_t positions,
+                               std::uint32_t head_dim, float rope_theta,
+                               hipStream_t stream) {
+  const std::size_t count = positions * (head_dim / 2);
+  if (count == 0)
+    return;
+  Bfloat16RotaryTableKernel<<<Grid(count), 256, 0, stream>>>(
+      reinterpret_cast<float2*>(table), count, head_dim, rope_theta);
+}
+
+}  // namespace gufo::qwen::eager
 
 #endif  // defined(ENGINE_ENABLE_HIP)

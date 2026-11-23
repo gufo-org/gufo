@@ -11,7 +11,8 @@
 #include <string>
 #include <vector>
 
-#include "src/models/qwen_image_21/hip/blas.hpp"
+#include "src/families/qwen/eager/attention.hpp"
+#include "src/families/qwen/eager/blas.hpp"
 #include "src/models/qwen_image_21/lora.hpp"
 #include "src/models/qwen_image_21/model.hpp"
 #include "src/models/qwen_image_21/weights.hpp"
@@ -45,25 +46,11 @@ bool ExpandConvolution3(const std::uint16_t* input, std::uint16_t* output,
 void ReorderHeads(const std::uint16_t* input, std::uint16_t* output, int rows,
                   int heads, int kv_heads, int dim, bool inverse,
                   hipStream_t stream);
-/// Up to three head-major key/value buffers read as one key sequence:
-/// segment i holds rows [end[i-1], end[i]) at a per-head stride of stride[i]
-/// rows. Unused trailing segments repeat the previous end.
-struct KeySegments {
-  const std::uint16_t* keys[3]{};
-  const std::uint16_t* values[3]{};
-  int end[3]{};
-  int stride[3]{};
-};
-void FusedAttention128Segmented(const std::uint16_t* queries,
-                                const KeySegments& segments,
-                                std::uint16_t* output, int heads, int rows,
-                                int query_start, int query_count,
-                                hipStream_t stream, const int* limits);
-void FusedAttention128(const std::uint16_t* queries, const std::uint16_t* keys,
-                       const std::uint16_t* values, std::uint16_t* output,
-                       int heads, int rows, int count, int query_start,
-                       hipStream_t stream, int query_count = 128,
-                       const int* limits = nullptr);
+// Fused attention is shared with the other Qwen models.
+using qwen::eager::FusedAttention128;
+using qwen::eager::FusedAttention128Segmented;
+using qwen::eager::Gemm;
+using qwen::eager::KeySegments;
 // weight[rows x cols] += scale * up[rows x rank] * down[rank x cols]; FP32,
 // row-major.
 void LoraLowRank(hipblasHandle_t blas, float* weight, const float* up,

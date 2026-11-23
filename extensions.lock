@@ -8,6 +8,7 @@
     "qwen3_asr",
     "qwen3_tts",
     "qwen38_flash_next",
-    "qwen_image_21"
+    "qwen_image_21",
+    "yue2"
   ]
 }

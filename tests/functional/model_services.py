@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run bounded embedding/ASR/TTS/image HTTP checks against an owned production server.
+"""Run bounded embedding/ASR/TTS/image/music HTTP checks against an owned production server.
 
 No downloads. Each invocation creates a fresh evidence directory and retains
 request bodies, model identity, configuration, timings and server logs.
@@ -29,7 +29,7 @@ NPU_REFERENCE_COSINE = 0.998
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('service', choices=('embedding', 'asr', 'tts', 'image'))
+    parser.add_argument('service', choices=('embedding', 'asr', 'tts', 'image', 'music'))
     parser.add_argument('--embedding-suite', choices=('smoke', 'full'), default='smoke')
     parser.add_argument('--image-suite', choices=('smoke', 'full'), default='full')
     parser.add_argument('--binary', type=Path, required=True)
@@ -44,12 +44,18 @@ def main():
                         help='Image: register an adapter (repeat for two)')
     parser.add_argument('--lora-default', metavar='NAME:SCALE',
                         help='Image: --lora-default for requests that omit adapters')
+    parser.add_argument('--vae-model', type=Path,
+                        help='Music: decoder directory when it is not the sibling YuE2-Vae')
     parser.add_argument('--startup-timeout', type=float, default=300)
     parser.add_argument('--npu', action='store_true',
                         help='Serve on the XDNA NPU (--npu); embeddings use the NPU cosine gate')
     args = parser.parse_args()
     if args.service == 'tts' and not (args.asr_binary and args.asr_model):
         parser.error('TTS requires --asr-binary and --asr-model for intelligibility checks')
+    if args.vae_model and args.service != 'music':
+        parser.error('--vae-model applies to music only')
+    if args.vae_model and not (args.vae_model / 'config.json').is_file():
+        parser.error('--vae-model must hold config.json; missing weights are not a pass')
     if args.startup_timeout <= 0:
         parser.error('--startup-timeout must be positive')
     args.binary, args.model, args.audio_root = (path.resolve() for path in
@@ -82,6 +88,10 @@ def main():
         command += ['--lora', f'{name}={Path(path).resolve()}']
     if args.lora_default:
         command += ['--lora-default', args.lora_default]
+    if args.service == 'music':
+        command += ['--root', str(output / 'jobs')]
+        if args.vae_model:
+            command += ['--vae-model', str(args.vae_model.resolve())]
     if args.service == 'tts' and args.variant == 'base':
         command += ['--voice', f'{voice}={args.audio_root / "clear-english-voice.wav"}',
                     '--voice-text', f'{voice}={args.audio_root / "clear-english-voice.txt"}']
@@ -106,7 +116,7 @@ def main():
               'timing_qualification': 'observations only; no matched baseline comparison',
               'service_harness_sha256': {name: sha256(HERE / name) for name in
                   ('model_services.py', 'service_http.py', 'asr_service.py', 'tts_service.py',
-                   'image_service.py',
+                   'image_service.py', 'music_service.py',
                    'embeddings.py', 'embedding_images.py', 'embedding_audio.py', 'embedding_video.py')}}
     evidence = Evidence(output, report)
     evidence.save()
@@ -150,6 +160,9 @@ def main():
                         assert f'event=generated mode={mode} ' in log, mode
                     assert all(' references=1 ' in line for line in log.splitlines()
                                if 'event=generated mode=edit ' in line), 'edits use one reference'
+            elif args.service == 'music':
+                import music_service
+                music_service.run(evidence, url, public_model, output / 'server.log')
             elif args.service == 'asr':
                 import asr_service
                 asr_service.run(evidence, url, args.audio_root, public_model)

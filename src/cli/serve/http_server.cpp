@@ -37,6 +37,7 @@
 #include "src/cli/serve/embeddings_api.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/music_api.hpp"
 #include "src/cli/serve/openai_chat.hpp"
 #include "src/cli/serve/responses_logprobs.hpp"
 #include "src/cli/serve/sampling_request.hpp"
@@ -725,7 +726,8 @@ HttpResponse ListModels(TextGenerationBackend* backend,
                         const TtsService* tts, const AsrService* asr,
                         const ImageService* images,
                         const EmbeddingService* embeddings,
-                        const DecisionService* decisions) {
+                        const DecisionService* decisions,
+                        const MusicService* music) {
   json::Value resp = json::Value::object();
   resp["object"] = "list";
   json::Value data = json::Value::array();
@@ -777,6 +779,21 @@ HttpResponse ListModels(TextGenerationBackend* backend,
       model["owned_by"] = "operator-supplied-minimax";
       model["root"] = "minimax-h3";
       model["capability"] = "video";
+      data.push_back(std::move(model));
+    }
+  }
+  if (music != nullptr && music->ready()) {
+    for (const auto& id :
+         ServedIds(music->model_id(), music->model_aliases())) {
+      json::Value model = json::Value::object();
+      model["id"] = id;
+      model["object"] = "model";
+      model["created"] = Now();
+      model["owned_by"] = "operator-supplied";
+      model["capability"] = "music";
+      json::Value gufo = json::Value::object();
+      gufo["music"] = MusicCapabilitiesJson(music->capabilities());
+      model["gufo"] = std::move(gufo);
       data.push_back(std::move(model));
     }
   }
@@ -2035,7 +2052,8 @@ HttpServer::HttpServer(std::string host, int port,
                        HttpServerOptions options,
                        std::shared_ptr<ImageService> images,
                        std::shared_ptr<EmbeddingService> embeddings,
-                       std::shared_ptr<DecisionService> decisions)
+                       std::shared_ptr<DecisionService> decisions,
+                       std::shared_ptr<MusicService> music)
     : host_(std::move(host)),
       port_(port),
       backend_(std::move(backend)),
@@ -2045,6 +2063,7 @@ HttpServer::HttpServer(std::string host, int port,
       images_(std::move(images)),
       embeddings_(std::move(embeddings)),
       decisions_(std::move(decisions)),
+      music_(std::move(music)),
       options_(std::move(options)) {
   if (options_.max_request_body_bytes == 0 || options_.max_connections == 0) {
     throw std::invalid_argument("HTTP server limits must be positive");
@@ -2363,6 +2382,7 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                        (tts_ != nullptr && tts_->ready()) ||
                        (asr_ != nullptr && asr_->ready()) ||
                        (embeddings_ != nullptr && embeddings_->ready()) ||
+                       (music_ != nullptr && music_->ready()) ||
                        images_ != nullptr || decisions_ != nullptr;
     if (!ready) {
       return Err(503, "Service Unavailable", "model service is not ready",
@@ -2382,6 +2402,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
       body["model"] = decisions_->model_id;
     } else if (images_ != nullptr) {
       body["model"] = images_->model_id();
+    } else if (music_ != nullptr) {
+      body["model"] = music_->model_id();
     } else {
       body["model"] = "minimax-h3";
     }
@@ -2390,7 +2412,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   if (req.method == "GET" &&
       (req.path == "/v1/models" || req.path == "/models")) {
     return ListModels(backend_.get(), video_jobs_.get(), tts_.get(), asr_.get(),
-                      images_.get(), embeddings_.get(), decisions_.get());
+                      images_.get(), embeddings_.get(), decisions_.get(),
+                      music_.get());
   }
   if (req.path == "/v1/systemone") {
     if (req.method != "POST")
@@ -2445,6 +2468,12 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
       return Err(503, "Service Unavailable", "ASR is not configured",
                  "server_error", "asr_service_unavailable");
     return HandleAsrWebSocket(req, *asr_);
+  }
+  if (IsMusicApiPath(req.path)) {
+    if (music_ == nullptr || !music_->ready())
+      return Err(503, "Service Unavailable", "music service is not configured",
+                 "server_error", "music_service_unavailable");
+    return HandleMusicApiRequest(req, *music_);
   }
   if (IsVideoApiPath(req.path)) {
     if (video_jobs_ == nullptr || !video_jobs_->ready()) {

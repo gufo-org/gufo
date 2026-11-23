@@ -15,6 +15,7 @@
 #   config           CPU-only GGUF configuration extraction
 #   text             tokenizer + chat template
 #   kernels          shared HIP operators (ENGINE_ENABLE_HIP only)
+#   eager            BF16 eager-parity Qwen3 operators (ENGINE_ENABLE_HIP only)
 #   vision           vision encoder, image prompt, image cache
 add_subdirectory(control_tokens)
 add_subdirectory(draft_vocab)
@@ -23,5 +24,6 @@ add_subdirectory(config)
 add_subdirectory(text)
 if (ENGINE_ENABLE_HIP)
   add_subdirectory(kernels)
+  add_subdirectory(eager)
 endif()
 add_subdirectory(vision)

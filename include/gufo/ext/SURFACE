@@ -37,6 +37,7 @@ include/gufo/ext/json.hpp
 include/gufo/ext/ledger.hpp
 include/gufo/ext/mapped_prefetch.hpp
 include/gufo/ext/model_config.hpp
+include/gufo/ext/music.hpp
 include/gufo/ext/options.hpp
 include/gufo/ext/platform/fs.hpp
 include/gufo/ext/platform/library.hpp
@@ -141,6 +142,7 @@ src/ext/device_probe.hpp
 src/ext/embeddings.hpp
 src/ext/host_budget.hpp
 src/ext/image.hpp
+src/ext/music.hpp
 src/ext/text.hpp
 src/ext/text_contracts.hpp
 src/ext/tts.hpp
