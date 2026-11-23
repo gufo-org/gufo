@@ -559,33 +559,52 @@ __global__ void __launch_bounds__(256)
 // The leaf of one output tile: Q8_0 units l, l + lpr, ... of the lane's
 // weight row `wrow` against the A rows `av` (quantized vectors), scales in
 // `ssc` ([2][16][K / 16]); q8_unit's arithmetic per entry.
-template<int K>
-__device__ __forceinline__ F8 mma_leaf(int l, int lpr, const uint8_t* wrow,
+template<int K, int LPR>
+__device__ __forceinline__ F8 mma_leaf(int l, const uint8_t* wrow,
                                        const v4u* av, const float* ssc,
                                        int half, int res) {
-  constexpr int NU = K / 32, NG = K / 16;
+  constexpr int NU = K / 32, NG = K / 16, NI = (NU + LPR - 1) / LPR;
   F8 acc;
 #pragma unroll
   for (int i = 0; i < 8; ++i)
     acc.v[i] = 0.f;
-#pragma unroll 1
-  for (int u = l; u < NU; u += lpr) {
-    const v8i z = {0, 0, 0, 0, 0, 0, 0, 0};
-    const uint8_t* pu = wrow + (size_t)u * 34;
-    const v4u w0 = *(const v4u_a2*)(pu + 2);
-    const v4u w1 = *(const v4u_a2*)(pu + 18);
-    const float d = __half2float(*(const __half*)pu);
-#pragma unroll 1
-    for (int pl = 0; pl <= res; ++pl) {
-      const v4u a0 = av[pl * 2 * NU + u], a1 = av[pl * 2 * NU + NU + u];
-      const v8i c0 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
-          true, (v4i)a0, true, (v4i)w0, z, false);
-      const v8i c1 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
-          true, (v4i)a1, true, (v4i)w1, z, false);
+  // every unit's weights and inputs are loaded before the first product
+  v4u w0[NI], w1[NI], a[NI][2][2];
+  float d[NI];
 #pragma unroll
-      for (int i = 0; i < 8; ++i) {
-        const float* sc = ssc + (pl * 16 + 2 * i + half) * NG + 2 * u;
-        acc.v[i] += d * (sc[0] * (float)c0[i] + sc[1] * (float)c1[i]);
+  for (int k = 0; k < NI; ++k) {
+    const int u = l + k * LPR;
+    if (NU % LPR == 0 || u < NU) {
+      const uint8_t* pu = wrow + (size_t)u * 34;
+      w0[k] = *(const v4u_a2*)(pu + 2);
+      w1[k] = *(const v4u_a2*)(pu + 18);
+      d[k] = __half2float(*(const __half*)pu);
+#pragma unroll
+      for (int pl = 0; pl < 2; ++pl)
+        if (pl <= res) {
+          a[k][pl][0] = av[pl * 2 * NU + u];
+          a[k][pl][1] = av[pl * 2 * NU + NU + u];
+        }
+    }
+  }
+#pragma unroll
+  for (int k = 0; k < NI; ++k) {
+    const int u = l + k * LPR;
+    if (NU % LPR == 0 || u < NU) {
+      const v8i z = {0, 0, 0, 0, 0, 0, 0, 0};
+#pragma unroll
+      for (int pl = 0; pl < 2; ++pl) {
+        if (pl > res)
+          break;
+        const v8i c0 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+            true, (v4i)a[k][pl][0], true, (v4i)w0[k], z, false);
+        const v8i c1 = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+            true, (v4i)a[k][pl][1], true, (v4i)w1[k], z, false);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+          const float* sc = ssc + (pl * 16 + 2 * i + half) * NG + 2 * u;
+          acc.v[i] += d[k] * (sc[0] * (float)c0[i] + sc[1] * (float)c1[i]);
+        }
       }
     }
   }
@@ -604,7 +623,9 @@ __global__ void __launch_bounds__(NW * 32)
                int Mtot, int nb, float softcap) {
   constexpr int NU = K / 32, NG = K / 16, QV = 2 * 2 * NU;
   __shared__ float ssc[2][16][NG];
-  __shared__ float lv[LPR][8][32];
+  static_assert(LPR % NW == 0, "leaves per wave");
+  constexpr int NLW = LPR / NW;  // leaves of a wave: w, w + NW, ...
+  __shared__ float lv[NW][8][32];
   const int t0 = blockIdx.x * 16, brow = blockIdx.y * 16;
   int bin = P.in[0];
 #pragma unroll
@@ -639,16 +660,26 @@ __global__ void __launch_bounds__(NW * 32)
   const uint8_t* wrow = Wm + (size_t)lr * NU * 34;
   const int tokA = min(t0 + c16, nb - 1);
   const v4u* av = qa + (size_t)(tokA * per + bin) * QV;
-  for (int l = w; l < LPR; l += NW) {
-    const F8 a = mma_leaf<K>(l, LPR, wrow, av, &ssc[0][0][0], half, P.res);
+  F8 lf[NLW];
 #pragma unroll
-    for (int i = 0; i < 8; ++i)
-      lv[l][i][lane] = a.v[i];
-  }
-  __syncthreads();
+  for (int j = 0; j < NLW; ++j)
+    lf[j] = mma_leaf<K, LPR>(w + j * NW, wrow, av, &ssc[0][0][0], half, P.res);
   // the butterfly's steps for lane 0 (offsets LPR / 2 .. 1): leaf l += leaf
-  // l + off for l < off, every entry by the block's threads in turn
-  for (int off = LPR / 2; off >= 1; off >>= 1) {
+  // l + off for l < off. Offsets of NW and more pair leaves of one wave (in
+  // registers), the others go through LDS, every entry by the block's
+  // threads in turn.
+#pragma unroll
+  for (int off = LPR / 2; off >= NW; off >>= 1)
+#pragma unroll
+    for (int j = 0; j * NW < off; ++j)
+#pragma unroll
+      for (int i = 0; i < 8; ++i)
+        lf[j].v[i] += lf[j + off / NW].v[i];
+#pragma unroll
+  for (int i = 0; i < 8; ++i)
+    lv[w][i][lane] = lf[0].v[i];
+  __syncthreads();
+  for (int off = NW / 2; off >= 1; off >>= 1) {
     for (int idx = threadIdx.x; idx < off * 8 * 32; idx += NW * 32) {
       const int l = idx / 256, i = (idx / 32) % 8, ln = idx % 32;
       lv[l][i][ln] += lv[l + off][i][ln];
