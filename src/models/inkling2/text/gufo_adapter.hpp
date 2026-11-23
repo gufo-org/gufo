@@ -162,6 +162,11 @@ inline RenderOptions ToRenderOptions(const g::ChatRequest& request) {
   //    (empty_thought_for_assistants) to keep the generated frontier and the
   //    next turn's prompt the same tokens, the way Qwen's template re-renders
   //    an empty <think></think> for every assistant.
+  // Reasoning on: the prompt ends with the assistant header the model writes
+  // first anyway (log-probability ~0), so its first generated token is the
+  // thinking opener, where a reasoning budget starts counting (the host's
+  // budget waits for the opener as the first token).
+  o.generation_prefix = RenderOptions::Prefix::kHeader;
   if (ReasoningOff(request)) {
     const bool tools = !request.tools.empty() &&
                        request.tool_choice != g::ChatRequest::ToolChoice::kNone;

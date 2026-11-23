@@ -76,6 +76,9 @@ public:
   /// SelectNext). Set per request by SetPromptContext; not part of a
   /// checkpoint.
   bool reasoning_off{false};
+  /// A reasoning budget closed the thought: no second thinking block may open
+  /// (the model reopens one right after the forced close). Per request.
+  bool budget_closed{false};
   /// Reasoning off and a call is required: after a header the model writes one
   /// declared function name, then the invoke token (see SelectNext). Token ids
   /// of each declared name, as the template writes it, and the name tokens
@@ -511,6 +514,7 @@ public:
             ? std::static_pointer_cast<const Inkling2PromptContext>(context)
             : nullptr;
     st.reasoning_off = c != nullptr && c->reasoning_off;
+    st.budget_closed = false;
     st.call_required = c != nullptr && c->call_required;
     st.answer_only = c != nullptr && c->answer_only;
     st.answer_done = false;
@@ -672,8 +676,11 @@ public:
     // writes, which a grammar that can name the function only once could not
     // (see docs/dev/M4-reasoning.md). Everything else is the model's own
     // choice.
+    if (sampler.ForcedToken() && st.block == Block::kThinking)
+      st.budget_closed = true;
     std::vector<float> masked;
-    if (st.reasoning_off && st.block == Block::kAfterHeader) {
+    if ((st.reasoning_off || st.budget_closed) &&
+        st.block == Block::kAfterHeader) {
       masked.assign(raw.begin(), raw.end());
       if (t_thinking_ < masked.size())
         masked[t_thinking_] = -std::numeric_limits<float>::infinity();
@@ -785,7 +792,8 @@ public:
     RowMode m;
     const auto& cfg = working.config();
     m.greedy = cfg.can_use_unmodified_argmax() && !cfg.logprobs &&
-               !working.ForcedToken() && !st.reasoning_off && !st.call_required;
+               !working.ForcedToken() && !st.reasoning_off &&
+               !st.budget_closed && !st.call_required;
     m.coupled = !m.greedy && cfg.temperature > 0 && !cfg.constraint &&
                 !working.ForcedToken() && cfg.top_k == 0 && cfg.top_p == 1 &&
                 !(cfg.min_p > 0 && cfg.min_keep > 1);
@@ -845,8 +853,9 @@ public:
     // RNG state are those of the rows one after another.
     const bool parallel =
         !greedy && width > 0 && cfg.temperature >= 0.1F && !cfg.constraint &&
-        !working.ForcedToken() && !cfg.penalties_enabled() && cfg.top_k == 0 &&
-        cfg.top_p == 1 && cfg.min_p == 0 && !st.reasoning_off &&
+        !working.ForcedToken() && !cfg.reasoning_budget &&
+        !cfg.penalties_enabled() && cfg.top_k == 0 && cfg.top_p == 1 &&
+        cfg.min_p == 0 && !st.reasoning_off && !st.budget_closed &&
         !st.call_required &&
         pos + static_cast<std::size_t>(width) + 1 < max_context_;
     std::array<std::uint64_t, Engine::kMaxVerifyRows + 1> draws{};
@@ -889,7 +898,13 @@ public:
           used = j + 1;
         }
       } else if (greedy) {
-        const auto tk = static_cast<g::TextRunnerToken>(amax[j]);
+        // A token the sampler forces (a reasoning budget's close) replaces
+        // the row's argmax, as Sample would.
+        const auto forced = working.ForcedToken();
+        if (forced && st.block == Block::kThinking)
+          st.budget_closed = true;
+        const auto tk = forced ? static_cast<g::TextRunnerToken>(*forced)
+                               : static_cast<g::TextRunnerToken>(amax[j]);
         const bool stop = at >= max_context_ || st.answer_done ||
                           (st.stop_at_eos() && tok_->IsStop(tk));
         sel = {.stop = stop,
@@ -903,7 +918,7 @@ public:
         step.terminal_logprobs = std::move(sel.logprobs);
         break;
       }
-      if (j < width && budget > 0 &&
+      if (j < width && budget > 0 && !(greedy && st.budget_closed) &&
           sel.token == static_cast<g::TextRunnerToken>(drafts[j])) {
         working.Accept(sel.token);
         CommitToken(st, sel.token);
