@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "models": {
+    "inkling-2-mini": {
+      "weights": {
+        "source": {
+          "hf": "unsloth/Inkling-2-Mini-GGUF",
+          "revision": "45fd08764f2b0bf16b03a5483a80e5c7aaec8772"
+        },
+        "include": [
+          "Inkling-2-Mini-UD-Q4_K_XL.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+            "size": 17629759456,
+            "sha256": "e62d463c135ffe283df8d94b279a96ca145ac128b52ce854478613045bf4de15"
+          }
+        ]
+      },
+      "mmproj": {
+        "source": {
+          "hf": "unsloth/Inkling-2-Mini-GGUF",
+          "revision": "45fd08764f2b0bf16b03a5483a80e5c7aaec8772"
+        },
+        "include": [
+          "mmproj-BF16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "mmproj-BF16.gguf",
+            "size": 641805760,
+            "sha256": "2c165c78790e78a3f45a2d1e9e931083e52ee69d45ff2a0dc9c281fdf1a666e7"
+          }
+        ]
+      }
+    }
+  }
+}

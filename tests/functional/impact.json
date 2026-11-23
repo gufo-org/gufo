@@ -57,6 +57,11 @@
       "model": "deepseek4",
       "mode": "dspark",
       "vision": false
+    },
+    "inkling-2-mini/off": {
+      "model": "inkling-2-mini",
+      "mode": "off",
+      "vision": true
     }
   },
   "suites": {
@@ -1629,6 +1634,21 @@
       "obligations": [
         "Run the changed model family's numerical, functional and speed checks; text suites do not qualify it."
       ],
+      "ignored": false
+    },
+    {
+      "id": "inkling2-runtime",
+      "paths": [
+        "src/models/inkling2/**"
+      ],
+      "priority": 10,
+      "profiles": [
+        "inkling-2-mini/off"
+      ],
+      "affects": [
+        "*"
+      ],
+      "obligations": [],
       "ignored": false
     }
   ],

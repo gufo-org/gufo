@@ -1,0 +1,26 @@
+{
+  "profiles": {
+    "inkling-2-mini/off": {
+      "model": "inkling-2-mini",
+      "mode": "off",
+      "vision": true
+    }
+  },
+  "rules": [
+    {
+      "id": "inkling2-runtime",
+      "paths": [
+        "src/models/inkling2/**"
+      ],
+      "priority": 10,
+      "profiles": [
+        "inkling-2-mini/off"
+      ],
+      "affects": [
+        "*"
+      ],
+      "obligations": [],
+      "ignored": false
+    }
+  ]
+}
