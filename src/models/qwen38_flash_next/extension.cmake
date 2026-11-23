@@ -24,6 +24,12 @@ if(TARGET gufo_qwen38_flash_next)
     ${GUFO_EXTENSION_BUILD_ROOT}
   )
 endif()
+# Extensions that list qwen38_flash_next in `depends` link these: the host
+# library (config, weights, probes) and, in HIP builds, the runtime.
+# TODO: export a narrower include set than ${PROJECT_SOURCE_DIR} once
+# Flash-Next publishes its own headers; until then dependents see private
+# Gufo headers through these exports.
+gufo_extension_export(TARGET gufo_qwen38_flash_next NAME qwen38_flash_next)
 
 add_library(gufo_qwen38_flash_next_reference STATIC EXCLUDE_FROM_ALL
   ${GUFO_EXTENSION_BUILD_ROOT}/cpu_ops.cpp
@@ -115,3 +121,4 @@ if(TARGET gufo_qwen38_flash_next_hip)
     ${GUFO_EXTENSION_BUILD_ROOT}
   )
 endif()
+gufo_extension_export(TARGET gufo_qwen38_flash_next_hip NAME qwen38_flash_next_hip)

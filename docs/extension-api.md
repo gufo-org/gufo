@@ -40,6 +40,7 @@ uses:
 | `gufo_ext_core` | GGUF reading, sampling, JSON constraints, dequantization, SHA-256, image decoding, hipBLASLt plans and, with HIP, `WeightUpload` | all |
 | `gufo_ext_cache` | The component cache and, with HIP, its transfer and host-memory helpers | all |
 | `gufo_ext_hip` | The HIP compile definitions and include paths the public HIP headers need | HIP only |
+| `gufo::<name>` | Another extension's export, outside this boundary with no API promise ([depend on another extension](writing-extensions.md#depend-on-another-extension)) | per export |
 
 ## Model directories
 

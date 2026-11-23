@@ -72,6 +72,15 @@ through the helpers:
   adds HIP sources with per-source flags.
 - `gufo_target_extensions(executable EXTENSIONS ...)` generates one
   registration source and the constants headers for an executable.
+- `gufo_extension_export(TARGET ... NAME ...)` aliases a manifest target as
+  `gufo::<NAME>`, where `NAME` is the extension name or starts with it and
+  `_` (longest extension-name prefix wins). The caller is identified from the
+  wrapper directory discovery runs it in (read-only directory properties), so
+  only the owning extension exports. A deferred pass checks every target in
+  every extension directory, `LINK_LIBRARIES` and `INTERFACE_LINK_LIBRARIES`
+  with generator-expression wrappers removed: links to another extension need
+  it in `depends`. These checks catch mistakes; build code can still rewrite
+  global properties or redefine the checking functions.
 
 The generated registry calls each entry in a fixed order and references entry
 symbols directly: no static constructors, no whole-archive. Constants live in
@@ -82,7 +91,10 @@ are written only when they change.
 
 External extensions see only the public headers: their targets are checked
 against the include and link allowlist (`gufo_ext_runtime`, `gufo_ext_core`,
-`gufo_ext_cache`, `gufo_ext_hip`).
+`gufo_ext_cache`, `gufo_ext_hip`). An in-tree extension's `gufo::` export is
+audited like those: the check stops there, so its usage requirements, private
+include paths included, reach the dependent. An external extension's export
+is checked like any other external target.
 
 ## Modules
 
