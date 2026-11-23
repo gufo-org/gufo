@@ -503,10 +503,17 @@ public:
       }
     }
     const auto* properties = root->find("properties");
-    if (!properties || !properties->is_object() || root->contains("anyOf") ||
-        root->contains("oneOf") || root->contains("const") ||
-        root->contains("enum"))
+    if (!properties || !properties->is_object() || root->contains("oneOf") ||
+        root->contains("const") || root->contains("enum"))
       properties = nullptr;
+    std::set<std::set<std::string>> required_alternatives;
+    if (const auto* any = root->find("anyOf")) {
+      if (properties)
+        required_alternatives =
+            RequiredAlternatives(*any, *properties, key_end);
+      if (required_alternatives.empty())
+        properties = nullptr;
+    }
     std::set<std::string> required;
     if (const auto* fields = root->find("required");
         properties && fields && fields->is_array())
@@ -596,7 +603,7 @@ public:
       members.emplace_back(
           name, Seq({value, Literal(close + tags.parameter_separator)}));
     }
-    grammar_->root_ = Arguments(members, required);
+    grammar_->root_ = Arguments(members, required, required_alternatives);
     return Finish();
   }
 
@@ -607,14 +614,66 @@ public:
   }
 
 private:
+  // Tagged parsers get field types from the root properties. Alternatives
+  // here can change only which of those fields must occur.
+  static std::set<std::set<std::string>> RequiredAlternatives(
+      const json::Value& any, const json::Value& properties,
+      std::string_view key_end) {
+    if (!any.is_array())
+      return {};
+    std::set<std::set<std::string>> alternatives;
+    for (const auto& branch : any.items()) {
+      if (!branch.is_object() ||
+          std::ranges::any_of(branch.members(), [](const auto& member) {
+            return member.first != "required" && !Annotation(member.first);
+          }))
+        return {};
+      std::set<std::string> names;
+      if (const auto* fields = branch.find("required")) {
+        if (!fields->is_array())
+          return {};
+        for (const auto& name : fields->items()) {
+          if (!name.is_string() || !properties.contains(name.str()) ||
+              name.str().empty() ||
+              name.str().find_first_of(key_end) != std::string::npos)
+            return {};
+          names.insert(name.str());
+        }
+      }
+      alternatives.insert(std::move(names));
+    }
+    return alternatives;
+  }
+
   // Native models choose argument order. Keep the small-object grammar, but
   // represent wide objects with a request-local subset instead of compiling
   // all 2^N subsets or forcing declaration order. Required fields and one-use
   // parameter names keep the same contract in both representations.
   std::uint32_t Arguments(
       const std::vector<std::pair<std::string, std::uint32_t>>& members,
-      const std::set<std::string>& required) {
+      const std::set<std::string>& required,
+      const std::set<std::set<std::string>>& required_alternatives = {}) {
     if (members.size() > 10) {
+      if (!required_alternatives.empty()) {
+        std::set<std::set<std::string>> remaining;
+        for (auto names : required_alternatives) {
+          std::erase_if(
+              names, [&](const auto& name) { return required.contains(name); });
+          if (names.empty())
+            return Arguments(members, required);
+          remaining.insert(std::move(names));
+        }
+        // Wide lists have a request-local state per alternative. Bound the
+        // initial expansion to the same budget as the ordinary matcher.
+        if (remaining.size() > kMaxStates / members.size())
+          Invalid("native argument alternatives exceed the state limit");
+        Sequence alternatives;
+        for (auto names : remaining) {
+          names.insert(required.begin(), required.end());
+          alternatives.push_back(Arguments(members, names));
+        }
+        return Alt(alternatives);
+      }
       JsonConstraint::ArgumentSet arguments;
       arguments.required.resize((members.size() + 63) / 64);
       for (std::size_t i = 0; i < members.size(); ++i) {
@@ -626,20 +685,33 @@ private:
       grammar_->argument_sets_.push_back(std::move(arguments));
       return Seq({static_cast<std::uint32_t>(kArguments | id)});
     }
+    const auto mask = [&](const std::set<std::string>& names) {
+      unsigned result = 0;
+      for (unsigned i = 0; i < members.size(); ++i)
+        if (names.contains(members[i].first))
+          result |= 1U << i;
+      return result;
+    };
+    const auto common = mask(required);
+    std::set<unsigned> requirements;
+    for (const auto& names : required_alternatives)
+      requirements.insert(common | mask(names));
+    if (requirements.empty())
+      requirements.insert(common);
     std::map<unsigned, std::uint32_t> suffixes;
     auto suffix = [&](auto&& self, unsigned used) -> std::uint32_t {
       if (auto found = suffixes.find(used); found != suffixes.end())
         return found->second;
       Rule alternatives;
-      bool complete = true;
       for (unsigned i = 0; i < members.size(); ++i) {
         if (used & (1U << i))
           continue;
-        complete &= !required.contains(members[i].first);
         alternatives.push_back(
             {members[i].second, self(self, used | (1U << i))});
       }
-      if (complete)
+      if (std::ranges::any_of(requirements, [&](unsigned needed) {
+            return (used & needed) == needed;
+          }))
         alternatives.push_back({});
       return suffixes[used] = New(std::move(alternatives));
     };

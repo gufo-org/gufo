@@ -49,6 +49,70 @@ void TestRequiredTaggedCallLeadingSpace() {
   assert(!Accepts(*required, std::string(200, '\n') + call));
 }
 
+void TestNativeToolRequiredAlternatives() {
+  using Format = JsonConstraint::ToolFormat;
+  const auto schema = parse(R"({"type":"object","properties":{
+    "path":{"type":"string"},"content":{"type":"string"},
+    "markdown":{"type":"string"},"base64":{"type":"string"},
+    "name":{"type":"string"},"mime":{"type":"string"}},
+    "anyOf":[{"required":["path"]},{"required":["content"]},
+             {"required":["markdown"]},{"required":["base64"]}]})");
+  auto named = schema;
+  named["required"] = parse(R"(["name"])");
+  auto paired = named;
+  paired["anyOf"] =
+      parse(R"([{"required":["path","mime"]},{"required":["markdown"]}])");
+
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const auto parameter = [&](std::string_view name, std::string_view value) {
+      return format == Format::kQwen
+                 ? "<parameter=" + std::string(name) + ">\n" +
+                       std::string(value) + "\n</parameter>\n"
+                 : "<｜DSML｜parameter name=\"" + std::string(name) +
+                       "\" string=\"true\">" + std::string(value) +
+                       "</｜DSML｜parameter>\n";
+    };
+    const auto path = parameter("path", "/workspace/notes.md");
+    const auto content = parameter("content", "Notes");
+    const auto markdown = parameter("markdown", "# Notes");
+    const auto base64 = parameter("base64", "YWJj");
+    const auto name = parameter("name", "notes.md");
+    const auto mime = parameter("mime", "text/markdown");
+    const auto grammar = JsonConstraint::ToolParameters(schema, false, format);
+    for (const auto& source : {path, content, markdown, base64})
+      assert(Accepts(*grammar, source));
+    assert(Accepts(*grammar, path + markdown));
+    assert(Accepts(*grammar, markdown + path));
+    assert(Accepts(*grammar, name + path + mime));
+    assert(!Accepts(*grammar, ""));
+    assert(!Accepts(*grammar, name + mime));
+    assert(!Accepts(*grammar, path + path));
+
+    const auto common = JsonConstraint::ToolParameters(named, false, format);
+    assert(Accepts(*common, path + name));
+    assert(Accepts(*common, name + content));
+    assert(!Accepts(*common, path));
+    assert(!Accepts(*common, name));
+
+    const auto multi = JsonConstraint::ToolParameters(paired, false, format);
+    assert(Accepts(*multi, mime + name + path));
+    assert(Accepts(*multi, name + markdown));
+    assert(!Accepts(*multi, path + name));
+    assert(!Accepts(*multi, mime + name));
+
+    auto wide = paired;
+    for (unsigned i = 0; i < 5; ++i)
+      wide["properties"]["extra" + std::to_string(i)] =
+          parse(R"({"type":"string"})");
+    const auto wide_grammar =
+        JsonConstraint::ToolParameters(wide, false, format);
+    assert(Accepts(*wide_grammar, path + mime + name));
+    assert(Accepts(*wide_grammar, name + markdown));
+    assert(!Accepts(*wide_grammar, name + path));
+    assert(!Accepts(*wide_grammar, markdown));
+  }
+}
+
 void TestWideNativeArgumentOrder() {
   using Format = JsonConstraint::ToolFormat;
   for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
@@ -3170,6 +3234,7 @@ int main(int argc, char** argv) {
   TestReasoningConstraint();
   TestAutomaticTools();
   TestRequiredTaggedCallLeadingSpace();
+  TestNativeToolRequiredAlternatives();
   TestWideNativeArgumentOrder();
   TestNativeTools();
   TestOpenNativeTools();
