@@ -19,6 +19,11 @@ namespace gufo::models::qwen::lora {
 /// Q8_0, the update added in float32 and the result encoded as Q8_0 again.
 inline constexpr std::string_view kLoraMergeAlgorithm = "q8-requant-v1";
 
+/// Target formats `LoraAdapter::Open` accepts: Q8_0 for a load-time merge,
+/// or any format when the update is applied beside the stock weights at
+/// inference, which never decodes the target.
+enum class LoraTargetFormats { kQ8_0, kAny };
+
 /// The adapter `--lora` and `--lora-scale` select; an empty path selects none.
 struct LoraSelection {
   std::string path;
@@ -69,12 +74,14 @@ public:
   [[nodiscard]] static std::unique_ptr<LoraAdapter> Open(
       const std::filesystem::path& path, float scale,
       std::string_view architecture, std::span<const LoraMatrix> targets,
-      std::string_view expected_targets, std::string* error);
+      std::string_view expected_targets, std::string* error,
+      LoraTargetFormats formats = LoraTargetFormats::kQ8_0);
   /// Validates an already opened adapter; `label` names it in errors.
   [[nodiscard]] static std::unique_ptr<LoraAdapter> Open(
       std::unique_ptr<core::GgufReader> reader, std::string label, float scale,
       std::string_view architecture, std::span<const LoraMatrix> targets,
-      std::string_view expected_targets, std::string* error);
+      std::string_view expected_targets, std::string* error,
+      LoraTargetFormats formats = LoraTargetFormats::kQ8_0);
 
   /// The patch for the model tensor named `name`, or null.
   [[nodiscard]] const LoraPatch* Find(std::string_view name) const;
@@ -90,13 +97,15 @@ public:
   [[nodiscard]] float scale() const noexcept { return scale_; }
   /// scale * alpha / rank, per patch.
   [[nodiscard]] float Multiplier(const LoraPatch& patch) const noexcept;
-  /// Value of the cache identity's `adapters=` line: merge algorithm,
-  /// adapter digest and the float32 bits of the effective scale.
-  [[nodiscard]] std::string CacheIdentity() const;
+  /// Value of the cache identity's `adapters=` line: the algorithm that
+  /// applies the update, adapter digest and the float32 bits of the
+  /// effective scale.
+  [[nodiscard]] std::string CacheIdentity(
+      std::string_view algorithm = kLoraMergeAlgorithm) const;
 
   /// Writes rows [first, first + count) of the patched tensor, Q8_0 encoded,
   /// to `out` (count * target.RowBytes() bytes). False when a merged value
-  /// or a block scale is not finite.
+  /// or a block scale is not finite, or when the target is not Q8_0.
   [[nodiscard]] bool MergeRows(const LoraPatch& patch, std::uint64_t first,
                                std::uint64_t count, std::uint8_t* out,
                                std::string* error) const;

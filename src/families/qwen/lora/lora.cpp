@@ -104,7 +104,8 @@ std::size_t LoraMatrix::RowBytes() const noexcept {
 std::unique_ptr<LoraAdapter> LoraAdapter::Open(
     const std::filesystem::path& path, float scale,
     std::string_view architecture, std::span<const LoraMatrix> targets,
-    std::string_view expected_targets, std::string* error) {
+    std::string_view expected_targets, std::string* error,
+    LoraTargetFormats formats) {
   std::string open_error;
   auto reader = core::GgufReader::OpenFile(path, &open_error);
   if (!reader) {
@@ -114,13 +115,14 @@ std::unique_ptr<LoraAdapter> LoraAdapter::Open(
     return nullptr;
   }
   return Open(std::move(reader), path.string(), scale, architecture, targets,
-              expected_targets, error);
+              expected_targets, error, formats);
 }
 
 std::unique_ptr<LoraAdapter> LoraAdapter::Open(
     std::unique_ptr<core::GgufReader> reader, std::string label, float scale,
     std::string_view architecture, std::span<const LoraMatrix> targets,
-    std::string_view expected_targets, std::string* error) {
+    std::string_view expected_targets, std::string* error,
+    LoraTargetFormats formats) {
   const auto fail = [&](const std::string& message) {
     if (error != nullptr) {
       *error = "LoRA adapter " + label + ": " + message;
@@ -199,7 +201,8 @@ std::unique_ptr<LoraAdapter> LoraAdapter::Open(
                   std::string(expected_targets));
     }
     const LoraMatrix& target = *found->second;
-    if (target.type != core::GgmlType::kQ8_0) {
+    if (formats == LoraTargetFormats::kQ8_0 &&
+        target.type != core::GgmlType::kQ8_0) {
       return fail("target " + base + " is " +
                   std::string(core::ToString(target.type)) +
                   " in the model, expected Q8_0");
@@ -269,18 +272,25 @@ float LoraAdapter::Multiplier(const LoraPatch& patch) const noexcept {
   return scale_ * (alpha_ / static_cast<float>(patch.rank));
 }
 
-std::string LoraAdapter::CacheIdentity() const {
+std::string LoraAdapter::CacheIdentity(std::string_view algorithm) const {
   char bits[16];
   std::snprintf(bits, sizeof(bits), "%08x",
                 static_cast<unsigned>(std::bit_cast<std::uint32_t>(scale_)));
-  return "lora;merge=" + std::string(kLoraMergeAlgorithm) +
-         ";sha256=" + sha256_ + ";scale_f32=0x" + bits;
+  return "lora;merge=" + std::string(algorithm) + ";sha256=" + sha256_ +
+         ";scale_f32=0x" + bits;
 }
 
 bool LoraAdapter::MergeRows(const LoraPatch& patch, std::uint64_t first,
                             std::uint64_t count, std::uint8_t* out,
                             std::string* error) const {
   const LoraMatrix& t = patch.target;
+  if (t.type != core::GgmlType::kQ8_0) {
+    if (error != nullptr) {
+      *error = "LoRA target " + std::string(t.name) + " is " +
+               std::string(core::ToString(t.type)) + ", a merge needs Q8_0";
+    }
+    return false;
+  }
   const std::size_t cols = t.cols;
   const std::size_t row_bytes = t.RowBytes();
   const float multiplier = Multiplier(patch);
