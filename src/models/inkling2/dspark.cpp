@@ -224,7 +224,7 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     I.logits = I.Alloc<float>(static_cast<std::size_t>(target.vocab));
     I.state = I.Alloc<float>(256);
     I.joint = I.Alloc<float>(1024);
-    I.ws = I.Alloc<float>(3 * 128);
+    I.ws = I.Alloc<float>(3 * 128 + 1);
     I.d_conf = I.Alloc<float>(8);
     {
       // the kHeadRows text tokens with the largest markov_w1 rows
@@ -396,7 +396,8 @@ void Drafter::Inject(hipStream_t s, State& st, const float* feats,
 
 int Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
                      std::size_t pos, int n, std::int32_t* out,
-                     float* confidence, const More& more) {
+                     float* confidence, const More& more,
+                     const Coupled* coupled) {
   Impl& I = *impl_;
   if (n <= 0)
     return 0;
@@ -409,15 +410,13 @@ int Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
   Check(hipMemcpyAsync(I.d_pos, I.h_in + 1, 4, hipMemcpyHostToDevice, s),
         "pos");
   Check(hipMemcpyAsync(I.d_prev, I.h_in, 4, hipMemcpyHostToDevice, s), "prev");
-  const fs::GemmItems it = I.Items(I.blk_items, I.blk_items + 1,
-                                   I.blk_items + 2, I.blk_items + 3, B);
   dsp::Embed(s, I.target.token_embd, I.target.token_embd_norm, I.d_anchor,
              I.mask, I.layer[0].attn_norm, I.x, I.h, I.h16, I.eps);
   for (int l = 0; l < 3; ++l) {
     const auto& L = I.layer[l];
-    I.Gemm(s, L.wq, 3072, kE, I.h16, I.q, it);
-    I.Gemm(s, L.wk, 1024, kE, I.h16, I.k, it);
-    I.Gemm(s, L.wv, 1024, kE, I.h16, I.v, it);
+    dsp::Gemv8(s, L.wq, 3072, kE, I.h16, I.q);
+    dsp::Gemv8(s, L.wk, 1024, kE, I.h16, I.k);
+    dsp::Gemv8(s, L.wv, 1024, kE, I.h16, I.v);
     dsp::QkNormRope(s, I.q, I.k, L.q_norm, L.k_norm, I.d_pos, I.theta, I.eps);
     dsp::AttnArgs aa{};
     aa.q = I.q;
@@ -432,12 +431,12 @@ int Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
     aa.ws = I.wsa;
     aa.out16 = I.o16;
     dsp::Attn(s, aa);
-    I.Gemm(s, L.wo, kE, 3072, I.o16, I.y, it);
+    dsp::Gemv8(s, L.wo, kE, 3072, I.o16, I.y);
     dsp::AddNorm(s, I.x, I.y, L.ffn_norm, I.h, I.h16, B, I.eps);
-    I.Gemm(s, L.wg, 9216, kE, I.h16, I.g, it);
-    I.Gemm(s, L.wu, 9216, kE, I.h16, I.u, it);
+    dsp::Gemv8(s, L.wg, 9216, kE, I.h16, I.g);
+    dsp::Gemv8(s, L.wu, 9216, kE, I.h16, I.u);
     dsp::Swiglu(s, I.g, I.u, I.a16, B * 9216);
-    I.Gemm(s, L.wd, kE, 9216, I.a16, I.y, it);
+    dsp::Gemv8(s, L.wd, kE, 9216, I.a16, I.y);
     dsp::AddNorm(s, I.x, I.y, l < 2 ? I.layer[l + 1].attn_norm : I.out_norm,
                  I.h, l < 2 ? I.h16 : nullptr, B, I.eps);
   }
@@ -459,8 +458,14 @@ int Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
     ma.row = i;
     dsp::MarkovStep(s, ma);
     fs::GemvQ8(s, kE, I.head, I.heff, I.logits, Impl::kHeadRows, 0.f, 1);
-    dsp::Argmax(s, I.logits, Impl::kHeadRows, I.head_ids, I.ws, I.d_tokens,
-                i - 1, I.d_prev, I.d_conf);
+    if (coupled != nullptr)
+      dsp::CoupledSample(s, I.logits, Impl::kHeadRows, I.head_ids,
+                         I.target.softcap, coupled->temperature, coupled->min_p,
+                         coupled->u[i - 1], I.ws, I.d_tokens, i - 1, I.d_prev,
+                         I.d_conf);
+    else
+      dsp::Argmax(s, I.logits, Impl::kHeadRows, I.head_ids, I.ws, I.d_tokens,
+                  i - 1, I.d_prev, I.d_conf);
     done = i;
     if (i < n && more) {  // read this step's probability to decide on the next
       Check(hipMemcpyAsync(I.h_out + 8 + (i - 1), I.d_conf + (i - 1), 4,

@@ -2204,6 +2204,7 @@ bool Engine::AttachDrafter(const std::string& path, std::string* error) {
   t.output = I.D(w.output);
   t.vocab = static_cast<int>(w.config.n_vocab_text);
   t.eps = w.config.rms_eps;
+  t.softcap = w.config.logit_softcap;
   auto d = Drafter::Open(path, t, error);
   if (!d)
     return false;
@@ -2235,7 +2236,8 @@ bool Engine::DraftReady(const Session& s) const {
 }
 
 int Engine::Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
-                    float* confidence, const Drafter::More& more) {
+                    float* confidence, const Drafter::More& more,
+                    const Drafter::Coupled* coupled) {
   const std::lock_guard lock(mutex_);
   if (!DraftReady(s))
     throw std::runtime_error("inkling2: no draft context at this position");
@@ -2244,7 +2246,7 @@ int Engine::Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
     throw std::runtime_error("inkling2: token id out of range");
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
   return impl_->dsp->Propose(impl_->ds, s.draft_, anchor, s.pos_, n, out,
-                             confidence, more);
+                             confidence, more, coupled);
 }
 
 void Engine::Step(Session& s, std::int32_t token, std::int32_t* argmax) {

@@ -379,6 +379,209 @@ __global__ void __launch_bounds__(256) k_heff(MarkovArgs a, const float* lat) {
     a.heff[row] = a.h[(size_t)a.row * kEmbd + row] + acc + a.bo[row];
 }
 
+// ---- 8-row Q8_0 GEMV
+// Block: 8 waves x 4 rows; the inputs [8][2304] of one K chunk in LDS as F16.
+// A lane takes Q8 blocks lane, lane + 32, lane + 64 of the chunk, holds the 4
+// rows' 32 codes as F16 pairs and accumulates every input with fdot2.
+typedef _Float16 h2 __attribute__((ext_vector_type(2)));
+template<int KC>
+__global__ void __launch_bounds__(256)
+    k_gemv8(const uint8_t* __restrict__ W, int M, int K,
+            const _Float16* __restrict__ x, float* __restrict__ y) {
+  constexpr int NBK = KC / 32, RW = 4;
+  __shared__ __attribute__((aligned(16))) _Float16 xs[kBlock][KC];
+  const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int r0 = (blockIdx.x * 8 + wave) * RW;
+  const size_t rb = (size_t)(K / 32) * 34;
+  float acc[RW][kBlock];
+#pragma unroll
+  for (int r = 0; r < RW; ++r)
+#pragma unroll
+    for (int i = 0; i < kBlock; ++i)
+      acc[r][i] = 0.f;
+  for (int k0 = 0; k0 < K; k0 += KC) {
+    __syncthreads();
+    for (int e = threadIdx.x; e < kBlock * KC / 8; e += 256) {
+      const int i = e / (KC / 8), c = (e % (KC / 8)) * 8;
+      *(uint4*)&xs[i][c] = *(const uint4*)(x + (size_t)i * K + k0 + c);
+    }
+    __syncthreads();
+    for (int b = lane; b < NBK; b += 32) {
+      h2 wq[RW][16];
+      float d[RW];
+#pragma unroll
+      for (int r = 0; r < RW; ++r) {
+        const uint8_t* p =
+            W + (size_t)(r0 + r) * rb + (size_t)(k0 / 32 + b) * 34;
+        d[r] = __half2float(*(const __half*)p);
+        const uint16_t* q = (const uint16_t*)(p + 2);
+#pragma unroll
+        for (int j = 0; j < 16; ++j) {
+          const uint16_t v = q[j];
+          wq[r][j] =
+              h2{(_Float16)(int8_t)(v & 0xFF), (_Float16)(int8_t)(v >> 8)};
+        }
+      }
+#pragma unroll
+      for (int i = 0; i < kBlock; ++i) {
+        const h2* xp = (const h2*)&xs[i][b * 32];
+        h2 xv[16];
+#pragma unroll
+        for (int j = 0; j < 16; ++j)
+          xv[j] = xp[j];
+#pragma unroll
+        for (int r = 0; r < RW; ++r) {
+          float s = 0.f;
+#pragma unroll
+          for (int j = 0; j < 16; ++j)
+            s = __builtin_amdgcn_fdot2(wq[r][j], xv[j], s, false);
+          acc[r][i] += d[r] * s;
+        }
+      }
+    }
+  }
+#pragma unroll
+  for (int r = 0; r < RW; ++r)
+#pragma unroll
+    for (int i = 0; i < kBlock; ++i) {
+      const float v = wsum(acc[r][i]);
+      if (lane == 0 && r0 + r < M)
+        y[(size_t)i * M + r0 + r] = v;
+    }
+}
+
+// ---- coupled sampling over contiguous chunks
+// --------------------------------------
+constexpr int kCsBlocks = 128;
+__device__ __forceinline__ float softcapf(float x, float c) {
+  return c > 0.f ? c * tanhf(x / c) : x;
+}
+// pass 1: block maxima of the capped logits (contiguous chunks)
+__global__ void __launch_bounds__(256)
+    k_cs_max(const float* x, int n, float cap, float* ws) {
+  const int per = (n + kCsBlocks - 1) / kCsBlocks;
+  const int lo = blockIdx.x * per, hi = min(n, lo + per);
+  float v = -INFINITY;
+  for (int i = lo + threadIdx.x; i < hi; i += 256)
+    v = fmaxf(v, softcapf(x[i], cap));
+  __shared__ float red[8];
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1)
+    v = fmaxf(v, __shfl_xor(v, o, 32));
+  if (threadIdx.x % 32 == 0)
+    red[threadIdx.x / 32] = v;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    for (int w = 1; w < 8; ++w)
+      v = fmaxf(v, red[w]);
+    ws[blockIdx.x] = v;
+  }
+}
+// pass 2: block sums of the weights
+__device__ __forceinline__ float cs_weight(float l, float cap, float m, float t,
+                                           float floor_) {
+  const float c = softcapf(l, cap);
+  return c >= floor_ ? __expf((c - m) / t) : 0.f;
+}
+__global__ void __launch_bounds__(256)
+    k_cs_sum(const float* x, int n, float cap, float t, float min_p,
+             float* ws) {
+  __shared__ float red[8];
+  __shared__ float mx;
+  if (threadIdx.x == 0) {
+    float m = -INFINITY;
+    for (int b = 0; b < kCsBlocks; ++b)
+      m = fmaxf(m, ws[b]);
+    mx = m;
+  }
+  __syncthreads();
+  const float m = mx;
+  const float floor_ = min_p > 0.f ? m + t * __logf(min_p) : -INFINITY;
+  const int per = (n + kCsBlocks - 1) / kCsBlocks;
+  const int lo = blockIdx.x * per, hi = min(n, lo + per);
+  float z = 0.f;
+  for (int i = lo + threadIdx.x; i < hi; i += 256)
+    z += cs_weight(x[i], cap, m, t, floor_);
+  z = wsum(z);
+  if (threadIdx.x % 32 == 0)
+    red[threadIdx.x / 32] = z;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float s = 0.f;
+    for (int w = 0; w < 8; ++w)
+      s += red[w];
+    ws[kCsBlocks + blockIdx.x] = s;
+    if (blockIdx.x == 0)
+      ws[3 * kCsBlocks] = m;
+  }
+}
+// pass 3 (one block): the chunk where the running sum passes u * Z, then the
+// token inside it
+__global__ void __launch_bounds__(256)
+    k_cs_pick(const float* x, int n, const int* map, float cap, float t,
+              float min_p, float u, const float* ws, int* tokens, int row,
+              int* prev, float* conf) {
+  __shared__ int chunk;
+  __shared__ float before, total;
+  __shared__ float part[256];
+  const float m = ws[3 * kCsBlocks];
+  const float floor_ = min_p > 0.f ? m + t * __logf(min_p) : -INFINITY;
+  if (threadIdx.x == 0) {
+    float z = 0.f;
+    for (int b = 0; b < kCsBlocks; ++b)
+      z += ws[kCsBlocks + b];
+    const float target = u * z;
+    float run = 0.f;
+    int c = kCsBlocks - 1;
+    for (int b = 0; b < kCsBlocks; ++b) {
+      const float nxt = run + ws[kCsBlocks + b];
+      if (target < nxt) {
+        c = b;
+        break;
+      }
+      run = nxt;
+    }
+    chunk = c;
+    before = run;
+    total = z;
+  }
+  __syncthreads();
+  const int per = (n + kCsBlocks - 1) / kCsBlocks;
+  const int lo = chunk * per, hi = min(n, lo + per);
+  // each thread sums its slice of the chunk, then thread 0 walks the slices
+  const int len = hi - lo, sl = (len + 255) / 256;
+  const int a0 = lo + threadIdx.x * sl, a1 = min(hi, a0 + sl);
+  float s = 0.f;
+  for (int i = a0; i < a1; ++i)
+    s += cs_weight(x[i], cap, m, t, floor_);
+  part[threadIdx.x] = s;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    const float target = u * total;
+    float run = before;
+    int tok = hi - 1;
+    for (int th = 0; th < 256; ++th) {
+      if (target < run + part[th]) {
+        const int b0 = lo + th * sl, b1 = min(hi, b0 + sl);
+        for (int i = b0; i < b1; ++i) {
+          const float w = cs_weight(x[i], cap, m, t, floor_);
+          run += w;
+          if (target < run) {
+            tok = i;
+            break;
+          }
+        }
+        break;
+      }
+      run += part[th];
+    }
+    const int id = map ? map[tok] : tok;
+    tokens[row] = id;
+    *prev = id;
+    conf[row] = cs_weight(x[tok], cap, m, t, floor_) / total;
+  }
+}
+
 // ---- argmax (first maximum) and its softmax probability
 // ----------------------
 __global__ void __launch_bounds__(256)
@@ -520,6 +723,29 @@ void Argmax(hipStream_t s, const float* logits, int n, const int* map,
   k_argmax1<<<nb, 256, 0, s>>>(logits, n, ws);
   k_argmax2<<<1, 32, 0, s>>>(ws, nb, map, tokens, row, prev, conf);
   Chk("argmax");
+}
+void Gemv8(hipStream_t s, const void* w, int m, int k, const _Float16* x,
+           float* y) {
+  const auto* W = static_cast<const uint8_t*>(w);
+  if (m % 32)
+    throw std::runtime_error("inkling2 dspark: gemv8 shape");
+  if (k % 2304 == 0)
+    k_gemv8<2304><<<m / 32, 256, 0, s>>>(W, m, k, x, y);
+  else if (k == 3072)
+    k_gemv8<3072><<<m / 32, 256, 0, s>>>(W, m, k, x, y);
+  else
+    throw std::runtime_error("inkling2 dspark: gemv8 shape");
+  Chk("gemv8");
+}
+void CoupledSample(hipStream_t s, const float* logits, int n, const int* map,
+                   float softcap, float temperature, float min_p, float u,
+                   float* ws, int* tokens, int row, int* prev, float* conf) {
+  k_cs_max<<<kCsBlocks, 256, 0, s>>>(logits, n, softcap, ws);
+  k_cs_sum<<<kCsBlocks, 256, 0, s>>>(logits, n, softcap, temperature, min_p,
+                                     ws);
+  k_cs_pick<<<1, 256, 0, s>>>(logits, n, map, softcap, temperature, min_p, u,
+                              ws, tokens, row, prev, conf);
+  Chk("coupled sample");
 }
 void GatherQ8Rows(hipStream_t s, const void* src, const int* ids, int n,
                   void* dst) {

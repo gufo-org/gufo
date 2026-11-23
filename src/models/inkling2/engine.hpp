@@ -232,7 +232,8 @@ public:
   [[nodiscard]] bool has_drafter() const;
   [[nodiscard]] bool DraftReady(const Session& s) const;
   int Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
-              float* confidence = nullptr, const Drafter::More& more = {});
+              float* confidence = nullptr, const Drafter::More& more = {},
+              const Drafter::Coupled* coupled = nullptr);
 
   /// One decode step of `token` that leaves the logits on the device (the
   /// session copies them when read) and writes their argmax (the greedy

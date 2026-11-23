@@ -34,6 +34,7 @@ public:
     const void* output;            // Q8_0 LM head
     int vocab;                     // text rows of the head
     float eps;
+    float softcap;  // of the target's logits
   };
   /// Per-session state (buffers declared with the session). Context rows of
   /// positions [first, valid) are injected (after a restore the context
@@ -74,12 +75,20 @@ public:
   /// After proposal i (1-based) with the probabilities so far: whether to
   /// draft the next one.
   using More = std::function<bool(int, const float*)>;
+  /// Coupled proposals for a request that samples with temperature only (the
+  /// target sampler's linear draw): proposal i is drawn from the drafter's
+  /// distribution with u[i - 1], the uniform the target's selection after
+  /// proposal i - 1 will use. Null: greedy proposals.
+  struct Coupled {
+    float temperature = 1.f, min_p = 0.f;
+    float u[kMaxDraft] = {};
+  };
   /// Up to `n` (<= kMaxDraft) greedy proposals after `anchor` at `pos`, and
   /// optionally each one's draft probability (the softmax maximum over the
   /// proposal head). Returns how many were drafted.
   int Propose(hipStream_t s, State& st, std::int32_t anchor, std::size_t pos,
               int n, std::int32_t* out, float* confidence = nullptr,
-              const More& more = {});
+              const More& more = {}, const Coupled* coupled = nullptr);
 
 private:
   Drafter() = default;

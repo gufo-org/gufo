@@ -95,13 +95,15 @@ private:
   return best;
 }
 
-/// Per-request back-off: after cycles that emit fewer tokens per millisecond
-/// than plain decoding would, skip drafting for a while (doubling, capped),
-/// then probe again.
+/// Per-request back-off: every eight drafted cycles, when they emitted fewer
+/// tokens per millisecond than plain decoding steps of the request's kind
+/// would, skip drafting for a while (8 steps, doubling to 64), then probe
+/// again.
 struct DsparkBackoff {
   int skip = 0;     // plain steps left before the next drafted cycle
-  int penalty = 0;  // the next back-off length
-  double gain = 1;  // running (emitted / cost) relative to plain decoding
+  int penalty = 0;  // the last back-off length
+  double tokens = 0, ms = 0;
+  int cycles = 0;
 
   [[nodiscard]] bool Draft() {
     if (skip > 0) {
@@ -111,13 +113,17 @@ struct DsparkBackoff {
     return true;
   }
   void Observe(int emitted, double cycle_ms, double plain_ms) {
-    const double g = emitted * plain_ms / std::max(cycle_ms, 1e-3);
-    gain += 0.25 * (g - gain);
-    if (gain < 0.95) {
-      penalty = std::clamp(penalty ? 2 * penalty : 4, 4, 32);
+    tokens += emitted;
+    ms += cycle_ms;
+    if (++cycles < 8)
+      return;
+    const double gain = tokens * plain_ms / std::max(ms, 1e-3);
+    tokens = ms = 0;
+    cycles = 0;
+    if (gain < 0.97) {
+      penalty = std::clamp(penalty ? 2 * penalty : 8, 8, 64);
       skip = penalty;
-      gain = 1;
-    } else if (g >= 1) {
+    } else {
       penalty = 0;
     }
   }

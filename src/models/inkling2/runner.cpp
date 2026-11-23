@@ -789,16 +789,37 @@ public:
     std::int32_t drafts[Drafter::kMaxDraft] = {};
     float conf[Drafter::kMaxDraft] = {};
     int n = 0;
+    // Plain greedy requests take each row's argmax from the device (the token
+    // Select would pick) and copy only the kept row's logits. Requests that
+    // sample with temperature only get coupled proposals: the drafter draws
+    // each with the uniform the request's sampler will use for that row.
+    const auto& cfg = working.config();
+    const bool greedy = cfg.can_use_unmodified_argmax() && !cfg.logprobs &&
+                        !working.ForcedToken() && !st.reasoning_off &&
+                        !st.call_required;
+    const bool coupled = !greedy && cfg.temperature > 0 && !cfg.constraint &&
+                         !working.ForcedToken() && cfg.top_k == 0 &&
+                         cfg.top_p == 1 && !(cfg.min_p > 0 && cfg.min_keep > 1);
+    Drafter::Coupled cp;
+    if (coupled) {
+      cp.temperature = cfg.temperature;
+      cp.min_p = cfg.min_p;
+      auto peek = working;  // the draws the rows' selections will make
+      for (float& u : cp.u)
+        u = static_cast<float>(peek.Uniform());
+    }
+    DsparkCalibration& cal = coupled ? cal_coupled_ : cal_;
     if (budget > 0 && engine_->DraftReady(ss) && st.backoff.Draft()) {
       n = static_cast<int>(std::min<std::size_t>(
           {std::size_t{3}, budget, engine_->VerifyRows(ss) - 1}));
       if (n > 0)  // stop once the width policy would not verify another
-        n = engine_->Propose(ss, static_cast<std::int32_t>(a), n, drafts, conf,
-                             [&](int i, const float* p) {
-                               const std::lock_guard lock(dsp_mutex_);
-                               return ChooseDsparkWidth(p, i, cal_, costs_) ==
-                                      i;
-                             });
+        n = engine_->Propose(
+            ss, static_cast<std::int32_t>(a), n, drafts, conf,
+            [&](int i, const float* p) {
+              const std::lock_guard lock(dsp_mutex_);
+              return ChooseDsparkWidth(p, i, cal, costs_) == i;
+            },
+            coupled ? &cp : nullptr);
     }
     const auto t1 = Clock::now();
     int width = 0;
@@ -807,16 +828,10 @@ public:
       if (n > 0)
         costs_.ObserveDraft(
             n, std::chrono::duration<double, std::milli>(t1 - t0).count());
-      width = n > 0 ? ChooseDsparkWidth(conf, n, cal_, costs_) : 0;
+      width = n > 0 ? ChooseDsparkWidth(conf, n, cal, costs_) : 0;
     }
     std::vector<std::int32_t> rows{static_cast<std::int32_t>(a)};
     rows.insert(rows.end(), drafts, drafts + width);
-    // Plain greedy requests take each row's argmax from the device (the token
-    // Select would pick) and copy only the kept row's logits.
-    const auto& cfg = working.config();
-    const bool greedy = cfg.can_use_unmodified_argmax() && !cfg.logprobs &&
-                        !working.ForcedToken() && !st.reasoning_off &&
-                        !st.call_required;
     std::span<const float> out;
     std::int32_t amax[Engine::kMaxDecodeBatch] = {};
     const std::size_t pos = ss.position();
@@ -877,12 +892,15 @@ public:
           static_cast<int>(rows.size()),
           std::chrono::duration<double, std::milli>(t2 - t1).count());
       for (int j = 0; j < width && j < static_cast<int>(keep); ++j)
-        cal_.Observe(conf[j], j + 1 < static_cast<int>(keep));
-      if (n > 0)
-        st.backoff.Observe(
-            static_cast<int>(keep),
-            std::chrono::duration<double, std::milli>(t3 - t0).count(),
-            costs_.Verify(1));
+        cal.Observe(conf[j], j + 1 < static_cast<int>(keep));
+      const double cycle =
+          std::chrono::duration<double, std::milli>(t3 - t0).count();
+      // what a plain step costs requests of this kind (host sampling included)
+      double& plain = greedy ? plain_greedy_ms_ : plain_sampled_ms_;
+      if (n == 0)
+        plain += 0.1 * (cycle - plain);
+      else
+        st.backoff.Observe(static_cast<int>(keep), cycle, plain);
     }
     if (width > 0) {
       step.draft_rounds = 1;
@@ -958,7 +976,8 @@ private:
       t_invoke_{};
   // DSpark width policy, shared by the requests
   mutable std::mutex dsp_mutex_;
-  mutable DsparkCalibration cal_;
+  mutable DsparkCalibration cal_, cal_coupled_;
+  mutable double plain_greedy_ms_ = 22.0, plain_sampled_ms_ = 23.5;
   mutable DsparkCosts costs_;
 };
 

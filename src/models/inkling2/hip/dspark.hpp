@@ -105,6 +105,21 @@ void MarkovStep(hipStream_t s, const MarkovArgs& a);
 void Argmax(hipStream_t s, const float* logits, int n, const int* map,
             float* ws, int* tokens, int row, int* prev, float* conf);
 
+/// y[r][m] = W[m] . x[r] for the 8 block rows: W Q8_0 [M][K], x F16 [8][K]
+/// (K a multiple of 2304 or 3072, M of 32).
+void Gemv8(hipStream_t s, const void* w, int m, int k, const _Float16* x,
+           float* y);
+
+/// Coupled sampling of one proposal: p over the n proposal-head rows (in
+/// token order) = softmax(softcap(logits) / temperature), rows below the
+/// min-p floor dropped; the token where the running sum first passes u
+/// (the target sampler's linear draw with the uniform it will use), mapped
+/// through `map`, goes to tokens[row] and *prev, its p to conf[row].
+/// ws: 3 * 128 + 1 floats.
+void CoupledSample(hipStream_t s, const float* logits, int n, const int* map,
+                   float softcap, float temperature, float min_p, float u,
+                   float* ws, int* tokens, int row, int* prev, float* conf);
+
 /// Copies the Q8_0 rows ids[0, n) of `src` (2304 columns) to `dst`.
 void GatherQ8Rows(hipStream_t s, const void* src, const int* ids, int n,
                   void* dst);
