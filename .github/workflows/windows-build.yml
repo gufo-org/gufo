@@ -435,6 +435,24 @@ jobs:
           path: external-extension
           persist-credentials: false
 
+      # Building the Loom runtime from hrx-system takes most of the build step,
+      # and HRX's configure downloads pinned sources, one of them from a host
+      # without a mirror. A cached library takes the loom-text-embed
+      # pkg-config path in src/models/loom/runtime.cmake instead.
+      - name: Restore Loom runtime
+        id: loom-runtime
+        if: hashFiles('src/models/loom/runtime.cmake') != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:/gufo-loom-runtime
+          key: gufo-loom-runtime-windows-v1-${{ env.SDK_SHA256 }}-${{ hashFiles('src/models/loom/runtime.cmake', 'src/models/loom/embed/**') }}
+
+      - name: Use cached Loom runtime
+        if: steps.loom-runtime.outputs.cache-hit == 'true'
+        run: |
+          "PKG_CONFIG_PATH=C:/gufo-loom-runtime/lib/pkgconfig" >> $env:GITHUB_ENV
+          "GUFO_LOOM_RUNTIME_CACHED=1" >> $env:GITHUB_ENV
+
       - name: Configure Windows build
         id: configure
         env:
@@ -466,6 +484,9 @@ jobs:
             "-DGUFO_IRON_PYTHON=$env:IRON_ROOT/Scripts/python.exe" -DGUFO_NPU_DESIGNS_REQUIRED=ON `
             "-DGUFO_NPU_CACHE_HOME=$env:RUNNER_TEMP/npu-cache" @identity
           if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
+          if ($env:GUFO_LOOM_RUNTIME_CACHED -and -not (Select-String -Quiet -SimpleMatch 'GUFO_LOOM_PC_FOUND:INTERNAL=1' build/windows-release/CMakeCache.txt)) {
+            throw 'configure did not take the cached Loom runtime'
+          }
           "$PWD\build\windows-release\vcpkg_installed\x64-windows-release\bin" >> $env:GITHUB_PATH
           "$PWD\build\windows-release" >> $env:GITHUB_PATH
 
@@ -481,6 +502,40 @@ jobs:
           cmake --build --preset windows-release --parallel $env:NUMBER_OF_PROCESSORS --target @targets
           if ($LASTEXITCODE -ne 0) { throw 'build failed' }
           ccache --show-stats
+
+      # Lay out the library as the Nix package does (.devops/nix/hrx/loom-runtime.nix).
+      - name: Stage Loom runtime
+        id: loom-runtime-stage
+        if: steps.loom-runtime.outcome == 'success' && steps.loom-runtime.outputs.cache-hit != 'true'
+        run: |
+          $built = 'build/windows-release/loom'
+          if (-not (Test-Path "$built/b/loom_text_embed.dll")) {
+            "Release without the Loom runtime build; nothing to cache."
+            exit 0
+          }
+          $version = (Select-String -Path src/models/loom/runtime.cmake -Pattern '^set\(GUFO_LOOM_HRX_VERSION (\S+)\)').Matches[0].Groups[1].Value
+          if (-not $version) { throw 'cannot read GUFO_LOOM_HRX_VERSION' }
+          $root = 'C:/gufo-loom-runtime'
+          New-Item -ItemType Directory -Force -Path "$root/lib/pkgconfig", "$root/share/licenses/loom-runtime" | Out-Null
+          Copy-Item "$built/b/loom_text_embed.dll" "$root/lib"
+          Copy-Item "$built/s/LICENSE" "$root/share/licenses/loom-runtime/LICENSE"
+          @(
+            "prefix=$root"
+            'libdir=${prefix}/lib'
+            ''
+            'Name: loom-text-embed'
+            'Description: Loom text model layer for Gufo, built from hrx-system'
+            "Version: $version"
+            'Libs: -L${libdir} -lloom_text_embed'
+          ) | Set-Content "$root/lib/pkgconfig/loom-text-embed.pc" -Encoding ascii
+          "staged=true" >> $env:GITHUB_OUTPUT
+
+      - name: Save Loom runtime
+        if: steps.loom-runtime-stage.outputs.staged == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:/gufo-loom-runtime
+          key: ${{ steps.loom-runtime.outputs.cache-primary-key }}
 
       - name: Run CPU and application checks
         run: |
