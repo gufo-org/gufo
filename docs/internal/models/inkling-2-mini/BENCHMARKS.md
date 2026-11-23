@@ -115,8 +115,23 @@ server's for all five requests:
 
 | Request | AR | DSpark (adaptive) |
 | --- | --- | --- |
-| Python function, greedy | 45.9 | 66.2 |
-| Why the sky is blue, greedy | 46.1 | 54.8 |
-| First 15 primes, greedy | 46.1 | 83.1 |
-| Haiku, temperature 0.8, seed | 46.0 | 57.8 |
-| Translation, temperature 0.7, seed | 43.3 | 49.8 |
+| Python function, greedy | 45.9 | 66.7 |
+| Why the sky is blue, greedy | 46.1 | 56.0 |
+| First 15 primes, greedy | 46.1 | 83.8 |
+| Haiku, temperature 0.8, seed | 46.0 | 59.6 |
+| Translation, temperature 0.7, seed | 43.3 | 50.8 |
+
+Sampled with the model's defaults (temperature 1, no truncation; coupled
+proposals), seeded, 400 tokens; identical text again:
+
+| Request | AR | DSpark |
+| --- | --- | --- |
+| Python function | 43.2 | 51.8 |
+| Why the sky is blue | 43.1 | 50.7 |
+| Short story, temperature 0.6 | 43.3 | 46.8 |
+| Ten fruits, min-p 0.05 | 44.4 | 49.8 |
+| Haiku, temperature 0.8, top-p 0.95 (greedy proposals) | 46.0 | 66.7 |
+
+At temperature 1 about 60% of the coupled proposals are accepted; the host
+sampler's pass over 200K logits (about 1.5 ms per selected token, AR too) is
+the larger cost of those cycles.

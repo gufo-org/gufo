@@ -31,6 +31,8 @@ against the build they modified. Every variant was exact unless noted.
 | Variant | Result |
 | --- | --- |
 | The full 200,058-row LM head for proposals | depth 3, context 64: 62.4 vs 68.2 tokens/s with the 65,536-row head, same acceptance counts |
+| A 32,768-row proposal head | context 64: 49% vs 70% of the proposals accepted, 56.4 vs 68.2 tokens/s |
+| Back-off after any cycle that emitted less than a plain step | sampled requests drafted in about 70 of 300 cycles; judged over eight cycles against the measured plain steps instead |
 | Verification MoE grouped by expert (one block row per distinct expert; all its pairs at once, or one after another) | 4 rows: 43.4 / 39.1 vs 37.8 ms: the pair-per-block grid already reads a shared expert once through L2 |
 
 ## Decode (tg128 after 64 tokens)

@@ -68,16 +68,33 @@ and `THIRD_PARTY.md` carry its license and attributions. Changes made here:
 - **Selection.** `Inkling2Runner::DecodeStep` selects each verified row's
   token exactly as `SelectNext` would after the tokens before it (masks, the
   request's sampler on a working copy; plain greedy requests take the device
-  argmax) and keeps a proposal while it equals that selection. The first
-  selection that differs becomes the next cycle's anchor (`pending`). The
-  emitted tokens and draws are therefore those of AR decoding.
+  argmax and leave the logits on the device until something reads them) and
+  keeps a proposal while it equals that selection. The first selection that
+  differs becomes the next cycle's anchor (`pending`). The emitted tokens and
+  draws are therefore those of AR decoding.
+- **Coupled proposals.** A request that samples with temperature only (no
+  top-k or top-p, the model's default) gets proposals drawn from the
+  drafter's own soft-capped distribution with the uniform its sampler will
+  use for that row (read in advance from a copy of the request's RNG). The
+  sampler's linear draw walks tokens in id order, as the proposal head's rows
+  are stored, so the proposal equals the target's draw whenever the two
+  distributions agree around the uniform. Other sampled requests get greedy
+  proposals. When every draw takes exactly one uniform (temperature 0.1 or
+  more, no min-p, penalties or constraint), the rows' host samplings run in
+  parallel with their draws known in advance.
+- **Several requests.** `DecodeBatch` (2 to 4 requests) runs one batched
+  one-token step of their anchors and selects each next token as its next
+  anchor, so a request moves between single (DSpark) and batched steps with
+  the same draws; concurrent requests do not draft.
 - **Width.** `dspark_policy.hpp`: the drafter's probability for each proposal,
   through a calibration of acceptance per probability bin that keeps learning,
   gives the survival of each prefix; the width maximises expected tokens per
   measured cycle cost (verifying 2/3/4 rows costs about 28/33/38 ms against
-  22 ms for one). Drafting stops early once a longer width cannot pay, and a
-  request whose cycles stop paying decodes plainly for a while (4 to 32
-  steps) before probing again.
+  22 ms for one); greedy and coupled proposals keep separate calibrations.
+  Drafting stops early once a longer width cannot pay. Every eight drafted
+  cycles, a request whose cycles emitted fewer tokens per millisecond than
+  its measured plain steps decodes plainly for a while (8 to 64 steps) before
+  probing again.
 
 ## Numerical contract
 
@@ -99,4 +116,5 @@ single-session decode.
 | `inkling2_cache_test --model GGUF --ids IDS` | GPU: checkpoint capture and restore, restore into a used slot, layered prefill; all bit-exact |
 | `inkling2_oracle` | Teacher-forced dumps; `tests/oracle/compare_dumps.py` scores KL and top-1 against a reference dump |
 | `tests/oracle/llama_dump.cpp` | The llama.cpp side of the same dump (CPU backend, or `NGL` layers on the GPU) |
-| `inkling2_bench` | Prefill and decode speed, batched decode, `--verify` |
+| `inkling2_spec_test --model GGUF [--dspark DRAFT]` | GPU: verification rows of 2 to 4 tokens (one proposal corrupted per step) byte-identical to one-token decoding, and greedy DSpark decoding equal to plain decoding |
+| `inkling2_bench` | Prefill and decode speed, batched decode, `--verify`; `--spec R` verification timing, `--dspark` speculative speed, acceptance and calibration |

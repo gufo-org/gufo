@@ -86,3 +86,12 @@ plain decoding:
   `--dspark-model`.
 - `inkling2_bench --batch 2,4 --verify` and the oracle dumps (batched and
   one-token paths) are unchanged.
+- `inkling2_spec_test --dspark` repeats the first two checks in 8 seconds.
+- Functional suites (`tests/functional/run.py`, the runner's default
+  `--sessions 4 --context 32768`, with disk-cache restarts and cancellations):
+  discovery, responses, stops, conversation, structured, tool-history,
+  tool-choice-cache, state-edges, prefill-scheduling, cache-edits,
+  cache-depth, logprobs, sampling-ranges, batch and cache. AR and DSpark pass
+  the same suites (batch fails for both: with thinking off the model argues
+  instead of calling the tool), and all 432 recorded responses have the same
+  output hash, with 2,062 drafted cycles in the DSpark run.
