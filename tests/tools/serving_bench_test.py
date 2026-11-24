@@ -1195,4 +1195,13 @@ cohort_metrics(log + log.replace("0.010s", "0.020s"), cohort, 2)
 check(_serving_rate({"results": {"c2": cohort}}, 2) == 300,
       "concurrency sums logged per-request rates without inventing client/log ID mapping")
 
+import hashlib
+plain = serving_bench._completion_sha256([], ["Hel", "lo"])
+check(plain == hashlib.sha256(b"Hello").hexdigest(),
+      "a completion without reasoning keeps its plain content hash")
+thought = serving_bench._completion_sha256(["think"], [])
+check(thought != hashlib.sha256(b"").hexdigest()
+      and thought != serving_bench._completion_sha256(["other"], []),
+      "streamed reasoning is part of the hash, so thought-only completions differ")
+
 print("Serving benchmark harness tests passed.")
