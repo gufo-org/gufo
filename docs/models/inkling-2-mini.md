@@ -70,8 +70,25 @@ With thinking off, Gufo therefore opens the answer (or, with tools, closes an
 empty thought) in the prompt and doesn't let a thought start; the model then
 sometimes writes its deliberation into the answer instead.
 
-With thinking on, `tool_choice: "required"` and named functions let the model
-think first, then force a call.
+With thinking on, `tool_choice: "required"`, named functions and
+`response_format` let the model think first, then force the call or the JSON.
+A required call gets one thought: a model that decided against the call would
+otherwise keep reopening thoughts until the token limit.
+
+## Tools and structured output
+
+Tool arguments are generated with their keys in sorted order, the order the
+template declares tools and re-renders calls in. The model writes them that way
+(`{"action":…,"id":…,"status":…}`), so with the schema's own order it could
+lose a property declared before one it had already written. Nested objects are
+sorted too; the template re-renders those as they were written.
+
+A grammar sees each token's own bytes, so it describes the thought as the model
+writes it after the prompt's header: `<|content_thinking|>`, then
+`<|end_message|><|message_model|><|content_text|>` before the answer. When the
+model answers without a thought, the grammar can't let it open the answer
+block, and it writes the JSON right after the header; Gufo streams that as the
+answer.
 
 ## Performance
 
