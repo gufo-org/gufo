@@ -1236,6 +1236,11 @@ endfunction()
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/cache_growth_test.py)
   set_tests_properties(cache_growth_test PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
 
+  add_test(NAME prune_caches_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/prune_caches_test.py)
+  set_tests_properties(prune_caches_test PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
+
   add_test(NAME extension_distribution_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/extension_distribution_test.py)

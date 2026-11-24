@@ -7,16 +7,19 @@ name: Actions caches
 # - A closed pull request's entries are deleted: nothing can restore them.
 # - A caller prunes its own ref after saving: per-run keys end in
 #   -<run id>-<attempt>, and only the newest entry of each family survives.
-#   It then evicts other refs' least recently used entries until the cache is
-#   under the budget below, so main's entries are never what LRU removes.
-#   Callers grant this job's permissions: actions: write, pull-requests: read.
+#   It then evicts other refs' entries, large and idle ones first, until the
+#   cache is under the budget below, so main's entries are never what LRU
+#   removes. Callers grant this job's permissions: actions: write,
+#   contents: read, pull-requests: read.
 # - The nightly run does all of this for every ref, catching missed events, and
 #   deletes entries of refs other than main that no run used for two days.
 #
 # An entry created or used in the last 15 minutes is never pruned: a concurrent
 # run may have resolved it and still be downloading it.
 #
-# No job checks out code, so pull_request_target runs nothing from the PR.
+# tools/ci/prune_caches.py holds the logic, its rate-limit retries and the
+# per-run delete cap. Under pull_request_target the job checks out the base
+# branch, so it runs nothing from the PR.
 
 on:
   pull_request_target:
@@ -43,6 +46,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       actions: write
+      contents: read
       pull-requests: read
     env:
       GH_TOKEN: ${{ github.token }}
@@ -55,111 +59,19 @@ jobs:
       BUDGET_BYTES: '7516192768'
       STALE_SECONDS: '172800'
       RECENT_SECONDS: '900'
+      # Deletes are rate-limited: stop well inside the job's 10 minutes and
+      # leave the rest to the next run or the nightly sweep.
+      MAX_DELETES: '100'
+      RETRY_SECONDS: '240'
     steps:
+      # Only the prune script: under pull_request_target this is the base
+      # branch's copy, never the pull request's.
+      - name: Check out the prune script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/ci/prune_caches.py
+          sparse-checkout-cone-mode: false
+
       - name: Prune Actions caches
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import json, os, re, subprocess, sys
-          from datetime import datetime, timezone
-
-          repo = os.environ["GH_REPO"]
-          mode = os.environ["MODE"]
-          protected = os.environ["PROTECTED_REF"]
-          budget = int(os.environ["BUDGET_BYTES"])
-          stale = int(os.environ["STALE_SECONDS"])
-          recent = int(os.environ["RECENT_SECONDS"])
-          now = datetime.now(timezone.utc)
-          errors = []
-
-          def gh(*args):
-              return subprocess.run(["gh", "api", *args], capture_output=True, text=True)
-
-          def age(entry):
-              """Seconds since the entry was created or last restored."""
-              stamps = [entry.get("last_accessed_at"), entry.get("created_at")]
-              newest = max(datetime.fromisoformat(s.replace("Z", "+00:00")) for s in stamps if s)
-              return (now - newest).total_seconds()
-
-          def listing(ref=None):
-              args = ["--paginate", "-X", "GET", f"repos/{repo}/actions/caches", "-F", "per_page=100"]
-              if ref:
-                  args += ["-f", f"ref={ref}"]
-              result = gh(*args, "--jq", ".actions_caches[]")
-              if result.returncode != 0:
-                  sys.exit(f"::error::listing caches failed: {result.stderr.strip()}")
-              return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-
-          deleted = set()
-
-          def remove(entries, reason):
-              for e in entries:
-                  if e["id"] in deleted:
-                      continue
-                  result = gh("--silent", "-X", "DELETE", f"repos/{repo}/actions/caches/{e['id']}")
-                  # A concurrent prune may have removed it already.
-                  if result.returncode == 0 or "HTTP 404" in result.stderr:
-                      deleted.add(e["id"])
-                      if result.returncode == 0:
-                          print(f"deleted ({reason}) {e['ref']} {e['key']} {e['size_in_bytes'] / 2**20:.0f} MiB")
-                  else:
-                      errors.append(f"{e['ref']} {e['key']}: {result.stderr.strip()}")
-
-          def superseded(entries):
-              """Every entry of a per-run family except the newest run's, per ref."""
-              best, rows = {}, []
-              for e in entries:
-                  m = re.search(r"-([0-9]{8,})-([0-9]+)$", e["key"])
-                  if not m:
-                      continue
-                  family = (e["ref"], e["key"][: m.start()])
-                  run = (int(m.group(1)), int(m.group(2)))
-                  rows.append((family, run, e))
-                  best[family] = max(best.get(family, run), run)
-              return [e for family, run, e in rows if run < best[family] and age(e) > recent]
-
-          def over_budget(entries):
-              """Least recently used entries of other refs until the total fits."""
-              live = [e for e in entries if e["id"] not in deleted]
-              total = sum(e["size_in_bytes"] for e in live)
-              print(f"cache total {total / 2**30:.2f} GiB, budget {budget / 2**30:.2f} GiB")
-              victims = sorted((e for e in live if e["ref"] != protected and age(e) > recent),
-                               key=lambda e: e.get("last_accessed_at") or e["created_at"])
-              chosen = []
-              for e in victims:
-                  if total <= budget:
-                      break
-                  chosen.append(e)
-                  total -= e["size_in_bytes"]
-              return chosen
-
-          if mode == "pull_request_target":
-              pr = os.environ["CLOSED_PR"]
-              for ref in (f"refs/pull/{pr}/merge", f"refs/pull/{pr}/head"):
-                  remove(listing(ref), "closed PR")
-          elif mode in ("schedule", "workflow_dispatch"):
-              entries = listing()
-              prs = sorted({m.group(1) for e in entries
-                            if (m := re.match(r"refs/pull/([0-9]+)/", e["ref"]))}, key=int)
-              closed = set()
-              for pr in prs:
-                  state = gh(f"repos/{repo}/pulls/{pr}", "--jq", ".state").stdout.strip()
-                  if state == "closed":
-                      closed.add(pr)
-              remove([e for e in entries
-                      if (m := re.match(r"refs/pull/([0-9]+)/", e["ref"])) and m.group(1) in closed],
-                     "closed PR")
-              remove(superseded(entries), "superseded")
-              remove([e for e in entries if e["ref"] != protected and age(e) > stale], "unused")
-              remove(over_budget(entries), "over budget")
-          elif mode == "caller":
-              remove(superseded(listing(os.environ["CALLER_REF"])), "superseded")
-              remove(over_budget(listing()), "over budget")
-          else:
-              sys.exit(f"::error::unknown prune mode {mode}")
-
-          if errors:
-              for line in errors:
-                  print(f"::error::deleting a cache failed: {line}")
-              sys.exit(1)
-          PY
+        run: python3 tools/ci/prune_caches.py
