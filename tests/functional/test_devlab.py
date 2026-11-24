@@ -113,10 +113,38 @@ class PlanTest(unittest.TestCase):
 
     def test_shared_llm_covers_every_llm(self):
         for path in ('src/core/sampling.cpp', 'src/cache/cache.cpp',
-                     'src/families/qwen/text/tokenizer.cpp', 'src/families/qwen/vision/encoder.hip',
                      'src/cli/serve/text_model_runner.cpp'):
             with self.subTest(path=path):
                 self.assertEqual(self.models(path), {'flash-next-q4', 'qwen27-q4', 'deepseek4'})
+
+    def test_shared_qwen_covers_its_consumers(self):
+        # DeepSeek has its own tokenizer and template, and no shared-Qwen profile.
+        # Qwen-Image takes the tokenizer and Qwen3-TTS the control tokens.
+        text = {'flash-next-q4', 'qwen27-q4'}
+        tts = {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design', 'qwen3-tts-custom-npu'}
+        for path, expected in [('src/families/qwen/text/chat_template.hpp', text),
+                               ('src/families/qwen/vision/encoder.hip', text),
+                               ('src/families/qwen/text/tokenizer.cpp', text | {'qwen-image-turbo'} | tts),
+                               ('src/families/qwen/control_tokens/control_tokens.hpp',
+                                text | {'qwen-image-turbo'} | tts)]:
+            with self.subTest(path=path):
+                self.assertEqual(self.models(path), expected)
+
+    def test_every_selected_llm_has_correctness_suites(self):
+        # A selected text model without a planned suite reports missing correctness.
+        # Sample both registries' patterns, so a narrow suite rule under a broad
+        # selection rule is planned too.
+        manifest = json.loads((devlab_models.HERE / 'impact.json').read_text())
+        patterns = {pattern for rules in (self.data['rules'], manifest['rules'])
+                    for rule in rules for pattern in rule['paths']}
+        for pattern in sorted(patterns):
+            path = pattern.replace('**', 'x').replace('*', 'x')
+            plan = self.plan(path)
+            planned = {group['profile'].split('/')[0] for group in plan['groups']}
+            for model in plan['models']:
+                if model['category'] == 'llm':
+                    with self.subTest(path=path, model=model['id']):
+                        self.assertIn(model['id'], planned)
 
     def test_private_model_and_mixed_paths_preserve_both(self):
         private = 'src/models/deepseek_v4_flash/model.cpp'

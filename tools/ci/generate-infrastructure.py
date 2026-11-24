@@ -371,7 +371,7 @@ def generate_devlab_registry(root: Path, manifests: List[Dict[str, Any]]) -> str
     # 1. documentation (from core)
     # 2. outside-current-scope (from core)
     # 3. model rules (qwen27, flash-next, deepseek, embedding, asr, tts, image)
-    # 4. shared rules (shared-audio, service-harness, shared-qwen, shared-text, functional-text, hosted-checks, shared-infrastructure, devlab-orchestration)
+    # 4. shared rules (shared-audio, service-harness, shared-qwen, shared-qwen-tokens, shared-text, functional-text, hosted-checks, shared-infrastructure, devlab-orchestration)
     RULE_ORDER = [
         "documentation",
         "outside-current-scope",
@@ -386,6 +386,7 @@ def generate_devlab_registry(root: Path, manifests: List[Dict[str, Any]]) -> str
         "npu",
         "service-harness",
         "shared-qwen",
+        "shared-qwen-tokens",
         "shared-text",
         "functional-text",
         "hosted-checks",
