@@ -1,5 +1,3 @@
-#include <png.h>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -28,19 +26,6 @@ struct Filter {
   int begin{0};
   std::vector<std::int32_t> weights;
 };
-
-struct PngOutput {
-  std::vector<std::uint8_t> bytes;
-  std::size_t used{0};
-};
-
-void WritePng(png_structp png, png_bytep data, png_size_t size) {
-  auto& output = *static_cast<PngOutput*>(png_get_io_ptr(png));
-  if (size > output.bytes.size() - output.used)
-    png_error(png, "output PNG exceeds its allocation");
-  std::memcpy(output.bytes.data() + output.used, data, size);
-  output.used += size;
-}
 
 std::vector<Filter> LanczosFilters(int input, int output) {
   std::vector<Filter> result(output);
@@ -116,75 +101,16 @@ std::uint64_t InitialNoiseSeed(std::uint64_t seed,
 Image DecodeImage(std::span<const std::uint8_t> bytes) {
   if (bytes.size() > core::kMaxEncodedImageBytes || bytes.size() < 8)
     throw std::invalid_argument("invalid or oversized input image");
-  if (png_sig_cmp(bytes.data(), 0, 8) != 0) {
-    const auto rgb = core::DecodeImage(bytes);
-    Image image{static_cast<int>(rgb.width), static_cast<int>(rgb.height), {}};
-    image.rgba.resize(static_cast<std::size_t>(rgb.width) * rgb.height * 4);
-    for (std::size_t i = 0; i < image.rgba.size() / 4; ++i) {
-      std::memcpy(image.rgba.data() + 4 * i, rgb.pixels.data() + 3 * i, 3);
-      image.rgba[4 * i + 3] = 255;
-    }
-    return image;
-  }
-  png_image png{};
-  png.version = PNG_IMAGE_VERSION;
-  if (!png_image_begin_read_from_memory(&png, bytes.data(), bytes.size()))
-    throw std::invalid_argument("cannot decode PNG image");
-  const auto cleanup = std::unique_ptr<png_image, decltype(&png_image_free)>(
-      &png, png_image_free);
-  if (!png.width || !png.height ||
-      static_cast<std::uint64_t>(png.width) * png.height >
-          core::kMaxImagePixels)
-    throw std::invalid_argument("PNG image dimensions exceed limits");
-  png.format = PNG_FORMAT_RGBA;
-  Image image{static_cast<int>(png.width), static_cast<int>(png.height), {}};
-  image.rgba.resize(PNG_IMAGE_SIZE(png));
-  if (!png_image_finish_read(&png, nullptr, image.rgba.data(), 0, nullptr))
-    throw std::invalid_argument("invalid PNG image data");
-  return image;
+  auto image = core::DecodeImageRgba(bytes);
+  return {static_cast<int>(image.width), static_cast<int>(image.height),
+          std::move(image.rgba)};
 }
 
 std::vector<std::uint8_t> EncodePng(const Image& image) {
   CheckImage(image);
-  png_image geometry{};
-  geometry.width = image.width;
-  geometry.height = image.height;
-  geometry.format = PNG_FORMAT_RGBA;
-  // Allocate before setjmp; callbacks only mutate heap state and cannot throw.
-  const auto output = std::make_unique<PngOutput>();
-  output->bytes.resize(PNG_IMAGE_PNG_SIZE_MAX(geometry));
-  auto png = png_create_write_struct(
-      PNG_LIBPNG_VER_STRING, nullptr,
-      [](png_structp p, png_const_charp) { png_longjmp(p, 1); }, nullptr);
-  if (!png)
-    throw std::runtime_error("cannot allocate PNG encoder");
-  auto info = png_create_info_struct(png);
-  if (!info) {
-    png_destroy_write_struct(&png, nullptr);
-    throw std::runtime_error("cannot allocate PNG metadata");
-  }
-  if (setjmp(png_jmpbuf(png))) {
-    png_destroy_write_struct(&png, &info);
-    throw std::runtime_error("cannot encode output PNG");
-  }
-  png_set_write_fn(png, output.get(), WritePng, nullptr);
-  png_set_IHDR(png, info, image.width, image.height, 8, PNG_COLOR_TYPE_RGBA,
-               PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
-               PNG_FILTER_TYPE_DEFAULT);
-  png_set_sRGB(png, info, PNG_sRGB_INTENT_PERCEPTUAL);
-  // Low compression avoids blocking the response on an expensive zlib search.
-  // Adaptive filtering and every RGBA byte are preserved.
-  png_set_compression_level(png, 1);
-  png_set_filter(png, PNG_FILTER_TYPE_BASE, PNG_ALL_FILTERS);
-  png_write_info(png, info);
-  for (int row = 0; row < image.height; ++row)
-    png_write_row(png, const_cast<png_bytep>(image.rgba.data() +
-                                             static_cast<std::size_t>(row) *
-                                                 image.width * 4));
-  png_write_end(png, info);
-  png_destroy_write_struct(&png, &info);
-  output->bytes.resize(output->used);
-  return std::move(output->bytes);
+  return core::EncodePngRgba(static_cast<std::uint32_t>(image.width),
+                             static_cast<std::uint32_t>(image.height),
+                             image.rgba);
 }
 
 Image ResizeImage(const Image& image, int width, int height) {

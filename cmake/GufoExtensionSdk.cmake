@@ -90,7 +90,7 @@ function(gufo_extension_sdk target)
   get_cmake_property(cache_variables CACHE_VARIABLES)
   foreach(variable IN LISTS cache_variables)
     if(variable MATCHES "^[A-Za-z0-9_-]+_DIR$" AND NOT variable MATCHES "^(CMAKE|gufo|GUFO)_"
-        OR variable MATCHES "^(ICU|OPENSSL|PNG|ZLIB|CURL|HIPCUB|ROCPRIM|ROCWMMA)_(INCLUDE_DIR|LIBRARY|.*_LIBRARY|.*_LIBRARY_RELEASE|LIBRARY_RELEASE)$"
+        OR variable MATCHES "^(ICU|OPENSSL|ZLIB|CURL|HIPCUB|ROCPRIM|ROCWMMA)_(INCLUDE_DIR|LIBRARY|.*_LIBRARY|.*_LIBRARY_RELEASE|LIBRARY_RELEASE)$"
         OR variable MATCHES "^(VCPKG_|OpenMP_)")
       get_property(type CACHE "${variable}" PROPERTY TYPE)
       if(NOT type STREQUAL "INTERNAL" AND NOT "${${variable}}" MATCHES "-NOTFOUND$")

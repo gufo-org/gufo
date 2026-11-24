@@ -346,7 +346,6 @@
               pkgsSys.findutils
               pkgsSys.icu
               pkgsSys.curl
-              pkgsSys.libpng
               pkgsSys.libwebp
               pkgsSys.libopus
               rustToolchain
@@ -472,7 +471,6 @@
               (pkgsSys.python3.withPackages (ps: [ ps.jsonschema ps.numpy ]))
               pkgsSys.icu
               pkgsSys.curl
-              pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
               pkgsSys.libopus

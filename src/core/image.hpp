@@ -24,6 +24,23 @@ struct Image {
 
 /// PNG, JPEG and WebP. Decoding checks dimensions before allocating pixels.
 [[nodiscard]] Image DecodeImage(std::span<const std::uint8_t> bytes);
+
+struct RgbaImage {
+  std::uint32_t width{0};
+  std::uint32_t height{0};
+  /// Packed, unpremultiplied RGBA8.
+  std::vector<std::uint8_t> rgba;
+};
+
+/// PNG as libpng's simplified API decodes it to 8-bit RGBA: tRNS becomes
+/// alpha, 16-bit samples round to 8 bits, color samples convert from the file
+/// gamma to sRGB, and EXIF orientation is ignored. JPEG and WebP decode as
+/// DecodeImage does, with opaque alpha.
+[[nodiscard]] RgbaImage DecodeImageRgba(std::span<const std::uint8_t> bytes);
+/// An 8-bit RGBA PNG with an sRGB chunk, for width * height pixels in rgba.
+[[nodiscard]] std::vector<std::uint8_t> EncodePngRgba(
+    std::uint32_t width, std::uint32_t height,
+    std::span<const std::uint8_t> rgba);
 [[nodiscard]] std::vector<std::uint8_t> ReadImageFile(
     const std::filesystem::path& path);
 /// Shared across all messages of one HTTP request.

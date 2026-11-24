@@ -66,12 +66,14 @@ configured `rustc` reports for its standard library. The C++
 sanitizer preset does not instrument the Rust library; it uses the development
 profile when configured as Debug.
 
-`png_decode_test` checks expected RGB bytes across color types, sample depths,
-transparency, Adam7 interlacing and EXIF orientations. It fixes the PNG port's intentional framing
-behavior: missing Adler trailers and unknown non-letter chunks are accepted;
-bad IEND CRCs, nonempty IEND and stray IDAT after text are rejected.
-APNG metadata is ignored while decoding the default image. Libpng only
-writes fixtures; no frozen decoder remains.
+`png_test` checks expected RGB and RGBA bytes across color types, sample
+depths, transparency, Adam7 interlacing and EXIF orientations, RGBA gamma
+cases recorded from libpng 1.6.59's simplified API, and encoder round trips.
+It fixes the PNG port's intentional framing behavior: missing Adler trailers
+and unknown non-letter chunks are accepted; bad IEND CRCs, nonempty IEND and
+stray IDAT after text are rejected. APNG metadata is ignored while decoding
+the default image. The test writes its own fixtures with stored deflate
+blocks; no frozen decoder remains.
 
 `jpeg_decode_test` compares the Rust JPEG decoder with the libjpeg-turbo path
 it replaced, frozen in `tests/core/jpeg_reference.cpp`. libjpeg-turbo writes

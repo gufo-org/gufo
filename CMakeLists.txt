@@ -66,7 +66,6 @@ endif()
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
-find_package(PNG REQUIRED)
 if (WIN32)
   # Windows has no system pkg-config; locate the pkgconf tool vcpkg installs.
   # .pc files resolve via CMAKE_PREFIX_PATH, which the vcpkg toolchain already
@@ -400,6 +399,7 @@ add_subdirectory(src/core/npu)
 add_library(gufo_core STATIC
   src/core/base64.cpp
   src/core/image.cpp
+  src/core/png.cpp
   src/core/crypto/sha256.cpp
   src/core/gguf_reader.cpp
   src/core/gguf_identity.cpp
@@ -546,7 +546,7 @@ add_library(gufo_http STATIC
   src/cli/serve/generation_parse.cpp
   src/cli/serve/openai_chat.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_qwen_text PNG::PNG)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_qwen_text)
 
 add_executable(gufo
   src/cli/main.cpp
@@ -999,13 +999,11 @@ endfunction()
   add_test(NAME json_write_test COMMAND json_write_test)
   set_tests_properties(json_write_test PROPERTIES LABELS "cpu;json;correctness")
 
-  # The test writes its PNG cases with zlib directly.
-  find_package(ZLIB REQUIRED)
-  add_executable(png_decode_test
-    tests/core/png_decode_test.cpp)
-  target_link_libraries(png_decode_test PRIVATE gufo_core PNG::PNG ZLIB::ZLIB)
-  add_test(NAME png_decode_test COMMAND png_decode_test)
-  set_tests_properties(png_decode_test PROPERTIES LABELS "cpu;image;correctness")
+  # The test writes its PNG cases itself, with stored deflate blocks.
+  add_executable(png_test tests/core/png_test.cpp)
+  target_link_libraries(png_test PRIVATE gufo_core)
+  add_test(NAME png_test COMMAND png_test)
+  set_tests_properties(png_test PROPERTIES LABELS "cpu;image;correctness")
 
   # libjpeg-turbo writes the cases and is the frozen reference decoder; the
   # shipped binary decodes JPEG in Rust.

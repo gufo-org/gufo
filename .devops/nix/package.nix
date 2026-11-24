@@ -8,6 +8,7 @@
   makeWrapper,
   icu,
   curl,
+  # Only for revisions before the Rust PNG encoder (the CI timing baseline).
   libpng,
   libjpeg,
   libwebp,
@@ -68,6 +69,8 @@ let
   hasRustAudio = builtins.pathExists (sourceRoot + "/src/core/audio_decode/Cargo.toml");
   # Before the Rust JPEG decoder, every build linked libjpeg-turbo.
   hasRustJpeg = builtins.pathExists (sourceRoot + "/src/core/jpeg_decode/Cargo.toml");
+  # Before the Rust PNG encoder, the image service and Qwen-Image linked libpng.
+  hasRustPng = builtins.pathExists (sourceRoot + "/src/core/png/Cargo.toml");
   # A store path has no Git metadata. A flake input or fetcher result still
   # names its commit (`dirtyRev` ends in "-dirty") or at least the hash of its
   # tree; a plain path names nothing.
@@ -172,7 +175,6 @@ stdenv.mkDerivation ({
   buildInputs = [
     icu
     curl
-    libpng
     libwebp
     libopus
     openssl
@@ -187,6 +189,7 @@ stdenv.mkDerivation ({
   ]
   # The JPEG decoder test writes its cases and checks them with libjpeg-turbo.
   ++ lib.optional (checked || !hasRustJpeg) libjpeg
+  ++ lib.optional (!hasRustPng) libpng
   ++ lib.optionals (!hasRustAudio) [
     libsndfile
     soxr

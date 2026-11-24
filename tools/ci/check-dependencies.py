@@ -26,7 +26,6 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "rocPRIM",
     "rocWMMA",
     "OpenSSL",
-    "libpng",
     "libwebp",
     "libopus",
     "httparse (Rust crate)",

@@ -239,7 +239,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gufo-png-decode"
+name = "gufo-png"
 version = "0.0.0"
 dependencies = [
  "gufo-ffi",
@@ -265,7 +265,7 @@ dependencies = [
  "gufo-jpeg-decode",
  "gufo-json",
  "gufo-json-schema",
- "gufo-png-decode",
+ "gufo-png",
  "gufo-websocket",
 ]
 
