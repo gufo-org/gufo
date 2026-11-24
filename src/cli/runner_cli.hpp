@@ -2,9 +2,12 @@
 #define GUFO_CLI_RUNNER_CLI_HPP_
 
 #include <chrono>
+#include <functional>
+#include <iosfwd>
 #include <string>
 
 #include "gufo/ext/text.hpp"
+#include "src/cli/serve/text_generation_backend.hpp"
 
 namespace gufo::cli {
 
@@ -23,6 +26,16 @@ namespace gufo::cli {
                                         const ext::TextProvider& provider,
                                         ext::TextRunnerOptions* options,
                                         std::string* error);
+
+using ChatResultCallback =
+    std::function<void(const server::TextGenerationBackend::Result&)>;
+
+/// The `gufo chat` conversation on `backend`: reads user turns from `in` until
+/// its end, /exit or /quit, streams each answer to `out` and keeps the answers
+/// (reasoning apart) in the history; `on_result` receives each answer.
+int RunChatSession(server::TextGenerationBackend& backend,
+                   const ext::TextPromptOptions& options, std::istream& in,
+                   std::ostream& out, const ChatResultCallback& on_result = {});
 
 [[nodiscard]] int RunRunnerPrompt(const ext::TextPromptOptions& options,
                                   std::chrono::steady_clock::time_point start);

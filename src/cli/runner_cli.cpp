@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/speculative_settings.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -40,6 +41,25 @@ bool PrepareFor(const Options& command, const ext::TextProvider& provider,
   }
 }
 
+// Splits "<open>reasoning<close>answer" with the request's own delimiters,
+// as the server's parsers do.
+void SplitReasoning(const std::string& text, const ext::ReasoningMarkup& markup,
+                    std::string* thought, std::string* content) {
+  const auto close =
+      markup.close.empty() ? std::string::npos : text.rfind(markup.close);
+  if (close == std::string::npos) {
+    *content = text;
+    return;
+  }
+  auto open = markup.open.empty() ? std::string::npos : text.find(markup.open);
+  open =
+      open == std::string::npos || open > close ? 0 : open + markup.open.size();
+  *thought = text.substr(open, close - open);
+  *content = text.substr(close + markup.close.size());
+  const auto first = content->find_first_not_of(" \t\r\n");
+  *content =
+      first == std::string::npos ? std::string() : content->substr(first);
+}
 #if defined(ENGINE_ENABLE_HIP)
 // The server's backend with one session, for the provider's runner.
 template<typename Options>
@@ -82,25 +102,6 @@ void PrintStats(const server::TextGenerationBackend::Result& result) {
   }
 }
 
-// Splits "<open>reasoning<close>answer" with the request's own delimiters,
-// as the server's parsers do.
-void SplitReasoning(const std::string& text, const ext::ReasoningMarkup& markup,
-                    std::string* thought, std::string* content) {
-  const auto close =
-      markup.close.empty() ? std::string::npos : text.rfind(markup.close);
-  if (close == std::string::npos) {
-    *content = text;
-    return;
-  }
-  auto open = markup.open.empty() ? std::string::npos : text.find(markup.open);
-  open =
-      open == std::string::npos || open > close ? 0 : open + markup.open.size();
-  *thought = text.substr(open, close - open);
-  *content = text.substr(close + markup.close.size());
-  const auto first = content->find_first_not_of(" \t\r\n");
-  *content =
-      first == std::string::npos ? std::string() : content->substr(first);
-}
 #endif
 
 }  // namespace
@@ -115,6 +116,41 @@ bool PrepareRunnerOptions(const ext::TextBenchOptions& command,
                           const ext::TextProvider& provider,
                           ext::TextRunnerOptions* options, std::string* error) {
   return PrepareFor(command, provider, options, error);
+}
+
+int RunChatSession(server::TextGenerationBackend& backend,
+                   const ext::TextPromptOptions& opt, std::istream& in,
+                   std::ostream& out, const ChatResultCallback& on_result) {
+  server::ChatRequest request;
+  request.reasoning.enabled = opt.thinking_mode();
+  if (!opt.system_prompt.empty())
+    request.messages.emplace_back(ext::ChatRole::kSystem, opt.system_prompt);
+  const auto print = [&out](const server::TokenPiece& piece) {
+    out << piece.text << std::flush;
+    return true;
+  };
+  for (std::string line;;) {
+    out << "\n> " << std::flush;
+    if (!std::getline(in, line) || line == "/exit" || line == "/quit")
+      break;
+    if (line.empty())
+      continue;
+    request.messages.emplace_back(ext::ChatRole::kUser, line);
+    // Streamed: without it the scheduler hands Wait no pieces to print.
+    const auto pending =
+        backend.start_chat(request, opt.max_tokens, opt.sampling, {},
+                           /*stream_output=*/true);
+    const auto result = pending->Wait(print);
+    std::string thought, content;
+    SplitReasoning(result.text, pending->ReasoningDelimiters(), &thought,
+                   &content);
+    request.messages.emplace_back(ext::ChatRole::kAssistant, content,
+                                  std::string(), thought);
+    out << "\n";
+    if (on_result)
+      on_result(result);
+  }
+  return 0;
 }
 
 int RunRunnerPrompt(const ext::TextPromptOptions& opt,
@@ -164,34 +200,11 @@ int RunRunnerChat(const ext::TextPromptOptions& opt,
     server::InferenceBackend backend;
     if (!LoadBackend(&backend, opt, opt.vision_model_path, start))
       return 1;
-    server::ChatRequest request;
-    request.reasoning.enabled = opt.thinking_mode();
-    if (!opt.system_prompt.empty())
-      request.messages.emplace_back(ext::ChatRole::kSystem, opt.system_prompt);
-    const auto print = [](const server::TokenPiece& piece) {
-      std::cout << piece.text << std::flush;
-      return true;
-    };
-    for (std::string line;;) {
-      std::cout << "\n> " << std::flush;
-      if (!std::getline(std::cin, line) || line == "/exit" || line == "/quit")
-        break;
-      if (line.empty())
-        continue;
-      request.messages.emplace_back(ext::ChatRole::kUser, line);
-      const auto pending =
-          backend.start_chat(request, opt.max_tokens, opt.sampling);
-      const auto result = pending->Wait(print);
-      std::string thought, content;
-      SplitReasoning(result.text, pending->ReasoningDelimiters(), &thought,
-                     &content);
-      request.messages.emplace_back(ext::ChatRole::kAssistant, content,
-                                    std::string(), thought);
-      std::cout << "\n";
-      if (opt.verbose)
-        PrintStats(result);
-    }
-    return 0;
+    return RunChatSession(backend, opt, std::cin, std::cout,
+                          [&](const server::TextGenerationBackend::Result& r) {
+                            if (opt.verbose)
+                              PrintStats(r);
+                          });
   } catch (const std::exception& exception) {
     std::cerr << "\nError: " << exception.what() << "\n";
     return 1;
