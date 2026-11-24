@@ -83,6 +83,12 @@ public:
   /// A reasoning budget closed the thought: no second thinking block may open
   /// (the model reopens one right after the forced close). Per request.
   bool budget_closed{false};
+  /// A thought of this turn closed. With a call required no second one may
+  /// open (Select): a model that decides against the call thinks again
+  /// instead, past the one reasoning span the parsers know, until the token
+  /// limit. With tools it may call, a second thought often plans the call, so
+  /// it stays. Per request.
+  bool thought_closed{false};
   /// A call is required: after a header the model writes a thought (unless
   /// reasoning is off or a budget closed it) or one declared function name
   /// (the tokens the template writes for it), then the invoke token (see
@@ -502,6 +508,18 @@ public:
     return {std::string(::inkling2::text::dialect::kReasoningOpen),
             std::string(::inkling2::text::dialect::kEndMessage)};
   }
+  /// Grammars see the tokens' own bytes. The prompt already wrote the
+  /// thought's header, so the model opens it with <|content_thinking|> alone
+  /// (the streamed opener would make it write a second header, or skip the
+  /// thought), and closes it with the answer block's framing, which the
+  /// streamed text drops. A call written after the thought ends the phase at
+  /// its header.
+  [[nodiscard]] std::optional<ReasoningMarkup> ReasoningGrammarMarkers(
+      const g::ChatRequest&) const override {
+    return ReasoningMarkup{
+        std::string(::inkling2::text::dialect::kThinking),
+        std::string(::inkling2::text::dialect::kReasoningClose)};
+  }
   [[nodiscard]] std::uint32_t VocabularySize() const override {
     return static_cast<std::uint32_t>(tok_->VocabSize());
   }
@@ -666,6 +684,7 @@ public:
             ? std::static_pointer_cast<const Inkling2PromptContext>(context)
             : nullptr;
     st.budget_closed = false;
+    st.thought_closed = false;
     st.reasoning_off = c != nullptr && c->reasoning_off;
     st.call_required = c != nullptr && c->call_required;
     st.answer_only = c != nullptr && c->answer_only;
@@ -865,7 +884,8 @@ public:
       if (prefix.empty() && t_invoke_ < raw.size())
         allowed.push_back(t_invoke_);  // a call without the first name
       if (prefix.empty() && st.block == Block::kAfterHeader &&
-          !st.reasoning_off && !st.budget_closed && t_thinking_ < raw.size())
+          !st.reasoning_off && !st.budget_closed && !st.thought_closed &&
+          t_thinking_ < raw.size())
         allowed.push_back(t_thinking_);  // a thought before the call
       for (const auto& name : st.call_names) {
         if (name.size() < prefix.size() ||
@@ -904,6 +924,8 @@ public:
       st.history.push_back(static_cast<std::int32_t>(token));
     if (st.answer_only && st.block == Block::kText && token == t_end_message_)
       st.answer_done = true;
+    if (st.block == Block::kThinking && token == t_end_message_)
+      st.thought_closed = true;
     if (token == t_header_)
       st.call_prefix.clear();
     else if ((st.block == Block::kAfterHeader || st.block == Block::kTool) &&

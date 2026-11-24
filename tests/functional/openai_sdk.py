@@ -1214,8 +1214,8 @@ def check_structured_outputs(client, model, checks, vision=False):
         name: str
         age: int
 
-    # The model's default reasoning, on a request it answers without a thought:
-    # the answer must not be framed away (Inkling 2 Mini lost it as a call).
+    # The model's default reasoning under a schema (Inkling 2 Mini's grammar
+    # once kept its thought from opening, and the answer was lost).
     result = client.chat.completions.parse(
         model=model, messages=[{"role": "user", "content": "Invent a person named Ada who is 36."}],
         temperature=0, seed=31, max_completion_tokens=768, response_format=Person)
