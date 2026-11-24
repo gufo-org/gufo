@@ -16,7 +16,7 @@ with a verb; a reusable workflow's jobs appear as `caller / called job`.
 | `devlab-linux.yml` | Linux validation | Run Linux model checks | Devlab Linux Strix Halo | Prepares while the hosted build runs, then tests once the packages arrive. |
 | `devlab-linux.yml` | Linux validation | Publish results | GitHub Ubuntu | After testing, failures included. Publishes the report and the `devlab/functional` status. |
 | `devlab-comment.yml` | Functional reporting | Update PR comment | GitHub Ubuntu | When Linux validation starts or ends. Keeps the PR comment current, also for forks, without running PR code. |
-| `caches.yml` | Actions caches | Prune caches | GitHub Ubuntu | Reusable after each cache-saving workflow, on PR close, nightly and manual. Deletes closed PRs' caches, superseded per-run entries and, over budget, other refs' least recently used entries. |
+| `caches.yml` | Actions caches | Prune caches | GitHub Ubuntu | Reusable after each cache-saving workflow, on PR close, nightly and manual. Deletes closed PRs' caches, superseded per-run entries and, over budget, other refs' large idle entries. |
 | `pr-title.yml` | PR title | Validate PR title | GitHub Ubuntu | PR opened, edited, reopened or updated. |
 | `docs-website.yml` | Website docs | Request website development docs | GitHub Ubuntu | Pushes to main that change public docs, manual. Sends `gufo-docs` so gufo.blog refreshes its `development` docs. |
 | `release-please.yml` | Release automation | Prepare, merge and publish release | GitHub Ubuntu | Manual. Waits for the required checks, creates the draft release and sends the tag to Toolboxes and the website. Toolboxes publishes the draft. |
@@ -58,14 +58,22 @@ avoid saving copies of `main`'s caches, and `caches.yml` keeps the total below
 
 - After each run, only the newest per-run entry (keys ending in
   `-<run id>-<attempt>`) of each key per branch or PR remains.
-- Then entries of refs other than `main` are deleted, least recently used
-  first, until the cache is below 7 GiB. `main`'s entries are never deleted
+- Then entries of refs other than `main` are deleted, largest and longest
+  idle first (size times idle time), until the cache is below 7 GiB. Thousands
+  of tiny Magic Nix Cache entries go last. `main`'s entries are never deleted
   this way.
 - A closed PR's entries are deleted. Nightly, every ref is swept again, and
   entries of other refs that no run has used for 2 days are deleted.
 - An entry created or restored in the last 15 minutes is never pruned, since a
-  concurrent run may be downloading it. A delete fails the job unless the entry
-  is already gone.
+  concurrent run may be downloading it.
+- One run deletes at most 100 entries, one per second; the next run or the
+  nightly sweep continues. A rate limit (HTTP 429, or a 403 reporting one) is
+  retried after `Retry-After`, or `X-RateLimit-Reset` once the hourly quota is
+  spent, else after 60 s, doubling. Retries take up to 4 minutes in total, then
+  the prune stops with a warning. Any other failed delete, such as
+  a missing permission, fails the job; an entry already gone does not.
+
+`tools/ci/prune_caches.py` implements this; its tests stub `gh`.
 
 Which runs save each cache:
 

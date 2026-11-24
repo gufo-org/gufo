@@ -72,7 +72,7 @@ list(APPEND gufo_pr_tests
   cache_workloads_test cache_disk_faults_test
   cache_boundary_test sched_boundary_test
   npu_decoder_plan_test npu_prefill_plan_test kernel_resources_parser_test check_docs_test check_pr_title_test
-  cache_growth_test
+  cache_growth_test prune_caches_test
   generate_infrastructure_test extension_distribution_test
   check_extension_isolation_test extension_isolation_report
   extension_core_model_includes_gate extension_serving_boundary_gate
