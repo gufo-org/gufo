@@ -73,6 +73,13 @@ void PrintStats(const server::TextGenerationBackend::Result& result) {
   std::cerr << "\n[" << result.prompt_tokens << " prompt tokens, "
             << result.completion_tokens << " generated; prefill " << prefill
             << " tok/s, decode " << decode << " tok/s]\n";
+  if (result.draft_rounds > 0) {
+    std::cerr << "[Speculative]: cycles=" << result.draft_rounds
+              << " drafted=" << result.draft_tokens
+              << " accepted=" << result.draft_accepted_tokens
+              << " lookup_proposed=" << result.lookup_tokens
+              << " lookup_accepted=" << result.lookup_accepted_tokens << '\n';
+  }
 }
 
 // Splits "<open>reasoning<close>answer" with the request's own delimiters,

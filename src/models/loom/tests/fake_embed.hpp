@@ -33,6 +33,8 @@ struct State {
   Script script;
   std::vector<Epoch> epochs;
   bool declares_logits{true};
+  // Verified tokens per step of the package's drafter; 0 without one.
+  std::uint32_t draft_depth{0};
   // What the fake chat program renders for the placeholder tool call.
   std::string tool_call_text{
       "<tool_call>\n{\"name\": \"qprobe\", \"arguments\": {\"zz\": "

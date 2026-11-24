@@ -32,15 +32,25 @@ std::size_t dispatched_draft_tokens = 0;
 std::size_t dispatched_min_draft_tokens = 0;
 std::string dispatched_draft_policy;
 bool invalid_defaults = false;
-// What the runner-only provider's factory last received.
+// What the runner-only providers' factories last received and answered.
 int runner_created = 0;
 gufo::ext::TextSpeculativeConfig runner_speculative;
+std::string runner_error;
 
+// The runner of `runner-text` drafts from a separate file; `self-draft-text`
+// checkpoints carry their own draft, as EXL3 Flash-Next packs do. Neither
+// returns a runner: the error tells which way the factory decided.
 std::shared_ptr<gufo::ext::TextModelRunner> CreateRunner(
-    const gufo::ext::TextRunnerOptions& options, std::string* error) {
+    const gufo::ext::TextRunnerOptions& options, bool self_draft,
+    std::string* error) {
   ++runner_created;
   runner_speculative = options.speculative;
-  *error = "fixture runner";
+  const bool missing = options.speculative.backend !=
+                           gufo::ext::TextSpeculativeBackend::kDisabled &&
+                       options.speculative.draft_model_path.empty();
+  *error = missing && !self_draft ? "fixture runner requires a draft model"
+                                  : "fixture runner";
+  runner_error = *error;
   return nullptr;
 }
 
@@ -72,6 +82,13 @@ int Dispatch(std::string_view command, const gufo::core::GgufReader& reader,
   dispatched = std::string(command) + ":" + std::string(architecture);
   dispatched_options = options;
   return 42;
+}
+
+// A model directory a runner-only provider claims holds a file named after it.
+bool ProbeDirectory(std::string_view root, std::string_view provider) {
+  std::error_code error;
+  return std::filesystem::is_regular_file(
+      std::filesystem::path(root) / std::string(provider), error);
 }
 
 bool ProbeArchitecture(const gufo::core::GgufReader& reader,
@@ -173,16 +190,38 @@ void gufo::ext::RegisterBuiltExtensions(gufo::ext::Registry& registry) {
   // Has no drivers: the commands load its runner through the server backend.
   registry.AddTextProvider({
       .id = "runner-text",
+      .probe =
+          +[](std::string_view root) {
+            return ProbeDirectory(root, "runner-text");
+          },
       .probe_gguf =
           +[](const core::GgufReader& reader) {
             return ProbeArchitecture(reader, "runner-text");
           },
-      .create = &CreateRunner,
+      .create =
+          +[](const TextRunnerOptions& options, std::string* error) {
+            return CreateRunner(options, false, error);
+          },
       .speculative_defaults = {{.backend = "mtp",
                                 .max_draft_tokens = 5,
                                 .min_draft_tokens = 3,
                                 .draft_policy = "calibrated",
                                 .draft_policies = {"calibrated"}}},
+  });
+  registry.AddTextProvider({
+      .id = "self-draft-text",
+      .probe =
+          +[](std::string_view root) {
+            return ProbeDirectory(root, "self-draft-text");
+          },
+      .probe_gguf =
+          +[](const core::GgufReader& reader) {
+            return ProbeArchitecture(reader, "self-draft-text");
+          },
+      .create =
+          +[](const TextRunnerOptions& options, std::string* error) {
+            return CreateRunner(options, true, error);
+          },
   });
   // Owns a tensor layout core cannot size; the others never see such a file.
   registry.AddTextProvider({
@@ -436,9 +475,10 @@ bool CheckSamplingDefaults(std::string_view command, const char* model) {
 
 // The runner options `flags` give a provider without a driver, as the command
 // parses them and prepares its runner; false when either rejects them.
-bool PrepareRunner(std::string_view command, std::vector<const char*> flags,
+bool PrepareRunner(std::string_view command, std::string_view provider_id,
+                   std::vector<const char*> flags,
                    gufo::ext::TextRunnerOptions* options) {
-  const auto* provider = gufo::ext::FindTextProvider("runner-text");
+  const auto* provider = gufo::ext::FindTextProvider(provider_id);
   std::string error;
   if (command == "bench") {
     const auto parsed = gufo::cli::ParseBenchOptions(flags, &error);
@@ -457,6 +497,7 @@ bool PrepareRunner(std::string_view command, std::vector<const char*> flags,
 // The preparation is checked in every build; the load needs the GPU engine.
 bool CheckRunnerSpeculative(std::string_view command,
                             const std::string& model) {
+  runner_error.clear();
   using Backend = gufo::ext::TextSpeculativeBackend;
   struct Case {
     std::vector<const char*> flags;
@@ -499,7 +540,7 @@ bool CheckRunnerSpeculative(std::string_view command,
   };
   for (const auto& entry : cases) {
     gufo::ext::TextRunnerOptions prepared;
-    if (!PrepareRunner(command, entry.flags, &prepared) ||
+    if (!PrepareRunner(command, "runner-text", entry.flags, &prepared) ||
         !matches(prepared.speculative, entry)) {
       return Fail(command,
                   "the runner options must carry the speculative "
@@ -519,19 +560,70 @@ bool CheckRunnerSpeculative(std::string_view command,
       return Fail(command, "the runner must receive the speculative settings");
     }
   }
-  // A backend without its draft model fails before any runner loads.
-  for (const auto* backend : {"mtp", "dflash2", "dspark"}) {
-    runner_created = 0;
-    if (Run(command, model, {"--speculative", backend}) != 2 ||
-        runner_created != 0) {
-      return Fail(command, "a backend without its draft model must fail");
+  return true;
+}
+
+// Without its draft model a backend still reaches a runner, from a GGUF or a
+// model directory, which decides as under `gufo serve`: a checkpoint may carry
+// its own draft. A provider's own drivers read the draft model from the
+// command line, so the command rejects a missing one before dispatching.
+struct RunnerModel {
+  std::string path;
+  bool self_draft;
+};
+
+bool CheckMissingDraftModel(std::string_view command,
+                            const std::string& driver_model,
+                            const std::vector<RunnerModel>& runner_models) {
+  using Backend = gufo::ext::TextSpeculativeBackend;
+  const struct {
+    const char* backend;
+    Backend expected;
+  } backends[] = {{"mtp", Backend::kMtp},
+                  {"dflash2", Backend::kDFlash},
+                  {"dspark", Backend::kDSpark}};
+  for (const auto& [backend, expected] : backends) {
+    const std::vector<const char*> flags = {"--speculative", backend};
+    for (const auto* provider : {"runner-text", "self-draft-text"}) {
+      gufo::ext::TextRunnerOptions prepared;
+      if (!PrepareRunner(command, provider, flags, &prepared) ||
+          prepared.speculative.backend != expected ||
+          !prepared.speculative.draft_model_path.empty()) {
+        return Fail(command,
+                    "a runner must receive a backend without its "
+                    "draft model");
+      }
+    }
+    for (const auto& [model, self_draft] : runner_models) {
+      runner_created = 0;
+      runner_speculative = {};
+      runner_error.clear();
+      const int status = Run(command, model, flags);
+#if defined(ENGINE_ENABLE_HIP)
+      const bool decided =
+          status == 1 && runner_created == 1 &&
+          runner_speculative.backend == expected &&
+          runner_error == (self_draft ? "fixture runner"
+                                      : "fixture runner requires a draft "
+                                        "model");
+#else
+      // Without the GPU engine no runner loads.
+      (void)self_draft;
+      const bool decided = status == 1 && runner_created == 0;
+#endif
+      if (!decided) {
+        return Fail(command, "the runner must decide on a missing draft model");
+      }
+    }
+    if (Run(command, driver_model, flags) != 2 || !dispatched.empty()) {
+      return Fail(command, "a driver must not run without its draft model");
     }
   }
   return true;
 }
 
-// Each backend drafts from its own option's model; unknown backends and
-// missing draft models are refused.
+// Each backend drafts from its own option's model, which may be empty; unknown
+// backends are refused. RequireDraftModel refuses an empty draft model.
 bool CheckSpeculativeConfig() {
   using Backend = gufo::ext::TextSpeculativeBackend;
   const auto is = [](std::string_view backend, const std::string& draft,
@@ -542,7 +634,7 @@ bool CheckSpeculativeConfig() {
   };
   const auto rejects = [](std::string_view backend, std::string_view message) {
     try {
-      (void)gufo::cli::SpeculativeConfigFor(backend, {}, {}, {});
+      gufo::cli::RequireDraftModel(backend, {}, {}, {});
     } catch (const std::invalid_argument& exception) {
       return std::string_view(exception.what()) == message;
     }
@@ -559,9 +651,18 @@ bool CheckSpeculativeConfig() {
               .draft_model_path == "s" &&
       is("mtp", "d", Backend::kMtp, "d") &&
       is("dflash2", "d", Backend::kDFlash, "d") &&
-      is("dspark", "d", Backend::kDSpark, "d");
+      is("dspark", "d", Backend::kDSpark, "d") &&
+      is("mtp", "", Backend::kMtp, "");
+  bool required = true;
+  try {
+    gufo::cli::RequireDraftModel("", {}, {}, {});
+    gufo::cli::RequireDraftModel("off", {}, {}, {});
+    gufo::cli::RequireDraftModel("mtp", "m", {}, {});
+  } catch (const std::invalid_argument&) {
+    required = false;
+  }
   const bool rejected =
-      rejects("mtp", "MTP requires --mtp-model") &&
+      required && rejects("mtp", "MTP requires --mtp-model") &&
       rejects("dflash2", "DFlash2 requires --dflash-model") &&
       rejects("dspark", "DSpark requires --dspark-model") &&
       rejects("eagle", "speculative backend 'eagle' is not supported");
@@ -627,7 +728,21 @@ int main(int argc, char** argv) {
   const auto path = write_model("test-text");
   const auto other_path = write_model("other-text");
   const auto runner_path = write_model("runner-text");
-  if (path.empty() || other_path.empty() || runner_path.empty()) {
+  const auto self_draft_path = write_model("self-draft-text");
+  // Model directories the runner-only providers claim.
+  const auto write_directory = [](std::string_view provider) {
+    const auto root =
+        std::filesystem::temp_directory_path() /
+        ("gufo-text-dispatch-" + std::to_string(gufo::platform::ProcessId()) +
+         "-" + std::string(provider));
+    std::filesystem::create_directories(root);
+    std::ofstream(root / std::string(provider)) << "";
+    return root;
+  };
+  const auto runner_dir = write_directory("runner-text");
+  const auto self_draft_dir = write_directory("self-draft-text");
+  if (path.empty() || other_path.empty() || runner_path.empty() ||
+      self_draft_path.empty()) {
     return 1;
   }
   const auto model = path.string();
@@ -648,11 +763,19 @@ int main(int argc, char** argv) {
       CheckProviderOptions(command, model, other_path.string()) &&
       CheckSpeculativeDefaults(command, model, other_path.string()) &&
       CheckHelp(command) && CheckSpeculativeConfig() &&
-      CheckRunnerSpeculative(command, runner_path.string());
+      CheckRunnerSpeculative(command, runner_path.string()) &&
+      CheckMissingDraftModel(command, model,
+                             {{runner_path.string(), false},
+                              {self_draft_path.string(), true},
+                              {runner_dir.string(), false},
+                              {self_draft_dir.string(), true}});
   const bool unsized_ok = CheckUnsizedTensors(command);
   std::filesystem::remove(path);
   std::filesystem::remove(other_path);
   std::filesystem::remove(runner_path);
+  std::filesystem::remove(self_draft_path);
+  std::filesystem::remove_all(runner_dir);
+  std::filesystem::remove_all(self_draft_dir);
   if (!dispatched_command) {
     std::cerr << "FAIL: " << command
               << " must register and dispatch to its built text provider\n";

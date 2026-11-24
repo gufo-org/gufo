@@ -106,6 +106,18 @@ inline std::string DraftOption(const ext::TextSpeculativeConfig& speculative) {
   }
 }
 
+// The --speculative value that selected the backend, for errors.
+inline std::string BackendName(const ext::TextSpeculativeConfig& speculative) {
+  switch (speculative.backend) {
+    case ext::TextSpeculativeBackend::kDFlash:
+      return "dflash2";
+    case ext::TextSpeculativeBackend::kDSpark:
+      return "dspark";
+    default:
+      return "mtp";
+  }
+}
+
 // One opened package; every Loom call is serialized on its mutex (recursive:
 // releasing a cache entry can release a checkpoint inside a runner call).
 class LoomModel {
@@ -184,6 +196,16 @@ public:
       }
     }
     loom_text_embed_info(embed_, &info_);
+    // Loom drafts with the package's drafter: speculation without one would
+    // decode autoregressively, so it is refused rather than ignored.
+    if (options.speculative.backend != ext::TextSpeculativeBackend::kDisabled &&
+        info_.draft_depth == 0) {
+      loom_text_embed_close(embed_);
+      throw std::runtime_error(
+          "loom: --speculative " + BackendName(options.speculative) +
+          " needs a drafter, and this package has none; give one with " +
+          DraftOption(options.speculative));
+    }
     loom_text_embed_logits_info(embed_, &logits_);
     chat_config_ = LoadChatConfig(path);
     fingerprint_ = PackageFingerprint(path, preset);

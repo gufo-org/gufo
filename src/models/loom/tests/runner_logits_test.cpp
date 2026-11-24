@@ -965,8 +965,48 @@ void TestDialectParallelAndEdges() {
 
 }  // namespace
 
+// --speculative is refused, not ignored, for a package without a drafter; one
+// with a drafter loads, and no speculation needs none.
+void TestSpeculativeNeedsDrafter() {
+  std::cerr << "speculative: a package without a drafter refuses it\n";
+  const auto dir =
+      std::filesystem::temp_directory_path() /
+      ("loom_speculative_test_" + std::to_string(gufo::platform::ProcessId()));
+  std::filesystem::create_directories(dir);
+  std::ofstream(dir / "model.json")
+      << R"({"schema_version":1,"programs":{},"services":{"chat":{"kind":"text"}},)"
+         R"("variants":{"v":{"services":{"chat":{"config":{"llm.card":true,)"
+         R"("llm.logits":false}}}}}})";
+  const auto create = [&](ext::TextSpeculativeBackend backend,
+                          std::uint32_t depth, std::string* error) {
+    fake::reset();
+    fake::state().script = PeakScript;
+    fake::state().draft_depth = depth;
+    ext::TextRunnerOptions options;
+    options.model_path = dir.string();
+    options.speculative.backend = backend;
+    return CreateLoomRunner(options, error) != nullptr;
+  };
+  std::string error;
+  CHECK(!create(ext::TextSpeculativeBackend::kMtp, 0, &error));
+  CHECK(error ==
+            "loom: --speculative mtp needs a drafter, and this package has "
+            "none; give one with --mtp-model",
+        error);
+  CHECK(!create(ext::TextSpeculativeBackend::kDFlash, 0, &error));
+  CHECK(error.find("--speculative dflash2") != std::string::npos &&
+            error.find("--dflash-model") != std::string::npos,
+        error);
+  error.clear();
+  CHECK(create(ext::TextSpeculativeBackend::kMtp, 4, &error), error);
+  CHECK(create(ext::TextSpeculativeBackend::kDisabled, 0, &error), error);
+  fake::reset();
+  std::filesystem::remove_all(dir);
+}
+
 int main() {
   TestDevicePathUnchanged();
+  TestSpeculativeNeedsDrafter();
   TestLogprobs();
   TestRepetitionPenalty();
   TestMinP();
