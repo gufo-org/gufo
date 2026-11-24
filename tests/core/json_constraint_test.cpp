@@ -4,6 +4,7 @@
 #include <array>
 #include <barrier>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <initializer_list>
@@ -14,6 +15,7 @@
 #include <thread>
 #include <utility>
 
+#include "src/core/json_constraint_describe.hpp"
 #include "src/core/sampling.hpp"
 
 using gufo::json::parse;
@@ -3181,7 +3183,118 @@ void TestProviderCallListAndKeywordSyntax() {
   assert(!Accepts(*calls, " to=h<|msg|><call name=\"h\"><p a>x</p></call>"));
 }
 
+// Every way a schema becomes a grammar: response formats (strict or not,
+// closed or open objects) and tool parameters in each built-in syntax.
+std::vector<std::string> GrammarDigests(const gufo::json::Value& schema) {
+  using Format = JsonConstraint::ToolFormat;
+  const auto digest = [](const std::string& text) {
+    std::uint64_t hash = 14695981039346656037ull;
+    for (unsigned char byte : text)
+      hash = (hash ^ byte) * 1099511628211ull;
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out(16, '0');
+    for (int i = 15; i >= 0; --i, hash >>= 4)
+      out[static_cast<std::size_t>(i)] = kHex[hash & 15];
+    return out;
+  };
+  const auto describe = [&](const auto& build) {
+    try {
+      return digest(DescribeJsonConstraint(*build()));
+    } catch (const std::exception& error) {
+      return digest(std::string("error ") + error.what());
+    }
+  };
+  std::vector<std::string> digests;
+  for (const bool strict : {false, true})
+    for (const bool open : {false, true})
+      digests.push_back(describe(
+          [&] { return JsonConstraint::Compile(schema, strict, open); }));
+  for (const bool strict : {false, true})
+    for (const auto format : {Format::kJson, Format::kQwen, Format::kDeepSeek})
+      digests.push_back(describe([&] {
+        return JsonConstraint::ToolParameters(schema, strict, format);
+      }));
+  return digests;
+}
+
+// Compiled grammars stay byte-identical across compiler changes that must
+// not alter them. The fixture holds the schemas of these tests, of
+// openai_chat_test, of the llama.cpp goldens and seeded generated unions,
+// intersections and references, each with the digest of every grammar built
+// from it. --write-grammar-digests records them again after an intended
+// grammar change.
+void TestGrammarDigests(bool write) {
+  std::ifstream in(GUFO_JSON_CONSTRAINT_GRAMMARS);
+  assert(in && "grammar digests are present");
+  const auto fixture =
+      parse(std::string(std::istreambuf_iterator<char>(in), {}));
+  in.close();
+  std::size_t index = 0, grammars = 0, differences = 0;
+  std::vector<gufo::json::Value> rows;
+  for (const auto& row : fixture.find("schemas")->items()) {
+    const auto digests = GrammarDigests(*row.find("schema"));
+    if (write) {
+      auto list = gufo::json::Value::array();
+      for (const auto& digest : digests)
+        list.push_back(digest);
+      rows.push_back(row);
+      rows.back()["digests"] = std::move(list);
+    } else {
+      const auto& expected = row.find("digests")->items();
+      assert(expected.size() == digests.size());
+      for (std::size_t mode = 0; mode < digests.size(); ++mode, ++grammars)
+        if (expected[mode].str() != digests[mode]) {
+          std::cerr << "grammar digest mismatch: schema " << index << " mode "
+                    << mode << " " << row.find("schema")->dump() << "\n";
+          ++differences;
+        }
+    }
+    ++index;
+  }
+  if (write) {
+    std::ofstream out(GUFO_JSON_CONSTRAINT_GRAMMARS);
+    out << "{\"note\":" << fixture.find("note")->dump() << ",\"schemas\":[\n";
+    for (std::size_t i = 0; i < rows.size(); ++i)
+      out << (i ? ",\n" : "") << rows[i].dump();
+    out << "\n]}\n";
+    return;
+  }
+  assert(differences == 0);
+  assert(grammars >= 6000);
+}
+
+// A definition whose union or intersection names itself several times once
+// cost branches^8 visits to classify each parameter's value kinds, before
+// any grammar was built.
+void TestRecursiveCombinatorsCompileQuickly() {
+  using Format = JsonConstraint::ToolFormat;
+  for (const std::string kind : {"allOf", "anyOf", "oneOf"})
+    for (const int branches : {2, 12, 32}) {
+      std::string parts;
+      for (int i = 0; i < branches; ++i)
+        parts += std::string(i ? "," : "") + R"({"$ref":"#/$defs/a"})";
+      const auto schema =
+          parse(R"({"type":"object","$defs":{"a":{")" + kind + R"(":[)" +
+                parts + R"(]}},"properties":{"x":{"$ref":"#/$defs/a"}}})");
+      const auto start = std::chrono::steady_clock::now();
+      for (const auto format :
+           {Format::kJson, Format::kQwen, Format::kDeepSeek})
+        for (const bool strict : {false, true})
+          try {
+            (void)JsonConstraint::ToolParameters(schema, strict, format);
+          } catch (const std::invalid_argument&) {
+            assert(strict);
+          }
+      assert(std::chrono::steady_clock::now() - start <
+             std::chrono::seconds(1));
+    }
+}
+
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--write-grammar-digests") {
+    TestGrammarDigests(true);
+    return 0;
+  }
   // Batch probes for the independent Python JSON Schema validator. This
   // exercises the production byte matcher without requiring model weights.
   if (argc == 2 && std::string_view(argv[1]) == "--probe") {
@@ -3214,6 +3327,8 @@ int main(int argc, char** argv) {
     }
     return 0;
   }
+  TestGrammarDigests(false);
+  TestRecursiveCombinatorsCompileQuickly();
   TestNestedToolObjectDefaults();
   TestNumberDigitLimits();
   TestObjectMemberOrders();
