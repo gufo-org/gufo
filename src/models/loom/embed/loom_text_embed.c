@@ -1477,13 +1477,6 @@ static loom_serve_text_state_t* loom_text_embed_state(loom_text_embed_t* embed) 
   return &embed->model->state;
 }
 
-static iree_device_size_t loom_text_embed_recurrent_bytes(
-    loom_serve_text_state_t* state) {
-  return state->recurrent.buffers && state->recurrent.buffers[0]
-             ? iree_hal_buffer_byte_length(state->recurrent.buffers[0])
-             : 0;
-}
-
 LOOM_TEXT_EMBED_EXPORT void loom_text_embed_image_layout(
     loom_text_embed_t* embed, loom_text_embed_image_layout_t* out_layout) {
   loom_serve_text_state_t* state = loom_text_embed_state(embed);
@@ -1494,8 +1487,7 @@ LOOM_TEXT_EMBED_EXPORT void loom_text_embed_image_layout(
             storage->regions[r].blocks.block_bytes;
   }
   out_layout->block_size = (uint32_t)storage->block_size;
-  out_layout->fixed_bytes =
-      loom_text_embed_recurrent_bytes(state) + storage->carry_stride;
+  out_layout->fixed_bytes = storage->recurrent.length + storage->carry_stride;
   out_layout->page_bytes = page;
   out_layout->supported = state->memory.buffers[1] != NULL;
 }
@@ -1525,8 +1517,6 @@ LOOM_TEXT_EMBED_EXPORT void loom_text_embed_memory(
   }
 }
 
-// recurrent_slot UINT32_MAX plans a suspended checkpoint: only lengths and
-// the image side are meaningful then.
 static iree_status_t loom_text_embed_image_plan(
     loom_serve_text_state_t* state, iree_host_size_t checkpoint_index,
     uint32_t recurrent_slot, uint32_t block_count, const uint32_t* blocks,
@@ -1534,10 +1524,13 @@ static iree_status_t loom_text_embed_image_plan(
   memset(out_plan, 0, sizeof(*out_plan));
   const loom_serve_text_storage_t* storage = &state->storage;
   iree_hal_buffer_t* views[5] = {0};
-  if (state->recurrent.buffers && state->recurrent.buffers[0]) {
-    views[TEXT_RECURRENT - TEXT_CONTROL] =
-        state->recurrent.buffers[recurrent_slot == UINT32_MAX ? 0
-                                                              : recurrent_slot];
+  if (storage->recurrent.length) {
+    iree_hal_buffer_t* view = state->recurrent.buffers[recurrent_slot];
+    if (!view) {
+      return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                              "checkpoint recurrent view is unavailable");
+    }
+    views[TEXT_RECURRENT - TEXT_CONTROL] = view;
   }
   // Loom merges consecutive physical pages into one range (and may group
   // capture and restore differently), so its ranges are split back into one
@@ -1759,6 +1752,11 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_checkpoint_import(
       needed > pages->available) {
     return 1;
   }
+  // SDK 0.3 stores page IDs in a mapping owned by each checkpoint.
+  uint32_t* blocks = NULL;
+  iree_status_t status = iree_allocator_malloc_array_uninitialized(
+      state->host_allocator, needed, sizeof(*blocks), (void**)&blocks);
+  if (!iree_status_is_ok(status)) EMBED_RETURN(embed, status);
   // As Loom resumes a suspended endpoint: fresh IDs, committed backing, then
   // the image's contents in logical order.
   uint32_t index = 0;
@@ -1767,12 +1765,25 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_checkpoint_import(
       &state->checkpoints.values[index];
   endpoint->position = info->position;
   endpoint->source_position = info->source_position;
+  endpoint->blocks = blocks;
   loom_runtime_block_pool_acquire(&state->cache.pool, needed, endpoint->blocks);
   endpoint->block_count = needed;
   loom_runtime_block_pool_acquire(&state->recurrent.pool, 1,
                                 &endpoint->recurrent_slot);
+  const uint32_t slot = endpoint->recurrent_slot;
+  const loom_serve_text_storage_t* storage = &state->storage;
+  if (storage->recurrent.length && !state->recurrent.buffers[slot]) {
+    status = iree_hal_buffer_subspan(
+        state->row_arena, storage->recurrent.origin + slot * storage->recurrent.stride,
+        storage->recurrent.length, state->host_allocator,
+        &state->recurrent.buffers[slot]);
+    if (!iree_status_is_ok(status)) {
+      loom_serve_text_state_checkpoint_release(endpoint);
+      EMBED_RETURN(embed, status);
+    }
+  }
   loom_text_embed_image_plan_t plan;
-  iree_status_t status = loom_text_embed_image_plan(
+  status = loom_text_embed_image_plan(
       state, index, endpoint->recurrent_slot, needed, endpoint->blocks, &plan);
   bool admitted = false;
   if (iree_status_is_ok(status) && loom_text_embed_image_size(&plan) != size) {
@@ -1809,6 +1820,7 @@ LOOM_TEXT_EMBED_EXPORT int loom_text_embed_checkpoint_import(
     if (!iree_status_is_ok(status)) EMBED_RETURN(embed, status);
     return 1;
   }
+  loom_serve_text_state_backing_checkpoint_changed(endpoint);
   loom_serve_text_checkpoint_t* checkpoint = &embed->model->checkpoints[index];
   *checkpoint = (loom_serve_text_checkpoint_t){
       .model = embed->model,

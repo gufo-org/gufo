@@ -40,9 +40,9 @@ Useful options:
 
 Loom runs on Linux and Windows, on the Strix Halo GPU, and needs no ROCm.
 
-- Building from source also builds the Loom runtime, which needs CMake 3.26
-  (4.2 on Windows), Python 3.12 and network access. To skip Loom, pass
-  `-DGUFO_EXTENSIONS=<list>` without it.
+- To build the Loom runtime from source, you need CMake 3.26 (4.2 on
+  Windows), Python 3.12, network access, and a C++23 toolchain with
+  `std::expected`. To skip Loom, pass `-DGUFO_EXTENSIONS=<list>` without it.
 - In a container, add `--security-opt seccomp=unconfined --ulimit memlock=-1`.
 - On Windows, turn on Developer Mode, or keep `TMP` on the same drive as your
   models.
