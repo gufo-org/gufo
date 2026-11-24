@@ -173,25 +173,49 @@ The engine is unchanged; the host side is checked against the round-5 build:
   1, 2, 4, 8), 28 single requests (greedy and seeded) and 8 copy requests
   are byte-identical between the builds and between AR and DSpark.
 
-### Open: a stall with eight sessions and RAM checkpoints
+### Resolved: a stall with eight sessions and RAM checkpoints
 
 `tests/functional/run.py --suite cache-concurrency` with `--sessions 8
---context 32768` does not finish: after its groups of four concurrent
-requests that share a prefix, an uncached repeat of one of them (a lone cold
-prefill of 1,868 or 7,343 tokens) never completes, and every later request
-waits behind it. The scheduler thread waits for device work that never
-finishes (seen in `hipStreamSynchronize` on the default stream and in the
-fence of a device-to-host copy); every other thread is idle and nothing is
-logged. Under a debugger it reproduces at the same request each time.
+--context 32768` used to stall on an uncached repeat after the groups of
+four requests that share a prefix: the scheduler waited for device work that
+never finished. On `53c31dd1` (the branch rebased on main `38a1589c`) it
+passes 4 of 4 runs (58.0 to 59.0 s, one of them with DSpark), as it does on
+a second machine and on Windows. It needed RAM checkpoints, whose K/V pages
+the sessions share; main changed that path meanwhile (eager clears finished
+before a state region is published, linear-time backing reservation, session
+pages kept for checkpoints and restored by mapping).
 
-- With `--sessions 4` the suite passes (58 s); with `--sessions 8
-  --cache-ram-bytes off` every request completes (the suite then fails only
-  its sharing assertions), so the stall needs RAM checkpoints, whose K/V
-  pages the sessions share.
-- It does not depend on DSpark (it stalls without `--dspark-model`), on the
-  round-5 weight prefetch or on round 6 (the round-4 build stalls the same
-  way), and `state-edges` at eight sessions passes on its own (its earlier
-  time-out followed this stall in the same server).
-- Not investigated further: the kernel log (device faults) could not be read
-  from this account.
+## Round 11: serving (November 24)
 
+Every engine and kernel output is unchanged: `inkling2_oracle` dumps of
+both paths (9,300 WikiText-2 positions) are byte-identical to the round-10
+build's, and `inkling2_cache_test` passes (restores and layered prefill
+bit-exact).
+
+- **Decoding inside prefill yields.** `inkling2_spec_test` now starts with
+  seven sessions decoding in the yields of an eighth's 5,000-token layered
+  prefill on a fresh engine (batches of 2 to 7, every third yield a batched
+  verification): 11 yields, 59 decoded rows, 0 mismatched against each
+  session's lone decode, and the yielded prefill's logits equal an unsplit
+  prefill's.
+- **DSpark on a real prompt.** The drafter check now decodes a chat prompt
+  (a C coding request): 128 tokens equal to plain decoding, 82 of 315
+  proposals kept (26.0%); the test requires 20%.
+- **Reasoning off** keeps Gufo's framing (no thought). The official template's
+  level 0, which llama.cpp uses for thinking off, still thinks: 29 to 345
+  tokens on eight short prompts (greedy), 29 to 513 at the default 0.9. With
+  it, 14 of the first 16 functional suites failed their no-reasoning
+  assertions. Required calls with thinking on are now masked like those with
+  thinking off (a thought, then one declared name and the invoke token).
+- **Host memory**: a loaded server with DSpark holds 0.38 GB RSS against
+  18.1 GB before on Linux (17.9 GB of file pages).
+- **Cancellation**: after a client disconnects mid-prefill, the next
+  request's one-token reply takes 42 to 60 ms against 0.09 to 1.74 s before;
+  the 34K-token prefill throughput is unchanged within 0.3%.
+- **Functional suites** (DSpark and vision, `--sessions 4 --context
+  32768`; 22 suites plus the cache suite's disk and cancel cases) on this
+  build and on `53c31dd1`: the same suites pass and fail (the failures are
+  the model behaviour above: tools, tool-edges, tool-agent, tool-streaming,
+  tool-reasoning, reasoning-separator, reasoning-budget, batch), and all 486
+  matched requests return the same output; the one unmatched request is a
+  `batch` request indexed by arrival order.

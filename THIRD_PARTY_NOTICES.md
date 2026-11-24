@@ -28,6 +28,7 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | libopus | Linked; Ogg Opus audio decoding; [license text](licenses/libopus.txt) | `BSD-3-Clause` | 1.6.1; flake.lock | [xiph/opus](https://github.com/xiph/opus) |
 | Loom / hrx-system | `libloom_text_embed`, loaded at run time by the loom extension; built from source with the third-party libraries its `MODULE.cmake.lock` pins, linked statically; [license](https://github.com/ROCm/hrx-system/blob/0cd370f2baaa0cfef47cc23007f1a109906f8a52/LICENSE), installed beside the library | `Apache-2.0 WITH LLVM-exception` | v0.2.0 (`0cd370f2baaa0cfef47cc23007f1a109906f8a52`); `src/models/loom/runtime.cmake`, `.devops/nix/hrx/loom-runtime.nix` | [ROCm/hrx-system](https://github.com/ROCm/hrx-system) |
 | loom-gufo-extension | Adapted loom extension, embedding library and tools (`src/models/loom`); [license](src/models/loom/LICENSE) | `MIT` | 0.3.6 (`683a9bf7e4190df1376d27e55c4e0a53f2fa53d1`) | [loom-fun/loom-gufo-extension](https://github.com/loom-fun/loom-gufo-extension) |
+| inkling2-gufo | Adapted Inkling 2 Mini engine, kernels, tokenizer, chat template, tool dialect and vision encoder (`src/models/inkling2`); [license](src/models/inkling2/LICENSE.inkling2), [notices](src/models/inkling2/THIRD_PARTY.md) | `MIT` | 0.1.2 (`8bb6cd5eaa76c3aa27c74ca005622735aa294a98`) | [headbouyJB/inkling2-gufo](https://github.com/headbouyJB/inkling2-gufo) |
 | mlir-aie (IRON) | Adapted NPU GEMM core kernel (`src/core/npu/kernels/bfpgemm/bfpgemm.cc`) and vendored kernel headers (`src/core/npu/kernels/bfpgemm/vendor/`); its Python toolchain compiles the NPU designs at build time | `Apache-2.0 WITH LLVM-exception AND MIT` | 1.4.5; `.devops/nix/iron` | [Xilinx/mlir-aie](https://github.com/Xilinx/mlir-aie) |
 | httparse (Rust crate) | Statically linked; HTTP request heads | `MIT OR Apache-2.0` | 1.10.1; Cargo.lock | [seanmonstar/httparse](https://github.com/seanmonstar/httparse) |
 | png (Rust crate) | Statically linked; PNG decoding | `MIT OR Apache-2.0` | 0.18.1; Cargo.lock | [image-rs/image-png](https://github.com/image-rs/image-png) |
@@ -46,13 +47,15 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | ccv TensorOps ancestry | Attribution retained through h3.c | `BSD-3-Clause` | h3.c pin above | [liuliu/ccv](https://github.com/liuliu/ccv) |
 
 Upstream license texts are retained in `licenses/` and
-[src/models/deepseek_v4_flash/LICENSE.ds4](src/models/deepseek_v4_flash/LICENSE.ds4).
+[src/models/deepseek_v4_flash/LICENSE.ds4](src/models/deepseek_v4_flash/LICENSE.ds4)
+and [src/models/inkling2/LICENSE.inkling2](src/models/inkling2/LICENSE.inkling2).
 CMake installs these with `LICENSE`, `NOTICE` and this inventory under
 `share/licenses/gufo`. Preserve embedded copyright notices when modifying
 adapted code. Model-private changes and import boundaries are recorded in the
 [DS4 provenance](src/models/deepseek_v4_flash/UPSTREAM.md),
 [DS4 HIP import](src/models/deepseek_v4_flash/kernels/rocm/mmq/VENDOR.md),
-[Flash-Next HIP import](src/models/qwen38_flash_next/kernels/rocm/mmq/VENDOR.md)
+[Flash-Next HIP import](src/models/qwen38_flash_next/kernels/rocm/mmq/VENDOR.md),
+[Inkling 2 Mini import](src/models/inkling2/THIRD_PARTY.md)
 and [H3 quality record](docs/internal/models/minimax-h3/QUALITY.md).
 
 This software is based in part on the work of the Independent JPEG Group.

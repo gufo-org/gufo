@@ -55,11 +55,23 @@ top-k, top-p or min-p truncation. Requests can override each value.
 
 ## Thinking
 
-Thinking is on by default. `reasoning_effort` and
+Thinking is on by default at effort `high`. `reasoning_effort` and
 `chat_template_kwargs.enable_thinking` follow the
-[reasoning controls](../server.md#reasoning-controls). With thinking off, the
-model sometimes writes its deliberation into the answer instead of a thinking
-block.
+[reasoning controls](../server.md#reasoning-controls); each effort selects the
+chat template's level:
+
+| Effort | `none` (thinking off) | `minimal` | `low` | `medium` | `high` | `xhigh`, `max` |
+| --- | --- | --- | --- | --- | --- | --- |
+| Level | 0 | 0.1 | 0.2 | 0.7 | 0.9 | 0.99 |
+
+The template itself can't switch thinking off: at level 0 the model still
+writes a short thought, 29 to 345 tokens on short prompts as of November 2026.
+With thinking off, Gufo therefore opens the answer (or, with tools, closes an
+empty thought) in the prompt and doesn't let a thought start; the model then
+sometimes writes its deliberation into the answer instead.
+
+With thinking on, `tool_choice: "required"` and named functions let the model
+think first, then force a call.
 
 ## Performance
 

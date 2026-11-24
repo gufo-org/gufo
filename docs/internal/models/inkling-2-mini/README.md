@@ -122,6 +122,66 @@ weights (`dspark_fuse`, `dflare_norm`, padded `markov_w1`, `hidden_out`; now
   its measured plain steps decodes plainly for a while (8 to 64 steps) before
   probing again.
 
+## Serving
+
+- **Loading.** The target and drafter weights stream to the device through
+  `hip::WeightUpload`, which reads the files without faulting their mappings.
+  The tensors the engine converts on the host (router, loop controllers,
+  bias tables, drafter tables) are read through the mapping, and its pages
+  are released once the engine is built (`platform::ReleaseMappedPages`).
+  A loaded server with DSpark holds 0.38 GB of host memory (18.1 GB before
+  on Linux, 17.6 GB on Windows, where a mapping's touched pages stay in the
+  working set and the RAM prompt cache, sized from free memory, got 0.53 GB
+  against 10.7 GB for Qwen 27B on the same binary).
+  Weights and scratch are `hipMalloc`ed only: no managed fallback, which on
+  Windows would be host RAM outside the GPU carve-out.
+- **Cancellation.** A cancelled request's prefill stops at the next layer
+  visit. While a cancellation check is set, the pass keeps one visit queued
+  ahead of the device (an event per visit), so the check runs while the
+  device works instead of milliseconds after the whole pass was queued. After
+  a client disconnects mid-prefill the next request starts within 42 to
+  60 ms (up to 1.7 s before); a 34K-token cold prefill runs at 1,972 tokens/s
+  against 1,978 without the waits.
+- **Layered prefill.** A pass yields to the decoders between up to 16 visit
+  groups, and every decoding session steps in each yield
+  (`max_yield_decode_width = Engine::kMaxDecodeBatch`): batched decode and
+  verification inside a yield equal decoding alone, byte for byte
+  (`inkling2_spec_test`, first check).
+- **Images.** `ImageCache` keeps decoded images (128 MiB of host memory,
+  matched on the uploaded bytes and detail) and encoder rows (256 MiB of
+  device memory, matched on the SHA-256 of the pixels), so a conversation
+  that sends its images again decodes and encodes each once. `Idle()` frees
+  the encoder's workspace, which grows to the largest image seen (up to
+  about 1 GiB).
+
+## Reasoning and tool calls
+
+The prompt is the official `chat_template.jinja` (byte-identical to the one
+in the GGUF, effort levels none 0, minimal 0.1, low 0.2, medium 0.7, high
+0.9 by default, xhigh and max 0.99) followed by the assistant header the
+model writes first. The template has no off switch: at level 0 (`none`) the
+model thinks for 29 to 345 tokens on short prompts, so llama.cpp, which
+renders thinking off as level 0, returns a thought. Gufo's thinking off
+promises no reasoning, so the prompt goes past the template:
+
+- without tools it ends with the answer block's opener
+  (`<|message_model|><|content_text|>`), and the turn ends with that block;
+- with tools it ends with a finished empty thought, and every earlier
+  assistant message is rendered with one too, so the next turn's render of
+  a reply is the tokens the model generated;
+- the thinking token cannot follow a header.
+
+Following the template instead (level 0, the model's own thought) fails 14 of
+the first 16 functional suites, which ask for thinking off and require no
+reasoning tokens.
+
+A required call (`tool_choice` required or a named function) masks the
+tokens after a header to a thought (thinking on, no closed budget) or one
+declared function name and the invoke token, so the generated call is the
+tokens the next turn's render writes; the host's grammar constrains the
+streamed call (`stream_dialect.hpp`). The template writes call arguments
+with sorted keys, so the model emits them alphabetically.
+
 ## Numerical contract
 
 Every optimisation kept the per-output arithmetic: the same dequantisation,
@@ -138,9 +198,39 @@ single-session decode.
 | Target | What it checks |
 | --- | --- |
 | `inkling2_probe_test` | Probe on synthetic GGUFs (CPU, CTest `inkling2.probe`) |
-| `inkling2_text_test --model GGUF` | Tokenizer and chat-template goldens from the HF tokenizer and `transformers` (CTest `inkling2.text` skips without a model) |
+| `inkling2_text_test [--model GGUF]` | Chat-template text and error goldens from `transformers`, JSON, tool dialect and reasoning controls (CPU, CTest `inkling2.text`); with a model also the tokenizer goldens from the HF tokenizer and the template's tokens |
 | `inkling2_cache_test --model GGUF --ids IDS` | GPU: checkpoint capture and restore, restore into a used slot, layered prefill; all bit-exact |
 | `inkling2_oracle` | Teacher-forced dumps; `tests/oracle/compare_dumps.py` scores KL and top-1 against a reference dump |
 | `tests/oracle/llama_dump.cpp` | The llama.cpp side of the same dump (CPU backend, or `NGL` layers on the GPU) |
-| `inkling2_spec_test --model GGUF [--dspark DRAFT]` | GPU: verification rows of 2 to 8 tokens (one proposal corrupted per step) byte-identical to one-token decoding, and greedy DSpark decoding equal to plain decoding |
+| `inkling2_spec_test --model GGUF [--dspark DRAFT]` | GPU: decoding inside a layered prefill's yields (batches of 2 to 7, batched verification) and verification rows of 2 to 64 tokens byte-identical to one-token decoding; with a drafter, greedy DSpark on a real chat prompt equal to plain decoding with at least 20% of proposals kept (26% measured) |
 | `inkling2_bench` | Prefill and decode speed, batched decode, `--verify`; `--spec R` verification timing, `--dspark` speculative speed, acceptance and calibration |
+
+The GPU tests need the model and run by hand; hosted CI builds the model
+(Linux and Windows) and runs the two CPU tests.
+
+## Possible improvements
+
+Exact, not done yet:
+
+- **In-pass checkpoints.** The host ends a pass at each checkpoint boundary
+  (a pass of N tokens becomes two; pp512 runs at 1,618 tokens/s against
+  2,268 at 2,048). A capture inside the pass can be exact: the window rings
+  (window + ubatch rows) still hold the boundary's last 1,024 rows at the end
+  of its ubatch and the global rows are append-only, so only the
+  convolution histories at the boundary need copying as each visit computes
+  them.
+- **Required calls through the grammar.** With reasoning on, the prompt ends
+  in a header and the shared grammar writes its call opener before every
+  call, so it cannot describe the call; the runner's mask (Select) does.
+  For a required call the shared grammar could replace the mask only once
+  it can name the function twice.
+
+Kept on purpose:
+
+- **Unicode tables.** The pre-tokenizer's tables (`text/unicode_tables.cpp`)
+  are Unicode 16.0, as the tokenizer goldens. ICU (Unicode 17.0), which the
+  Qwen tokenizers use, classifies 4,700 code points differently (newly
+  assigned ones, and U+0295 as Lo instead of Ll), so switching would change
+  tokenization.
+
+Not exact: see [Experiments](EXPERIMENTS.md#not-exact-not-taken).
