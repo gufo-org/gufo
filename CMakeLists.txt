@@ -542,6 +542,7 @@ add_library(gufo_http STATIC
   src/cli/serve/voice_page.cpp
   src/cli/serve/decision_service.cpp
   src/cli/serve/tts_websocket.cpp
+  src/cli/serve/generation_parse.cpp
   src/cli/serve/openai_chat.cpp
 )
 target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_qwen_text PNG::PNG)
@@ -1060,10 +1061,20 @@ endfunction()
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")
 
-  add_executable(quote_tracker_test tests/cli/quote_tracker_test.cpp)
-  target_link_libraries(quote_tracker_test PRIVATE gufo_core)
-  add_test(NAME quote_tracker_test COMMAND quote_tracker_test)
-  set_tests_properties(quote_tracker_test PROPERTIES LABELS "cpu;server;api")
+  # The Rust generation parser against a frozen copy of the C++ one it
+  # replaced, over the corpus in tests/fixtures/generation_parse, with the
+  # real Qwen and DeepSeek scanners and tool grammar.
+  add_executable(generation_parse_test
+    tests/cli/generation_parse_test.cpp
+    tests/cli/generation_parse_frozen.cpp
+  )
+  target_link_libraries(generation_parse_test PRIVATE gufo_core gufo_http
+    gufo_deepseek_v4_flash_text ${GUFO_QWEN_LIBRARIES})
+  add_test(NAME generation_parse_test
+    COMMAND generation_parse_test
+      ${PROJECT_SOURCE_DIR}/tests/fixtures/generation_parse)
+  set_tests_properties(generation_parse_test PROPERTIES
+    LABELS "cpu;server;api;openai;streaming;tools")
 
   # Image provider startup options and request capabilities with fake
   # providers; no sockets, so it runs on every host.

@@ -298,7 +298,8 @@
     {
       "id": "framing-and-stops",
       "paths": [
-        "src/cli/serve/quote_tracker.hpp",
+        "src/cli/serve/generation_parse.*",
+        "src/core/generation_parse/**",
         "src/cli/serve/stop_sequences.hpp"
       ],
       "priority": 20,
