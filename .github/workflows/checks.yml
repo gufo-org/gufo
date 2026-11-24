@@ -115,15 +115,18 @@ jobs:
           echo "ccache-$(python3 tools/ci/cache_growth.py check /tmp/gufo-ccache "$RUNNER_TEMP/cache-growth/ccache.json")" >> "$GITHUB_OUTPUT"
           echo "rust-$(python3 tools/ci/cache_growth.py check /tmp/gufo-rust-cache "$RUNNER_TEMP/cache-growth/rust.json")" >> "$GITHUB_OUTPUT"
 
+      # Only pull requests save here. On main every check comes from Cachix
+      # and compiles nothing, and a newer empty entry would supersede the one
+      # warm-caches.yml saves; that workflow owns main's compiler caches.
       - name: Save compiler cache
-        if: always() && contains(fromJSON('["success", "failure", "cancelled"]'), steps.check.outcome) && steps.growth.outputs.ccache-save != 'false'
+        if: always() && github.event_name == 'pull_request' && contains(fromJSON('["success", "failure", "cancelled"]'), steps.check.outcome) && steps.growth.outputs.ccache-save != 'false'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/gufo-ccache
           key: gufo-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ steps.ccache-key.outputs.epoch-week }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save Rust compiler cache
-        if: always() && contains(fromJSON('["success", "failure", "cancelled"]'), steps.check.outcome) && steps.growth.outputs.rust-save != 'false'
+        if: always() && github.event_name == 'pull_request' && contains(fromJSON('["success", "failure", "cancelled"]'), steps.check.outcome) && steps.growth.outputs.rust-save != 'false'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/gufo-rust-cache

@@ -8,6 +8,7 @@ with a verb; a reusable workflow's jobs appear as `caller / called job`.
 | --- | --- | --- | --- | --- |
 | `checks.yml` | Repository checks | Run CPU and repository checks | GitHub Ubuntu | PRs to main, pushes to main, manual. Bounded CPU, repository and functional-harness tests. |
 | `checks.yml` | Repository checks | Warm Linux package cache | GitHub Ubuntu, via `linux-build.yml` | Main and manual only. Builds the production package to fill the shared cache. |
+| `warm-caches.yml` | Compiler cache warming | Warm check compiler caches | GitHub Ubuntu | Pushes to main, nightly, manual. Compiles the CPU and Rust checks without running them to fill `main`'s compiler caches. Blocks nothing. |
 | `linux-build.yml` | Linux build | Linux package, Linux checked package | GitHub Ubuntu | Reusable. Main cache warming, candidate and baseline packages for comparisons, and on request the candidate's assertion-enabled `.#checked` package. |
 | `windows-build.yml` | Windows build | Windows package | GitHub Windows | Reusable. Builds the native application, runs CPU contracts and verifies the bundle. Called by Windows validation and by Toolboxes releases. |
 | `devlab-windows.yml` | Windows validation | Build, then Run Windows model checks | GitHub Windows, then Devlab Windows Strix Halo | PRs to main, pushes to main, manual. GPU diagnostics and model smoke checks on the same run's bundle. |
@@ -75,7 +76,8 @@ Which runs save each cache:
 | `gufo-vcpkg` | Manifest, TheRock SDK and toolchain file, per run | Always | When the run built a new archive, or without a measurement, when nothing for these inputs was restored |
 | `gufo-windows-extension-vcpkg` | Manifest, per run | Always | Only when nothing for this `vcpkg.json` was restored |
 | Windows NPU design cache (`gufo-npu-windows`) | IRON pins, per run | Always | Never; the compiled designs above cover the rerun |
-| Compiler caches (`gufo-ccache`, `gufo-rust`, `gufo-package-ccache`, `gufo-checked-ccache`, `gufo-windows-ccache`) | Toolchain, per run | Always | When the run added at least 32 MiB |
+| Check compiler caches (`gufo-ccache`, `gufo-rust`) | Toolchain, per run | `warm-caches.yml`, when the run added at least 32 MiB or nothing was restored | `checks.yml`, when the run added at least 32 MiB |
+| Other compiler caches (`gufo-package-ccache`, `gufo-checked-ccache`, `gufo-windows-ccache`) | Toolchain, per run | Always | When the run added at least 32 MiB |
 
 `tools/ci/cache_growth.py` measures what a run added: new files, or files whose
 size changed, since the restore. A failed measurement saves. Outside a pull
@@ -86,6 +88,14 @@ cache. Toolboxes calls `windows-build.yml` from `repository_dispatch`,
 Toolboxes cache.
 
 - **Repository checks** use the compiler cache, Cachix and the Magic Nix Cache.
+  On `main` every check comes from Cachix and compiles nothing, so
+  `warm-caches.yml` fills `main`'s check compiler caches instead. It builds
+  `.#check-tests-compile` and `.#check-rust-compile`, which compile what
+  `check-tests` and `check-rust` compile, with the same compilers, flags, cache
+  settings and sandbox paths, and run no tests. Their objects are therefore the
+  cache entries a PR's checks look up. The workflow pulls from Cachix and never
+  pushes, and a newer push to `main` cancels its run after saving what it
+  compiled.
 - **Linux package builds** use the package compiler cache and Cachix. Main's
   warming job exists because PR builds don't push to Cachix.
 - **Windows builds** cache the SDK archive, IRON, NPU designs, the Loom runtime,
