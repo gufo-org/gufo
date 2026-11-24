@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <gufo/ext/snapshot_copy.hpp>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
@@ -114,9 +115,20 @@ std::size_t StateLayout::SessionBytes(std::uint32_t context) const {
 // SessionStateAccess: the one place that knows the Session buffer layout.
 namespace {
 void Check(hipError_t e, const char* what) {
-  if (e != hipSuccess)
+  if (e != hipSuccess) {
+    // Clear it: the next launch check on this thread would report it.
+    (void)hipGetLastError();
     throw std::runtime_error(std::string("inkling2 state copy: ") + what +
                              ": " + hipGetErrorString(e));
+  }
+}
+// The cache's host buffers can be adjacent registrations, and HIP rejects a
+// copy whose host range spans two; the core snapshot copies split there. They
+// queue on the engine's default stream, so wait for them (after a failed
+// submission too: callers reuse the buffers once a copy returns).
+void Settle(hipError_t submitted, const char* what) {
+  const hipError_t settled = hipStreamSynchronize(nullptr);
+  Check(submitted != hipSuccess ? submitted : settled, what);
 }
 }  // namespace
 
@@ -149,20 +161,21 @@ void SessionStateAccess::RowsOut(const Session& s, std::uint32_t visit,
   const auto& sl = s.slots_.at(visit);
   const auto* base = static_cast<const std::byte*>(value ? sl.v : sl.k);
   const bool ring = !sl.global;
-  while (first < end) {
+  if (!ring && end > sl.rows)
+    throw std::invalid_argument("inkling2: row range beyond capacity");
+  hipError_t copied = hipSuccess;
+  const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+  while (first < end && copied == hipSuccess) {
     const std::size_t slot_row = ring ? first % sl.rows : first;
     const std::size_t n =
         ring ? std::min<std::size_t>(end - first, sl.rows - slot_row)
              : end - first;
-    if (!ring && end > sl.rows)
-      throw std::invalid_argument("inkling2: row range beyond capacity");
-    const std::shared_lock<std::shared_mutex> gate(CaptureGate());
-    Check(hipMemcpy(dst, base + slot_row * kKvRowBytes, n * kKvRowBytes,
-                    hipMemcpyDeviceToHost),
-          "rows out");
+    copied = hip::CopySnapshotToHost(dst, base + slot_row * kKvRowBytes,
+                                     n * kKvRowBytes, nullptr);
     dst += n * kKvRowBytes;
     first += n;
   }
+  Settle(copied, "rows out");
 }
 
 void SessionStateAccess::RowsIn(Session& s, std::uint32_t visit, bool value,
@@ -180,20 +193,19 @@ void SessionStateAccess::RowsIn(Session& s, std::uint32_t visit, bool value,
       throw std::invalid_argument("inkling2: row range beyond capacity");
     s.EnsureRows(end);  // BeginRestore made the pages private
   }
-  while (first < end) {
+  hipError_t copied = hipSuccess;
+  const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+  while (first < end && copied == hipSuccess) {
     const std::size_t slot_row = ring ? first % sl.rows : first;
     const std::size_t n =
         ring ? std::min<std::size_t>(end - first, sl.rows - slot_row)
              : end - first;
-    if (!ring && end > sl.rows)
-      throw std::invalid_argument("inkling2: row range beyond capacity");
-    const std::shared_lock<std::shared_mutex> gate(CaptureGate());
-    Check(hipMemcpy(base + slot_row * kKvRowBytes, src, n * kKvRowBytes,
-                    hipMemcpyDefault),
-          "rows in");
+    copied = hip::CopySnapshotToDevice(base + slot_row * kKvRowBytes, src,
+                                       n * kKvRowBytes, nullptr);
     src += n * kKvRowBytes;
     first += n;
   }
+  Settle(copied, "rows in");
 }
 
 std::span<const std::byte> SessionStateAccess::RowsView(const Session& s,
@@ -216,11 +228,12 @@ void SessionStateAccess::ConvVisitOut(const Session& s, std::uint32_t visit,
                                       std::size_t inner, std::size_t n,
                                       std::byte* dst) {
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
-  Check(hipMemcpy(
-            dst,
-            reinterpret_cast<const std::byte*>(s.slots_.at(visit).conv) + inner,
-            n, hipMemcpyDeviceToHost),
-        "conv out");
+  Settle(
+      hip::CopySnapshotToHost(
+          dst,
+          reinterpret_cast<const std::byte*>(s.slots_.at(visit).conv) + inner,
+          n, nullptr),
+      "conv out");
 }
 void SessionStateAccess::ConvVisitIn(Session& s, std::uint32_t visit,
                                      std::size_t inner, std::size_t n,
@@ -230,9 +243,10 @@ void SessionStateAccess::ConvVisitIn(Session& s, std::uint32_t visit,
   s.draft_.valid = 0;
   s.draft_.first = 0;
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
-  Check(hipMemcpy(reinterpret_cast<std::byte*>(s.slots_.at(visit).conv) + inner,
-                  src, n, hipMemcpyHostToDevice),
-        "conv in");
+  Settle(hip::CopySnapshotToDevice(
+             reinterpret_cast<std::byte*>(s.slots_.at(visit).conv) + inner, src,
+             n, nullptr),
+         "conv in");
 }
 void SessionStateAccess::SetFrontier(Session& s, std::size_t position,
                                      const float* logits, std::size_t n) {

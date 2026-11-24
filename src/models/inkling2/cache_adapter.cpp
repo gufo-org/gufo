@@ -12,8 +12,8 @@ namespace {
 using cache::Rows;
 using cache::TransferResult;
 
-/// Every copy of this adapter is synchronous (hipMemcpy on the engine's default
-/// stream), so a completion is born settled.
+/// Every copy of this adapter is synchronous (on the engine's default stream),
+/// so a completion is born settled.
 class DoneSignal final : public cache::CompletionSignal {
 public:
   explicit DoneSignal(TransferResult r) : result_(r) {}

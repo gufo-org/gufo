@@ -111,7 +111,7 @@ private:
 
 /// The only code that touches a Session's buffers for the cache: row ranges in
 /// and out (with the ring arithmetic of the window visits), conv history,
-/// logits and the frontier. Synchronous (hipMemcpy on the engine's default
+/// logits and the frontier. Synchronous (copies on the engine's default
 /// stream); the engine mutex is NOT taken, so these are safe from the guard
 /// callbacks inside Forward and from capture threads of an idle slot.
 class SessionStateAccess {
