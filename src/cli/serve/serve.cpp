@@ -1787,11 +1787,8 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: " << exception.what() << '\n';
       return 2;
     }
-    if (speculative_config.backend == server::TextSpeculativeBackend::kDFlash &&
-        dflash_model_path.empty()) {
-      std::cerr << "Error: DFlash2 requires --dflash-model\n";
-      return 2;
-    }
+    // A missing draft model is the runner's to reject: a checkpoint may carry
+    // its own draft.
     speculative_config.draft_model_path =
         speculative_config.backend == server::TextSpeculativeBackend::kDSpark
             ? dspark_model_path

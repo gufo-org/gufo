@@ -108,10 +108,10 @@ void TestInvalidFlags() {
   const std::array<const char*, 2> args9 = {"--reasoning-budget", "1024"};
   assert(!gufo::cli::ParsePromptOptions(args9, &err).has_value());
 
-  for (const auto* backend : {"dflash2", "mtp"}) {
+  // The selected provider decides whether a backend needs its draft model.
+  for (const auto* backend : {"dflash2", "mtp", "dspark"}) {
     const std::array<const char*, 2> missing_path = {"--speculative", backend};
-    assert(!gufo::cli::ParsePromptOptions(missing_path, &err).has_value());
-    assert(err.find("requires --") != std::string::npos);
+    assert(gufo::cli::ParsePromptOptions(missing_path, &err).has_value());
   }
   const std::array<const char*, 5> cpu_spec = {
       "--cpu", "--speculative", "dflash2", "--dflash-model", "draft.gguf"};

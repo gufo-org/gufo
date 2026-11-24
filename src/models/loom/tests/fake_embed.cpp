@@ -107,6 +107,7 @@ void loom_text_embed_info(const loom_text_embed_t* e,
   i->prefill_capacity = 64;
   i->rows = static_cast<std::uint32_t>(e->rows.size());
   i->max_epoch_spans = i->rows;
+  i->draft_depth = fake::state().draft_depth;
 }
 void loom_text_embed_logits_info(const loom_text_embed_t* e,
                                  loom_text_embed_logits_info_t* i) {
