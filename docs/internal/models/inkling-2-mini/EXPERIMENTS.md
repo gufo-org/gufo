@@ -173,3 +173,27 @@ Prefill attention at long context (exact variants only):
 | --- | --- |
 | The next key tile's K, V and bias rows loaded into registers while this one is computed | 243 VGPRs and spills, 5 waves per SIMD: a 12-wave block no longer fits a CU; pp32768 1,892 → 1,791 tokens/s |
 | 32-query blocks (two per CU) | not byte-identical (the window visits' key tiles start at the block's first query) and pp32768 1,682 tokens/s |
+
+## Round 10 (November 24)
+
+Measured on standalone replays of the prefill GEMMs (2,048 tokens, 186
+items), the 8-row GEMVs (weights rotated past the cache) and the grouped
+expert kernels (real routing), then in `inkling2_bench`:
+
+| Variant | Result |
+| --- | --- |
+| MoE gate/up with double-buffered weight tiles (one barrier per k-step; three blocks per WGP still fit) | 5.90 → 6.02 ms |
+| MoE gate/up at 8 waves per SIMD (`amdgpu_waves_per_eu`) | no change |
+| MoE gate/up computing padding tiles too (no per-tile branches) | 5.9 → 7.0 ms |
+| MoE down and dense GEMMs storing whole 256-byte token rows through LDS | no change: the 151 MB of F32 pair rows cost their DRAM write time either way (0.6 ms of 3.7 when skipped) |
+| Prefill MoE grids sized to the used units | no change (blocks already loop over units) |
+| SITU's `u / 25` as a corrected product and `1 / x` as `v_rcp` plus a Newton step (both equal IEEE division on all 2^32 inputs, with guards) | no faster |
+| SITU with a runtime check for the constants | the gain is lost: both paths are compiled |
+| One-input projections of 8 rows through int8 WMMA | verification +0.2 ms |
+| The 8-row output projection (K = 3072): rows per wave and waves per block, or WMMA | no faster |
+| Grouped expert kernels from 4 or 5 rows of one session, or for 6 sessions | equal or slower (6 sessions −1.5%) |
+| Controller gates of 2, 4 or 8 tokens per block (weight row in registers) | verification +0.1 to +0.3 ms: the per-token blocks' parallelism matters more than the L2-resident weight re-reads |
+| Verification attention with the split reduction folded into its last block | +0.3 ms per step (the reverse of the kept decode change) |
+| Controller apply and its RMS norm as two launches | no change |
+| No drafter context injection at eight sessions (upper bound, not exact for later proposals) | +0.6% over HTTP, within noise: not worth deferring the injection |
+| Prefetching the next K/V tile in the decode attention (global visits at 32K run at about 83% of DRAM) | not built: the kernels already hold 219 to 255 VGPRs |

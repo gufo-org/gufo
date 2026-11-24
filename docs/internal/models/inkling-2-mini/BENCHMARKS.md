@@ -651,3 +651,45 @@ over 32 blocks of 4 waves instead of 16 of 8 left the step at 20.8 ms. The
 small decode kernels (mixes, attention, controllers, router: 3.3 ms, plus
 1.0 ms between 505 launches) are latency-bound chains, and the weight GEMVs
 stay at 85–95% of the DRAM ceiling.
+
+## Round 10: verification steps and fixed costs (November 24)
+
+Every change is byte-identical: the oracle's prefill and decode dumps,
+`inkling2_cache_test`, `inkling2_spec_test`, `inkling2_bench --verify` (2, 4
+and 8 sessions at contexts 64 and 3,000), and 30 HTTP responses (AR and DSpark,
+1 to 8 concurrent requests, greedy and seeded) equal the round 9 build's.
+
+A serialized profile (`rocprofv3 --pmc`) of an 8-row verification step put
+the MoE at 85 to 88% of its DRAM floor (about 29 distinct experts per visit)
+and the dense 8-row GEMVs at about 150 GB/s:
+
+| Change | Effect |
+| --- | --- |
+| The grouped expert kernels' grid has 24 blocks per row block that loop over the step's distinct experts, instead of one block per possible slot (8 per row, most of them empty) | 8-row MoE gate/up 0.416 → 0.393 ms per visit, down 0.215 → 0.203; verification of 8 / 16 / 64 rows 51.8 → 51.0 / 73.3 → 69.0 / 169.7 → 165.4 ms |
+| Grouped expert kernels from 6 rows of one session (was 8) and for 8 sessions | 7-row verification 49.0 → 47.8 ms, eight sessions +0.6% |
+| The 8-row LM head through int8 WMMA (the 9- to 64-row path): the per-row GEMV runs 4 to 7 waves per SIMD at 8 rows | head 3.25 → 2.51 ms; 8-row verification 52.8 → 52.0 ms, eight sessions 124.8 → 126.2 tok/s |
+| The three-input (global-layer) projections through int8 WMMA from 8 rows | 8-row verification 52.1 → 51.8 ms |
+| One-input projections of 6 to 8 rows: two rows per wave instead of four | verification −0.4 to −0.7%, eight sessions 127.3 → 128.5 tok/s |
+| Decode attention reduces its splits in its own launch again (folded into the last split block, one block serialised a kv head's three heads) | one session 20.84 → 20.75 ms per token at context 64, 22.05 → 21.91 at 3,000; four sessions +1.2% |
+| SITU with the model's constants (ParseConfig refuses others): `g / 4` compiles to the multiply that equals it | prefill MoE gate/up −1.4%, pp2048 2,207 → 2,221 tok/s |
+
+`inkling2_bench`, the round 9 build against this one:
+
+| Workload | Before | After |
+| --- | --- | --- |
+| DSpark, context 64 / 3,000 (`--dspark --depth 7`, 256 tokens) | 66.3 / 42.2 tok/s | 68.4 / 43.7 tok/s |
+| Eight sessions, context 64 | 124.8 tok/s | 128.5 tok/s |
+| One session, context 64 | 20.81 ms per token | 20.75 ms per token |
+
+Over HTTP (`--sessions 8`, 256 tokens, half greedy, half seeded), DSpark at 8
+concurrent requests went 108.2 → 113.6 tok/s and AR 113.6 → 115.3; one
+request is unchanged within noise (AR 48.0, DSpark 71.6).
+
+The prefill GEMMs stay at 44 to 62% of the WMMA peak. Counters on MoE
+gate/up (`SQ_WAIT_INST_VALU` 44% of wave cycles) show the VALU pipe, which
+WMMA shares with the dequantization and the epilogue, as the contended
+resource: about 9 other VALU instructions per WMMA. The SITU change is the
+part of that which could go without changing the arithmetic. Outside the
+GEMMs every prefill kernel moves its bytes at the DRAM ceiling, and each F32
+pass feeds a different consumer. Rejected variants are in
+[Experiments](EXPERIMENTS.md#round-10-november-24).
