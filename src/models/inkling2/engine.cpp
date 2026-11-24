@@ -325,6 +325,9 @@ struct Engine::Impl {
   // waves per SIMD and streams about 150 GB/s, WMMA about 195 GB/s (the
   // one-input projections and the output matrix stay faster per row)
   static constexpr int kMmaHeadRows = kChunk;
+  // one-session verification steps from this many rows group the MoE pairs by
+  // expert (consecutive rows share most of their experts)
+  static constexpr int kGroupedVerifyRows = 6;
   static constexpr int kMsgInvTokens = 1024;
   static constexpr int kWideTileTokens =
       256;  // ubatches at least this long use 128-token GEMM tiles
@@ -1563,11 +1566,12 @@ struct Engine::Impl {
     fs::Router(ds, HW(L.ffn_gate_inp), DS(L.exp_probs_b), d_h, d_rlog,
                d_counter, d_ids8, d_wts8, cfg->expert_weights_scale, nb,
                ctl_half);
-    // Many rows, or eight consecutive rows of one session (which share most
-    // experts): each used expert's weights read once for all its pairs.
-    // Other sessions' rows share fewer experts and run per pair.
-    if (F.moe >= 0 &&
-        (nb > kChunk || (verify_mode && verify_one_session && nb == kChunk))) {
+    // Many rows, a full chunk, or six or more consecutive rows of one session
+    // (which share most experts): each used expert's weights read once for all
+    // its pairs. Fewer rows, and other sessions' rows (which share fewer
+    // experts), run per pair.
+    if (F.moe >= 0 && (nb >= kChunk || (verify_mode && verify_one_session &&
+                                        nb >= kGroupedVerifyRows))) {
       const int slots = std::min(E, 8 * nb);
       fs::MoeRouteGroup(ds, d_ids8, 8 * nb, d_groups);
       fs::MoeQuantGrouped(ds, F.moe, d_h, nb, kEmbd, d_groups);
