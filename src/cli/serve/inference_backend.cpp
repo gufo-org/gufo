@@ -746,6 +746,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .stop_sequences = request.stop_sequences,
           .return_progress = request.return_progress,
           .chat_template = true,
+          .initial_output_state = initial,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
       state, std::move(scheduled_request), initial, tool_format,
