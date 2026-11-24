@@ -160,23 +160,20 @@ The prompt is the official `chat_template.jinja` (byte-identical to the one
 in the GGUF, effort levels none 0, minimal 0.1, low 0.2, medium 0.7, high
 0.9 by default, xhigh and max 0.99) followed by the assistant header the
 model writes first. The template has no off switch: at level 0 (`none`) the
-model thinks for 29 to 345 tokens on short prompts, so llama.cpp, which
-renders thinking off as level 0, returns a thought. Gufo's thinking off
-promises no reasoning, so the prompt goes past the template:
-
-- without tools it ends with the answer block's opener
-  (`<|message_model|><|content_text|>`), and the turn ends with that block;
-- with tools it ends with a finished empty thought, and every earlier
-  assistant message is rendered with one too, so the next turn's render of
-  a reply is the tokens the model generated;
-- the thinking token cannot follow a header.
-
-Following the template instead (level 0, the model's own thought) fails 14 of
-the first 16 functional suites, which ask for thinking off and require no
-reasoning tokens.
+model thinks for 29 to 345 tokens on short prompts. Gufo renders thinking off
+as level 0 like llama.cpp and lets the model think: the runner reports
+`InitialOutputState::kAuto` for every request, so the parsers and the grammar
+accept a thought that the model opens itself. Forcing it off (an answer block
+or an empty thought in the prompt, the thinking token masked) moved the model
+off its own distribution: with `tool_choice: "auto"`, after the mask it wrote
+the call's arguments as text (`tool-schema-edges` text-only case), where
+llama.cpp thinks briefly and calls.
+The functional suites ask for thinking off to get short fixed answers;
+Inkling's Devlab entry sets `thinking_off_reasons`, so they bound that thought
+with a reasoning budget and accept it (`tests/functional/thinking.py`).
 
 A required call (`tool_choice` required or a named function) masks the
-tokens after a header to a thought (thinking on, no closed budget) or one
+tokens after a header to a thought (unless a budget closed one) or one
 declared function name and the invoke token, so the generated call is the
 tokens the next turn's render writes; the host's grammar constrains the
 streamed call (`stream_dialect.hpp`). The template writes call arguments

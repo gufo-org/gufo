@@ -131,12 +131,6 @@ inline std::optional<ReasoningLevel> LevelOf(
   return std::nullopt;
 }
 
-/// The request turns reasoning off (Gufo: enabled=false; reasoning_effort none
-/// maps to it).
-inline bool ReasoningOff(const g::ChatRequest& request) {
-  return request.reasoning.enabled && !*request.reasoning.enabled;
-}
-
 /// Tools are in play and the request insists on a call.
 inline bool CallRequired(const g::ChatRequest& request) {
   return !request.tools.empty() &&
@@ -148,34 +142,15 @@ inline RenderOptions ToRenderOptions(const g::ChatRequest& request) {
   o.effort_name = EffortNameFor(request.reasoning.enabled,
                                 LevelOf(request.reasoning.effort));
   o.preserve_thinking = request.reasoning.preserve_thinking;
-  // Gufo's "reasoning off" (enabled=false, effort none) renders the template's
-  // level 0, which does not stop the model from thinking (it opens a thinking
-  // block at level 0 as at every other level, 29 to 345 tokens on short
-  // prompts; the model card: the minimum "does not fully disable reasoning").
-  // So the prompt closes reasoning itself and the runner forbids another
-  // thinking block (ReasoningOff, SelectNext):
-  //  * no tools: the answer block is opened
-  //  (<|message_model|><|content_text|>), as Qwen's
-  //    generation prompt closes <think>;
-  //  * tools: a finished empty thinking block, after which the model chooses
-  //  between an answer and a
-  //    call. The template re-renders an assistant message without reasoning
-  //    with no such block, so those messages are rendered with one
-  //    (empty_thought_for_assistants) to keep the generated frontier and the
-  //    next turn's prompt the same tokens, the way Qwen's template re-renders
-  //    an empty <think></think> for every assistant.
-  // Reasoning on: the prompt ends with the assistant header the model writes
-  // first anyway (log-probability ~0), so its first generated token is the
-  // thinking opener, where a reasoning budget starts counting (the host's
-  // budget waits for the opener as the first token).
+  // Gufo's "reasoning off" (enabled=false, effort none) renders the
+  // template's level 0, which does not stop the model from thinking (the model
+  // card: the minimum "does not fully disable reasoning"; it opens a thinking
+  // block at level 0 as at every other level). As in llama.cpp, the model
+  // then decides: the prompt ends with the assistant header it writes first
+  // anyway (log-probability ~0), so its first generated token is the thinking
+  // opener, the answer's or a call's, and a reasoning budget starts counting
+  // at the opener.
   o.generation_prefix = RenderOptions::Prefix::kHeader;
-  if (ReasoningOff(request)) {
-    const bool tools = !request.tools.empty() &&
-                       request.tool_choice != g::ChatRequest::ToolChoice::kNone;
-    o.generation_prefix = tools ? RenderOptions::Prefix::kEmptyThought
-                                : RenderOptions::Prefix::kHeaderText;
-    o.empty_thought_for_assistants = tools;
-  }
   return o;
 }
 

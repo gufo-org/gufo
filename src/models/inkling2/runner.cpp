@@ -76,10 +76,6 @@ public:
   /// Where the generated text stands inside the model's block structure (see
   /// Piece()). Lives in the slot: it is part of a checkpoint's metadata.
   Block& block;
-  /// The request turned reasoning off: no thinking block may open (see
-  /// Select). Set per request by SetPromptContext; not part of a
-  /// checkpoint.
-  bool reasoning_off{false};
   /// A reasoning budget closed the thought: no second thinking block may open
   /// (the model reopens one right after the forced close). Per request.
   bool budget_closed{false};
@@ -90,7 +86,7 @@ public:
   /// it stays. Per request.
   bool thought_closed{false};
   /// A call is required: after a header the model writes a thought (unless
-  /// reasoning is off or a budget closed it) or one declared function name
+  /// a budget closed it) or one declared function name
   /// (the tokens the template writes for it), then the invoke token (see
   /// Select). Token ids of each declared name (of every request that may
   /// call one; see Piece()), as the template writes it, and the name tokens
@@ -98,13 +94,6 @@ public:
   bool call_required{false};
   std::vector<std::vector<g::TextRunnerToken>> call_names;
   std::vector<g::TextRunnerToken> call_prefix;
-  /// Reasoning off and no tools: the first answer block is the whole reply.
-  /// After its <|end_message|> the model may open another block (observed: a
-  /// thinking block, which Select forbids, so it would write the answer a
-  /// second time); the turn ends there instead. `answer_done` is set by
-  /// Advance, per request.
-  bool answer_only{false};
-  bool answer_done{false};
   /// The request's images (set by SetPromptContext; null for a text-only
   /// prompt).
   std::shared_ptr<const Inkling2PromptContext> prompt;
@@ -277,9 +266,7 @@ struct ImageEntry {
 
 /// What a request tells the runner beyond its tokens (SetPromptContext).
 struct Inkling2PromptContext final : g::TextPromptContext {
-  bool reasoning_off{false};
   bool call_required{false};
-  bool answer_only{false};
   std::vector<std::vector<g::TextRunnerToken>> call_names;
   std::vector<std::unique_ptr<ImageEntry>> images;
   /// The prompt's tokens, for copy drafts (a request whose whole prompt is
@@ -609,12 +596,7 @@ public:
     auto context = std::make_shared<Inkling2PromptContext>();
     if (max_draft_ > 0)
       context->tokens.assign(tokens->begin(), tokens->end());
-    context->reasoning_off = ga::ReasoningOff(request);
     context->call_required = ga::CallRequired(request);
-    context->answer_only =
-        context->reasoning_off &&
-        (request.tools.empty() ||
-         request.tool_choice == g::ChatRequest::ToolChoice::kNone);
     if (!request.tools.empty() &&
         request.tool_choice != g::ChatRequest::ToolChoice::kNone) {
       for (const auto& tool : request.tools) {
@@ -685,10 +667,7 @@ public:
             : nullptr;
     st.budget_closed = false;
     st.thought_closed = false;
-    st.reasoning_off = c != nullptr && c->reasoning_off;
     st.call_required = c != nullptr && c->call_required;
-    st.answer_only = c != nullptr && c->answer_only;
-    st.answer_done = false;
     st.call_names = c != nullptr ? c->call_names : decltype(st.call_names){};
     st.call_prefix.clear();
     st.pending.reset();
@@ -706,22 +685,12 @@ public:
     st.lookup.BeginRequest();
   }
   [[nodiscard]] g::InitialOutputState InitialOutputState(
-      const g::ChatRequest& r) const override {
-    // reasoning off without tools: the prompt opened the text block (see
-    // gufo_adapter ToRenderOptions). With tools the model may still open a
-    // thinking block: let the parser see.
-    const bool tools =
-        !r.tools.empty() && r.tool_choice != g::ChatRequest::ToolChoice::kNone;
-    if (!ga::ReasoningOff(r))
-      return g::InitialOutputState::kAuto;
-    if (!tools)
-      return g::InitialOutputState::kContent;
-    // A required call: the grammar must let the model write its own header and
-    // function name before the call, or it forces a call header that has no
-    // such tokens (a different frontier than the re-render of the call). Only a
-    // reasoning phase leaves that room; the phase ends at the call.
-    return ga::CallRequired(r) ? g::InitialOutputState::kReasoning
-                               : g::InitialOutputState::kAuto;
+      const g::ChatRequest&) const override {
+    // The prompt ends with the assistant header and the model chooses the
+    // block: a thought, an answer or a call. No effort level turns thinking
+    // off (level 0 is the minimum, per the model card), so reasoning "off"
+    // only lowers the effort and the model may still think.
+    return g::InitialOutputState::kAuto;
   }
   [[nodiscard]] std::string Decode(
       std::span<const g::TextRunnerToken> tokens) const override {
@@ -845,8 +814,7 @@ public:
       return sel;
     }
     const auto& raw = st.session().logits();
-    if (raw.empty() && st.session().position() < max_context_ &&
-        !st.answer_done)
+    if (raw.empty() && st.session().position() < max_context_)
       throw std::runtime_error("Inkling 2 Mini token selection has no logits");
     return Select(st, sampler, raw, st.session().position());
   }
@@ -856,12 +824,13 @@ public:
                                               sampling::SamplerState& sampler,
                                               std::span<const float> raw,
                                               std::size_t position) const {
-    if (position >= max_context_ || st.answer_done)
+    if (position >= max_context_)
       return {.stop = true, .piece = {}};
-    // Reasoning off: the template's effort level 0 does not stop the model
-    // from opening a thinking block, and after a reasoning budget closed the
-    // thought the model would reopen one right away; in both cases the
-    // thinking token cannot follow a header. With a call required, the block
+    // After a reasoning budget closed the thought the model would reopen one
+    // right away, so the thinking token cannot follow a header. Reasoning
+    // "off" is the template's effort level 0, which, as the model card says,
+    // does not disable thinking: the model may still think, as in llama.cpp.
+    // With a call required, the block
     // after a header is a thought (reasoning on) or the call: one
     // declared function name (the tokens the template writes for it), then
     // the invoke token. That keeps the generated tokens the ones the next
@@ -871,8 +840,7 @@ public:
     if (sampler.ForcedToken() && st.block == Block::kThinking)
       st.budget_closed = true;
     std::vector<float> masked;
-    if ((st.reasoning_off || st.budget_closed) &&
-        st.block == Block::kAfterHeader) {
+    if (st.budget_closed && st.block == Block::kAfterHeader) {
       masked.assign(raw.begin(), raw.end());
       if (t_thinking_ < masked.size())
         masked[t_thinking_] = -std::numeric_limits<float>::infinity();
@@ -884,8 +852,7 @@ public:
       if (prefix.empty() && t_invoke_ < raw.size())
         allowed.push_back(t_invoke_);  // a call without the first name
       if (prefix.empty() && st.block == Block::kAfterHeader &&
-          !st.reasoning_off && !st.budget_closed && !st.thought_closed &&
-          t_thinking_ < raw.size())
+          !st.budget_closed && !st.thought_closed && t_thinking_ < raw.size())
         allowed.push_back(t_thinking_);  // a thought before the call
       for (const auto& name : st.call_names) {
         if (name.size() < prefix.size() ||
@@ -922,8 +889,6 @@ public:
   void CommitToken(Inkling2State& st, g::TextRunnerToken token) const {
     if (st.history_ok)
       st.history.push_back(static_cast<std::int32_t>(token));
-    if (st.answer_only && st.block == Block::kText && token == t_end_message_)
-      st.answer_done = true;
     if (st.block == Block::kThinking && token == t_end_message_)
       st.thought_closed = true;
     if (token == t_header_)
@@ -997,8 +962,7 @@ public:
     RowMode m;
     const auto& cfg = working.config();
     m.greedy = cfg.can_use_unmodified_argmax() && !cfg.logprobs &&
-               !working.ForcedToken() && !st.reasoning_off &&
-               !st.budget_closed && !st.call_required;
+               !working.ForcedToken() && !st.budget_closed && !st.call_required;
     m.coupled = !m.greedy && cfg.temperature > 0 && !cfg.constraint &&
                 !working.ForcedToken() && cfg.top_k == 0 && cfg.top_p == 1 &&
                 !(cfg.min_p > 0 && cfg.min_keep > 1);
@@ -1097,8 +1061,7 @@ public:
       anchor = std::move(*st.pending);
       st.pending.reset();
     } else {
-      if (ss.logits().empty() && ss.position() < max_context_ &&
-          !st.answer_done)
+      if (ss.logits().empty() && ss.position() < max_context_)
         throw std::runtime_error(
             "Inkling 2 Mini token selection has no logits");
       anchor = Select(st, working, ss.logits(), ss.position());
@@ -1135,8 +1098,7 @@ public:
         !greedy && width > 0 && cfg.temperature >= 0.1F && !cfg.constraint &&
         !working.ForcedToken() && !cfg.reasoning_budget &&
         !cfg.penalties_enabled() && cfg.top_k == 0 && cfg.top_p == 1 &&
-        cfg.min_p == 0 && !st.reasoning_off && !st.budget_closed &&
-        !st.call_required &&
+        cfg.min_p == 0 && !st.budget_closed && !st.call_required &&
         pos + static_cast<std::size_t>(width) + 1 < max_context_;
     std::array<std::uint64_t, Engine::kMaxVerifyRows + 1> draws{};
     std::array<g::TextRunnerToken, Engine::kMaxVerifyRows> sampled{};
@@ -1165,18 +1127,14 @@ public:
       const std::size_t at = pos + static_cast<std::size_t>(j) + 1;
       g::TextDecodeSelection sel;
       if (parallel) {
-        if (st.answer_done) {
-          sel = {.stop = true, .piece = {}};
-        } else {
-          const auto tk = sampled[j];
-          const auto row = out.subspan(static_cast<std::size_t>(j) * V, V);
-          const bool stop = st.stop_at_eos() && tok_->IsStop(tk);
-          sel = {.stop = stop,
-                 .token = tk,
-                 .piece = stop ? std::string{} : Piece(st, tk),
-                 .logprobs = sampling::CollectLogprobs(row, tk, cfg.logprobs)};
-          used = j + 1;
-        }
+        const auto tk = sampled[j];
+        const auto row = out.subspan(static_cast<std::size_t>(j) * V, V);
+        const bool stop = st.stop_at_eos() && tok_->IsStop(tk);
+        sel = {.stop = stop,
+               .token = tk,
+               .piece = stop ? std::string{} : Piece(st, tk),
+               .logprobs = sampling::CollectLogprobs(row, tk, cfg.logprobs)};
+        used = j + 1;
       } else if (greedy) {
         // A token the sampler forces (a reasoning budget's close) replaces
         // the row's argmax, as Sample would.
@@ -1185,8 +1143,8 @@ public:
           st.budget_closed = true;
         const auto tk = forced ? static_cast<g::TextRunnerToken>(*forced)
                                : static_cast<g::TextRunnerToken>(amax[j]);
-        const bool stop = at >= max_context_ || st.answer_done ||
-                          (st.stop_at_eos() && tok_->IsStop(tk));
+        const bool stop =
+            at >= max_context_ || (st.stop_at_eos() && tok_->IsStop(tk));
         sel = {.stop = stop,
                .token = tk,
                .piece = stop ? std::string{} : Piece(st, tk)};
@@ -1635,7 +1593,7 @@ public:
                 l.st->budget_closed = true;
               const auto tk = forced ? static_cast<g::TextRunnerToken>(*forced)
                                      : static_cast<g::TextRunnerToken>(amax[k]);
-              const bool stop = at >= max_context_ || l.st->answer_done ||
+              const bool stop = at >= max_context_ ||
                                 (l.st->stop_at_eos() && tok_->IsStop(tk));
               l.st->pending = g::TextDecodeSelection{
                   .stop = stop,

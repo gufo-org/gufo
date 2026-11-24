@@ -60,18 +60,18 @@ Thinking is on by default at effort `high`. `reasoning_effort` and
 [reasoning controls](../server.md#reasoning-controls); each effort selects the
 chat template's level:
 
-| Effort | `none` (thinking off) | `minimal` | `low` | `medium` | `high` | `xhigh`, `max` |
+| Effort | `none` | `minimal` | `low` | `medium` | `high` | `xhigh`, `max` |
 | --- | --- | --- | --- | --- | --- | --- |
 | Level | 0 | 0.1 | 0.2 | 0.7 | 0.9 | 0.99 |
 
-The template itself can't switch thinking off: at level 0 the model still
-writes a short thought, 29 to 345 tokens on short prompts as of November 2026.
-With thinking off, Gufo therefore opens the answer (or, with tools, closes an
-empty thought) in the prompt and doesn't let a thought start; the model then
-sometimes writes its deliberation into the answer instead.
+Inkling can't switch thinking off. At level 0 (`none`, or
+`enable_thinking: false`) the model still usually writes a short thought, 29 to
+345 tokens on short prompts as of November 2026, as the model card says. Gufo
+follows the template, as llama.cpp does: `none` lowers the effort, and the
+reply may still carry `reasoning_content`.
 
-With thinking on, `tool_choice: "required"`, named functions and
-`response_format` let the model think first, then force the call or the JSON.
+`tool_choice: "required"`, named functions and `response_format` let the
+model think first, then force the call or the JSON.
 A required call gets one thought: a model that decided against the call would
 otherwise keep reopening thoughts until the token limit.
 
