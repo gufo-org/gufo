@@ -16,7 +16,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, Sleep};
 
-use crate::websocket::{WsHandlerCallback, run_websocket_session};
+use crate::websocket::{IDLE_TIMEOUT, WsHandlerCallback, run_websocket_session};
 
 /// Bounded channel capacity for streaming responses. Keeps memory bounded while
 /// letting the producer run ahead of socket flushes by a few chunks.
@@ -379,7 +379,13 @@ impl GufoHttpResponder {
         let Ok(upgraded) = self.runtime.block_on(on_upgrade) else {
             return false;
         };
-        run_websocket_session(upgraded, &self.runtime, self.shutdown.clone(), ws_handler);
+        run_websocket_session(
+            upgraded,
+            &self.runtime,
+            self.shutdown.clone(),
+            ws_handler,
+            IDLE_TIMEOUT,
+        );
         true
     }
 }

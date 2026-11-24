@@ -32,10 +32,6 @@ use crate::{GufoHttpHeaderView, GufoHttpRequestView, GufoHttpSliceView};
 /// the C++ transport set.
 const STALL_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Without a keep-alive idle limit, a request head gets the same allowance as
-/// any other stalled read.
-const FIRST_HEAD_TIMEOUT: Duration = STALL_TIMEOUT;
-
 pub(crate) struct HandlerCallback {
     pub(crate) func: extern "C" fn(*mut c_void, *const GufoHttpRequestView, *mut GufoHttpResponder),
     pub(crate) ctx: usize,
@@ -127,6 +123,13 @@ impl ConnectionTracker {
         }
     }
 
+    fn parked_since(&self, id: usize) -> Option<Instant> {
+        self.conns
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(&id).and_then(|entry| entry.parked_since))
+    }
+
     fn remove(&self, id: usize) {
         if let Ok(mut guard) = self.conns.lock() {
             guard.remove(&id);
@@ -147,11 +150,17 @@ impl ConnectionTracker {
 pub(crate) struct ConnSlot {
     tracker: Arc<ConnectionTracker>,
     id: usize,
+    /// Signalled each time the connection parks, for its idle timer.
+    parked: Notify,
 }
 
 impl ConnSlot {
     pub(crate) fn new(tracker: Arc<ConnectionTracker>, id: usize) -> Self {
-        Self { tracker, id }
+        Self {
+            tracker,
+            id,
+            parked: Notify::new(),
+        }
     }
 
     /// A request is in progress: it counts toward the limit.
@@ -162,6 +171,24 @@ impl ConnSlot {
     /// The connection waits idle for its next request and may be evicted.
     fn mark_parked(&self) {
         self.tracker.set_state(self.id, false, true);
+        self.parked.notify_one();
+    }
+
+    /// Resolves once the connection has stayed parked for `timeout`. A new
+    /// request or an eviction leaves the parked state and restarts the wait.
+    async fn idle_expired(&self, timeout: Duration) {
+        loop {
+            match self.tracker.parked_since(self.id) {
+                Some(since) => {
+                    let deadline = since + timeout;
+                    if Instant::now() >= deadline {
+                        return;
+                    }
+                    tokio::time::sleep_until(deadline.into()).await;
+                }
+                None => self.parked.notified().await,
+            }
+        }
     }
 
     /// The response is done and the connection is closing.
@@ -362,13 +389,13 @@ pub(crate) async fn serve_connection(
         .title_case_headers(true)
         .max_headers(101)
         .timer(TokioTimer::new());
-    // hyper times every request head, including the wait before it, with this
-    // one timeout: a reused connection idles for at most the keep-alive limit.
-    if options.keep_alive && !options.keep_alive_idle_timeout.is_zero() {
-        builder.header_read_timeout(options.keep_alive_idle_timeout);
-    } else {
-        builder.header_read_timeout(FIRST_HEAD_TIMEOUT);
-    }
+    // hyper times every request head, including the wait before it, with one
+    // timeout. It gets the stall allowance, so a first request may arrive as
+    // late as before; the keep-alive idle limit is timed separately, from the
+    // moment a response parks the connection.
+    let idle_timeout = (options.keep_alive && !options.keep_alive_idle_timeout.is_zero())
+        .then_some(options.keep_alive_idle_timeout);
+    builder.header_read_timeout(idle_timeout.map_or(STALL_TIMEOUT, |idle| idle.max(STALL_TIMEOUT)));
 
     let slot_svc = Arc::clone(&slot);
     let options_svc = Arc::clone(&options);
@@ -429,6 +456,15 @@ pub(crate) async fn serve_connection(
     let mut conn = Box::pin(builder.serve_connection(io, service).with_upgrades());
     tokio::select! {
         _ = &mut conn => {}
+        _ = async {
+            match idle_timeout {
+                Some(timeout) => slot.idle_expired(timeout).await,
+                None => std::future::pending().await,
+            }
+        } => {
+            Pin::as_mut(&mut conn).graceful_shutdown();
+            let _ = tokio::time::timeout(Duration::from_secs(2), &mut conn).await;
+        }
         _ = evict.notified() => {
             Pin::as_mut(&mut conn).graceful_shutdown();
             let _ = tokio::time::timeout(Duration::from_secs(2), &mut conn).await;

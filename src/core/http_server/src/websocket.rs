@@ -19,7 +19,13 @@ const MAX_QUEUE_BYTES: usize = 8 << 20;
 /// to grow without limit (empty frames cost no bytes).
 const MAX_QUEUE_MESSAGES: usize = 128;
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
-const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// A session where neither side sent anything for this long closes with 1001,
+/// like the socket receive timeout the C++ transport used.
+pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Unread client bytes are drained this long before the socket closes: on
+/// Windows, closing with unread data aborts the connection with RST and
+/// discards the close frame just sent.
+const CLOSE_DRAIN: Duration = Duration::from_millis(200);
 /// How often a waiting reader checks the idle timeout.
 const IDLE_POLL: Duration = Duration::from_millis(500);
 
@@ -66,6 +72,7 @@ struct Shared {
     reader_wake: Notify,
     epoch: Instant,
     last_activity_ms: AtomicU64,
+    idle_timeout: Duration,
 }
 
 impl Shared {
@@ -95,7 +102,7 @@ impl Shared {
     fn idle(&self) -> bool {
         let now_ms = self.epoch.elapsed().as_millis() as u64;
         let last = self.last_activity_ms.load(Ordering::Acquire);
-        now_ms.saturating_sub(last) >= IDLE_TIMEOUT.as_millis() as u64
+        now_ms.saturating_sub(last) >= self.idle_timeout.as_millis() as u64
     }
 }
 
@@ -200,12 +207,14 @@ fn close_with(runtime: &Handle, writer: &Writer, shared: &Shared, payload: &[u8]
 
 /// Runs one WebSocket session on the calling blocking thread: a reader thread
 /// parses client frames into the message queue while `handler` consumes it.
-/// Returns once the handler has returned and the reader has stopped.
+/// Returns once the handler has returned, the reader has stopped and the
+/// socket has closed.
 pub(crate) fn run_websocket_session(
     upgraded: Upgraded,
     runtime: &Handle,
     shutdown: watch::Receiver<bool>,
     handler: WsHandlerCallback,
+    idle_timeout: Duration,
 ) {
     let (mut read_half, write_half) = tokio::io::split(TokioIo::new(upgraded));
     let writer: Writer = Arc::new(AsyncMutex::new(write_half));
@@ -220,6 +229,7 @@ pub(crate) fn run_websocket_session(
         reader_wake: Notify::new(),
         epoch: Instant::now(),
         last_activity_ms: AtomicU64::new(0),
+        idle_timeout,
     });
 
     let reader_runtime = runtime.clone();
@@ -319,6 +329,7 @@ pub(crate) fn run_websocket_session(
             }
         }
         shared.mark_closed();
+        read_half
     });
 
     // Server shutdown closes the session, which wakes a handler waiting in
@@ -332,11 +343,119 @@ pub(crate) fn run_websocket_session(
 
     let mut session = GufoWsSession {
         runtime: runtime.clone(),
-        writer,
+        writer: Arc::clone(&writer),
         shared,
     };
     handler.call(&mut session);
     session.close(1000);
     watcher.abort();
-    let _ = runtime.block_on(reader_task);
+    let read_half = runtime.block_on(reader_task).ok();
+    runtime.block_on(async {
+        if let Some(mut read_half) = read_half {
+            let drain = async {
+                let mut sink = [0u8; 2048];
+                while matches!(read_half.read(&mut sink).await, Ok(n) if n > 0) {}
+            };
+            let _ = tokio::time::timeout(CLOSE_DRAIN, drain).await;
+        }
+        let _ = writer.lock().await.shutdown().await;
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use http::{Request, Response, StatusCode};
+    use http_body_util::Empty;
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use tokio::net::{TcpListener, TcpStream};
+
+    extern "C" fn receive_until_closed(
+        _context: *mut std::ffi::c_void,
+        session: *mut GufoWsSession,
+    ) {
+        // SAFETY: `run_websocket_session` passes a live session for the call.
+        #[allow(unsafe_code)]
+        let session = unsafe { &*session };
+        while session.receive().is_some() {}
+    }
+
+    async fn read_until(stream: &mut TcpStream, buffer: &mut Vec<u8>, len: usize) {
+        while buffer.len() < len {
+            let mut chunk = [0u8; 256];
+            let n = stream.read(&mut chunk).await.expect("read");
+            assert!(n > 0, "connection closed early");
+            buffer.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    // A session where neither side speaks closes with 1001 after the idle
+    // limit, then drains and closes the socket.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn silent_session_closes_after_idle_limit() {
+        const IDLE: Duration = Duration::from_millis(300);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let service = service_fn(move |mut req: Request<Incoming>| {
+                let on_upgrade = hyper::upgrade::on(&mut req);
+                let shutdown = shutdown_rx.clone();
+                let runtime = Handle::current();
+                tokio::task::spawn_blocking(move || {
+                    let upgraded = runtime.block_on(on_upgrade).expect("upgrade");
+                    let handler =
+                        WsHandlerCallback::new(receive_until_closed, std::ptr::null_mut());
+                    run_websocket_session(upgraded, &runtime, shutdown, handler, IDLE);
+                });
+                async {
+                    Response::builder()
+                        .status(StatusCode::SWITCHING_PROTOCOLS)
+                        .header(http::header::UPGRADE, "websocket")
+                        .header(http::header::CONNECTION, "Upgrade")
+                        .body(Empty::<Bytes>::new())
+                }
+            });
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades()
+                .await;
+        });
+
+        let mut client = TcpStream::connect(address).await.expect("connect");
+        client
+            .write_all(
+                b"GET / HTTP/1.1\r\nHost: test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            )
+            .await
+            .expect("write");
+        let started = Instant::now();
+        let mut buffer = Vec::new();
+        while !buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+            let len = buffer.len() + 1;
+            read_until(&mut client, &mut buffer, len).await;
+        }
+        let head_end = buffer
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("head")
+            + 4;
+        assert!(buffer.starts_with(b"HTTP/1.1 101"));
+        let mut frame = buffer.split_off(head_end);
+        read_until(&mut client, &mut frame, 4).await;
+        assert_eq!(&frame[..4], b"\x88\x02\x03\xE9");
+        assert!(started.elapsed() >= IDLE);
+        // The server drains and then sends FIN without waiting for a reply.
+        let mut rest = [0u8; 16];
+        let n = tokio::time::timeout(Duration::from_secs(2), client.read(&mut rest))
+            .await
+            .expect("server closes the socket")
+            .expect("read");
+        assert_eq!(n, 0);
+        server.await.expect("server task");
+    }
 }

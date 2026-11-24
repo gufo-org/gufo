@@ -3004,6 +3004,21 @@ void TestKeepAliveIdleTimeoutCloses() {
   net::CloseSocket(fd);
 }
 
+// The idle limit starts when a response parks the connection: a client may
+// connect before it sends its first request.
+void TestKeepAliveIdleTimeoutSparesFirstRequest() {
+  RunningServer server(
+      {.keep_alive = true,
+       .keep_alive_idle_timeout = std::chrono::milliseconds(100)});
+  const int fd = server.Connect();
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  ExpectStatus(ReadFramedResponse(fd), 200);
+  net::CloseSocket(fd);
+}
+
 // A stream that fails without a protocol error stays unterminated, so the
 // connection must close at once instead of waiting for the idle timeout.
 void TestKeepAliveClosesUnterminatedStream() {
@@ -4079,6 +4094,7 @@ int main() {
   TestKeepAliveClosesUnterminatedStream();
   TestKeepAlivePipelinedConnectionCounts();
   TestKeepAliveStreamingConnectionCounts();
+  TestKeepAliveIdleTimeoutSparesFirstRequest();
   TestKeepAliveCloseDecisions();
   TestKeepAliveRequestLimit();
   TestStreamingFraming();
