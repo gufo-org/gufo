@@ -113,7 +113,13 @@ jobs:
         if: always() && github.event_name == 'pull_request' && contains(fromJSON('["success", "failure", "cancelled"]'), steps.check.outcome)
         run: |
           echo "ccache-$(python3 tools/ci/cache_growth.py check /tmp/gufo-ccache "$RUNNER_TEMP/cache-growth/ccache.json")" >> "$GITHUB_OUTPUT"
-          echo "rust-$(python3 tools/ci/cache_growth.py check /tmp/gufo-rust-cache "$RUNNER_TEMP/cache-growth/rust.json")" >> "$GITHUB_OUTPUT"
+          # Rust objects are only ever added. Past 1 GiB, keep the restored
+          # entry; warm-caches.yml starts main's over again at that size.
+          if (( $(du -sb /tmp/gufo-rust-cache | cut -f1) > 1073741824 )); then
+            echo "rust-save=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust-$(python3 tools/ci/cache_growth.py check /tmp/gufo-rust-cache "$RUNNER_TEMP/cache-growth/rust.json")" >> "$GITHUB_OUTPUT"
+          fi
 
       # Only pull requests save here. On main every check comes from Cachix
       # and compiles nothing, and a newer empty entry would supersede the one

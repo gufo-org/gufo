@@ -95,7 +95,9 @@ Toolboxes cache.
   settings and sandbox paths, and run no tests. Their objects are therefore the
   cache entries a PR's checks look up. The workflow pulls from Cachix and never
   pushes, and a newer push to `main` cancels its run after saving what it
-  compiled.
+  compiled. The Rust cache only ever gains objects, so past 1 GiB the workflow
+  clears it before building, and a PR keeps its restored Rust cache instead of
+  saving.
 - **Linux package builds** use the package compiler cache and Cachix. Main's
   warming job exists because PR builds don't push to Cachix.
 - **Windows builds** cache the SDK archive, IRON, NPU designs, the Loom runtime,

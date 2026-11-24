@@ -71,6 +71,13 @@ jobs:
           chmod -R a+rwX /tmp/gufo-ccache
           chmod 1777 /tmp/gufo-ccache
           mkdir -p /tmp/gufo-rust-cache
+          # The checks publish Rust objects with rsync --ignore-existing and
+          # never delete, and the restore survives Cargo.lock changes. Past
+          # 1 GiB, start over: this run then saves only what main compiles.
+          if (( $(du -sb /tmp/gufo-rust-cache | cut -f1) > 1073741824 )); then
+            echo "::notice::Rust compiler cache over 1 GiB; clearing it"
+            rm -rf /tmp/gufo-rust-cache/objects-v1
+          fi
           chmod -R a+rwX /tmp/gufo-rust-cache
           chmod 1777 /tmp/gufo-rust-cache
 
@@ -93,11 +100,12 @@ jobs:
             extra-sandbox-paths = /tmp/gufo-ccache /tmp/gufo-rust-cache
 
       # Stop below the job limit so the saves below keep a slow run's work.
+      # --keep-going: a failing variant must not stop the other's warm-up.
       - name: Compile the CPU and Rust checks
         id: compile
         timeout-minutes: 45
         run: |
-          nix build --no-link --print-build-logs --cores "$(nproc)" --max-jobs 2 \
+          nix build --no-link --print-build-logs --keep-going --cores "$(nproc)" --max-jobs 2 \
             .#check-tests-compile .#check-rust-compile
 
       - name: Measure compiler cache growth
