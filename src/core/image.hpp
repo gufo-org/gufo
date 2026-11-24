@@ -34,10 +34,13 @@ struct RgbaImage {
 
 /// PNG as libpng's simplified API decodes it to 8-bit RGBA: tRNS becomes
 /// alpha, 16-bit samples round to 8 bits, color samples convert from the file
-/// gamma to sRGB, and EXIF orientation is ignored. JPEG and WebP decode as
-/// DecodeImage does, with opaque alpha.
+/// gamma to sRGB, and EXIF orientation is ignored. Interlaced 16-bit PNGs
+/// decode correctly, unlike libpng 1.6.59. JPEG and WebP decode as
+/// DecodeImage does, with opaque alpha. Checks kMaxEncodedImageBytes and
+/// kMaxImagePixels; invalid input throws std::invalid_argument.
 [[nodiscard]] RgbaImage DecodeImageRgba(std::span<const std::uint8_t> bytes);
-/// An 8-bit RGBA PNG with an sRGB chunk, for width * height pixels in rgba.
+/// An 8-bit RGBA PNG with an sRGB chunk, for width * height pixels in rgba,
+/// each dimension at most 1,000,000. Throws std::runtime_error otherwise.
 [[nodiscard]] std::vector<std::uint8_t> EncodePngRgba(
     std::uint32_t width, std::uint32_t height,
     std::span<const std::uint8_t> rgba);

@@ -7,21 +7,25 @@ use png::{BitDepth, ColorType, DeflateCompression, Encoder, Filter, SrgbRenderin
 /// which libpng used here; level 2 produced smaller files than that, faster.
 const DEFLATE_LEVEL: u8 = 2;
 
-use crate::decode::Error;
+use crate::decode::{Error, MAX_DIMENSION};
 
-/// Returns the PNG for `rgba`, packed rows of `width` pixels.
+/// Returns the PNG for `rgba`, packed rows of `width` pixels. Wider or taller
+/// images are rejected, as libpng and this crate's decoder reject them. The
+/// png crate grows its compressed buffer infallibly; callers bound the input
+/// by their pixel limits.
 pub fn encode_rgba8(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error> {
     let len = (width as usize)
         .checked_mul(height as usize)
         .and_then(|pixels| pixels.checked_mul(4));
-    if width == 0 || height == 0 || len != Some(rgba.len()) {
+    if width == 0
+        || height == 0
+        || width > MAX_DIMENSION
+        || height > MAX_DIMENSION
+        || len != Some(rgba.len())
+    {
         return Err(Error::Internal);
     }
-    // Room for incompressible pixels: filter bytes, stored-block headers and
-    // chunk framing stay well below this margin.
     let mut out = Vec::new();
-    out.try_reserve(rgba.len() + rgba.len() / 64 + height as usize + 1024)
-        .map_err(|_| Error::Internal)?;
     let mut encoder = Encoder::new(&mut out, width, height);
     encoder.set_color(ColorType::Rgba);
     encoder.set_depth(BitDepth::Eight);
@@ -83,5 +87,10 @@ mod tests {
     fn rejects_mismatched_lengths() {
         assert_eq!(encode_rgba8(&[0; 15], 2, 2), Err(Error::Internal));
         assert_eq!(encode_rgba8(&[], 0, 1), Err(Error::Internal));
+        assert_eq!(encode_rgba8(&[], 1, 0), Err(Error::Internal));
+        assert_eq!(
+            encode_rgba8(&[0; 4 * 1_000_001], 1_000_001, 1),
+            Err(Error::Internal)
+        );
     }
 }

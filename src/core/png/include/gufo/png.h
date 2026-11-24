@@ -27,7 +27,8 @@ enum {
   /* Packed, unpremultiplied RGBA8 as libpng's simplified API with
      PNG_FORMAT_RGBA: tRNS becomes alpha, 16-bit samples round to 8 bits, and
      color samples convert from the file gamma (sRGB or gAMA; otherwise sRGB
-     for 8-bit and linear for 16-bit samples) to sRGB. */
+     for 8-bit or smaller and linear for 16-bit samples) to sRGB. Interlaced
+     16-bit images decode correctly, unlike libpng 1.6.59. */
   GUFO_PNG_RGBA8 = 1,
 };
 
@@ -55,16 +56,16 @@ GufoPngStatus gufo_png_decode(GufoPngDecoder* decoder, uint8_t* pixels,
 /* Releases a decoder from gufo_png_open. A null decoder is ignored. */
 void gufo_png_close(GufoPngDecoder* decoder);
 
-/* Returns len writable bytes for the encoded PNG, or null on failure. */
-typedef uint8_t* (*GufoPngBufferFn)(void* context, size_t len);
+/* Receives the encoded PNG, valid only during the call. */
+typedef void (*GufoPngBytesFn)(void* context, const uint8_t* data, size_t len);
 
-/* Encodes packed RGBA8 rows (len = 4 * width * height, both nonzero) as an
-   8-bit RGBA PNG with an sRGB chunk, no interlacing, adaptive filters and fast
-   deflate, into the buffer that buffer returns for its exact length. The
-   buffer's contents are unspecified unless the result is GUFO_PNG_OK. */
+/* Encodes packed RGBA8 rows (len = 4 * width * height; width and height from
+   1 to 1,000,000) as an 8-bit RGBA PNG with an sRGB chunk, no interlacing,
+   adaptive filters and fast deflate, and passes it to bytes once on
+   GUFO_PNG_OK. bytes must not unwind. */
 GufoPngStatus gufo_png_encode_rgba8(const uint8_t* rgba, size_t len,
                                     uint32_t width, uint32_t height,
-                                    GufoPngBufferFn buffer, void* context);
+                                    GufoPngBytesFn bytes, void* context);
 
 #ifdef __cplusplus
 }

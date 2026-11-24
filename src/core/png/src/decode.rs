@@ -10,7 +10,7 @@ use png::{BitDepth, ColorType, Decoder, InterlaceInfo, Reader, Transformations};
 use crate::rgba::{Color, Converter};
 
 /// Wider or taller images are invalid, even when they fit the pixel limit.
-const MAX_DIMENSION: u32 = 1_000_000;
+pub const MAX_DIMENSION: u32 = 1_000_000;
 
 const RGB8_BITS_PER_PIXEL: u8 = 24;
 const RGBA8_BITS_PER_PIXEL: u8 = 32;
@@ -228,7 +228,11 @@ fn decode_rgba8(
     }
     let bits_per_pixel = reader.info().bits_per_pixel();
     if reader.info().interlaced {
-        let mut pass_rgba = vec![0; stride];
+        let mut pass_rgba = Vec::new();
+        pass_rgba
+            .try_reserve_exact(stride)
+            .map_err(|_| Error::Internal)?;
+        pass_rgba.resize(stride, 0);
         while let Some(row) = reader.next_interlaced_row().map_err(|_| Error::Invalid)? {
             let InterlaceInfo::Adam7(pass) = row.interlace() else {
                 return Err(Error::Internal);

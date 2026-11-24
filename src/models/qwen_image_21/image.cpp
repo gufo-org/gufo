@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstring>
 #include <gufo/ext/image.hpp>
 #include <gufo/ext/sha256.hpp>
 #include <limits>

@@ -89,12 +89,9 @@ std::vector<std::uint8_t> EncodePngRgba(std::uint32_t width,
   } out;
   const GufoPngStatus status = gufo_png_encode_rgba8(
       rgba.data(), rgba.size(), width, height,
-      [](void* context, std::size_t len) noexcept -> std::uint8_t* {
+      [](void* context, const std::uint8_t* data, std::size_t len) noexcept {
         auto& out = *static_cast<Output*>(context);
-        return out.failure.Guard<std::uint8_t*>(nullptr, [&] {
-          out.bytes.resize(len);
-          return out.bytes.data();
-        });
+        out.failure.Guard([&] { out.bytes.assign(data, data + len); });
       },
       &out);
   out.failure.Rethrow();

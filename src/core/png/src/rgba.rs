@@ -9,7 +9,7 @@
 //! - 16-bit samples round to 8 bits; gamma-corrected ones go through libpng's
 //!   16-to-8 table, whose precision follows the sBIT chunk.
 //!
-//! The png crate decodes the pixels with no transformations. The colour chunks
+//! The png crate decodes the pixels with no transformations. The color chunks
 //! are read here, because libpng ignores malformed or misplaced ones that the
 //! png crate may still record. iCCP, cHRM and cICP do not change the pixels.
 
@@ -58,7 +58,7 @@ impl Color {
     }
 }
 
-/// The libpng state that the colour chunks before IDAT leave behind.
+/// The libpng state that the color chunks before IDAT leave behind.
 #[derive(Debug, Default)]
 struct Chunks {
     /// Palette entries kept from PLTE, at most 2^depth for indexed images.
@@ -118,8 +118,8 @@ fn read_chunks(bytes: &[u8], color: Color, depth: u8) -> Chunks {
             IHDR => {}
             PLTE => {
                 // An indexed image's PLTE is critical: the png crate rejects
-                // the ones libpng rejects. Elsewhere libpng ignores bad ones,
-                // but keeps a good one even with a bad CRC.
+                // the ones libpng rejects. Elsewhere libpng ignores bad ones;
+                // the png crate rejects some of those, and a bad CRC, first.
                 if color == Color::Indexed {
                     have_plte = true;
                     chunks.palette_len = (length / 3).min(1 << depth);
@@ -145,15 +145,10 @@ fn read_chunks(bytes: &[u8], color: Color, depth: u8) -> Chunks {
                     chunks.trns = Some(data.to_vec());
                 }
             }
-            BKGD if !seen_bkgd && (1..=6).contains(&length) => {
+            // Only gates a later PLTE, which indexed images never ignore.
+            BKGD if color != Color::Indexed && !seen_bkgd && (1..=6).contains(&length) => {
                 let valid = match color {
-                    Color::Indexed => {
-                        have_plte
-                            && length == 1
-                            && crc_ok()
-                            && (chunks.palette_len == 0
-                                || usize::from(data[0]) < chunks.palette_len)
-                    }
+                    Color::Indexed => false,
                     Color::Gray | Color::GrayAlpha => {
                         length == 2
                             && crc_ok()

@@ -224,7 +224,7 @@ Bytes RandomRows(const Format& format, unsigned width, unsigned height) {
   return rows;
 }
 
-// Scanlines with filter type 0, in Adam7 pass order when interlaced.
+// Scanlines in Adam7 pass order when interlaced.
 Bytes Scanlines(const Format& format, unsigned width, unsigned height,
                 const Bytes& rows, bool interlace) {
   const auto bits = Channels(format.color) * format.depth;
@@ -238,15 +238,27 @@ Bytes Scanlines(const Format& format, unsigned width, unsigned height,
                                     {0, 1, 1, 2}}
                 : std::vector<Pass>{{0, 1, 0, 1}};
   Bytes out;
+  // Every other scanline uses the Sub filter, the rest filter type 0.
+  const std::size_t filter_step = std::max(bits / 8, 1U);
+  bool sub = false;
+  const auto filter = [&](std::size_t start) {
+    if ((sub = !sub)) {
+      out[start - 1] = 1;
+      for (std::size_t i = out.size(); i-- > start + filter_step;)
+        out[i] = static_cast<std::uint8_t>(out[i] - out[i - filter_step]);
+    }
+  };
   for (const auto& pass : passes) {
     if (pass.x0 >= width || pass.y0 >= height)
       continue;
     for (unsigned y = pass.y0; y < height; y += pass.dy) {
       out.push_back(0);
+      const std::size_t start = out.size();
       const auto* row = rows.data() + y * stride;
       if (bits >= 8) {
         for (unsigned x = pass.x0; x < width; x += pass.dx)
           out.insert(out.end(), row + x * bits / 8, row + (x + 1) * bits / 8);
+        filter(start);
         continue;
       }
       unsigned used = 0;
@@ -259,6 +271,7 @@ Bytes Scanlines(const Format& format, unsigned width, unsigned height,
         out.back() |= static_cast<std::uint8_t>(value << (8 - bits - used % 8));
         used += bits;
       }
+      filter(start);
     }
   }
   return out;
@@ -270,10 +283,10 @@ constexpr std::uint8_t PaletteAlpha(unsigned index) {
 
 Bytes WritePng(const Format& format, unsigned width, unsigned height,
                const Bytes& rows, bool interlace, bool trns,
-               std::vector<Chunk> colour = {}) {
+               std::vector<Chunk> color_chunks = {}) {
   std::vector<Chunk> chunks{
       Ihdr(width, height, format.depth, format.color, interlace ? 1 : 0)};
-  chunks.insert(chunks.end(), colour.begin(), colour.end());
+  chunks.insert(chunks.end(), color_chunks.begin(), color_chunks.end());
   if (format.color == kPalette) {
     const unsigned entries = 1U << format.depth;
     Bytes palette;
@@ -348,74 +361,78 @@ void RequireEqual(std::string_view name, const Bytes& actual,
 // RGB8 follows Pillow's convert("RGB"); RGBA8 follows libpng's simplified
 // API. 16-bit RGBA cases carry sRGB, so their samples only round.
 void Formats() {
-  for (const auto format : kFormats) {
-    for (const bool interlace : {false, true}) {
-      for (const bool trns : {false, true}) {
-        if (trns && !AllowsTrns(format.color))
-          continue;
-        constexpr unsigned width = 9, height = 7;
-        const auto rows = RandomRows(format, width, height);
-        const auto png =
-            WritePng(format, width, height, rows, interlace, trns,
-                     format.depth == 16 ? std::vector{Make("sRGB", {0})}
-                                        : std::vector<Chunk>{});
-        const auto rgb = DecodeImage(png);
-        const auto rgba = DecodeImageRgba(png);
-        Require(rgb.width == width && rgb.height == height);
-        Require(rgba.width == width && rgba.height == height);
-        const unsigned max = (1U << format.depth) - 1;
-        const bool color = format.color == kRgb || format.color == kRgba;
-        const bool alpha = format.color == kGrayAlpha || format.color == kRgba;
-        Bytes expected_rgb, expected_rgba;
-        for (unsigned y = 0; y < height; ++y) {
-          for (unsigned x = 0; x < width; ++x) {
-            const auto sample = [&](unsigned c) {
-              return Sample(format, width, rows, x, y, c);
-            };
-            if (format.color == kPalette) {
-              const auto index = sample(0);
-              for (const auto value : {index * 37, index * 91, 255 - index}) {
-                expected_rgb.push_back(static_cast<std::uint8_t>(value));
-                expected_rgba.push_back(static_cast<std::uint8_t>(value));
+  for (const auto [width, height] :
+       {std::pair{1U, 1U}, std::pair{3U, 3U}, std::pair{9U, 7U}}) {
+    for (const auto format : kFormats) {
+      for (const bool interlace : {false, true}) {
+        for (const bool trns : {false, true}) {
+          if (trns && !AllowsTrns(format.color))
+            continue;
+          const auto rows = RandomRows(format, width, height);
+          const auto png =
+              WritePng(format, width, height, rows, interlace, trns,
+                       format.depth == 16 ? std::vector{Make("sRGB", {0})}
+                                          : std::vector<Chunk>{});
+          const auto rgb = DecodeImage(png);
+          const auto rgba = DecodeImageRgba(png);
+          Require(rgb.width == width && rgb.height == height);
+          Require(rgba.width == width && rgba.height == height);
+          const unsigned max = (1U << format.depth) - 1;
+          const bool color = format.color == kRgb || format.color == kRgba;
+          const bool alpha =
+              format.color == kGrayAlpha || format.color == kRgba;
+          Bytes expected_rgb, expected_rgba;
+          for (unsigned y = 0; y < height; ++y) {
+            for (unsigned x = 0; x < width; ++x) {
+              const auto sample = [&](unsigned c) {
+                return Sample(format, width, rows, x, y, c);
+              };
+              if (format.color == kPalette) {
+                const auto index = sample(0);
+                for (const auto value : {index * 37, index * 91, 255 - index}) {
+                  expected_rgb.push_back(static_cast<std::uint8_t>(value));
+                  expected_rgba.push_back(static_cast<std::uint8_t>(value));
+                }
+                expected_rgba.push_back(trns ? PaletteAlpha(index) : 255);
+                continue;
               }
-              expected_rgba.push_back(trns ? PaletteAlpha(index) : 255);
-              continue;
-            }
-            bool keyed = trns;
-            for (unsigned c = 0; c < 3; ++c) {
-              const auto value = sample(color ? c : 0);
-              keyed = keyed &&
-                      value == Sample(format, width, rows, 0, 0, color ? c : 0);
-              // Gray16 keeps libpng's saturating conversion; RGB16 strips the
-              // low byte.
-              expected_rgb.push_back(static_cast<std::uint8_t>(
-                  format.depth < 8 ? value * 255 / max
-                  : format.depth == 16
-                      ? (format.color == kGray ? std::min(value, 255U)
-                                               : value >> 8)
-                      : value));
-              expected_rgba.push_back(
-                  format.depth < 8
-                      ? static_cast<std::uint8_t>(value * 255 / max)
-                  : format.depth == 16 ? Round16(value)
-                                       : static_cast<std::uint8_t>(value));
-            }
-            if (alpha) {
-              const auto value = sample(Channels(format.color) - 1);
-              expected_rgba.push_back(format.depth == 16
-                                          ? Round16(value)
-                                          : static_cast<std::uint8_t>(value));
-            } else {
-              expected_rgba.push_back(keyed ? 0 : 255);
+              bool keyed = trns;
+              for (unsigned c = 0; c < 3; ++c) {
+                const auto value = sample(color ? c : 0);
+                keyed = keyed && value == Sample(format, width, rows, 0, 0,
+                                                 color ? c : 0);
+                // RGB8 saturates Gray16 and strips the low byte of other 16-bit
+                // samples, as Pillow does; RGBA8 rounds, as libpng does.
+                expected_rgb.push_back(static_cast<std::uint8_t>(
+                    format.depth < 8 ? value * 255 / max
+                    : format.depth == 16
+                        ? (format.color == kGray ? std::min(value, 255U)
+                                                 : value >> 8)
+                        : value));
+                expected_rgba.push_back(
+                    format.depth < 8
+                        ? static_cast<std::uint8_t>(value * 255 / max)
+                    : format.depth == 16 ? Round16(value)
+                                         : static_cast<std::uint8_t>(value));
+              }
+              if (alpha) {
+                const auto value = sample(Channels(format.color) - 1);
+                expected_rgba.push_back(format.depth == 16
+                                            ? Round16(value)
+                                            : static_cast<std::uint8_t>(value));
+              } else {
+                expected_rgba.push_back(keyed ? 0 : 255);
+              }
             }
           }
+          const auto name =
+              std::to_string(width) + "x" + std::to_string(height) + " color " +
+              std::to_string(format.color) + " depth " +
+              std::to_string(format.depth) + " interlace " +
+              std::to_string(interlace) + " trns " + std::to_string(trns);
+          RequireEqual(name + " RGB", rgb.pixels, expected_rgb);
+          RequireEqual(name + " RGBA", rgba.rgba, expected_rgba);
         }
-        const auto name = "color " + std::to_string(format.color) + " depth " +
-                          std::to_string(format.depth) + " interlace " +
-                          std::to_string(interlace) + " trns " +
-                          std::to_string(trns);
-        RequireEqual(name + " RGB", rgb.pixels, expected_rgb);
-        RequireEqual(name + " RGBA", rgba.rgba, expected_rgba);
       }
     }
   }
@@ -437,7 +454,7 @@ Bytes Be16(std::initializer_list<unsigned> values) {
 }
 
 // Expected values are libpng 1.6.59's simplified API output. RGB8 ignores
-// the colour chunks.
+// the color chunks.
 void Gamma() {
   const Bytes gray8{0, 1, 64, 127, 128, 200, 254, 255};
   const auto gray16 = Be16({0, 1, 255, 4096, 32768, 50000, 65534, 65535});
@@ -452,10 +469,11 @@ void Gamma() {
   };
   const auto check = [](std::string_view name, const Format& format,
                         unsigned width, const Bytes& row,
-                        std::vector<Chunk> colour, const Bytes& expected) {
+                        std::vector<Chunk> color_chunks,
+                        const Bytes& expected) {
     RequireEqual(name,
                  DecodeImageRgba(WritePng(format, width, 1, row, false, false,
-                                          std::move(colour)))
+                                          std::move(color_chunks)))
                      .rgba,
                  expected);
   };
@@ -478,6 +496,26 @@ void Gamma() {
   check("rgba16 alpha only rounds", {kRgba, 16}, 1,
         Be16({32768, 4096, 65535, 32896}), {}, {186, 72, 255, 128});
   // gAMA after a suggested palette is out of place.
+  check("gray8 sRGB intent 4 ignored", {kGray, 8}, 8, gray8,
+        {Make("sRGB", {4}), Gamma(100000)}, linear8);
+  check("gray8 gAMA above INT32_MAX ignored", {kGray, 8}, 8, gray8,
+        {Gamma(0x80000000U), Gamma(100000)}, linear8);
+  check("gray8 gAMA of bad length ignored", {kGray, 8}, 8, gray8,
+        {Make("gAMA", {0, 1, 0x86, 0xa0, 0}), Gamma(100000)}, linear8);
+  check("gray8 gAMA with bad CRC ignored", {kGray, 8}, 8, gray8,
+        {WithCrc(Gamma(100000), 0)}, gray({0, 1, 64, 127, 128, 200, 254, 255}));
+  check("gray16 sBIT 10", {kGray, 16}, 8, gray16, {Make("sBIT", {10})},
+        gray({0, 0, 17, 72, 186, 225, 255, 255}));
+  check("gray16 sBIT 9", {kGray, 16}, 8, gray16, {Make("sBIT", {9})},
+        gray({0, 0, 11, 72, 186, 225, 255, 255}));
+  // A tRNS key above the sample depth matches its low bits.
+  check("gray2 tRNS 0x105", {kGray, 2}, 4, {0x1b}, {Make("tRNS", {1, 5})},
+        {0, 0, 0, 255, 85, 85, 85, 0, 170, 170, 170, 255, 255, 255, 255, 255});
+  // A suggested palette after tRNS is ignored, so gAMA still applies.
+  check("rgb8 PLTE after tRNS ignored", {kRgb, 8}, 2, {10, 100, 200, 1, 2, 3},
+        {Make("tRNS", {0, 1, 0, 2, 0, 3}), Make("PLTE", {0, 0, 0}),
+         Gamma(100000)},
+        {59, 167, 228, 255, 21, 28, 34, 0});
   check("rgb8 gAMA after PLTE ignored", {kRgb, 8}, 2,
         {10, 100, 200, 30, 60, 90}, {Make("PLTE", {0, 0, 0}), Gamma(100000)},
         {10, 100, 200, 255, 30, 60, 90, 255});
@@ -506,6 +544,18 @@ void Framing() {
           for (unsigned c = 0; c < 3; ++c)
             expected.push_back(DefaultFill(x, y, c));
       Require(image.pixels == expected);
+    } catch (const std::invalid_argument& error) {
+      if (accepted || std::string_view(error.what()) != "invalid PNG image")
+        throw;
+    }
+    // RGBA8 accepts and rejects the same files.
+    try {
+      const auto image = DecodeImageRgba(png);
+      if (!accepted || image.width != 8 || image.height != 8)
+        throw std::runtime_error(std::string(name) + " RGBA");
+      for (std::size_t i = 0; i < 64; ++i)
+        Require(image.rgba[i * 4 + 3] == 255 &&
+                image.rgba[i * 4] == DefaultFill(i % 8, i / 8, 0));
     } catch (const std::invalid_argument& error) {
       if (accepted || std::string_view(error.what()) != "invalid PNG image")
         throw;
@@ -598,6 +648,7 @@ void Encoding() {
       const auto chunks = Parse(png);
       Require(chunks.size() >= 4 && chunks[0].type == "IHDR" &&
               chunks[0].data[8] == 8 && chunks[0].data[9] == kRgba &&
+              chunks[0].data[10] == 0 && chunks[0].data[11] == 0 &&
               chunks[0].data[12] == 0 && chunks[1].type == "sRGB" &&
               chunks[1].data == Bytes{0} && chunks.back().type == "IEND");
       const auto decoded = DecodeImageRgba(png);
@@ -610,7 +661,8 @@ void Encoding() {
     }
   }
   for (const auto [width, height, size] :
-       {std::tuple{2U, 2U, 15U}, std::tuple{0U, 1U, 0U}}) {
+       {std::tuple{2U, 2U, 15U}, std::tuple{0U, 1U, 0U}, std::tuple{1U, 0U, 0U},
+        std::tuple{1'000'001U, 1U, 4'000'004U}}) {
     try {
       (void)EncodePngRgba(width, height, Bytes(size));
       throw std::runtime_error("invalid RGBA geometry encoded");

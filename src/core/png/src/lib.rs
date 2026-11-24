@@ -43,8 +43,8 @@ pub struct GufoPngDecoder {
     png: Option<decode::Png<'static>>,
 }
 
-/// Returns the buffer for an encoded PNG of `len` bytes, or null on failure.
-pub type GufoPngBufferFn = unsafe extern "C" fn(context: *mut c_void, len: usize) -> *mut u8;
+/// Receives the encoded PNG, borrowed for the call.
+pub type GufoPngBytesFn = unsafe extern "C" fn(context: *mut c_void, data: *const u8, len: usize);
 
 /// # Safety
 /// `bytes` points to `len` readable bytes, or `len` is 0, and they stay
@@ -126,9 +126,8 @@ pub unsafe extern "C" fn gufo_png_close(decoder: *mut GufoPngDecoder) {
 }
 
 /// # Safety
-/// `rgba` points to `len` readable bytes, or `len` is 0. `buffer` returns
-/// null or a pointer to as many writable bytes as it is asked for, which do
-/// not overlap `rgba` and stay valid until this function returns.
+/// `rgba` points to `len` readable bytes, or `len` is 0. `bytes` reads the
+/// encoded PNG only during the call and does not unwind.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gufo_png_encode_rgba8(
@@ -136,25 +135,21 @@ pub unsafe extern "C" fn gufo_png_encode_rgba8(
     len: usize,
     width: u32,
     height: u32,
-    buffer: Option<GufoPngBufferFn>,
+    bytes: Option<GufoPngBytesFn>,
     context: *mut c_void,
 ) -> GufoPngStatus {
     guard(GufoPngStatus::Internal, || {
         // SAFETY: the caller supplies `len` readable bytes.
-        let (Some(rgba), Some(buffer)) = (unsafe { gufo_ffi::input(rgba, len) }, buffer) else {
+        let (Some(rgba), Some(bytes)) = (unsafe { gufo_ffi::input(rgba, len) }, bytes) else {
             return GufoPngStatus::Internal;
         };
         let png = match encode::encode_rgba8(rgba, width, height) {
             Ok(png) => png,
             Err(error) => return status(Err(error)),
         };
-        // SAFETY: the callback follows the contract above.
-        let out = unsafe { buffer(context, png.len()) };
-        // SAFETY: a non-null result has `png.len()` writable bytes.
-        let Some(out) = (unsafe { gufo_ffi::output(out, png.len()) }) else {
-            return GufoPngStatus::Internal;
-        };
-        out.copy_from_slice(&png);
+        // SAFETY: `png` outlives the call, and the callback follows the
+        // contract above.
+        unsafe { bytes(context, png.as_ptr(), png.len()) };
         GufoPngStatus::Ok
     })
 }

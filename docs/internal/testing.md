@@ -67,8 +67,12 @@ sanitizer preset does not instrument the Rust library; it uses the development
 profile when configured as Debug.
 
 `png_test` checks expected RGB and RGBA bytes across color types, sample
-depths, transparency, Adam7 interlacing and EXIF orientations, RGBA gamma
-cases recorded from libpng 1.6.59's simplified API, and encoder round trips.
+depths, transparency, Adam7 interlacing, filters and EXIF orientations, and
+encoder round trips. Its RGBA gamma, sBIT and chunk-precedence values were
+recorded from libpng 1.6.59's simplified API (`png_image_begin_read_from_memory`
+and `png_image_finish_read` with `PNG_FORMAT_RGBA`, from
+`nix shell nixpkgs#libpng`); re-record them the same way after changing the
+RGBA conversion.
 It fixes the PNG port's intentional framing behavior: missing Adler trailers
 and unknown non-letter chunks are accepted; bad IEND CRCs, nonempty IEND and
 stray IDAT after text are rejected. APNG metadata is ignored while decoding
