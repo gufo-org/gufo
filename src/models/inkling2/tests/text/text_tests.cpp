@@ -101,11 +101,14 @@ bool ValidUtf8(std::string_view s) {
   return true;
 }
 
+/// Without --model only the checks that need no tokenizer run: template text
+/// and errors, JSON, the tool dialect and the reasoning controls.
 std::unique_ptr<Tokenizer> LoadTokenizer(const std::string& path) {
   if (path.empty()) {
     std::printf(
-        "SKIP: pass --model GGUF (an Inkling 2 GGUF) to read the tokenizer\n");
-    std::exit(77);
+        "no --model: tokenizer and token checks skipped (pass an Inkling 2 "
+        "GGUF to run them)\n");
+    return nullptr;
   }
   std::string err;
   auto tok = Tokenizer::CreateFromGguf(path, &err);
@@ -346,7 +349,7 @@ bool ToMessages(const json::Value& msgs, std::vector<Message>* out) {
   return true;
 }
 
-void TestRender(const Tokenizer& tok) {
+void TestRender(const Tokenizer* tok) {
   const auto g = LoadJson(kGoldens + "/render_cases.json");
   Group text("render goldens (text)");
   Group toks("render goldens (tokens)");
@@ -404,8 +407,10 @@ void TestRender(const Tokenizer& tok) {
                        "\n  got  " + json::QuoteString(r.Text())
                  : "render failed: " + err);
     });
+    if (tok == nullptr)
+      continue;
     PromptTokens pt;
-    const bool ok2 = RenderAndTokenize(tok, msgs, tools, opt, &pt, &err);
+    const bool ok2 = RenderAndTokenize(*tok, msgs, tools, opt, &pt, &err);
     const auto want = ToIds(*c.Find("tokens"));
     toks.Record(ok2 && pt.ids == want, [&] {
       return name + ": tokens differ\n  want " + Ids(want) + "\n  got  " +
@@ -420,10 +425,11 @@ void TestRender(const Tokenizer& tok) {
 }
 
 // ---- chat template behaviour beyond the goldens ----
-void TestTemplateExtras(const Tokenizer& tok) {
+void TestTemplateExtras(const Tokenizer* tokp) {
   // A client cannot inject control tokens: content is plain text, framing is
   // not.
-  {
+  if (tokp != nullptr) {
+    const Tokenizer& tok = *tokp;
     PromptTokens pt;
     std::string err;
     std::vector<Message> m = {
@@ -442,6 +448,39 @@ void TestTemplateExtras(const Tokenizer& tok) {
         pt.ids.end() - 1 - static_cast<std::ptrdiff_t>(plain.size()),
         pt.ids.end() - 1);
     CHECK(tail == plain, "content tokenized as plain text");
+  }
+  // generation prefix: the header the model writes first; a turn re-renders
+  // the model's own blocks after it, so prompt + generated call equals the
+  // template's render of the conversation with that call
+  {
+    const std::vector<Tool> tools = {
+        {R"({"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}})"}};
+    RenderOptions o;
+    o.effort_name = "none";
+    o.generation_prefix = RenderOptions::Prefix::kHeader;
+    Rendered first;
+    CHECK(RenderChat({Message::Text("user", "go")}, tools, o, &first, nullptr),
+          "prefix render");
+    const std::string p = first.Text();
+    CHECK(p.size() > 17 && p.substr(p.size() - 17) == "<|message_model|>",
+          "header prefix");
+    Message call;
+    call.role = "assistant";
+    call.content_kind = Message::Content::kNone;
+    call.tool_calls.push_back({"c1", "read", "{\"path\":\"a\"}"});
+    RenderOptions again = o;
+    again.generation_prefix = RenderOptions::Prefix::kNone;
+    Rendered full;
+    CHECK(RenderChat({Message::Text("user", "go"), call}, tools, again, &full,
+                     nullptr),
+          "re-render");
+    const std::string tail =
+        "read<|content_invoke_tool_json|>{\"name\":\"read\","
+        "\"args\":{\"path\":\"a\"}}<|end_message|><|content_model_end_sampling|"
+        ">";
+    CHECK(full.Text() == p + tail,
+          "re-render equals prompt + generated call, got %s",
+          full.Text().c_str());
   }
   // generation prefix
   {
@@ -500,7 +539,8 @@ void TestTemplateExtras(const Tokenizer& tok) {
           "template has no empty thought");
   }
   // image placeholders and positions
-  {
+  if (tokp != nullptr) {
+    const Tokenizer& tok = *tokp;
     Message m;
     m.role = "user";
     m.content_kind = Message::Content::kParts;
@@ -519,9 +559,10 @@ void TestTemplateExtras(const Tokenizer& tok) {
       all = all && pt.ids[p] == 200054;
     CHECK(all, "image positions point at the placeholder token");
   }
-  // per-image placeholder counts (M5): image k gets image_counts[k]
+  // per-image placeholder counts: image k gets image_counts[k]
   // placeholders, one run each
-  {
+  if (tokp != nullptr) {
+    const Tokenizer& tok = *tokp;
     Message m;
     m.role = "user";
     m.content_kind = Message::Content::kParts;
@@ -629,7 +670,7 @@ void TestTemplateExtras(const Tokenizer& tok) {
 }
 
 // ---- tool dialect ----
-void TestDialect(const Tokenizer& tok) {
+void TestDialect(const Tokenizer* tok) {
   using namespace dialect;
   // Everything the renderer writes for an assistant turn is read back by the
   // scanner.
@@ -742,11 +783,13 @@ void TestDialect(const Tokenizer& tok) {
     CHECK(calls.empty(), "bad json rejected");
   }
   // delimiters/tags are real control tokens (budget tags must be single tokens)
-  CHECK(tok.FindSpecial(kBudgetStart) && tok.FindSpecial(kBudgetForcedEnd) &&
-            tok.FindSpecial(kEndSampling),
+  if (tok == nullptr)
+    return;
+  CHECK(tok->FindSpecial(kBudgetStart) && tok->FindSpecial(kBudgetForcedEnd) &&
+            tok->FindSpecial(kEndSampling),
         "tags are control tokens");
-  CHECK(tok.Encode(std::string(kReasoningOpen), true).size() == 2 &&
-            tok.Encode(std::string(kReasoningClose), true).size() == 3,
+  CHECK(tok->Encode(std::string(kReasoningOpen), true).size() == 2 &&
+            tok->Encode(std::string(kReasoningClose), true).size() == 3,
         "delimiters tokenize to control tokens");
 }
 
@@ -760,6 +803,10 @@ int main(int argc, char** argv) {
     argc -= 2;
   }
   const auto tok = LoadTokenizer(model);
+  if (!tok && argc >= 3) {
+    std::printf("SKIP: %s needs --model\n", argv[1]);
+    return 77;
+  }
   if (argc >= 3 && std::string(argv[1]) == "--bench") {
     BenchMain(*tok, argv[2]);
     return 0;
@@ -781,10 +828,11 @@ int main(int argc, char** argv) {
     std::ofstream(argv[3]) << out << "]";
     return 0;
   }
-  TestTokenizer(*tok);
-  TestRender(*tok);
-  TestTemplateExtras(*tok);
-  TestDialect(*tok);
+  if (tok)
+    TestTokenizer(*tok);
+  TestRender(tok.get());
+  TestTemplateExtras(tok.get());
+  TestDialect(tok.get());
   std::printf("%s: %d checks, %d failed\n", g_failed == 0 ? "PASS" : "FAILED",
               g_checks, g_failed);
   return g_failed == 0 ? 0 : 1;

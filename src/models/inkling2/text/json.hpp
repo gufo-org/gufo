@@ -1,7 +1,7 @@
-// Small insertion-ordered JSON value, parser and Python-compatible serializer.
-// The chat template relies on Python's json.dumps spelling (ensure_ascii=False,
-// repr() floats, optional sort_keys, custom separators), so the dumper matches
-// it.
+// Small insertion-ordered JSON value with Python's json semantics: integers
+// of any size, floats, and a serializer that writes json.dumps' spelling
+// (ensure_ascii=False, repr() floats, optional sort_keys, custom separators),
+// which the chat template relies on. Parsing is Gufo's JSON parser.
 #pragma once
 
 #include <cstdint>
@@ -96,9 +96,9 @@ private:
   std::vector<Member> obj_;
 };
 
-/// Parses `text`; duplicate keys keep the first position and the last value, as
-/// Python's json.loads does. Returns false (and sets *error) on malformed
-/// input.
+/// Parses `text` with Gufo's parser (strict RFC 8259); duplicate keys keep the
+/// first position and the last value, as Python's json.loads does. Returns
+/// false (and sets *error) on malformed input.
 [[nodiscard]] bool Parse(std::string_view text, Value* out,
                          std::string* error = nullptr);
 

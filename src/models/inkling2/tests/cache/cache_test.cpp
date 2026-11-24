@@ -1,4 +1,4 @@
-// GPU test of the M2 cache layer, without a server (milestone M2).
+// GPU test of the cache layer, without a server.
 //
 //   inkling2_cache_test --model GGUF --ids ids.bin [--n 5000] [--tail 48]
 //

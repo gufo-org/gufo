@@ -1,12 +1,11 @@
-// Component layout of an Inkling 2 Mini session for Gufo's component cache
-// (milestone M2).
+// Component layout of an Inkling 2 Mini session for Gufo's component cache.
 //
 // One session holds, per layer visit (48 of them), a K and a V row stream (f16,
 // 8 heads x 128 = 1024 values = 2 KiB per row), and a short-convolution
 // history. The 8 full-attention visits are append rows (the whole history); the
 // 40 sliding-window visits are window rows (the last 1024). Everything else
 // (conv state, logits of the last token, position and block framing) is private
-// state that is valid only at its exact boundary. See docs/dev/M2-cache.md.
+// state that is valid only at its exact boundary.
 //
 // Host-side arithmetic only (no HIP): the engine access lives in
 // SessionStateAccess (state_layout.cpp), the single place that knows how a

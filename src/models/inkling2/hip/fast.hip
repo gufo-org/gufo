@@ -1,4 +1,4 @@
-// Fast kernels for Inkling 2 Mini (milestone M2). See fast.hpp.
+// Fast kernels for Inkling 2 Mini. See fast.hpp.
 // MIT. Ported from ext/lab (kern.h, kern2.h, attn/attn_kernels.h of this
 // repository).
 #include <hip/hip_fp16.h>

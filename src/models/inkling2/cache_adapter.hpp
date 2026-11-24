@@ -1,6 +1,6 @@
-// Gufo component-cache adapter for Inkling 2 Mini (milestone M2): checkpoint
+// Gufo component-cache adapter for Inkling 2 Mini: checkpoint
 // capture and restore of a session's state (see state_layout.hpp for the
-// component layout and docs/dev/M2-cache.md).
+// component layout).
 #pragma once
 
 #include <atomic>

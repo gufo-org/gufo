@@ -999,6 +999,22 @@ bool VisionEncoder::Load(const std::string& path, std::string* err,
   return true;
 }
 
+void VisionEncoder::ReleaseWorkspace() {
+  Impl& m = *impl_;
+  for (Impl::Buf* b : {&m.X, &m.XN, &m.Q, &m.K, &m.V, &m.O, &m.H, &m.OUT, &m.QA,
+                       &m.Q16, &m.K16, &m.V16, &m.AH}) {
+    if (b->p)
+      hipFree(b->p);
+    b->p = nullptr;
+    b->cap = 0;
+  }
+  if (m.d_img)
+    hipFree(m.d_img);
+  m.d_img = nullptr;
+  m.img_cap = 0;
+  m.ws_bytes = 0;
+}
+
 bool VisionEncoder::Encode(const uint8_t* rgb, int w, int h, hipStream_t s,
                            Result* out, std::string* err) {
   Impl& m = *impl_;

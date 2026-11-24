@@ -1,5 +1,6 @@
-// Inkling 2 Mini forward pass on HIP (milestone M1: simple, correct, slow).
-// Implements notes/B-forward-spec.md sections 2-3: 48 layer visits per token
+// Inkling 2 Mini forward pass on HIP.
+// As described in docs/internal/models/inkling-2-mini/FORWARD.md: 48 layer
+// visits per token
 // (24 physical layers, the core layers 6..17 applied three times), block
 // attention residuals, loop message controllers, short convolutions,
 // content-conditioned relative-bias attention with sinks, sigmoid-routed MoE
@@ -17,6 +18,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -43,9 +45,9 @@ class Engine;
 /// execution for that context bucket and width (a failed capture is not
 /// retried).
 std::shared_mutex& CaptureGate();
-class SessionStateAccess;  // state_layout.hpp (M2 cache layer)
+class SessionStateAccess;  // state_layout.hpp (cache layer)
 
-// ---- M2 hook (ext-p): session/cache layer <-> engine
+// ---- session/cache layer <-> engine
 // ------------------------------------------
 /// Installed on a Session by the cache adapter. Called on the host, inside
 /// Forward, before an ubatch writes rows [first, end) (absolute positions) of
@@ -57,18 +59,27 @@ public:
   virtual void BeforeWrite(std::size_t first, std::size_t end) = 0;
 };
 
-/// Layered prefill request for one Forward call (M2): split the pass into
+/// Layered prefill request for one Forward call: split the pass into
 /// `groups` groups of visits of similar cost and call `yield` between them. The
 /// engine mutex is released and the transient activations are spilled around
 /// `yield`, so it may run Forward on OTHER sessions.
 struct PrefillYield {
   std::size_t groups = 1;
   std::function<void()> yield;
+  /// Polled between visits (about 40 ms apart in a 4,096-token pass); when it
+  /// returns true (or throws) Forward waits for the queued work and throws
+  /// PrefillCancelled. The session is then mid-pass and must be reset.
+  std::function<bool()> cancelled;
 };
-// ---- end M2 hook
+
+/// Thrown by Engine::Forward when PrefillYield::cancelled reports true.
+struct PrefillCancelled : std::runtime_error {
+  PrefillCancelled() : std::runtime_error("generation cancelled") {}
+};
+// ---- end session/cache layer
 // -------------------------------------------------------------------------------
 
-// ---- M5 hook: image rows
+// ---- image rows
 // --------------------------------------------------------------------------
 /// Input rows that replace the embedding (token_embd + token_embd_norm) of
 /// tokens [first, first+count) of one Forward call: `device` points to
@@ -80,7 +91,7 @@ struct InputRows {
   std::size_t count = 0;
   const float* device = nullptr;
 };
-// ---- end M5 hook
+// ---- end image rows
 // -------------------------------------------------------------------------------
 
 /// Per-sequence state: 48 visit slots of KV (8 global, 40 sliding-window rings)
@@ -118,10 +129,10 @@ public:
 
 private:
   friend class Engine;
-  friend class SessionStateAccess;  // M2 hook: export/import of the per-visit
+  friend class SessionStateAccess;  // export/import of the per-visit
                                     // state
   Session() = default;
-  SessionHooks* hooks_ = nullptr;  // M2 hook
+  SessionHooks* hooks_ = nullptr;
   std::size_t pos_ = 0;
   std::size_t verify_rows_ = 0;  // rows of an uncommitted verification
   std::size_t verify_row0_ = 0;  // its first row in the verification step
@@ -165,7 +176,7 @@ public:
   [[nodiscard]] std::size_t demand_mapped_bytes() const;
   [[nodiscard]] std::uint32_t ubatch() const { return ubatch_; }
   [[nodiscard]] std::uint32_t max_context() const { return max_context_; }
-  /// Rows of one sliding-window ring (window + ubatch); the cache layer (M2)
+  /// Rows of one sliding-window ring (window + ubatch); the cache layer
   /// sizes against it.
   [[nodiscard]] std::uint32_t ring_rows() const { return 1024 + ubatch_; }
 
@@ -181,8 +192,8 @@ public:
   /// Evaluates `tokens` at the session position (ubatched). Afterwards
   /// `s.logits()` holds the last token's logits. With `sink`, the logits of
   /// every token are also delivered. Throws std::runtime_error on failure or
-  /// when the context is exhausted. With `yield` (M2), groups >= 2 and a
-  /// callback, the call yields between visit groups. With `rows` (M5), the
+  /// when the context is exhausted. With `yield`, groups >= 2 and a
+  /// callback, the call yields between visit groups. With `rows`, the
   /// listed token positions take the given input rows instead of an embedding.
   void Forward(Session& s, std::span<const std::int32_t> tokens,
                const LogitsSink& sink = {}, const PrefillYield* yield = nullptr,

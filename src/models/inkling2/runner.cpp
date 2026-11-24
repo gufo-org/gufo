@@ -45,6 +45,7 @@
 #include "src/models/inkling2/cache_adapter.hpp"
 #include "src/models/inkling2/dspark_policy.hpp"
 #include "src/models/inkling2/engine.hpp"
+#include "src/models/inkling2/image_cache.hpp"
 #include "src/models/inkling2/text/gguf_meta.hpp"
 #include "src/models/inkling2/text/gufo_adapter.hpp"
 #include "src/models/inkling2/vision/vision_encoder.hpp"
@@ -76,22 +77,24 @@ public:
   /// Piece()). Lives in the slot: it is part of a checkpoint's metadata.
   Block& block;
   /// The request turned reasoning off: no thinking block may open (see
-  /// SelectNext). Set per request by SetPromptContext; not part of a
+  /// Select). Set per request by SetPromptContext; not part of a
   /// checkpoint.
   bool reasoning_off{false};
   /// A reasoning budget closed the thought: no second thinking block may open
   /// (the model reopens one right after the forced close). Per request.
   bool budget_closed{false};
-  /// Reasoning off and a call is required: after a header the model writes one
-  /// declared function name, then the invoke token (see SelectNext). Token ids
-  /// of each declared name, as the template writes it, and the name tokens
-  /// written since the last header.
+  /// A call is required: after a header the model writes a thought (unless
+  /// reasoning is off or a budget closed it) or one declared function name
+  /// (the tokens the template writes for it), then the invoke token (see
+  /// Select). Token ids of each
+  /// declared name, as the template writes it, and the name tokens written
+  /// since the last header.
   bool call_required{false};
   std::vector<std::vector<g::TextRunnerToken>> call_names;
   std::vector<g::TextRunnerToken> call_prefix;
   /// Reasoning off and no tools: the first answer block is the whole reply.
   /// After its <|end_message|> the model may open another block (observed: a
-  /// thinking block, which SelectNext forbids, so it would write the answer a
+  /// thinking block, which Select forbids, so it would write the answer a
   /// second time); the turn ends there instead. `answer_done` is set by
   /// Advance, per request.
   bool answer_only{false};
@@ -123,6 +126,11 @@ public:
       const override {
     return session_->account();
   }
+  /// Polled between a prefill pass's visits (Engine::Forward).
+  void SetCancellationCheck(const CancellationCheck& check) override {
+    cancelled = check;
+  }
+  CancellationCheck cancelled;
   [[nodiscard]] g::TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
     return {.per_request_state_bytes = session_->allocated_bytes(),
@@ -251,28 +259,14 @@ const Inkling2State& Require(const g::TextRunnerState& s) {
 }
 
 /// One image of a request: its decoded pixels and, once a prefill needs them,
-/// its encoder rows.
+/// its encoder rows (both shared through the runner's ImageCache).
 struct ImageEntry {
-  vision::ImageU8 pixels;
+  std::shared_ptr<const DecodedImage> image;
   std::size_t first = 0;  // prompt index of the first placeholder token
   std::size_t count = 0;  // rows = placeholder tokens
-  std::array<std::uint8_t, 32>
-      digest{};  // SHA-256 of the decoded RGB pixels and size
-  // Filled by Inkling2Runner::EnsureRows (under `mutex`): device [count][2304]
-  // floats.
+  // Set by Inkling2Runner::EnsureRows (under `mutex`).
   std::mutex mutex;
-  float* rows = nullptr;
-  double encode_ms = 0;
-  ImageEntry() = default;
-  ImageEntry(const ImageEntry&) = delete;
-  ~ImageEntry() {
-    if (rows != nullptr) {
-      // Same gate as the other device calls made outside the engine mutex: no
-      // graph capture may be open.
-      const std::shared_lock<std::shared_mutex> gate(CaptureGate());
-      (void)hipFree(rows);
-    }
-  }
+  std::shared_ptr<const ImageRows> rows;
 };
 
 /// What a request tells the runner beyond its tokens (SetPromptContext).
@@ -353,9 +347,13 @@ public:
     // visits so other sessions keep decoding. The engine splits at visit
     // boundaries (Engine::Forward, PrefillYield) and the arithmetic of every
     // visit is unchanged.
-    d.scheduling = g::TextSchedulingProfile{.pass_tokens = engine_->ubatch(),
-                                            .max_layer_groups = kMaxLayerGroups,
-                                            .max_yield_decode_width = 1};
+    // Every decoding session may step between two groups: a batched step
+    // costs little more than a lone one (inkling2_spec_test checks that
+    // decoding inside a yield equals decoding alone).
+    d.scheduling = g::TextSchedulingProfile{
+        .pass_tokens = engine_->ubatch(),
+        .max_layer_groups = kMaxLayerGroups,
+        .max_yield_decode_width = Engine::kMaxDecodeBatch};
     return d;
   }
   [[nodiscard]] g::TextRunnerResourceClaim ResourceClaim() const override {
@@ -374,8 +372,8 @@ public:
                     // for a 4096-token image
       c.resident_weights_bytes =
           c.resident_weights_bytes.value_or(0) + vision_->device_bytes();
-      c.temporary_scratch_bytes =
-          c.temporary_scratch_bytes.value_or(0) + kVisionScratchBytes;
+      c.temporary_scratch_bytes = c.temporary_scratch_bytes.value_or(0) +
+                                  kVisionScratchBytes + ImageCache::kRowsBytes;
     }
     if (const auto memory = gufo::hip::QueryAdmissionMemory())
       c.state_capacity_bytes = memory->free_bytes;
@@ -389,7 +387,7 @@ public:
   }
   [[nodiscard]] std::vector<g::TextExecutionPlan> SupportedPlans()
       const override {
-    // Batched decode (M3): one weight pass for up to Engine kMaxDecodeBatch
+    // Batched decode: one weight pass for up to Engine kMaxDecodeBatch
     // sessions (AdvanceBatch).
     std::vector<g::TextExecutionPlan> plans{
         {.kind = g::TextExecutionPlanKind::kSerial, .physical_width = 1}};
@@ -526,24 +524,36 @@ public:
         if (!part.bytes || part.bytes->empty())
           throw std::invalid_argument("empty image");
         auto entry = std::make_unique<ImageEntry>();
-        // Gufo's decoder (PNG, JPEG, WebP; display orientation, RGB8), the one
-        // that validated the upload.
-        try {
-          const core::Image decoded = core::DecodeImage(*part.bytes);
-          entry->pixels.w = static_cast<int>(decoded.width);
-          entry->pixels.h = static_cast<int>(decoded.height);
-          entry->pixels.rgb = decoded.pixels;
-          // detail: low caps the longer side at 512 pixels (at most 13 x 13 =
-          // 169 rows), as Gufo's Qwen path does.
-          if (part.detail == g::ChatMessage::ImageDetail::kLow)
-            vision::ShrinkToFit(&entry->pixels, kLowDetailMaxSide);
-        } catch (const std::exception& e) {
-          throw std::invalid_argument(std::string("image decode failed: ") +
-                                      e.what());
-        }
+        const bool low = part.detail == g::ChatMessage::ImageDetail::kLow;
+        entry->image = image_cache_.Decoded(part.bytes, low, [&] {
+          auto out = std::make_shared<DecodedImage>();
+          // Gufo's decoder (PNG, JPEG, WebP; display orientation, RGB8), the
+          // one that validated the upload.
+          try {
+            const core::Image decoded = core::DecodeImage(*part.bytes);
+            out->pixels.w = static_cast<int>(decoded.width);
+            out->pixels.h = static_cast<int>(decoded.height);
+            out->pixels.rgb = decoded.pixels;
+            // detail: low caps the longer side at 512 pixels (at most 13 x 13
+            // = 169 rows), as Gufo's Qwen path does.
+            if (low)
+              vision::ShrinkToFit(&out->pixels, kLowDetailMaxSide);
+          } catch (const std::exception& e) {
+            throw std::invalid_argument(std::string("image decode failed: ") +
+                                        e.what());
+          }
+          crypto::Sha256Hasher h;
+          const std::uint64_t dims[2] = {
+              static_cast<std::uint64_t>(out->pixels.w),
+              static_cast<std::uint64_t>(out->pixels.h)};
+          h.Update({reinterpret_cast<const std::uint8_t*>(dims), sizeof dims});
+          h.Update(out->pixels.rgb);
+          out->digest = h.Finish();
+          return std::shared_ptr<const DecodedImage>(std::move(out));
+        });
         entry->count =
             static_cast<std::size_t>(vision::VisionEncoder::CountTokens(
-                entry->pixels.w, entry->pixels.h));
+                entry->image->pixels.w, entry->image->pixels.h));
         images.push_back(std::move(entry));
       }
     }
@@ -561,8 +571,7 @@ public:
     if (max_draft_ > 0)
       context->tokens.assign(tokens->begin(), tokens->end());
     context->reasoning_off = ga::ReasoningOff(request);
-    context->call_required =
-        context->reasoning_off && ga::CallRequired(request);
+    context->call_required = ga::CallRequired(request);
     context->answer_only =
         context->reasoning_off &&
         (request.tools.empty() ||
@@ -583,12 +592,6 @@ public:
           throw std::logic_error("image placeholders lost");
         e->first = pt.image_positions[at];
         at += e->count;
-        crypto::Sha256Hasher h;
-        const std::uint64_t dims[2] = {static_cast<std::uint64_t>(e->pixels.w),
-                                       static_cast<std::uint64_t>(e->pixels.h)};
-        h.Update({reinterpret_cast<const std::uint8_t*>(dims), sizeof dims});
-        h.Update(e->pixels.rgb);
-        e->digest = h.Finish();
       }
       if (at != pt.image_positions.size())
         throw std::logic_error("image placeholders left over");
@@ -612,7 +615,7 @@ public:
                  : std::vector<std::uint8_t>(before.begin(), before.end())});
         const std::uint64_t pos[2] = {e->first, e->count};
         feed(pos, sizeof pos);
-        feed(e->digest.data(), e->digest.size());
+        feed(e->image->digest.data(), e->image->digest.size());
       }
       const auto full = running.Finish();
       context->cache_identity.assign(full.begin(), full.end());
@@ -640,8 +643,8 @@ public:
         c != nullptr && !c->images.empty()
             ? std::static_pointer_cast<const Inkling2PromptContext>(context)
             : nullptr;
-    st.reasoning_off = c != nullptr && c->reasoning_off;
     st.budget_closed = false;
+    st.reasoning_off = c != nullptr && c->reasoning_off;
     st.call_required = c != nullptr && c->call_required;
     st.answer_only = c != nullptr && c->answer_only;
     st.answer_done = false;
@@ -751,7 +754,10 @@ public:
     const auto ids = ToIds(prompt.subspan(offset, consumed));
     // Layered prefill: the host asks for `groups` groups of visits with a
     // decode round between.
-    PrefillYield yield{st.prefill_yield_groups(), [&st] { st.YieldPrefill(); }};
+    // A cancelled request stops the pass at the next visit (tens of
+    // milliseconds) instead of finishing it.
+    PrefillYield yield{st.prefill_yield_groups(), [&st] { st.YieldPrefill(); },
+                       st.cancelled};
     // Image rows inside this chunk replace the placeholders' embeddings
     // (encoded on first use).
     std::vector<InputRows> rows;
@@ -762,12 +768,13 @@ public:
         if (lo >= hi)
           continue;
         EnsureRows(*e);
-        rows.push_back(
-            {lo - offset, hi - lo, e->rows + (lo - e->first) * kVisionDim});
+        rows.push_back({lo - offset, hi - lo,
+                        e->rows->device + (lo - e->first) * kVisionDim});
       }
     }
     engine_->Forward(st.session(), ids, {},
-                     yield.groups >= 2 ? &yield : nullptr, rows);
+                     yield.groups >= 2 || yield.cancelled ? &yield : nullptr,
+                     rows);
     // The prompt may end inside the assistant's block (reasoning off: header +
     // text token).
     st.block = Block::kIdle;
@@ -810,14 +817,16 @@ public:
                                               std::size_t position) const {
     if (position >= max_context_ || st.answer_done)
       return {.stop = true, .piece = {}};
-    // Reasoning off: the template's effort level 0 does not stop the model from
-    // opening a thinking block, so the thinking token cannot follow a header.
-    // With a call required the block is the call: after the header one declared
-    // function name (the tokens the template writes for it), then the invoke
-    // token. That keeps the generated tokens the ones the next turn's re-render
-    // writes, which a grammar that can name the function only once could not
-    // (see docs/dev/M4-reasoning.md). Everything else is the model's own
-    // choice.
+    // Reasoning off: the template's effort level 0 does not stop the model
+    // from opening a thinking block, and after a reasoning budget closed the
+    // thought the model would reopen one right away; in both cases the
+    // thinking token cannot follow a header. With a call required, the block
+    // after a header is a thought (reasoning on) or the call: one
+    // declared function name (the tokens the template writes for it), then
+    // the invoke token. That keeps the generated tokens the ones the next
+    // turn's re-render writes; the host's grammar sees only the streamed call
+    // (stream_dialect.hpp), which names the function once. Everything else is
+    // the model's own choice.
     if (sampler.ForcedToken() && st.block == Block::kThinking)
       st.budget_closed = true;
     std::vector<float> masked;
@@ -833,6 +842,9 @@ public:
       const auto& prefix = st.call_prefix;
       if (prefix.empty() && t_invoke_ < raw.size())
         allowed.push_back(t_invoke_);  // a call without the first name
+      if (prefix.empty() && st.block == Block::kAfterHeader &&
+          !st.reasoning_off && !st.budget_closed && t_thinking_ < raw.size())
+        allowed.push_back(t_thinking_);  // a thought before the call
       for (const auto& name : st.call_names) {
         if (name.size() < prefix.size() ||
             !std::equal(prefix.begin(), prefix.end(), name.begin()))
@@ -1733,6 +1745,15 @@ public:
       sampling::SamplerState& sampler) const override {
     return SelectNext(state, sampler);
   }
+  /// The encoder's workspace grows to the largest image seen (up to ~1 GiB)
+  /// and is needed only while one is encoded.
+  void Idle() const override {
+    if (!vision_)
+      return;
+    std::lock_guard<std::mutex> lock(vision_mutex_);
+    const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+    vision_->ReleaseWorkspace();
+  }
   [[nodiscard]] std::size_t CheckpointPosition(
       const g::TextRunnerState& state) const override {
     return Require(state).session().position();
@@ -1744,41 +1765,47 @@ private:
   static constexpr int kLowDetailMaxSide = 512;
   static constexpr std::size_t kVisionScratchBytes = std::size_t{1} << 30;
 
-  /// Encodes the image once (the encoder is single-threaded) into the entry's
-  /// own device rows.
+  /// The image's encoder rows: from the image cache, or encoded once (the
+  /// encoder is single-threaded) into rows of their own.
   void EnsureRows(ImageEntry& e) const {
     std::lock_guard<std::mutex> entry_lock(e.mutex);
     if (e.rows != nullptr)
       return;
+    if ((e.rows = image_cache_.FindRows(e.image->digest)) != nullptr) {
+      if (e.rows->count != e.count)
+        throw std::logic_error(
+            "inkling2: cached image rows do not match the prompt");
+      return;
+    }
     std::lock_guard<std::mutex> lock(vision_mutex_);
     const std::shared_lock<std::shared_mutex> gate(
         CaptureGate());  // no graph capture while image kernels run
-    const auto t0 = std::chrono::steady_clock::now();
     vision::VisionEncoder::Result r;
     std::string why;
     if (vision_stream_ == nullptr &&
         hipStreamCreate(&vision_stream_) != hipSuccess)
       throw std::runtime_error("inkling2: cannot create the vision stream");
-    if (!vision_->Encode(e.pixels.rgb.data(), e.pixels.w, e.pixels.h,
-                         vision_stream_, &r, &why))
+    const auto& px = e.image->pixels;
+    if (!vision_->Encode(px.rgb.data(), px.w, px.h, vision_stream_, &r, &why))
       throw std::runtime_error("inkling2: image encoding failed: " + why);
     if (static_cast<std::size_t>(r.n_tokens) != e.count ||
         r.dim != static_cast<int>(kVisionDim))
       throw std::logic_error(
           "inkling2: image encoder row count does not match the prompt");
-    float* dst = nullptr;
-    if (hipMalloc(&dst, e.count * kVisionDim * sizeof(float)) != hipSuccess)
+    auto rows = std::make_shared<ImageRows>();
+    if (hipMalloc(&rows->device, e.count * kVisionDim * sizeof(float)) !=
+        hipSuccess) {
+      rows->device = nullptr;
       throw std::runtime_error("inkling2: out of device memory for image rows");
-    if (hipMemcpyAsync(dst, r.embd, e.count * kVisionDim * sizeof(float),
-                       hipMemcpyDeviceToDevice, vision_stream_) != hipSuccess ||
-        hipStreamSynchronize(vision_stream_) != hipSuccess) {
-      (void)hipFree(dst);
-      throw std::runtime_error("inkling2: image rows copy failed");
     }
-    e.rows = dst;
-    e.encode_ms = std::chrono::duration<double, std::milli>(
-                      std::chrono::steady_clock::now() - t0)
-                      .count();
+    rows->count = e.count;
+    if (hipMemcpyAsync(rows->device, r.embd,
+                       e.count * kVisionDim * sizeof(float),
+                       hipMemcpyDeviceToDevice, vision_stream_) != hipSuccess ||
+        hipStreamSynchronize(vision_stream_) != hipSuccess)
+      throw std::runtime_error("inkling2: image rows copy failed");
+    image_cache_.PutRows(e.image->digest, rows);
+    e.rows = std::move(rows);
   }
 
   std::shared_ptr<Engine> engine_;
@@ -1793,6 +1820,7 @@ private:
   mutable LanePool lane_pool_{
       std::min(7U, std::max(1U, std::thread::hardware_concurrency()) - 1)};
   mutable std::mutex vision_mutex_;
+  mutable ImageCache image_cache_;
   mutable hipStream_t vision_stream_ = nullptr;
   g::TextRunnerToken t_header_{}, t_text_{}, t_thinking_{}, t_end_message_{},
       t_invoke_{};

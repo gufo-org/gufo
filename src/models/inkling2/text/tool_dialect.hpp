@@ -1,5 +1,5 @@
-// Inkling 2 tool-call dialect and output-block parser (no Gufo dependency; the
-// Gufo glue lives in gufo_adapter.hpp).
+// Inkling 2 tool-call dialect and output-block parser (the extension-API glue
+// lives in gufo_adapter.hpp).
 //
 // The model writes a turn as blocks, each closed by <|end_message|>:
 //   <|message_model|><|content_thinking|>REASONING<|end_message|>

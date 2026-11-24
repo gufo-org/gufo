@@ -9,12 +9,19 @@
 //    the rows up to it (CommitVerify). Every kept row's logits, and those of a
 //    one-token decode after the last commit, must equal the reference's byte
 //    for byte.
-// 2. With --dspark: greedy speculative decoding with the drafter's proposals
-//    must produce the reference's tokens.
+// 2. With --dspark: greedy speculative decoding of a real chat prompt with the
+//    drafter's proposals must produce plain decoding's tokens and keep at
+//    least --min-acceptance of the proposals.
 // 3. Several sessions at different positions (different attention buckets)
 //    in one step: Engine::DecodeBatch, and Engine::VerifyBatch with mixed
 //    widths and corruptions; every kept row must equal that session's lone
 //    one-token decode byte for byte.
+// 4. First, on the fresh engine (so the batch graphs are captured there):
+//    sessions decoding in the yields of another session's layered prefill,
+//    in batches of 2 to Engine::kMaxDecodeBatch - 1 (DecodeBatch) and in
+//    batched verification. The prefill's logits must equal an unsplit
+//    prefill's, and every decoded row the session's lone decode, byte for
+//    byte.
 // Exit 0 on success, 1 on a mismatch, 77 (skip) without a model.
 #include <algorithm>
 #include <cstdint>
@@ -30,6 +37,8 @@
 #include <vector>
 
 #include "src/models/inkling2/engine.hpp"
+#include "src/models/inkling2/text/chat_template.hpp"
+#include "src/models/inkling2/text/tokenizer.hpp"
 
 namespace {
 using gufo::models::inkling2::Engine;
@@ -43,6 +52,7 @@ std::int32_t Argmax(std::span<const float> l) {
 int main(int argc, char** argv) {
   std::string model, dspark, ids_in;
   int prompt = 600, tokens = 48;
+  double min_acceptance = 0.2;  // 26% on the built-in prompt (UD-Q4_K_XL)
   for (int i = 1; i < argc; ++i) {
     const std::string k = argv[i];
     auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -56,6 +66,8 @@ int main(int argc, char** argv) {
       prompt = std::atoi(next().c_str());
     else if (k == "--tokens")
       tokens = std::atoi(next().c_str());
+    else if (k == "--min-acceptance")
+      min_acceptance = std::atof(next().c_str());
     else {
       std::fprintf(stderr, "unknown option %s\n", k.c_str());
       return 2;
@@ -97,6 +109,103 @@ int main(int argc, char** argv) {
   }
   const std::size_t V = engine->config().n_vocab_text;
   const std::span<const std::int32_t> p(ids);
+  int failures = 0;
+  using gufo::models::inkling2::Session;
+
+  {
+    // 4. decoding inside a layered prefill's yields
+    constexpr int kD = static_cast<int>(Engine::kMaxDecodeBatch) - 1;
+    std::vector<std::vector<std::int32_t>> dp(kD);
+    std::vector<std::unique_ptr<Session>> ds;
+    for (int g = 0; g < kD; ++g) {
+      dp[g] = ids;
+      for (int i = 0; i < 150 * g; ++i)
+        dp[g].push_back(3000 + (i * 7907 + g * 13) % 40000);
+      ds.push_back(engine->NewSession());
+      engine->Forward(*ds.back(), dp[g]);
+    }
+    std::vector<std::vector<std::int32_t>> dt(kD);        // tokens each decoded
+    std::vector<std::vector<std::vector<float>>> dl(kD);  // and their logits
+    for (int g = 0; g < kD; ++g)
+      dt[g].push_back(Argmax(ds[g]->logits()));
+    std::vector<std::int32_t> long_prompt = ids;
+    for (int i = static_cast<int>(ids.size()); i < 5000; ++i)
+      long_prompt.push_back(1500 + (i * 6151) % 55000);
+    int round = 0;
+    long verify_rows = 0;
+    std::uint32_t rng = 4242u;
+    std::span<const float> vout;
+    gufo::models::inkling2::PrefillYield yield;
+    yield.groups = 12;
+    yield.yield = [&] {
+      // widths 2 .. kD, then a batched verification of up to 8 rows
+      const int w = 2 + round % (kD - 1);
+      std::vector<Session*> sp;
+      std::vector<std::int32_t> t;
+      for (int g = 0; g < w; ++g) {
+        sp.push_back(ds[g].get());
+        t.push_back(dt[g].back());
+      }
+      engine->DecodeBatch(sp, t);
+      for (int g = 0; g < w; ++g) {
+        dl[g].push_back(ds[g]->logits());
+        dt[g].push_back(Argmax(ds[g]->logits()));
+      }
+      if (round % 3 == 2) {
+        // two rows per session for four sessions, the second a guess that
+        // may be wrong; keep the rows up to the first wrong guess
+        std::vector<Session*> vp;
+        std::vector<std::size_t> cnt;
+        std::vector<std::int32_t> vt;
+        for (int g = 0; g < 4; ++g) {
+          vp.push_back(ds[g].get());
+          cnt.push_back(2);
+          rng = rng * 1664525u + 1013904223u;
+          vt.push_back(dt[g].back());
+          vt.push_back(static_cast<std::int32_t>(1000 + (rng >> 8) % 50000));
+        }
+        engine->VerifyBatch(vp, cnt, vt, &vout, nullptr);
+        for (int g = 0; g < 4; ++g) {
+          const auto r0 = vout.subspan(static_cast<std::size_t>(2 * g) * V, V);
+          const auto r1 =
+              vout.subspan(static_cast<std::size_t>(2 * g + 1) * V, V);
+          const bool second = Argmax(r0) == vt[2 * g + 1];
+          dl[g].emplace_back(r0.begin(), r0.end());
+          dt[g].push_back(Argmax(r0));
+          if (second) {
+            dl[g].emplace_back(r1.begin(), r1.end());
+            dt[g].push_back(Argmax(r1));
+          }
+          verify_rows += second ? 2 : 1;
+          engine->CommitVerify(
+              *vp[g], second ? 2 : 1,
+              vout.subspan(static_cast<std::size_t>(2 * g) * V, 2 * V));
+        }
+      }
+      ++round;
+    };
+    auto pre = engine->NewSession();
+    engine->Forward(*pre, long_prompt, {}, &yield);
+    const std::vector<float> yielded = pre->logits();
+    auto plain = engine->NewSession();
+    engine->Forward(*plain, long_prompt);
+    long bad = std::memcmp(yielded.data(), plain->logits().data(), V * 4) != 0;
+    long rows = 0;
+    for (int g = 0; g < kD; ++g) {
+      auto lone = engine->NewSession();
+      engine->Forward(*lone, dp[g]);
+      for (std::size_t i = 0; i < dl[g].size(); ++i) {
+        engine->Forward(*lone, std::span<const std::int32_t>(&dt[g][i], 1));
+        ++rows;
+        bad += std::memcmp(lone->logits().data(), dl[g][i].data(), V * 4) != 0;
+      }
+    }
+    std::printf(
+        "decode in prefill yields: %d yields, %ld decoded rows (%ld "
+        "verified), %ld mismatched (prefill logits included)\n",
+        round, rows, verify_rows, bad);
+    failures += bad != 0 || round == 0;
+  }
 
   // reference: one token at a time
   auto ref = engine->NewSession();
@@ -109,7 +218,6 @@ int main(int argc, char** argv) {
     want.push_back(Argmax(ref->logits()));
   }
 
-  int failures = 0;
   // 2 to 8 rows (DSpark), and the wide copy steps (int8 WMMA projections,
   // grouped MoE, chunked attention)
   for (int R : {2, 3, 4, 5, 6, 7, 8, 9, 16, 33, 64}) {
@@ -262,8 +370,32 @@ int main(int argc, char** argv) {
   }
 
   if (!dspark.empty()) {
+    // a real chat prompt: filler tokens would give the drafter nothing to
+    // predict
+    auto tok = inkling2::text::Tokenizer::CreateFromGguf(*reader, &err);
+    inkling2::text::PromptTokens pt;
+    inkling2::text::RenderOptions ro;
+    ro.generation_prefix = inkling2::text::RenderOptions::Prefix::kHeader;
+    if (!tok || !inkling2::text::RenderAndTokenize(
+                    *tok,
+                    {inkling2::text::Message::Text(
+                        "user",
+                        "Write a C function that reverses a singly linked "
+                        "list in place. Explain each step in a comment.")},
+                    {}, ro, &pt, &err)) {
+      std::fprintf(stderr, "chat prompt: %s\n", err.c_str());
+      return 1;
+    }
+    const std::vector<std::int32_t> chat(pt.ids.begin(), pt.ids.end());
+    auto plain = engine->NewSession();
+    engine->Forward(*plain, chat);
+    std::vector<std::int32_t> want{Argmax(plain->logits())};
+    while (static_cast<int>(want.size()) < tokens + 8) {
+      engine->Forward(*plain, std::span<const std::int32_t>(&want.back(), 1));
+      want.push_back(Argmax(plain->logits()));
+    }
     auto sp = engine->NewSession();
-    engine->Forward(*sp, p);
+    engine->Forward(*sp, chat);
     std::vector<std::int32_t> got{Argmax(sp->logits())};
     std::span<const float> out;
     long drafted = 0, accepted = 0;
@@ -290,13 +422,17 @@ int main(int argc, char** argv) {
       accepted += j;
     }
     int same = 0;
-    while (same < static_cast<int>(got.size()) && got[same] == want[same])
+    const int n = std::min(static_cast<int>(got.size()), tokens + 8);
+    while (same < n && got[same] == want[same])
       ++same;
+    const double rate =
+        drafted ? static_cast<double>(accepted) / static_cast<double>(drafted)
+                : 0.0;
     std::printf(
-        "dspark: %zu tokens, %d equal to plain decoding, %ld of %ld "
-        "proposals accepted\n",
-        got.size(), same, accepted, drafted);
-    failures += same != static_cast<int>(got.size());
+        "dspark: %d tokens, %d equal to plain decoding, %ld of %ld "
+        "proposals accepted (%.1f%%, at least %.1f%% required)\n",
+        n, same, accepted, drafted, 100.0 * rate, 100.0 * min_acceptance);
+    failures += same != n || rate < min_acceptance;
   }
   if (!dspark.empty()) {
     // proposals of several sessions in one drafter pass equal lone ones

@@ -7,9 +7,8 @@
 //   [r.n_tokens][r.dim] (dim = 2304)
 //
 // The embeddings are the rows the text model consumes in place of the image
-// placeholder tokens: not normed, one per token, consecutive positions (see
-// docs/dev/vision.md). MIT. Algorithm follows llama.cpp
-// tools/mtmd/models/inkling2v.cpp (e412c6f).
+// placeholder tokens: not normed, one per token, consecutive positions. The
+// algorithm follows llama.cpp tools/mtmd/models/inkling2v.cpp (e412c6f).
 #pragma once
 
 #include <hip/hip_runtime.h>
@@ -55,6 +54,9 @@ public:
   void set_options(const Options& o);
   int embedding_dim() const;    // text-model width the projector outputs (2304)
   size_t device_bytes() const;  // weights + current workspace
+  /// Frees the workspace an Encode grew (up to ~1 GiB for the largest
+  /// images); the next Encode allocates it again.
+  void ReleaseWorkspace();
 
   /// Encodes one RGB8 image (w*h*3, interleaved). Over-limit images are
   /// downscaled first. All work is enqueued on `stream`; the call itself

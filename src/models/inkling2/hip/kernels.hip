@@ -1,4 +1,4 @@
-// Simple HIP kernels for Inkling 2 Mini (milestone M1). See kernels.hpp.
+// Simple HIP kernels for Inkling 2 Mini. See kernels.hpp.
 // MIT. Dequantisation follows llama.cpp ggml-quants.c / ggml-common.h (MIT).
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>

@@ -1,4 +1,4 @@
-// Fast kernels for the Inkling 2 Mini forward pass (milestone M2): the
+// Fast kernels for the Inkling 2 Mini forward pass: the
 // validated lab kernels (ext/lab: GEMV, fused projections, router, SITU MoE,
 // split-K attention, WMMA grouped GEMMs) integrated into the engine, plus the
 // small fused per-visit ops. MIT. Weight formats with a fast path: Q8_0 (dense,
@@ -46,7 +46,7 @@ struct ProjSpec {  // fused Q8_0 GEMV over up to 5 matrices of K = 2304
   float* ty[3];
   int tys[3];
 };
-/// y[yoff_i + r] for matrix i, x = [ni][2304]. Batched (M3): `nb` tokens share
+/// y[yoff_i + r] for matrix i, x = [ni][2304]. Batched: `nb` tokens share
 /// one read of the weights; token b reads x + b * ldx and writes y + b * ldy
 /// (nb = 1: ldx, ldy unused).
 void ProjMulti(hipStream_t s, const ProjSpec& p, const float* x, int ni,

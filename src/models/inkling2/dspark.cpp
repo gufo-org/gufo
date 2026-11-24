@@ -4,7 +4,9 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <gufo/ext/experimental/weight_upload.hpp>
 #include <gufo/ext/gguf_reader.hpp>
+#include <gufo/ext/platform/prefault.hpp>
 #include <stdexcept>
 #include <string_view>
 
@@ -79,7 +81,14 @@ struct Drafter::Impl {
     allocs.push_back(p);
     return static_cast<T*>(p);
   }
+  /// Streams the drafter's weights to the device without faulting the
+  /// mapping (see DeviceWeights::Upload in engine.cpp).
+  std::unique_ptr<::gufo::hip::WeightUpload> upload;
   ~Impl() {
+    if (upload) {
+      std::string ignored;
+      (void)upload->Finish(&ignored);  // queued copies target `allocs`
+    }
     for (void* p : allocs)
       (void)hipFree(p);
     if (h_in)
@@ -99,8 +108,12 @@ struct Drafter::Impl {
   }
   const void* Upload(const GgufTensorInfo& t, std::size_t* total) {
     void* p = Alloc<char>(t.size_bytes);
-    Check(hipMemcpy(p, t.data, t.size_bytes, hipMemcpyHostToDevice),
-          "weight upload");
+    std::string error;
+    if (!upload)
+      upload =
+          ::gufo::hip::WeightUpload::Create(reader->GetMappedRegions(), &error);
+    if (!upload || !upload->CopyMapped(t.data, t.size_bytes, p, &error))
+      throw std::runtime_error("weight upload: " + error);
     *total += t.size_bytes;
     return p;
   }
@@ -220,6 +233,14 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     // markov_w1: one row per tokenizer token
     const auto w1_rows = static_cast<std::uint64_t>(target.vocab);
     I.w1 = I.BF16("markov_w1.weight", 256ull * w1_rows, &tot);
+    // The kernels below read these weights.
+    if (I.upload) {
+      std::string upload_error;
+      const bool uploaded = I.upload->Finish(&upload_error);
+      I.upload.reset();
+      if (!uploaded)
+        throw std::runtime_error("weight upload: " + upload_error);
+    }
     // the converter's softmax of each fuse row: layers 0-2, then the head
     for (int j = 0; j < 4; ++j) {
       const std::string n = j < 3
@@ -372,6 +393,10 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
                       hipMemcpyHostToDevice),
             "items");
     }
+    // The host reads (mask row, alpha, markov tables) are done: drop the
+    // mapping's pages from the process.
+    for (const auto& region : I.reader->GetMappedRegions())
+      ::gufo::platform::ReleaseMappedPages(region.data, region.size);
     d->impl_ = std::move(impl);
   } catch (const std::exception& e) {
     if (error)

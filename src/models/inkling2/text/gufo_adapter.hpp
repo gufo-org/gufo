@@ -1,6 +1,7 @@
-// Glue between the Gufo extension API (gufo/ext/text.hpp) and the Gufo-free
-// text front-end. Header-only: the runner includes it; inkling2_text does not
-// depend on Gufo. Compile-checked by tests/text/gufo_adapter_check.cpp.
+// Glue between the Gufo extension API (gufo/ext/text.hpp) and the text
+// front-end, which uses only Gufo's core (GGUF reader, JSON parser).
+// Header-only: the runner includes it. Compile-checked by
+// tests/text/gufo_adapter_check.cpp.
 #pragma once
 
 #include <optional>
@@ -149,9 +150,10 @@ inline RenderOptions ToRenderOptions(const g::ChatRequest& request) {
   o.preserve_thinking = request.reasoning.preserve_thinking;
   // Gufo's "reasoning off" (enabled=false, effort none) renders the template's
   // level 0, which does not stop the model from thinking (it opens a thinking
-  // block at level 0 as at every other level; see docs/dev/M4-reasoning.md). So
-  // the prompt closes reasoning itself and the runner forbids another thinking
-  // block (ReasoningOff, SelectNext):
+  // block at level 0 as at every other level, 29 to 345 tokens on short
+  // prompts; the model card: the minimum "does not fully disable reasoning").
+  // So the prompt closes reasoning itself and the runner forbids another
+  // thinking block (ReasoningOff, SelectNext):
   //  * no tools: the answer block is opened
   //  (<|message_model|><|content_text|>), as Qwen's
   //    generation prompt closes <think>;

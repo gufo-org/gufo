@@ -1,4 +1,4 @@
-// Teacher-forcing oracle dump for the Inkling 2 Mini HIP engine (milestone M1).
+// Teacher-forcing oracle dump for the Inkling 2 Mini HIP engine.
 //
 //   inkling2_oracle --model GGUF --text FILE --n N --out dump.bin [--ids-out
 //   ids.bin]
@@ -8,7 +8,8 @@
 // or reads the ids from --ids, evaluates them through the engine and writes,
 // per position, the logsumexp of the soft-capped logits over the text
 // vocabulary, the top-64 (id, logit) and, when --ref is given, our logits at
-// the reference's top-64 ids. tools/compare_dumps.py scores two dumps.
+// the reference's top-64 ids. compare_dumps.py (beside this
+// file) scores two dumps.
 // llama_dump.cpp writes the same format from llama.cpp's libllama.
 #include <algorithm>
 #include <chrono>

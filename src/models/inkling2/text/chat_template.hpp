@@ -80,7 +80,7 @@ struct RenderOptions {
   /// calls. It is the framing a request with generation_prefix == kEmptyThought
   /// puts in the prompt, so what the model then writes and the next turn's
   /// re-render of that message are the same tokens (see
-  /// docs/dev/M4-reasoning.md).
+  /// docs/internal/models/inkling-2-mini/README.md, Reasoning and tool calls).
   bool empty_thought_for_assistants{false};
   enum class Prefix {
     kNone,

@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
+#include <gufo/ext/json.hpp>
+#include <new>
 
 namespace inkling2::text::json {
 
@@ -55,284 +58,56 @@ bool Value::Truthy() const {
 
 namespace {
 
-class Parser {
-public:
-  Parser(std::string_view t, std::string* e) : t_(t), err_(e) {}
-
-  bool ParseDocument(Value* out) {
-    SkipWs();
-    if (!ParseValue(out, 0))
-      return false;
-    SkipWs();
-    if (p_ != t_.size())
-      return Fail("trailing characters");
-    return true;
-  }
-
-private:
-  bool Fail(const char* m) {
-    if (err_ != nullptr && err_->empty())
-      *err_ = std::string(m) + " at offset " + std::to_string(p_);
-    return false;
-  }
-  void SkipWs() {
-    while (p_ < t_.size() && (t_[p_] == ' ' || t_[p_] == '\t' ||
-                              t_[p_] == '\n' || t_[p_] == '\r'))
-      ++p_;
-  }
-  bool Lit(std::string_view w) {
-    if (t_.substr(p_, w.size()) == w) {
-      p_ += w.size();
-      return true;
+// NOLINTNEXTLINE(misc-no-recursion)
+Value FromCore(const ::gufo::json::Value& v) {
+  using T = ::gufo::json::Value::Type;
+  switch (v.type()) {
+    case T::kNull:
+      return Value::Null();
+    case T::kBool:
+      return Value::Bool(v.as_bool());
+    case T::kNumber: {
+      // json.loads: an integer token stays an int of any size, anything with
+      // a fraction or exponent is a float.
+      const std::string lexeme =
+          v.dump(::gufo::json::Value::Numbers::kAsParsed);
+      if (lexeme.find_first_of(".eE") != std::string::npos)
+        return Value::Double(v.as_double());
+      return Value::Int(lexeme == "-0" ? std::string("0") : lexeme);
     }
-    return false;
-  }
-  static void AppendUtf8(std::string* s, std::uint32_t cp) {
-    if (cp < 0x80)
-      s->push_back(static_cast<char>(cp));
-    else if (cp < 0x800) {
-      s->push_back(static_cast<char>(0xC0 | (cp >> 6)));
-      s->push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp < 0x10000) {
-      s->push_back(static_cast<char>(0xE0 | (cp >> 12)));
-      s->push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-      s->push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else {
-      s->push_back(static_cast<char>(0xF0 | (cp >> 18)));
-      s->push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-      s->push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-      s->push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    case T::kString:
+      return Value::String(v.str());
+    case T::kArray: {
+      Value out = Value::Array();
+      for (const auto& item : v.items())
+        out.Push(FromCore(item));
+      return out;
+    }
+    case T::kObject: {
+      Value out = Value::Object();
+      for (const auto& [key, item] : v.members())
+        out.Set(key, FromCore(item));
+      return out;
     }
   }
-  bool Hex4(std::uint32_t* v) {
-    if (p_ + 4 > t_.size())
-      return false;
-    std::uint32_t r = 0;
-    for (int i = 0; i < 4; ++i) {
-      const char c = t_[p_ + i];
-      r <<= 4;
-      if (c >= '0' && c <= '9')
-        r |= c - '0';
-      else if (c >= 'a' && c <= 'f')
-        r |= c - 'a' + 10;
-      else if (c >= 'A' && c <= 'F')
-        r |= c - 'A' + 10;
-      else
-        return false;
-    }
-    p_ += 4;
-    *v = r;
-    return true;
-  }
-  bool ParseString(std::string* out) {
-    ++p_;  // opening quote
-    while (p_ < t_.size()) {
-      const char c = t_[p_++];
-      if (c == '"')
-        return true;
-      if (static_cast<unsigned char>(c) < 0x20)
-        return Fail("control character in string");
-      if (c != '\\') {
-        out->push_back(c);
-        continue;
-      }
-      if (p_ >= t_.size())
-        break;
-      const char e = t_[p_++];
-      switch (e) {
-        case '"':
-          out->push_back('"');
-          break;
-        case '\\':
-          out->push_back('\\');
-          break;
-        case '/':
-          out->push_back('/');
-          break;
-        case 'b':
-          out->push_back('\b');
-          break;
-        case 'f':
-          out->push_back('\f');
-          break;
-        case 'n':
-          out->push_back('\n');
-          break;
-        case 'r':
-          out->push_back('\r');
-          break;
-        case 't':
-          out->push_back('\t');
-          break;
-        case 'u': {
-          std::uint32_t u;
-          if (!Hex4(&u))
-            return Fail("bad \\u escape");
-          if (u >= 0xD800 && u <= 0xDBFF && t_.substr(p_, 2) == "\\u") {
-            const auto save = p_;
-            p_ += 2;
-            std::uint32_t lo;
-            if (Hex4(&lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
-              u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00);
-            } else {
-              p_ = save;
-              u = 0xFFFD;
-            }
-          } else if (u >= 0xD800 && u <= 0xDFFF) {
-            u = 0xFFFD;
-          }
-          AppendUtf8(out, u);
-          break;
-        }
-        default:
-          return Fail("bad escape");
-      }
-    }
-    return Fail("unterminated string");
-  }
-  bool ParseNumber(Value* out) {
-    const std::size_t start = p_;
-    bool is_float = false;
-    if (p_ < t_.size() && t_[p_] == '-')
-      ++p_;
-    if (p_ >= t_.size())
-      return Fail("bad number");
-    if (t_[p_] == '0')
-      ++p_;
-    else if (t_[p_] >= '1' && t_[p_] <= '9') {
-      while (p_ < t_.size() && t_[p_] >= '0' && t_[p_] <= '9')
-        ++p_;
-    } else
-      return Fail("bad number");
-    if (p_ < t_.size() && t_[p_] == '.') {
-      is_float = true;
-      ++p_;
-      const auto d0 = p_;
-      while (p_ < t_.size() && t_[p_] >= '0' && t_[p_] <= '9')
-        ++p_;
-      if (p_ == d0)
-        return Fail("bad number");
-    }
-    if (p_ < t_.size() && (t_[p_] == 'e' || t_[p_] == 'E')) {
-      is_float = true;
-      ++p_;
-      if (p_ < t_.size() && (t_[p_] == '+' || t_[p_] == '-'))
-        ++p_;
-      const auto d0 = p_;
-      while (p_ < t_.size() && t_[p_] >= '0' && t_[p_] <= '9')
-        ++p_;
-      if (p_ == d0)
-        return Fail("bad number");
-    }
-    const std::string lex(t_.substr(start, p_ - start));
-    if (is_float) {
-      *out = Value::Double(std::strtod(lex.c_str(), nullptr));
-    } else {
-      *out = Value::Int(lex == "-0" ? std::string("0") : lex);
-    }
-    return true;
-  }
-  bool ParseValue(Value* out, int depth) {
-    if (depth > 256)
-      return Fail("nesting too deep");
-    if (p_ >= t_.size())
-      return Fail("unexpected end");
-    const char c = t_[p_];
-    if (c == '{') {
-      ++p_;
-      *out = Value::Object();
-      SkipWs();
-      if (p_ < t_.size() && t_[p_] == '}') {
-        ++p_;
-        return true;
-      }
-      for (;;) {
-        SkipWs();
-        if (p_ >= t_.size() || t_[p_] != '"')
-          return Fail("expected key");
-        std::string key;
-        if (!ParseString(&key))
-          return false;
-        SkipWs();
-        if (p_ >= t_.size() || t_[p_] != ':')
-          return Fail("expected ':'");
-        ++p_;
-        SkipWs();
-        Value v;
-        if (!ParseValue(&v, depth + 1))
-          return false;
-        out->Set(std::move(key), std::move(v));
-        SkipWs();
-        if (p_ < t_.size() && t_[p_] == ',') {
-          ++p_;
-          continue;
-        }
-        if (p_ < t_.size() && t_[p_] == '}') {
-          ++p_;
-          return true;
-        }
-        return Fail("expected ',' or '}'");
-      }
-    }
-    if (c == '[') {
-      ++p_;
-      *out = Value::Array();
-      SkipWs();
-      if (p_ < t_.size() && t_[p_] == ']') {
-        ++p_;
-        return true;
-      }
-      for (;;) {
-        SkipWs();
-        Value v;
-        if (!ParseValue(&v, depth + 1))
-          return false;
-        out->Push(std::move(v));
-        SkipWs();
-        if (p_ < t_.size() && t_[p_] == ',') {
-          ++p_;
-          continue;
-        }
-        if (p_ < t_.size() && t_[p_] == ']') {
-          ++p_;
-          return true;
-        }
-        return Fail("expected ',' or ']'");
-      }
-    }
-    if (c == '"') {
-      std::string s;
-      if (!ParseString(&s))
-        return false;
-      *out = Value::String(std::move(s));
-      return true;
-    }
-    if (Lit("true")) {
-      *out = Value::Bool(true);
-      return true;
-    }
-    if (Lit("false")) {
-      *out = Value::Bool(false);
-      return true;
-    }
-    if (Lit("null")) {
-      *out = Value::Null();
-      return true;
-    }
-    return ParseNumber(out);
-  }
-
-  std::string_view t_;
-  std::string* err_;
-  std::size_t p_{0};
-};
+  return Value::Null();
+}
 
 }  // namespace
 
 bool Parse(std::string_view text, Value* out, std::string* error) {
   if (error != nullptr)
     error->clear();
-  return Parser(text, error).ParseDocument(out);
+  try {
+    *out = FromCore(::gufo::json::parse(text));
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& e) {
+    if (error != nullptr)
+      *error = e.what();
+    return false;
+  }
+  return true;
 }
 
 std::string QuoteString(std::string_view s) {

@@ -57,6 +57,13 @@ if(TARGET gufo_inkling2_hip)
   target_include_directories(gufo_inkling2_hip PUBLIC ${PROJECT_SOURCE_DIR})
 endif()
 
+# Install model-owned license material only when this model is selected.
+install(FILES "${GUFO_EXTENSION_BUILD_ROOT}/LICENSE.inkling2"
+  DESTINATION share/licenses/gufo/third-party)
+install(FILES "${GUFO_EXTENSION_BUILD_ROOT}/THIRD_PARTY.md"
+  DESTINATION share/licenses/gufo/third-party
+  RENAME inkling2-THIRD_PARTY.md)
+
 gufo_extension_target(
   NAME inkling2_probe_test
   SOURCES

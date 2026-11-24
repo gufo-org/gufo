@@ -1,5 +1,5 @@
-// Simple, clearly-correct HIP kernels for the Inkling 2 Mini forward pass
-// (milestone M1). One kernel per operation, F32 activations,
+// Simple, clearly-correct HIP kernels for the Inkling 2 Mini forward pass.
+// One kernel per operation, F32 activations,
 // dequantize-on-the-fly weights in their native formats. No performance work:
 // see ext/lab for the optimised kernels. MIT. Quantization block layouts follow
 // llama.cpp ggml-common.h (see THIRD_PARTY.md).
