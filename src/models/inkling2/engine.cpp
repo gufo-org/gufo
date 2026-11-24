@@ -2683,6 +2683,19 @@ void Engine::Step(Session& s, std::int32_t token, std::int32_t* argmax) {
   impl_->DecodeN(&sp, &token, &none, 1, argmax);
 }
 
+void Engine::Decode(Session& s, std::int32_t token) {
+  const std::lock_guard lock(mutex_);
+  if (s.pos_ + 1 > max_context_)
+    throw std::runtime_error("inkling2: context exhausted");
+  if (token < 0 ||
+      static_cast<std::uint32_t>(token) >= weights_.config.n_vocab_text)
+    throw std::runtime_error("inkling2: token id out of range");
+  if (s.hooks_ != nullptr)
+    s.hooks_->BeforeWrite(s.pos_, s.pos_ + 1);
+  s.BackRows(s.pos_, s.pos_ + 1);
+  impl_->Decode(s, token, &s.logits_);
+}
+
 void Engine::Synchronize() {
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
   Check(hipStreamSynchronize(impl_->s), "synchronize");
@@ -2717,15 +2730,6 @@ void Engine::Forward(Session& s, std::span<const std::int32_t> tokens,
     ~RowsScope() { i->input_rows = saved; }
   } rows_scope{impl_.get(), impl_->input_rows};
   impl_->input_rows = rows;
-  if (tokens.size() == 1 && rows.empty()) {
-    if (s.hooks_ != nullptr)
-      s.hooks_->BeforeWrite(s.pos_, s.pos_ + 1);
-    s.BackRows(s.pos_, s.pos_ + 1);
-    impl_->Decode(s, tokens[0], &s.logits_);
-    if (sink)
-      sink(0, 1, s.logits_.data());
-    return;
-  }
   std::size_t done = 0;
   while (done < tokens.size()) {
     const std::size_t n = std::min<std::size_t>(ubatch_, tokens.size() - done);

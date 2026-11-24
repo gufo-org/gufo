@@ -3863,7 +3863,9 @@ __global__ __launch_bounds__(NTT * 96) void attn_prefill_db(PfArgs a) {
   const uint32_t sel_hi = half ? 0x03020706u : 0x07060302u;
   const int pfirst = a.p0 + tbase;
   const int plast = min(a.p0 + a.U - 1, a.p0 + tbase + 16 * NTT - 1);
-  const int kfirst = a.swa ? max(0, pfirst - (WIN - 1)) : 0;
+  // The 16-key steps start at multiples of 16 (absolute positions), so a
+  // row's softmax steps do not depend on where its prompt chunk starts.
+  const int kfirst = a.swa ? max(0, pfirst - (WIN - 1)) & ~15 : 0;
   const int ntiles = (plast - kfirst + PF_KT) / PF_KT;
   const int wmin = a.p0 + tb, wmax = a.p0 + tb + 15;
 
@@ -3988,6 +3990,15 @@ __global__ __launch_bounds__(NTT * 96) void attn_prefill_db(PfArgs a) {
       }
       l = l * alpha + ps;
       m = mn;
+      // A step holding keys this row masks (its own step's later keys, the
+      // keys before a window) is summed on the VALU with those keys' V
+      // zeroed: the WMMA's sum depends on the A entries a zero probability
+      // meets, and those rows differ with the prompt's chunking (later
+      // tokens, ring rows). Its WMMA column is zero, which leaves acc exact.
+      const bool edge =
+          rowvalid &&
+          ((posq >= pos0 && posq < pos0 + 15) ||
+           (a.swa && posq - (WIN - 1) > pos0 && posq - (WIN - 1) <= pos0 + 15));
       uint32_t mine[4], theirs[4];
 #pragma unroll
       for (int i = 0; i < 4; i++) {
@@ -3996,6 +4007,23 @@ __global__ __launch_bounds__(NTT * 96) void attn_prefill_db(PfArgs a) {
         pr[1] = (h16)p[2 * i + 1];
         mine[i] = as_u32(pr);
         theirs[i] = xor16u(mine[i]);
+      }
+      uint32_t pe[8] = {};  // edge: keys 2j, 2j + 1 of the step
+      if (edge) {
+#pragma unroll
+        for (int jj = 0; jj < 8; jj++) {
+          // key 2jj + e sits in the half e: its p is p[jj] of that half, in
+          // pair jj >> 1 (element jj & 1) of mine / theirs
+          const uint32_t a0 = half == 0 ? mine[jj >> 1] : theirs[jj >> 1];
+          const uint32_t a1 = half == 1 ? mine[jj >> 1] : theirs[jj >> 1];
+          const uint32_t lo = (jj & 1) ? (a0 >> 16) : (a0 & 0xffffu);
+          const uint32_t hi = (jj & 1) ? (a1 >> 16) : (a1 & 0xffffu);
+          pe[jj] = lo | (hi << 16);
+        }
+        // the other half holds the same row: its column is zero too
+#pragma unroll
+        for (int i = 0; i < 4; i++)
+          mine[i] = theirs[i] = 0;
       }
       v16h pf;
 #pragma unroll
@@ -4015,6 +4043,36 @@ __global__ __launch_bounds__(NTT * 96) void attn_prefill_db(PfArgs a) {
         const __half* vp = &sVt[dt * 16 + q16][kt * 16];
         acc[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
             cat16(*(const uint4*)vp, *(const uint4*)(vp + 8)), pf, acc[dt]);
+      }
+      if (edge) {
+        uint32_t vm[8];  // halves of the keys this row sees
+#pragma unroll
+        for (int jj = 0; jj < 8; jj++) {
+          uint32_t mk = 0;
+#pragma unroll
+          for (int e = 0; e < 2; e++) {
+            const int d = posq - (pos0 + 2 * jj + e);
+            if (d >= 0 && (!a.swa || d < WIN))
+              mk |= 0xffffu << (16 * e);
+          }
+          vm[jj] = mk;
+        }
+#pragma unroll
+        for (int dt = 0; dt < 8; dt++)
+#pragma unroll
+          for (int i = 0; i < 8; i++) {
+            const uint4* vr =
+                (const uint4*)&sVt[dt * 16 + 2 * i + half][kt * 16];
+            const uint4 v0 = vr[0], v1 = vr[1];
+            const uint32_t vv[8] = {v0.x, v0.y, v0.z, v0.w,
+                                    v1.x, v1.y, v1.z, v1.w};
+            float e = 0.f;
+#pragma unroll
+            for (int jj = 0; jj < 8; jj++)
+              e = __builtin_amdgcn_fdot2(as_v2h(pe[jj]),
+                                         as_v2h(vv[jj] & vm[jj]), e, false);
+            acc[dt][i] += e;
+          }
       }
     }
     if (tile + 1 < ntiles)

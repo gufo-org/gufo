@@ -232,6 +232,8 @@ int main(int argc, char** argv) {
   std::size_t n = 5000,
               tail =
                   48;  // n > ring rows (1024 + ubatch), so the SWA rings wrap
+  std::size_t chunk_prompt = 1853;  // over 1K keys, under one ubatch
+  bool chunks_only = false;
   for (int i = 1; i < argc; ++i) {
     const std::string k = argv[i];
     auto next = [&] {
@@ -245,11 +247,15 @@ int main(int argc, char** argv) {
       n = std::strtoull(next().c_str(), nullptr, 10);
     else if (k == "--tail")
       tail = std::strtoull(next().c_str(), nullptr, 10);
+    else if (k == "--chunk-prompt")
+      chunk_prompt = std::strtoull(next().c_str(), nullptr, 10);
+    else if (k == "--chunks-only")
+      chunks_only = true;
   }
   if (model.empty() || idsf.empty()) {
     std::fprintf(stderr,
                  "usage: inkling2_cache_test --model GGUF --ids ids.bin [--n "
-                 "N] [--tail T]\n");
+                 "N] [--tail T] [--chunk-prompt P] [--chunks-only]\n");
     return 2;
   }
   std::ifstream f(idsf, std::ios::binary);
@@ -289,6 +295,89 @@ int main(int argc, char** argv) {
 
   const std::span<const std::int32_t> prompt(ids.data(), n),
       more(ids.data() + n, tail);
+
+  // ---- 0. chunk invariance ----
+  // A restored prefix plus a tail prefill must equal one prefill of the whole
+  // prompt, bit for bit: every prompt chunk, however short, takes the same
+  // per-token arithmetic. Splits cover 1-token tails, the decode and
+  // verification widths (up to 64 rows), the GEMM tile edges and many short
+  // chunks.
+  {
+    const std::size_t P = std::min<std::size_t>(chunk_prompt, n);
+    const std::span<const std::int32_t> cp_prompt(ids.data(), P);
+    const std::span<const std::int32_t> cont(ids.data() + P, 4);
+    auto finish = [&](i2::Session& s) {
+      std::vector<float> all = s.logits();
+      for (const auto t : cont) {
+        eng.Step(s, t, nullptr);
+        const auto& l = s.logits();
+        all.insert(all.end(), l.begin(), l.end());
+      }
+      return all;
+    };
+    auto slot_r = adapter.CreateSlot(guard);
+    auto& sr = adapter.GetSession(*slot_r);
+    eng.Forward(sr, cp_prompt);
+    const auto want = finish(sr);
+    std::vector<std::vector<std::size_t>> splits;
+    for (const std::size_t k :
+         {1,  2,   3,   7,   8,   9,   31,  44,   63,   64,
+          65, 127, 128, 129, 255, 256, 257, 1023, 1024, 1025})
+      if (k < P)
+        splits.push_back({P - k, k});
+    splits.push_back({P / 3, P / 3, P - 2 * (P / 3)});
+    {
+      std::vector<std::size_t> many;
+      for (std::size_t at = 0; at < P; at += 37)
+        many.push_back(std::min<std::size_t>(37, P - at));
+      splits.push_back(many);
+    }
+    int bad = 0;
+    for (const auto& sp : splits) {
+      auto slot_s = adapter.CreateSlot(guard);
+      auto& sx = adapter.GetSession(*slot_s);
+      std::size_t at = 0;
+      for (const auto len : sp) {
+        eng.Forward(sx, cp_prompt.subspan(at, len));
+        at += len;
+      }
+      const auto got = finish(sx);
+      const double d = MaxDiff(got, want);
+      std::string desc;
+      for (const auto len : sp)
+        desc += (desc.empty() ? "" : "+") + std::to_string(len);
+      if (sp.size() > 4)
+        desc = std::to_string(sp.size()) + " chunks of " +
+               std::to_string(sp.front());
+      std::fprintf(stderr, "%s chunks %s: max |dlogit| %.3e\n",
+                   d == 0 ? "same" : "DIFF", desc.c_str(), d);
+      bad += d != 0;
+    }
+    // The server's case: a checkpoint of the prefix restored into a fresh
+    // slot, then the tail.
+    for (const std::size_t k : {1, 44}) {
+      auto slot_p = adapter.CreateSlot(guard);
+      auto& sp = adapter.GetSession(*slot_p);
+      eng.Forward(sp, cp_prompt.subspan(0, P - k));
+      const auto pre = Capture(adapter, *slot_p);
+      auto slot_q = adapter.CreateSlot(guard);
+      Restore(adapter, *slot_q, pre);
+      auto& sq = adapter.GetSession(*slot_q);
+      eng.Forward(sq, cp_prompt.subspan(P - k, k));
+      const double d = MaxDiff(finish(sq), want);
+      std::fprintf(stderr, "%s restore %zu + %zu: max |dlogit| %.3e\n",
+                   d == 0 ? "same" : "DIFF", P - k, k, d);
+      bad += d != 0;
+    }
+    REQUIRE(bad == 0, "%d chunkings or restores differ from one prefill", bad);
+    std::fprintf(stderr,
+                 "PASS chunk invariance: %zu chunkings and 2 restores of %zu "
+                 "tokens equal one prefill, logits and %zu decode steps bit "
+                 "for bit\n",
+                 splits.size(), P, cont.size());
+    if (chunks_only)
+      return 0;
+  }
 
   // ---- 1. capture / restore ----
   auto slot_a = adapter.CreateSlot(guard);
@@ -378,7 +467,8 @@ int main(int argc, char** argv) {
   y.yield = [&] {
     ++yields;
     const std::int32_t tok = ids[n + tail + 200 + yields];
-    d_yielded.push_back(Run(eng, sd, std::span<const std::int32_t>(&tok, 1)));
+    eng.Decode(sd, tok);
+    d_yielded.push_back(sd.logits());
   };
   std::vector<float> c_logits;
   for (std::size_t at = 0; at < n; at += 2048) {
@@ -398,7 +488,8 @@ int main(int argc, char** argv) {
   (void)Run(eng, sd2, dprompt);
   for (std::size_t k = 0; k < d_yielded.size(); ++k) {
     const std::int32_t tok = ids[n + tail + 200 + k + 1];
-    const auto l = Run(eng, sd2, std::span<const std::int32_t>(&tok, 1));
+    eng.Decode(sd2, tok);
+    const auto l = sd2.logits();
     REQUIRE(Same(l, d_yielded[k]), "decode during a yield differs at yield %zu",
             k);
   }

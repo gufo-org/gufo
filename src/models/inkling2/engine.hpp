@@ -189,15 +189,21 @@ public:
   using LogitsSink = std::function<void(std::size_t first, std::size_t count,
                                         const float* data)>;
 
-  /// Evaluates `tokens` at the session position (ubatched). Afterwards
+  /// Evaluates prompt `tokens` at the session position (ubatched). Afterwards
   /// `s.logits()` holds the last token's logits. With `sink`, the logits of
   /// every token are also delivered. Throws std::runtime_error on failure or
   /// when the context is exhausted. With `yield`, groups >= 2 and a
   /// callback, the call yields between visit groups. With `rows`, the
   /// listed token positions take the given input rows instead of an embedding.
+  /// Every call, however short, takes the prompt arithmetic, and a token's
+  /// rows do not depend on how the prompt is split into calls: a restored
+  /// prefix plus a tail equals one call over the whole prompt, bit for bit.
   void Forward(Session& s, std::span<const std::int32_t> tokens,
                const LogitsSink& sink = {}, const PrefillYield* yield = nullptr,
                std::span<const InputRows> rows = {});
+  /// One decode step of `token` (the decode arithmetic, as Step); afterwards
+  /// `s.logits()` holds its logits on the host.
+  void Decode(Session& s, std::int32_t token);
 
   /// Waits for all queued device work (M2: the cache adapter copies state with
   /// hipMemcpy).

@@ -883,7 +883,7 @@ public:
                g::TextRunnerToken token) const override {
     auto& st = Require(state);
     const std::int32_t id = static_cast<std::int32_t>(token);
-    engine_->Forward(st.session(), std::span<const std::int32_t>(&id, 1));
+    engine_->Decode(st.session(), id);
     CommitToken(st, token);
   }
   void CommitToken(Inkling2State& st, g::TextRunnerToken token) const {

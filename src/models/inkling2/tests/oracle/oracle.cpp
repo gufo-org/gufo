@@ -238,11 +238,10 @@ int main(int argc, char** argv) {
   const auto t2 = std::chrono::steady_clock::now();
   if (a.single) {
     // decode path: one token per call (T = 1 kernels)
-    for (std::size_t i = 0; i < ids.size(); ++i)
-      engine->Forward(*session, std::span<const std::int32_t>(&ids[i], 1),
-                      [&](std::size_t, std::size_t count, const float* data) {
-                        sink(i, count, data);
-                      });
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      engine->Decode(*session, ids[i]);
+      sink(i, 1, session->logits().data());
+    }
   } else {
     engine->Forward(*session, ids, sink);
   }

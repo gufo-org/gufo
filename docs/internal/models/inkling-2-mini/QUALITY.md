@@ -64,6 +64,41 @@ chat-template goldens from `transformers`' `apply_chat_template`.
 components) continues with bit-identical logits for 48 tokens, also into a used
 slot, and layered prefill with interleaved decodes matches uninterrupted runs.
 
+### Chunk invariance (November 24)
+
+A restored prefix plus a tail prefill now equals one prefill of the whole
+prompt, bit for bit. Before, restoring 1,809 cached tokens and prefilling the
+last 44 changed the greedy output, and `system-injection`, `cache-depth` and
+`cache` (`disk-spacing-disk`) failed on it. Three causes:
+
+- A one-token prompt chunk ran the decode step. `Engine::Forward` now always
+  takes the prompt arithmetic; decoding calls `Engine::Decode` or `Step`.
+- Window-layer prefill attention started its 16-key softmax steps at the
+  query block's first key, which moves with the chunk's start. The steps now
+  start at multiples of 16.
+- gfx1151's `v_wmma_f32_16x16x16_f16` does not ignore a zero product: the A
+  entries that meet a zero B entry change the result (37% of outputs in a
+  standalone test with tiny A values). It does keep a column exact when the
+  whole B column is zero, and rows and columns are independent. A row's own
+  16-key step (later keys masked) and its window's first step (earlier keys
+  masked) held V rows that differ with the chunking: later tokens, the last
+  row repeated at the chunk's end, or overwritten ring rows. Those two steps
+  are now summed on the VALU (`fdot2`) with the masked keys' V zeroed, and the
+  row's WMMA column is zero.
+
+`inkling2_cache_test` checks it first: 22 chunkings (tails of 1 to 1,025
+tokens, thirds, 37-token chunks) and a checkpoint restore plus a 1- or
+44-token tail, each against one prefill of 1,853 tokens (logits and four
+decode steps). Also passes at 5,000 tokens (`--chunk-prompt 5000`: ubatch
+boundaries, ring wraps, 128-query blocks). The three functional suites pass.
+
+The prefill path's arithmetic changed in those steps: KL against the CPU
+reference 1.554e-3 → 1.593e-3, top-1 98.02% → 97.96%, max KL 0.254 → 0.179
+(the position ranges move both ways: 0–1,023 1.134e-3, 1,024–2,047
+1.690e-3, 2,048–8,191 1.599e-3, 8,192–9,299 1.893e-3). The decode path is
+unchanged. Prefill speed in `inkling2_bench`: pp2048 2,221 → 2,212,
+pp8192 2,119 → 2,109, pp32000 1,934 → 1,917 tokens/s.
+
 ## Functional suites
 
 See the PR for the run on the final build. Known model behaviour, also

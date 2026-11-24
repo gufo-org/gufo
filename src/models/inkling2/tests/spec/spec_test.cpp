@@ -195,7 +195,7 @@ int main(int argc, char** argv) {
       auto lone = engine->NewSession();
       engine->Forward(*lone, dp[g]);
       for (std::size_t i = 0; i < dl[g].size(); ++i) {
-        engine->Forward(*lone, std::span<const std::int32_t>(&dt[g][i], 1));
+        engine->Decode(*lone, dt[g][i]);
         ++rows;
         bad += std::memcmp(lone->logits().data(), dl[g][i].data(), V * 4) != 0;
       }
@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
   std::vector<std::int32_t> want{Argmax(ref->logits())};
   std::vector<std::vector<float>> lg;
   for (int i = 0; i < tokens + 64; ++i) {
-    engine->Forward(*ref, std::span<const std::int32_t>(&want.back(), 1));
+    engine->Decode(*ref, want.back());
     lg.push_back(ref->logits());
     want.push_back(Argmax(ref->logits()));
   }
@@ -243,7 +243,7 @@ int main(int argc, char** argv) {
       engine->CommitVerify(*sp, static_cast<std::size_t>(wrong), out);
       i += wrong;
     }
-    engine->Forward(*sp, std::span<const std::int32_t>(&want[i], 1));
+    engine->Decode(*sp, want[i]);
     ++rows;
     bad += std::memcmp(sp->logits().data(), lg[i].data(), V * 4) != 0;
     std::printf("verify R=%d: %ld rows, %ld mismatched\n", R, rows, bad);
@@ -264,7 +264,7 @@ int main(int argc, char** argv) {
       engine->Forward(*r, pr[g]);
       wt[g].push_back(Argmax(r->logits()));
       for (int i = 0; i < tokens + 8; ++i) {
-        engine->Forward(*r, std::span<const std::int32_t>(&wt[g].back(), 1));
+        engine->Decode(*r, wt[g].back());
         rl[g].push_back(r->logits());
         wt[g].push_back(Argmax(r->logits()));
       }
@@ -357,8 +357,7 @@ int main(int argc, char** argv) {
         }
       }
       for (int g = 0; g < kS; ++g) {
-        engine->Forward(*ss[g],
-                        std::span<const std::int32_t>(&wt[g][at[g]], 1));
+        engine->Decode(*ss[g], wt[g][at[g]]);
         ++rows;
         bad += std::memcmp(ss[g]->logits().data(), rl[g][at[g]].data(),
                            V * 4) != 0;
@@ -391,7 +390,7 @@ int main(int argc, char** argv) {
     engine->Forward(*plain, chat);
     std::vector<std::int32_t> want{Argmax(plain->logits())};
     while (static_cast<int>(want.size()) < tokens + 8) {
-      engine->Forward(*plain, std::span<const std::int32_t>(&want.back(), 1));
+      engine->Decode(*plain, want.back());
       want.push_back(Argmax(plain->logits()));
     }
     auto sp = engine->NewSession();

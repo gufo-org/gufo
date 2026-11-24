@@ -197,3 +197,9 @@ expert kernels (real routing), then in `inkling2_bench`:
 | Controller apply and its RMS norm as two launches | no change |
 | No drafter context injection at eight sessions (upper bound, not exact for later proposals) | +0.6% over HTTP, within noise: not worth deferring the injection |
 | Prefetching the next K/V tile in the decode attention (global visits at 32K run at about 83% of DRAM) | not built: the kernels already hold 219 to 255 VGPRs |
+
+## Chunk invariance (November 24)
+
+| Variant | Result |
+| --- | --- |
+| 128-query blocks on window visits too (exact now that the softmax steps start at multiples of 16) | pp8192 / pp32000 equal within noise (2,106 / 1,917 against 2,108 / 1,917) |

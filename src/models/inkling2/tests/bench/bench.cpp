@@ -153,7 +153,7 @@ int main(int argc, char** argv) {
       std::vector<std::int32_t> want{amax(ref->logits())};
       const auto r0 = std::chrono::steady_clock::now();
       while (static_cast<int>(want.size()) < decode + 8) {
-        engine->Forward(*ref, std::span<const std::int32_t>(&want.back(), 1));
+        engine->Decode(*ref, want.back());
         want.push_back(amax(ref->logits()));
       }
       const double ar =
@@ -250,14 +250,14 @@ int main(int argc, char** argv) {
         session->logits().begin());
     // warm-up decode steps (graph capture etc.), then timed
     for (int i = 0; i < 3; ++i) {
-      engine->Forward(*session, std::span<const std::int32_t>(&next, 1));
+      engine->Decode(*session, next);
       next = static_cast<std::int32_t>(
           std::max_element(session->logits().begin(), session->logits().end()) -
           session->logits().begin());
     }
     const auto t2 = std::chrono::steady_clock::now();
     for (int i = 0; i < decode; ++i) {
-      engine->Forward(*session, std::span<const std::int32_t>(&next, 1));
+      engine->Decode(*session, next);
       next = static_cast<std::int32_t>(
           std::max_element(session->logits().begin(), session->logits().end()) -
           session->logits().begin());
@@ -293,7 +293,7 @@ int main(int argc, char** argv) {
       toks.push_back(amax(ref->logits()));
       const auto r0 = std::chrono::steady_clock::now();
       for (int i = 0; i < decode + 64; ++i) {
-        engine->Forward(*ref, std::span<const std::int32_t>(&toks.back(), 1));
+        engine->Decode(*ref, toks.back());
         lg.push_back(ref->logits());
         toks.push_back(amax(ref->logits()));
       }
@@ -335,7 +335,7 @@ int main(int argc, char** argv) {
           i += keep;
         }
         // one more plain decode after the last commit must match too
-        engine->Forward(*sp, std::span<const std::int32_t>(&toks[i], 1));
+        engine->Decode(*sp, toks[i]);
         ++rows;
         if (std::memcmp(sp->logits().data(), lg[i].data(), V * 4) != 0)
           ++bad;
@@ -408,7 +408,7 @@ int main(int argc, char** argv) {
         // sessions are ahead by 3 steps, so replay
         for (int i = 0; i < 3; ++i)
           for (int b = 0; b < B; ++b) {
-            engine->Forward(*r[b], std::span<const std::int32_t>(&nref[b], 1));
+            engine->Decode(*r[b], nref[b]);
             nref[b] = argmax(r[b]->logits());
           }
       }
@@ -417,7 +417,7 @@ int main(int argc, char** argv) {
         step();
         if (verify) {
           for (int b = 0; b < B; ++b) {
-            engine->Forward(*r[b], std::span<const std::int32_t>(&nref[b], 1));
+            engine->Decode(*r[b], nref[b]);
             nref[b] = argmax(r[b]->logits());
             const auto& x = a[b]->logits();
             const auto& y = r[b]->logits();
