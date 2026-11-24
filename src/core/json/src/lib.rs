@@ -1,14 +1,22 @@
-//! The C interface of the JSON parser. `gufo::json::parse`
-//! (src/core/json.cpp) builds its values from the events it reports.
+//! The JSON parser, a value tree built from its events and a writer that
+//! spells values as C++ `json::Value::dump` does, for Rust callers; and the
+//! C interface of the parser, from whose events `gufo::json::parse`
+//! (src/core/json.cpp) builds its values.
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 mod parse;
+mod value;
+mod write;
+mod write_abi;
+
+pub use parse::{Event, Failure, MAX_DEPTH, Sink, Stopped, parse};
+pub use value::{Limits, Number, Object, Value, ValueError, parse_value};
+pub use write::{Numbers, Spacing, Style, dump, tojson, write};
+pub use write_abi::{GUFO_JSON_DUMP_AS_PARSED, GUFO_JSON_DUMP_SPACED, gufo_json_dump};
 
 use gufo_ffi::guard;
 use std::ffi::{c_int, c_void};
-
-use parse::{Event, Failure, Sink, Stopped};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

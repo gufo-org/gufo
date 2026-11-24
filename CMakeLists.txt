@@ -990,6 +990,13 @@ endfunction()
   add_test(NAME json_parse_test COMMAND json_parse_test)
   set_tests_properties(json_parse_test PROPERTIES LABELS "cpu;json;correctness")
 
+  # Compares the Rust JSON writer with json::Value::dump; the Rust header
+  # comes from gufo_rust.
+  add_executable(json_write_test tests/core/json_write_test.cpp)
+  target_link_libraries(json_write_test PRIVATE gufo_json gufo_rust)
+  add_test(NAME json_write_test COMMAND json_write_test)
+  set_tests_properties(json_write_test PROPERTIES LABELS "cpu;json;correctness")
+
   # The test writes its PNG cases with zlib directly.
   find_package(ZLIB REQUIRED)
   add_executable(png_decode_test
