@@ -86,9 +86,9 @@ public:
   /// A call is required: after a header the model writes a thought (unless
   /// reasoning is off or a budget closed it) or one declared function name
   /// (the tokens the template writes for it), then the invoke token (see
-  /// Select). Token ids of each
-  /// declared name, as the template writes it, and the name tokens written
-  /// since the last header.
+  /// Select). Token ids of each declared name (of every request that may
+  /// call one; see Piece()), as the template writes it, and the name tokens
+  /// written since the last header.
   bool call_required{false};
   std::vector<std::vector<g::TextRunnerToken>> call_names;
   std::vector<g::TextRunnerToken> call_prefix;
@@ -412,10 +412,23 @@ public:
   // <|end_message|>" for a call (stream_dialect.hpp). The decision uses only
   // committed state (Advance), so previewing a token twice is harmless.
   // Decode() stays literal.
-  [[nodiscard]] std::string Piece(Block block, g::TextRunnerToken token) const {
+  //
+  // A grammar sees each token's own bytes, so it never allows <|content_text|>:
+  // under a response format the model writes its answer right after the header
+  // (unless a thought came first). An ordinary token after a header is
+  // therefore a function name only when it starts a declared one; otherwise it
+  // opens a text block.
+  [[nodiscard]] bool StartsName(const Inkling2State& st,
+                                g::TextRunnerToken token) const {
+    return std::any_of(
+        st.call_names.begin(), st.call_names.end(),
+        [&](const auto& name) { return !name.empty() && name[0] == token; });
+  }
+  [[nodiscard]] std::string Piece(const Inkling2State& st,
+                                  g::TextRunnerToken token) const {
     if (token == t_header_)
       return {};
-    switch (block) {
+    switch (st.block) {
       case Block::kAfterHeader:
         if (token == t_text_)
           return {};
@@ -423,10 +436,13 @@ public:
           return std::string(::inkling2::text::dialect::kHeader) +
                  std::string(tok_->TokenBytes(token));
         // The invoke token right after a header (a call written without the
-        // first function name): the call starts here. Otherwise the first token
-        // of the function name, which is written again inside the JSON.
-        return token == t_invoke_ ? std::string(tok_->TokenBytes(token))
-                                  : std::string{};
+        // first function name): the call starts here. The first token of a
+        // function name is written again inside the JSON.
+        if (token == t_invoke_)
+          return std::string(tok_->TokenBytes(token));
+        if (token == t_end_message_ || StartsName(st, token))
+          return {};  // an empty block, or a name
+        break;
       case Block::kTool:
         return token == t_invoke_ ? std::string(tok_->TokenBytes(token))
                                   : std::string{};
@@ -439,22 +455,27 @@ public:
     }
     return std::string(tok_->TokenBytes(token));
   }
-  [[nodiscard]] Block NextBlock(Block block, g::TextRunnerToken token) const {
+  [[nodiscard]] Block NextBlock(const Inkling2State& st,
+                                g::TextRunnerToken token) const {
     if (token == t_header_)
       return Block::kAfterHeader;
-    switch (block) {
+    switch (st.block) {
       case Block::kAfterHeader:
         if (token == t_text_)
           return Block::kText;
         if (token == t_thinking_)
           return Block::kThinking;
-        return token == t_invoke_ ? Block::kToolBody : Block::kTool;
+        if (token == t_invoke_)
+          return Block::kToolBody;
+        if (token == t_end_message_)
+          return Block::kIdle;
+        return StartsName(st, token) ? Block::kTool : Block::kText;
       case Block::kTool:
         if (token == t_invoke_)
           return Block::kToolBody;
-        return token == t_end_message_ ? Block::kIdle : block;
+        return token == t_end_message_ ? Block::kIdle : st.block;
       default:
-        return token == t_end_message_ ? Block::kIdle : block;
+        return token == t_end_message_ ? Block::kIdle : st.block;
     }
   }
 
@@ -576,7 +597,8 @@ public:
         context->reasoning_off &&
         (request.tools.empty() ||
          request.tool_choice == g::ChatRequest::ToolChoice::kNone);
-    if (context->call_required) {
+    if (!request.tools.empty() &&
+        request.tool_choice != g::ChatRequest::ToolChoice::kNone) {
       for (const auto& tool : request.tools) {
         std::vector<::inkling2::text::TokenId> ids;
         tok_->EncodeOrdinary(tool.name, &ids);
@@ -865,7 +887,7 @@ public:
     const bool stop = st.stop_at_eos() && tok_->IsStop(token);
     return {.stop = stop,
             .token = token,
-            .piece = stop ? std::string{} : Piece(st.block, token),
+            .piece = stop ? std::string{} : Piece(st, token),
             .logprobs = sampling::CollectLogprobs(
                 raw, token,
                 sampler.config().logprobs)};  // the model's own distribution
@@ -887,7 +909,7 @@ public:
     else if ((st.block == Block::kAfterHeader || st.block == Block::kTool) &&
              token != t_invoke_)
       st.call_prefix.push_back(token);
-    st.block = NextBlock(st.block, token);
+    st.block = NextBlock(st, token);
   }
   /// One token for each of several sessions in a single weight pass
   /// (Engine::DecodeBatch).
@@ -1129,7 +1151,7 @@ public:
           const bool stop = st.stop_at_eos() && tok_->IsStop(tk);
           sel = {.stop = stop,
                  .token = tk,
-                 .piece = stop ? std::string{} : Piece(st.block, tk),
+                 .piece = stop ? std::string{} : Piece(st, tk),
                  .logprobs = sampling::CollectLogprobs(row, tk, cfg.logprobs)};
           used = j + 1;
         }
@@ -1145,7 +1167,7 @@ public:
                           (st.stop_at_eos() && tok_->IsStop(tk));
         sel = {.stop = stop,
                .token = tk,
-               .piece = stop ? std::string{} : Piece(st.block, tk)};
+               .piece = stop ? std::string{} : Piece(st, tk)};
       } else {
         sel = Select(st, working, out.subspan(j * V, V), at);
       }
@@ -1596,7 +1618,7 @@ public:
               l.st->pending = g::TextDecodeSelection{
                   .stop = stop,
                   .token = tk,
-                  .piece = stop ? std::string{} : Piece(l.st->block, tk)};
+                  .piece = stop ? std::string{} : Piece(*l.st, tk)};
             } else {
               l.st->pending =
                   Select(*l.st, working[l.i], out.subspan(k * V, V), at);

@@ -1209,6 +1209,19 @@ def check_structured_outputs(client, model, checks, vision=False):
         result = client.chat.completions.parse(**body, response_format=Measurement)
         assert result.choices[0].message.parsed is not None, result
         record(f"schema_bounds_thinking_{thinking}", sdk_result(result))
+
+    class Person(BaseModel):
+        name: str
+        age: int
+
+    # The model's default reasoning, on a request it answers without a thought:
+    # the answer must not be framed away (Inkling 2 Mini lost it as a call).
+    result = client.chat.completions.parse(
+        model=model, messages=[{"role": "user", "content": "Invent a person named Ada who is 36."}],
+        temperature=0, seed=31, max_completion_tokens=768, response_format=Person)
+    parsed = result.choices[0].message.parsed
+    assert parsed is not None and (parsed.name, parsed.age) == ("Ada", 36), result
+    record("schema_default_reasoning", sdk_result(result))
     response = client.responses.parse(
         model=model, input=measured["messages"][0]["content"],
         text_format=Measurement, reasoning={"effort": "none"},
