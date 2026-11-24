@@ -26,7 +26,31 @@
       "draft": "dspark-Inkling-2-Mini-Q8_0.gguf",
       "draft_option": "--dspark-model",
       "mode": "dspark",
-      "sampling": "provider"
+      "sampling": "provider",
+      "suites": [
+        "logprobs",
+        "discovery",
+        "messages-image-counts",
+        "responses",
+        "stops",
+        "conversation",
+        "structured",
+        "tool-history",
+        "messages-tools",
+        "tool-choice-cache",
+        "tool-type-unions",
+        "tool-schema-edges",
+        "sampling-defaults",
+        "state-edges",
+        "prefill-scheduling",
+        "long-context",
+        "cache-edits",
+        "cache-depth",
+        "cache-concurrency",
+        "cache-bridge",
+        "system-injection",
+        "cache"
+      ]
     }
   },
   "rules": [

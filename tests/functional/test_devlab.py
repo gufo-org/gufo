@@ -389,6 +389,20 @@ class ShardTest(unittest.TestCase):
     def parts(shards, model):
         return [part for row in shards for part in row['parts'] if part['model'] == model]
 
+    def test_model_new_on_the_change_has_no_timing_arm(self):
+        # The base revision cannot serve a model the change adds: nothing to time.
+        data = without_npu(devlab_models.registry())
+        plan = devlab_plan.select(['src/models/inkling2/runner.cpp'], data, 'full',
+                                  base_models=set(data['models']) - {'inkling-2-mini'})
+        plan.update(base='a' * 40, head='b' * 40)
+        selection = next(row for row in plan['models'] if row['id'] == 'inkling-2-mini')
+        self.assertTrue(selection['new'])
+        self.assertEqual(selection['timing_checks'], [])
+        parts = self.parts(devlab_plan.shard(plan, self.TABLE), 'inkling-2-mini')
+        self.assertTrue(parts)
+        self.assertFalse(any(part['timing'] for part in parts))
+        self.assertTrue(any(part['groups'] for part in parts))
+
     def test_loom_has_no_timing_arm(self):
         shards = devlab_plan.shard(self.plan('src/models/loom/loom_runner.cpp'), self.TABLE)
         parts = self.parts(shards, 'loom-qwen3.5-2b')
