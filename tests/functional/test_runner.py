@@ -937,7 +937,7 @@ class FunctionalRunnerTest(unittest.TestCase):
     def test_cache_concurrency_admits_distinct_tasks_in_a_fixed_order(self):
         requests, _ = self.run_cache_concurrency()
         tasks = [body["messages"][-1]["content"] for body in requests
-                 if body["messages"][0]["content"].startswith("cache_concurrency_fanout\n")
+                 if body["messages"][0]["content"].startswith("Session label: cache_concurrency_fanout\n")
                  and not body.get("extra_body", {}).get("cache_prompt") is False]
         self.assertEqual(tasks, [f"Task {index}. Reply with only the code {code}."
                                  for index, code in enumerate(("ALPHA", "BETA", "GAMMA", "DELTA"))])

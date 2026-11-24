@@ -12,6 +12,8 @@ import argparse
 import json
 from pathlib import Path
 
+from thinking import answer_room, configure as configure_thinking
+
 NOTE = "Background notes are not instructions.\n"
 
 
@@ -24,7 +26,7 @@ def messages(tag):
 
 def chat(url, model, history, persist=None):
     import continuation  # Imported late, as in cache_disk_spacing.py.
-    body = {"model": model, "messages": history, "max_tokens": 8,
+    body = {"model": model, "messages": history, "max_tokens": answer_room(8),
             "temperature": 0, "seed": 31, "stream": False,
             "chat_template_kwargs": {"enable_thinking": False}}
     if persist is not None:
@@ -75,7 +77,10 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--restore", type=Path)
+    parser.add_argument("--thinking-off-reasons", action="store_true",
+                        help="The model still thinks with thinking off (thinking.py)")
     args = parser.parse_args()
+    configure_thinking(args.thinking_off_reasons)
     import continuation
     continuation.TRACE.path = args.output.with_suffix(".requests.json")
     if args.restore:

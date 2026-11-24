@@ -27,6 +27,7 @@
       "draft_option": "--dspark-model",
       "mode": "dspark",
       "sampling": "provider",
+      "thinking_off_reasons": true,
       "suites": [
         "logprobs",
         "discovery",

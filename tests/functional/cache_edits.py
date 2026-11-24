@@ -4,6 +4,7 @@ from copy import deepcopy
 import sys
 
 from cache_growth import check_unchanged_retry, log_offset
+from thinking import answer_room, no_reasoning
 
 
 def check_cache_edits(client, model, checks, chat_result, server_log=None):
@@ -46,7 +47,7 @@ def check_cache_edits(client, model, checks, chat_result, server_log=None):
                     {"role": "user", "content": "Reply with only ALPHA."},
                 ]
         request = dict(model=model, messages=messages, temperature=0, seed=31,
-                       max_completion_tokens=16, extra_body={
+                       max_completion_tokens=answer_room(16), extra_body={
                            "chat_template_kwargs": {"enable_thinking": False}})
         if tools:
             request["tools"] = tools
@@ -130,7 +131,7 @@ def check_cache_edits(client, model, checks, chat_result, server_log=None):
         control = chat("cold_control", control_request)
         assert work(control) == (prompt, 0, prompt), control
         assert signature(edited) == signature(control), (edited, control)
-        assert edited["text"].strip() == "BETA" and not edited["reasoning"] \
+        assert edited["text"].strip() == "BETA" and no_reasoning(edited["reasoning"]) \
             and not edited["tools"], edited
 
     # Retain all reproductions and their cold output controls before failing.

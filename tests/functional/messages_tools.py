@@ -117,6 +117,9 @@ def check_messages_tools(client, model, checks, chat_result):
     arguments = json.dumps(call["input"])
     chat = [{"role": "system", "content": system}, user,
             {"role": "assistant", "content": first["text"] or None,
+             # The Messages replay carries the thinking block of a model that
+             # thinks with thinking off (thinking.py); so does the control.
+             **({"reasoning_content": first["reasoning"]} if first["reasoning"] else {}),
              "tool_calls": [{"id": call["id"], "type": "function",
                              "function": {"name": call["name"], "arguments": arguments}}]},
             {"role": "tool", "tool_call_id": call["id"], "content": "Sunny, 22 C."}]
