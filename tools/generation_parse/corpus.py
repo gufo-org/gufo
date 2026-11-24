@@ -136,21 +136,23 @@ def from_trace(path):
     generations = []
     for line in open(path, encoding="utf-8"):
         record = json.loads(line)
-        if record.get("kind") == "request" or record.get("record") == "request":
+        if record.get("event") == "request":
             requests[record.get("request")] = record
-        elif "generation" in record and "pieces" in record:
+        elif record.get("event") == "generation" and "pieces" in record:
             generations.append(record)
     cases = []
     for generation in generations:
         request = requests.get(generation.get("request"))
         if request is None or generation.get("finish") == "cancelled" or "error" in generation:
             continue
+        if "initial_output_state" not in generation:
+            continue  # A raw completion, which the chat parsers never read.
         body = json.loads(request["body"])
         tools, choice = request_tools(body)
-        if request["path"] == "/v1/messages" and isinstance(body.get("thinking"), dict) is False:
-            pass
-        output = generation["output"].encode("utf-8", "surrogateescape")
-        ends = generation["pieces"]
+        output = generation["output"].encode("utf-8")
+        ends = [end for end in generation["pieces"] if end <= len(output)]
+        if generation["pieces"] and generation["pieces"][-1] != len(output):
+            continue  # Malformed UTF-8 was replaced, so the offsets no longer fit.
         pieces = []
         begin = 0
         for end in ends:
