@@ -269,6 +269,14 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   if (!speculative_explicit && !opt.dspark_model_path.empty()) {
     opt.speculative_backend = "dspark";
   }
+  try {
+    (void)SpeculativeConfigFor(opt.speculative_backend, opt.mtp_model_path,
+                               opt.dflash_model_path, opt.dspark_model_path);
+  } catch (const std::invalid_argument& exception) {
+    if (error_msg)
+      *error_msg = exception.what();
+    return std::nullopt;
+  }
 
   // Each model sets its draft settings (TextSpeculativeDefaults).
   for (const char* option :

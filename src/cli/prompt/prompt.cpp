@@ -227,19 +227,12 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
     return std::nullopt;
   }
 
-  if (opt.speculative_backend == "mtp" && opt.mtp_model_path.empty()) {
+  try {
+    (void)SpeculativeConfigFor(opt.speculative_backend, opt.mtp_model_path,
+                               opt.dflash_model_path, opt.dspark_model_path);
+  } catch (const std::invalid_argument& exception) {
     if (error_msg != nullptr)
-      *error_msg = "MTP requires --mtp-model";
-    return std::nullopt;
-  }
-  if (opt.speculative_backend == "dflash2" && opt.dflash_model_path.empty()) {
-    if (error_msg != nullptr)
-      *error_msg = "DFlash2 requires --dflash-model";
-    return std::nullopt;
-  }
-  if (opt.speculative_backend == "dspark" && opt.dspark_model_path.empty()) {
-    if (error_msg != nullptr)
-      *error_msg = "DSpark requires --dspark-model";
+      *error_msg = exception.what();
     return std::nullopt;
   }
   // Each model sets its draft settings (TextSpeculativeDefaults).

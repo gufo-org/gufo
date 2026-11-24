@@ -1,5 +1,6 @@
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <gufo/ext/registry.hpp>
@@ -9,6 +10,7 @@
 #include <optional>
 #include <span>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,6 +18,8 @@
 
 #include "src/cli/bench/bench.hpp"
 #include "src/cli/prompt/prompt.hpp"
+#include "src/cli/runner_cli.hpp"
+#include "src/cli/speculative_settings.hpp"
 #include "src/core/platform/os_info.hpp"
 #include "tests/fixtures/gguf_builder.hpp"
 
@@ -28,6 +32,17 @@ std::size_t dispatched_draft_tokens = 0;
 std::size_t dispatched_min_draft_tokens = 0;
 std::string dispatched_draft_policy;
 bool invalid_defaults = false;
+// What the runner-only provider's factory last received.
+int runner_created = 0;
+gufo::ext::TextSpeculativeConfig runner_speculative;
+
+std::shared_ptr<gufo::ext::TextModelRunner> CreateRunner(
+    const gufo::ext::TextRunnerOptions& options, std::string* error) {
+  ++runner_created;
+  runner_speculative = options.speculative;
+  *error = "fixture runner";
+  return nullptr;
+}
 
 std::optional<gufo::sampling::TextSamplingDefaults> SamplingDefaults(
     const gufo::core::GgufReader&) {
@@ -154,6 +169,20 @@ void gufo::ext::RegisterBuiltExtensions(gufo::ext::Registry& registry) {
               std::chrono::steady_clock::time_point) {
             return Dispatch("chat", reader, options);
           },
+  });
+  // Has no drivers: the commands load its runner through the server backend.
+  registry.AddTextProvider({
+      .id = "runner-text",
+      .probe_gguf =
+          +[](const core::GgufReader& reader) {
+            return ProbeArchitecture(reader, "runner-text");
+          },
+      .create = &CreateRunner,
+      .speculative_defaults = {{.backend = "mtp",
+                                .max_draft_tokens = 5,
+                                .min_draft_tokens = 3,
+                                .draft_policy = "calibrated",
+                                .draft_policies = {"calibrated"}}},
   });
   // Owns a tensor layout core cannot size; the others never see such a file.
   registry.AddTextProvider({
@@ -405,6 +434,142 @@ bool CheckSamplingDefaults(std::string_view command, const char* model) {
   return rejected;
 }
 
+// The runner options `flags` give a provider without a driver, as the command
+// parses them and prepares its runner; false when either rejects them.
+bool PrepareRunner(std::string_view command, std::vector<const char*> flags,
+                   gufo::ext::TextRunnerOptions* options) {
+  const auto* provider = gufo::ext::FindTextProvider("runner-text");
+  std::string error;
+  if (command == "bench") {
+    const auto parsed = gufo::cli::ParseBenchOptions(flags, &error);
+    return parsed &&
+           gufo::cli::PrepareRunnerOptions(*parsed, *provider, options, &error);
+  }
+  const auto parsed = gufo::cli::ParsePromptOptions(flags, &error);
+  return parsed &&
+         gufo::cli::PrepareRunnerOptions(*parsed, *provider, options, &error);
+}
+
+// A provider without a driver loads its runner with the speculative
+// configuration `gufo serve` would give it: the backend, the draft model of
+// that backend's option and the provider's draft settings. The factory then
+// accepts or rejects the backend, so speculation is never dropped silently.
+// The preparation is checked in every build; the load needs the GPU engine.
+bool CheckRunnerSpeculative(std::string_view command,
+                            const std::string& model) {
+  using Backend = gufo::ext::TextSpeculativeBackend;
+  struct Case {
+    std::vector<const char*> flags;
+    Backend backend;
+    std::string_view draft_model;
+    std::uint32_t max;
+    std::uint32_t min;
+    std::string_view policy;
+  };
+  const std::vector<Case> cases = {
+      {{"--speculative", "mtp", "--mtp-model", "mtp.gguf", "--dflash-model",
+        "dflash.gguf"},
+       Backend::kMtp,
+       "mtp.gguf",
+       5,
+       3,
+       "calibrated"},
+      {{"--speculative", "dflash2", "--dflash-model", "dflash.gguf"},
+       Backend::kDFlash,
+       "dflash.gguf",
+       7,
+       1,
+       ""},
+      {{"--dspark-model", "dspark.gguf"},
+       Backend::kDSpark,
+       "dspark.gguf",
+       7,
+       1,
+       ""},
+      {{"--dflash-model", "dflash.gguf"}, Backend::kDisabled, "", 7, 1, ""},
+      {{}, Backend::kDisabled, "", 7, 1, ""},
+  };
+  const auto matches = [](const gufo::ext::TextSpeculativeConfig& received,
+                          const Case& entry) {
+    return received.backend == entry.backend &&
+           received.draft_model_path == entry.draft_model &&
+           received.max_draft_tokens == entry.max &&
+           received.min_draft_tokens == entry.min &&
+           received.draft_policy == entry.policy;
+  };
+  for (const auto& entry : cases) {
+    gufo::ext::TextRunnerOptions prepared;
+    if (!PrepareRunner(command, entry.flags, &prepared) ||
+        !matches(prepared.speculative, entry)) {
+      return Fail(command,
+                  "the runner options must carry the speculative "
+                  "settings");
+    }
+    runner_created = 0;
+    runner_speculative = {};
+    const int status = Run(command, model, entry.flags);
+#if defined(ENGINE_ENABLE_HIP)
+    const bool loaded = status == 1 && runner_created == 1 &&
+                        matches(runner_speculative, entry);
+#else
+    // Without the GPU engine no runner loads.
+    const bool loaded = status == 1 && runner_created == 0;
+#endif
+    if (!loaded) {
+      return Fail(command, "the runner must receive the speculative settings");
+    }
+  }
+  // A backend without its draft model fails before any runner loads.
+  for (const auto* backend : {"mtp", "dflash2", "dspark"}) {
+    runner_created = 0;
+    if (Run(command, model, {"--speculative", backend}) != 2 ||
+        runner_created != 0) {
+      return Fail(command, "a backend without its draft model must fail");
+    }
+  }
+  return true;
+}
+
+// Each backend drafts from its own option's model; unknown backends and
+// missing draft models are refused.
+bool CheckSpeculativeConfig() {
+  using Backend = gufo::ext::TextSpeculativeBackend;
+  const auto is = [](std::string_view backend, const std::string& draft,
+                     Backend expected, std::string_view draft_model) {
+    const auto config =
+        gufo::cli::SpeculativeConfigFor(backend, draft, draft, draft);
+    return config.backend == expected && config.draft_model_path == draft_model;
+  };
+  const auto rejects = [](std::string_view backend, std::string_view message) {
+    try {
+      (void)gufo::cli::SpeculativeConfigFor(backend, {}, {}, {});
+    } catch (const std::invalid_argument& exception) {
+      return std::string_view(exception.what()) == message;
+    }
+    return false;
+  };
+  const bool mapped =
+      is("", "d", Backend::kDisabled, "") &&
+      is("off", "d", Backend::kDisabled, "") &&
+      gufo::cli::SpeculativeConfigFor("mtp", "m", "f", "s").draft_model_path ==
+          "m" &&
+      gufo::cli::SpeculativeConfigFor("dflash2", "m", "f", "s")
+              .draft_model_path == "f" &&
+      gufo::cli::SpeculativeConfigFor("dspark", "m", "f", "s")
+              .draft_model_path == "s" &&
+      is("mtp", "d", Backend::kMtp, "d") &&
+      is("dflash2", "d", Backend::kDFlash, "d") &&
+      is("dspark", "d", Backend::kDSpark, "d");
+  const bool rejected =
+      rejects("mtp", "MTP requires --mtp-model") &&
+      rejects("dflash2", "DFlash2 requires --dflash-model") &&
+      rejects("dspark", "DSpark requires --dspark-model") &&
+      rejects("eagle", "speculative backend 'eagle' is not supported");
+  return mapped && rejected
+             ? true
+             : Fail("speculative", "wrong configuration for a backend");
+}
+
 }  // namespace
 
 // Only a provider that accepts unsized tensors receives such a file, through
@@ -461,7 +626,8 @@ int main(int argc, char** argv) {
   };
   const auto path = write_model("test-text");
   const auto other_path = write_model("other-text");
-  if (path.empty() || other_path.empty()) {
+  const auto runner_path = write_model("runner-text");
+  if (path.empty() || other_path.empty() || runner_path.empty()) {
     return 1;
   }
   const auto model = path.string();
@@ -481,10 +647,12 @@ int main(int argc, char** argv) {
   const bool options_ok =
       CheckProviderOptions(command, model, other_path.string()) &&
       CheckSpeculativeDefaults(command, model, other_path.string()) &&
-      CheckHelp(command);
+      CheckHelp(command) && CheckSpeculativeConfig() &&
+      CheckRunnerSpeculative(command, runner_path.string());
   const bool unsized_ok = CheckUnsizedTensors(command);
   std::filesystem::remove(path);
   std::filesystem::remove(other_path);
+  std::filesystem::remove(runner_path);
   if (!dispatched_command) {
     std::cerr << "FAIL: " << command
               << " must register and dispatch to its built text provider\n";

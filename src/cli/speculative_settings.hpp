@@ -47,6 +47,14 @@ SpeculativeSettings ResolveSpeculativeSettings(
     const ext::TextProvider& provider, std::string_view backend,
     const SpeculativeFlags& flags);
 
+/// The configuration a runner loads with for `backend` ("" or "off" disables
+/// speculation), drafting from the model the backend's own option names; the
+/// draft settings stay the host's until `ApplySpeculativeSettings`. Throws
+/// std::invalid_argument for an unknown backend or a missing draft model.
+ext::TextSpeculativeConfig SpeculativeConfigFor(
+    std::string_view backend, const std::string& mtp_model_path,
+    const std::string& dflash_model_path, const std::string& dspark_model_path);
+
 /// Stores `settings` in `config`, including the DFlash2 policy they name.
 void ApplySpeculativeSettings(const SpeculativeSettings& settings,
                               ext::TextSpeculativeConfig* config);
