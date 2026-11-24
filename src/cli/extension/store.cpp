@@ -1,12 +1,16 @@
 #include "src/cli/extension/store.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
 #include <vector>
 
+#include "src/core/crypto/sha256.hpp"
 #include "src/core/platform/fs.hpp"
 #include "src/core/platform/module.hpp"
 #include "src/core/platform/os_info.hpp"
@@ -25,6 +29,48 @@ std::string ReadText(const std::filesystem::path& path) {
 
 std::string_view HostBuildId() {
   return GUFO_EXTENSION_BUILD_ID;
+}
+
+const std::vector<std::pair<std::string, std::string>>& HostExtensions() {
+  // `name=identity` pairs joined by commas (gufo_extension_host_identities).
+  static const auto extensions = [] {
+    std::vector<std::pair<std::string, std::string>> parsed;
+    std::string_view text = GUFO_EXTENSION_HOST_EXTENSIONS;
+    while (!text.empty()) {
+      const auto comma = text.find(',');
+      const auto pair = text.substr(0, comma);
+      const auto equals = pair.find('=');
+      parsed.emplace_back(std::string(pair.substr(0, equals)),
+                          std::string(pair.substr(equals + 1)));
+      text = comma == std::string_view::npos ? std::string_view{}
+                                             : text.substr(comma + 1);
+    }
+    return parsed;
+  }();
+  return extensions;
+}
+
+std::string ModuleBuildId(const json::Value& manifest) {
+  std::vector<std::string> depends;
+  if (const auto* array = manifest.find("depends");
+      array && array->is_array()) {
+    for (const auto& value : array->items())
+      depends.push_back(value.get_str());
+  }
+  std::ranges::sort(depends);
+  std::string lines;
+  for (const auto& dependency : depends) {
+    for (const auto& [name, identity] : HostExtensions()) {
+      if (name == dependency && !identity.empty())
+        lines += "host_extension=" + name + ":" + identity + "\n";
+    }
+  }
+  const std::string base(HostBuildId());
+  if (lines.empty())
+    return base;
+  const auto material = base + "\n" + lines;
+  return crypto::Sha256Hex(std::span(
+      reinterpret_cast<const std::uint8_t*>(material.data()), material.size()));
 }
 
 std::filesystem::path StoreDirectory() {
@@ -111,6 +157,12 @@ std::filesystem::path ModulePath(const std::filesystem::path& store,
 
 json::Value Manifest(const std::filesystem::path& source) {
   return json::parse(ReadText(source / "extension.json"));
+}
+
+std::filesystem::path InstalledModulePath(const std::filesystem::path& store,
+                                          std::string_view name) {
+  return ModulePath(store, name,
+                    ModuleBuildId(Manifest(SourceDirectory(store, name))));
 }
 
 Sdk LocateSdk() {

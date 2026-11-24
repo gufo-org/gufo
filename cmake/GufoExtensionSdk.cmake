@@ -34,6 +34,10 @@ function(gufo_extension_sdk target)
   endforeach()
   # Official selection is fixed in the host; modules are never part of it.
   file(WRITE "${sdk}/extensions.lock" "{\"schema\": 1, \"extensions\": []}\n")
+  # The in-tree extensions built into the executable, which modules may list
+  # in `depends`, and the usage requirements of their exports.
+  _gufo_host_extensions_record(host_extensions)
+  _gufo_write_if_different("${sdk}/host-extensions.cmake" "${host_extensions}")
   _gufo_sdk_copy("${root}/src/core/hip/libstdcxx_noinline.hpp"
     "${sdk}/support/libstdcxx_noinline.hpp")
   file(GLOB_RECURSE api_files RELATIVE "${root}"
@@ -161,6 +165,20 @@ function(gufo_extension_sdk target)
       string(JSON sdk_json SET "${sdk_json}" environment ${variable} "\"${value}\"")
     endif()
   endforeach()
+  # The extensions a module may list in `depends` (host-extensions.cmake).
+  _gufo_module_host_extensions(host_names)
+  list(SORT host_names)
+  string(JSON sdk_json SET "${sdk_json}" host_extensions "[]")
+  set(index 0)
+  foreach(name IN LISTS host_names)
+    string(JSON sdk_json SET "${sdk_json}" host_extensions ${index} "\"${name}\"")
+    math(EXPR index "${index}+1")
+  endforeach()
+  if(WIN32)
+    # Why `host_extensions` is empty: `gufo extension install` says so before building.
+    string(JSON sdk_json SET "${sdk_json}" host_extensions_unavailable
+      "\"Windows modules cannot have depends yet; compile the extension into gufo with GUFO_EXTENSION_DIRS instead\"")
+  endif()
   # Paths the profile pins; `gufo extension install` checks they still exist.
   string(JSON sdk_json SET "${sdk_json}" dependencies "[]")
   set(index 0)

@@ -590,6 +590,77 @@ void {name}_register(gufo::ext::Registry&) {{}}
                 directory = self.dependent(**arguments)
                 self.configure(f"-DGUFO_EXTENSION_DIRS={directory.as_posix()}", error=error)
 
+    def test_module_dependency_rules(self):
+        # A module may depend on an in-tree extension built into the host and
+        # links its export compile-only; the SDK records the host extensions
+        # and the build identity pins the exporter.
+        cmake = self.source / "CMakeLists.txt"
+        cmake.write_text(cmake.read_text().replace(
+            "gufo_target_extensions(fixture EXTENSIONS ${selected})",
+            "list(REMOVE_ITEM selected ${GUFO_EXTENSION_MODULES})\n"
+            "gufo_target_extensions(fixture EXTENSIONS ${selected})\n"
+            "set(GUFO_EXTENSION_MODULE_HOST fixture)\n"
+            # The build identity digests Gufo's own surface headers.
+            f"set(PROJECT_SOURCE_DIR \"{ROOT.as_posix()}\")\n"
+            "gufo_extension_modules(EXTENSIONS ${GUFO_EXTENSION_MODULES})\n"
+            "set(PROJECT_SOURCE_DIR \"${discovery_root}\")\n"
+            "if(TARGET gufo_aext)\n"
+            "  get_target_property(links gufo_aext LINK_LIBRARIES)\n"
+            "  message(STATUS \"aext links: ${links}\")\n"
+            "endif()\n"
+            f"include(\"{ROOT.as_posix()}/cmake/GufoExtensionHost.cmake\")\n"
+            "_gufo_host_export_libraries(kept)\n"
+            "message(STATUS \"host keeps: ${kept}\")\n"
+            "_gufo_host_extensions_record(record)\n"
+            "file(WRITE \"${CMAKE_BINARY_DIR}/host-extensions.cmake\" \"${record}\")\n"))
+        directory = f"-DGUFO_EXTENSION_DIRS={self.dependent().as_posix()}"
+        if os.name == "nt":
+            self.configure(directory, "-DGUFO_EXTENSION_MODULES=aext",
+                           error="which loadable extension modules do not support on Windows yet")
+            return
+        output = self.configure(directory, "-DGUFO_EXTENSION_MODULES=aext")
+        # The module links the stand-in the SDK would give it, not base's library.
+        self.assertIn("aext links: $<COMPILE_ONLY:gufo_ext_runtime>;gufo_module_export_aext_base", output)
+        self.assertIn("host keeps: base_registration", output)
+        record = (self.build / "host-extensions.cmake").read_text()
+        self.assertIn("gufo_host_extension(NAME base IDENTITY \"1.2.3:", record)
+        self.assertIn("gufo_host_export(NAME base EXTENSION base COMPILE_FEATURES [==[cxx_std_20]==])", record)
+        self.assertNotIn("NAME aext", record)
+        # Only the dependent module's identity covers base; the host's does not.
+        module_id = (self.build / "extension-modules/gufo-ext-aext-build-id.txt").read_text()
+        self.assertRegex(module_id, r"host_extension=base:1\.2\.3:[0-9a-f]{64}")
+        self.assertNotIn("host_extension", (self.build / "extension-build-id.txt").read_text())
+        # The dependency must stay in the host, and only exports cross.
+        self.configure(directory, "-DGUFO_EXTENSION_MODULES=aext;base",
+                       error="links gufo::base of extension base, which this gufo does not build in")
+        for label, extra, error in [
+                ("by name", None, "a module links only its gufo:: exports"),
+                # Usage requirements a module could not reproduce fail closed.
+                ("genex", "target_compile_definitions(base_registration INTERFACE $<$<CONFIG:Debug>:BASE_DEBUG>)\n",
+                 "a generator expression a loadable module could not reproduce"),
+                ("sources", "target_sources(base_registration INTERFACE ${GUFO_EXTENSION_BUILD_ROOT}/registration.cpp)\n",
+                 "sets INTERFACE_SOURCES, which loadable modules cannot reproduce"),
+                # The host keeps only gufo_* libraries behind an export.
+                ("helper", "add_library(helper STATIC ${GUFO_EXTENSION_BUILD_ROOT}/registration.cpp)\n"
+                           "target_link_libraries(base_registration PRIVATE helper)\n",
+                 "gufo::base links helper, a STATIC_LIBRARY outside Gufo's gufo_* and manifest libraries"),
+        ]:
+            with self.subTest(label):
+                self.fresh()
+                cmake = self.source / "CMakeLists.txt"
+                cmake.write_text(cmake.read_text().replace(
+                    "gufo_target_extensions(fixture EXTENSIONS ${selected})",
+                    "list(REMOVE_ITEM selected ${GUFO_EXTENSION_MODULES})\n"
+                    "gufo_target_extensions(fixture EXTENSIONS ${selected})\n"
+                    f"include(\"{ROOT.as_posix()}/cmake/GufoExtensionHost.cmake\")\n"
+                    "_gufo_host_export_libraries(kept)\n"))
+                if extra is None:
+                    aext = self.dependent(link="base_registration")
+                else:
+                    aext = self.dependent(base_extra=self.EXPORT_BASE + extra)
+                self.configure(f"-DGUFO_EXTENSION_DIRS={aext.as_posix()}",
+                               "-DGUFO_EXTENSION_MODULES=aext", error=error)
+
     def test_external_export_is_checked(self):
         # One external extension's export is checked like any external target.
         bext = self.external("bext")

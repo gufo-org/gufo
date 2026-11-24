@@ -12,6 +12,7 @@ import tempfile
 
 binary = sys.argv[1]
 fixture = Path(__file__).resolve().parent / "module_fixture"
+dependent_fixture = Path(__file__).resolve().parent / "module_dependent_fixture"
 
 
 def gufo(*args, check=True):
@@ -166,4 +167,57 @@ with tempfile.TemporaryDirectory() as temp:
     [installed] = installed_extensions()
     assert installed["version"] == "0.2.0" and installed["revision"] == second, installed
     gufo("extension", "remove", "module_fixture")
-print("PASS: extension module install, load, conflict, update, remove and registry releases")
+
+    # A module may depend on an in-tree extension built into gufo and link its
+    # export and the Qwen family library; their code resolves from gufo.
+    builtin_names = [e["name"] for e in listing() if e["builtin"]]
+    if "qwen38_flash_next" in builtin_names:
+        result = gufo("extension", "install", str(dependent_fixture), "--yes", check=False)
+        if os.name == "nt":
+            # Refused before building, with the reason.
+            assert result.returncode != 0, result.stdout
+            assert "Windows modules cannot have depends yet" in result.stderr, result.stderr
+            assert "configuring extension" not in result.stderr, result.stderr
+        else:
+            assert result.returncode == 0, result.stdout + result.stderr
+            [installed] = installed_extensions()
+            assert installed["name"] == "module_dependent_fixture", installed
+            assert installed["status"] == "ready", installed
+            report = extensions()
+            providers = {p["id"]: p for p in report["providers"]}
+            assert providers["module-dependent-fixture"]["available"], providers
+            # With HIP, the executable's runner calls the module's Stages and
+            # WeightSource subclasses, whose RTTI agrees across the boundary.
+            hip = providers["flash-next-q4"]["available"]
+            assert providers["module-dependent-fixture-hip"]["available"] == hip, providers
+            # A module whose dependency this gufo does not build in is skipped
+            # with a warning before it is loaded.
+            source = Path(temp) / "store" / "module_dependent_fixture" / "source" / "extension.json"
+            pinned = source.read_text()
+            manifest = json.loads(pinned)
+            manifest["depends"].append("no_such_extension")
+            source.write_text(json.dumps(manifest))
+            skipped = gufo("diagnose", "--section", "extensions", "--json")
+            assert ("skipping extension module_dependent_fixture: extension module_dependent_fixture "
+                    "depends on no_such_extension") in skipped.stderr, skipped.stderr
+            assert all(p["id"] != "module-dependent-fixture"
+                       for p in json.loads(skipped.stdout)["providers"])
+            source.write_text(pinned)
+            gufo("extension", "remove", "module_dependent_fixture")
+    else:
+        print("NOTE: qwen38_flash_next is not built in; module dependency install not exercised")
+
+    # A dependency this gufo does not build in is refused before building.
+    missing = Path(temp) / "missing"
+    shutil.copytree(dependent_fixture, missing)
+    manifest = json.loads((missing / "extension.json").read_text())
+    manifest["depends"] = ["no_such_extension"]
+    (missing / "extension.json").write_text(json.dumps(manifest))
+    refused = gufo("extension", "install", str(missing), "--yes", check=False)
+    assert refused.returncode != 0, refused.stdout
+    reason = ("Windows modules cannot have depends yet" if os.name == "nt"
+              else "depends on no_such_extension, which this gufo does not build in")
+    assert reason in refused.stderr, refused.stderr
+    assert "configuring extension" not in refused.stderr, refused.stderr
+    assert installed_extensions() == []
+print("PASS: extension module install, load, conflict, update, remove, registry releases and dependencies")

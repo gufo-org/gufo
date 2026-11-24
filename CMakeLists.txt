@@ -572,6 +572,7 @@ gufo_target_extensions(gufo LOAD_MODULES EXTENSIONS ${gufo_selected_extensions})
 set(GUFO_EXTENSION_MODULE_HOST gufo)
 gufo_extension_modules(EXTENSIONS ${GUFO_EXTENSION_MODULES})
 gufo_extension_build_id(gufo_extension_build_id)
+gufo_extension_host_identities(gufo_extension_host_extensions)
 include(cmake/GufoExtensionSdk.cmake)
 gufo_extension_sdk(gufo)
 target_sources(gufo PRIVATE src/cli/extension/modules.cpp
@@ -582,6 +583,7 @@ target_sources(gufo PRIVATE src/cli/extension/modules.cpp
 set_property(SOURCE src/cli/extension/modules.cpp
   src/cli/extension/store.cpp APPEND PROPERTY
   COMPILE_DEFINITIONS GUFO_EXTENSION_BUILD_ID="${gufo_extension_build_id}"
+  GUFO_EXTENSION_HOST_EXTENSIONS="${gufo_extension_host_extensions}"
   GUFO_EXECUTABLE_FILE_NAME="$<TARGET_FILE_NAME:gufo>")
 include(cmake/GufoExtensionHost.cmake)
 gufo_extension_host(gufo)
