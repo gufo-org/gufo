@@ -89,38 +89,6 @@ struct ParsedGeneration {
   std::vector<TextSourceSpan> text_spans;
 };
 
-void AppendTextSpans(std::vector<TextSourceSpan>& output,
-                     std::span<const TextSourceSpan> source, std::size_t offset,
-                     std::size_t size) {
-  for (const auto& span : source) {
-    if (offset >= span.size) {
-      offset -= span.size;
-      continue;
-    }
-    const auto count = std::min(size, span.size - offset);
-    if (count)
-      output.push_back({span.begin + offset, count});
-    size -= count;
-    if (!size)
-      break;
-    offset = 0;
-  }
-}
-
-void SetParsedText(ParsedGeneration& parsed, std::string_view text,
-                   std::string_view source, bool track) {
-  parsed.text = std::string(text);
-  parsed.text_spans.clear();
-  if (track && !text.empty())
-    parsed.text_spans.push_back(
-        {static_cast<std::size_t>(text.data() - source.data()), text.size()});
-}
-
-void RebaseTextSpans(ParsedGeneration& parsed, std::size_t offset) {
-  for (auto& span : parsed.text_spans)
-    span.begin += offset;
-}
-
 constexpr std::array<std::string_view, 7> kToolMarkers{
     tokenization::QwenToolSyntax::kCallOpen,
     "<｜DSML｜tool_calls｜>",
