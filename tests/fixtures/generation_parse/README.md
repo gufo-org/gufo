@@ -4,7 +4,7 @@ Cases for `generation_parse_test`, which compares the Rust generation parser
 with a frozen copy of the C++ parser it replaced (#1352). Each case is the
 parser's setup and the generated pieces, never a prompt:
 
-- `openai_chat_test.json`: the `FakeBackend` cases of
+- `fake_backend.json`: the `FakeBackend` cases of
   `tests/cli/openai_chat_test.cpp`, recorded through a temporary hook in
   `GenerationStream` and `ParseGeneratedText` and reduced with
   `tools/generation_parse/corpus.py capture`.
@@ -15,6 +15,9 @@ parser's setup and the generated pieces, never a prompt:
   converted from `gufo serve llm --trace` with
   `tools/generation_parse/corpus.py trace`.
 
-Run `generation_parse_test tests/fixtures/generation_parse --exhaustive` to
-split and truncate long responses at every byte, and `--bench` for the cost
-per token of each parser.
+CTest runs one test per file. Responses over 96 bytes are split and truncated
+at 48 points by default; run `generation_parse_test
+tests/fixtures/generation_parse --exhaustive` for every byte, and `--bench`
+for the cost per token of each parser. `corpus.py long` writes long
+synthetic calls for `--bench`. Each distinct tool list is stored once in
+`tool_sets`.

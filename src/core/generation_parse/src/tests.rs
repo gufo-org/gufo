@@ -345,3 +345,43 @@ fn a_stopping_sink_stops_the_stream() {
         Err(Error::Internal)
     );
 }
+
+/// A host whose Qwen scanner panics.
+struct Panicking;
+
+impl Host for Panicking {
+    fn qwen_scan(&mut self, _text: &[u8]) -> Result<QwenScan, Error> {
+        panic!("scanner failed");
+    }
+    fn dialect_scan(
+        &mut self,
+        _text: &[u8],
+        _markers: &[&[u8]],
+        _partial: bool,
+    ) -> Result<DialectScan, Error> {
+        panic!("scanner failed");
+    }
+    fn grammar_accepts(&mut self, _tool: usize, _arguments: &[u8]) -> Result<bool, Error> {
+        panic!("grammar failed");
+    }
+}
+
+#[test]
+fn a_panic_inside_feed_leaves_the_stream_refusing_input() {
+    let mut config = config(Initial::Content, ToolChoice::Auto, false);
+    config.markup.native = true;
+    let mut stream = Stream::new(config);
+    let mut sink = |_: Event<'_>| true;
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        stream.feed(b"<tool_call>{", &mut Panicking, &mut sink)
+    }));
+    assert!(panicked.is_err());
+    assert_eq!(
+        stream.feed(b"x", &mut Stub, &mut sink),
+        Err(Error::Internal)
+    );
+    assert_eq!(
+        stream.finish(true, false, &mut Stub, &mut sink),
+        Err(Error::Internal)
+    );
+}

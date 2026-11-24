@@ -44,6 +44,8 @@ impl Stream {
         if self.done {
             return Err(Error::Internal);
         }
+        // Set first, so a panic inside leaves the handle refusing input.
+        self.done = true;
         let result = self.feed_piece(bytes, host, sink);
         self.done = result.is_err();
         result

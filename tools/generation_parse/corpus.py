@@ -14,8 +14,17 @@ Two sources, neither of which keeps a prompt:
       temporary hook in src/cli/serve/generation_parse.cpp (see
       tests/fixtures/generation_parse/README.md).
 
+  corpus.py normalize IN.json OUT.json
+      Rewrites an existing corpus file in the current layout.
+
+  corpus.py long OUT.json --bytes 13000 --bytes 52000
+      Writes synthetic Qwen `write` calls of about the given sizes, split
+      into four-byte pieces, for `generation_parse_test --bench` on long
+      arguments. Not part of the CTest corpus.
+
 A case whose text is a prefix of another case with the same setup is
-dropped: the test truncates every case at every byte anyway.
+dropped: the test truncates every case at every byte anyway. Each distinct
+tool list is stored once in `tool_sets`, and cases name it by index.
 """
 
 import argparse
@@ -177,25 +186,87 @@ def from_trace(path):
     return cases
 
 
+def from_corpus(path):
+    corpus = json.load(open(path, encoding="utf-8"))
+    sets = corpus.get("tool_sets", [])
+    cases = []
+    for case in corpus["cases"]:
+        case = dict(case)
+        if isinstance(case["tools"], int):
+            case["tools"] = sets[case["tools"]]
+        cases.append(case)
+    return cases, corpus["source"]
+
+
+def long_calls(sizes):
+    write = {"name": "write", "parameters_json": json.dumps({
+        "type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["path", "content"]}, separators=(",", ":"))}
+    cases = []
+    for size in sizes:
+        lines = []
+        while sum(len(line) + 1 for line in lines) < size:
+            index = len(lines)
+            lines.append(f"    total += values[{index}] * {index % 7}  # step {index}")
+        text = ("<tool_call>\n<function=write>\n<parameter=path>\nsrc/long.py\n</parameter>\n"
+                "<parameter=content>\n" + "\n".join(lines) + "\n</parameter>\n</function>\n</tool_call>")
+        data = text.encode("utf-8")
+        cases.append({
+            "dialect": "qwen", "reasoning": ["<think>", "</think>"], "initial": "content",
+            "response_format": False, "constrained_tools": True, "tool_choice": "auto",
+            "tools": [write], "track_spans": False, "buffered": False, "interrupted": False,
+            "pieces": [piece(data[i:i + 4]) for i in range(0, len(data), 4)],
+        })
+    return cases
+
+
+def write_corpus(path, source, cases):
+    sets = []
+    keys = {}
+    for case in cases:
+        key = json.dumps(case["tools"], sort_keys=True)
+        if key not in keys:
+            keys[key] = len(sets)
+            sets.append(case["tools"])
+    with open(path, "w", encoding="utf-8") as out:
+        out.write('{"source": ' + json.dumps(source) + ',\n "tool_sets": [\n')
+        out.write(",\n".join("  " + json.dumps(tools, ensure_ascii=False) for tools in sets))
+        out.write('\n ],\n "cases": [\n')
+        rows = []
+        for index, case in enumerate(cases):
+            row = {**case, "name": case.get("name", f"{index:04d}"),
+                   "tools": keys[json.dumps(case["tools"], sort_keys=True)]}
+            row = {"name": row.pop("name"), **row}
+            rows.append("  " + json.dumps(row, ensure_ascii=False))
+        out.write(",\n".join(rows))
+        out.write("\n]}\n")
+    print(f"{path}: {len(cases)} cases, {len(sets)} tool sets, "
+          f"{sum(len(text_of(c)) for c in cases)} bytes", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("kind", choices=["trace", "capture"])
-    parser.add_argument("input")
+    parser.add_argument("kind", choices=["trace", "capture", "normalize", "long"])
+    parser.add_argument("input", nargs="?")
     parser.add_argument("output")
-    parser.add_argument("--source", required=True)
+    parser.add_argument("--source")
     parser.add_argument("--max-bytes", type=int, default=0, help="drop cases longer than this")
+    parser.add_argument("--bytes", type=int, action="append", default=[], help="long: a call size")
     args = parser.parse_args()
-    cases = from_trace(args.input) if args.kind == "trace" else from_capture(args.input)
+    if args.kind == "long":
+        write_corpus(args.output, args.source or "synthetic long Qwen write calls", long_calls(args.bytes))
+        return
+    if args.kind == "normalize":
+        cases, source = from_corpus(args.input)
+        source = args.source or source
+    else:
+        cases = from_trace(args.input) if args.kind == "trace" else from_capture(args.input)
+        source = args.source
+    if not source:
+        parser.error("--source is required")
     if args.max_bytes:
         cases = [case for case in cases if len(text_of(case)) <= args.max_bytes]
-    cases = reduce(cases)
-    for index, case in enumerate(cases):
-        case["name"] = f"{index:04d}"
-    with open(args.output, "w", encoding="utf-8") as out:
-        out.write('{"source": ' + json.dumps(args.source) + ',\n "cases": [\n')
-        out.write(",\n".join("  " + json.dumps({"name": c["name"], **{k: v for k, v in c.items() if k != "name"}}, ensure_ascii=False) for c in cases))
-        out.write("\n]}\n")
-    print(f"{args.output}: {len(cases)} cases, {sum(len(text_of(c)) for c in cases)} bytes", file=sys.stderr)
+    write_corpus(args.output, source, cases if args.kind == "normalize" else reduce(cases))
 
 
 if __name__ == "__main__":

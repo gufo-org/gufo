@@ -5,7 +5,7 @@
 // every two-piece split, buffered, and under deterministic mutations. Both use
 // the real Qwen and DeepSeek scanners and tool grammar.
 //
-// Usage: generation_parse_test CORPUS_DIR [--bench | --exhaustive]
+// Usage: generation_parse_test CORPUS_FILE_OR_DIR [--bench | --exhaustive]
 // --bench replays every case at its recorded boundaries and prints the cost
 // per token (p50 and p99) of each parser. --exhaustive splits and truncates
 // long responses at every byte too, not only at a stride.
@@ -20,6 +20,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <set>
@@ -493,7 +494,23 @@ Run FrozenParse(const Setup& setup, std::string_view text,
 
 // What a client assembles from a stream: the joined deltas and the final
 // events. Equal across splits of one response.
-std::string Assembled(const Run& run, bool trim_reasoning = false) {
+// What Assembled leaves out, for the explanations below.
+struct Leave {
+  bool reasoning_whitespace{false};
+  bool content{false};
+  std::set<std::size_t> tools;
+};
+
+// The content deltas joined.
+std::string StreamedContent(const Run& run) {
+  std::string content;
+  for (const auto& event : run.events)
+    if (event.kind == EventKind::kContentDelta)
+      content += event.text;
+  return content;
+}
+
+std::string Assembled(const Run& run, const Leave& leave = {}) {
   std::string reasoning;
   std::string content;
   struct Tool {
@@ -527,23 +544,25 @@ std::string Assembled(const Run& run, bool trim_reasoning = false) {
       }
     }
   }
-  if (trim_reasoning)
+  if (leave.reasoning_whitespace)
     reasoning.erase(reasoning.find_last_not_of(" \t\r\n") + 1);
-  out << "reasoning " << Show(reasoning) << "\ncontent " << Show(content)
-      << "\n";
+  out << "reasoning " << Show(reasoning) << "\n";
+  if (!leave.content)
+    out << "content " << Show(content) << "\n";
   for (const auto& [index, tool] : tools)
-    out << "tool #" << index << " " << Show(tool.name) << " "
-        << Show(tool.arguments) << (tool.complete ? " complete" : "") << "\n";
+    if (!leave.tools.contains(index))
+      out << "tool #" << index << " " << Show(tool.name) << " "
+          << Show(tool.arguments) << (tool.complete ? " complete" : "") << "\n";
   return out.str();
 }
 
 // Responses longer than this are split and truncated at every `Stride`-th
 // byte rather than at all of them, unless --exhaustive is given.
-constexpr std::size_t kExhaustiveBytes = 1024;
+constexpr std::size_t kExhaustiveBytes = 96;
 bool exhaustive = false;
 
 std::size_t Stride(std::size_t size) {
-  return exhaustive || size <= kExhaustiveBytes ? 1 : size / 256;
+  return exhaustive || size <= kExhaustiveBytes ? 1 : size / 48;
 }
 
 struct Totals {
@@ -579,28 +598,62 @@ std::optional<std::string> Explained(const Case& item, std::string_view variant,
   // agree.
   if (run.outcome != Outcome::kComplete && run.outcome == whole.outcome)
     return "failed as the whole response did";
-  // An interrupted turn drops a call it had begun streaming.
+  // An interrupted turn drops a call it had begun streaming: everything a
+  // client assembled agrees once the calls missing from the final events
+  // are left out.
   if (item.interrupted && run.outcome == Outcome::kComplete) {
-    std::set<std::size_t> final_calls;
-    for (const auto& event : run.events)
-      if (event.kind == EventKind::kFinalCall)
-        final_calls.insert(event.index);
-    for (const auto& event : run.events)
-      if (event.kind == EventKind::kToolDelta &&
-          !final_calls.contains(event.index))
-        return "an interrupted turn dropped a begun call";
+    const auto dropped = [](const Run& stream) {
+      std::set<std::size_t> finals;
+      std::set<std::size_t> begun;
+      for (const auto& event : stream.events) {
+        if (event.kind == EventKind::kFinalCall)
+          finals.insert(event.index);
+        if (event.kind == EventKind::kToolDelta && event.begin)
+          begun.insert(event.index);
+      }
+      Leave leave;
+      std::ranges::set_difference(
+          begun, finals, std::inserter(leave.tools, leave.tools.end()));
+      return leave;
+    };
+    const auto leave = dropped(run);
+    if (!leave.tools.empty() &&
+        Assembled(run, leave) == Assembled(whole, dropped(whole)))
+      return "an interrupted turn dropped a begun call";
   }
   // A marker inside a fence still open when it arrives switches the stream
   // to tool mode; the rest of the reasoning then streams from the final,
   // trimmed reasoning.
-  if (Assembled(run, true) == Assembled(whole, true))
+  if (Assembled(run, {.reasoning_whitespace = true}) ==
+      Assembled(whole, {.reasoning_whitespace = true}))
     return "streamed reasoning lost trailing whitespace";
-  // A provisional inline quote: a backtick run that ends a piece closes the
-  // span around the call markup before it, which then streams as content;
-  // later backticks reopen the span and the final parse accepts the call.
-  // Only the inline mutation, whose text opens with a backtick, does this.
-  if (variant.starts_with("inline") && Finals(run) == Finals(whole))
-    return "a provisional inline quote streamed call markup";
+  // A provisional inline quote (the defect in issue-backtick.md): a backtick
+  // run that ends a piece closes the span around the call markup before it,
+  // which then streams as content; later backticks reopen the span and the
+  // final parse accepts the call. Everything else agrees, the streamed
+  // content is P + X + T with X running from the first call marker to the
+  // last '>', and the whole stream's content is P + T': T and T' only
+  // backticks.
+  if (variant.starts_with("inline") &&
+      Assembled(run, {.content = true}) ==
+          Assembled(whole, {.content = true})) {
+    const auto streamed = StreamedContent(run);
+    const auto expected = StreamedContent(whole);
+    const auto markup =
+        gufo::server::SelectGenerationMarkup(item.setup.dialect);
+    auto first = std::string::npos;
+    for (const auto marker : markup.markers)
+      first = std::min(first, streamed.find(marker));
+    const auto last = streamed.rfind('>');
+    const auto ticks = [](std::string_view text) {
+      return text.find_first_not_of('`') == std::string_view::npos;
+    };
+    if (first != std::string::npos && last != std::string::npos &&
+        first < last && expected.starts_with(streamed.substr(0, first)) &&
+        ticks(std::string_view(expected).substr(first)) &&
+        ticks(std::string_view(streamed).substr(last + 1)))
+      return "a provisional inline quote streamed call markup";
+  }
   return std::nullopt;
 }
 
@@ -769,7 +822,10 @@ std::vector<Case> Load(const std::filesystem::path& path) {
     setup.response_format = entry.find("response_format")->as_bool();
     setup.constrained_tools = entry.find("constrained_tools")->as_bool();
     setup.choice = ParseChoice(entry.member_str("tool_choice"));
-    for (const auto& tool : entry.find("tools")->items())
+    const auto* tools = entry.find("tools");
+    if (tools->is_number())
+      tools = &corpus.find("tool_sets")->items().at(tools->as_size());
+    for (const auto& tool : tools->items())
       setup.tools.push_back(
           {.name = tool.member_str("name"),
            .parameters_json = tool.member_str("parameters_json")});
@@ -826,13 +882,17 @@ void Bench(const std::vector<Case>& cases) {
 
 int main(int argc, char** argv) {
   Expect(argc >= 2,
-         "usage: generation_parse_test CORPUS_DIR [--bench | --exhaustive]");
+         "usage: generation_parse_test CORPUS [--bench | --exhaustive]");
   gufo::models::deepseek_v4_flash::RegisterToolDialect();
   RegisterLedgerToolDialect();
   std::vector<std::filesystem::path> files;
-  for (const auto& entry : std::filesystem::directory_iterator(argv[1]))
-    if (entry.path().extension() == ".json")
-      files.push_back(entry.path());
+  if (std::filesystem::is_directory(argv[1])) {
+    for (const auto& entry : std::filesystem::directory_iterator(argv[1]))
+      if (entry.path().extension() == ".json")
+        files.push_back(entry.path());
+  } else {
+    files.push_back(argv[1]);
+  }
   std::ranges::sort(files);
   std::vector<Case> cases;
   for (const auto& file : files)

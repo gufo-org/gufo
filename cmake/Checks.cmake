@@ -51,6 +51,9 @@ set(gufo_pr_targets
 set(gufo_pr_tests ${gufo_pr_targets})
 list(REMOVE_ITEM gufo_pr_tests text_cli_dispatch_test)
 list(APPEND gufo_pr_tests text_cli_dispatch_prompt text_cli_dispatch_chat text_cli_dispatch_bench)
+# One test per generation parse corpus file.
+list(REMOVE_ITEM gufo_pr_tests generation_parse_test)
+list(APPEND gufo_pr_tests "generation_parse_.*_test")
 if(NOT WIN32)
   list(APPEND gufo_pr_tests platform_library_relocated_test extension_schema_test)
 endif()

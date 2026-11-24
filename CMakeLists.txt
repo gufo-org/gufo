@@ -1070,11 +1070,17 @@ endfunction()
   )
   target_link_libraries(generation_parse_test PRIVATE gufo_core gufo_http
     gufo_deepseek_v4_flash_text ${GUFO_QWEN_LIBRARIES})
-  add_test(NAME generation_parse_test
-    COMMAND generation_parse_test
-      ${PROJECT_SOURCE_DIR}/tests/fixtures/generation_parse)
-  set_tests_properties(generation_parse_test PROPERTIES
-    LABELS "cpu;server;api;openai;streaming;tools")
+  # One test per corpus file, so a parallel ctest spreads them.
+  file(GLOB generation_parse_corpus CONFIGURE_DEPENDS
+    ${PROJECT_SOURCE_DIR}/tests/fixtures/generation_parse/*.json)
+  foreach(corpus IN LISTS generation_parse_corpus)
+    get_filename_component(corpus_name "${corpus}" NAME_WE)
+    string(REPLACE "-" "_" corpus_name "${corpus_name}")
+    add_test(NAME generation_parse_${corpus_name}_test
+      COMMAND generation_parse_test "${corpus}")
+    set_tests_properties(generation_parse_${corpus_name}_test PROPERTIES
+      LABELS "cpu;server;api;openai;streaming;tools")
+  endforeach()
 
   # Image provider startup options and request capabilities with fake
   # providers; no sockets, so it runs on every host.
