@@ -13,6 +13,7 @@ crate-type = ["staticlib"]
 gufo-audio-decode = { path = "../audio_decode" }
 gufo-base64 = { path = "../base64" }
 gufo-cache-manifest = { path = "../cache_manifest" }
+gufo-generation-parse = { path = "../generation_parse" }
 gufo-gguf = { path = "../gguf" }
 gufo-http = { path = "../http" }
 gufo-http-server = { path = "../http_server" }

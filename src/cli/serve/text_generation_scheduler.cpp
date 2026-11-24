@@ -440,7 +440,26 @@ bool DeadlineExceeded(const std::shared_ptr<ScheduledRequest>& request) {
 struct GenerationTrace {
   json::Value record;
   std::string prompt;
+  /// The end offset of each piece delivered to the consumer, which the
+  /// output parser read one at a time.
+  std::vector<std::size_t> piece_ends;
 };
+
+const char* InitialOutputStateName(
+    TextGenerationBackend::InitialOutputState state) {
+  using State = TextGenerationBackend::InitialOutputState;
+  switch (state) {
+    case State::kAuto:
+      return "auto";
+    case State::kReasoning:
+      return "reasoning";
+    case State::kContent:
+      return "content";
+    case State::kContentAfterReasoning:
+      return "content_after_reasoning";
+  }
+  return "auto";
+}
 
 // The shortest decimal that round-trips the float, so a configured 0.7 reads
 // 0.7 rather than its widened 0.699999988.
@@ -454,8 +473,9 @@ double TraceFloat(float value) {
   return std::strtod(std::string(buffer.data(), end).c_str(), nullptr);
 }
 
-GenerationTrace StartGenerationTrace(const ScheduledRequest& request,
-                                     const TextModelRunner& runner) {
+GenerationTrace StartGenerationTrace(
+    const ScheduledRequest& request, const TextModelRunner& runner,
+    std::optional<TextGenerationBackend::InitialOutputState> initial) {
   GenerationTrace trace{
       .record = Trace::Record("generation", Trace::CurrentRequest()),
       // Special tokens decode to their spelling, so this is the rendered
@@ -477,6 +497,15 @@ GenerationTrace StartGenerationTrace(const ScheduledRequest& request,
   sampling["presence_penalty"] = TraceFloat(request.sampling.presence_penalty);
   sampling["constrained"] = request.sampling.constraint != nullptr;
   trace.record["sampling"] = std::move(sampling);
+  // What the output parser reads the generated text with.
+  trace.record["tool_dialect"] = runner.ToolDialectId();
+  const auto reasoning = runner.ReasoningDelimiters();
+  json::Value markup = json::Value::object();
+  markup["open"] = Trace::Text(reasoning.open);
+  markup["close"] = Trace::Text(reasoning.close);
+  trace.record["reasoning"] = std::move(markup);
+  if (initial)
+    trace.record["initial_output_state"] = InitialOutputStateName(*initial);
   return trace;
 }
 
@@ -529,6 +558,13 @@ void WriteGenerationTrace(GenerationTrace trace,
   }
   record["prompt"] = std::move(trace.prompt);
   record["output"] = Trace::Text(result.text);
+  // Piece boundaries as delivered, else as generated (byte offsets into the
+  // raw output, before malformed UTF-8 is replaced).
+  json::Value pieces = json::Value::array();
+  for (const auto end :
+       trace.piece_ends.empty() ? result.piece_ends : trace.piece_ends)
+    pieces.push_back(end);
+  record["pieces"] = std::move(pieces);
   Trace::Write(record);
 }
 
@@ -2795,6 +2831,12 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
       deliver(on_progress, *progress);
     }
     if (has_piece && deliver_pieces && on_token) {
+      if (impl_->trace.has_value())
+        impl_->trace->piece_ends.push_back(
+            (impl_->trace->piece_ends.empty()
+                 ? 0
+                 : impl_->trace->piece_ends.back()) +
+            piece.text.size());
       deliver(on_token, TokenPiece(piece.text, piece.logprobs ? &*piece.logprobs
                                                               : nullptr));
     }
@@ -3006,7 +3048,8 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   // Decoded before the enqueue below hands the prompt to the scheduler thread.
   std::optional<GenerationTrace> trace;
   if (Trace::Enabled()) {
-    trace = StartGenerationTrace(*request, impl_->runner_pool->runner());
+    trace = StartGenerationTrace(*request, impl_->runner_pool->runner(),
+                                 metadata.initial_output_state);
   }
 
   // A refusal is reported and thrown after the lock below is released.

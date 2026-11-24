@@ -26,7 +26,7 @@ set(gufo_pr_targets
   platform_publish_test platform_prefault_test platform_mapped_file_test
   platform_fs_test platform_library_test npu_test npu_host_ops_test
   logit_sampler_test ggml_dequant_test
-  quote_tracker_test logprobs_test sampling_test image_api_test sdapi_test
+  generation_parse_test logprobs_test sampling_test image_api_test sdapi_test
   openai_chat_test http_server_test http_server_signals_test trace_test
   audio_websocket_test
   text_generation_scheduler_test layered_prefill_conformance_test
@@ -51,6 +51,9 @@ set(gufo_pr_targets
 set(gufo_pr_tests ${gufo_pr_targets})
 list(REMOVE_ITEM gufo_pr_tests text_cli_dispatch_test)
 list(APPEND gufo_pr_tests text_cli_dispatch_prompt text_cli_dispatch_chat text_cli_dispatch_bench)
+# One test per generation parse corpus file.
+list(REMOVE_ITEM gufo_pr_tests generation_parse_test)
+list(APPEND gufo_pr_tests "generation_parse_.*_test")
 if(NOT WIN32)
   list(APPEND gufo_pr_tests platform_library_relocated_test extension_schema_test)
 endif()
