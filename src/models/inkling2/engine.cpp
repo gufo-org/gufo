@@ -320,6 +320,10 @@ struct Engine::Impl {
   // steps of at least this many rows run the dense Q8 GEMVs through int8
   // WMMA (same outputs; slower for fewer rows, whose tiles are half empty)
   static constexpr int kMmaRows = kChunk + 1;
+  // The LM head takes the int8 WMMA path from a full chunk: at 8 rows its
+  // per-row GEMV runs 4 to 7 waves per SIMD and streams about 150 GB/s, WMMA
+  // about 195 GB/s (the projections and the output matrix stay faster per row)
+  static constexpr int kMmaHeadRows = kChunk;
   static constexpr int kMsgInvTokens = 1024;
   static constexpr int kWideTileTokens =
       256;  // ubatches at least this long use 128-token GEMM tiles
@@ -1685,7 +1689,7 @@ struct Engine::Impl {
     PrefetchJoin();
     const int V = static_cast<int>(cfg->n_vocab_text);
     if (head_fast) {
-      if (nb >= kMmaRows) {
+      if (nb >= kMmaHeadRows) {
         fs::QuantRows(ds, kEmbd, d_hn, 1, kEmbd, nb, d_qa, d_qs);
         fs::GemvMma(ds, kEmbd, D(w->output), d_qa, d_qs, logits_d, V,
                     cfg->logit_softcap, nb);
