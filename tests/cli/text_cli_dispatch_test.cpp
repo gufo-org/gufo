@@ -707,6 +707,101 @@ bool CheckUnsizedTensors(std::string_view command) {
                    "them");
 }
 
+namespace {
+
+// A server backend that, like the scheduler, hands Wait the answer's pieces
+// only for a streamed request; every request's history is kept.
+class ChatBackend final : public gufo::server::TextGenerationBackend {
+public:
+  std::vector<gufo::server::ChatRequest> requests;
+
+  std::string model_id() const override { return "chat-fixture"; }
+  bool ready() const override { return true; }
+  std::size_t count_tokens(std::string_view) const override { return 0; }
+  Result complete(std::string_view, std::size_t,
+                  const gufo::sampling::SamplingConfig&,
+                  const CancellationCheck&, const TokenCallback&,
+                  std::string_view, const std::vector<std::string>&, bool,
+                  bool) override {
+    return {};
+  }
+  Result chat(const gufo::server::ChatRequest&, std::size_t,
+              const gufo::sampling::SamplingConfig&, const CancellationCheck&,
+              const TokenCallback&) override {
+    return {};
+  }
+  std::shared_ptr<GenerationRequest> start_chat(
+      const gufo::server::ChatRequest& request, std::size_t,
+      const gufo::sampling::SamplingConfig&, const CancellationCheck&,
+      bool stream_output) override {
+    requests.push_back(request);
+    return std::make_shared<Pending>(requests.size(), stream_output);
+  }
+
+private:
+  class Pending final : public GenerationRequest {
+  public:
+    Pending(std::size_t turn, bool stream) : turn_(turn), stream_(stream) {}
+    Result Wait(const TokenCallback& on_token, const ProgressCallback&,
+                const StartCallback&) override {
+      const std::vector<std::string> pieces = {
+          "<think>why ", std::to_string(turn_), "</think>", "Answer ",
+          std::to_string(turn_)};
+      Result result;
+      for (const auto& piece : pieces) {
+        result.text += piece;
+        if (stream_ && on_token)
+          on_token(gufo::server::TokenPiece(piece));
+      }
+      result.completion_tokens = pieces.size();
+      return result;
+    }
+    void Cancel() noexcept override {}
+
+  private:
+    std::size_t turn_;
+    bool stream_;
+  };
+};
+
+}  // namespace
+
+// `gufo chat` on a runner-only provider prints each streamed answer and keeps
+// the conversation, reasoning apart, for the next turn.
+bool CheckChatSession() {
+  ChatBackend backend;
+  gufo::ext::TextPromptOptions options;
+  options.system_prompt = "Be brief.";
+  std::istringstream in("first\n\nsecond\n/exit\nnever\n");
+  std::ostringstream out;
+  std::size_t answers = 0;
+  const int status = gufo::cli::RunChatSession(
+      backend, options, in, out,
+      [&](const gufo::server::TextGenerationBackend::Result&) { ++answers; });
+  using Role = gufo::ext::ChatRole;
+  const auto& requests = backend.requests;
+  const auto is = [](const gufo::ext::ChatMessage& message, Role role,
+                     std::string_view content, std::string_view thought = {}) {
+    return message.role == role && message.content == content &&
+           message.thought == thought;
+  };
+  const bool ok =
+      status == 0 && answers == 2 &&
+      out.str() ==
+          "\n> <think>why 1</think>Answer 1\n\n> \n> <think>why "
+          "2</think>Answer 2\n\n> " &&
+      requests.size() == 2 && requests[0].messages.size() == 2 &&
+      is(requests[0].messages[0], Role::kSystem, "Be brief.") &&
+      is(requests[0].messages[1], Role::kUser, "first") &&
+      requests[1].messages.size() == 4 &&
+      is(requests[1].messages[2], Role::kAssistant, "Answer 1", "why 1") &&
+      is(requests[1].messages[3], Role::kUser, "second");
+  if (!ok)
+    std::cerr << "chat output: " << out.str() << "\n";
+  return ok ? true
+            : Fail("chat", "each streamed answer must be printed and kept");
+}
+
 int main(int argc, char** argv) {
   if (argc != 2) {
     return 2;
@@ -769,7 +864,8 @@ int main(int argc, char** argv) {
                               {self_draft_path.string(), true},
                               {runner_dir.string(), false},
                               {self_draft_dir.string(), true}});
-  const bool unsized_ok = CheckUnsizedTensors(command);
+  const bool unsized_ok =
+      CheckUnsizedTensors(command) && (command != "chat" || CheckChatSession());
   std::filesystem::remove(path);
   std::filesystem::remove(other_path);
   std::filesystem::remove(runner_path);
