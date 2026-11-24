@@ -1,5 +1,5 @@
 [package]
-name = "gufo-png-decode"
+name = "gufo-png"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

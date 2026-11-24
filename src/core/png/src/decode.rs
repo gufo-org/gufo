@@ -1,20 +1,30 @@
-//! Decodes PNG bytes to packed RGB8 as Pillow's `convert("RGB")` does. It
-//! ignores gamma and ICC profiles and drops alpha without compositing.
+//! Decodes PNG bytes to packed RGB8 as Pillow's `convert("RGB")` does, or to
+//! RGBA8 as libpng's simplified API does (see `rgba`). RGB8 ignores gamma and
+//! ICC profiles and drops alpha without compositing.
 
 use std::borrow::Cow;
 use std::io::Cursor;
 
 use png::{BitDepth, ColorType, Decoder, InterlaceInfo, Reader, Transformations};
 
+use crate::rgba::{Color, Converter};
+
 /// Wider or taller images are invalid, even when they fit the pixel limit.
-const MAX_DIMENSION: u32 = 1_000_000;
+pub const MAX_DIMENSION: u32 = 1_000_000;
 
 const RGB8_BITS_PER_PIXEL: u8 = 24;
+const RGBA8_BITS_PER_PIXEL: u8 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Invalid,
     Internal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Rgb8,
+    Rgba8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,9 +93,11 @@ impl Layout {
     }
 }
 
-fn transformations(color: ColorType, depth: BitDepth) -> Transformations {
-    match (color, depth) {
-        (ColorType::Grayscale, BitDepth::Sixteen) => Transformations::IDENTITY,
+fn transformations(format: Format, color: ColorType, depth: BitDepth) -> Transformations {
+    match (format, color, depth) {
+        (Format::Rgba8, _, _) | (Format::Rgb8, ColorType::Grayscale, BitDepth::Sixteen) => {
+            Transformations::IDENTITY
+        }
         _ => Transformations::EXPAND | Transformations::STRIP_16,
     }
 }
@@ -129,7 +141,7 @@ fn without_animation(bytes: &[u8]) -> Cow<'_, [u8]> {
     }
 }
 
-fn reader(bytes: &[u8]) -> Result<Reader<Cursor<Cow<'_, [u8]>>>, Error> {
+fn reader(bytes: &[u8], format: Format) -> Result<Reader<Cursor<Cow<'_, [u8]>>>, Error> {
     let mut decoder = Decoder::new(Cursor::new(without_animation(bytes)));
     // The png crate skips the zlib Adler-32 check by default.
     decoder.ignore_checksums(false);
@@ -141,16 +153,18 @@ fn reader(bytes: &[u8]) -> Result<Reader<Cursor<Cow<'_, [u8]>>>, Error> {
     if width > MAX_DIMENSION || height > MAX_DIMENSION {
         return Err(Error::Invalid);
     }
-    decoder.set_transformations(transformations(color, depth));
+    decoder.set_transformations(transformations(format, color, depth));
     let reader = decoder.read_info().map_err(|_| Error::Invalid)?;
-    // png 0.18.1 panics while expanding such a palette; libpng rejects it too.
-    // Check before the caller allocates the output.
+    // libpng rejects an indexed image without PLTE, and png 0.18.1 panics
+    // while expanding a palette whose length is not a multiple of 3; libpng
+    // rejects that too. RGBA8 does not expand, so check both here, before the
+    // caller allocates the output.
     if color == ColorType::Indexed
         && reader
             .info()
             .palette
             .as_ref()
-            .is_some_and(|palette| palette.len() % 3 != 0)
+            .is_none_or(|palette| palette.len() % 3 != 0)
     {
         return Err(Error::Invalid);
     }
@@ -160,12 +174,32 @@ fn reader(bytes: &[u8]) -> Result<Reader<Cursor<Cow<'_, [u8]>>>, Error> {
 /// A PNG whose header and chunks before the image data have been read.
 pub struct Png<'a> {
     reader: Reader<Cursor<Cow<'a, [u8]>>>,
+    /// Present for RGBA8 output.
+    rgba: Option<Converter>,
 }
 
-pub fn open(bytes: &[u8]) -> Result<Png<'_>, Error> {
-    Ok(Png {
-        reader: reader(bytes)?,
-    })
+pub fn open(bytes: &[u8], format: Format) -> Result<Png<'_>, Error> {
+    let reader = reader(bytes, format)?;
+    let rgba = match format {
+        Format::Rgb8 => None,
+        Format::Rgba8 => {
+            let info = reader.info();
+            let color = match info.color_type {
+                ColorType::Grayscale => Color::Gray,
+                ColorType::Rgb => Color::Rgb,
+                ColorType::Indexed => Color::Indexed,
+                ColorType::GrayscaleAlpha => Color::GrayAlpha,
+                ColorType::Rgba => Color::Rgba,
+            };
+            Some(Converter::new(
+                bytes,
+                color,
+                info.bit_depth as u8,
+                info.palette.as_deref(),
+            ))
+        }
+    };
+    Ok(Png { reader, rgba })
 }
 
 impl Png<'_> {
@@ -173,9 +207,53 @@ impl Png<'_> {
         self.reader.info().size()
     }
 
-    pub fn decode_rgb8(self, rgb: &mut [u8]) -> Result<(), Error> {
-        decode_rgb8(self.reader, rgb)
+    /// Decodes in the format the PNG was opened for.
+    pub fn decode(self, out: &mut [u8]) -> Result<(), Error> {
+        match self.rgba {
+            None => decode_rgb8(self.reader, out),
+            Some(converter) => decode_rgba8(self.reader, &converter, out),
+        }
     }
+}
+
+fn decode_rgba8(
+    mut reader: Reader<Cursor<Cow<'_, [u8]>>>,
+    converter: &Converter,
+    rgba: &mut [u8],
+) -> Result<(), Error> {
+    let (width, height) = reader.info().size();
+    let stride = width as usize * 4;
+    if stride.checked_mul(height as usize) != Some(rgba.len()) {
+        return Err(Error::Internal);
+    }
+    let bits_per_pixel = reader.info().bits_per_pixel();
+    if reader.info().interlaced {
+        let mut pass_rgba = Vec::new();
+        pass_rgba
+            .try_reserve_exact(stride)
+            .map_err(|_| Error::Internal)?;
+        pass_rgba.resize(stride, 0);
+        while let Some(row) = reader.next_interlaced_row().map_err(|_| Error::Invalid)? {
+            let InterlaceInfo::Adam7(pass) = row.interlace() else {
+                return Err(Error::Internal);
+            };
+            // Padding bits may add samples past the pass width; the expansion
+            // below reads only the pass's own.
+            let pixels = (row.data().len() * 8 / bits_per_pixel).min(width as usize);
+            let pass_rgba = &mut pass_rgba[..pixels * 4];
+            converter.row(row.data(), pass_rgba);
+            png::expand_interlaced_row(rgba, stride, pass_rgba, pass, RGBA8_BITS_PER_PIXEL);
+        }
+    } else {
+        for out in rgba.chunks_exact_mut(stride) {
+            let row = reader
+                .next_row()
+                .map_err(|_| Error::Invalid)?
+                .ok_or(Error::Internal)?;
+            converter.row(row.data(), out);
+        }
+    }
+    reader.finish().map_err(|_| Error::Invalid)
 }
 
 fn decode_rgb8(mut reader: Reader<Cursor<Cow<'_, [u8]>>>, rgb: &mut [u8]) -> Result<(), Error> {

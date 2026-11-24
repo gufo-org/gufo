@@ -23,7 +23,6 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | ICU | Linked; Unicode normalization/tokenization | `Unicode-3.0` | 78.3; flake.lock | [unicode-org/icu](https://github.com/unicode-org/icu) |
 | curl / libcurl | Linked; image HTTPS and evaluation client | `curl` | 8.21.0; flake.lock | [curl/curl](https://github.com/curl/curl) |
 | OpenSSL | Linked; cryptographic hashes and HTTPS dependency | `Apache-2.0` | 3.6.3; flake.lock | [openssl/openssl](https://github.com/openssl/openssl) |
-| libpng | Linked; Qwen-Image PNG input decoding and output encoding | `libpng-2.0` | 1.6.58; flake.lock | [pnggroup/libpng](https://github.com/pnggroup/libpng) |
 | libwebp | Linked; WebP decoding | `BSD-3-Clause` | 1.6.0; flake.lock | [webmproject/libwebp](https://chromium.googlesource.com/webm/libwebp) |
 | libopus | Linked; Ogg Opus audio decoding; [license text](licenses/libopus.txt) | `BSD-3-Clause` | 1.6.1; flake.lock | [xiph/opus](https://github.com/xiph/opus) |
 | Loom / hrx-system | `libloom_text_embed`, loaded at run time by the loom extension; built from source with the third-party libraries its `MODULE.cmake.lock` pins, linked statically; [license](https://github.com/ROCm/hrx-system/blob/0cd370f2baaa0cfef47cc23007f1a109906f8a52/LICENSE), installed beside the library | `Apache-2.0 WITH LLVM-exception` | v0.2.0 (`0cd370f2baaa0cfef47cc23007f1a109906f8a52`); `src/models/loom/runtime.cmake`, `.devops/nix/hrx/loom-runtime.nix` | [ROCm/hrx-system](https://github.com/ROCm/hrx-system) |
@@ -32,7 +31,7 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | httparse (Rust crate) | Statically linked; HTTP request heads | `MIT OR Apache-2.0` | 1.10.1; Cargo.lock | [seanmonstar/httparse](https://github.com/seanmonstar/httparse) |
 | hyper, hyper-util, http-body-util, http (Rust crates) | Statically linked; HTTP/1.1 server transport | `MIT` (`http`: `MIT OR Apache-2.0`) | 1.6.0, 0.1.14, 0.1.3, 1.3.1; Cargo.lock | [hyperium/hyper](https://github.com/hyperium/hyper) |
 | tokio, bytes, socket2 (Rust crates) | Statically linked; async networking runtime and socket setup | `MIT` (`socket2`: `MIT OR Apache-2.0`) | 1.45.1, 1.10.1, 0.5.10; Cargo.lock | [tokio-rs/tokio](https://github.com/tokio-rs/tokio) |
-| png (Rust crate) | Statically linked; PNG decoding | `MIT OR Apache-2.0` | 0.18.1; Cargo.lock | [image-rs/image-png](https://github.com/image-rs/image-png) |
+| png (Rust crate) | Statically linked; PNG decoding and encoding | `MIT OR Apache-2.0` | 0.18.1; Cargo.lock | [image-rs/image-png](https://github.com/image-rs/image-png) |
 | symphonia (Rust crates) | Statically linked, unmodified; audio decoding; [license text and source](licenses/rust.txt) | `MPL-2.0` | 0.6.1; Cargo.lock | [pdeljanov/Symphonia](https://github.com/pdeljanov/Symphonia) |
 | zune-jpeg, zune-core (Rust crates) | Statically linked; JPEG decoding | `MIT OR Apache-2.0 OR Zlib` | 0.5.15, 0.5.3; Cargo.lock | [etemesi254/zune-image](https://github.com/etemesi254/zune-image) |
 | Rust standard library and crates | Statically linked into the Rust library; [license texts](licenses/rust.txt) | `MIT OR Apache-2.0` and per-crate terms | rustc in rust-toolchain.toml, with the crates its standard library bundles; crates in Cargo.lock | [rust-lang/rust](https://github.com/rust-lang/rust) |
