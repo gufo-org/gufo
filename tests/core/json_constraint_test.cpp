@@ -2,14 +2,17 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <barrier>
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -3263,31 +3266,115 @@ void TestGrammarDigests(bool write) {
   assert(grammars >= 6000);
 }
 
+// Live heap bytes and their peak, from the replaceable allocation functions
+// below, so tests can bound a compile's memory on every platform.
+static std::atomic<std::size_t> heap_bytes{0}, heap_peak{0};
+
+void* operator new(std::size_t size) {
+  constexpr std::size_t kHeader = alignof(std::max_align_t);
+  auto* block = static_cast<unsigned char*>(std::malloc(size + kHeader));
+  if (!block)
+    throw std::bad_alloc();
+  *reinterpret_cast<std::size_t*>(block) = size;
+  const auto live = heap_bytes.fetch_add(size) + size;
+  for (auto peak = heap_peak.load();
+       live > peak && !heap_peak.compare_exchange_weak(peak, live);) {
+  }
+  return block + kHeader;
+}
+void* operator new[](std::size_t size) {
+  return operator new(size);
+}
+void operator delete(void* pointer) noexcept {
+  if (!pointer)
+    return;
+  constexpr std::size_t kHeader = alignof(std::max_align_t);
+  auto* block = static_cast<unsigned char*>(pointer) - kHeader;
+  heap_bytes.fetch_sub(*reinterpret_cast<std::size_t*>(block));
+  std::free(block);
+}
+void operator delete[](void* pointer) noexcept {
+  operator delete(pointer);
+}
+void operator delete(void* pointer, std::size_t) noexcept {
+  operator delete(pointer);
+}
+void operator delete[](void* pointer, std::size_t) noexcept {
+  operator delete(pointer);
+}
+
 // A definition whose union or intersection names itself several times once
 // cost branches^8 visits to classify each parameter's value kinds, before
-// any grammar was built.
+// any grammar was built. A chain of definitions that each name the next
+// several times, reached through a `$ref` or `anyOf` with sibling
+// constraints, once expanded into branches^length intersections: seconds
+// and gigabytes for a 2.6 KB schema. Both now finish quickly in bounded
+// memory; the chains are rejected (strict) or fall back to looser native
+// arguments, as other over-budget schemas do.
 void TestRecursiveCombinatorsCompileQuickly() {
   using Format = JsonConstraint::ToolFormat;
+  const auto bounded = [](const gufo::json::Value& schema) {
+    const auto start = std::chrono::steady_clock::now();
+    const auto base = heap_bytes.load();
+    heap_peak = base;
+    for (const auto format : {Format::kJson, Format::kQwen, Format::kDeepSeek})
+      for (const bool strict : {false, true})
+        try {
+          (void)JsonConstraint::ToolParameters(schema, strict, format);
+        } catch (const std::invalid_argument&) {
+          assert(strict);
+        }
+    for (const bool strict : {false, true})
+      try {
+        (void)JsonConstraint::Compile(schema, strict);
+      } catch (const std::invalid_argument&) {
+      }
+    assert(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
+    assert(heap_peak.load() - base < 256u << 20);
+  };
+  const auto references = [](const std::string& target, int count) {
+    std::string parts;
+    for (int i = 0; i < count; ++i)
+      parts +=
+          std::string(i ? "," : "") + R"({"$ref":"#/$defs/)" + target + R"("})";
+    return parts;
+  };
   for (const std::string kind : {"allOf", "anyOf", "oneOf"})
-    for (const int branches : {2, 12, 32}) {
-      std::string parts;
-      for (int i = 0; i < branches; ++i)
-        parts += std::string(i ? "," : "") + R"({"$ref":"#/$defs/a"})";
-      const auto schema =
-          parse(R"({"type":"object","$defs":{"a":{")" + kind + R"(":[)" +
-                parts + R"(]}},"properties":{"x":{"$ref":"#/$defs/a"}}})");
-      const auto start = std::chrono::steady_clock::now();
-      for (const auto format :
-           {Format::kJson, Format::kQwen, Format::kDeepSeek})
-        for (const bool strict : {false, true})
-          try {
-            (void)JsonConstraint::ToolParameters(schema, strict, format);
-          } catch (const std::invalid_argument&) {
-            assert(strict);
-          }
-      assert(std::chrono::steady_clock::now() - start <
-             std::chrono::seconds(1));
+    for (const int branches : {2, 12, 32})
+      bounded(parse(R"({"type":"object","$defs":{"a":{")" + kind + R"(":[)" +
+                    references("a", branches) +
+                    R"(]}},"properties":{"x":{"$ref":"#/$defs/a"}}})"));
+  // 16^6 paths in a 2.6 KB schema: 21 s and 6.4 GB per compile before.
+  constexpr int branches = 16, length = 6;
+  for (const bool through_any_of : {false, true}) {
+    std::string defs;
+    for (int i = 0; i < length; ++i)
+      defs += "\"d" + std::to_string(i) + R"(":{"anyOf":[)" +
+              references("d" + std::to_string(i + 1), branches) + "]},";
+    defs += "\"d" + std::to_string(length) + R"(":{"type":"string"})";
+    const std::string value =
+        through_any_of ? R"({"anyOf":[)" + references("d0", branches) +
+                             R"(],"minLength":1})"
+                       : R"({"$ref":"#/$defs/d0","minLength":1})";
+    const auto schema = parse(
+        R"({"type":"object","$defs":{)" + defs + R"(},"properties":{"x":)" +
+        value + R"(},"required":["x"],"additionalProperties":false})");
+    const auto start = std::chrono::steady_clock::now();
+    const auto base = heap_bytes.load();
+    heap_peak = base;
+    // Non-strict native arguments fall back as before; strict compilation
+    // reports the cut-off expansion.
+    (void)JsonConstraint::ToolParameters(schema, false, Format::kQwen);
+    try {
+      (void)JsonConstraint::Compile(schema, true);
+      assert(false);
+    } catch (const std::invalid_argument& error) {
+      assert(std::string_view(error.what()) ==
+             "JSON Schema: schema intersection exceeds its resource budget");
     }
+    assert(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
+    assert(heap_peak.load() - base < 256u << 20);
+  }
 }
 
 int main(int argc, char** argv) {

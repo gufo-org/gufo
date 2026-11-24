@@ -29,6 +29,11 @@ constexpr std::size_t kMaxDepth = 16;
 constexpr std::size_t kMaxStates = 8192;
 constexpr std::size_t kMaxStack = 16384;
 constexpr std::size_t kMaxWork = 2000000;
+// Schema intersections one compiler may form. Each distributes sibling
+// constraints into a copy of its operands, so a chain of definitions that
+// reference one another several times expands exponentially before the rule
+// limit can see it. Schemas within the rule limit form a few per rule.
+constexpr std::size_t kMaxConjunctions = 8 * kMaxRules;
 
 [[noreturn]] void Invalid(std::string_view message) {
   throw std::invalid_argument("JSON Schema: " + std::string(message));
@@ -1075,6 +1080,8 @@ private:
                       unsigned depth = 0) {
     if (depth > 64)
       Invalid("schema intersection exceeds its reference budget");
+    if (++conjunctions_ > kMaxConjunctions)
+      Invalid("schema intersection exceeds its resource budget");
     Keys(left);
     Keys(right);
     if (const auto* ref = left.find("$ref"))
@@ -2089,6 +2096,7 @@ private:
            std::shared_ptr<const JsonSchemaLexeme>>
       value_checks_;
   std::size_t properties_{0}, enum_values_{0}, string_characters_{0};
+  std::size_t conjunctions_{0};
 };
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::Compile(
