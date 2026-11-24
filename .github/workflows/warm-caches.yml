@@ -137,5 +137,6 @@ jobs:
     if: always() && needs.warm.result != 'skipped'
     permissions:
       actions: write
+      contents: read
       pull-requests: read
     uses: ./.github/workflows/caches.yml
