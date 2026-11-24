@@ -61,13 +61,31 @@ public:
   /// rows route to more distinct experts than one session's).
   static DsparkCosts Batched() {
     DsparkCosts c;
-    c.verify_ = {0, 21.9, 29.3, 35.5, 42.8, 47.8, 53.0, 58.0, 63.0};
+    c.start_ = {0, 21.9, 29.3, 35.5, 42.8, 47.8, 53.0, 58.0, 63.0};
+    c.verify_ = c.start_;
     return c;
   }
   [[nodiscard]] double Draft(int tokens) const {
     return draft_base_ + draft_step_ * tokens;
   }
-  void ObserveVerify(int rows, double ms) { Ema(verify_[rows], ms); }
+  /// One sample moves an estimate by at most 5%: a step that something else
+  /// stalled (a cache spill, a long prefill beside it) can't by itself make
+  /// a width look unaffordable. A width the policy doesn't choose is never
+  /// timed again, so a pessimistic estimate would stay for the server's life:
+  /// estimates not refreshed for kStale steps relax towards the starting
+  /// table scaled by the one-row cost (which follows the context depth), until
+  /// the width is chosen and measured again.
+  void ObserveVerify(int rows, double ms) {
+    Ema(verify_[rows], std::min(ms, 2 * verify_[rows]));
+    age_[rows] = 0;
+    const double scale = verify_[1] / start_[1];
+    for (int r = 2; r <= kMaxRows; ++r) {
+      if (r == rows || ++age_[r] < kStale)
+        continue;
+      if (verify_[r] > start_[r] * scale)
+        Ema(verify_[r], start_[r] * scale);
+    }
+  }
   void ObserveDraft(int tokens, double ms) {
     // the per-token part from the known base, the base from the rest
     if (tokens > 0)
@@ -76,10 +94,13 @@ public:
   }
 
 private:
+  static constexpr int kStale = 256;
   static void Ema(double& v, double x) { v += 0.05 * (x - v); }
   // Strix Halo, short context (inkling2_bench --spec / --dspark)
-  std::array<double, kMaxRows + 1> verify_{0,    20.2, 26.2, 31.0, 35.5,
-                                           40.5, 45.3, 50.0, 54.9};
+  std::array<double, kMaxRows + 1> start_{0,    20.2, 26.2, 31.0, 35.5,
+                                          40.5, 45.3, 50.0, 54.9};
+  std::array<double, kMaxRows + 1> verify_ = start_;
+  std::array<int, kMaxRows + 1> age_{};
   double draft_base_ = 2.8, draft_step_ = 0.25;
 };
 

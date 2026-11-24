@@ -115,6 +115,12 @@
       ],
       "role": "test"
     },
+    "inkling2_policy_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
+    },
     "inkling2_oracle": {
       "requires": [
         "hip",
@@ -178,6 +184,12 @@
     {
       "target": "inkling2_text_test",
       "ctest": "inkling2\\.text",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "inkling2_policy_test",
+      "ctest": "inkling2\\.policy",
       "check_pr": true,
       "windows_build": true
     }

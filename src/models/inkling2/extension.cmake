@@ -78,6 +78,13 @@ gufo_extension_target(
   LINK_LIBRARIES
     gufo_inkling2
 )
+gufo_extension_target(
+  NAME inkling2_policy_test
+  SOURCES
+    tests/spec/policy_test.cpp
+  LINK_LIBRARIES
+    gufo_inkling2
+)
 if(TARGET inkling2_text_test)
   target_compile_definitions(inkling2_text_test PRIVATE
     INKLING2_TEXT_GOLDENS_DIR="${GUFO_EXTENSION_BUILD_ROOT}/tests/text/goldens")
@@ -116,6 +123,10 @@ gufo_extension_target(
 if(TARGET inkling2_probe_test)
   add_test(NAME inkling2.probe COMMAND inkling2_probe_test)
   set_tests_properties(inkling2.probe PROPERTIES LABELS inkling2)
+endif()
+if(TARGET inkling2_policy_test)
+  add_test(NAME inkling2.policy COMMAND inkling2_policy_test)
+  set_tests_properties(inkling2.policy PROPERTIES LABELS inkling2)
 endif()
 if(TARGET inkling2_text_test)
   add_test(NAME inkling2.text COMMAND inkling2_text_test)
