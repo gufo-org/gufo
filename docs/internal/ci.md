@@ -72,7 +72,8 @@ Which runs save each cache:
 | Cache | Key | Pushes to `main`, schedule, dispatch | Pull requests |
 | --- | --- | --- | --- |
 | TheRock SDK, IRON, compiled NPU designs, Loom runtime, Linux NPU designs | Exact content | On a miss | On a miss, which means the PR changed the inputs |
-| vcpkg binary caches (`gufo-vcpkg`, `gufo-windows-extension-vcpkg`) | Manifest, per run | Always | Only when nothing for this `vcpkg.json` was restored |
+| `gufo-vcpkg` | Manifest, TheRock SDK and toolchain file, per run | Always | When the run built a new archive, or without a measurement, when nothing for these inputs was restored |
+| `gufo-windows-extension-vcpkg` | Manifest, per run | Always | Only when nothing for this `vcpkg.json` was restored |
 | Windows NPU design cache (`gufo-npu-windows`) | IRON pins, per run | Always | Never; the compiled designs above cover the rerun |
 | Compiler caches (`gufo-ccache`, `gufo-rust`, `gufo-package-ccache`, `gufo-checked-ccache`, `gufo-windows-ccache`) | Toolchain, per run | Always | When the run added at least 32 MiB |
 

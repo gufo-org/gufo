@@ -203,10 +203,18 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\vcpkg-archives
-          key: gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: gufo-vcpkg-v4-${{ runner.os }}-${{ env.SDK_TARBALL }}-${{ hashFiles('vcpkg.json', 'cmake/toolchains/windows-therock.cmake') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-
+            gufo-vcpkg-v4-${{ runner.os }}-${{ env.SDK_TARBALL }}-${{ hashFiles('vcpkg.json', 'cmake/toolchains/windows-therock.cmake') }}-
             gufo-vcpkg-v4-${{ runner.os }}-
+
+      # Port ABIs also depend on the chain-loaded TheRock toolchain, so the key
+      # covers it. A pull request also saves when it built any new archive,
+      # in case an ABI input the key misses changed.
+      - name: Snapshot restored vcpkg binary cache
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: python tools/ci/cache_growth.py snapshot "$env:RUNNER_TEMP\vcpkg-archives" "$env:RUNNER_TEMP\vcpkg-growth.json"
 
       # A full clone: the manifest baseline resolves through vcpkg's history.
       # vcvars points VCPKG_ROOT at the VS-bundled copy, which is not one.
@@ -810,14 +818,26 @@ jobs:
           path: ${{ runner.temp }}\npu-cache
           key: gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      # A pull request saves only when nothing for its manifest was restored,
-      # such as after it changed vcpkg.json.
+      # Any new archive is a port build a rerun would repeat, so the threshold
+      # is 1 MiB. An empty result, such as from a failed measurement, saves.
+      - name: Measure vcpkg binary cache growth
+        id: vcpkg-growth
+        if: always() && github.event_name == 'pull_request' && steps.configure.outcome != 'skipped'
+        continue-on-error: true
+        run: python tools/ci/cache_growth.py check "$env:RUNNER_TEMP\vcpkg-archives" "$env:RUNNER_TEMP\vcpkg-growth.json" --min-mib 1 >> $env:GITHUB_OUTPUT
+
+      # A pull request saves when it built new archives. Without a measurement
+      # it saves only when nothing for its manifest and toolchain was restored,
+      # such as after it changed vcpkg.json or TheRock.
       - name: Save vcpkg binary cache
         if: >-
           always() && steps.configure.outcome != 'skipped' &&
           (github.event_name != 'pull_request' ||
-          !startsWith(steps.vcpkg-cache.outputs.cache-matched-key, format('gufo-vcpkg-v4-{0}-{1}-', runner.os, hashFiles('vcpkg.json'))))
+          steps.vcpkg-growth.outputs.save == 'true' ||
+          steps.vcpkg-growth.outputs.save != 'false' &&
+          !startsWith(steps.vcpkg-cache.outputs.cache-matched-key,
+          format('gufo-vcpkg-v4-{0}-{1}-{2}-', runner.os, env.SDK_TARBALL, hashFiles('vcpkg.json', 'cmake/toolchains/windows-therock.cmake'))))
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\vcpkg-archives
-          key: gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: gufo-vcpkg-v4-${{ runner.os }}-${{ env.SDK_TARBALL }}-${{ hashFiles('vcpkg.json', 'cmake/toolchains/windows-therock.cmake') }}-${{ github.run_id }}-${{ github.run_attempt }}

@@ -39,7 +39,7 @@ jobs:
           key: gufo-windows-extension-vcpkg-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             gufo-windows-extension-vcpkg-${{ hashFiles('vcpkg.json') }}-
-            gufo-vcpkg-v4-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-
+            gufo-vcpkg-v4-${{ runner.os }}-
 
       # The fixture needs only OpenSSL, at the same baseline as the application.
       # Do not install the full media stack or the HIP SDK for header checks.
