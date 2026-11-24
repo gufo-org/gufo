@@ -30,8 +30,9 @@ jobs:
         with:
           persist-credentials: false
 
+      # Saved below even when a later step fails or times out.
       - name: Restore vcpkg binary cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\vcpkg-archives
           key: gufo-windows-extension-vcpkg-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -61,6 +62,8 @@ jobs:
           "VCPKG_DEFAULT_BINARY_CACHE=$env:RUNNER_TEMP\vcpkg-archives" >> $env:GITHUB_ENV
 
       - name: Configure standalone extension fixture
+        id: configure
+        timeout-minutes: 8
         run: |
           cmake -S tests/extensions/fixture -B build/windows-extensions -A x64 -T ClangCL `
             -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg-gufo/scripts/buildsystems/vcpkg.cmake `
@@ -69,6 +72,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'extension fixture configuration failed' }
 
       - name: Build and run extension contracts
+        timeout-minutes: 4
         run: |
           cmake --build build/windows-extensions --config RelWithDebInfo --parallel 4 `
             --target extension_runtime_test extension_role_test ext_runtime_neutral_contracts_test
@@ -77,9 +81,28 @@ jobs:
             --no-tests=error --timeout 60 -R '^(extension_runtime_test|extension_role_test|ext_runtime_neutral_contracts_test)$'
           if ($LASTEXITCODE -ne 0) { throw 'extension fixture tests failed' }
 
+      - name: Save vcpkg binary cache
+        if: always() && contains(fromJSON('["success", "failure", "cancelled"]'), steps.configure.outcome)
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\vcpkg-archives
+          key: gufo-windows-extension-vcpkg-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
   build:
     name: Build
     uses: ./.github/workflows/windows-build.yml
+
+  # After the hosted caches save; the Devlab job saves none.
+  prune-caches:
+    name: Prune superseded caches
+    needs: [ extension-contracts, build ]
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      actions: write
+      pull-requests: read
+    uses: ./.github/workflows/caches.yml
 
   devlab:
     name: Run Windows model checks

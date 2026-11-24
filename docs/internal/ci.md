@@ -16,6 +16,7 @@ with a verb; a reusable workflow's jobs appear as `caller / called job`.
 | `devlab-linux.yml` | Linux validation | Run Linux model checks | Devlab Linux Strix Halo | Prepares while the hosted build runs, then tests once the packages arrive. |
 | `devlab-linux.yml` | Linux validation | Publish results | GitHub Ubuntu | After testing, failures included. Publishes the report and the `devlab/functional` status. |
 | `devlab-comment.yml` | Functional reporting | Update PR comment | GitHub Ubuntu | When Linux validation starts or ends. Keeps the PR comment current, also for forks, without running PR code. |
+| `caches.yml` | Actions caches | Prune caches | GitHub Ubuntu | Reusable after each cache-saving workflow, on PR close, nightly and manual. Deletes closed PRs' caches and superseded per-run entries. |
 | `pr-title.yml` | PR title | Validate PR title | GitHub Ubuntu | PR opened, edited, reopened or updated. |
 | `docs-website.yml` | Website docs | Request website development docs | GitHub Ubuntu | Pushes to main that change public docs, manual. Sends `gufo-docs` so gufo.blog refreshes its `development` docs. |
 | `release-please.yml` | Release automation | Prepare, merge and publish release | GitHub Ubuntu | Manual. Waits for the required checks, creates the draft release and sends the tag to Toolboxes and the website. Toolboxes publishes the draft. |
@@ -44,6 +45,18 @@ and release PRs alike. See [testing](testing.md#text-api-functional-tests) for
 how checks are selected.
 
 ## Caches
+
+Compiler and dependency caches restore and save in separate steps. Saves run
+even when the build fails, is cancelled or times out, so a cold run seeds the
+cache for its rerun. Long steps have their own time limits below the job's,
+which leaves time for the saves.
+
+The Actions cache holds 10 GB per repository and evicts the least recently used
+entries. A pull request restores only its own entries and `main`'s, so
+`caches.yml` keeps `main`'s from being pushed out. Per-run keys end in
+`-<run id>-<attempt>`, and after each run only the newest entry of each key per
+branch or PR remains. A closed PR's entries are deleted, and a nightly run
+repeats both for every ref.
 
 - **Repository checks** use the compiler cache, Cachix and the Magic Nix Cache.
   Each run saves under a fresh key, so the Actions cache stays current.
