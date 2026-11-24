@@ -197,6 +197,7 @@ src/models/qwen38_flash_next/mtp_costs.hpp
 src/models/qwen38_flash_next/mtp_policy.hpp
 src/models/qwen38_flash_next/ngram.hpp
 src/models/qwen38_flash_next/primitives.hpp
+src/models/qwen38_flash_next/projection.hpp
 src/models/qwen38_flash_next/rope_scaling.hpp
 src/models/qwen38_flash_next/runner.hpp
 src/models/qwen38_flash_next/stages.hpp

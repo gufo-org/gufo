@@ -69,6 +69,7 @@ bool LoadBackend(server::InferenceBackend* backend, const Options& opt,
   std::string error;
   const bool loaded = backend->load(
       opt.model_path, &error, 0, 1, {}, {}, {}, vision_model, {}, false,
+      /*projection_vector_path=*/{}, /*projection_layers=*/{},
       [&](const ext::TextProvider& provider, const core::GgufReader*,
           ext::TextRunnerOptions* options, std::string* message) {
         return PrepareRunnerOptions(opt, provider, options, message);

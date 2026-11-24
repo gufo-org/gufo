@@ -128,6 +128,7 @@ struct ScheduledRequest {
   // says whether a chat template trimmed reply whitespace.
   std::optional<bool> align_frontier;
   bool stop_at_eos{true};
+  bool projection{false};
   std::size_t token_limit{1};
   std::size_t prompt_state_bytes{0};
   std::shared_ptr<PromptBudget> prompt_budget;
@@ -1556,7 +1557,7 @@ struct TextGenerationScheduler::Impl {
             request->cache_prefix_tokens, request->stop_at_eos,
             request->cache_persist,
             request->state_ticket ? &*request->state_ticket : nullptr,
-            beside_decoders);
+            beside_decoders, request->projection);
         // What the session did not claim returns to the budget.
         request->state_ticket.reset();
         // Each admission may restore or capture a checkpoint of its own.
@@ -2967,6 +2968,7 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
       impl_->incremental_text_is_exact)
     request->align_frontier = metadata.chat_template;
   request->stop_at_eos = metadata.stop_at_eos;
+  request->projection = metadata.projection;
   request->token_limit =
       max_tokens > 0 ? std::min(max_tokens, available) : available;
   // Shared session state (#715): a request ends where the shared state ends,

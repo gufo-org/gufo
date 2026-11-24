@@ -11,6 +11,7 @@
 #include <new>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -36,6 +37,16 @@ void SetError(std::string* error, std::string message) {
 
 bool DiskCacheEnabled(const TextDiskCacheConfig& config) {
   return !config.directory.empty() && config.capacity_bytes > 0;
+}
+
+void RequireProjectionSupport(const ChatRequest& request,
+                              const TextModelRunner& runner) {
+  if (request.projection.value_or(false) &&
+      !runner.Descriptor().capabilities.runtime_projection) {
+    throw std::invalid_argument(
+        "projection requested but this model has no projection vector "
+        "loaded (--projection-vector)");
+  }
 }
 
 }  // namespace
@@ -171,7 +182,8 @@ struct InferenceBackend::Impl {
       bool cache_prompt = true, std::size_t cache_prefix_tokens = 0,
       const std::vector<std::string>& stop_sequences = {},
       InitialOutputState initial = InitialOutputState::kContent,
-      bool cache_persist = true, bool chat_template = false) const {
+      bool cache_persist = true, bool projection = false,
+      bool chat_template = false) const {
     Result result;
     result.prompt_tokens = prompt_tokens.size();
     result.client_id = client_id.empty() ? "anonymous" : client_id;
@@ -194,6 +206,7 @@ struct InferenceBackend::Impl {
             .cache_prompt = cache_prompt,
             .cache_persist = cache_persist,
             .cache_prefix_tokens = cache_prefix_tokens,
+            .projection = projection,
             .stop_sequences = stop_sequences,
             .chat_template = chat_template,
         });
@@ -283,6 +296,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             const std::string& vision_model_path,
                             TextRunnerRamCacheOptions ram_cache_config,
                             bool enable_yarn,
+                            const std::string& projection_vector_path,
+                            const std::string& projection_layers,
                             const PrepareRunnerOptions& prepare_runner_options,
                             const LoadProgress& on_progress) {
   // Stage boundaries, as rough shares of a typical load: the runner loads the
@@ -323,6 +338,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       .session_count = session_count,
       .speculative = speculative_config,
       .vision_model_path = vision_model_path,
+      .projection_vector_path = projection_vector_path,
+      .projection_layers = projection_layers,
       .disk_cache = disk_cache_config,
       .ram_cache = ram_cache_config,
       .enable_yarn = enable_yarn,
@@ -334,6 +351,11 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   report(0.05, "Loading weights");
   auto runner = provider->create(options, error);
   if (runner == nullptr) {
+    return false;
+  }
+  if (!projection_vector_path.empty() &&
+      !runner->Descriptor().capabilities.runtime_projection) {
+    SetError(error, "--projection-vector is not supported by this model");
     return false;
   }
   report(0.9, "Preparing sessions and cache");
@@ -353,8 +375,9 @@ bool InferenceBackend::load(const std::string&, std::string* error,
                             std::uint32_t, std::size_t, TextSchedulerPolicy,
                             const TextSpeculativeConfig&,
                             const TextDiskCacheConfig&, const std::string&,
-                            TextRunnerRamCacheOptions, bool,
-                            const PrepareRunnerOptions&, const LoadProgress&) {
+                            TextRunnerRamCacheOptions, bool, const std::string&,
+                            const std::string&, const PrepareRunnerOptions&,
+                            const LoadProgress&) {
   SetError(error, "HIP engine is disabled");
   return false;
 }
@@ -628,6 +651,7 @@ InferenceBackend::Result InferenceBackend::chat(
   auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
                                           &effective_sampling);
   const auto& effective_request = constrained ? *constrained : request;
+  RequireProjectionSupport(effective_request, state->scheduler->runner());
   auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return {};
@@ -644,7 +668,8 @@ InferenceBackend::Result InferenceBackend::chat(
       effective_sampling, is_cancelled, on_token, request.client_id,
       std::move(prompt->context), request.cache_prompt,
       prompt->cache_prefix_tokens, request.stop_sequences, initial,
-      request.cache_persist, true);
+      request.cache_persist, effective_request.projection.value_or(false),
+      true);
 #else
   (void)request;
   (void)max_tokens;
@@ -717,6 +742,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
       ConstrainChatRequest(request, state->scheduler->runner(),
                            &effective_sampling, &tool_format, &tool_dialect);
   const auto& effective_request = constrained ? *constrained : request;
+  RequireProjectionSupport(effective_request, state->scheduler->runner());
   auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return TextGenerationBackend::start_chat(
@@ -743,6 +769,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .cache_prompt = request.cache_prompt,
           .cache_persist = request.cache_persist,
           .cache_prefix_tokens = prompt->cache_prefix_tokens,
+          .projection = effective_request.projection.value_or(false),
           .stop_sequences = request.stop_sequences,
           .return_progress = request.return_progress,
           .chat_template = true,

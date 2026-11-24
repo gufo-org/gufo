@@ -101,7 +101,7 @@ bool Load(const gufo::ext::Registry& registry, const std::string& model,
   return backend.load(
       model, error, 0, 1, {},
       {.backend = gufo::ext::TextSpeculativeBackend::kDFlash}, {}, {}, {},
-      false,
+      false, {}, {},
       [&](const gufo::ext::TextProvider& provider,
           const gufo::core::GgufReader*, gufo::ext::TextRunnerOptions* options,
           std::string* message) {

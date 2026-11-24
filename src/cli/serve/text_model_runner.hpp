@@ -223,7 +223,8 @@ public:
       std::shared_ptr<const TextPromptContext> context = {},
       bool reuse_prompt = true, std::size_t cache_prefix_tokens = 0,
       bool stop_at_eos = true, bool persist = true,
-      StateTicket* state = nullptr, const RestoreCopyRunner& run_copies = {});
+      StateTicket* state = nullptr, const RestoreCopyRunner& run_copies = {},
+      bool projection = false);
 
   /// Whether sessions share their demand-mapped state (#715): more sessions
   /// are configured at full context than fit at once. Each request then

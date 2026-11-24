@@ -115,7 +115,7 @@ public:
       std::shared_ptr<const TextPromptContext>, bool, std::size_t, bool,
       bool persist = true, std::size_t state_tokens = 0,
       mem::StateReservation* reservation = nullptr,
-      const RestoreRunner& run_copies = {});
+      const RestoreRunner& run_copies = {}, bool projection = false);
   // Whether sessions share their demand-mapped state (#715).
   [[nodiscard]] bool shared_state() const noexcept;
   // Whether restores copy where decode work cannot hold them up, and so may

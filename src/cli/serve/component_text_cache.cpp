@@ -1589,7 +1589,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     std::shared_ptr<const TextPromptContext> context, bool reuse,
     std::size_t stable, bool stop_at_eos, bool persist,
     std::size_t state_tokens, mem::StateReservation* reservation,
-    const RestoreRunner& run_copies) {
+    const RestoreRunner& run_copies, bool projection) {
   if (cancelled && cancelled())
     return {};
   auto input = Inputs(prompt.size(), context.get());
@@ -1744,6 +1744,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       }
     request.state->SetCancellationCheck(cancelled);
     request.state->SetStopAtEos(stop_at_eos);
+    request.state->SetProjectionEnabled(projection);
     impl_->runner->SetPromptContext(*request.state, context);
     const auto started = Clock::now();
     // Cold Acquire has already reset the slot. Only an attempted restore (or
