@@ -4231,8 +4231,12 @@ void ProjMulti(hipStream_t s, const ProjSpec& p, const float* x, int ni,
     }
   };
   // 4+ tokens: each block's quantized inputs take most of a CU's LDS, so
-  // blocks of 16 waves keep twice the loads in flight (rows' sums unchanged)
-  if (nb >= 4)
+  // blocks of 16 waves keep twice the loads in flight (rows' sums unchanged);
+  // one input and 6+ tokens: two rows per wave (more blocks, 0.4 to 0.7% per
+  // verification step)
+  if (nb >= 6 && ni == 1)
+    run(I<16>{}, I<2>{}, I<16>{});
+  else if (nb >= 4)
     run(I<16>{}, I<4>{}, I<16>{});
   else
     run(I<16>{}, I<4>{}, I<8>{});
