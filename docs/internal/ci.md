@@ -16,7 +16,7 @@ with a verb; a reusable workflow's jobs appear as `caller / called job`.
 | `devlab-linux.yml` | Linux validation | Run Linux model checks | Devlab Linux Strix Halo | Prepares while the hosted build runs, then tests once the packages arrive. |
 | `devlab-linux.yml` | Linux validation | Publish results | GitHub Ubuntu | After testing, failures included. Publishes the report and the `devlab/functional` status. |
 | `devlab-comment.yml` | Functional reporting | Update PR comment | GitHub Ubuntu | When Linux validation starts or ends. Keeps the PR comment current, also for forks, without running PR code. |
-| `caches.yml` | Actions caches | Prune caches | GitHub Ubuntu | Reusable after each cache-saving workflow, on PR close, nightly and manual. Deletes closed PRs' caches and superseded per-run entries. |
+| `caches.yml` | Actions caches | Prune caches | GitHub Ubuntu | Reusable after each cache-saving workflow, on PR close, nightly and manual. Deletes closed PRs' caches, superseded per-run entries and, over budget, other refs' least recently used entries. |
 | `pr-title.yml` | PR title | Validate PR title | GitHub Ubuntu | PR opened, edited, reopened or updated. |
 | `docs-website.yml` | Website docs | Request website development docs | GitHub Ubuntu | Pushes to main that change public docs, manual. Sends `gufo-docs` so gufo.blog refreshes its `development` docs. |
 | `release-please.yml` | Release automation | Prepare, merge and publish release | GitHub Ubuntu | Manual. Waits for the required checks, creates the draft release and sends the tag to Toolboxes and the website. Toolboxes publishes the draft. |
@@ -52,18 +52,44 @@ cache for its rerun. Long steps have their own time limits below the job's,
 which leaves time for the saves.
 
 The Actions cache holds 10 GB per repository and evicts the least recently used
-entries. A pull request restores only its own entries and `main`'s, so
-`caches.yml` keeps `main`'s from being pushed out. Per-run keys end in
-`-<run id>-<attempt>`, and after each run only the newest entry of each key per
-branch or PR remains. A closed PR's entries are deleted, and a nightly run
-repeats both for every ref.
+entries. A pull request restores only its own entries and `main`'s, so PRs
+avoid saving copies of `main`'s caches, and `caches.yml` keeps the total below
+`main`'s eviction point:
+
+- After each run, only the newest per-run entry (keys ending in
+  `-<run id>-<attempt>`) of each key per branch or PR remains.
+- Then entries of refs other than `main` are deleted, least recently used
+  first, until the cache is below 7 GiB. `main`'s entries are never deleted
+  this way.
+- A closed PR's entries are deleted. Nightly, every ref is swept again, and
+  entries of other refs that no run has used for 2 days are deleted.
+- An entry created or restored in the last 15 minutes is never pruned, since a
+  concurrent run may be downloading it. A delete fails the job unless the entry
+  is already gone.
+
+Which runs save each cache:
+
+| Cache | Key | Pushes to `main`, schedule, dispatch | Pull requests |
+| --- | --- | --- | --- |
+| TheRock SDK, IRON, compiled NPU designs, Loom runtime, Linux NPU designs | Exact content | On a miss | On a miss, which means the PR changed the inputs |
+| `gufo-vcpkg` | Manifest, TheRock SDK and toolchain file, per run | Always | When the run built a new archive, or without a measurement, when nothing for these inputs was restored |
+| `gufo-windows-extension-vcpkg` | Manifest, per run | Always | Only when nothing for this `vcpkg.json` was restored |
+| Windows NPU design cache (`gufo-npu-windows`) | IRON pins, per run | Always | Never; the compiled designs above cover the rerun |
+| Compiler caches (`gufo-ccache`, `gufo-rust`, `gufo-package-ccache`, `gufo-checked-ccache`, `gufo-windows-ccache`) | Toolchain, per run | Always | When the run added at least 32 MiB |
+
+`tools/ci/cache_growth.py` measures what a run added: new files, or files whose
+size changed, since the restore. A failed measurement saves. Outside a pull
+request, a Linux build saves only when it built the calling ref's own revision:
+a dispatched Devlab run builds a PR from `main`'s ref and must not fill `main`'s
+cache. Toolboxes calls `windows-build.yml` from `repository_dispatch`,
+`schedule` and `workflow_dispatch`, so its runs save as `main` does, in the
+Toolboxes cache.
 
 - **Repository checks** use the compiler cache, Cachix and the Magic Nix Cache.
-  Each run saves under a fresh key, so the Actions cache stays current.
 - **Linux package builds** use the package compiler cache and Cachix. Main's
   warming job exists because PR builds don't push to Cachix.
-- **Windows builds** cache the SDK archive, the compiler cache and the vcpkg
-  binary cache.
+- **Windows builds** cache the SDK archive, IRON, NPU designs, the Loom runtime,
+  the compiler cache and the vcpkg binary cache.
 - **Devlab runners** download the verified bundles that the hosted builds
   produce; Windows uses the bundle from the same workflow run.
 

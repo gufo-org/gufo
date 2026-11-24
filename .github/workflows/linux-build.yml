@@ -45,6 +45,10 @@ jobs:
       # Release builds share one compiler cache. The checked build also
       # restores it: its production libraries keep NDEBUG and hit it.
       CCACHE_PREFIX: ${{ matrix.variant == 'checked' && 'gufo-checked-ccache-v1' || 'gufo-package-ccache-v1' }}
+      # Outside a pull request, caches land in the calling ref's scope. A
+      # dispatched Devlab run builds a PR's merge commit from main, so only a
+      # build of the ref's own revision saves there.
+      OWN_REVISION: ${{ inputs.revision == github.sha }}
     steps:
       - name: Check out candidate source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -84,6 +88,13 @@ jobs:
           mkdir -p /tmp/gufo-ccache
           chmod -R a+rwX /tmp/gufo-ccache
           chmod 1777 /tmp/gufo-ccache
+
+      # A pull request saves its compiler cache only when the build added at
+      # least 32 MiB to it; otherwise it keeps no duplicate of main's cache.
+      - name: Snapshot restored compiler cache
+        continue-on-error: true
+        if: github.event_name == 'pull_request'
+        run: python3 tools/ci/cache_growth.py snapshot /tmp/gufo-ccache "$RUNNER_TEMP/cache-growth.json"
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -191,10 +202,14 @@ jobs:
             --revision "$EXPECTED_REVISION" --output linux-artifacts/checked
 
       # After the candidate build, even a failed one: the designs build first.
-      # The release leg alone saves them, under one key.
+      # The release leg alone saves them, under one key, and only on a miss:
+      # a pull request saves them only when it changed a design.
       - name: Export NPU designs
         id: npu-export
-        if: always() && matrix.variant == 'release' && steps.npu.outputs.drv != '' && steps.npu-cache.outputs.cache-hit != 'true'
+        if: >-
+          always() && matrix.variant == 'release' && steps.npu.outputs.drv != '' &&
+          steps.npu-cache.outputs.cache-hit != 'true' &&
+          (github.event_name == 'pull_request' || env.OWN_REVISION == 'true')
         env:
           NPU_OUT: ${{ steps.npu.outputs.out }}
         run: |
@@ -212,8 +227,18 @@ jobs:
           path: /tmp/gufo-npu-designs
           key: ${{ steps.npu.outputs.key }}
 
+      # An empty result, such as from a failed measurement, saves.
+      - name: Measure compiler cache growth
+        continue-on-error: true
+        id: growth
+        if: always() && github.event_name == 'pull_request'
+        run: python3 tools/ci/cache_growth.py check /tmp/gufo-ccache "$RUNNER_TEMP/cache-growth.json" >> "$GITHUB_OUTPUT"
+
       - name: Save compiler cache
-        if: always()
+        if: >-
+          always() &&
+          (github.event_name == 'pull_request' && steps.growth.outputs.save != 'false' ||
+          github.event_name != 'pull_request' && env.OWN_REVISION == 'true')
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/gufo-ccache
