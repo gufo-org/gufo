@@ -60,6 +60,26 @@ impl Object {
         Ok(())
     }
 
+    /// The value of the first member named `key`, as `get` finds it.
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        self.members
+            .iter_mut()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
+    }
+
+    /// Removes the first member named `key` and returns its value, keeping
+    /// the others in order; a later duplicate then becomes the first.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        let at = self.members.iter().position(|(k, _)| k == key)?;
+        Some(self.members.remove(at).1)
+    }
+
+    /// The members in order, moved out without copying.
+    pub fn into_members(self) -> Vec<(String, Value)> {
+        self.members
+    }
+
     pub fn len(&self) -> usize {
         self.members.len()
     }
@@ -69,8 +89,27 @@ impl Object {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl IntoIterator for Object {
+    type Item = (String, Value);
+    type IntoIter = std::vec::IntoIter<(String, Value)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.members.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Object {
+    type Item = &'a (String, Value);
+    type IntoIter = std::slice::Iter<'a, (String, Value)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.members.iter()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum Value {
+    #[default]
     Null,
     Bool(bool),
     Number(Number),
@@ -84,6 +123,40 @@ impl Value {
     pub fn get(&self, key: &str) -> Option<&Value> {
         match self {
             Self::Object(object) => object.get(key),
+            _ => None,
+        }
+    }
+
+    /// The first member named `key` of an object, mutably.
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        match self {
+            Self::Object(object) => object.get_mut(key),
+            _ => None,
+        }
+    }
+
+    /// Moves the value out, leaving `Null`.
+    pub fn take(&mut self) -> Value {
+        std::mem::take(self)
+    }
+
+    pub fn into_string(self) -> Option<String> {
+        match self {
+            Self::String(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn into_array(self) -> Option<Vec<Value>> {
+        match self {
+            Self::Array(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    pub fn into_object(self) -> Option<Object> {
+        match self {
+            Self::Object(object) => Some(object),
             _ => None,
         }
     }
@@ -147,7 +220,11 @@ pub enum ValueError {
     Rejected(&'static str),
     /// The text or its values exceed the caller's `Limits`.
     TooLarge,
+    /// An allocation failed.
     NoMemory,
+    /// The parser broke its event contract (a key outside an object, an
+    /// unmatched end, text that is not UTF-8): a bug, not bad input.
+    Internal,
 }
 
 /// Parses `text` into a value tree within `limits`.
@@ -166,10 +243,10 @@ pub fn parse_value(text: &[u8], limits: Limits) -> Result<Value, ValueError> {
         Err(Failure::Rejected(reason)) => return Err(ValueError::Rejected(reason)),
         Err(Failure::NoMemory) => return Err(ValueError::NoMemory),
         // Only the builder stops, after recording why.
-        Err(Failure::Stopped) => return Err(builder.error.unwrap_or(ValueError::NoMemory)),
+        Err(Failure::Stopped) => return Err(builder.error.unwrap_or(ValueError::Internal)),
     }
     // A complete parse closed every container and gave one root.
-    builder.root.ok_or(ValueError::NoMemory)
+    builder.root.ok_or(ValueError::Internal)
 }
 
 /// An open container; an object's newest key waits for its value.
@@ -187,7 +264,7 @@ struct Builder {
 
 fn owned(bytes: &[u8]) -> Result<String, ValueError> {
     // The parser reports strict UTF-8; anything else is a parser bug.
-    let text = std::str::from_utf8(bytes).map_err(|_| ValueError::NoMemory)?;
+    let text = std::str::from_utf8(bytes).map_err(|_| ValueError::Internal)?;
     let mut out = String::new();
     out.try_reserve_exact(text.len())
         .map_err(|_| ValueError::NoMemory)?;
@@ -211,7 +288,7 @@ impl Builder {
                 items.push(value);
             }
             Some(Open::Object(object, key)) => {
-                let key = key.take().ok_or(ValueError::NoMemory)?;
+                let key = key.take().ok_or(ValueError::Internal)?;
                 object.push(key, value).map_err(no_memory)?;
             }
         }
@@ -237,7 +314,7 @@ impl Builder {
                         *slot = Some(key);
                         Ok(())
                     }
-                    _ => Err(ValueError::NoMemory),
+                    _ => Err(ValueError::Internal),
                 };
             }
             Event::BeginArray | Event::BeginObject => {
@@ -251,7 +328,7 @@ impl Builder {
             Event::End => match self.open.pop() {
                 Some(Open::Array(items)) => Value::Array(items),
                 Some(Open::Object(object, None)) => Value::Object(object),
-                _ => return Err(ValueError::NoMemory),
+                _ => return Err(ValueError::Internal),
             },
         };
         self.place(value)
@@ -346,6 +423,77 @@ mod tests {
             parse_value(b"[x, 1, 2]", limits(9, 2)),
             Err(ValueError::Rejected("bad number"))
         );
+    }
+
+    #[test]
+    fn members_move_out_without_copying() {
+        let mut value = parse(r#"{"a":"payload","b":[1]}"#);
+        let pointer = value.get("a").unwrap().as_str().unwrap().as_ptr();
+        // `take` and `into_string` move the string's buffer.
+        let taken = value.get_mut("a").unwrap().take().into_string().unwrap();
+        assert_eq!(taken.as_ptr(), pointer);
+        assert_eq!(value.get("a"), Some(&Value::Null));
+        let mut object = value.into_object().unwrap();
+        *object.get_mut("b").unwrap() = Value::Bool(true);
+        assert_eq!(object.remove("a"), Some(Value::Null));
+        assert_eq!(object.remove("a"), None);
+        assert_eq!(object.members().len(), 1);
+        let members: Vec<_> = (&object).into_iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(members, ["b"]);
+        let (key, value) = object.into_iter().next().unwrap();
+        assert_eq!((key.as_str(), value), ("b", Value::Bool(true)));
+
+        let mut duplicates = Object::new();
+        duplicates.push("k".into(), Value::Bool(true)).unwrap();
+        duplicates.push("j".into(), Value::Null).unwrap();
+        duplicates.push("k".into(), Value::Bool(false)).unwrap();
+        // `remove` takes the first; the later duplicate becomes visible.
+        assert_eq!(duplicates.remove("k"), Some(Value::Bool(true)));
+        assert_eq!(duplicates.get("k"), Some(&Value::Bool(false)));
+        let keys: Vec<String> = duplicates
+            .into_members()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(keys, ["j", "k"]);
+        assert_eq!(Value::Null.into_array(), None);
+        assert_eq!(Value::Bool(true).into_string(), None);
+        assert_eq!(parse("[2]").into_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn broken_event_contracts_are_internal() {
+        let builder = || Builder {
+            open: Vec::new(),
+            root: None,
+            left: usize::MAX,
+            error: None,
+        };
+        // A key outside an object, an unmatched end, an end with a key
+        // waiting, text that is not UTF-8 and a second key in a row.
+        let mut b = builder();
+        assert_eq!(b.take(Event::Key(b"k")), Err(ValueError::Internal));
+        let mut b = builder();
+        assert_eq!(b.take(Event::End), Err(ValueError::Internal));
+        let mut b = builder();
+        b.take(Event::BeginObject).unwrap();
+        b.take(Event::Key(b"k")).unwrap();
+        assert_eq!(b.take(Event::End), Err(ValueError::Internal));
+        let mut b = builder();
+        assert_eq!(b.take(Event::String(b"\xff")), Err(ValueError::Internal));
+        let mut b = builder();
+        b.take(Event::BeginObject).unwrap();
+        b.take(Event::Key(b"k")).unwrap();
+        assert_eq!(b.take(Event::Key(b"j")), Err(ValueError::Internal));
+        // A value in an object without its key.
+        let mut b = builder();
+        b.take(Event::BeginObject).unwrap();
+        assert_eq!(b.take(Event::Null), Err(ValueError::Internal));
+        // Through the sink, the recorded error stops the parse.
+        let mut b = builder();
+        b.take(Event::BeginObject).unwrap();
+        assert_eq!(b.event(Event::Null), Err(Stopped));
+        assert_eq!(b.error, Some(ValueError::Internal));
     }
 
     #[test]

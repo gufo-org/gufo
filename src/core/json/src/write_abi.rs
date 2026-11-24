@@ -55,16 +55,14 @@ pub unsafe extern "C" fn gufo_json_dump(
         };
         let value = match parse_value(text, Limits::NONE) {
             Ok(value) => value,
-            Err(ValueError::Rejected(reason)) => {
-                if let Some(error) = error {
+            Err(failure) => {
+                if let (ValueError::Rejected(reason), Some(error)) = (failure, error) {
                     // SAFETY: the caller allows calling `error` with
                     // `context`; `reason` is static.
                     unsafe { error(context, reason.as_ptr(), reason.len()) };
                 }
-                return GufoJsonParse::Rejected;
+                return status(failure);
             }
-            Err(ValueError::NoMemory) => return GufoJsonParse::NoMemory,
-            Err(ValueError::TooLarge) => return GufoJsonParse::Internal,
         };
         let mut written = String::new();
         if write(&value, style, &mut written).is_err() {
@@ -75,6 +73,16 @@ pub unsafe extern "C" fn gufo_json_dump(
         unsafe { out(context, written.as_ptr(), written.len()) };
         GufoJsonParse::Complete
     })
+}
+
+/// The status for a failed parse. No limits are set, so `TooLarge` is a bug
+/// too.
+fn status(failure: ValueError) -> GufoJsonParse {
+    match failure {
+        ValueError::Rejected(_) => GufoJsonParse::Rejected,
+        ValueError::NoMemory => GufoJsonParse::NoMemory,
+        ValueError::TooLarge | ValueError::Internal => GufoJsonParse::Internal,
+    }
 }
 
 #[cfg(test)]
@@ -104,6 +112,14 @@ mod tests {
             )
         };
         (status, String::from_utf8(seen).unwrap())
+    }
+
+    #[test]
+    fn failures_map_to_statuses() {
+        assert_eq!(status(ValueError::Rejected("x")), GufoJsonParse::Rejected);
+        assert_eq!(status(ValueError::NoMemory), GufoJsonParse::NoMemory);
+        assert_eq!(status(ValueError::Internal), GufoJsonParse::Internal);
+        assert_eq!(status(ValueError::TooLarge), GufoJsonParse::Internal);
     }
 
     #[test]
