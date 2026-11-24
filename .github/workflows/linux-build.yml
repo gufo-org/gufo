@@ -137,16 +137,20 @@ jobs:
             fi
           done < /tmp/gufo-npu-designs/roots.txt
 
+      # Step limits stay below the job's 120 minutes so the cache saves below
+      # still run after a slow or cold build.
       # Build independent designs concurrently, before the memory-heavy Gufo
       # compile. Each design's Ninja pool bounds program compilation to two.
       - name: Build NPU designs
         if: steps.npu.outputs.drv != ''
+        timeout-minutes: 30
         env:
           NPU_DRV: ${{ steps.npu.outputs.drv }}
         run: nix build --no-link "$NPU_DRV^*" --print-build-logs --cores 2 --max-jobs 4
 
       - name: Build and package baseline
         if: inputs.baseline != '' && matrix.variant == 'release'
+        timeout-minutes: 40
         env:
           EXPECTED_REVISION: ${{ inputs.baseline }}
         run: |
@@ -161,6 +165,7 @@ jobs:
 
       - name: Build and package candidate
         if: matrix.variant == 'release'
+        timeout-minutes: 40
         env:
           EXPECTED_REVISION: ${{ inputs.revision }}
         run: |
@@ -173,6 +178,7 @@ jobs:
       # assertions that production compiles out (.devops/nix/package.nix).
       - name: Build and package the checked candidate
         if: matrix.variant == 'checked'
+        timeout-minutes: 40
         env:
           EXPECTED_REVISION: ${{ inputs.revision }}
           CTEST_LABELS: ${{ inputs.ctest-labels }}
