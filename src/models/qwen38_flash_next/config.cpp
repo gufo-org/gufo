@@ -12,6 +12,19 @@ namespace {
 
 constexpr std::string_view kArchitecture = "qwen4exp";
 
+/// Reports the first failure of Config::Validated.
+struct Failure {
+  std::string* error;
+  bool ok{true};
+
+  void Fail(std::string message) {
+    if (ok && error != nullptr) {
+      *error = std::move(message);
+    }
+    ok = false;
+  }
+};
+
 struct Reader {
   const core::GgufReader& gguf;
   std::string* error;
@@ -223,7 +236,43 @@ std::optional<Config> Config::FromGguf(const core::GgufReader& gguf,
   if (!r.ok) {
     return std::nullopt;
   }
+  return Validated(c, require_trunk, error_msg);
+}
 
+std::optional<Config> Config::Validated(Config c, bool require_trunk,
+                                        std::string* error_msg) {
+  Failure r{error_msg};
+  // The PLE tables, as the n-gram reader indexes them. FromGguf rejects
+  // these first, with the same messages; another format's binder relies on
+  // them here.
+  if (c.ple_layer >= 0) {
+    if (static_cast<std::uint32_t>(c.ple_layer) >= c.num_layers) {
+      r.Fail("PLE layer lies outside the trunk");
+      return std::nullopt;
+    }
+    if (c.ple_ngram_size < 2 || c.ple_ngram_size > kMaxPleNgram ||
+        c.ple_heads_per_ngram == 0 ||
+        c.ple_heads_per_ngram > kMaxPleHeads / (c.ple_ngram_size - 1) ||
+        c.ple_head_dim == 0 || c.ple_conv_kernel == 0 ||
+        c.ple_heads != (c.ple_ngram_size - 1) * c.ple_heads_per_ngram) {
+      r.Fail("unsupported PLE n-gram geometry");
+      return std::nullopt;
+    }
+    std::uint64_t rows = 0;
+    for (std::uint32_t h = 0; h < c.ple_heads; ++h) {
+      if (c.ple_head_vocab[h] == 0 ||
+          c.ple_head_offsets[h] > UINT32_MAX - c.ple_head_vocab[h]) {
+        r.Fail("PLE head range does not fit a 32-bit row index");
+        return std::nullopt;
+      }
+      rows = std::max<std::uint64_t>(
+          rows, std::uint64_t{c.ple_head_offsets[h]} + c.ple_head_vocab[h]);
+    }
+    if (c.ple_rows != rows) {
+      r.Fail("PLE row count does not match its head ranges");
+      return std::nullopt;
+    }
+  }
   // Structural limits of this runtime, not of the format.
   if (c.context_length == 0 || c.context_length > INT32_MAX ||
       !std::isfinite(c.rms_eps) || c.rms_eps <= 0 ||

@@ -125,7 +125,10 @@ gufo_extension_export(TARGET gufo_qwen38_flash_next_hip NAME qwen38_flash_next_h
 
 `<name>` is the exporting extension's name or starts with it and `_`, and
 mustn't fall in a longer extension name's namespace. Only the extension's own
-`extension.cmake` can export its targets. Your targets then link the alias:
+`extension.cmake` can export its targets. For Flash-Next, include only the
+experimental `<gufo/ext/families/qwen/models/flash_next/...>` headers; a new
+format serves through `CreateQwenFlashNextTextRunner(options, stages, weights,
+error)`. Your targets then link the alias:
 
 ```cmake
 gufo_extension_target(

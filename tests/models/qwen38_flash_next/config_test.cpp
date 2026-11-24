@@ -262,11 +262,70 @@ void CheckScaledContext() {
           "keys today)");
 }
 
+// The checks FromGguf ends with, as a non-GGUF weight source calls them.
+void CheckValidated() {
+  const auto parsed = Parse(ValidMetadata());
+  Require(parsed.has_value(), "valid metadata must parse");
+  std::string error;
+  const auto again = qfn::Config::Validated(*parsed, true, &error);
+  Require(again && again->num_layers == parsed->num_layers &&
+              again->ple_layer == parsed->ple_layer && error.empty(),
+          "Validated must accept and keep a parsed Config");
+  auto wrong = *parsed;
+  wrong.num_experts_used = wrong.num_experts + 1;
+  Require(!qfn::Config::Validated(wrong, true, &error) && !error.empty(),
+          "Validated must reject an unsupported shape");
+  wrong = *parsed;
+  wrong.hidden_size = 2048;
+  error.clear();
+  Require(!qfn::Config::Validated(wrong, true, &error) &&
+              error == "unsupported Qwen3.8-Flash-Next kernel geometry",
+          "Validated must reject another kernel geometry");
+  // The PLE tables the n-gram reader divides and indexes by, on the
+  // fixture with the production PLE geometry added.
+  auto ple = *parsed;
+  ple.ple_layer = 0;
+  ple.ple_ngram_size = 3;
+  ple.ple_heads_per_ngram = 8;
+  ple.ple_heads = 16;
+  ple.ple_head_dim = 160;
+  ple.ple_conv_kernel = 4;
+  for (std::uint32_t h = 0; h < ple.ple_heads; ++h) {
+    ple.ple_head_offsets[h] = h * 100;
+    ple.ple_head_vocab[h] = 100;
+  }
+  ple.ple_rows = 1600;
+  Require(ple.IsLinearLayer(0), "the fixture's layer 0 is a linear layer");
+  error.clear();
+  Require(
+      qfn::Config::Validated(ple, true, &error).has_value(),
+      ("Validated must accept the production PLE geometry: " + error).c_str());
+  wrong = ple;
+  wrong.ple_layer = static_cast<std::int32_t>(wrong.num_layers);
+  Require(!qfn::Config::Validated(wrong, true, &error),
+          "Validated must reject a PLE layer outside the trunk");
+  wrong = ple;
+  wrong.ple_heads_per_ngram = 0;
+  Require(!qfn::Config::Validated(wrong, true, &error),
+          "Validated must reject an empty PLE n-gram");
+  wrong = ple;
+  wrong.ple_head_vocab[0] = 0;
+  Require(!qfn::Config::Validated(wrong, true, &error),
+          "Validated must reject an empty PLE head");
+  wrong = ple;
+  wrong.ple_rows += 1;
+  error.clear();
+  Require(!qfn::Config::Validated(wrong, true, &error) &&
+              error == "PLE row count does not match its head ranges",
+          "Validated must reject PLE rows that do not match the heads");
+}
+
 }  // namespace
 
 int main() {
   CheckSidecarCompatibility();
   CheckMalformedMetadata();
   CheckScaledContext();
+  CheckValidated();
   std::cout << "Flash-Next metadata checks passed.\n";
 }

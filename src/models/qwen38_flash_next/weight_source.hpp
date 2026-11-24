@@ -38,6 +38,11 @@ class QwenTokenizer;
 
 namespace gufo::ext::qwen::flash_next {
 
+/// The scheme labelling a weight source's own Identity() / DraftIdentity()
+/// in disk cache identities; GGUF identities keep "gguf-sha256-v1".
+inline constexpr std::string_view kWeightSourceIdentityScheme =
+    "flash-next-weight-source-sha256-v1";
+
 using ::gufo::models::qwen38_flash_next::Config;
 using ::gufo::models::qwen38_flash_next::ModelWeights;
 using ::gufo::models::qwen38_flash_next::MtpWeights;
@@ -98,6 +103,10 @@ public:
   /// block's with `mtp`.
   [[nodiscard]] virtual std::span<const ::gufo::core::GgufMappedRegion> Regions(
       bool mtp) const = 0;
+  /// After each walk of the upload (the measuring one, then the uploading
+  /// one, also when it failed), once every region read it queued has
+  /// landed: a source may free its upload staging.
+  virtual void UploadDone(bool measuring) { (void)measuring; }
   /// Uploads a tensor with format_state; GGUF tensors never reach it.
   virtual Tensor Upload(const TensorRef& tensor, const UploadHint& hint,
                         UploadContext& upload) {
@@ -116,9 +125,31 @@ public:
     *head = {};
     return true;
   }
-  /// Cache identity of the artifact; empty lets callers hash the GGUF
-  /// reader.
+  /// Cache identity of the artifact as lowercase SHA-256 hex; empty lets
+  /// callers hash the GGUF reader. The non-GGUF runner requires it when a
+  /// disk cache is set.
   [[nodiscard]] virtual std::string Identity() const { return {}; }
+  /// Cache identity (SHA-256 hex) of the bound MTP draft block, for the
+  /// non-GGUF runner. Empty derives sha256(Identity() + ":mtp") when MtpPath
+  /// returned the model path (the artifact's own block), and the GGUF
+  /// identity of a separate GGUF draft model; otherwise it is required.
+  [[nodiscard]] virtual std::string DraftIdentity() const { return {}; }
+  /// Native context of the artifact at `model_path`, read before Open (the
+  /// non-GGUF runner sizes the context and YaRN from it, then requires it to
+  /// equal the bound Config::context_length); 0 if unknown.
+  [[nodiscard]] virtual std::uint32_t NativeContextLength(
+      const std::string& model_path) const {
+    (void)model_path;
+    return 0;
+  }
+  /// The MTP path to Open for a request of `requested` (the configured draft
+  /// model, possibly empty): a checkpoint carrying its own draft block
+  /// returns `model_path`.
+  [[nodiscard]] virtual std::string MtpPath(
+      const std::string& model_path, const std::string& requested) const {
+    (void)model_path;
+    return requested;
+  }
   [[nodiscard]] virtual std::string ModelName() const = 0;
   /// Where the vision projector sidecar is searched from.
   [[nodiscard]] virtual std::string VisionPath(

@@ -13,26 +13,36 @@
 //   default model. Its first greedy tokens must match the default model's,
 //   and its MTP decoding must reproduce its own AR greedy text.
 //
-// Each run asserts that the hooks it relies on were called.
+// Each run asserts that the hooks it relies on were called. The neutral run
+// also binds through Config::Validated and serves the PLE table through
+// NgramTable::OpenEncoded with a decoder of the GGUF rows; a last load
+// builds the serving runner from the non-GGUF entry point.
 
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "src/core/crypto/sha256.hpp"
+#include "src/core/gguf_identity.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/sampling.hpp"
+#include "src/ext/continuation.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/models/qwen38_flash_next/runner.hpp"
 #include "src/models/qwen38_flash_next/stages.hpp"
 #include "src/models/qwen38_flash_next/weight_source.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
@@ -57,6 +67,10 @@ struct Format {
 };
 
 struct Counters {
+  std::atomic<int> ngram_rows{0};
+  mutable int native_context_reads{0};
+  int validated{0};
+  int upload_walks_done{0};
   int uploads{0};
   int draft_heads{0};
   int linear{0};
@@ -69,6 +83,28 @@ struct Counters {
 };
 
 enum class Mode { kNeutral, kRouting };
+
+/// The GGUF PLE row formats, decoded the way NgramTable decodes them.
+qfn::NgramRowDecoder GgufRows(gufo::core::GgmlType type, std::uint32_t dim,
+                              std::atomic<int>& rows) {
+  return [type, dim, &rows](const std::uint8_t* src, std::uint32_t row,
+                            float* dst) {
+    (void)row;
+    rows.fetch_add(1, std::memory_order_relaxed);
+    if (type == gufo::core::GgmlType::kIQ4_NL) {
+      gufo::quant::DequantizeIQ4_NL(src, dst, dim);
+    } else if (type == gufo::core::GgmlType::kQ8_0) {
+      gufo::quant::DequantizeQ8_0(src, dst, dim);
+    } else {
+      for (std::uint32_t i = 0; i < dim; ++i) {
+        std::uint16_t bits = 0;
+        std::memcpy(&bits, src + 2 * i, 2);
+        const std::uint32_t f = static_cast<std::uint32_t>(bits) << 16;
+        std::memcpy(dst + i, &f, sizeof(float));
+      }
+    }
+  };
+}
 
 class TaggingSource final : public fn::WeightSource {
 public:
@@ -85,6 +121,12 @@ public:
   bool BindTrunk(qfn::ModelWeights* w, std::string* error) override {
     if (!inner_->BindTrunk(w, error))
       return false;
+    // What another format's binder calls on the Config it builds.
+    auto checked = qfn::Config::Validated(w->config, true, error);
+    if (!checked)
+      return false;
+    w->config = *checked;
+    ++c_.validated;
     Tag(w->output);
     // A host payload: the first mixer norm, copied out of its mapping.
     auto& norm = w->layers[0].hc_attn.norm;
@@ -125,11 +167,21 @@ public:
   }
   std::unique_ptr<qfn::NgramTable> Ngram(const qfn::ModelWeights& w,
                                          std::string* error) override {
-    return inner_->Ngram(w, error);
+    if (mode_ != Mode::kNeutral)
+      return inner_->Ngram(w, error);
+    const auto& t = w.ple_table;
+    return qfn::NgramTable::OpenEncoded(
+        inner_->Regions(false)[t.shard].file_descriptor, t.file_offset, t.rows,
+        w.config.ple_head_dim, t.RowBytes(),
+        GgufRows(t.type, w.config.ple_head_dim, c_.ngram_rows), error);
   }
   [[nodiscard]] std::span<const gufo::core::GgufMappedRegion> Regions(
       bool mtp) const override {
     return inner_->Regions(mtp);
+  }
+  void UploadDone(bool measuring) override {
+    (void)measuring;
+    ++c_.upload_walks_done;
   }
   fn::Tensor Upload(const qfn::TensorRef& t, const fn::UploadHint& hint,
                     fn::UploadContext& up) override {
@@ -173,6 +225,35 @@ public:
   [[nodiscard]] std::string ModelName() const override {
     return inner_->ModelName();
   }
+  // The non-GGUF runner entry reads these.
+  [[nodiscard]] std::string Identity() const override {
+    // Disk cache identities are SHA-256 hex digests.
+    const std::string seed = "stage-seam-trunk";
+    return gufo::crypto::Sha256Hex(
+        {reinterpret_cast<const std::uint8_t*>(seed.data()), seed.size()});
+  }
+  [[nodiscard]] std::string DraftIdentity() const override {
+    return draft_identity_;
+  }
+  std::string draft_identity_ = std::string(64, 'd');
+  [[nodiscard]] std::uint32_t NativeContextLength(
+      const std::string& path) const override {
+    ++c_.native_context_reads;
+    if (native_override_ != 0)
+      return native_override_;
+    auto reader = gufo::core::GgufReader::OpenFile(path, nullptr);
+    return reader ? reader->GetMetadataUint32("qwen4exp.context_length")
+                        .value_or(0)
+                  : 0;
+  }
+  /// Non-zero: the native context to report instead of the artifact's.
+  std::uint32_t native_override_{0};
+  [[nodiscard]] std::string MtpPath(
+      const std::string& path, const std::string& requested) const override {
+    (void)path;
+    return requested.empty() ? mtp_ : requested;
+  }
+  std::string mtp_;
 
   int attention_layer() const { return attention_layer_; }
   int linear_layer() const { return linear_layer_; }
@@ -270,7 +351,8 @@ std::string Prompt() {
 
 Result Run(const std::string& path, const std::string& mtp,
            std::unique_ptr<fn::Stages> stages,
-           std::unique_ptr<fn::WeightSource> source) {
+           std::unique_ptr<fn::WeightSource> source,
+           const std::function<void(const qfn::Model&)>& inspect = {}) {
   std::string error;
   qfn::ModelOptions options;
   options.max_context = kContext;
@@ -278,6 +360,8 @@ Result Run(const std::string& path, const std::string& mtp,
   auto model = qfn::Model::Load(path, options, std::move(stages),
                                 std::move(source), &error);
   Require(model != nullptr, "load: " + error);
+  if (inspect)
+    inspect(*model);
   const auto prompt = model->Tokenize(Prompt());
   Result r;
   {
@@ -357,8 +441,38 @@ int main() {
                                     fn::TensorId::kFfnGateExps,
                                     fn::TensorId::kShexpDown},
           c);
-      const Result r = Run(model, head, std::move(stages),
-                           std::make_unique<TaggingSource>(Mode::kNeutral, c));
+      auto source = std::make_unique<TaggingSource>(Mode::kNeutral, c);
+      source->draft_identity_.clear();
+      // The runner's cache identities, resolved over this source.
+      const auto identities = [&](const qfn::Model& loaded) {
+        std::string error;
+        qfn::FlashNextCacheIdentities own;
+        const std::string seed = loaded.ArtifactIdentity() + ":mtp";
+        check(qfn::ResolveWeightSourceIdentities(loaded, true, true, model,
+                                                 &own, &error) &&
+                  own.model == loaded.ArtifactIdentity() &&
+                  own.draft ==
+                      gufo::crypto::Sha256Hex(
+                          {reinterpret_cast<const std::uint8_t*>(seed.data()),
+                           seed.size()}) &&
+                  own.model_scheme == fn::kWeightSourceIdentityScheme,
+              "identity,own_draft_derived");
+        qfn::FlashNextCacheIdentities separate;
+        auto draft = gufo::core::GgufReader::OpenFile(head, nullptr);
+        check(draft &&
+                  qfn::ResolveWeightSourceIdentities(loaded, true, false, head,
+                                                     &separate, &error) &&
+                  separate.draft == gufo::core::GgufIdentityHex(*draft) &&
+                  separate.draft_scheme == gufo::ext::kGgufIdentityScheme,
+              "identity,separate_gguf_draft");
+        qfn::FlashNextCacheIdentities malformed{"not-a-digest"};
+        check(!qfn::ResolveWeightSourceIdentities(loaded, false, true, model,
+                                                  &malformed, &error) &&
+                  error.find("SHA-256") != std::string::npos,
+              "identity,malformed_rejected");
+      };
+      const Result r =
+          Run(model, head, std::move(stages), std::move(source), identities);
       check(Same(r.prefill, reference.prefill), "neutral,prefill_bitwise");
       bool decode_same = r.decode.size() == reference.decode.size();
       for (std::size_t i = 0; decode_same && i < r.decode.size(); ++i)
@@ -372,6 +486,9 @@ int main() {
                 c.prompt_rows_missing == 0,
             "neutral,prompt_layer_hook");
       check(c.moe_on_prompt_copy > 0, "neutral,prompt_copy_layer_handle");
+      check(c.validated == 1, "neutral,config_validated");
+      check(c.upload_walks_done == 2, "neutral,upload_done");
+      check(c.ngram_rows.load() > 0, "neutral,encoded_ngram_rows");
     }
     {
       Counters c;
@@ -401,6 +518,45 @@ int main() {
             "routing,linear_hooks");
       check(c.prompt_layers_used > 0 && c.moe_on_prompt_copy > 0,
             "routing,prompt_layer_hook");
+    }
+    {
+      // A native context that is not the artifact's fails once the model is
+      // bound, instead of silently resizing YaRN.
+      Counters c;
+      auto source = std::make_unique<TaggingSource>(Mode::kNeutral, c);
+      source->mtp_ = head;
+      source->native_override_ = 131072;
+      gufo::ext::TextRunnerOptions options;
+      options.model_path = model;
+      options.max_context = kContext;
+      std::string error;
+      const auto runner = qfn::CreateQwenFlashNextTextRunner(
+          options, nullptr, std::move(source), &error);
+      check(runner == nullptr && c.native_context_reads == 1 &&
+                error.find("native context") != std::string::npos,
+            "runner,native_context_checked");
+    }
+    {
+      // The serving runner over a weight source: context, draft path and
+      // cache identities come from the source.
+      Counters c;
+      auto source = std::make_unique<TaggingSource>(Mode::kNeutral, c);
+      source->mtp_ = head;
+      // A separate GGUF draft with no DraftIdentity: its GGUF identity.
+      source->draft_identity_.clear();
+      gufo::ext::TextRunnerOptions options;
+      options.model_path = model;
+      options.max_context = kContext;
+      options.speculative.backend = gufo::ext::TextSpeculativeBackend::kMtp;
+      options.disk_cache.directory = "/nonexistent/stage-seam-cache";
+      std::string error;
+      const auto runner = qfn::CreateQwenFlashNextTextRunner(
+          options, nullptr, std::move(source), &error);
+      check(runner != nullptr && c.uploads == 1 && c.draft_heads == 1 &&
+                c.native_context_reads == 1,
+            "runner,weight_source_entry");
+      if (!runner)
+        std::cerr << "runner: " << error << '\n';
     }
     return passed ? 0 : 1;
   } catch (const std::exception& failure) {
