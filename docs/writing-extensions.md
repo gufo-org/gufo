@@ -143,8 +143,9 @@ your `extension.cmake` defines, helper targets and `INTERFACE` links included:
 a link to another extension's library, by export or target name, fails unless
 you list that extension in `depends`. For an extension outside Gufo's tree,
 every transitive link is checked too. A target disabled by its `requires`
-exports nothing, so give targets that link it the same `requires`. Modules (`gufo extension install`) don't support dependencies yet;
-compile both extensions in.
+exports nothing, so give targets that link it the same `requires`. A module
+may depend only on in-tree extensions its Gufo compiles in, and link only their
+exports; not on Windows yet. See [modules](internal/extension-build.md#modules).
 
 > **Warning:** Depending on an export takes you outside the versioned
 > [extension API](extension-api.md#the-boundary): its headers and libraries are
