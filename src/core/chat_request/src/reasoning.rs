@@ -4,18 +4,19 @@
 
 use crate::draft::Reasoning;
 use crate::error::{Failure, Outcome, bad_request, compatibility, invalid};
-use crate::fields::{non_null, number};
+use crate::fields::{concat, non_null, number};
+use crate::host;
 use gufo_json::Value;
 
 /// `ParseReasoningEffortName`: the `ReasoningEffort` value of a name.
 pub fn effort_name(value: &str) -> Option<u8> {
     match value {
-        "minimal" => Some(0),
-        "low" => Some(1),
-        "medium" => Some(2),
-        "high" => Some(3),
-        "xhigh" => Some(4),
-        "max" => Some(5),
+        "minimal" => Some(host::EFFORT_MINIMAL),
+        "low" => Some(host::EFFORT_LOW),
+        "medium" => Some(host::EFFORT_MEDIUM),
+        "high" => Some(host::EFFORT_HIGH),
+        "xhigh" => Some(host::EFFORT_XHIGH),
+        "max" => Some(host::EFFORT_MAX),
         _ => None,
     }
 }
@@ -165,7 +166,7 @@ pub fn responses(body: &Value, reasoning: &mut Reasoning) -> Outcome<()> {
         if key != "effort" {
             return Err(bad_request(
                 "invalid_reasoning",
-                format!("unsupported reasoning member: {key}"),
+                concat(&["unsupported reasoning member: ", key])?,
             ));
         }
         if matches!(value, Value::Null) {
@@ -250,9 +251,10 @@ pub fn messages_output_config(body: &Value, reasoning: &mut Reasoning) -> Outcom
     };
     for (key, value) in object.members() {
         if key != "effort" {
-            return Err(compatibility(format!(
-                "unsupported output_config member: {key}"
-            )));
+            return Err(compatibility(concat(&[
+                "unsupported output_config member: ",
+                key,
+            ])?));
         }
         if matches!(value, Value::Null) {
             continue;

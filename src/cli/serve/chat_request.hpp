@@ -60,9 +60,10 @@ struct DecodedChatRequest {
 };
 
 /// Decodes `body` as `api` reads it (ParseRequest, ReadOpenAiResponseChat or
-/// ReadAnthropicChat). Returns the rejection, or fills `output`. Throws
-/// std::bad_alloc when memory runs out, and rethrows a hook's exception that
-/// is not a std::exception the API reports.
+/// ReadAnthropicChat). Returns the rejection, or fills `output`. Running out
+/// of memory is a 400 rejection whose message is std::bad_alloc's, as the C++
+/// decoders answered; a hook's exception that the API does not report is
+/// rethrown.
 std::optional<HttpResponse> DecodeChatRequest(
     ChatApi api, std::string_view body,
     const ChatDecodeEnvironment& environment, bool require_model,

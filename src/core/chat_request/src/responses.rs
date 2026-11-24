@@ -8,13 +8,14 @@ use crate::content::responses_parts;
 use crate::draft::{Draft, Message, Role, ToolChoice, Tools};
 use crate::error::{Failure, Outcome, bad_request, compatibility, invalid};
 use crate::fields::{
-    append, body_view, copy, dump, member_str, member_str_or, non_null, push, take_text,
+    append, body_view, concat, copy, member_str, member_str_or, non_null, push, take_text,
+    write_key, write_value,
 };
 use crate::host::{Host, HostField};
 use crate::message::{Content, historical, message};
 use crate::reasoning;
 use crate::tool_choice::parse_tool_controls;
-use gufo_json::{Object, Value};
+use gufo_json::{Numbers, Object, Value};
 
 /// `cache_prompt`, `cache_persist` and `return_progress`: null keeps the
 /// default.
@@ -74,7 +75,7 @@ pub fn controls(body: &Value, draft: &mut Draft, host: &mut impl Host) -> Outcom
             if key != "format" {
                 return Err(bad_request(
                     "invalid_response_format",
-                    format!("unsupported text member: {key}"),
+                    concat(&["unsupported text member: ", key])?,
                 ));
             }
             field(host, HostField::TextFormat, 0, Some(value))?;
@@ -110,10 +111,14 @@ pub fn item(item: &mut Value, host: &mut impl Host) -> Outcome<Message> {
                 else {
                     return invalid("historical custom tool calls require string input");
                 };
-                // One free-form input, kept as literal argument data.
-                let mut arguments = Object::new();
-                arguments.push(copy("input")?, input.clone())?;
-                let arguments = Value::String(dump(&Value::Object(arguments))?);
+                // One free-form input, kept as literal argument data:
+                // {"input":...} as C++ dumped it.
+                let mut arguments = String::new();
+                append(&mut arguments, "{")?;
+                write_key("input", &mut arguments)?;
+                write_value(input, Numbers::Canonical, &mut arguments)?;
+                append(&mut arguments, "}")?;
+                let arguments = Value::String(arguments);
                 historical(id, item.get("name"), Some(&arguments))?
             } else {
                 historical(id, item.get("name"), item.get("arguments"))?

@@ -17,26 +17,25 @@ use crate::tool_choice::parse_tool_controls;
 use gufo_json::{Object, Value};
 
 /// `ParseAnthropicToolControls`: the Messages declarations rewritten as
-/// Chat tools, so validation, schemas and framing stay on the Chat path.
-pub fn tool_controls(body: &Value, draft: &mut Draft, host: &mut impl Host) -> Outcome<()> {
-    let tools = body.get("tools");
-    let choice = body.get("tool_choice");
-    if tools.is_none() && choice.is_none() {
+/// Chat tools, so validation, schemas and framing stay on the Chat path. The
+/// declarations move out of `body`, which nothing reads after them.
+pub fn tool_controls(body: &mut Value, draft: &mut Draft, host: &mut impl Host) -> Outcome<()> {
+    if body.get("tools").is_none() && body.get("tool_choice").is_none() {
         return Ok(());
     }
     let mut converted = Object::new();
-    if let Some(tools) = tools {
-        let Some(items) = tools.as_array() else {
+    if let Some(tools) = body.get_mut("tools") {
+        let Value::Array(items) = tools else {
             return Err(bad_request("invalid_tools", "'tools' must be an array"));
         };
         let mut functions = Vec::new();
         functions.try_reserve_exact(items.len())?;
-        for tool in items {
+        for tool in items.iter_mut() {
             let schema = tool.get("input_schema");
-            let (true, "custom", Some(schema)) = (
+            let (true, "custom", true) = (
                 matches!(tool, Value::Object(_)),
                 member_str_or(tool, "type", "custom"),
-                schema,
+                schema.is_some(),
             ) else {
                 return Err(bad_request(
                     "invalid_tools",
@@ -45,11 +44,12 @@ pub fn tool_controls(body: &Value, draft: &mut Draft, host: &mut impl Host) -> O
             };
             let mut function = Object::new();
             for key in ["name", "description"] {
-                if let Some(value) = tool.get(key) {
-                    function.push(copy(key)?, value.clone())?;
+                if let Some(value) = tool.get_mut(key) {
+                    function.push(copy(key)?, value.take())?;
                 }
             }
-            function.push(copy("parameters")?, schema.clone())?;
+            let schema = tool.get_mut("input_schema").ok_or(Failure::Internal)?;
+            function.push(copy("parameters")?, schema.take())?;
             let mut wrapped = Object::new();
             wrapped.push(copy("type")?, string("function")?)?;
             wrapped.push(copy("function")?, Value::Object(function))?;
@@ -57,9 +57,17 @@ pub fn tool_controls(body: &Value, draft: &mut Draft, host: &mut impl Host) -> O
         }
         converted.push(copy("tools")?, Value::Array(functions))?;
     }
-    if let Some(choice) = choice {
+    if let Some(choice) = body.get_mut("tool_choice") {
         let kind = match choice {
             Value::Object(_) => member_str(choice, "type"),
+            _ => "",
+        };
+        // A static copy of the type, so the forced name can move out.
+        let kind: &'static str = match kind {
+            "auto" => "auto",
+            "none" => "none",
+            "any" => "any",
+            "tool" => "tool",
             _ => "",
         };
         let converted_choice = match kind {
@@ -67,8 +75,8 @@ pub fn tool_controls(body: &Value, draft: &mut Draft, host: &mut impl Host) -> O
             "any" => string("required")?,
             "tool" => {
                 let mut function = Object::new();
-                if let Some(name) = choice.get("name") {
-                    function.push(copy("name")?, name.clone())?;
+                if let Some(name) = choice.get_mut("name") {
+                    function.push(copy("name")?, name.take())?;
                 }
                 let mut forced = Object::new();
                 forced.push(copy("type")?, string("function")?)?;
@@ -267,7 +275,7 @@ pub fn decode(text: &[u8], defaults: &Defaults, host: &mut impl Host) -> Outcome
     let view = body_view(&body)?;
     let thinking = thinking_argument(&draft.reasoning);
     host.field(HostField::MessagesOptions, thinking, Some(view.as_bytes()))?;
-    tool_controls(&body, &mut draft, host)?;
+    tool_controls(&mut body, &mut draft, host)?;
 
     if let Some(system) = body.get_mut("system") {
         let mut message = Message::new(Role::System);
@@ -304,6 +312,6 @@ pub fn decode(text: &[u8], defaults: &Defaults, host: &mut impl Host) -> Outcome
 
 /// `GUFO_CHAT_FRAGMENT_ANTHROPIC_TOOLS`.
 pub fn decode_tools(text: &[u8], draft: &mut Draft, host: &mut impl Host) -> Outcome<()> {
-    let body = parse_body(text)?;
-    tool_controls(&body, draft, host)
+    let mut body = parse_body(text)?;
+    tool_controls(&mut body, draft, host)
 }

@@ -42,8 +42,34 @@ typedef enum GufoChatApi {
 /* Values of an optional field: unset, false or true. */
 #define GUFO_CHAT_UNSET (-1)
 
+/* tokenization::ChatRole; src/cli/serve/chat_request.cpp checks each. */
+typedef enum GufoChatRole {
+  GUFO_CHAT_ROLE_SYSTEM = 0,
+  GUFO_CHAT_ROLE_DEVELOPER = 1,
+  GUFO_CHAT_ROLE_USER = 2,
+  GUFO_CHAT_ROLE_ASSISTANT = 3,
+  GUFO_CHAT_ROLE_TOOL = 4,
+} GufoChatRole;
+
+/* ReasoningEffort. */
+typedef enum GufoChatEffort {
+  GUFO_CHAT_EFFORT_MINIMAL = 0,
+  GUFO_CHAT_EFFORT_LOW = 1,
+  GUFO_CHAT_EFFORT_MEDIUM = 2,
+  GUFO_CHAT_EFFORT_HIGH = 3,
+  GUFO_CHAT_EFFORT_XHIGH = 4,
+  GUFO_CHAT_EFFORT_MAX = 5,
+} GufoChatEffort;
+
+/* ChatRequest::ToolChoice. */
+typedef enum GufoChatToolChoice {
+  GUFO_CHAT_TOOL_CHOICE_AUTO = 0,
+  GUFO_CHAT_TOOL_CHOICE_NONE = 1,
+  GUFO_CHAT_TOOL_CHOICE_REQUIRED = 2,
+} GufoChatToolChoice;
+
 /* ReasoningOptions; each field is GUFO_CHAT_UNSET when absent. effort is a
-   ReasoningEffort value. budget_tokens counts only when has_budget is 1. */
+   GufoChatEffort. budget_tokens counts only when has_budget is 1. */
 typedef struct GufoChatReasoning {
   int32_t enabled;
   int32_t effort;
@@ -67,7 +93,7 @@ typedef struct GufoChatDefaults {
      start from them. The fragments start from the request's current values. */
   GufoChatReasoning reasoning;
   /* The fragments: names of the request's current tools in order, and its
-     ChatRequest::ToolChoice. The APIs pass none and kAuto. */
+     GufoChatToolChoice. The APIs pass none and GUFO_CHAT_TOOL_CHOICE_AUTO. */
   const GufoChatBytes* tool_names;
   size_t tool_name_count;
   int32_t tool_choice;
@@ -99,10 +125,10 @@ typedef enum GufoChatOp {
   GUFO_CHAT_OP_ADD_VISION_ID = 13,   /* [int] */
   /* The whole ReasoningOptions, in these four steps. */
   GUFO_CHAT_OP_REASONING_ENABLED = 14,   /* [int] or GUFO_CHAT_UNSET */
-  GUFO_CHAT_OP_REASONING_EFFORT = 15,    /* [int] or GUFO_CHAT_UNSET */
+  GUFO_CHAT_OP_REASONING_EFFORT = 15,    /* [int] GufoChatEffort or unset */
   GUFO_CHAT_OP_PRESERVE_THINKING = 16,   /* [int] or GUFO_CHAT_UNSET */
   GUFO_CHAT_OP_BUDGET_TOKENS = 17,       /* [int] or GUFO_CHAT_UNSET */
-  GUFO_CHAT_OP_TOOL_CHOICE = 18,         /* [int] ChatRequest::ToolChoice */
+  GUFO_CHAT_OP_TOOL_CHOICE = 18,         /* [int] GufoChatToolChoice */
   GUFO_CHAT_OP_FORCED_TOOL_NAME = 19,    /* [text] */
   GUFO_CHAT_OP_PARALLEL_TOOL_CALLS = 20, /* [int] */
   GUFO_CHAT_OP_CONSTRAINED_TOOLS = 21,   /* [int] */
@@ -117,7 +143,7 @@ typedef enum GufoChatOp {
   /* Keeps only the tool at [index] of all tools, current ones first. */
   GUFO_CHAT_OP_SELECT_TOOL = 34,
   /* Appends a ChatMessage. */
-  GUFO_CHAT_OP_MESSAGE = 40,      /* [int] tokenization::ChatRole */
+  GUFO_CHAT_OP_MESSAGE = 40,      /* [int] GufoChatRole */
   GUFO_CHAT_OP_CONTENT = 41,      /* [text] */
   GUFO_CHAT_OP_NAME = 42,         /* [text] */
   GUFO_CHAT_OP_THOUGHT = 43,      /* [text] */

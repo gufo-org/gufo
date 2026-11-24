@@ -2,10 +2,10 @@
 //! hosted tools, strict schemas and the JSON the templates render.
 
 use crate::draft::{Tool, Tools};
-use crate::error::{Failure, Outcome, invalid};
-use crate::fields::{assign, copy, dump, dump_as_parsed, member_str, push, string};
+use crate::error::{Outcome, invalid};
+use crate::fields::{append, copy, member_str, push, write_key, write_value};
 use crate::host::Host;
-use gufo_json::{Object, Value};
+use gufo_json::{Numbers, Object, Value};
 use std::collections::HashSet;
 
 /// Declared names reach Qwen and DeepSeek unescaped inside "<function=NAME>"
@@ -23,14 +23,17 @@ pub fn renderable(name: &str) -> bool {
             .all(|c| c > 0x20 && c < 0x7F && !matches!(c, b'<' | b'>' | b'"' | b'\\'))
 }
 
-/// The parameters a strict function without them gets.
-fn empty_strict_schema() -> Outcome<Value> {
-    let mut schema = Object::new();
-    schema.push(copy("type")?, string("object")?)?;
-    schema.push(copy("properties")?, Value::Object(Object::new()))?;
-    schema.push(copy("required")?, Value::Array(Vec::new()))?;
-    schema.push(copy("additionalProperties")?, Value::Bool(false))?;
-    Ok(Value::Object(schema))
+/// Adds `name` to the set; false when it was there.
+fn insert_name(names: &mut HashSet<Vec<u8>>, name: &[u8]) -> Outcome<bool> {
+    if names.contains(name) {
+        return Ok(false);
+    }
+    names.try_reserve(1)?;
+    let mut owned = Vec::new();
+    owned.try_reserve_exact(name.len())?;
+    owned.extend_from_slice(name);
+    names.insert(owned);
+    Ok(true)
 }
 
 /// `ParseTools`: appends the function tools of `tools` to the request's,
@@ -44,7 +47,7 @@ pub fn parse_tools(
 ) -> Outcome<()> {
     let mut names: HashSet<Vec<u8>> = HashSet::new();
     for name in tools.names() {
-        names.insert(name.to_vec());
+        insert_name(&mut names, name)?;
     }
     parse_list(value, tools, &mut names, responses, host)
 }
@@ -118,58 +121,141 @@ fn function_tool(
     if !renderable(name) {
         return invalid(TOOL_NAME_RULE);
     }
-    if !names.insert(name.as_bytes().to_vec()) {
+    if !insert_name(names, name.as_bytes())? {
         return invalid("function names must be unique");
     }
     if parameters.is_some_and(|parameters| !matches!(parameters, Value::Null | Value::Object(_))) {
         return invalid("function tools require an object parameters schema");
     }
     // Keep nested definitions and their field order; a flat tool's body
-    // moves under "function", strict included.
-    let mut body = Object::new();
-    let members = source.as_object().map_or(&[][..], Object::members);
-    for (key, value) in members {
-        if key == "parametersJsonSchema" || (!nested && key == "type") {
-            continue;
-        }
-        body.push(copy(key)?, value.clone())?;
-    }
+    // moves under "function", strict included. Both are written straight
+    // from the request, as C++ dumped the copies it built.
+    let strict = source.get("strict").and_then(Value::as_bool) == Some(true);
     let schema = match parameters {
-        Some(schema @ Value::Object(_)) => schema.clone(),
-        _ => Value::Object(Object::new()),
+        Some(schema @ Value::Object(_)) => Schema::Sent(schema),
+        // Omitting parameters defines a strict function with no arguments.
+        None | Some(Value::Null) if strict => Schema::Strict,
+        _ => Schema::Empty,
     };
-    assign(&mut body, "parameters", schema)?;
-    if body.get("strict").and_then(Value::as_bool) == Some(true) {
-        // Omitting parameters defines a function with no arguments.
-        if matches!(parameters, None | Some(Value::Null)) {
-            assign(&mut body, "parameters", empty_strict_schema()?)?;
-        }
-        let schema = body.get("parameters").ok_or(Failure::Internal)?;
-        host.compile_schema(dump_as_parsed(schema)?.as_bytes())?;
+    if strict {
+        let mut text = String::new();
+        schema.write(Numbers::AsParsed, &mut text)?;
+        host.compile_schema(text.as_bytes())?;
     }
-    let parameters_json = dump(body.get("parameters").ok_or(Failure::Internal)?)?;
-    let mut definition = Object::new();
+    let mut parameters_json = String::new();
+    schema.write(Numbers::Canonical, &mut parameters_json)?;
+    let body = Body {
+        members: source.as_object().map_or(&[][..], Object::members),
+        nested,
+        schema,
+    };
+    let mut definition = String::new();
     if nested {
         let members = item.as_object().map_or(&[][..], Object::members);
-        for (key, value) in members {
-            if key != "function" {
-                definition.push(copy(key)?, value.clone())?;
+        let (mut kind, mut function) = (false, false);
+        append(&mut definition, "{")?;
+        for (index, (key, value)) in members.iter().enumerate() {
+            if index > 0 {
+                append(&mut definition, ",")?;
+            }
+            write_key(key, &mut definition)?;
+            if key == "type" && !kind {
+                kind = true;
+                append(&mut definition, "\"function\"")?;
+            } else if key == "function" && !function {
+                function = true;
+                body.write(&mut definition)?;
             } else {
-                // Placeholder; `assign` below fills the first one in place.
-                definition.push(copy(key)?, Value::Null)?;
+                write_value(value, Numbers::Canonical, &mut definition)?;
             }
         }
+        if !kind {
+            append(&mut definition, if members.is_empty() { "" } else { "," })?;
+            append(&mut definition, "\"type\":\"function\"")?;
+        }
+        if !function {
+            append(&mut definition, ",\"function\":")?;
+            body.write(&mut definition)?;
+        }
+        append(&mut definition, "}")?;
+    } else {
+        append(&mut definition, "{\"type\":\"function\",\"function\":")?;
+        body.write(&mut definition)?;
+        append(&mut definition, "}")?;
     }
-    assign(&mut definition, "type", string("function")?)?;
-    let description = copy(member_str(source, "description"))?;
-    let name = copy(name)?;
-    assign(&mut definition, "function", Value::Object(body))?;
     Ok(Tool {
-        name,
-        description,
+        name: copy(name)?,
+        description: copy(member_str(source, "description"))?,
         parameters: parameters_json,
-        definition: dump(&Value::Object(definition))?,
+        definition,
     })
+}
+
+/// A function's parameters: the request's schema, an empty one, or the
+/// schema of a strict function that declares none.
+#[derive(Clone, Copy)]
+enum Schema<'a> {
+    Sent(&'a Value),
+    Empty,
+    Strict,
+}
+
+const STRICT_SCHEMA: &str =
+    r#"{"type":"object","properties":{},"required":[],"additionalProperties":false}"#;
+
+impl Schema<'_> {
+    fn write(self, numbers: Numbers, out: &mut String) -> Outcome<()> {
+        match self {
+            Self::Sent(schema) => write_value(schema, numbers, out),
+            Self::Empty => append(out, "{}"),
+            Self::Strict => append(out, STRICT_SCHEMA),
+        }
+    }
+}
+
+/// The function object C++ built: the source's members without
+/// `parametersJsonSchema` (and, for a flat tool, `type`), its first
+/// `parameters` replaced by the schema or the schema appended.
+struct Body<'a> {
+    members: &'a [(String, Value)],
+    nested: bool,
+    schema: Schema<'a>,
+}
+
+impl Body<'_> {
+    fn write(&self, out: &mut String) -> Outcome<()> {
+        append(out, "{")?;
+        let mut first = true;
+        let mut replaced = false;
+        for (key, value) in self.members {
+            if key == "parametersJsonSchema" || (!self.nested && key == "type") {
+                continue;
+            }
+            if !first {
+                append(out, ",")?;
+            }
+            first = false;
+            write_key(key, out)?;
+            if key == "parameters" && !replaced {
+                replaced = true;
+                self.schema.write(Numbers::Canonical, out)?;
+            } else {
+                write_value(value, Numbers::Canonical, out)?;
+            }
+        }
+        if !replaced {
+            append(
+                out,
+                if first {
+                    "\"parameters\":"
+                } else {
+                    ",\"parameters\":"
+                },
+            )?;
+            self.schema.write(Numbers::Canonical, out)?;
+        }
+        append(out, "}")
+    }
 }
 
 #[cfg(test)]

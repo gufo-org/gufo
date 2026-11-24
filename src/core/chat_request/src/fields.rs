@@ -2,7 +2,7 @@
 //! of input-sized text.
 
 use crate::error::Outcome;
-use gufo_json::{Numbers, Object, Spacing, Style, Value, write};
+use gufo_json::{Numbers, Spacing, Style, Value, write};
 
 /// `member_str(key)`: the member's string, or "" when it is missing or not a
 /// string (also on non-objects).
@@ -52,17 +52,6 @@ pub fn take_text(value: &mut Value) -> String {
     }
 }
 
-/// C++ `object[key] = value`: replaces the first member named `key`, or
-/// appends one.
-pub fn assign(object: &mut Object, key: &str, value: Value) -> Outcome<()> {
-    if let Some(slot) = object.get_mut(key) {
-        *slot = value;
-        return Ok(());
-    }
-    object.push(copy(key)?, value)?;
-    Ok(())
-}
-
 pub fn string(text: &str) -> Outcome<Value> {
     Ok(Value::String(copy(text)?))
 }
@@ -75,6 +64,31 @@ pub fn dump(value: &Value) -> Outcome<String> {
 /// `value.dump(kAsParsed)`, which `json::parse` reads back to the same value.
 pub fn dump_as_parsed(value: &Value) -> Outcome<String> {
     Ok(gufo_json::dump(value, Numbers::AsParsed)?)
+}
+
+/// `value` written compactly, as `dump` writes it.
+pub fn write_value(value: &Value, numbers: Numbers, out: &mut String) -> Outcome<()> {
+    let style = Style {
+        numbers,
+        spacing: Spacing::Compact,
+    };
+    Ok(write(value, style, out)?)
+}
+
+/// An object key and its colon.
+pub fn write_key(key: &str, out: &mut String) -> Outcome<()> {
+    write_value(&Value::String(copy(key)?), Numbers::Canonical, out)?;
+    append(out, ":")
+}
+
+/// Text joined from parts, some of them the client's.
+pub fn concat(parts: &[&str]) -> Outcome<String> {
+    let mut out = String::new();
+    out.try_reserve_exact(parts.iter().map(|part| part.len()).sum())?;
+    for part in parts {
+        out.push_str(part);
+    }
+    Ok(out)
 }
 
 /// Members whose values the C++ helpers never read; the body view sends
@@ -128,15 +142,6 @@ mod tests {
         assert_eq!(member_str(&parse("[1]"), "a"), "");
         assert!(non_null(&value, "c").is_none());
         assert!(non_null(&value, "b").is_some());
-    }
-
-    #[test]
-    fn assign_replaces_the_first_member_in_place() {
-        let mut object = parse(r#"{"a":1,"b":2}"#).into_object().unwrap();
-        assign(&mut object, "a", Value::Bool(true)).unwrap();
-        assign(&mut object, "c", Value::Null).unwrap();
-        let text = dump(&Value::Object(object)).unwrap();
-        assert_eq!(text, r#"{"a":true,"b":2,"c":null}"#);
     }
 
     #[test]

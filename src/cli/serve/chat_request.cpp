@@ -32,6 +32,115 @@ std::string UpToNul(const std::string& message) {
   return std::string(message.c_str());
 }
 
+// The C ABI names each value of these enums; a new value must be added there.
+static_assert(static_cast<int>(tokenization::ChatRole::kSystem) ==
+              GUFO_CHAT_ROLE_SYSTEM);
+static_assert(static_cast<int>(tokenization::ChatRole::kDeveloper) ==
+              GUFO_CHAT_ROLE_DEVELOPER);
+static_assert(static_cast<int>(tokenization::ChatRole::kUser) ==
+              GUFO_CHAT_ROLE_USER);
+static_assert(static_cast<int>(tokenization::ChatRole::kAssistant) ==
+              GUFO_CHAT_ROLE_ASSISTANT);
+static_assert(static_cast<int>(tokenization::ChatRole::kTool) ==
+              GUFO_CHAT_ROLE_TOOL);
+static_assert(static_cast<int>(ReasoningEffort::kMinimal) ==
+              GUFO_CHAT_EFFORT_MINIMAL);
+static_assert(static_cast<int>(ReasoningEffort::kLow) == GUFO_CHAT_EFFORT_LOW);
+static_assert(static_cast<int>(ReasoningEffort::kMedium) ==
+              GUFO_CHAT_EFFORT_MEDIUM);
+static_assert(static_cast<int>(ReasoningEffort::kHigh) ==
+              GUFO_CHAT_EFFORT_HIGH);
+static_assert(static_cast<int>(ReasoningEffort::kXHigh) ==
+              GUFO_CHAT_EFFORT_XHIGH);
+static_assert(static_cast<int>(ReasoningEffort::kMax) == GUFO_CHAT_EFFORT_MAX);
+static_assert(static_cast<int>(ChatRequest::ToolChoice::kAuto) ==
+              GUFO_CHAT_TOOL_CHOICE_AUTO);
+static_assert(static_cast<int>(ChatRequest::ToolChoice::kNone) ==
+              GUFO_CHAT_TOOL_CHOICE_NONE);
+static_assert(static_cast<int>(ChatRequest::ToolChoice::kRequired) ==
+              GUFO_CHAT_TOOL_CHOICE_REQUIRED);
+
+// Each enum value as the C ABI names it; -Wswitch flags a value added to the
+// C++ enum without one.
+GufoChatEffort ToC(ReasoningEffort effort) {
+  switch (effort) {
+    case ReasoningEffort::kMinimal:
+      return GUFO_CHAT_EFFORT_MINIMAL;
+    case ReasoningEffort::kLow:
+      return GUFO_CHAT_EFFORT_LOW;
+    case ReasoningEffort::kMedium:
+      return GUFO_CHAT_EFFORT_MEDIUM;
+    case ReasoningEffort::kHigh:
+      return GUFO_CHAT_EFFORT_HIGH;
+    case ReasoningEffort::kXHigh:
+      return GUFO_CHAT_EFFORT_XHIGH;
+    case ReasoningEffort::kMax:
+      return GUFO_CHAT_EFFORT_MAX;
+  }
+  throw std::logic_error("unknown reasoning effort");
+}
+
+GufoChatToolChoice ToC(ChatRequest::ToolChoice choice) {
+  switch (choice) {
+    case ChatRequest::ToolChoice::kAuto:
+      return GUFO_CHAT_TOOL_CHOICE_AUTO;
+    case ChatRequest::ToolChoice::kNone:
+      return GUFO_CHAT_TOOL_CHOICE_NONE;
+    case ChatRequest::ToolChoice::kRequired:
+      return GUFO_CHAT_TOOL_CHOICE_REQUIRED;
+  }
+  throw std::logic_error("unknown tool choice");
+}
+
+ReasoningEffort EffortFrom(std::int64_t value) {
+  switch (value) {
+    case GUFO_CHAT_EFFORT_MINIMAL:
+      return ReasoningEffort::kMinimal;
+    case GUFO_CHAT_EFFORT_LOW:
+      return ReasoningEffort::kLow;
+    case GUFO_CHAT_EFFORT_MEDIUM:
+      return ReasoningEffort::kMedium;
+    case GUFO_CHAT_EFFORT_HIGH:
+      return ReasoningEffort::kHigh;
+    case GUFO_CHAT_EFFORT_XHIGH:
+      return ReasoningEffort::kXHigh;
+    case GUFO_CHAT_EFFORT_MAX:
+      return ReasoningEffort::kMax;
+    default:
+      throw std::logic_error("unknown chat effort");
+  }
+}
+
+ChatRequest::ToolChoice ToolChoiceFrom(std::int64_t value) {
+  switch (value) {
+    case GUFO_CHAT_TOOL_CHOICE_AUTO:
+      return ChatRequest::ToolChoice::kAuto;
+    case GUFO_CHAT_TOOL_CHOICE_NONE:
+      return ChatRequest::ToolChoice::kNone;
+    case GUFO_CHAT_TOOL_CHOICE_REQUIRED:
+      return ChatRequest::ToolChoice::kRequired;
+    default:
+      throw std::logic_error("unknown chat tool choice");
+  }
+}
+
+tokenization::ChatRole RoleFrom(std::int64_t value) {
+  switch (value) {
+    case GUFO_CHAT_ROLE_SYSTEM:
+      return tokenization::ChatRole::kSystem;
+    case GUFO_CHAT_ROLE_DEVELOPER:
+      return tokenization::ChatRole::kDeveloper;
+    case GUFO_CHAT_ROLE_USER:
+      return tokenization::ChatRole::kUser;
+    case GUFO_CHAT_ROLE_ASSISTANT:
+      return tokenization::ChatRole::kAssistant;
+    case GUFO_CHAT_ROLE_TOOL:
+      return tokenization::ChatRole::kTool;
+    default:
+      throw std::logic_error("unknown chat role");
+  }
+}
+
 std::optional<bool> Thinking(std::int32_t argument) {
   if (argument == GUFO_CHAT_UNSET)
     return std::nullopt;
@@ -44,7 +153,7 @@ GufoChatReasoning ToC(const ReasoningOptions& options) {
   };
   return {
       .enabled = flag(options.enabled),
-      .effort = options.effort ? static_cast<std::int32_t>(*options.effort)
+      .effort = options.effort ? static_cast<std::int32_t>(ToC(*options.effort))
                                : GUFO_CHAT_UNSET,
       .preserve_thinking = flag(options.preserve_thinking),
       .has_budget = static_cast<std::uint8_t>(options.budget_tokens ? 1 : 0),
@@ -75,6 +184,9 @@ struct Decoder {
           environment.read_image(url, budget));
       images.push_back(std::move(bytes));
     } catch (const std::exception& exception) {
+      // std::bad_alloc too: an image read that runs out of memory answers
+      // 400 with its message, as the C++ decoders did and as a decode that
+      // runs out of memory does (see Run).
       const std::string_view message = exception.what();
       error->set(error->state, Bytes(message), message.size());
       return 1;
@@ -249,10 +361,9 @@ struct Decoder {
         chat.reasoning.enabled = optional_flag();
         return;
       case GUFO_CHAT_OP_REASONING_EFFORT:
-        chat.reasoning.effort =
-            event.integer < 0
-                ? std::nullopt
-                : std::optional(static_cast<ReasoningEffort>(event.integer));
+        chat.reasoning.effort = event.integer < 0
+                                    ? std::nullopt
+                                    : std::optional(EffortFrom(event.integer));
         return;
       case GUFO_CHAT_OP_PRESERVE_THINKING:
         chat.reasoning.preserve_thinking = optional_flag();
@@ -264,7 +375,7 @@ struct Decoder {
                 : std::optional(static_cast<std::size_t>(event.integer));
         return;
       case GUFO_CHAT_OP_TOOL_CHOICE:
-        chat.tool_choice = static_cast<ChatRequest::ToolChoice>(event.integer);
+        chat.tool_choice = ToolChoiceFrom(event.integer);
         return;
       case GUFO_CHAT_OP_FORCED_TOOL_NAME:
         chat.forced_tool_name = std::move(text);
@@ -302,8 +413,7 @@ struct Decoder {
         return;
       }
       case GUFO_CHAT_OP_MESSAGE:
-        chat.messages.emplace_back().role =
-            static_cast<tokenization::ChatRole>(event.integer);
+        chat.messages.emplace_back().role = RoleFrom(event.integer);
         return;
       case GUFO_CHAT_OP_CONTENT:
         Message().content = std::move(text);
@@ -420,8 +530,14 @@ bool Run(GufoChatApi api, std::string_view body,
       if (!decoder.rejection)
         throw std::logic_error("chat decoder rejected without a response");
       return false;
-    case GUFO_CHAT_NO_MEMORY:
-      throw std::bad_alloc();
+    case GUFO_CHAT_NO_MEMORY: {
+      // The C++ decoders caught std::bad_alloc with the other exceptions of
+      // json::parse and answered 400 with its message; keep that answer.
+      decoder.rejection_message = std::bad_alloc().what();
+      decoder.rejection =
+          ChatRejection(400, decoder.rejection_message, "parse_error");
+      return false;
+    }
     case GUFO_CHAT_STOPPED:
     case GUFO_CHAT_INTERNAL:
       break;
@@ -461,7 +577,7 @@ std::optional<HttpResponse> DecodeFragment(GufoChatApi api,
       .reasoning = ToC(chat->reasoning),
       .tool_names = names.data(),
       .tool_name_count = names.size(),
-      .tool_choice = static_cast<std::int32_t>(chat->tool_choice),
+      .tool_choice = ToC(chat->tool_choice),
   };
   if (!Run(api, body.dump(json::Value::Numbers::kAsParsed), defaults, decoder))
     return std::move(decoder.rejection);
@@ -521,7 +637,7 @@ std::optional<HttpResponse> DecodeChatRequest(
       .reasoning = ToC(environment.reasoning_defaults),
       .tool_names = nullptr,
       .tool_name_count = 0,
-      .tool_choice = static_cast<std::int32_t>(ChatRequest::ToolChoice::kAuto),
+      .tool_choice = GUFO_CHAT_TOOL_CHOICE_AUTO,
   };
   const GufoChatApi raw = api == ChatApi::kChat        ? GUFO_CHAT_API_CHAT
                           : api == ChatApi::kResponses ? GUFO_CHAT_API_RESPONSES
@@ -549,10 +665,10 @@ bool DecodeResponseItem(const json::Value& item,
   const GufoChatDefaults defaults{
       .model_id = {},
       .require_model = 1,
-      .reasoning = ToC({}),
+      .reasoning = ToC(ReasoningOptions{}),
       .tool_names = nullptr,
       .tool_name_count = 0,
-      .tool_choice = static_cast<std::int32_t>(ChatRequest::ToolChoice::kAuto),
+      .tool_choice = GUFO_CHAT_TOOL_CHOICE_AUTO,
   };
   if (!Run(GUFO_CHAT_FRAGMENT_RESPONSE_ITEM,
            item.dump(json::Value::Numbers::kAsParsed), defaults, decoder)) {

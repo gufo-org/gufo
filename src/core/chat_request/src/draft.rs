@@ -2,15 +2,16 @@
 //! accepted; `Draft::emit` then replays it as builder steps.
 
 use crate::error::Outcome;
-use crate::host::{Host, Op};
+use crate::host::{self, Host, Op};
 
+#[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    System = 0,
-    Developer = 1,
-    User = 2,
-    Assistant = 3,
-    Tool = 4,
+    System = host::ROLE_SYSTEM,
+    Developer = host::ROLE_DEVELOPER,
+    User = host::ROLE_USER,
+    Assistant = host::ROLE_ASSISTANT,
+    Tool = host::ROLE_TOOL,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,19 +71,20 @@ pub struct Tool {
     pub definition: String,
 }
 
+#[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolChoice {
-    Auto = 0,
-    None = 1,
-    Required = 2,
+    Auto = host::TOOL_CHOICE_AUTO,
+    None = host::TOOL_CHOICE_NONE,
+    Required = host::TOOL_CHOICE_REQUIRED,
 }
 
 impl ToolChoice {
     pub fn from_raw(raw: i32) -> Option<Self> {
         match raw {
-            0 => Some(Self::Auto),
-            1 => Some(Self::None),
-            2 => Some(Self::Required),
+            host::TOOL_CHOICE_AUTO => Some(Self::Auto),
+            host::TOOL_CHOICE_NONE => Some(Self::None),
+            host::TOOL_CHOICE_REQUIRED => Some(Self::Required),
             _ => None,
         }
     }

@@ -3,7 +3,7 @@
 use crate::Defaults;
 use crate::draft::{Draft, Reasoning, ToolChoice, Tools};
 use crate::error::{Failure, Outcome, Rejection, bad_request};
-use crate::fields::{body_view, copy, dump_as_parsed, member_str, non_null, number, push};
+use crate::fields::{body_view, concat, copy, dump_as_parsed, member_str, non_null, number, push};
 use crate::host::{Host, HostField};
 use crate::message::{Content, message};
 use crate::reasoning;
@@ -76,7 +76,7 @@ pub fn decode(text: &[u8], defaults: &Defaults, host: &mut impl Host) -> Outcome
         return Err(Failure::Rejected(Rejection {
             status: 404,
             code: "model_not_found",
-            message: format!("model '{model}' is not served by this process"),
+            message: concat(&["model '", &model, "' is not served by this process"])?,
         }));
     }
     draft.model = Some(model);

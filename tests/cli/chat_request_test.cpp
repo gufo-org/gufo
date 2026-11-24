@@ -899,8 +899,8 @@ std::string MessagesBody(std::mt19937_64& random) {
 
 // ---------------------------------------------------------------------------
 // Mutations of a body: a value at a random path changes type, an object
-// loses or repeats a member, a number changes spelling, or a string or key
-// gains a NUL or non-ASCII byte.
+// loses, renames or repeats a member, a number changes spelling, or a string
+// or key gains a NUL or non-ASCII byte.
 
 const char* const kNumbers[] = {"1.0",        "1e2", "-0",  "9007199254740993",
                                 "4294967296", "-1",  "0.5", "2147483648"};
@@ -937,15 +937,17 @@ Value Mutate(std::mt19937_64& random, const Value& value, std::size_t& target) {
         if (value.is_object() && !value.empty()) {
           Value out = Value::object();
           const std::size_t pick = random() % value.size();
-          const bool drop = random() % 2;
+          // Drop, rename or repeat the member at `pick`.
+          const std::size_t edit = random() % 3;
           std::size_t index = 0;
           for (const auto& [key, member] : value.members()) {
-            if (index == pick && drop) {
-              ++index;
+            const bool picked = index++ == pick;
+            if (picked && edit == 0)
               continue;
-            }
-            out.append_member(index == pick ? Spice(random, key) : key, member);
-            ++index;
+            out.append_member(picked && edit == 1 ? Spice(random, key) : key,
+                              member);
+            if (picked && edit == 2)
+              out.append_member(key, member);
           }
           return out;
         }

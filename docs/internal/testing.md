@@ -196,13 +196,14 @@ image URLs, rejects chosen schemas and logs every call. Generated bodies, half
 of them built only from valid members, cover roles, content parts, images,
 historical tool calls, tools, namespaces, tool choices, reasoning controls,
 budgets, token limits and the shared sampling, stop and format fields; seeded
-mutations change a value's type, drop or rename a member, respell a number and
-insert NUL or non-ASCII bytes, and byte edits make parse errors. Each must give
+mutations change a value's type, drop, rename or repeat a member, respell a
+number and insert NUL or non-ASCII bytes, and byte edits make parse errors. Each must give
 the same request, the same rejection (status, code and message) and the same
 log, under three server settings. A rejected fragment alone may differ: the
 shim leaves its request unchanged where C++ filled part of it. It runs in
 `check-pr` in under half a second; the crate's Rust tests cover the check
-order, the body view the C++ helpers get and the C ABI.
+order, the body view the C++ helpers get, the C ABI and, under a failing
+allocator, `NO_MEMORY` instead of an abort for copies of large values.
 
 `cache_disk_manifest_test` compares the Rust disk manifest codec and CRC-64
 (`src/core/cache_manifest`), through `src/cache/disk.hpp`, with a frozen copy

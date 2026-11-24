@@ -58,6 +58,26 @@ pub enum HostField {
     StopSequences = 7,
 }
 
+/// `GufoChatRole`: `tokenization::ChatRole`.
+pub const ROLE_SYSTEM: i32 = 0;
+pub const ROLE_DEVELOPER: i32 = 1;
+pub const ROLE_USER: i32 = 2;
+pub const ROLE_ASSISTANT: i32 = 3;
+pub const ROLE_TOOL: i32 = 4;
+
+/// `GufoChatEffort`: `ReasoningEffort`.
+pub const EFFORT_MINIMAL: u8 = 0;
+pub const EFFORT_LOW: u8 = 1;
+pub const EFFORT_MEDIUM: u8 = 2;
+pub const EFFORT_HIGH: u8 = 3;
+pub const EFFORT_XHIGH: u8 = 4;
+pub const EFFORT_MAX: u8 = 5;
+
+/// `GufoChatToolChoice`: `ChatRequest::ToolChoice`.
+pub const TOOL_CHOICE_AUTO: i32 = 0;
+pub const TOOL_CHOICE_NONE: i32 = 1;
+pub const TOOL_CHOICE_REQUIRED: i32 = 2;
+
 pub const HOST_OK: c_int = 0;
 pub const HOST_REJECTED: c_int = 1;
 

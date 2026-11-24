@@ -23,7 +23,8 @@ mod tools;
 use draft::{Draft, Reasoning, ToolChoice, Tools};
 use error::Failure;
 use gufo_ffi::guard;
-use host::{Callbacks, GufoChatHost, Host};
+use host::{Callbacks, Host};
+pub use host::{GufoChatEvent, GufoChatHost, GufoChatMessage, GufoChatRejection, HostField};
 use std::ffi::c_void;
 
 #[repr(C)]
@@ -103,8 +104,11 @@ impl GufoChatReasoning {
             enabled: optional_bool(self.enabled)?,
             effort: match self.effort {
                 -1 => None,
-                0..=5 => Some(u8::try_from(self.effort).ok()?),
-                _ => return None,
+                raw => Some(
+                    u8::try_from(raw)
+                        .ok()
+                        .filter(|effort| *effort <= host::EFFORT_MAX)?,
+                ),
             },
             preserve_thinking: optional_bool(self.preserve_thinking)?,
             budget_tokens: match self.has_budget {
@@ -120,27 +124,60 @@ impl GufoChatReasoning {
 impl GufoChatDefaults {
     /// # Safety
     /// The byte ranges and the name array are readable for the call.
-    unsafe fn decode(&self) -> Option<Defaults> {
+    unsafe fn decode(&self) -> Result<Defaults, GufoChatDecode> {
+        // SAFETY: as the caller guarantees for `decode_inner`.
+        let defaults = unsafe { self.decode_inner() }.ok_or(GufoChatDecode::Internal)?;
+        defaults.map_err(|_| GufoChatDecode::NoMemory)
+    }
+
+    /// # Safety
+    /// As for `decode`.
+    unsafe fn decode_inner(&self) -> Option<Result<Defaults, Failure>> {
         // SAFETY: the caller guarantees the model id bytes.
         let model = unsafe { gufo_ffi::input(self.model_id.data, self.model_id.len) }?;
         // SAFETY: the caller guarantees `tool_name_count` names.
         let names = unsafe { gufo_ffi::input(self.tool_names, self.tool_name_count) }?;
-        let mut tool_names = Vec::new();
-        tool_names.try_reserve_exact(names.len()).ok()?;
+        let mut slices = Vec::new();
+        if slices.try_reserve_exact(names.len()).is_err() {
+            return Some(Err(Failure::NoMemory));
+        }
         for name in names {
             // SAFETY: as above, for each name's bytes.
-            let bytes = unsafe { gufo_ffi::input(name.data, name.len) }?;
-            tool_names.push(bytes.to_vec());
+            slices.push(unsafe { gufo_ffi::input(name.data, name.len) }?);
         }
-        Some(Defaults {
+        let reasoning = self.reasoning.decode()?;
+        let tool_choice = ToolChoice::from_raw(self.tool_choice)?;
+        let owned = || -> Result<Defaults, Failure> {
+            let tool_names = copy_names(&slices)?;
             // Served names are UTF-8; others reach messages as replacements.
-            model_id: String::from_utf8_lossy(model).into_owned(),
-            require_model: self.require_model != 0,
-            reasoning: self.reasoning.decode()?,
-            tool_names,
-            tool_choice: ToolChoice::from_raw(self.tool_choice)?,
-        })
+            let model_id = match std::str::from_utf8(model) {
+                Ok(model) => fields::copy(model)?,
+                Err(_) => String::from_utf8_lossy(model).into_owned(),
+            };
+            Ok(Defaults {
+                model_id,
+                require_model: self.require_model != 0,
+                reasoning,
+                tool_names,
+                tool_choice,
+            })
+        };
+        Some(owned())
     }
+}
+
+/// Owned copies of the request's tool names.
+fn copy_names(names: &[impl AsRef<[u8]>]) -> Result<Vec<Vec<u8>>, Failure> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(names.len())?;
+    for name in names {
+        let name = name.as_ref();
+        let mut owned = Vec::new();
+        owned.try_reserve_exact(name.len())?;
+        owned.extend_from_slice(name);
+        out.push(owned);
+    }
+    Ok(out)
 }
 
 /// Which body a decode reads.
@@ -175,26 +212,26 @@ pub fn decode(
     defaults: &Defaults,
     host: &mut impl Host,
 ) -> Result<Draft, Failure> {
-    let fragment = || {
-        Draft::new(
+    let fragment = || -> Result<Draft, Failure> {
+        Ok(Draft::new(
             defaults.reasoning,
-            Tools::new(defaults.tool_names.clone(), defaults.tool_choice),
-        )
+            Tools::new(copy_names(&defaults.tool_names)?, defaults.tool_choice),
+        ))
     };
     match api {
         Api::Chat => chat::decode(body, defaults, host),
         Api::Responses => responses::decode(body, defaults, host),
         Api::Messages => anthropic::decode(body, defaults, host),
         Api::ResponseControls => {
-            let mut draft = fragment();
+            let mut draft = fragment()?;
             responses::decode_controls(body, &mut draft, host).map(|()| draft)
         }
         Api::ResponseItem => {
-            let mut draft = fragment();
+            let mut draft = fragment()?;
             responses::decode_item(body, &mut draft, host).map(|()| draft)
         }
         Api::AnthropicTools => {
-            let mut draft = fragment();
+            let mut draft = fragment()?;
             anthropic::decode_tools(body, &mut draft, host).map(|()| draft)
         }
     }
@@ -247,8 +284,9 @@ pub unsafe extern "C" fn gufo_chat_decode(
             return GufoChatDecode::Internal;
         };
         // SAFETY: the caller guarantees the byte ranges `defaults` names.
-        let Some(defaults) = (unsafe { defaults.decode() }) else {
-            return GufoChatDecode::Internal;
+        let defaults = match unsafe { defaults.decode() } {
+            Ok(defaults) => defaults,
+            Err(status) => return status,
         };
         let Some(mut callbacks) = Callbacks::new(host, context) else {
             return GufoChatDecode::Internal;
