@@ -345,7 +345,6 @@ struct Engine::Impl {
   float* d_qs = nullptr;
   int* d_step;  // {token, position, row within its session}
   unsigned* d_counter;
-  unsigned* d_acnt;  // fused decode attention: [kMaxB][8] split counters
   unsigned* d_ccnt;  // fused controller apply + norm: [kMaxB][4]
   fs::SlotEntry* d_tbl;
   const float* d_states[16];
@@ -696,8 +695,6 @@ struct Engine::Impl {
           "pinned");
     d_counter = reinterpret_cast<unsigned*>(NewInts(B));
     Check(hipMemset(d_counter, 0, B * 4), "counter");
-    d_acnt = reinterpret_cast<unsigned*>(NewInts(B * 8));
-    Check(hipMemset(d_acnt, 0, B * 8 * 4), "attention counters");
     d_ccnt = reinterpret_cast<unsigned*>(NewInts(B * 4));
     Check(hipMemset(d_ccnt, 0, B * 4 * 4), "controller counters");
     d_tbl = static_cast<fs::SlotEntry*>(
@@ -1475,7 +1472,6 @@ struct Engine::Impl {
       aa.tau_alpha = cfg->log_scale_alpha;
       aa.ldp = kSProj;
       aa.ws_tok = static_cast<int>(kMaxSplit * 8 * 12);
-      aa.cnt = d_acnt;
       if (!verify_mode) {
         fs::KvAttnDecode(ds, ka, aa, nb);
       } else {

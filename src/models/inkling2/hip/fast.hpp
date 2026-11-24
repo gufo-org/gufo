@@ -259,11 +259,10 @@ struct AttnArgs {
                    // [nb][3072], sink [nb][24]
   int ws_tok = 0;  // token stride of ws_m / ws_l (floats); ws_o is ws_tok * 128
   int nrows = 0;   // attn_decode_rows: rows of the step (groups of NB per z)
-  unsigned* cnt = nullptr;  // KvAttnDecode: [nb][8] zero, self-resetting
 };
 void AttnDecode(hipStream_t s, const AttnArgs& a, int nb = 1);
-/// KvPrep then AttnDecode in one launch, for rows of distinct sessions (no
-/// verification capture): the same arithmetic.
+/// KvPrep and the attention in one launch, then the split reduction, for rows
+/// of distinct sessions (no verification capture): the same arithmetic.
 void KvAttnDecode(hipStream_t s, const KvPrepArgs& kv, const AttnArgs& a,
                   int nb = 1);
 /// AttnDecode of nb (2 to 4) rows of one session at consecutive positions

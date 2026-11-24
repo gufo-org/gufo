@@ -2952,16 +2952,15 @@ __global__ __launch_bounds__(128) void decode_reduce(AttnArgs a) {
   reduce_head(a, blockIdx.x, blockIdx.z, sc, sred);
 }
 
-// attn_decode of distinct sessions' rows with its neighbours folded in: the
-// block of the split holding the row's position first writes the kv head's
-// K/V row (k_kvprep), and the last split block of a kv head to finish
-// combines its three heads (decode_reduce). Same arithmetic as the three
-// launches.
+// attn_decode of distinct sessions' rows with k_kvprep folded in: the block of
+// the split holding the row's position first writes the kv head's K/V row.
+// decode_reduce combines the splits in its own launch (24 heads x rows blocks
+// in parallel; folded into the last split block it serialises the three heads
+// of a kv head, 0.5% slower per token). Same arithmetic as the three launches.
 template<int NW>
 __global__ __launch_bounds__(NW * 32) void attn_decode_fused(AttnArgs a,
                                                              KvPrepArgs kv) {
   __shared__ float red[32];
-  __shared__ unsigned last;
   const int kvh = blockIdx.x, split = blockIdx.y, tk = blockIdx.z;
   {
     const int p0 = a.pos[tk];
@@ -2972,21 +2971,6 @@ __global__ __launch_bounds__(NW * 32) void attn_decode_fused(AttnArgs a,
     }
   }
   attn_decode_body<NW>(a);
-  __threadfence();
-  __syncthreads();
-  if (threadIdx.x == 0)
-    last = atomicAdd(&a.cnt[tk * NKV + kvh], 1u) == gridDim.y - 1;
-  __syncthreads();
-  if (!last)
-    return;
-  __threadfence();
-  if (threadIdx.x == 0)
-    a.cnt[tk * NKV + kvh] = 0;
-  __shared__ float sc[1024];
-  for (int r = 0; r < 3; ++r) {
-    reduce_head(a, kvh * 3 + r, tk, sc, red);
-    __syncthreads();
-  }
 }
 }  // namespace ia
 
@@ -4611,6 +4595,7 @@ void AttnDecode(hipStream_t s, const AttnArgs& a, int nb) {
 void KvAttnDecode(hipStream_t s, const KvPrepArgs& kv, const AttnArgs& a,
                   int nb) {
   ia::attn_decode_fused<4><<<dim3(8, a.nsplit, nb), 128, 0, s>>>(a, kv);
+  ia::decode_reduce<<<dim3(24, 1, nb), 128, 0, s>>>(a);
   Chk("attn_decode_fused");
 }
 void AttnDecodeRows(hipStream_t s, const AttnArgs& a0, int nb) {
