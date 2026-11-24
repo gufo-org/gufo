@@ -54,6 +54,10 @@ pub struct GufoHttpRequestView {
     pub peer_addr: GufoHttpSliceView,
     pub http11: c_int,
     pub cancel: *mut GufoHttpCancel,
+    /// Nonzero when the transport refused the request before reading it
+    /// whole: the HTTP status (400, 413, 431 or 500) to answer with. The body
+    /// is then empty and the connection closes after the response.
+    pub rejection: c_int,
 }
 
 pub type GufoHttpBytesSink = Option<extern "C" fn(*mut c_void, *const u8, usize)>;

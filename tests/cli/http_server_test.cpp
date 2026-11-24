@@ -390,8 +390,14 @@ void TestFramingAndMetrics() {
   ExpectStatus(
       server.Send("POST /echo HTTP/1.1\r\nContent-Length: 4\r\n\r\nx", true),
       400);
-  ExpectStatus(
-      server.Send("POST /echo HTTP/1.1\r\nContent-Length: 8193\r\n\r\n"), 413);
+  // A refused request is answered like any other: a browser client can read
+  // the error, and the log names it by request ID.
+  const auto too_large =
+      server.Send("POST /echo HTTP/1.1\r\nContent-Length: 8193\r\n\r\n");
+  ExpectStatus(too_large, 413);
+  assert(too_large.find("payload_too_large") != std::string::npos);
+  assert(too_large.find("Access-Control-Allow-Origin: *") != std::string::npos);
+  assert(!ResponseRequestId(too_large).empty());
   const std::string payload(5000, 'x');
   const auto echo = server.Send(
       "POST /echo HTTP/1.1\r\nContent-Length: 5000\r\nContent-Length: "
@@ -3041,6 +3047,42 @@ void TestKeepAlivePipelinedConnectionCounts() {
   net::CloseSocket(fd);
 }
 
+// A kept-alive connection is serving until its streamed body ends: it counts
+// toward the limit and is never evicted while the stream is still writing.
+void TestKeepAliveStreamingConnectionCounts() {
+  RunningServer server({.max_connections = 1,
+                        .keep_alive = true,
+                        .keep_alive_idle_timeout = std::chrono::seconds(30)});
+  const int fd = server.Connect();
+  const std::string request =
+      "POST /sse-held HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+  assert(net::SendNoSignal(fd, request.data(), request.size()) ==
+         static_cast<ssize_t>(request.size()));
+  std::string streamed;
+  const auto read_until = [&](std::string_view marker) {
+    while (streamed.find(marker) == std::string::npos) {
+      char buffer[4096];
+      const auto count = ::read(fd, buffer, sizeof(buffer));
+      assert(count > 0);
+      streamed.append(buffer, static_cast<std::size_t>(count));
+    }
+  };
+  read_until("data: first\n\n");
+  ExpectStatus(streamed, 200);
+
+  const int next = server.Connect();
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  assert(net::SendNoSignal(next, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  ExpectStatus(ReadFramedResponse(next), 503);
+  net::CloseSocket(next);
+
+  server.held_stream.release();
+  read_until("0\r\n\r\n");
+  assert(streamed.find("data: [DONE]\n\n") != std::string::npos);
+  net::CloseSocket(fd);
+}
+
 // Responses that cannot be followed on the same socket close it: a HEAD
 // answer never carries its body, an upgrade request the route declines keeps
 // its trailing bytes, and a malformed request may leave unread bytes. An SSE
@@ -4036,6 +4078,7 @@ int main() {
   TestKeepAliveIdleTimeoutCloses();
   TestKeepAliveClosesUnterminatedStream();
   TestKeepAlivePipelinedConnectionCounts();
+  TestKeepAliveStreamingConnectionCounts();
   TestKeepAliveCloseDecisions();
   TestKeepAliveRequestLimit();
   TestStreamingFraming();

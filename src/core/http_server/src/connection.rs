@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use http::{HeaderValue, Method, Request, Response, StatusCode, Version};
 use http_body_util::{BodyExt, Limited};
-use hyper::body::Incoming;
+use hyper::body::{Body, Frame, Incoming, SizeHint};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -21,10 +21,20 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, oneshot, watch};
+use tokio::time::Sleep;
 
-use crate::bridge::{GufoHttpCancel, GufoHttpResponder, ResponseBody};
+use crate::bridge::{GufoHttpCancel, GufoHttpResponder, ResponseBody, StreamAbortError};
 use crate::platform::format_peer_addr;
 use crate::{GufoHttpHeaderView, GufoHttpRequestView, GufoHttpSliceView};
+
+/// A request body that stops arriving, or a client that stops reading its
+/// response, fails after this long without progress, like the socket timeouts
+/// the C++ transport set.
+const STALL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Without a keep-alive idle limit, a request head gets the same allowance as
+/// any other stalled read.
+const FIRST_HEAD_TIMEOUT: Duration = STALL_TIMEOUT;
 
 pub(crate) struct HandlerCallback {
     pub(crate) func: extern "C" fn(*mut c_void, *const GufoHttpRequestView, *mut GufoHttpResponder),
@@ -108,37 +118,111 @@ impl ConnectionTracker {
         Some((id, evict))
     }
 
-    pub(crate) fn mark_serving(&self, id: usize) {
+    fn set_state(&self, id: usize, serving: bool, parked: bool) {
         if let Ok(mut guard) = self.conns.lock() {
             if let Some(entry) = guard.get_mut(&id) {
-                entry.serving = true;
-                entry.parked_since = None;
+                entry.serving = serving;
+                entry.parked_since = parked.then(Instant::now);
             }
         }
     }
 
-    pub(crate) fn mark_parked(&self, id: usize) {
-        if let Ok(mut guard) = self.conns.lock() {
-            if let Some(entry) = guard.get_mut(&id) {
-                entry.serving = false;
-                entry.parked_since = Some(Instant::now());
-            }
-        }
-    }
-
-    pub(crate) fn remove(&self, id: usize) {
+    fn remove(&self, id: usize) {
         if let Ok(mut guard) = self.conns.lock() {
             guard.remove(&id);
         }
     }
 
-    pub(crate) fn evict_all(&self) {
-        if let Ok(mut guard) = self.conns.lock() {
-            for entry in guard.values_mut() {
-                entry.parked_since = None;
-                entry.evict.notify_one();
-            }
+    /// True once every admitted connection and the handlers it started have
+    /// finished.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.conns.lock().map_or(true, |guard| guard.is_empty())
+    }
+}
+
+/// An admitted connection's entry in the tracker. The connection task and
+/// every handler it starts hold the slot, so a handler still running after
+/// its client left, or a WebSocket session after the upgrade, keeps the
+/// entry until it returns.
+pub(crate) struct ConnSlot {
+    tracker: Arc<ConnectionTracker>,
+    id: usize,
+}
+
+impl ConnSlot {
+    pub(crate) fn new(tracker: Arc<ConnectionTracker>, id: usize) -> Self {
+        Self { tracker, id }
+    }
+
+    /// A request is in progress: it counts toward the limit.
+    fn mark_serving(&self) {
+        self.tracker.set_state(self.id, true, false);
+    }
+
+    /// The connection waits idle for its next request and may be evicted.
+    fn mark_parked(&self) {
+        self.tracker.set_state(self.id, false, true);
+    }
+
+    /// The response is done and the connection is closing.
+    fn mark_released(&self) {
+        self.tracker.set_state(self.id, false, false);
+    }
+}
+
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        self.tracker.remove(self.id);
+    }
+}
+
+/// What the connection's slot becomes once a response body has been written.
+#[derive(Clone, Copy)]
+enum AfterResponse {
+    /// Idle keep-alive: parked and evictable.
+    Park,
+    /// The connection closes after this response.
+    Release,
+    /// A pipelined request already arrived, or an upgraded session continues:
+    /// the connection stays serving.
+    Keep,
+}
+
+/// A response body that updates the connection slot once hyper has finished
+/// with it, so a streamed response counts as serving until its last chunk.
+pub(crate) struct ConnectionBody {
+    inner: ResponseBody,
+    slot: Arc<ConnSlot>,
+    after: AfterResponse,
+}
+
+impl Drop for ConnectionBody {
+    fn drop(&mut self) {
+        match self.after {
+            AfterResponse::Park => self.slot.mark_parked(),
+            AfterResponse::Release => self.slot.mark_released(),
+            AfterResponse::Keep => {}
         }
+    }
+}
+
+impl Body for ConnectionBody {
+    type Data = Bytes;
+    type Error = StreamAbortError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.get_mut().inner).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
     }
 }
 
@@ -156,10 +240,9 @@ pub(crate) async fn reject_overloaded(mut stream: TcpStream) {
 }
 
 pub(crate) struct ConnectionContext {
-    pub(crate) conn_id: usize,
+    pub(crate) slot: Arc<ConnSlot>,
     pub(crate) evict: Arc<Notify>,
     pub(crate) shutdown: watch::Receiver<bool>,
-    pub(crate) tracker: Arc<ConnectionTracker>,
     pub(crate) options: Arc<ConnectionOptions>,
     pub(crate) runtime: Handle,
 }
@@ -167,6 +250,33 @@ pub(crate) struct ConnectionContext {
 struct TrackedStream {
     inner: TcpStream,
     pipelined: Arc<AtomicBool>,
+    /// Armed while a write cannot make progress; a client that stops reading
+    /// for `stall_timeout` fails the connection, which cancels its handler.
+    write_stall: Option<Pin<Box<Sleep>>>,
+    stall_timeout: Duration,
+}
+
+impl TrackedStream {
+    fn track_write<T>(
+        &mut self,
+        cx: &mut Context<'_>,
+        res: Poll<io::Result<T>>,
+    ) -> Poll<io::Result<T>> {
+        if res.is_ready() {
+            self.write_stall = None;
+            return res;
+        }
+        let stall = self
+            .write_stall
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(self.stall_timeout)));
+        if stall.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "client stopped reading the response",
+            )));
+        }
+        Poll::Pending
+    }
 }
 
 impl AsyncRead for TrackedStream {
@@ -195,7 +305,21 @@ impl AsyncWrite for TrackedStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
+        let res = Pin::new(&mut self.inner).poll_write(cx, buf);
+        self.track_write(cx, res)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let res = Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
+        self.track_write(cx, res)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -213,10 +337,9 @@ pub(crate) async fn serve_connection(
     ctx: ConnectionContext,
 ) {
     let ConnectionContext {
-        conn_id,
+        slot,
         evict,
         mut shutdown,
-        tracker,
         options,
         runtime,
     } = ctx;
@@ -230,6 +353,8 @@ pub(crate) async fn serve_connection(
     let io = TokioIo::new(TrackedStream {
         inner: stream,
         pipelined: Arc::clone(&pipelined),
+        write_stall: None,
+        stall_timeout: STALL_TIMEOUT,
     });
     let mut builder = http1::Builder::new();
     builder
@@ -237,11 +362,15 @@ pub(crate) async fn serve_connection(
         .title_case_headers(true)
         .max_headers(101)
         .timer(TokioTimer::new());
+    // hyper times every request head, including the wait before it, with this
+    // one timeout: a reused connection idles for at most the keep-alive limit.
     if options.keep_alive && !options.keep_alive_idle_timeout.is_zero() {
         builder.header_read_timeout(options.keep_alive_idle_timeout);
+    } else {
+        builder.header_read_timeout(FIRST_HEAD_TIMEOUT);
     }
 
-    let tracker_svc = Arc::clone(&tracker);
+    let slot_svc = Arc::clone(&slot);
     let options_svc = Arc::clone(&options);
     let runtime_svc = runtime.clone();
     let shutdown_svc = shutdown.clone();
@@ -250,7 +379,7 @@ pub(crate) async fn serve_connection(
     let pipelined_svc = Arc::clone(&pipelined);
 
     let service = service_fn(move |req: Request<Incoming>| {
-        let tracker = Arc::clone(&tracker_svc);
+        let slot = Arc::clone(&slot_svc);
         let options = Arc::clone(&options_svc);
         let runtime = runtime_svc.clone();
         let shutdown = shutdown_svc.clone();
@@ -258,21 +387,42 @@ pub(crate) async fn serve_connection(
         let peer = Arc::clone(&peer_svc);
         let pipelined = Arc::clone(&pipelined_svc);
         async move {
-            tracker.mark_serving(conn_id);
+            slot.mark_serving();
             let n = served.fetch_add(1, Ordering::AcqRel) + 1;
             let client_wants_keep = client_requests_keep_alive(&req);
             let force_close = !options.keep_alive
                 || !client_wants_keep
                 || n >= options.max_requests_per_connection;
             let has_body = req.headers().contains_key(http::header::CONTENT_LENGTH);
-            let resp =
-                handle_hyper_request(req, &peer, force_close, &options, &runtime, shutdown).await;
+            let resp = handle_hyper_request(
+                req,
+                &peer,
+                force_close,
+                &options,
+                &runtime,
+                shutdown,
+                Arc::clone(&slot),
+            )
+            .await;
             let saw_trailing = pipelined.swap(false, Ordering::AcqRel);
-            let is_pipelined = !has_body && saw_trailing;
-            if !force_close && !is_pipelined {
-                tracker.mark_parked(conn_id);
-            }
-            Ok::<_, std::convert::Infallible>(resp)
+            let closing = resp
+                .headers()
+                .get(http::header::CONNECTION)
+                .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"close"));
+            let after = if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+                AfterResponse::Keep
+            } else if closing {
+                AfterResponse::Release
+            } else if !has_body && saw_trailing {
+                AfterResponse::Keep
+            } else {
+                AfterResponse::Park
+            };
+            Ok::<_, std::convert::Infallible>(resp.map(|inner| ConnectionBody {
+                inner,
+                slot,
+                after,
+            }))
         }
     });
 
@@ -283,13 +433,12 @@ pub(crate) async fn serve_connection(
             Pin::as_mut(&mut conn).graceful_shutdown();
             let _ = tokio::time::timeout(Duration::from_secs(2), &mut conn).await;
         }
-        _ = shutdown.changed() => {
-            Pin::as_mut(&mut conn).graceful_shutdown();
-            let _ = tokio::time::timeout(Duration::from_secs(2), &mut conn).await;
-        }
+        // Shutdown closes the connection at once, like the C++ transport's
+        // socket shutdown: dropping it cancels a request in progress, so
+        // `run` returns as soon as handlers observe the cancellation.
+        // `wait_for` also sees a shutdown sent before this task first ran.
+        _ = async { drop(shutdown.wait_for(|stopped| *stopped).await) } => {}
     }
-
-    tracker.remove(conn_id);
 }
 
 struct CancelOnDrop {
@@ -323,6 +472,63 @@ fn client_requests_keep_alive(req: &Request<Incoming>) -> bool {
     }
 }
 
+/// Status a request is refused with before its handler runs, or `None`.
+fn reject_head(req: &Request<Incoming>, options: &ConnectionOptions) -> Option<u16> {
+    if req.headers().len() > 100 {
+        return Some(431);
+    }
+    // Requests keep Content-Length framing only, as before.
+    if req.headers().contains_key(http::header::TRANSFER_ENCODING) {
+        return Some(400);
+    }
+    if let Some(cl_val) = req.headers().get(http::header::CONTENT_LENGTH) {
+        let Some(cl) = cl_val
+            .to_str()
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        else {
+            return Some(400);
+        };
+        if cl > options.max_request_body_bytes as u64 {
+            return Some(413);
+        }
+    }
+    None
+}
+
+/// Reads a whole request body. Each frame must arrive within the stall
+/// timeout. Errors carry the status the request is refused with.
+async fn read_body(body: Incoming, limit: usize) -> Result<Bytes, u16> {
+    let mut body = Limited::new(body, limit);
+    let mut out: Vec<u8> = Vec::new();
+    loop {
+        let frame = match tokio::time::timeout(STALL_TIMEOUT, body.frame()).await {
+            Err(_) => return Err(400),
+            Ok(None) => break,
+            Ok(Some(Err(err))) => {
+                return Err(
+                    if err
+                        .downcast_ref::<http_body_util::LengthLimitError>()
+                        .is_some()
+                    {
+                        413
+                    } else {
+                        400
+                    },
+                );
+            }
+            Ok(Some(Ok(frame))) => frame,
+        };
+        if let Ok(data) = frame.into_data() {
+            if out.try_reserve(data.len()).is_err() {
+                return Err(500);
+            }
+            out.extend_from_slice(&data);
+        }
+    }
+    Ok(Bytes::from(out))
+}
+
 async fn handle_hyper_request(
     mut req: Request<Incoming>,
     peer_addr: &str,
@@ -330,67 +536,21 @@ async fn handle_hyper_request(
     options: &ConnectionOptions,
     runtime: &Handle,
     shutdown: watch::Receiver<bool>,
+    slot: Arc<ConnSlot>,
 ) -> Response<ResponseBody> {
-    if req.headers().len() > 100 {
-        return json_error(
-            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-            "request has more than 100 header fields",
-            "invalid_request_error",
-            "request_header_fields_too_large",
-            true,
-        );
-    }
+    // A refused request still reaches the handler, which answers it with the
+    // same headers, request ID and log line as any other response.
+    let mut rejection = reject_head(&req, options);
 
-    // Reject Transfer-Encoding on requests to preserve existing framing contract.
-    if req.headers().contains_key(http::header::TRANSFER_ENCODING) {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "malformed request",
-            "invalid_request_error",
-            "bad_request",
-            true,
-        );
-    }
-
-    // Check Content-Length before reading the body.
-    if let Some(cl_val) = req.headers().get(http::header::CONTENT_LENGTH) {
-        let Ok(cl_str) = cl_val.to_str() else {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "malformed request",
-                "invalid_request_error",
-                "bad_request",
-                true,
-            );
-        };
-        let Ok(cl) = cl_str.trim().parse::<u64>() else {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "malformed request",
-                "invalid_request_error",
-                "bad_request",
-                true,
-            );
-        };
-        if cl > options.max_request_body_bytes as u64 {
-            return json_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "request body is too large",
-                "invalid_request_error",
-                "payload_too_large",
-                true,
-            );
-        }
-    }
-
-    let is_upgrade = req
-        .headers()
-        .get(http::header::UPGRADE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| {
-            v.split(',')
-                .any(|token| token.trim().eq_ignore_ascii_case("websocket"))
-        });
+    let is_upgrade = rejection.is_none()
+        && req
+            .headers()
+            .get(http::header::UPGRADE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| {
+                v.split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("websocket"))
+            });
     let on_upgrade = if is_upgrade {
         Some(hyper::upgrade::on(&mut req))
     } else {
@@ -408,35 +568,19 @@ async fn handle_hyper_request(
         .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
         .collect();
 
-    let body_bytes = if is_upgrade {
+    let body_bytes = if rejection.is_some() || is_upgrade {
         Bytes::new()
     } else {
-        let limited = Limited::new(req.into_body(), options.max_request_body_bytes);
-        match limited.collect().await {
-            Ok(collected) => collected.to_bytes(),
-            Err(err) => {
-                if err
-                    .downcast_ref::<http_body_util::LengthLimitError>()
-                    .is_some()
-                {
-                    return json_error(
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        "request body is too large",
-                        "invalid_request_error",
-                        "payload_too_large",
-                        true,
-                    );
-                }
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    "malformed request",
-                    "invalid_request_error",
-                    "bad_request",
-                    true,
-                );
+        match read_body(req.into_body(), options.max_request_body_bytes).await {
+            Ok(bytes) => bytes,
+            Err(status) => {
+                rejection = Some(status);
+                Bytes::new()
             }
         }
     };
+    // Unread or partial body bytes cannot be followed by another request.
+    let force_close = force_close || rejection.is_some();
 
     let cancel = Arc::new(AtomicBool::new(false));
     let mut cancel_guard = CancelOnDrop {
@@ -451,6 +595,8 @@ async fn handle_hyper_request(
     let cancel_for_handler = Arc::clone(&cancel);
 
     runtime.spawn_blocking(move || {
+        // The connection stays counted until its handler returns.
+        let _slot = slot;
         let header_views: Vec<GufoHttpHeaderView> = headers
             .iter()
             .map(|(k, v)| GufoHttpHeaderView {
@@ -494,6 +640,7 @@ async fn handle_hyper_request(
             },
             http11: i32::from(http11),
             cancel: &mut cancel_token as *mut GufoHttpCancel,
+            rejection: rejection.map_or(0, i32::from),
         };
         let mut responder = GufoHttpResponder::new(
             resp_tx,
@@ -554,4 +701,35 @@ fn json_error(
     builder
         .body(ResponseBody::Full(Some(Bytes::from(body))))
         .unwrap_or_else(|_| Response::new(ResponseBody::Empty))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stalled_client_fails_the_write() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let client = TcpStream::connect(listener.local_addr().expect("address"))
+            .await
+            .expect("connect");
+        let (server, _) = listener.accept().await.expect("accept");
+        let mut stream = TrackedStream {
+            inner: server,
+            pipelined: Arc::new(AtomicBool::new(false)),
+            write_stall: None,
+            stall_timeout: Duration::from_millis(100),
+        };
+        // The client never reads, so the socket buffers fill and stay full.
+        let chunk = vec![0u8; 1 << 20];
+        let error = loop {
+            if let Err(error) = stream.write_all(&chunk).await {
+                break error;
+            }
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        drop(client);
+    }
 }

@@ -2147,13 +2147,16 @@ void HttpServer::dispatch_request(const GufoHttpRequestView& view,
 
   const Trace::RequestScope trace_scope(req.request_id);
   try {
+    // The transport refuses a request it could not read whole; the reply
+    // carries the usual headers and log line.
+    const int rejection = view.rejection;
     const bool log_request =
         req.method == "POST" || req.method == "DELETE" ||
         req.path == "/v1/models" || req.path.ends_with("/content") ||
         req.path == "/v1/realtime" || req.path == "/v1/audio/speech/stream";
     const LogLevel request_level =
         log_request ? LogLevel::kInfo : LogLevel::kDebug;
-    if (Logger::Enabled(request_level)) {
+    if (rejection == 0 && Logger::Enabled(request_level)) {
       Logger::Log(request_level, "http",
                   "request=" + req.request_id + " event=received method=" +
                       req.method + " path=" + req.path +
@@ -2161,7 +2164,20 @@ void HttpServer::dispatch_request(const GufoHttpRequestView& view,
     }
 
     HttpResponse resp;
-    if (req.method == "OPTIONS") {
+    if (rejection == 413) {
+      resp = Err(413, "Payload Too Large", "request body is too large",
+                 "invalid_request_error", "payload_too_large");
+    } else if (rejection == 431) {
+      resp = Err(431, "Request Header Fields Too Large",
+                 "request has more than 100 header fields",
+                 "invalid_request_error", "request_header_fields_too_large");
+    } else if (rejection == 400) {
+      resp = Err(400, "Bad Request", "malformed request",
+                 "invalid_request_error", "bad_request");
+    } else if (rejection != 0) {
+      resp = Err(500, "Internal Server Error", "internal server error",
+                 "internal_error", "server_exception");
+    } else if (req.method == "OPTIONS") {
       resp = {.status = 204, .reason = "No Content"};
     } else {
       traced = Trace::Enabled() && IsTracedRoute(req);
@@ -2179,33 +2195,28 @@ void HttpServer::dispatch_request(const GufoHttpRequestView& view,
       response_started = true;
       const auto headers = BuildResponseHeaders(resp);
       const auto header_views = ToHeaderViews(headers);
-      auto* ws_fn =
-          new std::function<void(WebSocket&)>(std::move(resp.websocket));
+      // The session runs on this thread inside the call, within this
+      // request's trace scope; the request is logged once it ends.
+      struct WebSocketRun {
+        std::function<void(WebSocket&)>* handler;
+        std::exception_ptr failure;
+      } run{&resp.websocket, nullptr};
       const auto ws_trampoline = [](void* ctx,
                                     GufoWsSession* session) noexcept {
-        std::unique_ptr<std::function<void(WebSocket&)>> fn(
-            static_cast<std::function<void(WebSocket&)>*>(ctx));
-        if (session == nullptr) {
-          return;
-        }
+        auto& run = *static_cast<WebSocketRun*>(ctx);
         try {
           WebSocket socket(session);
-          (*fn)(socket);
-        } catch (const std::exception& e) {
-          Logger::Error(
-              "http",
-              std::string("event=websocket_exception reason=") + e.what());
+          (*run.handler)(socket);
         } catch (...) {
-          Logger::Error("http", "event=websocket_exception reason=unknown");
+          run.failure = std::current_exception();
         }
       };
       connected = gufo_http_respond_websocket(
                       responder, resp.status,
                       header_views.empty() ? nullptr : header_views.data(),
-                      header_views.size(), ws_trampoline, ws_fn) != 0;
-      if (!connected) {
-        delete ws_fn;
-      }
+                      header_views.size(), ws_trampoline, &run) != 0;
+      if (run.failure)
+        std::rethrow_exception(run.failure);
     } else if (resp.streaming_body) {
       const auto headers = BuildResponseHeaders(resp);
       const auto header_views = ToHeaderViews(headers);

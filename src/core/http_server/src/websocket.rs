@@ -7,21 +7,28 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use gufo_websocket::{Event, Reader};
-use hyper::upgrade::OnUpgrade;
+use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::runtime::Handle;
-use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
 
 const MAX_MESSAGE_BYTES: usize = 4 << 20;
 const MAX_QUEUE_BYTES: usize = 8 << 20;
+/// Bounds the queue of small messages too, which the byte budget alone allows
+/// to grow without limit (empty frames cost no bytes).
+const MAX_QUEUE_MESSAGES: usize = 128;
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often a waiting reader checks the idle timeout.
+const IDLE_POLL: Duration = Duration::from_millis(500);
 
 const OPCODE_TEXT: u8 = 0x01;
 const OPCODE_BINARY: u8 = 0x02;
 const OPCODE_CLOSE: u8 = 0x08;
 const OPCODE_PONG: u8 = 0x0A;
+
+type Writer = Arc<AsyncMutex<WriteHalf<TokioIo<Upgraded>>>>;
 
 pub(crate) struct WsHandlerCallback {
     func: extern "C" fn(*mut std::ffi::c_void, *mut GufoWsSession),
@@ -50,22 +57,65 @@ struct MessageQueue {
     closed: bool,
 }
 
+/// State shared by the session, its frame reader and the shutdown watcher.
+struct Shared {
+    queue: Mutex<MessageQueue>,
+    ready: Condvar,
+    closed: AtomicBool,
+    /// Wakes a reader waiting for client bytes once the session closes.
+    reader_wake: Notify,
+    epoch: Instant,
+    last_activity_ms: AtomicU64,
+}
+
+impl Shared {
+    /// Marks the session closed; true for the call that closed it.
+    fn mark_closed(&self) -> bool {
+        let was_open = {
+            // `receive` checks the flag under this lock, so a close cannot
+            // slip between its check and its wait.
+            let mut guard = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            guard.closed = true;
+            !self.closed.swap(true, Ordering::AcqRel)
+        };
+        self.ready.notify_all();
+        self.reader_wake.notify_one();
+        was_open
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    fn touch(&self) {
+        let elapsed = self.epoch.elapsed().as_millis() as u64;
+        self.last_activity_ms.store(elapsed, Ordering::Release);
+    }
+
+    fn idle(&self) -> bool {
+        let now_ms = self.epoch.elapsed().as_millis() as u64;
+        let last = self.last_activity_ms.load(Ordering::Acquire);
+        now_ms.saturating_sub(last) >= IDLE_TIMEOUT.as_millis() as u64
+    }
+}
+
 /// Opaque WebSocket session passed to C++ `WebSocket`.
 pub struct GufoWsSession {
     runtime: Handle,
-    writer: Arc<AsyncMutex<WriteHalf<TokioIo<hyper::upgrade::Upgraded>>>>,
-    queue: Arc<(Mutex<MessageQueue>, Condvar)>,
-    closed: Arc<AtomicBool>,
-    epoch: Instant,
-    last_send_ms: Arc<AtomicU64>,
+    writer: Writer,
+    shared: Arc<Shared>,
 }
 
 impl GufoWsSession {
+    /// Waits for the next client message. Returns `None` once the session has
+    /// closed, even with messages still queued, as the C++ transport did.
     pub(crate) fn receive(&self) -> Option<Vec<u8>> {
-        let (lock, cvar) = &*self.queue;
-        let mut guard = lock.lock().ok()?;
+        let mut guard = self.shared.queue.lock().ok()?;
         while guard.messages.is_empty() && !guard.closed {
-            guard = cvar.wait(guard).ok()?;
+            guard = self.shared.ready.wait(guard).ok()?;
+        }
+        if guard.closed {
+            return None;
         }
         let msg = guard.messages.pop_front()?;
         guard.queued_bytes = guard.queued_bytes.saturating_sub(msg.len());
@@ -81,60 +131,31 @@ impl GufoWsSession {
     }
 
     pub(crate) fn close(&self, code: u16) {
-        if self.mark_closed() {
-            let payload = code.to_be_bytes();
-            let _ = self.write_raw_frame(OPCODE_CLOSE, &payload);
+        if self.shared.mark_closed() {
+            let _ = write_frame(
+                &self.runtime,
+                &self.writer,
+                OPCODE_CLOSE,
+                &code.to_be_bytes(),
+            );
         }
     }
 
     pub(crate) fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
-    }
-
-    fn mark_closed(&self) -> bool {
-        let was_open = !self.closed.swap(true, Ordering::AcqRel);
-        if was_open {
-            let (lock, cvar) = &*self.queue;
-            if let Ok(mut guard) = lock.lock() {
-                guard.closed = true;
-            }
-            cvar.notify_all();
-        }
-        was_open
+        self.shared.is_closed()
     }
 
     fn send_frame(&self, opcode: u8, payload: &[u8]) -> bool {
-        if self.closed.load(Ordering::Acquire) {
+        if self.shared.is_closed() {
             return false;
         }
-        let ok = self.write_raw_frame(opcode, payload);
+        let ok = write_frame(&self.runtime, &self.writer, opcode, payload);
         if ok {
-            let elapsed = self.epoch.elapsed().as_millis() as u64;
-            self.last_send_ms.store(elapsed, Ordering::Release);
+            self.shared.touch();
         } else {
-            self.mark_closed();
+            self.shared.mark_closed();
         }
         ok
-    }
-
-    fn write_raw_frame(&self, opcode: u8, payload: &[u8]) -> bool {
-        let header = encode_frame_header(opcode, payload.len());
-        let writer = Arc::clone(&self.writer);
-        let payload_copy = payload.to_vec();
-        self.runtime.block_on(async move {
-            let mut guard = writer.lock().await;
-            let write_fut = async {
-                guard.write_all(&header).await?;
-                if !payload_copy.is_empty() {
-                    guard.write_all(&payload_copy).await?;
-                }
-                guard.flush().await
-            };
-            matches!(
-                tokio::time::timeout(SEND_TIMEOUT, write_fut).await,
-                Ok(Ok(()))
-            )
-        })
     }
 }
 
@@ -153,164 +174,169 @@ fn encode_frame_header(opcode: u8, len: usize) -> Vec<u8> {
     header
 }
 
-pub(crate) async fn run_websocket_upgrade(
-    on_upgrade: OnUpgrade,
-    runtime: Handle,
-    mut shutdown: watch::Receiver<bool>,
+/// Writes one unmasked final frame from a blocking thread. A client that
+/// stops reading fails the write after `SEND_TIMEOUT`.
+fn write_frame(runtime: &Handle, writer: &Writer, opcode: u8, payload: &[u8]) -> bool {
+    let header = encode_frame_header(opcode, payload.len());
+    runtime.block_on(async {
+        let mut guard = writer.lock().await;
+        let write = async {
+            guard.write_all(&header).await?;
+            if !payload.is_empty() {
+                guard.write_all(payload).await?;
+            }
+            guard.flush().await
+        };
+        matches!(tokio::time::timeout(SEND_TIMEOUT, write).await, Ok(Ok(())))
+    })
+}
+
+/// Sends a close frame with `code` if this call closes the session.
+fn close_with(runtime: &Handle, writer: &Writer, shared: &Shared, payload: &[u8]) {
+    if shared.mark_closed() {
+        let _ = write_frame(runtime, writer, OPCODE_CLOSE, payload);
+    }
+}
+
+/// Runs one WebSocket session on the calling blocking thread: a reader thread
+/// parses client frames into the message queue while `handler` consumes it.
+/// Returns once the handler has returned and the reader has stopped.
+pub(crate) fn run_websocket_session(
+    upgraded: Upgraded,
+    runtime: &Handle,
+    shutdown: watch::Receiver<bool>,
     handler: WsHandlerCallback,
 ) {
-    let Ok(upgraded) = on_upgrade.await else {
-        // Notify C++ with null session so it can free `ws_context`.
-        handler.call(std::ptr::null_mut());
-        return;
-    };
-    let io = TokioIo::new(upgraded);
-    let (mut read_half, write_half) = tokio::io::split(io);
-
-    let writer = Arc::new(AsyncMutex::new(write_half));
-    let queue = Arc::new((
-        Mutex::new(MessageQueue {
+    let (mut read_half, write_half) = tokio::io::split(TokioIo::new(upgraded));
+    let writer: Writer = Arc::new(AsyncMutex::new(write_half));
+    let shared = Arc::new(Shared {
+        queue: Mutex::new(MessageQueue {
             messages: VecDeque::new(),
             queued_bytes: 0,
             closed: false,
         }),
-        Condvar::new(),
-    ));
-    let closed = Arc::new(AtomicBool::new(false));
-    let epoch = Instant::now();
-    let last_send_ms = Arc::new(AtomicU64::new(0));
+        ready: Condvar::new(),
+        closed: AtomicBool::new(false),
+        reader_wake: Notify::new(),
+        epoch: Instant::now(),
+        last_activity_ms: AtomicU64::new(0),
+    });
 
     let reader_runtime = runtime.clone();
     let reader_writer = Arc::clone(&writer);
-    let reader_queue = Arc::clone(&queue);
-    let reader_closed = Arc::clone(&closed);
-    let reader_last_send = Arc::clone(&last_send_ms);
-
+    let reader_shared = Arc::clone(&shared);
     let reader_task = runtime.spawn_blocking(move || {
+        let runtime = reader_runtime;
+        let writer = reader_writer;
+        let shared = reader_shared;
         let mut frame_reader = Reader::new(MAX_MESSAGE_BYTES);
-        let send_control = |opcode: u8, payload: &[u8]| {
-            let header = encode_frame_header(opcode, payload.len());
-            let w = Arc::clone(&reader_writer);
-            let p = payload.to_vec();
-            reader_runtime.block_on(async move {
-                let mut guard = w.lock().await;
-                let fut = async {
-                    guard.write_all(&header).await?;
-                    if !p.is_empty() {
-                        guard.write_all(&p).await?;
-                    }
-                    guard.flush().await
-                };
-                let _ = tokio::time::timeout(SEND_TIMEOUT, fut).await;
-            });
-        };
-
         let mut timed_out = false;
-        loop {
-            if reader_closed.load(Ordering::Acquire) {
-                break;
-            }
+        while !shared.is_closed() {
             let event = frame_reader.next(&mut |buf: &mut [u8]| {
                 let mut offset = 0;
                 while offset < buf.len() {
-                    if reader_closed.load(Ordering::Acquire) {
+                    if shared.is_closed() {
                         return false;
                     }
-                    let res = reader_runtime.block_on(async {
-                        tokio::time::timeout(
-                            Duration::from_millis(500),
-                            read_half.read(&mut buf[offset..]),
-                        )
-                        .await
+                    let res = runtime.block_on(async {
+                        tokio::select! {
+                            read = read_half.read(&mut buf[offset..]) => Some(read),
+                            _ = shared.reader_wake.notified() => None,
+                            _ = tokio::time::sleep(IDLE_POLL) => Some(Err(
+                                std::io::ErrorKind::WouldBlock.into(),
+                            )),
+                        }
                     });
                     match res {
-                        Ok(Ok(0)) => return false,
-                        Ok(Ok(n)) => offset += n,
-                        Ok(Err(_)) => return false,
-                        Err(_) => {
-                            let now_ms = epoch.elapsed().as_millis() as u64;
-                            let last = reader_last_send.load(Ordering::Acquire);
-                            if now_ms.saturating_sub(last) >= IDLE_TIMEOUT.as_millis() as u64 {
+                        None | Some(Ok(0)) => return false,
+                        Some(Ok(n)) => offset += n,
+                        Some(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            // A client that only listens to streamed output
+                            // is not idle.
+                            if shared.idle() {
                                 timed_out = true;
                                 return false;
                             }
                         }
+                        Some(Err(_)) => return false,
                     }
                 }
                 true
             });
 
+            // Replies go out only while the session is open, so none follows
+            // the server's own close frame.
             match event {
                 Event::End => {
                     if timed_out {
-                        send_control(OPCODE_CLOSE, &1001u16.to_be_bytes());
+                        close_with(&runtime, &writer, &shared, &1001u16.to_be_bytes());
                     }
                     break;
                 }
                 Event::Message(msg) => {
-                    let now_ms = epoch.elapsed().as_millis() as u64;
-                    reader_last_send.store(now_ms, Ordering::Release);
-                    let (lock, cvar) = &*reader_queue;
-                    let Ok(mut guard) = lock.lock() else {
+                    shared.touch();
+                    let Ok(mut guard) = shared.queue.lock() else {
                         break;
                     };
-                    if guard.queued_bytes.saturating_add(msg.len()) > MAX_QUEUE_BYTES {
-                        drop(guard);
-                        send_control(OPCODE_CLOSE, &1009u16.to_be_bytes());
+                    if guard.closed {
                         break;
                     }
-                    guard.queued_bytes += msg.len();
-                    guard.messages.push_back(msg.to_vec());
-                    cvar.notify_one();
+                    let mut owned = Vec::new();
+                    let refusal = if guard.messages.len() >= MAX_QUEUE_MESSAGES
+                        || guard.queued_bytes.saturating_add(msg.len()) > MAX_QUEUE_BYTES
+                    {
+                        Some(1009u16)
+                    } else if owned.try_reserve_exact(msg.len()).is_err() {
+                        Some(1011u16)
+                    } else {
+                        None
+                    };
+                    if let Some(code) = refusal {
+                        drop(guard);
+                        close_with(&runtime, &writer, &shared, &code.to_be_bytes());
+                        break;
+                    }
+                    owned.extend_from_slice(msg);
+                    guard.queued_bytes += owned.len();
+                    guard.messages.push_back(owned);
+                    drop(guard);
+                    shared.ready.notify_one();
                 }
                 Event::Ping(payload) => {
-                    send_control(OPCODE_PONG, payload);
+                    if !shared.is_closed() && !write_frame(&runtime, &writer, OPCODE_PONG, payload)
+                    {
+                        break;
+                    }
                 }
                 Event::Close(payload) => {
-                    send_control(OPCODE_CLOSE, payload);
+                    close_with(&runtime, &writer, &shared, payload);
                     break;
                 }
                 Event::Error(code) => {
-                    send_control(OPCODE_CLOSE, &code.to_be_bytes());
+                    close_with(&runtime, &writer, &shared, &code.to_be_bytes());
                     break;
                 }
             }
         }
-
-        reader_closed.store(true, Ordering::Release);
-        let (lock, cvar) = &*reader_queue;
-        if let Ok(mut guard) = lock.lock() {
-            guard.closed = true;
-        }
-        cvar.notify_all();
+        shared.mark_closed();
     });
 
-    let mut session = Box::new(GufoWsSession {
+    // Server shutdown closes the session, which wakes a handler waiting in
+    // `receive` and makes its sends fail.
+    let watcher_shared = Arc::clone(&shared);
+    let mut watcher_shutdown = shutdown;
+    let watcher = runtime.spawn(async move {
+        let _ = watcher_shutdown.wait_for(|stopped| *stopped).await;
+        watcher_shared.mark_closed();
+    });
+
+    let mut session = GufoWsSession {
         runtime: runtime.clone(),
-        writer: Arc::clone(&writer),
-        queue: Arc::clone(&queue),
-        closed: Arc::clone(&closed),
-        epoch,
-        last_send_ms,
-    });
-
-    let mut handler_task = runtime.spawn_blocking(move || {
-        handler.call(&mut *session);
-        session.close(1000);
-    });
-
-    tokio::select! {
-        _ = &mut handler_task => {}
-        _ = shutdown.changed() => {
-            closed.store(true, Ordering::Release);
-            let (lock, cvar) = &*queue;
-            if let Ok(mut guard) = lock.lock() {
-                guard.closed = true;
-            }
-            cvar.notify_all();
-            let _ = handler_task.await;
-        }
-    }
-    closed.store(true, Ordering::Release);
-    let _ = reader_task.await;
+        writer,
+        shared,
+    };
+    handler.call(&mut session);
+    session.close(1000);
+    watcher.abort();
+    let _ = runtime.block_on(reader_task);
 }

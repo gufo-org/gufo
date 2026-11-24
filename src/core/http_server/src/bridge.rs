@@ -16,7 +16,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, Sleep};
 
-use crate::websocket::{WsHandlerCallback, run_websocket_upgrade};
+use crate::websocket::{WsHandlerCallback, run_websocket_session};
 
 /// Bounded channel capacity for streaming responses. Keeps memory bounded while
 /// letting the producer run ahead of socket flushes by a few chunks.
@@ -349,6 +349,10 @@ impl GufoHttpResponder {
         self.tx = Some(tx);
     }
 
+    /// Sends the upgrade response, then runs the session on this handler
+    /// thread once hyper hands over the connection. Returns after the session
+    /// ends, so the request is logged, traced and counted for its whole
+    /// duration.
     pub(crate) fn respond_websocket(
         &mut self,
         status: u16,
@@ -372,11 +376,10 @@ impl GufoHttpResponder {
         if tx.send(response).is_err() {
             return false;
         }
-        let runtime = self.runtime.clone();
-        let shutdown = self.shutdown.clone();
-        self.runtime.spawn(async move {
-            run_websocket_upgrade(on_upgrade, runtime, shutdown, ws_handler).await;
-        });
+        let Ok(upgraded) = self.runtime.block_on(on_upgrade) else {
+            return false;
+        };
+        run_websocket_session(upgraded, &self.runtime, self.shutdown.clone(), ws_handler);
         true
     }
 }

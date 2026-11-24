@@ -294,6 +294,43 @@ void ListeningClientIsNotIdle() {
   }
   server.stop();
 }
+
+// An upgraded session keeps its connection slot until it ends, so open
+// WebSockets count toward the connection limit like any request in progress.
+void WebSocketHoldsConnectionSlot() {
+  HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, nullptr,
+                    {.max_connections = 1});
+  server.add("GET", "/ws-echo", [](const HttpRequest& req, auto&) {
+    return UpgradeWebSocket(req, [](WebSocket& socket) {
+      std::string text;
+      while (socket.Receive(&text) && text != "bye")
+        assert(socket.SendText(text));
+    });
+  });
+  std::string error;
+  assert(server.start(&error));
+  std::jthread thread([&] { server.run(); });
+  {
+    Client client(server.port(), "/ws-echo");
+    assert(client.headers.starts_with("HTTP/1.1 101"));
+    client.Text("ping");
+    const auto [opcode, payload] = client.Receive();
+    assert(opcode == 1 && payload == "ping");
+    assert(HttpGet(server.port(), "/missing").starts_with("HTTP/1.1 503"));
+    client.Text("bye");
+    assert(client.Receive().first == 8);
+  }
+  // The slot frees once the session has closed.
+  bool admitted = false;
+  for (int attempt = 0; attempt < 200 && !admitted; ++attempt) {
+    admitted = HttpGet(server.port(), "/missing").starts_with("HTTP/1.1 404");
+    if (!admitted)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  assert(admitted);
+  server.stop();
+}
+
 // 24 kHz PCM16 of silence (quiet noise) or a speech-loud tone.
 std::string Pcm(double seconds, bool loud) {
   std::vector<float> samples(std::size_t(seconds * 24000));
@@ -592,6 +629,7 @@ void RealtimeStreams() {
 
 int main() {
   ListeningClientIsNotIdle();
+  WebSocketHoldsConnectionSlot();
   VoiceActivityDetects();
   std::atomic<int> tts_calls{0}, asr_calls{0};
   std::atomic<bool> entered{false}, cancelled{false};

@@ -35,6 +35,10 @@ typedef struct GufoHttpRequestView {
   GufoHttpSliceView peer_addr;
   int http11;
   GufoHttpCancel* cancel;
+  /* Nonzero when the transport refused the request before reading it whole:
+     the HTTP status (400, 413, 431 or 500) to answer with. The body is then
+     empty and the connection closes after the response. */
+  int rejection;
 } GufoHttpRequestView;
 
 typedef void (*GufoHttpBytesSink)(void* context, const uint8_t* data,
@@ -52,7 +56,8 @@ typedef void (*GufoHttpHandlerFn)(void* context,
    and after each request. May be NULL. */
 typedef int (*GufoHttpDeviceLostFn)(void* context);
 
-/* Called on a blocking thread after a WebSocket upgrade completes. */
+/* Called on the request's handler thread once a WebSocket upgrade completes,
+   from within gufo_http_respond_websocket. */
 typedef void (*GufoWsHandlerFn)(void* context, GufoWsSession* session);
 
 typedef struct GufoHttpServerConfig {
@@ -128,9 +133,10 @@ int gufo_http_stream_end(GufoHttpStream* stream, int complete);
 void gufo_http_stream_abort_deferred(GufoHttpStream* stream,
                                      GufoHttpResponder* responder);
 
-/* Upgrades the connection to a WebSocket (status 101) and runs ws_handler on a
-   blocking thread once the upgrade completes. Returns 1 if upgrade response
-   was sent, 0 otherwise. */
+/* Upgrades the connection to a WebSocket (status 101), runs ws_handler on the
+   calling thread once the upgrade completes and returns after the session has
+   ended. Returns 1 if the session ran, 0 if the upgrade failed, in which case
+   ws_handler is not called. */
 int gufo_http_respond_websocket(GufoHttpResponder* responder, int status,
                                 const GufoHttpHeaderView* headers,
                                 size_t headers_len, GufoWsHandlerFn ws_handler,

@@ -12,7 +12,8 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::sync::watch;
 
 use crate::connection::{
-    ConnectionContext, ConnectionOptions, ConnectionTracker, reject_overloaded, serve_connection,
+    ConnSlot, ConnectionContext, ConnectionOptions, ConnectionTracker, reject_overloaded,
+    serve_connection,
 };
 use crate::platform::{bind_tcp_listener, is_addr_in_use, parse_listen_address};
 
@@ -137,10 +138,9 @@ impl GufoHttpServer {
                         match tracker.try_admit(options.max_connections) {
                             Some((conn_id, evict)) => {
                                 let ctx = ConnectionContext {
-                                    conn_id,
+                                    slot: Arc::new(ConnSlot::new(Arc::clone(&tracker), conn_id)),
                                     evict,
                                     shutdown: shutdown_rx.clone(),
-                                    tracker: Arc::clone(&tracker),
                                     options: Arc::clone(&options),
                                     runtime: handle.clone(),
                                 };
@@ -155,14 +155,21 @@ impl GufoHttpServer {
                     }
                 }
             }
+            // Like the joins of the C++ transport, return only once every
+            // connection and the handlers it started have finished, so no
+            // handler or device-loss hook outlives `run`.
+            drop(listener);
+            while !tracker.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
             Ok(())
         })
     }
 
     pub(crate) fn stop(&self) {
+        // Every connection task watches the shutdown flag and closes at once.
         if !self.stopped.swap(true, Ordering::AcqRel) {
             let _ = self.shutdown_tx.send(true);
-            self.tracker.evict_all();
         }
     }
 }
