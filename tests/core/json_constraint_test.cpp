@@ -2,18 +2,23 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <barrier>
 #include <cassert>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <utility>
 
+#include "src/core/json_constraint_describe.hpp"
 #include "src/core/sampling.hpp"
 
 using gufo::json::parse;
@@ -3181,7 +3186,203 @@ void TestProviderCallListAndKeywordSyntax() {
   assert(!Accepts(*calls, " to=h<|msg|><call name=\"h\"><p a>x</p></call>"));
 }
 
+// Every way a schema becomes a grammar: response formats (strict or not,
+// closed or open objects) and tool parameters in each built-in syntax.
+std::vector<std::string> GrammarDigests(const gufo::json::Value& schema) {
+  using Format = JsonConstraint::ToolFormat;
+  const auto digest = [](const std::string& text) {
+    std::uint64_t hash = 14695981039346656037ull;
+    for (unsigned char byte : text)
+      hash = (hash ^ byte) * 1099511628211ull;
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out(16, '0');
+    for (int i = 15; i >= 0; --i, hash >>= 4)
+      out[static_cast<std::size_t>(i)] = kHex[hash & 15];
+    return out;
+  };
+  const auto describe = [&](const auto& build) {
+    try {
+      return digest(DescribeJsonConstraint(*build()));
+    } catch (const std::exception& error) {
+      return digest(std::string("error ") + error.what());
+    }
+  };
+  std::vector<std::string> digests;
+  for (const bool strict : {false, true})
+    for (const bool open : {false, true})
+      digests.push_back(describe(
+          [&] { return JsonConstraint::Compile(schema, strict, open); }));
+  for (const bool strict : {false, true})
+    for (const auto format : {Format::kJson, Format::kQwen, Format::kDeepSeek})
+      digests.push_back(describe([&] {
+        return JsonConstraint::ToolParameters(schema, strict, format);
+      }));
+  return digests;
+}
+
+// Compiled grammars stay byte-identical across compiler changes that must
+// not alter them. The fixture holds the schemas of these tests, of
+// openai_chat_test, of the llama.cpp goldens and seeded generated unions,
+// intersections and references, each with the digest of every grammar built
+// from it. --write-grammar-digests records them again after an intended
+// grammar change.
+void TestGrammarDigests(bool write) {
+  std::ifstream in(GUFO_JSON_CONSTRAINT_GRAMMARS);
+  assert(in && "grammar digests are present");
+  const auto fixture =
+      parse(std::string(std::istreambuf_iterator<char>(in), {}));
+  in.close();
+  std::size_t index = 0, grammars = 0, differences = 0;
+  std::vector<gufo::json::Value> rows;
+  for (const auto& row : fixture.find("schemas")->items()) {
+    const auto digests = GrammarDigests(*row.find("schema"));
+    if (write) {
+      auto list = gufo::json::Value::array();
+      for (const auto& digest : digests)
+        list.push_back(digest);
+      rows.push_back(row);
+      rows.back()["digests"] = std::move(list);
+    } else {
+      const auto& expected = row.find("digests")->items();
+      assert(expected.size() == digests.size());
+      for (std::size_t mode = 0; mode < digests.size(); ++mode, ++grammars)
+        if (expected[mode].str() != digests[mode]) {
+          std::cerr << "grammar digest mismatch: schema " << index << " mode "
+                    << mode << " " << row.find("schema")->dump() << "\n";
+          ++differences;
+        }
+    }
+    ++index;
+  }
+  if (write) {
+    std::ofstream out(GUFO_JSON_CONSTRAINT_GRAMMARS);
+    out << "{\"note\":" << fixture.find("note")->dump() << ",\"schemas\":[\n";
+    for (std::size_t i = 0; i < rows.size(); ++i)
+      out << (i ? ",\n" : "") << rows[i].dump();
+    out << "\n]}\n";
+    return;
+  }
+  assert(differences == 0);
+  assert(grammars >= 6000);
+}
+
+// Live heap bytes and their peak, from the replaceable allocation functions
+// below, so tests can bound a compile's memory on every platform.
+static std::atomic<std::size_t> heap_bytes{0}, heap_peak{0};
+
+void* operator new(std::size_t size) {
+  constexpr std::size_t kHeader = alignof(std::max_align_t);
+  auto* block = static_cast<unsigned char*>(std::malloc(size + kHeader));
+  if (!block)
+    throw std::bad_alloc();
+  *reinterpret_cast<std::size_t*>(block) = size;
+  const auto live = heap_bytes.fetch_add(size) + size;
+  for (auto peak = heap_peak.load();
+       live > peak && !heap_peak.compare_exchange_weak(peak, live);) {
+  }
+  return block + kHeader;
+}
+void* operator new[](std::size_t size) {
+  return operator new(size);
+}
+void operator delete(void* pointer) noexcept {
+  if (!pointer)
+    return;
+  constexpr std::size_t kHeader = alignof(std::max_align_t);
+  auto* block = static_cast<unsigned char*>(pointer) - kHeader;
+  heap_bytes.fetch_sub(*reinterpret_cast<std::size_t*>(block));
+  std::free(block);
+}
+void operator delete[](void* pointer) noexcept {
+  operator delete(pointer);
+}
+void operator delete(void* pointer, std::size_t) noexcept {
+  operator delete(pointer);
+}
+void operator delete[](void* pointer, std::size_t) noexcept {
+  operator delete(pointer);
+}
+
+// A definition whose union or intersection names itself several times once
+// cost branches^8 visits to classify each parameter's value kinds, before
+// any grammar was built: 32 branches would take about 10^12 visits. A chain
+// of definitions that each name the next several times, reached through a
+// `$ref` or `anyOf` with sibling constraints, once expanded into
+// branches^length intersections: 21 s and 6.4 GB per compile for a 2.6 KB
+// schema. The chains now stop at the intersection budget, which strict
+// compilation reports; non-strict native arguments fall back as other
+// over-budget schemas do. Work is bounded by those outcomes and the heap
+// peak; the generous time limit only guards against a hang.
+void TestRecursiveCombinatorsCompileQuickly() {
+  using Format = JsonConstraint::ToolFormat;
+  constexpr auto kHang = std::chrono::seconds(30);
+  const auto bounded = [&](const gufo::json::Value& schema) {
+    const auto start = std::chrono::steady_clock::now();
+    const auto base = heap_bytes.load();
+    heap_peak = base;
+    for (const auto format : {Format::kJson, Format::kQwen, Format::kDeepSeek})
+      for (const bool strict : {false, true})
+        try {
+          (void)JsonConstraint::ToolParameters(schema, strict, format);
+        } catch (const std::invalid_argument&) {
+          assert(strict);
+        }
+    for (const bool strict : {false, true})
+      try {
+        (void)JsonConstraint::Compile(schema, strict);
+      } catch (const std::invalid_argument&) {
+      }
+    assert(std::chrono::steady_clock::now() - start < kHang);
+    assert(heap_peak.load() - base < 64u << 20);
+  };
+  const auto references = [](const std::string& target, int count) {
+    std::string parts;
+    for (int i = 0; i < count; ++i)
+      parts +=
+          std::string(i ? "," : "") + R"({"$ref":"#/$defs/)" + target + R"("})";
+    return parts;
+  };
+  for (const std::string kind : {"allOf", "anyOf", "oneOf"})
+    for (const int branches : {2, 12, 32})
+      bounded(parse(R"({"type":"object","$defs":{"a":{")" + kind + R"(":[)" +
+                    references("a", branches) +
+                    R"(]}},"properties":{"x":{"$ref":"#/$defs/a"}}})"));
+  constexpr int branches = 16, length = 6;
+  for (const bool through_any_of : {false, true}) {
+    std::string defs;
+    for (int i = 0; i < length; ++i)
+      defs += "\"d" + std::to_string(i) + R"(":{"anyOf":[)" +
+              references("d" + std::to_string(i + 1), branches) + "]},";
+    defs += "\"d" + std::to_string(length) + R"(":{"type":"string"})";
+    const std::string value =
+        through_any_of ? R"({"anyOf":[)" + references("d0", branches) +
+                             R"(],"minLength":1})"
+                       : R"({"$ref":"#/$defs/d0","minLength":1})";
+    const auto schema = parse(
+        R"({"type":"object","$defs":{)" + defs + R"(},"properties":{"x":)" +
+        value + R"(},"required":["x"],"additionalProperties":false})");
+    const auto start = std::chrono::steady_clock::now();
+    const auto base = heap_bytes.load();
+    heap_peak = base;
+    if (!through_any_of)
+      (void)JsonConstraint::ToolParameters(schema, false, Format::kQwen);
+    try {
+      (void)JsonConstraint::Compile(schema, true);
+      assert(false);
+    } catch (const std::invalid_argument& error) {
+      assert(std::string_view(error.what()) ==
+             "JSON Schema: schema intersection exceeds its resource budget");
+    }
+    assert(std::chrono::steady_clock::now() - start < kHang);
+    assert(heap_peak.load() - base < 256u << 20);
+  }
+}
+
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--write-grammar-digests") {
+    TestGrammarDigests(true);
+    return 0;
+  }
   // Batch probes for the independent Python JSON Schema validator. This
   // exercises the production byte matcher without requiring model weights.
   if (argc == 2 && std::string_view(argv[1]) == "--probe") {
@@ -3214,6 +3415,8 @@ int main(int argc, char** argv) {
     }
     return 0;
   }
+  TestGrammarDigests(false);
+  TestRecursiveCombinatorsCompileQuickly();
   TestNestedToolObjectDefaults();
   TestNumberDigitLimits();
   TestObjectMemberOrders();
