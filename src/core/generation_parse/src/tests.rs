@@ -385,3 +385,24 @@ fn a_panic_inside_feed_leaves_the_stream_refusing_input() {
         Err(Error::Internal)
     );
 }
+
+#[test]
+fn a_self_intersecting_schema_parses_quickly() {
+    // Each part of `a` is `a` again; checking a value once used to visit
+    // 3^17 schema nodes on every re-parse.
+    let mut config = config(Initial::Content, ToolChoice::Auto, true);
+    config.tools = vec![
+        Tool::new(
+            "t".to_owned(),
+            br##"{"type":"object","$defs":{"a":{"allOf":[{"$ref":"#/$defs/a"},{"$ref":"#/$defs/a"},{"$ref":"#/$defs/a"}]}},"properties":{"x":{"$ref":"#/$defs/a"}}}"##,
+        )
+        .unwrap(),
+    ];
+    let text = "<call:t>x=«1»;</call>";
+    let start = std::time::Instant::now();
+    let bytes: Vec<&[u8]> = text.as_bytes().chunks(1).collect();
+    let (out, error) = run(&config, &bytes, false);
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(error, None);
+    assert_eq!(out[2], r#"tools [("t", "{\"x\":\"1\"}", true)]"#);
+}

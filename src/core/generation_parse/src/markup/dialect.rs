@@ -40,7 +40,7 @@ fn accepted_count(
             continue;
         };
         match try_parse_json(trim(&argument.value))? {
-            Some(parsed) if accepts(schema, property, &parsed, 0) => {}
+            Some(parsed) if accepts(schema, property, &parsed)? => {}
             _ => return Ok(index),
         }
     }
