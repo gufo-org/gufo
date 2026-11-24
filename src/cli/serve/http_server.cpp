@@ -1614,6 +1614,19 @@ double KvCacheUsageRatio(const TextGenerationBackend& b) {
   return static_cast<double>(used) / static_cast<double>(capacity);
 }
 
+HttpResponse HudPageHandler(const HttpRequest&, TextGenerationBackend&) {
+  // The HUD page holds no data; it polls `/hud/api/state` itself.
+  HttpResponse page{
+      .status = 200, .reason = "OK", .body = std::string(HudPage())};
+  page.headers.emplace_back("Content-Type", "text/html; charset=utf-8");
+  page.headers.emplace_back("Cache-Control", "no-store");
+  return page;
+}
+
+HttpResponse HudStateHandler(const HttpRequest&, TextGenerationBackend& b) {
+  return Ok(HudStateJson(b));
+}
+
 HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
   std::ostringstream out;
   out << std::setprecision(std::numeric_limits<double>::max_digits10);
@@ -2093,6 +2106,8 @@ void HttpServer::register_routes() {
   add("GET", "/v1/slots", LlamaSlots);
   add("GET", "/metrics", LlamaMetrics);
   add("GET", "/v1/metrics", LlamaMetrics);
+  add("GET", "/hud", HudPageHandler);
+  add("GET", "/hud/api/state", HudStateHandler);
 
   // ---- sdapi ----
   add("POST", "/sdapi/v1/txt2img", NotImplemented);

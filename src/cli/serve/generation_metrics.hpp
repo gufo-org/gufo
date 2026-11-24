@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <sstream>
 
+#include "src/cli/serve/hud_state.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/core/json.hpp"
 
@@ -138,6 +139,7 @@ inline void RecordRequestMetrics(const TextGenerationBackend::Result& result) {
   if (tok_per_sec > 0.0) {
     detail::LastGenSpeed().store(tok_per_sec, std::memory_order_relaxed);
   }
+  RecordHudRequest(result);
 }
 
 inline std::string GenerationLogDetails(

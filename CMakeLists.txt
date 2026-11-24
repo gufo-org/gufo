@@ -530,11 +530,13 @@ add_library(gufo_http STATIC
   src/cli/serve/asr_websocket.cpp
   src/cli/serve/voice_websocket.cpp
   src/cli/serve/voice_page.cpp
+  src/cli/serve/hud_state.cpp
+  src/cli/serve/hud_page.cpp
   src/cli/serve/decision_service.cpp
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_qwen_text PNG::PNG)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_diagnostics gufo_qwen_text PNG::PNG)
 
 add_executable(gufo
   src/cli/main.cpp
