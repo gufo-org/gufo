@@ -68,8 +68,9 @@ avoid saving copies of `main`'s caches, and `caches.yml` keeps the total below
   concurrent run may be downloading it.
 - One run deletes at most 100 entries, one per second; the next run or the
   nightly sweep continues. A rate limit (HTTP 429, or a 403 reporting one) is
-  retried after `Retry-After` or `X-RateLimit-Reset` for up to 4 minutes in
-  total, then the prune stops with a warning. Any other failed delete, such as
+  retried after `Retry-After`, or `X-RateLimit-Reset` once the hourly quota is
+  spent, else after 60 s, doubling. Retries take up to 4 minutes in total, then
+  the prune stops with a warning. Any other failed delete, such as
   a missing permission, fails the job; an entry already gone does not.
 
 `tools/ci/prune_caches.py` implements this; its tests stub `gh`.

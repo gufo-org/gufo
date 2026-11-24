@@ -16,8 +16,8 @@ Magic Nix Cache entries, and one run deletes at most MAX_DELETES entries;
 the nightly sweep continues where a run stopped.
 
 GitHub rate-limits cache deletes. A 429, or a 403 that reports a rate limit,
-is retried after Retry-After or X-RateLimit-Reset, else with exponential
-backoff, for at most RETRY_SECONDS in total. Past that the prune stops with a
+is retried after Retry-After, or X-RateLimit-Reset once the primary quota is
+spent, else after 60 s doubling, for at most RETRY_SECONDS in total. Past that the prune stops with a
 warning and succeeds. Any other failed delete, such as a 403 for a missing
 actions: write permission, fails the job; a 404 means it is already gone.
 """
@@ -96,10 +96,13 @@ class Api:
     def wait_for(self, response: Response, attempt: int) -> float:
         if response.headers.get("retry-after", "").isdigit():
             return float(response.headers["retry-after"])
+        # The reset time belongs to the primary hourly quota; it only applies
+        # once that quota is spent. A secondary limit with quota left waits at
+        # least a minute, as GitHub asks, doubling up to the retry budget.
         reset = response.headers.get("x-ratelimit-reset", "")
-        if reset.isdigit():
+        if response.headers.get("x-ratelimit-remaining") == "0" and reset.isdigit():
             return max(1.0, float(reset) - self.clock())
-        return min(60.0, 5.0 * 2**attempt)
+        return 60.0 * 2**attempt
 
     def call(self, args: list[str]) -> Response:
         attempt = 0

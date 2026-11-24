@@ -96,15 +96,29 @@ class ParseTest(unittest.TestCase):
 class RetryTest(unittest.TestCase):
     def test_429_is_retried_after_retry_after(self):
         stub = StubGh([], [TOO_MANY, SECONDARY])
-        a, slept = api(stub)
+        a, slept = api(stub, retry_seconds=240)
         self.assertEqual(a.delete(1).status, 204)
-        self.assertEqual(slept[:2], [7.0, 5.0 * 2])  # Retry-After, then backoff.
+        self.assertEqual(slept[:2], [7.0, 120.0])  # Retry-After, then backoff.
 
-    def test_reset_header_sets_the_wait(self):
-        reset = PRUNE.Response(429, {"x-ratelimit-reset": str(int(NOW.timestamp()) + 42)}, "")
-        a, slept = api(StubGh([], [reset]))
+    def test_reset_header_applies_once_the_quota_is_spent(self):
+        reset = str(int(NOW.timestamp()) + 42)
+        spent = PRUNE.Response(429, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": reset}, "")
+        a, slept = api(StubGh([], [spent]))
         a.delete(1)
         self.assertEqual(slept[0], 42.0)
+
+    def test_secondary_limit_with_quota_left_backs_off_a_minute(self):
+        # Every response carries the primary reset, up to an hour away.
+        reset = str(int(NOW.timestamp()) + 2400)
+        left = PRUNE.Response(429, {"x-ratelimit-remaining": "4800", "x-ratelimit-reset": reset}, "")
+        stub = StubGh([], [left, left])
+        a, slept = api(stub, retry_seconds=240)
+        self.assertEqual(a.delete(1).status, 204)
+        self.assertEqual(slept[:2], [60.0, 120.0])
+        a, slept = api(StubGh([], [left] * 5), retry_seconds=240)
+        with self.assertRaises(PRUNE.RateLimited):
+            a.delete(1)
+        self.assertEqual(slept, [60.0, 120.0])  # 240 more would pass the budget.
 
     def test_retry_budget_stops_the_prune_without_failing(self):
         entries = [entry(i, "refs/pull/7/merge", f"k{i}", 5) for i in range(1, 4)]
