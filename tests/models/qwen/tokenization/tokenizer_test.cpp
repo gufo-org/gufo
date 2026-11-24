@@ -294,6 +294,224 @@ void TestUnicodeContractionBoundary() {
          "Unicode contraction prevents a merge into the following word");
 }
 
+// The same small byte-level tokenizer as Hugging Face tokenizer.json and as
+// its GGUF conversion: "Ġ" spells a space, "Í¡" the bytes CD A1 of U+0361
+// (a combining mark). Ids 18 and 19 are unused and padded to vocab_size 20.
+// The pipeline is the one the Qwen3.5 and Qwen3.8 tokenizer.json files use.
+constexpr std::string_view kQwen35TokenizerJson = R"json({"version":"1.0",
+  "added_tokens":[
+    {"id":11,"content":"<|endoftext|>","single_word":false,"lstrip":false,
+     "rstrip":false,"normalized":false,"special":true},
+    {"id":12,"content":"<|im_start|>","special":true},
+    {"id":13,"content":"<|im_end|>","special":true},
+    {"id":14,"content":"<think>","special":false},
+    {"id":15,"content":"</think>","special":false}],
+  "normalizer":{"type":"NFC"},
+  "pre_tokenizer":{"type":"Sequence","pretokenizers":[
+    {"type":"Split","pattern":{"Regex":"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"},
+     "behavior":"Isolated","invert":false},
+    {"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,
+     "use_regex":false}]},
+  "post_processor":{"type":"ByteLevel","add_prefix_space":false,
+    "trim_offsets":false,"use_regex":false},
+  "decoder":{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,
+    "use_regex":false},
+  "model":{"type":"BPE","dropout":null,"unk_token":null,
+    "continuing_subword_prefix":"","end_of_word_suffix":"","fuse_unk":false,
+    "byte_fallback":false,"ignore_merges":false,
+    "vocab":{"a":0,"b":1,"h":2,"i":3,"Ġ":4,"Í":5,"¡":6,"hi":7,"Ġhi":8,
+      "aÍ":9,"aÍ¡":10,"1":16,"11":17},
+    "merges":["h i",["Ġ","hi"],"a Í","aÍ ¡","1 1"]}})json";
+constexpr std::size_t kTokenizerJsonVocabSize = 20;
+
+// The fixture with the first `from` replaced by `to`.
+std::string TokenizerJsonWith(std::string_view from, std::string_view to) {
+  std::string json(kQwen35TokenizerJson);
+  const auto at = json.find(from);
+  Expect(at != std::string::npos, "fixture holds " + std::string(from));
+  return json.replace(at, from.size(), to);
+}
+
+void TestTokenizerJsonMatchesGguf() {
+  using gufo::tokenization::QwenTokenizer;
+  using gufo::tokenization::TokenId;
+  std::string err;
+  auto from_json = QwenTokenizer::CreateFromTokenizerJson(
+      kQwen35TokenizerJson, kTokenizerJsonVocabSize, &err);
+  Expect(from_json != nullptr, "tokenizer.json loads: " + err);
+
+  GgufTokenizerBuilder builder;
+  builder.AddMetadataString("tokenizer.ggml.model", "gpt2");
+  builder.AddMetadataString("tokenizer.ggml.pre", "qwen35");
+  builder.AddMetadataUint32("tokenizer.ggml.eos_token_id", 13U);
+  builder.AddMetadataUint32("tokenizer.ggml.bos_token_id", 11U);
+  builder.AddMetadataUint32("tokenizer.ggml.padding_token_id", 11U);
+  const std::vector<std::string> gguf_tokens{"a",
+                                             "b",
+                                             "h",
+                                             "i",
+                                             "Ġ",
+                                             "Í",
+                                             "¡",
+                                             "hi",
+                                             "Ġhi",
+                                             "aÍ",
+                                             "aÍ¡",
+                                             "<|endoftext|>",
+                                             "<|im_start|>",
+                                             "<|im_end|>",
+                                             "<think>",
+                                             "</think>",
+                                             "1",
+                                             "11",
+                                             "[PAD18]",
+                                             "[PAD19]"};
+  builder.AddMetadataStringArray("tokenizer.ggml.tokens", gguf_tokens);
+  builder.AddMetadataStringArray("tokenizer.ggml.merges",
+                                 {"h i", "Ġ hi", "a Í", "aÍ ¡", "1 1"});
+  auto binary = builder.Build();
+  auto reader =
+      gufo::core::GgufReader::OpenMemory(binary.data(), binary.size(), &err);
+  Expect(reader != nullptr, "tokenizer GGUF opens: " + err);
+  auto from_gguf = QwenTokenizer::CreateFromGguf(*reader, &err);
+  Expect(from_gguf != nullptr, "tokenizer GGUF loads: " + err);
+
+  Expect(from_json->GetVocabSize() == kTokenizerJsonVocabSize &&
+             from_gguf->GetVocabSize() == kTokenizerJsonVocabSize,
+         "tokenizer.json pads to the model vocabulary size");
+  Expect(from_json->GetEosTokenId() == 13U &&
+             from_json->GetBosTokenId() == 11U &&
+             from_json->GetPadTokenId() == 11U,
+         "tokenizer.json EOS, BOS and padding match the GGUF metadata");
+  Expect(from_json->GetEosTokenId() == from_gguf->GetEosTokenId() &&
+             from_json->GetBosTokenId() == from_gguf->GetBosTokenId() &&
+             from_json->GetPadTokenId() == from_gguf->GetPadTokenId(),
+         "EOS, BOS and padding are identical");
+  for (TokenId id = 0; id < kTokenizerJsonVocabSize; ++id) {
+    const std::vector<TokenId> one{id};
+    Expect(from_json->IsSpecialToken(id) == from_gguf->IsSpecialToken(id) &&
+               from_json->IsStopToken(id) == from_gguf->IsStopToken(id) &&
+               from_json->Decode(one) == from_gguf->Decode(one),
+           "token " + std::to_string(id) + " matches");
+  }
+  Expect(from_json->IsSpecialToken(14) && !from_json->IsSpecialToken(10),
+         "control tokens are special and BPE pieces are not");
+
+  gufo::tokenization::TokenizerOptions opts;
+  opts.parse_special_tokens = true;
+  for (const std::string_view text :
+       {"hi hi", "11 1", "a\u0361b",
+        "<|im_start|>hi<think>a\u0361</think><|im_end|>",
+        "ba\u0361 hi<|endoftext|>"}) {
+    const auto encoded = from_json->Encode(text, opts);
+    Expect(encoded == from_gguf->Encode(text, opts),
+           "tokenizer.json and GGUF encode alike: " + std::string(text));
+    Expect(from_json->Decode(encoded) == text,
+           "tokenizer.json round-trips: " + std::string(text));
+  }
+  Expect(from_json->Encode("hi hi") == std::vector<TokenId>({7, 8}),
+         "array and string merges both apply");
+  Expect(from_json->Encode("a\u0361") == std::vector<TokenId>({10}),
+         "the Qwen3.5 split keeps a combining mark with its letter");
+
+  Expect(from_json->Encode("11") == std::vector<TokenId>({16, 16}),
+         "the Qwen3.5 split keeps digits apart");
+
+  // Without `vocab_size` the table ends at the last entry.
+  auto unpadded = QwenTokenizer::CreateFromTokenizerJson(
+      std::string(kQwen35TokenizerJson), 0, &err);
+  Expect(unpadded != nullptr && unpadded->GetVocabSize() == 18,
+         "tokenizer.json without vocab_size loads unpadded: " + err);
+  // An added token may repeat its vocabulary entry.
+  Expect(QwenTokenizer::CreateFromTokenizerJson(
+             TokenizerJsonWith(R"("id":15,)",
+                               R"("id":13,"content":"<|im_end|>"},{"id":15,)"),
+             kTokenizerJsonVocabSize, &err) != nullptr,
+         "a repeated identical added token loads: " + err);
+}
+
+// Every file this tokenizer cannot encode exactly as the reference fails.
+void TestTokenizerJsonRejectsUnsupported() {
+  using gufo::tokenization::QwenTokenizer;
+  const auto rejected = [](const std::string& json, std::string_view what,
+                           std::size_t vocab_size = kTokenizerJsonVocabSize) {
+    std::string err;
+    Expect(QwenTokenizer::CreateFromTokenizerJson(json, vocab_size, &err) ==
+                   nullptr &&
+               !err.empty(),
+           "tokenizer.json is rejected: " + std::string(what));
+  };
+  rejected("{", "malformed JSON");
+  rejected(TokenizerJsonWith(R"("type":"BPE")", R"("type":"Unigram")"),
+           "non-BPE model");
+  // Pipeline: the Qwen3 split (no \p{M}), another normalizer or stage.
+  rejected(TokenizerJsonWith(R"([\\p{L}\\p{M}]+)", R"(\\p{L}+)"),
+           "Qwen3 split pattern");
+  rejected(TokenizerJsonWith(R"("normalizer":{"type":"NFC"})",
+                             R"("normalizer":null)"),
+           "no normalizer");
+  rejected(TokenizerJsonWith(R"({"type":"NFC"})", R"({"type":"NFKC"})"),
+           "NFKC normalizer");
+  rejected(TokenizerJsonWith(R"("pre_tokenizer":)", R"("unused":)"),
+           "no pre-tokenizer");
+  rejected(TokenizerJsonWith(R"("Isolated")", R"("Removed")"),
+           "split behavior");
+  rejected(TokenizerJsonWith(R"("add_prefix_space":false)",
+                             R"("add_prefix_space":true)"),
+           "byte level with a prefix space");
+  rejected(TokenizerJsonWith(R"("decoder":{"type":"ByteLevel")",
+                             R"("decoder":{"type":"Metaspace")"),
+           "decoder");
+  // BPE options other than the defaults.
+  rejected(TokenizerJsonWith(R"("dropout":null)", R"("dropout":0.1)"),
+           "dropout");
+  rejected(TokenizerJsonWith(R"("unk_token":null)", R"("unk_token":"a")"),
+           "unknown token");
+  rejected(TokenizerJsonWith(R"("continuing_subword_prefix":"")",
+                             R"("continuing_subword_prefix":"##")"),
+           "continuing subword prefix");
+  rejected(TokenizerJsonWith(R"("end_of_word_suffix":"")",
+                             R"("end_of_word_suffix":"</w>")"),
+           "end of word suffix");
+  rejected(
+      TokenizerJsonWith(R"("byte_fallback":false)", R"("byte_fallback":true)"),
+      "byte fallback");
+  rejected(
+      TokenizerJsonWith(R"("ignore_merges":false)", R"("ignore_merges":true)"),
+      "ignore merges");
+  // Ids: duplicates, conflicts with added tokens, the vocabulary size.
+  rejected(TokenizerJsonWith(R"("b":1,)", R"("b":0,)"),
+           "two entries with one id");
+  rejected(TokenizerJsonWith(R"("id":14,)", R"("id":7,)"),
+           "an added token over a vocabulary entry");
+  rejected(TokenizerJsonWith(R"("b":1,)", R"("b":1,"a2":"x",)"),
+           "a non-numeric id");
+  rejected(std::string(kQwen35TokenizerJson), "an id at vocab_size", 17);
+  rejected(TokenizerJsonWith(R"("b":1,)", R"("b":1,"[PAD18]":19,)"),
+           "an entry spelled as padding");
+  // Added tokens: only whole control tokens without stripping.
+  rejected(TokenizerJsonWith(R"("added_tokens":[)",
+                             R"("added_tokens":{},"unused":[)"),
+           "non-array added_tokens");
+  rejected(
+      TokenizerJsonWith(R"("content":"<think>")", R"("content":"thought")"),
+      "an added token that is not a control token");
+  rejected(TokenizerJsonWith(R"("content":"<think>",)",
+                             R"("content":"<think>","lstrip":true,)"),
+           "a stripping added token");
+  // Merges: one space between two entries that merge into an entry.
+  rejected(TokenizerJsonWith(R"("h i")", "7"), "a numeric merge");
+  rejected(TokenizerJsonWith(R"(["Ġ","hi"])", R"(["Ġ","hi","a"])"),
+           "a three-part merge");
+  rejected(TokenizerJsonWith(R"("h i")", R"("hi")"), "a merge without a space");
+  rejected(TokenizerJsonWith(R"(["Ġ","hi"])", R"(["Ġ"," hi"])"),
+           "a merge part holding a space");
+  rejected(TokenizerJsonWith(R"("h i")", R"("h z")"),
+           "a merge of an unknown token");
+  rejected(TokenizerJsonWith(R"("a Í")", R"("a b")"),
+           "a merge into an unknown token");
+}
+
 void TestEmptyAndSpecialEdgeCases() {
   std::vector<std::string> tokens = {std::string(kEndOfText), "a", "b", "c"};
   std::vector<std::string> merges = {};
@@ -369,6 +587,8 @@ int main() {
   TestGgufTokenizerLoading();
   TestStopTokensFollowVocabulary();
   TestUnicodeContractionBoundary();
+  TestTokenizerJsonMatchesGguf();
+  TestTokenizerJsonRejectsUnsupported();
   TestEmptyAndSpecialEdgeCases();
   TestCorpusConformance();
   std::cout << "All QwenTokenizer tests passed successfully!\n";
