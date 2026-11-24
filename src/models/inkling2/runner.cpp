@@ -56,7 +56,7 @@ namespace {
 namespace g = ::gufo::ext;
 namespace ga = ::inkling2::text::gufo_adapter;
 
-constexpr std::string_view kStateAbi = "inkling2-hip-m2-v1";
+constexpr std::string_view kStateAbi = "inkling2-hip-m2-v2";
 /// Layer groups one pass may be split into (48 visits; the host caps it by pass
 /// length).
 constexpr std::size_t kMaxLayerGroups = 16;
@@ -1854,6 +1854,7 @@ cache::Identity BuildIdentity(const ext::TextRunnerOptions& options,
                               const core::GgufReader& reader,
                               const Engine& engine,
                               const std::string& fingerprint,
+                              const std::string& draft_fingerprint,
                               std::string* error) {
   const auto& c = engine.config();
   ::inkling2::text::TokenizerData tokenizer;
@@ -1900,7 +1901,13 @@ cache::Identity BuildIdentity(const ext::TextRunnerOptions& options,
      << "numerics=ubatch:" << engine.ubatch() << " softcap:" << c.logit_softcap
      << " log_scale:" << c.log_scale_floor << '/' << c.log_scale_alpha
      << " rms_eps:" << c.rms_eps << '\n'
-     << "adapters=none\nspeculative=none\n";
+     << "adapters=none\n";
+  // A drafter's context rows are part of the checkpoints.
+  if (engine.has_drafter())
+    id << "speculative=dspark:"
+       << (draft_fingerprint.empty() ? "process" : draft_fingerprint) << '\n';
+  else
+    id << "speculative=none\n";
   const auto text = id.str();
   return {text.begin(), text.end()};
 }
@@ -1986,8 +1993,28 @@ std::shared_ptr<ext::TextModelRunner> CreateInkling2TextRunner(
         return nullptr;
       }
     }
-    const auto identity =
-        BuildIdentity(options, *reader, *engine, fingerprint, &why);
+    std::string draft_fingerprint;
+    if (dspark && !fingerprint.empty()) {
+      try {
+        core::GgufOpenOptions draft_open;
+        draft_open.allow_unsized_tensors = true;
+        const auto draft = core::GgufReader::OpenFile(
+            options.speculative.draft_model_path, &why, draft_open);
+        if (!draft) {
+          if (error)
+            *error = "inkling2: drafter: " + why;
+          return nullptr;
+        }
+        draft_fingerprint = core::GgufIdentityHex(*draft);
+      } catch (const std::exception& e) {
+        if (error)
+          *error = std::string("inkling2: drafter fingerprinting failed: ") +
+                   e.what();
+        return nullptr;
+      }
+    }
+    const auto identity = BuildIdentity(options, *reader, *engine, fingerprint,
+                                        draft_fingerprint, &why);
     if (identity.empty()) {
       if (error)
         *error = why;

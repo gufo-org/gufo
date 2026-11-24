@@ -693,3 +693,23 @@ part of that which could go without changing the arithmetic. Outside the
 GEMMs every prefill kernel moves its bytes at the DRAM ceiling, and each F32
 pass feeds a different consumer. Rejected variants are in
 [Experiments](EXPERIMENTS.md#round-10-november-24).
+
+## DSpark after a cache restore (November 24)
+
+One request at a time over HTTP, `--speculative dspark --context 32768`,
+greedy, 400 tokens, WikiText-2 prose plus "Summarize the text above in five
+bullet points"; the first request prefills, the next two restore the whole
+prompt from the RAM cache. Decode tokens/s from the first to the last streamed
+token. Checkpoints now hold the drafter's context; before, a restore dropped it.
+
+| Prompt tokens | Before: fresh | Before: restored | After: fresh | After: restored |
+| --- | --- | --- | --- | --- |
+| 3,875 | 77.1 | 52.7 / 53.5 | 76.0 | 78.1 / 76.8 |
+| 15,694 | 50.3* | 50.7 / 50.8 | 75.8 | 76.0 / 76.3 |
+| 30,177 | 45.4* | 44.2 / 44.8 | 57.7 | 59.4 / 60.1 |
+
+\* Partly restored (2,048 and 14,336 tokens) from the previous prompt, which
+shares the text's start. Accepted drafts on the restored 3,875-token prompt:
+166–168 of ~360 before, 266–268 after. Outputs are identical across all
+requests and both builds. A checkpoint at 5,000 tokens grows from 341.9 to
+370.5 MiB.

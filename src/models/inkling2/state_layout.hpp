@@ -5,7 +5,9 @@
 // history. The 8 full-attention visits are append rows (the whole history); the
 // 40 sliding-window visits are window rows (the last 1024). Everything else
 // (conv state, logits of the last token, position and block framing) is private
-// state that is valid only at its exact boundary.
+// state that is valid only at its exact boundary. With a DSpark drafter the
+// drafter's context rows (two window layers, one global layer, same row shape)
+// and its Markov vector join them, so a restored prompt keeps its proposals.
 //
 // Host-side arithmetic only (no HIP): the engine access lives in
 // SessionStateAccess (state_layout.cpp), the single place that knows how a
@@ -35,8 +37,11 @@ inline constexpr std::size_t kConvBytes = kVisits * kConvBytesPerVisit;
 inline constexpr cache::Rows kRowsPerChunk = 256;
 inline constexpr cache::Rows kWindowRows = 1024;
 inline constexpr std::size_t kMetaBytes = 64;
+/// Drafter layers after the 48 target visits: visit kVisits + l.
+inline constexpr std::uint32_t kDraftLayers = 3;
+inline constexpr std::size_t kDraftFBytes = 2304 * 4;  // Markov vector, F32
 
-enum class Part : std::uint8_t { kMeta, kLogits, kConv, kKey, kValue };
+enum class Part : std::uint8_t { kMeta, kLogits, kConv, kKey, kValue, kDraftF };
 
 struct StateComponent {
   cache::ComponentDescriptor descriptor;
@@ -59,20 +64,25 @@ enum class Block : std::uint8_t {
 /// The 64-byte private metadata component. Fixed layout, little endian on the
 /// supported hosts.
 struct StateMeta {
-  std::uint32_t version{1};
+  static constexpr std::uint32_t kVersion = 2;
+  std::uint32_t version{kVersion};
   std::uint32_t block{0};
   std::uint64_t position{0};
   std::uint32_t logits_valid{0};
   std::uint32_t ring_rows{0};
-  std::uint8_t reserved[40]{};
+  /// Drafter context: rows [draft_first, draft_valid), Markov vector of
+  /// draft_f_pos (all zero without a drafter).
+  std::uint64_t draft_first{0}, draft_valid{0}, draft_f_pos{0};
+  std::uint8_t reserved[16]{};
 };
 static_assert(sizeof(StateMeta) == kMetaBytes);
 
 class StateLayout {
 public:
   /// `ring_rows`: rows of one sliding-window ring (at least window + chunk -
-  /// 1).
-  StateLayout(const Inkling2Config& config, std::uint32_t ring_rows);
+  /// 1). `drafter`: the session also holds a DSpark drafter's context.
+  StateLayout(const Inkling2Config& config, std::uint32_t ring_rows,
+              bool drafter = false);
 
   [[nodiscard]] std::span<const StateComponent> components() const {
     return components_;
@@ -81,6 +91,7 @@ public:
   [[nodiscard]] std::uint32_t ring_rows() const { return ring_rows_; }
   [[nodiscard]] std::size_t logits_bytes() const { return logits_bytes_; }
   [[nodiscard]] std::size_t vocab() const { return vocab_; }
+  [[nodiscard]] bool drafter() const { return drafter_; }
 
   /// The frontier of every component for a session standing at `position`
   /// tokens.
@@ -107,6 +118,7 @@ private:
   std::vector<StateComponent> components_;
   std::uint32_t ring_rows_;
   std::size_t logits_bytes_, vocab_;
+  bool drafter_;
 };
 
 /// The only code that touches a Session's buffers for the cache: row ranges in
@@ -136,6 +148,15 @@ public:
   static void SetFrontier(Session&, std::size_t position, const float* logits,
                           std::size_t n);
   static void SetHooks(Session&, SessionHooks*);
+  /// The drafter's context bounds and Markov vector (kDraftFBytes).
+  static void DraftOut(const Session&, StateMeta& meta);
+  static void DraftFOut(const Session&, std::size_t inner, std::size_t n,
+                        std::byte* dst);
+  static void DraftFIn(Session&, std::size_t inner, std::size_t n,
+                       const std::byte* src);
+  /// After SetFrontier: the restored drafter context, when `meta` holds one
+  /// that ends at the frontier.
+  static void DraftIn(Session&, const StateMeta& meta);
   /// Device bytes of rows [first, end) of a global visit, which never wrap.
   [[nodiscard]] static std::span<const std::byte> RowsView(const Session&,
                                                            std::uint32_t visit,
@@ -143,6 +164,16 @@ public:
                                                            cache::Rows first,
                                                            cache::Rows end);
   static void PrepareRestore(Session&, std::size_t rows);
+
+private:
+  /// One K or V row stream: a target visit's slot, or (visit >= kVisits) a
+  /// drafter layer.
+  struct Stream {
+    void* base;
+    std::size_t rows;
+    bool global;
+  };
+  static Stream RowStream(const Session&, std::uint32_t visit, bool value);
 };
 
 }  // namespace gufo::models::inkling2

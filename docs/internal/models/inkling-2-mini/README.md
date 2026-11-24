@@ -56,8 +56,10 @@ weights (`dspark_fuse`, `dflare_norm`, padded `markov_w1`, `hidden_out`; now
   into context K/V rows (K normed per head and rotated, NeoX
   RoPE, theta 1e6) and the Markov context `f` of the last token. Sessions
   declare the drafter's rings (layers 0 and 2, 1,024-token windows) and its
-  global layer (a demand-mapped region) with the rest of their state. A cache
-  restore drops the context; it restarts at the restored position.
+  global layer (a demand-mapped region) with the rest of their state, and
+  checkpoints hold them too (six row components and the Markov vector; the
+  metadata records the context's bounds), so a restored prompt keeps its
+  proposals. A context that does not reach the frontier restarts there.
 - **Proposals.** `Drafter::Propose` runs the 8-row block [anchor, mask x 7]
   through the three layers (non-causal over the block plus the context), then
   the gated RNN Markov head proposes greedily, one row at a time. Proposals
@@ -196,7 +198,7 @@ single-session decode.
 | --- | --- |
 | `inkling2_probe_test` | Probe on synthetic GGUFs (CPU, CTest `inkling2.probe`) |
 | `inkling2_text_test [--model GGUF]` | Chat-template text and error goldens from `transformers`, JSON, tool dialect and reasoning controls (CPU, CTest `inkling2.text`); with a model also the tokenizer goldens from the HF tokenizer and the template's tokens |
-| `inkling2_cache_test --model GGUF --ids IDS [--chunk-prompt P] [--chunks-only]` | GPU: chunk invariance (a prompt split into calls, or a restored prefix plus a tail, equals one prefill), checkpoint capture and restore, restore into a used slot, layered prefill; all bit-exact |
+| `inkling2_cache_test --model GGUF --ids IDS [--chunk-prompt P] [--chunks-only] [--dspark DRAFT]` | GPU: chunk invariance (a prompt split into calls, or a restored prefix plus a tail, equals one prefill), checkpoint capture and restore, restore into a used slot (with a drafter, its proposals after a restore), layered prefill; all bit-exact |
 | `inkling2_oracle` | Teacher-forced dumps; `tests/oracle/compare_dumps.py` scores KL and top-1 against a reference dump |
 | `tests/oracle/llama_dump.cpp` | The llama.cpp side of the same dump (CPU backend, or `NGL` layers on the GPU) |
 | `inkling2_spec_test --model GGUF [--dspark DRAFT]` | GPU: decoding inside a layered prefill's yields (batches of 2 to 7, batched verification) and verification rows of 2 to 64 tokens byte-identical to one-token decoding; with a drafter, greedy DSpark on a real chat prompt equal to plain decoding with at least 20% of proposals kept (26% measured) |

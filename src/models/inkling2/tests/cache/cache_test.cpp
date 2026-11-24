@@ -234,6 +234,7 @@ int main(int argc, char** argv) {
                   48;  // n > ring rows (1024 + ubatch), so the SWA rings wrap
   std::size_t chunk_prompt = 1853;  // over 1K keys, under one ubatch
   bool chunks_only = false;
+  std::string dspark;  // drafter GGUF: its context is checkpointed too
   for (int i = 1; i < argc; ++i) {
     const std::string k = argv[i];
     auto next = [&] {
@@ -251,11 +252,14 @@ int main(int argc, char** argv) {
       chunk_prompt = std::strtoull(next().c_str(), nullptr, 10);
     else if (k == "--chunks-only")
       chunks_only = true;
+    else if (k == "--dspark")
+      dspark = next();
   }
   if (model.empty() || idsf.empty()) {
     std::fprintf(stderr,
                  "usage: inkling2_cache_test --model GGUF --ids ids.bin [--n "
-                 "N] [--tail T] [--chunk-prompt P] [--chunks-only]\n");
+                 "N] [--tail T] [--chunk-prompt P] [--chunks-only] [--dspark "
+                 "DRAFT]\n");
     return 2;
   }
   std::ifstream f(idsf, std::ios::binary);
@@ -285,6 +289,10 @@ int main(int argc, char** argv) {
     return 1;
   }
   const auto V = engine->config().n_vocab_text;
+  if (!dspark.empty() && !engine->AttachDrafter(dspark, &err)) {
+    std::fprintf(stderr, "drafter: %s\n", err.c_str());
+    return 1;
+  }
 
   CountingGuard guard;
   gufo::models::inkling2::Inkling2CacheAdapter adapter(
@@ -428,6 +436,24 @@ int main(int argc, char** argv) {
   REQUIRE(sb.position() == n, "restored position %zu", sb.position());
   REQUIRE(sb.logits() == logits_at_n,
           "restored logits differ from the captured ones");
+  if (eng.has_drafter()) {
+    // The drafter's context came back with the checkpoint: proposals at the
+    // restored frontier equal those of a session that prefilled the prompt.
+    auto slot_o = adapter.CreateSlot(guard);
+    auto& so = adapter.GetSession(*slot_o);
+    for (std::size_t at = 0; at < n; at += 2048)
+      eng.Forward(so, prompt.subspan(at, std::min<std::size_t>(2048, n - at)));
+    REQUIRE(eng.DraftReady(sb), "no drafter context after a restore");
+    std::int32_t pa[7] = {}, pb[7] = {};
+    float ca[7] = {}, cb[7] = {};
+    const int na = eng.Propose(so, more[0], 7, pa, ca);
+    const int nb = eng.Propose(sb, more[0], 7, pb, cb);
+    REQUIRE(na == nb && std::memcmp(pa, pb, sizeof pa) == 0 &&
+                std::memcmp(ca, cb, sizeof ca) == 0,
+            "proposals after a restore differ (%d vs %d)", na, nb);
+    std::fprintf(stderr,
+                 "PASS drafter context restored: %d proposals identical\n", na);
+  }
   const auto got = Run(eng, sb, more);
   REQUIRE(got.size() == ref.size(), "size");
   REQUIRE(Same(got, ref),

@@ -100,7 +100,7 @@ Inkling2CacheAdapter::Inkling2CacheAdapter(std::shared_ptr<Engine> engine,
                                            cache::Identity identity,
                                            bool durable, std::size_t plan_step)
     : engine_(std::move(engine)),
-      layout_(engine_->config(), engine_->ring_rows()),
+      layout_(engine_->config(), engine_->ring_rows(), engine_->has_drafter()),
       identity_(std::move(identity)),
       durable_(durable),
       plan_step_(plan_step) {
@@ -173,6 +173,8 @@ void Inkling2CacheAdapter::CapturePrivateInto(const Inkling2Slot& slot,
       m.block = static_cast<std::uint32_t>(slot.block);
       m.logits_valid = SessionStateAccess::HasLogits(session) ? 1U : 0U;
       m.ring_rows = layout_.ring_rows();
+      if (layout_.drafter())
+        SessionStateAccess::DraftOut(session, m);
       std::memcpy(out.data(), reinterpret_cast<const std::byte*>(&m) + offset,
                   out.size());
       break;
@@ -197,6 +199,9 @@ void Inkling2CacheAdapter::CapturePrivateInto(const Inkling2Slot& slot,
       }
       break;
     }
+    case Part::kDraftF:
+      SessionStateAccess::DraftFOut(session, offset, out.size(), out.data());
+      break;
     default:
       throw std::invalid_argument("component is not private state");
   }
@@ -385,6 +390,10 @@ cache::Completion Inkling2CacheAdapter::LoadPrivatePiece(
         }
         break;
       }
+      case Part::kDraftF:
+        SessionStateAccess::DraftFIn(s.session(), offset, bytes.size(),
+                                     bytes.data());
+        break;
       default:
         throw std::invalid_argument("component is not private state");
     }
@@ -419,7 +428,7 @@ bool Inkling2CacheAdapter::Validate(
       return refuse();
   }
   const std::size_t target = s.expected.front().valid_rows;
-  if (s.meta.version != 1 || s.meta.position != target ||
+  if (s.meta.version != StateMeta::kVersion || s.meta.position != target ||
       s.meta.ring_rows != layout_.ring_rows() ||
       s.meta.block > static_cast<std::uint32_t>(Block::kToolBody) ||
       s.meta.logits_valid > 1 || (s.meta.logits_valid == 0 && target != 0))
@@ -428,6 +437,8 @@ bool Inkling2CacheAdapter::Validate(
   SessionStateAccess::SetFrontier(
       s.session(), target, s.meta.logits_valid ? s.logits.data() : nullptr,
       s.logits.size());
+  if (layout_.drafter())
+    SessionStateAccess::DraftIn(s.session(), s.meta);
   s.block = static_cast<Block>(s.meta.block);
   s.restoring = false;
   s.coverage.clear();

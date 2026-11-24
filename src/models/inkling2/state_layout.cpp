@@ -13,10 +13,12 @@
 
 namespace gufo::models::inkling2 {
 
-StateLayout::StateLayout(const Inkling2Config& c, std::uint32_t ring_rows)
+StateLayout::StateLayout(const Inkling2Config& c, std::uint32_t ring_rows,
+                         bool drafter)
     : ring_rows_(ring_rows),
       logits_bytes_(std::size_t{c.n_vocab_text} * 4),
-      vocab_(c.n_vocab_text) {
+      vocab_(c.n_vocab_text),
+      drafter_(drafter) {
   if (ring_rows < kWindowRows + kRowsPerChunk - 1)
     throw std::invalid_argument(
         "inkling2: sliding-window ring smaller than a checkpoint keeps");
@@ -45,6 +47,17 @@ StateLayout::StateLayout(const Inkling2Config& c, std::uint32_t ring_rows)
                              : cache::ComponentKind::kWindowRows;
     add(Part::kKey, kind, kKvRowBytes, 0, v, global);
     add(Part::kValue, kind, kKvRowBytes, 0, v, global);
+  }
+  if (drafter) {
+    add(Part::kDraftF, cache::ComponentKind::kPrivateState, 0, kDraftFBytes, 0,
+        false);
+    for (std::uint32_t l = 0; l < kDraftLayers; ++l) {
+      const bool global = !Drafter::WindowLayer(static_cast<int>(l));
+      const auto kind = global ? cache::ComponentKind::kAppendRows
+                               : cache::ComponentKind::kWindowRows;
+      add(Part::kKey, kind, kKvRowBytes, 0, kVisits + l, global);
+      add(Part::kValue, kind, kKvRowBytes, 0, kVisits + l, global);
+    }
   }
 }
 
@@ -104,7 +117,7 @@ std::size_t StateLayout::CheckpointBytes(std::size_t position) const {
 }
 
 std::size_t StateLayout::SessionBytes(std::uint32_t context) const {
-  std::size_t b = kConvBytes;
+  std::size_t b = kConvBytes + (drafter_ ? kDraftFBytes : 0);
   for (const auto& c : components_)
     if (HasRows(c.descriptor.kind))
       b += c.descriptor.row_bytes * (c.global ? context : ring_rows_);
@@ -132,15 +145,29 @@ void Settle(hipError_t submitted, const char* what) {
 }
 }  // namespace
 
+SessionStateAccess::Stream SessionStateAccess::RowStream(const Session& s,
+                                                         std::uint32_t visit,
+                                                         bool value) {
+  if (visit >= kVisits) {
+    const std::uint32_t l = visit - kVisits;
+    if (l >= kDraftLayers || s.draft_.k[l] == nullptr)
+      throw std::invalid_argument("inkling2: no drafter layer for the visit");
+    return {value ? s.draft_.v[l] : s.draft_.k[l], s.draft_.cap[l],
+            !Drafter::WindowLayer(static_cast<int>(l))};
+  }
+  const auto& sl = s.slots_.at(visit);
+  return {value ? sl.v : sl.k, sl.rows, sl.global};
+}
+
 std::size_t SessionStateAccess::Position(const Session& s) {
   return s.pos_;
 }
 bool SessionStateAccess::Global(const Session& s, std::uint32_t v) {
-  return s.slots_.at(v).global;
+  return RowStream(s, v, false).global;
 }
 std::uint32_t SessionStateAccess::RingRows(const Session& s, std::uint32_t v) {
-  const auto& sl = s.slots_.at(v);
-  return sl.global ? 0 : static_cast<std::uint32_t>(sl.rows);
+  const auto st = RowStream(s, v, false);
+  return st.global ? 0 : static_cast<std::uint32_t>(st.rows);
 }
 bool SessionStateAccess::HasLogits(const Session& s) {
   return s.logits_stale_ || !s.logits_.empty();
@@ -158,8 +185,8 @@ void SessionStateAccess::LogitsOut(const Session& s, std::byte* dst,
 void SessionStateAccess::RowsOut(const Session& s, std::uint32_t visit,
                                  bool value, cache::Rows first, cache::Rows end,
                                  std::byte* dst) {
-  const auto& sl = s.slots_.at(visit);
-  const auto* base = static_cast<const std::byte*>(value ? sl.v : sl.k);
+  const auto sl = RowStream(s, visit, value);
+  const auto* base = static_cast<const std::byte*>(sl.base);
   const bool ring = !sl.global;
   if (!ring && end > sl.rows)
     throw std::invalid_argument("inkling2: row range beyond capacity");
@@ -181,12 +208,11 @@ void SessionStateAccess::RowsOut(const Session& s, std::uint32_t visit,
 void SessionStateAccess::RowsIn(Session& s, std::uint32_t visit, bool value,
                                 cache::Rows first, cache::Rows end,
                                 const std::byte* src) {
-  // The drafter context is not part of the state: it restarts with the next
-  // injection after the restored frontier.
+  // The drafter context is dropped until the restore validates (DraftIn).
   s.draft_.valid = 0;
   s.draft_.first = 0;
-  auto& sl = s.slots_.at(visit);
-  auto* base = static_cast<std::byte*>(value ? sl.v : sl.k);
+  const auto sl = RowStream(s, visit, value);
+  auto* base = static_cast<std::byte*>(sl.base);
   const bool ring = !sl.global;
   if (!ring) {
     if (end > sl.rows)
@@ -213,10 +239,10 @@ std::span<const std::byte> SessionStateAccess::RowsView(const Session& s,
                                                         bool value,
                                                         cache::Rows first,
                                                         cache::Rows end) {
-  const auto& sl = s.slots_.at(visit);
+  const auto sl = RowStream(s, visit, value);
   if (!sl.global || first > end || end > sl.rows)
     return {};
-  const auto* base = static_cast<const std::byte*>(value ? sl.v : sl.k);
+  const auto* base = static_cast<const std::byte*>(sl.base);
   return {base + first * kKvRowBytes, (end - first) * kKvRowBytes};
 }
 
@@ -238,8 +264,7 @@ void SessionStateAccess::ConvVisitOut(const Session& s, std::uint32_t visit,
 void SessionStateAccess::ConvVisitIn(Session& s, std::uint32_t visit,
                                      std::size_t inner, std::size_t n,
                                      const std::byte* src) {
-  // The drafter context is not part of the state: it restarts with the next
-  // injection after the restored frontier.
+  // The drafter context is dropped until the restore validates (DraftIn).
   s.draft_.valid = 0;
   s.draft_.first = 0;
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
@@ -254,6 +279,8 @@ void SessionStateAccess::SetFrontier(Session& s, std::size_t position,
   // The DSpark context of a shorter prefix stays valid; a restore (RowsIn /
   // ConvVisitIn) already dropped it.
   s.draft_.valid = std::min(s.draft_.valid, position);
+  if (s.draft_.first > s.draft_.valid)
+    s.draft_.first = s.draft_.valid = 0;
   if (logits != nullptr)
     s.logits_.assign(logits, logits + n);
   else
@@ -262,6 +289,49 @@ void SessionStateAccess::SetFrontier(Session& s, std::size_t position,
 }
 void SessionStateAccess::SetHooks(Session& s, SessionHooks* h) {
   s.hooks_ = h;
+}
+
+void SessionStateAccess::DraftOut(const Session& s, StateMeta& m) {
+  if (s.draft_.f == nullptr)
+    return;
+  m.draft_first = s.draft_.first;
+  m.draft_valid = s.draft_.valid;
+  m.draft_f_pos = s.draft_.f_pos;
+}
+void SessionStateAccess::DraftFOut(const Session& s, std::size_t inner,
+                                   std::size_t n, std::byte* dst) {
+  if (s.draft_.f == nullptr || inner + n > kDraftFBytes)
+    throw std::invalid_argument("inkling2: no drafter state to capture");
+  const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+  Settle(hip::CopySnapshotToHost(
+             dst, reinterpret_cast<const std::byte*>(s.draft_.f) + inner, n,
+             nullptr),
+         "draft out");
+}
+void SessionStateAccess::DraftFIn(Session& s, std::size_t inner, std::size_t n,
+                                  const std::byte* src) {
+  if (s.draft_.f == nullptr || inner + n > kDraftFBytes)
+    throw std::invalid_argument("inkling2: no drafter state to restore");
+  s.draft_.valid = 0;
+  s.draft_.first = 0;
+  const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+  Settle(hip::CopySnapshotToDevice(
+             reinterpret_cast<std::byte*>(s.draft_.f) + inner, src, n, nullptr),
+         "draft in");
+}
+void SessionStateAccess::DraftIn(Session& s, const StateMeta& m) {
+  // Only a context that reaches the frontier: rows a window still holds and
+  // the Markov vector of the last token. Anything else restarts at the
+  // frontier, as before.
+  s.draft_.first = s.draft_.valid = 0;
+  s.draft_.f_pos = static_cast<std::size_t>(-1);
+  if (s.draft_.f == nullptr || m.draft_valid != s.pos_ ||
+      m.draft_first > m.draft_valid || s.pos_ == 0 ||
+      m.draft_f_pos != s.pos_ - 1)
+    return;
+  s.draft_.first = static_cast<std::size_t>(m.draft_first);
+  s.draft_.valid = static_cast<std::size_t>(m.draft_valid);
+  s.draft_.f_pos = static_cast<std::size_t>(m.draft_f_pos);
 }
 
 }  // namespace gufo::models::inkling2
