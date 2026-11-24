@@ -32,6 +32,7 @@ jobs:
 
       # Saved below even when a later step fails or times out.
       - name: Restore vcpkg binary cache
+        id: vcpkg-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\vcpkg-archives
@@ -81,8 +82,13 @@ jobs:
             --no-tests=error --timeout 60 -R '^(extension_runtime_test|extension_role_test|ext_runtime_neutral_contracts_test)$'
           if ($LASTEXITCODE -ne 0) { throw 'extension fixture tests failed' }
 
+      # A pull request saves only when nothing for its manifest was restored
+      # from this cache, such as after it changed vcpkg.json.
       - name: Save vcpkg binary cache
-        if: always() && contains(fromJSON('["success", "failure", "cancelled"]'), steps.configure.outcome)
+        if: >-
+          always() && contains(fromJSON('["success", "failure", "cancelled"]'), steps.configure.outcome) &&
+          (github.event_name != 'pull_request' ||
+          !startsWith(steps.vcpkg-cache.outputs.cache-matched-key, format('gufo-windows-extension-vcpkg-{0}-', hashFiles('vcpkg.json'))))
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\vcpkg-archives

@@ -191,7 +191,15 @@ jobs:
           # GITHUB_ENV applies from the next step on.
           ccache --dir "$env:RUNNER_TEMP\ccache" --zero-stats
 
+      # A pull request saves its compiler cache only when the build added at
+      # least 32 MiB to it; otherwise it keeps no duplicate of main's cache.
+      - name: Snapshot restored compiler cache
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: python tools/ci/cache_growth.py snapshot "$env:RUNNER_TEMP\ccache" "$env:RUNNER_TEMP\cache-growth.json"
+
       - name: Restore vcpkg binary cache
+        id: vcpkg-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\vcpkg-archives
@@ -773,26 +781,42 @@ jobs:
           path: ${{ runner.temp }}\therock-archive
           key: gufo-therock-v2-${{ env.SDK_TARBALL }}
 
+      # An empty result, such as from a failed measurement, saves.
+      - name: Measure compiler cache growth
+        id: ccache-growth
+        if: always() && github.event_name == 'pull_request' && (steps.openmp.outcome == 'success' || steps.configure.outcome == 'success')
+        continue-on-error: true
+        run: python tools/ci/cache_growth.py check "$env:RUNNER_TEMP\ccache" "$env:RUNNER_TEMP\cache-growth.json" >> $env:GITHUB_OUTPUT
+
       # Save both OpenMP and Gufo objects, even if a later stage fails. A fresh
       # key preserves this run's new entries alongside the restored set.
       - name: Save compiler cache
-        if: always() && (steps.openmp.outcome == 'success' || steps.configure.outcome == 'success')
+        if: >-
+          always() && (steps.openmp.outcome == 'success' || steps.configure.outcome == 'success') &&
+          steps.ccache-growth.outputs.save != 'false'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\ccache
           key: gufo-windows-ccache-v1-${{ env.SDK_TARBALL }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       # Saved even when the build fails or times out, so a rerun keeps every
-      # design that finished; IRON drops failed compilations itself.
+      # design that finished; IRON drops failed compilations itself. A pull
+      # request saves the compiled designs above instead, so its rerun skips
+      # the compilation and needs none of these.
       - name: Save NPU design cache
-        if: always() && steps.iron-python.outcome == 'success'
+        if: always() && steps.iron-python.outcome == 'success' && github.event_name != 'pull_request'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\npu-cache
           key: gufo-npu-windows-v1-${{ steps.iron.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
 
+      # A pull request saves only when nothing for its manifest was restored,
+      # such as after it changed vcpkg.json.
       - name: Save vcpkg binary cache
-        if: always() && steps.configure.outcome != 'skipped'
+        if: >-
+          always() && steps.configure.outcome != 'skipped' &&
+          (github.event_name != 'pull_request' ||
+          !startsWith(steps.vcpkg-cache.outputs.cache-matched-key, format('gufo-vcpkg-v4-{0}-{1}-', runner.os, hashFiles('vcpkg.json'))))
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}\vcpkg-archives
