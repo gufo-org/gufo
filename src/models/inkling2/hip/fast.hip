@@ -820,7 +820,12 @@ __global__ void __launch_bounds__(256)
 }
 
 // ---------------- MoE gate/up + SITU ----------------
-__device__ __forceinline__ float situ(float g, float u, float beta, float lb) {
+// The SITU constants of Inkling 2 Mini (ParseConfig refuses other values; the
+// host launchers check them). As constants, g / 4 compiles to the multiply by
+// 0.25 that equals it, which makes the MoE gate/up epilogues cheaper.
+constexpr float kSituBeta = 4.f, kSituLinearBeta = 25.f;
+__device__ __forceinline__ float situ(float g, float u) {
+  constexpr float beta = kSituBeta, lb = kSituLinearBeta;
   return beta * tanhf(g / beta) * (1.f / (1.f + expf(-g))) *
          (lb * tanhf(u / lb));
 }
@@ -828,7 +833,7 @@ template<int FMT, int K, int LPR, int NIT, int BW>
 __global__ void __launch_bounds__(BW* WS)
     k_moe_gu(const uint8_t* __restrict__ W, const float* __restrict__ escale,
              const float* __restrict__ x, const int* __restrict__ ids,
-             float* __restrict__ a, int FF, float beta, float lb, int res) {
+             float* __restrict__ a, int FF, int res) {
   constexpr int NU = K / Fm<FMT>::UEL, CPU = Fm<FMT>::UEL / 16,
                 RPP = WS / LPR / 2;
   __shared__ v4u aq[2 * CPU * NU];
@@ -858,7 +863,7 @@ __global__ void __launch_bounds__(BW* WS)
                             K / 16, res, 0, lir, acc);
     float other = __shfl_xor(acc[0], LPR, WS);
     if (!isup && lir == 0 && j < FF)
-      a[(size_t)p * FF + j] = situ(acc[0] * sc, other * sc, beta, lb);
+      a[(size_t)p * FF + j] = situ(acc[0] * sc, other * sc);
   }
 }
 
@@ -1220,7 +1225,7 @@ __global__ void __launch_bounds__(BW* WS)
                 const uint8_t* __restrict__ qx, const int* __restrict__ sorted,
                 const int* __restrict__ ue, const int* __restrict__ ub,
                 const int* __restrict__ un, const int* __restrict__ nd,
-                float* __restrict__ a, int FF, float beta, float lb, int res) {
+                float* __restrict__ a, int FF, int res) {
   constexpr int NU = K / Fm<FMT>::UEL, RPP = WS / LPR / 2;
   const int k = blockIdx.x, rbk = blockIdx.y;
   if (k >= *nd)
@@ -1272,7 +1277,7 @@ __global__ void __launch_bounds__(BW* WS)
         }
       }
       if (!isup && lir < B && j < FF)
-        a[(size_t)pb * FF + j] = situ(gv * sc, uv * sc, beta, lb);
+        a[(size_t)pb * FF + j] = situ(gv * sc, uv * sc);
     });
   }
 }
@@ -3004,7 +3009,6 @@ struct GP3 {
   const int* pair;  // EPI 2: (token * 8 + slot) of each sorted position:
                     // deterministic, non-atomic write
   const float* posw;
-  float beta, lb;
 };
 
 __device__ __forceinline__ void nib4_to_half(uint32_t n, uint32_t& a,
@@ -3207,8 +3211,8 @@ __global__ void __launch_bounds__(64 * RG) k_gemm4(GP3 p, int rgn) {
           p.out[(size_t)pd * p.ldo + row + 16] = facc[t][1][i];
         } else if (EPI == 1) {
           int j = rgi * (16 * RG) + rg * 16 + ln;
-          p.outh[(size_t)pd * FF + j] = (_Float16)situ(
-              facc[t][0][i] * esc, facc[t][1][i] * esc, p.beta, p.lb);
+          p.outh[(size_t)pd * FF + j] =
+              (_Float16)situ(facc[t][0][i] * esc, facc[t][1][i] * esc);
         } else {
           float w = p.posw[pd] * esc;
           // One row per (token, slot) pair; MoeTail adds the 8 slots in a fixed
@@ -3355,8 +3359,8 @@ __global__ void __launch_bounds__(256) k_gu128(GP3 p, int rgn) {
           if (pl >= n)
             continue;
           const int j = rgi * 64 + (2 * cg + c) * 16 + ln;
-          p.outh[(size_t)(start + pl) * FF + j] = (_Float16)situ(
-              facc[t][c][0][i] * esc, facc[t][c][1][i] * esc, p.beta, p.lb);
+          p.outh[(size_t)(start + pl) * FF + j] =
+              (_Float16)situ(facc[t][c][0][i] * esc, facc[t][c][1][i] * esc);
         }
   }
 }
@@ -4336,9 +4340,16 @@ void Router(hipStream_t s, const void* w, const float* bias, const float* x,
   Chk("router");
 }
 
+// The kernels evaluate SITU with Inkling 2 Mini's constants.
+static void CheckSitu(float beta, float lb) {
+  if (beta != kSituBeta || lb != kSituLinearBeta)
+    throw std::runtime_error("inkling2 fast: unsupported SITU constants");
+}
+
 void MoeGu(hipStream_t s, int fmt, const void* w, const float* escale,
            const float* x, const int* ids, float* a, int ff, float beta,
            float lb, int nb) {
+  CheckSitu(beta, lb);
   const uint8_t* W = static_cast<const uint8_t*>(w);
   auto run = [&](auto fm, auto lpr, auto nit, auto bw) {
     constexpr int FM = decltype(fm)::value, LPR = decltype(lpr)::value,
@@ -4347,7 +4358,7 @@ void MoeGu(hipStream_t s, int fmt, const void* w, const float* escale,
     k_moe_gu<FM, 2304, LPR, NIT, BW>
         <<<nb == 1 ? dim3((ff + RPB - 1) / RPB, 8)
                    : dim3(8 * nb, (ff + RPB - 1) / RPB),
-           BW * WS, 0, s>>>(W, escale, x, ids, a, ff, beta, lb, g_res);
+           BW * WS, 0, s>>>(W, escale, x, ids, a, ff, g_res);
   };
   if (fmt == kFmtNvfp4) {
     run(I<FMT_NVFP4>{}, I<16>{}, I<1>{}, I<8>{});
@@ -4443,14 +4454,14 @@ void MoeRouteGroup(hipStream_t s, const int* ids, int pairs, MoeGroups g) {
 void MoeGuGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
                   MoeGroups g, int slots, float* a, int ff, float beta,
                   float lb) {
+  CheckSitu(beta, lb);
   const uint8_t* W = static_cast<const uint8_t*>(w);
   const uint8_t* qx = static_cast<const uint8_t*>(g.qx);
   auto run = [&](auto fm) {
     constexpr int FM = decltype(fm)::value, RPB = kGgBw * (WS / 16 / 2);
     k_moe_gu_gg<FM, 2304, 16, kGgBw>
         <<<dim3(slots, (ff + RPB - 1) / RPB), kGgBw * WS, 0, s>>>(
-            W, escale, qx, g.sorted, g.ue, g.ub, g.un, g.nd, a, ff, beta, lb,
-            g_res);
+            W, escale, qx, g.sorted, g.ue, g.ub, g.un, g.nd, a, ff, g_res);
   };
   if (fmt == kFmtNvfp4)
     run(I<FMT_NVFP4>{});
@@ -4793,8 +4804,7 @@ void MoeGuPrefill(hipStream_t s, int fmt, int tile, const void* w,
   p.item_start = ws.item_start;
   p.item_n = ws.item_n;
   p.outh = static_cast<_Float16*>(act16);
-  p.beta = beta;
-  p.lb = lb;
+  CheckSitu(beta, lb);
   if (fmt == kFmtNvfp4) {
     if (tile == 32)
       gu_launch<FMT_NVFP4, 32, 2>(s, p, max_items);
