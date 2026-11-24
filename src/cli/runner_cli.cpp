@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <exception>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "src/cli/speculative_settings.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/cli/serve/inference_backend.hpp"
@@ -18,22 +21,41 @@ double Seconds(std::chrono::steady_clock::time_point start) {
       .count();
 }
 
+template<typename Options>
+bool PrepareFor(const Options& command, const ext::TextProvider& provider,
+                ext::TextRunnerOptions* options, std::string* error) {
+  try {
+    options->provider_options = command.provider_options;
+    options->speculative = SpeculativeConfigFor(
+        command.speculative_backend, command.mtp_model_path,
+        command.dflash_model_path, command.dspark_model_path);
+    ApplySpeculativeSettings(
+        ResolveSpeculativeSettings(provider, command.speculative_backend, {}),
+        &options->speculative);
+    return true;
+  } catch (const std::invalid_argument& exception) {
+    if (error != nullptr)
+      *error = exception.what();
+    return false;
+  }
+}
+
 #if defined(ENGINE_ENABLE_HIP)
 // The server's backend with one session, for the provider's runner.
-bool LoadBackend(server::InferenceBackend* backend, const std::string& model,
+template<typename Options>
+bool LoadBackend(server::InferenceBackend* backend, const Options& opt,
                  const std::string& vision_model,
-                 const ext::ParsedOptions& provider_options,
                  std::chrono::steady_clock::time_point start) {
   std::string error;
-  const bool loaded =
-      backend->load(model, &error, 0, 1, {}, {}, {}, vision_model, {}, false,
-                    [&](const ext::TextProvider&, const core::GgufReader*,
-                        ext::TextRunnerOptions* options, std::string*) {
-                      options->provider_options = provider_options;
-                      return true;
-                    });
+  const bool loaded = backend->load(
+      opt.model_path, &error, 0, 1, {}, {}, {}, vision_model, {}, false,
+      [&](const ext::TextProvider& provider, const core::GgufReader*,
+          ext::TextRunnerOptions* options, std::string* message) {
+        return PrepareRunnerOptions(opt, provider, options, message);
+      });
   if (!loaded) {
-    std::cerr << "Error loading model '" << model << "': " << error << "\n";
+    std::cerr << "Error loading model '" << opt.model_path << "': " << error
+              << "\n";
     return false;
   }
   std::cerr << "Model loaded in " << Seconds(start) << " s\n";
@@ -76,13 +98,24 @@ void SplitReasoning(const std::string& text, const ext::ReasoningMarkup& markup,
 
 }  // namespace
 
+bool PrepareRunnerOptions(const ext::TextPromptOptions& command,
+                          const ext::TextProvider& provider,
+                          ext::TextRunnerOptions* options, std::string* error) {
+  return PrepareFor(command, provider, options, error);
+}
+
+bool PrepareRunnerOptions(const ext::TextBenchOptions& command,
+                          const ext::TextProvider& provider,
+                          ext::TextRunnerOptions* options, std::string* error) {
+  return PrepareFor(command, provider, options, error);
+}
+
 int RunRunnerPrompt(const ext::TextPromptOptions& opt,
                     std::chrono::steady_clock::time_point start) {
 #if defined(ENGINE_ENABLE_HIP)
   try {
     server::InferenceBackend backend;
-    if (!LoadBackend(&backend, opt.model_path, opt.vision_model_path,
-                     opt.provider_options, start))
+    if (!LoadBackend(&backend, opt, opt.vision_model_path, start))
       return 1;
     const auto print = [](const server::TokenPiece& piece) {
       std::cout << piece.text << std::flush;
@@ -122,8 +155,7 @@ int RunRunnerChat(const ext::TextPromptOptions& opt,
 #if defined(ENGINE_ENABLE_HIP)
   try {
     server::InferenceBackend backend;
-    if (!LoadBackend(&backend, opt.model_path, opt.vision_model_path,
-                     opt.provider_options, start))
+    if (!LoadBackend(&backend, opt, opt.vision_model_path, start))
       return 1;
     server::ChatRequest request;
     request.reasoning.enabled = opt.thinking_mode();
@@ -170,7 +202,7 @@ int RunRunnerBench(const ext::TextBenchOptions& opt,
 #if defined(ENGINE_ENABLE_HIP)
   try {
     server::InferenceBackend backend;
-    if (!LoadBackend(&backend, opt.model_path, {}, opt.provider_options, start))
+    if (!LoadBackend(&backend, opt, {}, start))
       return 1;
     // A prompt of exactly `tokens` tokens, from repeated text.
     const auto prompt_of = [&](std::size_t tokens) {

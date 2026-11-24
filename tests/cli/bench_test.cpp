@@ -89,6 +89,21 @@ void TestFlashMtpSamplingOptions() {
          "Flash MTP benchmark retains every sampling control");
 }
 
+// A speculative backend needs its draft model, as for prompt and chat.
+void TestMissingDraftModel() {
+  for (const auto* backend : {"mtp", "dflash2", "dspark"}) {
+    std::string error;
+    const std::array<const char*, 2> args = {"--speculative", backend};
+    Expect(!gufo::cli::ParseBenchOptions(args, &error) &&
+               error.find("requires --") != std::string::npos,
+           "a speculative backend without its draft model is rejected");
+  }
+  std::string error;
+  const std::array<const char*, 2> off = {"--speculative", "off"};
+  Expect(gufo::cli::ParseBenchOptions(off, &error).has_value(),
+         "no speculation needs no draft model");
+}
+
 void TestDepthOptions() {
   const std::array<const char*, 8> args = {
       "--n-prompt",    "2048",      "--n-gen",
@@ -204,6 +219,7 @@ int main() {
   TestDefaultOptions();
   TestDs4SamplingOptions();
   TestFlashMtpSamplingOptions();
+  TestMissingDraftModel();
   TestDepthOptions();
   TestInvalidDepth();
   TestInvalidWorkload();
