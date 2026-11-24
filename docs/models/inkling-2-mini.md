@@ -92,18 +92,21 @@ answer.
 
 ## Performance
 
-As of November 23, 2026, on Strix Halo, compared with llama.cpp's HIP backend on
-the same weights:
+As of November 24, 2026, on Strix Halo with greedy decoding and thinking off,
+compared with llama.cpp's HIP backend on the same weights:
 
 | Workload | Gufo | llama.cpp HIP |
 | --- | --- | --- |
-| Prefill, 2,048-token prompt | 2,268 tokens/s | 383 tokens/s |
-| Decode, one user, short context | 47.0 tokens/s | 24.3 tokens/s |
-| Decode, one user, DSpark, code (greedy / default sampling) | 78.0 / 65.7 tokens/s | not measured |
-| Decode, one user, DSpark, prose | 48 to 92 tokens/s | not measured |
-| Decode, one user, DSpark, rewriting a file (default sampling) | 90.1 tokens/s | not measured |
-| Decode, 2 users, DSpark, mixed greedy and sampled | 73.9 tokens/s in total (AR 62.3) | not measured |
-| Decode, 4 / 8 users, mixed greedy and sampled | 91.1 / 114.1 tokens/s in total | not measured |
+| Prefill, 2,048-token prompt | 1,916 tokens/s | 347 tokens/s |
+| Decode, one user | 47.4 tokens/s | 22.0 tokens/s |
+| Decode, one user, 131,072 tokens of context | 24.3 tokens/s | 7.7 tokens/s |
+| Decode, one user, DSpark, prose | 59.1 tokens/s | N/A |
+| Decode, 8 users, in total | 188.4 tokens/s | 68.3 tokens/s |
+| Cold start to ready, with DSpark | 4.7 s | N/A |
+
+llama.cpp can't load the DSpark drafter yet. DSpark gains most on predictable
+text: a prose summary whose prompt comes back from the cache decodes at 77
+tokens/s.
 
 The [benchmarks](../internal/models/inkling-2-mini/BENCHMARKS.md) give every
 measurement, and the [quality report](../internal/models/inkling-2-mini/QUALITY.md)

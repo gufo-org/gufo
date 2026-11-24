@@ -6,6 +6,7 @@ is [benchmarks](../benchmarks.md). Measure release binaries (`nix build`, then
 
 - [DeepSeek V4 Flash](models/deepseek-v4-flash/BENCHMARKS.md)
 - [EmbeddingGemma 2](models/embeddinggemma-2/BENCHMARKS.md)
+- [Inkling 2 Mini](models/inkling-2-mini/BENCHMARKS.md)
 - [MiniMax H3](models/minimax-h3/BENCHMARKS.md)
 - [Qwen-Image-2.1](models/qwen-image-2.1/BENCHMARKS.md)
 - [Qwen3.8 27B](models/qwen3.8-27b/BENCHMARKS.md)
@@ -17,7 +18,7 @@ is [benchmarks](../benchmarks.md). Measure release binaries (`nix build`, then
 
 `tools/bench/model-bench.py` measures the tables of a model's `BENCHMARKS.md`
 over HTTP for Gufo and for the reference project of its category (llama.cpp
-for Qwen; antirez/ds4 for DeepSeek), writes per-table artifacts, and renders the tables
+for Qwen and Inkling; antirez/ds4 for DeepSeek), writes per-table artifacts, and renders the tables
 and SVG charts between the `<!-- bench:<id> -->` markers. Workloads and table
 layouts are declared in `docs/internal/models/<model>/artifacts/bench.json`; the
 `benchmark-model` skill in `.agents/skills` describes the procedure.
@@ -30,6 +31,7 @@ the normal development shell and hosted checks:
 | Qwen AR / DFlash2 | `.#llama-cpp-reference` | `llama-server` |
 | Flash-Next MTP | `.#llama-cpp-mtp-reference` | `llama-server-mtp` |
 | DeepSeek AR / DSpark | `.#ds4-reference` | `ds4-server`, `ds4-bench` |
+| Inkling 2 Mini AR | none yet: a llama.cpp `4c92c5bfb` ROCm build, passed with `--reference-binary` | `llama-server` |
 
 For example, enter the development shell and add only the needed baseline:
 

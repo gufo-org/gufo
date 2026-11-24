@@ -1,0 +1,17 @@
+{
+  "single-dspark": {
+    "*": "llama.cpp 4c92c5bfb cannot load the DSpark drafter (joint_proj.weight 5120x768 vs 2816x768 expected; Inkling DSpark support, llama.cpp #32218, is unmerged)."
+  },
+  "single-dspark-repetition": {
+    "*": "llama.cpp 4c92c5bfb cannot load the DSpark drafter (joint_proj.weight 5120x768 vs 2816x768 expected; Inkling DSpark support, llama.cpp #32218, is unmerged)."
+  },
+  "multi-mixed": {
+    "*": "llama.cpp 4c92c5bfb cannot load the DSpark drafter (joint_proj.weight 5120x768 vs 2816x768 expected; Inkling DSpark support, llama.cpp #32218, is unmerged)."
+  },
+  "multi-repetition": {
+    "*": "llama.cpp 4c92c5bfb cannot load the DSpark drafter (joint_proj.weight 5120x768 vs 2816x768 expected; Inkling DSpark support, llama.cpp #32218, is unmerged)."
+  },
+  "loading": {
+    "*": "Matched loading needs the DSpark drafter on both sides; llama.cpp 4c92c5bfb cannot load it."
+  }
+}

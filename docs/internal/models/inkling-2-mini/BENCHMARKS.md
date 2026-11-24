@@ -1,715 +1,126 @@
 # Inkling 2 Mini benchmarks
 
-Strix Halo (Ryzen AI MAX+ 395, gfx1151, 128 GB), ROCm 10.1, November 23,
-2026. Measured ceilings on this host (`tools/bench/gfx1151_peak.hip`): 240.5
-GB/s DRAM read, 54.8 TFLOPS F16 WMMA.
-
-## End to end
-
-`gufo bench -m Inkling-2-Mini-UD-Q4_K_XL.gguf -p N -n 128 -r 2` against
-llama.cpp `94f3af3d0` `llama-bench -fa 1` (HIP, the same file).
-
-| Workload | Gufo | llama.cpp HIP |
-| --- | --- | --- |
-| pp512 | 1,626 tokens/s | not measured |
-| pp2048 | 2,268 tokens/s | 383.5 tokens/s |
-| pp8192 | 2,209 tokens/s | not measured |
-| tg128 after 64 tokens | 47.0 tokens/s | 24.3 tokens/s (tg128) |
-| tg128 after 2,048 tokens | 43.9 tokens/s | |
-| tg128 after 8,192 tokens | 42.0 tokens/s | |
-
-Batched decode (`inkling2_bench --ctx 8192 --batch 2,4`, aggregate):
-
-| Sessions | 64-token context | 4,096-token context |
-| --- | --- | --- |
-| 1 | 46.1 | 43.5 |
-| 2 | 68.3 | 61.7 |
-| 4 | 93.4 | 80.2 |
-
-The imported extension measured 44.7 / 86.2 tokens/s (1 / 4 sessions, short
-context) and 1,366 tokens/s at a 4K prompt on Gufo 0.35.0; on this build its
-kernels gave 1,395 tokens/s at pp2048 and 45.7 tokens/s decode.
-
-### Windows
-
-Same machine, Windows 11, TheRock 10.0.0, 96 GB Variable Graphics Memory,
-`gufo bench -r 2`:
-
-| Workload | Gufo (Windows) |
-| --- | --- |
-| pp512 / pp2048 / pp8192 | 1,648 / 2,271 / 2,199 tokens/s |
-| tg128 after 512 / 2,048 / 8,192 tokens | 46.0 / 44.8 / 42.8 tokens/s |
-
-The decode weight prefetch costs more than it saves on Windows: its
-side-stream waits in the replayed graph (ABBA, C = 1: 39.4 tokens/s with
-it, 46.0 without; `inkling2_bench` at a 2,048-token context, 2 / 4 / 8
-sessions: 56.4 / 81.3 / 104.3 with it, 64.5 / 88.0 / 109.7 without). `Engine::Create` therefore times replayed one-session decode steps of a
-scratch session with and without it and keeps it only when it is faster. The
-prefetch only warms the cache, so the logits are unchanged. `inkling2_spec_test`,
-`inkling2_cache_test` and `inkling2_bench --verify` (2, 4 and 8 sessions) pass
-bit for bit, and six HTTP requests (greedy, seeded, a tool call and an image)
-return identical responses with and without DSpark.
-
-## Prefill changes (all byte-identical)
-
-pp2048 progression, each step measured with the previous one in place:
-
-| Change | pp2048 |
-| --- | --- |
-| Imported extension, ported | 1,395 |
-| Loop-controller gate and apply re-tiled to 64 tokens x 64 rows per block (k-order kept) | 1,566 |
-| Controller apply grid with a token tile's channel blocks adjacent | 1,658 |
-| Residual and message-bank copies replaced by buffer swaps | ~1,665 |
-| 128-token MoE gate/up kernel: 8 waves of 32 tokens x (32 gate + 32 up) | 1,697 |
-| Activations straight from global memory into the WMMA A operand | 1,859 |
-| Same 128 x 128 kernel for MoE down and the dense projections | 1,903 |
-| MoE tail fused (slot sum, post conv, residual add) | 1,912 |
-| WMMA skipped on 16-token tiles past an item's end | 2,037 |
-| 128-token tiles from 256-token ubatches (was 1,024; pp512 1,378 → 1,483) | 2,041 |
-
-The generic attention-residual mix (`mix_k`) dropped from 72 to 46 ms per
-pp2048 by unrolling its loops, which issues loads ahead without reordering the
-additions.
-
-Second round (November 23), `inkling2_bench` pp2048 after a warm-up prefill
-(`gufo bench` measured 2,036 before and 2,210 after; pp512 1,483 → 1,618,
-pp8192 1,960 → 2,156). Outside the GEMMs nearly every prefill kernel streams
-19 MB F32 activation buffers at the DRAM ceiling, so the gains come from
-removing passes and from overlapping bandwidth-bound work with the
-compute-bound GEMMs:
-
-| Change | pp2048 |
-| --- | --- |
-| Before (PR head) | 1,990 |
-| Down and K = 2304 dense GEMMs: one straight-line WMMA body per live-tile count (no per-tile branches between the LDS loads and the WMMAs); skinny sink / conv-tap projections with float4 LDS reads and a prefetched k-chunk | 2,029 |
-| F16 GEMM operands written by the norm, mix and attention kernels that produce them (no separate F32 → F16 passes); 64 x 64 tiled gate for the single-job FFN controller | 2,077 |
-| Attention post-conv and residual add in one pass (as the MoE tail) | 2,085 |
-| Relative-bias table rows a key tile meets staged in LDS | 2,095 |
-| K/V short convolutions evaluated inside the KV-cache write; unread F32 window-layer norm outputs skipped | 2,108 |
-| k, v, rel and the skinny projections on a side stream beside q and gate | 2,126 |
-| The next layer's messages mixed on the side stream beside the MoE gate/up GEMM | 2,143 |
-| That mix also writes the messages' inverse RMS, so the controller gates skip half their prologue (ubatches of 1,024+ tokens) | 2,162 |
-
-Decode is unchanged (45.9 tokens/s after 64 tokens, 44.0 after 2,048) and
-batched decode still matches single-session decode bit for bit.
-
-Rejected variants are in [Experiments](EXPERIMENTS.md).
-
-## Decode changes (all byte-identical)
-
-tg128 after 64 tokens, alternating A/B on one build each:
-
-| Change | tg128 |
-| --- | --- |
-| Imported extension kernels | 45.7 |
-| One session: expert GEMV grid with an expert's row blocks adjacent | 46.0 |
-| 8 waves per block in every weight GEMV (rows per block only) | 46.8 |
-| A pass's 12 message mixes in one launch (they share the pass's bank) | 47.0 |
-
-At 47 tokens/s a step takes 21.3 ms: about 16.8 ms of weight GEMVs at 87–98%
-of the DRAM ceiling (the LM head reads 492 MB in 2.1 ms), about 3.4 ms of small
-kernels and under 1 ms of gaps. Rejected variants are in [Experiments](EXPERIMENTS.md).
-
-## DSpark
-
-Greedy speculative decoding against plain decoding of the same prompt
-(`inkling2_bench --dspark ... --depth D`, WikiText-2, 256 tokens; output
-identical in every run). Fixed depths, before the adaptive width:
-
-| Context | Depth 1 | Depth 2 | Depth 3 | AR |
-| --- | --- | --- | --- | --- |
-| 64 | 57.6 (87% accepted) | 64.0 (75%) | 68.2 (70%) | 45.0 |
-| 2,000 | 44.8 (48%) | 43.6 (35%) | 39.2 (26%) | 43.1 |
-| 6,000 | 53.4 (80%) | 59.0 (67%) | 57.9 (57%) | 41.9 |
-
-A depth-3 cycle at short context: propose 4.7 ms, verify 38.2 ms, commit
-2.2 ms (`inkling2_bench` host timings). Verifying 2/3/4 rows of one session
-(`--spec`) takes 27.8/32.9/37.8 ms against 22.1 ms for one decode step; the
-extra rows mostly cost the distinct experts they route to (a 4-row step
-streams about 22 experts per visit instead of 8).
-
-HTTP, one session, default settings (`gufo serve llm --model ...
---dspark-model ...`), 400 tokens, thinking on; the text equals the AR
-server's for all five requests:
-
-| Request | AR | DSpark (adaptive) |
-| --- | --- | --- |
-| Python function, greedy | 45.9 | 66.7 |
-| Why the sky is blue, greedy | 46.1 | 56.0 |
-| First 15 primes, greedy | 46.1 | 83.8 |
-| Haiku, temperature 0.8, seed | 46.0 | 59.6 |
-| Translation, temperature 0.7, seed | 43.3 | 50.8 |
-
-Sampled with the model's defaults (temperature 1, no truncation; coupled
-proposals), seeded, 400 tokens; identical text again:
-
-| Request | AR | DSpark |
-| --- | --- | --- |
-| Python function | 43.2 | 51.8 |
-| Why the sky is blue | 43.1 | 50.7 |
-| Short story, temperature 0.6 | 43.3 | 46.8 |
-| Ten fruits, min-p 0.05 | 44.4 | 49.8 |
-| Haiku, temperature 0.8, top-p 0.95 (greedy proposals) | 46.0 | 66.7 |
-
-At temperature 1 about 60% of the coupled proposals are accepted; the host
-sampler's pass over 200K logits (about 1.5 ms per selected token, AR too) is
-the larger cost of those cycles.
-
-### Verification at depth (multi-row global attention)
-
-A verification step's rows are consecutive positions of one session, so on
-global visits one block per (KV head, split) now reads each K/V tile once for
-all rows (their 3 heads each fill the WMMA query slots one row used to leave
-empty). Keys past a row's position are masked, so every row's result is the
-one-row kernel's: `inkling2_spec_test` and `--spec` report 0 mismatched rows.
-
-| `inkling2_bench --spec` | before | after |
-| --- | --- | --- |
-| R = 2, ctx 64 / 4,000 / 32,000 | 27.7 / 29.5 / 38.2 ms | 27.8 / 29.4 / 34.6 ms |
-| R = 4, ctx 64 / 4,000 / 32,000 | 37.5 / 39.8 / 57.7 ms | 37.5 / 39.4 / 43.6 ms |
-| DSpark depth 3, ctx 32,000 (AR 36.1 tok/s) | 34.8 tok/s | 44.2 tok/s |
-
-### Wider verification (up to seven drafts)
-
-The drafter's block holds seven proposals; the width policy now chooses among
-all of them (the same expected-tokens-per-cost rule, verify costs below as its
-prior). Every row is still exact (`inkling2_spec_test`: 0 mismatched rows for
-2 to 8 rows).
-
-| `inkling2_bench --spec` rows | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| ctx 64 (ms) | 27.7 | 32.9 | 37.6 | 43.1 | 47.8 | 53.6 | 58.9 |
-| ctx 32,000 (ms) | 34.6 | | 43.8 | 50.2 | 60.6 | 66.7 | 77.0 (before the 4 + 4 split) |
-
-Over HTTP (one session, all responses byte-identical to plain decoding):
-
-| Workload | AR | up to 3 drafts | up to 7 drafts |
-| --- | --- | --- | --- |
-| Six coding tasks, 1,024 tokens, greedy | 46.0 tok/s | 70.7 | 74.3 |
-| The same, default sampling (T = 1, seeded) | 43.4 tok/s | 61.2 | 62.8 |
-| Primes list (greedy) | 46.1 | 83.8 | 87.5 |
-| Explanation (greedy) | 46.1 | 56.9 | 55.4 |
-| Translation (T = 0.7) | 43.3 | 51.6 | 50.2 |
-
-A replay of the coding runs drafting seven tokens every cycle accepted all
-seven in 15% of the cycles and none in 24% (mean 2.6).
-
-### Verification and drafting, round 3
-
-Exact changes (every row still byte-identical; oracle dumps unchanged):
-multi-row projections no longer spill (the tiny-matrix rows' token loop was
-unrolled and hoisted every token's loads: 232 to 3,672 bytes of scratch per
-lane), the three-input projections read their weights once for up to five
-tokens, the attention row groups of 6 to 8 rows run interleaved, and the
-multi-row LM head takes two rows per wave. Drafting uses the low-rank
-proposal logits (the drafter's rounding only; acceptance unchanged on the
-replays).
-
-| `inkling2_bench --spec` rows | 2 | 4 | 5 | 6 | 7 | 8 |
-| --- | --- | --- | --- | --- | --- | --- |
-| ctx 64, before (ms) | 27.7 | 37.6 | 43.1 | 47.8 | 53.6 | 58.9 |
-| ctx 64, after (ms) | 27.4 | 36.1 | 41.3 | 45.8 | 51.2 | 57.2 |
-| ctx 32,000, after (ms) | 33.4 | 43.2 | 49.1 | 55.4 | 60.9 | 68.2 |
-
-Plain decode: 21.9 ms per token (22.0). DSpark propose at depth 7: 4.66 ms
-per cycle (7.62).
-
-| HTTP, all outputs byte-identical to AR | AR | before | after |
-| --- | --- | --- | --- |
-| Six coding tasks, greedy | 46.0 tok/s | 74.3 | 78.0 |
-| Six coding tasks, default sampling | 43.4 tok/s | 62.8 | 65.7 |
-| Primes (greedy) | 46.1 | 87.5 | 91.9 |
-| Explanation (greedy) | 46.1 | 55.4 | 57.7 |
-| Translation (T = 0.7) | 43.3 | 50.2 | 52.2 |
-
-
-### Concurrent requests (November 23, round 4)
-
-Requests decoding at the same time draft together (one drafter pass reads
-each weight row once for all of them: `Engine::ProposeBatch`) and are checked
-in one `Engine::VerifyBatch` step of up to eight rows from several sessions.
-Rows go to the drafts most likely to survive while they pay for their share
-of the step (`ChooseDsparkBatchWidths`); the costs by total rows are learnt
-online, and a back-off per batch width stops drafting that buys nothing.
-Greedy and sampled requests share a step: greedy rows take the device
-argmax, sampled rows the host logits (temperature-only requests with coupled
-proposals), and the requests' selections run on parallel threads.
-
-Global-attention decode rows now take the split length of their own
-position's bucket instead of the batch's largest. Before, a request batched
-with one past 4K tokens got a different split, so its logits depended on
-what ran beside it (`inkling2_spec_test`: 24 of 36 batched decode rows and 37
-of 54 batched verification rows differed from lone decoding; 0 now).
-
-HTTP, `--sessions 4`, eight requests of 400 tokens (four greedy, four with
-the default sampling and a seed; coding and prose), aggregate tokens/s. All
-48 outputs are byte-identical across AR and DSpark and across C:
-
-| C | AR | DSpark, sessions drafting one after another | DSpark, one drafter pass and parallel selection |
-| --- | --- | --- | --- |
-| 1 | 44.8 | 60.7 | 60.8 |
-| 2 | 65.5 | 75.8 | 77.7 |
-| 4 | 88.0 | 86.9 | 90.1 |
-
-Before this round, concurrent requests decoded AR (the AR column).
-
-With four requests the eight-row step leaves four draft rows, and each must
-beat a plain step's 10.8 ms per token; the policy drafts mostly for the
-greedy coding requests there.
-
-### Prefill, round 3
-
-`inkling2_bench` pp2048 2,170 → 2,210 tokens/s (pp512 1,500 → 1,515, pp8192
-2,075 → 2,115); `gufo bench` pp2048 2,210 → 2,268, pp512 1,618 → 1,626,
-pp8192 2,156 → 2,209. Oracle dumps byte-identical:
-
-| Change | Kernel time per pp2048 (serialized) |
-| --- | --- |
-| Controller apply: float4 LDS reads, epilogue inputs loaded before the products | 43.8 → 35.0 ms |
-| Controller inputs' inverse RMS from the attention-residual mix (summed in the gate prologue's order), so the gates no longer re-read them | gates 37.9 → 32.8 ms |
-
-Under the counter profiler (kernels serialized) the pp2048 kernels sum to
-about the parallel wall time: MoE gate/up 5.0 ms and down 3.7 ms per visit
-(about 70% and 47% of the WMMA ceiling for the live 16-token tiles), dense
-projections 161 ms, attention 62 ms, attention-residual mixes 64 ms, MoE
-tails 54 ms. The gate/up kernel's loop alone (dequantisation, weight and
-activation loads removed) runs at 65% of the WMMA ceiling.
-
-The exact changes left are small: every remaining kernel is either at its
-DRAM floor (mixes, MoE tails, norms) or a WMMA loop already near its own
-ceiling, and none of the tried restructurings beat it (see
-[Experiments](EXPERIMENTS.md)). The ideas that would reach about 2,400 tokens/s
-change the arithmetic and need their own quality qualification first: F16 MoE
-slot rows instead of F32 (about 45 ms per pp2048), the relative-position bias
-as a WMMA product, a one-pass prefill mix, and the controller inputs' inverse
-RMS in the mixes' own reduction order (listed under "Not exact, not taken").
-
-## Round 5: up to eight concurrent requests, decode overheads (November 23)
-
-All changes exact: oracle dumps of both paths byte-identical, `inkling2_bench
---verify` 0 differences for batches of 4 and 8 (192 of 192 rows),
-`inkling2_spec_test` all pass, and every HTTP response below byte-identical
-to the baseline's.
-
-### Eight sessions in one step
-
-Batched decode and the drafter now take up to eight sessions (they took four;
-the decode kernels were already eight rows wide). Steps of 5 to 8 sessions
-share one weight pass.
-
-| Change | 1 row | 4 rows | 8 rows |
-| --- | --- | --- | --- |
-| Before (decode step, ctx 64) | 21.85 ms | 41.88 ms | (two steps of 4) |
-| K/V preparation and the split reduction inside the decode attention launch; the controllers' norm inside their apply launch (649 → 505 launches per token) | 21.76 | 41.73 | 66.1 |
-| A norm's nine loads per thread issued together (explicit FMAs keep each sum) | 21.65 | | |
-| 16-wave blocks for GEMVs of 4+ rows (their quantized inputs fill a CU's LDS, so 8-wave blocks left one block per CU) | | 41.78 | 64.6 |
-| A visit's q (7.5 MB) read on a side stream while its inputs are mixed, its output projection and router while it attends (20 blocks; the DRAM is mostly idle during those latency-bound kernels, and the GEMVs then find the weights in the last-level cache) | 20.68 | 40.83 | 63.9 |
-
-Verification of 2 / 4 / 6 / 8 rows of one session: 27.3 / 35.9 / 46.1 /
-57.5 → 26.2 / 35.1 / 45.1 / 54.5 ms. Decode after 4,096 / 16,384 / 32,000
-tokens: 23.18 / 25.11 / 27.49 → 22.10 / 24.11 / 26.58 ms per token (at 32K
-the eight global visits read about 1 GB of K/V per token, near the DRAM
-ceiling).
-
-Prefetch variants (decode step at ctx 64): more of the projections (q and
-part of gate) 20.79 → 20.82–21.20 ms; 40 / 80 / 160 blocks instead of 20
-21.29 / 21.53 / 21.66; the controllers' weights before q 21.16; the next
-visit's q beside this visit's experts 21.25 (competes with, or is evicted
-by, the expert stream).
-
-### Drafting
-
-| Change | per cycle |
-| --- | --- |
-| The draft context of every session in a step injected in one pass (one GEMV per weight for all rows instead of a WMMA GEMM per session) | commit 2.09 → 1.96 ms |
-| Drafter GEMVs of one input in one launch (q/k/v, gate/up, context k/v) | propose 3.47 → 3.37 ms (depth 3) |
-| Low-rank proposal table in int8 with one scale per token (16.8 MB per chain step instead of 33.5) | propose at depth 7 4.31 → 3.32 ms |
-
-Acceptance is unchanged on the replays (79 of 153 at depth 3, 191 of 469 and
-114 of 962 at depth 7, contexts 64 and 2,000).
-
-`--draft-tokens` is now honoured (it was ignored) and defaults to the
-drafter's seven proposals (the provider declared 3, which the runner never
-applied).
-
-### HTTP
-
-`gufo serve --sessions 8 --context 32768`, eight prompts (coding and prose),
-256 tokens each, even requests greedy and odd ones seeded with the default
-sampling (T = 1), aggregate tokens/s. Every response is byte-identical across
-builds, AR and DSpark, and C:
-
-| C | AR before | AR after | DSpark before | DSpark after |
-| --- | --- | --- | --- | --- |
-| 1 | 45.6 | 48.1 | 67.9 | 71.8 |
-| 2 | 62.0 | 66.6 (65.5–68.3, three runs) | 67.0 | 71.0 |
-| 4 | 86.1 | 87.9 | 84.3 | 89.1 |
-| 8 | 87.2 | 112.4 | 90.3 | 111.1 |
-
-At C = 8 the step is bound by expert weights: the MoE kernels take 70% of it
-and stream about 250 GB/s over the 50 or so distinct experts its 64
-(token, slot) pairs route to. Drafting cannot pay there: each extra
-verification row costs about 4.7 ms (the experts it adds) and survives about
-60% of the time, roughly 8 ms per drafted token against 8.3 ms per token for
-the plain eight-row step, so the policy does not draft at C = 8 and DSpark
-trails AR by the context injection (about 1.4%).
-
-Where a C = 1 step went before the prefetch (21.5 ms span): weight GEMVs about 16.8 ms at
-86–98% of the DRAM ceiling, 505 launches of which the latency-bound small
-kernels (mixes, attention, router, controllers) take about 3.6 ms and the
-launch gaps about 1 ms. A C = 1 DSpark cycle (36.5 ms at three rows) keeps
-the GPU 96% busy: verification 31.9 ms, drafter 3.1 ms. The host sampler
-(temperature 1: a double-precision exp per vocabulary entry, in token order)
-costs about 1.5 ms per sampled token outside the GPU.
-
-## Round 6: host-side selection, copy drafts, batched policy (November 23)
-
-Engine and kernels are unchanged, so every logit is the round-5 one. Every
-HTTP response below is byte-identical to the round-5 build's, AR and DSpark,
-at every C (8 prompts x 2 modes x 4 widths, 14 more single requests and 8
-copy requests), and the functional suites record the same outputs (see
-[Quality](QUALITY.md)).
-
-### Where a decode step's time goes
-
-`rocprofv3` kernel trace of plain decode at a 64-token context, weight prefetch
-off (the profiler hangs on the prefetch side stream): 21.7 ms per step, of
-which 17.3 ms are weight GEMVs at 85 to 95% of the DRAM ceiling, 3.3 ms the
-latency-bound kernels and 1.0 ms the gaps between 505 launches (2.0 us each,
-whatever the kernels).
-
-| Kernels (per step) | Time | Rate |
-| --- | --- | --- |
-| MoE gate/up, 48 visits x 8 experts | 5.74 ms | 215 GB/s (NVFP4 visits) |
-| Attention projections (q, gate, rel, k, v) | 4.66 ms | 216 GB/s |
-| MoE down | 3.03 ms | 202 GB/s |
-| LM head | 2.15 ms | 228 GB/s |
-| Attention output projection | 1.77 ms | 204 GB/s |
-| Attention-residual mixes (98) | 1.02 ms | 10.4 us each |
-| Attention (48) | 0.93 ms | 19.3 us each |
-| Loop controllers (gate and apply, 48 each) | 0.88 ms | 7.3 and 11.0 us |
-| Router (48) | 0.47 ms | 9.7 us |
-
-A four-row verification step (35.9 ms) spends 21.3 ms in the MoE kernels
-against 8.8 ms for one row: each extra row costs about 4.2 ms of expert
-weights (about half of its 8 experts per visit are new to the step) and
-0.5 ms elsewhere. Both steps are bound by the bytes of the distinct experts
-their rows route to.
-
-### Sampled requests
-
-A request that samples (the model's default: temperature 1, no truncation)
-paid 1.3 ms per token on the host that a greedy request does not: the logits
-row came back through a pageable buffer, and the sampler built a 3.2 MB list
-of candidates per token and passed over it four times.
-
-| Change | Sampled plain decode |
-| --- | --- |
-| Before | 21.35 ms per token (greedy 20.03) |
-| The whole-row temperature draw without the candidate list: the same weights from the same operands, summed in token order, the same quotients subtracted from the same uniform (`SamplerState::Sample`, all models); the exps shared with a few threads that take chunks as they wake | 20.78 |
-| The row's logits through the pinned buffer; the maximum taken on the floats and the widening folded into the threaded pass | 20.57 |
-
-`sampling_test` draws 1,200 rows both ways (penalties, min-p, masked entries,
-single-survivor rows, 200,058-entry rows): same token and RNG state every
-time. In the microbenchmark a 200,058-entry draw takes 0.36 ms against
-1.16 ms.
-
-Several sampled rows (a verification step's, or several requests') ran each
-on a new thread; a thread woken for one row takes about 1 ms where the
-calling thread takes 0.4 ms. Up to three rows now run one after another on
-the calling thread, more on persistent selection threads: four requests,
-two of them sampled, select in 0.84 ms instead of 1.6 ms.
-
-### Copy drafts
-
-A sampled request whose last 24 generated tokens repeat an earlier stretch of
-its context (5 where the last accepted copy left off; Gufo's
-`speculative::PromptLookup` rules) takes its proposals from the tokens that
-followed that stretch instead of from the drafter. The drafter's coupled draw
-misses about a fifth of the tokens of a copied stretch; the copied token
-misses almost none. Proposals only: the request's sampler still selects
-every token.
-
-| HTTP, one request, 500 tokens, default sampling, seeded | Before | After | Copied proposals kept |
-| --- | --- | --- | --- |
-| Rewrite a 60-line file with one command added | 75.7 tok/s | 90.1 | 267 of 268 |
-| Repeat a paragraph, then translate a sentence | 54.3 | 63.5 | 99 of 102 |
-| Rename a class throughout a file | 80.3 | 84.8 | 176 of 176 |
-| Write a function (nothing to copy) | 72.9 | 74.8 | none proposed |
-
-Greedy requests do not copy: the drafter already copies as well (rewrite
-84.0 tok/s, 357 of 433 proposals kept), and where a match's continuation
-differs the copied proposals displace better ones (a function written from
-scratch: 81.4 to 77.8 tok/s with copies).
-
-### HTTP, before and after
-
-`gufo serve --sessions 8 --context 32768`, the round-5 workload (eight
-prompts, 256 tokens, even requests greedy and odd ones seeded with the
-default sampling), aggregate tokens/s:
-
-| C | AR before | AR after | DSpark before | DSpark after |
-| --- | --- | --- | --- | --- |
-| 1 (greedy) | 48.3 | 48.0 | 71.7 | 72.7 |
-| 2 | 59.7 | 62.3 | 71.1 | 73.9 |
-| 4 | 88.0 | 91.1 | 88.5 | 91.1 |
-| 8 | 113.0 | 114.1 | 111.7 | 109.9 to 112.9 (four runs) |
-
-Six seeded requests with the default sampling, one at a time, 400 tokens:
-AR 46.6 to 48.4 tok/s, DSpark 59.3 to 61.1 (1,050 of 1,624 proposals kept,
-as before).
-
-With four requests drafting lost about 2% to plain batched steps (five of
-the eight rows are anchors, and the drafter's pass for four requests takes
-5.8 ms); the back-off for batched cycles now compares against measured plain
-steps of the same request count and tolerates no loss, so DSpark matches AR
-there. At eight requests no row is left to draft in and DSpark trails AR by
-the draft-context injection (about 1.5%).
-
-## Round 7: wide copy verification (November 23)
-
-A request decoding alone verifies up to 64 rows in one step when the rows
-after the drafter's proposals are copied from its context (prompt lookup).
-Every row keeps the arithmetic of a one-token decode, so the output is still
-byte-identical to plain decoding (`inkling2_spec_test` at 2 to 64 rows, the
-oracle on both paths, `inkling2_cache_test`, HTTP hashes).
-
-Steps of 9 to 64 rows read each weight once for all rows:
-
-- The dense Q8_0 projections and the LM head use int8 WMMA. Each 16-element
-  integer dot product of the GEMV is one WMMA entry; the float scaling and the
-  lanes' butterfly are replayed in the GEMV's order (the leaves are spread
-  over a block's eight waves and combined from LDS).
-- The MoE groups a step's (row, slot) pairs by expert. A block reads each
-  expert row once for up to four pairs; the per-pair dot products are
-  unchanged.
-- Attention runs in groups of eight rows.
-
-`inkling2_bench --spec`, context 64, ms per verification step:
-
-| Rows | 8 | 9 | 16 | 32 | 64 |
-| --- | --- | --- | --- | --- | --- |
-| Before (8-row steps one after another) | 55.6 | n/a | n/a | n/a | n/a |
-| Grouped MoE + 8-row GEMV launches | 55.6 | 74.8 | 96.4 | 177.9 | 344.9 |
-| Final | 55.6 | 62.5 | 80.9 | 133.6 | 245.4 |
-| Per row, final | 6.95 | 6.94 | 5.06 | 4.18 | 3.83 |
-
-At context 20,000: 16 rows 93.0 ms, 64 rows 292.7 ms.
-
-The width starts at eight rows and doubles after two whole copies of that
-width, up to 64; any rejected copy returns it to eight. Greedy requests append
-a copy to the drafter's proposals when the context they extend continues an
-earlier stretch; while a copy keeps being kept, the next cycle copies first
-without drafting.
-
-HTTP, one request, DSpark, outputs identical to before:
-
-| Request | Before | After |
-| --- | --- | --- |
-| Rewrite a file, greedy, 1,500 tokens | 103.2 tok/s | 118.1 tok/s |
-| Rewrite a file, sampled, 1,500 tokens | 100.1 tok/s | 117.9 tok/s |
-| Rename in a file, greedy (801 tokens) | 98.5 tok/s | 116.4 tok/s |
-| Rewrite, sampled, 400 tokens | 82.7 tok/s | 94.2 tok/s |
-| Code from scratch, greedy, 400 tokens | 77.8 tok/s | 76.4 tok/s |
-
-AR and batched requests are unchanged (C = 1, 4, 8 within noise, same hashes).
-
-Rejected (all exact):
-
-| Variant | Result |
-| --- | --- |
-| Expert pairs grouped 8 per block (LDS for 8 inputs) | 64 rows 324 ms vs 272 with 4 (one block per CU) |
-| Wide dp4a GEMVs looping 8-token groups in one launch | spilled (8 rows of LPR 16 need > 256 VGPRs); with 4-token groups 64 rows 264 ms vs 245 with WMMA |
-| MoE by int8 WMMA (pairs of an expert as A rows, NVFP4 decoded to int8) | 64 rows 241 ms vs 245, 16 rows 117 vs 81: a 16-row tile has about four live pairs |
-| Dense WMMA from 4 rows (DSpark and batched steps) | 8 rows 61.4 vs 55.6 ms: half-empty tiles |
-
-
-## Round 8: wide-step expert layers and WMMA GEMVs (November 23)
-
-Engine changes only; every output is byte-identical. `inkling2_spec_test`
-passes at 2 to 64 rows (and its batched checks),
-`inkling2_bench --spec` reports 0 mismatched rows, `inkling2_bench --batch 4,8
---verify` 0 differences, and every HTTP response below has the PR head's hash.
-
-### Where the wide steps went
-
-A 64-row step at context 64 routes its 512 (row, slot) pairs to only about 59
-distinct experts per visit (consecutive tokens choose alike), so its expert
-weights are about 178 MB (gate/up) and 89 MB (down) per NVFP4 visit, 0.74 and
-0.37 ms at the DRAM ceiling. The grouped kernels took 2.42 and 1.05 ms. A
-standalone replay of the kernels on the step's real routing (exact against the
-per-pair decode kernels) showed why: with every weight read removed the
-gate/up kernel still took 1.83 of its 2.0 ms. It was bound by instructions and
-latency, not by memory: each block re-quantized ~37 KB of inputs for 20 KB of
-weights, waited for them behind two barriers per group of four pairs, and ran
-the SITU activation once per pair in every lane.
-
-Kernel trace of the step (`rocprofv3`), gate/up and down per NVFP4 visit:
-2.42 and 1.05 ms before, 1.36 and 0.73 ms after. The steps between, on the
-replay (whose kernels time within 1% of the trace's):
-
-| Change (64-row step, per NVFP4 visit) | gate/up | down |
-| --- | --- | --- |
-| Inputs quantized once per step (`MoeQuantGrouped`) instead of in every block; a lane's weight units loaded into registers before its pairs are staged and kept for all of them (trace) | 1.95 ms | 0.87 ms |
-| NVFP4 units decoded once per block instead of once per group of four pairs | 2.00 (2.08 without) | 0.89 (0.92) |
-| The units left after the full lane passes (4 of 16 lanes, 2 of 8) split over the idle lanes, the partial sums moved there and back by shuffles (same terms, same order) | 1.85 | 0.86 |
-| Inputs read from global memory (vector caches) instead of LDS: no staging or barriers, a wave runs all its expert's pairs; 16-wave blocks | 1.58 | 0.77 |
-| One SITU per pair (every lane of a row holds the butterfly's sum; gate lane b takes pair b) | 1.37 | 0.73 |
-
-The Q8_0 visits (layers 20 to 23) take the same kernels: gate/up 3.20 → 1.69
-ms, down 1.18 → 0.88 ms (trace). Gate/up is still issue-bound: the products
-alone (four `v_dot4` and three float operations per 16 weights, pair and
-plane) are about 75 M wave instructions per visit; before the SITU change the
-counters showed 181 M VALU instructions at about half the issue rate. Eight consecutive rows of one session (DSpark's widest
-cycle) now take the grouped kernels too (0.63 vs 0.72 ms per visit); rows of
-different sessions share fewer experts and stay on the per-pair kernels
-(batched decode of 3 to 8 sessions was 1 to 2% slower grouped).
-
-The int8 WMMA GEMVs of the dense projections and the LM head loaded each
-unit's weights and inputs only when they were needed (`#pragma unroll 1`) and
-kept 16 to 32 KB of per-leaf sums in LDS, which left about 3 waves per SIMD.
-Each leaf now loads all its units first, and the butterfly steps that pair two
-leaves of the same wave run in registers (8 leaves go to LDS).
-
-`inkling2_bench --spec`, ms per verification step:
-
-| Rows | 8 | 9 | 16 | 32 | 64 |
-| --- | --- | --- | --- | --- | --- |
-| Context 64, before | 54.9 | 62.5 | 81.6 | 134.3 | 249.2 |
-| Context 64, after | 53.3 | 58.4 | 73.8 | 106.6 | 167.7 |
-| Per row, after | 6.67 | 6.49 | 4.61 | 3.33 | 2.62 |
-| Context 20,000, before / after | | | 93.0 / 86.1 | | 292.7 / 218.5 |
-
-HTTP, `--sessions 8 --context 32768`, DSpark, one request at a time
-(`copy2.py`), PR head against this round on the same build tree (only the
-inkling2 sources swapped); every hash identical:
-
-| Request | Before | After |
-| --- | --- | --- |
-| Rewrite a file, greedy, 1,500 tokens | 118.7 tok/s | 124.0 tok/s |
-| Rewrite a file, sampled, 1,500 tokens | 117.2 tok/s | 122.2 tok/s |
-| Rename in a file, greedy (801 tokens) | 120.9 tok/s | 129.3 tok/s |
-| Rewrite, sampled, 400 tokens | 94.9 tok/s | 98.2 tok/s |
-| Rename, sampled, 400 tokens | 79.2 tok/s | 81.5 tok/s |
-| Code from scratch, greedy, 400 tokens | 76.7 to 77.9 tok/s | 76.3 to 78.0 tok/s |
-
-The eight-prompt concurrency workload (`conc.py`, 256 tokens) is unchanged:
-C = 1 greedy 71.0 to 74.3 tok/s before and 71.6 to 73.3 after (four runs
-each), C = 2 / 4 / 8 73.9 / 90.3 / 112.2 against 73.3 / 90.7 / 112.8.
-
-### Long context
-
-Prefill of 32,768 tokens runs at 1,892 tokens/s (2,207 at 2,048): the global
-visits' attention grows to 34 ms per 2,048-token ubatch at 30K (about 43% of
-the F16 WMMA ceiling) and is 2.1 of the 17.3 s; the window visits take 1.25 s.
-Decode at 32,000 tokens (26.6 ms per token, 63.6 ms per step for four
-sessions) reads the global visits' K/V at 216 to 218 GB/s, about 90% of the
-DRAM ceiling, for one and for four sessions.
-
-## Round 9: prefill attention (November 23)
-
-Every output byte-identical: the oracle dumps of both paths equal the
-baselines, `inkling2_cache_test` passes with a maximum logit difference of 0,
-and a standalone replay of the attention kernel (random K/V caches, 37 to
-2,048 queries, positions 0 to 126,976, window and global visits) matches the
-previous kernel bit for bit.
-
-At 32K the global visits' flash attention ran at 23.7 TFLOPS (43% of the WMMA
-ceiling). On the replay, skipping every K/V tile load after the first made it
-30% faster, so the loads and their two barriers per tile were exposed. With
-the softmax also removed it reached 43.5 TFLOPS, which is the bound set by the
-WMMAs and the LDS reads.
-
-| Change (global visit, 2,048 queries after 30,720 keys) | ms |
-| --- | --- |
-| Before (64-query blocks, 64-key tiles, two barriers per tile) | 33.6 |
-| 128-query blocks (24 waves share each K/V tile), next tile in registers, 32-key tiles (64-key tiles spill) | 28.3 |
-| Double-buffered LDS: one barrier per tile | 27.6 |
-| Half-wave probability exchange by `v_perm` instead of selects | 27.4 |
-
-At 126,976 keys the visit takes 108.8 ms instead of 137.7. The softmax still
-steps over 16 keys from key 0, so the larger blocks group the keys exactly as
-before. Window visits keep 64-query blocks because their first key follows
-the block's first query, and larger blocks would regroup their steps (the
-replay differs). They still gain from the double buffering: 2.06 → 1.95 ms at
-30K. Global visits before 1K keys, or with fewer than 512 queries, also stay on
-64-query blocks.
-
-`inkling2_bench` (prefill from scratch):
-
-| Prompt | Before | After |
-| --- | --- | --- |
-| 2,048 | 2,196 tok/s | 2,213 tok/s |
-| 32,768 | 1,874 tok/s | 1,922 tok/s |
-| 65,536 | 1,649 tok/s | 1,737 tok/s |
-
-Rejected on the replay (all exact): skipping the rescale when every
-row's maximum is unchanged, and a mask-free path for far tiles (both raise
-VGPRs to occupancy 6 and gain under 1%); `permlanex16` for the remaining
-`shfl_xor`s (no change); 10- and 6-tile blocks (slower). Decode: the router
-over 32 blocks of 4 waves instead of 16 of 8 left the step at 20.8 ms. The
-small decode kernels (mixes, attention, controllers, router: 3.3 ms, plus
-1.0 ms between 505 launches) are latency-bound chains, and the weight GEMVs
-stay at 85–95% of the DRAM ceiling.
-
-## Round 10: verification steps and fixed costs (November 24)
-
-Every change is byte-identical: the oracle's prefill and decode dumps,
-`inkling2_cache_test`, `inkling2_spec_test`, `inkling2_bench --verify` (2, 4
-and 8 sessions at contexts 64 and 3,000), and 30 HTTP responses (AR and DSpark,
-1 to 8 concurrent requests, greedy and seeded) equal the round 9 build's.
-
-A serialized profile (`rocprofv3 --pmc`) of an 8-row verification step put
-the MoE at 85 to 88% of its DRAM floor (about 29 distinct experts per visit)
-and the dense 8-row GEMVs at about 150 GB/s:
-
-| Change | Effect |
-| --- | --- |
-| The grouped expert kernels' grid has 24 blocks per row block that loop over the step's distinct experts, instead of one block per possible slot (8 per row, most of them empty) | 8-row MoE gate/up 0.416 → 0.393 ms per visit, down 0.215 → 0.203; verification of 8 / 16 / 64 rows 51.8 → 51.0 / 73.3 → 69.0 / 169.7 → 165.4 ms |
-| Grouped expert kernels from 6 rows of one session (was 8) and for 8 sessions | 7-row verification 49.0 → 47.8 ms, eight sessions +0.6% |
-| The 8-row LM head through int8 WMMA (the 9- to 64-row path): the per-row GEMV runs 4 to 7 waves per SIMD at 8 rows | head 3.25 → 2.51 ms; 8-row verification 52.8 → 52.0 ms, eight sessions 124.8 → 126.2 tok/s |
-| The three-input (global-layer) projections through int8 WMMA from 8 rows | 8-row verification 52.1 → 51.8 ms |
-| One-input projections of 6 to 8 rows: two rows per wave instead of four | verification −0.4 to −0.7%, eight sessions 127.3 → 128.5 tok/s |
-| Decode attention reduces its splits in its own launch again (folded into the last split block, one block serialised a kv head's three heads) | one session 20.84 → 20.75 ms per token at context 64, 22.05 → 21.91 at 3,000; four sessions +1.2% |
-| SITU with the model's constants (ParseConfig refuses others): `g / 4` compiles to the multiply that equals it | prefill MoE gate/up −1.4%, pp2048 2,207 → 2,221 tok/s |
-
-`inkling2_bench`, the round 9 build against this one:
-
-| Workload | Before | After |
-| --- | --- | --- |
-| DSpark, context 64 / 3,000 (`--dspark --depth 7`, 256 tokens) | 66.3 / 42.2 tok/s | 68.4 / 43.7 tok/s |
-| Eight sessions, context 64 | 124.8 tok/s | 128.5 tok/s |
-| One session, context 64 | 20.81 ms per token | 20.75 ms per token |
-
-Over HTTP (`--sessions 8`, 256 tokens, half greedy, half seeded), DSpark at 8
-concurrent requests went 108.2 → 113.6 tok/s and AR 113.6 → 115.3; one
-request is unchanged within noise (AR 48.0, DSpark 71.6).
-
-The prefill GEMMs stay at 44 to 62% of the WMMA peak. Counters on MoE
-gate/up (`SQ_WAIT_INST_VALU` 44% of wave cycles) show the VALU pipe, which
-WMMA shares with the dequantization and the epilogue, as the contended
-resource: about 9 other VALU instructions per WMMA. The SITU change is the
-part of that which could go without changing the arithmetic. Outside the
-GEMMs every prefill kernel moves its bytes at the DRAM ceiling, and each F32
-pass feeds a different consumer. Rejected variants are in
-[Experiments](EXPERIMENTS.md#round-10-november-24).
-
-## DSpark after a cache restore (November 24)
-
-One request at a time over HTTP, `--speculative dspark --context 32768`,
-greedy, 400 tokens, WikiText-2 prose plus "Summarize the text above in five
-bullet points"; the first request prefills, the next two restore the whole
-prompt from the RAM cache. Decode tokens/s from the first to the last streamed
-token. Checkpoints now hold the drafter's context; before, a restore dropped it.
-
-| Prompt tokens | Before: fresh | Before: restored | After: fresh | After: restored |
-| --- | --- | --- | --- | --- |
-| 3,875 | 77.1 | 52.7 / 53.5 | 76.0 | 78.1 / 76.8 |
-| 15,694 | 50.3* | 50.7 / 50.8 | 75.8 | 76.0 / 76.3 |
-| 30,177 | 45.4* | 44.2 / 44.8 | 57.7 | 59.4 / 60.1 |
-
-\* Partly restored (2,048 and 14,336 tokens) from the previous prompt, which
-shares the text's start. Accepted drafts on the restored 3,875-token prompt:
-166–168 of ~360 before, 266–268 after. Outputs are identical across all
-requests and both builds. A checkpoint at 5,000 tokens grows from 341.9 to
-370.5 MiB.
+AMD Strix Halo `gfx1151`, 128 GB unified memory, ROCm 10.1. Unsloth
+`UD-Q4_K_XL` (revision `8078d149`) with its Q8_0 DSpark drafter. HTTP, greedy,
+thinking off (Inkling may still think briefly). Gufo `82645e0a`; llama.cpp
+`4c92c5bfb` ROCm (November 24, 2026). Positive gain favors Gufo. **TODO**
+means unmeasured.
+[Quality and measurement details](QUALITY.md#benchmark-method)
+
+## Single user, autoregressive
+
+pp2048 / tg128; depth is the cached prefix in tokens.
+
+<!-- bench:single-ar -->
+| Inkling 2 Mini UD-Q4_K_XL AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 1916.44 | 346.56 | +453.0% | 47.42 | 21.95 | +116.0% |
+| 4,096 | 1962.26 | 275.54 | +612.2% | 45.90 | 21.11 | +117.4% |
+| 8,192 | 1894.84 | 236.43 | +701.4% | 44.44 | 20.26 | +119.3% |
+| 12,288 | 1840.88 | 207.41 | +787.6% | 42.75 | 19.61 | +118.0% |
+| 16,384 | 1654.53 | 185.51 | +791.9% | 41.95 | 18.76 | +123.6% |
+| 32,768 | 1601.97 | 129.53 | +1136.8% | 37.91 | 15.88 | +138.7% |
+| 65,536 | 1219.22 | 78.20 | +1459.1% | 31.88 | 12.11 | +163.3% |
+| 131,072 | 989.29 | 42.46 | +2229.9% | 24.30 | 7.74 | +214.0% |
+<!-- /bench -->
+
+![Single user, autoregressive](artifacts/charts/single-ar.svg)
+
+## Single user, DSpark
+
+Shared pp, separate mixed/repetitive tg and gains. pp is the highest measured
+rate per engine and depth across both text types. With thinking off Inkling
+still thinks first, so the 128 timed tokens are its thought and the repetitive
+task does not reach the copy. Output equals AR at every depth (reasoning
+included). llama.cpp cannot load the DSpark drafter: N/A.
+
+<!-- bench:single-dspark -->
+| Inkling 2 Mini UD-Q4_K_XL DSpark<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 1916.28 | N/A | N/A | 59.14 | N/A | N/A | 62.58 | N/A | N/A |
+| 4,096 | 1961.21 | N/A | N/A | 57.39 | N/A | N/A | 54.73 | N/A | N/A |
+| 8,192 | 1889.51 | N/A | N/A | 58.73 | N/A | N/A | 58.78 | N/A | N/A |
+| 12,288 | 1832.42 | N/A | N/A | 61.79 | N/A | N/A | 60.25 | N/A | N/A |
+| 16,384 | 1644.73 | N/A | N/A | 57.10 | N/A | N/A | 56.43 | N/A | N/A |
+| 32,768 | 1593.40 | N/A | N/A | 51.30 | N/A | N/A | 50.71 | N/A | N/A |
+| 65,536 | 1209.49 | N/A | N/A | 43.14 | N/A | N/A | 40.29 | N/A | N/A |
+| 131,072 | 953.87 | N/A | N/A | 35.11 | N/A | N/A | 28.69 | N/A | N/A |
+<!-- /bench -->
+
+![Single user, DSpark](artifacts/charts/single-dspark.svg)
+
+## Multiple users, autoregressive
+
+Same pp2048 prose prompt as single-user d0, tg128, context 4096 per user.
+Prefill every session before timed decoding; sum individual request decode rates.
+
+<!-- bench:multi-ar -->
+| Inkling 2 Mini UD-Q4_K_XL AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
+| ---: | ---: | ---: | ---: |
+| 1 | 47.39 | 22.89 | +107.0% |
+| 2 | 83.34 | 34.78 | +139.6% |
+| 4 | 116.76 | 51.70 | +125.8% |
+| 6 | 133.54 | 62.26 | +114.5% |
+| 8 | 188.35 | 68.33 | +175.6% |
+<!-- /bench -->
+
+![Multiple users, autoregressive](artifacts/charts/multi-ar.svg)
+
+## Multiple users, DSpark
+
+Same pp2048 mixed/repetitive prompts as single-user d0, tg128. C1 directly
+cross-checks that row. Prefill every session before timed decoding. Output
+equals the isolated AR reference at every concurrency. llama.cpp: N/A, as
+above.
+
+<!-- bench:multi-dspark -->
+| Inkling 2 Mini UD-Q4_K_XL DSpark<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 56.98 | N/A | N/A | 62.90 | N/A | N/A |
+| 2 | 91.33 | N/A | N/A | 93.63 | N/A | N/A |
+| 4 | 126.89 | N/A | N/A | 132.33 | N/A | N/A |
+| 6 | 126.74 | N/A | N/A | 131.03 | N/A | N/A |
+| 8 | 187.31 | N/A | N/A | 187.38 | N/A | N/A |
+<!-- /bench -->
+
+![Multiple users, DSpark](artifacts/charts/multi-dspark.svg)
+
+## Loading time
+
+C1, capacity 262,144, DSpark. Cold model files (`POSIX_FADV_DONTNEED`) to HTTP
+readiness. llama.cpp: N/A (it cannot load the drafter).
+
+<!-- bench:loading -->
+| Inkling 2 Mini UD-Q4_K_XL<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |
+| --- | ---: | ---: | ---: |
+| UD-Q4_K_XL | 4.66 | N/A | N/A |
+<!-- /bench -->
+
+![Loading time](artifacts/charts/loading.svg)
+
+## Memory occupation
+
+C1, capacity 133,121, AR, no projector. llama-server preallocates its KV
+cache, so its footprint does not grow with the prefix.
+
+<!-- bench:memory -->
+| Inkling 2 Mini UD-Q4_K_XL AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
+| --- | ---: | ---: | ---: |
+| pp2048 + tg128 | 28.42 | 36.97 | +30.1% |
+| 16K prefix, pp4096 + tg128 | 30.44 | 37.49 | +23.2% |
+<!-- /bench -->
+
+![Memory occupation](artifacts/charts/memory.svg)
+
+## DSpark after a cache restore
+
+Greedy, 400 tokens, WikiText-2 prose plus "Summarize the text above in five
+bullet points", `--context 32768`; the second and third requests restore the
+whole prompt from the RAM cache. Decode tok/s, Gufo `82645e0a` (checkpoints
+hold the drafter's context) against `94ef8903` (a restore dropped it).
+
+| Inkling Q4 DSpark<br>Prompt (tokens) | Fresh (tok/s) | Restored, before (tok/s) | Restored (tok/s) |
+| ---: | ---: | ---: | ---: |
+| 3,875 | 76.0 | 52.7 / 53.5 | 78.1 / 76.8 |
+| 15,694 | 75.8 | 50.7 / 50.8 | 76.0 / 76.3 |
+| 30,177 | 57.7 | 44.2 / 44.8 | 59.4 / 60.1 |
