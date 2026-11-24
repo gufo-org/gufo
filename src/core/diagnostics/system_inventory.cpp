@@ -109,6 +109,8 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
     inv.gpu.pci_slot = primary_gpu.pci_slot;
     inv.gpu.power_mode = primary_gpu.power_mode;
     inv.gpu.temperatures = primary_gpu.hwmon_sensors;
+    if (primary_gpu.compute_units != 0)
+      inv.gpu.compute_units = primary_gpu.compute_units;
 
     const std::string_view pci_view = primary_gpu.pci_id;
     if (pci_view.find("1002:1586") != std::string_view::npos ||
@@ -131,8 +133,12 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
       inv.gpu.name = prop.name;
       inv.gpu.raw_arch_name = prop.gcnArchName;
       inv.gpu.total_memory_bytes = prop.totalGlobalMem;
-      inv.gpu.compute_units =
-          static_cast<std::uint32_t>(prop.multiProcessorCount);
+      // multiProcessorCount counts WGPs (two CUs each) when HIP runs in WGP
+      // mode, the RDNA default; prefer the KFD CU count rocminfo reports.
+      if (gpus.empty() || gpus[0].compute_units == 0) {
+        inv.gpu.compute_units =
+            static_cast<std::uint32_t>(prop.multiProcessorCount);
+      }
 
       // Normalize architecture to gfx1151
       const std::string_view raw_view(prop.gcnArchName);

@@ -22,14 +22,14 @@
 #include <vector>
 
 #include "gufo/ext/crypto.hpp"
+#include "gufo/ext/families/qwen/control_tokens/control_tokens.hpp"
+#include "gufo/ext/families/qwen/text/chat_template.hpp"
+#include "gufo/ext/families/qwen/text/tokenizer.hpp"
+#include "gufo/ext/families/qwen/vision/encoder.hpp"
+#include "gufo/ext/families/qwen/vision/prompt.hpp"
 #include "gufo/ext/text.hpp"
 #include "src/families/qwen/config/qwen_config.hpp"
-#include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/families/qwen/hip_common/execution_policy.hpp"
-#include "src/families/qwen/text/chat_template.hpp"
-#include "src/families/qwen/text/tokenizer.hpp"
-#include "src/families/qwen/vision/encoder.hpp"
-#include "src/families/qwen/vision/prompt.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -586,6 +586,7 @@ int RunQwenBenchmarkImpl(
           dflash_verifier->RestoreSnapshot(*prepared_draft);
       }
       HIP_CHECK(hipDeviceSynchronize());
+      return 0;
     };
 
     for (const std::size_t p_len : opt.n_prompts) {
@@ -604,6 +605,7 @@ int RunQwenBenchmarkImpl(
                                              static_cast<std::uint32_t>(depth));
         }
         HIP_CHECK(hipDeviceSynchronize());
+        return 0;
       };
       restore_depth();
       prefill();

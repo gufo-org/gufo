@@ -118,7 +118,6 @@ NgramTable::~NgramTable() {
 std::unique_ptr<NgramTable> NgramTable::Open(
     platform::PlatformFile file, std::uint64_t file_offset, std::uint64_t rows,
     std::uint32_t row_dim, core::GgmlType type, std::string* error_msg) {
-  std::unique_ptr<NgramTable> t(new NgramTable());
   const bool blocked =
       type == core::GgmlType::kIQ4_NL || type == core::GgmlType::kQ8_0;
   const std::size_t block = blocked ? 32 : 1;
@@ -132,9 +131,36 @@ std::unique_ptr<NgramTable> NgramTable::Open(
     }
     return nullptr;
   }
+  return OpenRows(file, file_offset, rows, row_dim,
+                  row_dim / block * block_bytes, type, error_msg);
+}
+
+std::unique_ptr<NgramTable> NgramTable::OpenEncoded(
+    platform::PlatformFile file, std::uint64_t file_offset, std::uint64_t rows,
+    std::uint32_t row_dim, std::size_t row_bytes, NgramRowDecoder decode,
+    std::string* error_msg) {
+  if (!decode || row_dim == 0 || row_bytes == 0 || row_bytes > kCacheBytes) {
+    if (error_msg != nullptr) {
+      *error_msg = "unsupported encoded n-gram table";
+    }
+    return nullptr;
+  }
+  auto t = OpenRows(file, file_offset, rows, row_dim, row_bytes,
+                    core::GgmlType::kI32, error_msg);
+  if (t != nullptr) {
+    t->decode_ = std::move(decode);
+  }
+  return t;
+}
+
+std::unique_ptr<NgramTable> NgramTable::OpenRows(
+    platform::PlatformFile file, std::uint64_t file_offset, std::uint64_t rows,
+    std::uint32_t row_dim, std::size_t row_bytes, core::GgmlType type,
+    std::string* error_msg) {
+  std::unique_ptr<NgramTable> t(new NgramTable());
   t->type_ = type;
   t->row_dim_ = row_dim;
-  t->row_bytes_ = row_dim / block * block_bytes;
+  t->row_bytes_ = row_bytes;
   t->cache_count_ = std::bit_floor(kCacheBytes / t->row_bytes_);
   t->cache_entries_ = std::make_unique<CacheEntry[]>(t->cache_count_);
   t->cache_rows_.resize(t->cache_count_ * t->row_bytes_);
@@ -160,7 +186,12 @@ std::unique_ptr<NgramTable> NgramTable::Open(
   return t;
 }
 
-void NgramTable::DecodeRow(const std::uint8_t* src, float* dst) const {
+void NgramTable::DecodeRow(const std::uint8_t* src, float* dst,
+                           std::uint32_t row) const {
+  if (decode_) {
+    decode_(src, row, dst);
+    return;
+  }
   if (type_ == core::GgmlType::kIQ4_NL) {
     gufo::quant::DequantizeIQ4_NL(src, dst, row_dim_);
   } else if (type_ == core::GgmlType::kQ8_0) {
@@ -193,7 +224,7 @@ bool NgramTable::ReadCached(std::uint32_t row, float* dst) {
   }
   const bool hit = entry.valid && entry.row == row;
   if (hit) {
-    DecodeRow(cache_rows_.data() + slot * row_bytes_, dst);
+    DecodeRow(cache_rows_.data() + slot * row_bytes_, dst, row);
   }
   entry.busy.clear(std::memory_order_release);
   return hit;
@@ -256,7 +287,7 @@ bool NgramTable::ReadOne(std::uint32_t row, float* dst,
     entry->valid = true;
     entry->busy.clear(std::memory_order_release);
   }
-  DecodeRow(base + (offset - begin), dst);
+  DecodeRow(base + (offset - begin), dst, row);
   return true;
 }
 

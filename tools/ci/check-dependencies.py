@@ -27,13 +27,15 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "rocWMMA",
     "OpenSSL",
     "libpng",
-    "libjpeg-turbo",
     "libwebp",
     "libopus",
     "httparse (Rust crate)",
+    "hyper, hyper-util, http-body-util, http (Rust crates)",
+    "tokio, bytes, socket2 (Rust crates)",
     "png (Rust crate)",
     "Rust standard library and crates",
     "symphonia (Rust crates)",
+    "zune-jpeg, zune-core (Rust crates)",
     "DS4",
     "h3.c",
     "ccv TensorOps ancestry",
@@ -41,6 +43,7 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "ICU",
     "curl / libcurl",
     "FFmpeg",
+    "Loom / hrx-system",
 }
 
 REQUIRED_EVALUATION_COMPONENTS = {

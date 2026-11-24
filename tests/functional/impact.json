@@ -276,6 +276,7 @@
         "flash-next-q4/mtp"
       ],
       "configuration": "standard",
+      "isolation": "server",
       "vision_required": true,
       "tier": "release"
     },
@@ -305,6 +306,7 @@
         "flash-next-q4/mtp"
       ],
       "configuration": "standard",
+      "isolation": "server",
       "vision_required": true,
       "tier": "release"
     },
@@ -805,6 +807,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "server",
       "vision_required": false
     },
     "long-context": {
@@ -913,6 +916,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "server",
       "vision_required": false,
       "tier": "release"
     },
@@ -953,6 +957,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "cache-fill",
       "vision_required": false,
       "tier": "release"
     },
@@ -972,6 +977,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "cache-fill",
       "vision_required": false,
       "tier": "release",
       "escalate": [
@@ -1090,6 +1096,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "cache-fill",
       "vision_required": false,
       "tier": "release",
       "escalate": [
@@ -1119,6 +1126,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "cache-fill",
       "vision_required": false,
       "tier": "release",
       "escalate": [
@@ -1268,6 +1276,7 @@
       ],
       "status": "active",
       "configuration": "standard",
+      "isolation": "server",
       "vision_required": false
     }
   },

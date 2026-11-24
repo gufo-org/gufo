@@ -15,6 +15,7 @@ contributors are in [AGENTS.md](../../AGENTS.md).
 | `src/core` | Shared runtime: GGUF loading, sampling, quantization, HIP helpers, diagnostics |
 | `src/cache` | Continuation cache: tiers, ledger and the neutral capture/backing contract |
 | `src/sched` | Text scheduling policy: work-unit decisions and prefill rate, without serving or model code |
+| `src/mem` | State memory: the ledger of promised, mapped and pooled state, and the host floor, without HIP; its page pool and regions are `src/core/hip/state_*` (see [state memory](state-memory.md)) |
 | `src/ext` | Extension runtime: registry, options, neutral continuation and host-service contracts |
 | `src/models/<model>` | One model extension: manifest, config, weights, engine, kernels, CPU reference |
 | `src/families/<family>` | Libraries shared by several models of one family, such as Qwen |

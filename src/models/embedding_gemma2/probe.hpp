@@ -22,6 +22,10 @@ namespace gufo::models::embedding_gemma2 {
 /// Creates the HIP-backed multimodal embedding runner.
 [[nodiscard]] std::unique_ptr<ext::EmbeddingRunner> CreateEmbeddingGemma2Runner(
     const std::string& model_root, std::string* error = nullptr);
+/// As CreateEmbeddingGemma2Runner; `--npu` selects the NPU text encoder.
+[[nodiscard]] std::unique_ptr<ext::EmbeddingRunner>
+CreateEmbeddingGemma2RunnerWithOptions(
+    const ext::EmbeddingRunnerOptions& options, std::string* error = nullptr);
 #endif
 
 }  // namespace gufo::models::embedding_gemma2

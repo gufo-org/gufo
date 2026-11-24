@@ -15,12 +15,15 @@ namespace gufo::sched {
 /// The policy's prompt granularity. A prompt within it runs unsplit beside
 /// decoders, a layered pass gets at most one group per unit of its tokens
 /// (arXiv 2510.08055, section 4.4), and a long prompt alone stops after each
-/// unit while a short peer or a capture waits.
+/// unit while a short peer or a capture waits. While a session is free, a
+/// lone prompt keeps the profile's pass width, so an arrival waits at most
+/// one such pass.
 inline constexpr std::size_t kPrefillUnitTokens = 512;
 
 /// Longest a decoder should wait for one layer group of a prompt pass. The
 /// group count follows from the measured pass time, up to the profile's
-/// maximum and one group per unit of the pass's tokens.
+/// maximum and one group per unit of the pass's tokens. A pass within a unit
+/// is split only by the time passes like it spent on a context as deep.
 inline constexpr std::chrono::milliseconds kTargetDecoderWait{250};
 
 struct PolicyOptions {
@@ -35,6 +38,8 @@ struct PolicyOptions {
 
 struct PrefillingRequest {
   std::size_t remaining_tokens{0};
+  /// Tokens already in its context: the depth its next pass attends over.
+  std::size_t position{0};
 };
 
 struct DecodingRequest {
@@ -56,6 +61,8 @@ struct WorkQueues {
   bool forming_batch{false};
   /// No prefill unit has run beside decoders since the last decode.
   bool after_decode{true};
+  /// A free session would admit a request arriving during this unit.
+  bool admission_open{false};
 };
 
 /// Prefill one request of `prefilling`.
@@ -110,7 +117,7 @@ public:
 
 private:
   [[nodiscard]] std::size_t LayerGroups(const PrefillRate& rate,
-                                        std::size_t remaining_tokens) const;
+                                        const PrefillingRequest& request) const;
   [[nodiscard]] bool Short(const PrefillingRequest& request) const noexcept {
     return request.remaining_tokens <= options_.unit_tokens;
   }

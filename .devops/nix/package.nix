@@ -3,6 +3,7 @@
   stdenv,
   cmake,
   ninja,
+  runCommand,
   pkg-config,
   makeWrapper,
   icu,
@@ -19,9 +20,28 @@
   rustToolchain,
   rustPlatform,
   rocmPackages,
+  libuuid,
+  python3,
+  # XRT with the amdxdna plugin (.devops/nix/xrt): the NPU runtime. Null
+  # only for revisions that predate it (the CI timing baseline).
+  xrt ? null,
+  # The IRON toolchain (.devops/nix/iron): compiles the in-tree NPU designs
+  # (src/core/npu/kernels) into share/gufo/npu. Null builds without them.
+  iron ? null,
+  # The Loom runtime (.devops/nix/hrx/loom-runtime.nix) of the loom extension,
+  # found through pkg-config. Null builds it from source, which the sandbox
+  # cannot download.
+  loomRuntime ? null,
   releaseVersion ? null,
   extensionsFromLock ? false,
   extensions ? [ ],
+  # Devlab correctness binary: the gpu-test configuration (BUILD_TESTING=ON),
+  # which keeps the serving, memory and cache assertions and the checked Rust
+  # profile that the production configuration compiles out.
+  checked ? false,
+  # With `checked`: CTest labels whose test executables the package also
+  # builds and bundles (tools/ci/ctest_bundle.py), for Devlab's GPU runners.
+  ctestLabels ? [ ],
   revision,
   sourceRoot ? ../..,
 }:
@@ -46,6 +66,8 @@ let
   # The CI timing baseline builds an older revision with this definition;
   # before the Rust audio decoder, EmbeddingGemma 2 linked libsndfile and soxr.
   hasRustAudio = builtins.pathExists (sourceRoot + "/src/core/audio_decode/Cargo.toml");
+  # Before the Rust JPEG decoder, every build linked libjpeg-turbo.
+  hasRustJpeg = builtins.pathExists (sourceRoot + "/src/core/jpeg_decode/Cargo.toml");
   # A store path has no Git metadata. A flake input or fetcher result still
   # names its commit (`dirtyRev` ends in "-dirty") or at least the hash of its
   # tree; a plain path names nothing.
@@ -71,6 +93,18 @@ let
   hasExtensions = builtins.pathExists (sourceRoot + "/extensions.lock");
   # Revisions before extension modules have no SDK to install.
   hasExtensionSdk = builtins.pathExists (sourceRoot + "/cmake/GufoExtensionSdk.cmake");
+  # The NPU designs build as a derivation of their own from this sourceRoot
+  # (the CI timing baseline overrides it), so the package build does not
+  # recompile them for every source change. Older revisions compile them in
+  # the package build, or have none.
+  npuDesigns =
+    if iron != null && xrt != null && builtins.pathExists (sourceRoot + "/cmake/npu-designs/CMakeLists.txt") then
+      import ./npu-designs.nix {
+        inherit lib stdenv cmake ninja iron xrt sourceRoot runCommand;
+        hostCxx = rocmPackages.llvm.clang;
+      }
+    else
+      null;
   evalFixture =
     if hasExtensions then
       "tests/fixtures/eval/antirez-ds4.json"
@@ -116,10 +150,12 @@ let
   };
 in
 assert lib.versions.majorMinor rocmPackages.clr.version == "10.1";
-stdenv.mkDerivation {
-  pname = "gufo";
+assert ctestLabels == [ ] || checked;
+stdenv.mkDerivation ({
+  pname = if checked then "gufo-checked" else "gufo";
   version = packageVersion;
-  src = productionSource;
+  # Test builds configure the test tree, so they need the full source.
+  src = if checked then sourceRoot else productionSource;
   # The extension SDK pins the build toolchain, so it lives in its own output:
   # the runtime closure stays free of compilers and development libraries.
   outputs = [ "out" ] ++ lib.optional hasExtensionSdk "sdk";
@@ -131,13 +167,12 @@ stdenv.mkDerivation {
     makeWrapper
     rustToolchain
     rocmPackages.clr
-  ];
+  ] ++ lib.optional checked python3;
 
   buildInputs = [
     icu
     curl
     libpng
-    libjpeg
     libwebp
     libopus
     openssl
@@ -149,21 +184,33 @@ stdenv.mkDerivation {
     rocmPackages.rocprim
     rocmPackages.rocwmma
     rocmPackages.rocblas
-  ] ++ lib.optionals (!hasRustAudio) [
+  ]
+  # The JPEG decoder test writes its cases and checks them with libjpeg-turbo.
+  ++ lib.optional (checked || !hasRustJpeg) libjpeg
+  ++ lib.optionals (!hasRustAudio) [
     libsndfile
     soxr
-  ];
+  ] ++ lib.optionals (xrt != null) [
+    xrt
+    libuuid
+  ] ++ lib.optional (loomRuntime != null) loomRuntime;
 
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
-    "-DBUILD_TESTING=OFF"
+    "-DBUILD_TESTING=${if checked then "ON" else "OFF"}"
     "-DGUFO_EXTENSIONS_FROM_LOCK=${if extensionsFromLock then "ON" else "OFF"}"
     "-DGUFO_RELEASE_VERSION=${versionLabel}"
     "-DGUFO_REVISION=${revision}"
     "-DGUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
     "-DGUFO_FFPROBE_EXECUTABLE=${ffmpeg-headless}/bin/ffprobe"
     "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
-  ] ++ lib.optional hasExtensionSdk "-DGUFO_SDK_INSTALL_DIR=${placeholder "sdk"}/lib/gufo/sdk"
+  ] ++ lib.optional (xrt != null) "-DXRT_DIR=${xrt}/opt/xilinx/xrt/share/cmake/XRT"
+  ++ lib.optional (npuDesigns != null) "-DGUFO_NPU_PREBUILT_DESIGNS=${npuDesigns}/share/gufo/npu"
+  ++ lib.optional (iron != null && npuDesigns == null) "-DGUFO_IRON_PYTHON=${iron}/bin/python3"
+  ++ lib.optional hasExtensionSdk "-DGUFO_SDK_INSTALL_DIR=${placeholder "sdk"}/lib/gufo/sdk"
+  # Its own build phase keeps Ninja, which nixpkgs selects only for the
+  # default one.
+  ++ lib.optionals checked [ "-GNinja" "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" ]
   ++ lib.optionals (extensions != [ ]) [
     "-DGUFO_EXTENSION_DIRS=${lib.concatMapStringsSep ";" (ext: "${ext}") extensions}"
     "-DGUFO_EXTENSION_DIR_REVISIONS=${lib.concatMapStringsSep ";" extensionRevision extensions}"
@@ -173,7 +220,13 @@ stdenv.mkDerivation {
   # C/C++ sources. Keep HIP uncached: Clang emits a bundled preprocessor output
   # whose included headers ccache 4.13.6 does not record. A header-only change
   # can then reuse a stale HIP object, including one from the timing baseline.
-  preConfigure = cargoSetup + ''
+  preConfigure = cargoSetup + lib.optionalString (iron != null && npuDesigns == null) ''
+    export PEANO_INSTALL_DIR=${iron.peano}
+  '' + lib.optionalString checked ''
+    # Test executables built only from HIP sources link through the HIP
+    # compiler's C driver, which adds no C++ runtime. Production links none.
+    cmakeFlagsArray+=("-DCMAKE_HIP_STANDARD_LIBRARIES=-lstdc++ -lm")
+  '' + ''
     ccache_dir=/tmp/gufo-ccache
     if [[ -d "$ccache_dir" && -w "$ccache_dir" ]]; then
       export CCACHE_DIR="$ccache_dir"
@@ -197,6 +250,9 @@ stdenv.mkDerivation {
   postFixup = ''
     # HIP loads ROCr transitively. Select the patched ABI-compatible runtime
     # without rebuilding the unchanged HIP/BLAS compiler and kernel libraries.
+    # XRT locates its amdxdna plugin beside libxrt_coreutil, which the NPU
+    # module's (lib/gufo/libgufo_npu_xrt.so) RUNPATH finds in the merged XRT
+    # package.
     wrapProgram "$out/bin/gufo" \
       --prefix LD_LIBRARY_PATH : "${rocmRuntime}/lib"
   '';
@@ -214,6 +270,25 @@ stdenv.mkDerivation {
     test ! -e $out/bin/gufo-kernel-bench
     test -f $out/share/licenses/gufo/LICENSE
     test -f $out/share/licenses/gufo/third-party/LICENSE.ds4
+  '' + lib.optionalString (npuDesigns != null) ''
+    # Timing baselines may predate the generated manifest.
+    if test -f npu-artifacts.txt; then
+      while IFS= read -r artifact; do
+        test -s "$out/share/gufo/npu/$artifact"
+      done < npu-artifacts.txt
+      cmp npu-artifacts.txt "$out/share/gufo/npu/npu-artifacts.txt"
+    else
+      # Every program a runtime opens; a missing one silently drops to a slower path.
+      for f in q8gemm/q8gemm qwen3dec/qwen3dec qwen3dec/qwen3dec_p bfpgemm/bfpgemm bfpgemm/bfpgemm_s; do
+        test -f $out/share/gufo/npu/$f.xclbin
+        test -f $out/share/gufo/npu/''${f}_dispatch.so
+      done
+      for m in 256 512 1024; do
+        test -f $out/share/gufo/npu/qwen3pre/qwen3pre_$m.xclbin
+        test -f $out/share/gufo/npu/qwen3pre/qwen3pre_$m.bin
+        test -f $out/share/gufo/npu/qwen3pre/qwen3pre_''${m}_plan.txt
+      done
+    fi
   '' + lib.optionalString hasExtensionSdk ''
     test ! -e $out/lib/gufo/sdk
     test -f $sdk/lib/gufo/sdk/profile.cmake
@@ -225,7 +300,7 @@ stdenv.mkDerivation {
   '';
 
   passthru = {
-    inherit releaseVersion revision rocmPackages rocmRuntime extensionsFromLock;
+    inherit releaseVersion revision rocmPackages rocmRuntime extensionsFromLock xrt iron npuDesigns checked ctestLabels;
     extensionMetadata = import ./extension-metadata.nix {
       inherit lib sourceRoot extensions extensionsFromLock;
     };
@@ -245,4 +320,31 @@ stdenv.mkDerivation {
     platforms = [ "x86_64-linux" ];
     mainProgram = "gufo";
   };
-}
+} // lib.optionalAttrs checked {
+  # BUILD_TESTING=ON adds every test target to `all`; build only what the
+  # package installs, and install without building `all`.
+  buildPhase = ''
+    runHook preBuild
+    targets=(gufo)
+    if ninja -t targets all | grep -q '^gufo_npu_xrt:'; then
+      targets+=(gufo_npu_xrt)
+    fi
+  '' + lib.optionalString (ctestLabels != [ ]) ''
+    tests=$(python3 ../tools/ci/ctest_bundle.py targets --build . \
+      ${lib.concatMapStringsSep " " (label: "--label ${lib.escapeShellArg label}") ctestLabels})
+    targets+=($tests)
+  '' + ''
+    ninja -j"$NIX_BUILD_CORES" "''${targets[@]}"
+    runHook postBuild
+  '';
+  installPhase = ''
+    runHook preInstall
+    cmake --install .
+  '' + lib.optionalString (ctestLabels != [ ]) ''
+    python3 ../tools/ci/ctest_bundle.py collect --build . --source "$(cd .. && pwd)" \
+      ${lib.concatMapStringsSep " " (label: "--label ${lib.escapeShellArg label}") ctestLabels} \
+      --output "$out"
+  '' + ''
+    runHook postInstall
+  '';
+})

@@ -110,6 +110,7 @@ one URL.
 ## Performance
 
 As of September 20, 2026, on Strix Halo, CustomVoice speaks at up to **2.54×
-real time** and starts playing after **201 ms**. See the
-[full benchmarks](../internal/models/qwen3-tts/BENCHMARKS.md) and the
+real time** and starts playing after **201 ms**; `gufo serve tts --npu` runs
+every variant on the XDNA NPU with the GPU off, at about 1.4× real time. See
+the [benchmarks](../internal/models/qwen3-tts/BENCHMARKS.md#npu) and the
 [quality report](../internal/models/qwen3-tts/QUALITY.md).

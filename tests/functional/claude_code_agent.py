@@ -90,14 +90,14 @@ def strings(value):
 
 def completed_requests(server_log, wanted, timeout=10):
     """The server logs completion after the response, so allow it a moment."""
-    deadline = time.monotonic() + timeout
+    deadline = time.perf_counter() + timeout
     while True:
         completed = {}
         for line in server_log.read_text().splitlines():
             if "event=completed " in line:
                 fields = dict(re.findall(r"(?:^|\s)(\w+)=([^\s]+)", line))
                 completed[fields.get("request")] = fields
-        if wanted <= completed.keys() or time.monotonic() > deadline:
+        if wanted <= completed.keys() or time.perf_counter() > deadline:
             return completed
         time.sleep(0.2)
 
@@ -192,14 +192,14 @@ def run_case(args, recorder, env, index, name):
     recorder.case = case.name
     row = {"case": case.name, "start_request": len(recorder.requests)}
     stdout = case / "stdout.jsonl"
-    start = time.monotonic()
+    start = time.perf_counter()
     proc = None
     try:
         with stdout.open("w") as out, (case / "stderr.log").open("w") as err:
             proc = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                     stdout=out, stderr=err, start_new_session=True)
             while proc.poll() is None:
-                if time.monotonic() - start > args.timeout:
+                if time.perf_counter() - start > args.timeout:
                     raise AssertionError("Claude Code task timeout")
                 if repeated_actions(transcript(stdout)) > 5:
                     raise AssertionError("Repeated tool action")
@@ -216,7 +216,7 @@ def run_case(args, recorder, env, index, name):
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
-    row["wall_ms"] = (time.monotonic() - start) * 1000
+    row["wall_ms"] = (time.perf_counter() - start) * 1000
     events = transcript(stdout)
     row["tool_calls"] = len(blocks(events, "assistant", "tool_use"))
     row["tool_errors"] = [r for r in blocks(events, "user", "tool_result") if r.get("is_error")]

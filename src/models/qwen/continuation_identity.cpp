@@ -7,9 +7,9 @@
 #include <stdexcept>
 
 #include "gufo/ext/continuation.hpp"
+#include "gufo/ext/families/qwen/text/chat_template.hpp"
 #include "gufo/ext/speculative_verifier.hpp"
 #include "src/families/qwen/hip_common/attention_policy.hpp"
-#include "src/families/qwen/text/chat_template.hpp"
 
 namespace gufo::models::qwen {
 

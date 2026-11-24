@@ -92,6 +92,31 @@ class ConfigureTests(unittest.TestCase):
         invalid[0]["providers"][0]["serving"] = {"voices": True}
         self.configure(invalid, "serving voices requires speech_synthesis")
 
+    def test_serving_hardware_queues(self):
+        manifests = copy.deepcopy(BASE)
+        provider = manifests[0]["providers"][0]
+        provider["capability"] = "speech_synthesis"
+        provider["serving"] = {"hardware_queues": 2}
+        self.configure(manifests)
+        for value in (0, 8, 1.5, "2"):
+            invalid = copy.deepcopy(manifests)
+            invalid[0]["providers"][0]["serving"]["hardware_queues"] = value
+            with self.subTest(value=value):
+                self.configure(invalid, "serving hardware_queues must be an integer from 1 to 7")
+        invalid = copy.deepcopy(BASE)
+        invalid[0]["providers"][0]["serving"] = {"hardware_queues": 2}
+        self.configure(invalid, "serving hardware_queues requires speech_synthesis or speech_recognition")
+
+    def test_serving_hip(self):
+        manifests = copy.deepcopy(BASE)
+        manifests[0]["providers"][0]["serving"] = {"hip": False}
+        self.configure(manifests)
+        for value in (0, "false", None):
+            invalid = copy.deepcopy(manifests)
+            invalid[0]["providers"][0]["serving"]["hip"] = value
+            with self.subTest(value=value):
+                self.configure(invalid, "serving hip must be a boolean")
+
     def test_names_and_collisions(self):
         cases = [
             (lambda m: m[0].update(name="Bad-name"), "invalid extension name"),

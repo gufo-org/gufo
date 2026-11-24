@@ -119,12 +119,13 @@ Module Load(const std::filesystem::path& path) {
   };
   const std::string_view build_id =
       reinterpret_cast<BuildIdFn>(symbol("gufo_ext_module_build_id_v1"))();
-  if (build_id != extension_store::HostBuildId())
-    throw std::runtime_error(path.string() + " was built for build identity " +
-                             std::string(build_id) + ", this gufo is " +
-                             std::string(extension_store::HostBuildId()));
   module.manifest = json::parse(
       reinterpret_cast<ManifestFn>(symbol("gufo_ext_module_manifest_v1"))());
+  const auto expected = extension_store::ModuleBuildId(module.manifest);
+  if (build_id != expected)
+    throw std::runtime_error(path.string() + " was built for build identity " +
+                             std::string(build_id) + ", this gufo expects " +
+                             expected);
   module.name = module.manifest.member_str("name");
   module.register_extension =
       reinterpret_cast<RegisterFn>(symbol("gufo_ext_module_register_v1"));
@@ -150,8 +151,18 @@ const std::vector<Module>& Modules() {
     try {
       const auto store = extension_store::StoreDirectory();
       for (const auto& installed : extension_store::Read(store)) {
-        const auto path = extension_store::ModulePath(
-            store, installed.name, extension_store::HostBuildId());
+        std::filesystem::path path;
+        try {
+          // Checked before loading: a module whose dependency this gufo
+          // lacks would not resolve its symbols.
+          const auto manifest = extension_store::Manifest(
+              extension_store::SourceDirectory(store, installed.name));
+          CheckDependencies(manifest, HostExtensionNames());
+          path = extension_store::InstalledModulePath(store, installed.name);
+        } catch (const std::exception& error) {
+          Warn("skipping extension " + installed.name + ": " + error.what());
+          continue;
+        }
         if (!std::filesystem::exists(path)) {
           Warn("extension " + installed.name +
                " is not built for this gufo; run 'gufo extension update " +
@@ -199,6 +210,30 @@ void CheckConflicts(const json::Value& manifest, const json::Value& other) {
   CheckProviders(Providers(other), manifest, {});
 }
 
+std::vector<std::string> HostExtensionNames() {
+  std::vector<std::string> names;
+  for (const auto& [name, identity] : extension_store::HostExtensions())
+    names.push_back(name);
+  return names;
+}
+
+void CheckDependencies(const json::Value& manifest,
+                       const std::vector<std::string>& available,
+                       const std::string& unavailable) {
+  for (const auto& dependency : Strings(manifest, "depends")) {
+    if (!unavailable.empty())
+      throw std::runtime_error("extension " + manifest.member_str("name") +
+                               " depends on " + dependency + ": " +
+                               unavailable);
+    if (std::ranges::find(available, dependency) == available.end())
+      throw std::runtime_error(
+          "extension " + manifest.member_str("name") + " depends on " +
+          dependency +
+          ", which this gufo does not build in; a module may depend only on "
+          "an in-tree extension built into gufo");
+  }
+}
+
 void Verify(const std::filesystem::path& module_path) {
   const auto module = Load(module_path);
   ext::Registry registry;
@@ -215,8 +250,12 @@ bool ExtensionModuleShadows(std::string_view name) {
 }
 
 void RegisterExtensionModules(Registry& registry) {
+  // A module depends only on the in-tree extensions built into this
+  // executable, whose code it links; a replaced built-in keeps that code.
+  const auto hosts = cli::extension_modules::HostExtensionNames();
   for (const auto& module : cli::extension_modules::Modules()) {
     try {
+      cli::extension_modules::CheckDependencies(module.manifest, hosts);
       cli::extension_modules::CheckConflicts(registry, module.manifest);
       module.register_extension(&registry, module.source.c_str());
     } catch (const std::exception& error) {

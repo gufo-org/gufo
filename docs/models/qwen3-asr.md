@@ -6,9 +6,7 @@ recorded files and for live audio over a WebSocket.
 ## Files
 
 ```sh
-hf download Qwen/Qwen3-ASR-1.7B \
-  --revision 7278e1e70fe206f11671096ffdd38061171dd6e5 \
-  --local-dir models/Qwen3-ASR-1.7B
+gufo model install qwen3-asr
 ```
 
 The 0.6B checkpoint, forced alignment and audio GGUF files aren't supported.
@@ -16,8 +14,8 @@ The 0.6B checkpoint, forced alignment and audio GGUF files aren't supported.
 ## Run
 
 ```sh
-gufo transcribe --model models/Qwen3-ASR-1.7B --audio speech.wav
-gufo serve asr --model models/Qwen3-ASR-1.7B
+gufo transcribe --model qwen3-asr --audio speech.wav
+gufo serve asr --model qwen3-asr
 curl -sS http://127.0.0.1:8080/v1/audio/transcriptions \
   -F file=@speech.wav -F model=qwen3-asr-1.7b -F response_format=json
 ```
@@ -28,10 +26,10 @@ greedy, so `temperature` must be 0.
 
 ## Audio input
 
-Gufo reads WAV files with 16-, 24- or 32-bit integer or 32-bit float samples,
-up to eight channels and 192 kHz, and converts them to 16 kHz mono. A
-recording can be up to 30 minutes long; the CLI also caps input at 256 MiB,
-and the server applies its request size limit.
+Gufo reads WAV, FLAC, MP3 and Ogg (Vorbis or Opus) files, up to eight
+channels and 192 kHz, and converts them to 16 kHz mono. M4A/AAC isn't
+supported. A recording can be up to 30 minutes long; the CLI also caps input
+at 256 MiB, and the server applies its request size limit.
 
 Gufo splits long recordings at quiet points, transcribes each piece and joins
 the results. `--context` sets the capacity for one piece, and `--max-tokens`
@@ -80,3 +78,10 @@ As of September 21, 2026, on Strix Halo, transcription runs at **15.27×
 real time** once the model is loaded. See the
 [full benchmarks](../internal/models/qwen3-asr/BENCHMARKS.md) and the
 [quality report](../internal/models/qwen3-asr/QUALITY.md).
+
+## On the NPU
+
+`--npu` (on `gufo serve asr` and `gufo transcribe`) runs the model on the
+XDNA NPU with the GPU off, at about half the GPU's speed: a 10-second
+recording takes about 1.3 s. See the
+[NPU benchmarks](../internal/models/qwen3-asr/BENCHMARKS.md#npu).

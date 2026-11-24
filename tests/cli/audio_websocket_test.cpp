@@ -267,37 +267,70 @@ private:
   std::string last_;
 };
 
-// The server's receive timeout is an idle limit. A client that only listens
-// to streamed output must stay connected; a silent session closes cleanly.
+// A client that only listens to streamed output stays connected while the
+// server sends binary frames.
 void ListeningClientIsNotIdle() {
-  std::array<int, 2> fds{};
-  assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds.data()) == 0);
-  assert(net::SetSocketTimeouts(fds[0], 300));
-  assert(net::SetSocketTimeouts(fds[1], 3'000));
-  {
-    WebSocket socket(fds[0], {});
-    // Unmasked final binary frame with a five-byte payload.
-    const auto expected = std::string("\x82\x05", 2) + "audio";
-    const auto streaming_until =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(1200);
-    while (std::chrono::steady_clock::now() < streaming_until) {
-      assert(socket.SendBinary("audio"));
-      std::string frame(expected.size(), '\0');
-      assert(::recv(fds[1], frame.data(), frame.size(), MSG_WAITALL) ==
-             static_cast<ssize_t>(frame.size()));
-      assert(frame == expected);
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    assert(!socket.cancelled());
-    std::array<char, 4> close{};
-    assert(::recv(fds[1], close.data(), close.size(), MSG_WAITALL) == 4);
-    assert(std::string_view(close.data(), close.size()) ==
-           std::string_view("\x88\x02\x03\xE9", 4));
-    assert(socket.cancelled());
+  HttpServer server("127.0.0.1", 0, nullptr);
+  server.add("GET", "/ws-stream", [](const HttpRequest& req, auto&) {
+    return UpgradeWebSocket(req, [](WebSocket& socket) {
+      for (int i = 0; i < 10; ++i) {
+        assert(socket.SendBinary("audio"));
+        assert(!socket.cancelled());
+        if (i + 1 < 10)
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+      socket.Close(1000);
+    });
+  });
+  std::string error;
+  assert(server.start(&error));
+  std::jthread thread([&] { server.run(); });
+
+  Client client(server.port(), "/ws-stream");
+  assert(client.headers.find("101 ") != std::string::npos);
+  for (int i = 0; i < 10; ++i) {
+    const auto [opcode, payload] = client.Receive();
+    assert(opcode == 2 && payload == "audio");
   }
-  net::CloseSocket(fds[0]);
-  net::CloseSocket(fds[1]);
+  server.stop();
 }
+
+// An upgraded session keeps its connection slot until it ends, so open
+// WebSockets count toward the connection limit like any request in progress.
+void WebSocketHoldsConnectionSlot() {
+  HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, nullptr,
+                    {.max_connections = 1});
+  server.add("GET", "/ws-echo", [](const HttpRequest& req, auto&) {
+    return UpgradeWebSocket(req, [](WebSocket& socket) {
+      std::string text;
+      while (socket.Receive(&text) && text != "bye")
+        assert(socket.SendText(text));
+    });
+  });
+  std::string error;
+  assert(server.start(&error));
+  std::jthread thread([&] { server.run(); });
+  {
+    Client client(server.port(), "/ws-echo");
+    assert(client.headers.starts_with("HTTP/1.1 101"));
+    client.Text("ping");
+    const auto [opcode, payload] = client.Receive();
+    assert(opcode == 1 && payload == "ping");
+    assert(HttpGet(server.port(), "/missing").starts_with("HTTP/1.1 503"));
+    client.Text("bye");
+    assert(client.Receive().first == 8);
+  }
+  // The slot frees once the session has closed.
+  bool admitted = false;
+  for (int attempt = 0; attempt < 200 && !admitted; ++attempt) {
+    admitted = HttpGet(server.port(), "/missing").starts_with("HTTP/1.1 404");
+    if (!admitted)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  assert(admitted);
+  server.stop();
+}
+
 // 24 kHz PCM16 of silence (quiet noise) or a speech-loud tone.
 std::string Pcm(double seconds, bool loud) {
   std::vector<float> samples(std::size_t(seconds * 24000));
@@ -578,7 +611,10 @@ void RealtimeStreams() {
                    "Sec-WebSocket-Protocol: realtime, "
                    "openai-insecure-api-key.test\r\n");
     assert(browser.headers.starts_with("HTTP/1.1 101"));
-    assert(browser.headers.find("Sec-WebSocket-Protocol: realtime") !=
+    auto lower_headers = browser.headers;
+    for (char& c : lower_headers)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    assert(lower_headers.find("sec-websocket-protocol: realtime") !=
            std::string::npos);
     browser.Event("session.created");
     const auto page = HttpGet(server.port(), "/voice");
@@ -593,6 +629,7 @@ void RealtimeStreams() {
 
 int main() {
   ListeningClientIsNotIdle();
+  WebSocketHoldsConnectionSlot();
   VoiceActivityDetects();
   std::atomic<int> tts_calls{0}, asr_calls{0};
   std::atomic<bool> entered{false}, cancelled{false};

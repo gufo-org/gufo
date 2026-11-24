@@ -27,6 +27,30 @@ capability. A provider has:
   says whether this provider runs it;
 - a **factory** that builds the running model once the probe says yes.
 
+## Core or extension
+
+Gufo's maintainers spend their time on the core: the parts every model relies
+on to serve well. Models live in extensions.
+
+- **Core** is everything Gufo owns above, plus shared building blocks such as
+  GGUF loading, sampling, quantization helpers and the extension runtime.
+  Change the core when the change helps more than one model, or when your
+  extension needs something the [extension API](extension-api.md) doesn't offer
+  yet. Add it as a general contract, not a hook for one model.
+- **An extension** is everything about one model: its engine, kernels,
+  loaders, templates, tests and quality evidence. A new model, or a new variant
+  of one, starts as an extension in your own repository, and you maintain it.
+
+Gufo ships one or two **official** models per use case. They live in Gufo's
+repository and come with the default build; every other extension is
+installed separately. Each official model needs its own optimizations to be
+the fastest and most accurate on Strix Halo, and maintainer time is limited,
+so a model becomes official only when it fills or improves a use case and
+someone commits to maintaining it. A model that works well isn't enough on its
+own. An official model stays until a better one arrives for the same use case;
+it then moves to its own repository as a community extension. A community
+extension gets the same runtime, cache and scheduler as an official one.
+
 ## Start from the template
 
 Copy [examples/extension_template](../examples/extension_template/README.md)
@@ -62,7 +86,15 @@ anything:
   (`target`) and registration function.
 - `targets[].requires`: what a library needs to build, such as `hip` or
   `testing`. Test libraries use `role: "test"`.
+- `depends`: the extensions yours builds on; see
+  [depend on another extension](#depend-on-another-extension).
 - `options`: command-line options your providers add, with their types.
+- `models`: the weights `gufo model` can install, one entry per model. Each
+  component names its role, the option its path fills (one fills `--model`),
+  whether `install` treats it as `required`, `default` or `optional`, a
+  pinned Hugging Face `source` and `include`/`exclude` globs. Run
+  `python3 tools/models/lock.py <extension-dir>` to pin every file's size and
+  SHA-256 in `models.lock.json`; `gufo model` installs only locked files.
 - `packages`, `licenses`, `install_data`, `runtime_libraries`: what the build
   needs and what an install must ship. `packages[].pkg_config` names a
   pkg-config module, which the build then provides as `PkgConfig::<module>`.
@@ -70,6 +102,58 @@ anything:
 Keep host code (probes, metadata parsing) apart from HIP code, so diagnostics
 and probes work on machines without a GPU, and keep test code under the
 `testing` condition. Declare only the platforms you test.
+
+## Depend on another extension
+
+An extension can build on another one's code, such as a new checkpoint format
+for a model another extension already runs. List it in `depends`:
+
+```json
+{ "depends": ["qwen38_flash_next"] }
+```
+
+Gufo then builds it before yours, in-tree or from `GUFO_EXTENSION_DIRS`, and
+refuses to configure if it's missing or unselected, if a lock build locks
+yours without it, or if the dependencies form a cycle.
+
+Link only what the other extension **exports**: a library it publishes as
+`gufo::<name>` from its `extension.cmake`:
+
+```cmake
+gufo_extension_export(TARGET gufo_qwen38_flash_next_hip NAME qwen38_flash_next_hip)
+```
+
+`<name>` is the exporting extension's name or starts with it and `_`, and
+mustn't fall in a longer extension name's namespace. Only the extension's own
+`extension.cmake` can export its targets. For Flash-Next, include only the
+experimental `<gufo/ext/families/qwen/models/flash_next/...>` headers; a new
+format serves through `CreateQwenFlashNextTextRunner(options, stages, weights,
+error)`. Your targets then link the alias:
+
+```cmake
+gufo_extension_target(
+  NAME my_extension_hip
+  SOURCES src/provider.cpp
+  LINK_LIBRARIES gufo_ext_runtime gufo::qwen38_flash_next_hip
+)
+```
+
+After every extension is built, Gufo checks the direct links of each target
+your `extension.cmake` defines, helper targets and `INTERFACE` links included:
+a link to another extension's library, by export or target name, fails unless
+you list that extension in `depends`. For an extension outside Gufo's tree,
+every transitive link is checked too. A target disabled by its `requires`
+exports nothing, so give targets that link it the same `requires`. A module
+may depend only on in-tree extensions its Gufo compiles in, and link only their
+exports; not on Windows yet. See [modules](internal/extension-build.md#modules).
+
+> **Warning:** Depending on an export takes you outside the versioned
+> [extension API](extension-api.md#the-boundary): its headers and libraries are
+> the exporting extension's code, with no compatibility promise, like an
+> experimental header. An export from Gufo's own tree passes the external
+> include and link checks whole, so it can expose private Gufo headers. Pin the
+> dependency to the exact revision you tested. These checks catch mistakes,
+> not hostile build code, which runs with your permissions.
 
 ## Implement a capability
 
@@ -160,8 +244,7 @@ For each Gufo update:
 5. Bump your version and update the quality notes, keeping failed results
    visible.
 
-If your model fits Gufo's goal, the best model for each use case on Strix
-Halo, you can ask for it to become official. That needs a named maintainer and
-the evidence above; the
+If your model fits [Gufo's goal](#core-or-extension), you can ask for it to
+become official. That needs a named maintainer and the evidence above; the
 [support policy](internal/extension-distribution.md#support-states)
 describes the process.

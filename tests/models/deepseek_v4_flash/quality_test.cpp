@@ -19,6 +19,7 @@
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+#include "tests/support/source_path.hpp"
 
 namespace gufo::testing::ds4 {
 void CheckTokenGoldens(const models::deepseek_v4_flash::Model& model);
@@ -50,7 +51,7 @@ void CheckIndexerBoundary(
     bool batched) {
   // Shared pp2048 benchmark recipe, seed 100000, at 2035 actual tokens.
   // Generation crosses ratio-4's 512-entry sparse attention boundary.
-  std::ifstream file(GUFO_DS4_BOUNDARY_PROMPT);
+  std::ifstream file(gufo::testing::SourcePath(GUFO_DS4_BOUNDARY_PROMPT));
   Expect(file.good(), "open indexer boundary prompt");
   const std::string text{std::istreambuf_iterator<char>(file), {}};
   const auto prompt = model->EncodeChat("", text);

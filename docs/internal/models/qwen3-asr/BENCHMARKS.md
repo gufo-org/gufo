@@ -58,3 +58,21 @@ The benchmark uses the CLI's decoded sample count and supports float WAV.
 Record fixture/model/binary identities. Profile separately with
 `tools/prof/prof.py --stages qwen-asr`; raw traces stay outside Git.
 Long-form corpus accuracy and current concurrent throughput remain **TODO**.
+
+## NPU
+
+Measured on November 13, 2026 with `gufo transcribe --npu`
+(`HIP_VISIBLE_DEVICES=-1`) against the GPU on the same build. The transcript
+of `tests/functional/fixtures/audio/clear-english-voice.wav` (10 s) and of a
+40 s clip made of four copies match the GPU exactly.
+
+| Case | GPU | NPU | NPU / GPU |
+| --- | ---: | ---: | ---: |
+| 10 s clip, total | 586 ms | 1,270 ms | 46% |
+| 40 s clip, total | 2,447 ms | 4,748 ms | 52% |
+
+On the 10 s clip the audio encoder takes 77 ms (matrix products on
+`BfpGemm`), the 145-token prefill 165 ms and decoding 36.4 ms per token on the
+fused one-dispatch Qwen3 decoder (`src/core/npu/kernels/qwen3dec`), near the
+NPU's DRAM ceiling for 1.83 GB of Q8_0 weights per token. See
+[the NPU notes](../../npu.md).

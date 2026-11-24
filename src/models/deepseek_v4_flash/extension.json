@@ -32,6 +32,40 @@
       }
     }
   ],
+  "models": [
+    {
+      "id": "deepseek4",
+      "provider": "deepseek4",
+      "license": "mit",
+      "description": "DeepSeek V4 Flash, IQ2XXS GGUF",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "antirez/deepseek-v4-gguf",
+            "revision": "1cd7b564460821938add0475a60b942c409295e0"
+          },
+          "include": [
+            "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf"
+          ]
+        },
+        {
+          "role": "dspark",
+          "option": "--dspark-model",
+          "install": "default",
+          "source": {
+            "hf": "antirez/deepseek-v4-gguf",
+            "revision": "e7f04037032990db0346398d249baf9fb9df1ccc"
+          },
+          "include": [
+            "DeepSeek-V4-Flash-DSpark-support-0731.gguf"
+          ]
+        }
+      ]
+    }
+  ],
   "options": [
     {
       "name": "--dspark-model",
@@ -66,7 +100,8 @@
       "**/*.h",
       "**/*.hpp",
       "**/*.hip",
-      "extension.*"
+      "extension.*",
+      "models.lock.json"
     ],
     "exclude": [
       "tests/",

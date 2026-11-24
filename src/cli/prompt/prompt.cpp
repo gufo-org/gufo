@@ -1,6 +1,7 @@
 #include "src/cli/prompt/prompt.hpp"
 
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -14,6 +15,7 @@
 #include "gufo/ext/text.hpp"
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/provider_options.hpp"
+#include "src/cli/runner_cli.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/speculative_settings.hpp"
 #include "src/core/gguf_reader.hpp"
@@ -225,19 +227,12 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
     return std::nullopt;
   }
 
-  if (opt.speculative_backend == "mtp" && opt.mtp_model_path.empty()) {
+  try {
+    (void)SpeculativeConfigFor(opt.speculative_backend, opt.mtp_model_path,
+                               opt.dflash_model_path, opt.dspark_model_path);
+  } catch (const std::invalid_argument& exception) {
     if (error_msg != nullptr)
-      *error_msg = "MTP requires --mtp-model";
-    return std::nullopt;
-  }
-  if (opt.speculative_backend == "dflash2" && opt.dflash_model_path.empty()) {
-    if (error_msg != nullptr)
-      *error_msg = "DFlash2 requires --dflash-model";
-    return std::nullopt;
-  }
-  if (opt.speculative_backend == "dspark" && opt.dspark_model_path.empty()) {
-    if (error_msg != nullptr)
-      *error_msg = "DSpark requires --dspark-model";
+      *error_msg = exception.what();
     return std::nullopt;
   }
   // Each model sets its draft settings (TextSpeculativeDefaults).
@@ -281,11 +276,16 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
 }
 
 // Delivers the selected provider's options and resolves its draft settings;
-// false after reporting an error.
+// false after reporting an error. The provider's own `driver` reads the draft
+// model from the command line, so it needs one; a runner may carry its draft.
 bool PrepareForProvider(const ProviderOptions& provider,
-                        const ext::TextProvider& selected, PromptOptions* opt) {
+                        const ext::TextProvider& selected, bool driver,
+                        PromptOptions* opt) {
   try {
     opt->provider_options = provider.Select(selected.id);
+    if (driver)
+      RequireDraftModel(opt->speculative_backend, opt->mtp_model_path,
+                        opt->dflash_model_path, opt->dspark_model_path);
     const auto settings =
         ResolveSpeculativeSettings(selected, opt->speculative_backend, {});
     opt->draft_tokens = settings.max_draft_tokens;
@@ -399,6 +399,18 @@ int RunPrompt(std::span<const char* const> args) {
   }
 
   const auto model_load_start = std::chrono::steady_clock::now();
+  // A model directory belongs to the provider whose probe claims it.
+  if (const ext::TextProvider* provider = nullptr;
+      ext::ProbeModelDirectory(opt.model_path, &provider)) {
+    if (provider == nullptr) {
+      std::cerr << "Error: no text provider claims model directory '"
+                << opt.model_path << "'\n";
+      return 1;
+    }
+    if (!PrepareForProvider(provider_options, *provider, false, &opt))
+      return 2;
+    return RunRunnerPrompt(opt, model_load_start);
+  }
   std::string err;
   auto reader_owner = gufo::core::GgufReader::OpenFile(
       opt.model_path, &err, {.allow_unsized_tensors = true});
@@ -418,12 +430,18 @@ int RunPrompt(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
+  if (provider != nullptr && provider->prompt_driver == nullptr &&
+      provider->create != nullptr) {
+    if (!PrepareForProvider(provider_options, *provider, false, &opt))
+      return 2;
+    return RunRunnerPrompt(opt, model_load_start);
+  }
   if (provider == nullptr || provider->prompt_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for prompt\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  if (!PrepareForProvider(provider_options, *provider, &opt)) {
+  if (!PrepareForProvider(provider_options, *provider, true, &opt)) {
     PrintModelLoadTime(model_load_start, false);
     return 2;
   }
@@ -459,6 +477,18 @@ int RunChat(std::span<const char* const> args) {
   }
 
   const auto model_load_start = std::chrono::steady_clock::now();
+  // A model directory belongs to the provider whose probe claims it.
+  if (const ext::TextProvider* provider = nullptr;
+      ext::ProbeModelDirectory(opt.model_path, &provider)) {
+    if (provider == nullptr) {
+      std::cerr << "Error: no text provider claims model directory '"
+                << opt.model_path << "'\n";
+      return 1;
+    }
+    if (!PrepareForProvider(provider_options, *provider, false, &opt))
+      return 2;
+    return RunRunnerChat(opt, model_load_start);
+  }
   std::string err;
   auto reader_owner = gufo::core::GgufReader::OpenFile(
       opt.model_path, &err, {.allow_unsized_tensors = true});
@@ -478,12 +508,18 @@ int RunChat(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
+  if (provider != nullptr && provider->chat_driver == nullptr &&
+      provider->create != nullptr) {
+    if (!PrepareForProvider(provider_options, *provider, false, &opt))
+      return 2;
+    return RunRunnerChat(opt, model_load_start);
+  }
   if (provider == nullptr || provider->chat_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for chat\n";
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  if (!PrepareForProvider(provider_options, *provider, &opt)) {
+  if (!PrepareForProvider(provider_options, *provider, true, &opt)) {
     PrintModelLoadTime(model_load_start, false);
     return 2;
   }

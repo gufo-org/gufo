@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -20,23 +21,25 @@
 
 #include "gufo/ext/component_cache_resources.hpp"
 #include "gufo/ext/experimental/admission_query.hpp"
+#include "gufo/ext/experimental/state_memory.hpp"
+#include "gufo/ext/families/qwen/control_tokens/control_tokens.hpp"
+#include "gufo/ext/families/qwen/text/chat_template.hpp"
+#include "gufo/ext/families/qwen/text/tokenizer.hpp"
+#include "gufo/ext/families/qwen/vision/encoder.hpp"
+#include "gufo/ext/families/qwen/vision/image_cache.hpp"
+#include "gufo/ext/families/qwen/vision/prompt.hpp"
 #include "gufo/ext/gguf_identity.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "gufo/ext/speculative_verifier.hpp"
 #include "src/families/qwen/config/qwen_config.hpp"
-#include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/hip_common/execution_policy.hpp"
-#include "src/families/qwen/text/chat_template.hpp"
-#include "src/families/qwen/text/tokenizer.hpp"
-#include "src/families/qwen/vision/encoder.hpp"
-#include "src/families/qwen/vision/image_cache.hpp"
-#include "src/families/qwen/vision/prompt.hpp"
 #include "src/models/qwen/continuation_adapter.hpp"
 #include "src/models/qwen/continuation_identity.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/hip/qwen_speculative_verifier.hpp"
+#include "src/models/qwen/prefill_groups.hpp"
 #include "src/models/qwen/probe.hpp"
 
 namespace gufo::models::qwen {
@@ -205,6 +208,10 @@ public:
     executor_->SetCancellationCheck(check);
   }
   ~QwenTextRunnerState() override { executor_->SetCancellationCheck({}); }
+  [[nodiscard]] std::shared_ptr<mem::StateAccount> state_account()
+      const override {
+    return executor_->state_account();
+  }
 
   class PrefillScope {
   public:
@@ -304,6 +311,20 @@ public:
     }
     frontier_published_ = false;
     rollback_position_.reset();
+  }
+
+  /// Whether a prefill step at `token` replays a published token with
+  /// decode arithmetic (ResumeGeneratedToken) instead of running a pass.
+  [[nodiscard]] bool ResumesWith(TextRunnerToken token) const noexcept {
+    return !resume_tokens_.empty() && resume_tokens_.front() == token;
+  }
+  /// Drops published tokens the prompt does not continue with, as
+  /// ResumeGeneratedToken does for a different token.
+  void DropResumeTokens() noexcept { resume_tokens_.clear(); }
+
+  /// Runs an in-pass checkpoint consumer on the frontier the last pass left.
+  void CaptureBoundary(const std::function<void()>& capture) {
+    adapter_->CaptureAtBoundary(*slot_, capture);
   }
 
   bool ResumeGeneratedToken(TextRunnerToken token, bool decode_ready) {
@@ -607,6 +628,9 @@ private:
 // Beside decoders, prompts keep the 4,096-row pass and split it into layer
 // groups: one pass takes about 6.5 s, a decode step about 82 ms.
 constexpr std::size_t kMaxPrefillLayerGroups = 16;
+// Cache boundaries one prefill step captures in place: within a 4,096-row
+// pass, its grid checkpoints and both prompt targets.
+constexpr std::size_t kMaxInPassCheckpoints = 4;
 
 // Shared runner base for the HIP models. Device-loss probing is the runtime's
 // `ext::DeviceProbe` (RFC step 6); the probe holds its buffer and private
@@ -719,8 +743,10 @@ public:
                 .batched_multi_token_decode_max_width =
                     speculative_enabled ? MaximumDecodeBatchWidth() : 0,
                 .prefix_reuse = true,
+                .in_pass_checkpoint = true,
                 .partial_prefill_retention = true,
                 .prefill_rollback = true,
+                .max_in_pass_checkpoints = kMaxInPassCheckpoints,
             },
         .sampling_defaults = QwenSamplingDefaults(model_->GetConfig()),
         // Each session owns its executor, so a yield's decodes, batched
@@ -782,6 +808,11 @@ public:
         .retained_snapshot_capacity_bytes = snapshot_capacity,
         .retained_snapshot_ceiling_bytes = snapshot_ceiling,
         .requires_device_runtime_lock = true,
+        .demand_mapped_state_bytes =
+            mem::DemandMapped()
+                ? hip::QwenGpuArena::KvBytes(model_->GetConfig(), max_context_,
+                                             execution_policy_)
+                : 0,
     };
   }
 
@@ -983,42 +1014,10 @@ public:
         return {.consumed_tokens = 1,
                 .decode_ready = offset + 1 == prompt.size()};
       }
-      if (qwen.speculative()) {
-        if (offset == 0) {
-          const auto consumed = std::min(max_input_tokens, prompt.size());
-          if (consumed == 0) {
-            throw std::logic_error(
-                "Qwen prefill requires a nonzero token budget");
-          }
-          qwen.PrimeSpeculative(prompt.first(consumed),
-                                consumed == prompt.size());
-          return {.consumed_tokens = consumed,
-                  .decode_ready = consumed == prompt.size()};
-        }
-        const std::size_t consumed =
-            std::min(max_input_tokens, prompt.size() - offset);
-        if (consumed == 0) {
-          throw std::logic_error(
-              "Qwen DFlash retained prefix has no suffix to prefill");
-        }
-        qwen.ExtendSpeculative(prompt.subspan(offset, consumed),
-                               offset + consumed == prompt.size());
-        return {
-            .consumed_tokens = consumed,
-            .decode_ready = offset + consumed == prompt.size(),
-        };
-      }
-
       const std::size_t consumed =
           std::min(max_input_tokens, prompt.size() - offset);
       const bool decode_ready = offset + consumed == prompt.size();
-      const auto frontier = qwen.executor().ForwardPromptBatch(
-          prompt.subspan(offset, consumed), static_cast<std::uint32_t>(offset),
-          decode_ready);
-      qwen.set_position(offset + consumed);
-      if (decode_ready) {
-        qwen.set_frontier(frontier);
-      }
+      PrefillPass(qwen, prompt, offset, consumed, decode_ready);
       return {
           .consumed_tokens = consumed,
           .decode_ready = decode_ready,
@@ -1027,6 +1026,108 @@ public:
       activity.Rollback();
       return {.interrupted = true};
     }
+  }
+
+  [[nodiscard]] std::optional<std::size_t> PrefillCheckpointBytes(
+      const TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget,
+      std::size_t boundary) const override {
+    const auto& qwen = RequireQwenState(state);
+    const auto end = InPassEnd(qwen, prompt, offset, budget);
+    // A boundary joins the step only when at most one prefill unit follows
+    // it, which would otherwise run as a step of its own, unsplit beside
+    // decoders; a boundary with more after it still ends the step, where the
+    // scheduler admits prompts that arrived meanwhile. Nor does a step of one
+    // unit or less take one: the scheduler runs it unsplit, so joining the
+    // passes would only make decoders wait for both.
+    if (!end || boundary <= offset || boundary >= *end ||
+        *end - boundary > kPrefillUnitTokens ||
+        *end - offset <= kPrefillUnitTokens)
+      return std::nullopt;
+    // The step ends a pass at the boundary and the consumer reads the live
+    // slot there, so it needs no checkpoint memory of its own.
+    return 0;
+  }
+
+  // Runs the step as the passes a runner without in-pass checkpoints would
+  // run as separate steps, ending one at each boundary, so every capture and
+  // output keeps the arithmetic of those passes. One step instead of several
+  // lets the host's layer groups span the passes: a short pass between two
+  // boundaries no longer runs unsplit beside decoders.
+  [[nodiscard]] TextPrefillStep PrefillThrough(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget,
+      std::span<const std::size_t> boundaries,
+      const InPassConsumer& consume) const override {
+    auto& qwen = RequireQwenState(state);
+    const auto end = InPassEnd(qwen, prompt, offset, budget);
+    if (!consume || !end || boundaries.empty() ||
+        boundaries.size() > kMaxInPassCheckpoints ||
+        boundaries.front() <= offset || boundaries.back() >= *end ||
+        std::ranges::adjacent_find(boundaries, std::ranges::greater_equal{}) !=
+            boundaries.end())
+      throw std::logic_error("invalid Qwen in-pass checkpoint request");
+    std::vector<std::size_t> ends(boundaries.begin(), boundaries.end());
+    ends.push_back(*end);
+    // Groups of about equal time: a short pass costs more per row than a
+    // long one, which shares its weight reads and may take the FP16 route.
+    // DFlash2 then injects the pass's rows into its draft, about 0.12 ms per
+    // row on gfx1151, before the next pass can yield.
+    std::vector<PrefillPassTime> times;
+    for (std::size_t pass = 0, start = offset; pass < ends.size(); ++pass) {
+      const auto rows = ends[pass] - start;
+      times.push_back(
+          {.layers = qwen.executor().PrefillPassCost(rows),
+           .end = qwen.speculative() ? 0.12 * static_cast<double>(rows) : 0});
+      start = ends[pass];
+    }
+    const auto yields = PrefillYieldLayers(
+        times, model_->GetConfig().num_layers, state.prefill_yield_groups());
+    struct ClearYield {
+      hip::QwenGpuExecutor& executor;
+      ~ClearYield() { executor.SetPrefillYield(1, {}); }
+    } clear_yield{qwen.executor()};
+    double capture_ms = 0;
+    std::size_t position = offset;
+    for (std::size_t pass = 0; pass < ends.size(); ++pass) {
+      const bool last = pass + 1 == ends.size();
+      if (state.prefill_yield_groups() > 1)
+        qwen.executor().SetPrefillYieldLayers(
+            yields[pass], [&state] { state.YieldPrefill(); });
+      {
+        // Each pass pins its own entry recurrence, as a separate step would.
+        auto activity = qwen.BeginPrefill();
+        // Published tokens the prompt does not continue with are dropped
+        // inside the first pass's scope, as Prefill drops them, so cancelling
+        // that pass keeps them.
+        if (pass == 0 && offset != 0)
+          qwen.DropResumeTokens();
+        try {
+          // A boundary is a complete frontier, logits included, like the
+          // prompt snapshot target a pass ends at without in-pass checkpoints.
+          PrefillPass(qwen, prompt, position, ends[pass] - position,
+                      !last || ends[pass] == prompt.size());
+        } catch (const hip::QwenPrefillCancelled&) {
+          activity.Rollback();
+          if (position == offset)
+            return {.interrupted = true};
+          // The completed passes stay, as their separate steps would have.
+          return {.consumed_tokens = position - offset,
+                  .checkpoint_ms = capture_ms};
+        }
+      }
+      position = ends[pass];
+      if (last)
+        break;
+      const auto started = std::chrono::steady_clock::now();
+      qwen.CaptureBoundary([&] { consume(pass); });
+      capture_ms += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - started)
+                        .count();
+    }
+    return {.consumed_tokens = *end - offset,
+            .decode_ready = *end == prompt.size(),
+            .checkpoint_ms = capture_ms};
   }
 
   [[nodiscard]] TextDecodeSelection SelectNext(
@@ -1170,6 +1271,48 @@ public:
   }
 
 private:
+  // One prompt pass over `count` tokens from `offset`. `logits` completes the
+  // next-token frontier at its end, as a pass ending the model prompt does.
+  static void PrefillPass(QwenTextRunnerState& qwen,
+                          std::span<const TextRunnerToken> prompt,
+                          std::size_t offset, std::size_t count, bool logits) {
+    if (qwen.speculative()) {
+      if (count == 0) {
+        throw std::logic_error(
+            offset == 0 ? "Qwen prefill requires a nonzero token budget"
+                        : "Qwen DFlash retained prefix has no suffix to "
+                          "prefill");
+      }
+      if (offset == 0)
+        qwen.PrimeSpeculative(prompt.first(count), logits);
+      else
+        qwen.ExtendSpeculative(prompt.subspan(offset, count), logits);
+      return;
+    }
+    const auto frontier = qwen.executor().ForwardPromptBatch(
+        prompt.subspan(offset, count), static_cast<std::uint32_t>(offset),
+        logits);
+    qwen.set_position(offset + count);
+    if (logits)
+      qwen.set_frontier(frontier);
+  }
+
+  // Where a step from `offset` with `budget` tokens ends when it can capture
+  // in place; none when Prefill would replay a published token instead.
+  [[nodiscard]] static std::optional<std::size_t> InPassEnd(
+      const QwenTextRunnerState& qwen, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget) {
+    if (offset != qwen.position() || offset >= prompt.size() ||
+        (offset != 0 && qwen.ResumesWith(prompt[offset])))
+      return std::nullopt;
+    const auto count =
+        std::min({budget, std::size_t{qwen.executor().GetMaxPromptBatch()},
+                  prompt.size() - offset});
+    if (count == 0)
+      return std::nullopt;
+    return offset + count;
+  }
+
   // Shares the loaded weights; only the attention/recurrent state is private.
   // Sized to the longest prompt encoded so far in 1,024-token steps, so a
   // runner with a long serving context does not reserve a second full-length
@@ -1363,17 +1506,33 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
   // Narrow the width until the configured sessions fit, rather than refusing
   // a session count the ordinary verifier width fits.
   const std::size_t sessions = std::max<std::size_t>(options.session_count, 1);
-  for (auto rows = static_cast<std::uint32_t>(
-           hip::QwenGpuExecutor::kMaxWideVerificationRows);
-       speculative; rows /= 2) {
+  const auto fit = [&](std::uint32_t rows) {
     runner->LimitCopyRows(rows);
     const auto claim = runner->ResourceClaim();
-    if (rows <= hip::kSsmReplayCapacity || !claim.state_capacity_bytes ||
-        !claim.per_request_state_bytes || !claim.temporary_scratch_bytes ||
-        sessions * (*claim.per_request_state_bytes +
-                    *claim.temporary_scratch_bytes) <=
-            *claim.state_capacity_bytes)
-      break;
+    if (!claim.state_capacity_bytes || !claim.per_request_state_bytes ||
+        !claim.temporary_scratch_bytes)
+      return mem::SessionFit::Kind::kFits;
+    return mem::FitSessions(
+               sessions,
+               *claim.per_request_state_bytes + *claim.temporary_scratch_bytes,
+               claim.demand_mapped_state_bytes.value_or(0),
+               *claim.state_capacity_bytes)
+        .kind;
+  };
+  if (speculative) {
+    const auto widest = static_cast<std::uint32_t>(
+        hip::QwenGpuExecutor::kMaxWideVerificationRows);
+    auto rows = widest;
+    while (rows > hip::kSsmReplayCapacity &&
+           fit(rows) != mem::SessionFit::Kind::kFits)
+      rows /= 2;
+    // When no width fits every session at full context, the sessions share
+    // their K/V (mem::FitSessions): keep the widest width that allows it.
+    if (fit(rows) != mem::SessionFit::Kind::kFits)
+      for (rows = widest; rows > hip::kSsmReplayCapacity &&
+                          fit(rows) == mem::SessionFit::Kind::kRefused;)
+        rows /= 2;
+    runner->LimitCopyRows(rows);
   }
   return runner;
 }

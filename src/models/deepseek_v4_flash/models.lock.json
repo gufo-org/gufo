@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "models": {
+    "deepseek4": {
+      "weights": {
+        "source": {
+          "hf": "antirez/deepseek-v4-gguf",
+          "revision": "1cd7b564460821938add0475a60b942c409295e0"
+        },
+        "include": [
+          "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
+            "size": 86720111488,
+            "sha256": "ca22ae2f838e14077c22bc1c1417b71b45b5e5a3687bd96c2ac6e17fdb6261c0"
+          }
+        ]
+      },
+      "dspark": {
+        "source": {
+          "hf": "antirez/deepseek-v4-gguf",
+          "revision": "e7f04037032990db0346398d249baf9fb9df1ccc"
+        },
+        "include": [
+          "DeepSeek-V4-Flash-DSpark-support-0731.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "DeepSeek-V4-Flash-DSpark-support-0731.gguf",
+            "size": 5989114272,
+            "sha256": "7e319924541db3f7a163ed7e11d7532a70d48228ab59d36cb81e1d4511885360"
+          }
+        ]
+      }
+    }
+  }
+}

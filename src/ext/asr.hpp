@@ -10,6 +10,8 @@
 #include <string_view>
 #include <vector>
 
+#include "gufo/ext/options.hpp"
+
 namespace gufo::ext {
 
 struct TranscriptionTimings {
@@ -45,6 +47,9 @@ struct TranscriptionResult {
   std::size_t prompt_tokens{0};
   std::size_t chunks{0};
   TranscriptionTimings timings;
+  /// Set by a failed Transcribe when the request's audio could not be
+  /// decoded: the caller's input, not the model, is at fault.
+  bool invalid_audio{false};
 };
 
 using CancellationCheck = std::function<bool()>;
@@ -160,6 +165,9 @@ struct AsrRunnerOptions {
   std::string model_root;
   std::size_t maximum_context_tokens{1024};
   std::string projector_path;
+  /// The explicit command-line values of the options the provider declares
+  /// for this command (see TextRunnerOptions::provider_options).
+  ParsedOptions provider_options{};
 };
 
 using AsrProbe = bool (*)(std::string_view model_root);

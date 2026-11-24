@@ -31,7 +31,7 @@ set_tests_properties(ds4.config_f32 PROPERTIES LABELS "cpu;ds4;loader")
 
 add_executable(ds4_chat_template_test chat_template_test.cpp)
 target_link_libraries(ds4_chat_template_test PRIVATE gufo_core
-  gufo_deepseek_v4_flash_text)
+  gufo_deepseek_v4_flash_text gufo_test_source_path)
 target_compile_definitions(ds4_chat_template_test PRIVATE
   GUFO_DEEPSEEK_CHAT_TEMPLATE_REFERENCE="${PROJECT_SOURCE_DIR}/src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja"
   GUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
@@ -103,7 +103,8 @@ if(ENGINE_ENABLE_HIP)
     GUFO_DS4_BOUNDARY_PROMPT="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/indexer-boundary-prompt.txt"
     GUFO_DS4_OFFICIAL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/official-0731.json"
     GUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
-  target_link_libraries(ds4_quality_test PRIVATE gufo_deepseek_v4_flash_hip hip::host)
+  target_link_libraries(ds4_quality_test PRIVATE gufo_deepseek_v4_flash_hip hip::host
+    OpenSSL::Crypto gufo_test_source_path)
   add_test(NAME ds4.target COMMAND ds4_quality_test)
   add_test(NAME ds4.dspark COMMAND ds4_quality_test --dspark)
   set_tests_properties(ds4.target ds4.dspark PROPERTIES
@@ -141,6 +142,18 @@ if(ENGINE_ENABLE_HIP)
     TIMEOUT 1800
     SKIP_RETURN_CODE 77)
 
+  # Compressed rows released by a shared-state reclaim, then backed again.
+  add_executable(ds4_state_trim_test state_trim_test.cpp)
+  target_link_libraries(ds4_state_trim_test PRIVATE
+    gufo_deepseek_v4_flash_hip)
+  add_test(NAME ds4.state_trim COMMAND ds4_state_trim_test)
+  set_tests_properties(ds4.state_trim PROPERTIES
+    LABELS "gpu;hip;ds4;external-model;slow"
+    RESOURCE_LOCK ds4_model
+    RUN_SERIAL TRUE
+    TIMEOUT 900
+    SKIP_RETURN_CODE 77)
+
   add_executable(ds4_serving_test serving_test.cpp)
   # gufo_serving still reaches the Qwen 27B model and vision stack through
   # inference_backend.cpp; step 10 removes that interim edge.
@@ -167,7 +180,8 @@ if(ENGINE_ENABLE_HIP)
   add_executable(ds4_projection_test projection_test.hip moe_test.hip)
   target_include_directories(ds4_projection_test SYSTEM PRIVATE ${ROCWMMA_INCLUDE_DIR})
   target_include_directories(ds4_projection_test PRIVATE ${PROJECT_SOURCE_DIR})
-  target_compile_options(ds4_projection_test PRIVATE -O3 -ffast-math -fno-finite-math-only)
+  target_compile_options(ds4_projection_test PRIVATE -O3 ${GUFO_CLANG_OPTION}-ffast-math
+    ${GUFO_CLANG_OPTION}-fno-finite-math-only)
   target_link_libraries(ds4_projection_test PRIVATE hip::host)
   add_test(NAME ds4.projections COMMAND ds4_projection_test)
   set_tests_properties(ds4.projections PROPERTIES
@@ -179,7 +193,8 @@ if(ENGINE_ENABLE_HIP)
   target_include_directories(ds4_attention_test PRIVATE ${PROJECT_SOURCE_DIR})
   target_include_directories(ds4_attention_test SYSTEM PRIVATE
     ${HIPCUB_INCLUDE_DIR} ${ROCPRIM_INCLUDE_DIR} ${ROCWMMA_INCLUDE_DIR})
-  target_compile_options(ds4_attention_test PRIVATE -O3 -ffast-math -fno-finite-math-only)
+  target_compile_options(ds4_attention_test PRIVATE -O3 ${GUFO_CLANG_OPTION}-ffast-math
+    ${GUFO_CLANG_OPTION}-fno-finite-math-only)
   target_link_libraries(ds4_attention_test PRIVATE hip::host)
   add_test(NAME ds4.attention COMMAND ds4_attention_test)
   set_tests_properties(ds4.attention PROPERTIES
@@ -196,6 +211,6 @@ set_tests_properties(ds4.dataset PROPERTIES
 add_executable(ds4_eval_test eval_test.cpp)
 target_compile_definitions(ds4_eval_test PRIVATE
   GUFO_EVAL_TEST_DATA="${PROJECT_SOURCE_DIR}/tests/fixtures/eval/antirez-ds4.json")
-target_link_libraries(ds4_eval_test PRIVATE gufo_core gufo_eval)
+target_link_libraries(ds4_eval_test PRIVATE gufo_core gufo_eval gufo_test_source_path)
 add_test(NAME ds4.eval COMMAND ds4_eval_test)
 set_tests_properties(ds4.eval PROPERTIES LABELS "cpu;ds4;quality;eval;dataset;extractor")

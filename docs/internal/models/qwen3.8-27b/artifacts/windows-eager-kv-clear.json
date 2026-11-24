@@ -1,0 +1,42 @@
+{
+  "date": "2026-11-21",
+  "platform": "Windows x86-64, Radeon 8060S (gfx1151), TheRock 10.0.0",
+  "last_good_parent": "3844dafd3cf2566d18d3fb25c359b7025a65d9de",
+  "first_bad": "842295e45ba31a7462a1bc0fc0c9fb83fb93b044",
+  "validation_base": "029a156976867ba25021fd934636cfafe29149f6",
+  "model": "Qwen3.8-27B-UD-Q8_K_XL.gguf",
+  "projector": "mmproj-BF16.gguf",
+  "functional_case": {
+    "suite": "tests/functional/run.py --suite long-context",
+    "case": "long_schema_cold",
+    "context": 32768,
+    "speculative": "off",
+    "prompt_tokens": 12425,
+    "cached_tokens": 0,
+    "request_sha256": "6a6d37f35caa2b0ec17c8fe899c6113c752107ed858874fc64c8b3d49c5d2d4c",
+    "expected_keyword": "LANTERN",
+    "observed_keyword": {
+      "last_good_parent": "LANTERN",
+      "first_bad": "red",
+      "validation_base": "red",
+      "validation_base_with_default_stream_fence": "LANTERN"
+    }
+  },
+  "device_capture": {
+    "layer_zero_based": 3,
+    "prefill_offset": 12288,
+    "current_chunk_tokens": 130,
+    "historical_fp16_elements_per_k_or_v_plane": 12582912,
+    "historical_bytes_per_plane": 25165824,
+    "observation": "The parent and first bad build wrote identical prefix K/V. On the first bad build both prefix planes became all zero across the first image injection at the same address. The new chunk's Q/K/V projections still matched the parent.",
+    "fixed_tensors_matching_parent_byte_for_byte": 13
+  },
+  "hip_control": {
+    "region_bytes": 2147483648,
+    "sentinel_bytes": 4096,
+    "procedure": "Clear on the default stream, write the sentinel on a non-blocking stream, finish and read on the writer, then synchronize the device and read again.",
+    "trials_per_condition": 3,
+    "late_overwrites_before_fix": 3,
+    "late_overwrites_with_default_stream_fence": 0
+  }
+}

@@ -12,6 +12,7 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_bfloat16.h>
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include "src/core/hip/detail/hip_graph_decode_executor.hpp"
@@ -355,6 +356,101 @@ void TestAttentionBackendEquivalence() {
   HIP_CHECK(hipFree(d_out_wmma));
 }
 
+// Verification rows over the fp16 cache in the Qwen3.8-27B shape: 2..8 rows
+// share KV tiles in one block, other counts keep the per-pair kernel. Every
+// count must match one scalar decode per row bit for bit, on both sides of
+// the 512-token shared-KV threshold and across partial tiles.
+void TestVerificationAttentionMatchesScalarRows() {
+  constexpr std::uint32_t num_heads = 24;
+  constexpr std::uint32_t num_kv_heads = 4;
+  constexpr std::uint32_t head_dim = 256;
+  constexpr std::uint32_t max_context = 3072;
+  constexpr std::uint32_t layer = 1;
+  constexpr std::uint32_t max_rows = 10;
+  constexpr std::size_t width = std::size_t{num_heads} * head_dim;
+  constexpr std::size_t cache_elements =
+      std::size_t{2} * max_context * num_kv_heads * head_dim;
+
+  std::vector<float> h_q(max_rows * width), h_gate(max_rows * width);
+  for (std::size_t index = 0; index < h_q.size(); ++index) {
+    h_q[index] = 1.5F * std::sin(static_cast<float>(index) * 0.073F);
+    h_gate[index] = std::cos(static_cast<float>(index) * 0.019F);
+  }
+  // Large keys on some heads keep the running maximum moving.
+  std::vector<__half> h_k(cache_elements), h_v(cache_elements);
+  for (std::size_t index = 0; index < cache_elements; ++index) {
+    const float key_scale = (index / head_dim) % 3 == 0 ? 2.5F : 0.5F;
+    h_k[index] =
+        __float2half(key_scale * std::sin(static_cast<float>(index) * 0.011F));
+    h_v[index] = __float2half(std::cos(static_cast<float>(index) * 0.007F));
+  }
+
+  float *d_q = nullptr, *d_gate = nullptr, *d_scalar = nullptr,
+        *d_batched = nullptr, *d_scratch = nullptr;
+  __half *d_k = nullptr, *d_v = nullptr;
+  const std::size_t scratch_elements =
+      max_rows *
+      gufo::hip::detail::DecodeAttentionScratchElements(num_heads, head_dim);
+  HIP_CHECK(hipMalloc(&d_q, h_q.size() * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_gate, h_gate.size() * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_scalar, h_q.size() * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_batched, h_q.size() * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_scratch, scratch_elements * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_k, cache_elements * sizeof(__half)));
+  HIP_CHECK(hipMalloc(&d_v, cache_elements * sizeof(__half)));
+  HIP_CHECK(hipMemcpy(d_q, h_q.data(), h_q.size() * sizeof(float),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_gate, h_gate.data(), h_gate.size() * sizeof(float),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_k, h_k.data(), cache_elements * sizeof(__half),
+                      hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(d_v, h_v.data(), cache_elements * sizeof(__half),
+                      hipMemcpyHostToDevice));
+
+  std::vector<float> scalar(h_q.size()), batched(h_q.size());
+  std::size_t checked = 0;
+  for (const std::uint32_t start : {100U, 509U, 511U, 512U, 777U, 2047U, 3000U})
+    for (std::uint32_t rows = 1; rows <= max_rows; ++rows) {
+      if (start + rows > max_context)
+        continue;
+      HIP_CHECK(hipMemset(d_scalar, 0xff, h_q.size() * sizeof(float)));
+      HIP_CHECK(hipMemset(d_batched, 0x7f, h_q.size() * sizeof(float)));
+      for (std::uint32_t row = 0; row < rows; ++row) {
+        gufo::hip::LaunchAttention(
+            d_q + row * width, nullptr, nullptr, d_gate + row * width, nullptr,
+            nullptr, d_k, d_v, d_scalar + row * width, layer, start + row,
+            max_context, num_heads, num_kv_heads, head_dim, nullptr, d_scratch,
+            true);
+      }
+      gufo::hip::LaunchCausalDecodeAttention(
+          d_q, d_gate, nullptr, nullptr, d_k, d_v, d_batched, layer, start,
+          rows, max_context, num_heads, num_kv_heads, head_dim, nullptr,
+          {d_scratch, scratch_elements});
+      HIP_CHECK(hipDeviceSynchronize());
+      HIP_CHECK(hipMemcpy(scalar.data(), d_scalar, rows * width * sizeof(float),
+                          hipMemcpyDeviceToHost));
+      HIP_CHECK(hipMemcpy(batched.data(), d_batched,
+                          rows * width * sizeof(float), hipMemcpyDeviceToHost));
+      if (std::memcmp(scalar.data(), batched.data(),
+                      rows * width * sizeof(float)) != 0) {
+        std::cerr << "Verification attention differs from scalar rows at start "
+                  << start << " with " << rows << " rows\n";
+        std::abort();
+      }
+      ++checked;
+    }
+  std::cout << "Verification attention bit-identical to scalar rows: "
+            << checked << " shapes\n";
+
+  HIP_CHECK(hipFree(d_q));
+  HIP_CHECK(hipFree(d_gate));
+  HIP_CHECK(hipFree(d_scalar));
+  HIP_CHECK(hipFree(d_batched));
+  HIP_CHECK(hipFree(d_scratch));
+  HIP_CHECK(hipFree(d_k));
+  HIP_CHECK(hipFree(d_v));
+}
+
 #endif  // defined(ENGINE_ENABLE_HIP)
 
 int main() {
@@ -368,6 +464,7 @@ int main() {
 
   TestBatchedAttentionEquivalence();
   TestAttentionBackendEquivalence();
+  TestVerificationAttentionMatchesScalarRows();
   std::cout << "Qwen attention backend ops test passed on gfx1151.\n";
   return 0;
 #else

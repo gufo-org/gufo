@@ -9,3 +9,6 @@ concurrency pairs the speech with silence generated in memory.
 - Mono PCM16, 16 kHz, 10 seconds.
 
 Tests never download voice recordings or depend on a mounted audio folder.
+
+`clear-english-voice.mp3` is the same recording as 16 kHz mono MP3, so ASR
+can check that an MP3 upload gives the WAV's transcript.

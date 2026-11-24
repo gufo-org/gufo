@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -15,6 +16,7 @@
 #include "gufo/ext/text.hpp"
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/provider_options.hpp"
+#include "src/cli/runner_cli.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/speculative_settings.hpp"
 #include "src/core/gguf_reader.hpp"
@@ -267,6 +269,14 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   if (!speculative_explicit && !opt.dspark_model_path.empty()) {
     opt.speculative_backend = "dspark";
   }
+  try {
+    (void)SpeculativeConfigFor(opt.speculative_backend, opt.mtp_model_path,
+                               opt.dflash_model_path, opt.dspark_model_path);
+  } catch (const std::invalid_argument& exception) {
+    if (error_msg)
+      *error_msg = exception.what();
+    return std::nullopt;
+  }
 
   // Each model sets its draft settings (TextSpeculativeDefaults).
   for (const char* option :
@@ -311,6 +321,17 @@ int RunBench(std::span<const char* const> args) {
   }
 
   const auto model_load_start = std::chrono::steady_clock::now();
+  // A model directory belongs to the provider whose probe claims it.
+  if (const ext::TextProvider* provider = nullptr;
+      ext::ProbeModelDirectory(opt.model_path, &provider)) {
+    if (provider == nullptr) {
+      std::cerr << "Error: no text provider claims model directory '"
+                << opt.model_path << "'\n";
+      return 1;
+    }
+    opt.provider_options = provider_options.Select(provider->id);
+    return RunRunnerBench(opt, model_load_start);
+  }
   std::string err;
   auto reader_owner = gufo::core::GgufReader::OpenFile(
       opt.model_path, &err, {.allow_unsized_tensors = true});
@@ -330,6 +351,11 @@ int RunBench(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
+  if (provider != nullptr && provider->bench_driver == nullptr &&
+      provider->create != nullptr) {
+    opt.provider_options = provider_options.Select(provider->id);
+    return RunRunnerBench(opt, model_load_start);
+  }
   if (provider == nullptr || provider->bench_driver == nullptr) {
     std::cerr << "Error: unsupported model architecture for benchmark\n";
     PrintModelLoadTime(model_load_start, false);
@@ -337,6 +363,9 @@ int RunBench(std::span<const char* const> args) {
   }
   try {
     opt.provider_options = provider_options.Select(provider->id);
+    // The driver reads the draft model from the command line.
+    RequireDraftModel(opt.speculative_backend, opt.mtp_model_path,
+                      opt.dflash_model_path, opt.dspark_model_path);
     const auto settings =
         ResolveSpeculativeSettings(*provider, opt.speculative_backend, {});
     opt.draft_tokens = settings.max_draft_tokens;

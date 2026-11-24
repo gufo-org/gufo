@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 
+#include "gufo/ext/options.hpp"
 #include "src/core/json.hpp"
 
 namespace gufo::ext {
@@ -16,6 +17,9 @@ struct DecisionRunnerOptions {
   std::string projector_path;
   /// Longest complete decision prompt.
   std::size_t maximum_context_tokens{8192};
+  /// The explicit command-line values of the options the provider declares
+  /// for this command (see TextRunnerOptions::provider_options).
+  ParsedOptions provider_options{};
 };
 
 /// Abstract capability runner for decision models: a request of typed

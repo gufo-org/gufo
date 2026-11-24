@@ -214,14 +214,14 @@ def run_case(args, recorder, index, name):
     save(case / "command.json", command)
     recorder.case = case.name
     row = {"case": case.name, "start_request": len(recorder.requests)}
-    start = time.monotonic()
+    start = time.perf_counter()
     proc = None
     try:
         with (case / "events.jsonl").open("w") as out, (case / "stderr.log").open("w") as err:
             proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=out, stderr=err,
                                     start_new_session=True)
             while proc.poll() is None:
-                if time.monotonic() - start > args.timeout:
+                if time.perf_counter() - start > args.timeout:
                     raise AssertionError("opencode task timeout")
                 time.sleep(0.5)
             assert proc.returncode == 0, (case / "stderr.log").read_text()[-4000:]
@@ -236,7 +236,7 @@ def run_case(args, recorder, index, name):
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
-    row["wall_ms"] = (time.monotonic() - start) * 1000
+    row["wall_ms"] = (time.perf_counter() - start) * 1000
     row["requests"] = recorder.requests[row["start_request"]:]
     try:
         row["agent_requests"] = len(validate_requests(row["requests"], args.output))

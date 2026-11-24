@@ -112,7 +112,8 @@ cut the JSON short.
 Vision models accept images as `image_url` parts in Chat Completions,
 `input_image` in Responses and `image` blocks in Messages, also inside tool
 results. Send PNG, JPEG or WebP as a data URL or a public HTTPS URL; Gufo
-refuses private and loopback addresses.
+refuses private and loopback addresses. Arithmetic-coded and lossless JPEG
+files are rejected; see [image inputs](internal/server.md).
 
 All images in a request share 20 MiB of encoded data and 15 seconds of
 downloading, and each can have up to 32 megapixels. There's no fixed number of
@@ -145,7 +146,7 @@ Request fields and limits are on the [MiniMax H3](models/minimax-h3.md) page.
 | --- | --- | --- |
 | `gufo serve asr` | `POST /v1/audio/transcriptions`, WebSocket `/v1/realtime` | [Qwen3-ASR](models/qwen3-asr.md) |
 | `gufo serve tts` | `POST /v1/audio/speech`, `GET /v1/audio/voices`, WebSocket `/v1/audio/speech/stream` | [Qwen3-TTS](models/qwen3-tts.md) |
-| `gufo serve image` | `POST /v1/images/generations`, `POST /v1/images/edits` | [Qwen-Image-2.1](models/qwen-image-2.1.md) |
+| `gufo serve image` | `POST /v1/images/generations`, `POST /v1/images/edits`, A1111 `/sdapi/v1/txt2img` and `/sdapi/v1/img2img` | [Qwen-Image-2.1](models/qwen-image-2.1.md) |
 | `gufo serve decision` | `POST /v1/systemone` | Defined by the model |
 
 ## Model names
@@ -223,3 +224,10 @@ because loading and reading the disk cache take a while.
 Gufo never logs prompts or replies, and never runs tool calls, commands or
 generated code. Only the opt-in [`--trace`](troubleshooting.md#content-trace)
 file records content.
+
+Gufo keeps HTTP/1.1 connections open for sequential requests, so a reverse
+proxy can reuse upstream connections. An HTTP/1.0 request or `Connection: close`
+closes the connection after its response. An idle connection closes after 5
+seconds, after 100 requests, or earlier when a new client needs its slot, so a
+pooled client should retry a request that fails on a reused connection before
+any response arrives.

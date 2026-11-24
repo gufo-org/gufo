@@ -19,6 +19,9 @@ struct ComponentCacheMetrics {
   std::size_t deepest_live{}, deepest_ram{}, deepest_disk{}, selected{};
   std::size_t restored_bytes{}, prefilled{}, captures{}, captured_bytes{};
   std::size_t borrowed_capacity_bytes{}, copied_payload_bytes{};
+  // Restored bytes that took no copy, and captured bytes that share their
+  // session's pages (part of borrowed_capacity_bytes).
+  std::size_t remapped_bytes{}, shared_payload_bytes{};
   std::vector<std::uint64_t> captured_checkpoint_ids;
   std::size_t disk_queued_bytes{};
   double disk_enqueue_ms{};
@@ -36,11 +39,13 @@ inline json::Value ComponentCacheJson(const ComponentCacheMetrics& value) {
   result["deepest_disk_tokens"] = value.deepest_disk;
   result["selected_tokens"] = value.selected;
   result["restored_bytes"] = value.restored_bytes;
+  result["remapped_bytes"] = value.remapped_bytes;
   result["prefilled_tokens"] = value.prefilled;
   result["captures"] = value.captures;
   result["captured_capacity_bytes"] = value.captured_bytes;
   result["borrowed_capacity_bytes"] = value.borrowed_capacity_bytes;
   result["copied_payload_bytes"] = value.copied_payload_bytes;
+  result["shared_payload_bytes"] = value.shared_payload_bytes;
   auto checkpoints = json::Value::array();
   for (const auto id : value.captured_checkpoint_ids)
     checkpoints.push_back(id);

@@ -1,6 +1,7 @@
 #ifndef GUFO_CACHE_PREFIX_INDEX_HPP_
 #define GUFO_CACHE_PREFIX_INDEX_HPP_
 
+#include <functional>
 #include <memory>
 #include <span>
 #include <vector>
@@ -112,6 +113,12 @@ public:
   // RAM retention drops only its payload ownership when a durable copy exists.
   // A checkpoint without a usable durable description is erased instead.
   void DropResident(IndexEntryId);
+  // True only while a complete published copy can still be pinned.
+  [[nodiscard]] bool IsDurable(IndexEntryId) const;
+  // Visit usable generated frontiers with no non-text input identity. Spans
+  // remain valid until the next mutation; the visitor must not reenter.
+  void VisitGenerated(Identity compatibility,
+                      const std::function<void(std::span<const Token>)>&) const;
   // Applies to every index entry bound to this publication. Corruption erases
   // RAM candidates too; ordinary disk eviction retains coherent RAM copies.
   void RemoveDurable(const DiskDescription&, bool corrupt = false);

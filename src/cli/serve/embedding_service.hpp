@@ -37,6 +37,8 @@ struct EmbeddingServiceOptions {
                                     EmbeddingBatch* batch, std::string* error)>;
 
   std::filesystem::path model_root;
+  /// Values of the provider's declared `serve embedding` options.
+  ext::ParsedOptions provider_options;
   bool validate_model{true};
   std::string model_id;
   /// Additional IDs accepted from requests; `model_id` stays primary in

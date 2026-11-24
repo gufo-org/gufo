@@ -1,0 +1,159 @@
+{
+  "date": "2026-11-12",
+  "base_revision": "0d238d4f5fee49720d6be45c2c27795100922d5c",
+  "platform": "Linux-7.2.9-x86_64-with-glibc2.42",
+  "rust": "1.88.0",
+  "sccache": "0.18.0",
+  "measurement": "Nix Rust check wall time; same candidate and toolchain, changing only cargo test and compiler cache directory; dependencies already available locally",
+  "negative_probes": [
+    {
+      "crate": "gufo-ffi",
+      "gate_rejected_broken_unit_test": true,
+      "wall_seconds": 3.68
+    },
+    {
+      "crate": "gufo-rust",
+      "gate_rejected_broken_unit_test": true,
+      "wall_seconds": 6.106
+    },
+    {
+      "crate": "gufo-audio-decode",
+      "gate_rejected_broken_unit_test": true,
+      "wall_seconds": 3.593
+    },
+    {
+      "crate": "gufo-base64",
+      "gate_rejected_broken_unit_test": true,
+      "wall_seconds": 3.507
+    },
+    {
+      "crate": "gufo-http",
+      "gate_rejected_broken_unit_test": true,
+      "wall_seconds": 3.42
+    },
+    {
+      "crate": "gufo-png-decode",
+      "gate_rejected_broken_unit_test": true,
+      "wall_seconds": 3.397
+    },
+    {
+      "crate": "gufo-resample",
+      "gate_rejected_broken_unit_test": true,
+      "wall_seconds": 6.08
+    },
+    {
+      "crate": "gufo-wav-decode",
+      "gate_rejected_broken_unit_test": true,
+      "wall_seconds": 5.963
+    },
+    {
+      "crate": "gufo-websocket",
+      "gate_rejected_broken_unit_test": true,
+      "wall_seconds": 6.078
+    }
+  ],
+  "original_differential_tests": {
+    "passed": 5,
+    "wall_seconds": 0.26
+  },
+  "replacement_and_integration_tests": {
+    "passed": 8,
+    "wall_seconds": 2.22
+  },
+  "registration_mutation_tests": {
+    "passed": 5,
+    "wall_seconds": 0.012
+  },
+  "preliminary_direct_cache_runs": [
+    {
+      "unit_tests": false,
+      "compiler_cache": "cold",
+      "wall_seconds": 3.978,
+      "rust_cache_hits": 0,
+      "rust_cache_misses": 40,
+      "exit_code": 0
+    },
+    {
+      "unit_tests": false,
+      "compiler_cache": "warm",
+      "wall_seconds": 1.628,
+      "rust_cache_hits": 40,
+      "rust_cache_misses": 0,
+      "exit_code": 0
+    },
+    {
+      "unit_tests": true,
+      "compiler_cache": "cold",
+      "wall_seconds": 9.642,
+      "rust_cache_hits": 0,
+      "rust_cache_misses": 78,
+      "exit_code": 0
+    },
+    {
+      "unit_tests": true,
+      "compiler_cache": "warm",
+      "wall_seconds": 4.948,
+      "rust_cache_hits": 78,
+      "rust_cache_misses": 0,
+      "exit_code": 0
+    }
+  ],
+  "preliminary_direct_cache_note": "Superseded: disk ownership and concurrent servers made direct sharing unsuitable; the final design snapshots privately and publishes atomically.",
+  "runs": [
+    {
+      "unit_tests": false,
+      "compiler_cache": "cold",
+      "wall_seconds": 4.302,
+      "rust_cache_hits": 0,
+      "rust_cache_misses": 40,
+      "exit_code": 0
+    },
+    {
+      "unit_tests": false,
+      "compiler_cache": "warm",
+      "wall_seconds": 1.527,
+      "rust_cache_hits": 40,
+      "rust_cache_misses": 0,
+      "exit_code": 0
+    },
+    {
+      "unit_tests": true,
+      "compiler_cache": "cold",
+      "wall_seconds": 10.478,
+      "rust_cache_hits": 0,
+      "rust_cache_misses": 78,
+      "exit_code": 0
+    },
+    {
+      "unit_tests": true,
+      "compiler_cache": "warm_after_source_edit",
+      "wall_seconds": 6.667,
+      "rust_cache_hits": 75,
+      "rust_cache_misses": 3,
+      "exit_code": 0
+    }
+  ],
+  "nix_result_cache": {
+    "wall_seconds": 0.08,
+    "exit_code": 0,
+    "rebuilt": false
+  },
+  "warm_snapshot_negative_probe": {
+    "crate": "gufo-base64",
+    "gate_rejected_broken_unit_test": true,
+    "wall_seconds": 3.708
+  },
+  "panic_abort_rejected": true,
+  "note": "Single local observations, with CPU gate building concurrently; not hosted-runner timings. Cold means an empty sccache snapshot, not empty Nix toolchain/dependency stores.",
+  "canonical_gate": {
+    "command": "nix flake check --print-build-logs --cores 4 --max-jobs 2",
+    "passed": true,
+    "cpu_test_count": 186,
+    "cpu_tests_passed": 176,
+    "model_fixture_skips": 10,
+    "cpu_ctest_wall_seconds": 56.87,
+    "rust_unit_tests_passed": 31,
+    "cpp_cache_hits": 1232,
+    "cpp_cache_misses": 33
+  }
+}

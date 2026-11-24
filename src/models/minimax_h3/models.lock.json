@@ -1,0 +1,378 @@
+{
+  "schema": 1,
+  "models": {
+    "minimax-h3": {
+      "weights": {
+        "source": {
+          "hf": "MiniMaxAI/MiniMax-H3",
+          "revision": "42ed227ee7df40d41602854ae760620d6eb651fe"
+        },
+        "include": [
+          "FL2VA/audio_vae/config.json",
+          "FL2VA/audio_vae/config.yaml",
+          "FL2VA/audio_vae/metadata.json",
+          "FL2VA/audio_vae/model.safetensors",
+          "FL2VA/model_index.json",
+          "FL2VA/processor/chat_template.json",
+          "FL2VA/processor/merges.txt",
+          "FL2VA/processor/preprocessor_config.json",
+          "FL2VA/processor/tokenizer.json",
+          "FL2VA/processor/tokenizer_config.json",
+          "FL2VA/processor/video_preprocessor_config.json",
+          "FL2VA/processor/vocab.json",
+          "FL2VA/text_encoder/chat_template.json",
+          "FL2VA/text_encoder/config.json",
+          "FL2VA/text_encoder/merges.txt",
+          "FL2VA/text_encoder/model-00001-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00002-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00003-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00004-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00005-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00006-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00007-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00008-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00009-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00010-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00011-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00012-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00013-of-00014.safetensors",
+          "FL2VA/text_encoder/model-00014-of-00014.safetensors",
+          "FL2VA/text_encoder/model.safetensors.index.json",
+          "FL2VA/text_encoder/preprocessor_config.json",
+          "FL2VA/text_encoder/tokenizer.json",
+          "FL2VA/text_encoder/tokenizer_config.json",
+          "FL2VA/text_encoder/video_preprocessor_config.json",
+          "FL2VA/text_encoder/vocab.json",
+          "FL2VA/tokenizer/merges.txt",
+          "FL2VA/tokenizer/tokenizer.json",
+          "FL2VA/tokenizer/tokenizer_config.json",
+          "FL2VA/tokenizer/vocab.json",
+          "FL2VA/transformer/config.json",
+          "FL2VA/transformer/model-00001-of-00013.safetensors",
+          "FL2VA/transformer/model-00002-of-00013.safetensors",
+          "FL2VA/transformer/model-00003-of-00013.safetensors",
+          "FL2VA/transformer/model-00004-of-00013.safetensors",
+          "FL2VA/transformer/model-00005-of-00013.safetensors",
+          "FL2VA/transformer/model-00006-of-00013.safetensors",
+          "FL2VA/transformer/model-00007-of-00013.safetensors",
+          "FL2VA/transformer/model-00008-of-00013.safetensors",
+          "FL2VA/transformer/model-00009-of-00013.safetensors",
+          "FL2VA/transformer/model-00010-of-00013.safetensors",
+          "FL2VA/transformer/model-00011-of-00013.safetensors",
+          "FL2VA/transformer/model-00012-of-00013.safetensors",
+          "FL2VA/transformer/model-00013-of-00013.safetensors",
+          "FL2VA/transformer/model.safetensors.index.json",
+          "FL2VA/video_vae/config.json",
+          "FL2VA/video_vae/source/config.json",
+          "FL2VA/video_vae/source/model.safetensors",
+          "LICENSE",
+          "README.md",
+          "model_index.json"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "FL2VA/audio_vae/config.json",
+            "size": 1973,
+            "sha256": "d8f3bcc62e23c7e9806970fa63cca6139c06faa3797cf9c94034f60db8512771"
+          },
+          {
+            "path": "FL2VA/audio_vae/config.yaml",
+            "size": 91,
+            "sha256": "259f675c9f71eedc24ca4f23965cd32a1b3878fc894f56664c40328d99831a5e"
+          },
+          {
+            "path": "FL2VA/audio_vae/metadata.json",
+            "size": 440,
+            "sha256": "755d0529d43b2b5c83590f6f44ca659bc68e6a21b01d5669c93e8b2965749bff"
+          },
+          {
+            "path": "FL2VA/audio_vae/model.safetensors",
+            "size": 605429308,
+            "sha256": "37dddc2f3e6d5d5139d823d5ea283bbf304dadcb885b1ccda818aa13dade5ea2"
+          },
+          {
+            "path": "FL2VA/model_index.json",
+            "size": 719,
+            "sha256": "d1113e0f123c69f79cd0de35ca1771606ebc3ec924270d257b771f96f584aa6b"
+          },
+          {
+            "path": "FL2VA/processor/chat_template.json",
+            "size": 5499,
+            "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce"
+          },
+          {
+            "path": "FL2VA/processor/merges.txt",
+            "size": 1671839,
+            "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+          },
+          {
+            "path": "FL2VA/processor/preprocessor_config.json",
+            "size": 390,
+            "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+          },
+          {
+            "path": "FL2VA/processor/tokenizer.json",
+            "size": 7032403,
+            "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+          },
+          {
+            "path": "FL2VA/processor/tokenizer_config.json",
+            "size": 11003,
+            "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
+          },
+          {
+            "path": "FL2VA/processor/video_preprocessor_config.json",
+            "size": 385,
+            "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+          },
+          {
+            "path": "FL2VA/processor/vocab.json",
+            "size": 2776833,
+            "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+          },
+          {
+            "path": "FL2VA/text_encoder/chat_template.json",
+            "size": 5499,
+            "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce"
+          },
+          {
+            "path": "FL2VA/text_encoder/config.json",
+            "size": 1474,
+            "sha256": "d2dd0c60d01b9e195d9447c52da61c7302d28828524914c044d9c6e1b81d0427"
+          },
+          {
+            "path": "FL2VA/text_encoder/merges.txt",
+            "size": 1671839,
+            "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00001-of-00014.safetensors",
+            "size": 4932328944,
+            "sha256": "6b9dfbc930e505402ae9d7e5091a9d7d656cda5f34614f01cfe70bfb0cca27cb"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00002-of-00014.safetensors",
+            "size": 4875990528,
+            "sha256": "d8bb44b4ff303fe76fe9e894022fb3dc71b15a2e716592790fe0e3c3e60478fa"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00003-of-00014.safetensors",
+            "size": 4875990552,
+            "sha256": "54f22e8b3168f8dc962fac0d313607ebf52a12b433d4cf3098a0d82d9f042940"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00004-of-00014.safetensors",
+            "size": 4875990584,
+            "sha256": "ad09c74d3c13ee29b5d0d84548fd8a3424a651564eaccd519946c296e59c557f"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00005-of-00014.safetensors",
+            "size": 4875990584,
+            "sha256": "fc993c8a0e2a5b0570f383e1a95dc3a1281d1b224b6f3ee908f4827941e1dfc2"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00006-of-00014.safetensors",
+            "size": 4875990584,
+            "sha256": "82f05620d1f718a90c362b221d6a184ff1a0f53301d706882d3df49695fa1974"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00007-of-00014.safetensors",
+            "size": 4875990584,
+            "sha256": "fb91da8cb01ff4de3eef0eab1c3e769a734b3a1aafc61734068638a0d6c86934"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00008-of-00014.safetensors",
+            "size": 4875990584,
+            "sha256": "431ca56535c8781944ce3801f5eb61c45531e853ecc5846d936ebaf4761b764f"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00009-of-00014.safetensors",
+            "size": 4875990584,
+            "sha256": "3825e3f4302f4d2f7d76aa7430d2ce0864fde6b9e540a5806bf0d8e38e4d9f47"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00010-of-00014.safetensors",
+            "size": 4875990584,
+            "sha256": "aded5a4d1d5e22dbd8b6f79266b6eb88c840411b09527c53917a1419ace22e2f"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00011-of-00014.safetensors",
+            "size": 4875990584,
+            "sha256": "3820ffe8d8d6477f6fe8d614ef3c87abb264ee39accebf43a1507b970d80946f"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00012-of-00014.safetensors",
+            "size": 4875990584,
+            "sha256": "05ad2d08ce71963121c9b03f1d9ec5d7641052f4b23c6c12b80d71065eb8e98e"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00013-of-00014.safetensors",
+            "size": 4875990584,
+            "sha256": "b64f2289871261fdd1abbd3b78bcd66011b341de3dc8eeb2ed1a473ee7c8d95c"
+          },
+          {
+            "path": "FL2VA/text_encoder/model-00014-of-00014.safetensors",
+            "size": 3270697008,
+            "sha256": "e45b6c9998c77ee5a6577f9f47bc76416c1d4d387169e50c4c9d3134ea51b13b"
+          },
+          {
+            "path": "FL2VA/text_encoder/model.safetensors.index.json",
+            "size": 97831,
+            "sha256": "06c952c569285870b811989b794b9766493e280fb77fbcb957fc4e5fcf25403a"
+          },
+          {
+            "path": "FL2VA/text_encoder/preprocessor_config.json",
+            "size": 390,
+            "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+          },
+          {
+            "path": "FL2VA/text_encoder/tokenizer.json",
+            "size": 7032403,
+            "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+          },
+          {
+            "path": "FL2VA/text_encoder/tokenizer_config.json",
+            "size": 11003,
+            "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
+          },
+          {
+            "path": "FL2VA/text_encoder/video_preprocessor_config.json",
+            "size": 385,
+            "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+          },
+          {
+            "path": "FL2VA/text_encoder/vocab.json",
+            "size": 2776833,
+            "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+          },
+          {
+            "path": "FL2VA/tokenizer/merges.txt",
+            "size": 1671839,
+            "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+          },
+          {
+            "path": "FL2VA/tokenizer/tokenizer.json",
+            "size": 7032403,
+            "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+          },
+          {
+            "path": "FL2VA/tokenizer/tokenizer_config.json",
+            "size": 11003,
+            "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
+          },
+          {
+            "path": "FL2VA/tokenizer/vocab.json",
+            "size": 2776833,
+            "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+          },
+          {
+            "path": "FL2VA/transformer/config.json",
+            "size": 604,
+            "sha256": "f619093a231fcfbcc3d035bec26c50ad864e7331a500d5c519f5045dc1e50458"
+          },
+          {
+            "path": "FL2VA/transformer/model-00001-of-00013.safetensors",
+            "size": 5227812968,
+            "sha256": "0b3386565e476bfdea287e9ea9f269d036e5c649ed14bb9b4afac1dc4661bd2a"
+          },
+          {
+            "path": "FL2VA/transformer/model-00002-of-00013.safetensors",
+            "size": 5164578856,
+            "sha256": "9c98fd4579c9bc96d1b1bbf65c1243f9256df60bccd229570cecc61897773003"
+          },
+          {
+            "path": "FL2VA/transformer/model-00003-of-00013.safetensors",
+            "size": 5164578872,
+            "sha256": "fa484c940d4170199fb69f5016739df2daf6ecd1150631b12a297e06e3964730"
+          },
+          {
+            "path": "FL2VA/transformer/model-00004-of-00013.safetensors",
+            "size": 5164578896,
+            "sha256": "4a851df37cce2d14b39cb58df41def7b591b1f11b8520a32b421a5fa3e997c9f"
+          },
+          {
+            "path": "FL2VA/transformer/model-00005-of-00013.safetensors",
+            "size": 5164578896,
+            "sha256": "3fe6ff94dc9d3107c6776a25277d2b72b5443f88cf0f4ed835fd5b65a94ea5d4"
+          },
+          {
+            "path": "FL2VA/transformer/model-00006-of-00013.safetensors",
+            "size": 5164578896,
+            "sha256": "79b47e1b9ff03a2c6f06dd15a28972acf32c0867172ee34e5aa6e96b99494127"
+          },
+          {
+            "path": "FL2VA/transformer/model-00007-of-00013.safetensors",
+            "size": 5164578896,
+            "sha256": "6ac4d6ce639786b722a8dd99843ed56dcab48a0d174a4b0f9b8cdcbe5160fb0f"
+          },
+          {
+            "path": "FL2VA/transformer/model-00008-of-00013.safetensors",
+            "size": 5164578896,
+            "sha256": "03531812243fb0a333e01efa7e3d39750580bca8cbf2ba0529da419278eab736"
+          },
+          {
+            "path": "FL2VA/transformer/model-00009-of-00013.safetensors",
+            "size": 5164578896,
+            "sha256": "7e82a80b0d0d267026eb841b81523069cc7b956c1ebd8a18c07e462ffb262487"
+          },
+          {
+            "path": "FL2VA/transformer/model-00010-of-00013.safetensors",
+            "size": 5164578896,
+            "sha256": "ef0a1f6b65145232543dd2232d58d91a4d31f44b0da5084acf22cea123255481"
+          },
+          {
+            "path": "FL2VA/transformer/model-00011-of-00013.safetensors",
+            "size": 5164578896,
+            "sha256": "bf885b8f2f078c5499b75fded21094a26bfe0e6e00bee276e499443ecd2f298d"
+          },
+          {
+            "path": "FL2VA/transformer/model-00012-of-00013.safetensors",
+            "size": 5164578896,
+            "sha256": "dc717572d014ebf8527e35af815d10eb2f5a6bc87253b8a7d2f456965192db69"
+          },
+          {
+            "path": "FL2VA/transformer/model-00013-of-00013.safetensors",
+            "size": 4242305176,
+            "sha256": "8bfd852d5817e9836de1d3ec8dbac1c5446b167568b717371f08282b22291aa2"
+          },
+          {
+            "path": "FL2VA/transformer/model.safetensors.index.json",
+            "size": 38323,
+            "sha256": "fb457a26ffa6294660e249b0ddd03a337f2e5393f770b5c34c8b8f90a29a7efb"
+          },
+          {
+            "path": "FL2VA/video_vae/config.json",
+            "size": 1807,
+            "sha256": "3edd2cdd1ebc823c868be55ef917e1b3b8a398fde4d3150dae44a3bf05d9f627"
+          },
+          {
+            "path": "FL2VA/video_vae/source/config.json",
+            "size": 1164,
+            "sha256": "66c68f541e6578ce613ce7a0fc985eb59097038829e49f7535e6d08e6d95ab12"
+          },
+          {
+            "path": "FL2VA/video_vae/source/model.safetensors",
+            "size": 10415548320,
+            "sha256": "5f0c2e161d895a9fee7645ca32d4a7e3a22b90cacfcbeba62ec999cdbbefe0d3"
+          },
+          {
+            "path": "LICENSE",
+            "size": 17604,
+            "sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44"
+          },
+          {
+            "path": "README.md",
+            "size": 38406,
+            "sha256": "f0116a90332496bdfcc827320c603a26b849c73bf804f2674d03682fbbd2334a"
+          },
+          {
+            "path": "model_index.json",
+            "size": 2936,
+            "sha256": "5a587fe13b2371427415ac892463142683aefcd8d322e274a3a095eac37ac7d2"
+          }
+        ]
+      }
+    }
+  }
+}

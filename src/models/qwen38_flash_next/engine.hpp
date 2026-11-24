@@ -4,6 +4,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <gufo/ext/families/qwen/draft_vocab/draft_vocab.hpp>
+#include <gufo/ext/families/qwen/text/tokenizer.hpp>
+#include <gufo/ext/families/qwen/vision/encoder.hpp>
+#include <gufo/ext/families/qwen/vision/prompt.hpp>
 #include <gufo/ext/prompt_lookup.hpp>
 #include <gufo/ext/sampling.hpp>
 #include <gufo/ext/session_mode.hpp>
@@ -14,10 +18,6 @@
 #include <string_view>
 #include <vector>
 
-#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
-#include "src/families/qwen/text/tokenizer.hpp"
-#include "src/families/qwen/vision/encoder.hpp"
-#include "src/families/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
@@ -26,6 +26,11 @@
 namespace gufo::core {
 class GgufReader;
 }
+
+namespace gufo::ext::qwen::flash_next {
+class Stages;
+class WeightSource;
+}  // namespace gufo::ext::qwen::flash_next
 
 namespace gufo::models::qwen38_flash_next {
 
@@ -81,6 +86,13 @@ public:
   [[nodiscard]] static std::shared_ptr<Model> Load(
       const std::string& model_path, const ModelOptions& options,
       std::string* error_msg = nullptr);
+  /// Load with overridden per-layer stages and weight source; a null
+  /// argument keeps the GGUF default (stages.hpp, weight_source.hpp).
+  [[nodiscard]] static std::shared_ptr<Model> Load(
+      const std::string& model_path, const ModelOptions& options,
+      std::unique_ptr<ext::qwen::flash_next::Stages> stages,
+      std::unique_ptr<ext::qwen::flash_next::WeightSource> weights,
+      std::string* error_msg = nullptr);
 
   [[nodiscard]] std::unique_ptr<Session> CreateSession(
       core::SessionMode mode, std::uint32_t max_context,
@@ -94,6 +106,28 @@ public:
   [[nodiscard]] std::uint32_t VocabSize() const noexcept;
   [[nodiscard]] std::uint32_t PrefillCapacity() const noexcept;
   [[nodiscard]] std::uint32_t PrefillThroughCapacity() const noexcept;
+  /// Rows the next prompt step over `remaining` tokens may take under a
+  /// scheduler budget of `budget`: a wide pass when the budget allows more
+  /// than a narrow one (no session decodes beside it) and the executor can
+  /// map the wide scratch now; otherwise the narrow capacities above.
+  [[nodiscard]] std::size_t StepCapacity(std::size_t remaining,
+                                         std::size_t budget) const;
+  /// The through capacity of that step: the widest single pass it may
+  /// take.
+  [[nodiscard]] std::size_t StepThrough(std::size_t remaining,
+                                        std::size_t budget) const;
+  /// The pass widths the cache plans prompt captures around: the widest
+  /// passes, which a prompt alone takes when the host has the memory.
+  [[nodiscard]] std::size_t PlannedThrough() const noexcept;
+  [[nodiscard]] std::size_t PlannedChunk() const noexcept;
+  /// The chunk a pass that does not finish its prompt takes at the current
+  /// pass width.
+  [[nodiscard]] std::size_t PassChunk() const noexcept;
+  /// The widest single pass at the current pass width.
+  [[nodiscard]] std::size_t PassThrough() const noexcept;
+  /// Frees the wide pass scratch; decode steps and the idle scheduler call
+  /// it.
+  void ReleaseWidePasses() const;
   [[nodiscard]] std::uint32_t MaxContext() const noexcept {
     return options_.max_context;
   }
@@ -115,6 +149,11 @@ public:
     return options_.decode_concurrency;
   }
   [[nodiscard]] std::string ModelName() const;
+  /// Cache identity the weight source reports; empty for GGUF artifacts,
+  /// whose callers hash the reader.
+  [[nodiscard]] std::string ArtifactIdentity() const;
+  /// WeightSource::DraftIdentity: the bound MTP block's cache identity.
+  [[nodiscard]] std::string DraftIdentity() const;
   [[nodiscard]] const Config& config() const noexcept;
   [[nodiscard]] const tokenization::QwenTokenizer& tokenizer() const noexcept {
     return *tokenizer_;
@@ -122,7 +161,11 @@ public:
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
   /// Worst-case private device state, including the configured rollback cap.
   [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
-                                         std::uint32_t context) const noexcept;
+                                         std::uint32_t context) const;
+  /// The part of SessionBytes() a session maps only as it writes it (K/V
+  /// regions); zero without demand mapping.
+  [[nodiscard]] std::size_t DemandMappedBytes(core::SessionMode mode,
+                                              std::uint32_t context) const;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
   /// Caps wide copy verification (Executor::LimitCopyRows); call before any
   /// session is created.
@@ -140,12 +183,16 @@ private:
   Model() = default;
 
   ModelOptions options_;
+  /// Declared first: the weights, device model and stages borrow from it.
+  std::unique_ptr<ext::qwen::flash_next::WeightSource> source_;
+  /// Outlives executor_, which calls it.
+  std::unique_ptr<ext::qwen::flash_next::Stages> stages_;
+  /// Rows of a narrow prompt pass (WeightSource::PreferredPrefillChunk).
+  std::uint32_t prefill_chunk_{0};
   /// Loaded projection (see ModelOptions::projection_vector_path); owned
   /// here so the executor's device table stays valid for its lifetime.
   ProjectionVector projection_;
   bool projection_loaded_{false};
-  std::shared_ptr<core::GgufReader> reader_;
-  std::shared_ptr<core::GgufReader> mtp_reader_;
   std::unique_ptr<ModelWeights> weights_;
   std::unique_ptr<MtpWeights> mtp_weights_;
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer_;
@@ -264,6 +311,8 @@ public:
   void SetCancellationCheck(std::function<bool()> check);
   [[nodiscard]] bool IsValid() const noexcept { return valid_; }
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
+  /// The account of this session's demand-mapped K/V.
+  [[nodiscard]] std::shared_ptr<mem::StateAccount> StateAccount() const;
   void ConfigureVision(std::shared_ptr<const qwen::vision::Prompt> prompt);
   /// A new request reusing cached context starts its own acceptance history.
   void ResetDraftPolicy();

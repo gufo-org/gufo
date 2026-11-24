@@ -70,7 +70,7 @@ public:
   DurableEntry& operator=(const DurableEntry&) = delete;
   ~DurableEntry() = default;
   [[nodiscard]] DiskFileId File() const { return file_; }
-  [[nodiscard]] const DiskManifest& Manifest() const { return manifest_; }
+  [[nodiscard]] const DiskManifest& Manifest() const { return *manifest_; }
   // Startup attests metadata and dependency sizes only. Streaming restore must
   // validate payload checksums before making a destination executable.
   [[nodiscard]] bool Durable() const { return durable_; }
@@ -82,7 +82,9 @@ private:
   ResourceCharge metadata_;
   std::shared_ptr<const ResourceCharge> pin_;
   DiskFileId file_{};
-  DiskManifest manifest_;
+  // Immutable once durable, then shared by descriptions and snapshots, which
+  // also share metadata_: the manifest is stored and charged once.
+  std::shared_ptr<DiskManifest> manifest_;
   bool durable_{true};
   bool payload_verified_{false};
   bool available_{true};
@@ -93,6 +95,10 @@ struct DiskStartupStats {
   std::uint64_t manifest_bytes_read{};
   std::uint64_t dependency_stats{}, rejected_manifests{};
   std::uint64_t managed_bytes{};
+  // Decoded references versus unique (namespace, file ID) observations during
+  // cold recovery. dependency_stats counts actual dependency StatAt calls;
+  // the initial directory enumeration also stats files independently.
+  std::uint64_t dependency_references{}, distinct_dependency_files{};
 };
 // Host-buffer publication only; caller retains and admits immutable buffers
 // until Publish returns. Full chunks already referenced by a checkpoint can be
@@ -144,7 +150,7 @@ class DiskStore;
 // description from acquiring a replacement publication with the same ID.
 class DiskDescription {
 public:
-  [[nodiscard]] const DiskManifest& Manifest() const { return manifest_; }
+  [[nodiscard]] const DiskManifest& Manifest() const { return *manifest_; }
   [[nodiscard]] std::uint64_t Epoch() const { return epoch_; }
   [[nodiscard]] DiskStore& Store() const { return *store_; }
   [[nodiscard]] DiskReadPin Pin() const;
@@ -155,7 +161,9 @@ public:
 private:
   friend class DiskStore;
   ResourceCharge metadata_;
-  DiskManifest manifest_;
+  // The entry's manifest charge, released after the shared manifest.
+  ResourceCharge manifest_metadata_;
+  std::shared_ptr<const DiskManifest> manifest_;
   std::shared_ptr<detail::DiskAvailability> availability_;
   DiskStore* store_{};
   std::uint64_t epoch_{};
@@ -170,21 +178,22 @@ public:
   DiskFileId file;
 };
 enum class DiskRetireResult { kRetired, kMissing, kPinned, kBusy };
-// Owned metadata plus a dependency pin. The store must outlive this snapshot
-// and every read using it. It remains stable across concurrent index changes.
+// The entry's manifest, shared with its charge, plus a dependency pin. The
+// store must outlive this snapshot and every read using it. It remains stable
+// across concurrent index changes.
 class DiskSnapshot {
 public:
   DiskSnapshot(DiskSnapshot&&) noexcept = default;
   DiskSnapshot& operator=(DiskSnapshot&&) = delete;
   DiskSnapshot(const DiskSnapshot&) = delete;
-  [[nodiscard]] const DiskManifest& Manifest() const { return manifest_; }
+  [[nodiscard]] const DiskManifest& Manifest() const { return *manifest_; }
 
 private:
   friend class DiskStore;
   DiskSnapshot() = default;
   ResourceCharge metadata_;
   DiskReadPin pin_;
-  DiskManifest manifest_;
+  std::shared_ptr<const DiskManifest> manifest_;
   const void* store_{};
 };
 #ifdef GUFO_CACHE_TESTING
@@ -215,6 +224,10 @@ enum class DiskPublicationStep {
 // A directory above the budget (for example after lowering it) still opens;
 // publication refuses until retirement or orphan reclamation brings
 // Stats().managed_bytes back within the budget.
+struct DiskUseHistory {
+  std::uint64_t last_used{}, admitted_bytes{};
+  std::optional<std::uint64_t> reused_at;
+};
 class DiskStore {
 public:
   DiskStore(ResourceLedger&, const std::filesystem::path& directory,
@@ -225,6 +238,11 @@ public:
   DiskStore(DiskStore&&) = delete;
   DiskStore& operator=(DiskStore&&) = delete;
   [[nodiscard]] std::span<const DurableEntry> Entries() const;
+  // Initialized, retained manifest vector storage included in the RAM ledger.
+  // For startup remaining-allocation accounting, not an RSS measurement.
+  // Excludes spare capacity, owner/index estimates, temporary validation,
+  // payloads and reservations. Use at quiescence with the host observation.
+  [[nodiscard]] std::size_t OwnedManifestBytes() const;
   [[nodiscard]] DiskStartupStats Stats() const;
   [[nodiscard]] DiskPublicationStats PublicationStats() const;
   void Publish(DiskFileId manifest_file, const DiskManifest&,
@@ -241,6 +259,13 @@ public:
   // bytes or identity; ReadPayload must still validate the actual read.
   void PrefetchPayload(const DiskSnapshot&, bool private_file,
                        const DiskPayload&, std::uint64_t bytes) const;
+  // Reads an owned dependency through `buffer` so a later ReadPayload finds
+  // it in the page cache, without validating it. A hint like PrefetchPayload,
+  // but complete on return. Returns the bytes read; stops early on a short
+  // file or when `stop` is requested.
+  std::uint64_t WarmPayload(const DiskSnapshot&, bool private_file,
+                            const DiskPayload&, std::span<std::uint8_t> buffer,
+                            std::stop_token stop = {}) const;
   // Reads one dependency, invokes consume only with complete pieces, and
   // checks its CRC and stable file identity before returning. Consumers must
   // keep their destination non-executable until every dependency has passed.
@@ -250,7 +275,23 @@ public:
       const std::function<void(std::uint64_t, std::span<const std::uint8_t>)>&
           consume,
       DiskReadStats* observation = nullptr);
+  // The same, reading each piece into `buffer(offset)`, which may differ per
+  // piece: a reader can fill one staging piece while another is copied out.
+  [[nodiscard]] DiskReadStats ReadPayload(
+      const DiskSnapshot&, bool private_file, const DiskPayload&,
+      const std::function<std::span<std::uint8_t>(std::uint64_t offset)>&
+          buffer,
+      const std::function<void(std::uint64_t, std::span<const std::uint8_t>)>&
+          consume,
+      DiskReadStats* observation = nullptr);
   [[nodiscard]] DiskReadPin Pin(CheckpointId, std::uint64_t epoch = 0) const;
+  // Advisory use history, independently checksummed and budgeted. Invalid or
+  // absent history returns zero. Writing never waits for a busy store; failure
+  // leaves the checkpoint and its immutable dependencies unchanged.
+  [[nodiscard]] DiskUseHistory UseHistory(CheckpointId) const;
+  [[nodiscard]] std::uint64_t LastUse(CheckpointId) const;
+  [[nodiscard]] bool TryRecordUse(CheckpointId, std::uint64_t);
+  [[nodiscard]] bool TryRecordUse(CheckpointId, const DiskUseHistory&);
   // Short logical quarantine; keeps filesystem references until retirement.
   void Invalidate(CheckpointId, std::uint64_t epoch);
   // Includes provisional writers, without acquiring the I/O lock. New claims
@@ -266,6 +307,9 @@ public:
   void WaitForReclamation();
 #ifdef GUFO_CACHE_TESTING
   void SetCrashHook(std::function<void(DiskPublicationStep)>);
+  // Current-thread scope around reference validation, after filesystem
+  // discovery. Both notifications are nonthrowing, including during unwind.
+  static void SetReferenceValidationHook(void (*)(bool entering) noexcept);
 #endif
 
 private:

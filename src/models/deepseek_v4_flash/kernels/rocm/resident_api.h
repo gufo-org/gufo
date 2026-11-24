@@ -47,6 +47,10 @@ struct ds4_gpu_q8_f16_weight {
 /* Registers a model's F16 weight copies. The next lookup builds every
  * registered copy in one pass, so they exist for all layers or for none. */
 int ds4_gpu_register_q8_f16_weights(const void *model_map, uint64_t model_size, const struct ds4_gpu_q8_f16_weight *weights, uint32_t count);
+/* Builds the registered copies now instead of at the first lookup: call it
+ * once the sessions exist, so they claim memory first and no request pays
+ * for the allocation. */
+void ds4_gpu_build_q8_f16_weights(void);
 int ds4_gpu_reserve_support_map(const void *support_map, uint64_t support_size, uint64_t arena_bytes);
 int ds4_gpu_cache_support_range(const void *support_map, uint64_t support_size, uint64_t offset, uint64_t bytes, const char *label);
 void ds4_gpu_release_support_map(void);
@@ -216,7 +220,9 @@ int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
     uint64_t up_offset, uint64_t in_dim, uint64_t out_dim,
     const ds4_gpu_tensor* x, const ds4_gpu_tensor* xq8, float clamp,
     uint32_t n_tok);
-int ds4_gpu_should_use_managed_kv_cache(uint64_t kv_cache_bytes, uint64_t context_bytes);
+/* With `regions` (demand-mapped rows charged to the session), never; else the
+ * managed-memory policy for very large caches. */
+int ds4_gpu_should_use_managed_kv_cache(uint64_t kv_cache_bytes, uint64_t context_bytes, int regions);
 int ds4_gpu_spec_row_argmax_tensor(ds4_gpu_tensor *out_index, const ds4_gpu_tensor *logits, uint32_t vocab, uint32_t n_rows);
 int ds4_gpu_attention_noncausal_raw_batch_heads_tensor(
     ds4_gpu_tensor* heads, const void* model_map, uint64_t model_size,
@@ -244,6 +250,14 @@ int ds4_gpu_synchronize(void);
 ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes);
 ds4_gpu_tensor *ds4_gpu_tensor_alloc_managed(uint64_t bytes);
 uint64_t ds4_gpu_tensor_bytes(const ds4_gpu_tensor *tensor);
+/// Whether state rows map pages on demand on this device.
+int ds4_gpu_demand_mapped(void);
+/// Whether `tensor` comes from ds4_gpu_tensor_from_state.
+int ds4_gpu_tensor_demand_mapped(const ds4_gpu_tensor *tensor);
+/// Backs rows [0, rows) of a tensor from ds4_gpu_tensor_from_state and widens
+/// its byte size to the backed rows. 0 when it is not such a tensor or no
+/// memory is left; rows past its maximum fail.
+int ds4_gpu_tensor_ensure_rows(ds4_gpu_tensor *tensor, uint64_t rows);
 /// Device address for transfers on an independent stream; changes if the owner reallocates.
 void* ds4_gpu_tensor_device_pointer(const ds4_gpu_tensor* tensor);
 int ds4_gpu_tensor_copy(ds4_gpu_tensor *dst, uint64_t dst_offset, const ds4_gpu_tensor *src, uint64_t src_offset, uint64_t bytes);
@@ -259,6 +273,37 @@ int ds4_gpu_tensor_write(ds4_gpu_tensor *tensor, uint64_t offset, const void *da
 
 #ifdef __cplusplus
 }  // extern "C"
+
+#include <memory>
+
+#include "src/mem/state_declaration.hpp"
+
+namespace gufo::mem {
+class SessionState;
+class StateAccount;
+}  // namespace gufo::mem
+
+/// The memory of a session's declared state (gufo::mem::SessionState): its
+/// regions keep one address each for their whole size and take pages as
+/// rows are reserved, charged to the state's account when `charged`. Null
+/// when the device cannot map memory on demand or a region cannot reserve
+/// its range; callers then allocate rows whole.
+std::shared_ptr<gufo::mem::SessionState> ds4_gpu_session_state_create(
+    const gufo::mem::StateDeclaration &declaration, bool charged);
+/// The account charging `state`'s pages to its session; null when uncharged.
+std::shared_ptr<gufo::mem::StateAccount> ds4_gpu_session_state_account(
+    const std::shared_ptr<gufo::mem::SessionState> &state);
+/// Buffer `buffer` of `state` as a tensor of its rows, starting with
+/// `initial_rows` backed. Growth maps pages in place
+/// (ds4_gpu_tensor_ensure_rows): nothing is copied or freed, so no device
+/// drain, and a reclaim may unmap rows past the session's need. Null on
+/// failure.
+ds4_gpu_tensor *ds4_gpu_tensor_from_state(
+    const std::shared_ptr<gufo::mem::SessionState> &state,
+    gufo::mem::StateBufferId buffer, uint64_t initial_rows);
+/// While `bytes` is set, ds4_gpu_tensor_alloc adds each allocation's size to
+/// it on this thread; null stops. Measures a session's fixed state.
+void ds4_gpu_tally_allocations(uint64_t *bytes);
 #endif
 
 #endif  // GUFO_MODELS_DEEPSEEK_V4_FLASH_ROCM_RESIDENT_API_H_

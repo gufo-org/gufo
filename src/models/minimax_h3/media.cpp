@@ -214,7 +214,6 @@ bool ProbeMediaFile(const std::filesystem::path& path, MediaProbe* probe,
   const std::string path_text = path.string();
   std::string video_output;
   std::vector<std::string> video_arguments = {
-      "ffprobe",
       "-v",
       "error",
       "-select_streams",
@@ -250,7 +249,6 @@ bool ProbeMediaFile(const std::filesystem::path& path, MediaProbe* probe,
 
   std::string audio_output;
   std::vector<std::string> audio_arguments = {
-      "ffprobe",
       "-v",
       "error",
       "-select_streams",

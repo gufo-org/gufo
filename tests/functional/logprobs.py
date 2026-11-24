@@ -3,6 +3,9 @@
 import json
 import math
 
+# The server's default text byte limit that 20 candidates per token once exceeded.
+LIMIT_BYTES = 1 << 20
+
 
 def check_logprobs(client, model, checks, completion_frame):
     for chat in (False, True):
@@ -70,14 +73,22 @@ def check_logprobs(client, model, checks, completion_frame):
                 assert seen >= baseline["usage"]["completion_tokens"], (name, seen, baseline["usage"])
 
     # Twenty candidates per token once exceeded the default 1 MiB text byte
-    # limit near 560 tokens.
-    long = client.completions.create(model=model, prompt="Count upward, one number per line:\n1\n",
-                                     max_tokens=1200, temperature=0, logprobs=20,
-                                     extra_body={"ignore_eos": True, "cache_prompt": False}).model_dump()
-    checks["logprobs_completion_k20_long"] = {"usage": long["usage"],
+    # limit near 560 Qwen tokens. Bytes per token depend on the tokenizer, so a
+    # short request measures them and the long one is sized to cross the limit.
+    def k20(tokens):
+        raw = client.completions.with_raw_response.create(
+            model=model, prompt="Count upward, one number per line:\n1\n", max_tokens=tokens,
+            temperature=0, logprobs=20, extra_body={"ignore_eos": True, "cache_prompt": False})
+        return len(raw.http_response.content), raw.parse().model_dump()
+
+    probe_bytes, _ = k20(64)
+    tokens = math.ceil(1.25 * LIMIT_BYTES * 64 / probe_bytes)
+    size, long = k20(tokens)
+    checks["logprobs_completion_k20_long"] = {"usage": long["usage"], "body_bytes": size,
                                               "finish_reason": long["choices"][0]["finish_reason"]}
-    assert long["usage"]["completion_tokens"] == 1200, long["usage"]
-    assert len(long["choices"][0]["logprobs"]["tokens"]) == 1200
+    assert long["usage"]["completion_tokens"] == tokens, long["usage"]
+    assert len(long["choices"][0]["logprobs"]["tokens"]) == tokens
+    assert size > LIMIT_BYTES, f"{tokens} tokens sent {size} bytes, under the 1 MiB limit"
 
 
 def check_responses_logprobs(client, model, checks):

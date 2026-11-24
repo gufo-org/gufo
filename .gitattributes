@@ -7,6 +7,8 @@ tests/models/*/fixtures/continuation_identity/** text eol=lf
 *.npz binary
 *.mp4 binary
 *.webm binary
+# Captured multipart requests keep their CRLF bytes.
+tests/fixtures/multipart/*.form binary
 # cmd.exe parses batch files reliably only with CRLF line endings.
 *.cmd text eol=crlf
 # Numeric and image model fixtures are binary payloads.

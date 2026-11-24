@@ -25,6 +25,13 @@
       "category": "asr",
       "asset": "asr",
       "service": "asr"
+    },
+    "qwen3-asr-npu": {
+      "title": "Qwen3-ASR NPU",
+      "category": "asr",
+      "asset": "asr",
+      "service": "asr",
+      "npu": true
     }
   },
   "rules": [
@@ -39,7 +46,8 @@
         "tests/functional/asr_service.py"
       ],
       "owners": [
-        "asr"
+        "asr",
+        "qwen3-asr-npu"
       ]
     }
   ]

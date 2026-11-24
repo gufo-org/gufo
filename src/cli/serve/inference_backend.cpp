@@ -52,14 +52,36 @@ void RequireProjectionSupport(const ChatRequest& request,
 }  // namespace
 
 std::size_t CountReasoningTokens(
+    std::string_view text, std::span<const std::size_t> ends,
+    TextGenerationBackend::InitialOutputState initial,
+    const ext::ReasoningMarkup& reasoning) {
+  using State = TextGenerationBackend::InitialOutputState;
+  if (TextGenerationBackend::IsContent(initial) || reasoning.close.empty() ||
+      (initial == State::kAuto && reasoning.open.empty()))
+    return 0;
+  std::size_t begin = 0;
+  if (initial == State::kAuto) {
+    const auto leading = text.find_first_not_of(" \t\r\n");
+    if (leading == std::string_view::npos ||
+        !text.substr(leading).starts_with(reasoning.open))
+      return 0;
+    begin = leading + reasoning.open.size();
+  } else if (text.starts_with(reasoning.open)) {
+    begin = reasoning.open.size();
+  }
+  const auto end = std::min(text.find(reasoning.close, begin), text.size());
+  if (begin >= end)
+    return 0;
+  const auto first = std::ranges::upper_bound(ends, begin);
+  const auto last = std::lower_bound(first, ends.end(), end);
+  return static_cast<std::size_t>(last - first) + 1;
+}
+
+std::size_t CountReasoningTokens(
     std::span<const tokenization::TokenId> tokens,
     TextGenerationBackend::InitialOutputState initial,
     const ext::ReasoningMarkup& reasoning,
     const std::function<std::string(tokenization::TokenId)>& decode) {
-  using State = TextGenerationBackend::InitialOutputState;
-  if (initial == State::kContent || reasoning.close.empty() ||
-      (initial == State::kAuto && reasoning.open.empty()))
-    return 0;
   // The parsers match delimiters in text, and tokens at their edges can merge
   // with neighbouring output, so match in text too and map back to tokens.
   std::string text;
@@ -69,23 +91,7 @@ std::size_t CountReasoningTokens(
     text += decode(token);
     ends.push_back(text.size());
   }
-  const std::string_view view = text;
-  std::size_t begin = 0;
-  if (initial == State::kAuto) {
-    const auto leading = view.find_first_not_of(" \t\r\n");
-    if (leading == std::string_view::npos ||
-        !view.substr(leading).starts_with(reasoning.open))
-      return 0;
-    begin = leading + reasoning.open.size();
-  } else if (view.starts_with(reasoning.open)) {
-    begin = reasoning.open.size();
-  }
-  const auto end = std::min(view.find(reasoning.close, begin), view.size());
-  if (begin >= end)
-    return 0;
-  const auto first = std::ranges::upper_bound(ends, begin);
-  const auto last = std::lower_bound(first, ends.end(), end);
-  return static_cast<std::size_t>(last - first) + 1;
+  return CountReasoningTokens(text, ends, initial, reasoning);
 }
 
 struct InferenceBackend::Impl {
@@ -122,11 +128,17 @@ struct InferenceBackend::Impl {
                 const StartCallback& on_start) override {
       auto result = request_.Wait(on_token, on_progress, on_start);
       const auto& runner = state_->scheduler->runner();
+      // A runner may publish markup its raw tokens never spell, so count in
+      // the emitted text when the scheduler recorded it.
       result.reasoning_tokens =
-          CountReasoningTokens(result.tokens, initial_, reasoning_,
-                               [&runner](tokenization::TokenId token) {
-                                 return runner.Decode(std::span(&token, 1));
-                               });
+          !result.piece_ends.empty()
+              ? CountReasoningTokens(result.text, result.piece_ends, initial_,
+                                     reasoning_)
+              : CountReasoningTokens(
+                    result.tokens, initial_, reasoning_,
+                    [&runner](tokenization::TokenId token) {
+                      return runner.Decode(std::span(&token, 1));
+                    });
       return result;
     }
 
@@ -170,8 +182,8 @@ struct InferenceBackend::Impl {
       bool cache_prompt = true, std::size_t cache_prefix_tokens = 0,
       const std::vector<std::string>& stop_sequences = {},
       InitialOutputState initial = InitialOutputState::kContent,
-      bool cache_persist = true, bool chat_template = false,
-      bool projection = false) const {
+      bool cache_persist = true, bool projection = false,
+      bool chat_template = false) const {
     Result result;
     result.prompt_tokens = prompt_tokens.size();
     result.client_id = client_id.empty() ? "anonymous" : client_id;
@@ -284,22 +296,36 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             const std::string& vision_model_path,
                             TextRunnerRamCacheOptions ram_cache_config,
                             bool enable_yarn,
-                            const PrepareRunnerOptions& prepare_runner_options,
                             const std::string& projection_vector_path,
-                            const std::string& projection_layers) {
-  std::string load_error;
-  auto reader_owner = core::GgufReader::OpenFile(
-      model_path, &load_error, {.allow_unsized_tensors = true});
-  if (reader_owner == nullptr) {
-    SetError(error, "Failed to open GGUF: " + load_error);
-    return false;
-  }
-  const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
-  const auto* provider = ext::ProbeTextProvider(*reader);
-  if (provider == nullptr && reader->FirstUnsizedTensor() != nullptr) {
-    // No provider owns this layout: keep the reader's own diagnostic.
-    SetError(error, "Failed to open GGUF: " + reader->UnsizedTensorError());
-    return false;
+                            const std::string& projection_layers,
+                            const PrepareRunnerOptions& prepare_runner_options,
+                            const LoadProgress& on_progress) {
+  // Stage boundaries, as rough shares of a typical load: the runner loads the
+  // weights, then the sessions are prepared and the disk tier is walked.
+  const auto report = [&](double progress, std::string_view message) {
+    if (on_progress)
+      on_progress(progress, message);
+  };
+  report(0.0, "Opening model");
+  std::shared_ptr<const core::GgufReader> reader;
+  const ext::TextProvider* provider = nullptr;
+  if (std::error_code ec; std::filesystem::is_directory(model_path, ec)) {
+    provider = ext::ProbeTextProvider(std::string_view(model_path));
+  } else {
+    std::string load_error;
+    auto reader_owner = core::GgufReader::OpenFile(
+        model_path, &load_error, {.allow_unsized_tensors = true});
+    if (reader_owner == nullptr) {
+      SetError(error, "Failed to open GGUF: " + load_error);
+      return false;
+    }
+    reader = std::move(reader_owner);
+    provider = ext::ProbeTextProvider(*reader);
+    if (provider == nullptr && reader->FirstUnsizedTensor() != nullptr) {
+      // No provider owns this layout: keep the reader's own diagnostic.
+      SetError(error, "Failed to open GGUF: " + reader->UnsizedTensorError());
+      return false;
+    }
   }
   if (provider == nullptr || provider->create == nullptr) {
     SetError(error, "No text provider found for model architecture");
@@ -319,9 +345,10 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       .enable_yarn = enable_yarn,
   };
   if (prepare_runner_options &&
-      !prepare_runner_options(*provider, *reader, &options, error)) {
+      !prepare_runner_options(*provider, reader.get(), &options, error)) {
     return false;
   }
+  report(0.05, "Loading weights");
   auto runner = provider->create(options, error);
   if (runner == nullptr) {
     return false;
@@ -331,6 +358,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     SetError(error, "--projection-vector is not supported by this model");
     return false;
   }
+  report(0.9, "Preparing sessions and cache");
   return load(std::move(runner), error, session_count, scheduler_policy,
               disk_cache_config, ram_cache_config);
 }
@@ -347,9 +375,9 @@ bool InferenceBackend::load(const std::string&, std::string* error,
                             std::uint32_t, std::size_t, TextSchedulerPolicy,
                             const TextSpeculativeConfig&,
                             const TextDiskCacheConfig&, const std::string&,
-                            TextRunnerRamCacheOptions, bool,
-                            const PrepareRunnerOptions&, const std::string&,
-                            const std::string&) {
+                            TextRunnerRamCacheOptions, bool, const std::string&,
+                            const std::string&, const PrepareRunnerOptions&,
+                            const LoadProgress&) {
   SetError(error, "HIP engine is disabled");
   return false;
 }
@@ -421,6 +449,18 @@ std::vector<InferenceBackend::SessionState> InferenceBackend::session_states()
                           : std::vector<SessionState>{};
 #else
   return {};
+#endif
+}
+
+std::optional<InferenceBackend::SharedState> InferenceBackend::shared_state()
+    const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr)
+    return std::nullopt;
+  return state->scheduler->SharedStateSnapshot();
+#else
+  return std::nullopt;
 #endif
 }
 
@@ -619,7 +659,7 @@ InferenceBackend::Result InferenceBackend::chat(
   const auto initial =
       state->scheduler->runner().InitialOutputState(effective_request);
   if (request.reasoning.budget_tokens &&
-      initial != TextGenerationBackend::InitialOutputState::kContent)
+      !TextGenerationBackend::IsContent(initial))
     effective_sampling.reasoning_budget =
         state->scheduler->runner().BuildReasoningBudget(
             *request.reasoning.budget_tokens, prompt->tokens, initial);
@@ -628,8 +668,8 @@ InferenceBackend::Result InferenceBackend::chat(
       effective_sampling, is_cancelled, on_token, request.client_id,
       std::move(prompt->context), request.cache_prompt,
       prompt->cache_prefix_tokens, request.stop_sequences, initial,
-      request.cache_persist, true,
-      effective_request.projection.value_or(false));
+      request.cache_persist, effective_request.projection.value_or(false),
+      true);
 #else
   (void)request;
   (void)max_tokens;
@@ -712,7 +752,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   const auto initial =
       state->scheduler->runner().InitialOutputState(effective_request);
   if (request.reasoning.budget_tokens &&
-      initial != TextGenerationBackend::InitialOutputState::kContent)
+      !TextGenerationBackend::IsContent(initial))
     effective_sampling.reasoning_budget =
         state->scheduler->runner().BuildReasoningBudget(
             *request.reasoning.budget_tokens, prompt->tokens, initial);

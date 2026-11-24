@@ -54,6 +54,20 @@ struct TextSchedulerPolicy {
   /// Internal prompt granularity of the scheduling policy
   /// (sched::kPrefillUnitTokens); tests shrink it to keep prompts small.
   std::size_t prefill_unit_tokens{sched::kPrefillUnitTokens};
+  /// How often an idle scheduler lets the pool return memory only running
+  /// work holds (TextRunnerPool::Idle): a /proc/meminfo read when nothing is
+  /// held.
+  std::chrono::milliseconds idle_interval{std::chrono::seconds(1)};
+  /// A restore that would stop running decoders longer than this, and longer
+  /// than `restore_beside_rounds` of their decode rounds, copies beside them
+  /// instead (RunBesideDecoders). Shorter ones run inline: a worker hands them
+  /// back only after the current decode round, so a restore shorter than a
+  /// round would wait longer for it than it stops the decoders. A 224 MB
+  /// DeepSeek restore beside its decode rounds raised that request's TTFT
+  /// from 0.10 to 0.15 s and shortened no pause.
+  std::chrono::microseconds restore_beside_decoders_after{
+      std::chrono::milliseconds(10)};
+  double restore_beside_rounds{1.0};
 };
 
 /// Single-owner scheduler for opaque text-model runner states.
@@ -116,6 +130,10 @@ public:
 
   private:
     friend class TextGenerationScheduler;
+#ifdef GUFO_CACHE_TESTING
+    // The fixture pauses the scheduler before observing its capture future.
+    friend bool SnapshotPendingForTesting(const Request& request);
+#endif
     struct Impl;
 
     explicit Request(std::unique_ptr<Impl> impl);
@@ -149,6 +167,9 @@ public:
   /// Null when the runner does not publish prompt-state admission inputs.
   [[nodiscard]] std::optional<PromptAdmissionBudget>
   PromptAdmissionBudgetSnapshot() const;
+  /// Null unless sessions share their demand-mapped state (#715).
+  [[nodiscard]] std::optional<TextGenerationBackend::SharedState>
+  SharedStateSnapshot() const;
 
   [[nodiscard]] Request Submit(std::vector<TextRunnerToken> prompt,
                                std::size_t max_tokens,

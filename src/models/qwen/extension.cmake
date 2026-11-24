@@ -69,9 +69,7 @@ gufo_extension_target(
   LINK_LIBRARIES
     gufo_qwen
     gufo_cache_hip
-    gufo_qwen_kernels
-    gufo_qwen_vision
-    gufo_qwen_draft_vocab
+    gufo::qwen_family
     gufo_compare
     hip::host
 )
@@ -80,7 +78,6 @@ if(TARGET gufo_qwen_hip)
   gufo_extension_hip_sources(gufo_qwen_hip
     SOURCES
       hip/attention.hip
-      hip/batched_ssm.hip
   )
   target_compile_definitions(gufo_qwen_hip PUBLIC ENGINE_ENABLE_HIP=1)
   target_include_directories(gufo_qwen_hip SYSTEM PUBLIC

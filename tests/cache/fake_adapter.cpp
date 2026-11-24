@@ -18,6 +18,10 @@ struct FakeTransfer {
 };
 
 struct FakeStreamState {
+  // A bounded test provider can attach its lease to both stream and completion
+  // ownership, matching the production transfer pool without simulating bytes.
+  std::shared_ptr<void> lease_owner;
+  std::function<void()> before_transfer;
   std::deque<std::shared_ptr<FakeTransfer>> jobs;
   bool running{false};
   TransferResult Advance() noexcept {
@@ -31,6 +35,8 @@ struct FakeStreamState {
     jobs.pop_front();
     running = true;
     try {
+      if (before_transfer)
+        before_transfer();
       job->result = job->run();
     } catch (...) {
       job->result = TransferResult::kFailed;
@@ -196,8 +202,12 @@ private:
   std::shared_ptr<FakeTransfer> job_;
 };
 
-FakeStream::FakeStream(bool delayed)
-    : state_(std::make_shared<FakeStreamState>()), delayed_(delayed) {}
+FakeStream::FakeStream(bool delayed, std::shared_ptr<void> lease_owner,
+                       std::function<void()> before_transfer)
+    : state_(std::make_shared<FakeStreamState>()), delayed_(delayed) {
+  state_->lease_owner = std::move(lease_owner);
+  state_->before_transfer = std::move(before_transfer);
+}
 FakeStream::~FakeStream() {
   (void)Synchronize();
 }
@@ -305,7 +315,7 @@ Identity FakeAdapter::CompatibilityIdentity() const {
           static_cast<std::uint8_t>(private_state_)};
 }
 std::unique_ptr<Slot> FakeAdapter::CreateSlot(MutationGuard& guard) {
-  if (std::exchange(fail_allocation_, false))
+  if (fail_allocation_.exchange(false))
     throw std::bad_alloc();
   return std::make_unique<FakeSlot>(guard, ring_rows_);
 }
@@ -375,7 +385,7 @@ void FakeAdapter::BeginRestore(Slot& slot,
   CheckRange(0, target_end,
              static_cast<std::size_t>(target_end) * sizeof(Token));
   CheckRange(0, draft_end, static_cast<std::size_t>(draft_end) * sizeof(Token));
-  if (std::exchange(fail_allocation_, false))
+  if (fail_allocation_.exchange(false))
     throw std::bad_alloc();
   std::vector<Token> target(static_cast<std::size_t>(target_end));
   std::vector<Token> draft(static_cast<std::size_t>(draft_end));

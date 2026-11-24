@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <gufo/ext/host.hpp>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -513,6 +514,61 @@ std::uint32_t Session::PrefillCapacity() const {
 
 std::uint64_t Session::PayloadBytes() const {
   return ds4_session_payload_bytes(session_);
+}
+
+std::shared_ptr<mem::StateAccount> Session::StateAccount() const {
+  return ds4_session_state_account(session_);
+}
+
+std::size_t Model::DemandMappedBytes(std::uint32_t max_context) const {
+  return ds4_engine_state_regions(engine_)
+             ? ds4_session_demand_mapped_bytes(static_cast<int>(max_context))
+             : 0;
+}
+
+bool Model::MeasureSessionState(core::SessionMode mode,
+                                std::uint32_t max_context,
+                                std::string* error_msg) {
+  // The first session may create the shared batch workspace; the second
+  // allocates only what every session does.
+  auto first = CreateSession(mode, max_context, error_msg);
+  if (!first)
+    return false;
+  auto second = CreateSession(mode, max_context, error_msg);
+  if (!second)
+    return false;
+  measured_context_ = max_context;
+  measured_fixed_bytes_ = ds4_session_fixed_bytes(second->session_);
+  const std::uint64_t workspace =
+      ds4_session_created_workspace(first->session_)
+          ? ds4_session_fixed_bytes(first->session_) -
+                std::min(ds4_session_fixed_bytes(first->session_),
+                         measured_fixed_bytes_)
+          : 0;
+  gufo::server::Logger::LogFormatted(
+      gufo::server::LogLevel::kInfo, "ds4",
+      "event=session_state context=%u fixed_bytes=%zu "
+      "demand_mapped_bytes=%zu workspace_bytes=%llu",
+      max_context, measured_fixed_bytes_, DemandMappedBytes(max_context),
+      (unsigned long long)workspace);
+  return true;
+}
+
+void Model::BuildWeightCopies() {
+  ds4_engine_build_weight_copies(engine_);
+}
+
+void Model::DisableStateRegions() {
+  ds4_engine_disable_state_regions(engine_);
+}
+
+std::optional<std::size_t> Model::SessionBytes(
+    std::uint32_t max_context) const {
+  if (measured_context_ != max_context || measured_context_ == 0 ||
+      !ds4_engine_state_regions(engine_))
+    return std::nullopt;
+  return ds4_session_demand_mapped_bytes(static_cast<int>(max_context)) +
+         measured_fixed_bytes_;
 }
 
 SessionSnapshot::SessionSnapshot(ds4_session_snapshot snapshot)

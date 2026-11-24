@@ -3,6 +3,7 @@
 // The reviewed extension registry (https://github.com/gufo-org/gufo-extension):
 // one index.json listing extensions and their reviewed releases.
 
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -39,6 +40,17 @@ struct Listing {
   std::string reason;  // why none qualifies
 };
 std::vector<Listing> List(const json::Value& index);
+
+// What a release offers, read from its reviewed commit without building it:
+// extension.json, and models.lock.json (an empty object when absent). Git
+// fetches only that commit's tree and these two files. Commits are
+// immutable, so `cache` keeps each result; an unwritable cache is skipped.
+struct Metadata {
+  json::Value manifest;
+  json::Value lock;
+};
+Metadata FetchMetadata(const Release& release,
+                       const std::filesystem::path& cache);
 
 // MAJOR.MINOR.PATCH ordering; malformed versions order first.
 bool Newer(std::string_view candidate, std::string_view installed);

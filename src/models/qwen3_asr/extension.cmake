@@ -29,6 +29,8 @@ gufo_extension_target(
   NAME gufo_qwen3_asr_hip
   SOURCES
     hip/transcription_runtime.cpp
+    npu/runtime.cpp
+    npu/split_q8.cpp
     provider.cpp
   LINK_LIBRARIES
     gufo_qwen3_asr
@@ -53,4 +55,15 @@ if(TARGET gufo_qwen3_asr_hip)
     ${GUFO_EXTENSION_BUILD_ROOT}
     ${GUFO_EXTENSION_BUILD_ROOT}/hip
   )
+endif()
+
+# The CPU share of decode-step products (npu/split_q8.cpp) needs AVX2.
+if(TARGET gufo_qwen3_asr_hip)
+  if(MSVC)
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/npu/split_q8.cpp TARGET_DIRECTORY gufo_qwen3_asr_hip
+      PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+  else()
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/npu/split_q8.cpp TARGET_DIRECTORY gufo_qwen3_asr_hip
+      PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-O3")
+  endif()
 endif()

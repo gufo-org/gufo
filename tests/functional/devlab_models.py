@@ -39,6 +39,8 @@ def asset_keys(plan, data):
         keys.add(model['asset'])
         if 'draft_asset' in model:
             keys.add(model['draft_asset'])
+        if 'checkpoint_asset' in model:
+            keys.add(model['checkpoint_asset'])
         if model['category'] == 'tts':
             keys.add('asr')  # The main binary is the fixed intelligibility evaluator.
     return sorted(keys)
@@ -64,7 +66,7 @@ def download(plan, cache, data):
         print('Download', key, asset['revision'], 'to', destination, flush=True)
         existing = sum((destination / name).is_file() for name in asset['required'])
         print(f'{key}: {existing}/{len(asset["required"])} required files already present', flush=True)
-        started = time.monotonic()
+        started = time.perf_counter()
         for attempt in range(3):
             try:
                 snapshot_download(repo_id=asset['repo'], revision=asset['revision'],
@@ -80,7 +82,7 @@ def download(plan, cache, data):
             if not path.is_file() or not path.stat().st_size:
                 raise FileNotFoundError(path)
         paths[key] = str(destination.resolve())
-        print(f'{key}: ready in {time.monotonic() - started:.1f} s', flush=True)
+        print(f'{key}: ready in {time.perf_counter() - started:.1f} s', flush=True)
     return paths
 
 
@@ -105,6 +107,8 @@ def service_command(model_id, binary, assets, audio_root, public_model):
     if model.get('variant') == 'base':
         command += ['--voice', f'narrator={audio_root / "clear-english-voice.wav"}',
                     '--voice-text', f'narrator={audio_root / "clear-english-voice.txt"}']
+    if model.get('npu'):
+        command += ['--npu']
     return command
 
 
@@ -113,10 +117,16 @@ def main():
     parser.add_argument('--plan', type=Path, required=True)
     parser.add_argument('--cache', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--shard', help="Fetch only this shard's model assets")
     args = parser.parse_args()
+    plan = json.loads(args.plan.read_text())
+    if args.shard:
+        shard = next(row for row in plan['shards'] if row['id'] == args.shard)
+        models = {part['model'] for part in shard['parts']}
+        plan = {**plan, 'models': [row for row in plan['models'] if row['id'] in models]}
     route = allow_large_http_downloads()
     try:
-        paths = download(json.loads(args.plan.read_text()), args.cache.resolve(), registry())
+        paths = download(plan, args.cache.resolve(), registry())
     except Exception:
         # The workflow shows only the log's tail; repeat the route after the traceback.
         traceback.print_exc()

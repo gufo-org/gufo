@@ -9,6 +9,11 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from npu_artifacts import check_artifacts, read_manifest
+import ctest_bundle
 
 
 STORE = Path('/nix/store')
@@ -36,11 +41,25 @@ def copy_runtime(source, root):
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source.is_symlink():
-        target = runtime_path(source.resolve(strict=True), root)
+        # Bundle the target too: a lib/ link may point outside every scanned
+        # lib/ directory (XRT installs under opt/xilinx/xrt/lib).
+        resolved = source.resolve(strict=True)
+        copy_runtime(resolved, root)
+        target = runtime_path(resolved, root)
         destination.symlink_to(os.path.relpath(target, destination.parent))
     else:
         shutil.copyfile(source, destination)
         destination.chmod(source.stat().st_mode & 0o777)
+
+
+def resolved_directories(lines):
+    """Store directories of the libraries in ld.so --list output, in resolution order."""
+    directories = []
+    for line in lines:
+        found = re.search(r'=> (/nix/store/\S+)', line)
+        if found and (directory := Path(found[1]).parent) not in directories:
+            directories.append(directory)
+    return directories
 
 
 def copy_share(source, destination):
@@ -52,14 +71,15 @@ def copy_share(source, destination):
             directory.chmod(directory.stat().st_mode | 0o700)
 
 
-def launcher(directory, name, loader, libraries, environment):
+def launcher(directory, name, loader, libraries, environment, depth=1):
+    """A script in directory that runs libexec/name; depth is directory's distance from the bundle root."""
     script = directory / name
     # Use shell builtins only before invoking the bundled ELF loader. The
     # loader's --library-path applies to Gufo and dlopen, without leaking a
     # newer libc through LD_LIBRARY_PATH into host programs spawned by Gufo.
     text = '#!/bin/sh\nset -eu\n'
     text += 'here=$(CDPATH= cd -- "${0%/*}" && pwd -P)\n'
-    text += 'root=$(CDPATH= cd -- "$here/.." && pwd -P)\n'
+    text += f'root=$(CDPATH= cd -- "$here/{"/".join([".."] * depth)}" && pwd -P)\n'
     text += 'unset LD_LIBRARY_PATH\n'
     for key, value in environment.items():
         text += f'export {key}="$root/{value}"\n'
@@ -85,6 +105,12 @@ def pack(package, revision, destination):
         raise ValueError('Production package does not contain an ELF executable')
     shutil.copy2(executable, destination / 'libexec/gufo')
     copy_share(package / 'share', destination / 'share')
+    # Gufo's own runtime modules (lib/gufo: the XRT module, loaded on first
+    # NPU use). The bundled loader is the process image, so Gufo finds them
+    # by name through its --library-path.
+    modules = package / 'lib/gufo'
+    if modules.is_dir():
+        copy_share(modules, destination / 'lib/gufo')
     for dependency in closure:
         if dependency == package:
             continue
@@ -98,16 +124,38 @@ def pack(package, revision, destination):
     if not patched:
         raise ValueError('Production package does not select its patched ROCr runtime')
     preferred = runtime_path(Path(patched[1]), root).relative_to(root).as_posix()
-    directories = sorted({path.parent.relative_to(root).as_posix()
-                          for path in (root / 'runtime').rglob('*')
-                          if path.is_file() and '.so' in path.name
-                          and any(path.is_relative_to(runtime_path(dep, root)) for dep in closure)})
-    libraries = [preferred] + [path for path in directories if path != preferred]
     loaders = sorted({(dep / 'lib/ld-linux-x86-64.so.2').resolve() for dep in closure
                       if (dep / 'lib/ld-linux-x86-64.so.2').is_file()})
     if len(loaders) != 1:
         raise ValueError('Expected one pinned glibc ELF loader')
     loader = runtime_path(loaders[0], root).relative_to(root).as_posix()
+    # The directories the executable's and its modules' RUNPATHs resolve keep
+    # their precedence over the rest of the closure. XRT locates its device
+    # shim and driver plugins beside the path libxrt_coreutil was loaded from:
+    # the merged XRT package's lib/, not the base XRT's (only the XRT module
+    # links it).
+    # GPU test executables of the checked package (tools/ci/ctest_bundle.py).
+    tests = sorted((package / ctest_bundle.EXECUTABLES).glob('*'))
+    listed = [executable, *(sorted(modules.glob('*.so')) if modules.is_dir() else []), *tests]
+    linked = resolved_directories(
+        line for path in listed
+        for line in output(str(loaders[0]), '--list', str(path)).splitlines())
+    for directory in linked:
+        # The closure copy above already holds every <package>/lib directory.
+        if directory.parent.parent == STORE:
+            continue
+        for library in directory.iterdir():
+            if (library.is_file() or library.is_symlink()) and runtime_file(library):
+                copy_runtime(library, root)
+    linked = [runtime_path(path, root).relative_to(root).as_posix() for path in linked]
+    directories = sorted({path.parent.relative_to(root).as_posix()
+                          for path in (root / 'runtime').rglob('*')
+                          if path.is_file() and '.so' in path.name
+                          and any(path.is_relative_to(runtime_path(dep, root)) for dep in closure)})
+    libraries = [preferred] + [path for path in linked if path != preferred]
+    if modules.is_dir():
+        libraries.append(destination.relative_to(root).as_posix() + '/lib/gufo')
+    libraries += [path for path in directories if path not in libraries]
     environment = {}
     for dependency in closure:
         # HIPBLASLT_TENSILE_LIBPATH stays unset. hipBLASLt finds its gfx1151
@@ -126,8 +174,21 @@ def pack(package, revision, destination):
         shutil.copy2(ffmpeg[0] / 'bin' / name, destination / 'libexec' / name)
         launcher(destination, name, loader, libraries, {})
         environment['GUFO_' + name.upper()] = destination.relative_to(root).as_posix() + '/' + name
+    # The bundled loader is the process image, so Gufo cannot find its NPU
+    # designs beside the executable; point it at the copied share directory.
+    if (destination / 'share/gufo/npu').is_dir():
+        environment['GUFO_NPU_DESIGNS'] = destination.relative_to(root).as_posix() + '/share/gufo/npu'
     launcher(destination, 'gufo', loader, libraries, environment)
     (destination / 'gufo-server').symlink_to('gufo')
+    checksums = {}
+    if tests:
+        # tests/<name> runs tests/libexec/<name> with Gufo's runtime environment.
+        (destination / 'tests/libexec').mkdir(parents=True)
+        for test in tests:
+            shutil.copy2(test, destination / 'tests/libexec' / test.name)
+            launcher(destination / 'tests', test.name, loader, libraries, environment, depth=2)
+            with test.open('rb') as file:
+                checksums[test.name] = hashlib.file_digest(file, 'sha256').hexdigest()
     executable = destination / 'libexec/gufo'
     with executable.open('rb') as file:
         digest = hashlib.file_digest(file, 'sha256').hexdigest()
@@ -137,6 +198,12 @@ def pack(package, revision, destination):
     script.write_text(script.read_text().replace('set -eu\n', f'# Gufo ELF SHA-256: {digest}\nset -eu\n', 1))
     manifest = {'schema': 2, 'revision': revision, 'version': version, 'sha256': digest,
                 'loader': loader, 'libraries': libraries}
+    if checksums:
+        manifest['tests'] = checksums
+    npu = destination / 'share/gufo/npu'
+    if (package / 'share/gufo/npu/npu-artifacts.txt').is_file():
+        manifest['npu_artifacts'] = read_manifest(npu / 'npu-artifacts.txt')
+        check_artifacts(npu, manifest['npu_artifacts'])
     (destination / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     print(f'{version}: portable executable and gfx1151 runtime prepared', flush=True)
 
@@ -145,6 +212,11 @@ def verify(source, revision):
     manifest = json.loads((source / 'manifest.json').read_text())
     if manifest['schema'] != 2 or manifest['revision'] != revision:
         raise ValueError('Artifact does not match the authorized revision')
+    if 'npu_artifacts' in manifest:
+        npu = source / 'share/gufo/npu'
+        check_artifacts(npu, manifest['npu_artifacts'])
+        if read_manifest(npu / 'npu-artifacts.txt') != manifest['npu_artifacts']:
+            raise ValueError('Bundled NPU manifest differs from the package')
     with (source / 'libexec/gufo').open('rb') as file:
         if hashlib.file_digest(file, 'sha256').hexdigest() != manifest['sha256']:
             raise ValueError('Linux binary checksum mismatch')
@@ -157,6 +229,17 @@ def verify(source, revision):
                     '--list', str(source / 'libexec/gufo'))
     if '=> /nix/store/' in linked or 'not found' in linked:
         raise ValueError('Linux binary depends on an unbundled runtime library')
+    for name, expected in manifest.get('tests', {}).items():
+        with (source / 'tests/libexec' / name).open('rb') as file:
+            if hashlib.file_digest(file, 'sha256').hexdigest() != expected:
+                raise ValueError(f'Test executable {name} checksum mismatch')
+    tests = [source / 'tests/libexec' / name for name in sorted(manifest.get('tests', {}))]
+    for module in [*sorted((source / 'lib/gufo').glob('*.so')), *tests]:
+        linked = output(str(root / manifest['loader']), '--library-path',
+                        ':'.join(str(root / path) for path in manifest['libraries']),
+                        '--list', str(module))
+        if '=> /nix/store/' in linked or 'not found' in linked:
+            raise ValueError(f'{module.name} depends on an unbundled runtime library')
     print(version, flush=True)
 
 

@@ -144,6 +144,16 @@ int main() {
                             &error) &&
             recovered.generated_ids == result.generated_ids,
         "runtime remains reproducible after cancellation");
+  const std::vector<std::byte> malformed(9, std::byte{'x'});
+  qwen3_asr::TranscriptionResult rejected;
+  qwen3_asr::TranscriptionResult failed;
+  Check(!runtime->Transcribe({.wav = malformed, .max_new_tokens = 128}, {},
+                             &rejected, &error) &&
+            rejected.invalid_audio &&
+            !runtime->Transcribe({.wav = wav, .max_new_tokens = 0}, {}, &failed,
+                                 &error) &&
+            !failed.invalid_audio,
+        "only undecodable audio is reported as invalid audio");
   const auto concurrent = [&](std::string context) {
     qwen3_asr::TranscriptionResult output;
     std::string failure;

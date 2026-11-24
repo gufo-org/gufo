@@ -18,15 +18,33 @@ Reference protocols:
 ## Implementation
 
 The C++20 runtime serves bounded HTTP/1.1 requests with one connection worker
-per request and a separate inference scheduler. Connections close after each
-response. Request heads are parsed in Rust by httparse as RFC 9112 defines
+per connection and a separate inference scheduler. The CLI keeps HTTP/1.1
+connections open for sequential requests, bounded by 5 seconds of idle time and
+100 requests; HTTP/1.0 requests and `Connection: close` close after the
+response, and embedded callers retain close-per-response by default. A
+connection waiting for its next request does not count toward
+`--max-connections`: at the limit the server closes the one idle longest to
+admit a new client. A stream that ends without its final chunk closes its
+connection. Request
+heads are parsed in Rust by httparse as RFC 9112 defines
 them: a token method, single spaces in the request line, an origin-form target
 without control bytes in UTF-8, HTTP/1.0 or HTTP/1.1, and header fields without
 control bytes. A bare LF ends a line, and one empty line before the request line
 is ignored. Other heads, `Transfer-Encoding` (chunked bodies are not
 implemented), and `Content-Length` values that are not decimal digits or
 disagree get 400; more than 100 header fields, llama-server's limit too, get
-431. Chat Completions, Responses and Messages stream with Server-Sent
+431. Multipart form bodies, which the ASR, image-edit and video APIs take, are
+parsed in Rust as RFC 7578 defines them: a `boundary` of 1 to 70 RFC 2046
+characters, the last one not a space; parameters as RFC 9110 writes them
+(quoted strings with escapes, case-insensitive names, each at most once, at
+most 16 per header field), tolerating spaces around `=` and
+parameters without a value; exactly one `form-data` `Content-Disposition` with
+a `name` per part; part header lines ending in CRLF, at most 16 KiB and 16
+fields per part; the first boundary at the start of the body, a delimiter only
+where optional spaces and tabs and CRLF follow it (or `--` followed by
+padding and CRLF or EOF for the close delimiter). An epilogue after the final
+CRLF is ignored. Each API sets its field limit (ASR 12, video 16, image 32)
+and whether names must be unique (ASR and video). Chat Completions, Responses and Messages stream with Server-Sent
 Events; closing the socket cancels the request in the scheduler. JSON parsing
 rejects duplicate keys, invalid numbers and nesting beyond 128 containers.
 Python may serve development tools and conformance tests, never requests.
@@ -131,7 +149,8 @@ privacy-safe scheduler and stage metrics used by
 `tools/serving/gufo-serving-bench.py`: queue, prefill, decode, TTFT and ITL timing;
 actual prefill work; cache use; logical concurrency; physical execution width;
 and the executed plan. Prompts, generated text, local paths, request IDs, and
-token IDs are excluded.
+token IDs are excluded. `tools/serving/gufo-interface-bench.py` reads the same
+metrics to separate connection, framing and token-arrival cost from generation.
 
 DeepSeek V4 Flash batches up to eight active requests. Each request owns its
 attention caches, compressor state, position, and sampling state. Dense and
@@ -172,7 +191,9 @@ cost.
 Each model chooses its prefill chunk. Every text runner declares a scheduling
 profile: beside decoders, the host keeps the profile's pass width and splits
 each pass by layers, with a decode round between groups (one group runs it
-unsplit). A lone request keeps the model's own pass width. `--prefill-chunk`
+unsplit). A lone request keeps the profile's pass width while another session
+is free, so a request arriving during it waits for one such pass, and the
+model's own, possibly wider, pass when every session is taken. `--prefill-chunk`
 is deprecated: it is accepted, ignored with a `event=deprecated_option`
 warning, and will be removed at the next breaking release.
 
@@ -198,9 +219,11 @@ at 32 GiB and half the available host RAM after model/state allocation, respecti
 container limits. Available RAM is `MemAvailable` minus `CmaFree`: free CMA
 pages, such as the kernel's KHO scratch area on Ubuntu 26.04, only hold
 movable pages, not GPU allocations. 27B also checks HIP free memory. A
-positive value sets a byte cap that may exceed the automatic budget, up to the
-available host RAM minus 4 GiB; the startup line reports both as
-`automatic_bytes` and `max_bytes`.
+positive value sets a byte cap that may exceed the automatic budget, up to
+`MemAvailable` minus the larger of `CmaFree` and a 4 GiB host reserve (within
+a container, its limit minus 4 GiB). The OS keeps its reserve in the free CMA
+pages, which the cache cannot pin, so the two are not subtracted together. The
+startup line reports both as `automatic_bytes` and `max_bytes`.
 The pinned disk staging buffer comes out of that ceiling, and `max_bytes`
 excludes it.
 The 128 checkpoint records are independent of `--sessions`; more than one can
@@ -292,9 +315,9 @@ Do not share a directory with another model server; the component cache removes
 their checkpoint and temporary files too, including writes in progress.
 The server ignores `--cache-disk-staging-bytes` and logs
 `event=option_ignored`. Writes and restores stream each checkpoint through an
-internal 1 MiB pinned buffer, piece by piece; a larger buffer did not change
-restore or write speed and took pinned RAM and device heap from the cache and
-the sessions. Remove the option from Qwen27B and Flash-Next command lines.
+internal 8 MiB pinned buffer of 1 MiB pieces: writes move one piece at a time,
+restores read and check eight pieces in parallel while copying others out.
+Remove the option from Qwen27B and Flash-Next command lines.
 
 For DeepSeek, `--cache-disk-staging-bytes 0` (the default) selects the
 smaller of one eighth of available host RAM after model/session loading
@@ -305,7 +328,7 @@ Snapshots that exceed either limit are skipped with their required size and
 available budget logged; live conversation reuse remains available. Existing
 files that exceed the current staging limit are preserved subject to disk LRU
 eviction and can be reused after restarting with sufficient staging.
-Qwen27B streams large checkpoints through the same fixed 1 MiB staging buffer;
+Qwen27B streams large checkpoints through the same fixed 8 MiB staging buffer;
 `--cache-disk-bytes` still needs to fit the retained checkpoints.
 
 For a focused cancellation check, run
@@ -359,6 +382,12 @@ the runtime default down to a single queue at one and at four concurrent
 requests, and both audio servers are flat within run-to-run noise. Image,
 video, and embedding are unmeasured, so they keep the runtime default
 unless the device is too busy to hold it.
+
+A speech provider that overlaps work across streams can replace the audio cap
+with `"serving": {"hardware_queues": N}` in its `extension.json`, for example
+a TTS model that decodes audio on a second stream while it generates the next
+patch. The server probes the model's provider before the first HIP dispatch
+and uses that cap in place of 1. Providers that declare nothing keep 1.
 
 The cap is only ever lowered to fit the free slots, never raised to fill them,
 so a server's throughput does not depend on the order the servers started. A
@@ -483,7 +512,10 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/v1/systemone` | A decision model is configured with `gufo serve decision` |
 | `POST` | `/v1/images/generations` | Qwen-Image-2.1 image serving is configured |
 | `POST` | `/v1/images/edits` | Qwen-Image-2.1 image serving is configured |
-| `GET` | `/sdapi/v1/loras` | Qwen-Image-2.1 image serving is configured; lists `--lora` adapters. A text server answers 501 |
+| `POST` | `/sdapi/v1/txt2img`, `/sdapi/v1/img2img` | Image serving is configured; the [A1111 image API](#a1111-image-api). A text server answers 501 |
+| `GET` | `/sdapi/v1/loras` | Image serving is configured; lists `--lora` adapters. A text server answers 501 |
+| `GET` | `/sdapi/v1/options`, `/sdapi/v1/sd-models`, `/sdapi/v1/samplers`, `/sdapi/v1/schedulers`, `/sdapi/v1/upscalers`, `/sdapi/v1/latent-upscale-modes`, `/sdapi/v1/progress` | Image serving is configured; A1111 discovery |
+| `POST` | `/sdapi/v1/options` | Image serving is configured; accepts the loaded `sd_model_checkpoint` |
 | `POST` | `/v1/videos` | A validated operator-supplied MiniMax H3 checkpoint is configured |
 | `GET` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
 | `GET` | `/v1/videos/{id}/content` | The requested MiniMax H3 job completed |
@@ -499,7 +531,14 @@ Use `gufo serve image --model SNAPSHOT_DIR` for
 editing accepts multipart PNG/JPEG references. Both return base64 PNG data
 and work through llama-swap's image routes. LoRA adapters registered with
 `--lora NAME=PATH` are selected per request with the `loras` field; see
-[LoRA adapters](../models/qwen-image-2.1.md#lora-adapters).
+[LoRA adapters](../models/qwen-image-2.1.md#lora-adapters). Flat
+`negative_prompt`, `guidance_scale` and `strength` fields (and a base64 `image`
+start image on generations) select classifier-free guidance and image to image
+on both routes. Below full strength, the first image of an edit is the start
+image and further images stay references; a provider that does not declare the `guidance` or
+`image_to_image` capability refuses them with 400, and a request that does not
+fit into free device memory returns 503. See
+[Settings](../models/qwen-image-2.1.md#settings).
 
 Qwen3-TTS serving is enabled with a dedicated model process. All three 12Hz
 1.7B variants are supported; the variant is detected from the checkpoint's
@@ -611,6 +650,9 @@ and supports `json`, `text`, and `verbose_json`. `stream=true` with JSON emits
 OpenAI transcript delta/done events. Long uploads are split within model
 capacity; `max_tokens` applies per chunk. Timestamp (`timestamp_granularities[]`)
 and logprobs (`include[]`) requests are rejected; unknown fields are ignored.
+A `file` the model cannot decode returns 400 `invalid_audio_input` (an
+`invalid_audio_input` error event when streaming); other failures return 500
+`transcription_failed`.
 
 `GET /v1/realtime?intent=transcription` upgrades to OpenAI's manual-commit
 transcription WebSocket interface. [ASR streaming examples](../models/qwen3-asr.md#streaming-a-file)
@@ -670,6 +712,87 @@ request memory, persists only its SHA-256 digest, and wipes both source and
 active string storage after transfer and completion. Completed MP4s are probed
 for H.264/AAC codec, geometry, rates, duration, and A/V synchronization before
 atomic publication.
+
+## A1111 image API
+
+`gufo serve image` also speaks the AUTOMATIC1111 Stable Diffusion WebUI API
+(`/sdapi/v1/*`) in the dialect of stable-diffusion.cpp's server
+(`examples/server/routes_sdapi.cpp`), so A1111 clients such as Open WebUI
+(image engine "Automatic1111"), SillyTavern ("Stable Diffusion WebUI") and
+llama-swap setups written for sd.cpp work unchanged. It is a separate API
+layer (`src/cli/serve/sdapi.cpp`) with its own schema, responses and errors;
+it shares only the `ImageService` (`image_service.cpp`) and its generation
+loop with the OpenAI routes (`image_api.cpp`). Neither API reads the other's
+fields: `cfg_scale` or `lora` on `/v1/images/*`, and `guidance_scale`,
+`loras` or `size` on `/sdapi/v1/*`, are unknown fields and ignored.
+
+`txt2img` and `img2img` take JSON. Defaults are the model's, not A1111's
+processing defaults; `null` counts as omitted.
+
+| Field | Behavior |
+| --- | --- |
+| `prompt` | Required; empty answers `400 {"error": "prompt required"}`. `<lora:...>` tags stay literal text |
+| `negative_prompt` | Default `""`; forwarded |
+| `cfg_scale` | Forwarded as given (A1111 clients send 7), 0 to 100. Omitted uses the model default (1, unguided, for Qwen-Image-2.1 and Turbo, so a negative prompt alone has no effect) |
+| `steps` | 2 to 100; omitted uses the checkpoint default (40; Turbo accepts only 8) |
+| `seed` | Integer; negative or omitted is random. Batch images use consecutive seeds |
+| `width`, `height` | Positive; multiples of 32, at most 4096 per side and 4.5 megapixels. `txt2img` default 1024 × 1024 |
+| `batch_size` | Image count, 1 to 10 (default 1). `n_iter` is ignored |
+| `lora` | Adapter list; see below |
+| `init_images` | `img2img` only, required: the first entry, as base64 or a base64 data URL; URLs are not fetched |
+| `denoising_strength` | `img2img` only: clamped to 0.01–1; omitted or negative is 0.75, as in sd.cpp and A1111. Ignored by `txt2img` |
+| `mask` | `img2img`: refused with 400 (no inpainting) |
+| `sampler_name`, `scheduler`, `clip_skip`, `enable_hr`, `hr_*`, `alwayson_scripts`, other fields | Ignored |
+
+Without `width` and `height`, `img2img` uses the init image's size on the
+32-pixel grid, scaled down to the size limits; one given side keeps its aspect
+ratio. As in stable-diffusion.cpp, `steps` is the schedule length and
+`denoising_strength` selects how much of it runs (the last `steps × strength`
+steps), without A1111's step-count rewrite.
+
+The response is `{"images": [base64 PNG, ...], "parameters": <request echo>,
+"info": "<JSON string>"}`. `info` follows sd.cpp's `prepare_info_field`:
+`prompt`, `negative_prompt`, `seed`, `cfg_scale`, `width`, `height`, `steps`,
+`sampler_name` (`Euler`), `version` (`gufo`), `denoising_strength` for
+`img2img`, and the per-image arrays `infotexts` (A1111 parameter text),
+`all_prompts`, `all_negative_prompts`, `all_seeds` and `generation_info`
+(`seed`, `steps_run`, `loras`, `total_ms`). An omitted `cfg_scale` reports the
+scale the runner applied (`ImageMetrics::guidance_scale`), or `null` if the
+runner does not report it; an omitted `steps` is `null` below full strength,
+where the schedule length is not visible to the host.
+
+`lora` follows sd.cpp: `[{"path": ..., "multiplier": 1, "is_high_noise":
+false}]`, where `path` is a `path` from `GET /sdapi/v1/loras`. An array
+(including `[]`) replaces the `--lora-default` set; omitted or a non-array
+value keeps it. Non-object entries are skipped; repeated paths sum their
+multipliers. An unknown path answers `400 {"error": "invalid lora path:
+..."}` and a missing one `lora.path required`. `is_high_noise` entries select
+the second stage of two-stage models; single-stage Qwen-Image validates and
+skips them. Gufo's bounds apply: at most 16 adapters and summed multipliers at
+most 10 in magnitude.
+
+Errors are `{"error": message}`: 400 for invalid requests, 405 for the wrong
+method, 404 for other `/sdapi/v1/` paths, 503 when the request does not fit
+into free GPU memory and 500 for generation failures.
+
+Discovery answers what A1111 clients read before generating:
+`GET /sdapi/v1/options` returns `{"samples_format": "png",
+"sd_model_checkpoint": <served model>}`; `POST` accepts the served model or an
+alias as `sd_model_checkpoint` (400 otherwise) and ignores other settings.
+`sd-models` lists the served model (`title`, `model_name`, `filename`, with
+`hash`, `sha256` and `config` null). `samplers`, `schedulers` and `upscalers`
+list the single choice each (`Euler`, `default`, `None`) and
+`latent-upscale-modes` is empty. `progress` reports no step progress or
+preview: `state.job_count` counts generations running or waiting, so clients
+that wait for an idle server do not wait forever.
+
+Deliberate differences from stable-diffusion.cpp: no `sd_cpp_extra_args`,
+`<lora:...>` tags, `mask`, `extra_images`, highres fix, ADetailer, previews or
+interrupt; samplers, schedulers and `clip_skip` are ignored; an omitted
+`cfg_scale` is the model's default instead of sd.cpp's engine-wide 7; URL init
+images are never fetched (A1111's `api_enable_requests` setting has no
+equivalent); `img2img` requires `init_images`; wrong field types answer 400
+instead of 500; batch and adapter bounds are Gufo's.
 
 ## Embeddings
 
@@ -781,7 +904,8 @@ resolved by these endpoints.
 `top_logprobs`, and the shared
 sampling controls. Message content supports
 `input_text` and `input_image` with an `image_url` (HTTPS or a data URL).
-Image uploads accept PNG, JPEG and WebP. Base64 data URLs also accept
+Image uploads accept PNG, JPEG and WebP. JPEG excludes arithmetic coding,
+lossless JPEG and DNL markers, which are rejected with 400. Base64 data URLs also accept
 `image/jpg`, mixed-case media types/`base64`, and parameters such as `name=`.
 Clients supply the complete conversation, including prior Gufo `output` items
 when retaining reasoning. Replay `function_call` items with their `call_id`,
@@ -1243,10 +1367,13 @@ Use appropriate HTTP status codes:
 - `429` admission queue full or rate limit exceeded
 - `499` internally recorded client cancellation
 - `500` internal failure
-- `503` model or backend unavailable, GPU context lost (`device_lost`), or a
+- `503` model or backend unavailable, GPU context lost (`device_lost`), a
   prompt whose host prompt-state bytes do not fit the admission budget
   (`insufficient_memory`, with `error.required_bytes` and
-  `error.remaining_bytes` and the same values under `usage.gufo`)
+  `error.remaining_bytes` and the same values under `usage.gufo`), or a host
+  that other processes left more than 2 GiB short of its memory reserve
+  (`insufficient_memory`, with the shortfall as `error.required_bytes`; see
+  [state memory](state-memory.md#pressure-from-other-processes))
 
 Generation stops at the request budget or context capacity and reports a
 length finish reason when either limit is reached.
@@ -1270,8 +1397,10 @@ waits for `/ready` to return HTTP 200 before forwarding the triggering
 request. Gufo returns 503 while the model loads. The served model name
 matches the llama-swap model ID, so clients can request `gufo-model`
 through the proxy. Gufo requires no credentials on any route, so llama-swap's
-default `/health` probe works too. For long cold starts, increase llama-swap's
-`healthCheckTimeout` to cover model and disk-cache loading.
+default `/health` probe works too. While `gufo serve llm` loads, its 503 body
+reports the load stage, which llama-swap v269 and later show; each new stage
+restarts the `healthCheckTimeout` countdown. Set `healthCheckTimeout` to cover
+the longest stage, usually loading the weights or walking the disk cache.
 
 Gufo answers the names passed to `--served-model-name` plus its built-in
 identifiers: TTS also accepts `qwen3-tts`, ASR also accepts `qwen3-asr` and
@@ -1357,9 +1486,17 @@ recorded device state without performing GPU work on each poll. HTTP model repla
 conversations are not implemented.
 
 While `gufo serve llm` loads its model and walks the disk cache tier, the port
-already answers every request, `/health` included, with 503
-`{"error":{"message":"Loading model","type":"unavailable_error","code":"loading"}}`
-and `Retry-After: 1`, as llama-server does. A refused connection therefore
+already answers every request, `/health` included, with 503 and
+`Retry-After: 1`, as llama-server does. The body carries llama-server's error
+object plus the load stage as top-level `progress` (0 to 1) and `message`:
+
+```json
+{"error":{"message":"Loading model","type":"unavailable_error","code":"loading"},"progress":0.05,"message":"Loading weights"}
+```
+
+The stages are `Opening model` (0), `Loading weights` (0.05) and
+`Preparing sessions and cache` (0.9), which includes the disk-tier walk.
+`progress` marks the stage, not a share of the remaining time. A refused connection therefore
 means the process is not running; supervisors such as llama-swap, which treat
 only a 200 health check as ready, keep waiting until the model is loaded. If
 the address cannot be bound early, the port stays closed until the load ends.

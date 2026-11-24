@@ -109,3 +109,20 @@ C1, context capacity 262144, AR. Peak memory reported by HIP.
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory.svg)
+
+## Cache cost calibration (November 12, 2026)
+
+Diagnostic least-squares fits of the retained single-user pp2048 depth sweeps
+above, using `tools/cache/fit_cost.py`. These reuse the dated measurements;
+they are not a new speed qualification. For interval `[a,b)`, seconds are
+`d*(b-a) + e*(b-a)*(b+a)/200000`. Policy thresholds remain unchanged.
+
+| Sweep | d (s/token) | e (s/token) | Maximum fit error |
+| --- | ---: | ---: | ---: |
+| [single-ar](artifacts/cache-cost-single-ar.csv) | 0.002276678925 | 0.000892284196 | 7.32% |
+| [single-dspark](artifacts/cache-cost-single-dspark.csv) | 0.002291861115 | 0.000866333072 | 9.25% |
+
+Restore estimates use the [measured 96 GB/s RAM control](../../design/cache-redesign/RFC.md#measured-constants)
+and the [3.3 GB/s disk observation](../../cache.md). Both are approximate hardware
+controls. Other quantizations, cold files and concurrent work can differ; inspect
+the `cost_estimate` event beside actual request timings before using the estimates.

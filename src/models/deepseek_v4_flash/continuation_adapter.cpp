@@ -213,6 +213,13 @@ Session& ContinuationAdapter::GetSession(cache::Slot& slot) {
   state.RequireIdle();
   return *state.session;
 }
+std::optional<cache::CostEstimate> ContinuationAdapter::Cost() const {
+  // Fixed least-squares fit of the retained gfx1151 depth sweep; see this
+  // model's BENCHMARKS.md. Restore rates are shared measured hardware controls.
+  return mode_ == core::SessionMode::kSpeculative
+             ? cache::CostEstimate{0.002291861115, 0.000866333072, 96e9, 3.3e9}
+             : cache::CostEstimate{0.002276678925, 0.000892284196, 96e9, 3.3e9};
+}
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
   return {.continuation = true, .persistent_encoding = true};
 }
@@ -529,7 +536,7 @@ cache::Completion ContinuationAdapter::LoadPrivatePiece(
               std::memcpy(destination, source, end - first);
             else
               Check(hip::CopySnapshotToDevice(destination, source, end - first,
-                                              transfer.Native()));
+                                              transfer));
           }
         });
   } catch (...) {
@@ -592,7 +599,7 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
             std::memcpy(destination, bytes.data(), bytes.size());
           else if (!bytes.empty())
             Check(hip::CopySnapshotToDevice(destination, bytes.data(),
-                                            bytes.size(), transfer.Native()));
+                                            bytes.size(), transfer));
         });
   } catch (...) {
     state.failed = true;

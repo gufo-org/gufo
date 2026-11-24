@@ -48,7 +48,8 @@ struct AsrService::Impl {
         native_runtime = provider->create_with_options(
             {.model_root = options.model_root.string(),
              .maximum_context_tokens = options.native_context_tokens,
-             .projector_path = options.projector_path.string()},
+             .projector_path = options.projector_path.string(),
+             .provider_options = options.provider_options},
             &initialization_error);
       else if (!options.projector_path.empty())
         initialization_error =

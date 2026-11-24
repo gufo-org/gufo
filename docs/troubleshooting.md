@@ -7,7 +7,7 @@ the common failures, and what to include in a bug report.
 
 ```sh
 gufo diagnose
-gufo diagnose --section gpu        # platform, gpu, inventory or extensions
+gufo diagnose --section gpu        # platform, gpu, npu, inventory or extensions
 gufo diagnose --json               # for scripts and bug reports
 ```
 
@@ -34,6 +34,17 @@ can't see the state of a server that is already running; use `/health` and
   lets every container on the host use the devices passed to it; review that
   scope before enabling it.
 
+## The NPU isn't found
+
+- Check that the kernel's `amdxdna` driver created the node:
+  `ls -l /dev/accel/accel0`. Your user needs access to it, usually through
+  the `render` group.
+- In a container, pass `--device /dev/accel/accel0`.
+- On Windows, install AMD's NPU driver; it supplies XRT
+  (`xrt_coreutil.dll` in System32). Remove any `xrt_coreutil.dll` beside
+  `gufo.exe` and unset `XILINX_XRT`: either makes XRT look for the driver's
+  device plugin in the wrong folder.
+
 ## The server stops with `device_lost`
 
 A GPU reset leaves the process unable to use the GPU again. Gufo returns 503
@@ -49,7 +60,15 @@ exit.
   the responses. If it's near zero, something early in the prompt changes
   between turns; see [what breaks reuse](cache.md#what-breaks-reuse).
 - **Requests wait:** each `--sessions` slot runs one request; others queue.
-  `/slots` shows what each session is doing.
+  `/slots` shows what each session is doing. When sessions share memory (more
+  than fit at full context), a request also waits until its tokens fit; the
+  log shows `event=state_wait` and `event=state_wait_end`, and `/metrics`
+  `gufo_shared_state_*`. A request stopped with `memory_pressure` (503) can be
+  retried; `insufficient_memory_permanent` (507) means the prompt never fits.
+- **Requests fail with `insufficient_memory` (503) while another program
+  runs:** the host has less than about 2 GiB of available memory. Gufo
+  finishes running requests, then gives RAM-cache memory back (the log shows
+  `event=host_pressure_release`); retry, or close the other program.
 - **Prefill seems stuck:** start the server with `--log-progress` to log each
   prefill chunk and every 50 decoded tokens, with speeds.
 

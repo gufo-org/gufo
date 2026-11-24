@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <gufo/ext/families/qwen/text/tokenizer.hpp>
 #include <gufo/ext/gguf_reader.hpp>
 #include <gufo/ext/sampling.hpp>
 #include <memory>
@@ -12,7 +13,6 @@
 #include <string>
 #include <vector>
 
-#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/state.hpp"
 

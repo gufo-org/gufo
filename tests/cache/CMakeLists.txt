@@ -19,6 +19,18 @@ if (ENGINE_ENABLE_HIP)
     LABELS "hip;gpu;gfx1151;cache" TIMEOUT 60)
 endif()
 target_link_libraries(gufo_cache_fake PUBLIC gufo_cache)
+# Exercise production host-side HIP resources with controlled CPU completions.
+add_executable(cache_transfer_pool_test transfer_pool_test.cpp
+  ${PROJECT_SOURCE_DIR}/src/core/hip/component_cache_resources.cpp
+  ${PROJECT_SOURCE_DIR}/src/core/hip/committed_backing.cpp
+  ${PROJECT_SOURCE_DIR}/src/core/hip/host_allocations.cpp
+  ${PROJECT_SOURCE_DIR}/src/core/hip/transfer_pool.cpp)
+target_include_directories(cache_transfer_pool_test BEFORE PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/fake_hip)
+target_link_libraries(cache_transfer_pool_test PRIVATE gufo_cache_fake gufo_mem)
+add_test(NAME cache_transfer_pool_test COMMAND cache_transfer_pool_test)
+set_tests_properties(cache_transfer_pool_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
 add_executable(cache_adapter_lifecycle_test lifecycle_test.cpp)
 target_link_libraries(cache_adapter_lifecycle_test PRIVATE gufo_cache_fake)
 add_test(NAME cache_adapter_lifecycle_test COMMAND cache_adapter_lifecycle_test)
@@ -70,6 +82,13 @@ if (GUFO_BUILD_TOOLS)
   target_compile_options(cache_disk_bench PRIVATE -UNDEBUG)
 endif()
 
+add_executable(cache_disk_manifest_test disk_manifest_test.cpp
+  disk_manifest_reference.cpp)
+target_link_libraries(cache_disk_manifest_test PRIVATE gufo_cache gufo_rust)
+add_test(NAME cache_disk_manifest_test COMMAND cache_disk_manifest_test)
+set_tests_properties(cache_disk_manifest_test PROPERTIES
+  LABELS "cpu;cache;correctness" TIMEOUT 60)
+
 # These tests fork, inject faults with --wrap or create POSIX temporaries;
 # the boundary check needs Python. Windows builds the tests above only.
 if (NOT WIN32)
@@ -86,7 +105,7 @@ if (NOT WIN32)
       ${PROJECT_SOURCE_DIR}/tests/support/package_boundary_test.py
       ${PROJECT_SOURCE_DIR}/src/cache
       ${CMAKE_CURRENT_BINARY_DIR}/cache-links-$<CONFIG>.txt
-      Threads::Threads gufo_platform)
+      Threads::Threads gufo_platform gufo_rust)
   set_tests_properties(cache_boundary_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
 
   add_executable(cache_slot_test slot_test.cpp)

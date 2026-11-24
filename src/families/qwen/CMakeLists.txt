@@ -16,6 +16,9 @@
 #   text             tokenizer + chat template
 #   kernels          shared HIP operators (ENGINE_ENABLE_HIP only)
 #   vision           vision encoder, image prompt, image cache
+#
+# gufo::qwen_family bundles them as one experimental extension link target; its
+# headers are the forwards under include/gufo/ext/families/qwen/.
 add_subdirectory(control_tokens)
 add_subdirectory(draft_vocab)
 add_subdirectory(hip_common)
@@ -25,3 +28,18 @@ if (ENGINE_ENABLE_HIP)
   add_subdirectory(kernels)
 endif()
 add_subdirectory(vision)
+
+# The experimental Qwen family extension library. Like gufo_ext_core it adds no
+# repository include path: the forwarding headers under
+# include/gufo/ext/families/qwen/ and their SURFACE closure come from
+# gufo_ext_runtime, which the consumer links, as it does gufo_ext_hip in HIP
+# builds. This target links the family implementation.
+add_library(gufo_qwen_family INTERFACE)
+target_link_libraries(gufo_qwen_family INTERFACE
+  $<LINK_ONLY:gufo_qwen_config>
+  $<LINK_ONLY:gufo_qwen_text>
+  $<LINK_ONLY:gufo_qwen_vision>)
+if (ENGINE_ENABLE_HIP)
+  target_link_libraries(gufo_qwen_family INTERFACE $<LINK_ONLY:gufo_qwen_kernels>)
+endif()
+add_library(gufo::qwen_family ALIAS gufo_qwen_family)

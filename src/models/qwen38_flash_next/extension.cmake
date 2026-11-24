@@ -25,6 +25,16 @@ if(TARGET gufo_qwen38_flash_next)
     ${GUFO_EXTENSION_BUILD_ROOT}
   )
 endif()
+# Extensions that list qwen38_flash_next in `depends` link these: the host
+# library (config, weights, probes) and, in HIP builds, the runtime.
+# Dependents should include only the experimental public headers under
+# include/gufo/ext/families/qwen/models/flash_next/ (SURFACE, from
+# gufo_ext_runtime). TODO: export a narrower include set than
+# ${PROJECT_SOURCE_DIR}. An export is an ALIAS of the implementation target,
+# whose PUBLIC root the in-tree tests and kernels rely on, so narrowing needs
+# a separate interface target; until then dependents also see private Gufo
+# headers through these exports.
+gufo_extension_export(TARGET gufo_qwen38_flash_next NAME qwen38_flash_next)
 
 add_library(gufo_qwen38_flash_next_reference STATIC EXCLUDE_FROM_ALL
   ${GUFO_EXTENSION_BUILD_ROOT}/cpu_ops.cpp
@@ -49,13 +59,11 @@ if (ENGINE_ENABLE_HIP)
     ${QFN_MMQ_DIR}/qfn_mmq.hip.cpp
     ${QFN_MMQ_DIR}/mmid.hip.cpp
     ${QFN_MMQ_DIR}/mmvq.hip.cpp
-    ${QFN_MMQ_DIR}/moe_wave64.hip.cpp
+    ${QFN_MMQ_DIR}/moe_wave32.hip.cpp
     ${QFN_MMQ_DIR}/quantize.hip.cpp)
 
   add_library(gufo_qwen38_flash_next_mmq STATIC ${QFN_MMQ_SOURCES})
   set_source_files_properties(${QFN_MMQ_SOURCES} PROPERTIES LANGUAGE HIP)
-  set_source_files_properties(${QFN_MMQ_DIR}/moe_wave64.hip.cpp
-    PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
   set_target_properties(gufo_qwen38_flash_next_mmq PROPERTIES
     HIP_STANDARD 17
     HIP_STANDARD_REQUIRED ON
@@ -63,7 +71,7 @@ if (ENGINE_ENABLE_HIP)
   target_compile_definitions(gufo_qwen38_flash_next_mmq PRIVATE
     GGML_HIP_NO_VMM ENGINE_ENABLE_HIP=1)
   target_compile_options(gufo_qwen38_flash_next_mmq PRIVATE
-    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-value;-Wno-unused-command-line-argument>)
+    $<$<COMPILE_LANGUAGE:HIP>:${GUFO_CLANG_OPTION}-O3;${GUFO_CLANG_OPTION}-ffast-math;${GUFO_CLANG_OPTION}-fno-finite-math-only;-Wno-unused-value;-Wno-unused-command-line-argument>)
   target_include_directories(gufo_qwen38_flash_next_mmq SYSTEM PUBLIC ${QFN_MMQ_DIR})
   target_link_libraries(gufo_qwen38_flash_next_mmq PUBLIC hip::host roc::hipblas)
 endif()
@@ -76,6 +84,8 @@ gufo_extension_target(
     kernels/rocm/device_model.cpp
     kernels/rocm/executor.cpp
     kernels/rocm/batch.cpp
+    kernels/rocm/stages.cpp
+    weight_source.cpp
     engine.cpp
     runner.cpp
     drivers.cpp
@@ -83,8 +93,7 @@ gufo_extension_target(
   LINK_LIBRARIES
     gufo_qwen38_flash_next
     gufo_cache_hip
-    gufo_qwen_vision
-    gufo_qwen_draft_vocab
+    gufo::qwen_family
     gufo_qwen38_flash_next_mmq
     gufo_compare
     hip::host
@@ -97,14 +106,18 @@ if(TARGET gufo_qwen38_flash_next_hip)
   gufo_extension_hip_sources(gufo_qwen38_flash_next_hip
     SOURCES
       kernels/rocm/kernels.hip.cpp
+      kernels/rocm/draft_head.hip.cpp
       kernels/rocm/w8a8_wave64.hip
   )
   set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip
     PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
+  # The draft head quantizer keeps ggml's IEEE single-precision rounding.
+  set_source_files_properties(${QFN_ROCM_DIR}/draft_head.hip.cpp
+    PROPERTIES COMPILE_OPTIONS "${GUFO_CLANG_OPTION}-fno-fast-math;${GUFO_CLANG_OPTION}-ffp-contract=off")
   target_compile_definitions(gufo_qwen38_flash_next_hip PRIVATE QFN_ROCM_BUILD=1)
   target_compile_options(gufo_qwen38_flash_next_hip PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O2>
-    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
+    $<$<COMPILE_LANGUAGE:HIP>:${GUFO_CLANG_OPTION}-O3;${GUFO_CLANG_OPTION}-ffast-math;${GUFO_CLANG_OPTION}-fno-finite-math-only;-Wno-unused-command-line-argument>)
   target_include_directories(gufo_qwen38_flash_next_hip SYSTEM PUBLIC
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR}
@@ -114,3 +127,4 @@ if(TARGET gufo_qwen38_flash_next_hip)
     ${GUFO_EXTENSION_BUILD_ROOT}
   )
 endif()
+gufo_extension_export(TARGET gufo_qwen38_flash_next_hip NAME qwen38_flash_next_hip)

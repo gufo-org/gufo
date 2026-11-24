@@ -608,6 +608,41 @@ void PrefixIndex::AttachDurable(
   record.availability = std::move(admitted);
   record.durable = std::move(durable);
 }
+void PrefixIndex::VisitGenerated(
+    Identity compatibility,
+    const std::function<void(std::span<const Token>)>& visit) const {
+  const auto tree = impl_->trees.find(compatibility);
+  if (tree == impl_->trees.end())
+    return;
+  for (const auto& [id, node] : impl_->directory) {
+    (void)node;
+    const auto& record = impl_->Get(IndexEntryId{id});
+    if (record.tree != &tree->second || !record.Input().empty())
+      continue;
+    if (record.checkpoint && record.checkpoint->IsValid() &&
+        record.checkpoint->Purpose() == CheckpointPurpose::kGenerated)
+      visit(record.checkpoint->Tokens());
+    else if (record.durable && record.durable->Pin() &&
+             record.durable->Manifest().purpose ==
+                 CheckpointPurpose::kGenerated)
+      visit(record.durable->Manifest().tokens);
+  }
+}
+bool PrefixIndex::IsDurable(IndexEntryId id) const {
+  if (!impl_->directory.contains(id.value))
+    return false;
+  const auto& record = impl_->Get(id);
+  if (!record.durable || !record.availability || !record.durable->Pin())
+    return false;
+  for (const auto& descriptor : record.tree->descriptors) {
+    const auto found =
+        std::ranges::find(record.availability->components, descriptor.id,
+                          &ComponentAvailability::id);
+    if (found == record.availability->components.end() || !found->durable)
+      return false;
+  }
+  return true;
+}
 void PrefixIndex::DropResident(IndexEntryId id) {
   if (!impl_->directory.contains(id.value))
     return;

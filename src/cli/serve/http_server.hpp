@@ -17,6 +17,11 @@
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 
+struct GufoHttpServer;
+struct GufoHttpRequestView;
+struct GufoHttpResponder;
+struct GufoLoadingResponder;
+
 namespace gufo::server {
 
 class VideoJobService;
@@ -26,6 +31,9 @@ class ImageService;
 class EmbeddingService;
 struct DecisionService;
 class WebSocket;
+
+/// Whether a comma-separated header value lists the lowercase token.
+bool HasToken(std::string_view value, std::string_view token);
 
 struct HttpRequest {
   std::string method;  // "GET" / "POST" / ...
@@ -95,6 +103,15 @@ struct HttpServerOptions {
   std::size_t max_request_body_bytes{static_cast<std::size_t>(8) * 1024 * 1024};
   std::size_t max_connections{16};
   std::chrono::milliseconds sse_heartbeat_interval{std::chrono::seconds(15)};
+  /// Reuse HTTP/1.1 connections for sequential requests. The CLI enables it;
+  /// embedders that assume one request per socket keep the old behavior.
+  bool keep_alive{false};
+  /// A reused connection waiting for its next request holds a worker slot for
+  /// at most this long.
+  std::chrono::milliseconds keep_alive_idle_timeout{std::chrono::seconds(5)};
+  /// Bound the requests one connection may serve, so a pooled client rotates
+  /// sockets and idle clients cannot pin a worker indefinitely.
+  std::size_t max_requests_per_connection{100};
   /// Called once, on the listener or a request thread, when the text backend or
   /// the embedding service reports a lost device. Health, readiness and
   /// generation answer 503 `device_lost` from then on; the hook decides how the
@@ -139,12 +156,10 @@ public:
   [[nodiscard]] int port() const noexcept { return port_; }
 
 private:
-  struct ConnectionWorker;
-
   HttpResponse handle_request(const HttpRequest& req);
   bool device_lost();
-  void handle_connection(int client_fd, std::atomic<bool>& response_sent);
-  void reap_workers();
+  void dispatch_request(const GufoHttpRequestView& view,
+                        GufoHttpResponder* responder);
   void register_routes();
 
   std::string host_;
@@ -157,11 +172,9 @@ private:
   std::shared_ptr<EmbeddingService> embeddings_;
   std::shared_ptr<DecisionService> decisions_;
   HttpServerOptions options_;
-  int listen_fd_ = -1;
+  GufoHttpServer* server_ = nullptr;
   std::atomic<bool> stopped_{false};
   std::atomic<bool> device_lost_reported_{false};
-  std::mutex workers_mutex_;
-  std::vector<std::unique_ptr<ConnectionWorker>> workers_;
   std::vector<std::pair<std::pair<std::string, std::string>, Handler>> routes_;
 };
 
@@ -174,6 +187,10 @@ private:
 /// Best effort: when the address cannot be bound, or for port 0, nothing
 /// listens and the caller proceeds exactly as without it. stop() closes the
 /// socket so `HttpServer::start` can bind the same address.
+///
+/// Beside the `error` object the body reports the load stage as top-level
+/// `progress` (0 to 1) and `message`, which llama-swap v269 and later show
+/// and use to restart `healthCheckTimeout` whenever `progress` changes.
 class LoadingResponder {
 public:
   LoadingResponder(const std::string& host, int port);
@@ -185,19 +202,22 @@ public:
   LoadingResponder& operator=(LoadingResponder&&) = delete;
 
   /// True while the responder owns the listen socket.
-  [[nodiscard]] bool listening() const noexcept { return listen_fd_ >= 0; }
+  [[nodiscard]] bool listening() const noexcept {
+    return listening_.load(std::memory_order_acquire);
+  }
 
   /// Stops answering and releases the port. Returns within one poll interval
   /// plus the bounded waits for a request that is still arriving and for the
   /// answered client to close.
   void stop();
 
-private:
-  void serve();
+  /// Reports a load stage in later replies. `progress` is clamped to [0, 1].
+  /// Safe to call from any thread, before or after stop().
+  void SetProgress(double progress, std::string_view message);
 
-  int listen_fd_ = -1;
-  std::atomic<bool> stopped_{false};
-  std::thread thread_;
+private:
+  GufoLoadingResponder* responder_ = nullptr;
+  std::atomic<bool> listening_{false};
 };
 
 /// Scheduled requests are recorded by the scheduler when they finish. Other

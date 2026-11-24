@@ -231,6 +231,28 @@ written to the artifact. `gufo bench` remains the direct model-path
 microbenchmark; use this serving harness for TTFT, ITL, queueing, and
 concurrency decisions.
 
+### Interface benchmark
+
+Use the interface harness against the same server to separate transport and
+HTTP framing from model speed. It reports connect, first byte, client TTFT,
+token-arrival gaps and events per read, and compares fresh with reused
+connections on a small overhead request:
+
+```sh
+tools/serving/gufo-interface-bench.py \
+  --base-url http://127.0.0.1:8080 \
+  --model "$MODEL" \
+  --requests 20 \
+  --concurrency 1,2,4 \
+  --max-tokens 128 \
+  --output artifacts/serving/interface.json
+```
+
+Add `--no-cache-prompt` when prompt-cache hits would hide prefill in TTFT.
+
+Compare it with the server's `usage.gufo.ttft_ms` before attributing a stall to
+generation.
+
 ### Kernel resource check
 
 The check reads the code objects in a binary. It does not use a GPU. Run it

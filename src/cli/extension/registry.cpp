@@ -8,12 +8,15 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <random>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
 
 #include "gufo/ext/version.hpp"
 #include "src/core/platform/os_info.hpp"
+#include "src/core/platform/process.hpp"
 
 namespace gufo::cli::extension_registry {
 namespace {
@@ -185,6 +188,96 @@ std::optional<Release> Resolve(const json::Value& index, std::string_view name,
                          std::string(ext::RuntimeApiVersion());
   }
   return best;
+}
+
+namespace {
+std::string Git(const std::filesystem::path& repository,
+                std::vector<std::string> arguments) {
+  arguments.insert(arguments.begin(), {"-C", repository.string()});
+  std::string output;
+  std::string error;
+  if (!platform::RunCapture("git", arguments, &output, &error))
+    throw std::runtime_error(error);
+  return output;
+}
+}  // namespace
+
+Metadata FetchMetadata(const Release& release,
+                       const std::filesystem::path& cache) {
+  namespace fs = std::filesystem;
+  static const std::regex commit("^[0-9a-f]{40}$");
+  if (!std::regex_match(release.revision, commit))
+    throw std::runtime_error("reviewed revision is not a commit: " +
+                             release.revision);
+  const auto cached =
+      cache.empty() ? fs::path() : cache / (release.revision + ".json");
+  std::error_code ec;
+  if (!cached.empty() && fs::is_regular_file(cached, ec)) {
+    std::ifstream input(cached, std::ios::binary);
+    std::ostringstream text;
+    text << input.rdbuf();
+    try {
+      auto value = json::parse(text.str());
+      if (value.find("manifest") && value.find("lock"))
+        return {*value.find("manifest"), *value.find("lock")};
+    } catch (const std::exception&) {
+      // A damaged cache entry is fetched again.
+    }
+  }
+  std::random_device random;
+  const auto scratch = fs::temp_directory_path() /
+                       ("gufo-registry-" + release.revision.substr(0, 12) +
+                        "-" + std::to_string(random()));
+  struct Remove {
+    fs::path path;
+    ~Remove() {
+      // Git marks objects read-only, which Windows refuses to delete.
+      std::error_code ignored;
+      for (fs::recursive_directory_iterator it(path, ignored), end; it != end;
+           it.increment(ignored))
+        fs::permissions(it->path(), fs::perms::owner_write,
+                        fs::perm_options::add, ignored);
+      fs::remove_all(path, ignored);
+    }
+  } cleanup{scratch};
+  Metadata metadata;
+  try {
+    fs::create_directories(scratch);
+    Git(scratch, {"init", "--quiet"});
+    Git(scratch, {"remote", "add", "origin", release.source});
+    Git(scratch, {"fetch", "--quiet", "--depth=1", "--filter=blob:none",
+                  "origin", release.revision});
+    const auto files =
+        Git(scratch, {"ls-tree", "--name-only", release.revision});
+    metadata.manifest = json::parse(
+        Git(scratch, {"show", release.revision + ":extension.json"}));
+    metadata.lock =
+        ("\n" + files).find("\nmodels.lock.json\n") != std::string::npos
+            ? json::parse(Git(scratch,
+                              {"show", release.revision + ":models.lock.json"}))
+            : json::Value::object();
+  } catch (const std::exception& error) {
+    throw std::runtime_error("cannot read " + release.source + "@" +
+                             release.revision + ": " + error.what());
+  }
+  if (metadata.manifest.member_str("name") != release.name)
+    throw std::runtime_error(release.source + "@" + release.revision +
+                             " is not extension " + release.name);
+  if (cached.empty())
+    return metadata;
+  auto value = json::Value::object();
+  value["manifest"] = metadata.manifest;
+  value["lock"] = metadata.lock;
+  const auto partial = cached.string() + ".partial-" + std::to_string(random());
+  fs::create_directories(cache, ec);
+  if (std::ofstream output(partial, std::ios::binary); output) {
+    output << value.dump();
+    output.close();
+    if (output)
+      fs::rename(partial, cached, ec);
+  }
+  fs::remove(partial, ec);
+  return metadata;
 }
 
 std::vector<Listing> List(const json::Value& index) {

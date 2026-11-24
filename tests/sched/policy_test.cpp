@@ -1,6 +1,7 @@
 #include "src/sched/policy.hpp"
 
 #include <cassert>
+#include <cmath>
 #include <stdexcept>
 #include <variant>
 #include <vector>
@@ -46,6 +47,33 @@ void LonePromptKeepsFullPasses() {
   const std::vector<PrefillingRequest> prefilling{{.remaining_tokens = 9000}};
   const auto work = Prefill(kIncremental.Next({.prefilling = prefilling}));
   assert(!work.beside_decoders && !work.peer_waiting && !work.max_tokens);
+}
+
+void FreeSessionBoundsLonePasses() {
+  // While another session could admit an arrival, a lone prompt keeps the
+  // profile's pass width, so the arrival waits for one such pass (#470).
+  const Policy policy({.profile = TextSchedulingProfile{.pass_tokens = 4096,
+                                                        .max_layer_groups = 8},
+                       .incremental_prefill = true});
+  const std::vector<PrefillingRequest> prefilling{{.remaining_tokens = 12000}};
+  auto work =
+      Prefill(policy.Next({.prefilling = prefilling, .admission_open = true}));
+  assert(!work.beside_decoders && !work.peer_waiting &&
+         work.max_tokens == 4096u && work.layer_groups == 1);
+  // Every session taken: nobody can join, so the runner's widest pass.
+  work = Prefill(policy.Next({.prefilling = prefilling}));
+  assert(!work.max_tokens);
+  // A waiting short peer still bounds it to one unit.
+  const std::vector<PrefillingRequest> short_peer{{.remaining_tokens = 12000},
+                                                  {.remaining_tokens = 25}};
+  work =
+      Prefill(policy.Next({.prefilling = short_peer, .admission_open = true}));
+  assert(work.peer_waiting && work.max_tokens == kPrefillUnitTokens);
+  // A runner that prefills whole prompts is not bounded.
+  const Policy whole({.profile = TextSchedulingProfile{.pass_tokens = 4096}});
+  work =
+      Prefill(whole.Next({.prefilling = prefilling, .admission_open = true}));
+  assert(!work.max_tokens);
 }
 
 void WaitingPeersBoundPrefill() {
@@ -154,6 +182,82 @@ void PrefillRateTracksRecentWork() {
   for (int i = 0; i < 8; ++i)
     rate.Observe(1000, 100);
   assert(rate.Estimate(2048)->count() == 204.8);
+}
+
+void ShortPassesFollowTheirContext() {
+  PrefillRate rate;
+  assert(!rate.EstimateContext(76000));
+  // Not samples: nothing consumed, no time, or enough tokens to cost time
+  // of their own.
+  rate.ObserveContext(0, 76000, 300);
+  rate.ObserveContext(7, 76000, 0);
+  rate.ObserveContext(17, 76000, 900);
+  assert(!rate.EstimateContext(76000));
+
+  // One depth gives no slope: the measurement holds there and deeper, and
+  // shrinks with the depth below it.
+  rate.ObserveContext(7, 76000, 350);
+  assert(rate.EstimateContext(76000)->count() == 350);
+  assert(rate.EstimateContext(200000)->count() == 350);
+  assert(rate.EstimateContext(38000)->count() == 175);
+  assert(rate.EstimateContext(0)->count() == 0);
+  // Nor do passes closer than 4,096 tokens.
+  rate.ObserveContext(16, 78000, 354);
+  assert(rate.EstimateContext(200000)->count() == 354);
+
+  // A shallow pass gives the line: 130 ms fixed, 220 ms per 76K of depth.
+  PrefillRate line;
+  line.ObserveContext(7, 0, 130);
+  line.ObserveContext(7, 76000, 350);
+  assert(line.EstimateContext(0)->count() == 130);
+  assert(std::abs(line.EstimateContext(152000)->count() - 570) < 1e-6);
+  // One stalled pass does not tilt it.
+  line.ObserveContext(7, 38000, 240);
+  line.ObserveContext(7, 114000, 460);
+  line.ObserveContext(7, 60000, 5000);
+  assert(std::abs(line.EstimateContext(152000)->count() - 570) < 1);
+  // A falling line is no slope.
+  PrefillRate falling;
+  falling.ObserveContext(7, 0, 300);
+  falling.ObserveContext(7, 76000, 100);
+  assert(falling.EstimateContext(152000)->count() <= 300);
+  // Only the 16 most recent passes count.
+  for (int i = 0; i < 16; ++i)
+    line.ObserveContext(7, 50000, 90);
+  assert(line.EstimateContext(50000)->count() == 90);
+
+  const Policy policy(
+      {.profile = TextSchedulingProfile{.pass_tokens = 4096,
+                                        .max_layer_groups = 4,
+                                        .max_yield_decode_width = 2},
+       .incremental_prefill = true});
+  const std::vector<DecodingRequest> decoding{{.started = true}};
+  const auto groups = [&](std::size_t remaining, std::size_t position,
+                          const PrefillRate& measured) {
+    const std::vector<PrefillingRequest> prefilling{
+        {.remaining_tokens = remaining, .position = position}};
+    return Prefill(policy.Next({.prefilling = prefilling, .decoding = decoding},
+                               measured))
+        .layer_groups;
+  };
+  PrefillRate deep;
+  deep.ObserveContext(7, 0, 130);
+  deep.ObserveContext(7, 76000, 350);
+  // 350 ms of context: two groups, so decoders wait 175 ms, not 350.
+  assert(groups(7, 76000, deep) == 2);
+  // Within the wait it runs unsplit, as does every shallow pass.
+  assert(groups(7, 40000, deep) == 1);
+  assert(groups(512, 0, deep) == 1);
+  // 251K deep: 857 ms, four groups, the profile's maximum past that.
+  assert(groups(7, 251000, deep) == 4);
+  assert(groups(7, 1000000, deep) == 4);
+  // A unit of tokens still rides in one group, however slow: only the
+  // context splits a short pass.
+  deep.Observe(4096, 8192);
+  assert(groups(512, 0, deep) == 1);
+  assert(groups(512, 76000, deep) == 2);
+  // Past a unit the token rule applies, as before.
+  assert(groups(513, 76000, deep) == 2);
 }
 
 void ProfiledPassesSplitByLayers() {
@@ -304,6 +408,7 @@ void InvalidProfiles() {
 int main() {
   Preconditions();
   LonePromptKeepsFullPasses();
+  FreeSessionBoundsLonePasses();
   WaitingPeersBoundPrefill();
   DecodersBoundPrefillUntilDue();
   DecodersWithoutPrefill();
@@ -311,6 +416,7 @@ int main() {
   WholePromptRunners();
   CustomUnit();
   PrefillRateTracksRecentWork();
+  ShortPassesFollowTheirContext();
   ProfiledPassesSplitByLayers();
   OnePassPeersGoFirst();
   RoundsBetweenGroups();

@@ -11,6 +11,7 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -36,6 +37,8 @@
 #include "src/core/json.hpp"
 #include "src/core/platform/env.hpp"
 #include "src/core/platform/os_info.hpp"
+#include "src/mem/account.hpp"
+#include "src/mem/ledger.hpp"
 #include "tests/cache/fake_adapter.hpp"
 #include "tests/cli/fake_cache_resources.hpp"
 
@@ -213,6 +216,7 @@ struct FakeControl {
   std::atomic<bool> device_usable{true};
   std::atomic<std::size_t> device_probes{0};
   std::atomic<std::size_t> idle_probes{0};
+  std::atomic<std::size_t> idle_calls{0};
   std::atomic<TextModelRunner::DeviceProbeStatus> idle_probe_status{
       TextModelRunner::DeviceProbeStatus::kUsable};
   TextRunnerToken advance_gate_label{0};
@@ -246,10 +250,19 @@ struct FakeControl {
   // Without `scheduling`, an unsplit profile of this many pass tokens, the
   // scheduler's prompt unit: passes beside decoders take one unit.
   std::size_t unit_tokens{gufo::sched::kPrefillUnitTokens};
+  // Optional gate after a prefill enters and before it updates state.
+  std::function<void(TextRunnerToken)> before_prefill;
   // Runs on the scheduler thread before each yield of a layered pass.
   std::function<void()> before_yield;
   // Each decode advance inside a yield takes this long.
   std::chrono::milliseconds yield_advance_delay{0};
+  // Every decode advance takes this many microseconds.
+  std::atomic<unsigned> advance_delay_us{0};
+  // Runs where a restore copies its first rows in; set before the scheduler
+  // starts.
+  std::function<void()> restore_callback;
+  // Whether restores may copy beside decode (a restore queue of its own).
+  bool restore_beside_decode{true};
   std::atomic<bool> yielding{false};
   std::vector<std::string> output_pieces;
   std::uint32_t max_context{128};
@@ -258,10 +271,44 @@ struct FakeControl {
   // Requests share nothing unless asked; a capture observer implies it.
   bool snapshots{false};
   std::function<void()> snapshot_callback;
+  // Shared session state (#715): with `shared_full_sessions`, sessions keep
+  // demand-mapped state of kFakeStateRowBytes per token in accounts, and
+  // the runner's capacity holds that many sessions at full context beside
+  // `shared_fixed_bytes` of fixed state each.
+  std::optional<std::size_t> shared_full_sessions;
+  std::size_t shared_fixed_bytes{0};
+  std::mutex accounts_mutex;
+  std::map<const void*, std::shared_ptr<gufo::mem::StateAccount>> accounts;
+  std::shared_ptr<gufo::mem::StateAccount> AccountFor(const void* slot);
   [[nodiscard]] bool Retains() const {
     return snapshots || bool(snapshot_callback);
   }
 };
+
+// 1,024 tokens per 2 MiB page.
+constexpr std::size_t kFakeStateRowBytes = gufo::mem::kPageBytes / 1024;
+
+std::shared_ptr<gufo::mem::StateAccount> FakeControl::AccountFor(
+    const void* slot) {
+  if (!shared_full_sessions)
+    return nullptr;
+  const std::lock_guard lock(accounts_mutex);
+  auto& account = accounts[slot];
+  if (!account) {
+    account = std::make_shared<gufo::mem::StateAccount>();
+    const gufo::mem::RegionShape shape{.row_bytes = kFakeStateRowBytes,
+                                       .rows = max_context};
+    // Trimming unmaps what the rows no longer need, as a region does.
+    account->AddRegion(
+        shape, 1, [raw = account.get(), shape](std::size_t rows) {
+          const auto keep = gufo::mem::RegionPageBytes(shape, rows);
+          const auto mapped = raw->mapped_bytes();
+          if (mapped > keep)
+            raw->OnUnmap(mapped - keep);
+        });
+  }
+  return account;
+}
 
 // What a checkpoint restores besides the adapter's rows.
 struct FakeFrontier {
@@ -291,6 +338,16 @@ public:
       control_->RecordInvalidation();
     return FakeAdapter::Invalidate(slot);
   }
+  gufo::cache::Completion CopyRowsIn(gufo::cache::Slot& slot,
+                                     gufo::cache::ComponentId id,
+                                     gufo::cache::Rows first,
+                                     gufo::cache::Rows end,
+                                     std::span<const std::byte> bytes,
+                                     gufo::cache::Stream& stream) override {
+    if (first == 0 && control_->restore_callback)
+      control_->restore_callback();
+    return FakeAdapter::CopyRowsIn(slot, id, first, end, bytes, stream);
+  }
   gufo::cache::Completion CapturePrivatePiece(
       const gufo::cache::Slot& slot, gufo::cache::ComponentId id,
       std::size_t offset, std::span<std::byte> bytes,
@@ -313,9 +370,24 @@ public:
     (void)adapter.Invalidate(slot);
     static_cast<FakeFrontier&>(*this) = {};
   }
+  [[nodiscard]] std::shared_ptr<gufo::mem::StateAccount> state_account()
+      const override {
+    return account;
+  }
+  // Maps the rows the position reached, as a model's write choke point
+  // does: past what the shared budget allows it fails.
+  void MapRows() const {
+    if (!account)
+      return;
+    const auto target = account->BytesFor(position);
+    const auto mapped = account->mapped_bytes();
+    if (target > mapped && !account->OnMap(target - mapped))
+      throw std::runtime_error("state memory exhausted");
+  }
 
   gufo::cache::testing::FakeAdapter& adapter;
   gufo::cache::Slot& slot;
+  std::shared_ptr<gufo::mem::StateAccount> account;
 };
 
 FakeState& RequireFakeState(TextRunnerState& state) {
@@ -366,6 +438,19 @@ public:
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    if (control_->shared_full_sessions) {
+      const std::size_t demand = control_->max_context * kFakeStateRowBytes;
+      const std::size_t session = demand + control_->shared_fixed_bytes;
+      return {
+          .resident_weights_bytes = 0,
+          .state_capacity_bytes = *control_->shared_full_sessions * session,
+          .per_request_state_bytes = session,
+          .temporary_scratch_bytes = 0,
+          .retained_snapshot_capacity_bytes = 1U << 25,
+          .requires_device_runtime_lock = true,
+          .demand_mapped_state_bytes = demand,
+      };
+    }
     return {
         .resident_weights_bytes = 0,
         .state_capacity_bytes = 8 * 64,
@@ -443,12 +528,14 @@ public:
         ledger, std::make_unique<ObservedAdapter>(control_),
         {.private_blocks = 512,
          .row_backing_bytes = 1024,
-         .total_row_bytes = 1U << 24});
+         .total_row_bytes = 1U << 24,
+         .restore_beside_decode = control_->restore_beside_decode});
   }
   [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
       gufo::cache::Adapter& adapter, gufo::cache::Slot& slot) const override {
     auto state = std::make_unique<FakeState>(
         dynamic_cast<gufo::cache::testing::FakeAdapter&>(adapter), slot);
+    state->account = control_->AccountFor(&slot);
     Recall(*state);
     return state;
   }
@@ -494,6 +581,9 @@ public:
       }
     }
 
+    if (control_->before_prefill)
+      control_->before_prefill(fake.label);
+
     // Layer groups: the host decodes other sessions between them.
     for (std::size_t group = 1; group < fake.prefill_yield_groups(); ++group) {
       control_->Log({.kind = EventKind::kYield,
@@ -514,6 +604,7 @@ public:
     const auto rows = prompt.subspan(offset, consumed);
     fake.adapter.Append(fake.slot, rows, rows);
     fake.position += consumed;
+    fake.MapRows();
     const bool ready = fake.position == prompt.size();
     if (ready) {
       fake.frontier = fake.label * 100;
@@ -574,6 +665,8 @@ public:
     }
     if (control_->yielding)
       std::this_thread::sleep_for(control_->yield_advance_delay);
+    if (const auto delay = control_->advance_delay_us.load())
+      std::this_thread::sleep_for(std::chrono::microseconds(delay));
 
     {
       std::unique_lock<std::mutex> lock(control_->mutex);
@@ -601,6 +694,7 @@ public:
 
     fake.adapter.Append(fake.slot, {&token, 1}, {&token, 1});
     ++fake.position;
+    fake.MapRows();
     ++fake.decode_count;
     fake.frontier = token + 1;
     Remember(fake);
@@ -670,6 +764,11 @@ public:
   [[nodiscard]] std::size_t CheckpointPosition(
       const TextRunnerState& state) const override {
     return RequireFakeState(state).position;
+  }
+
+  void Idle() const override {
+    control_->idle_calls.fetch_add(1, std::memory_order_relaxed);
+    control_->condition.notify_all();
   }
 
   [[nodiscard]] DeviceProbeStatus PollDevice() const override {
@@ -1028,6 +1127,37 @@ void TestRunnerCanSkipUnusedFinalAdvance() {
          "runner skips the unused frontier computation after the final token");
 }
 
+// A retained frontier covers a capped reply in both decode modes, so the next
+// turn continues the same executed history and prefills only its own tokens.
+void TestRetainedCappedReplyExecutesFinalToken() {
+  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  for (const bool multi : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->final_token_advance_required = false;
+    control->multi_token_decode = multi;
+    control->snapshots = true;
+    auto scheduler = MakeScheduler(control, 1);
+
+    const auto capped = scheduler->Submit({7, 70}, 2, 0.0F).Wait();
+    Expect(capped.tokens == ExpectedTokens(7, 2) &&
+               capped.finish_reason == Finish::kLength,
+           "a capped request emits its complete token budget");
+    std::size_t advances = 0;
+    for (const auto& event : control->Events()) {
+      if (event.kind == EventKind::kAdvance && event.label == 7) {
+        ++advances;
+      }
+    }
+    Expect(advances == 2,
+           "a retained capped request executes each emitted token once");
+
+    const auto next = scheduler->Submit({7, 70, 700, 701, 71}, 1, 0.0F).Wait();
+    Expect(next.cache_hit && next.cached_prompt_tokens == 4 &&
+               next.prefill_tokens == 1,
+           "the next turn reuses the complete capped reply");
+  }
+}
+
 void TestRunnerCanReuseExactIncrementalText() {
   auto control = std::make_shared<FakeControl>();
   control->incremental_text_is_exact = true;
@@ -1328,11 +1458,16 @@ void TestMultiResidentPrefillUsesBoundedWorkUnits() {
       if (event.kind == EventKind::kPrefill && event.label == 7)
         chunks.push_back(event.count);
     }
-    Expect(chunks == std::vector<std::size_t>({3, 3, 1}),
-           "idle prefill uses model geometry regardless of spare slots");
-    Expect(
-        result.prefill_chunks == 3 && result.active_decode_prefill_chunks == 0,
-        "model-sized work units still yield for admission and cancellation");
+    // Alone, the runner's own geometry; while a spare session could admit an
+    // arrival, the profile's pass (two tokens here), which it waits for.
+    const auto expected = capacity == 1
+                              ? std::vector<std::size_t>({3, 3, 1})
+                              : std::vector<std::size_t>({2, 2, 2, 1});
+    Expect(chunks == expected,
+           "idle prefill keeps model geometry unless a spare slot could admit");
+    Expect(result.prefill_chunks == expected.size() &&
+               result.active_decode_prefill_chunks == 0,
+           "model-sized work units still yield for admission and cancellation");
   }
 }
 
@@ -1678,17 +1813,22 @@ void TestLayeredPrefillTimeExcludesYieldRounds() {
 }
 
 void TestLayeredPrefillAloneRunsUnsplit() {
-  auto control = std::make_shared<FakeControl>();
-  control->scheduling =
-      gufo::ext::TextSchedulingProfile{.pass_tokens = 4, .max_layer_groups = 3};
-  auto scheduler = MakeScheduler(control, 2, 2);
-  const auto result =
-      scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F).Wait();
-  Expect(result.tokens == ExpectedTokens(2, 2) && result.prefill_chunks == 1 &&
-             result.max_prefill_layer_groups == 1,
-         "a lone prompt keeps one unsplit pass");
-  for (const auto& event : control->Events())
-    Expect(event.kind != EventKind::kYield, "a lone prompt never yields");
+  // With one session nobody can join: one pass. With a spare session, passes
+  // of the profile's width, so an arrival waits for one. Neither yields.
+  for (const auto capacity : {1U, 2U}) {
+    auto control = std::make_shared<FakeControl>();
+    control->scheduling = gufo::ext::TextSchedulingProfile{
+        .pass_tokens = 4, .max_layer_groups = 3};
+    auto scheduler = MakeScheduler(control, capacity, 2);
+    const auto result =
+        scheduler->Submit({2, 20, 21, 22, 23, 24, 25}, 2, 0.0F).Wait();
+    Expect(result.tokens == ExpectedTokens(2, 2) &&
+               result.prefill_chunks == capacity &&
+               result.max_prefill_layer_groups == 1,
+           "a lone prompt keeps unsplit passes");
+    for (const auto& event : control->Events())
+      Expect(event.kind != EventKind::kYield, "a lone prompt never yields");
+  }
 }
 
 void TestDecoderFinishesInsideYield() {
@@ -1880,6 +2020,43 @@ void TestPendingLimitsRejectBeforeStateAdmission() {
   Expect(active.Wait().tokens == ExpectedTokens(1, 4) &&
              queued.Wait().tokens == ExpectedTokens(2, 1),
          "accepted work survives a queue rejection");
+}
+
+void TestZeroPendingLimitsAdmitOnlyFreeSessions() {
+  auto control = std::make_shared<FakeControl>();
+  control->block_advance_label = 1;
+  auto scheduler = MakeScheduler(control, 2, {},
+                                 {
+                                     .max_pending_requests = 0,
+                                     .max_pending_requests_per_client = 0,
+                                 });
+
+  auto active =
+      scheduler->Submit({1}, 4, 0.0F, {}, false, ClientMetadata("client"));
+  control->WaitForAdvance(1);
+  // The second session is free, so the client's next request runs there even
+  // though neither limit allows anything to wait.
+  auto second =
+      scheduler->Submit({2}, 1, 0.0F, {}, false, ClientMetadata("client"));
+
+  bool rejected = false;
+  try {
+    (void)scheduler->Submit({3}, 1, 0.0F, {}, false,
+                            ClientMetadata("third-client"));
+  } catch (const TextGenerationError& error) {
+    rejected = error.code() == TextGenerationErrorCode::kQueueFull;
+  }
+  Expect(rejected, "a zero pending limit rejects once every session is taken");
+
+  control->ReleaseAdvance();
+  Expect(active.Wait().tokens == ExpectedTokens(1, 4) &&
+             second.Wait().tokens == ExpectedTokens(2, 1),
+         "a zero pending limit still admits work for free sessions");
+  Expect(
+      scheduler->Submit({4}, 1, 0.0F, {}, false, ClientMetadata("third-client"))
+              .Wait()
+              .tokens == ExpectedTokens(4, 1),
+      "freed sessions admit new work again");
 }
 
 void TestPendingClientsAreRoundRobinAndIndividuallyBounded() {
@@ -2273,6 +2450,13 @@ void TestMetricsDuringCacheAdmission() {
     auto next = scheduler->Submit({1, 10, 100, 11}, 1, 0.0F);
     Expect(entered.try_acquire_for(kTestTimeout),
            "continuation admission captures its live checkpoint");
+    // The capture may be the first request's idle frontier task, entered
+    // before the scheduler pops this request; admission then waits for it.
+    const auto admitted_deadline =
+        std::chrono::steady_clock::now() + kTestTimeout;
+    while (metrics::RequestsProcessing().load() != processing_before + 1 &&
+           std::chrono::steady_clock::now() < admitted_deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     Expect(metrics::RequestsProcessing().load() == processing_before + 1 &&
                metrics::RequestsDeferred().load() == deferred_before,
            "cache preparation remains visible as processing");
@@ -2498,6 +2682,99 @@ void TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement() {
   Expect(replacement.Wait().tokens == ExpectedTokens(8, 2),
          "replacement request succeeds after runner failure");
   Expect(control->device_probes == 1, "successful work never probes");
+}
+
+/// An idle scheduler tells the runner on going idle and keeps telling it
+/// while idle, so it can return memory only running work holds (Flash-Next's
+/// wide pass scratch, the RAM cache under host pressure); running work does
+/// not, and device probes keep their own interval.
+void TestIdleNotifiesRunnerWhileIdle() {
+  auto control = std::make_shared<FakeControl>();
+  TextSchedulerPolicy policy{.device_probe_interval =
+                                 std::chrono::milliseconds(5)};
+  auto scheduler = MakeScheduler(control, 1, {}, policy);
+  const auto wait_for = [&](auto predicate, const char* message) {
+    std::unique_lock lock(control->mutex);
+    Expect(control->condition.wait_for(lock, kTestTimeout, predicate), message);
+  };
+  wait_for([&] { return control->idle_calls >= 3; },
+           "a scheduler that starts idle keeps telling the runner");
+  control->block_prefill_label = 1;
+  auto request = scheduler->Submit({1, 10, 11}, 2, 0.0F);
+  control->WaitForPrefill(1);
+  const auto during = control->idle_calls.load();
+  std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  Expect(control->idle_calls == during, "running work is not idle");
+  control->ReleasePrefill();
+  Expect(request.Wait().tokens == ExpectedTokens(1, 2),
+         "the request completes normally");
+  wait_for([&] { return control->idle_calls >= during + 2; },
+           "the scheduler tells the runner again once the work is done");
+  scheduler.reset();
+
+  // A long probe interval does not slow the idle calls, which keep their own
+  // interval, nor do they probe the device.
+  auto slow = std::make_shared<FakeControl>();
+  auto quiet = MakeScheduler(
+      slow, 1, {},
+      TextSchedulerPolicy{.device_probe_interval = std::chrono::hours(1),
+                          .idle_interval = std::chrono::milliseconds(5)});
+  {
+    std::unique_lock lock(slow->mutex);
+    Expect(slow->condition.wait_for(lock, kTestTimeout,
+                                    [&] { return slow->idle_calls >= 3; }),
+           "idle calls repeat at their own interval");
+  }
+  Expect(slow->idle_probes == 0, "idle calls do not probe the device");
+}
+
+/// A host short of its reserve after promises (#932) refuses new work with
+/// a retryable insufficient_memory until the shortfall is small again; work
+/// already queued is not affected.
+void TestHostShortfallRefusesAdmission() {
+  constexpr std::uint64_t gib = std::uint64_t{1} << 30;
+  auto control = std::make_shared<FakeControl>();
+  auto runner = std::make_shared<FakeRunner>(control);
+  auto pool = std::make_shared<TextRunnerPool>(std::move(runner), 1);
+  std::atomic<std::uint64_t> available{64 * gib};
+  pool->SetHostSampler([&] {
+    return gufo::ext::HostMemorySample{.available = available.load()};
+  });
+  auto scheduler = std::make_unique<TextGenerationScheduler>(pool);
+  Expect(
+      scheduler->Submit({1, 10}, 2, 0.0F).Wait().tokens == ExpectedTokens(1, 2),
+      "a host with room admits work");
+  // 3 GiB available: 1 GiB short of the 4 GiB reserve, within the margin.
+  available = 3 * gib;
+  Expect(
+      scheduler->Submit({2, 20}, 2, 0.0F).Wait().tokens == ExpectedTokens(2, 2),
+      "a shortfall within the admission margin still admits");
+  // 1 GiB available: 3 GiB short.
+  available = 1 * gib;
+  bool refused = false;
+  try {
+    (void)scheduler->Submit({3, 30}, 2, 0.0F);
+  } catch (const TextGenerationError& error) {
+    refused = error.code() == TextGenerationErrorCode::kInsufficientMemory &&
+              error.http_status() == 503 && error.retryable() &&
+              error.required_bytes() == 3 * gib;
+  }
+  Expect(refused, "a host deep below its reserve refuses with 503");
+  // State promised to sessions is not memory in use: it never refuses.
+  pool->SetHostSampler([&] {
+    return gufo::ext::HostMemorySample{.available = 20 * gib,
+                                       .outstanding = 30 * gib};
+  });
+  Expect(
+      scheduler->Submit({5, 50}, 2, 0.0F).Wait().tokens == ExpectedTokens(5, 2),
+      "promised state alone does not refuse admission");
+  pool->SetHostSampler([&] {
+    return gufo::ext::HostMemorySample{.available = available.load()};
+  });
+  available = 64 * gib;
+  Expect(
+      scheduler->Submit({4, 40}, 2, 0.0F).Wait().tokens == ExpectedTokens(4, 2),
+      "admission resumes once memory is back");
 }
 
 void TestIdleDeviceProbe() {
@@ -2857,9 +3134,12 @@ void TestFirstTokenPrecedesSnapshotAndPreservesBudget() {
     control->multi_token_decode = multi;
     control->preview_first_token = true;
     std::binary_semaphore captured(0), release(0);
+    std::atomic<unsigned> captures{0};
     control->snapshot_callback = [&] {
-      captured.release();
-      release.acquire();
+      if (captures.fetch_add(1) == 0) {
+        captured.release();
+        release.acquire();
+      }
     };
     auto scheduler = MakeScheduler(control, 1);
     auto request = scheduler->Submit({1, 10}, 7, 0.0F, {}, true);
@@ -2943,6 +3223,73 @@ void TestSnapshotDoesNotBlockOtherRequests() {
   }
 }
 
+// A restore's copies run beside a running decoder instead of stopping it, but
+// only where they run on a copy engine: without one they would wait behind
+// decode work, so the restore stops the decoder as before. A restore shorter
+// than a decode round also stops it: beside, it would wait for the round.
+void CheckRestoreBesideDecoders(bool engine, bool longer_than_round = true) {
+  const bool beside = engine && longer_than_round;
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 4096;
+  control->snapshots = true;
+  control->restore_beside_decode = engine;
+  const auto advances = [&] {
+    std::size_t count = 0;
+    for (const auto& event : control->Events())
+      count += event.kind == EventKind::kAdvance && event.label == 2;
+    return count;
+  };
+  std::atomic<bool> armed{false}, restoring{false}, decoded{false};
+  control->restore_callback = [&] {
+    if (!armed || restoring.exchange(true))
+      return;
+    const auto before = advances();
+    // Inline, no decoder may step: wait long enough to see one.
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        (beside ? kTestTimeout : std::chrono::milliseconds(100));
+    while (std::chrono::steady_clock::now() < deadline &&
+           advances() < before + 3)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    decoded = advances() != before;
+  };
+  // The fake checkpoint is small: copy it beside decoders all the same,
+  // unless its estimate counts against their rounds (500 us each here).
+  TextSchedulerPolicy policy;
+  policy.restore_beside_decoders_after = {};
+  if (longer_than_round)
+    policy.restore_beside_rounds = 0;
+  auto scheduler = MakeScheduler(control, 2, 2, policy);
+  const std::vector<TextRunnerToken> history(2200, 1);
+  Expect(!scheduler->Submit(history, 2, 0.0F).Wait().cancelled,
+         "history request completes");
+  control->advance_delay_us = 500;
+  auto decoder = scheduler->Submit({2, 20}, 2000, 0.0F);
+  while (advances() == 0)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  // Diverges after the history's 2,048-token checkpoint: no live frontier
+  // continues it, so admission restores that checkpoint from RAM.
+  std::vector<TextRunnerToken> branch(history.begin(), history.begin() + 2100);
+  branch.push_back(9);
+  armed = true;
+  const auto restored = scheduler->Submit(branch, 2, 0.0F).Wait();
+  control->advance_delay_us = 0;
+  Expect(restoring && restored.cache_hit && restored.cache_restore_bytes > 0,
+         "the branch restores a RAM checkpoint");
+  Expect(decoded == beside,
+         beside   ? "the decoder advances while the restore copies"
+         : engine ? "a restore shorter than a decode round stops the decoder"
+                  : "without an engine the restore stops the decoder");
+  Expect(!decoder.Wait().cancelled, "the decoder completes");
+  scheduler.reset();
+}
+
+void TestRestoreCopiesRunBesideDecoders() {
+  CheckRestoreBesideDecoders(true);
+  CheckRestoreBesideDecoders(false);
+  CheckRestoreBesideDecoders(true, false);
+}
+
 void TestCapturedDecoderResumesBeforeMorePrefill() {
   auto control = std::make_shared<FakeControl>();
   control->max_context = 4096;
@@ -2983,6 +3330,95 @@ void TestCapturedDecoderResumesBeforeMorePrefill() {
   Expect(
       position(EventKind::kAdvance, 1, 0) < position(EventKind::kPrefill, 2, 1),
       "a request leaving capture decodes before another peer chunk");
+}
+
+void TestCapturedPrefillResumesBeforeRepeatedPeerPrefill() {
+  const auto started = std::chrono::steady_clock::now();
+  for (const bool older_waiter : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->max_context = 4096;
+    control->preview_first_token = true;
+    control->block_prefill_label = 2;
+    std::binary_semaphore entered(0), release(0), older_entered(0),
+        release_older(0);
+    unsigned older_calls = 0;
+    if (older_waiter) {
+      control->before_prefill = [&](TextRunnerToken label) {
+        if (label == 3 && older_calls++ == 0) {
+          older_entered.release();
+          release_older.acquire();
+        }
+      };
+    }
+    std::atomic<unsigned> captures{0};
+    control->snapshot_callback = [&] {
+      if (captures.fetch_add(1) == 0) {
+        entered.release();
+        release.acquire();
+      }
+    };
+    // Keep the production prompt unit and a model pass wider than it, which
+    // a lone prompt keeps while a session is free. The peer is longer than
+    // that unit, so it has another turn after the held prefill.
+    control->scheduling = gufo::ext::TextSchedulingProfile{.pass_tokens = 4096};
+    auto scheduler = MakeScheduler(control, older_waiter ? 3 : 2);
+    auto first =
+        scheduler->Submit(std::vector<TextRunnerToken>(2200, 1), 3, 0.0F);
+    Expect(entered.try_acquire_for(kTestTimeout),
+           "partial prompt capture starts");
+    std::optional<TextGenerationScheduler::Request> older;
+    if (older_waiter) {
+      older.emplace(
+          scheduler->Submit(std::vector<TextRunnerToken>(3000, 3), 1, 0.0F));
+      Expect(older_entered.try_acquire_for(kTestTimeout),
+             "older prefill is resident before the peer is admitted");
+    }
+    auto second =
+        scheduler->Submit(std::vector<TextRunnerToken>(3000, 2), 1, 0.0F);
+    if (older_waiter)
+      release_older.release();
+    control->WaitForPrefill(2);
+    release.release();
+    // The scheduler stays inside the peer's held call while the actual
+    // snapshot future becomes ready; observing readiness cannot race its get().
+    const auto deadline = std::chrono::steady_clock::now() + kTestTimeout;
+    while (SnapshotPendingForTesting(first) &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    const bool ready = !SnapshotPendingForTesting(first);
+    control->ReleasePrefill();
+    Expect(ready, "partial prompt capture is ready before the peer returns");
+    const auto first_result = first.Wait();
+    const auto second_result = second.Wait();
+    Expect(first_result.tokens == ExpectedTokens(1, 3) &&
+               first_result.prefill_tokens == 2200,
+           "captured prefill preserves output and exact prompt work");
+    Expect(second_result.tokens == ExpectedTokens(2, 1) &&
+               second_result.prefill_tokens == 3000,
+           "peer prefill preserves output and exact prompt work");
+    if (older) {
+      const auto result = older->Wait();
+      Expect(result.tokens == ExpectedTokens(3, 1) &&
+                 result.prefill_tokens == 3000,
+             "older waiting prefill preserves output and exact prompt work");
+    }
+    const auto events = control->Events();
+    const auto first_resume = EventIndex(events, EventKind::kPrefill, 1, 1);
+    const auto peer_repeat = EventIndex(events, EventKind::kPrefill, 2, 1);
+    Expect(first_resume != events.size() && peer_repeat != events.size(),
+           "both requests have a partial prefill continuation");
+    Expect(first_resume < peer_repeat,
+           "ready partial prefill resumes before its peer repeats");
+    if (older_waiter) {
+      Expect(EventIndex(events, EventKind::kPrefill, 3, 1) < first_resume,
+             "resumed capture preserves an older queued prefill's turn");
+    }
+  }
+  std::cout << "Captured prefill resume cases: "
+            << std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - started)
+                   .count()
+            << " ms\n";
 }
 
 void TestCapturesAtCapacityAllowQueuedProgress() {
@@ -3380,6 +3816,40 @@ void TestPromptProgressCancellation() {
   }
 }
 
+// A client cancels a stream, then replays its answer as text in the next
+// prompt (#1154, #1213). The replay must continue the cancelled frontier even
+// when it arrives while that stream is still decoding: otherwise the same
+// request samples from a different tokenization once the frontier is free.
+void TestRetryDuringCancelledStreamAlignsToItsFrontier() {
+  for (const std::size_t capacity : {1U, 2U}) {
+    auto control = std::make_shared<FakeControl>();
+    control->snapshots = true;
+    control->incremental_text_is_exact = true;
+    control->block_advance_label = 1;
+    auto scheduler = MakeScheduler(control, capacity);
+    std::atomic<bool> disconnected{false};
+    auto stream = scheduler->Submit(
+        {1, 10}, 8, 0.0F, [&] { return disconnected.load(); }, true);
+    // The stream is decoding its first token, 100, when its client
+    // disconnects and sends the retry.
+    control->WaitForAdvance(1);
+    disconnected = true;
+    // Pieces "10" and "0" replay the text of the sampled token 100.
+    auto retry = scheduler->Submit({1, 10, 10, 0, 7}, 1, 0.0F);
+    control->ReleaseAdvance();
+    const auto cancelled = stream.Wait();
+    const auto resumed = retry.Wait();
+    Expect(cancelled.cancelled && cancelled.tokens == ExpectedTokens(1, 1),
+           "the stream is cancelled after its first token");
+    Expect(resumed.prompt_tokens == 4 && resumed.cached_prompt_tokens == 3,
+           "a retry submitted during the cancelled stream continues its "
+           "frontier at capacity " +
+               std::to_string(capacity) + " (prompt " +
+               std::to_string(resumed.prompt_tokens) + ", cached " +
+               std::to_string(resumed.cached_prompt_tokens) + ")");
+  }
+}
+
 void TestIgnoreEosIsRequestScoped() {
   auto control = std::make_shared<FakeControl>();
   control->eos_after = 0;
@@ -3580,7 +4050,123 @@ void TestReasoningTokenCount() {
          "an unclosed model-opened block counts to the end");
   Expect(count({"<a>\n", "x", "</a>"}, State::kText) == 0,
          "text output has no reasoning");
+  Expect(count({"\n", "<a>\n", "x", "</a>"}, State::kTextAfterThought) == 0,
+         "text after reasoning the prompt closed has no reasoning");
   Expect(count({}, State::kThought) == 0, "no output counts nothing");
+
+  // Pieces may carry markup the raw tokens do not spell; framing tokens may
+  // have empty pieces.
+  const auto in_text = [&markup](const Pieces& pieces, State initial) {
+    std::string text;
+    std::vector<std::size_t> ends;
+    for (const auto& piece : pieces) {
+      text += piece;
+      ends.push_back(text.size());
+    }
+    return gufo::server::CountReasoningTokens(text, ends, initial, markup);
+  };
+  Expect(in_text({"<a>\nx", "y", "", "</a>z"}, State::kAuto) == 2,
+         "emitted reasoning counts the tokens that carry it");
+  Expect(in_text({"", "", "z"}, State::kAuto) == 0,
+         "emitted text with no reasoning counts nothing");
+  Expect(in_text({"x", "</a>", "z"}, State::kThought) == 1,
+         "emitted reasoning the prompt opened counts to the close");
+}
+
+std::vector<TextRunnerToken> LabeledPrompt(TextRunnerToken label,
+                                           std::size_t tokens) {
+  std::vector<TextRunnerToken> prompt(tokens, 7);
+  prompt.front() = label;
+  return prompt;
+}
+
+// Shared session state (#715): four sessions share what two hold at full
+// context. Requests past it wait in arrival order, and run as earlier ones
+// end and their state is reclaimed.
+void TestSharedStateWaitsInOrder() {
+  constexpr std::size_t kPage = gufo::mem::kPageBytes;
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 16384;  // 16 pages at full context
+  control->shared_full_sessions = 2;
+  auto scheduler = MakeScheduler(control, 4);
+  const auto shared = scheduler->SharedStateSnapshot();
+  Expect(shared && shared->shared_bytes == 32 * kPage &&
+             shared->max_prompt_tokens == 16383,
+         "four sessions share two full contexts of state");
+
+  // Hold the scheduler in a small prefill while the others queue.
+  control->block_prefill_label = 1;
+  auto hold = scheduler->Submit({1, 2}, 1, 0.0F);
+  control->WaitForPrefill(1);
+  // 13 pages each: two fit beside the held request, the third waits, and a
+  // small request behind it waits too: none passes the oldest waiter.
+  auto a = scheduler->Submit(LabeledPrompt(10, 13000), 1, 0.0F);
+  auto b = scheduler->Submit(LabeledPrompt(11, 13000), 1, 0.0F);
+  auto c = scheduler->Submit(LabeledPrompt(12, 13000), 1, 0.0F);
+  auto d = scheduler->Submit(LabeledPrompt(13, 100), 1, 0.0F);
+  control->ReleasePrefill();
+  for (auto* request : {&hold, &a, &b, &c, &d}) {
+    const auto result = request->Wait();
+    Expect(!result.cancelled && result.tokens.size() == 1,
+           "every request runs once state frees");
+  }
+  const auto events = control->Events();
+  const auto prefill = [&](TextRunnerToken label) {
+    return EventIndex(events, EventKind::kPrefill, label);
+  };
+  const auto advance = [&](TextRunnerToken label) {
+    return EventIndex(events, EventKind::kAdvance, label);
+  };
+  Expect(prefill(12) > std::min(advance(10), advance(11)),
+         "the third long prompt waits until an earlier one ends");
+  Expect(prefill(13) > prefill(12),
+         "a short prompt does not pass the waiting long one");
+  const auto after = scheduler->SharedStateSnapshot();
+  Expect(after && after->waits >= 2 && after->preemptions == 0,
+         "waits are counted");
+  scheduler.reset();
+  control->accounts.clear();
+  Expect(gufo::mem::StateLedger::Process().ChargedBytes() == 0 &&
+             gufo::mem::StateLedger::Process().PromiseCap() == 0,
+         "sessions return their charges and the cap ends with the pool");
+}
+
+// Two requests that each decode to the end of the context need more than
+// the shared state: one pauses until the other cannot grow either, then the
+// most recently admitted is stopped with memory_pressure and the older one
+// finishes.
+void TestSharedStatePausesThenPreempts() {
+  constexpr std::size_t kPage = gufo::mem::kPageBytes;
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 32768;  // 32 pages at full context
+  control->shared_fixed_bytes = 8 * kPage;
+  control->shared_full_sessions = 2;
+  auto scheduler = MakeScheduler(control, 4);
+  const auto shared = scheduler->SharedStateSnapshot();
+  // Two sessions of 40 pages, less four sessions' fixed 8.
+  Expect(shared && shared->shared_bytes == 48 * kPage,
+         "fixed state of every session comes out of the shared state");
+  control->block_prefill_label = 1;
+  auto hold = scheduler->Submit({1, 2}, 1, 0.0F);
+  control->WaitForPrefill(1);
+  auto older = scheduler->Submit(LabeledPrompt(20, 1000), 0, 0.0F);
+  auto younger = scheduler->Submit(LabeledPrompt(21, 1000), 0, 0.0F);
+  control->ReleasePrefill();
+  (void)hold.Wait();
+  const auto first = older.Wait();
+  Expect(!first.cancelled && first.tokens.size() == 32768 - 1000,
+         "the older request decodes to the end of the context");
+  bool preempted = false;
+  try {
+    (void)younger.Wait();
+  } catch (const TextGenerationError& error) {
+    preempted = error.code() == TextGenerationErrorCode::kMemoryPressure &&
+                error.http_status() == 503 && error.retryable();
+  }
+  Expect(preempted, "the younger request stops retryably with memory_pressure");
+  const auto after = scheduler->SharedStateSnapshot();
+  Expect(after && after->pauses >= 2 && after->preemptions == 1,
+         "both requests paused before one was stopped");
 }
 
 void TestPromptStateAdmissionBudget() {
@@ -3714,6 +4300,7 @@ int main() {
   TestBackendPreservesModelSamplingPreset();
   TestBackendRejectsInvalidSamplingDefaults();
 #endif
+  TestRetryDuringCancelledStreamAlignsToItsFrontier();
   TestTokenLogprobs();
   TestReasoningTokenCount();
   TestPublicationWaitUsesRecentSubstantialPrefill();
@@ -3775,6 +4362,7 @@ int main() {
     }
   }
   TestCapturedDecoderResumesBeforeMorePrefill();
+  TestCapturedPrefillResumesBeforeRepeatedPeerPrefill();
   TestCapturesAtCapacityAllowQueuedProgress();
   TestShutdownCancelsRunnerAcquisition();
   TestSnapshotDoesNotBlockOtherRequests();
@@ -3788,6 +4376,7 @@ int main() {
   TestRetainedHistoryBeatsSharedPrefixWait();
   TestAwaitedCheckpointSurvivesCachePressure();
   TestRunnerCanSkipUnusedFinalAdvance();
+  TestRetainedCappedReplyExecutesFinalToken();
   TestRunnerCanReuseExactIncrementalText();
   TestGenerationTraceRecordsPromptAndOutput();
   TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();
@@ -3821,6 +4410,10 @@ int main() {
   TestPromptCancelledInsideYield();
   TestFinishedCaptureRejoinsYields();
   TestPendingLimitsRejectBeforeStateAdmission();
+  TestZeroPendingLimitsAdmitOnlyFreeSessions();
+  TestSharedStateWaitsInOrder();
+  TestSharedStatePausesThenPreempts();
+  TestRestoreCopiesRunBesideDecoders();
   TestPromptStateAdmissionBudget();
   TestPromptAdmissionTracksLiveHeadroom();
   TestPromptAdmissionRollsBackFailedEnqueue();
@@ -3842,6 +4435,8 @@ int main() {
   TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement();
   TestDeviceLossIsStickyAndReported();
   TestIdleDeviceProbe();
+  TestIdleNotifiesRunnerWhileIdle();
+  TestHostShortfallRefusesAdmission();
   TestStallMonitor();
   Expect(
       gufo::server::detail::RequestsProcessing().load() == 0 &&

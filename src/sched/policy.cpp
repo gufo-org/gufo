@@ -19,13 +19,24 @@ Policy::Policy(PolicyOptions options) : options_(options) {
 }
 
 std::size_t Policy::LayerGroups(const PrefillRate& rate,
-                                std::size_t remaining_tokens) const {
+                                const PrefillingRequest& request) const {
   const auto& profile = options_.profile;
+  const std::size_t remaining_tokens = request.remaining_tokens;
   // A short remainder, such as a cached continuation, is a short pass: each
-  // group adds a decode round to its time to first token. One within a unit
-  // runs unsplit.
-  if (remaining_tokens <= options_.unit_tokens)
-    return 1;
+  // group adds a decode round to its time to first token, and a unit of
+  // tokens is what one group may carry, so its tokens never split it. Its
+  // context can: deep in a long one the pass reads every attention row for
+  // those few tokens. A group carries at most the decoders' wait of that
+  // time, once few-token passes measured it; until then it runs unsplit.
+  if (remaining_tokens <= options_.unit_tokens) {
+    const auto context = rate.EstimateContext(request.position);
+    if (!context)
+      return 1;
+    return std::clamp<std::size_t>(
+        static_cast<std::size_t>(std::ceil(
+            *context / PrefillRate::Milliseconds(kTargetDecoderWait))),
+        1, profile.max_layer_groups);
+  }
   const std::size_t tokens = std::min(remaining_tokens, profile.pass_tokens);
   const auto pass = rate.Estimate(tokens);
   // Until a lone pass has been measured, assume a full pass needs the most
@@ -87,11 +98,11 @@ Work Policy::Next(const WorkQueues& queues, const PrefillRate& rate) const {
         fits == queues.prefilling.end()
             ? 0
             : static_cast<std::size_t>(fits - queues.prefilling.begin());
-    return PrefillWork{.request = index,
-                       .beside_decoders = true,
-                       .max_tokens = profile.pass_tokens,
-                       .layer_groups = LayerGroups(
-                           rate, queues.prefilling[index].remaining_tokens)};
+    return PrefillWork{
+        .request = index,
+        .beside_decoders = true,
+        .max_tokens = profile.pass_tokens,
+        .layer_groups = LayerGroups(rate, queues.prefilling[index])};
   }
 
   if (!queues.decoding.empty()) {
@@ -101,15 +112,20 @@ Work Policy::Next(const WorkQueues& queues, const PrefillRate& rate) const {
   }
 
   // Bound work for short waiting prefills and captures as well as decoders.
-  // Long prefills alone retain the model's efficient chunk size.
+  // A long prefill alone keeps the profile's pass width while a free session
+  // could admit an arrival, which then waits for one such pass, not a wider
+  // one the runner takes when nobody can join (#470). Otherwise it retains
+  // the runner's own widest pass.
   const bool peer_waiting =
       queues.capturing ||
       std::any_of(queues.prefilling.begin() + 1, queues.prefilling.end(),
                   [&](const auto& peer) { return Short(peer); });
-  return PrefillWork{.peer_waiting = peer_waiting,
-                     .max_tokens = options_.incremental_prefill && peer_waiting
-                                       ? std::optional(options_.unit_tokens)
-                                       : std::nullopt};
+  std::optional<std::size_t> max_tokens;
+  if (options_.incremental_prefill && peer_waiting)
+    max_tokens = options_.unit_tokens;
+  else if (options_.incremental_prefill && queues.admission_open)
+    max_tokens = options_.profile.pass_tokens;
+  return PrefillWork{.peer_waiting = peer_waiting, .max_tokens = max_tokens};
 }
 
 }  // namespace gufo::sched

@@ -40,6 +40,10 @@ using ext::TextDFlashDraftPolicyName;
 /// `open`; an automatic output counts only a block it opens itself, after blank
 /// text. An unclosed block counts to the end.
 [[nodiscard]] std::size_t CountReasoningTokens(
+    std::string_view text, std::span<const std::size_t> ends,
+    TextGenerationBackend::InitialOutputState initial,
+    const ext::ReasoningMarkup& reasoning);
+[[nodiscard]] std::size_t CountReasoningTokens(
     std::span<const tokenization::TokenId> tokens,
     TextGenerationBackend::InitialOutputState initial,
     const ext::ReasoningMarkup& reasoning,
@@ -64,15 +68,23 @@ public:
   /// Completes `options` for the selected text provider before its runner is
   /// created (command-line settings that depend on the provider); false, with
   /// `error` set, rejects the load.
+  /// `reader` is null for a model directory.
   using PrepareRunnerOptions = std::function<bool(
-      const ext::TextProvider& provider, const core::GgufReader& reader,
+      const ext::TextProvider& provider, const core::GgufReader* reader,
       ext::TextRunnerOptions* options, std::string* error)>;
 
-  /// Loads weights from a GGUF file. Returns false and sets *error on failure.
+  /// Receives each load stage as it starts: the fraction of the load that
+  /// precedes the stage (0 to 1) and a short description. Called on the
+  /// loading thread.
+  using LoadProgress =
+      std::function<void(double progress, std::string_view message)>;
+
+  /// Loads weights from a GGUF file, or a model directory a provider's `probe`
+  /// claims. Returns false and sets *error on failure.
   /// `enable_yarn` opts Flash-Next into YaRN, required for (and only accepted
   /// with) a `max_context` above its native context; each session scales only
   /// past the native context. `prepare_runner_options` runs after the
-  /// provider is selected.
+  /// provider is selected. `on_progress`, when set, receives the stages.
   bool load(const std::string& model_path, std::string* error,
             std::uint32_t max_context = 0, std::size_t session_count = 1,
             TextSchedulerPolicy scheduler_policy = {},
@@ -81,9 +93,10 @@ public:
             const std::string& vision_model_path = {},
             TextRunnerRamCacheOptions ram_cache_config = {},
             bool enable_yarn = false,
-            const PrepareRunnerOptions& prepare_runner_options = {},
             const std::string& projection_vector_path = {},
-            const std::string& projection_layers = {});
+            const std::string& projection_layers = {},
+            const PrepareRunnerOptions& prepare_runner_options = {},
+            const LoadProgress& on_progress = {});
 
   /// Installs a previously prepared runner with request-owned sessions.
   bool load(std::shared_ptr<ext::TextModelRunner> runner, std::string* error,
@@ -103,6 +116,7 @@ public:
   [[nodiscard]] SamplingDefaults sampling_defaults() const override;
   [[nodiscard]] std::uint32_t max_context() const override;
   [[nodiscard]] std::vector<SessionState> session_states() const override;
+  [[nodiscard]] std::optional<SharedState> shared_state() const override;
   [[nodiscard]] std::optional<PromptAdmissionBudget> prompt_admission_budget()
       const override;
   [[nodiscard]] ReasoningOptions reasoning_defaults() const override;

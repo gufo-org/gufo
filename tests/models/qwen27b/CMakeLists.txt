@@ -9,6 +9,12 @@ target_compile_definitions(qwen27b_continuation_identity_test PRIVATE
 add_test(NAME qwen27b_continuation_identity_test COMMAND qwen27b_continuation_identity_test)
 set_tests_properties(qwen27b_continuation_identity_test PROPERTIES LABELS "cpu;qwen27b;cache;correctness")
 
+# Layer groups spread over a prefill step's passes; header only.
+add_executable(qwen27b_prefill_groups_test prefill_groups_test.cpp)
+target_include_directories(qwen27b_prefill_groups_test PRIVATE ${PROJECT_SOURCE_DIR})
+add_test(NAME qwen27b_prefill_groups_test COMMAND qwen27b_prefill_groups_test)
+set_tests_properties(qwen27b_prefill_groups_test PROPERTIES LABELS "cpu;qwen27b;correctness")
+
 # Model-specific checks live here; generic Qwen operator controls stay in qwen/.
 add_test(NAME qwen27b.tools
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools_test.py)
@@ -62,6 +68,11 @@ if (ENGINE_ENABLE_HIP)
   target_link_libraries(qwen27b_layered_prefill_test PRIVATE gufo_test_support)
   set_tests_properties(qwen27b_layered_prefill_test PROPERTIES
     RUN_SERIAL TRUE TIMEOUT 1800)
+  # In-pass prompt checkpoints (PrefillThrough) against steps ending at each
+  # boundary, in AR and DFlash2 modes; DFlash2 needs GUFO_QWEN27B_DFLASH_MODEL.
+  add_qwen27b_test(qwen27b_in_pass_test in_pass_test.cpp
+    "gpu;hip;cache;dflash2;external-model")
+  set_tests_properties(qwen27b_in_pass_test PROPERTIES RUN_SERIAL TRUE)
   add_qwen27b_test(qwen_dflash_upload_lifetime_test
     dflash_upload_lifetime_test.cpp "gpu;hip;dflash2;external-model")
   target_link_libraries(qwen_dflash_upload_lifetime_test PRIVATE hip::host)

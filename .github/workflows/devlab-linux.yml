@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       tier:
-        description: pr trims suites and transports; full runs the complete set (release PRs)
+        description: pr smoke-tests one image model; full runs both image models in full (release PRs). Other suites match.
         type: choice
         options: [ full, pr ]
         default: full
@@ -47,6 +47,8 @@ jobs:
       has_work: ${{ steps.plan.outputs.has_work }}
       base: ${{ steps.plan.outputs.base }}
       tier: ${{ steps.plan.outputs.tier }}
+      shards: ${{ steps.plan.outputs.shards }}
+      ctest_labels: ${{ steps.plan.outputs.ctest_labels }}
     permissions:
       contents: read
       statuses: write # fork PR tokens stay read-only
@@ -162,6 +164,10 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               work = bool(plan['models'])
               print('has_work=' + str(work).lower(), file=output)
+              # One runner job per shard; ids name its artifacts.
+              print('shards=' + json.dumps([row['id'] for row in plan['shards']]), file=output)
+              # The checked build bundles these labels' GPU test executables.
+              print('ctest_labels=' + ','.join(plan['ctest_labels']), file=output)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write('## Changed-file functional plan\n\n')
               summary.write(f"Revisions: `{plan['base']}` → `{plan['head']}`; tier `{plan['tier']}`.\n\n")
@@ -171,7 +177,15 @@ jobs:
                   summary.write(f"\n**{model['id']}**: " + ', '.join(sorted({reason['rule'] for reason in model['reasons']})) + '\n')
               for group in plan['groups']:
                   summary.write(f"\n**{group['profile']} / {group['configuration']}**: " + ', '.join(group['suites']) + '\n')
+              for model in plan['models']:
+                  if model.get('ctest'):
+                      summary.write(f"\n**{model['id']} GPU tests**: `ctest -L` " + ', '.join(model['ctest']['labels']) + '\n')
               summary.write(f"\nDeferred: {len(plan['deferred'])}; release run only: {len(plan['release_only'])}; outside scope {', '.join(plan['scope'])}: {len(plan['out_of_scope'])}.\n")
+              summary.write('\n| Shard | Suites | Estimated |\n| --- | --- | --- |\n')
+              for row in plan['shards']:
+                  work = ', '.join(f"{part['model']}: {sum(len(group['suites']) for group in part['groups'])}"
+                                   + (' + timing' if part['timing'] else '') for part in row['parts'])
+                  summary.write(f"| `{row['id']}` | {work} | {row['seconds'] / 60:.1f} min |\n")
               summary.write('Selected candidate correctness and paired server-phase timings against main. Other-model and agent replay obligations remain separate.\n')
           PYPLAN
 
@@ -192,17 +206,28 @@ jobs:
       revision: ${{ needs.authorize.outputs.merge }}
       baseline: ${{ needs.authorize.outputs.base }}
       artifact-name: linux-devlab-${{ github.run_attempt }}
+      checked: true
+      ctest-labels: ${{ needs.authorize.outputs.ctest_labels }}
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
   smoke:
-    name: Run Linux model checks
+    name: Run Linux model checks (${{ matrix.shard }})
     # Downloads overlap hosted compilation; consume the finalized artifact as
     # soon as it exists rather than waiting for hosted cache-save post steps.
     needs: authorize
     if: needs.authorize.outputs.has_work == 'true'
     runs-on: [ linux, strix-halo, devlab-dispatch ]
-    timeout-minutes: 360
+    timeout-minutes: 120
+    # Each shard is one device's work: a server for a subset of one model's
+    # suites, or one model's paired main/PR timing arms. A failing shard keeps
+    # the others; rerunning failed jobs repeats only the failed shards.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.authorize.outputs.shards) }}
+    env:
+      SHARD: ${{ matrix.shard }}
     permissions:
       contents: read
       actions: read
@@ -212,7 +237,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          leftovers=(candidate baseline controller linux-artifacts linux-artifacts.tar.gz functional-results functional-report functional-plan.json functional-assets.json phase-logs)
+          leftovers=(candidate baseline controller linux-artifacts linux-artifacts.tar.gz linux-checked.tar.gz functional-results functional-report functional-plan.json functional-assets.json phase-logs)
           # Earlier packages kept the Nix store's read-only directories.
           for path in "${leftovers[@]}"; do
             if [[ -d $path && ! -L $path ]]; then chmod -R u+w -- "$path"; fi
@@ -254,6 +279,21 @@ jobs:
             exit 1
           }
           printf -- '- Linux x86-64: verified\n- KFD/render device access: verified\n' >> "$GITHUB_STEP_SUMMARY"
+          # The NPU smoke models (*-npu in devlab.json) need the XDNA accel
+          # node; without it they fail on their own, with this as the cause.
+          npu_access=false
+          for device in /dev/accel/accel*; do
+            if [[ -c "$device" && -r "$device" && -w "$device" ]]; then
+              echo "Accessible NPU device: $device"
+              npu_access=true
+            fi
+          done
+          if [[ "$npu_access" == true ]]; then
+            printf -- '- XDNA NPU access: verified (memlock %s)\n' "$(ulimit -l)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::No accessible XDNA NPU (/dev/accel); NPU smoke models will fail."
+            printf -- '- XDNA NPU access: missing\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Report power profile and exposed limits
         shell: bash
@@ -355,7 +395,9 @@ jobs:
       - name: Download selection plan
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: functional-plan-${{ github.run_attempt }}
+          # "Re-run failed jobs" keeps the first attempt's planning job and plan.
+          pattern: functional-plan-*
+          merge-multiple: true
 
       # Fetch assets while the hosted binary bundle builds and downloads. No mounted
       # weights or voice fixtures are required; the controller includes English audio.
@@ -375,7 +417,7 @@ jobs:
               export HF_HUB_DOWNLOAD_TIMEOUT=1800
               export HF_HUB_ETAG_TIMEOUT=60
               "$RUNNER_TEMP/gufo-hf-cli/bin/python" controller/tests/functional/devlab_models.py \
-                --plan functional-plan.json --cache "$GUFO_CACHE_ROOT/models" \
+                --plan functional-plan.json --shard "$SHARD" --cache "$GUFO_CACHE_ROOT/models" \
                 --output functional-assets.json
             ) || status=$?
             echo "$status" > "$RUNNER_TEMP/gufo-weights.status"
@@ -388,8 +430,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          set -euo pipefail
           python3 controller/tools/ci/devlab_artifact.py linux \
             --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --output linux-artifacts.tar.gz
+          # Correctness runs on the assertion-enabled candidate, built in parallel.
+          python3 controller/tools/ci/devlab_artifact.py linux --variant checked \
+            --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --output linux-checked.tar.gz
 
       - name: Validate comparison packages
         id: binaries
@@ -401,6 +447,7 @@ jobs:
         run: |
           set -euo pipefail
           tar -xzf linux-artifacts.tar.gz
+          tar -xzf linux-checked.tar.gz
           python3 controller/tools/ci/devlab_artifact.py runtime \
             --run "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
             --manifest linux-artifacts/runtime.json --cache "$GUFO_CACHE_ROOT/runtimes" \
@@ -409,7 +456,10 @@ jobs:
             --source linux-artifacts/candidate --revision "$APPROVED_MERGE"
           python3 controller/tools/ci/linux_artifact.py verify \
             --source linux-artifacts/baseline --revision "$APPROVED_BASE"
+          python3 controller/tools/ci/linux_artifact.py verify \
+            --source linux-artifacts/checked --revision "$APPROVED_MERGE"
           linux-artifacts/candidate/gufo diagnose
+          linux-artifacts/checked/gufo diagnose
           linux-artifacts/baseline/gufo diagnose
 
       - name: Wait for model weight downloads
@@ -440,6 +490,9 @@ jobs:
           "$RUNNER_TEMP/gufo-functional-client/bin/python" -c \
             'import jsonschema, PIL, numpy, httpx, run, openai_sdk, metrics, devlab_run, service_phases'
 
+      # Correctness uses the assertion-enabled build (--check-binary) and runs
+      # the model's GPU tests from its bundle when the plan selects them;
+      # paired timing compares the release builds of the PR and main.
       - name: Run correctness and performance checks
         if: >-
           !cancelled() && steps.binaries.outcome == 'success' && steps.weights.outcome == 'success' &&
@@ -447,49 +500,24 @@ jobs:
         shell: bash
         run: |
           "$RUNNER_TEMP/gufo-functional-client/bin/python" controller/tests/functional/devlab_run.py \
-            --plan functional-plan.json --assets functional-assets.json \
+            --plan functional-plan.json --shard "$SHARD" --assets functional-assets.json \
             --binary linux-artifacts/candidate/gufo --base-binary linux-artifacts/baseline/gufo \
-            --output functional-results --report functional-report --logs phase-logs
-
-      # Suite failures must not hide benchmark observations.
-      - name: Benchmark Flash-Next AR through 128K depth on base and PR
-        if: >-
-          !cancelled() && inputs.benchmark &&
-          steps.binaries.outcome == 'success' &&
-          steps.weights.outcome == 'success'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p functional-report
-          model_dir=$(python3 -c 'import json; print(json.load(open("functional-assets.json"))["flash-next"])')
-          # Same runner and weights; main runs first.
-          for revision in base head; do
-            binary=linux-artifacts/candidate/gufo
-            [[ "$revision" == base ]] && binary=linux-artifacts/baseline/gufo
-            printf '\n### Benchmark: %s\n\n' "$revision" >> "$GITHUB_STEP_SUMMARY"
-            "$binary" bench \
-              --model "$model_dir/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf" \
-              --speculative off --n-prompt 2048 --n-gen 128 \
-              --n-depth 0,4096,8192,12288,16384,32768,65536,131072 \
-              --repetitions 1 \
-              2> >(tee "functional-report/bench-$revision.stderr" >&2) \
-              | tee "functional-report/bench-$revision.md"
-            cat "functional-report/bench-$revision.md" >> "$GITHUB_STEP_SUMMARY"
-          done
+            --check-binary linux-artifacts/checked/gufo --ctest-bundle linux-artifacts/checked \
+            --output functional-results --report "functional-report/shards/$SHARD" --logs phase-logs
 
       - name: Collect report inputs
         if: always()
         shell: bash
         run: |
-          mkdir -p functional-report
-          [[ -f functional-results/summary.json ]] && cp functional-results/summary.json functional-report/
+          mkdir -p "functional-report/shards/$SHARD"
+          [[ -f functional-results/summary.json ]] && cp functional-results/summary.json "functional-report/shards/$SHARD/"
           true
 
       - name: Upload report inputs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: functional-report-${{ github.run_attempt }}
+          name: functional-report-${{ matrix.shard }}-${{ github.run_attempt }}
           path: functional-report/
           if-no-files-found: ignore
           retention-days: 14
@@ -498,7 +526,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: model-functional-${{ github.run_attempt }}
+          name: model-functional-${{ matrix.shard }}-${{ github.run_attempt }}
           path: |
             functional-plan.json
             functional-assets.json
@@ -543,15 +571,17 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: functional-plan-${{ github.run_attempt }}
+          # "Re-run failed jobs" keeps the first attempt's planning job and plan.
+          pattern: functional-plan-*
+          merge-multiple: true
           path: report-input
 
       - name: Download report inputs
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: functional-report-${{ github.run_attempt }}
-          path: report-input/results
+          pattern: functional-report-*
+          path: report-input/artifacts
 
       - name: Render PR comment and status
         env:
@@ -562,7 +592,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p report-input/results
+          mkdir -p report-input/results report-input/artifacts
+          # Merge each shard's newest attempt; missing shards fail their model.
+          python3 tests/functional/devlab_merge.py --plan report-input/functional-plan.json \
+            --artifacts report-input/artifacts --output report-input/results
           benchmark=()
           [[ "$RUN_BENCHMARK" == true ]] && benchmark=(--benchmark)
           python3 tests/functional/report.py --plan report-input/functional-plan.json \

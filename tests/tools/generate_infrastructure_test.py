@@ -29,6 +29,7 @@ class GenerateInfrastructureTest(unittest.TestCase):
         expected = [
             "deepseek_v4_flash",
             "embedding_gemma2",
+            "loom",
             "minimax_h3",
             "qwen",
             "qwen38_flash_next",
@@ -95,6 +96,27 @@ class GenerateInfrastructureTest(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 GEN.load_manifests(root)
             self.assertIn("Duplicate provider id 'shared-provider'", str(ctx.exception))
+
+    def test_dependencies_must_exist_and_be_acyclic(self):
+        cases = [
+            ({"a": ["b"], "b": []}, None),
+            ({"a": ["absent"]}, "unknown dependency 'absent'"),
+            ({"a": ["a"]}, "Cyclic extension dependency: a -> a"),
+            ({"a": ["b"], "b": ["c"], "c": ["b"]}, "Cyclic extension dependency: b -> c -> b"),
+        ]
+        for graph, error in cases:
+            with self.subTest(graph=graph), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                for name, depends in graph.items():
+                    (root / "src/models" / name).mkdir(parents=True)
+                    (root / "src/models" / name / "extension.json").write_text(
+                        json.dumps({"name": name, "depends": depends}), encoding="utf-8")
+                if error is None:
+                    self.assertEqual([m["name"] for m in GEN.load_manifests(root)], ["a", "b"])
+                    continue
+                with self.assertRaises(ValueError) as ctx:
+                    GEN.load_manifests(root)
+                self.assertIn(error, str(ctx.exception))
 
     def test_conditional_metadata_omissions(self):
         """Extensions without docs or tests are handled gracefully without breaking."""

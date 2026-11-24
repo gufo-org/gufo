@@ -39,7 +39,17 @@ struct SpeechEncoderTrace {
   std::size_t output_frames{0};
 };
 
-class SpeechEncoderHipRuntime {
+/// Reference-audio codec encoding for Base prompts, on the GPU or the NPU.
+class SpeechEncoderBackend {
+public:
+  virtual ~SpeechEncoderBackend() = default;
+  [[nodiscard]] virtual bool Encode(const AudioBuffer& audio,
+                                    SpeechEncoderOutput* output,
+                                    std::string* error = nullptr,
+                                    SpeechEncoderTrace* trace = nullptr) = 0;
+};
+
+class SpeechEncoderHipRuntime : public SpeechEncoderBackend {
 public:
   ~SpeechEncoderHipRuntime();
 
@@ -54,7 +64,7 @@ public:
   [[nodiscard]] bool Encode(const AudioBuffer& audio,
                             SpeechEncoderOutput* output,
                             std::string* error = nullptr,
-                            SpeechEncoderTrace* trace = nullptr);
+                            SpeechEncoderTrace* trace = nullptr) override;
 
 private:
   struct Impl;

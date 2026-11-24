@@ -13,6 +13,11 @@ kernel directories beside it. Bundles include an LLVM OpenMP runtime built
 from upstream LLVM 18.1.8 source under Apache-2.0 with LLVM exceptions, using
 `libomp140.x86_64.dll` as required by the SDK. The license is included under
 `llvm-openmp-LICENSE.txt`, with source provenance in `llvm-openmp-version.txt`.
+The NPU runtime uses XRT from AMD's NPU driver, which the bundle does not
+ship; without the driver, `gufo diagnose` warns `No XDNA NPU found` and the
+GPU paths work as before. The compiled NPU programs ship in `npu\` beside
+`gufo.exe`, so `--npu` (EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS) needs only
+the driver; keep that folder with the executable.
 
 The v0.24.0 ZIP omitted this DLL ([#801](https://github.com/gufo-org/gufo/issues/801)).
 If it exits silently, including for `--help`, with status `0xC0000135`, the
@@ -34,7 +39,11 @@ release packaging builds the upstream runtime instead.
 - **Visual Studio 2022 or 18** with the "Desktop development with C++"
   workload (MSVC x64).
 - **Git**, **CMake ≥ 3.29**, **Ninja** (Visual Studio bundles both;
-  `vs-env.cmd` puts them on `PATH`) and **Python 3**.
+  `vs-env.cmd` puts them on `PATH`) and **Python 3**. The
+  [Loom runtime](docs/models/loom.md#platforms), which the build compiles
+  from source, needs **CMake ≥ 4.2**, newer than Visual Studio's; put a
+  standalone CMake first on `PATH`, or leave Loom out with
+  `-DGUFO_EXTENSIONS=<list>`.
 - **Rust 1.88 or newer** from [rustup](https://rustup.rs), with the
   `x86_64-pc-windows-msvc` target. Rustup reads the pinned version from
   `rust-toolchain.toml`; Cargo builds the Rust components.
@@ -58,12 +67,57 @@ release packaging builds the upstream runtime instead.
 
   AMD's index no longer serves 10.0.0; CI downloads it from the
   [Windows port's mirror](https://github.com/endyjasmi/gufo/releases/tag/toolchain/therock-10.0.0).
-  It is the only SDK validated at full speed on gfx1151: later builds
-  (10.1.0 through at least the 10.2.0a nightlies of October 2026) compile
-  correct kernels that stall on this GPU, with decode up to hundreds of times
-  slower. The `windows-base` preset chain-loads
+  It is the only SDK that CI builds and validates. Later SDKs used to stall on
+  this GPU: from clang 24 (ROCm 10.1), `clang-cl` stops passing its optimisation
+  level to the device compile, so HIP sources that set no level of their own
+  built device code at `-O0`, and decode ran up to hundreds of times slower. The
+  build adds `/clang:-O3` for both compiles, so as of November 2026 a 10.1.0
+  build of these sources runs at 10.0.0 speed; keep 10.0.0 until CI covers a
+  later SDK. The `windows-base` preset chain-loads
   `cmake/toolchains/windows-therock.cmake`, which takes `clang-cl` and the
-  runtime from `HIP_PATH`.
+  runtime from `HIP_PATH`. `clang-cl` ignores GCC-style options such as
+  `-ffast-math`, `-ffp-contract=off` or `-fno-slp-vectorize`, with only a
+  `-Wunknown-argument` warning; CMake files spell them
+  `${GUFO_CLANG_OPTION}-ffast-math`, which adds the `/clang:` prefix there.
+- **XRT Windows SDK 2.21**, Xilinx's
+  [`xrt_windows_sdk.zip`](https://github.com/Xilinx/XRT/releases/download/2.21.75/xrt_windows_sdk.zip)
+  (sha256 `ccc244c2c423588972ade76142cdc01049477aaa39a35be97e782b97eb7c5295`),
+  extracted to `C:\xrt`, where configure finds it:
+
+  ```cmd
+  mkdir C:\xrt
+  tar -xf xrt_windows_sdk.zip -C C:\xrt
+  ```
+
+  The NPU runtime compiles against its headers and import library. At run
+  time Gufo uses the `xrt_coreutil.dll` that AMD's NPU driver installs in
+  System32 (the driver ships XRT 2.21 too); without the driver it runs on the
+  GPU only. Elsewhere, pass `-DXRT_DIR=<dir>/xrt_sdk/xrt/share/cmake/XRT`. Do
+  not set `XILINX_XRT`: the driver's XRT then looks for its device plugin
+  there and finds no NPU.
+- **IRON** (mlir-aie with the Peano AIE compiler) in a Python 3.12 venv at
+  `C:\iron`, where configure finds it. It compiles the in-tree NPU designs
+  (`src\core\npu\kernels`) into `npu\` beside `gufo.exe`, which `--npu`
+  needs. [`tools\windows\iron-requirements.txt`](tools/windows/iron-requirements.txt)
+  pins the wheels with their sha256, the same versions as the Nix build, and
+  CI installs from it:
+
+  ```cmd
+  py -3.12 -m venv C:\iron
+  C:\iron\Scripts\python -m pip install -r tools\windows\iron-requirements.txt
+  ```
+
+  The designs compile on any x86 machine, no NPU needed. Most take seconds to
+  a minute; `qwen3pre`'s 1024-row program takes far longer, because its MLIR
+  verification grows faster than linearly with the program. IRON caches
+  compiled designs in `GUFO_NPU_CACHE_HOME` (default `build\...\npu\.cache`),
+  keyed on their sources, so a rebuild only recompiles a changed design; CI
+  keeps that cache and the venv between runs. Configure takes Peano from the
+  venv and `xclbinutil` from the XRT SDK, so neither goes on `PATH`.
+  Elsewhere, pass `-DGUFO_IRON_PYTHON=<venv>\Scripts\python.exe`.
+  Without IRON the build skips the designs and `--npu` fails with `NPU design
+  ... not found`; `-DGUFO_NPU_DESIGNS_REQUIRED=ON` makes that a configure
+  error instead (CI sets it).
 
 ## 2. Patch the SDK's HIP headers (once, and after every SDK reinstall)
 
@@ -88,7 +142,8 @@ calling script stops after it. The first configure builds the dependencies
 through vcpkg (ICU and OpenSSL take several minutes). The build produces
 `build\windows-release\gufo.exe` and `gufo-server.exe`, with the TheRock
 runtime DLLs and the `rocblas\` and `hipblaslt\` kernel libraries staged
-beside them.
+beside them, and the NPU designs in `build\windows-release\npu\` (found from
+the build tree; `cmake --install` puts them in `bin\npu\`).
 
 For the host test suite, which needs no GPU:
 
@@ -131,15 +186,18 @@ Then `curl http://127.0.0.1:8080/ready` and POST to `/v1/chat/completions`.
 [`.github/workflows/windows-build.yml`](.github/workflows/windows-build.yml) builds this
 recipe on a hosted `windows-latest` runner, with the SDK archive, the vcpkg
 packages and the compiler cache restored from the Actions cache, and runs
-`check-pr`. It also builds the upstream OpenMP runtime, extracts the packaged
+`check-pr`. It installs IRON from `tools\windows\iron-requirements.txt` and
+compiles the NPU designs into the bundle's `npu\` folder (failing if they are
+missing). It also builds the upstream OpenMP runtime, extracts the packaged
 bundle, checks every EXE/DLL's normal and delay imports against the bundle and
 an explicit Windows system DLL list, and runs `--help`, `--version` and platform
 diagnosis with a restricted `PATH`. The import check does not use the builder's
 installed DLLs, so developer tools cannot conceal an omitted dependency.
 On pull requests and manual dispatches, the
 [Windows validation workflow](.github/workflows/devlab-windows.yml) downloads
-the resulting bundle on Windows Strix Halo and runs `gufo diagnose`, weight-free
-GPU tests, and one small model per family through
+the resulting bundle on Windows Strix Halo and runs `gufo diagnose`, requiring
+the NPU check to pass, weight-free GPU tests, and one small model per family
+through
 [`tests/functional/family_smoke.py`](tests/functional/family_smoke.py):
 EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
 
@@ -151,8 +209,30 @@ EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
   to the executable, ahead of the older `amdhip64` the AMD driver installs in
   System32; copy the whole folder (`gufo.exe`, the DLLs, `rocblas\` and
   `hipblaslt\`).
+- If configure fails with `Could not find a package configuration file
+  provided by "XRT"`, extract the XRT SDK to `C:\xrt` (step 1) or pass
+  `-DXRT_DIR`.
+- If `gufo diagnose` warns `No XDNA NPU found` on a machine with the NPU
+  driver, unset `XILINX_XRT` and remove any `xrt_coreutil.dll` beside
+  `gufo.exe`.
+- If `--npu` fails with `NPU design <name> not found`, the build had no IRON:
+  install it (step 1) and reconfigure, or set `GUFO_NPU_DESIGNS` to a folder
+  holding `<name>\`. If aiecc stops with `tool 'xclbinutil' not found`,
+  configure could not find the XRT SDK's `xclbinutil.exe`.
 - After reinstalling or upgrading the SDK, rerun the patch in step 2 and
   rebuild into a fresh build directory so the runtime stages again.
+
+## NPU device test (developers)
+
+With IRON installed (step 1), build and run the on-device design checks:
+
+```cmd
+tools\windows\vs-env.cmd cmake --preset windows-release -B build\npu-test -DBUILD_TESTING=ON
+tools\windows\vs-env.cmd cmake --build build\npu-test --target npu_device_test npu_bfp_device_test npu_qwen3dec_device_test
+build\npu-test\npu_device_test.exe build\npu-test\npu\q8gemm
+```
+
+It prints each product's error relative to a double reference (about 3e-5).
 
 ## External source extensions
 

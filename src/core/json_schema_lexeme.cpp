@@ -1,192 +1,23 @@
 #include "src/core/json_schema_lexeme.hpp"
 
+#include <gufo/json_schema.h>
+
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
-#include <limits>
-#include <optional>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "src/core/json_number_limits.hpp"
+#include "src/core/json_schema_call.hpp"
 #include "src/core/json_schema_regex.hpp"
 
 namespace gufo::sampling {
 namespace {
-
-[[noreturn]] void Invalid(std::string_view reason) {
-  throw std::invalid_argument("JSON Schema: " + std::string(reason));
-}
-
-// Exact finite-decimal arithmetic. JSON Schema multipleOf must not rely on a
-// floating-point remainder (e.g. 0.3 is a multiple of 0.1).
-struct Decimal {
-  std::string digits{"0"};
-  int scale{0};
-  bool negative{false};
-
-  static Decimal Parse(std::string_view text) {
-    Decimal value;
-    value.digits.clear();
-    if (text.starts_with('-')) {
-      value.negative = true;
-      text.remove_prefix(1);
-    }
-    bool fraction = false;
-    std::size_t i = 0;
-    for (; i < text.size() && text[i] != 'e' && text[i] != 'E'; ++i) {
-      if (text[i] == '.') {
-        fraction = true;
-      } else {
-        value.digits += text[i];
-        value.scale += fraction;
-      }
-    }
-    if (i < text.size()) {
-      int exponent = 0;
-      ++i;
-      if (i < text.size() && text[i] == '+')
-        ++i;
-      const auto result =
-          std::from_chars(text.data() + i, text.data() + text.size(), exponent);
-      if (result.ec != std::errc{})
-        Invalid("numeric exponent is outside the supported range");
-      value.scale -= exponent;
-    }
-    value.Normalize();
-    return value;
-  }
-  void Normalize() {
-    const auto first = digits.find_first_not_of('0');
-    if (first == std::string::npos) {
-      digits = "0";
-      scale = 0;
-      negative = false;
-      return;
-    }
-    digits.erase(0, first);
-    while (digits.size() > 1 && digits.back() == '0') {
-      digits.pop_back();
-      --scale;
-    }
-  }
-};
-
-int Magnitude(const Decimal& a, const Decimal& b) {
-  if (a.digits == "0" || b.digits == "0")
-    return (a.digits != "0") - (b.digits != "0");
-  const auto ae = static_cast<int>(a.digits.size()) - a.scale;
-  const auto be = static_cast<int>(b.digits.size()) - b.scale;
-  if (ae != be)
-    return ae < be ? -1 : 1;
-  for (std::size_t i = 0; i < std::max(a.digits.size(), b.digits.size()); ++i) {
-    const char x = i < a.digits.size() ? a.digits[i] : '0';
-    const char y = i < b.digits.size() ? b.digits[i] : '0';
-    if (x != y)
-      return x < y ? -1 : 1;
-  }
-  return 0;
-}
-
-int Compare(const Decimal& a, const Decimal& b) {
-  if (a.negative != b.negative)
-    return a.negative ? -1 : 1;
-  return (a.negative ? -1 : 1) * Magnitude(a, b);
-}
-
-int NaturalCompare(std::string_view a, std::string_view b) {
-  if (a.size() != b.size())
-    return a.size() < b.size() ? -1 : 1;
-  return a.compare(b);
-}
-
-void Subtract(std::string& a, std::string_view b) {
-  int borrow = 0;
-  for (std::size_t i = 0; i < a.size(); ++i) {
-    int digit = a[a.size() - 1 - i] - '0' - borrow;
-    if (i < b.size())
-      digit -= b[b.size() - 1 - i] - '0';
-    borrow = digit < 0;
-    a[a.size() - 1 - i] = '0' + digit + 10 * borrow;
-  }
-  const auto first = a.find_first_not_of('0');
-  a = first == std::string::npos ? "0" : a.substr(first);
-}
-
-std::pair<std::string, std::string> Divide(const Decimal& value,
-                                           const Decimal& divisor) {
-  const int scale = std::max(value.scale, divisor.scale);
-  std::string numerator = value.digits + std::string(scale - value.scale, '0');
-  std::string denominator =
-      divisor.digits + std::string(scale - divisor.scale, '0');
-  std::string remainder{"0"};
-  std::string quotient;
-  for (const char digit : numerator) {
-    if (remainder == "0")
-      remainder.clear();
-    remainder += digit;
-    unsigned count = 0;
-    while (NaturalCompare(remainder, denominator) >= 0)
-      Subtract(remainder, denominator), ++count;
-    if (count || !quotient.empty())
-      quotient += static_cast<char>('0' + count);
-  }
-  return {quotient.empty() ? "0" : quotient, remainder};
-}
-
-bool Multiple(const Decimal& value, const Decimal& divisor) {
-  return value.digits == "0" || Divide(value, divisor).second == "0";
-}
-
-std::string Increment(std::string value) {
-  for (std::size_t i = value.size(); i > 0; --i) {
-    if (value[i - 1] != '9') {
-      ++value[i - 1];
-      return value;
-    }
-    value[i - 1] = '0';
-  }
-  return "1" + value;
-}
-
-Decimal Product(const Decimal& value, std::string_view factor) {
-  std::vector<unsigned> digits(value.digits.size() + factor.size());
-  for (std::size_t i = 0; i < value.digits.size(); ++i)
-    for (std::size_t j = 0; j < factor.size(); ++j)
-      digits[i + j + 1] += (value.digits[i] - '0') * (factor[j] - '0');
-  for (std::size_t i = digits.size() - 1; i > 0; --i) {
-    digits[i - 1] += digits[i] / 10;
-    digits[i] %= 10;
-  }
-  Decimal result{"", value.scale, false};
-  for (unsigned digit : digits)
-    result.digits += static_cast<char>('0' + digit);
-  result.Normalize();
-  return result;
-}
-
-Decimal AddUnit(const Decimal& value, int scale) {
-  Decimal next = value;
-  next.negative = false;
-  if (next.digits == "0")
-    next = Decimal{"1", scale, false};
-  else {
-    next.digits.append(scale - next.scale, '0');
-    next.scale = scale;
-    bool carry = true;
-    for (std::size_t i = next.digits.size(); i && carry; --i) {
-      carry = next.digits[i - 1] == '9';
-      next.digits[i - 1] = carry ? '0' : next.digits[i - 1] + 1;
-    }
-    if (carry)
-      next.digits.insert(0, 1, '1');
-    next.Normalize();
-  }
-  return next;
-}
 
 class WhitespaceLexeme final : public JsonSchemaLexeme {
 public:
@@ -213,243 +44,53 @@ public:
   bool CacheTransitions() const override { return true; }
 };
 
+// The Rust compiler checks numbers exactly (include/gufo/json_schema.h): the
+// bounds and multipleOf are decimal, never floating point, so 0.3 is a
+// multiple of 0.1.
 class NumberLexeme final : public JsonSchemaLexeme {
 public:
   NumberLexeme(const json::Value& schema, bool integer)
-      : JsonSchemaLexeme("0123456789-."), integer_(integer) {
-    for (const auto* key : {"minimum", "maximum", "exclusiveMinimum",
-                            "exclusiveMaximum", "multipleOf"}) {
-      const auto* entry = schema.find(key);
-      if (!entry)
-        continue;
-      if (!entry->is_number() || !std::isfinite(entry->as_double()))
-        Invalid(std::string(key) + " must be a finite number");
-      const auto value = Decimal::Parse(entry->dump());
-      if (std::string_view(key) == "multipleOf") {
-        if (value.negative || value.digits == "0")
-          Invalid("multipleOf must be positive");
-        multiple_ = value;
-        continue;
-      }
-      const bool lower = std::string_view(key) == "minimum" ||
-                         std::string_view(key) == "exclusiveMinimum";
-      auto& bound = lower ? lower_ : upper_;
-      const bool exclusive = std::string_view(key).starts_with("exclusive");
-      const int comparison = bound ? Compare(value, bound->value) : 0;
-      if (!bound || (lower ? comparison > 0 : comparison < 0) ||
-          (comparison == 0 && exclusive))
-        bound = Bound{value, exclusive};
-    }
-    if (lower_ && upper_) {
-      const int comparison = Compare(lower_->value, upper_->value);
-      if (comparison > 0 ||
-          (comparison == 0 &&
-           (lower_->exclusive || upper_->exclusive || !Valid(lower_->value))))
-        throw JsonSchemaEmpty(
-            "JSON Schema: numeric constraints describe an empty interval");
-    }
-    if (integer_) {
-      if (!multiple_)
-        multiple_ = Decimal{"1", 0, false};
-      if (multiple_->scale > 0) {
-        const int scale = multiple_->scale;
-        multiple_->scale = 0;
-        for (const int factor : {2, 5}) {
-          for (int count = 0; count < scale; ++count) {
-            const auto division =
-                Divide(*multiple_, Decimal{std::to_string(factor), 0, false});
-            if (division.second != "0")
-              break;
-            multiple_->digits = division.first;
-          }
-        }
-        multiple_->Normalize();
-      }
-    }
-    if (lower_ && upper_ && multiple_ && !GridPoint(*lower_, *upper_))
-      throw JsonSchemaEmpty(
-          "JSON Schema: numeric constraints contain no multipleOf value");
-    // Widen the digit caps only for schema numbers that need longer values.
-    for (const auto* value :
-         {lower_ ? &lower_->value : nullptr, upper_ ? &upper_->value : nullptr,
-          multiple_ ? &*multiple_ : nullptr}) {
-      if (!value)
-        continue;
-      const int integral =
-          static_cast<int>(value->digits.size()) - value->scale;
-      if (integral >= integral_digits_)
-        integral_digits_ = integral + 1;
-      if (value->scale >= fraction_digits_)
-        fraction_digits_ = value->scale + 1;
-    }
+      : JsonSchemaLexeme("0123456789-.") {
+    const detail::JsonSchemaKeywords<5> keywords(
+        schema, {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+                 "multipleOf"});
+    detail::JsonSchemaCall call;
+    GufoJsonSchemaNumber* number = nullptr;
+    const auto status = gufo_json_schema_number_new(
+        keywords.data(), integer ? 1 : 0, kMaxJsonNumberDigits,
+        detail::JsonSchemaCall::Reason, &call, &number);
+    number_.reset(number);
+    call.Check(status);
   }
   bool AcceptValue(const json::Value& value) const override {
-    return value.is_number() && Valid(Decimal::Parse(value.dump()));
+    if (!value.is_number())
+      return false;
+    const auto text = value.dump();
+    detail::JsonSchemaCall call;
+    std::uint8_t accepted = 0;
+    call.Check(gufo_json_schema_number_accept(
+        number_.get(), reinterpret_cast<const std::uint8_t*>(text.data()),
+        text.size(), &accepted, detail::JsonSchemaCall::Reason, &call));
+    return accepted != 0;
   }
-
   Match Check(std::string_view bytes) const override {
-    if (bytes.empty())
-      return {true, false};
-    if (bytes.size() > 4096)
-      return {};
-    const bool negative = bytes.starts_with('-');
-    auto text = bytes;
-    if (negative)
-      text.remove_prefix(1);
-    if (text.empty())
-      return {!lower_ || lower_->value.negative ||
-                  (lower_->value.digits == "0" && !lower_->exclusive),
-              false};
-    const auto dot = text.find('.');
-    if (dot == 0 || (integer_ && dot != std::string_view::npos))
-      return {};
-    if (text.front() == '0' && text.size() > 1 && text[1] != '.')
-      return {};
-    for (std::size_t i = 0; i < text.size(); ++i)
-      if ((text[i] < '0' || text[i] > '9') && (text[i] != '.' || i != dot))
-        return {};
-    const int integral =
-        static_cast<int>(dot == std::string_view::npos ? text.size() : dot);
-    const int places =
-        dot == std::string_view::npos ? 0 : text.size() - dot - 1;
-    if (integral > integral_digits_ || places > fraction_digits_)
-      return {};
-    const auto value = Decimal::Parse(bytes);
-    const bool complete = text.back() != '.' && Valid(value);
-    // At the scalar budget or the decimal cap there is no room for another
-    // digit. Do not admit an unfinished prefix which would fail next step.
-    if (bytes.size() == 4096 || places == fraction_digits_)
-      return {complete, complete};
-    // Decimal prefixes cover an interval. Before the decimal point, appending
-    // integer digits also shifts that interval by powers of ten.
-    Decimal low = value;
-    low.negative = false;
-    Decimal high = AddUnit(low, places);
-    const bool extend_integer =
-        dot == std::string_view::npos && text.front() != '0';
-    for (unsigned shift = 0; shift <= 1024; ++shift) {
-      Decimal first = negative ? high : low;
-      Decimal last = negative ? low : high;
-      first.negative = negative && first.digits != "0";
-      last.negative = negative && last.digits != "0";
-      const bool intersects_lower =
-          !lower_ || Compare(last, lower_->value) > 0 ||
-          (negative && !lower_->exclusive && Compare(last, lower_->value) == 0);
-      const bool intersects_upper = !upper_ ||
-                                    Compare(first, upper_->value) < 0 ||
-                                    (!negative && !upper_->exclusive &&
-                                     Compare(first, upper_->value) == 0);
-      if (intersects_lower && intersects_upper) {
-        Bound lower{first, negative}, upper{last, !negative};
-        if (lower_ &&
-            (Compare(lower_->value, lower.value) > 0 ||
-             (Compare(lower_->value, lower.value) == 0 && lower_->exclusive)))
-          lower = *lower_;
-        if (upper_ &&
-            (Compare(upper_->value, upper.value) < 0 ||
-             (Compare(upper_->value, upper.value) == 0 && upper_->exclusive)))
-          upper = *upper_;
-        if (!multiple_ || GridPoint(lower, upper))
-          return {true, complete};
-      }
-      if (!extend_integer ||
-          integral + static_cast<int>(shift) + 1 > integral_digits_ ||
-          (negative && !intersects_lower) || (!negative && !intersects_upper))
-        break;
-      --low.scale;
-      --high.scale;
-    }
-    return {complete, complete};
+    std::uint8_t found = 0;
+    if (gufo_json_schema_number_check(
+            number_.get(), reinterpret_cast<const std::uint8_t*>(bytes.data()),
+            bytes.size(), &found) != GUFO_JSON_SCHEMA_COMPLETE)
+      throw std::logic_error("JSON number matcher failed");
+    return {(found & GUFO_JSON_SCHEMA_PREFIX) != 0,
+            (found & GUFO_JSON_SCHEMA_MATCH) != 0};
   }
 
 private:
-  struct Bound {
-    Decimal value;
-    bool exclusive;
-  };
-  bool GridPoint(Bound low, Bound high) const {
-    if (low.value.negative && !high.value.negative && high.value.digits != "0")
-      return true;  // Zero is inside.
-    if (low.value.negative) {
-      std::swap(low, high);
-      low.value.negative = false;
-      high.value.negative = false;
+  struct Free {
+    void operator()(GufoJsonSchemaNumber* number) const {
+      gufo_json_schema_number_free(number);
     }
-    auto [quotient, remainder] = Divide(low.value, *multiple_);
-    if (remainder != "0" || low.exclusive)
-      quotient = Increment(std::move(quotient));
-    const auto candidate = Product(*multiple_, quotient);
-    const auto comparison = Compare(candidate, high.value);
-    return comparison < 0 || (comparison == 0 && !high.exclusive);
-  }
-  bool Valid(const Decimal& value) const {
-    if (integer_ && value.scale > 0)
-      return false;
-    if (lower_ &&
-        Compare(value, lower_->value) < static_cast<int>(lower_->exclusive))
-      return false;
-    if (upper_ &&
-        Compare(value, upper_->value) > -static_cast<int>(upper_->exclusive))
-      return false;
-    return !multiple_ || Multiple(value, *multiple_);
-  }
-  bool integer_;
-  std::optional<Bound> lower_, upper_;
-  std::optional<Decimal> multiple_;
-  int integral_digits_{kMaxJsonNumberDigits},
-      fraction_digits_{kMaxJsonNumberDigits};
+  };
+  std::unique_ptr<GufoJsonSchemaNumber, Free> number_;
 };
-
-// Formats follow JSON Schema's RFC-backed string formats. The grammar validates
-// decoded strings, so an escaped character has exactly the same meaning as its
-// UTF-8 spelling.
-std::string FormatPattern(std::string_view format) {
-  const std::string leap =
-      R"((?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00))";
-  const std::string date =
-      R"((?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|)" +
-      leap + R"(-02-29))";
-  const std::string time =
-      R"((?:[01][0-9]|2[0-3]):[0-5][0-9]:(?:[0-5][0-9]|60)(?:\.[0-9]+)?(?:[zZ]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]))";
-  if (format == "date")
-    return "^" + date + "$";
-  if (format == "time")
-    return "^" + time + "$";
-  if (format == "date-time")
-    return "^" + date + "[tT]" + time + "$";
-  if (format == "uuid")
-    return R"(^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$)";
-  if (format == "ipv4")
-    return R"(^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$)";
-  if (format == "hostname")
-    return R"(^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.?$)";
-  if (format == "email")
-    return R"(^[^@\s]+@[^@\s]+$)";
-  if (format == "duration")
-    return R"(^P(?:[0-9]+W|(?=[0-9]|T[0-9])(?:[0-9]+Y)?(?:[0-9]+M)?(?:[0-9]+D)?(?:T(?=[0-9])(?:[0-9]+H)?(?:[0-9]+M)?(?:[0-9]+(?:\.[0-9]+)?S)?)?)$)";
-  if (format == "ipv6") {
-    const std::string group = "[0-9a-fA-F]{1,4}";
-    auto groups = [&](int count) {
-      std::string result;
-      for (int i = 0; i < count; ++i)
-        result += (i ? ":" : "") + group;
-      return result;
-    };
-    std::string result = "^(?:" + groups(8);
-    for (int left = 0; left < 8; ++left)
-      for (int right = 0; left + right < 8; ++right)
-        result += "|" + groups(left) + "::" + groups(right);
-    auto ipv4 = FormatPattern("ipv4");
-    ipv4 = ipv4.substr(1, ipv4.size() - 2);
-    result += "|" + groups(6) + ":" + ipv4;
-    for (int left = 0; left < 6; ++left)
-      for (int right = 0; left + right < 6; ++right)
-        result += "|" + groups(left) + "::" + groups(right) +
-                  (right ? ":" : "") + ipv4;
-    return result + ")$";
-  }
-  Invalid("unsupported string format");
-}
 
 class StringLexeme final : public JsonSchemaLexeme {
   enum Phase : std::uint32_t {
@@ -468,34 +109,17 @@ class StringLexeme final : public JsonSchemaLexeme {
 
 public:
   explicit StringLexeme(const json::Value& schema) {
-    for (const auto* key : {"minLength", "maxLength"}) {
-      if (const auto* value = schema.find(key)) {
-        if (!value->is_number() || value->as_double() < 0 ||
-            value->as_double() > 1048576 ||
-            std::floor(value->as_double()) != value->as_double())
-          Invalid("string lengths must be nonnegative integers up to 1048576");
-        (std::string_view(key) == "minLength" ? minimum_ : maximum_) =
-            value->as_size();
-      }
-    }
-    if (minimum_ > maximum_)
-      throw JsonSchemaEmpty("JSON Schema: minLength exceeds maxLength");
-    std::vector<std::string> patterns;
-    for (const auto* key : {"pattern", "format"}) {
-      const auto* value = schema.find(key);
-      if (!value)
-        continue;
-      if (!value->is_string())
-        Invalid(std::string(key) + " must be a string");
-      auto expression = std::string_view(key) == "format"
-                            ? FormatPattern(value->str())
-                            : value->str();
-      if (std::string_view(key) == "format") {
-        if (value->str() == "hostname")
-          maximum_ = std::min(maximum_, 253U);
-      }
-      patterns.push_back(std::move(expression));
-    }
+    // Lengths, pattern and format, checked by the Rust compiler. Formats
+    // follow JSON Schema's RFC-backed string formats. The grammar validates
+    // decoded strings, so an escaped character has exactly the same meaning
+    // as its UTF-8 spelling.
+    const detail::JsonSchemaKeywords<4> keywords(
+        schema, {"minLength", "maxLength", "pattern", "format"});
+    detail::JsonSchemaCall call;
+    call.Check(gufo_json_schema_string(keywords.data(), &minimum_, &maximum_,
+                                       detail::JsonSchemaCall::Output,
+                                       detail::JsonSchemaCall::Reason, &call));
+    const auto& patterns = call.outputs;
     if (patterns.empty()) {
       scalar_only_ = true;
       static const auto unconstrained =
@@ -988,38 +612,39 @@ std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::Reasoning(
 
 json::Value JsonSchemaLexeme::IntersectMultipleOf(const json::Value& a,
                                                   const json::Value& b) {
-  for (const auto* value : {&a, &b})
-    if (!value->is_number() || !std::isfinite(value->as_double()) ||
-        value->as_double() <= 0)
-      Invalid("multipleOf must be a positive finite number");
-  auto left = Decimal::Parse(a.dump()), right = Decimal::Parse(b.dump());
-  // Put both steps on the same integer grid, then compute the exact LCM.
-  const int scale = std::max(left.scale, right.scale);
-  left.digits.append(scale - left.scale, '0');
-  right.digits.append(scale - right.scale, '0');
-  left.scale = right.scale = 0;
-  auto x = left, y = right;
-  while (y.digits != "0") {
-    auto remainder = Divide(x, y).second;
-    x = std::move(y);
-    y = Decimal{std::move(remainder), 0, false};
+  const detail::JsonSchemaKeywords<2> keywords({&a, &b});
+  detail::JsonSchemaCall call;
+  call.Check(gufo_json_schema_multiple_of(
+      keywords.data(), keywords.data() + 1, detail::JsonSchemaCall::Output,
+      detail::JsonSchemaCall::Reason, &call));
+  const auto& common = call.outputs.at(0);
+  const auto result = json::parse(common);
+  // A double must hold the exact least common multiple.
+  std::uint8_t equal = 0;
+  if (result.is_number() && std::isfinite(result.as_double())) {
+    const auto text = result.dump();
+    call.Check(gufo_json_schema_number_equal(
+        reinterpret_cast<const std::uint8_t*>(text.data()), text.size(),
+        reinterpret_cast<const std::uint8_t*>(common.data()), common.size(),
+        &equal, detail::JsonSchemaCall::Reason, &call));
   }
-  auto common = Product(Decimal{Divide(left, x).first, 0, false}, right.digits);
-  common.scale += scale;
-  common.Normalize();
-  const auto result =
-      json::parse(common.digits + "e" + std::to_string(-common.scale));
-  if (!result.is_number() || !std::isfinite(result.as_double()) ||
-      Compare(Decimal::Parse(result.dump()), common) != 0)
-    Invalid("combined multipleOf exceeds the exact schema-number range");
+  if (!equal)
+    throw std::invalid_argument(
+        "JSON Schema: combined multipleOf exceeds the exact schema-number "
+        "range");
   return result;
 }
 
 json::Value JsonSchemaLexeme::Format(std::string_view format) {
+  detail::JsonSchemaCall call;
+  std::uint32_t cap = UINT32_MAX;
+  call.Check(gufo_json_schema_format(
+      reinterpret_cast<const std::uint8_t*>(format.data()), format.size(), &cap,
+      detail::JsonSchemaCall::Output, detail::JsonSchemaCall::Reason, &call));
   auto schema = json::Value::object();
-  schema["pattern"] = FormatPattern(format);
-  if (format == "hostname")
-    schema["maxLength"] = 253;
+  schema["pattern"] = call.outputs.at(0);
+  if (cap != UINT32_MAX)
+    schema["maxLength"] = static_cast<int>(cap);
   return schema;
 }
 std::shared_ptr<const JsonSchemaLexeme> JsonSchemaLexeme::Number(

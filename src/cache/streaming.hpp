@@ -14,7 +14,16 @@
 
 namespace gufo::cache {
 class BorrowedRows;
-inline constexpr std::size_t kDefaultDiskStagingBytes = 1ULL << 20;
+// Disk writes move one piece at a time. A restore reads and checks files
+// into kDiskRestoreReaders pieces in parallel while it copies others out.
+inline constexpr std::size_t kDiskStagingPieceBytes = 1ULL << 20;
+inline constexpr std::size_t kDiskRestoreReaders = 8;
+inline constexpr std::size_t kDefaultDiskStagingBytes =
+    kDiskRestoreReaders * kDiskStagingPieceBytes;
+// Files read from disk at once by a restore's read-ahead or a warm-up. One
+// thread reads the encrypted NVMe of the reference host at 0.8 GB/s; whole
+// 1 MiB files at 4 at a time 3.9 GB/s, 16 6.0 GB/s, 32 6.7 GB/s (measured).
+inline constexpr std::size_t kDiskReadsInFlight = 16;
 inline constexpr std::chrono::milliseconds kPersistenceYieldLimit{500};
 // Restores and observed-row captures move whole rows per staging piece; a
 // smaller staging budget can never restore a checkpoint of these components.
@@ -88,18 +97,47 @@ private:
   std::uint64_t bytes_;
   std::size_t alignment_;
 };
+// Runs a restore's copy phase: the file reads, checks and the adapter's
+// CopyRowsIn/LoadPrivatePiece calls with their completions, no other adapter
+// call. It may run `copies` on another thread and do other work meanwhile, but
+// returns only once `copies` has, rethrowing what it threw.
+using RestoreCopyRunner =
+    std::function<void(const std::function<void()>& copies)>;
+// Marks the calling thread, for its lifetime, as running a restore's copies
+// beside decode. A runner that does so holds one around `copies`, so a
+// provider can lease restore streams that never wait behind decode work there
+// (ComponentCacheResources::restore_beside_decode) and its faster shared ones
+// elsewhere.
+class BesideDecodeScope {
+public:
+  BesideDecodeScope() noexcept;
+  ~BesideDecodeScope();
+  BesideDecodeScope(const BesideDecodeScope&) = delete;
+  BesideDecodeScope& operator=(const BesideDecodeScope&) = delete;
+
+private:
+  bool previous_;
+};
+// Whether the calling thread is inside a BesideDecodeScope.
+[[nodiscard]] bool CopyingBesideDecode() noexcept;
 // One initialization-time allocation, leased by piece to writers and held by
 // foreground restores. Optional yielding never holds staging or a stream. A HIP
 // allocator supplies committed pinned storage outside this CPU-only package.
 // The disk store, ledger and stream provider must outlive this object.
 class StreamedStore {
 public:
+  // Restores divide staging into pieces of `piece_bytes` (see
+  // kDiskRestoreReaders); writes use one.
   StreamedStore(ResourceLedger&, DiskStore&, std::size_t staging_bytes,
-                StagingAllocator, StreamLease);
+                StagingAllocator, StreamLease,
+                std::size_t piece_bytes = kDiskStagingPieceBytes);
   StreamedStore(ResourceLedger&, DiskStore&, StagingAllocator, StreamLease);
   ~StreamedStore();
   StreamedStore(const StreamedStore&) = delete;
   StreamedStore& operator=(const StreamedStore&) = delete;
+  // Optional stream classes for disk writes and restores; empty leases keep
+  // the constructor's. Call before the first Write or Restore.
+  void SetStreamClasses(StreamLease write, StreamLease restore);
   void Write(DiskFileId, const DiskManifest&, std::span<PersistenceSource>,
              TransferTiming&, std::stop_token = {},
              const std::function<bool()>& model_idle = {});
@@ -107,11 +145,14 @@ public:
   // does not run fallback. All loads and disk pins settle before either path.
   // dependency_failed runs after invalidation and before fallback, only for
   // filesystem/checksum failures; it can quarantine reverse dependencies.
+  // BeginRestore, Validate and Invalidate run on the calling thread; an empty
+  // run_copies runs the copy phase there too.
   [[nodiscard]] bool Restore(
       CheckpointId, CompatibilityDigest expected_compatibility, Adapter&, Slot&,
       TransferTiming&, std::stop_token = {},
       const std::function<void()>& fallback = {},
-      const std::function<void(bool, DiskFileId)>& dependency_failed = {});
+      const std::function<void(bool, DiskFileId)>& dependency_failed = {},
+      const RestoreCopyRunner& run_copies = {});
   [[nodiscard]] std::size_t StagingBytes() const;
   [[nodiscard]] std::uint64_t StartupAllocatorNanoseconds() const;
 
@@ -149,7 +190,8 @@ struct PersistenceQueueStats {
 // device-source locks. A job yields for at most yield_limit after its write
 // starts, so continuous load cannot hold its pins indefinitely.
 // Keep the first pending boundary and coalesce later pending ancestors into
-// their newest descendant. Under pressure, recent jobs
+// their newest descendant. Generated frontiers coalesce only when the queue has
+// no room, keeping two newer ones. Under pressure, recent jobs
 // may replace the oldest pending non-learned job; active writes are untouched.
 // Completion reports false for superseded work, outside the queue lock.
 class PersistenceQueue {
@@ -164,6 +206,10 @@ public:
   PersistenceQueue(const PersistenceQueue&) = delete;
   PersistenceQueue& operator=(const PersistenceQueue&) = delete;
   bool TrySubmit(PersistenceJob);
+  // Discard one queued (never active) write and release its source pins.
+  // Reports false completion outside the queue lock before returning; counted
+  // as superseded work. Drain also waits for this completion callback.
+  bool DiscardPending(CheckpointId);
   void Drain();
   void Stop();
   [[nodiscard]] PersistenceQueueStats Stats() const;

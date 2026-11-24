@@ -50,8 +50,10 @@ def assert_update(result):
 
 
 def check_tool_parameter_order(client, model, checks, chat_result):
-    prompt = ("Mark existing task 1 as completed. Call the todo tool. "
-              "Do not change any other field.")
+    # Under sampled thinking DeepSeek reads the task before it updates it
+    # unless told not to (7 of 10 seeds, #670).
+    prompt = ("Update existing task 1 to completed with the todo tool. "
+              "Do not read it first or change any other field.")
     failures = []
     # The first four rows are the reporter's declaration-order/size controls.
     # Other rows cover wide/loose schemas, all APIs, sampling and thinking.

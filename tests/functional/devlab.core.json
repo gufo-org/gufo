@@ -5,7 +5,8 @@
     "llm": "flash-next-q4",
     "embedding": "embedding-gemma2",
     "asr": "qwen3-asr",
-    "tts": "qwen3-tts-base"
+    "tts": "qwen3-tts-base",
+    "image": "qwen-image-turbo"
   },
   "rules": [
     {
@@ -26,13 +27,10 @@
       "id": "outside-current-scope",
       "priority": 20,
       "paths": [
-        "src/models/qwen_image_21/**",
         "src/models/minimax_h3/**",
-        "tests/models/qwen_image_21/**",
         "tests/models/minimax_h3*",
         "tools/h3/**",
         "tools/gufo/h3*",
-        "tools/models/qwen_image_21/**",
         "tests/cli/video*"
       ],
       "owners": []
@@ -48,7 +46,26 @@
       ],
       "owners": [
         "asr",
-        "tts"
+        "tts",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu"
+      ]
+    },
+    {
+      "id": "npu",
+      "priority": 20,
+      "owners": [
+        "embedding-gemma2-npu",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu"
+      ],
+      "paths": [
+        "src/core/npu/**",
+        "include/gufo/ext/experimental/npu.hpp",
+        "cmake/GufoNpuDesigns.cmake",
+        ".devops/nix/xrt/**",
+        ".devops/nix/iron/**",
+        "tests/core/npu*"
       ]
     },
     {
@@ -62,7 +79,11 @@
       "owners": [
         "embedding",
         "asr",
-        "tts"
+        "tts",
+        "image",
+        "embedding-gemma2-npu",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu"
       ]
     },
     {
@@ -70,12 +91,25 @@
       "priority": 30,
       "paths": [
         "src/families/qwen/text/chat_template.*",
-        "src/families/qwen/text/tokenizer.*",
-        "src/families/qwen/control_tokens/control_tokens.hpp",
         "src/families/qwen/vision/**"
       ],
       "owners": [
-        "llm"
+        "flash-next-q4",
+        "qwen27-q4"
+      ]
+    },
+    {
+      "id": "shared-qwen-tokens",
+      "priority": 30,
+      "paths": [
+        "src/families/qwen/text/tokenizer.*",
+        "src/families/qwen/control_tokens/control_tokens.hpp"
+      ],
+      "owners": [
+        "flash-next-q4",
+        "qwen27-q4",
+        "image",
+        "tts"
       ]
     },
     {
@@ -162,7 +196,20 @@
         "llm",
         "embedding",
         "asr",
-        "tts"
+        "tts",
+        "image"
+      ]
+    },
+    {
+      "id": "gpu-test-bundles",
+      "priority": 30,
+      "paths": [
+        "tools/ci/ctest_bundle.py",
+        "tests/support/source_path.hpp",
+        "tests/functional/devlab_run.py"
+      ],
+      "owners": [
+        "deepseek4"
       ]
     },
     {
@@ -173,13 +220,18 @@
         "tests/functional/service_phases.py",
         "tests/functional/requirements.txt",
         "tools/ci/linux_artifact.py",
-        "tools/ci/devlab_artifact.py"
+        "tools/ci/devlab_artifact.py",
+        "tools/ci/linux-checked.nix"
       ],
       "owners": [
         "llm",
         "embedding",
         "asr",
-        "tts"
+        "tts",
+        "image",
+        "embedding-gemma2-npu",
+        "qwen3-asr-npu",
+        "qwen3-tts-custom-npu"
       ]
     }
   ]

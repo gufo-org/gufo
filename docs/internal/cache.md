@@ -40,7 +40,8 @@ sampled frontier and pending output tokens. DFlash2 adds private ring KV with
 its own injected frontier, pending target features and draft controller state.
 Borrowed target KV rows are preserved before mutation or rollback; private
 frontiers are captured into committed host backing. Disk transfers use fixed
-1 MiB staging regardless of checkpoint size.
+8 MiB staging regardless of checkpoint size: writes move one 1 MiB piece at a
+time, restores read eight pieces in parallel.
 
 DeepSeek shares its compressed attention and indexer rows, which are final once
 emitted, one row per `ratio` tokens. Each layer's sliding window and compressor
@@ -110,6 +111,21 @@ conversation is nearly free, and why reuse can cover generated tokens and not
 just prompt tokens. A request that continues no live frontier takes the least
 recently used idle session (Flash-Next prefers one without a frontier), so
 it does not replace the frontier of a conversation that has just replied.
+
+Indexing the frontier is optional. When its index record cannot be allocated,
+for example because the cache's metadata has filled its byte budget, the
+cache reclaims retained records and retries until the record fits or nothing
+is left to reclaim. If it still does not fit, the reply completes anyway: the
+session stays unindexed, the server logs `event=live_frontier_refused`, and
+the next turn restores from a retained checkpoint, if any, or prefills.
+
+A client replays the previous answer as text, and the next prompt can tokenize
+it differently from the sampled tokens (#1154). At admission, after earlier
+requests have committed their frontiers, a text-only prompt whose text repeats
+a frontier is rewritten to that frontier's tokens. An unchanged retry of such a
+prompt is rewritten to the same tokens when a checkpoint retains them, so an
+identical request samples identical output. A prompt whose own tokens already
+begin a frontier is never rewritten.
 
 A **snapshot** is an immutable retained checkpoint. Reusing one means restoring
 it into a session, which costs a copy.
@@ -270,6 +286,13 @@ When space is needed, RAM retention prefers removing:
    share, not an older turn, and never counts as covered.
 4. Remaining checkpoints, oldest-used first within each priority.
 
+Under byte pressure, a short checkpoint whose fixed state costs more than
+eight times its rows is cheap to prefill again and leaves before idle deep
+conversations, but only once a sixteenth of the RAM budget was admitted after
+its conversation's last use. Until then it competes by recency, so the next
+unrelated request evicts a stale conversation instead of the newest one, and
+that conversation's follow-up still reuses its checkpoint.
+
 Under entry pressure, an edited branch can first replace its incompatible
 tail, preserving earlier shared checkpoints. Optional history/retry copies
 are skipped rather than removing another prefix family's last useful copy.
@@ -337,11 +360,18 @@ be captured first.
 Flash-Next copies its mutable recurrent, convolution and PLE state into
 private device storage at capture; the small indexer-ring, draft-residual and
 kept-row regions go directly into the host payload. Committed K/V and pooled
-rows remain in the live session while it appends, without a K/V copy.
-A same-session rewind allocates backing blocks for only the rows it would
-overwrite and copies them once for checkpoints sharing those rows. Appending
-allocates no K/V backing blocks. Restore keeps the still-live prefix without
-a K/V upload.
+rows are not copied: where session state is demand-mapped, the checkpoint
+keeps the session's own pages ([shared pages](state-memory.md#shared-pages)).
+The session goes on appending to them, a rewind copies only the pages it
+rewrites, and a session given to another conversation leaves the pages with
+the checkpoint. A RAM restore maps every page the checkpoint fills into the
+target session and loads only the rest: the page it ends in, tails and
+private state. Elsewhere (no demand mapping, or a GPU heap smaller than host
+memory) Flash-Next borrows those rows from the live session as Qwen3.8-27B
+does: a same-session rewind allocates backing blocks for only the rows it
+would overwrite and copies them once for checkpoints sharing those rows.
+A disk write copies shared pages to its staging memory on the device's copy
+engine, outside every stream.
 
 A model with a sliding attention window declares that attention as a
 window-rows component (`ComponentKind::kWindowRows` with `window_rows`) instead
@@ -375,7 +405,9 @@ copies before prefill resumes, so disk serialization does not introduce a
 background K/V transfer during inference.
 
 **Admission is advisory, never fatal.** A refused reservation or a failed
-capture is a skipped optimisation. The request must still complete.
+capture is a skipped optimisation. The request must still complete. That
+includes sizing a checkpoint inside a prefill pass: an adapter that cannot
+take one at a boundary refuses, and the pass ends there instead.
 
 **Eviction cannot skip a victim.** If removing an entry fails, the eviction
 loop stops rather than trying the next candidate, in both tiers **(source)**.
@@ -406,10 +438,24 @@ can still fail if host memory is exhausted. This does not enable RAM checkpoints
 or enlarge the fixed capture backing and disk staging buffer. Persistence pins
 remain capped at the 512 MiB disk-capture backing capacity.
 
+The disk-capture backing is the cache's own share of state pages: it lends no
+page to sessions, so idle sessions holding long frontiers cannot take it and
+stop later captures. Each disk capture is queued as soon as it is staged,
+before its request publishes it, so the backing returns as each write ends. A
+prompt capture that finds the backing full waits up to 20 s for queued writes
+to release it (`event=staging_waited`); exact-frontier captures stay optional
+and don't wait. A capture that still finds no room logs
+`event=staging_exhausted` with its staged bytes, the bytes other captures hold
+and how long it waited.
+
 When the sessions leave no RAM for the cache above the 4 GiB host reserve,
 the server refuses to load with that reason and the remedies: fewer
 `--sessions`, a smaller `--context`, or `--cache-ram-bytes off`. `off` loads
 even when the host is already below its reserve before the sessions allocate.
+The refusal also logs `event=ram_cache_refused` with the host sample it
+judged: `host_available_bytes`, `cma_free_bytes`, `cgroup_available_bytes`
+(under a container limit), `outstanding_state_bytes`, `host_reserve_bytes`
+and `host_ceiling_bytes`.
 When an explicit value is only partly available, the server loads with what
 the host allows and logs `event=ram_cache_trimmed` with the requested and the
 granted bytes; the same remedies restore the full budget.
@@ -489,9 +535,9 @@ Qwen27B and Flash-Next use the same options with these meanings:
 
 | Option | Meaning |
 | --- | --- |
-| `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in equal steps of about 1 GiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. |
-| `--cache-disk-bytes` | Counts referenced, temporary and orphaned files. A lower budget at startup removes temporaries and orphans, then the oldest checkpoints by creation order: use history does not survive a restart. |
-| `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 1 MiB pinned buffer; checkpoints of any size stream through it. Its size did not change restore or write speed, and a larger value only took pinned RAM and device heap. |
+| `--cache-ram-bytes` | The automatic and explicit sizing above, as a cap. Pinned 64 KiB pages for up to about 89% of it are committed as captures need them, in equal steps of about 1 GiB, and stay committed; the rest is reserved for cache metadata, which grows with use. The pages hold checkpoint state, KV rows, partial tails and idle-session spill. There is no separate spill budget. Rows a checkpoint shares with a session ([shared pages](state-memory.md#shared-pages)) count against the cap like copies but commit no cache page. |
+| `--cache-disk-bytes` | Counts referenced, temporary, orphaned and access-history files. A lower budget at startup removes temporaries and orphans, then applies the same lineage-aware eviction order as runtime, using persisted access history when available. |
+| `--cache-disk-staging-bytes` | Ignored, with an `event=option_ignored` warning. Disk transfers use an internal 8 MiB pinned buffer; checkpoints of any size stream through it. Writes move one 1 MiB piece at a time, whose size did not change write speed; restores read and check eight pieces in parallel while copying others out. |
 | `--cache-disk DIR` | Owned by one server. A second one fails at startup, before committing its RAM budget, with an ownership error naming the directory.  model's server sharing it. |
 
 The 128-record limit stays internal. The following measured sizes and timings
@@ -503,6 +549,15 @@ count under 128; only larger explicit budgets can reach the record limit. The st
 `automatic_bytes`, `max_bytes`, `staging_capacity_bytes`,
 `disk_capacity_bytes` and `slot_pinned_bytes` (host memory the sessions pinned
 at startup, charged on top of `capacity_bytes`).
+
+The post-slot host recheck counts initialized recovered manifest storage once
+inside the total RAM allowance. It credits those bytes when comparing remaining
+allocations with remaining host headroom, and half of them when reconstructing
+the automatic half-available budget. Pinned execution slots remain outside the
+cache allowance; staging remains a separate pending allocation. The grant never
+credits unused vector capacity, ledger reservations or estimated overhead as
+resident storage. `event=ram_admission` reports `owned_manifest_bytes` and the
+remaining `additional_bytes`; this is allocation accounting, not an RSS measure.
 
 Flash-Next prepares a bounded two-segment reserve before readiness and can
 prepare the next segment before a prefill with at least 512 tokens remaining
@@ -546,6 +601,37 @@ page cache that holds recent disk checkpoints, so a restore soon after a
 restart reads them from memory. A cache that has filled keeps its footprint; the advice above on explicit budgets for co-resident servers
 still applies.
 
+### Native transfer resources
+
+Flash-Next preallocates `sessions + 1` native HIP streams and
+`18 * sessions + 1` independent event leases. Each exclusively leased session
+can hold a preservation lease, a foreground batch of up to 16 transfers and
+one submitted idle piece; the serialized disk staging transfer adds one lease.
+For four sessions this is five native streams and 73 event leases.
+
+Several leases may submit to one FIFO stream. Completion waits stop at the
+lease's system-visible event fence, retaining the stream and source owners
+until submitted work settles. Failures quarantine the affected native lane;
+exhaustion after quarantine terminates instead of waiting for lost capacity.
+All native handles exist before cache sizing, so acquisition cannot introduce
+an unaccounted later stream allocation. Other providers keep their existing
+exclusive-stream policy unless they opt into the session-aware factory.
+
+Restores lease their own native streams at the highest stream priority.
+Restores beside running decoders instead copy on the GPU's SDMA copy engine
+(HSA async copy), outside every stream and compute queue, where the runtime has
+one (not on Windows). HIP pools streams onto a few hardware queues and gave a
+priority restore stream the executor stream's: beside decode, each restore copy
+then waited for a whole decode graph, and a 2.2 GB disk restore took 2.6 s
+instead of 0.25 s (Flash-Next, November 2026). A stream on a hardware queue of
+its own avoided the wait but cost one of the device's compute queues and
+doubled decode step time while it copied; the engine does neither. Alone it
+copies slower than the copy kernel on the two priority streams (54–65 against
+117–124 GB/s), so restores with nothing beside them keep those. The engine
+reads and writes by GPU address, so it copies device memory and registered
+host memory; anything else, and Qwen's FP32 K/V rows, go through the
+lease's priority stream.
+
 ## The disk tier
 
 `--cache-disk DIR` adds a second tier that survives restarts. A checkpoint
@@ -559,31 +645,122 @@ restore, which still reads, checks and copies them in order. That restore took
 8.7–9.9 s when one thread hinted each file in turn **(measured, NVMe under
 dm-crypt)**.
 
+Where restores have the copy engine (above), a request admitted while other
+requests decode restores beside them when the restore would take longer than
+their decode round: a worker thread runs the restore's reads, checks and
+copies, none on the executor stream, while the scheduler keeps stepping the
+decoders. Only the adapter's `BeginRestore`, `Validate` and `Invalidate`,
+which use the executor stream, run on the scheduler thread. In November 2026,
+with a Flash-Next request decoding, a 76K-token (2.2 GB) disk restore beside it
+cut that request's longest pause between tokens from 318–343 ms to
+159–200 ms; what remains is the restored request's short prefill. A shorter
+restore runs inline, as without the engine: the worker hands the restored
+request back only after the round in progress, so beside DeepSeek's rounds a
+224 MB restore raised that request's TTFT from 0.10 to 0.15 s and shortened no
+pause. A restore still holds up other prompts' prefill and admission, so while
+another prompt prefills, others wait to be admitted, or the restore will run
+inline, the request first waits while 16 workers read its checkpoint into the
+page cache (`event=disk_warm`) and the others proceed. Without the engine the
+copies would wait behind decode work: a 15K-token DeepSeek disk restore took
+1.1–1.3 s beside decode on priority streams instead of 0.1 s inline.
+
 Learned divergence points (see above) are ordinary checkpoints, so they reach
 disk like any other and survive restarts.
 
-**Disk checkpoints are spaced at least 2048 tokens apart.** A conversation
-advances a few hundred tokens per turn, so writing every turn serialises, fsyncs
-and retains a nearly identical snapshot. A checkpoint less than 2048 tokens past
-the longest stored entry that is still a prefix of it is skipped and logged as
-`min_step`; the RAM tier still retains it. When RAM does not retain it either,
-the device state is not copied at all, so a skipped checkpoint costs no capture
-time on the request path. Learned shared-prefix boundaries are
-exempt, because they sit close to a deeper entry by construction. On a
-Qwen3.8-27B functional run this cut disk writes from 31 to 5 and written bytes
-from 6.97 GiB to 1.37 GiB **(measured)**.
+Prompt checkpoints less than 2048 tokens past a stored prefix remain optional.
+Learned boundaries and exact generated frontiers bypass this spacing rule.
+A completed request schedules its executed decode-end frontier on a bounded
+per-slot task when the device is idle. Admission waits for that task before
+reusing a slot, and teardown joins it before draining disk jobs. When another
+foreground lease is active, capture stays on the exclusive completion path.
+Complete chunks share the execution history; private state and tails copy under
+slot exclusivity, and borrowed rows use the existing idle preservation worker.
+Optional setup or admission refusal leaves the completed live execution valid.
+The disk queue writes these copies during idle work. Each one is a turn end
+that an edit or a branch restores, so a queued turn end coalesces into newer
+ones only when the queue has no room for the next write, keeping the two most
+recent. That next write may belong to another conversation, so one
+conversation's backlog cannot crowd out another's newest turn end. A larger
+turn end coalesces as many older ones as it needs to fit, so the newest turn
+end is not the one skipped. A writer that falls behind delays turn ends
+instead of dropping them.
+A refused capture or full persistence queue can still leave an earlier fallback.
+Before their first restore, generated copies use free capacity or replace older
+unused frontiers. Where the backing provider can estimate capacity, optional
+copies also leave projected headroom for an equivalent incremental capture.
+Headroom refusal cannot bypass the limit through optional disk staging. This
+protects private-state capacity, without promising space for an arbitrary larger
+prompt or unfragmented allocation. Prompt admission reclaims unused generated copies before exact
+retries, including their queued disk writes; active writes are left alone.
+Once a generated checkpoint restores a request it competes normally. Unused
+generated victims are dropped rather than requeued for demotion.
 
-The trade-off is what a disk-only restore resumes from. After a restart, or
-once RAM evicted the conversation, a request restores the nearest stored entry
-and re-prefills up to 2048 tokens plus its own turn, instead of resuming
-exactly at the previous frontier. Greedy output is unchanged. Sampled output can
-differ from the pre-restart response, because the re-prefilled gap follows
-different chunk shapes, as with any partial hit. Plain continuation from RAM is
-unaffected.
+When RAM pressure removes a checkpoint with a complete usable disk publication,
+it prefers that copy within its pressure tier. Publication quarantine or
+retirement immediately removes that preference. A RAM-only victim can be
+queued for demotion from its retained payload, bypassing prompt spacing. Only
+one demotion can pin payload after logical removal; while it is occupied,
+further victims are dropped. Demotion remains optional and never waits for disk.
+Grid checkpoints remain RAM-only.
 
-Disk entries are evicted by global LRU on last access, so one active run whose
-checkpoints are all recent will displace every other conversation in age order
-**(measured)**.
+Disk eviction removes superseded history before another conversation's last
+frontier. A generated frontier supersedes covered entries only after three
+newer generated frontiers of the same lineage, leaving two recent turn ends
+for edits. Forks and learned boundaries are exempt. Other conversations whose
+checkpoint or descendant was restored within one disk budget of newly admitted
+unique payload bytes outlive unreused conversations. This protection expires
+at a byte turnover and survives a clean restart. Within each tier, entries use
+the newest descendant's access recency, and also the admission of any prefix
+no other branch shares, so a prefix published after its leaf (spacing and
+write order decide that) ranks with the leaf instead of outliving it. A
+restored prefix lends nothing: the client that resumed there did not match
+the leaf. Within one recency, covered entries leave first, then leaves and
+forks; ties prefer the retirement that frees more unique payload bytes. Shared
+chunks are excluded from that estimate. A busy store refuses eviction
+immediately,
+and reader pins still protect their publication.
+
+Access history lives in independently checksummed 40-byte files under
+`v2/uses`, counts against the disk budget, and is removed with its manifest.
+Legacy 16-byte recency records remain readable without a reuse stamp. New
+records also retain the admission-byte clock and last reuse coordinate.
+Lookup only marks access history dirty. Quiescent maintenance and catalog
+teardown flush updates; filesystem work never runs from ordinary lookup.
+An abrupt shutdown can lose these advisory updates. Missing or damaged history
+falls back to checkpoint ID.
+It never changes whether a checkpoint can restore.
+
+RAM byte pressure also delays preferential eviction of the two newest covered
+turns in a reused conversation. Multiple captures in one serving turn count
+once. These edit fallbacks still leave before leaves and forks under pressure.
+
+Adapters can provide fixed prefill and restore cost estimates. The
+`cost_estimate` event logs estimated milliseconds for the selected interval
+beside actual request metrics. The model benchmark pages hold the calibrations;
+these estimates do not change capture thresholds or enable cost-per-byte ranking.
+
+### Recovery metadata validation
+
+Cold recovery reads manifests and checks each distinct payload identity once
+per namespace. The temporary validation map stores actual file type and size,
+then reuses its nodes for canonical reference geometry. Borrowed manifest
+fields and fixed-size geometry avoid per-reference owner/geometry vectors;
+two bounded arrays track rejected owners and duplicate checkpoint IDs.
+
+Unavailable dependencies exclude their owners before conflict validation.
+Every complete owner involved in incompatible shared geometry, private aliasing
+or a duplicate checkpoint ID is rejected, regardless of enumeration order.
+Allocation failure aborts recovery and releases its charges and directory lock;
+it is not treated as evidence of corrupt data.
+
+`DiskStartupStats` separates decoded `dependency_references`,
+`distinct_dependency_files` and actual `dependency_stats`. These counters
+exclude the directory scans, which still inspect every managed file to account
+for referenced, temporary and orphaned bytes. Reusing dependency observations
+reduces repeated work; it does not remove the distinct-file filesystem metadata
+working set or establish a reduction in system memory use. Observations expire
+at the end of recovery. Restore still checks the opened file, identity and
+payload checksum before making state executable.
 
 ## What invalidates reuse
 
@@ -625,14 +802,26 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | --- | --- |
 | `schema=component-cache-v1 event=configured` | Flash-Next: RAM, staging and disk budgets at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim; `ram_cache=on` or `ram_cache=off` at the end of the line, and `disk_backing_bytes` for the backing an off cache keeps for disk captures |
 | `schema=component-cache-v1 event=backing_grown` | Flash-Next: a capture committed another segment of cache pages (about 1 GiB); reports `committed_bytes`, `segments` and the capture's `acquire_ms` |
+| `schema=component-cache-v1 event=ram_cache_refused` | Warning before a load refusal for RAM: the sessions leave the cache nothing above the host reserve. Reports `sessions`, `budget_bytes` when the slots could not allocate under the budget, and the host sample before they allocated: `host_available_bytes` (MemAvailable), `cma_free_bytes`, `cgroup_available_bytes` under a container limit, `outstanding_state_bytes`, `host_reserve_bytes` and `host_ceiling_bytes` |
+| `schema=component-cache-v1 event=host_pressure_release` | Warning: the idle scheduler found MemAvailable below the host reserve (another process took memory) and the RAM cache gave memory back. Reports `shortfall_bytes`, `wanted_bytes` (shortfall + 2 GiB), `released_bytes`, `evicted` checkpoints, `ms` and the host sample. Logged on each release, and once when nothing more can go |
 | `schema=component-cache-v1 event=ram_cache_trimmed` | Qwen3.8-27B, Flash-Next and DeepSeek V4: an explicit `--cache-ram-bytes` exceeds what the host keeps above its 4 GiB reserve after the sessions allocated; reports `requested_bytes` and the granted `capacity_bytes` |
 | `schema=component-cache-v1 event=backing_limited reason=host_reserve` | Flash-Next: the cache stopped growing below its budget because the host would keep less than 4 GiB available |
 | `schema=component-cache-v1 event=backing_limited reason=device_heap_reserve` | Flash-Next: the cache stopped growing because registering a segment's pages took the device heap below its 4 GiB dispatch reserve, which would push session and scratch allocations onto managed memory. Hosts that do not charge registered pages to the heap log it only when other allocations shrink the heap during the registration |
 | `schema=component-cache-v1 event=option_ignored option=--cache-disk-staging-bytes` | Flash-Next: the staging option is ignored; disk transfers use the internal buffer |
-| `schema=component-cache-v1 event=disk_evicted reason=budget` | Flash-Next: startup removed the oldest checkpoints (creation order) to fit a lowered `--cache-disk-bytes` |
+| `schema=component-cache-v1 event=disk_evicted reason=budget` | Startup applied lineage and persisted access ordering to fit a lowered `--cache-disk-bytes` |
 | `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
+| `schema=component-cache-v1 event=staging_waited` | `--cache-ram-bytes off`: a disk capture waited `waited_ms` for queued writes to release the capture backing |
+| `schema=component-cache-v1 event=staging_exhausted` | `--cache-ram-bytes off`: a disk capture found no room in the capture backing; reports `staged_bytes`, `held_bytes` by other captures, `backing_bytes`, `waited_ms` and whether it was an exact `frontier` |
+| `schema=component-cache-v1 event=row_storage` | At startup: `mode=shared_pages` when checkpoints keep the session pages that hold their rows, `mode=backing` when rows are copied or borrowed |
+| `schema=component-cache-v1 event=acquire` | The reuse a request got: `reuse` (`live`, `ram`, `disk`, `none`), `selected_tokens`, `restored_bytes`, and `remapped_bytes`, the part of them restored by mapping shared pages instead of a copy |
+| `schema=component-cache-v1 event=in_pass_unsupported` | The adapter could not take a checkpoint at `tokens` inside a prefill pass (`cached_tokens` is the reused prefix); the pass ends there and the checkpoint is captured after it |
 | `schema=component-cache-v1 event=published` | A checkpoint finished disk publication; `checkpoint_id` identifies the capture and `tokens` its boundary |
+| `schema=component-cache-v1 event=disk_restore` | A checkpoint was restored from disk: `tokens`, `bytes`, `pieces` and timings. `filesystem_ms` and `checksum_ms` add up the parallel readers' time, so they can exceed the restore's wall time; `stream_wait_ms` is the restoring thread's wait for copies |
+| `schema=component-cache-v1 event=disk_warm` | A request admitted while another prompt prefilled, or while others ran, found its checkpoint only on disk; a worker read its `bytes` into the page cache in `ms`. `skipped=floor` when free pages would drop below the host floor; `skipped=beside` when nothing else waited and the restore copies beside the running requests instead |
+| `event=disk_warm_wait` | The request waited `wait_ms` for that read (`read=1`) or for the scheduler to go idle (`read=0`) before restoring |
 | `schema=component-cache-v1 event=persistence_refused reason=min_step` | A captured checkpoint is too close to an existing publication; includes `checkpoint_id` and `tokens` |
+| `schema=component-cache-v1 event=persistence_refused reason=allocation` | The disk write's job metadata could not be allocated, for example because metadata filled the byte budget; the reply completes without that checkpoint |
+| `schema=component-cache-v1 event=live_frontier_refused reason=allocation` | The live frontier's index record could not be allocated even after reclaiming; the reply completes and the next turn restores from a retained checkpoint, if any, or prefills |
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
 | `event=snapshot action=skipped reason=entry_capacity` | no checkpoint record could be replaced safely for this capture |
 | `event=snapshot action=skipped reason=byte_capacity` | a checkpoint did not fit the RAM budget |
@@ -659,6 +848,10 @@ stored prompt shares a token with the request and `no_compatible_boundary`
 when one does but no restorable boundary covers it;
 `cache_common_prefix_tokens` is then the longest agreement and
 `cache_checkpoint_tokens` the deepest compatible boundary.
+
+`usage.gufo.component_cache` adds `remapped_bytes` (restored bytes that took
+no copy) and `shared_payload_bytes` (captured bytes that share their session's
+pages, part of `borrowed_capacity_bytes`).
 
 Flash-Next also reports `usage.gufo.component_cache.captured_checkpoint_ids`.
 Match these request-local IDs to `checkpoint_id` in publication/refusal logs:

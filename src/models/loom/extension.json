@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "name": "loom",
+  "version": "0.3.6",
+  "api_version": ">= 0.3.37",
+  "entry": "loom_register",
+  "registration_target": "gufo_loom",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "loom-text",
+      "capability": "text_generation",
+      "keys": [
+        "manifest:loom"
+      ],
+      "model_ids": [],
+      "target": "gufo_loom",
+      "entry": "loom_text_provider_register",
+      "serving": {
+        "hip": false
+      }
+    }
+  ],
+  "targets": {
+    "gufo_loom": {
+      "requires": []
+    }
+  },
+  "production_paths": {
+    "include": [
+      "**/*.c",
+      "**/*.cpp",
+      "**/*.h",
+      "**/*.hpp",
+      "embed/*",
+      "extension.*",
+      "runtime.cmake"
+    ],
+    "exclude": [
+      "tests/",
+      "tools/"
+    ]
+  },
+  "docs": {
+    "title": "Loom packages",
+    "inputs": "loom-fun packages: GGUF models on AMD Loom kernels",
+    "guide": "docs/models/loom.md"
+  },
+  "tests": [
+    {
+      "target": "loom_package_test",
+      "ctest": "loom_package_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "loom_runner_logits_test",
+      "ctest": "loom_runner_logits_test",
+      "check_pr": true,
+      "windows_build": true
+    }
+  ],
+  "test_labels": [
+    "loom"
+  ],
+  "functional": "functional/",
+  "licenses": [
+    "LICENSE"
+  ]
+}

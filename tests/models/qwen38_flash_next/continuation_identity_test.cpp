@@ -33,6 +33,7 @@ void FlashCases() {
   Golden("adapters",
          QwenFlashNextCompatibilityIdentity(
              artifact, draft, false, 4096, 4, 1, "absolute-v1",
+             ext::kGgufIdentityScheme, ext::kGgufIdentityScheme,
              "projection-v1;layers=4-44;sha256=" + std::string(64, 'c')));
 }
 

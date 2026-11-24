@@ -212,6 +212,15 @@ ResourceReservation ResourceLedger::Reserve(ResourceCategory category,
       category == Chunk || bytes == 0)
     throw std::invalid_argument(
         "ledger reserve requires a nonzero allocation category");
+  return Admit(category, bytes);
+}
+ResourceReservation ResourceLedger::ReserveShared(std::size_t bytes) {
+  if (bytes == 0)
+    throw std::invalid_argument("shared payload has no bytes");
+  return Admit(Chunk, bytes);
+}
+ResourceReservation ResourceLedger::Admit(ResourceCategory category,
+                                          std::size_t bytes) {
   // Host bookkeeping allocation is outside the lock and has strong exception
   // safety. Charge payload sizes must include any owner/index metadata
   // separately.
@@ -330,10 +339,18 @@ ResourceReservation ResourceCharge::ReserveBacking(
     const auto& allocation = blocks[i].token_->allocation;
     if (allocation->ledger != first->ledger)
       throw std::invalid_argument("backing assignment spans ledgers");
-    for (std::size_t j = 0; j < i; ++j)
-      if (allocation == blocks[j].token_->allocation)
-        throw std::invalid_argument("duplicate backing block");
     assignment->additional.push_back(allocation);
+  }
+  // Sorted, not pairwise: a 15.7 GB private state is 240k blocks, and
+  // comparing each with every earlier one held its capture for 20 s (#1317).
+  if (blocks.size() > 1) {
+    std::vector<const detail::Allocation*> seen;
+    seen.reserve(blocks.size());
+    for (const auto& block : blocks)
+      seen.push_back(block.token_->allocation.get());
+    std::ranges::sort(seen);
+    if (std::ranges::adjacent_find(seen) != seen.end())
+      throw std::invalid_argument("duplicate backing block");
   }
   auto& a = *first;
   const detail::Lock lock(*a.ledger, LedgerStep::kReserve);

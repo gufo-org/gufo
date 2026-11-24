@@ -1,5 +1,6 @@
 #include <gufo/ext/asr.hpp>
 #include <gufo/ext/generated/qwen3_asr_constants.hpp>
+#include <gufo/ext/options.hpp>
 #include <gufo/ext/registry.hpp>
 
 #include "hip/transcription_runtime.hpp"
@@ -35,6 +36,23 @@ std::unique_ptr<ext::AsrRunner> CreateQwen3AsrRunner(
   }
   return std::make_unique<Qwen3AsrRunnerImpl>(std::move(runtime));
 }
+
+std::unique_ptr<ext::AsrRunner> CreateQwen3AsrRunnerWithOptions(
+    const ext::AsrRunnerOptions& options, std::string* error) {
+  if (!options.projector_path.empty()) {
+    if (error)
+      *error = "Qwen3-ASR does not take --mmproj";
+    return nullptr;
+  }
+  const bool* npu = ext::FindOption<bool>(options.provider_options, "--npu");
+  auto runtime = hip::TranscriptionHipRuntime::Create(
+      options.model_root, options.maximum_context_tokens, error,
+      npu != nullptr && *npu);
+  if (!runtime) {
+    return nullptr;
+  }
+  return std::make_unique<Qwen3AsrRunnerImpl>(std::move(runtime));
+}
 #endif
 
 }  // namespace gufo::models::qwen3_asr
@@ -49,12 +67,14 @@ void qwen3_asr_provider_register(gufo::ext::Registry& registry) {
       .probe = &ProbeQwen3Asr,
       .resolve = &ResolveQwen3AsrArtifacts,
       .create = &CreateQwen3AsrRunner,
+      .create_with_options = &CreateQwen3AsrRunnerWithOptions,
   });
   registry.AddAsrProvider({
       .id = "qwen3-asr-1.7b",
       .probe = &ProbeQwen3Asr,
       .resolve = &ResolveQwen3AsrArtifacts,
       .create = &CreateQwen3AsrRunner,
+      .create_with_options = &CreateQwen3AsrRunnerWithOptions,
   });
 #endif
 }

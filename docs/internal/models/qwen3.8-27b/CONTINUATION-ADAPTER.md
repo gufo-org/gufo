@@ -73,7 +73,7 @@ Legacy snapshots retain their existing caller responsibility to supply the
 matching image input; their payload format is unchanged.
 
 Serving uses committed host backing in equal segments of about 128 MiB, admitted
-above both host and device heap reserves, and fixed 1 MiB disk staging. Each
+above both host and device heap reserves, and fixed 8 MiB disk staging. Each
 prefill pass pins its entry recurrent buffer; writes use the existing rollback
 pair. Cancellation can stop between layers and restore that pointer, preserving
 completed prompt work without copying another checkpoint. The second recurrent
@@ -82,6 +82,27 @@ claim. Cancellation occurs before the target vocabulary head and draft
 catch-up, leaving their previous frontier intact. Qwen's legacy server snapshot
 hooks are removed; standalone native
 snapshots remain available and DeepSeek keeps its legacy serving path.
+
+A prefill step captures its prompt checkpoints in place (`PrefillThrough`). It
+runs the passes that steps ending at each boundary would run, and the consumer
+reads the live slot between them, so captures and outputs keep the arithmetic
+of those passes. One merged pass would not: UD-Q4_K_XL prefills passes of
+1,024 rows or more with FP16 activations and shorter ones with Q8_1. Each
+boundary is a complete frontier, logits included, as for a prompt snapshot
+target. The host's layer groups span the step's passes, so a short pass between
+two boundaries no longer runs unsplit beside decoders. A boundary joins the step
+only when at most one 512-row prefill unit follows it; a boundary further from
+the step's end still ends the step, where the scheduler admits prompts that
+arrived meanwhile. A step of one unit or less takes no boundary in place: the
+scheduler runs it unsplit, so joining its passes would only make decoders wait
+for both. The groups split the step's estimated time, not its rows: the
+runner prices a pass at 120 ms plus 2.25 ms per row, or 1.80 ms per row on the
+FP16 route, and DFlash2's draft injection at 0.12 ms per row after the pass.
+As of November 2026 these fit passes measured on gfx1151 at depth 2,048; each
+capture between passes took 4.0–7.1 ms, which the plan leaves out
+([measurements](artifacts/in-pass-prefill-costs.json)). Each pass pins its own
+entry recurrence: cancelling a later pass keeps the passes before it, as their
+separate steps would.
 
 Qwen restores use the destination executor's stream to avoid the pooled-stream
 wait observed behind another session's cancelled prefill. Cold reassignment
@@ -116,6 +137,12 @@ The draft check restores into another slot and checks component bytes, injected
 position, sampled proposals/RNG and feedback/controller state. The portable
 `qwen27b_continuation_layout_test` covers checked geometry and policy identity;
 it does not load model weights or establish numerical quality.
+
+`qwen27b_in_pass_test "$MODEL" "$DRAFT"` checks the in-pass checkpoints of one
+prefill step in AR and DFlash2 modes. It compares each capture, a restored one
+continued in place and a cancelled step, component by component, with steps
+that end at each boundary. It also checks which boundaries the runner claims;
+the host captures only those in place.
 
 The step probe uses the production release configuration and requires two
 native slots plus 8 GiB of committed checkpoint backing:

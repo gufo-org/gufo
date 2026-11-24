@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <gufo/ext/continuation.hpp>
 #include <string_view>
 #include <vector>
 
@@ -12,6 +13,8 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
     std::string_view artifact_fingerprint, std::string_view mtp_fingerprint,
     bool has_mtp, std::uint32_t max_context, std::uint32_t max_draft_tokens,
     std::uint32_t decode_concurrency, std::string_view position_policy,
+    std::string_view artifact_scheme = ext::kGgufIdentityScheme,
+    std::string_view draft_scheme = ext::kGgufIdentityScheme,
     std::string_view adapters = "none");
 
 std::vector<std::uint8_t> QwenFlashNextProcessIdentity(

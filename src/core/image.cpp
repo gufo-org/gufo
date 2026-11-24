@@ -1,19 +1,19 @@
 #include "src/core/image.hpp"
 
 #include <curl/curl.h>
+#include <gufo/jpeg_decode.h>
 #include <gufo/png_decode.h>
-#include <jpeglib.h>
 #include <webp/decode.h>
 
 #include <algorithm>
 #include <array>
-#include <csetjmp>
 #include <cstring>
 #include <fstream>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include "src/core/base64.hpp"
 #include "src/core/platform/socket.hpp"
@@ -29,75 +29,32 @@ void ValidateDimensions(std::uint32_t width, std::uint32_t height) {
   }
 }
 
-struct JpegError {
-  jpeg_error_mgr manager{};
-  std::jmp_buf jump;
-};
-
-struct JpegDecoder {
-  jpeg_decompress_struct decoder{};
-  JpegError error;
-  Image image;
-  std::vector<std::uint8_t> cmyk_row;
-  bool created{false};
-  ~JpegDecoder() {
-    if (created)
-      jpeg_destroy_decompress(&decoder);
-  }
-};
-
-Image DecodeJpeg(std::span<const std::uint8_t> bytes) {
-  // Keep every modified C++ object on the heap, outside libjpeg's longjmp.
-  auto state = std::make_unique<JpegDecoder>();
-  state->decoder.err = jpeg_std_error(&state->error.manager);
-  state->error.manager.error_exit = [](j_common_ptr common) {
-    std::longjmp(reinterpret_cast<JpegError*>(common->err)->jump, 1);
-  };
-  state->error.manager.output_message = [](j_common_ptr) {};
-  if (setjmp(state->error.jump) != 0) {
+void CheckJpeg(GufoJpegStatus status) {
+  if (status == GUFO_JPEG_INVALID)
     throw std::invalid_argument("invalid JPEG image");
-  }
-  jpeg_create_decompress(&state->decoder);
-  state->created = true;
-  jpeg_mem_src(&state->decoder, bytes.data(), bytes.size());
-  if (jpeg_read_header(&state->decoder, TRUE) != JPEG_HEADER_OK) {
-    throw std::invalid_argument("invalid JPEG header");
-  }
-  ValidateDimensions(state->decoder.image_width, state->decoder.image_height);
-  const bool cmyk = state->decoder.jpeg_color_space == JCS_CMYK ||
-                    state->decoder.jpeg_color_space == JCS_YCCK;
-  state->decoder.out_color_space = cmyk ? JCS_CMYK : JCS_RGB;
-  jpeg_start_decompress(&state->decoder);
-  state->image.width = state->decoder.output_width;
-  state->image.height = state->decoder.output_height;
-  state->image.pixels.resize(std::size_t{state->image.width} *
-                             state->image.height * 3);
-  if (cmyk)
-    state->cmyk_row.resize(std::size_t{state->image.width} * 4);
-  while (state->decoder.output_scanline < state->decoder.output_height) {
-    auto* rgb =
-        state->image.pixels.data() +
-        std::size_t{state->decoder.output_scanline} * state->image.width * 3;
-    JSAMPROW row = cmyk ? state->cmyk_row.data() : rgb;
-    if (jpeg_read_scanlines(&state->decoder, &row, 1) != 1) {
-      throw std::invalid_argument("truncated JPEG image");
-    }
-    if (cmyk) {
-      // Pillow decodes JPEG CMYK with inverted channels, then converts to RGB.
-      for (std::size_t x = 0; x < state->image.width; ++x) {
-        for (std::size_t c = 0; c < 3; ++c) {
-          const unsigned product =
-              unsigned{row[x * 4 + c]} * row[x * 4 + 3] + 128;
-          rgb[x * 3 + c] =
-              static_cast<std::uint8_t>((product + (product >> 8)) >> 8);
-        }
-      }
-    }
-  }
-  jpeg_finish_decompress(&state->decoder);
-  if (state->error.manager.num_warnings != 0)
-    throw std::invalid_argument("corrupt or truncated JPEG image");
-  return std::move(state->image);
+  if (status != GUFO_JPEG_OK)
+    throw std::runtime_error("JPEG decoder failed");
+}
+
+struct JpegDecoderClose {
+  void operator()(GufoJpegDecoder* decoder) const { gufo_jpeg_close(decoder); }
+};
+
+// Returns the image before its EXIF orientation is applied.
+Image DecodeJpeg(std::span<const std::uint8_t> bytes, unsigned& orientation) {
+  GufoJpegDecoder* opened = nullptr;
+  GufoJpegInfo info{};
+  const GufoJpegStatus status =
+      gufo_jpeg_open(bytes.data(), bytes.size(), &opened, &info);
+  const std::unique_ptr<GufoJpegDecoder, JpegDecoderClose> decoder(opened);
+  CheckJpeg(status);
+  ValidateDimensions(info.width, info.height);
+  orientation = info.orientation;
+  Image image{info.width, info.height, {}};
+  image.pixels.resize(std::size_t{image.width} * image.height * 3);
+  CheckJpeg(gufo_jpeg_decode_rgb8(decoder.get(), image.pixels.data(),
+                                  image.pixels.size()));
+  return image;
 }
 
 void CheckPng(GufoPngStatus status) {
@@ -126,7 +83,7 @@ Image DecodePng(std::span<const std::uint8_t> bytes) {
   return image;
 }
 
-// Bounds-checked TIFF orientation; shared by JPEG APP1 and PNG eXIf.
+// Bounds-checked TIFF orientation for PNG eXIf; the JPEG decoder reads APP1.
 unsigned TiffOrientation(std::span<const std::uint8_t> data) {
   if (data.size() < 8)
     return 1;
@@ -157,36 +114,6 @@ unsigned TiffOrientation(std::span<const std::uint8_t> data) {
       const unsigned value = read(p + 8, 2);
       return value >= 1 && value <= 8 ? value : 1;
     }
-  }
-  return 1;
-}
-
-unsigned JpegOrientation(std::span<const std::uint8_t> bytes) {
-  for (std::size_t offset = 2; offset < bytes.size();) {
-    if (bytes[offset] != 0xff)
-      break;
-    // JPEG permits repeated FF fill bytes before a marker.
-    while (offset < bytes.size() && bytes[offset] == 0xff)
-      ++offset;
-    if (offset == bytes.size())
-      break;
-    const auto marker = bytes[offset++];
-    if (marker == 0xda || marker == 0xd9)
-      break;
-    if (marker == 0x01 || marker == 0xd8 || (marker >= 0xd0 && marker <= 0xd7))
-      continue;
-    if (bytes.size() - offset < 2)
-      break;
-    const std::size_t length =
-        (unsigned{bytes[offset]} << 8) | bytes[offset + 1];
-    if (length < 2 || length > bytes.size() - offset)
-      break;
-    const auto data = bytes.subspan(offset + 2, length - 2);
-    if (marker == 0xe1 && data.size() >= 14 &&
-        std::memcmp(data.data(), "Exif\0\0", 6) == 0) {
-      return TiffOrientation(data.subspan(6));
-    }
-    offset += length;
   }
   return 1;
 }
@@ -313,7 +240,9 @@ Image DecodeImage(std::span<const std::uint8_t> bytes) {
     return Orient(DecodePng(bytes), PngOrientation(bytes));
   }
   if (bytes.size() >= 2 && bytes[0] == 0xff && bytes[1] == 0xd8) {
-    return Orient(DecodeJpeg(bytes), JpegOrientation(bytes));
+    unsigned orientation = 1;
+    Image image = DecodeJpeg(bytes, orientation);
+    return Orient(std::move(image), orientation);
   }
   if (bytes.size() >= 12 && std::memcmp(bytes.data(), "RIFF", 4) == 0 &&
       std::memcmp(bytes.data() + 8, "WEBP", 4) == 0) {

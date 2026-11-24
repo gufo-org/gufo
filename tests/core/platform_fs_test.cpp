@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -303,6 +304,29 @@ int main() {
     platform::Advise(file, platform::AdviseHint::kWillNeed, 0, 16);
     platform::Advise(file, platform::AdviseHint::kDontNeed, 0, 0);
     platform::CloseFile(file);
+  }
+
+  // CloneFile: a reflink holds the same bytes in its own file; where the file
+  // system cannot clone, nothing is left behind. It never replaces a file.
+  {
+    const auto source = root / "clone-source";
+    const auto clone = root / "clone";
+    std::ofstream(source, std::ios::binary) << "shared extents";
+    if (platform::CloneFile(source, clone, ec)) {
+      std::ifstream in(clone, std::ios::binary);
+      std::string text((std::istreambuf_iterator<char>(in)), {});
+      CHECK(text == "shared extents");
+      CHECK(!fs::equivalent(source, clone));
+      std::error_code again;
+      CHECK(!platform::CloneFile(source, clone, again));
+      CHECK(again == std::errc::file_exists);
+    } else {
+      CHECK(static_cast<bool>(ec));
+      CHECK(!fs::exists(clone));
+    }
+    std::error_code missing;
+    CHECK(!platform::CloneFile(root / "absent", root / "never", missing));
+    CHECK(!fs::exists(root / "never"));
   }
 
   std::error_code cleanup;

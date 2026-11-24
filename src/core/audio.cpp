@@ -2,8 +2,9 @@
 
 #include <gufo/audio_decode.h>
 
-#include <exception>
 #include <string>
+
+#include "src/core/rust/callback.hpp"
 
 namespace gufo::core {
 namespace {
@@ -51,23 +52,20 @@ struct Context {
   DecodedAudio* output;
   bool downmix_mono;
   // An exception from should_stop or the copy, rethrown once Rust returns.
-  std::exception_ptr failure;
+  ffi::CallbackFailure failure;
 };
 
 int Stop(void* opaque) noexcept {
   auto& context = *static_cast<Context*>(opaque);
-  try {
+  return context.failure.Guard(1, [&] {
     return *context.should_stop && (*context.should_stop)() ? 1 : 0;
-  } catch (...) {
-    context.failure = std::current_exception();
-    return 1;
-  }
+  });
 }
 
 int Append(void* opaque, const GufoAudioInfo* info, const float* samples,
            std::size_t len) noexcept {
   auto& context = *static_cast<Context*>(opaque);
-  try {
+  return context.failure.Guard(1, [&] {
     DecodedAudio& output = *context.output;
     if (output.samples.empty()) {
       output.sample_rate = info->sample_rate;
@@ -87,10 +85,7 @@ int Append(void* opaque, const GufoAudioInfo* info, const float* samples,
     Mix(std::span(samples, len), info->channels,
         std::span(output.samples).subspan(frames));
     return 0;
-  } catch (...) {
-    context.failure = std::current_exception();
-    return 1;
-  }
+  });
 }
 
 AudioStatus FromRust(GufoAudioStatus status) {
@@ -141,13 +136,11 @@ DecodedAudio DecodeAudio(std::span<const std::byte> bytes,
       .max_pcm_bits = limits.max_pcm_bits,
   };
   DecodedAudio output;
-  Context context{&should_stop, &output, limits.downmix_mono, nullptr};
+  Context context{&should_stop, &output, limits.downmix_mono, {}};
   const GufoAudioStatus status =
       gufo_audio_decode(reinterpret_cast<const std::uint8_t*>(bytes.data()),
                         bytes.size(), &rust_limits, Stop, Append, &context);
-  if (context.failure) {
-    std::rethrow_exception(context.failure);
-  }
+  context.failure.Rethrow();
   if (status != GUFO_AUDIO_OK) {
     throw AudioError(FromRust(status));
   }
@@ -169,12 +162,10 @@ std::vector<float> Resample(std::span<const float> samples,
                             std::uint32_t from_rate, std::uint32_t to_rate) {
   DecodedAudio output;
   const std::function<bool()> never;
-  Context context{&never, &output, false, nullptr};
+  Context context{&never, &output, false, {}};
   const GufoAudioStatus status = gufo_audio_resample(
       samples.data(), samples.size(), from_rate, to_rate, Append, &context);
-  if (context.failure) {
-    std::rethrow_exception(context.failure);
-  }
+  context.failure.Rethrow();
   if (status == GUFO_AUDIO_OUT_OF_BOUNDS) {
     throw std::invalid_argument(
         "Resample: a rate is 0 or more than 64 times the other");

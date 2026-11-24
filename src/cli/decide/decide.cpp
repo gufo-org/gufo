@@ -11,6 +11,7 @@
 
 #include "gufo/ext/registry.hpp"
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/provider_options.hpp"
 #include "src/cli/serve/decision_service.hpp"
 #include "src/core/json.hpp"
 
@@ -37,6 +38,11 @@ int RunDecide(std::span<const char* const> args) {
       "", "--jsonl",
       "Read and answer one JSON request per line, keeping the model loaded",
       "Input", &jsonl);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions declared_options(registry, "decide",
+                                   ext::Capability::kDecision);
+  declared_options.Register(parser);
   std::string error;
   if (!parser.Parse(args, &error)) {
     std::cerr << "Error: " << error << '\n';
@@ -50,12 +56,18 @@ int RunDecide(std::span<const char* const> args) {
     std::cerr << "Error: decide needs --model and a positive --context\n";
     return 2;
   }
-  ext::Registry registry;
-  ext::RegisterBuiltExtensions(registry);
+  ext::ParsedOptions provider_options;
+  try {
+    provider_options = declared_options.Parse();
+  } catch (const std::invalid_argument& e) {
+    std::cerr << "Error: " << e.what() << '\n';
+    return 2;
+  }
   auto service =
       server::CreateDecisionService({.model_root = model_path.string(),
                                      .projector_path = mmproj.string(),
-                                     .maximum_context_tokens = context},
+                                     .maximum_context_tokens = context,
+                                     .provider_options = provider_options},
                                     {}, &error);
   if (!service) {
     std::cerr << "Error: " << error << '\n';

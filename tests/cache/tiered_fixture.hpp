@@ -64,10 +64,11 @@ struct TieredFixture {
     tokens.insert(tokens.end(), suffix.begin(), suffix.end());
     drafts.insert(drafts.end(), draft_suffix.begin(), draft_suffix.end());
   }
-  std::shared_ptr<const Checkpoint> Capture() {
+  std::shared_ptr<const Checkpoint> Capture(
+      CheckpointPurpose purpose = CheckpointPurpose::kPrompt) {
     return history.Capture(
         {tokens, InputIdentity(tokens.size()), adapter.Positions(*slot),
-         CheckpointPurpose::kPrompt, 1},
+         purpose, 1},
         [&](const PayloadRequest& request) {
           auto admission =
               ledger.Reserve(ResourceCategory::kBackingFree, request.bytes);
@@ -90,6 +91,8 @@ struct TieredFixture {
     DiskManifest manifest;
     manifest.checkpoint = checkpoint.Id();
     manifest.lineage = checkpoint.Lineage();
+    manifest.purpose = checkpoint.Purpose();
+    manifest.rank = checkpoint.Rank();
     manifest.compatibility = digest;
     manifest.input = checkpoint.Input();
     manifest.tokens.assign(checkpoint.Tokens().begin(),

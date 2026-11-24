@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -17,20 +18,24 @@
 
 #include "gufo/ext/component_cache_resources.hpp"
 #include "gufo/ext/experimental/admission_query.hpp"
+#include "gufo/ext/families/qwen/control_tokens/control_tokens.hpp"
+#include "gufo/ext/families/qwen/text/chat_template.hpp"
+#include "gufo/ext/families/qwen/text/tokenizer.hpp"
+#include "gufo/ext/families/qwen/vision/encoder.hpp"
+#include "gufo/ext/families/qwen/vision/image_cache.hpp"
+#include "gufo/ext/families/qwen/vision/prompt.hpp"
 #include "gufo/ext/gguf_identity.hpp"
+#include "gufo/ext/host.hpp"
 #include "gufo/ext/host_budget.hpp"
-#include "src/families/qwen/control_tokens/control_tokens.hpp"
-#include "src/families/qwen/text/chat_template.hpp"
-#include "src/families/qwen/text/tokenizer.hpp"
-#include "src/families/qwen/vision/encoder.hpp"
-#include "src/families/qwen/vision/image_cache.hpp"
-#include "src/families/qwen/vision/prompt.hpp"
+#include "gufo/ext/sha256.hpp"
 #include "src/models/qwen38_flash_next/continuation_adapter.hpp"
 #include "src/models/qwen38_flash_next/continuation_identity.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/probe.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
+#include "src/models/qwen38_flash_next/stages.hpp"
+#include "src/models/qwen38_flash_next/weight_source.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 namespace {
@@ -58,9 +63,14 @@ bool EndsTurn(const State& state, const Tokens& tokens, int token) {
   return state.stop_at_eos() && tokens.IsStopToken(token);
 }
 
+// Cache backing diagnostics (transfer resources, backing growth and limits)
+// go to the process log under the cache component, as before the extension
+// migration.
 [[nodiscard]] inline hip::ComponentCacheHooks HipComponentCacheHooks() {
-  return {[] { return ext::HostSnapshotCeilingBytes(); },
-          [](std::string_view) {}, [](std::string_view) {}};
+  return {
+      [] { return ext::HostSnapshotCeilingBytes(); },
+      [](std::string_view message) { server::Logger::Warn("cache", message); },
+      [](std::string_view message) { server::Logger::Info("cache", message); }};
 }
 
 struct QwenImageContext final : TextPromptContext {
@@ -203,6 +213,10 @@ public:
     return {.per_request_state_bytes = session_->AllocatedBytes(),
             .temporary_scratch_bytes = 0};
   }
+  [[nodiscard]] std::shared_ptr<mem::StateAccount> state_account()
+      const override {
+    return session_->StateAccount();
+  }
 
   [[nodiscard]] QwenFlashNextSession& session() const { return *session_; }
   [[nodiscard]] models::qwen38_flash_next::ContinuationAdapter& adapter()
@@ -269,11 +283,12 @@ public:
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kQwen;
   }
-  QwenFlashNextTextRunner(std::shared_ptr<QwenFlashNextModel> model,
-                          std::uint32_t max_context, bool use_mtp,
-                          std::uint32_t max_draft_tokens,
-                          std::string artifact_fingerprint = {},
-                          std::string mtp_fingerprint = {})
+  QwenFlashNextTextRunner(
+      std::shared_ptr<QwenFlashNextModel> model, std::uint32_t max_context,
+      bool use_mtp, std::uint32_t max_draft_tokens,
+      std::string artifact_fingerprint = {}, std::string mtp_fingerprint = {},
+      std::string_view artifact_scheme = ext::kGgufIdentityScheme,
+      std::string_view draft_scheme = ext::kGgufIdentityScheme)
       : model_(std::move(model)),
         max_context_(max_context),
         use_mtp_(use_mtp),
@@ -289,7 +304,7 @@ public:
           model_->DecodeConcurrency(),
           models::qwen38_flash_next::RopePositionPolicy(
               model_->config().rope_scaling),
-          model_->ProjectionAdapterIdentity());
+          artifact_scheme, draft_scheme, model_->ProjectionAdapterIdentity());
     } else {
       component_identity_ = QwenFlashNextProcessIdentity(
           model_.get(), max_context_, use_mtp_, max_draft_tokens_,
@@ -300,6 +315,23 @@ public:
   [[nodiscard]] std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
+    return CreateCacheResources(ledger, ram, {});
+  }
+  [[nodiscard]] std::unique_ptr<ComponentCacheResources>
+  CreateComponentCacheResourcesForSessions(
+      cache::ResourceLedger& ledger, std::size_t ram,
+      std::size_t sessions) const override {
+    return CreateCacheResources(ledger, ram,
+                                hip::PlanComponentTransfers(sessions));
+  }
+  [[nodiscard]] std::unique_ptr<ComponentCacheResources> CreateCacheResources(
+      cache::ResourceLedger& ledger, std::size_t ram,
+      std::optional<hip::ComponentTransferPlan> transfers) const {
+    auto hooks = HipComponentCacheHooks();
+    if (transfers) {
+      hooks.transfer_streams = transfers->native_streams;
+      hooks.transfer_leases = transfers->leases;
+    }
     (void)ram;
     return hip::CreateHipComponentCacheResources(
         std::make_unique<models::qwen38_flash_next::ContinuationAdapter>(
@@ -307,7 +339,7 @@ public:
             use_mtp_ ? core::SessionMode::kSpeculative
                      : core::SessionMode::kAutoregressive,
             max_context_, component_identity_),
-        ledger, HipComponentCacheHooks());
+        ledger, std::move(hooks));
   }
   [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
       cache::Adapter& adapter, cache::Slot& slot) const override {
@@ -357,10 +389,9 @@ public:
   }
 
   [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
-    const auto session_bytes = model_->SessionBytes(
-        use_mtp_ ? gufo::core::SessionMode::kSpeculative
-                 : gufo::core::SessionMode::kAutoregressive,
-        max_context_);
+    const auto mode = use_mtp_ ? gufo::core::SessionMode::kSpeculative
+                               : gufo::core::SessionMode::kAutoregressive;
+    const auto session_bytes = model_->SessionBytes(mode, max_context_);
     std::optional<std::size_t> capacity;
     if (const auto memory = gufo::hip::QueryAdmissionMemory()) {
       const auto deferred = model_->DeferredScratchBytes();
@@ -380,6 +411,8 @@ public:
         .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
         .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
         .requires_device_runtime_lock = true,
+        .demand_mapped_state_bytes =
+            model_->DemandMappedBytes(mode, max_context_),
     };
   }
 
@@ -491,9 +524,7 @@ public:
     const std::size_t remaining = prompt.size() - offset;
     const std::size_t consumed =
         StepTokens(offset, max_input_tokens, remaining,
-                   remaining <= model_->PrefillThroughCapacity()
-                       ? model_->PrefillThroughCapacity()
-                       : model_->PrefillCapacity());
+                   model_->StepCapacity(remaining, max_input_tokens));
     const std::size_t next_position = offset + consumed;
     const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
     // The next step most likely takes the same budget; its n-gram rows are
@@ -503,11 +534,10 @@ public:
                           ? state.prefill_lookahead()
                           : prompt.subspan(next_position);
     const std::size_t after = rest.size();
-    const auto next = QwenFlashNextEngineTokens(rest.subspan(
-        0, std::min<std::size_t>({max_input_tokens, after,
-                                  after <= model_->PrefillThroughCapacity()
-                                      ? model_->PrefillThroughCapacity()
-                                      : model_->PrefillCapacity()})));
+    const auto next = QwenFlashNextEngineTokens(
+        rest.subspan(0, std::min<std::size_t>(
+                            {max_input_tokens, after,
+                             model_->StepCapacity(after, max_input_tokens)})));
     std::string error;
     const PrefillYieldScope yield(*model_, state);
     if (!qfn.session().Sync(prefix, &error, next)) {
@@ -526,8 +556,9 @@ public:
       std::size_t offset, std::size_t budget,
       std::size_t boundary) const override {
     const auto& qfn = RequireQwenFlashNextState(state);
-    const auto consumed = StepTokens(offset, budget, prompt.size() - offset,
-                                     model_->PrefillThroughCapacity());
+    const auto consumed =
+        StepTokens(offset, budget, prompt.size() - offset,
+                   model_->StepThrough(prompt.size() - offset, budget));
     if (boundary <= offset + 1 || boundary >= offset + consumed)
       return std::nullopt;
     const auto bytes = qfn.session().PrefillCheckpointBytes(
@@ -543,8 +574,9 @@ public:
     auto& qfn = RequireQwenFlashNextState(state);
     if (!consume || boundaries.empty() || offset != qfn.position())
       throw std::logic_error("invalid component in-pass checkpoint request");
-    const auto consumed = StepTokens(offset, budget, prompt.size() - offset,
-                                     model_->PrefillThroughCapacity());
+    const auto consumed =
+        StepTokens(offset, budget, prompt.size() - offset,
+                   model_->StepThrough(prompt.size() - offset, budget));
     const auto next_position = offset + consumed;
     const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
     // As in Prefill: the next step's n-gram rows are read during this one.
@@ -553,10 +585,8 @@ public:
                           : prompt.subspan(next_position);
     const std::size_t after = rest.size();
     const auto next = QwenFlashNextEngineTokens(rest.subspan(
-        0, std::min<std::size_t>({budget, after,
-                                  after <= model_->PrefillThroughCapacity()
-                                      ? model_->PrefillThroughCapacity()
-                                      : model_->PrefillCapacity()})));
+        0, std::min<std::size_t>(
+               {budget, after, model_->StepCapacity(after, budget)})));
     std::vector<std::uint32_t> points(boundaries.begin(), boundaries.end());
     double capture_ms = 0;
     const PrefillYieldScope yield(*model_, state);
@@ -782,6 +812,12 @@ public:
     return RequireQwenFlashNextState(state).position();
   }
 
+  // A prefill that ends without advancing a token (cancelled, failed, or a
+  // stop token sampled from its logits) keeps the wide pass scratch, since
+  // decode steps and Advance release it. Idle, nothing will use it soon: give
+  // it back to the host.
+  void Idle() const override { model_->ReleaseWidePasses(); }
+
   [[nodiscard]] TextRunnerNgramRows NgramRows(
       const TextRunnerState& state) const override {
     const auto totals =
@@ -820,14 +856,135 @@ private:
 std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     std::shared_ptr<Model> model, std::uint32_t max_context,
     const ext::TextSpeculativeConfig& speculative_config,
-    std::string artifact_fingerprint, std::string draft_artifact_fingerprint) {
+    std::string artifact_fingerprint, std::string draft_artifact_fingerprint,
+    std::string_view artifact_scheme, std::string_view draft_scheme) {
   const bool use_mtp =
       speculative_config.backend == ext::TextSpeculativeBackend::kMtp;
   return std::make_shared<QwenFlashNextTextRunner>(
       std::move(model), max_context, use_mtp,
       speculative_config.max_draft_tokens, std::move(artifact_fingerprint),
-      std::move(draft_artifact_fingerprint));
+      std::move(draft_artifact_fingerprint), artifact_scheme, draft_scheme);
 }
+
+namespace {
+
+using Fingerprints = FlashNextCacheIdentities;
+
+/// What the GGUF and non-GGUF entry points share once the artifact's native
+/// context and draft path are known. `fingerprints` fills the disk cache
+/// identities the options leave empty, after the model has loaded.
+std::shared_ptr<ext::TextModelRunner> CreateRunner(
+    const ext::TextRunnerOptions& options, std::uint32_t native_context,
+    std::string_view no_context_error, const std::string& mtp_path,
+    std::unique_ptr<ext::qwen::flash_next::Stages> stages,
+    std::unique_ptr<ext::qwen::flash_next::WeightSource> weights,
+    const std::function<bool(const Model&, bool use_mtp, Fingerprints*,
+                             std::string* error)>& fingerprints,
+    std::string* error) {
+  std::uint32_t max_context = options.max_context;
+  if (max_context == 0) {
+    max_context = native_context;
+    if (max_context < 2) {
+      if (error)
+        *error = no_context_error;
+      return nullptr;
+    }
+  }
+  std::optional<RopeScaling> rope_scaling;
+  if (!ResolveRopeScaling(max_context, native_context, options.enable_yarn,
+                          &rope_scaling, error)) {
+    return nullptr;
+  }
+  const bool use_mtp =
+      options.speculative.backend == ext::TextSpeculativeBackend::kMtp;
+  if (options.speculative.backend != ext::TextSpeculativeBackend::kDisabled &&
+      !use_mtp) {
+    if (error)
+      *error =
+          "Qwen3.8-Flash-Next HTTP models support only MTP speculative "
+          "decoding";
+    return nullptr;
+  }
+  if (use_mtp && mtp_path.empty()) {
+    if (error)
+      *error = "Qwen3.8-Flash-Next MTP HTTP decoding requires --mtp-model";
+    return nullptr;
+  }
+  std::string load_error;
+  auto model =
+      Model::Load(options.model_path,
+                  ModelOptions{
+                      .max_context = max_context,
+                      .mtp_model_path = use_mtp ? mtp_path : std::string{},
+                      .vision_model_path = options.vision_model_path,
+                      .projection_vector_path = options.projection_vector_path,
+                      .projection_layers = options.projection_layers,
+                      .decode_concurrency =
+                          DecodeConcurrencyForSessions(options.session_count),
+                      .rope_scaling = rope_scaling,
+                  },
+                  std::move(stages), std::move(weights), &load_error);
+  if (!model) {
+    if (error)
+      *error = "Failed to load Flash-Next model: " + load_error;
+    return nullptr;
+  }
+  // The context and YaRN above were sized from native_context.
+  if (native_context != 0 && model->config().context_length != native_context) {
+    if (error)
+      *error = "Flash-Next native context " + std::to_string(native_context) +
+               " does not match the model's " +
+               std::to_string(model->config().context_length);
+    return nullptr;
+  }
+  try {
+    models::qwen::vision::PrepareForServing(model->VisionEncoder());
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
+    return nullptr;
+  }
+  // Each eight rows of wide copy verification past the first reserve
+  // rollback rows beside the sessions (ResourceClaim). Narrow the width
+  // until the configured sessions fit, rather than refusing a session count
+  // the ordinary verifier width fits.
+  if (std::size_t free_bytes = 0, total_bytes = 0;
+      use_mtp && mem::MemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
+    const std::size_t sessions =
+        std::max<std::size_t>(options.session_count, 1);
+    const auto mode = gufo::core::SessionMode::kSpeculative;
+    const auto fit = [&](std::uint32_t rows) {
+      model->LimitCopyRows(rows);
+      const std::size_t deferred = model->DeferredScratchBytes();
+      if (free_bytes <= deferred)
+        return mem::SessionFit::Kind::kRefused;
+      return mem::FitSessions(sessions, model->SessionBytes(mode, max_context),
+                              model->DemandMappedBytes(mode, max_context),
+                              free_bytes - deferred)
+          .kind;
+    };
+    std::uint32_t rows = rocm::Executor::kWideRows;
+    while (rows > 8 && fit(rows) != mem::SessionFit::Kind::kFits)
+      rows -= 8;
+    // When no width fits every session at full context, the sessions share
+    // their K/V (mem::FitSessions): keep the widest width that allows it.
+    if (fit(rows) != mem::SessionFit::Kind::kFits)
+      for (rows = rocm::Executor::kWideRows;
+           rows > 8 && fit(rows) == mem::SessionFit::Kind::kRefused;)
+        rows -= 8;
+    model->LimitCopyRows(rows);
+  }
+  Fingerprints ids{options.disk_cache.model_artifact_fingerprint,
+                   options.disk_cache.draft_model_artifact_fingerprint};
+  if (!options.disk_cache.directory.empty() &&
+      !fingerprints(*model, use_mtp, &ids, error))
+    return nullptr;
+  return CreateQwenFlashNextTextRunner(
+      std::move(model), max_context, options.speculative, ids.model, ids.draft,
+      ids.model_scheme, ids.draft_scheme);
+}
+
+}  // namespace
 
 std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
     const ext::TextRunnerOptions& options, std::string* error) {
@@ -852,115 +1009,124 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
   }
   const std::uint32_t qwen4exp_native_context =
       reader->GetMetadataUint32("qwen4exp.context_length").value_or(0);
-  std::uint32_t max_context = options.max_context;
-  if (max_context == 0) {
-    max_context = qwen4exp_native_context;
-    if (max_context < 2) {
-      if (error)
-        *error = "GGUF has no valid native context length; specify --context";
-      return nullptr;
+  const auto gguf_fingerprints = [&](const Model&, bool use_mtp,
+                                     Fingerprints* ids,
+                                     std::string* fingerprint_error) {
+    std::string* model_fingerprint = &ids->model;
+    std::string* draft_fingerprint = &ids->draft;
+    if (model_fingerprint->empty()) {
+      try {
+        *model_fingerprint = core::GgufIdentityHex(*reader);
+      } catch (const std::exception& e) {
+        if (fingerprint_error)
+          *fingerprint_error =
+              std::string("Flash-Next disk cache fingerprinting failed: ") +
+              e.what();
+        return false;
+      }
     }
-  }
-  std::optional<RopeScaling> rope_scaling;
-  if (!ResolveRopeScaling(max_context, qwen4exp_native_context,
-                          options.enable_yarn, &rope_scaling, error)) {
-    return nullptr;
-  }
-  const bool use_mtp =
-      options.speculative.backend == ext::TextSpeculativeBackend::kMtp;
-  if (options.speculative.backend != ext::TextSpeculativeBackend::kDisabled &&
-      !use_mtp) {
+    if (use_mtp && draft_fingerprint->empty()) {
+      std::string mtp_error;
+      auto mtp_reader = core::GgufReader::OpenFile(
+          options.speculative.draft_model_path, &mtp_error);
+      if (!mtp_reader) {
+        if (fingerprint_error)
+          *fingerprint_error = "Failed to open MTP model: " + mtp_error;
+        return false;
+      }
+      try {
+        *draft_fingerprint = core::GgufIdentityHex(*mtp_reader);
+      } catch (const std::exception& e) {
+        if (fingerprint_error)
+          *fingerprint_error =
+              std::string("MTP disk cache fingerprinting failed: ") + e.what();
+        return false;
+      }
+    }
+    return true;
+  };
+  return CreateRunner(
+      options, qwen4exp_native_context,
+      "GGUF has no valid native context length; specify --context",
+      options.speculative.draft_model_path, nullptr, nullptr, gguf_fingerprints,
+      error);
+}
+
+bool ResolveWeightSourceIdentities(const Model& model, bool use_mtp,
+                                   bool own_draft, const std::string& mtp_path,
+                                   FlashNextCacheIdentities* ids,
+                                   std::string* error) {
+  const auto fail = [&](std::string message) {
     if (error)
-      *error =
-          "Qwen3.8-Flash-Next HTTP models support only MTP speculative "
-          "decoding";
-    return nullptr;
+      *error = std::move(message);
+    return false;
+  };
+  if (ids->model.empty()) {
+    ids->model = model.ArtifactIdentity();
+    ids->model_scheme = ext::qwen::flash_next::kWeightSourceIdentityScheme;
   }
-  if (use_mtp && options.speculative.draft_model_path.empty()) {
+  if (use_mtp && ids->draft.empty()) {
+    ids->draft = model.DraftIdentity();
+    ids->draft_scheme = ext::qwen::flash_next::kWeightSourceIdentityScheme;
+    if (ids->draft.empty() && own_draft && !model.ArtifactIdentity().empty()) {
+      const std::string seed = model.ArtifactIdentity() + ":mtp";
+      ids->draft = crypto::Sha256Hex(
+          {reinterpret_cast<const std::uint8_t*>(seed.data()), seed.size()});
+    } else if (ids->draft.empty() && !own_draft) {
+      // A separate draft model: its GGUF identity, when it is one.
+      std::string open_error;
+      auto reader = core::GgufReader::OpenFile(mtp_path, &open_error);
+      if (!reader)
+        return fail(
+            "the Flash-Next weight source has no draft identity and its "
+            "draft model is not a GGUF: " +
+            open_error);
+      try {
+        ids->draft = core::GgufIdentityHex(*reader);
+      } catch (const std::exception& e) {
+        return fail(std::string("MTP disk cache fingerprinting failed: ") +
+                    e.what());
+      }
+      ids->draft_scheme = ext::kGgufIdentityScheme;
+    }
+  }
+  if (ids->model.empty() || (use_mtp && ids->draft.empty()))
+    return fail("the Flash-Next weight source has no disk cache identity");
+  if (!IsSha256Hex(ids->model) || (use_mtp && !IsSha256Hex(ids->draft)))
+    return fail(
+        "Flash-Next disk cache identities must be lowercase SHA-256 hex");
+  return true;
+}
+
+std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
+    const ext::TextRunnerOptions& options,
+    std::unique_ptr<ext::qwen::flash_next::Stages> stages,
+    std::unique_ptr<ext::qwen::flash_next::WeightSource> weights,
+    std::string* error) {
+  if (!weights) {
     if (error)
-      *error = "Qwen3.8-Flash-Next MTP HTTP decoding requires --mtp-model";
+      *error = "Flash-Next runner needs a weight source";
     return nullptr;
   }
-  std::string load_error;
-  auto model = Model::Load(
-      options.model_path,
-      ModelOptions{
-          .max_context = max_context,
-          .mtp_model_path =
-              use_mtp ? options.speculative.draft_model_path : std::string{},
-          .vision_model_path = options.vision_model_path,
-          .projection_vector_path = options.projection_vector_path,
-          .projection_layers = options.projection_layers,
-          .decode_concurrency =
-              DecodeConcurrencyForSessions(options.session_count),
-          .rope_scaling = rope_scaling,
-      },
-      &load_error);
-  if (!model) {
-    if (error)
-      *error = "Failed to load Flash-Next model: " + load_error;
-    return nullptr;
-  }
-  try {
-    models::qwen::vision::PrepareForServing(model->VisionEncoder());
-  } catch (const std::exception& e) {
-    if (error)
-      *error = e.what();
-    return nullptr;
-  }
-  // Each eight rows of wide copy verification past the first reserve
-  // rollback rows beside the sessions (ResourceClaim). Narrow the width
-  // until the configured sessions fit, rather than refusing a session count
-  // the ordinary verifier width fits.
-  if (std::size_t free_bytes = 0, total_bytes = 0;
-      use_mtp && hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
-    const std::size_t sessions =
-        std::max<std::size_t>(options.session_count, 1);
-    for (std::uint32_t rows = rocm::Executor::kWideRows;; rows -= 8) {
-      model->LimitCopyRows(rows);
-      if (rows == 8 ||
-          sessions * model->SessionBytes(gufo::core::SessionMode::kSpeculative,
-                                         max_context) +
-                  model->DeferredScratchBytes() <=
-              free_bytes)
-        break;
-    }
-  }
-  std::string model_fingerprint = options.disk_cache.model_artifact_fingerprint;
-  if (!options.disk_cache.directory.empty() && model_fingerprint.empty()) {
-    try {
-      model_fingerprint = core::GgufIdentityHex(*reader);
-    } catch (const std::exception& e) {
-      if (error)
-        *error = std::string("Flash-Next disk cache fingerprinting failed: ") +
-                 e.what();
-      return nullptr;
-    }
-  }
-  std::string draft_fingerprint =
-      options.disk_cache.draft_model_artifact_fingerprint;
-  if (!options.disk_cache.directory.empty() && use_mtp &&
-      draft_fingerprint.empty()) {
-    std::string mtp_error;
-    auto mtp_reader = core::GgufReader::OpenFile(
-        options.speculative.draft_model_path, &mtp_error);
-    if (!mtp_reader) {
-      if (error)
-        *error = "Failed to open MTP model: " + mtp_error;
-      return nullptr;
-    }
-    try {
-      draft_fingerprint = core::GgufIdentityHex(*mtp_reader);
-    } catch (const std::exception& e) {
-      if (error)
-        *error =
-            std::string("MTP disk cache fingerprinting failed: ") + e.what();
-      return nullptr;
-    }
-  }
-  return CreateQwenFlashNextTextRunner(std::move(model), max_context,
-                                       options.speculative, model_fingerprint,
-                                       draft_fingerprint);
+  const std::uint32_t native_context =
+      weights->NativeContextLength(options.model_path);
+  const std::string mtp_path = weights->MtpPath(
+      options.model_path, options.speculative.draft_model_path);
+  // A draft block bound from the artifact itself, rather than a separate
+  // draft model.
+  const bool own_draft = mtp_path == options.model_path;
+  const auto source_fingerprints = [&](const Model& model, bool use_mtp,
+                                       Fingerprints* ids,
+                                       std::string* fingerprint_error) {
+    return ResolveWeightSourceIdentities(model, use_mtp, own_draft, mtp_path,
+                                         ids, fingerprint_error);
+  };
+  return CreateRunner(
+      options, native_context,
+      "the Flash-Next weight source reports no native context length; "
+      "specify --context",
+      mtp_path, std::move(stages), std::move(weights), source_fingerprints,
+      error);
 }
 
 }  // namespace gufo::models::qwen38_flash_next

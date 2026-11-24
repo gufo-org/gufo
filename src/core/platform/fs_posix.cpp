@@ -5,11 +5,17 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#if defined(__linux__)
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#endif
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <new>
 #include <utility>
 
 #include "src/core/platform/fs.hpp"
@@ -150,7 +156,7 @@ bool Stat(PlatformFile file, FileInfo* out, std::error_code& ec) noexcept {
 }
 
 bool StatAt(const Directory& dir, std::string_view name, bool follow_symlinks,
-            FileInfo* out, std::error_code& ec) noexcept {
+            FileInfo* out, std::error_code& ec) noexcept try {
   ec.clear();
   struct stat st{};
   const int flags = follow_symlinks ? 0 : AT_SYMLINK_NOFOLLOW;
@@ -160,6 +166,9 @@ bool StatAt(const Directory& dir, std::string_view name, bool follow_symlinks,
   }
   *out = FromStat(st);
   return true;
+} catch (const std::bad_alloc&) {
+  ec = std::make_error_code(std::errc::not_enough_memory);
+  return false;
 }
 
 RenameResult RenameNoReplace(const Directory& from_dir,
@@ -349,6 +358,44 @@ std::filesystem::path UserDataDirectory() noexcept {
   if (home == nullptr || *home == '\0')
     return {};
   return std::filesystem::path(home) / ".local" / "share";
+}
+
+bool CloneFile(const std::filesystem::path& from,
+               const std::filesystem::path& to, std::error_code& ec) noexcept {
+  ec.clear();
+#if defined(FICLONE)
+  const int source = ::open(from.c_str(), O_RDONLY | O_CLOEXEC);
+  if (source < 0) {
+    ec = Errno();
+    return false;
+  }
+  struct stat info{};
+  if (::fstat(source, &info) != 0) {
+    ec = Errno();
+    ::close(source);
+    return false;
+  }
+  const int target = ::open(to.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+                            info.st_mode & 0777);
+  if (target < 0) {
+    ec = Errno();
+    ::close(source);
+    return false;
+  }
+  const bool cloned = ::ioctl(target, FICLONE, source) == 0;
+  if (!cloned)
+    ec = Errno();
+  ::close(target);
+  ::close(source);
+  if (!cloned)
+    ::unlink(to.c_str());
+  return cloned;
+#else
+  (void)from;
+  (void)to;
+  ec = std::make_error_code(std::errc::operation_not_supported);
+  return false;
+#endif
 }
 
 std::size_t Write(PlatformFile file, const void* data, std::size_t bytes,

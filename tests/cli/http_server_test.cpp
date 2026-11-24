@@ -2,7 +2,9 @@
 
 #include <atomic>
 #include <cassert>
+#include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -56,9 +58,12 @@ CapturedLogs CaptureTraffic(LogLevel level) {
         "/v1/chat/completions?private-query",
         R"({"model":"test","messages":[{"role":"user","content":"private-prompt"}],"stream":true})");
     ExpectStatus(response, 200);
-    const auto header = response.find("X-Request-ID: ");
+    auto lower_resp = response;
+    for (char& c : lower_resp)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const auto header = lower_resp.find("x-request-id: ");
     assert(header != std::string::npos);
-    const auto begin = header + std::string("X-Request-ID: ").size();
+    const auto begin = header + std::string("x-request-id: ").size();
     captured.request_id =
         response.substr(begin, response.find("\r\n", begin) - begin);
 
@@ -118,9 +123,12 @@ void TestRequestLogging() {
 }
 
 std::string ResponseRequestId(const std::string& response) {
-  const auto header = response.find("X-Request-ID: ");
+  auto lower_resp = response;
+  for (char& c : lower_resp)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  const auto header = lower_resp.find("x-request-id: ");
   assert(header != std::string::npos);
-  const auto begin = header + std::string("X-Request-ID: ").size();
+  const auto begin = header + std::string("x-request-id: ").size();
   return response.substr(begin, response.find("\r\n", begin) - begin);
 }
 
@@ -322,6 +330,20 @@ void TestLogLevelNames() {
 
 void TestFramingAndMetrics() {
   RunningServer server({.max_request_body_bytes = 8192});
+  const auto lowercase_head = [](const std::string& response) {
+    const auto end = response.find("\r\n\r\n");
+    assert(end != std::string::npos);
+    auto head = response.substr(0, end + 2);
+    for (char& c : head)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return head;
+  };
+  const auto preflight =
+      server.Send("OPTIONS /v1/models HTTP/1.1\r\nHost: x\r\n\r\n");
+  ExpectStatus(preflight, 204);
+  assert(preflight.find("\r\n\r\n") == preflight.size() - 4);
+  assert(lowercase_head(preflight).find("\r\ncontent-length:") ==
+         std::string::npos);
   ExpectStatus(server.Send("GET /health HTTP/1.1\r\n\r\n"), 200);
   // The root path answers like /health so llama-swap Load and preload
   // succeed (#957).
@@ -350,10 +372,11 @@ void TestFramingAndMetrics() {
         "G@T /health HTTP/1.1\r\n\r\n"sv,
         "GET /health HTTP/1.1\r\nX: a\x01"
         "b\r\n\r\n"sv,
-        "GET /health HTTP/1.1\r\nX: a\0b\r\n\r\n"sv,
-        "\r\n\r\nGET /health HTTP/1.1\r\n\r\n"sv}) {
+        "GET /health HTTP/1.1\r\nX: a\0b\r\n\r\n"sv}) {
     ExpectStatus(server.Send(request, true), 400);
   }
+  // RFC 9112 2.2: hyper ignores multiple leading empty lines ("at least one").
+  ExpectStatus(server.Send("\r\n\r\nGET /health HTTP/1.1\r\n\r\n"), 200);
   // At most 100 header fields; more get 431 (RFC 6585 5).
   std::string fields;
   for (int i = 0; i < 100; ++i) {
@@ -367,14 +390,22 @@ void TestFramingAndMetrics() {
   ExpectStatus(
       server.Send("POST /echo HTTP/1.1\r\nContent-Length: 4\r\n\r\nx", true),
       400);
-  ExpectStatus(
-      server.Send("POST /echo HTTP/1.1\r\nContent-Length: 8193\r\n\r\n"), 413);
+  // A refused request is answered like any other: a browser client can read
+  // the error, and the log names it by request ID.
+  const auto too_large =
+      server.Send("POST /echo HTTP/1.1\r\nContent-Length: 8193\r\n\r\n");
+  ExpectStatus(too_large, 413);
+  assert(too_large.find("payload_too_large") != std::string::npos);
+  assert(too_large.find("Access-Control-Allow-Origin: *") != std::string::npos);
+  assert(!ResponseRequestId(too_large).empty());
   const std::string payload(5000, 'x');
   const auto echo = server.Send(
       "POST /echo HTTP/1.1\r\nContent-Length: 5000\r\nContent-Length: "
       "5000\r\n\r\n" +
       payload);
   ExpectStatus(echo, 200);
+  assert(lowercase_head(echo).find("\r\ncontent-length: 5000\r\n") !=
+         std::string::npos);
   assert(echo.substr(echo.find("\r\n\r\n") + 4) == payload);
 
   const std::string body = R"({"prompt":"hi","n_predict":1})";
@@ -2545,13 +2576,19 @@ std::string SendParts(const std::string& host, int port,
   return response;
 }
 
-void ExpectLoading(const std::string& response) {
+// `progress` and `message` are the top-level fields llama-swap v269 and later
+// read from a not-ready health reply (#957).
+void ExpectLoading(const std::string& response,
+                   std::string_view progress = R"("progress":0,)",
+                   std::string_view message = "Loading model") {
   ExpectStatus(response, 503);
   assert(response.find("\r\nRetry-After: 1\r\n") != std::string::npos);
   const auto body = response.substr(response.find("\r\n\r\n") + 4);
   assert(body ==
          R"({"error":{"message":"Loading model","type":"unavailable_error",)"
-         R"("code":"loading"}})");
+         R"("code":"loading"},)" +
+             std::string(progress) + R"("message":")" + std::string(message) +
+             R"("})");
 }
 
 void TestLoadingResponder() {
@@ -2596,6 +2633,16 @@ void TestLoadingResponder() {
   ExpectLoading(
       SendParts("127.0.0.1", port, {"GET /hea", "lth HTTP/1.1\r\n", "\r\n"}));
 
+  // Later replies report the latest stage; progress stays within [0, 1].
+  loading.SetProgress(0.05, "Loading weights");
+  ExpectLoading(SendParts("127.0.0.1", port, {"GET /ready HTTP/1.1\r\n\r\n"}),
+                R"("progress":0.05,)", "Loading weights");
+  loading.SetProgress(7.0, "Preparing sessions and cache");
+  ExpectLoading(SendParts("127.0.0.1", port, {"GET /health HTTP/1.1\r\n\r\n"}),
+                R"("progress":1,)", "Preparing sessions and cache");
+  loading.SetProgress(std::nan(""), "Loading model");
+  ExpectLoading(SendParts("127.0.0.1", port, {"GET / HTTP/1.1\r\n\r\n"}));
+
   // The port is held: the real server cannot bind it until stop().
   {
     HttpServer early("127.0.0.1", port, nullptr);
@@ -2636,6 +2683,18 @@ void TestLoadingResponder() {
     RunningServer owner;
     LoadingResponder blocked("127.0.0.1", owner.server.port());
     assert(!blocked.listening());
+    ExpectStatus(owner.Send("GET /health HTTP/1.1\r\n\r\n"), 200);
+  }
+
+  // A second server on a port one already serves fails at bind() and names
+  // the port; on Windows SO_REUSEADDR alone would let it share the listener.
+  {
+    RunningServer owner;
+    HttpServer second("127.0.0.1", owner.server.port(), nullptr);
+    std::string why;
+    assert(!second.start(&why));
+    assert(why.find(std::to_string(owner.server.port())) != std::string::npos);
+    assert(why.find("already in use") != std::string::npos);
     ExpectStatus(owner.Send("GET /health HTTP/1.1\r\n\r\n"), 200);
   }
 
@@ -2728,24 +2787,39 @@ private:
   std::binary_semaphore released_{0};
 };
 
-std::string ReadFramedResponse(int fd) {
-  std::string response;
-  char buffer[4096];
+// Reads one Content-Length framed response. A read can return several
+// responses from a kept-alive connection, so bytes past the first stay in
+// `buffered` for the next call instead of being dropped.
+std::string ReadFramedResponse(int fd, std::string& buffered) {
   std::size_t total = std::string::npos;
   for (;;) {
-    const auto head = response.find("\r\n\r\n");
-    if (head != std::string::npos && total == std::string::npos) {
-      const auto length = response.find("Content-Length: ");
-      assert(length != std::string::npos && length < head);
-      total = head + 4 + std::stoul(response.substr(length + 16));
+    if (total == std::string::npos) {
+      const auto head = buffered.find("\r\n\r\n");
+      if (head != std::string::npos) {
+        const auto length = buffered.find("Content-Length: ");
+        assert(length != std::string::npos && length < head);
+        total = head + 4 + std::stoul(buffered.substr(length + 16));
+      }
     }
-    if (total != std::string::npos && response.size() >= total)
+    if (total != std::string::npos && buffered.size() >= total) {
+      std::string response = buffered.substr(0, total);
+      buffered.erase(0, total);
       return response;
+    }
+    char buffer[4096];
     const auto count = ::read(fd, buffer, sizeof(buffer));
-    if (count <= 0)
+    if (count <= 0) {
+      std::string response = std::move(buffered);
+      buffered.clear();
       return response;
-    response.append(buffer, static_cast<std::size_t>(count));
+    }
+    buffered.append(buffer, static_cast<std::size_t>(count));
   }
+}
+
+std::string ReadFramedResponse(int fd) {
+  std::string buffered;
+  return ReadFramedResponse(fd, buffered);
 }
 
 void TestConnectionLimitIgnoresClosingConnections() {
@@ -2785,6 +2859,342 @@ void TestConnectionLimitIgnoresClosingConnections() {
     net::CloseSocket(idle);
   }
   std::clog.rdbuf(previous_sink);
+}
+
+void TestKeepAlive() {
+  RunningServer server(
+      {.keep_alive = true,
+       .keep_alive_idle_timeout = std::chrono::milliseconds(200)});
+  const int fd = server.Connect();
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  // One read can carry several kept-alive responses, so keep the surplus
+  // between reads instead of letting it go with the first response.
+  std::string buffered;
+  for (int request = 0; request < 2; ++request) {
+    assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+           static_cast<ssize_t>(health.size()));
+    const auto response = ReadFramedResponse(fd, buffered);
+    ExpectStatus(response, 200);
+    assert(response.find("Connection: keep-alive") != std::string::npos);
+  }
+  // A pipelined pair proves bytes after the first head are carried into the
+  // next request instead of being dropped with the body.
+  const std::string pair = health + health;
+  assert(net::SendNoSignal(fd, pair.data(), pair.size()) ==
+         static_cast<ssize_t>(pair.size()));
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  // A request body is consumed exactly: bytes past Content-Length belong to
+  // the next pipelined request.
+  const std::string pipelined_post =
+      "POST /echo HTTP/1.1\r\nContent-Length: 4\r\n\r\nping" + health;
+  assert(net::SendNoSignal(fd, pipelined_post.data(), pipelined_post.size()) ==
+         static_cast<ssize_t>(pipelined_post.size()));
+  assert(ReadFramedResponse(fd, buffered).ends_with("ping"));
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  // A chunked streaming response ends at its zero-length chunk without closing
+  // the connection, so the next request runs on the same socket.
+  const std::string streaming =
+      "POST /stream HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+  assert(net::SendNoSignal(fd, streaming.data(), streaming.size()) ==
+         static_cast<ssize_t>(streaming.size()));
+  std::string streamed;
+  char stream_buffer[256];
+  while (!streamed.ends_with("0\r\n\r\n")) {
+    const auto count = ::read(fd, stream_buffer, sizeof(stream_buffer));
+    assert(count > 0);
+    streamed.append(stream_buffer, static_cast<std::size_t>(count));
+  }
+  ExpectStatus(streamed, 200);
+  assert(streamed.find("Transfer-Encoding: chunked") != std::string::npos);
+  assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  // The close token wins even when the header also lists keep-alive.
+  const std::string closing =
+      "GET /health HTTP/1.1\r\nConnection: keep-alive, close\r\n\r\n";
+  assert(net::SendNoSignal(fd, closing.data(), closing.size()) ==
+         static_cast<ssize_t>(closing.size()));
+  const auto last = ReadFramedResponse(fd, buffered);
+  ExpectStatus(last, 200);
+  assert(last.find("Connection: close") != std::string::npos);
+  char byte = 0;
+  assert(::read(fd, &byte, 1) == 0);
+  net::CloseSocket(fd);
+
+  // A stale idle connection is closed without a malformed-request answer.
+  const int idle = server.Connect();
+  const std::string idle_health = "GET /health HTTP/1.1\r\n\r\n";
+  assert(net::SendNoSignal(idle, idle_health.data(), idle_health.size()) ==
+         static_cast<ssize_t>(idle_health.size()));
+  ExpectStatus(ReadFramedResponse(idle), 200);
+  char idle_byte = 0;
+  assert(::read(idle, &idle_byte, 1) == 0);
+  net::CloseSocket(idle);
+}
+
+// Read until the peer closes; false if the receive timeout expires first.
+bool ReadsToClose(int fd, std::string& received) {
+  char buffer[256];
+  for (;;) {
+    const auto count = ::read(fd, buffer, sizeof(buffer));
+    if (count == 0)
+      return true;
+    if (count < 0)
+      return false;
+    received.append(buffer, static_cast<std::size_t>(count));
+  }
+}
+
+// A parked keep-alive connection holds no request, so it never refuses a new
+// client: at the limit the listener closes it to admit the new connection.
+// The idle timeout is long, so only that eviction can close it in time.
+void TestKeepAliveParkedConnectionYieldsSlot() {
+  RunningServer server({.max_connections = 1,
+                        .keep_alive = true,
+                        .keep_alive_idle_timeout = std::chrono::seconds(30)});
+  const int parked = server.Connect();
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  assert(net::SendNoSignal(parked, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  std::string buffered;
+  const auto first = ReadFramedResponse(parked, buffered);
+  ExpectStatus(first, 200);
+  assert(first.find("Connection: keep-alive") != std::string::npos);
+
+  // The worker parks just after its write, so a client that reconnects
+  // within that instant can still meet the limit; retry instead of racing.
+  bool admitted = false;
+  for (int attempt = 0; attempt < 200 && !admitted; ++attempt) {
+    const int next = server.Connect();
+    assert(net::SendNoSignal(next, health.data(), health.size()) ==
+           static_cast<ssize_t>(health.size()));
+    const auto response = ReadFramedResponse(next);
+    net::CloseSocket(next);
+    admitted = response.starts_with("HTTP/1.1 200");
+    if (!admitted) {
+      ExpectStatus(response, 503);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  }
+  assert(admitted);
+
+  (void)net::SetSocketTimeouts(parked, 5'000);
+  std::string after;
+  assert(ReadsToClose(parked, after));
+  assert(after.empty());
+  net::CloseSocket(parked);
+}
+
+// Without competition, the idle timeout closes a parked connection.
+void TestKeepAliveIdleTimeoutCloses() {
+  RunningServer server(
+      {.keep_alive = true,
+       .keep_alive_idle_timeout = std::chrono::milliseconds(100)});
+  const int fd = server.Connect();
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  std::string buffered;
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  (void)net::SetSocketTimeouts(fd, 5'000);
+  std::string after;
+  assert(ReadsToClose(fd, after));
+  assert(after.empty());
+  net::CloseSocket(fd);
+}
+
+// The idle limit starts when a response parks the connection: a client may
+// connect before it sends its first request.
+void TestKeepAliveIdleTimeoutSparesFirstRequest() {
+  RunningServer server(
+      {.keep_alive = true,
+       .keep_alive_idle_timeout = std::chrono::milliseconds(100)});
+  const int fd = server.Connect();
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  ExpectStatus(ReadFramedResponse(fd), 200);
+  net::CloseSocket(fd);
+}
+
+// A stream that fails without a protocol error stays unterminated, so the
+// connection must close at once instead of waiting for the idle timeout.
+void TestKeepAliveClosesUnterminatedStream() {
+  RunningServer server({.keep_alive = true,
+                        .keep_alive_idle_timeout = std::chrono::seconds(30)});
+  const int fd = server.Connect();
+  const std::string failing =
+      "POST /stream HTTP/1.1\r\nContent-Length: 1\r\n\r\nx";
+  assert(net::SendNoSignal(fd, failing.data(), failing.size()) ==
+         static_cast<ssize_t>(failing.size()));
+  (void)net::SetSocketTimeouts(fd, 5'000);
+  std::string streamed;
+  assert(ReadsToClose(fd, streamed));
+  ExpectStatus(streamed, 200);
+  assert(!streamed.ends_with("0\r\n\r\n"));
+  net::CloseSocket(fd);
+}
+
+// A connection holding a pipelined request is serving, not idle: it counts
+// toward the limit and is never evicted for a new client.
+void TestKeepAlivePipelinedConnectionCounts() {
+  RunningServer server({.max_connections = 1,
+                        .keep_alive = true,
+                        .keep_alive_idle_timeout = std::chrono::seconds(30)});
+  const int fd = server.Connect();
+  const std::string pipelined = "GET /health HTTP/1.1\r\n\r\nGET /hea";
+  assert(net::SendNoSignal(fd, pipelined.data(), pipelined.size()) ==
+         static_cast<ssize_t>(pipelined.size()));
+  std::string buffered;
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  const int next = server.Connect();
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  assert(net::SendNoSignal(next, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  ExpectStatus(ReadFramedResponse(next), 503);
+  net::CloseSocket(next);
+  const std::string rest = "lth HTTP/1.1\r\nConnection: close\r\n\r\n";
+  assert(net::SendNoSignal(fd, rest.data(), rest.size()) ==
+         static_cast<ssize_t>(rest.size()));
+  ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+  net::CloseSocket(fd);
+}
+
+// A kept-alive connection is serving until its streamed body ends: it counts
+// toward the limit and is never evicted while the stream is still writing.
+void TestKeepAliveStreamingConnectionCounts() {
+  RunningServer server({.max_connections = 1,
+                        .keep_alive = true,
+                        .keep_alive_idle_timeout = std::chrono::seconds(30)});
+  const int fd = server.Connect();
+  const std::string request =
+      "POST /sse-held HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+  assert(net::SendNoSignal(fd, request.data(), request.size()) ==
+         static_cast<ssize_t>(request.size()));
+  std::string streamed;
+  const auto read_until = [&](std::string_view marker) {
+    while (streamed.find(marker) == std::string::npos) {
+      char buffer[4096];
+      const auto count = ::read(fd, buffer, sizeof(buffer));
+      assert(count > 0);
+      streamed.append(buffer, static_cast<std::size_t>(count));
+    }
+  };
+  read_until("data: first\n\n");
+  ExpectStatus(streamed, 200);
+
+  const int next = server.Connect();
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  assert(net::SendNoSignal(next, health.data(), health.size()) ==
+         static_cast<ssize_t>(health.size()));
+  ExpectStatus(ReadFramedResponse(next), 503);
+  net::CloseSocket(next);
+
+  server.held_stream.release();
+  read_until("0\r\n\r\n");
+  assert(streamed.find("data: [DONE]\n\n") != std::string::npos);
+  net::CloseSocket(fd);
+}
+
+// Responses that cannot be followed on the same socket close it: a HEAD
+// answer never carries its body, an upgrade request the route declines keeps
+// its trailing bytes, and a malformed request may leave unread bytes. An SSE
+// error event and HTTP/1.0 keep-alive leave the connection reusable.
+void TestKeepAliveCloseDecisions() {
+  RunningServer server({.keep_alive = true,
+                        .keep_alive_idle_timeout = std::chrono::seconds(30)});
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  const auto reusable = [&](const std::string& first) {
+    const int fd = server.Connect();
+    assert(net::SendNoSignal(fd, first.data(), first.size()) ==
+           static_cast<ssize_t>(first.size()));
+    std::string buffered;
+    if (first.starts_with("POST /stream")) {
+      // Chunked: the zero-length chunk ends the response.
+      char byte = 0;
+      while (!buffered.ends_with("0\r\n\r\n")) {
+        assert(::read(fd, &byte, 1) == 1);
+        buffered += byte;
+      }
+      buffered.clear();
+    } else {
+      (void)ReadFramedResponse(fd, buffered);
+    }
+    assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+           static_cast<ssize_t>(health.size()));
+    const auto next = ReadFramedResponse(fd, buffered);
+    net::CloseSocket(fd);
+    return next.starts_with("HTTP/1.1 200");
+  };
+  const auto closes = [&](const std::string& first) {
+    const int fd = server.Connect();
+    assert(net::SendNoSignal(fd, first.data(), first.size()) ==
+           static_cast<ssize_t>(first.size()));
+    (void)net::SetSocketTimeouts(fd, 5'000);
+    std::string received;
+    const bool closed = ReadsToClose(fd, received);
+    net::CloseSocket(fd);
+    return std::pair{closed, received};
+  };
+
+  // HEAD keeps the connection and sends headers only; the next response
+  // starts cleanly instead of after a stray body.
+  {
+    const int fd = server.Connect();
+    const std::string head = "HEAD /missing HTTP/1.1\r\n\r\n";
+    assert(net::SendNoSignal(fd, head.data(), head.size()) ==
+           static_cast<ssize_t>(head.size()));
+    std::string headers;
+    char byte = 0;
+    while (!headers.ends_with("\r\n\r\n")) {
+      assert(::read(fd, &byte, 1) == 1);
+      headers += byte;
+    }
+    // An unknown route answers with an error body; HEAD must omit it.
+    assert(headers.starts_with("HTTP/1.1 4"));
+    assert(headers.find("Content-Length: ") != std::string::npos);
+    assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+           static_cast<ssize_t>(health.size()));
+    std::string buffered;
+    ExpectStatus(ReadFramedResponse(fd, buffered), 200);
+    net::CloseSocket(fd);
+  }
+  const auto [upgrade_closed, upgrade] = closes(
+      "GET /health HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: "
+      "websocket\r\n\r\n");
+  assert(upgrade_closed);
+  assert(upgrade.find("Connection: close") != std::string::npos);
+  const auto [bad_closed, bad] = closes("POST /echo HTTP/1.1 extra\r\n\r\n");
+  assert(bad_closed);
+  ExpectStatus(bad, 400);
+  assert(
+      reusable("POST /stream HTTP/1.1\r\nContent-Length: 8\r\n\r\nreported"));
+  // HTTP/1.0 asks for reuse explicitly; its response is length-delimited.
+  assert(reusable("GET /health HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"));
+}
+
+void TestKeepAliveRequestLimit() {
+  RunningServer server({.keep_alive = true, .max_requests_per_connection = 2});
+  const int fd = server.Connect();
+  const std::string health = "GET /health HTTP/1.1\r\n\r\n";
+  std::string buffered;
+  for (int request = 0; request < 2; ++request) {
+    assert(net::SendNoSignal(fd, health.data(), health.size()) ==
+           static_cast<ssize_t>(health.size()));
+    const auto response = ReadFramedResponse(fd, buffered);
+    ExpectStatus(response, 200);
+    // The second response is the last one this connection may serve, so it
+    // closes instead of promising a third.
+    const bool keep_alive = request == 0;
+    assert(response.find(keep_alive
+                             ? "Connection: keep-alive"
+                             : "Connection: close") != std::string::npos);
+  }
+  char byte = 0;
+  assert(::read(fd, &byte, 1) == 0);
+  net::CloseSocket(fd);
 }
 
 void TestPeerDisconnect() {
@@ -3000,7 +3410,9 @@ void TestStreamingFraming() {
            chunks + (body == "fail" ? "" : "0\r\n\r\n"));
   }
   const auto thrown = server.Post("/stream-error", "");
-  assert(thrown.substr(thrown.find("\r\n\r\n") + 4) == "b\r\nfirst chunk\r\n");
+  const auto thrown_body = thrown.substr(thrown.find("\r\n\r\n") + 4);
+  assert(thrown_body == "b\r\nfirst chunk\r\n" ||
+         thrown_body == "B\r\nfirst chunk\r\n");
   // Existing HTTP/1.0 clients retain close-delimited framing.
   const auto legacy = server.Send("POST /stream HTTP/1.0\r\n\r\n");
   assert(legacy.find("Transfer-Encoding:") == std::string::npos);
@@ -3676,6 +4088,15 @@ int main() {
   TestCompatibilityUtf8();
   TestPeerDisconnect();
   TestConnectionLimitIgnoresClosingConnections();
+  TestKeepAlive();
+  TestKeepAliveParkedConnectionYieldsSlot();
+  TestKeepAliveIdleTimeoutCloses();
+  TestKeepAliveClosesUnterminatedStream();
+  TestKeepAlivePipelinedConnectionCounts();
+  TestKeepAliveStreamingConnectionCounts();
+  TestKeepAliveIdleTimeoutSparesFirstRequest();
+  TestKeepAliveCloseDecisions();
+  TestKeepAliveRequestLimit();
   TestStreamingFraming();
   TestSseHeartbeat();
   TestSseHeartbeatShutdown();

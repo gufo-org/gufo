@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <ctime>
 #include <iomanip>
 #include <limits>
@@ -264,8 +265,49 @@ const char* StatusReason(int status) noexcept {
       return "Service Unavailable";
     case 502:
       return "Bad Gateway";
+    case 507:
+      return "Insufficient Storage";
     default:
       return "Internal Server Error";
+  }
+}
+
+/// Append `text` as the body of a JSON string (without the quotes). The stream
+/// writer builds one frame buffer per token instead of a JSON DOM, so it needs
+/// the same escaping `json::Value::dump` applies, without its allocation.
+void AppendEscapedJson(std::string& out, std::string_view text) {
+  for (const unsigned char c : text) {
+    switch (c) {
+      case '"':
+        out += "\\\"";
+        break;
+      case '\\':
+        out += "\\\\";
+        break;
+      case '\b':
+        out += "\\b";
+        break;
+      case '\f':
+        out += "\\f";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      default:
+        if (c < 0x20) {
+          char escape[8];
+          (void)std::snprintf(escape, sizeof(escape), "\\u%04x", c);
+          out += escape;
+        } else {
+          out += static_cast<char>(c);
+        }
+    }
   }
 }
 
@@ -1925,7 +1967,14 @@ ParsedGeneration ParseGeneration(
       SetParsedText(parsed, content, raw, track_text);
     }
   } else {
-    SetParsedText(parsed, content, raw, track_text);
+    // After reasoning the prompt closed, the model writes the separator.
+    SetParsedText(parsed,
+                  initial_output_state ==
+                          TextGenerationBackend::InitialOutputState::
+                              kContentAfterReasoning
+                      ? AfterReasoningSeparator(content, markup)
+                      : content,
+                  raw, track_text);
   }
 
   quotes.Reset(parsed.text);
@@ -2072,6 +2121,9 @@ ParsedGeneration ParseStructuredGeneration(
       raw.remove_prefix(end + reasoning.close.size());
       raw = AfterReasoningSeparator(raw, markup);
     }
+  } else if (initial == TextGenerationBackend::InitialOutputState::
+                            kContentAfterReasoning) {
+    raw = AfterReasoningSeparator(raw, markup);
   }
   const auto trimmed = Trim(raw);
   const bool held_opener = choice == ChatRequest::ToolChoice::kRequired &&
@@ -2331,9 +2383,12 @@ public:
         TextGenerationBackend::InitialOutputState::kReasoning) {
       state_ = State::kThinking;
       reasoning_start_ = true;
-    } else if (initial_output_state ==
-               TextGenerationBackend::InitialOutputState::kContent) {
+    } else if (TextGenerationBackend::IsContent(initial_output_state)) {
       state_ = State::kContent;
+      // The prompt closed reasoning: the model writes the separator.
+      trim_reasoning_separator_ =
+          initial_output_state ==
+          TextGenerationBackend::InitialOutputState::kContentAfterReasoning;
     }
   }
 
@@ -3118,13 +3173,48 @@ HttpResponse StreamingResponse(
            stream_log](const HttpResponse::BodyWriter& writer) {
             bool connected = true;
             bool started = false;
+            // The id/object/created/model/choices envelope is identical for
+            // every token. Keeping it serialized avoids building and dumping
+            // a JSON DOM per token; only the delta body changes.
+            std::string chunk_prefix = "data: {\"id\":\"";
+            AppendEscapedJson(chunk_prefix, id);
+            chunk_prefix +=
+                "\",\"object\":\"chat.completion.chunk\",\"created\":";
+            chunk_prefix += std::to_string(created);
+            chunk_prefix += ",\"model\":\"";
+            AppendEscapedJson(chunk_prefix, model);
+            chunk_prefix += "\",\"choices\":[{\"index\":0,\"delta\":";
+            const std::string chunk_suffix = ",\"finish_reason\":null}]}\n\n";
+            std::optional<std::string> pending_logprobs;
+            const auto write_delta = [&](std::string_view delta,
+                                         bool attach_logprobs = true) {
+              std::string frame;
+              frame.reserve(chunk_prefix.size() + delta.size() + 64);
+              frame += chunk_prefix;
+              frame += delta;
+              if (attach_logprobs && pending_logprobs) {
+                frame += ",\"logprobs\":";
+                frame += *pending_logprobs;
+                pending_logprobs.reset();
+              }
+              frame += chunk_suffix;
+              return writer(frame);
+            };
+            const auto write_text = [&](std::string_view field,
+                                        std::string_view text) {
+              std::string delta;
+              delta.reserve(field.size() + text.size() + 8);
+              delta += "{\"";
+              delta += field;
+              delta += "\":\"";
+              AppendEscapedJson(delta, text);
+              delta += "\"}";
+              return write_delta(delta);
+            };
             const auto begin = [&] {
               if (!started) {
                 started = true;
-                json::Value role_delta = json::Value::object();
-                role_delta["role"] = "assistant";
-                connected = writer(Sse(
-                    ChoiceChunk(id, created, model, std::move(role_delta))));
+                connected = write_delta("{\"role\":\"assistant\"}", false);
               }
               return connected;
             };
@@ -3132,13 +3222,8 @@ HttpResponse StreamingResponse(
               generation->Cancel();
               return;
             }
-            std::optional<json::Value> pending_logprobs;
             const auto write_choice = [&](json::Value delta) {
-              auto chunk =
-                  ChoiceChunk(id, created, model, std::move(delta), nullptr,
-                              pending_logprobs ? &*pending_logprobs : nullptr);
-              pending_logprobs.reset();
-              return writer(Sse(chunk));
+              return write_delta(delta.dump());
             };
             QuoteTracker quotes;
             StreamingTextFilter filter(
@@ -3148,13 +3233,9 @@ HttpResponse StreamingResponse(
                   if (text.empty()) {
                     return true;
                   }
-                  json::Value delta = json::Value::object();
-                  if (is_reasoning) {
-                    delta["reasoning_content"] = std::string(text);
-                  } else {
-                    delta["content"] = std::string(text);
-                  }
-                  connected = write_choice(std::move(delta));
+                  connected = is_reasoning
+                                  ? write_text("reasoning_content", text)
+                                  : write_text("content", text);
                   return connected;
                 },
                 request.chat.response_format != nullptr,
@@ -3199,7 +3280,8 @@ HttpResponse StreamingResponse(
                     if (piece.logprobs && request.sampling.logprobs)
                       pending_logprobs =
                           ChatLogprobs(std::span(piece.logprobs, 1),
-                                       *request.sampling.logprobs);
+                                       *request.sampling.logprobs)
+                              .dump();
                     if (!begin() || !filter.Push(piece.text))
                       return false;
                     if (filter.in_tools() && markup.native &&

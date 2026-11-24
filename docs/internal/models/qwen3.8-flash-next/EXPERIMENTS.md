@@ -1,5 +1,24 @@
 # Qwen3.8 Flash-Next experiments
 
+## Sampled MTP decode (November 13, 2026)
+
+Main `6858788b`, default sampling (thinking on: temperature 1, top-k 20,
+top-p 0.95), C1. A round of about 47 ms spends 43 ms in the verification
+pass (3.2 rows on average), 3.7 ms drafting and under 1 ms on the host
+(anchor sampling 0.03 ms, compact candidates 0.12 ms, rollback 0.6 ms).
+Dense Q8_0 GEMVs take about 18 ms per pass at any width; each further row
+adds about 4 ms of routed experts at 165–220 GB/s of unique weights.
+
+| Experiment | Outcome |
+| --- | --- |
+| Q4_K copy of the 98,304-row draft head prefix | Retained: the subset head took 1.17 ms per draft (267 MB at 228 GB/s). Drafting falls by about 1 ms per round with unchanged acceptance; +2.6% at C1 ([quality](QUALITY.md#q4_k-draft-head-november-13-2026)). |
+| Block verification (Sun et al., 2024) instead of token-by-token rejection | Rejected: logging both expected accepted lengths on the same 2,138 real rounds gives +0.2%. Chains are short (2.2 drafts) and gated, where the methods nearly coincide. |
+| Recalibrated proposal (temperature 0.6–1.2, top-p 0.8–1, top-k 10–40) | Rejected: over 9,442 verified rows, the head's own sampler gives the highest Σ min(p, q) (0.786 thinking on); every alternative is lower or equal. |
+| Smaller ID-prefix draft vocabulary | Rejected: 3.9% of the target's mass already lies above 98,304; 65,536 rows lower acceptance from 0.688 to 0.676 for a 1–2% head saving. |
+| BF16 router and DeltaNet alpha/beta | Not needed: the F32 tensors are BF16-exact, but the loader already narrows these stacks to F16. |
+| Fusing kernels to remove graph nodes | Not pursued: 1,000 empty nodes add 4.5–6 ms to a verification pass, but earlier fusions recovered about 1 µs per removed node, so the ~1,100 nodes of a pass bound the gain near 1–3%. |
+| Q4 copy of the MTP block itself | Not tried: its experts and projections read about 140 MB per row, worth about 1% more, with acceptance at risk. |
+
 ## Host CPU paths (November 9, 2026)
 
 Retained the ideas from [Youry Metlitsky's issue #716 patches](https://github.com/gufo-org/gufo/issues/716):

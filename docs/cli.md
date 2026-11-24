@@ -19,6 +19,7 @@ you'll reach for most; `gufo <command> --help` lists every option.
 | `gufo eval` | Grades a running server on a fixed set of questions. |
 | `gufo diagnose` | Checks drivers, permissions and memory; see [troubleshooting](troubleshooting.md). |
 | `gufo extension` | Builds and manages [extension modules](extensions.md#modules). |
+| `gufo model` | Downloads and manages the [model weights](install.md#model-files) extensions offer. |
 
 Every command accepts `--help` and `--version`. Unknown options and invalid
 combinations are errors, never silently ignored.
@@ -48,7 +49,7 @@ These server options work with every modality:
 | --- | --- | --- |
 | `--host`, `-i` | `127.0.0.1` | Address to listen on. Use `0.0.0.0` inside a container, or `::` for IPv6 and IPv4. |
 | `--port`, `-p` | `8080` | Port to listen on. |
-| `--max-connections` | 16 | Open HTTP connections; more wait or are refused. |
+| `--max-connections` | 16 | HTTP connections serving a request; more are refused. Idle kept-alive connections are closed to admit new ones. |
 | `--max-request-bytes` | 8 MiB | Largest request body. Raise it for audio and image uploads. |
 | `--log-level` | `info` | `error`, `warn`, `info` or `debug`; `-v` means `debug`. |
 | `--served-model-name` | per model | The model ID clients send. Repeat it to accept aliases. |
@@ -63,10 +64,15 @@ These server options work with every modality:
 **Model and memory**
 
 - `--model`, `-m`: the GGUF file. For sharded files, pass the first shard.
+  An extension's provider can also accept a model directory.
 - `--context`, `-c`: tokens per request. The default is the model's native
   context; lower it to fit more sessions in memory.
 - `--sessions`, `-j` (server only): requests that compute at the same time,
-  1 by default. Each session reserves memory for a full context.
+  1 by default. Each session reserves memory for a full context. With Qwen3.8
+  Flash-Next and Qwen3.8 27B on Linux, more sessions than fit at full context
+  share the memory of those that do: a request runs when its prompt and the
+  first 8,192 generated tokens fit, and waits otherwise. `/props` reports the
+  longest prompt as `max_prompt_tokens`.
 
 **Sampling**
 
@@ -111,8 +117,8 @@ the same distribution.
 | Option | Default | Use |
 | --- | --- | --- |
 | `--prefill-chunk` | ignored | Deprecated and ignored; it will be removed. A prompt beside decoding requests is split by layers, so they keep decoding. |
-| `--max-pending` | 16 | Requests waiting for a session. |
-| `--max-pending-per-client` | `--max-pending` | Waiting requests per client IP. |
+| `--max-pending` | 16 | Requests waiting for a session. `0` turns the queue off: when every session is busy, a request gets `429` at once, so a router can fail over. |
+| `--max-pending-per-client` | `--max-pending` | Waiting requests per client IP. At most `--max-pending`; `0` lets a client run only on a free session. |
 | `--request-timeout-ms` | off | Cancel a request after this long, waiting included. |
 | `--stall-timeout-ms` | off | Exit as `device_lost` when generation stops progressing, so a supervisor restarts the server. At least 60000. |
 | `--max-output-bytes` | 1 MiB | Largest response. |

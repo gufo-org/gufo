@@ -145,8 +145,10 @@ def phases_section(data):
                  f"{settings['slowdown'] * 100:.0f}% and >{settings['noise_ms']} ms); 🟨 slower in "
                  "some repeats, inconclusive; ⬜ never slower. Observations, not qualified timing "
                  f"regressions. Measured in {data['wall_s'] / 60:.1f} min.</sub>")
-    if any(phase.get('advisory_reason') for phase in phases):
-        lines += ["", "⚠️ HTTP ready timing is advisory: server-side timestamps are unavailable in one or more arms."]
+    reasons = sorted({phase['advisory_reason'] for phase in phases if phase.get('advisory_reason')})
+    for reason in reasons:
+        lines += ["", "⚠️ HTTP ready timing is advisory: server-side timestamps are unavailable in one or more arms."
+                  if reason == 'server readiness timestamps unavailable' else f"⚠️ Timings are advisory: {reason}."]
     if data.get("diverged"):
         lines += ["", "⚠️ Generated text differs or server work differs between arms for "
                   + ", ".join(f"`{key}`" for key in data["diverged"])
@@ -236,6 +238,30 @@ def timing_state(data):
     return 'measured'
 
 
+def ctest_section(item, selection):
+    """The model's GPU tests (checked package, `ctest -L`), when the plan selected them."""
+    if not selection.get('ctest'):
+        return []
+    labels = ', '.join(f'`{label}`' for label in selection['ctest']['labels'])
+    observed = item.get('ctest')
+    if not observed:
+        return ['', f'⚠️ GPU tests ({labels}) are missing.']
+    tests = observed.get('tests', [])
+    counts = {status: [row['name'] for row in tests if row['status'] == status]
+              for status in ('passed', 'skipped', 'failed')}
+    icon = ICONS['success'] if observed['status'] == 'passed' else ICONS['failure']
+    lines = ['', f"{icon} GPU tests ({labels}, assertion build): {len(counts['passed'])} passed"
+             + (f", {len(counts['skipped'])} skipped (" + ', '.join(f'`{name}`' for name in counts['skipped']) + ')'
+                if counts['skipped'] else '')
+             + (f", {len(counts['failed'])} failed" if counts['failed'] else '') + '.']
+    for row in tests:
+        if row['status'] == 'failed':
+            lines += ['', f"`{row['name']}` failed:", '', '```text', short(row.get('log_tail', ''), ERROR_CHARS), '```']
+    if observed.get('error'):
+        lines += ['', 'GPU test runner: ' + short(observed['error'], ERROR_CHARS)]
+    return lines
+
+
 def render_models(args, plan, summary):
     from devlab_models import registry
     definitions = registry()['models']
@@ -245,10 +271,15 @@ def render_models(args, plan, summary):
     expected_groups = {(row['profile'], row['configuration']): row['suites'] for row in plan['groups']}
     observed_groups = {(row['profile'], row['configuration']): row['suites'] for row in rows}
     phases = {key: load_json(args.results / (key + '.phases.json')) for key in expected}
-    speeds = {key: timing_state(phases[key]) if phases[key] and phases[key].get('revisions') == {
-        'base': plan['base'], 'head': plan['head']} else 'missing' for key in expected}
+    # Models the plan runs without timing arms (Loom packages: a smoke check only).
+    parts = [part for row in plan.get('shards', []) for part in row['parts']]
+    timed = {part['model'] for part in parts if part['timing']}
+    untimed = {part['model'] for part in parts} - timed
+    speeds = {key: 'not timed' if key in untimed else timing_state(phases[key])
+              if phases[key] and phases[key].get('revisions') == {
+                  'base': plan['base'], 'head': plan['head']} else 'missing' for key in expected}
     state, description = 'success', f'{len(expected)} selected models passed correctness and speed checks'
-    if speeds and all(speed == 'observations' for speed in speeds.values()):
+    if expected - untimed and all(speeds[key] == 'observations' for key in expected - untimed):
         description = f'{len(expected)} selected models passed; timing observations retained'
     if args.authorize != 'success':
         state, description = 'error', 'Authorization or planning failed'
@@ -260,7 +291,8 @@ def render_models(args, plan, summary):
         state, description = 'error', 'Selected model results are missing or incomplete'
     elif any(row['status'] != 'passed' for row in rows) or any(item['correctness'] == 'failed' for item in items.values()):
         state, description = 'failure', 'Selected model correctness checks failed'
-    elif any(item['correctness'] != 'passed' or item['timing'] != 'passed' for item in items.values()):
+    elif any(item['correctness'] != 'passed' or item['timing'] != ('skipped' if key in untimed else 'passed')
+             for key, item in items.items()):
         state, description = 'error', 'Selected model correctness or timing evidence is incomplete'
     elif any(speed == 'slower' for speed in speeds.values()):
         state, description = 'failure', f'Server phases slower in every paired repeat (>{SLOWDOWN * 100:g}% and >{NOISE_MS} ms)'
@@ -290,11 +322,14 @@ def render_models(args, plan, summary):
             lines += [''] + group_table(model_rows) + failure_details(model_rows)
         else:
             lines += ['', '⚠️ Correctness results are missing.']
+        lines += ctest_section(item, selection)
         for limitation in item.get('known_limitations', []):
             lines += ['', '⚠️ ' + short(limitation, 500)]
         if item.get('error'):
             lines += ['', 'Runner: ' + short(item['error'], ERROR_CHARS)]
-        if phases[key] and phases[key].get('phases'):
+        if key in untimed:
+            lines += ['', 'Speed is not compared for this model: its checks have no timing arms.']
+        elif phases[key] and phases[key].get('phases'):
             checks = phases[key].get('timing_checks')
             if checks is not None:
                 lines += ['', 'Speed gates: ' + (', '.join(f'`{key}`' for key in checks) if checks else
@@ -313,8 +348,10 @@ def render_models(args, plan, summary):
     lines += ['', f"<sub>[Workflow run and evidence]({args.run_url}) · "
               f"merge `{plan['head'][:7]}` vs main `{plan['base'][:7]}` · "
               f"{len(plan['deferred'])} deferred, {len(plan['release_only'])} for the release run. "
+              + ('Correctness ran on the assertion-enabled `gpu-test` build; speed compares release builds. '
+                 if (summary or {}).get('correctness_binary') == 'checked' else '') +
               f"`{STATUS_CONTEXT}` is advisory on PRs; only the automatic release merge waits for it. "
-              'Coverage is limited to the selected representatives; image/video generation and agent replay remain separate.</sub>']
+              'Coverage is limited to the selected representatives; video generation and agent replay remain separate.</sub>']
     return state, description, '\n'.join(lines) + '\n'
 
 

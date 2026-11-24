@@ -105,4 +105,24 @@ void ReleaseSharedTempMapping(SharedTempMapping& mapping) noexcept {
   mapping = {};
 }
 
+bool DevicePagesUseHostMemory() noexcept {
+  return false;
+}
+
+bool CanMapDeviceFiles() noexcept {
+  return false;
+}
+
+bool IsAddressRangeReserved(const void*, std::size_t) {
+  return false;
+}
+
+bool MapDeviceFileAt(void*, std::size_t, std::intptr_t) noexcept {
+  return false;
+}
+
+void CloseDeviceFile(std::intptr_t) noexcept {}
+
+void UnmapDeviceFileAt(void*, std::size_t) noexcept {}
+
 }  // namespace gufo::platform

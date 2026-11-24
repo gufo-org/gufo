@@ -7,9 +7,7 @@ vectors in one shared space, for search, clustering and classification across
 ## Files
 
 ```sh
-hf download google/embeddinggemma-2 \
-  --revision 914f7f89142e33e77833254d9c9b90c3cef7303b \
-  --local-dir models/embeddinggemma-2
+gufo model install embeddinggemma-2
 ```
 
 Only the BF16 safetensors checkpoint is supported, not GGUF or quantized files.
@@ -17,7 +15,7 @@ Only the BF16 safetensors checkpoint is supported, not GGUF or quantized files.
 ## Run
 
 ```sh
-gufo serve embedding --model models/embeddinggemma-2
+gufo serve embedding --model embeddinggemma-2
 curl -sS http://127.0.0.1:8080/v1/embeddings \
   -H 'Content-Type: application/json' \
   -d '{"model":"embeddinggemma-2","input":["task: search result | query: What causes the northern lights?"]}'
@@ -115,6 +113,7 @@ A request for another model ID returns 404 `model_not_found`;
 ## Performance
 
 As of October 23, 2026, on Strix Halo, Gufo embeds up to **41.5k tokens/s**
-over HTTP and answers a 404-token request in **13.0 ms**. Loading takes about
-2 seconds. See the [full benchmarks](../internal/models/embeddinggemma-2/BENCHMARKS.md)
-and the [quality report](../internal/models/embeddinggemma-2/QUALITY.md).
+over HTTP and answers a 404-token request in **13.0 ms**; `--npu` embeds text
+on the XDNA NPU with the GPU off, at about 30% of that throughput. See the
+[benchmarks](../internal/models/embeddinggemma-2/BENCHMARKS.md#npu) and the
+[quality report](../internal/models/embeddinggemma-2/QUALITY.md).

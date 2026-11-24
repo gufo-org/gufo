@@ -2,7 +2,8 @@
 """Startup contract while a text model loads, then after the listener handoff.
 
 Polls health, readiness and generation from process start. While loading,
-every answer must be llama-server's 503 `Loading model`, `/health` included:
+every answer must be llama-server's 503 `Loading model`, `/health` included,
+with a non-decreasing `progress` and a `message` naming the load stage:
 pollers such as llama-swap and `run.py` treat a 200 health check as ready.
 After the handoff the real server must answer health, readiness and a
 generation. The runner owns the port; pass a production `gufo serve llm`
@@ -33,7 +34,7 @@ def require(condition, message):
 
 
 def probe(port, method, path, body=None):
-    started = time.monotonic()
+    started = time.perf_counter()
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
         connection.request(method, path, None if body is None else json.dumps(body),
@@ -46,17 +47,21 @@ def probe(port, method, path, body=None):
             payload = text
         return {"status": response.status, "body": payload,
                 "retry_after": response.getheader("Retry-After"),
-                "wall_s": time.monotonic() - started}
+                "wall_s": time.perf_counter() - started}
     except (OSError, http.client.HTTPException) as error:
         return {"status": None, "error": type(error).__name__,
-                "wall_s": time.monotonic() - started}
+                "wall_s": time.perf_counter() - started}
     finally:
         connection.close()
 
 
 def is_loading(result):
-    return (result["status"] == 503 and isinstance(result["body"], dict)
-            and result["body"].get("error") == LOADING
+    body = result["body"] if isinstance(result.get("body"), dict) else {}
+    progress = body.get("progress")
+    # `progress` and `message` are the load stage llama-swap v269+ reads.
+    return (result["status"] == 503 and body.get("error") == LOADING
+            and isinstance(progress, (int, float)) and 0 <= progress <= 1
+            and isinstance(body.get("message"), str) and body["message"] != ""
             and result["retry_after"] == "1")
 
 
@@ -67,18 +72,18 @@ def generation(model):
 
 def observe(process, port, deadline, observations):
     """Probes until /ready answers 200, appending every observation in order."""
-    spawned = time.monotonic()
+    spawned = time.perf_counter()
 
     def record(method, path, body=None):
         result = probe(port, method, path, body)
-        result.update(t_s=round(time.monotonic() - spawned, 3),
+        result.update(t_s=round(time.perf_counter() - spawned, 3),
                       method=method, path=path)
         observations.append(result)
         return result
 
     while True:
         require(process.poll() is None, f"server exited {process.returncode} during load")
-        require(time.monotonic() < deadline, "startup timed out before /ready")
+        require(time.perf_counter() < deadline, "startup timed out before /ready")
         health = record("GET", "/health")
         if record("GET", "/ready")["status"] == 200:
             return
@@ -116,9 +121,13 @@ def check_loading_phase(observations):
     interleaved = [item for item in observations[first_loading:last_loading]
                    if item["status"] is None]
     require(not interleaved, f"connection refused between loading answers: {interleaved}")
+    progress = [item["body"]["progress"] for item in loading]
+    require(progress == sorted(progress), f"loading progress went back: {progress}")
+    stages = list(dict.fromkeys(item["body"]["message"] for item in loading))
     handoff_s = observations[first_real]["t_s"] - observations[last_loading]["t_s"]
     require(handoff_s < MAX_HANDOFF_S, f"handoff took {handoff_s:.3f}s")
     return {"loading_answers": len(loading),
+            "loading_stages": stages,
             "first_loading_s": loading[0]["t_s"],
             "last_loading_s": observations[last_loading]["t_s"],
             "first_real_s": observations[first_real]["t_s"],
@@ -186,7 +195,7 @@ def main():
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                    **SERVER_POPEN)
         try:
-            observe(process, port, time.monotonic() + args.startup_timeout,
+            observe(process, port, time.perf_counter() + args.startup_timeout,
                     observations)
             report["loading"] = check_loading_phase(observations)
             report["ready"] = check_ready(port, model)

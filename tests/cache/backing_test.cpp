@@ -592,6 +592,55 @@ void OnDemandBacking() {
   exact.GrowAhead(std::numeric_limits<std::size_t>::max());
   exact.WaitForGrowth();
   assert(exact.BlockCount() == many);
+  // A larger reserve asked while the ahead thread still grows a smaller one
+  // raises its target instead of being dropped. The first segment is held
+  // until the raise is asked, so the thread is still growing then.
+  std::atomic<bool> segment_asked{}, segment_open{};
+  cache::ResourceLedger raised_ledger(Limits(many_capacity));
+  hip::CommittedBackingPool raised(raised_ledger,
+                                   {many_capacity, block_bytes, many_headroom,
+                                    3 * block_bytes, [&](std::size_t) {
+                                      segment_asked.store(true);
+                                      while (!segment_open.load())
+                                        std::this_thread::yield();
+                                      return true;
+                                    }});
+  raised.GrowAhead(3 * block_bytes);
+  while (!segment_asked.load())
+    std::this_thread::yield();
+  raised.GrowAhead(9 * block_bytes);
+  segment_open.store(true);
+  raised.WaitForGrowth();
+  assert(raised.BlockCount() == 9);
+  raised.GrowAhead(3 * block_bytes);
+  raised.WaitForGrowth();
+  assert(raised.BlockCount() == 9);
+  // A restore's worker waits for the reserve without a lock: while it does,
+  // and the thread still grows, the serving thread asks for more unblocked.
+  std::atomic<bool> waited_asked{}, waited_open{}, waited{};
+  cache::ResourceLedger waited_ledger(Limits(many_capacity));
+  hip::CommittedBackingPool waiting(waited_ledger,
+                                    {many_capacity, block_bytes, many_headroom,
+                                     3 * block_bytes, [&](std::size_t) {
+                                       waited_asked.store(true);
+                                       while (!waited_open.load())
+                                         std::this_thread::yield();
+                                       return true;
+                                     }});
+  waiting.WaitWhileGrowingAhead();
+  waiting.GrowAhead(3 * block_bytes);
+  while (!waited_asked.load())
+    std::this_thread::yield();
+  std::thread waiter([&] {
+    waiting.WaitWhileGrowingAhead();
+    waited.store(true);
+  });
+  waiting.GrowAhead(6 * block_bytes);
+  assert(!waited.load() && waiting.BlockCount() == 0);
+  waited_open.store(true);
+  waiter.join();
+  assert(waited.load() && waiting.BlockCount() == 6);
+  waiting.WaitWhileGrowingAhead();
 }
 void HeapReserveSegments() {
   // #781: 2.9 GiB of heap free, where registered pages are not charged.
@@ -664,6 +713,11 @@ void CaptureCapacity() {
   const auto physical = allocations.load(), host = host_allocations.load();
   assert(pool.CanFit(capture));
   assert(pool.CanFit({}));
+  // Budget that payloads outside the pool hold (rows sharing session pages)
+  // is capacity the pool cannot grow into: the capture needs four blocks.
+  assert(pool.CanFit(capture, 2 * block_bytes));
+  assert(!pool.CanFit(capture, 2 * block_bytes + 1));
+  assert(!pool.CanFit(capture, std::numeric_limits<std::size_t>::max()));
   // Capacity checks must neither commit pages nor allocate metadata.
   assert(pool.BlockCount() == 0 && ledger.Snapshot() == before);
   assert(allocations.load() == physical && host_allocations.load() == host);

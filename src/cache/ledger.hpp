@@ -173,6 +173,11 @@ public:
   // metadata/staging capacity. Request-time private capture and borrowed tails
   // use ReserveBacking on existing committed blocks instead of allocating.
   [[nodiscard]] ResourceReservation Reserve(ResourceCategory, std::size_t);
+  // Admit completed rows whose storage the cache shares with the session
+  // that wrote them, instead of copying them to pool backing. Charged like
+  // a copy: the bytes count as kBackingMaterialized and against RAM, and the
+  // converted charge is committed payload outside the pool.
+  [[nodiscard]] ResourceReservation ReserveShared(std::size_t);
   [[nodiscard]] ResourceSnapshot Snapshot() const;
   [[nodiscard]] ResourceLimits Limits() const;
   // Initialization only, before workers start: lower limits after execution
@@ -192,6 +197,7 @@ public:
   void ClearFaults();
 
 private:
+  [[nodiscard]] ResourceReservation Admit(ResourceCategory, std::size_t);
   std::shared_ptr<detail::LedgerState> state_;
 };
 

@@ -25,6 +25,47 @@
       "entry": "qwen_image_21_provider_register"
     }
   ],
+  "models": [
+    {
+      "id": "qwen-image-2.1",
+      "provider": "qwen-image-21",
+      "license": "qwen-research",
+      "description": "Qwen-Image 2.1, diffusers",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "entry": ".",
+          "source": {
+            "hf": "Qwen/Qwen-Image-2.1",
+            "revision": "b3179ad355be050328e483a9dfdd9e60cd62adfa"
+          }
+        }
+      ]
+    },
+    {
+      "id": "qwen-image-2.1-turbo",
+      "provider": "qwen-image-21",
+      "license": "qwen-research",
+      "description": "Qwen-Image 2.1 Turbo, diffusers",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "entry": ".",
+          "source": {
+            "hf": "Qwen/Qwen-Image-2.1-Turbo",
+            "revision": "fc13ba1986fcb905854dc8de2f52eee395f49b5b"
+          },
+          "exclude": [
+            "assets/*"
+          ]
+        }
+      ]
+    }
+  ],
   "targets": {
     "gufo_qwen_image_21": {
       "requires": []
@@ -41,7 +82,8 @@
       "**/*.h",
       "**/*.hpp",
       "**/*.hip",
-      "extension.*"
+      "extension.*",
+      "models.lock.json"
     ],
     "exclude": [
       "tests/",

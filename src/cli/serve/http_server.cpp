@@ -1,6 +1,7 @@
 #include "src/cli/serve/http_server.hpp"
 
 #include <gufo/http.h>
+#include <gufo/http_server.h>
 
 #include <algorithm>
 #include <cctype>
@@ -40,6 +41,7 @@
 #include "src/cli/serve/openai_chat.hpp"
 #include "src/cli/serve/responses_logprobs.hpp"
 #include "src/cli/serve/sampling_request.hpp"
+#include "src/cli/serve/sdapi.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
 #include "src/cli/serve/tts_service.hpp"
@@ -47,8 +49,8 @@
 #include "src/cli/serve/video_jobs.hpp"
 #include "src/cli/serve/websocket.hpp"
 #include "src/core/json.hpp"
-#include "src/core/platform/net.hpp"
 #include "src/core/platform/shutdown_signal.hpp"
+#include "src/core/rust/callback.hpp"
 #include "src/core/utf8.hpp"
 #include "src/families/qwen/text/chat_template.hpp"
 
@@ -76,118 +78,6 @@ public:
 private:
   platform::ShutdownSignalGuard guard_;
 };
-
-// ---------------------------------------------------------------------------
-// Socket I/O helpers
-// ---------------------------------------------------------------------------
-
-// Reads until the Rust parser finds a complete request head or rejects it
-// (GUFO_HTTP_MALFORMED, or GUFO_HTTP_TOO_MANY_FIELDS beyond 100 fields);
-// GUFO_HTTP_PARTIAL when the connection ends first or more than 16 MiB arrive
-// without one. `out` keeps the body bytes read with the head. On
-// GUFO_HTTP_COMPLETE, `request` has the head's header fields. A failure on the
-// server's side (memory, a parser bug) throws, so the caller answers 500.
-GufoHttpParse ReadHead(std::string& out, int fd, HttpRequest& request,
-                       GufoHttpHead& head) {
-  struct FieldContext {
-    HttpRequest* request;
-    std::exception_ptr failure;
-  } context{&request, nullptr};
-  const GufoHttpFieldFn add_field =
-      [](void* opaque, const std::uint8_t* name, std::size_t name_len,
-         const std::uint8_t* value, std::size_t value_len) noexcept -> int {
-    auto& context = *static_cast<FieldContext*>(opaque);
-    try {
-      context.request->headers.emplace_back(
-          std::string(reinterpret_cast<const char*>(name), name_len),
-          std::string(reinterpret_cast<const char*>(value), value_len));
-      return 0;
-    } catch (...) {
-      context.failure = std::current_exception();
-      return 1;
-    }
-  };
-  char buf[4096];
-  std::size_t known_partial = 0;
-  while (true) {
-    const std::intptr_t n = net::Receive(fd, buf, sizeof(buf), 0);
-    if (n < 0 && net::IsSocketInterrupted())
-      continue;
-    if (n <= 0)
-      return GUFO_HTTP_PARTIAL;
-    out.append(buf, static_cast<std::size_t>(n));
-    if (out.size() > (static_cast<std::size_t>(16) * 1024 * 1024))
-      return GUFO_HTTP_PARTIAL;
-    const GufoHttpParse parsed = gufo_http_parse_head(
-        reinterpret_cast<const std::uint8_t*>(out.data()), out.size(),
-        known_partial, &head, add_field, &context);
-    if (context.failure)
-      std::rethrow_exception(context.failure);
-    if (parsed == GUFO_HTTP_INTERNAL)
-      throw std::runtime_error("Rust HTTP request parser failed internally");
-    if (parsed != GUFO_HTTP_PARTIAL)
-      return parsed;
-    known_partial = out.size();
-  }
-}
-
-bool ReadN(std::string& out, int fd, std::size_t n) {
-  out.reserve(n);
-  std::size_t got = 0;
-  char buf[4096];
-  while (got < n) {
-    const std::size_t want = std::min(sizeof(buf), n - got);
-    const std::intptr_t r = net::Receive(fd, buf, want, 0);
-    if (r < 0 && net::IsSocketInterrupted())
-      continue;
-    if (r <= 0)
-      return false;
-    out.append(buf, static_cast<std::size_t>(r));
-    got += static_cast<std::size_t>(r);
-  }
-  return true;
-}
-
-bool SendAll(int fd, std::string_view data) {
-  std::size_t sent = 0;
-  while (sent < data.size()) {
-    const std::intptr_t n =
-        net::SendNoSignal(fd, data.data() + sent, data.size() - sent);
-    if (n < 0 && net::IsSocketInterrupted())
-      continue;
-    if (n <= 0)
-      return false;
-    sent += static_cast<std::size_t>(n);
-  }
-  return true;
-}
-
-bool SendChunk(int fd, std::string_view data, std::string_view prefix = {}) {
-  if (data.empty())
-    return prefix.empty() || SendAll(fd, prefix);
-  char header[2 * sizeof(std::size_t) + 2];
-  const auto length =
-      std::to_chars(header, header + sizeof(header) - 2, data.size(), 16);
-  *length.ptr = '\r';
-  *(length.ptr + 1) = '\n';
-  if (!prefix.empty()) {
-    // Deferred headers and the first event travel in one send, avoiding a
-    // separate small packet before the client can start parsing the stream.
-    std::string first;
-    first.reserve(prefix.size() + data.size() + sizeof(header) + 2);
-    first.append(prefix);
-    first.append(header, length.ptr + 2);
-    first.append(data);
-    first.append("\r\n");
-    return SendAll(fd, first);
-  }
-  return SendAll(fd, std::string_view(header, length.ptr + 2 - header)) &&
-         SendAll(fd, data) && SendAll(fd, "\r\n");
-}
-
-bool IsPeerDisconnected(int fd) noexcept {
-  return net::IsPeerDisconnected(fd);
-}
 
 // ---------------------------------------------------------------------------
 // Request / response helpers
@@ -243,42 +133,39 @@ bool IsEventStream(const HttpResponse& response) {
   });
 }
 
-std::string BuildResponseHead(const HttpResponse& resp,
-                              std::optional<std::size_t> content_length) {
-  std::string out;
-  out.reserve(256);
-  out += "HTTP/1.1 ";
-  out += std::to_string(resp.status);
-  out += ' ';
-  out += resp.reason;
-  out += "\r\n";
+std::vector<std::pair<std::string, std::string>> BuildResponseHeaders(
+    const HttpResponse& resp) {
+  std::vector<std::pair<std::string, std::string>> out;
+  out.reserve(resp.headers.size() + 4);
   if (resp.status != 101 && !HasHeader(resp, "content-type")) {
-    out += "Content-Type: application/json\r\n";
+    out.emplace_back("Content-Type", "application/json");
   }
-  if (content_length.has_value()) {
-    out += "Content-Length: " + std::to_string(*content_length) + "\r\n";
-  }
-  out += "Access-Control-Allow-Origin: *\r\n";
-  out += "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n";
+  out.emplace_back("Access-Control-Allow-Origin", "*");
+  out.emplace_back("Access-Control-Allow-Methods",
+                   "GET, POST, DELETE, OPTIONS");
   // Authorization is accepted (and ignored) so browser SDKs that always send
   // it still pass their CORS preflight.
-  out += "Access-Control-Allow-Headers: Content-Type, Authorization, Range\r\n";
-  for (const auto& [name, value] : resp.headers) {
-    out += name;
-    out += ": ";
-    out += value;
-    out += "\r\n";
+  out.emplace_back("Access-Control-Allow-Headers",
+                   "Content-Type, Authorization, Range");
+  for (const auto& header : resp.headers) {
+    out.push_back(header);
   }
-  if (!HasHeader(resp, "connection"))
-    out += "Connection: close\r\n";
-  out += "\r\n";
   return out;
 }
 
-std::string BuildResponse(const HttpResponse& resp) {
-  std::string out = BuildResponseHead(resp, resp.body.size());
-  out += resp.body;
-  return out;
+std::vector<GufoHttpHeaderView> ToHeaderViews(
+    const std::vector<std::pair<std::string, std::string>>& headers) {
+  std::vector<GufoHttpHeaderView> views;
+  views.reserve(headers.size());
+  for (const auto& [name, value] : headers) {
+    views.push_back(GufoHttpHeaderView{
+        .name = {reinterpret_cast<const std::uint8_t*>(name.data()),
+                 name.size()},
+        .value = {reinterpret_cast<const std::uint8_t*>(value.data()),
+                  value.size()},
+    });
+  }
+  return views;
 }
 
 // ---------------------------------------------------------------------------
@@ -1503,6 +1390,11 @@ HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend& b) {
   if (const auto sessions = b.session_states().size(); sessions > 0) {
     resp["total_slots"] = sessions;
   }
+  // Sessions sharing their state (#715) hold prompts up to this length; a
+  // longer one is refused with 507 insufficient_memory_permanent.
+  if (const auto shared = b.shared_state()) {
+    resp["max_prompt_tokens"] = shared->max_prompt_tokens;
+  }
 
   // What a request without sampling fields gets.
   const auto defaults = b.sampling_defaults();
@@ -1679,6 +1571,39 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
          "tokens over sessions times context; excludes retained cache\n"
       << "# TYPE llamacpp:kv_cache_usage_ratio gauge\n"
       << "llamacpp:kv_cache_usage_ratio " << KvCacheUsageRatio(b) << "\n";
+  if (const auto shared = b.shared_state()) {
+    out << "# HELP gufo_shared_state_bytes Session state the configured "
+           "sessions share when they do not all fit at full context\n"
+        << "# TYPE gufo_shared_state_bytes gauge\n"
+        << "gufo_shared_state_bytes " << shared->shared_bytes << "\n"
+        << "# HELP gufo_shared_state_charged_bytes Shared session state "
+           "charged to sessions\n"
+        << "# TYPE gufo_shared_state_charged_bytes gauge\n"
+        << "gufo_shared_state_charged_bytes " << shared->charged_bytes << "\n"
+        << "# HELP gufo_shared_state_reclaimable_bytes Charged session state "
+           "held by idle sessions or mapped past a session's need\n"
+        << "# TYPE gufo_shared_state_reclaimable_bytes gauge\n"
+        << "gufo_shared_state_reclaimable_bytes " << shared->reclaimable_bytes
+        << "\n"
+        << "# HELP gufo_shared_state_max_prompt_tokens Longest prompt the "
+           "shared session state holds\n"
+        << "# TYPE gufo_shared_state_max_prompt_tokens gauge\n"
+        << "gufo_shared_state_max_prompt_tokens " << shared->max_prompt_tokens
+        << "\n"
+        << "# HELP gufo_shared_state_waits_total Requests that waited for "
+           "shared session state\n"
+        << "# TYPE gufo_shared_state_waits_total counter\n"
+        << "gufo_shared_state_waits_total " << shared->waits << "\n"
+        << "# HELP gufo_shared_state_pauses_total Decoding requests paused "
+           "until shared session state freed\n"
+        << "# TYPE gufo_shared_state_pauses_total counter\n"
+        << "gufo_shared_state_pauses_total " << shared->pauses << "\n"
+        << "# HELP gufo_shared_state_preemptions_total Requests stopped "
+           "with memory_pressure so others could continue\n"
+        << "# TYPE gufo_shared_state_preemptions_total counter\n"
+        << "gufo_shared_state_preemptions_total " << shared->preemptions
+        << "\n";
+  }
   if (const auto budget = b.prompt_admission_budget()) {
     out << "# HELP gufo_prompt_state_budget_bytes Host RAM prompt state may "
            "claim before admission refuses\n"
@@ -1700,198 +1625,48 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
           .headers = {{"Content-Type", "text/plain; version=0.0.4"}}};
 }
 
-// Numeric literals only, so the listener never depends on name resolution.
-// IPv4 is parsed strictly, without inet_aton shorthand such as `127.1`; IPv6
-// goes through getaddrinfo so link-local scopes (`fe80::1%eth0`) resolve.
-bool ParseListenAddress(const std::string& host, int port,
-                        sockaddr_storage* address, net::SocklenT* length) {
-  *address = {};
-  // Bracketed literals are a URI convention, not a listen host; Winsock's
-  // getaddrinfo would accept them and glibc would not.
-  if (host.find('[') != std::string::npos ||
-      host.find(']') != std::string::npos)
-    return false;
-  const auto network_port = htons(static_cast<std::uint16_t>(port));
-  auto* ipv4 = reinterpret_cast<sockaddr_in*>(address);
-  if (::inet_pton(AF_INET, host.c_str(), &ipv4->sin_addr) == 1) {
-    ipv4->sin_family = AF_INET;
-    ipv4->sin_port = network_port;
-    *length = sizeof(sockaddr_in);
-    return true;
-  }
-  addrinfo hints{};
-  hints.ai_family = AF_INET6;
-  hints.ai_socktype = SOCK_STREAM;
-  hints.ai_flags = AI_NUMERICHOST;
-  addrinfo* result = nullptr;
-  if (::getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0) {
-    // Another host's interface name in a link-local scope (`fe80::1%eth0` on
-    // a machine without it) still names a well-formed listener; validate the
-    // address part and resolve the zone best effort. An unknown zone fails
-    // at bind() with the usual error instead of here.
-    const auto zone = host.rfind('%');
-    if (zone == std::string::npos)
-      return false;
-    const std::string bare = host.substr(0, zone);
-    const std::string scope = host.substr(zone + 1);
-    auto* ipv6 = reinterpret_cast<sockaddr_in6*>(address);
-    if (scope.empty() ||
-        ::inet_pton(AF_INET6, bare.c_str(), &ipv6->sin6_addr) != 1)
-      return false;
-    ipv6->sin6_family = AF_INET6;
-    ipv6->sin6_port = network_port;
-    ipv6->sin6_scope_id =
-        std::ranges::all_of(
-            scope,
-            [](char character) {
-              return std::isdigit(static_cast<unsigned char>(character));
-            })
-            ? static_cast<std::uint32_t>(
-                  std::strtoul(scope.c_str(), nullptr, 10))
-            : ::if_nametoindex(scope.c_str());
-    *length = sizeof(sockaddr_in6);
-    return true;
-  }
-  const bool parsed = result != nullptr && result->ai_family == AF_INET6 &&
-                      result->ai_addrlen <= sizeof(sockaddr_storage);
-  if (parsed) {
-    std::memcpy(address, result->ai_addr, result->ai_addrlen);
-    reinterpret_cast<sockaddr_in6*>(address)->sin6_port = network_port;
-    *length = static_cast<net::SocklenT>(result->ai_addrlen);
-  }
-  ::freeaddrinfo(result);
-  return parsed;
-}
-
-// Client IDs key per-client scheduling, so one client keeps one ID whichever
-// listener it reaches: an IPv4 peer of a dual-stack `::` listener arrives as
-// `::ffff:a.b.c.d` and is reported as `a.b.c.d`. Empty when unavailable.
-std::string PeerAddress(int client_fd) {
-  sockaddr_storage peer{};
-  net::SocklenT length = sizeof(peer);
-  if (::getpeername(client_fd, reinterpret_cast<sockaddr*>(&peer), &length) !=
-      0)
-    return {};
-  if (peer.ss_family == AF_INET6) {
-    const auto& ipv6 = reinterpret_cast<const sockaddr_in6&>(peer);
-    if (IN6_IS_ADDR_V4MAPPED(&ipv6.sin6_addr)) {
-      sockaddr_in ipv4{};
-      ipv4.sin_family = AF_INET;
-      ipv4.sin_port = ipv6.sin6_port;
-      std::memcpy(&ipv4.sin_addr, &ipv6.sin6_addr.s6_addr[12],
-                  sizeof(ipv4.sin_addr));
-      std::memcpy(&peer, &ipv4, sizeof(ipv4));
-      length = sizeof(ipv4);
-    }
-  }
-  char text[NI_MAXHOST]{};
-  if (::getnameinfo(reinterpret_cast<const sockaddr*>(&peer), length, text,
-                    sizeof(text), nullptr, 0, NI_NUMERICHOST) != 0)
-    return {};
-  return text;
-}
-
 }  // namespace
 
+bool HasToken(std::string_view value, std::string_view token) {
+  const int found = gufo_http_has_token(
+      reinterpret_cast<const std::uint8_t*>(value.data()), value.size(),
+      reinterpret_cast<const std::uint8_t*>(token.data()), token.size());
+  if (found < 0)
+    throw std::logic_error("Rust HTTP token check failed internally");
+  return found != 0;
+}
+
 LoadingResponder::LoadingResponder(const std::string& host, int port) {
-  net::EnsureSocketRuntimeStarted();
-  sockaddr_storage addr{};
-  net::SocklenT addr_length = 0;
-  if (port <= 0 || port > 65535 ||
-      !ParseListenAddress(host, port, &addr, &addr_length))
-    return;
-  const int fd = static_cast<int>(net::CreateStreamSocket(addr.ss_family));
-  if (fd < 0)
-    return;
-  // Match HttpServer::start, which binds the same address after stop().
-  if (!net::SetExclusiveListenerReuse(fd)) {
-    net::CloseSocket(fd);
-    return;
-  }
-  if ((addr.ss_family == AF_INET6 && !net::ClearIpv6Only(fd)) ||
-      ::bind(fd, reinterpret_cast<sockaddr*>(&addr), addr_length) < 0 ||
-      ::listen(fd, 16) < 0) {
-    const int error = net::LastSocketError();
-    Logger::Debug("server", "event=loading_listener_unavailable host=" + host +
-                                " port=" + std::to_string(port) +
-                                " errno=" + std::to_string(error));
-    net::CloseSocket(fd);
-    return;
-  }
-  listen_fd_ = fd;
-  thread_ = std::thread([this] { serve(); });
+  responder_ = gufo_loading_responder_start(
+      reinterpret_cast<const std::uint8_t*>(host.data()), host.size(), port);
+  listening_.store(responder_ != nullptr, std::memory_order_release);
 }
 
 LoadingResponder::~LoadingResponder() {
   stop();
+  gufo_loading_responder_free(responder_);
+  responder_ = nullptr;
 }
 
 void LoadingResponder::stop() {
-  stopped_.store(true, std::memory_order_release);
-  if (thread_.joinable())
-    thread_.join();
-  if (listen_fd_ >= 0) {
-    net::CloseSocket(listen_fd_);
-    listen_fd_ = -1;
+  if (listening_.exchange(false, std::memory_order_acq_rel) &&
+      responder_ != nullptr) {
+    gufo_loading_responder_stop(responder_);
   }
 }
 
-void LoadingResponder::serve() {
-  HttpResponse loading = Err(503, "Service Unavailable", "Loading model",
-                             "unavailable_error", "loading");
-  loading.headers.emplace_back("Retry-After", "1");
-  const std::string reply = BuildResponse(loading);
-  // One connection at a time is enough for probes. Read the request head
-  // before replying, and after replying read what the client still sends (a
-  // request body) until it closes: closing with unread data resets the
-  // connection, and the client can lose the reply. Bound both waits: a client
-  // that connects and sends nothing must not delay stop().
-  constexpr auto kRequestWait = std::chrono::milliseconds(500);
-  while (!stopped_.load(std::memory_order_acquire)) {
-    if (net::PollReadable(listen_fd_, 100) <= 0)
-      continue;
-    const int client_fd = static_cast<int>(net::AcceptClientSocket(listen_fd_));
-    if (client_fd < 0)
-      continue;
-    // Appends one read to `into` (when set); false once the deadline passes,
-    // the client closes or stop() runs.
-    const auto receive = [&](std::chrono::steady_clock::time_point deadline,
-                             std::string* into) {
-      const auto remaining =
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              deadline - std::chrono::steady_clock::now())
-              .count();
-      if (stopped_.load(std::memory_order_acquire) || remaining <= 0 ||
-          net::PollReadable(client_fd, static_cast<int>(remaining)) <= 0)
-        return false;
-      char buffer[4096];
-      const std::intptr_t received =
-          net::Receive(client_fd, buffer, sizeof(buffer), 0);
-      if (received <= 0)
-        return false;
-      if (into != nullptr)
-        into->append(buffer, static_cast<std::size_t>(received));
-      return true;
-    };
-    std::string head;
-    const auto head_deadline = std::chrono::steady_clock::now() + kRequestWait;
-    while (head.find("\r\n\r\n") == std::string::npos && head.size() < 8192 &&
-           receive(head_deadline, &head)) {
-    }
-    (void)SendAll(client_fd, reply);
-    (void)net::ShutdownSocket(client_fd, net::ShutdownHow::kWrite);
-    const auto drain_deadline = std::chrono::steady_clock::now() + kRequestWait;
-    while (receive(drain_deadline, nullptr)) {
-    }
-    net::CloseSocket(client_fd);
+void LoadingResponder::SetProgress(double progress, std::string_view message) {
+  if (responder_ != nullptr) {
+    gufo_loading_responder_set_progress(
+        responder_, progress,
+        reinterpret_cast<const std::uint8_t*>(message.data()), message.size());
   }
 }
 
 bool IsListenAddress(const std::string& host) {
-  net::EnsureSocketRuntimeStarted();
-  sockaddr_storage address{};
-  net::SocklenT length = 0;
-  return ParseListenAddress(host, 0, &address, &length);
+  return gufo_http_is_listen_address(
+             reinterpret_cast<const std::uint8_t*>(host.data()), host.size()) !=
+         0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1901,23 +1676,19 @@ bool IsListenAddress(const std::string& host) {
 std::string HttpRequest::query_param(const std::string& key) const {
   struct Found {
     std::string value;
-    std::exception_ptr failure;
+    core::ffi::CallbackFailure failure;
   } found;
   const GufoHttpBytesFn keep = [](void* opaque, const std::uint8_t* data,
                                   std::size_t len) noexcept {
     auto& out = *static_cast<Found*>(opaque);
-    try {
-      out.value.assign(reinterpret_cast<const char*>(data), len);
-    } catch (...) {
-      out.failure = std::current_exception();
-    }
+    out.failure.Guard(
+        [&] { out.value.assign(reinterpret_cast<const char*>(data), len); });
   };
   const int status = gufo_http_query_param(
       reinterpret_cast<const std::uint8_t*>(query.data()), query.size(),
       reinterpret_cast<const std::uint8_t*>(key.data()), key.size(), keep,
       &found);
-  if (found.failure)
-    std::rethrow_exception(found.failure);
+  found.failure.Rethrow();
   if (status < 0)
     throw std::logic_error("Rust query parser failed internally");
   return found.value;
@@ -1926,16 +1697,6 @@ std::string HttpRequest::query_param(const std::string& key) const {
 // ---------------------------------------------------------------------------
 // HttpServer
 // ---------------------------------------------------------------------------
-
-struct HttpServer::ConnectionWorker {
-  int fd{-1};  // Protected by workers_mutex_, including shutdown and close.
-  // Set after the final response is written. The server reads nothing more,
-  // so the connection only logs and closes and no longer counts toward the
-  // limit.
-  std::atomic<bool> response_sent{false};
-  std::atomic<bool> done{false};
-  std::jthread thread;
-};
 
 HttpServer::HttpServer(std::string host, int port,
                        std::shared_ptr<TextGenerationBackend> backend,
@@ -1964,9 +1725,8 @@ HttpServer::HttpServer(std::string host, int port,
 
 HttpServer::~HttpServer() {
   stop();
-  if (listen_fd_ >= 0) {
-    net::CloseSocket(listen_fd_);
-  }
+  gufo_http_server_free(server_);
+  server_ = nullptr;
 }
 
 void HttpServer::add(const std::string& method, const std::string& path,
@@ -2011,87 +1771,97 @@ void HttpServer::register_routes() {
 }
 
 bool HttpServer::start(std::string* error) {
-  net::EnsureSocketRuntimeStarted();
-  if (listen_fd_ >= 0 || stopped_.load(std::memory_order_acquire)) {
+  if (server_ != nullptr || stopped_.load(std::memory_order_acquire)) {
     if (error != nullptr) {
       *error = "HTTP server has already been started or stopped";
     }
     return false;
   }
-  sockaddr_storage addr{};
-  net::SocklenT addr_length = 0;
-  if (port_ < 0 || port_ > 65535 ||
-      !ParseListenAddress(host_, port_, &addr, &addr_length)) {
-    if (error != nullptr) {
-      *error =
-          "host must be an IPv4 or IPv6 address and port must be between "
-          "0 and 65535";
-    }
-    return false;
-  }
-  platform::IgnoreSocketPipeSignal();
-  listen_fd_ = static_cast<int>(net::CreateStreamSocket(addr.ss_family));
-  if (listen_fd_ < 0) {
-    if (error != nullptr)
-      *error = "socket() failed";
-    return false;
-  }
-  (void)net::SetReuseAddr(listen_fd_);
-  // `::` serves IPv4 clients too. Set it explicitly: the kernel default
-  // follows net.ipv6.bindv6only, which differs between hosts.
-  if (addr.ss_family == AF_INET6 && !net::ClearIpv6Only(listen_fd_)) {
-    if (error != nullptr)
-      *error = "setsockopt(IPV6_V6ONLY) failed";
-    net::CloseSocket(listen_fd_);
-    listen_fd_ = -1;
-    return false;
-  }
-
-  if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), addr_length) < 0) {
-    if (error != nullptr) {
-      *error = "bind() failed on " + host_ + ":" + std::to_string(port_);
-    }
-    net::CloseSocket(listen_fd_);
-    listen_fd_ = -1;
-    return false;
-  }
-  if (::listen(listen_fd_, 16) < 0) {
-    if (error != nullptr)
-      *error = "listen() failed";
-    net::CloseSocket(listen_fd_);
-    listen_fd_ = -1;
-    return false;
-  }
-  if (port_ == 0) {
-    sockaddr_storage bound{};
-    net::SocklenT length = sizeof(bound);
-    if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound),
-                      &length) != 0) {
-      if (error != nullptr) {
-        *error = "getsockname() failed";
+  const auto on_request = [](void* context, const GufoHttpRequestView* view,
+                             GufoHttpResponder* responder) noexcept {
+    auto* self = static_cast<HttpServer*>(context);
+    if (self != nullptr && view != nullptr && responder != nullptr) {
+      try {
+        self->dispatch_request(*view, responder);
+      } catch (const std::exception& e) {
+        Logger::Error(
+            "http", std::string("event=dispatch_exception reason=") + e.what());
+      } catch (...) {
+        Logger::Error("http", "event=dispatch_exception reason=unknown");
       }
-      net::CloseSocket(listen_fd_);
-      listen_fd_ = -1;
-      return false;
     }
-    port_ = ntohs(bound.ss_family == AF_INET6
-                      ? reinterpret_cast<sockaddr_in6&>(bound).sin6_port
-                      : reinterpret_cast<sockaddr_in&>(bound).sin_port);
+  };
+  const auto on_device_lost = [](void* context) noexcept -> int {
+    auto* self = static_cast<HttpServer*>(context);
+    if (self == nullptr)
+      return 0;
+    try {
+      return self->device_lost() ? 1 : 0;
+    } catch (...) {
+      return 0;
+    }
+  };
+  const auto on_error = [](void* context, const std::uint8_t* data,
+                           std::size_t len) noexcept {
+    if (context == nullptr)
+      return;
+    auto* out = static_cast<std::string*>(context);
+    out->assign(reinterpret_cast<const char*>(data), len);
+  };
+
+  GufoHttpServerConfig config{};
+  config.host = reinterpret_cast<const std::uint8_t*>(host_.data());
+  config.host_len = host_.size();
+  config.port = port_;
+  config.max_request_body_bytes = options_.max_request_body_bytes;
+  config.max_connections = options_.max_connections;
+  config.sse_heartbeat_interval_ms =
+      options_.sse_heartbeat_interval.count() > 0
+          ? static_cast<std::uint64_t>(options_.sse_heartbeat_interval.count())
+          : 0;
+  config.keep_alive = options_.keep_alive ? 1 : 0;
+  config.keep_alive_idle_timeout_ms =
+      options_.keep_alive_idle_timeout.count() > 0
+          ? static_cast<std::uint64_t>(options_.keep_alive_idle_timeout.count())
+          : 0;
+  config.max_requests_per_connection = options_.max_requests_per_connection;
+  config.handler = on_request;
+  config.handler_context = this;
+  config.device_lost = on_device_lost;
+  config.device_lost_context = this;
+
+  std::string err_msg;
+  server_ = gufo_http_server_start(&config, on_error, &err_msg);
+  if (server_ == nullptr) {
+    if (error != nullptr) {
+      *error = err_msg.empty() ? "failed to start HTTP server" : err_msg;
+    }
+    return false;
   }
+  port_ = gufo_http_server_port(server_);
   return true;
 }
 
 void HttpServer::run(bool handle_signals) {
   std::optional<ShutdownSignals> signals;
+  std::jthread signal_watcher;
   if (handle_signals) {
     signals.emplace();
+    signal_watcher = std::jthread([this](std::stop_token stop_token) {
+      while (!stop_token.stop_requested() &&
+             !stopped_.load(std::memory_order_acquire)) {
+        const int signal = shutdown_signal.load(std::memory_order_relaxed);
+        if (signal != 0) {
+          Logger::Info("server", "event=shutdown_requested signal=" +
+                                     std::to_string(signal));
+          stop();
+          platform::NotifyShutdownHandled();
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    });
   }
-  // Poll even without signal handling so device loss is observed while a
-  // request worker is blocked writing to a slow client. Nonblocking accept
-  // also keeps a vanished connection from wedging this observation loop.
-  if (!net::SetNonBlocking(listen_fd_))
-    throw std::system_error(net::LastSocketError(), std::system_category(),
-                            "configure HTTP listener");
   Logger::Info(
       "server",
       "event=listening monotonic_us=" +
@@ -2104,107 +1874,19 @@ void HttpServer::run(bool handle_signals) {
           ":" + std::to_string(port_) +
           " max_connections=" + std::to_string(options_.max_connections) +
           " max_body_bytes=" + std::to_string(options_.max_request_body_bytes));
-  while (!stopped_.load(std::memory_order_acquire)) {
-    (void)device_lost();
-    if (handle_signals) {
-      const int signal = shutdown_signal.load(std::memory_order_relaxed);
-      if (signal != 0) {
-        Logger::Info("server", "event=shutdown_requested signal=" +
-                                   std::to_string(signal));
-        stop();
-        platform::NotifyShutdownHandled();
-        break;
-      }
-    }
-    const int ready = net::PollReadable(listen_fd_, 100);
-    if (ready < 0 && !net::IsSocketInterrupted())
-      throw std::system_error(net::LastSocketError(), std::system_category(),
-                              "poll HTTP listener");
-    if (ready <= 0)
-      continue;
-    const int client_fd = static_cast<int>(net::AcceptClientSocket(listen_fd_));
-    if (client_fd < 0) {
-      if (stopped_.load(std::memory_order_acquire)) {
-        break;
-      }
-      continue;
-    }
-    if (stopped_.load(std::memory_order_acquire)) {
-      net::CloseSocket(client_fd);
-      break;
-    }
-
-    reap_workers();
-    auto worker = std::make_unique<ConnectionWorker>();
-    ConnectionWorker* const worker_ptr = worker.get();
-    bool overloaded = false;
-    {
-      const std::lock_guard<std::mutex> lock(workers_mutex_);
-      const auto serving = static_cast<std::size_t>(std::ranges::count_if(
-          workers_, [](const std::unique_ptr<ConnectionWorker>& existing) {
-            return !existing->response_sent.load(std::memory_order_acquire);
-          }));
-      overloaded = stopped_.load(std::memory_order_acquire) ||
-                   serving >= options_.max_connections;
-      if (!overloaded) {
-        worker_ptr->fd = client_fd;
-        worker_ptr->thread = std::jthread([this, worker_ptr, client_fd] {
-          handle_connection(client_fd, worker_ptr->response_sent);
-          {
-            const std::lock_guard<std::mutex> lock(workers_mutex_);
-            net::CloseSocket(worker_ptr->fd);
-            worker_ptr->fd = -1;
-          }
-          worker_ptr->done.store(true, std::memory_order_release);
-        });
-        workers_.push_back(std::move(worker));
-      }
-    }
-    if (overloaded) {
-      HttpResponse response =
-          Err(503, "Service Unavailable", "connection limit reached",
-              "server_error", "overloaded");
-      response.headers.emplace_back("Retry-After", "1");
-      (void)SendAll(client_fd, BuildResponse(response));
-      net::CloseSocket(client_fd);
-    }
+  if (server_ != nullptr) {
+    (void)gufo_http_server_run(server_);
   }
-  reap_workers();
+  if (signal_watcher.joinable()) {
+    signal_watcher.request_stop();
+    signal_watcher.join();
+  }
 }
 
 void HttpServer::stop() {
   const bool was_stopped = stopped_.exchange(true, std::memory_order_acq_rel);
-  if (!was_stopped && listen_fd_ >= 0) {
-    // Keep the descriptor owned until destruction: run() may still be inside
-    // accept(). Closing here allows it to observe a reused descriptor.
-    (void)net::ShutdownSocket(listen_fd_, net::ShutdownHow::kReadWrite);
-  }
-
-  std::vector<std::unique_ptr<ConnectionWorker>> workers;
-  {
-    const std::lock_guard<std::mutex> lock(workers_mutex_);
-    workers = std::move(workers_);
-    for (const auto& worker : workers) {
-      if (worker->fd >= 0) {
-        (void)net::ShutdownSocket(worker->fd, net::ShutdownHow::kReadWrite);
-      }
-    }
-  }
-}
-
-void HttpServer::reap_workers() {
-  std::vector<std::unique_ptr<ConnectionWorker>> finished;
-  {
-    const std::lock_guard<std::mutex> lock(workers_mutex_);
-    auto iterator = workers_.begin();
-    while (iterator != workers_.end()) {
-      if ((*iterator)->done.load(std::memory_order_acquire)) {
-        finished.push_back(std::move(*iterator));
-        iterator = workers_.erase(iterator);
-      } else {
-        ++iterator;
-      }
-    }
+  if (!was_stopped && server_ != nullptr) {
+    gufo_http_server_stop(server_);
   }
 }
 
@@ -2309,8 +1991,10 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                  "server_error", "image_service_unavailable");
     return HandleImageApiRequest(req, *images_);
   }
-  if (req.path == "/sdapi/v1/loras" && images_ != nullptr)
-    return HandleImageLorasRequest(req, *images_);
+  // An image server answers every A1111 route; a text server keeps the 501
+  // stubs of the route table.
+  if (images_ != nullptr && IsSdapiPath(req.path))
+    return HandleSdapiRequest(req, *images_);
   if (req.path == "/v1/audio/speech/stream") {
     if (!tts_ || !tts_->ready())
       return Err(503, "Service Unavailable", "TTS is not configured",
@@ -2377,7 +2061,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
 
 bool HttpServer::device_lost() {
   const bool lost = (backend_ != nullptr && backend_->device_lost()) ||
-                    (embeddings_ != nullptr && embeddings_->device_lost());
+                    (embeddings_ != nullptr && embeddings_->device_lost()) ||
+                    (images_ != nullptr && images_->device_lost());
   if (!lost)
     return false;
   if (options_.on_device_lost &&
@@ -2392,113 +2077,86 @@ bool HttpServer::device_lost() {
   return true;
 }
 
-void HttpServer::handle_connection(int client_fd,
-                                   std::atomic<bool>& response_sent) {
-  (void)net::SetSocketTimeouts(client_fd, 120'000);
-
-  const auto start_time = std::chrono::steady_clock::now();
-  HttpRequest req;
+void HttpServer::dispatch_request(const GufoHttpRequestView& view,
+                                  GufoHttpResponder* responder) {
   static std::atomic<std::uint64_t> next_request{0};
-  if (auto peer = PeerAddress(client_fd); !peer.empty())
+  const auto start_time = std::chrono::steady_clock::now();
+
+  const auto view_str = [](GufoHttpSliceView slice) {
+    return slice.data != nullptr && slice.len > 0
+               ? std::string(reinterpret_cast<const char*>(slice.data),
+                             slice.len)
+               : std::string{};
+  };
+
+  HttpRequest req;
+  req.method = view_str(view.method);
+  req.path = view_str(view.path);
+  req.query = view_str(view.query);
+  req.body = view_str(view.body);
+  req.headers.reserve(view.headers_len);
+  for (std::size_t i = 0; i < view.headers_len; ++i) {
+    req.headers.emplace_back(view_str(view.headers[i].name),
+                             view_str(view.headers[i].value));
+  }
+  if (auto peer = view_str(view.peer_addr); !peer.empty()) {
     req.client_id = std::move(peer);
+  }
   req.request_id = "r" + std::to_string(next_request.fetch_add(1) + 1);
-  // Set for routes `--trace` records; `traced_stream` collects the body bytes
-  // a streaming reply delivered.
+  GufoHttpCancel* cancel = view.cancel;
+  req.is_cancelled = [cancel] {
+    return cancel != nullptr && gufo_http_cancel_is_cancelled(cancel) != 0;
+  };
+
   bool traced = false;
   std::string traced_stream;
+  std::mutex traced_mutex;
   bool response_started = false;
-  bool http11 = false;
   int response_status = 0;
+
   const auto elapsed_ms = [&] {
     return std::chrono::duration<double, std::milli>(
                std::chrono::steady_clock::now() - start_time)
         .count();
   };
-  // A failure after a stream started keeps the bytes it already delivered.
-  const auto trace_failure = [&](const HttpResponse& error) {
-    if (traced)
-      TraceResponse(
-          req.request_id, response_started ? response_status : error.status,
-          response_started ? "stream_error" : "failed", response_started,
-          response_started ? traced_stream : error.body);
+
+  const auto send_buffered = [&](const HttpResponse& resp) {
+    const auto headers = BuildResponseHeaders(resp);
+    const auto header_views = ToHeaderViews(headers);
+    return gufo_http_respond_buffered(
+               responder, resp.status,
+               header_views.empty() ? nullptr : header_views.data(),
+               header_views.size(),
+               reinterpret_cast<const std::uint8_t*>(resp.body.data()),
+               resp.body.size()) != 0;
   };
-  // Generation submitted on this thread, by the handler or by a stream body
-  // that defers it, names this request in its trace record.
+
+  const auto trace_failure = [&](const HttpResponse& error) {
+    if (traced) {
+      std::string captured;
+      if (response_started) {
+        const std::lock_guard lock(traced_mutex);
+        captured = traced_stream;
+      }
+      TraceResponse(req.request_id,
+                    response_started ? response_status : error.status,
+                    response_started ? "stream_error" : "failed",
+                    response_started, response_started ? captured : error.body);
+    }
+  };
+
   const Trace::RequestScope trace_scope(req.request_id);
   try {
-    bool ok = false;
-    bool payload_too_large = false;
-    bool too_many_fields = false;
-    {
-      std::string buffer;
-      GufoHttpHead head{};
-      const GufoHttpParse parsed = ReadHead(buffer, client_fd, req, head);
-      too_many_fields = parsed == GUFO_HTTP_TOO_MANY_FIELDS;
-      if (parsed == GUFO_HTTP_COMPLETE) {
-        // ReadHead over-reads: `buffer` holds the head and possibly some body
-        // bytes already. Carry those forward so we only read the remainder
-        // from the socket.
-        std::string body = buffer.substr(head.len);
-        const auto text = [](GufoHttpSlice slice) {
-          return std::string(reinterpret_cast<const char*>(slice.data),
-                             slice.len);
-        };
-        req.method = text(head.method);
-        req.path = text(head.path);
-        req.query = text(head.query);
-        http11 = head.http11 != 0;
-
-        const bool framing_valid =
-            head.framing_valid != 0 &&
-            std::in_range<std::size_t>(head.content_length);
-        const std::size_t content_length =
-            framing_valid ? static_cast<std::size_t>(head.content_length) : 0;
-        const std::size_t remaining =
-            content_length > body.size() ? content_length - body.size() : 0;
-        if (!framing_valid) {
-          ok = false;
-        } else if (content_length > options_.max_request_body_bytes) {
-          payload_too_large = true;
-        } else if (content_length > 0) {
-          if (remaining > 0) {
-            // A HTTP/1.0 request's expectation is ignored (RFC 9110 10.1.1).
-            ok = (!http11 || head.expect_continue == 0 ||
-                  SendAll(client_fd, "HTTP/1.1 100 Continue\r\n\r\n")) &&
-                 ReadN(body, client_fd, remaining);
-          } else {
-            ok = true;
-          }
-          if (body.size() > content_length) {
-            body.resize(content_length);
-          }
-        } else {
-          ok = true;
-          if (!IsWebSocketUpgrade(req))
-            body.clear();
-        }
-        if (ok) {
-          req.body = std::move(body);
-          req.is_cancelled = [client_fd] {
-            return IsPeerDisconnected(client_fd);
-          };
-        }
-      }
-    }
-
-    // Successful health/metrics polling and video status polling stay quiet at
-    // the default level. Under --log-level=debug they become visible, because
-    // "is anything actually arriving?" is the first question an operator asks
-    // when a client reports a hang.
+    // The transport refuses a request it could not read whole; the reply
+    // carries the usual headers and log line.
+    const int rejection = view.rejection;
     const bool log_request =
         req.method == "POST" || req.method == "DELETE" ||
         req.path == "/v1/models" || req.path.ends_with("/content") ||
         req.path == "/v1/realtime" || req.path == "/v1/audio/speech/stream";
     const LogLevel request_level =
         log_request ? LogLevel::kInfo : LogLevel::kDebug;
-    // The tier check subsumes the method test: receipt lines are kInfo for
-    // the methods above and kDebug otherwise, so a quiet tier that discards
-    // the line also skips the concatenation that would build it.
-    if (ok && Logger::Enabled(request_level)) {
+    if (rejection == 0 && Logger::Enabled(request_level)) {
       Logger::Log(request_level, "http",
                   "request=" + req.request_id + " event=received method=" +
                       req.method + " path=" + req.path +
@@ -2506,16 +2164,19 @@ void HttpServer::handle_connection(int client_fd,
     }
 
     HttpResponse resp;
-    if (payload_too_large) {
+    if (rejection == 413) {
       resp = Err(413, "Payload Too Large", "request body is too large",
                  "invalid_request_error", "payload_too_large");
-    } else if (too_many_fields) {
+    } else if (rejection == 431) {
       resp = Err(431, "Request Header Fields Too Large",
                  "request has more than 100 header fields",
                  "invalid_request_error", "request_header_fields_too_large");
-    } else if (!ok) {
+    } else if (rejection == 400) {
       resp = Err(400, "Bad Request", "malformed request",
                  "invalid_request_error", "bad_request");
+    } else if (rejection != 0) {
+      resp = Err(500, "Internal Server Error", "internal server error",
+                 "internal_error", "server_exception");
     } else if (req.method == "OPTIONS") {
       resp = {.status = 204, .reason = "No Content"};
     } else {
@@ -2529,92 +2190,102 @@ void HttpServer::handle_connection(int client_fd,
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     response_status = resp.status;
     bool connected = true;
+
     if (resp.websocket) {
       response_started = true;
-      connected = SendAll(client_fd, BuildResponseHead(resp, std::nullopt));
-      if (connected) {
-        WebSocket socket(client_fd, std::move(req.body));
-        resp.websocket(socket);
-      }
-    } else if (resp.streaming_body) {
-      const bool chunked = http11 && !HasHeader(resp, "content-length");
-      if (chunked)
-        resp.headers.emplace_back("Transfer-Encoding", "chunked");
-      const auto head = BuildResponseHead(resp, std::nullopt);
-      if (!resp.defer_stream_headers) {
-        response_started = true;
-        connected = SendAll(client_fd, head);
-      }
-      if (connected) {
-        std::mutex write_mutex;
-        std::condition_variable_any write_cv;
-        auto last_write = std::chrono::steady_clock::now();
-        const auto send_body = [&](std::string_view chunk) {
-          const std::lock_guard lock(write_mutex);
-          if (!connected)
-            return false;
-          if (!response_started) {
-            response_started = true;
-            connected = chunked ? SendChunk(client_fd, chunk, head)
-                                : SendAll(client_fd, head + std::string(chunk));
-            write_cv.notify_all();
-          } else {
-            connected = chunked ? SendChunk(client_fd, chunk)
-                                : SendAll(client_fd, chunk);
-          }
-          if (connected && !chunk.empty()) {
-            last_write = std::chrono::steady_clock::now();
-            if (traced)
-              traced_stream.append(chunk);
-          }
-          return connected;
-        };
-        std::jthread heartbeat;
-        if (IsEventStream(resp) &&
-            options_.sse_heartbeat_interval.count() > 0) {
-          heartbeat = std::jthread([&](std::stop_token stop) {
-            std::unique_lock lock(write_mutex);
-            write_cv.wait(lock, stop,
-                          [&] { return response_started || !connected; });
-            while (!stop.stop_requested() && connected) {
-              const auto deadline =
-                  last_write + options_.sse_heartbeat_interval;
-              // Stop-aware waiting cannot miss a stop requested just before
-              // sleeping. Ordinary writes only move the deadline; they need
-              // not wake a second thread for every generated token.
-              write_cv.wait_until(lock, stop, deadline,
-                                  [&] { return !connected; });
-              if (!stop.stop_requested() && connected &&
-                  std::chrono::steady_clock::now() >=
-                      last_write + options_.sse_heartbeat_interval) {
-                // SSE comments carry bytes without changing the API event
-                // stream.
-                connected = chunked ? SendChunk(client_fd, ": ping\n\n")
-                                    : SendAll(client_fd, ": ping\n\n");
-                last_write = std::chrono::steady_clock::now();
-                if (traced && connected)
-                  traced_stream.append(": ping\n\n");
-              }
-            }
-          });
+      const auto headers = BuildResponseHeaders(resp);
+      const auto header_views = ToHeaderViews(headers);
+      // The session runs on this thread inside the call, within this
+      // request's trace scope; the request is logged once it ends.
+      struct WebSocketRun {
+        std::function<void(WebSocket&)>* handler;
+        std::exception_ptr failure;
+      } run{&resp.websocket, nullptr};
+      const auto ws_trampoline = [](void* ctx,
+                                    GufoWsSession* session) noexcept {
+        auto& run = *static_cast<WebSocketRun*>(ctx);
+        try {
+          WebSocket socket(session);
+          (*run.handler)(socket);
+        } catch (...) {
+          run.failure = std::current_exception();
         }
-        resp.streaming_body(send_body);
-        heartbeat.request_stop();
-        if (heartbeat.joinable())
-          heartbeat.join();
-        // An SSE error is a complete protocol response. A failed raw PCM
-        // stream must remain incomplete, or it looks like valid shorter audio.
-        if (connected && response_started && chunked &&
-            (!resp.stream_log || resp.stream_log->error_code.empty() ||
-             resp.stream_log->error_event_sent))
-          connected = SendAll(client_fd, "0\r\n\r\n");
+      };
+      connected = gufo_http_respond_websocket(
+                      responder, resp.status,
+                      header_views.empty() ? nullptr : header_views.data(),
+                      header_views.size(), ws_trampoline, &run) != 0;
+      if (run.failure)
+        std::rethrow_exception(run.failure);
+    } else if (resp.streaming_body) {
+      const auto headers = BuildResponseHeaders(resp);
+      const auto header_views = ToHeaderViews(headers);
+      const bool is_sse = IsEventStream(resp);
+      struct HeartbeatTraceCtx {
+        std::mutex* mutex;
+        std::string* stream;
+      } hb_ctx{&traced_mutex, &traced_stream};
+      const GufoHttpBytesSink hb_sink =
+          traced ? static_cast<GufoHttpBytesSink>([](void* ctx,
+                                                     const std::uint8_t* data,
+                                                     std::size_t len) noexcept {
+            auto* h = static_cast<HeartbeatTraceCtx*>(ctx);
+            try {
+              const std::lock_guard lock(*h->mutex);
+              h->stream->append(reinterpret_cast<const char*>(data), len);
+            } catch (...) {
+            }
+          })
+                 : nullptr;
+
+      GufoHttpStream* stream = gufo_http_respond_stream_begin(
+          responder, resp.status,
+          header_views.empty() ? nullptr : header_views.data(),
+          header_views.size(), is_sse ? 1 : 0,
+          resp.defer_stream_headers ? 1 : 0, hb_sink, &hb_ctx);
+      if (stream == nullptr) {
+        connected = false;
+      } else {
+        if (!resp.defer_stream_headers) {
+          response_started = true;
+        }
+        try {
+          const auto send_body = [&](std::string_view chunk) {
+            if (!connected)
+              return false;
+            response_started = true;
+            connected =
+                gufo_http_stream_write(
+                    stream, reinterpret_cast<const std::uint8_t*>(chunk.data()),
+                    chunk.size()) != 0;
+            if (connected && !chunk.empty() && traced) {
+              const std::lock_guard lock(traced_mutex);
+              traced_stream.append(chunk);
+            }
+            return connected;
+          };
+          resp.streaming_body(send_body);
+        } catch (...) {
+          if (!response_started) {
+            gufo_http_stream_abort_deferred(stream, responder);
+          } else {
+            (void)gufo_http_stream_end(stream, 0);
+          }
+          throw;
+        }
+        (void)device_lost();
+        const bool complete = !resp.stream_log ||
+                              resp.stream_log->error_code.empty() ||
+                              resp.stream_log->error_event_sent;
+        connected =
+            gufo_http_stream_end(stream, complete ? 1 : 0) != 0 && connected;
       }
     } else {
-      const auto payload = BuildResponse(resp);
+      (void)device_lost();
       response_started = true;
-      connected = SendAll(client_fd, payload);
+      connected = send_buffered(resp);
     }
-    response_sent.store(true, std::memory_order_release);
+
     std::string outcome = connected ? "completed" : "disconnected";
     if (resp.stream_log) {
       resp.log_details = resp.stream_log->details;
@@ -2629,7 +2300,6 @@ void HttpServer::handle_connection(int client_fd,
         if (const auto* error = body.find("error"))
           resp.log_details += " error_code=" + error->member_str("code");
       } catch (const std::exception&) {
-        // The status remains useful for an endpoint returning a non-JSON error.
       }
     }
     if (Logger::Enabled(request_level) || resp.status >= 400 || !connected) {
@@ -2639,13 +2309,16 @@ void HttpServer::handle_connection(int client_fd,
     }
     if (traced) {
       const bool stream = static_cast<bool>(resp.streaming_body);
+      std::string captured;
+      if (stream) {
+        const std::lock_guard lock(traced_mutex);
+        captured = traced_stream;
+      }
       TraceResponse(req.request_id, resp.status, outcome, stream,
-                    stream ? traced_stream : resp.body);
+                    stream ? captured : resp.body);
     }
   } catch (const TextGenerationError& exception) {
-    const auto duration_ms = std::chrono::duration<double, std::milli>(
-                                 std::chrono::steady_clock::now() - start_time)
-                                 .count();
+    const auto duration_ms = elapsed_ms();
     HttpResponse resp = TextGenerationErrorResponse(exception);
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     Logger::LogRequest(req.request_id, req.method, req.path,
@@ -2655,14 +2328,10 @@ void HttpServer::handle_connection(int client_fd,
                        response_started ? "stream_error" : "failed");
     trace_failure(resp);
     if (!response_started)
-      (void)SendAll(client_fd, BuildResponse(resp));
-    response_sent.store(true, std::memory_order_release);
+      (void)send_buffered(resp);
   } catch (const std::exception& e) {
-    const auto duration_ms = std::chrono::duration<double, std::milli>(
-                                 std::chrono::steady_clock::now() - start_time)
-                                 .count();
+    const auto duration_ms = elapsed_ms();
     const char* message = *e.what() ? e.what() : "generation failed";
-    // Retain the cause in logs alongside the client's stable code.
     Logger::Error("http", "request=" + req.request_id +
                               " event=server_exception reason=" + message);
     HttpResponse resp = Err(500, "Internal Server Error", message,
@@ -2674,12 +2343,9 @@ void HttpServer::handle_connection(int client_fd,
                        response_started ? "stream_error" : "failed");
     trace_failure(resp);
     if (!response_started)
-      (void)SendAll(client_fd, BuildResponse(resp));
-    response_sent.store(true, std::memory_order_release);
+      (void)send_buffered(resp);
   } catch (...) {
-    const auto duration_ms = std::chrono::duration<double, std::milli>(
-                                 std::chrono::steady_clock::now() - start_time)
-                                 .count();
+    const auto duration_ms = elapsed_ms();
     HttpResponse resp =
         Err(500, "Internal Server Error", "unknown server error",
             "internal_error", "server_exception");
@@ -2690,10 +2356,8 @@ void HttpServer::handle_connection(int client_fd,
                        response_started ? "stream_error" : "failed");
     trace_failure(resp);
     if (!response_started)
-      (void)SendAll(client_fd, BuildResponse(resp));
-    response_sent.store(true, std::memory_order_release);
+      (void)send_buffered(resp);
   }
-  // Act on a loss found by this request now, not at the next health probe.
   (void)device_lost();
 }
 

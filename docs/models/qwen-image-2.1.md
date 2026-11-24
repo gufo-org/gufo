@@ -13,14 +13,14 @@ Images API.
 The checkpoint is about 33.1 GB:
 
 ```sh
-MODEL_DIR=$(hf download Qwen/Qwen-Image-2.1 \
-  --revision b3179ad355be050328e483a9dfdd9e60cd62adfa)
+gufo model install qwen-image-2.1
+MODEL=qwen-image-2.1
 ```
 
 ## Run
 
 ```sh
-gufo serve image --model "$MODEL_DIR" \
+gufo serve image --model "$MODEL" \
   --served-model-name Qwen-Image-2.1 --port 8080
 curl --fail-with-body http://127.0.0.1:8080/v1/images/generations \
   -H 'Content-Type: application/json' \
@@ -44,16 +44,22 @@ curl --fail-with-body http://127.0.0.1:8080/v1/images/edits \
 
 | Setting | Behavior |
 | --- | --- |
-| `size` | `auto` (the default) gives 1024 × 1024, or the reference's aspect ratio when editing. Sides must be multiples of 32, at most 4096, and 4 megapixels in total. |
+| `size` | `auto` (the default) gives 1024 × 1024, or the reference's aspect ratio when editing. Sides must be multiples of 32, at most 4096, and 4.5 megapixels in total, which covers every [recommended aspect ratio](https://huggingface.co/Qwen/Qwen-Image-2.1#supported-aspect-ratios). |
 | `steps` | 40 by default, from 2 to 100. Fewer steps are faster and lower quality. |
 | `seed` | The same seed, settings and build give the same image, also after a restart. |
 | `n` | 1 to 10 images, each with its own seed, made one after another. |
 | `background` | `auto`, `transparent`, or `opaque` (over white). |
 | References | Up to 10 PNG or JPEG files, 20 MiB and 32 megapixels in total. |
+| `negative_prompt` | Text the image should move away from, used when `guidance_scale` is above 1. |
+| `guidance_scale` | 0 to 100, default 1 (off). Above 1 turns on true classifier-free guidance; each step runs twice, so it takes about twice as long. Without `negative_prompt`, the negative side is an empty prompt. |
+| `strength` | 0.01 to 1 (the default). Below 1, as Diffusers' image to image, only the last `steps` × `strength` steps run, from the noised start image. With `size` `auto`, the output keeps the start image's size, rounded to multiples of 32. |
+| `image` | Start image of a JSON generation: base64 PNG or JPEG, or a `data:` URL. URLs are not fetched. |
 
 Output is base64 PNG. URL output, separate masks, streaming and
-`input_fidelity` aren't supported. With the OpenAI SDK, pass `seed` and
-`steps` through `extra_body`.
+`input_fidelity` aren't supported. With the OpenAI SDK, pass `seed`, `steps`,
+`negative_prompt`, `guidance_scale` and `strength` through `extra_body` (both
+endpoints). Below full `strength`, an edit's first image is the start image
+and further images stay references. Unknown fields are ignored.
 
 The upstream project recommends 2048 × 2048; Gufo defaults to 1024 × 1024,
 like the pinned Diffusers version. Set `size` for larger images.
@@ -64,9 +70,9 @@ Turbo is a separately trained checkpoint (about 32.5 GB, same license) that
 always uses eight steps. It runs on the same server, API and editing paths:
 
 ```sh
-MODEL_DIR=$(hf download Qwen/Qwen-Image-2.1-Turbo \
-  --revision fc13ba1986fcb905854dc8de2f52eee395f49b5b --exclude 'assets/*')
-gufo serve image --model "$MODEL_DIR" \
+gufo model install qwen-image-2.1-turbo
+MODEL=qwen-image-2.1-turbo
+gufo serve image --model "$MODEL" \
   --served-model-name Qwen-Image-2.1-Turbo --port 8080
 ```
 
@@ -91,14 +97,14 @@ Register LoRA safetensors published for `Qwen/Qwen-Image-2.1` at startup and
 select them per request by name:
 
 ```sh
-gufo serve image --model "$MODEL_DIR"   --lora voxel=/models/loras/Qwen-Image-2.1-Voxel-Style-3000.safetensors   --lora-default voxel:0.8
+gufo serve image --model "$MODEL"   --lora voxel=/models/loras/Qwen-Image-2.1-Voxel-Style-3000.safetensors   --lora-default voxel:0.8
 ```
 
 Generation JSON and edit forms accept `"loras": [{"name": "voxel", "scale":
 0.8}]`; omitting it applies the `--lora-default` set and `[]` applies none.
-`GET /sdapi/v1/loras` lists the registered adapters. Supported layouts,
-limits and the merge are described in
-[LoRA adapters](../internal/models/qwen-image-2.1/LORA.md).
+The [A1111 API](../internal/server.md#a1111-image-api) that Open WebUI and
+SillyTavern speak lists them at `GET /sdapi/v1/loras`. Layouts, limits and the
+merge: [LoRA adapters](../internal/models/qwen-image-2.1/LORA.md).
 
 ## Performance
 

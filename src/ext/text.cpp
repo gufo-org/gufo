@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <deque>
+#include <filesystem>
 #include <stdexcept>
 #include <utility>
 
@@ -204,6 +205,17 @@ const TextProvider* ProbeTextProvider(std::string_view model_root) {
     }
   }
   return nullptr;
+}
+
+bool ProbeModelDirectory(const std::string& path,
+                         const TextProvider** provider) {
+  std::error_code error;
+  if (!std::filesystem::is_directory(path, error))
+    return false;
+  const auto* claimed = ProbeTextProvider(std::string_view(path));
+  *provider =
+      claimed != nullptr && claimed->create != nullptr ? claimed : nullptr;
+  return true;
 }
 
 const TextProvider* ProbeTextProvider(const core::GgufReader& reader) {

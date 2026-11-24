@@ -7,4 +7,5 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+gufo-ffi = { path = "../ffi" }
 png = "=0.18.1"

@@ -2578,7 +2578,7 @@ __device__ __forceinline__ static float iq2_xxs_dequant_256_direct(const unsigne
     const uint32_t grid_idx = (aux_g >> (8u * ((__half << 1u) + g))) & 0xffu;
     const uint32_t sign_idx = (aux_s >> (14u * __half + 7u * g)) & 127u;
     const uint64_t grid = hip_iq2xxs_grid[grid_idx];
-    const uint32_t signs = dev_unpack_iq2_signs(hip_ksigns_iq2xs[sign_idx]);
+    const uint32_t signs = dev_unpack_iq2_signs(sign_idx);
     float w = (float)((grid >> (8u * ii)) & 0xffu);
     if (signs & (1u << ii)) w = -w;
     return dev_f16_to_f32(d_bits) * (0.125f + 0.25f * (float)(aux_s >> 28u)) * w;
@@ -3101,7 +3101,10 @@ __device__ static float dev_iq2_xxs_dot_f32(const hip_block_iq2_xxs *row, const 
                 for (uint32_t g = 0; g < 2; g++) {
                     const uint32_t gi = __half * 2 + g;
                     const uint64_t grid = hip_iq2xxs_grid[grids[gi]];
-                    const uint8_t signs = hip_ksigns_iq2xs[(aux_s >> (14u * __half + 7u * g)) & 127u];
+                    const uint32_t sign_idx =
+                        (aux_s >> (14u * __half + 7u * g)) & 127u;
+                    const uint32_t signs =
+                        sign_idx ^ ((__popc(sign_idx) & 1u) << 7u);
                     for (uint32_t i = 0; i < 8; i++) {
                         float w = (float)((grid >> (8u * i)) & 0xffu);
                         if (signs & (1u << i)) w = -w;

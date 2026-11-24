@@ -5,6 +5,7 @@
 #include <atomic>
 #include <barrier>
 #include <cassert>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <random>
@@ -170,6 +171,32 @@ void GroupedBacking() {
   Empty(ledger);
   Empty(foreign);
 }
+// A private state as large as #1317's (15.7 GB of 64 KiB blocks is 240k
+// blocks) reserves its run in linear time. The pairwise duplicate check took
+// 20 s for it; this bound is far above the linear cost, even with sanitizers.
+void LargeBackingGroup() {
+  constexpr std::size_t count = std::size_t{1} << 18;
+  ResourceLedger ledger({count * 64, count * 64, 0, count * 64});
+  std::vector<ResourceCharge> pages(count);
+  for (auto& page : pages)
+    page = ledger.Reserve(Free, 64).Convert();
+  const auto started = std::chrono::steady_clock::now();
+  auto group = ResourceCharge::ReserveBacking(pages, Private);
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  assert(elapsed < std::chrono::seconds(2));
+  assert(group.Info().bytes == count * 64 && group.Info().reserved);
+  group = {};
+  // A repeat anywhere in a large run is still refused, leaving it free.
+  const auto free = ledger.Snapshot();
+  auto repeated = pages;
+  repeated.back() = pages[count / 2];
+  Throws<std::invalid_argument>(
+      [&] { (void)ResourceCharge::ReserveBacking(repeated, Spill); });
+  assert(ledger.Snapshot() == free);
+  repeated = {};
+  pages = {};
+  Empty(ledger);
+}
 void FreeBackingSearch() {
   constexpr std::size_t count = 9;
   ResourceLedger ledger({count * 64, count * 64, 0, count * 64});
@@ -293,6 +320,28 @@ void LimitsAndFaults() {
   for (auto invalid : {Spill, Chunk, static_cast<ResourceCategory>(255)})
     Throws<std::invalid_argument>([&] { auto r = ledger.Reserve(invalid, 1); });
   Throws<std::invalid_argument>([&] { auto r = ledger.Reserve(Private, 0); });
+  // Shared rows are charged like a copied chunk, outside the pool.
+  Throws<std::invalid_argument>([&] { auto r = ledger.ReserveShared(0); });
+  {
+    const auto before = ledger.Snapshot();
+    auto shared = ledger.ReserveShared(8);
+    assert(shared.Info().category == Chunk && shared.Info().reserved &&
+           !shared.Info().pool_backing);
+    auto charge = shared.Convert();
+    assert(ledger.Snapshot().bytes[Index(Chunk)] ==
+           before.bytes[Index(Chunk)] + 8);
+    assert(ledger.Snapshot().ram_bytes == before.ram_bytes + 8);
+    {
+      auto pin = charge.PinPersistence();
+      assert(ledger.Snapshot().persistence_pinned_bytes ==
+             before.persistence_pinned_bytes + 8);
+    }
+    charge = {};
+    assert(ledger.Snapshot().bytes == before.bytes);
+    assert(ledger.Snapshot().ram_bytes == before.ram_bytes);
+    Throws<ResourceExhausted>(
+        [&] { auto r = ledger.ReserveShared(ledger.Limits().ram_bytes + 1); });
+  }
 
   ResourceLedger partitions({1000, 80, 30, 20});
   auto ram = partitions.Reserve(Metadata, 80).Convert();
@@ -661,6 +710,7 @@ void AdmissionRace() {
 int main() {
   BackingAndPins();
   GroupedBacking();
+  LargeBackingGroup();
   FreeBackingSearch();
   LimitsAndFaults();
   ConstrainedStartupLimits();

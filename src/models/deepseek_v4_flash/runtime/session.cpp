@@ -12,7 +12,9 @@
 #include "dspark_policy.h"
 #include "model_data_internal.h"
 #include "native_internal.h"
+#include "../kernels/rocm/resident_api.h"
 #include "src/models/deepseek_v4_flash/continuation_hooks.hpp"
+#include <gufo/ext/host.hpp>
 
 #define DS4_SESSION_NEG_INF (-1.0e30f)
 
@@ -32,6 +34,9 @@ struct ds4_session {
     std::unique_ptr<float[]> spec_rows;
     uint32_t spec_rows_cap = 0;
     gufo::models::deepseek_v4_flash::ContinuationHooks* hooks = nullptr;
+    /* Device bytes allocated whole at creation (see ds4_session_create). */
+    uint64_t fixed_bytes = 0;
+    bool created_workspace = false;
 };
 
 static void session_before_write(ds4_session* session, uint32_t first,
@@ -78,6 +83,13 @@ int ds4_session_create(ds4_session** out, ds4_engine* engine, int context_size,
   session->use_dspark = use_dspark;
   session->context_size = context_size;
   session->prefill_capacity = ds4_rocm_graph_prefill_capacity(context_size);
+  // Measures this session's whole allocations: its fixed state, plus the
+  // shared batch workspace when it is the first session to need one.
+  ds4_gpu_tally_allocations(&session->fixed_bytes);
+  struct StopTally {
+    ~StopTally() { ds4_gpu_tally_allocations(nullptr); }
+  } stop_tally;
+  session->created_workspace = engine->batch_workspace == nullptr;
   session->graph =
       ds4_rocm_graph_create(engine, context_size, session->prefill_capacity);
   if (!session->graph) {
@@ -105,8 +117,42 @@ int ds4_session_create(ds4_session** out, ds4_engine* engine, int context_size,
     }
   }
 
+  ds4_gpu_tally_allocations(nullptr);
   *out = session.release();
   return 0;
+}
+
+std::shared_ptr<gufo::mem::StateAccount> ds4_session_state_account(
+    const ds4_session *session) {
+  return session ? ds4_rocm_graph_state_account(session->graph) : nullptr;
+}
+
+bool ds4_session_demand_mapped(void) { return ds4_gpu_demand_mapped() != 0; }
+
+void ds4_engine_build_weight_copies(ds4_engine *engine) {
+  if (engine)
+    ds4_gpu_build_q8_f16_weights();
+}
+
+bool ds4_engine_state_regions(const ds4_engine *engine) {
+  return engine && !engine->state_regions_off && ds4_session_demand_mapped();
+}
+
+void ds4_engine_disable_state_regions(ds4_engine *engine) {
+  if (engine)
+    engine->state_regions_off = true;
+}
+
+uint64_t ds4_session_demand_mapped_bytes(int context_size) {
+  return ds4_rocm_graph_demand_mapped_bytes(context_size);
+}
+
+uint64_t ds4_session_fixed_bytes(const ds4_session *session) {
+  return session ? session->fixed_bytes : 0;
+}
+
+bool ds4_session_created_workspace(const ds4_session *session) {
+  return session && session->created_workspace;
 }
 
 void ds4_session_free(ds4_session *session) {

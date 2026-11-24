@@ -60,6 +60,10 @@ struct ds4_gpu_tensor {
     void *ptr;
     uint64_t bytes;
     int owner;
+    /* Demand-mapped rows (ds4_gpu_tensor_from_state): a heap-held
+     * std::shared_ptr<gufo::mem::Region>; null otherwise. */
+    void *region;
+    uint64_t row_bytes;
 };
 
 #include "detail/ds4_rocm_runtime.hip.hpp"

@@ -2,13 +2,36 @@
 
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string_view>
 
 #include "src/cache/component_resources.hpp"
 #include "src/cache/ledger.hpp"
 
 namespace gufo::hip {
+
+struct ComponentTransferPlan {
+  std::size_t native_streams;
+  std::size_t leases;
+};
+
+// Each exclusively leased slot runs one capture/restore/reassignment batch
+// (at most 16), and keeps one preservation lease. Also allow one already
+// submitted idle piece per slot and one serialized disk-staging transfer.
+// Native FIFO streams can carry several independently fenced transfers. The
+// lane count matches the slot producers plus disk; transfers may queue on a
+// shared lane and need no exclusive native lease. Logical leases, not native
+// lanes, bound outstanding completion ownership.
+[[nodiscard]] inline ComponentTransferPlan PlanComponentTransfers(
+    std::size_t sessions) {
+  if (!sessions)
+    throw std::invalid_argument("cache transfer plan requires sessions");
+  if (sessions > (std::numeric_limits<std::size_t>::max() - 1) / 18)
+    throw std::overflow_error("cache transfer plan overflows");
+  return {sessions + 1, sessions * 18 + 1};
+}
 
 // Policy inputs the backing provider must not own: the host RAM that stays
 // free, and where diagnostics go. The serving layer supplies both, so this
@@ -19,13 +42,18 @@ struct ComponentCacheHooks {
   std::function<std::size_t()> host_ceiling;
   std::function<void(std::string_view)> warn;
   std::function<void(std::string_view)> info;
-  // Transfer streams, created up front for captures, restores and idle spill.
-  // HIP queues consume resident memory. Each serving session holds one stream
-  // for preservation; leave additional streams for captures, restores and idle
-  // spill. Batches lease up to 16 and drain their own work before retrying an
-  // exhausted pool. Acquisition does not wait for other users and can fail.
-  // Must be nonzero.
+  // Native streams created up front. With transfer_leases=0 each lease owns
+  // an exclusive stream/event pair, preserving the unsized provider contract.
+  // With more leases than streams, independent event fences share FIFO native
+  // streams. PlanComponentTransfers sizes both from the actual cache slots.
+  // Must be nonzero. This counts streams, not hardware queues.
   std::size_t transfer_streams{64};
+  // Preallocated logical stream/event leases; zero means transfer_streams.
+  // Must cover permanent preservation, foreground batches, idle and disk
+  // work. Sharing native streams never waits for another lease or creates
+  // native resources on acquisition. Unsupported/unsized providers retain
+  // their existing exclusive pool by leaving this zero.
+  std::size_t transfer_leases{0};
 };
 
 // HIP component-cache backing for any adapter: pinned committed pages, a

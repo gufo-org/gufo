@@ -36,6 +36,11 @@ enum class TextGenerationErrorCode : std::uint8_t {
   kToolChoiceUnsatisfied,
   kInsufficientMemory,
   kDeviceLost,
+  /// The request can never fit in the shared session state (#715).
+  kInsufficientMemoryPermanent,
+  /// A running request was stopped to let others continue when the shared
+  /// session state ran out (#715).
+  kMemoryPressure,
 };
 
 /// Client-facing message for a GPU context that can no longer execute work.
@@ -71,7 +76,10 @@ public:
       case TextGenerationErrorCode::kSchedulerStopping:
       case TextGenerationErrorCode::kInsufficientMemory:
       case TextGenerationErrorCode::kDeviceLost:
+      case TextGenerationErrorCode::kMemoryPressure:
         return 503;
+      case TextGenerationErrorCode::kInsufficientMemoryPermanent:
+        return 507;
       case TextGenerationErrorCode::kToolChoiceUnsatisfied:
         return 502;
     }
@@ -97,13 +105,18 @@ public:
         return "insufficient_memory";
       case TextGenerationErrorCode::kDeviceLost:
         return "device_lost";
+      case TextGenerationErrorCode::kInsufficientMemoryPermanent:
+        return "insufficient_memory_permanent";
+      case TextGenerationErrorCode::kMemoryPressure:
+        return "memory_pressure";
     }
     return "generation_error";
   }
   [[nodiscard]] bool retryable() const noexcept {
     return code_ != TextGenerationErrorCode::kOutputLimit &&
            code_ != TextGenerationErrorCode::kToolChoiceUnsatisfied &&
-           code_ != TextGenerationErrorCode::kDeviceLost;
+           code_ != TextGenerationErrorCode::kDeviceLost &&
+           code_ != TextGenerationErrorCode::kInsufficientMemoryPermanent;
   }
 
 private:
@@ -160,6 +173,13 @@ public:
   using InitialOutputState = gufo::ext::InitialOutputState;
   using ReasoningMarkup = gufo::ext::ReasoningMarkup;
 
+  /// Output that starts as content, after a reasoning block the prompt closed
+  /// or with no reasoning at all.
+  [[nodiscard]] static constexpr bool IsContent(InitialOutputState initial) {
+    return initial == InitialOutputState::kContent ||
+           initial == InitialOutputState::kContentAfterReasoning;
+  }
+
   struct SamplingDefaults {
     /// Zero means generate until EOS or the remaining context is exhausted.
     std::size_t max_tokens{0};
@@ -189,6 +209,9 @@ public:
     std::size_t completion_tokens{0};
     /// Generated reasoning tokens, excluding the closing template delimiter.
     std::size_t reasoning_tokens{0};
+    /// With exact incremental text: the end offset in `text` of each
+    /// generated token's piece.
+    std::vector<std::size_t> piece_ends;
     /// Number of speculative verification rounds actually executed.
     std::size_t draft_rounds{0};
     std::size_t draft_tokens{0};
@@ -323,6 +346,22 @@ public:
   };
   [[nodiscard]] virtual std::optional<PromptAdmissionBudget>
   prompt_admission_budget() const {
+    return std::nullopt;
+  }
+  /// Sessions sharing their demand-mapped state (#715), when they do.
+  struct SharedState {
+    /// The longest prompt the shared state holds with one generated token.
+    std::size_t max_prompt_tokens{0};
+    std::size_t shared_bytes{0};
+    /// Charged to sessions: their needs and mapped pages.
+    std::size_t charged_bytes{0};
+    /// Charged bytes reclaimable from idle sessions and mapped tails.
+    std::size_t reclaimable_bytes{0};
+    std::uint64_t waits{0};
+    std::uint64_t pauses{0};
+    std::uint64_t preemptions{0};
+  };
+  [[nodiscard]] virtual std::optional<SharedState> shared_state() const {
     return std::nullopt;
   }
   /// Whether the loaded backend accepts image inputs in chat requests.

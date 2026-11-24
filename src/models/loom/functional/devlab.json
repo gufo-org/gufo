@@ -1,0 +1,53 @@
+{
+  "assets": {
+    "loom-qwen35-2b": {
+      "repo": "loom-fun/unsloth-Qwen3.5-2B-loom",
+      "revision": "0841f9d4e1058fa2efdd8dcc663504c255aae1a6",
+      "patterns": [
+        "*.json",
+        "*.lock",
+        "*.loom",
+        "program/*",
+        "gen/*"
+      ],
+      "required": [
+        "model.json",
+        "llm_config.json",
+        "tokenizer.json"
+      ]
+    },
+    "loom-qwen35-2b-gguf": {
+      "repo": "unsloth/Qwen3.5-2B-GGUF",
+      "revision": "f6d5376be1edb4d416d56da11e5397a961aca8ae",
+      "patterns": [
+        "Qwen3.5-2B-Q4_K_M.gguf",
+        "mmproj-F16.gguf"
+      ],
+      "required": [
+        "Qwen3.5-2B-Q4_K_M.gguf",
+        "mmproj-F16.gguf"
+      ]
+    }
+  },
+  "models": {
+    "loom-qwen3.5-2b": {
+      "title": "Loom Qwen3.5 2B",
+      "category": "loom",
+      "asset": "loom-qwen35-2b",
+      "checkpoint_asset": "loom-qwen35-2b-gguf"
+    }
+  },
+  "rules": [
+    {
+      "id": "loom",
+      "priority": 20,
+      "paths": [
+        "src/models/loom/**",
+        ".devops/nix/hrx/loom-runtime.nix"
+      ],
+      "owners": [
+        "loom-qwen3.5-2b"
+      ]
+    }
+  ]
+}

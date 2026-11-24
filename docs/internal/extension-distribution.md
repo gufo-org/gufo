@@ -70,6 +70,33 @@ binary's own output, not another `gufo` from `PATH`:
 /path/to/installed/gufo diagnose --section extensions --json
 ```
 
+## Running third-party extensions
+
+An unreviewed extension gets everything the server process gets. Whatever
+service manager or container runtime you use, give that process only what
+inference needs:
+
+- **Network:** none. Gufo binds `127.0.0.1` by default and serves from a network
+  namespace that has only `lo`; forward one socket into it for clients.
+- **Devices:** `/dev/kfd` and the DRM nodes under `/dev/dri`, with the `video`
+  and `render` groups. Both are needed: without the DRM nodes the kernel logs
+  `amdgpu: no gpu node! Cannot create KFD process` and Gufo reports no ROCm
+  device.
+- **Files:** read-only models, binary and extension store. Only `/tmp` and a
+  [`--cache-disk`](../cache.md#disk) directory need to be writable.
+- **Privileges:** no capabilities and no new privileges; an unlimited
+  `memlock` limit, as in [install](../install.md#container).
+
+Install or build the extension in a separate step, with network access but no
+devices or models, and pin an exact commit. Gufo has no authentication, so
+remote clients need a reverse proxy with TLS and access control; see
+[exposure](../server.md#exposure).
+
+> **Warning:** This limits what an extension can reach; it isn't a sandbox. The
+> process still drives the GPU, reads every mounted model and sees every
+> request, and the extension's build scripts run when it is installed or
+> compiled in.
+
 ## Modules
 
 A module is the same extension source built as a loadable library against the
@@ -96,13 +123,20 @@ Module builds need the SDK and its toolchain: `<build>/sdk` or
 packages (`#sdk`, `#release-sdk`), or the `gufo-runtime` image, which carries
 both. `GUFO_SDK_DIR` points elsewhere. In a build tree, `GUFO_EXTENSION_MODULES`
 builds listed extensions as `extension-modules/gufo-ext-<name>.so` instead of
-linking them. Modules may use only the public `<gufo/ext/...>` surface, cannot
-have `depends`, and cannot be `kind: library`.
+linking them. Modules may use only the public `<gufo/ext/...>` surface and
+cannot be `kind: library`. Their `depends` may name only in-tree extensions
+built into the host, whose exports they link as stand-ins; `sdk.json` lists
+those names under `host_extensions`, and `install` and `update` refuse any other
+dependency before building. A dependent module's build identity covers each
+such extension that exports anything, so a change to it makes only its
+dependents `needs update` (see [modules](extension-build.md#modules)).
 
 On Windows, `gufo.exe` exports its symbols through a generated `.def` file and
 the SDK ships `lib/gufo.lib`; modules are DLLs that load only into `gufo.exe`.
 Exported data symbols need `__declspec(dllimport)`, so an extension using such
-data doesn't link on Windows yet.
+data doesn't link on Windows yet. Windows modules can't have `depends` or link
+`gufo::qwen_family` yet: `gufo.exe` doesn't export that code. The Windows SDK
+lists no `host_extensions` and says why, so `install` refuses before building.
 
 ## Linux source and CMake recipe
 

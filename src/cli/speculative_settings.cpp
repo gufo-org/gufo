@@ -105,6 +105,46 @@ SpeculativeSettings ResolveSpeculativeSettings(
   return settings;
 }
 
+ext::TextSpeculativeConfig SpeculativeConfigFor(
+    std::string_view backend, const std::string& mtp_model_path,
+    const std::string& dflash_model_path,
+    const std::string& dspark_model_path) {
+  ext::TextSpeculativeConfig config;
+  if (backend.empty() || backend == "off") {
+    return config;
+  }
+  if (backend == "mtp") {
+    config.backend = ext::TextSpeculativeBackend::kMtp;
+    config.draft_model_path = mtp_model_path;
+  } else if (backend == "dflash2") {
+    config.backend = ext::TextSpeculativeBackend::kDFlash;
+    config.draft_model_path = dflash_model_path;
+  } else if (backend == "dspark") {
+    config.backend = ext::TextSpeculativeBackend::kDSpark;
+    config.draft_model_path = dspark_model_path;
+  } else {
+    throw std::invalid_argument("speculative backend '" + std::string(backend) +
+                                "' is not supported");
+  }
+  return config;
+}
+
+void RequireDraftModel(std::string_view backend,
+                       const std::string& mtp_model_path,
+                       const std::string& dflash_model_path,
+                       const std::string& dspark_model_path) {
+  const auto config = SpeculativeConfigFor(
+      backend, mtp_model_path, dflash_model_path, dspark_model_path);
+  if (config.backend == ext::TextSpeculativeBackend::kDisabled ||
+      !config.draft_model_path.empty()) {
+    return;
+  }
+  throw std::invalid_argument(backend == "mtp" ? "MTP requires --mtp-model"
+                              : backend == "dflash2"
+                                  ? "DFlash2 requires --dflash-model"
+                                  : "DSpark requires --dspark-model");
+}
+
 void ApplySpeculativeSettings(const SpeculativeSettings& settings,
                               ext::TextSpeculativeConfig* config) {
   config->max_draft_tokens = settings.max_draft_tokens;

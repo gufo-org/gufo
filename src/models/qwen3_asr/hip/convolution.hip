@@ -8,7 +8,7 @@
 namespace gufo::models::qwen3_asr::hip {
 namespace {
 using B = hip_bfloat16;
-using Fragment = __attribute__((ext_vector_type(16))) unsigned short;
+using Fragment = __attribute__((ext_vector_type(16))) short;
 using Accumulator = __attribute__((ext_vector_type(8))) float;
 
 __device__ Fragment LoadFragment(const unsigned short* source) {

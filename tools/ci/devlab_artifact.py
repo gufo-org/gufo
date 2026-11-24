@@ -3,10 +3,13 @@
 
 import argparse
 from contextlib import contextmanager
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import re
 import shutil
 import socket
@@ -25,24 +28,75 @@ class GitHub:
         self.repository = repository
         self.root = f"https://api.github.com/repos/{repository}"
 
-    def api(self, path, data=None, method=None, missing=False):
-        request = Request(self.root + path, method=method,
-                          data=None if data is None else json.dumps(data).encode(),
-                          headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
-                                   "Accept": "application/vnd.github+json",
-                                   "Content-Type": "application/json"})
-        try:
-            with urlopen(request, timeout=60) as response:
-                body = response.read()
-                return json.loads(body) if body else None
-        except HTTPError as error:
-            if missing and error.code == 404:
-                return None
-            raise
+    def api(self, path, data=None, method=None, missing=False, deadline=None):
+        # Rate-limit waits never outlast the caller's deadline (an hour by default).
+        deadline = time.monotonic() + 3600 if deadline is None else deadline
+        retries = 0
+        while True:
+            request = Request(self.root + path, method=method,
+                              data=None if data is None else json.dumps(data).encode(),
+                              headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                                       "Accept": "application/vnd.github+json",
+                                       "Content-Type": "application/json"})
+            try:
+                with urlopen(request, timeout=60) as response:
+                    body = response.read()
+                    return json.loads(body) if body else None
+            except HTTPError as error:
+                if missing and error.code == 404:
+                    return None
+                if not wait_out_rate_limit(error, retries, deadline):
+                    raise
+                retries += 1
 
-    def artifacts(self, run, name):
+    def artifacts(self, run, name, deadline=None):
         # Filtering by name avoids pagination through unrelated model results.
-        return self.api(f"/actions/runs/{run}/artifacts?name={name}")["artifacts"]
+        return self.api(f"/actions/runs/{run}/artifacts?name={name}", deadline=deadline)["artifacts"]
+
+
+def rate_limit_delay(error, retries=0):
+    """Seconds to wait before retrying a rate-limited response, or None to fail.
+
+    GitHub answers both primary and secondary rate limits with 403 or 429; only
+    responses that carry a rate-limit signal are retried, so authorization
+    failures still fail immediately. `retries` counts earlier rate-limited
+    responses to the same request.
+    """
+    if error.code not in (403, 429):
+        return None
+    headers = error.headers or {}
+    jitter = random.uniform(1, 10)
+    retry_after = headers.get('retry-after')
+    if retry_after and retry_after.strip().isdigit():
+        return min(int(retry_after), 3600) + jitter
+    reset = headers.get('x-ratelimit-reset')
+    if headers.get('x-ratelimit-remaining') == '0' and reset and reset.strip().isdigit():
+        # Measure against GitHub's clock when it is given: runner clock skew
+        # must not turn the wait into a burst of immediate retries.
+        try:
+            now = parsedate_to_datetime(headers['date']).timestamp()
+        except (KeyError, TypeError, ValueError, IndexError):
+            now = time.time()
+        return min(max(int(reset) - now, 5), 3600) + jitter
+    try:
+        message = error.read().decode(errors='replace')
+    except (OSError, ValueError):
+        message = ''
+    # Secondary limits may omit both headers; GitHub asks for at least a minute
+    # and an increasing wait while the limit persists.
+    if 'rate limit' in message.lower():
+        return min(60 * 2 ** retries, 3600) + jitter
+    return None
+
+
+def wait_out_rate_limit(error, retries, deadline):
+    """Sleep through a rate limit and return True, or return False to fail now."""
+    delay = rate_limit_delay(error, retries)
+    if delay is None or time.monotonic() + delay > deadline:
+        return False
+    print(f"GitHub API rate limited (HTTP {error.code}); retrying in {delay:.0f}s", flush=True)
+    time.sleep(delay)
+    return True
 
 
 def checked_digest(value):
@@ -178,36 +232,101 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def signed_url(github, artifact):
-    request = Request(github.root + f"/actions/artifacts/{artifact}/zip", headers={
-        'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
-    try:
-        build_opener(NoRedirect).open(request, timeout=30)
-    except HTTPError as error:
-        if error.code == 302 and error.headers['Location'].startswith('https://'):
-            return error.headers['Location']
-        raise RuntimeError(f'Cannot obtain artifact download URL: HTTP {error.code}') from None
-    raise RuntimeError('Expected an artifact download redirect')
+def signed_url(github, artifact, deadline=None):
+    deadline = time.monotonic() + 300 if deadline is None else deadline
+    retries = 0
+    while True:
+        request = Request(github.root + f"/actions/artifacts/{artifact}/zip", headers={
+            'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
+        try:
+            build_opener(NoRedirect).open(request, timeout=30)
+        except HTTPError as error:
+            if error.code == 302 and error.headers['Location'].startswith('https://'):
+                return error.headers['Location']
+            if wait_out_rate_limit(error, retries, deadline):
+                retries += 1
+                continue
+            raise RuntimeError(f'Cannot obtain artifact download URL: HTTP {error.code}') from None
+        raise RuntimeError('Expected an artifact download redirect')
 
 
-def wait_artifact(github, run, attempt, name):
+# The hosted job that produces each Devlab package, as the caller's "Build"
+# job names the reusable linux-build.yml job.
+BUILD_JOBS = {'release': 'Build / Linux package', 'checked': 'Build / Linux checked package'}
+PACKAGES = {'release': ('', 'linux-artifacts.tar.gz'), 'checked': ('-checked', 'linux-checked.tar.gz')}
+
+
+def started(stamp):
+    """Seconds since the epoch for a GitHub timestamp, or None when absent."""
+    return datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp() if stamp else None
+
+
+def wait_artifact(github, run, attempt, name, job=BUILD_JOBS['release'], earlier=None):
+    """Wait for this run's artifact `name`, published by the hosted job `job`.
+
+    `earlier(k)` names the same package as attempt k published it: re-running only
+    failed jobs carries the successful build job into the new attempt without
+    rebuilding, so its package keeps the attempt that produced it.
+
+    The GITHUB_TOKEN request budget is shared by every job of the repository,
+    so each poll reads only this attempt's job list; the artifact list is read
+    once the build job has succeeded, which happens after its upload.
+    """
     deadline = time.monotonic() + 7200
-    while time.monotonic() < deadline:
-        artifacts = [item for item in github.artifacts(run, name)
-                     if item['name'] == name and not item['expired']]
-        if len(artifacts) == 1:
-            checked_digest(artifacts[0].get('digest'))
-            return artifacts[0]
-        state = github.api(f'/actions/runs/{run}')
-        if state['run_attempt'] != attempt or state['status'] == 'completed':
+
+    def listed(candidate):
+        return [item for item in github.artifacts(run, candidate, deadline=deadline)
+                if item['name'] == candidate and not item['expired']]
+
+    def single(found, candidate):
+        if len(found) > 1:
+            raise RuntimeError(f'Run {run} lists {candidate} more than once')
+        checked_digest(found[0].get('digest'))
+        return found[0]
+
+    def state():
+        current = github.api(f'/actions/runs/{run}', deadline=deadline)
+        if current['run_attempt'] != attempt or current['status'] == 'completed':
             raise RuntimeError('Source run ended or was superseded before artifact delivery')
-        jobs = github.api(f'/actions/runs/{run}/attempts/{attempt}/jobs?per_page=100')['jobs']
-        if any(job['name'].startswith('Hosted Linux binaries /') and
-               job['conclusion'] in ('failure', 'cancelled', 'timed_out', 'skipped') for job in jobs):
-            raise RuntimeError('Hosted Linux build failed')
+        return current
+
+    state()
+    checked = time.monotonic()
+    interval = 60
+    while True:
+        jobs = github.api(f'/actions/runs/{run}/attempts/{attempt}/jobs?per_page=100',
+                          deadline=deadline)['jobs']
+        rows = [row for row in jobs if row['name'] == job]
+        if any(row['conclusion'] in ('failure', 'cancelled', 'timed_out', 'skipped')
+               for row in rows):
+            raise RuntimeError(f'Hosted job {job} failed')
+        if any(row['conclusion'] == 'success' for row in rows):
+            found = listed(name)
+            if found:
+                return single(found, name)
+            # A build job carried from an earlier attempt started before this one.
+            began = started(state().get('run_started_at'))
+            carried = began is not None and all(
+                started(row.get('started_at')) is not None and started(row['started_at']) < began
+                for row in rows)
+            if earlier and carried:
+                for previous in range(attempt - 1, 0, -1):
+                    candidate = earlier(previous)
+                    found = listed(candidate)
+                    if found:
+                        print(f'Using {candidate} from the build carried into attempt {attempt}',
+                              flush=True)
+                        return single(found, candidate)
+            raise RuntimeError(f'Hosted job {job} succeeded without publishing {name}; '
+                               're-run all jobs')
+        if time.monotonic() - checked >= 1800:
+            state()
+            checked = time.monotonic()
+        if time.monotonic() + interval > deadline:
+            raise TimeoutError('Hosted artifact unavailable')
         print(f'Waiting for {name}; model downloads continue', flush=True)
-        time.sleep(10)
-    raise TimeoutError('Hosted artifact unavailable')
+        time.sleep(interval)
+        interval = min(interval * 1.5, 150)
 
 
 def fetch(github, artifact, destination):
@@ -267,12 +386,16 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--manifest', type=Path)
     parser.add_argument('--cache', type=Path)
+    parser.add_argument('--variant', choices=sorted(PACKAGES), default='release',
+                        help='linux: the release comparison packages or the assertion-enabled candidate')
     args = parser.parse_args()
     github = GitHub(args.repository)
     if args.operation == 'fetch':
         if not args.artifact:
             parser.error('--artifact is required')
-        fetch(github, github.api(f'/actions/artifacts/{args.artifact}'), args.output)
+        # The calling step has a 20-minute budget; keep rate-limit waits short.
+        fetch(github, github.api(f'/actions/artifacts/{args.artifact}',
+                                 deadline=time.monotonic() + 300), args.output)
     else:
         if not args.run or not args.attempt:
             parser.error('--run and --attempt are required')
@@ -281,11 +404,14 @@ def main():
                 parser.error('--manifest and --cache are required')
             runtime(github, args.run, args.attempt, args.manifest, args.cache, args.output)
         else:
-            artifact = wait_artifact(github, args.run, args.attempt, f'linux-devlab-{args.attempt}')
+            suffix, member = PACKAGES[args.variant]
+            artifact = wait_artifact(github, args.run, args.attempt, f'linux-devlab-{args.attempt}{suffix}',
+                                     BUILD_JOBS[args.variant],
+                                     lambda previous: f'linux-devlab-{previous}{suffix}')
             with tempfile.TemporaryDirectory() as directory:
                 source = Path(directory) / 'binaries.zip'
                 fetch(github, artifact, source)
-                extract_member(source, 'linux-artifacts.tar.gz', args.output)
+                extract_member(source, member, args.output)
 
 
 if __name__ == '__main__':

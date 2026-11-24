@@ -9,8 +9,12 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <functional>
 #include <gufo/ext/experimental/managed_alloc.hpp>
 #include <gufo/ext/experimental/snapshot_transfer.hpp>
+#include <gufo/ext/experimental/state_memory.hpp>
+#include <gufo/ext/families/qwen/draft_vocab/draft_vocab.hpp>
 #include <gufo/ext/platform/pages.hpp>
 #include <limits>
 #include <memory>
@@ -22,13 +26,19 @@
 #include <vector>
 
 #include "qfn_mmq.h"
-#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
 namespace {
 
 using core::GgmlType;
+
+// Rows past the frontier that must be backed now: tile-rounded attention
+// reads and the next steps' writes.
+constexpr std::size_t kKvTileRows = 2048;
+// Rows the pool thread maps further ahead, off the scheduler thread: a
+// prefill pass and more, so a writer normally finds its pages mapped.
+constexpr std::size_t kKvAheadRows = 8192;
 
 void AssignError(std::string* error_msg, const std::string& message) {
   if (error_msg != nullptr) {
@@ -82,6 +92,8 @@ WeightType SmallType(GgmlType type) {
 // The tier's tiled kernels compute whole column tiles; below this width the
 // matrix-vector kernels read each weight once per row and win outright.
 constexpr std::uint32_t kVecBatch = 8;
+/// Rows of one draft head projection: a batch drafts at most eight sessions.
+constexpr std::uint32_t kDraftHeadRows = 8;
 // Keep prompt arithmetic independent of chunk width. A scoped, per-thread
 // policy also lets the output head retain its existing logits-row arithmetic.
 thread_local bool prefill_phase = false;
@@ -144,6 +156,13 @@ std::size_t RoutedTileCapacity(std::size_t slots, const Config& c) {
              kRoutedTileRowsNarrow +
          c.num_experts + 1;
 }
+
+/// Address space reserved per row of the widest pass for its scratch set
+/// (about 0.35 MiB per row today, plus 2 MiB alignment per buffer).
+constexpr std::size_t kArenaRowBytesBound = std::size_t{1} << 20;
+/// Memory a wide pass needs beyond its scratch set: its own K/V, indexer
+/// and checkpoint pages.
+constexpr std::size_t kWidePassSpare = std::size_t{1} << 30;
 
 std::uint32_t IndexerCapacity(const Config& c, std::uint32_t batch,
                               std::uint32_t context) {
@@ -246,7 +265,7 @@ public:
                           std::uint64_t reserved = 0) const {
     std::size_t free = 0;
     std::size_t total = 0;
-    if (hipMemGetInfo(&free, &total) != hipSuccess)
+    if (mem::MemGetInfo(&free, &total) != hipSuccess)
       return false;
     return free >= bytes && free - bytes + reserved >= reserve_;
   }
@@ -676,9 +695,7 @@ Session::~Session() {
   for (auto& [key, exec] : graphs_) {
     (void)hipGraphExecDestroy(exec);
   }
-  for (void* p : allocations_) {
-    (void)hipFree(p);
-  }
+  state_.reset();
 }
 
 void Session::RestoreVisionLayout(const qwen::vision::RopeLayout& layout,
@@ -903,10 +920,7 @@ void Session::TrimRollback(std::uint32_t depth) noexcept {
   }
   rollback_allocations_.resize(depth);
   rollback_depth_ = depth;
-  rollback_bytes_ =
-      owner_->SessionBytes(core::SessionMode::kAutoregressive, max_context_,
-                           depth) -
-      owner_->SessionBytes(core::SessionMode::kAutoregressive, max_context_, 0);
+  rollback_bytes_ = owner_->RollbackBytes(depth);
   ngram_snapshots_.resize(depth);
 }
 
@@ -991,6 +1005,18 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   e->ngram_ = ngram;
   e->options_ = options;
   e->options_.max_batch = std::max<std::uint32_t>(1, options.max_batch);
+  e->narrow_batch_ =
+      options.narrow_batch == 0
+          ? e->options_.max_batch
+          : std::min(options.narrow_batch, e->options_.max_batch);
+  if (e->narrow_batch_ < e->options_.max_batch) {
+    // Wide passes run on their own scratch, mapped only while they run
+    // (#952). Without demand mapping, every pass is narrow.
+    e->scratch_arena_ = gufo::mem::ScratchArena::Reserve(
+        std::size_t{e->options_.max_batch} * kArenaRowBytesBound, error_msg);
+    if (!e->scratch_arena_)
+      e->options_.max_batch = e->narrow_batch_;
+  }
   e->options_.max_logit_rows = std::clamp<std::uint32_t>(
       options.max_logit_rows, 1, e->options_.max_batch);
   e->options_.max_speculative = std::clamp<std::uint32_t>(
@@ -1038,12 +1064,14 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     e->yarn_max_ = c.rope_scaling;
     e->yarn_ = YarnRope{};  // every session starts unscaled
   }
+  // Pinned host staging serves both scratch sets: T is the widest pass.
   const std::size_t T = e->options_.max_batch;
+  const std::size_t Tn = e->narrow_batch_;
   e->blaslt_ = BlasLt::Create(e->stream_, error_msg);
   if (e->blaslt_ == nullptr) {
     return nullptr;
   }
-  if (MatrixRows(T)) {
+  if (MatrixRows(Tn)) {
     // The first indexer heuristic query also loads the library's code object.
     // Do that before readiness instead of leaving a ~100 ms GPU idle gap in
     // the first prefill. Exact geometry still determines every plan; no trial
@@ -1055,7 +1083,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
              tensor->type == GgmlType::kF16) &&
             !e->blaslt_->Prepare(
                 tensor->type == GgmlType::kBF16 ? HIP_R_16BF : HIP_R_16F,
-                tensor->rows, T, tensor->cols, error_msg)) {
+                tensor->rows, Tn, tensor->cols, error_msg)) {
           return nullptr;
         }
       }
@@ -1067,8 +1095,6 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   auto& a = e->allocations_;
   Scratch& s = e->s_;
   auto f32 = [&](std::size_t n) { return Alloc<float>(a, n, error_msg); };
-  s.tokens = Alloc<std::int32_t>(a, T, error_msg);
-  s.x_half = Alloc<std::uint16_t>(a, T * model.max_half_cols(), error_msg);
   for (void*& slot : s.x_q8) {
     slot = Alloc<std::uint8_t>(
         a,
@@ -1086,71 +1112,9 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   s.mixed_q8_1 = q8_1(hidden);
   s.gdn_q8_1 = q8_1(c.SsmValueDim());
   s.ctx_q8_1 = q8_1(c.AttentionQDim());
-  s.x_q8t =
-      Alloc<std::uint8_t>(a, Q8TiledBytes(T, model.max_q8_cols()), error_msg);
-  s.res = f32(T * hc_dim);
-  s.xn = f32(T * hc_dim);
-  s.xn_half = Alloc<__half>(a, T * hc_dim, error_msg);
-  s.xn_q8t = Alloc<std::uint8_t>(a, Q8TiledBytes(T, hc_dim), error_msg);
-  s.lo = f32(T * c.hc_low_rank);
-  s.mixed = f32(T * hidden);
-  s.inject = f32(T * c.hc_count * HcInjectParts(hidden));
-  s.block_out = f32(T * hidden);
-  s.hc_defer_w = f32(T * c.hc_count);
   e->hc_fused_state_ =
       Alloc<std::uint8_t>(a, HcMixQ8FusedStateBytes(), error_msg);
   e->mask_words_ = c.SparseMaskWords(e->context_capacity_);
-  const std::size_t linear_projection = std::max<std::size_t>(
-      c.SsmConvChannels() + c.SsmValueDim(), c.ple_layer >= 0 ? hc_dim : 0);
-  const std::size_t linear_floats =
-      T * (linear_projection + 2 * c.ssm_num_v_heads + 2 * c.SsmKeyDim() +
-           2 * c.SsmValueDim()) +
-      (T + c.ssm_conv_kernel) * c.SsmConvChannels();
-  const std::size_t attention_floats =
-      T * (5 * c.AttentionQDim() + 4 * c.AttentionKvDim() +
-           c.indexer_heads * c.indexer_head_dim + c.indexer_head_dim +
-           e->mask_words_);
-  const std::size_t expert_floats = slots * (2 * c.expert_ff + hidden);
-  // Linear/full attention and routed experts run sequentially on stream_.
-  // Their intermediates die before the next stage, including batched rows,
-  // MTP catch-up and the deferred MoE epilogue consumed by Combine. Keep
-  // stable addresses for graph replay without reserving all three stages.
-  float* const stage =
-      f32(std::max({linear_floats, attention_floats, expert_floats,
-                    T * (linear_projection + hc_dim)}));
-  if (stage == nullptr) {
-    return nullptr;
-  }
-  // Mixer gates die before attention/experts start. PLE also uses this
-  // buffer as its key, so keep it beyond PLE's gated output at stage.
-  s.hc_gate = stage + T * linear_projection;
-  float* cursor = stage;
-  const auto take = [&](std::size_t count) {
-    float* result = cursor;
-    cursor += count;
-    return result;
-  };
-  // Stacked and separate SSM projections are mutually exclusive. MTP's
-  // projected embedding is consumed before attention and reuses this space.
-  s.qkvz = take(T * linear_projection);
-  s.qkv = s.qkvz;
-  s.z = s.qkvz != nullptr ? s.qkvz + T * c.SsmConvChannels() : nullptr;
-  s.alpha_beta = take(T * 2 * c.ssm_num_v_heads);
-  s.conv_scratch = take((T + c.ssm_conv_kernel) * c.SsmConvChannels());
-  s.qn = take(T * c.SsmKeyDim());
-  s.kn = take(T * c.SsmKeyDim());
-  s.gdn_raw = take(T * c.SsmValueDim());
-  s.gdn_out = take(T * c.SsmValueDim());
-  cursor = stage;
-  s.qg = take(T * (2 * c.AttentionQDim() + 2 * c.AttentionKvDim()));
-  s.q = take(T * c.AttentionQDim());
-  s.attn_gate = take(T * c.AttentionQDim());
-  s.k = take(T * c.AttentionKvDim());
-  s.v = take(T * c.AttentionKvDim());
-  s.iq = take(T * c.indexer_heads * c.indexer_head_dim);
-  s.ik = take(T * c.indexer_head_dim);
-  s.mask = reinterpret_cast<std::uint32_t*>(take(T * e->mask_words_));
-  s.ctx = take(T * c.AttentionQDim());
   // Keep score/selection traffic near the device cache size. Captured
   // verification still needs all its rows at the maximum context.
   const std::size_t score_stride = std::size_t{e->mask_words_} * 32;
@@ -1165,21 +1129,13 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       error_msg);
   s.attn_counts = Alloc<std::uint32_t>(a, kVecBatch, error_msg);
   if (c.ple_layer >= 0) {
-    // PLE finishes before this layer's mixer/SSM. Its gate consumes key
-    // and query before normalization/convolution reuse those two buffers.
-    // The gated input stays separate until PleInject consumes both outputs.
-    s.ple_key = s.hc_gate;
-    s.ple_value = s.block_out;
-    s.ple_query = s.xn;
-    s.ple_gated = s.qkvz;
-    s.ple_norm = s.hc_gate;
-    s.ple_conv = s.xn;
     s.ple_history_scratch =
         f32(static_cast<std::size_t>(c.PleConvHistory()) * hc_dim);
     // The quantizer reads each n-gram row once. On this UMA target it can
     // consume the coherent reader buffer directly, without another device
     // allocation or upload. Its address stays fixed for graph replay; the
     // next-chunk prefetch uses separate storage until this forward finishes.
+    // Both scratch sets share it, so it holds the widest pass.
     void* pinned = nullptr;
     if (!Check(e->host_allocations_.Allocate(
                    &pinned, T * c.PleEmbeddingDim() * sizeof(float),
@@ -1197,27 +1153,14 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     if (ngram)
       ngram->ReserveGather(T * c.ple_heads);
   }
-  s.router = f32(T * (c.num_experts + 1));
-  s.ids = Alloc<std::int32_t>(a, slots, error_msg);
   s.expert_counts = Alloc<std::uint32_t>(a, c.num_experts, error_msg);
-  {
-    const std::size_t compact = RoutedCompactRows(slots, c.num_experts);
-    s.routed_bounds = Alloc<std::int32_t>(a, c.num_experts + 1, error_msg);
-    s.routed_cursors = Alloc<std::int32_t>(a, c.num_experts, error_msg);
-    s.rows_token = Alloc<std::int32_t>(a, compact, error_msg);
-    s.rows_slot = Alloc<std::int32_t>(a, compact, error_msg);
-    s.routed_tiles =
-        Alloc<std::int32_t>(a, 3 * RoutedTileCapacity(slots, c), error_msg);
-  }
-  s.weights = f32(slots);
-  cursor = stage;
-  s.gate_e = take(slots * c.expert_ff);
-  s.up_e = take(slots * c.expert_ff);
-  s.down_e = take(slots * hidden);
-  s.shexp_gate = f32(T * c.shared_expert_ff);
-  s.shexp_up = f32(T * c.shared_expert_ff);
-  s.shexp_out = f32(T * hidden);
-  s.shexp_half = Alloc<__half>(a, T * c.shared_expert_ff, error_msg);
+  s.routed_bounds = Alloc<std::int32_t>(a, c.num_experts + 1, error_msg);
+  s.routed_cursors = Alloc<std::int32_t>(a, c.num_experts, error_msg);
+  // Buffers with a row per pass token, whole at the narrow width.
+  if (!e->CarveRowScratch(s, Tn, [&](std::size_t bytes) -> void* {
+        return Alloc<std::uint8_t>(a, bytes, error_msg);
+      }))
+    return nullptr;
   s.logits =
       f32(static_cast<std::size_t>(e->options_.max_logit_rows) * c.vocab_size);
   {
@@ -1251,6 +1194,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       return nullptr;
     }
     e->tiles_host_ = static_cast<std::int32_t*>(tiles);
+    e->tiles_host_capacity_ = 3 * RoutedTileCapacity(slots, c);
     e->control_host_ = static_cast<Session::Control*>(control);
     e->tokens_host_ = static_cast<std::int32_t*>(tokens);
     e->logits_host_ = static_cast<float*>(logits);
@@ -1296,16 +1240,10 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     std::fill_n(e->projection_rows_host_, e->options_.max_batch, 0u);
   }
   if (model.has_mtp()) {
-    // The trunk's kept rows are session-owned. Its transient residual and
-    // mixer buffers are free while MTP constructs its input. The split
-    // projections consume h/embd before the first mixer rewrites xn/mixed.
-    s.mtp_h = s.xn;
-    s.mtp_embd = s.mixed;
-    s.mtp_eproj = s.qkvz;
-    s.mtp_res = s.res;
     s.mtp_argmax = Alloc<ArgmaxCandidate>(a, kArgmaxParts, error_msg);
     // The draft token and its confidence (float bits), one host transfer.
     s.mtp_token = Alloc<std::int32_t>(a, 2, error_msg);
+    s.draft_head_ids = Alloc<std::int32_t>(a, kDraftHeadRows, error_msg);
     const auto candidate_ids = std::max<std::size_t>(
         MtpCandidateWorkspaceSize(c.vocab_size),
         e->options_.max_speculative * kArgmaxParts *
@@ -1332,10 +1270,17 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
           a, rows * MtpCandidateWorkspaceSize(c.vocab_size), error_msg);
       e->verification_scratch_ids_ = Alloc<std::uint32_t>(
           a, rows * MtpCandidateWorkspaceSize(c.vocab_size), error_msg);
+      const auto mask_words = (c.vocab_size + 31U) / 32U;
+      e->verification_allowed_masks_ =
+          Alloc<std::uint32_t>(a, rows * mask_words, error_msg);
       const auto candidates = rows * (kMtpCandidates + kCompactPenaltyLimit);
       e->verification_candidates_ =
           Alloc<sampling::LogitCandidate>(a, candidates, error_msg);
       if (!Check(e->host_allocations_.Allocate(
+                     &e->verification_allowed_masks_host_,
+                     rows * mask_words * sizeof(std::uint32_t)),
+                 "pinned verification constraint masks", error_msg) ||
+          !Check(e->host_allocations_.Allocate(
                      &e->verification_candidates_host_,
                      candidates * sizeof(sampling::LogitCandidate)),
                  "pinned verification candidates", error_msg) ||
@@ -1353,9 +1298,263 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       return nullptr;
     }
   }
+  e->narrow_s_ = s;
+  e->scratch_rows_ = e->narrow_batch_;
+  if (e->scratch_arena_) {
+    // Wide passes run on a second set of the row buffers, whose pages are
+    // mapped only while such passes run; every other buffer is shared.
+    e->wide_s_ = s;
+    if (!e->CarveRowScratch(e->wide_s_, T, [&](std::size_t bytes) {
+          return e->scratch_arena_->Take(bytes, 0, error_msg);
+        }))
+      return nullptr;
+  }
+  // Stages attach once the executor's scratch exists, before the first
+  // pass (CalibrateDecodeOverlap runs MoE layers).
+  {
+    namespace fn = ext::qwen::flash_next;
+    static fn::Stages gguf_stages;
+    e->stages_ = options.stages != nullptr ? options.stages : &gguf_stages;
+    e->stage_impl_.executor = e.get();
+    const auto& layers = model.layers();
+    e->stage_layers_.reserve(layers.size());
+    for (std::size_t il = 0; il < layers.size(); ++il)
+      e->stage_layers_.push_back(
+          fn::LayerAccess::Make(&layers[il], static_cast<std::uint32_t>(il)));
+    const fn::Limits limits{
+        e->options_.max_batch,
+        e->narrow_batch_,
+        e->options_.max_context,
+        e->stage_layers_,
+        ToTensor(model.output()),
+        model.has_mtp() ? fn::LayerAccess::Make(&model.mtp(), fn::Layer::kMtp)
+                        : fn::Layer{}};
+    const std::size_t bytes = e->stages_->ScratchBytes(limits);
+    if (bytes != 0) {
+      if (!Check(hipMalloc(&e->stage_scratch_, bytes), "stage scratch",
+                 error_msg))
+        return nullptr;
+      e->allocations_.push_back(e->stage_scratch_);
+    }
+    if (!e->stages_->Attach({e->stage_scratch_, bytes, e->stream_, limits},
+                            error_msg))
+      return nullptr;
+    e->prompt_layer_hook_ = (e->stages_->Hooks() & fn::kPromptLayers) != 0;
+    if (e->prompt_layer_hook_)
+      e->prompt_layers_ = layers;
+  }
   if (!e->CalibrateDecodeOverlap(error_msg))
     return nullptr;
   return e;
+}
+
+ext::qwen::flash_next::Layer Executor::LayerHandle(
+    const DeviceLayer& l) const noexcept {
+  namespace fn = ext::qwen::flash_next;
+  const auto& layers = model_->layers();
+  if (&l >= layers.data() && &l < layers.data() + layers.size())
+    return fn::LayerAccess::Make(
+        &l, static_cast<std::uint32_t>(&l - layers.data()));
+  if (!prompt_layers_.empty() && &l >= prompt_layers_.data() &&
+      &l < prompt_layers_.data() + prompt_layers_.size())
+    return fn::LayerAccess::Make(
+        &l, static_cast<std::uint32_t>(&l - prompt_layers_.data()));
+  return fn::LayerAccess::Make(&l, fn::Layer::kMtp);
+}
+
+ext::qwen::flash_next::StageContext Executor::StageCtx(
+    const DeviceLayer* l, std::uint32_t n_tokens,
+    std::string* error_msg) const noexcept {
+  namespace fn = ext::qwen::flash_next;
+  return {
+      stream_,         prefill_phase ? fn::Phase::kPrompt : fn::Phase::kDecode,
+      n_tokens,        l != nullptr ? LayerHandle(*l) : fn::Layer{},
+      stage_defaults_, stage_scratch_,
+      error_msg};
+}
+
+bool Executor::StageLinear(const DeviceTensor& w,
+                           const ext::qwen::flash_next::LinearInput& in,
+                           float* out, std::uint32_t n_tokens,
+                           std::string* error_msg) const {
+  return stages_->Linear(StageCtx(nullptr, n_tokens, error_msg), ToTensor(w),
+                         in, out);
+}
+
+bool Executor::StageGroup(
+    std::span<const ext::qwen::flash_next::LinearJob> jobs,
+    const ext::qwen::flash_next::LinearInput& in, std::uint32_t n_tokens,
+    std::string* error_msg) const {
+  return stages_->LinearGroup(StageCtx(nullptr, n_tokens, error_msg), jobs, in);
+}
+
+bool Executor::PromptLayer(std::uint32_t il, std::uint32_t n_tokens,
+                           const DeviceLayer** layer,
+                           std::string* error_msg) const {
+  namespace fn = ext::qwen::flash_next;
+  fn::LayerEdit edit = fn::LayerAccess::MakeEdit(&prompt_layers_[il], il);
+  fn::StageContext ctx = StageCtx(&prompt_layers_[il], n_tokens, error_msg);
+  bool use = false;
+  if (!stages_->PromptLayer(ctx, edit, &use))
+    return false;
+  if (use)
+    *layer = &prompt_layers_[il];
+  return true;
+}
+
+bool Executor::CarveRowScratch(
+    Scratch& s, std::size_t T,
+    const std::function<void*(std::size_t)>& allocate) const {
+  const Config& c = config();
+  const DeviceModel& model = *model_;
+  const std::size_t hc_dim = c.HcDim();
+  const std::size_t hidden = c.hidden_size;
+  const std::size_t slots = T * c.num_experts_used;
+  bool ok = true;
+  const auto bytes = [&](std::size_t count) {
+    void* p = allocate(count);
+    ok = ok && p != nullptr;
+    return p;
+  };
+  const auto f32 = [&](std::size_t n) {
+    return static_cast<float*>(bytes(n * sizeof(float)));
+  };
+  const auto i32 = [&](std::size_t n) {
+    return static_cast<std::int32_t*>(bytes(n * sizeof(std::int32_t)));
+  };
+  s.tokens = i32(T);
+  s.x_half = bytes(T * model.max_half_cols() * sizeof(std::uint16_t));
+  s.x_q8t = bytes(Q8TiledBytes(T, model.max_q8_cols()));
+  s.res = f32(T * hc_dim);
+  s.xn = f32(T * hc_dim);
+  s.xn_half = static_cast<__half*>(bytes(T * hc_dim * sizeof(__half)));
+  s.xn_q8t = bytes(Q8TiledBytes(T, hc_dim));
+  s.lo = f32(T * c.hc_low_rank);
+  s.mixed = f32(T * hidden);
+  s.inject = f32(T * c.hc_count * HcInjectParts(hidden));
+  s.block_out = f32(T * hidden);
+  s.hc_defer_w = f32(T * c.hc_count);
+  const std::size_t linear_projection = std::max<std::size_t>(
+      c.SsmConvChannels() + c.SsmValueDim(), c.ple_layer >= 0 ? hc_dim : 0);
+  const std::size_t linear_floats =
+      T * (linear_projection + 2 * c.ssm_num_v_heads + 2 * c.SsmKeyDim() +
+           2 * c.SsmValueDim()) +
+      (T + c.ssm_conv_kernel) * c.SsmConvChannels();
+  const std::size_t attention_floats =
+      T *
+      (5 * c.AttentionQDim() + 4 * c.AttentionKvDim() +
+       c.indexer_heads * c.indexer_head_dim + c.indexer_head_dim + mask_words_);
+  const std::size_t expert_floats = slots * (2 * c.expert_ff + hidden);
+  // Linear/full attention and routed experts run sequentially on stream_.
+  // Their intermediates die before the next stage, including batched rows,
+  // MTP catch-up and the deferred MoE epilogue consumed by Combine. Keep
+  // stable addresses for graph replay without reserving all three stages.
+  float* const stage =
+      f32(std::max({linear_floats, attention_floats, expert_floats,
+                    T * (linear_projection + hc_dim)}));
+  if (stage == nullptr) {
+    return false;
+  }
+  // Mixer gates die before attention/experts start. PLE also uses this
+  // buffer as its key, so keep it beyond PLE's gated output at stage.
+  s.hc_gate = stage + T * linear_projection;
+  float* cursor = stage;
+  const auto take = [&](std::size_t count) {
+    float* result = cursor;
+    cursor += count;
+    return result;
+  };
+  // Stacked and separate SSM projections are mutually exclusive. MTP's
+  // projected embedding is consumed before attention and reuses this space.
+  s.qkvz = take(T * linear_projection);
+  s.qkv = s.qkvz;
+  s.z = s.qkvz + T * c.SsmConvChannels();
+  s.alpha_beta = take(T * 2 * c.ssm_num_v_heads);
+  s.conv_scratch = take((T + c.ssm_conv_kernel) * c.SsmConvChannels());
+  s.qn = take(T * c.SsmKeyDim());
+  s.kn = take(T * c.SsmKeyDim());
+  s.gdn_raw = take(T * c.SsmValueDim());
+  s.gdn_out = take(T * c.SsmValueDim());
+  cursor = stage;
+  s.qg = take(T * (2 * c.AttentionQDim() + 2 * c.AttentionKvDim()));
+  s.q = take(T * c.AttentionQDim());
+  s.attn_gate = take(T * c.AttentionQDim());
+  s.k = take(T * c.AttentionKvDim());
+  s.v = take(T * c.AttentionKvDim());
+  s.iq = take(T * c.indexer_heads * c.indexer_head_dim);
+  s.ik = take(T * c.indexer_head_dim);
+  s.mask = reinterpret_cast<std::uint32_t*>(take(T * mask_words_));
+  s.ctx = take(T * c.AttentionQDim());
+  if (c.ple_layer >= 0) {
+    // PLE finishes before this layer's mixer/SSM. Its gate consumes key
+    // and query before normalization/convolution reuse those two buffers.
+    // The gated input stays separate until PleInject consumes both outputs.
+    s.ple_key = s.hc_gate;
+    s.ple_value = s.block_out;
+    s.ple_query = s.xn;
+    s.ple_gated = s.qkvz;
+    s.ple_norm = s.hc_gate;
+    s.ple_conv = s.xn;
+  }
+  s.router = f32(T * (c.num_experts + 1));
+  s.ids = i32(slots);
+  const std::size_t compact = RoutedCompactRows(slots, c.num_experts);
+  s.rows_token = i32(compact);
+  s.rows_slot = i32(compact);
+  s.routed_tiles = i32(3 * RoutedTileCapacity(slots, c));
+  s.weights = f32(slots);
+  cursor = stage;
+  s.gate_e = take(slots * c.expert_ff);
+  s.up_e = take(slots * c.expert_ff);
+  s.down_e = take(slots * hidden);
+  s.shexp_gate = f32(T * c.shared_expert_ff);
+  s.shexp_up = f32(T * c.shared_expert_ff);
+  s.shexp_out = f32(T * hidden);
+  s.shexp_half =
+      static_cast<__half*>(bytes(T * c.shared_expert_ff * sizeof(__half)));
+  if (model.has_mtp()) {
+    // The trunk's kept rows are session-owned. Its transient residual and
+    // mixer buffers are free while MTP constructs its input. The split
+    // projections consume h/embd before the first mixer rewrites xn/mixed.
+    s.mtp_h = s.xn;
+    s.mtp_embd = s.mixed;
+    s.mtp_eproj = s.qkvz;
+    s.mtp_res = s.res;
+  }
+  return ok;
+}
+
+bool Executor::AcquireWidePasses() const {
+  if (!scratch_arena_)
+    return false;
+  if (scratch_arena_->transient_mapped())
+    return true;
+  // The wide set plus room for what the pass maps itself (its K/V and
+  // checkpoint pages) must fit the device heap after the state promised to
+  // sessions, and leave the host its free floor. Mapping may reclaim clean
+  // page cache: 55-91 ms for the 4.6 GiB set with no compaction stalls,
+  // while only prefills run. The RAM cache's pages are pinned and stay.
+  const std::size_t bytes = scratch_arena_->transient_bytes() + kWidePassSpare;
+  std::size_t free_bytes = 0;
+  std::size_t total_bytes = 0;
+  if (gufo::mem::MemGetInfo(&free_bytes, &total_bytes) != hipSuccess) {
+    (void)hipGetLastError();
+    return false;
+  }
+  if (free_bytes < bytes ||
+      gufo::mem::HostAvailableBytes() < gufo::mem::HostFreeFloorBytes() + bytes)
+    return false;
+  return scratch_arena_->MapTransient(nullptr);
+}
+
+void Executor::ReleaseWidePasses() const {
+  // Nothing reads the wide set once the pass that used it returned: only
+  // the shared pinned n-gram buffer outlives it, for the next prefetch.
+  // Unmapping waits for in-flight GPU work (10-15 ms measured).
+  if (!scratch_arena_ || !scratch_arena_->transient_mapped() ||
+      wide_pass_running_)
+    return;
+  scratch_arena_->ReleaseTransient();
 }
 
 bool Executor::CalibrateDecodeOverlap(std::string* error_msg) {
@@ -1439,78 +1638,52 @@ std::unique_ptr<Session> Executor::CreateSession(core::SessionMode mode,
   s->index_capacity_ = IndexerCapacity(c, options_.max_batch, max_context);
   s->linear_.resize(c.num_layers);
   s->attention_.resize(c.num_layers);
-  auto& a = s->allocations_;
-  const std::size_t kv_row = c.AttentionKvDim();
-  const std::size_t conv_elems =
-      static_cast<std::size_t>(c.ssm_conv_kernel - 1) * c.SsmConvChannels();
-  const std::size_t state_elems = static_cast<std::size_t>(c.ssm_num_v_heads) *
-                                  c.ssm_head_dim * c.ssm_head_dim;
+  // K/V keeps a fixed address for the whole context, backed by pages as
+  // positions are written (EnsureKv); the account charges them to the
+  // shared state budget (#715), and its margin covers the tile EnsureKv
+  // backs past the frontier. Pooled keys are regions backed whole, so
+  // checkpoints share their pages like the K/V's.
+  const SessionStateLayout layout = DeclareSessionState(mode, max_context);
+  s->state_ = gufo::mem::SessionState::Create(layout.state, error_msg);
+  if (!s->state_)
+    return nullptr;
+  const auto& state = *s->state_;
+  s->account_ = state.account();
+  s->allocated_bytes_ = state.allocated_bytes();
   for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    const auto& ids = layout.layers[il];
     if (c.IsLinearLayer(il)) {
       auto& l = s->linear_[il];
-      l.conv_state =
-          Alloc<float>(a, conv_elems, error_msg, &s->allocated_bytes_);
-      l.state = Alloc<float>(a, state_elems, error_msg, &s->allocated_bytes_);
+      l.conv_state = state.data<float>(ids.conv);
+      l.state = state.data<float>(ids.state);
     } else {
       auto& at = s->attention_[il];
-      at.k_cache =
-          Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                        error_msg, &s->allocated_bytes_);
-      at.v_cache =
-          Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                        error_msg, &s->allocated_bytes_);
-      at.index_k = Alloc<float>(
-          a, static_cast<std::size_t>(s->index_capacity_) * c.indexer_head_dim,
-          error_msg, &s->allocated_bytes_);
-      at.block_k = Alloc<__half>(
-          a,
-          static_cast<std::size_t>(max_context / c.compress_ratio + 1) *
-              c.indexer_head_dim,
-          error_msg, &s->allocated_bytes_);
+      at.k_cache = state.data<__half>(ids.k);
+      at.v_cache = state.data<__half>(ids.v);
+      at.index_k = state.data<float>(ids.index_k);
+      at.block_k = state.data<__half>(ids.block_k);
+      s->kv_regions_.push_back(state.region(ids.k));
+      s->kv_regions_.push_back(state.region(ids.v));
+      s->pooled_regions_.push_back(state.region(ids.block_k));
     }
   }
-  if (c.ple_layer >= 0) {
-    const std::size_t hist =
-        static_cast<std::size_t>(c.PleConvHistory()) * c.HcDim();
-    s->ple_history_ = Alloc<float>(a, hist, error_msg, &s->allocated_bytes_);
-  }
-  s->control_ = Alloc<Session::Control>(a, 1, error_msg, &s->allocated_bytes_);
-  if (s->mtp_enabled_) {
-    // Wide copy verification keeps every row for the draft catch-up.
-    s->mtp_.target_hidden =
-        Alloc<float>(a,
-                     static_cast<std::size_t>(
-                         std::max(options_.max_speculative, max_copy_rows())) *
-                         c.HcDim(),
-                     error_msg, &s->allocated_bytes_);
-    s->mtp_.k_cache =
-        Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                      error_msg, &s->allocated_bytes_);
-    s->mtp_.v_cache =
-        Alloc<__half>(a, static_cast<std::size_t>(max_context) * kv_row,
-                      error_msg, &s->allocated_bytes_);
-    s->mtp_.index_k =
-        Alloc<float>(a, std::size_t{s->index_capacity_} * c.indexer_head_dim,
-                     error_msg, &s->allocated_bytes_);
-    s->mtp_.block_k = Alloc<__half>(
-        a, std::size_t{max_context / c.compress_ratio + 1} * c.indexer_head_dim,
-        error_msg, &s->allocated_bytes_);
-    s->mtp_.h = Alloc<float>(a, c.HcDim(), error_msg, &s->allocated_bytes_);
-    if (!model_->draft_output().empty()) {
-      s->mtp_.draft_rows =
-          Alloc<std::uint8_t>(a,
-                              std::size_t{speculative::kDraftVocabExtraRows} *
-                                      model_->output_row_bytes() +
-                                  4096,
-                              error_msg, &s->allocated_bytes_);
-      s->mtp_.draft_ids =
-          Alloc<std::int32_t>(a, speculative::kDraftVocabExtraRows, error_msg,
-                              &s->allocated_bytes_);
-    }
-  }
-  for (void* p : a) {
-    if (p == nullptr) {
-      return nullptr;
+  if (layout.ple_history)
+    s->ple_history_ = state.data<float>(*layout.ple_history);
+  s->control_ = state.data<Session::Control>(layout.control);
+  if (layout.mtp) {
+    const auto& ids = *layout.mtp;
+    s->mtp_.target_hidden = state.data<float>(layout.mtp_target_hidden);
+    s->mtp_.k_cache = state.data<__half>(ids.k);
+    s->mtp_.v_cache = state.data<__half>(ids.v);
+    s->mtp_.index_k = state.data<float>(ids.index_k);
+    s->mtp_.block_k = state.data<__half>(ids.block_k);
+    s->mtp_.h = state.data<float>(layout.mtp_h);
+    s->mtp_kv_regions_.push_back(state.region(ids.k));
+    s->mtp_kv_regions_.push_back(state.region(ids.v));
+    s->mtp_pooled_regions_.push_back(state.region(ids.block_k));
+    if (layout.mtp_draft_rows) {
+      s->mtp_.draft_rows = state.data<std::uint8_t>(*layout.mtp_draft_rows);
+      s->mtp_.draft_ids = state.data<std::int32_t>(layout.mtp_draft_ids);
     }
   }
   // The zero fills above run on the null stream; nothing may read the new
@@ -1539,7 +1712,7 @@ bool Executor::AppendDraftRows(Session& session, std::uint32_t first,
     AssignError(error_msg, "invalid draft table append");
     return false;
   }
-  const auto& output = model_->output();
+  const auto& output = model_->draft_source();
   const std::size_t row_bytes = model_->output_row_bytes();
   for (std::size_t i = 0; i < ids.size(); ++i) {
     if (ids[i] < 0 || static_cast<std::uint32_t>(ids[i]) >= output.rows) {
@@ -1578,7 +1751,7 @@ bool Executor::ClearDraftRows(Session& session, std::uint32_t first,
 }
 
 DeviceTensor Executor::DraftTable(const Session& session) const noexcept {
-  DeviceTensor table = model_->output();
+  DeviceTensor table = model_->draft_source();
   table.data = session.mtp_.draft_rows;
   table.rows = speculative::kDraftVocabExtraRows;
   return table;
@@ -1720,9 +1893,117 @@ bool Executor::EnsureWideSegments(std::uint32_t segments,
   return true;
 }
 
-std::size_t Executor::SessionBytes(
-    core::SessionMode mode, std::uint32_t max_context,
-    std::uint32_t rollback_depth) const noexcept {
+bool Executor::EnsureKv(Session& session, std::uint32_t trunk_end,
+                        std::uint32_t mtp_end, std::string* error) const {
+  const auto ensure = [&](const auto& regions, std::size_t end) {
+    for (const auto& region : regions) {
+      if (!region->Ensure(end + kKvTileRows, error))
+        return false;
+      region->MapAhead(end + kKvAheadRows);
+    }
+    return true;
+  };
+  // Pooled keys stay backed whole; a restore can leave pages to map again.
+  const auto whole = [&](const auto& regions) {
+    return std::ranges::all_of(regions, [&](const auto& region) {
+      return region->Ensure(region->shape().rows, error);
+    });
+  };
+  return ensure(session.kv_regions_, trunk_end) &&
+         ensure(session.mtp_kv_regions_, mtp_end) &&
+         whole(session.pooled_regions_) && whole(session.mtp_pooled_regions_);
+}
+
+void Executor::MapKvAhead(Session& session, std::uint32_t trunk_end,
+                          std::uint32_t mtp_end) const {
+  for (const auto& region : session.kv_regions_)
+    region->MapAhead(trunk_end + kKvAheadRows);
+  for (const auto& region : session.mtp_kv_regions_)
+    region->MapAhead(mtp_end + kKvAheadRows);
+}
+
+bool Executor::UnshareKv(Session& session, bool draft, std::uint32_t first,
+                         std::uint32_t end, std::uint32_t kept,
+                         std::uint32_t first_block, std::uint32_t end_block,
+                         std::uint32_t kept_block, std::string* error) const {
+  for (const auto& region :
+       draft ? session.mtp_kv_regions_ : session.kv_regions_)
+    if (!region->PrepareWrite(first, end, kept, error))
+      return false;
+  for (const auto& region :
+       draft ? session.mtp_pooled_regions_ : session.pooled_regions_)
+    if (!region->PrepareWrite(first_block, end_block, kept_block, error))
+      return false;
+  // Replaced pages reach the device, and get their copies, only now: one
+  // barrier for every buffer. Two atomic reads when nothing was replaced.
+  const auto& regions = draft ? session.mtp_kv_regions_ : session.kv_regions_;
+  return regions.empty() || regions.front()->SettleRemaps(error);
+}
+
+Executor::SessionStateLayout Executor::DeclareSessionState(
+    core::SessionMode mode, std::uint32_t max_context) const {
+  const Config& c = config();
+  SessionStateLayout layout(kKvTileRows);
+  auto& state = layout.state;
+  const std::size_t kv_row = c.AttentionKvDim() * sizeof(__half);
+  const std::size_t index_bytes =
+      std::size_t{IndexerCapacity(c, options_.max_batch, max_context)} *
+      c.indexer_head_dim * sizeof(float);
+  // Before sparse attention starts, pooling can lag by indexer_top_k rows
+  // (the raw ring, index_k). Afterwards only an incomplete block precedes
+  // the current batch; completed block keys stay in block_k, one row per
+  // compressed block.
+  const gufo::mem::RegionShape pooled{
+      .row_bytes = c.indexer_head_dim * sizeof(__half),
+      .rows = std::size_t{max_context} / c.compress_ratio + 1};
+  const auto attention = [&] {
+    SessionStateLayout::Layer ids;
+    ids.k = state.Context({.row_bytes = kv_row, .rows = max_context});
+    ids.v = state.Context({.row_bytes = kv_row, .rows = max_context});
+    ids.index_k = state.Fixed(index_bytes);
+    ids.block_k = state.Whole(pooled);
+    return ids;
+  };
+  layout.layers.resize(c.num_layers);
+  for (std::uint32_t il = 0; il < c.num_layers; ++il) {
+    auto& ids = layout.layers[il];
+    if (c.IsLinearLayer(il)) {
+      ids.conv = state.Fixed(std::size_t{c.ssm_conv_kernel - 1} *
+                             c.SsmConvChannels() * sizeof(float));
+      ids.state = state.Fixed(std::size_t{c.ssm_num_v_heads} * c.ssm_head_dim *
+                              c.ssm_head_dim * sizeof(float));
+    } else {
+      ids = attention();
+    }
+  }
+  if (c.ple_layer >= 0)
+    layout.ple_history = state.Fixed(std::size_t{c.PleConvHistory()} *
+                                     c.HcDim() * sizeof(float));
+  layout.control = state.Fixed(sizeof(Session::Control));
+  if (mode == core::SessionMode::kSpeculative) {
+    // Wide copy verification keeps every verified trunk hidden row for the
+    // draft catch-up (target_hidden); h is the draft block's own row.
+    layout.mtp_target_hidden = state.Fixed(
+        std::size_t{std::max(options_.max_speculative, max_copy_rows())} *
+        c.HcDim() * sizeof(float));
+    layout.mtp = attention();
+    layout.mtp_h = state.Fixed(std::size_t{c.HcDim()} * sizeof(float));
+    if (!model_->draft_output().empty()) {
+      layout.mtp_draft_rows =
+          state.Fixed(std::size_t{speculative::kDraftVocabExtraRows} *
+                          model_->output_row_bytes() +
+                      4096);
+      layout.mtp_draft_ids =
+          state.Fixed(std::size_t{speculative::kDraftVocabExtraRows} *
+                      sizeof(std::int32_t));
+    }
+  }
+  return layout;
+}
+
+std::size_t Executor::RollbackBytes(std::uint32_t depth) const noexcept {
+  if (depth == 0)
+    return 0;
   const auto& c = config();
   const std::size_t attention = c.num_layers / c.full_attention_interval;
   const std::size_t linear = c.num_layers - attention;
@@ -1732,36 +2013,28 @@ std::size_t Executor::SessionBytes(
       std::size_t{c.ssm_num_v_heads} * c.ssm_head_dim * c.ssm_head_dim;
   const std::size_t ple =
       c.ple_layer >= 0 ? std::size_t{c.PleConvHistory()} * c.HcDim() : 0;
-  const std::size_t kv =
-      2 * std::size_t{max_context} * c.AttentionKvDim() * sizeof(__half);
-  const std::size_t index =
-      std::size_t{IndexerCapacity(c, options_.max_batch, max_context)} *
-          c.indexer_head_dim * sizeof(float) +
-      std::size_t{max_context / c.compress_ratio + 1} * c.indexer_head_dim *
-          sizeof(__half);
-  const auto rollback_state =
-      rollback_depth == 0
-          ? 0
-          : state + (rollback_depth - 1) *
-                        GdnRollbackRowFloats(1, c.ssm_num_k_heads,
-                                             c.ssm_num_v_heads, c.ssm_head_dim);
-  // MTP keeps every verified trunk hidden row (target_hidden: the verifier
-  // width, or a wide copy's) plus the draft block's own row (h).
-  const std::size_t hidden_rows =
-      std::size_t{std::max(options_.max_speculative, max_copy_rows())} + 1;
-  return ((linear * conv + ple) * (rollback_depth + 1) +
-          linear * (state + rollback_state)) *
-             sizeof(float) +
-         attention * (kv + index) + sizeof(Session::Control) +
-         (mode == core::SessionMode::kSpeculative
-              ? kv + index + hidden_rows * c.HcDim() * sizeof(float) +
-                    (model_->draft_output().empty()
-                         ? 0
-                         : std::size_t{speculative::kDraftVocabExtraRows} *
-                                   (model_->output_row_bytes() +
-                                    sizeof(std::int32_t)) +
-                               4096)
-              : 0);
+  const std::size_t rollback_state =
+      state + (depth - 1) * GdnRollbackRowFloats(1, c.ssm_num_k_heads,
+                                                 c.ssm_num_v_heads,
+                                                 c.ssm_head_dim);
+  return ((linear * conv + ple) * depth + linear * rollback_state) *
+         sizeof(float);
+}
+
+std::size_t Executor::DemandMappedBytes(core::SessionMode mode,
+                                        std::uint32_t max_context) const {
+  if (!gufo::mem::DemandMapped())
+    return 0;
+  return DeclareSessionState(mode, max_context)
+      .state.ContextBytes(gufo::mem::StateBytes::kSize);
+}
+
+std::size_t Executor::SessionBytes(core::SessionMode mode,
+                                   std::uint32_t max_context,
+                                   std::uint32_t rollback_depth) const {
+  return DeclareSessionState(mode, max_context)
+             .state.Bytes(gufo::mem::StateBytes::kSize) +
+         RollbackBytes(rollback_depth);
 }
 
 std::size_t Executor::DeferredScratchBytes() const {
@@ -1879,9 +2152,9 @@ bool Executor::SetYarnFactor(Session& s, float factor, std::string* error_msg) {
   // and the rows the cache borrowed or is copying out.
   s.PreserveSnapshots(0, 0);
   if (s.continuation_hooks_) {
-    s.continuation_hooks_->BeforeWrite(false, 0, s.position_, 0, s.blocks_);
-    s.continuation_hooks_->BeforeWrite(true, 0, s.mtp_.position, 0,
-                                       s.mtp_.blocks);
+    s.continuation_hooks_->BeforeRewrite(false, 0, s.position_, 0, s.blocks_);
+    s.continuation_hooks_->BeforeRewrite(true, 0, s.mtp_.position, 0,
+                                         s.mtp_.blocks);
   }
   // A prefill checkpoint over these rows is consumed before the next
   // forward, which this precedes.
@@ -2046,6 +2319,35 @@ bool Executor::DenseF16Route(const DeviceTensor& w,
 
 bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
                      std::uint32_t n_tokens, std::string* error_msg) const {
+  if (w.format_state != nullptr) [[unlikely]] {
+    return StageLinear(w, {x, n_tokens, 1, nullptr}, out, n_tokens, error_msg);
+  }
+  if (w.type == GgmlType::kQ4_K) {
+    // The draft head (DeviceModel::SetDraftVocab): use the dense Q4_K decode
+    // kernel at decode widths.
+    if (n_tokens <= kVecBatch && w.cols % 256 == 0) {
+      Q8Input q;
+      if (!Quantize(x, n_tokens, w.cols, &q, error_msg))
+        return false;
+      if (qfn_mmq_q4_K_dense_vec_preq(w.data, q.data, out,
+                                      static_cast<int>(w.rows),
+                                      static_cast<int>(n_tokens),
+                                      static_cast<int>(w.cols), stream_) != 0) {
+        AssignError(error_msg, "Q4_K draft head projection failed");
+        return false;
+      }
+      return true;
+    }
+    if (n_tokens > kDraftHeadRows || s_.draft_head_ids == nullptr ||
+        qfn_mmq_moe_vec(static_cast<int>(GgmlType::kQ4_K), w.data, x,
+                        s_.draft_head_ids, out, static_cast<int>(w.rows),
+                        static_cast<int>(w.cols), static_cast<int>(n_tokens), 1,
+                        1, stream_) != 0) {
+      AssignError(error_msg, "Q4_K draft head projection failed");
+      return false;
+    }
+    return true;
+  }
   if (w.type == GgmlType::kQ8_0) {
     if (!MatrixRows(n_tokens)) {
       Q8Input q;
@@ -2058,7 +2360,7 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
     // GEMM. Both staging buffers hold max_batch rows; a wider call (the
     // draft block folds its streams into rows) runs in pieces.
     const bool f16 = DenseF16Route(w, n_tokens);
-    const std::uint32_t piece = static_cast<std::uint32_t>(options_.max_batch);
+    const std::uint32_t piece = scratch_rows_;
     for (std::uint32_t r0 = 0; r0 < n_tokens; r0 += piece) {
       const std::uint32_t rows = std::min(piece, n_tokens - r0);
       // The staging buffer may already hold this input (a producer wrote
@@ -2139,6 +2441,12 @@ void Executor::RoutedHints(const DeviceTensor& w,
       RoutedTileCols(n_tokens, config().num_experts_used, w.experts));
 }
 
+bool Executor::WaitCounts(std::uint32_t n_tokens,
+                          std::string* error_msg) const {
+  return !ExpertMatrixRows(n_tokens) ||
+         Check(hipEventSynchronize(counts_ready_), "expert counts", error_msg);
+}
+
 bool Executor::RouteHints(std::uint32_t n_tokens,
                           std::string* error_msg) const {
   // Every column tile past an expert's bucket still costs a dispatch and a
@@ -2197,6 +2505,9 @@ bool Executor::Experts(const DeviceTensor& w, const float* x,
                        const std::int32_t* ids, float* out,
                        std::uint32_t n_rows, std::uint32_t n_used,
                        std::uint32_t n_tokens, std::string* error_msg) const {
+  if (w.format_state != nullptr) [[unlikely]] {
+    return StageLinear(w, {x, n_rows, n_used, ids}, out, n_tokens, error_msg);
+  }
   const int M = static_cast<int>(w.rows);
   const int K = static_cast<int>(w.cols);
   const int E = static_cast<int>(w.experts);
@@ -2244,6 +2555,15 @@ bool Executor::GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
                             const float* x, const std::int32_t* ids, float* out,
                             std::uint32_t n_tokens, std::uint32_t n_used,
                             std::string* error_msg) const {
+  if (a.format_state != nullptr || b.format_state != nullptr) [[unlikely]] {
+    const ext::qwen::flash_next::LinearJob jobs[] = {{ToTensor(a), out},
+                                                     {ToTensor(b), s_.up_e}};
+    if (!StageGroup(jobs, {x, n_tokens, n_used, ids}, n_tokens, error_msg))
+      return false;
+    Swiglu(out, s_.up_e, static_cast<std::size_t>(n_tokens) * n_used * a.rows,
+           stream_);
+    return true;
+  }
   const bool same_shape = a.type == b.type && a.rows == b.rows &&
                           a.cols == b.cols && a.experts == b.experts;
   if (!MatrixRows(n_tokens) && n_used <= 32 && same_shape &&
@@ -2813,6 +3133,19 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
                                std::string* error_msg, bool projections_ready,
                                bool project_output,
                                GdnCheckpoint checkpoint) const {
+  const ext::qwen::flash_next::LinearAttentionArgs args{
+      s, n_tokens, speculative, projections_ready, project_output, checkpoint};
+  return stages_->LinearAttention(StageCtx(&l, n_tokens, error_msg), args, x,
+                                  out);
+}
+
+bool Executor::DefaultLinearAttention(const DeviceLayer& l,
+                                      Session::LinearState& s, const float* x,
+                                      float* out, std::uint32_t n_tokens,
+                                      bool speculative, std::string* error_msg,
+                                      bool projections_ready,
+                                      bool project_output,
+                                      GdnCheckpoint checkpoint) const {
   const Config& c = config();
   const std::uint32_t channels = c.SsmConvChannels();
   const float* qkv = s_.qkv;
@@ -2872,11 +3205,19 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
     z = s_.qkvz + channels;
     qkv_stride = z_stride = l.ssm_in.rows;
   } else if (!projections_ready) {
-    Q8Input xq;
-    if (!Quantize(x, n_tokens, c.hidden_size, &xq, error_msg) ||
-        !Dense(l.ssm_qkv, xq, s_.qkv, error_msg) ||
-        !Dense(l.ssm_gate, xq, s_.z, error_msg)) {
-      return false;
+    if (l.ssm_qkv.format_state != nullptr || l.ssm_gate.format_state != nullptr)
+        [[unlikely]] {
+      const ext::qwen::flash_next::LinearJob jobs[] = {
+          {ToTensor(l.ssm_qkv), s_.qkv}, {ToTensor(l.ssm_gate), s_.z}};
+      if (!StageGroup(jobs, {x, n_tokens, 1, nullptr}, n_tokens, error_msg))
+        return false;
+    } else {
+      Q8Input xq;
+      if (!Quantize(x, n_tokens, c.hidden_size, &xq, error_msg) ||
+          !Dense(l.ssm_qkv, xq, s_.qkv, error_msg) ||
+          !Dense(l.ssm_gate, xq, s_.z, error_msg)) {
+        return false;
+      }
     }
   }
   if (!projections_ready &&
@@ -2955,6 +3296,28 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                          std::string* error_msg, bool last_only,
                          bool projections_ready, bool project_output,
                          PassCheckpoints checkpoints) const {
+  const ext::qwen::flash_next::AttentionArgs args{s,
+                                                  n_tokens,
+                                                  pos,
+                                                  first_block,
+                                                  start_pos,
+                                                  pool_grid,
+                                                  max_context,
+                                                  sparse,
+                                                  last_only,
+                                                  projections_ready,
+                                                  project_output,
+                                                  checkpoints};
+  return stages_->Attention(StageCtx(&l, n_tokens, error_msg), args, x, out);
+}
+
+bool Executor::DefaultAttention(
+    const DeviceLayer& l, Session::AttentionState& s, const float* x,
+    float* out, std::uint32_t n_tokens, const std::uint32_t* pos,
+    const std::uint32_t* first_block, std::uint32_t start_pos,
+    std::uint32_t pool_grid, std::uint32_t max_context, bool sparse,
+    std::string* error_msg, bool last_only, bool projections_ready,
+    bool project_output, PassCheckpoints checkpoints) const {
   const Config& c = config();
   const std::uint32_t kv_row = c.AttentionKvDim();
   const std::uint32_t index_capacity =
@@ -2993,6 +3356,18 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                     n_tokens, c.num_heads, c.head_dim, kv_row, stream_);
       }
     }
+  } else if (!projections_ready && (l.attn_q.format_state != nullptr ||
+                                    l.attn_k.format_state != nullptr ||
+                                    l.attn_v.format_state != nullptr))
+      [[unlikely]] {
+    const ext::qwen::flash_next::LinearJob jobs[] = {
+        {ToTensor(l.attn_q), s_.qg},
+        {ToTensor(l.attn_k), s_.k},
+        {ToTensor(l.attn_v), s_.v}};
+    if (!StageGroup(jobs, {x, n_tokens, 1, nullptr}, n_tokens, error_msg))
+      return false;
+    UnpackQGate(s_.qg, 2 * c.AttentionQDim(), s_.q, s_.attn_gate, nullptr,
+                nullptr, n_tokens, c.num_heads, c.head_dim, 0, stream_);
   } else {
     Q8Input xq;
     if (!projections_ready &&
@@ -3182,6 +3557,62 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
       return false;
     }
   }
+  // Only the Q8_0 shared expert overlaps (see DefaultMoeFfn).
+  const bool overlap = (ExpertMatrixRows(n_tokens) ||
+                        (decode_overlap_ && n_tokens <= kVecBatch)) &&
+                       !last_only && l.shexp_gate.type == GgmlType::kQ8_0 &&
+                       l.shexp_up.type == GgmlType::kQ8_0 &&
+                       l.shexp_down.type == GgmlType::kQ8_0;
+  const ext::qwen::flash_next::MoeRouting routing{
+      s_.ids,
+      s_.weights,
+      s_.router,
+      c.num_experts + 1,
+      c.num_experts,
+      used,
+      counts_host_,
+      tiles_host_,
+      tiles_host_capacity_,
+      last_only,
+      overlap,
+      {s_.gate_e, s_.up_e, s_.down_e, s_.shexp_up, s_.shexp_gate, s_.shexp_out,
+       s_.expert_counts, s_.routed_bounds, s_.routed_cursors, s_.rows_token,
+       s_.rows_slot, s_.routed_tiles}};
+  // An override that forked the shared expert and failed still leaves the
+  // main stream joined (the default joins before it returns).
+  struct JoinGuard {
+    const Executor* executor;
+    ~JoinGuard() { (void)executor->JoinSide(nullptr); }
+  } join_guard{this};
+  return stages_->MoeFfn(StageCtx(&l, n_tokens, error_msg), routing, x, out);
+}
+
+bool Executor::SharedExpertRows(const DeviceLayer& l, const float* x,
+                                std::uint32_t n_tokens,
+                                std::string* error_msg) const {
+  shexp_half_ready_ = false;
+  if (!GatedDense(l.shexp_up, l.shexp_gate, x, s_.shexp_up, n_tokens,
+                  &l.shexp_down, error_msg)) {
+    return false;
+  }
+  if (shexp_half_ready_) {
+    shexp_half_ready_ = false;
+    if (!DenseF16Gemm(l.shexp_down.data, s_.shexp_half, s_.shexp_out, n_tokens,
+                      l.shexp_down.rows, l.shexp_down.cols, stream_)) {
+      AssignError(error_msg, "shared expert F16 GEMM failed");
+      return false;
+    }
+    return true;
+  }
+  return Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, n_tokens, error_msg);
+}
+
+bool Executor::DefaultMoeFfn(const DeviceLayer& l,
+                             const ext::qwen::flash_next::MoeRouting& routing,
+                             const float* x, float* out, std::uint32_t n_tokens,
+                             std::string* error_msg) const {
+  const Config& c = config();
+  const bool last_only = routing.last_only;
   // The shared expert (gated by the last router row) does not depend on
   // routing. Queue its GEMMs after the count download, then prepare the
   // routed dispatch on the CPU without waiting for these GEMMs to finish.
@@ -3199,11 +3630,7 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // Create measured it to pay for its joins (decode_overlap_). The
   // intermediate 9-32-row route keeps its previous serial dispatch until it
   // is separately qualified. Rows are the total token rows, not sessions.
-  const bool overlap = (ExpertMatrixRows(n_tokens) ||
-                        (decode_overlap_ && n_tokens <= kVecBatch)) &&
-                       !last_only && l.shexp_gate.type == GgmlType::kQ8_0 &&
-                       l.shexp_up.type == GgmlType::kQ8_0 &&
-                       l.shexp_down.type == GgmlType::kQ8_0;
+  const bool overlap = routing.overlap;
   const hipStream_t main = stream_;
   if (overlap) {
     if (!Check(hipEventRecord(side_start_, main), "side stream fork",
@@ -3259,25 +3686,7 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   } shared_scope{this, main, overlap};
   if (overlap)
     stream_ = side_stream_;
-  const auto shared_expert = [&] {
-    shexp_half_ready_ = false;
-    if (!GatedDense(l.shexp_up, l.shexp_gate, x, s_.shexp_up, n_tokens,
-                    &l.shexp_down, error_msg)) {
-      return false;
-    }
-    if (shexp_half_ready_) {
-      shexp_half_ready_ = false;
-      if (!DenseF16Gemm(l.shexp_down.data, s_.shexp_half, s_.shexp_out,
-                        n_tokens, l.shexp_down.rows, l.shexp_down.cols,
-                        stream_)) {
-        AssignError(error_msg, "shared expert F16 GEMM failed");
-        return false;
-      }
-      return true;
-    }
-    return Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, n_tokens, error_msg);
-  };
-  const bool shared_ok = shared_expert();
+  const bool shared_ok = SharedExpertRows(l, x, n_tokens, error_msg);
   if (!Check(shared_scope.Finish(), "side stream join", error_msg))
     return false;
   if (!shared_ok) {
@@ -3416,7 +3825,15 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   // The epilogue reads the shared expert's output.
   if (!JoinSide(error_msg))
     return false;
-  if (wmma_experts) {
+  MoeEpilogueRows(out, n_tokens, wmma_experts);
+  return true;
+}
+
+void Executor::MoeEpilogueRows(float* out, std::uint32_t n_tokens,
+                               bool half_down) const {
+  const Config& c = config();
+  const std::uint32_t used = c.num_experts_used;
+  if (half_down) {
     // The combine that follows folds this epilogue into its own pass when
     // it takes the F16 route (Combine); otherwise it runs here.
     moe_pending_ = out == s_.block_out;
@@ -3434,7 +3851,6 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
     MoeEpilogue(s_.down_e, s_.weights, s_.shexp_out, s_.router + c.num_experts,
                 c.num_experts + 1, out, n_tokens, used, c.hidden_size, stream_);
   }
-  return true;
 }
 
 bool Executor::KeepHiddenRow(Session& session, std::uint32_t row,
@@ -3474,6 +3890,14 @@ bool Executor::CopyTrunkHidden(const Session& session, std::span<float> hidden,
 bool Executor::MtpHead(const DeviceMixer& head, const float* res, bool token,
                        bool candidates, const Session* draft,
                        std::string* error_msg) const {
+  const ext::qwen::flash_next::MtpHeadArgs args{head, res, token, candidates,
+                                                draft};
+  return stages_->MtpHead(StageCtx(nullptr, 1, error_msg), args);
+}
+
+bool Executor::DefaultMtpHead(const DeviceMixer& head, const float* res,
+                              bool token, bool candidates, const Session* draft,
+                              std::string* error_msg) const {
   const std::uint32_t prefix = model_->draft_output().rows;
   const std::uint32_t rows = draft != nullptr
                                  ? prefix + speculative::kDraftVocabExtraRows
@@ -3643,10 +4067,28 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
       return false;
     }
   }
-  if (n == 0 || n > options_.max_batch ||
+  if (n == 0 || n > pass_rows() ||
       (speculative && n > options_.max_speculative)) {
     AssignError(error_msg, "token batch is empty or exceeds the batch limit");
     return false;
+  }
+  // A wide pass runs on the wide scratch set; ReleaseWidePasses() leaves it
+  // mapped until the pass is done.
+  struct WidePassScope {
+    const Executor* executor;
+    bool wide;
+    ~WidePassScope() {
+      if (wide) {
+        executor->UseScratch(executor->narrow_s_);
+        executor->scratch_rows_ = executor->narrow_batch_;
+        executor->wide_pass_running_ = false;
+      }
+    }
+  } wide_scope{this, n > narrow_batch_};
+  if (wide_scope.wide) {
+    wide_pass_running_ = true;
+    scratch_rows_ = options_.max_batch;
+    UseScratch(wide_s_);
   }
   if (n_logits > n || n_logits > options_.max_logit_rows) {
     AssignError(error_msg, "requested logit rows exceed the batch or limit");
@@ -3656,6 +4098,10 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
     AssignError(error_msg, "session context is full");
     return false;
   }
+  if (!EnsureKv(session, session.position_ + n,
+                session.mtp_enabled_ ? session.mtp_.position + n : 0,
+                error_msg))
+    return false;
   for (auto t : tokens) {
     if (t < 0 || static_cast<std::uint32_t>(t) >= c.vocab_size) {
       AssignError(error_msg, "token out of range");
@@ -3974,7 +4420,11 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
   for (std::uint32_t il = first_layer; il < end_layer; ++il) {
     if (!session.CheckCancellation(error_msg))
       return false;
-    const DeviceLayer& l = layers[il];
+    const DeviceLayer* view = &layers[il];
+    if (prompt_layer_hook_ && prefill_phase &&
+        !PromptLayer(il, n, &view, error_msg))
+      return false;
+    const DeviceLayer& l = *view;
     if (c.IsPleLayer(il) && !Ple(l, session, n, s_.res, speculative, error_msg,
                                  embeddings_ready, checkpoints)) {
       return false;
@@ -4030,7 +4480,8 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                              ? (n - needed) / 128 * 128
                              : 0U;
     const auto finish = [&](std::uint32_t rows) {
-      defer_residual_ = WmmaExperts(l, rows);
+      defer_residual_ =
+          stages_->MoeDefersEpilogue(StageCtx(&l, rows, error_msg));
       // The wide FFN reads the mix only through its F16 rows (router, routed
       // experts) and tiled Q8 rows (shared expert).
       const bool no_f32 = prefill_phase && defer_residual_ &&
@@ -4705,6 +5156,13 @@ bool Executor::RestoreSnapshot(Session& session,
     AssignError(error_msg, "snapshot positions do not fit this session");
     return false;
   }
+  if (!EnsureKv(session, h.position, h.mtp_position, error_msg))
+    return false;
+  // The payload overwrites these rows: never in a page a checkpoint shares.
+  if (!UnshareKv(session, false, 0, h.position, 0, 0, h.blocks, 0, error_msg) ||
+      !UnshareKv(session, true, 0, h.mtp_position, 0, 0, h.mtp_blocks, 0,
+                 error_msg))
+    return false;
   if (h.position - h.blocks * h.compress_ratio > session.index_capacity_) {
     AssignError(error_msg, "unpooled indexer rows exceed the ring capacity");
     return false;
@@ -5094,7 +5552,7 @@ bool Executor::CanCompactMtpVerification(
          std::size_t(config.top_k) <= kMtpCandidates &&
          config.min_keep <= kMtpCandidates &&
          sampler.penalties().size() + 8 <= kCompactPenaltyLimit &&
-         !sampler.NeedsConstraintMask();
+         !sampler.ForcedToken();
 }
 
 bool Executor::SampledMtpCandidates(
@@ -5137,13 +5595,66 @@ bool Executor::SampledMtpCandidates(
   auto& penalties = verification_penalty_host_;
   penalties.clear();
   GreedyPenaltyRows batch{};
-  auto tentative = sampler.WithoutConstraint();
-  for (std::size_t row = 0; row < rows; ++row) {
-    const auto counts = tentative.penalties();
-    penalties.insert(penalties.end(), counts.begin(), counts.end());
-    batch.offsets[row + 1] = penalties.size();
-    if (row + 1 < rows)
-      tentative.Accept(static_cast<sampling::TokenId>(drafts[row]));
+  std::uint32_t mask_stride = 0;
+  std::uint32_t mask_active = 0;
+  if (sampler.HasConstraint() && verification_allowed_masks_ != nullptr &&
+      verification_allowed_masks_host_ != nullptr) {
+    mask_stride = (config().vocab_size + 31U) / 32U;
+    auto tentative = sampler;
+    bool constraint_alive = true;
+    std::uint32_t active_rows = 0;
+    for (std::size_t row = 0; row < rows; ++row) {
+      const auto counts = tentative.penalties();
+      penalties.insert(penalties.end(), counts.begin(), counts.end());
+      batch.offsets[row + 1] = penalties.size();
+      if (constraint_alive && !tentative.ForcedToken()) {
+        if (const auto bm = tentative.CachedConstraintBitmask();
+            bm && bm->restricts) {
+          auto* dst = verification_allowed_masks_host_ + row * mask_stride;
+          const auto copy_words =
+              std::min<std::size_t>(bm->words.size(), mask_stride);
+          std::memcpy(dst, bm->words.data(),
+                      copy_words * sizeof(std::uint32_t));
+          if (copy_words < mask_stride) {
+            std::memset(dst + copy_words, 0,
+                        (mask_stride - copy_words) * sizeof(std::uint32_t));
+          }
+          mask_active |= (std::uint32_t{1} << row);
+          active_rows = static_cast<std::uint32_t>(row + 1);
+        }
+      }
+      if (row + 1 < rows) {
+        const auto draft = static_cast<sampling::TokenId>(drafts[row]);
+        if (constraint_alive) {
+          if (tentative.AllowsToken(draft)) {
+            tentative.Accept(draft);
+          } else {
+            constraint_alive = false;
+            tentative = tentative.WithoutConstraint();
+            tentative.Accept(draft);
+          }
+        } else {
+          tentative.Accept(draft);
+        }
+      }
+    }
+    if (mask_active != 0 &&
+        !Check(
+            hipMemcpyAsync(
+                verification_allowed_masks_, verification_allowed_masks_host_,
+                std::size_t{active_rows} * mask_stride * sizeof(std::uint32_t),
+                hipMemcpyHostToDevice, stream_),
+            "verification constraint bitmask", error_msg))
+      return false;
+  } else {
+    auto tentative = sampler.WithoutConstraint();
+    for (std::size_t row = 0; row < rows; ++row) {
+      const auto counts = tentative.penalties();
+      penalties.insert(penalties.end(), counts.begin(), counts.end());
+      batch.offsets[row + 1] = penalties.size();
+      if (row + 1 < rows)
+        tentative.Accept(static_cast<sampling::TokenId>(drafts[row]));
+    }
   }
   batch.penalties = verification_penalties_;
   if (!penalties.empty() &&
@@ -5154,7 +5665,9 @@ bool Executor::SampledMtpCandidates(
     return false;
   VerificationCandidates(VerificationLogits(), batch, verification_ids_,
                          verification_scratch_ids_, verification_candidates_,
-                         rows, config().vocab_size, stream_);
+                         rows, config().vocab_size, stream_,
+                         mask_active ? verification_allowed_masks_ : nullptr,
+                         mask_stride, mask_active);
   const auto count = rows * kMtpCandidates + penalties.size();
   const bool copied = Check(
       hipMemcpyAsync(verification_candidates_host_, verification_candidates_,
@@ -5194,11 +5707,11 @@ bool Executor::MtpForward(Session& session,
     return false;
   }
 
-  if (n == 0 || n > options_.max_batch || (hidden_row < 0 && n != 1) ||
+  if (n == 0 || n > scratch_rows_ || (hidden_row < 0 && n != 1) ||
       (hidden_row >= 0 &&
        static_cast<std::uint32_t>(hidden_row) + n >
            (hidden_source
-                ? options_.max_batch
+                ? scratch_rows_
                 : std::max(options_.max_speculative, max_copy_rows())))) {
     AssignError(error_msg, "MTP batch outside the kept hidden rows");
     return false;
@@ -5220,6 +5733,8 @@ bool Executor::MtpForward(Session& session,
     AssignError(error_msg, "MTP context is full");
     return false;
   }
+  if (!EnsureKv(session, session.position_, pos + n, error_msg))
+    return false;
   if (session.continuation_hooks_)
     session.continuation_hooks_->BeforeWrite(
         true, pos, pos + n, session.mtp_.blocks,

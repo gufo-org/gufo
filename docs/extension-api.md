@@ -15,14 +15,14 @@ prints the exact version.
   any later 0.2 revision.
 - A **minor** bump may break extensions. The minor in your `api_version` must
   equal the host's, so `">= 0.1.12"` doesn't build against 0.2.
-- Headers under `include/gufo/ext/experimental/` carry no promise; check them
-  whenever you update.
+- Headers under `include/gufo/ext/experimental/` and `families/`, and what only
+  they include, carry no promise and change without a record; check them when
+  you update. Family headers reach no model and models no other model; a model
+  forwards only to its directory in `MODEL_SOURCES` (check-extension-api.py).
 
 The promise is source compatibility: rebuild against a new Gufo and your
 extension compiles. Binaries built for one Gufo don't load into another.
-
-Every change to the API adds a record under
-[`include/gufo/ext/changes/`](../include/gufo/ext/changes/README.md), and the
+Every change to the API adds a record under [`include/gufo/ext/changes/`](../include/gufo/ext/changes/README.md), and the
 revision is the number of records, so the records are the changelog.
 
 ## The boundary
@@ -40,6 +40,23 @@ uses:
 | `gufo_ext_core` | GGUF reading, sampling, JSON constraints, dequantization, SHA-256, image decoding, hipBLASLt plans and, with HIP, `WeightUpload` | all |
 | `gufo_ext_cache` | The component cache and, with HIP, its transfer and host-memory helpers | all |
 | `gufo_ext_hip` | The HIP compile definitions and include paths the public HIP headers need | HIP only |
+| `gufo::qwen_family` | Experimental: the Qwen tokenizer, chat template, control tokens, draft vocabulary, vision and, with HIP, kernels behind `<gufo/ext/families/qwen/...>`. Extensions and Linux loadable modules link it too | all |
+| `gufo::<name>` | Another extension's export, outside this boundary with no API promise ([depend on another extension](writing-extensions.md#depend-on-another-extension)) | per export |
+
+## Model directories
+
+`--model` can name a directory instead of a GGUF. The provider whose
+`probe(model_root)` accepts it creates the runner, with
+`TextRunnerOptions::model_path` set to the directory and no GGUF reader. A
+provider with a runner but no drivers of its own gets `prompt`, `chat` and
+`bench` through the server's backend.
+
+## Session state
+
+Declare a session's buffers in a `mem::StateDeclaration` (`gufo/ext/state.hpp`)
+and allocate them with `mem::SessionState::Create`; return its account from
+`state_account()`, claim the declaration's `Bytes` and `ContextBytes`, and call
+`Ensure` before each write ([state memory](internal/state-memory.md)).
 
 ## Continuation
 
@@ -75,7 +92,9 @@ refuses to load one that leaves a field at zero. While other sessions decode,
 Gufo bounds each prompt pass with it so they don't wait for all of it:
 
 - `pass_tokens` is the width Gufo uses for a prompt beside decoders, normally
-  the model's own prefill pass. A prompt running alone isn't bounded.
+  the model's own prefill pass. A prompt running alone gets it too while
+  another session is free, so an arrival waits for at most one such pass; with
+  every session taken it isn't bounded.
 - `max_layer_groups` is how many layer groups one such pass may be split into.
   One runs every pass unsplit, so decoders wait for the whole pass.
 - `max_yield_decode_width` is how many sessions one decode step between groups
@@ -124,7 +143,10 @@ and closes reasoning. The default follows `ReasoningBudgetTags()`; override it
 when the model's text differs from its control tokens. `close` must not be
 empty and `open` must not start with whitespace. With
 `InitialOutputState::kThought` the prompt opened reasoning; with `kAuto` the
-model's output does.
+model's output does. With `kTextAfterThought` the prompt closed it, as a
+template that ends in `<think></think>` does: the output is text, and the
+server drops the separator the model writes before it, as after a `</think>`
+the model wrote: line breaks, or any whitespace with the `qwen` tool format.
 
 ## Tool calls
 
@@ -181,3 +203,48 @@ A GGUF whose tensors use a type or shape Gufo doesn't know, such as your own
 quantization, still opens: those tensors have `sized == false`. Only a provider
 that sets `accepts_unsized_tensors` is asked to probe such a file, and it reads
 those tensors itself.
+
+## NPU programs
+
+`gufo/ext/experimental/npu.hpp` runs mlir-aie (IRON) designs on the Strix Halo
+XDNA NPU through XRT. An **NPU program** is one xclbin and the instruction
+streams built for it:
+
+```cpp
+namespace npu = gufo::npu;
+npu::Device device = npu::Device::Open();
+npu::Program prefill = npu::Program::Load(device, dir / "prefill.xclbin");
+npu::Instructions insts = prefill.LoadInstructions(dir / "prefill.insts");
+npu::Buffer weights = prefill.LoadBuffer(dir / "weights.bin", 4);
+npu::Buffer state = prefill.Allocate(state_bytes, 3);
+npu::Run run = prefill.Start(insts, {&state, &weights});
+run.Wait();
+state.FromDevice(0, logits_bytes);
+```
+
+Buffers are kernel arguments 3 and up and work in every program of the device.
+`Start` returns at once, so you can sample while the NPU runs the next step.
+Switching programs costs milliseconds; keep a prefill or a decode step in one.
+
+For a design with run-time values (token, position), open its dispatch library
+with `DispatchLibrary::Open` and generate streams. If only a few address words
+change, `DiffInstructions` turns two generated streams into patches for
+`Instructions::Apply`.
+
+`npu::Q8Gemm` runs Q8_0 matrix products on the NPU for any row count, with
+the weights resident in one arena. It loads the IRON design in
+`src/core/npu/kernels/q8gemm`, which `q8gemm.py <dir>` compiles:
+
+```cpp
+npu::Q8Gemm gemm = npu::Q8Gemm::Open(device, dir);
+int w = gemm.Upload(rows, cols, codes, scales);  // Q8_0 codes and block scales
+gemm.Run(w, x, batch, y);                        // y [batch][rows] = x W^T
+```
+
+To compile your own designs, the dev shell has the IRON toolchain
+(`GUFO_IRON_PYTHON`, `PEANO_INSTALL_DIR`); `gufo diagnose --section npu`
+checks the device.
+
+The header has no XRT types, so your extension builds without XRT headers;
+Gufo links XRT itself. On a machine without an NPU, `Device::Open` throws
+`npu::Error`. Call `ProbeDevices()` before you register an NPU path.

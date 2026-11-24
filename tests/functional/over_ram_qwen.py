@@ -113,11 +113,11 @@ def disconnect(messages, after):
     log_path = Path(out, "server.log")
     offset = log_path.stat().st_size
     connection = http.client.HTTPConnection("127.0.0.1", PORT, timeout=120)
-    sent = time.monotonic()
+    sent = time.perf_counter()
     try:
         connection.request("POST", "/v1/chat/completions", body(messages),
                            {"Content-Type": "application/json"})
-        sent = time.monotonic()
+        sent = time.perf_counter()
         # Cancellation can now roll back an interrupted pass. Observe actual
         # completed work before disconnecting, instead of relying on the server
         # finishing its first pass after the client has already gone away.
@@ -131,16 +131,16 @@ def disconnect(messages, after):
                 break
             except ValueError as error:
                 reason = str(error)
-            if server.poll() is not None or time.monotonic() >= deadline:
+            if server.poll() is not None or time.perf_counter() >= deadline:
                 raise RuntimeError(f"No completed pass before cancellation: {reason}")
             time.sleep(0.01)
         time.sleep(after)
         # Closing the connection releases both its socket and HTTP state.
         connection.close()
-        closed = time.monotonic()
+        closed = time.perf_counter()
     finally:
         connection.close()
-    deadline = time.monotonic() + 120
+    deadline = time.perf_counter() + 120
     while True:
         with log_path.open("rb") as stream:
             stream.seek(offset)
@@ -150,7 +150,7 @@ def disconnect(messages, after):
             break
         except ValueError as error:
             reason = str(error)
-        if server.poll() is not None or time.monotonic() >= deadline:
+        if server.poll() is not None or time.perf_counter() >= deadline:
             Path(out, "C_disconnect.observation.json").write_text(json.dumps({
                 "qualified": False, "reason": reason, "raw_log": segment,
                 "disconnect_seconds": closed - sent,

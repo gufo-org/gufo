@@ -40,7 +40,7 @@ struct Log final : RetentionEventSink {
 };
 }  // namespace
 int main(int argc, char** argv) {
-  if (argc != 2)
+  if (argc != 2 && argc != 4)
     return 2;
   std::size_t fixed{}, row{}, budget{}, requests{};
   if (!(std::cin >> fixed >> row >> budget >> requests))
@@ -48,6 +48,16 @@ int main(int argc, char** argv) {
   const std::array<ComponentDescriptor, 2> descriptors{
       {{{1}, 1, ComponentKind::kAppendRows, row, 2048, 0},
        {{2}, 1, ComponentKind::kPrivateState, 0, 0, fixed}}};
+  const CostEstimate cost{argc == 4 ? std::stod(argv[2]) : 0.000573457239,
+                          argc == 4 ? std::stod(argv[3]) : 0.000058015348, 96e9,
+                          3.3e9};
+  std::ofstream requests_file(std::string(argv[1]) + ".requests.csv");
+  if (!requests_file)
+    throw std::runtime_error("cannot open request replay log");
+  requests_file << "request,prompt_tokens,cached_tokens,prefill_tokens,"
+                   "estimated_prefill_seconds\n";
+  std::size_t total_prefill{};
+  double total_seconds{};
   ResourceLedger ledger({budget, budget, 0, 0});
   Log log(argv[1]);
   std::size_t final_payload{}, final_records{}, lifetimes{}, required_splits{},
@@ -88,6 +98,11 @@ int main(int argc, char** argv) {
         source = lookup.selected->checkpoint->Id();
         policy->Touch(source);
       }
+      const auto estimated = cost.PrefillSeconds(reused, count);
+      total_prefill += count - reused;
+      total_seconds += estimated;
+      requests_file << log.request << ',' << count << ',' << reused << ','
+                    << count - reused << ',' << estimated << '\n';
       std::vector<Rows> retained;
       for (const auto& c : lookup.candidates)
         retained.push_back(c.boundary);
@@ -122,6 +137,9 @@ int main(int argc, char** argv) {
             prefix, {1}, {}, purpose, std::min<Rows>(stable, prefix.size()),
             source};
         request.new_payload_bytes = history.NewPayloadBytes(positions);
+        request.reused = reused != 0;
+        request.reused_tokens = reused;
+        request.turn = log.request + 1;
         (void)policy->Admit(request, [&] {
           return history.Capture(
               {prefix,
@@ -147,7 +165,12 @@ int main(int argc, char** argv) {
   log.file.flush();
   if (!log.file)
     return 1;
-  std::cout << "{\"requests\":" << requests << ",\"admitted\":" << log.admitted
+  requests_file.flush();
+  if (!requests_file)
+    return 1;
+  std::cout << "{\"prefill_tokens\":" << total_prefill
+            << ",\"estimated_prefill_seconds\":" << total_seconds
+            << ",\"requests\":" << requests << ",\"admitted\":" << log.admitted
             << ",\"refused\":" << log.refused << ",\"evicted\":" << log.removed
             << ",\"peak_ledger_bytes\":" << log.peak
             << ",\"peak_retained_payload_bytes\":" << log.payload_peak

@@ -1,6 +1,7 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <gufo/ext/experimental/hip_utils.hpp>
 #include <stdexcept>
 #include <thread>
@@ -15,17 +16,28 @@ void QwenGpuExecutor::CheckPrefillCancellation() const {
 
 void QwenGpuExecutor::SetPrefillYield(std::size_t groups,
                                       std::function<void()> yield) {
+  std::vector<std::uint32_t> layers;
+  const std::uint32_t count = weights_.config.num_layers;
+  for (std::size_t k = 1; k < groups; ++k) {
+    const auto layer = static_cast<std::uint32_t>(k * count / groups);
+    if (layer != 0 && layer < count &&
+        (layers.empty() || layers.back() != layer))
+      layers.push_back(layer);
+  }
+  SetPrefillYieldLayers(std::move(layers), std::move(yield));
+}
+
+void QwenGpuExecutor::SetPrefillYieldLayers(std::vector<std::uint32_t> layers,
+                                            std::function<void()> yield) {
   yield_layers_.clear();
   yield_ = {};
-  if (groups < 2 || !yield)
+  if (layers.empty() || !yield)
     return;
-  const std::uint32_t layers = weights_.config.num_layers;
-  for (std::size_t k = 1; k < groups; ++k) {
-    const auto layer = static_cast<std::uint32_t>(k * layers / groups);
-    if (layer != 0 && layer < layers &&
-        (yield_layers_.empty() || yield_layers_.back() != layer))
-      yield_layers_.push_back(layer);
-  }
+  if (std::ranges::adjacent_find(layers, std::ranges::greater_equal{}) !=
+          layers.end() ||
+      layers.back() >= weights_.config.num_layers)
+    throw std::invalid_argument("prefill yield layers must ascend in range");
+  yield_layers_ = std::move(layers);
   yield_ = std::move(yield);
 }
 

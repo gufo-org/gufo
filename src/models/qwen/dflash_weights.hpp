@@ -3,12 +3,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/families/qwen/text/tokenizer.hpp>
 #include <gufo/ext/gguf_reader.hpp>
 #include <optional>
 #include <string>
 #include <vector>
 
-#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/state.hpp"
 
 namespace gufo::speculative {

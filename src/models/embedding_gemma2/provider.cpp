@@ -23,6 +23,7 @@
 #include "hip/encoder_runtime.hpp"
 #include "image_processor.hpp"
 #include "loader.hpp"
+#include "npu/encoder_npu.hpp"
 #include "probe.hpp"
 #include "tokenizer.hpp"
 #include "video_processor.hpp"
@@ -65,6 +66,15 @@ public:
         image_processor_error_(std::move(image_err)),
         audio_processor_error_(std::move(audio_err)),
         video_processor_error_(std::move(video_err)) {}
+  EmbeddingGemma2Runner(Tokenizer tokenizer_in,
+                        std::unique_ptr<npu::Encoder> npu_in,
+                        std::string image_err, std::string audio_err,
+                        std::string video_err)
+      : tokenizer_(std::move(tokenizer_in)),
+        npu_(std::move(npu_in)),
+        image_processor_error_(std::move(image_err)),
+        audio_processor_error_(std::move(audio_err)),
+        video_processor_error_(std::move(video_err)) {}
 
   ext::EmbeddingStatus EmbedInputs(
       const std::vector<ext::EmbeddingInput>& inputs,
@@ -96,8 +106,7 @@ public:
         if (part.type == ext::EmbeddingPart::Type::kText) {
           text += part.value;
         } else if (part.type == ext::EmbeddingPart::Type::kVideo) {
-          if (!encoder_->config().supported_video ||
-              !video_processor_error_.empty()) {
+          if (!Config().supported_video || !video_processor_error_.empty()) {
             if (error) {
               *error = video_processor_error_.empty()
                            ? "unsupported embedding vision configuration"
@@ -148,8 +157,7 @@ public:
             return ext::EmbeddingStatus::kInvalidVideoInput;
           }
         } else if (part.type == ext::EmbeddingPart::Type::kAudio) {
-          if (!encoder_->config().supported_audio ||
-              !audio_processor_error_.empty()) {
+          if (!Config().supported_audio || !audio_processor_error_.empty()) {
             if (error) {
               *error = audio_processor_error_.empty()
                            ? "unsupported embedding audio configuration"
@@ -189,7 +197,7 @@ public:
             return ext::EmbeddingStatus::kInvalidAudioInput;
           }
         } else {
-          if (!encoder_->config().supported_vision) {
+          if (!Config().supported_vision) {
             if (error) {
               *error = "unsupported embedding vision configuration";
             }
@@ -331,9 +339,13 @@ public:
       batch->token_counts.push_back(sequence.tokens.size());
       sequences.push_back(std::move(sequence));
     }
-    if (!encoder_->EmbedMultimodal(sequences, &batch->embeddings, error,
-                                   is_cancelled)) {
-      if (encoder_->device_lost()) {
+    const bool ok =
+        npu_ ? npu_->EmbedMultimodal(sequences, &batch->embeddings, error,
+                                     is_cancelled)
+             : encoder_->EmbedMultimodal(sequences, &batch->embeddings, error,
+                                         is_cancelled);
+    if (!ok) {
+      if (encoder_ && encoder_->device_lost()) {
         device_lost_.store(true);
         return ext::EmbeddingStatus::kDeviceLost;
       }
@@ -350,8 +362,13 @@ public:
   }
 
 private:
+  const ModelConfig& Config() const {
+    return npu_ ? npu_->config() : encoder_->config();
+  }
+
   Tokenizer tokenizer_;
   std::unique_ptr<hip::EncoderRuntime> encoder_;
+  std::unique_ptr<npu::Encoder> npu_;
   std::string image_processor_error_;
   std::string audio_processor_error_;
   std::string video_processor_error_;
@@ -362,8 +379,10 @@ private:
 }  // namespace
 
 #if defined(ENGINE_ENABLE_HIP)
-std::unique_ptr<ext::EmbeddingRunner> CreateEmbeddingGemma2Runner(
-    const std::string& model_root, std::string* error) {
+namespace {
+
+std::unique_ptr<ext::EmbeddingRunner> CreateRunner(
+    const std::string& model_root, bool use_npu, std::string* error) {
   if (!ProbeEmbeddingGemma2(model_root)) {
     if (error) {
       *error = "embedding service requires an EmbeddingGemma 2 model directory";
@@ -385,6 +404,19 @@ std::unique_ptr<ext::EmbeddingRunner> CreateEmbeddingGemma2Runner(
   (void)ValidateAudioProcessor(model_root, &audio_processor_error);
   (void)ValidateVideoProcessor(model_root, &video_processor_error);
 
+  if (use_npu) {
+    auto npu_encoder = npu::Encoder::Create(model_root, &load_err);
+    if (!npu_encoder) {
+      if (error) {
+        *error = "embedding encoder failed to load: " + load_err;
+      }
+      return nullptr;
+    }
+    return std::make_unique<EmbeddingGemma2Runner>(
+        std::move(*loaded), std::move(npu_encoder),
+        std::move(image_processor_error), std::move(audio_processor_error),
+        std::move(video_processor_error));
+  }
   auto encoder = hip::EncoderRuntime::Create(model_root, &load_err);
   if (!encoder) {
     if (error) {
@@ -395,6 +427,19 @@ std::unique_ptr<ext::EmbeddingRunner> CreateEmbeddingGemma2Runner(
   return std::make_unique<EmbeddingGemma2Runner>(
       std::move(*loaded), std::move(encoder), std::move(image_processor_error),
       std::move(audio_processor_error), std::move(video_processor_error));
+}
+
+}  // namespace
+
+std::unique_ptr<ext::EmbeddingRunner> CreateEmbeddingGemma2Runner(
+    const std::string& model_root, std::string* error) {
+  return CreateRunner(model_root, false, error);
+}
+
+std::unique_ptr<ext::EmbeddingRunner> CreateEmbeddingGemma2RunnerWithOptions(
+    const ext::EmbeddingRunnerOptions& options, std::string* error) {
+  const bool* npu = ext::FindOption<bool>(options.provider_options, "--npu");
+  return CreateRunner(options.model_root, npu != nullptr && *npu, error);
 }
 #endif
 
@@ -410,6 +455,7 @@ void embedding_gemma2_provider_register(gufo::ext::Registry& registry) {
       .probe = &ProbeEmbeddingGemma2,
       .resolve = &ResolveEmbeddingGemma2Artifacts,
       .create = &CreateEmbeddingGemma2Runner,
+      .create_with_options = &CreateEmbeddingGemma2RunnerWithOptions,
   });
 #endif
 }

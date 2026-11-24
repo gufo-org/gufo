@@ -34,7 +34,31 @@
       "draft": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
       "draft_option": "--dflash-model",
       "mode": "dflash2",
-      "sampling": "qwen38"
+      "sampling": "qwen38",
+      "cache_disk_bytes": 25769803776,
+      "suites": [
+        "logprobs",
+        "discovery",
+        "stops",
+        "conversation",
+        "image-inputs",
+        "structured",
+        "tool-streaming",
+        "tools",
+        "sampling-defaults",
+        "batch",
+        "long-context",
+        "state-edges",
+        "prefill-scheduling",
+        "cache-edits",
+        "cache-growth",
+        "cache-depth",
+        "cache-rotation",
+        "cache-concurrency",
+        "cache-shared-prefix",
+        "cache-bridge",
+        "cache"
+      ]
     }
   },
   "rules": [

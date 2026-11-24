@@ -65,6 +65,12 @@ registry extensions to their newest reviewed release that your Gufo supports.
 model ID clash with one Gufo already has. `--replace-builtin` replaces the
 built-in extension of the same name, for example to test a newer version.
 
+**Dependencies.** A module can build on an extension compiled into your Gufo,
+for example an EXL3 extension on the built-in `qwen38_flash_next`. It uses
+that extension's code from Gufo, so `install` refuses it when your Gufo
+doesn't include the extension, and `update` is needed when Gufo's copy changes.
+On Windows, a module can't have dependencies yet: compile it in instead.
+
 ### What a module build needs
 
 `install` and `update` check these first and report everything missing at

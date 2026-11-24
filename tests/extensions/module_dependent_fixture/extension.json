@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "name": "module_dependent_fixture",
+  "version": "0.1.0",
+  "api_version": ">= 0.3.0",
+  "entry": "module_dependent_fixture_register",
+  "registration_target": "module_dependent_fixture_registration",
+  "depends": [
+    "qwen38_flash_next"
+  ],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "module-dependent-fixture",
+      "capability": "text_generation",
+      "keys": [
+        "gguf:module_dependent_fixture"
+      ],
+      "model_ids": [
+        "module-dependent-fixture"
+      ],
+      "target": "module_dependent_fixture_provider",
+      "entry": "module_dependent_fixture_provider_register"
+    },
+    {
+      "id": "module-dependent-fixture-hip",
+      "capability": "text_generation",
+      "keys": [
+        "gguf:module_dependent_fixture_hip"
+      ],
+      "model_ids": [
+        "module-dependent-fixture-hip"
+      ],
+      "target": "module_dependent_fixture_hip",
+      "entry": "module_dependent_fixture_hip_register"
+    }
+  ],
+  "targets": {
+    "module_dependent_fixture_registration": {
+      "requires": []
+    },
+    "module_dependent_fixture_provider": {
+      "requires": []
+    },
+    "module_dependent_fixture_hip": {
+      "requires": [
+        "hip"
+      ]
+    }
+  }
+}

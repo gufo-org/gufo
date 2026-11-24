@@ -328,8 +328,6 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
       ModelOptions{.max_context = 262144, .dspark_model_path = support_path},
       &error);
   Expect(model != nullptr, error);
-  CheckExecutionModes(model);
-  CheckDsparkEosBoundary(model);
   const TextSpeculativeConfig speculative{
       .backend = TextSpeculativeBackend::kDSpark,
       .draft_model_path = support_path};
@@ -350,6 +348,12 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
            "DSpark prefix reuse resets policy and reproduces output and draft "
            "decisions");
   }
+  // After the full-context server, as in production: the first loaded
+  // server builds the F16 weight copies once its sessions claim memory. Built
+  // first for 512-token sessions, they took the device memory the 262144
+  // sessions need on a 100 GiB device.
+  CheckExecutionModes(model);
+  CheckDsparkEosBoundary(model);
 
   // C1 retains the point-mass route and its stronger AR seed-trace contract.
   {
@@ -414,13 +418,16 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
     CheckSampledBatchReplay(model, direct_prompt);
   }
 
-  // Greedy and seeded sampled requests share one DSpark cohort.
+  // Greedy and seeded sampled requests share one DSpark cohort. The width-2
+  // cohort is the functional batch suite's DeepSeek case (alternating greedy
+  // and sampled rows at physical width 2); its servers run two sessions, so
+  // width 4 stays here.
   const gufo::sampling::SamplingConfig sampled{.temperature = 0.8F,
                                                .top_k = 20,
                                                .top_p = 0.9F,
                                                .seed = 1234,
                                                .repeat_penalty = 1.1F};
-  for (const std::size_t concurrency : {2U, 4U}) {
+  for (const std::size_t concurrency : {4U}) {
     InferenceBackend backend;
     Expect(Load(backend, model, &error, 4096, concurrency, {}, {}, speculative),
            error);
@@ -448,27 +455,8 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
              "mixed sampling reports one DSpark cohort");
     }
   }
-  {
-    InferenceBackend backend;
-    Expect(Load(backend, model, &error, 4096, 2, 32, {}, speculative), error);
-    auto active = backend.start_chat(prompt, 64, 0.0F, {}, true);
-    std::shared_ptr<TextGenerationBackend::GenerationRequest> late;
-    auto long_request = prompt;
-    long_request.client_id = "late-long-prompt";
-    for (int i = 0; i < 256; ++i)
-      long_request.messages.front().content += " additional context";
-    const auto first = active->Wait([&](std::string_view) {
-      if (!late)
-        late = backend.start_chat(long_request, 8, 0.0F, {}, true);
-      return true;
-    });
-    Expect(late != nullptr && !first.tokens.empty(),
-           "late prompt arrives during decoding");
-    const auto second = late->Wait();
-    Expect(second.active_decode_prefill_chunks > 0 &&
-               second.max_consecutive_active_prefill_chunks == 1,
-           "real DSpark serving yields to decoding between long-prompt chunks");
-  }
+  // Decoding between a late long prompt's chunks is the functional
+  // prefill-scheduling suite's DeepSeek DSpark case, on the same scheduler.
 
   {
     auto no_reasoning_prompt = prompt;
@@ -516,8 +504,7 @@ void CheckDsparkServing(const char* model_path, const char* support_path) {
       Expect(result.tokens == expected,
              "DSpark disk restore retains output quality");
   }
-  std::cout << "DSpark serving: prefix/disk reuse, mixed sampling, and late "
-               "prefill passed\n";
+  std::cout << "DSpark serving: prefix/disk reuse and mixed sampling passed\n";
 }
 
 }  // namespace

@@ -343,6 +343,21 @@ std::string Describe(const store::Installed& installed) {
               : "@" + installed.source.revision);
 }
 
+// Refuses, before building, a dependency the SDK's gufo does not build in.
+void CheckSdkDependencies(const store::Sdk& sdk, const json::Value& manifest) {
+  std::vector<std::string> host_extensions;
+  if (const auto* names = sdk.description.find("host_extensions");
+      names && names->is_array()) {
+    for (const auto& host_extension : names->items())
+      host_extensions.push_back(host_extension.get_str());
+  }
+  std::string unavailable;
+  if (const auto* reason = sdk.description.find("host_extensions_unavailable");
+      reason && reason->is_string())
+    unavailable = reason->get_str();
+  extension_modules::CheckDependencies(manifest, host_extensions, unavailable);
+}
+
 // Fetches, checks, builds and records one extension; the store is locked.
 // A registry release must match its reviewed digest before anything builds.
 store::Installed Perform(const fs::path& directory, const store::Sdk& sdk,
@@ -381,6 +396,7 @@ store::Installed Perform(const fs::path& directory, const store::Sdk& sdk,
                              installed.name);
   extension_modules::CheckConflicts(builtins, manifest,
                                     replace_builtin ? installed.name : "");
+  CheckSdkDependencies(sdk, manifest);
   auto all = store::Read(directory);
   for (const auto& other : all) {
     if (other.name != installed.name)
@@ -390,7 +406,7 @@ store::Installed Perform(const fs::path& directory, const store::Sdk& sdk,
   }
 
   const auto module = staging / "modules" /
-                      (std::string(store::HostBuildId()) +
+                      (store::ModuleBuildId(manifest) +
                        std::string(platform::ModuleFileSuffix()));
   Build(sdk, tools, staging / "source", installed.name, staging / "build",
         module);
@@ -465,8 +481,7 @@ int Update(std::span<const char* const> names) {
         continue;
       }
     }
-    if (fs::exists(
-            store::ModulePath(directory, installed.name, store::HostBuildId())))
+    if (fs::exists(store::InstalledModulePath(directory, installed.name)))
       std::cout << installed.name << " " << installed.version
                 << " is up to date\n";
     else
@@ -485,8 +500,9 @@ int Update(std::span<const char* const> names) {
               << ")\n";
   }
   for (const auto& installed : stale) {
-    const auto module =
-        store::ModulePath(directory, installed.name, store::HostBuildId());
+    CheckSdkDependencies(sdk, store::Manifest(store::SourceDirectory(
+                                  directory, installed.name)));
+    const auto module = store::InstalledModulePath(directory, installed.name);
     auto pending = module;
     pending += ".new";
     Build(sdk, tools, store::SourceDirectory(directory, installed.name),
@@ -547,10 +563,16 @@ int List(bool json_mode) {
     auto& item = row(installed.name);
     item.installed = &installed;
     item.version = installed.version;
-    item.status = fs::exists(store::ModulePath(directory, installed.name,
-                                               store::HostBuildId()))
-                      ? "ready"
-                      : "needs update";
+    std::error_code missing;
+    try {
+      item.status =
+          fs::exists(store::InstalledModulePath(directory, installed.name),
+                     missing)
+              ? "ready"
+              : "needs update";
+    } catch (const std::exception&) {
+      item.status = "needs update";
+    }
   }
   std::string registry_error;
   try {

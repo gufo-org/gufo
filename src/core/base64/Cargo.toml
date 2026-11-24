@@ -5,3 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
+
+[dependencies]
+gufo-ffi = { path = "../ffi" }

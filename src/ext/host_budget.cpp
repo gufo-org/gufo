@@ -9,29 +9,9 @@
 #include <string>
 
 #include "src/core/platform/os_info.hpp"
+#include "src/mem/ledger.hpp"
 
 namespace gufo::ext {
-
-std::optional<std::uint64_t> MeminfoAvailableBytes(std::string_view meminfo) {
-  std::optional<std::uint64_t> available_kib;
-  std::uint64_t cma_free_kib = 0;
-  std::istringstream lines{std::string(meminfo)};
-  for (std::string line; std::getline(lines, line);) {
-    std::istringstream fields(line);
-    std::string key;
-    std::uint64_t kib = 0;
-    if (!(fields >> key >> kib))
-      continue;
-    if (key == "MemAvailable:")
-      available_kib = kib;
-    else if (key == "CmaFree:")
-      cma_free_kib = kib;
-  }
-  if (!available_kib)
-    return std::nullopt;
-  return (*available_kib > cma_free_kib ? *available_kib - cma_free_kib : 0) *
-         1024;
-}
 
 std::uint64_t CgroupAvailableBytes(const std::filesystem::path& root,
                                    std::string_view membership_text,
@@ -88,21 +68,73 @@ std::uint64_t CgroupAvailableBytes(const std::filesystem::path& root,
 
 namespace {
 
-/// Host RAM still available, after cgroup limits. Unified-memory device
-/// allocations draw from the same RAM, so HIP's device capacity is not used.
-std::uint64_t HostAvailableBytes() {
-  std::uint64_t available = platform::AvailableMemoryBytes();
+struct MeminfoKiB {
+  std::optional<std::uint64_t> available;
+  std::uint64_t cma_free = 0;
+};
+
+MeminfoKiB ParseMeminfoKiB(std::string_view meminfo) {
+  MeminfoKiB result;
+  std::istringstream lines{std::string(meminfo)};
+  for (std::string line; std::getline(lines, line);) {
+    std::istringstream fields(line);
+    std::string key;
+    std::uint64_t kib = 0;
+    if (!(fields >> key >> kib))
+      continue;
+    if (key == "MemAvailable:")
+      result.available = kib;
+    else if (key == "CmaFree:")
+      result.cma_free = kib;
+  }
+  return result;
+}
+
+std::uint64_t KiBToBytes(std::uint64_t kib) {
+  constexpr auto max_bytes = std::numeric_limits<std::uint64_t>::max();
+  return kib > max_bytes / 1024 ? max_bytes : kib * 1024;
+}
+
+std::uint64_t SaturatingSubtract(std::uint64_t value, std::uint64_t amount) {
+  return value > amount ? value - amount : 0;
+}
+
+}  // namespace
+
+std::optional<std::uint64_t> MeminfoAvailableBytes(std::string_view meminfo) {
+  const auto kib = ParseMeminfoKiB(meminfo);
+  if (!kib.available)
+    return std::nullopt;
+  // Both fields can exceed the byte range while their difference still fits.
+  return KiBToBytes(SaturatingSubtract(*kib.available, kib.cma_free));
+}
+
+std::optional<HostMemorySample> MeminfoSample(std::string_view meminfo) {
+  const auto kib = ParseMeminfoKiB(meminfo);
+  if (!kib.available)
+    return std::nullopt;
+  return HostMemorySample{.available = KiBToBytes(*kib.available),
+                          .cma_free = KiBToBytes(kib.cma_free)};
+}
+
+HostMemorySample SampleHostMemory() {
+  HostMemorySample sample{.available = platform::AvailableMemoryBytes()};
   std::ifstream meminfo("/proc/meminfo");
   std::ostringstream meminfo_text;
   meminfo_text << meminfo.rdbuf();
-  if (const auto parsed = MeminfoAvailableBytes(meminfo_text.str()))
-    available = *parsed;
+  if (const auto parsed = MeminfoSample(meminfo_text.str()))
+    sample = *parsed;
   std::ifstream membership("/proc/self/cgroup");
   std::ostringstream membership_text;
   membership_text << membership.rdbuf();
-  return CgroupAvailableBytes("/sys/fs/cgroup", membership_text.str(),
-                              available);
+  sample.cgroup_available =
+      CgroupAvailableBytes("/sys/fs/cgroup", membership_text.str(),
+                           std::numeric_limits<std::uint64_t>::max());
+  sample.outstanding = mem::StateLedger::Process().OutstandingBytes();
+  return sample;
 }
+
+namespace {
 
 std::size_t ClampToSize(std::uint64_t bytes) {
   return static_cast<std::size_t>(
@@ -111,14 +143,52 @@ std::size_t ClampToSize(std::uint64_t bytes) {
 
 }  // namespace
 
+std::uint64_t PinnableBytes(const HostMemorySample& sample) {
+  return SaturatingSubtract(
+      std::min(SaturatingSubtract(sample.available, sample.cma_free),
+               sample.cgroup_available),
+      sample.outstanding);
+}
+
+std::uint64_t SnapshotBudgetBytes(const HostMemorySample& sample) {
+  return PinnableBytes(sample) / 2;
+}
+
+std::uint64_t SnapshotCeilingBytes(const HostMemorySample& sample) {
+  const auto host = SaturatingSubtract(
+      sample.available, std::max(sample.cma_free, kHostSnapshotHeadroomBytes));
+  const auto cgroup =
+      SaturatingSubtract(sample.cgroup_available, kHostSnapshotHeadroomBytes);
+  return SaturatingSubtract(std::min(host, cgroup), sample.outstanding);
+}
+
+std::uint64_t HostAvailableBytes() {
+  return PinnableBytes(SampleHostMemory());
+}
+
+std::uint64_t HostReserveShortfallBytes(const HostMemorySample& sample) {
+  return SaturatingSubtract(
+      std::max(sample.cma_free, kHostSnapshotHeadroomBytes), sample.available);
+}
+
+std::string DescribeHostMemory(const HostMemorySample& sample) {
+  std::string text =
+      "host_available_bytes=" + std::to_string(sample.available) +
+      " cma_free_bytes=" + std::to_string(sample.cma_free);
+  if (sample.cgroup_available != std::numeric_limits<std::uint64_t>::max())
+    text +=
+        " cgroup_available_bytes=" + std::to_string(sample.cgroup_available);
+  return text +
+         " outstanding_state_bytes=" + std::to_string(sample.outstanding) +
+         " host_reserve_bytes=" + std::to_string(kHostSnapshotHeadroomBytes) +
+         " host_ceiling_bytes=" + std::to_string(SnapshotCeilingBytes(sample));
+}
+
 std::size_t HostSnapshotBudgetBytes() {
-  return ClampToSize(HostAvailableBytes() / 2);
+  return ClampToSize(SnapshotBudgetBytes(SampleHostMemory()));
 }
 
 std::size_t HostSnapshotCeilingBytes() {
-  const auto available = HostAvailableBytes();
-  return ClampToSize(available > kHostSnapshotHeadroomBytes
-                         ? available - kHostSnapshotHeadroomBytes
-                         : 0);
+  return ClampToSize(SnapshotCeilingBytes(SampleHostMemory()));
 }
 }  // namespace gufo::ext

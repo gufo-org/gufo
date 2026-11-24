@@ -44,12 +44,59 @@ if(NOT GUFO_EXTENSION_FIXTURE)
     gufo_ext_cache $<$<TARGET_EXISTS:gufo_ext_hip>:gufo_ext_hip>)
   add_test(NAME ext_public_link_test COMMAND ext_public_link_test)
   set_tests_properties(ext_public_link_test PROPERTIES LABELS "cpu;extensions")
+  # The same view of the experimental Qwen family library. Gufo always defines
+  # it; the discovery fixture projects that reuse this list do not.
+  if(TARGET gufo::qwen_family)
+    add_executable(qwen_family_public_link_test qwen_family_public_link_test.cpp)
+    set_property(TARGET qwen_family_public_link_test PROPERTY INCLUDE_DIRECTORIES "")
+    target_link_libraries(qwen_family_public_link_test PRIVATE gufo_ext_runtime gufo::qwen_family
+      $<$<TARGET_EXISTS:gufo_ext_hip>:gufo_ext_hip>)
+    add_test(NAME qwen_family_public_link_test COMMAND qwen_family_public_link_test)
+    set_tests_properties(qwen_family_public_link_test PROPERTIES LABELS "cpu;extensions")
+  endif()
+  # The experimental Flash-Next model headers over the in-tree extension.
+  if(TARGET gufo_qwen38_flash_next_hip)
+    # One translation unit per public header, so each compiles on its own.
+    set(flash_next_header_tus)
+    foreach(header config model ngram primitives runner stages weight_source weights)
+      set(tu "${CMAKE_CURRENT_BINARY_DIR}/qwen_flash_next_public_${header}.cpp")
+      file(CONFIGURE OUTPUT "${tu}" CONTENT
+        "#include <gufo/ext/families/qwen/models/flash_next/${header}.hpp>\n")
+      list(APPEND flash_next_header_tus "${tu}")
+    endforeach()
+    add_executable(qwen_flash_next_public_test qwen_flash_next_public_test.cpp
+      ${flash_next_header_tus})
+    set_property(TARGET qwen_flash_next_public_test PROPERTY INCLUDE_DIRECTORIES "")
+    target_link_libraries(qwen_flash_next_public_test PRIVATE gufo_ext_runtime
+      gufo::qwen_family gufo_qwen38_flash_next_hip hip::host)
+    target_compile_definitions(qwen_flash_next_public_test PRIVATE
+      ENGINE_ENABLE_HIP=1)
+    add_test(NAME qwen_flash_next_public_test COMMAND qwen_flash_next_public_test)
+    set_tests_properties(qwen_flash_next_public_test PROPERTIES
+      LABELS "hip;extensions;qwen38_flash_next")
+  endif()
   if(Python3_EXECUTABLE)
     add_test(NAME extension_cli_provenance_test COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_LIST_DIR}/cli_provenance_test.py $<TARGET_FILE:gufo>)
     # The provenance contract covers this build, not the user's installed modules.
     set_tests_properties(extension_cli_provenance_test PROPERTIES LABELS "cpu;extensions"
       ENVIRONMENT "GUFO_EXTENSIONS_DIR=${CMAKE_CURRENT_BINARY_DIR}/empty-extension-store")
+    add_test(NAME extension_model_cli_test COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_LIST_DIR}/model_cli_test.py $<TARGET_FILE:gufo>)
+    set_tests_properties(extension_model_cli_test PROPERTIES
+      LABELS "cpu;extensions" TIMEOUT 120)
+    file(GLOB model_lock_extensions LIST_DIRECTORIES true
+      "${PROJECT_SOURCE_DIR}/src/models/*" "${PROJECT_SOURCE_DIR}/src/families/*/*")
+    set(model_lock_dirs)
+    foreach(dir IN LISTS model_lock_extensions)
+      if(EXISTS "${dir}/extension.json")
+        list(APPEND model_lock_dirs "${dir}")
+      endif()
+    endforeach()
+    add_test(NAME extension_model_locks_test COMMAND ${Python3_EXECUTABLE}
+      ${PROJECT_SOURCE_DIR}/tools/models/lock.py --check ${model_lock_dirs})
+    set_tests_properties(extension_model_locks_test PROPERTIES
+      LABELS "cpu;extensions" TIMEOUT 30)
     add_test(NAME extension_module_cli_test COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_LIST_DIR}/module_cli_test.py $<TARGET_FILE:gufo>)
     set_tests_properties(extension_module_cli_test PROPERTIES

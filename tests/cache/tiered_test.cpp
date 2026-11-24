@@ -2,6 +2,7 @@
 #include <fstream>
 #include <future>
 #include <new>
+#include <numeric>
 
 #include "src/cache/retention.hpp"
 #include "tests/cache/tiered_fixture.hpp"
@@ -167,6 +168,318 @@ void GlobalLRUAndSharedFiles() {
   assert(fs::exists(path));
   assert(f.catalog.EvictOne());
   assert(!fs::exists(path) && f.disk.Stats().managed_bytes == 0);
+}
+void SupersededDiskTurnsLeaveBeforeAnotherConversation() {
+  TieredFixture f;
+  // An unrelated conversation is older than every active-run checkpoint.
+  auto idle_history = ExecutionHistory::Cold(f.ledger, f.adapter.Components(),
+                                             f.adapter.CompatibilityIdentity());
+  const std::vector<Token> idle_tokens(8, 99);
+  f.adapter.Append(*f.slot, idle_tokens, idle_tokens);
+  auto idle = idle_history.Capture(
+      {idle_tokens, InputIdentity(8), f.adapter.Positions(*f.slot),
+       CheckpointPurpose::kGenerated, 1},
+      [&](const PayloadRequest& request) {
+        auto pool =
+            f.ledger.Reserve(ResourceCategory::kBackingFree, request.bytes)
+                .Convert();
+        auto bytes = std::make_shared<std::vector<std::byte>>(request.bytes);
+        auto assigned = pool.ReserveBacking(request.category);
+        auto completion =
+            request.category == ResourceCategory::kPrivateState
+                ? f.adapter.CapturePrivate(*f.slot, request.component, *bytes,
+                                           f.stream)
+                : f.adapter.CopyRowsOut(*f.slot, request.component,
+                                        request.first, request.end, *bytes,
+                                        f.stream);
+        assert(completion.Wait() == TransferResult::kSucceeded);
+        return Payload::Committed(assigned.Convert(), bytes);
+      });
+  auto idle_description = f.Publish(*idle);
+  assert(f.adapter.Invalidate(*f.slot));
+  std::vector<CheckpointId> active;
+  for (int turn = 0; turn < 4; ++turn) {
+    f.Append(4, 4);
+    const auto checkpoint = f.Capture(CheckpointPurpose::kGenerated);
+    active.push_back(checkpoint->Id());
+    (void)f.Publish(*checkpoint);
+  }
+  // The result names the retired entry and why it was chosen.
+  const auto evicted = f.catalog.EvictOne();
+  assert(evicted && evicted.superseded && !evicted.reused);
+  assert(evicted.description->Manifest().checkpoint == active.front());
+  assert(!f.disk.Open(active.front()));
+  assert(f.disk.Open(idle->Id()));
+  for (std::size_t i = 1; i < active.size(); ++i)
+    assert(f.disk.Open(active[i]));
+}
+void PromptAnchorOutlivesCoveredAndLeafGeneratedFrontiers() {
+  TieredFixture f;
+  f.Append(8, 4);
+  const auto prompt_cp = f.Capture(CheckpointPurpose::kPrompt);
+  (void)f.Publish(*prompt_cp);
+  std::vector<CheckpointId> active;
+  for (int turn = 0; turn < 4; ++turn) {
+    f.Append(4, 4);
+    const auto checkpoint = f.Capture(CheckpointPurpose::kGenerated);
+    active.push_back(checkpoint->Id());
+    (void)f.Publish(*checkpoint);
+  }
+  // Turn 0 has 3 newer generated descendants: superseded (Field 0 = 0).
+  assert(f.catalog.EvictOne());
+  assert(!f.disk.Open(active[0]));
+  assert(f.disk.Open(prompt_cp->Id()));
+  // Turns 1 and 2 are covered intermediates (rank 0). Turn 2 has a private
+  // tail while Turn 1 aligns to a chunk boundary, so Turn 2 releases more
+  // unique bytes and leaves first.
+  const auto covered = f.catalog.EvictOne();
+  assert(covered && !covered.superseded && !covered.reused);
+  assert(covered.description->Manifest().checkpoint == active[2]);
+  assert(!f.disk.Open(active[2]));
+  assert(f.disk.Open(active[1]));
+  assert(f.disk.Open(active[3]));
+  assert(f.disk.Open(prompt_cp->Id()));
+  assert(f.catalog.EvictOne());
+  assert(!f.disk.Open(active[1]));
+  assert(f.disk.Open(active[3]));
+  assert(f.disk.Open(prompt_cp->Id()));
+  // Turn 3 is leaf (rank 1).
+  assert(f.catalog.EvictOne());
+  assert(!f.disk.Open(active[3]));
+  // Prompt anchor is root (shared, rank 2): outlives all of them!
+  assert(f.disk.Open(prompt_cp->Id()));
+  assert(f.catalog.EvictOne());
+  assert(!f.disk.Open(prompt_cp->Id()));
+  assert(f.catalog.Size() == 0);
+}
+// Captures `tokens` on a fresh execution of the fixture slot.
+std::shared_ptr<const Checkpoint> CaptureCold(
+    TieredFixture& f, ExecutionHistory& history,
+    const std::vector<Token>& tokens) {
+  f.adapter.Append(*f.slot, tokens, tokens);
+  auto checkpoint = history.Capture(
+      {tokens, InputIdentity(tokens.size()), f.adapter.Positions(*f.slot),
+       CheckpointPurpose::kPrompt, 1},
+      [&](const PayloadRequest& request) {
+        auto pool =
+            f.ledger.Reserve(ResourceCategory::kBackingFree, request.bytes)
+                .Convert();
+        auto bytes = std::make_shared<std::vector<std::byte>>(request.bytes);
+        auto assigned = pool.ReserveBacking(request.category);
+        auto completion =
+            request.category == ResourceCategory::kPrivateState
+                ? f.adapter.CapturePrivate(*f.slot, request.component, *bytes,
+                                           f.stream)
+                : f.adapter.CopyRowsOut(*f.slot, request.component,
+                                        request.first, request.end, *bytes,
+                                        f.stream);
+        assert(completion.Wait() == TransferResult::kSucceeded);
+        return Payload::Committed(assigned.Convert(), bytes);
+      });
+  assert(f.adapter.Invalidate(*f.slot));
+  return checkpoint;
+}
+CheckpointId Evicted(TieredFixture& f) {
+  const auto evicted = f.catalog.EvictOne();
+  assert(evicted);
+  return evicted.description->Manifest().checkpoint;
+}
+// #1254: a prefix published after its leaf must not outlive it. The
+// conversation's covered prefix leaves first, then its leaf, then the root
+// anchor. Restoring the prefix instead means the client did not match the
+// leaf, so the restore keeps the prefix and lends the leaf nothing.
+void LeafOutlivesItsLaterPrefix() {
+  for (const bool restored : {false, true}) {
+    TieredFixture f;
+    f.Append(8, 4);
+    const auto root = f.Capture();
+    f.Append(4, 4);
+    const auto prefix = f.Capture();
+    f.Append(4, 4);
+    const auto leaf = f.Capture();
+    (void)f.Publish(*root);
+    if (restored) {
+      (void)f.Publish(*prefix);
+      (void)f.Publish(*leaf);
+      f.catalog.Touch(prefix->Id());
+      assert(Evicted(f) == leaf->Id());
+      assert(Evicted(f) == prefix->Id());
+    } else {
+      (void)f.Publish(*leaf);
+      (void)f.Publish(*prefix);
+      assert(Evicted(f) == prefix->Id());
+      assert(f.disk.Open(leaf->Id()) && f.disk.Open(root->Id()));
+      assert(Evicted(f) == leaf->Id());
+    }
+    assert(Evicted(f) == root->Id());
+  }
+}
+// A prefix two branches share lends its admission to neither leaf: publishing
+// it after both keeps no older leaf ahead of a newer conversation.
+void SharedPrefixLendsNothingToItsBranches() {
+  TieredFixture f;
+  auto other = ExecutionHistory::Cold(f.ledger, f.adapter.Components(),
+                                      f.adapter.CompatibilityIdentity());
+  std::vector<Token> sibling_tokens(12);
+  std::iota(sibling_tokens.begin(), sibling_tokens.begin() + 8, 7);
+  std::iota(sibling_tokens.begin() + 8, sibling_tokens.end(), 15);
+  sibling_tokens.insert(sibling_tokens.end(), {500, 501, 502, 503});
+  const auto sibling = CaptureCold(f, other, sibling_tokens);
+  auto unrelated_history = ExecutionHistory::Cold(
+      f.ledger, f.adapter.Components(), f.adapter.CompatibilityIdentity());
+  const auto unrelated =
+      CaptureCold(f, unrelated_history, std::vector<Token>(8, 99));
+  f.Append(8, 4);
+  const auto root = f.Capture();
+  f.Append(4, 4);
+  const auto shared = f.Capture();
+  assert(std::equal(f.tokens.begin(), f.tokens.end(), sibling_tokens.begin()));
+  f.Append(4, 4);
+  const auto leaf = f.Capture();
+  for (const auto& checkpoint : {root, leaf, sibling, unrelated, shared})
+    (void)f.Publish(*checkpoint);
+  assert(Evicted(f) == leaf->Id());
+  // Without the leaf, the prefix belongs to the sibling's conversation alone.
+  assert(Evicted(f) == unrelated->Id());
+  assert(Evicted(f) == shared->Id());
+  assert(Evicted(f) == sibling->Id());
+  assert(Evicted(f) == root->Id());
+}
+void DiskUseHistorySurvivesCatalogRestart() {
+  TieredFixture f;
+  f.Append(8, 4);
+  auto first = f.Capture();
+  (void)f.Publish(*first);
+  f.Append(4, 4);
+  auto second = f.Capture();
+  (void)f.Publish(*second);
+  f.catalog.FlushUses();
+  const auto before = f.disk.LastUse(first->Id());
+  f.catalog.Touch(first->Id());
+  assert(f.disk.LastUse(first->Id()) == before);
+  f.catalog.FlushUses();
+  assert(f.disk.LastUse(first->Id()) > f.disk.LastUse(second->Id()));
+  DiskCatalog recovered(f.ledger, f.disk, f.index);
+  assert(recovered.EvictOne());
+  assert(f.disk.Open(first->Id()) && !f.disk.Open(second->Id()));
+  assert(recovered.EvictOne());
+  assert(f.disk.Stats().managed_bytes == 0);
+}
+void DiskReuseExpiresAfterAByteTurnoverAndSurvivesRestart() {
+  for (const std::uint64_t turnover : {1U, 1U << 20}) {
+    TieredFixture f;
+    CheckpointId first, second;
+    {
+      DiskCatalog catalog(f.ledger, f.disk, f.index, turnover);
+      f.Append(8, 4);
+      auto a = f.Capture();
+      first = a->Id();
+      (void)f.Publish(*a, false);
+      catalog.Track(first);
+      catalog.Touch(first);
+      catalog.FlushUses();
+      assert(f.adapter.Invalidate(*f.slot));
+      auto other = ExecutionHistory::Cold(f.ledger, f.adapter.Components(),
+                                          f.adapter.CompatibilityIdentity());
+      f.tokens.clear();
+      f.drafts.clear();
+      f.Append(8, 4);
+      auto b = other.Capture(
+          {f.tokens, InputIdentity(f.tokens.size()),
+           f.adapter.Positions(*f.slot), CheckpointPurpose::kPrompt, 1},
+          [&](const PayloadRequest& request) {
+            auto pool =
+                f.ledger.Reserve(ResourceCategory::kBackingFree, request.bytes)
+                    .Convert();
+            auto bytes =
+                std::make_shared<std::vector<std::byte>>(request.bytes);
+            auto assigned = pool.ReserveBacking(request.category);
+            auto completion =
+                request.category == ResourceCategory::kPrivateState
+                    ? f.adapter.CapturePrivate(*f.slot, request.component,
+                                               *bytes, f.stream)
+                    : f.adapter.CopyRowsOut(*f.slot, request.component,
+                                            request.first, request.end, *bytes,
+                                            f.stream);
+            assert(completion.Wait() == TransferResult::kSucceeded);
+            return Payload::Committed(assigned.Convert(), bytes);
+          });
+      second = b->Id();
+      (void)f.Publish(*b, false);
+      catalog.Track(second);
+      catalog.FlushUses();
+      const auto history = f.disk.UseHistory(first);
+      assert(history.reused_at && history.admitted_bytes > *history.reused_at);
+    }
+    DiskCatalog recovered(f.ledger, f.disk, f.index, turnover);
+    assert(recovered.EvictOne());
+    // A recent reused conversation outlives newer untouched admissions, but
+    // loses that protection after one budget of newly admitted unique bytes.
+    assert(bool(f.disk.Open(first)) == (turnover > 1));
+    assert(bool(f.disk.Open(second)) == (turnover == 1));
+  }
+}
+void AUsedFrontierIsNotAnOptionalVictim() {
+  TieredFixture f;
+  RetentionPolicy policy(f.ledger, f.index);
+  f.Append(8, 8);
+  auto first = f.Capture(CheckpointPurpose::kGenerated);
+  RetentionRequest request{f.tokens, f.adapter.CompatibilityIdentity(), {}};
+  assert(policy.Admit(request, [&] { return first; }));
+  assert(policy.Rank(first->Id()) == 0);
+  policy.Touch(first->Id());
+  assert(policy.Rank(first->Id()) == 3);
+  request.optional_frontier = true;
+  assert(!policy.Reclaim(request));
+  f.Append(4, 4);
+  auto second = f.Capture(CheckpointPurpose::kGenerated);
+  request.tokens = f.tokens;
+  assert(policy.Admit(request, [&] { return second; }));
+  assert(policy.Rank(second->Id()) == 0);
+  assert(policy.Reclaim(request));
+  assert(policy.Size() == 1 && policy.Rank(first->Id()) == 3);
+}
+void DiskEvictionNeedsNoLedgerHeadroom() {
+  TieredFixture f;
+  f.Append(8, 4);
+  const auto checkpoint = f.Capture();
+  (void)f.Publish(*checkpoint);
+  const auto spare =
+      f.ledger.Limits().ram_bytes - f.ledger.Snapshot().ram_bytes;
+  auto occupied =
+      f.ledger.Reserve(ResourceCategory::kMetadata, spare).Convert();
+  assert(f.ledger.Snapshot().ram_bytes == f.ledger.Limits().ram_bytes);
+  assert(f.catalog.EvictOne());
+  assert(f.catalog.Size() == 0 && f.disk.Stats().managed_bytes == 0);
+}
+void RecordPressureDropsUnusedFrontierBeforeRetry() {
+  TieredFixture f;
+  RetentionPolicy policy(f.ledger, f.index, nullptr, 3);
+  f.Append(8, 4);
+  auto stable = f.Capture();
+  assert(policy.Admit({f.tokens, f.adapter.CompatibilityIdentity(), {}},
+                      [&] { return stable; }));
+  f.Append(4, 4);
+  auto retry = f.Capture();
+  RetentionRequest request{f.tokens,
+                           f.adapter.CompatibilityIdentity(),
+                           {},
+                           RetentionPurpose::kRetry,
+                           8};
+  assert(policy.Admit(request, [&] { return retry; }));
+  f.Append(4, 4);
+  auto frontier = f.Capture(CheckpointPurpose::kGenerated);
+  request.tokens = f.tokens;
+  request.purpose = RetentionPurpose::kContinuation;
+  assert(policy.Admit(request, [&] { return frontier; }));
+  f.Append(4, 4);
+  auto next = f.Capture();
+  request.tokens = f.tokens;
+  request.purpose = RetentionPurpose::kRetry;
+  assert(policy.Admit(request, [&] { return next; }));
+  assert(f.index.CachedPrefixTokens(
+             {f.adapter.CompatibilityIdentity(), retry->Tokens(),
+              InputIdentity(retry->Boundary())}) == retry->Boundary());
 }
 void MixedSourcesAndCompatibility() {
   TieredFixture f;
@@ -532,11 +845,123 @@ void QuarantineRacingPublication() {
     assert(f.disk.Stats().managed_bytes == 0);
   }
 }
+struct RetentionLog final : RetentionEventSink {
+  std::vector<RetentionEvent> events;
+  void Emit(const RetentionEvent& e) noexcept override { events.push_back(e); }
+};
+void DurableCheckpointEvictedAheadOfNonDurableUnderPressure() {
+  RetentionLog log;
+  TieredFixture f;
+  RetentionPolicy retention(f.ledger, f.index, &log);
+
+  // Non-durable first conversation created earlier (older recency).
+  f.Append(16, 0);
+  const auto non_durable_tokens = f.tokens;
+  auto non_durable = f.Capture();
+  const auto non_durable_id = non_durable->Id();
+  RetentionRequest req1{
+      non_durable_tokens, f.adapter.CompatibilityIdentity(), {}};
+  assert(retention.Admit(req1, [&] { return non_durable; }));
+  auto lookup1 = f.index.Lookup(f.Query());
+  assert(lookup1.selected);
+  const auto non_durable_entry = lookup1.selected->entry;
+  assert(!f.index.IsDurable(non_durable_entry));
+
+  // Reset slot to create an independent second conversation with distinct
+  // tokens.
+  assert(f.adapter.Invalidate(*f.slot));
+  std::vector<Token> durable_tokens(16);
+  std::iota(durable_tokens.begin(), durable_tokens.end(), 200);
+  f.adapter.Append(*f.slot, durable_tokens, {});
+  auto durable_history = ExecutionHistory::Cold(
+      f.ledger, f.adapter.Components(), f.adapter.CompatibilityIdentity());
+  auto durable_checkpoint = durable_history.Capture(
+      {durable_tokens, InputIdentity(durable_tokens.size()),
+       f.adapter.Positions(*f.slot), CheckpointPurpose::kPrompt, 1},
+      [&](const PayloadRequest& request) {
+        auto admission =
+            f.ledger.Reserve(ResourceCategory::kBackingFree, request.bytes);
+        auto bytes = std::make_shared<std::vector<std::byte>>(request.bytes);
+        auto pool = admission.Convert();
+        auto assigned = pool.ReserveBacking(request.category);
+        auto completion =
+            request.category == ResourceCategory::kPrivateState
+                ? f.adapter.CapturePrivate(*f.slot, request.component, *bytes,
+                                           f.stream)
+                : f.adapter.CopyRowsOut(*f.slot, request.component,
+                                        request.first, request.end, *bytes,
+                                        f.stream);
+        assert(completion.Wait() == TransferResult::kSucceeded);
+        return Payload::Committed(assigned.Convert(), bytes);
+      });
+  const auto durable_id = durable_checkpoint->Id();
+
+  // Admit second conversation (newer recency).
+  RetentionRequest req2{durable_tokens, f.adapter.CompatibilityIdentity(), {}};
+  assert(retention.Admit(req2, [&] { return durable_checkpoint; }));
+  auto lookup2 = f.index.Lookup({{f.adapter.CompatibilityIdentity()},
+                                 durable_tokens,
+                                 InputIdentity(durable_tokens.size()),
+                                 0,
+                                 true});
+  assert(lookup2.selected);
+  const auto durable_entry = lookup2.selected->entry;
+
+  // Publish second checkpoint to disk and attach it, making it durable.
+  auto durable_desc = f.Publish(*durable_checkpoint);
+  f.index.AttachDurable(durable_entry, durable_desc);
+  assert(f.index.IsDurable(durable_entry));
+
+  // Under pure LRU, the older non-durable checkpoint would be evicted first.
+  // Under PressureOrder, durable checkpoints are evicted first from RAM (rank 0
+  // vs 1) within the same tier so non-durable state without disk backing is
+  // preserved.
+  RetentionRequest reclaim_req{
+      std::vector<Token>{999}, f.adapter.CompatibilityIdentity(), {}};
+  assert(retention.Reclaim(reclaim_req));
+  assert(log.events.back().checkpoint == durable_id);
+
+  // The durable checkpoint dropped its RAM residency but remains searchable
+  // from disk via PrefixIndex.
+  auto lookup_durable_after =
+      f.index.Lookup({{f.adapter.CompatibilityIdentity()},
+                      durable_tokens,
+                      InputIdentity(durable_tokens.size()),
+                      0,
+                      true});
+  assert(lookup_durable_after.selected &&
+         lookup_durable_after.selected->durable == durable_desc &&
+         !lookup_durable_after.selected->checkpoint);
+
+  // The older non-durable checkpoint is still resident in RAM.
+  auto lookup_non_durable_after =
+      f.index.Lookup({{f.adapter.CompatibilityIdentity()},
+                      non_durable_tokens,
+                      InputIdentity(non_durable_tokens.size()),
+                      0,
+                      true});
+  assert(lookup_non_durable_after.selected &&
+         lookup_non_durable_after.selected->entry == non_durable_entry &&
+         lookup_non_durable_after.selected->checkpoint);
+
+  // Subsequent pressure now reclaims the non-durable checkpoint.
+  assert(retention.Reclaim(reclaim_req));
+  assert(log.events.back().checkpoint == non_durable_id);
+}
 }  // namespace
 int main() {
   DeeperDiskAndRAMEviction();
   CorruptionInvalidatesAllDependents();
   GlobalLRUAndSharedFiles();
+  SupersededDiskTurnsLeaveBeforeAnotherConversation();
+  PromptAnchorOutlivesCoveredAndLeafGeneratedFrontiers();
+  LeafOutlivesItsLaterPrefix();
+  SharedPrefixLendsNothingToItsBranches();
+  DiskUseHistorySurvivesCatalogRestart();
+  DiskReuseExpiresAfterAByteTurnoverAndSurvivesRestart();
+  AUsedFrontierIsNotAnOptionalVictim();
+  DiskEvictionNeedsNoLedgerHeadroom();
+  RecordPressureDropsUnusedFrontierBeforeRetry();
   MixedSourcesAndCompatibility();
   PublicationCorruptionQuarantinesImmediately();
   RepublishedQuarantineCannotRehabilitateOldRAM();
@@ -545,4 +970,5 @@ int main() {
   CatalogAdmissionFailures();
   EvictionDoesNotWaitForYieldingWriter();
   QuarantineRacingPublication();
+  DurableCheckpointEvictedAheadOfNonDurableUnderPressure();
 }

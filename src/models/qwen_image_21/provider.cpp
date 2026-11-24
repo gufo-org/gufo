@@ -24,6 +24,10 @@ public:
         .seed = request.seed,
         .background = request.background,
         .loras = request.loras,
+        .negative_prompt = request.negative_prompt,
+        .guidance_scale = request.guidance_scale,
+        .init_image = request.init_image,
+        .strength = request.strength,
     };
     req.images.reserve(request.images.size());
     for (const auto& img : request.images) {
@@ -46,6 +50,7 @@ public:
                 .resident_weight_bytes = result.metrics.resident_weight_bytes,
                 .steps = result.metrics.steps,
                 .lora_ms = result.metrics.lora_ms,
+                .guidance_scale = result.metrics.guidance_scale,
             },
     };
   }
@@ -62,6 +67,8 @@ public:
   std::vector<ext::ImageLora> ActiveLoras() const override {
     return model_->ActiveLoras();
   }
+
+  bool DeviceLost() const override { return model_->DeviceLost(); }
 
 private:
   std::unique_ptr<Model> model_;

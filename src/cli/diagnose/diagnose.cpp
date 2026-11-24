@@ -18,6 +18,7 @@
 #include "src/core/diagnostics/fingerprint.h"
 #include "src/core/diagnostics/linux_sysfs.h"
 #include "src/core/diagnostics/system_inventory.h"
+#include "src/core/npu/npu.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
@@ -57,7 +58,7 @@ void PrintDiagnoseHelp(std::string_view program_name) {
       << "  --output <path>              Write command output to specified "
          "file\n"
       << "  --section <name>             Diagnostic section to run: all, "
-         "inventory, platform, gpu, extensions\n"
+         "inventory, platform, gpu, npu, extensions\n"
       << "  -h, --help                   Print help information\n";
 }
 
@@ -181,7 +182,37 @@ diagnostics::DiagnosticReport CollectDiagnostics(
     report.AddCheck(std::move(check));
   }
 
-  // 4. Toolchain Check
+  // 4. NPU Check: XDNA accel nodes (sysfs) and whether XRT opens the device.
+  // An absent NPU is a warning: GPU paths do not need it.
+  if (section == "all" || section == "npu" || section == "inventory") {
+    diagnostics::DiagnosticCheck check;
+    check.name = "npu";
+    const auto devices = npu::ProbeDevices();
+    check.details["devices"] = std::to_string(devices.size());
+    if (devices.empty()) {
+      check.status = diagnostics::DiagnosticStatus::kWarn;
+      check.message = "No XDNA NPU found (no amdxdna accel node)";
+    } else {
+      const auto& d = devices.front();
+      check.details["node"] = d.node;
+      check.details["driver"] = d.driver;
+      check.details["pciId"] = d.pci_id;
+      check.details["firmware"] = d.firmware;
+      try {
+        auto device = npu::Device::Open();
+        check.details["xrtDevice"] = device.name();
+        check.status = diagnostics::DiagnosticStatus::kPass;
+        check.message = "XDNA NPU " + d.node + " opens through XRT";
+      } catch (const std::exception& e) {
+        check.status = diagnostics::DiagnosticStatus::kWarn;
+        check.message = "XDNA NPU " + d.node +
+                        " found, but XRT cannot open it: " + e.what();
+      }
+    }
+    report.AddCheck(std::move(check));
+  }
+
+  // 5. Toolchain Check
   if (section == "all" || section == "inventory") {
     diagnostics::DiagnosticCheck check;
     check.name = "toolchain";
@@ -325,7 +356,7 @@ int RunDiagnose(std::span<const char* const> args) {
   }
 
   if (section != "all" && section != "inventory" && section != "platform" &&
-      section != "gpu" && section != "extensions") {
+      section != "gpu" && section != "npu" && section != "extensions") {
     std::cerr << "Error: unknown diagnostic section '" << section << "'\n";
     return 2;
   }

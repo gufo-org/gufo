@@ -412,12 +412,14 @@ static int moe_vector_projection(int weight_type, const void* W,
       !gated && !W_b && !X_q8 &&
       (type == GGML_TYPE_Q5_1 || type == GGML_TYPE_Q8_0) && K == 640 &&
       n_expert_used == 1 && n_tokens > 1;
+  // Over MMVQ_MAX_BATCH_SIZE tokens, gate/up keeps two counters (multi- and
+  // single-token expert groups) and room for every slot in each list.
   const size_t group_bytes =
       by_expert ? 2 * size_t(n_tokens) * sizeof(int32_t)
       : gated && n_tokens > 1
           ? (n_tokens > MMVQ_MAX_BATCH_SIZE
-                 ? sizeof(int32_t) +
-                       size_t(n_tokens) * n_expert_used * sizeof(MoeBatchGroup)
+                 ? 2 * sizeof(int32_t) + 2 * size_t(n_tokens) * n_expert_used *
+                                             sizeof(MoeBatchGroup)
                  : size_t(mmvq_moe_group_ints(n_tokens, n_expert_used)) *
                        sizeof(int32_t))
           : 0;
@@ -464,7 +466,7 @@ static int moe_vector_projection(int weight_type, const void* W,
   const int input_stride = ne10_padded / QK8_1;
   if (gated) {
     if (n_tokens > MMVQ_MAX_BATCH_SIZE &&
-        hipMemsetAsync(groups, 0, sizeof(int32_t), stream) != hipSuccess)
+        hipMemsetAsync(groups, 0, 2 * sizeof(int32_t), stream) != hipSuccess)
       return -2;
     mul_mat_vec_moe_gated(W, W_b, type, input, ids, groups, out_f32, K, M,
                           n_tokens, n_expert_used, input_stride, stream);
@@ -506,6 +508,22 @@ extern "C" int qfn_mmq_moe_vec(int weight_type, const void* W,
   return moe_vector_projection(weight_type, W, X_f32, ids, out_f32, M, K,
                                n_tokens, n_experts, n_expert_used, stream, W_b,
                                out_b, false);
+}
+
+extern "C" int qfn_mmq_q4_K_dense_vec_preq(const void* W, const void* X_q8,
+                                           float* out_f32, int M, int N, int K,
+                                           hipStream_t stream) {
+  if (!W || !X_q8 || !out_f32 || M <= 0 || N <= 0 || N > 8 || K <= 0 ||
+      K % QK_K != 0) {
+    fprintf(stderr,
+            "qfn_mmq_q4_K_dense_vec_preq: bad arguments M=%d N=%d K=%d\n", M,
+            N, K);
+    return -1;
+  }
+  const int input_stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;
+  mul_mat_vec_q4k_dense_dispatch(W, static_cast<const block_q8_1*>(X_q8),
+                                 out_f32, K, M, N, input_stride, stream);
+  return hipGetLastError() == hipSuccess ? 0 : -3;
 }
 
 extern "C" int qfn_mmq_moe_gated_vec(int weight_type, const void* gate,
@@ -694,14 +712,15 @@ extern "C" int qfn_mmq_q8_0_dense_vec_preq(const void* W, const void* W_gate,
                                            const void* X_q8, float* out_f32,
                                            int M, int N, int K,
                                            hipStream_t stream) {
-  const bool wide_matrix = K == 2560 && M >= 8192 && N <= 48;
-  const bool grouped_matrix =
-      N > 48 && N % 32 == 0 &&
-      ((K == 2560 && M >= 1024) || (K == 320 && M == 10240));
+  // Ungated projections of at least 256 rows take the integer matrix tiles,
+  // which keep the vector kernel's per-row arithmetic at every batch width.
+  const bool matrix_shape = !W_gate && M >= 256 && K % 32 == 0;
+  const bool wide_matrix = matrix_shape && N <= 48;
+  const bool grouped_matrix = matrix_shape && N > 48 && N % 32 == 0;
   if (!W || !X_q8 || !out_f32 || M <= 0 || N <= 0 || K <= 0 || K % 32 != 0 ||
       (N > 32 && !wide_matrix && !grouped_matrix &&
        (M != 320 || K != 10240 || N % 8 != 0)) ||
-      (N > MMVQ_MAX_BATCH_SIZE && W_gate)) {
+      (N > 32 && W_gate)) {
     fprintf(stderr,
             "qfn_mmq_q8_0_dense_vec_preq: bad arguments M=%d N=%d K=%d\n", M, N,
             K);
@@ -711,7 +730,7 @@ extern "C" int qfn_mmq_q8_0_dense_vec_preq(const void* W, const void* W_gate,
     launch_q8_hc_down(W, X_q8, out_f32, N, stream);
     return hipGetLastError() == hipSuccess ? 0 : -3;
   }
-  if (N > MMVQ_MAX_BATCH_SIZE && N % 8 == 0 && M == 320 && K == 10240) {
+  if (N > 48 && N % 8 == 0 && M == 320 && K == 10240) {
     qfn_q8_hc_down_kernel<8, true><<<dim3(320, N / 8), 32, 0, stream>>>(
         static_cast<const block_q8_0*>(W),
         static_cast<const block_q8_1*>(X_q8), out_f32);

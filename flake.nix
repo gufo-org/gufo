@@ -259,34 +259,58 @@
             inherit (pkgsSys) lib rustPlatform;
           };
 
+          # sccache's local storage supports one server. Build in a private
+          # snapshot, then publish immutable entries atomically with rsync.
+          # Shared files must be accessible to different Nix build users.
+          rustCacheSetup = ''
+            if [[ -d /tmp/gufo-rust-cache && -w /tmp/gufo-rust-cache ]]; then
+              rust_shared_cache=/tmp/gufo-rust-cache/objects-v1
+              (umask 000; mkdir -p "$rust_shared_cache")
+              export SCCACHE_DIR="$TMPDIR/rust-cache"
+              mkdir -p "$SCCACHE_DIR"
+              rsync -r --exclude='.*' "$rust_shared_cache/" "$SCCACHE_DIR/"
+              export SCCACHE_SERVER_UDS="$TMPDIR/sccache.sock"
+              export CARGO_INCREMENTAL=0
+              export RUSTC_WRAPPER=${pkgsSys.sccache}/bin/sccache
+              save_rust_cache() {
+                sccache --stop-server || true
+                # rsync renames complete temporary files into place. Never
+                # replace another builder's entry for the same compiler key.
+                (umask 000; rsync -r --ignore-existing --chmod=ugo=rwX \
+                  "$SCCACHE_DIR/" "$rust_shared_cache/") || true
+              }
+              trap save_rust_cache EXIT
+            fi
+          '';
+
           rustCheck = pkgsSys.runCommand "check-rust" {
-            nativeBuildInputs = [ rustToolchain pkgsSys.stdenv.cc ];
+            nativeBuildInputs = [ rustToolchain pkgsSys.stdenv.cc pkgsSys.pkg-config pkgsSys.python3 pkgsSys.sccache pkgsSys.rsync ];
+            buildInputs = [ pkgsSys.libopus ];
             src = mkFilteredSource {
-              directories = [
-                "src/core/rust"
-                "src/core/audio_decode"
-                "src/core/base64"
-                "src/core/http"
-                "src/core/png_decode"
-                "src/core/resample"
-                "src/core/wav_decode"
-                "src/core/websocket"
-              ];
+              # One source list: a new workspace member cannot silently miss CI.
+              directories = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.members;
               files = [
                 "rust-toolchain.toml"
                 "Cargo.toml"
                 "Cargo.lock"
-              ];
+                "tools/ci/check-rust-workspace.py"
+                "tests/tools/check_rust_workspace_test.py"
+              ] ++ map (name: "src/core/${name}/Cargo.toml") (builtins.filter
+                (name: builtins.pathExists (./src/core + "/${name}/Cargo.toml"))
+                (builtins.attrNames (builtins.readDir ./src/core)));
             };
-          } (cargoSetup + ''
+          } (cargoSetup + rustCacheSetup + ''
             export HOME=$TMPDIR
             cp -r "$src" source
             chmod -R u+w source
             cd source
+            python3 tools/ci/check-rust-workspace.py
+            python3 tests/tools/check_rust_workspace_test.py
             cargo fmt --all --check
             cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+            cargo test --workspace --locked --offline
             mkdir -p $out
-            echo "PASS: Rust formatting and clippy clean" > $out/result.txt
+            echo "PASS: Rust formatting, clippy and unit tests clean" > $out/result.txt
           '');
 
           formatCheck = pkgsSys.runCommand "check-format" {
@@ -311,7 +335,6 @@
               pkgsSys.icu
               pkgsSys.curl
               pkgsSys.libpng
-              pkgsSys.libjpeg
               pkgsSys.libwebp
               pkgsSys.libopus
               rustToolchain
@@ -424,6 +447,8 @@
             nativeBuildInputs = [
               pkgsSys.stdenv.cc
               pkgsSys.ccache
+              pkgsSys.sccache
+              pkgsSys.rsync
               pkgsSys.cmake
               pkgsSys.ninja
               pkgsSys.pkg-config
@@ -439,10 +464,17 @@
               rustToolchain
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
+              # The NPU runtime links XRT on Linux.
+              gufoPackages.${system}.xrt-amdxdna
+              pkgsSys.libuuid
+              # The loom extension's runtime, which the sandbox cannot build
+              # from source (its configure step downloads dependencies).
+              gufoPackages.${system}.loom-runtime
             ];
             src = testSource;
-          } (cargoSetup + ''
+          } (cargoSetup + rustCacheSetup + ''
             export HOME=$TMPDIR
+            export XILINX_XRT=${gufoPackages.${system}.xrt-amdxdna}/opt/xilinx/xrt
             set -euo pipefail
 
             # The store source name changes on every revision. base_dir alone
@@ -655,14 +687,35 @@
           h3-quality = h3QualityCheck;
           h3-ml-quality = h3MlQualityCheck;
           tests = testCheck;
+          model-sync =
+            assert import ./.devops/nix/model-sync-tests.nix {
+              pkgs = pkgsSys;
+              defaultPackage = self.packages.${system}.default;
+            };
+            pkgsSys.runCommand "check-model-sync" { nativeBuildInputs = [ pkgsSys.python3 ]; } ''
+              cp ${./.devops/nix/model-sync-tests.py} model-sync-tests.py
+              cp ${./.devops/nix/model-sync.py} model-sync.py
+              python3 model-sync-tests.py
+              touch $out
+            '';
           mk-serve = mkServeCheck;
           mk-serve-nixos = mkServeNixosCheck;
         }
       );
     in
     {
+      nixosModules.model-sync = import ./.devops/nix/model-sync-module.nix { inherit self; };
       lib = {
         inherit releaseVersion revision;
+        mkModelSync =
+          {
+            pkgs,
+            gufo ? self.packages.${pkgs.stdenv.hostPlatform.system}.default,
+            ...
+          }@args:
+          pkgs.callPackage ./.devops/nix/mk-model-sync.nix { inherit gufo; } (
+            builtins.removeAttrs args [ "pkgs" "gufo" ]
+          );
         mkGufoServe =
           {
             pkgs ? null,
@@ -711,6 +764,9 @@
           # Official artifacts select this output from a tagged source. The
           # default package remains visibly developmental on moving branches.
           release = base.override { inherit releaseVersion; extensionsFromLock = true; };
+          # The gpu-test configuration with its assertions, which Devlab's
+          # functional correctness runs against (docs: tests/functional/README.md).
+          checked = base.override { checked = true; };
           # gufo with its extension SDK, for `gufo extension install`.
           sdk = gufoPackages.${system}.extensionModules.withSdk base;
           release-sdk = gufoPackages.${system}.extensionModules.withSdk
@@ -742,6 +798,11 @@
             gufo = base;
             hrx = self.packages.${system}.hrx;
           };
+          # XRT with its amdxdna plugin, as the Gufo package links it.
+          xrt-amdxdna = gufoPackages.${system}.xrt-amdxdna;
+          iron = gufoPackages.${system}.iron;
+          # The Loom runtime the loom extension loads.
+          loom-runtime = gufoPackages.${system}.loom-runtime;
         }
       );
 
@@ -759,6 +820,9 @@
               pkgs.${system}.sox
               pkgs.${system}.rocmPackages.gfx1151.rocprofiler-sdk
               pkgs.${system}.sqlite
+              # The test presets build jpeg_decode_test, whose cases and
+              # reference decoder use libjpeg-turbo; the package does not.
+              pkgs.${system}.libjpeg
               # Debugging and repository work. The test presets build
               # RelWithDebInfo with assertions, and contributors commit with
               pkgs.${system}.gdb
@@ -768,12 +832,19 @@
               # Compiler cache for the local loop; CMake attaches it as the C
               # and C++ launcher when it is on PATH, as the CPU checks do.
               pkgs.${system}.ccache
+              # NPU designs: IRON (mlir-aie) and Peano; CMake compiles the
+              # in-tree designs with it (cmake/GufoNpuDesigns.cmake).
+              gufoPackages.${system}.iron
               (audio-cpp.packages.${system}.rocm-gfx1151.override {
                 rocmPackages = pkgs.${system}.rocmPackages.gfx1151;
               })
             ];
             env = {
               TORCH_HOME = "${alexnetTorchHome system}";
+              # CMake finds XRT here, and XRT its amdxdna plugin.
+              XILINX_XRT = "${gufoPackages.${system}.xrt-amdxdna}/opt/xilinx/xrt";
+              PEANO_INSTALL_DIR = gufoPackages.${system}.iron.peano;
+              GUFO_IRON_PYTHON = "${gufoPackages.${system}.iron}/bin/python3";
               # CMake links HIP binaries against the patched ROCr.
               GUFO_ROCR_LIBRARY_DIR = "${self.packages.${system}.default.rocmRuntime}/lib";
               LD_LIBRARY_PATH = pkgs.${system}.lib.makeLibraryPath [

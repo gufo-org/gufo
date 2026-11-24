@@ -57,6 +57,13 @@ assert lib.assertMsg (
 ) "gufo: duplicate provider IDs in serving metadata";
 {
   inherit providers;
+  models = lib.concatMap (
+    manifest:
+    map (model: {
+      inherit (model) id;
+      extension = manifest.name;
+    }) (manifest.models or [ ])
+  ) selected;
   options = lib.concatMap (
     m:
     map (

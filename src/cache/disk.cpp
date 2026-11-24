@@ -1,23 +1,28 @@
 #include "src/cache/disk.hpp"
 
-#include <immintrin.h>
+#include <gufo/cache_manifest.h>
 
 #include <algorithm>
 #include <atomic>
-#include <bit>
 #include <chrono>
-#include <cstring>
 #include <future>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
-#include <set>
+#include <new>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <thread>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "src/core/platform/fs.hpp"
+#include "src/core/rust/callback.hpp"
 
 namespace gufo::cache {
 namespace detail {
@@ -27,6 +32,12 @@ struct DiskAvailability {
 };
 }  // namespace detail
 namespace {
+// New payloads are synchronized in batches by concurrent threads.
+constexpr std::size_t kPayloadSyncBatch = 128;
+constexpr std::size_t kPayloadSyncThreads = 32;
+#ifdef GUFO_CACHE_TESTING
+thread_local void (*reference_validation_hook)(bool) noexcept {};
+#endif
 template<class F>
 struct Finally {
   F action;
@@ -55,11 +66,6 @@ private:
   std::uint64_t& cost_;
   std::chrono::steady_clock::time_point start_;
 };
-constexpr std::array<std::uint8_t, 8> kMagic{'G', 'U', 'F', 'O',
-                                             'M', 'N', 'F', '2'};
-constexpr std::size_t kMaxTokens = std::size_t{2} * 1024 * 1024;
-constexpr std::size_t kMaxComponents = 256, kMaxReferences = 65536;
-constexpr std::size_t kMaxInputBytes = 65536;
 [[noreturn]] void Invalid() {
   throw std::invalid_argument("invalid cache v2 manifest");
 }
@@ -73,151 +79,71 @@ std::uint64_t Multiply(std::uint64_t a, std::uint64_t b) {
     Invalid();
   return a * b;
 }
-void Validate(const DiskManifest& m) {
-  if (!m.checkpoint.value || !m.lineage.value || m.tokens.size() > kMaxTokens ||
-      m.input.size() > kMaxInputBytes || m.components.empty() ||
-      m.components.size() > kMaxComponents ||
-      static_cast<unsigned>(m.purpose) >
-          static_cast<unsigned>(CheckpointPurpose::kLearned))
-    Invalid();
-  std::set<DiskFileId> private_files;
-  std::size_t references{};
-  std::uint32_t previous{};
-  bool first = true;
-  for (const auto& c : m.components) {
-    const auto& d = c.descriptor;
-    const auto tail = c.tail, private_state = c.private_state;
-    if (c.position.id != d.id || !d.layout_version ||
-        (!first && d.id.value <= previous))
+// The C interface mirrors these definitions.
+static_assert(GUFO_CACHE_APPEND_ROWS ==
+              static_cast<int>(ComponentKind::kAppendRows));
+static_assert(GUFO_CACHE_PRIVATE_STATE ==
+              static_cast<int>(ComponentKind::kPrivateState));
+static_assert(GUFO_CACHE_WINDOW_ROWS ==
+              static_cast<int>(ComponentKind::kWindowRows));
+static_assert(GUFO_CACHE_MAX_PURPOSE ==
+              static_cast<int>(CheckpointPurpose::kLearned));
+static_assert(GUFO_CACHE_FORMAT_VERSION == kDiskFormatVersion);
+static_assert(GUFO_CACHE_WINDOW_FORMAT_VERSION == kDiskWindowFormatVersion);
+static_assert(GUFO_CACHE_MAX_MANIFEST_BYTES == kMaxManifestBytes);
+static_assert(std::is_same_v<Token, std::uint32_t> &&
+              sizeof(DiskFileId) == sizeof(GufoCachePayload::file));
+// Throws for a failed codec call: a rejected manifest as before, memory
+// exhaustion as std::bad_alloc, and an exception of a callback as itself.
+void Check(GufoCacheStatus status,
+           const core::ffi::CallbackFailure* failure = nullptr) {
+  if (failure)
+    failure->Rethrow();
+  switch (status) {
+    case GUFO_CACHE_COMPLETE:
+      return;
+    case GUFO_CACHE_REJECTED:
       Invalid();
-    previous = d.id.value;
-    first = false;
-    references += c.chunks.size() + bool(tail) + bool(private_state);
-    if (references > kMaxReferences)
-      Invalid();
-    if (HasRows(d.kind)) {
-      if (!d.row_bytes || !d.rows_per_chunk || d.state_bytes || private_state ||
-          (d.kind == ComponentKind::kWindowRows) != (d.window_rows != 0) ||
-          c.chunks.size() != (c.position.valid_rows -
-                              FirstChunkRow(d, c.position.valid_rows)) /
-                                 d.rows_per_chunk)
-        Invalid();
-      (void)Multiply(d.row_bytes, c.position.valid_rows);
-      auto full_bytes = Multiply(d.row_bytes, d.rows_per_chunk);
-      std::set<DiskFileId> chunks;
-      for (const auto& p : c.chunks)
-        if (p.bytes != full_bytes || !chunks.insert(p.file).second)
-          Invalid();
-      auto remaining = c.position.valid_rows % d.rows_per_chunk;
-      if (bool(tail) != bool(remaining) ||
-          (tail.has_value() &&
-           tail.value().bytes != Multiply(d.row_bytes, remaining)))
-        Invalid();
-    } else if (d.kind == ComponentKind::kPrivateState) {
-      if (d.row_bytes || d.rows_per_chunk || !d.state_bytes || d.window_rows ||
-          !c.chunks.empty() || tail || !private_state ||
-          private_state->bytes != d.state_bytes ||
-          c.position.valid_rows != m.tokens.size())
-        Invalid();
-    } else
-      Invalid();
-    for (auto p : {tail, private_state})
-      if (p && !private_files.insert(p->file).second)
-        Invalid();
+    case GUFO_CACHE_NO_MEMORY:
+      throw std::bad_alloc();
+    case GUFO_CACHE_STOPPED:
+    case GUFO_CACHE_INTERNAL:
+      break;
   }
+  throw std::logic_error("disk manifest codec failed");
 }
-struct Writer {
-  std::vector<std::uint8_t> bytes;
-  void Number(std::uint64_t n, unsigned width) {
-    if (bytes.size() + width > kMaxManifestBytes - 8)
-      Invalid();
-    for (unsigned i = 0; i < width; ++i) {
-      bytes.push_back(n & 255);
-      n >>= 8;
-    }
-  }
-  void Blob(std::span<const std::uint8_t> b) {
-    if (b.size() > kMaxManifestBytes - 8 - bytes.size())
-      Invalid();
-    bytes.insert(bytes.end(), b.begin(), b.end());
-  }
-  void Payload(const DiskPayload& p) {
-    Blob(p.file);
-    Number(p.bytes, 8);
-    Number(p.checksum, 8);
-  }
-};
-struct Reader {
-  std::span<const std::uint8_t> bytes;
-  std::uint64_t Number(unsigned width) {
-    auto b = Blob(width);
-    std::uint64_t n{};
-    for (unsigned i = 0; i < width; ++i)
-      n |= std::uint64_t(b[i]) << (8 * i);
-    return n;
-  }
-  std::span<const std::uint8_t> Blob(std::size_t n) {
-    if (n > bytes.size())
-      Invalid();
-    auto result = bytes.first(n);
-    bytes = bytes.subspan(n);
-    return result;
-  }
-  std::size_t Count(std::size_t max, std::size_t element_bytes) {
-    auto n = Number(4);
-    if (n > max || n > bytes.size() / element_bytes)
-      Invalid();
-    return n;
-  }
-  DiskPayload Payload() {
-    DiskPayload p;
-    auto id = Blob(p.file.size());
-    std::copy(id.begin(), id.end(), p.file.begin());
-    p.bytes = Number(8);
-    p.checksum = Number(8);
-    return p;
-  }
-};
+GufoCachePayload CodecPayload(const DiskPayload& p) {
+  GufoCachePayload c{};
+  std::copy(p.file.begin(), p.file.end(), c.file);
+  c.bytes = p.bytes;
+  c.checksum = p.checksum;
+  return c;
+}
+DiskPayload FromCodec(const GufoCachePayload& c) {
+  DiskPayload p;
+  std::copy(std::begin(c.file), std::end(c.file), p.file.begin());
+  p.bytes = c.bytes;
+  p.checksum = c.checksum;
+  return p;
+}
+std::optional<DiskPayload> OptionalPayload(int present,
+                                           const GufoCachePayload& c) {
+  if (!present)
+    return {};
+  return FromCodec(c);
+}
 struct MetadataPlan {
   std::size_t retained{}, references{};
 };
+// The metadata DecodeManifest retains, which reserves exactly these
+// capacities, and the payload references it validates.
 MetadataPlan PlanMetadata(std::span<const std::uint8_t> bytes) {
-  if (bytes.size() < 20 || bytes.size() > kMaxManifestBytes)
-    Invalid();
-  Reader r{bytes.first(bytes.size() - 8)};
-  r.Blob(65);  // Fixed fields preceding the input length.
-  MetadataPlan plan;
-  auto input = r.Count(kMaxInputBytes, 1);
-  r.Blob(input);
-  plan.retained = input;
-  auto tokens = r.Count(kMaxTokens, 4);
-  r.Blob(tokens * sizeof(Token));
-  plan.retained = Add(plan.retained, tokens * sizeof(Token));
-  auto components = r.Count(kMaxComponents, 47);
-  plan.retained = Add(plan.retained, components * sizeof(DiskComponent));
-  for (std::size_t i = 0; i < components; ++i) {
-    // The kind byte follows the ID and layout version; a window component
-    // also carries its window size.
-    if (r.Blob(41)[8] == static_cast<std::uint8_t>(ComponentKind::kWindowRows))
-      r.Blob(8);
-    auto chunks = r.Count(kMaxReferences - plan.references, 32);
-    plan.references += chunks;
-    r.Blob(chunks * 32);
-    plan.retained = Add(plan.retained, chunks * sizeof(DiskPayload));
-    for (unsigned j = 0; j < 2; ++j) {
-      auto present = r.Number(1);
-      if (present > 1)
-        Invalid();
-      if (present) {
-        if (++plan.references > kMaxReferences)
-          Invalid();
-        r.Blob(32);
-      }
-    }
-  }
-  if (!r.bytes.empty())
-    Invalid();
-  return plan;
+  GufoCacheManifestPlan plan{};
+  Check(gufo_cache_manifest_plan(bytes.data(), bytes.size(), &plan));
+  auto retained = Add(plan.input_bytes, plan.tokens * sizeof(Token));
+  retained = Add(retained, plan.components * sizeof(DiskComponent));
+  retained = Add(retained, plan.chunks * sizeof(DiskPayload));
+  return {retained, plan.references};
 }
 class Fd {
 public:
@@ -238,6 +164,62 @@ private:
                           const std::error_code& ec) {
   throw std::runtime_error(message + ": " + ec.message());
 }
+// Synchronizes files on helper threads while the caller continues; Wait()
+// helps finish them. File systems commit concurrent synchronizations together,
+// while one at a time each small file waits for its own commit (#1180).
+class ConcurrentSync {
+public:
+  ConcurrentSync(std::span<const platform::PlatformFile> files,
+                 std::size_t threads)
+      : files_(files), begin_(std::chrono::steady_clock::now()) {
+    threads = std::min(threads, files.size());
+    workers_.reserve(threads);
+    for (std::size_t i = 0; i < threads; ++i) {
+      try {
+        workers_.emplace_back([this] { Work(); });
+      } catch (const std::system_error&) {
+        break;  // Wait() completes the remaining files.
+      }
+    }
+  }
+  ConcurrentSync(const ConcurrentSync&) = delete;
+  ConcurrentSync& operator=(const ConcurrentSync&) = delete;
+  ~ConcurrentSync() { Stop(); }
+  // Returns the first failure once every file has been attempted.
+  std::error_code Wait() {
+    Work();
+    Stop();
+    return failure_;
+  }
+  [[nodiscard]] std::size_t Files() const { return files_.size(); }
+  [[nodiscard]] std::uint64_t ElapsedNs() const {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(end_ - begin_)
+        .count();
+  }
+
+private:
+  void Work() {
+    for (std::size_t i; (i = next_.fetch_add(1)) < files_.size();) {
+      std::error_code ec;
+      if (!platform::SyncFile(files_[i], ec)) {
+        std::lock_guard guard(failure_mutex_);
+        if (!failure_)
+          failure_ = ec ? ec : std::make_error_code(std::errc::io_error);
+      }
+    }
+  }
+  void Stop() {
+    // Joining also orders the workers' failure writes before Wait() reads.
+    workers_.clear();
+    end_ = std::chrono::steady_clock::now();
+  }
+  std::span<const platform::PlatformFile> files_;
+  std::chrono::steady_clock::time_point begin_, end_;
+  std::atomic<std::size_t> next_{};
+  std::mutex failure_mutex_;
+  std::error_code failure_;
+  std::vector<std::jthread> workers_;
+};
 void SyncDirectoryFd(const platform::Directory& directory) {
   std::error_code ec;
   if (!platform::SyncDirectory(directory, ec))
@@ -298,224 +280,153 @@ bool Contains(const DiskManifest& manifest, bool private_file,
       return true;
   return false;
 }
-std::uint64_t ChecksumTable(std::span<const std::uint8_t> bytes,
-                            std::uint64_t crc) {
-  static constexpr auto table = [] {
-    std::array<std::array<std::uint64_t, 256>, 8> t{};
-    for (unsigned i = 0; i < 256; ++i) {
-      auto n = std::uint64_t(i) << 56;
-      for (unsigned j = 0; j < 8; ++j)
-        n = (n << 1) ^ ((n >> 63) ? 0x42f0e1eba9ea3693ULL : 0);
-      t[0][i] = n;
-    }
-    for (unsigned slice = 1; slice < t.size(); ++slice)
-      for (unsigned i = 0; i < 256; ++i) {
-        const auto previous = t[slice - 1][i];
-        t[slice][i] = (previous << 8) ^ t[0][previous >> 56];
-      }
-    return t;
-  }();
-  // Preserve CRC-64/ECMA and streaming seeds while breaking the per-byte
-  // dependency chain. memcpy permits arbitrary payload alignment.
-  while (bytes.size() >= 8) {
-    std::uint64_t word;
-    std::memcpy(&word, bytes.data(), sizeof(word));
-    if constexpr (std::endian::native == std::endian::little)
-      word = __builtin_bswap64(word);
-    crc ^= word;
-    crc = table[7][crc >> 56] ^ table[6][(crc >> 48) & 255] ^
-          table[5][(crc >> 40) & 255] ^ table[4][(crc >> 32) & 255] ^
-          table[3][(crc >> 24) & 255] ^ table[2][(crc >> 16) & 255] ^
-          table[1][(crc >> 8) & 255] ^ table[0][crc & 255];
-    bytes = bytes.subspan(8);
-  }
-  for (auto b : bytes)
-    crc = (crc << 8) ^ table[0][(crc >> 56) ^ b];
-  return crc;
-}
-constexpr std::uint64_t CrcPower(unsigned exponent) {
-  std::uint64_t result = 1;
-  while (exponent--)
-    result = (result << 1) ^ ((result >> 63) ? 0x42f0e1eba9ea3693ULL : 0);
-  return result;
-}
-__attribute__((target("pclmul,ssse3"))) inline __m128i CrcLoad(
-    const std::uint8_t* bytes) {
-  // Treat the big-endian byte sequence as a polynomial with its low limb in
-  // the low SIMD lane. Loads remain unaligned and never pass the input end.
-  return _mm_shuffle_epi8(
-      _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes)),
-      _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0));
-}
-__attribute__((target("pclmul,ssse3"))) inline __m128i CrcFold(__m128i previous,
-                                                               __m128i powers,
-                                                               __m128i next) {
-  return _mm_xor_si128(
-      _mm_xor_si128(_mm_clmulepi64_si128(previous, powers, 0x00),
-                    _mm_clmulepi64_si128(previous, powers, 0x11)),
-      next);
-}
-__attribute__((target("pclmul,ssse3"))) std::uint64_t ChecksumFold(
-    std::span<const std::uint8_t> bytes, std::uint64_t crc) {
-  // Fold in GF(2), modulo the same ECMA polynomial. A low limb advances by
-  // x^128 (or x^512); its high limb advances another 64 bits. Four independent
-  // lanes hide carry-less multiply latency. Their final merge restores byte
-  // order before the unchanged table reduction and partial-byte suffix.
-  const auto powers = _mm_set_epi64x(CrcPower(192), CrcPower(128));
-  const auto wide_powers = _mm_set_epi64x(CrcPower(576), CrcPower(512));
-  auto a = _mm_xor_si128(CrcLoad(bytes.data()), _mm_set_epi64x(crc, 0));
-  auto b = CrcLoad(bytes.data() + 16);
-  auto c = CrcLoad(bytes.data() + 32);
-  auto d = CrcLoad(bytes.data() + 48);
-  bytes = bytes.subspan(64);
-  while (bytes.size() >= 64) {
-    a = CrcFold(a, wide_powers, CrcLoad(bytes.data()));
-    b = CrcFold(b, wide_powers, CrcLoad(bytes.data() + 16));
-    c = CrcFold(c, wide_powers, CrcLoad(bytes.data() + 32));
-    d = CrcFold(d, wide_powers, CrcLoad(bytes.data() + 48));
-    bytes = bytes.subspan(64);
-  }
-  a = CrcFold(CrcFold(CrcFold(a, powers, b), powers, c), powers, d);
-  while (bytes.size() >= 16) {
-    a = CrcFold(a, powers, CrcLoad(bytes.data()));
-    bytes = bytes.subspan(16);
-  }
-  std::array<std::uint8_t, 16> remainder;
-  _mm_storeu_si128(
-      reinterpret_cast<__m128i*>(remainder.data()),
-      _mm_shuffle_epi8(a, _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5,
-                                        4, 3, 2, 1, 0)));
-  return ChecksumTable(bytes, ChecksumTable(remainder, 0));
-}
 }  // namespace
 std::uint64_t DiskChecksum(std::span<const std::uint8_t> bytes,
                            std::uint64_t crc) {
-  static const bool folding =
-      __builtin_cpu_supports("pclmul") && __builtin_cpu_supports("ssse3");
-  if (folding && bytes.size() >= 256)
-    return ChecksumFold(bytes, crc);
-  return ChecksumTable(bytes, crc);
+  Check(gufo_cache_checksum(bytes.data(), bytes.size(), crc, &crc));
+  return crc;
 }
 std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {
-  Validate(m);
-  const bool windowed = std::ranges::any_of(m.components, [](const auto& c) {
-    return c.descriptor.kind == ComponentKind::kWindowRows;
-  });
-  Writer w;
-  w.Blob(kMagic);
-  w.Number(windowed ? kDiskWindowFormatVersion : kDiskFormatVersion, 4);
-  w.Number(m.checkpoint.value, 8);
-  w.Number(m.lineage.value, 8);
-  w.Blob(m.compatibility);
-  w.Number(static_cast<unsigned>(m.purpose), 1);
-  w.Number(m.rank, 4);
-  w.Number(m.input.size(), 4);
-  w.Blob(m.input);
-  w.Number(m.tokens.size(), 4);
-  for (auto t : m.tokens)
-    w.Number(t, 4);
-  w.Number(m.components.size(), 4);
+  // Oversized manifests are rejected before their C view is built.
+  if (m.components.size() > GUFO_CACHE_MAX_COMPONENTS)
+    Invalid();
+  std::size_t chunk_count{};
+  for (const auto& c : m.components) {
+    chunk_count += c.chunks.size();
+    if (chunk_count > GUFO_CACHE_MAX_REFERENCES)
+      Invalid();
+  }
+  std::vector<GufoCachePayload> chunks;
+  chunks.reserve(chunk_count);
+  std::vector<GufoCacheComponent> components;
+  components.reserve(m.components.size());
   for (const auto& c : m.components) {
     const auto& d = c.descriptor;
-    const auto tail = c.tail, private_state = c.private_state;
-    w.Number(d.id.value, 4);
-    w.Number(d.layout_version, 4);
-    w.Number(static_cast<unsigned>(d.kind), 1);
-    w.Number(d.row_bytes, 8);
-    w.Number(d.rows_per_chunk, 8);
-    w.Number(d.state_bytes, 8);
-    w.Number(c.position.valid_rows, 8);
-    if (d.kind == ComponentKind::kWindowRows)
-      w.Number(d.window_rows, 8);
-    w.Number(c.chunks.size(), 4);
+    const auto first = chunks.size();
     for (const auto& p : c.chunks)
-      w.Payload(p);
-    w.Number(bool(tail), 1);
-    if (tail.has_value())
-      w.Payload(tail.value());
-    w.Number(bool(private_state), 1);
-    if (private_state.has_value())
-      w.Payload(private_state.value());
+      chunks.push_back(CodecPayload(p));
+    components.push_back({
+        .id = d.id.value,
+        .layout_version = d.layout_version,
+        .kind = static_cast<std::uint8_t>(d.kind),
+        .row_bytes = d.row_bytes,
+        .rows_per_chunk = d.rows_per_chunk,
+        .state_bytes = d.state_bytes,
+        .window_rows = d.window_rows,
+        .position_id = c.position.id.value,
+        .valid_rows = c.position.valid_rows,
+        .chunks = chunks.data() + first,
+        .chunk_count = c.chunks.size(),
+        .has_tail = c.tail.has_value(),
+        .tail = c.tail ? CodecPayload(*c.tail) : GufoCachePayload{},
+        .has_private_state = c.private_state.has_value(),
+        .private_state = c.private_state ? CodecPayload(*c.private_state)
+                                         : GufoCachePayload{},
+    });
   }
-  auto checksum = DiskChecksum(w.bytes);
-  // The checksum is the final eight bytes and excluded from its own input.
-  for (unsigned i = 0; i < 8; ++i)
-    w.bytes.push_back((checksum >> (8 * i)) & 255);
-  return std::move(w.bytes);
+  GufoCacheManifest view{
+      .checkpoint = m.checkpoint.value,
+      .lineage = m.lineage.value,
+      .compatibility = {},
+      .purpose = static_cast<std::uint8_t>(m.purpose),
+      .rank = m.rank,
+      .input = m.input.data(),
+      .input_len = m.input.size(),
+      .tokens = m.tokens.data(),
+      .token_count = m.tokens.size(),
+      .components = components.data(),
+      .component_count = components.size(),
+  };
+  std::copy(m.compatibility.begin(), m.compatibility.end(), view.compatibility);
+  struct Output {
+    std::vector<std::uint8_t> bytes;
+    core::ffi::CallbackFailure failure;
+  } out;
+  const auto status = gufo_cache_manifest_encode(
+      &view,
+      [](void* context, std::size_t len) noexcept -> std::uint8_t* {
+        auto& out = *static_cast<Output*>(context);
+        return out.failure.Guard<std::uint8_t*>(nullptr, [&] {
+          out.bytes.resize(len);
+          return out.bytes.data();
+        });
+      },
+      &out);
+  Check(status, &out.failure);
+  return std::move(out.bytes);
 }
 DiskManifest DecodeManifest(std::span<const std::uint8_t> bytes) {
-  if (bytes.size() < 20 || bytes.size() > kMaxManifestBytes)
-    Invalid();
-  Reader trailer{bytes.last(8)};
-  if (DiskChecksum(bytes.first(bytes.size() - 8)) != trailer.Number(8))
-    Invalid();
-  Reader r{bytes.first(bytes.size() - 8)};
-  auto magic = r.Blob(kMagic.size());
-  if (!std::equal(magic.begin(), magic.end(), kMagic.begin()))
-    Invalid();
-  const auto version = r.Number(4);
-  if (version != kDiskFormatVersion && version != kDiskWindowFormatVersion)
-    Invalid();
-  DiskManifest m;
-  m.checkpoint.value = r.Number(8);
-  m.lineage.value = r.Number(8);
-  auto identity = r.Blob(m.compatibility.size());
-  std::copy(identity.begin(), identity.end(), m.compatibility.begin());
-  m.purpose = static_cast<CheckpointPurpose>(r.Number(1));
-  m.rank = r.Number(4);
-  auto input = r.Blob(r.Count(kMaxInputBytes, 1));
-  m.input.assign(input.begin(), input.end());
-  auto tokens = r.Count(kMaxTokens, 4);
-  m.tokens.reserve(tokens);
-  for (std::size_t i = 0; i < tokens; ++i)
-    m.tokens.push_back(r.Number(4));
-  auto components = r.Count(kMaxComponents, 47);
-  m.components.reserve(components);
-  std::size_t references{};
-  for (std::size_t i = 0; i < components; ++i) {
-    DiskComponent c;
-    auto& d = c.descriptor;
-    d.id.value = r.Number(4);
-    d.layout_version = r.Number(4);
-    d.kind = static_cast<ComponentKind>(r.Number(1));
-    d.row_bytes = r.Number(8);
-    d.rows_per_chunk = r.Number(8);
-    d.state_bytes = r.Number(8);
-    c.position = {d.id, r.Number(8)};
-    if (d.kind == ComponentKind::kWindowRows) {
-      if (version != kDiskWindowFormatVersion)
-        Invalid();
-      d.window_rows = r.Number(8);
-    }
-    auto chunks = r.Count(kMaxReferences - references, 32);
-    c.chunks.reserve(chunks);
-    references += chunks;
-    for (std::size_t j = 0; j < chunks; ++j)
-      c.chunks.push_back(r.Payload());
-    auto optional_payload = [&]() -> std::optional<DiskPayload> {
-      auto present = r.Number(1);
-      if (present > 1)
-        Invalid();
-      if (!present)
-        return {};
-      if (++references > kMaxReferences)
-        Invalid();
-      return r.Payload();
-    };
-    c.tail = optional_payload();
-    c.private_state = optional_payload();
-    m.components.push_back(std::move(c));
-  }
-  // Only manifests with window components use the window format version, so
-  // every manifest has one canonical encoding.
-  if (!r.bytes.empty() ||
-      (version == kDiskWindowFormatVersion &&
-       std::ranges::none_of(m.components, [](const auto& c) {
-         return c.descriptor.kind == ComponentKind::kWindowRows;
-       })))
-    Invalid();
-  Validate(m);
-  return m;
+  // Reserves the exact capacities PlanMetadata accounts for.
+  struct Decoder {
+    DiskManifest m;
+    core::ffi::CallbackFailure failure;
+  } decoder;
+  const GufoCacheManifestSink sink{
+      .context = &decoder,
+      .begin =
+          [](void* context, const GufoCacheManifest* view) noexcept {
+            auto& decoder = *static_cast<Decoder*>(context);
+            return decoder.failure.Guard(1, [&] {
+              auto& m = decoder.m;
+              m.checkpoint.value = view->checkpoint;
+              m.lineage.value = view->lineage;
+              std::copy(std::begin(view->compatibility),
+                        std::end(view->compatibility), m.compatibility.begin());
+              m.purpose = static_cast<CheckpointPurpose>(view->purpose);
+              m.rank = view->rank;
+              m.input.assign(view->input, view->input + view->input_len);
+              m.tokens.reserve(view->token_count);
+              m.components.reserve(view->component_count);
+              return 0;
+            });
+          },
+      .tokens =
+          [](void* context, const std::uint32_t* tokens,
+             std::size_t count) noexcept {
+            auto& decoder = *static_cast<Decoder*>(context);
+            return decoder.failure.Guard(1, [&] {
+              decoder.m.tokens.insert(decoder.m.tokens.end(), tokens,
+                                      tokens + count);
+              return 0;
+            });
+          },
+      .component =
+          [](void* context, const GufoCacheComponent* c) noexcept {
+            auto& decoder = *static_cast<Decoder*>(context);
+            return decoder.failure.Guard(1, [&] {
+              DiskComponent component;
+              auto& d = component.descriptor;
+              d.id.value = c->id;
+              d.layout_version = c->layout_version;
+              d.kind = static_cast<ComponentKind>(c->kind);
+              d.row_bytes = c->row_bytes;
+              d.rows_per_chunk = c->rows_per_chunk;
+              d.state_bytes = c->state_bytes;
+              d.window_rows = c->window_rows;
+              component.position = {{c->position_id}, c->valid_rows};
+              component.chunks.reserve(c->chunk_count);
+              component.tail = OptionalPayload(c->has_tail, c->tail);
+              component.private_state =
+                  OptionalPayload(c->has_private_state, c->private_state);
+              decoder.m.components.push_back(std::move(component));
+              return 0;
+            });
+          },
+      .chunks =
+          [](void* context, const GufoCachePayload* chunks,
+             std::size_t count) noexcept {
+            auto& decoder = *static_cast<Decoder*>(context);
+            return decoder.failure.Guard(1, [&] {
+              auto& target = decoder.m.components.back().chunks;
+              for (std::size_t i = 0; i < count; ++i)
+                target.push_back(FromCodec(chunks[i]));
+              return 0;
+            });
+          },
+  };
+  Check(gufo_cache_manifest_decode(bytes.data(), bytes.size(), &sink),
+        &decoder.failure);
+  return std::move(decoder.m);
 }
 std::string DiskFileName(DiskFileId id) {
   constexpr char hex[] = "0123456789abcdef";
@@ -526,12 +437,17 @@ std::string DiskFileName(DiskFileId id) {
   }
   return name + ".bin";
 }
+// An index slot also pays for its entry's shared manifest object: the
+// DiskManifest header and the shared_ptr control block beside it.
+constexpr std::size_t kEntrySlotBytes =
+    sizeof(DurableEntry) + sizeof(DiskManifest) + 64;
 struct DiskStore::Impl {
   ResourceLedger* ledger;
   ResourceCharge metadata, entry_capacity;
   platform::Directory root;
   Fd lock;
-  platform::Directory version, manifests, chunks, private_files, temporary;
+  platform::Directory version, manifests, chunks, private_files, temporary,
+      uses;
   DiskStartupStats stats;
   std::vector<DurableEntry> entries;
   std::uint64_t budget_bytes;
@@ -616,6 +532,7 @@ struct DiskStore::Impl {
         chunks(DirectoryAt(version, "chunks")),
         private_files(DirectoryAt(version, "private")),
         temporary(DirectoryAt(version, "tmp")),
+        uses(DirectoryAt(version, "uses")),
         budget_bytes(budget) {
     // Persist the layout, including a newly created root and ancestors, before
     // any checkpoint can rely on these directory entries.
@@ -626,7 +543,7 @@ struct DiskStore::Impl {
       IoError("sync cache ancestors", ec);
     std::size_t manifest_count{};
     for (const platform::Directory* directory :
-         {&manifests, &chunks, &private_files})
+         {&manifests, &chunks, &private_files, &uses})
       Scan(*directory,
            [&](const std::string& name, const platform::FileInfo& st) {
              if (ParseName(name)) {
@@ -642,7 +559,7 @@ struct DiskStore::Impl {
     if (manifest_count) {
       auto entry_reservation =
           ledger->Reserve(ResourceCategory::kMetadata,
-                          Multiply(manifest_count, sizeof(DurableEntry)));
+                          Multiply(manifest_count, kEntrySlotBytes));
       std::vector<DurableEntry> allocated;
       allocated.reserve(manifest_count);
       if (allocated.capacity() != manifest_count)
@@ -656,17 +573,6 @@ struct DiskStore::Impl {
         return;
       try {
         auto entry = ReadManifest(name, st);
-        auto& m = entry.manifest_;
-        bool available = true;
-        for (const auto& c : m.components) {
-          for (const auto& p : c.chunks)
-            available = Check(chunks, p) && available;
-          for (auto p : {c.tail, c.private_state})
-            if (p)
-              available = Check(private_files, *p) && available;
-        }
-        if (!available)
-          Invalid();
         entry.file_ = *id;
         entry.epoch_ = next_epoch++;
         entries.push_back(std::move(entry));
@@ -700,47 +606,116 @@ struct DiskStore::Impl {
   void ValidateReferences() {
     if (entries.empty())
       return;
+#ifdef GUFO_CACHE_TESTING
+    const auto hook = reference_validation_hook;
+    if (hook)
+      hook(true);
+    const Finally leave_scope{[hook] {
+      if (hook)
+        hook(false);
+    }};
+#endif
     // Shared files must describe the same immutable lineage/range/layout.
     // Private bytes cannot be aliased across checkpoints. Reject every side
     // of a conflict, independent of filesystem enumeration order.
     struct Claim {
-      CompatibilityDigest compatibility;
-      std::vector<std::uint64_t> geometry;
-      std::vector<std::size_t> entries;
-      bool conflict{};
+      const DiskManifest* manifest{};
+      const ComponentDescriptor* descriptor{};
+      const DiskPayload* payload{};
+      Rows first{};
+      std::uint64_t observed_bytes{};
+      bool regular{}, conflict{};
     };
+    using Key = std::pair<bool, DiskFileId>;
     std::size_t references{};
     for (const auto& entry : entries)
-      for (const auto& c : entry.manifest_.components)
+      for (const auto& c : entry.manifest_->components)
         references = Add(
             references, c.chunks.size() + bool(c.tail) + bool(c.private_state));
-    // Cover map records, geometry arrays, vector growth and tree links before
-    // building the temporary cross-manifest reference catalog.
+    stats.dependency_references = references;
+    // One temporary node per distinct dependency: first its filesystem
+    // observation, then its borrowed canonical claim. Do not index orphan
+    // directory entries or retain another metadata cache after recovery.
+    // The reservation covers worst-case distinct nodes, tree/allocator overhead
+    // and the two compact arrays. It is temporary working capacity, never
+    // evidence of retained physical backing.
     auto working = ledger->Reserve(
         ResourceCategory::kMetadata,
-        Add(Multiply(references, sizeof(Claim) + sizeof(DiskFileId) +
-                                     24 * sizeof(std::uint64_t)),
-            Multiply(entries.size(), 96)));
-    std::map<std::pair<bool, DiskFileId>, Claim> claims;
-    std::map<std::uint64_t, std::vector<std::size_t>> checkpoints;
-    std::vector<bool> rejected(entries.size());
+        Add(Add(Multiply(references,
+                         sizeof(Claim) + sizeof(Key) + 8 * sizeof(void*)),
+                Multiply(entries.size(), sizeof(std::size_t) + 1)),
+            2 * 64));
+    std::map<Key, Claim> claims;
+    std::vector<std::size_t> checkpoints(entries.size());
+    std::vector<std::uint8_t> rejected(entries.size());
+    if (checkpoints.capacity() != entries.size() ||
+        rejected.capacity() != entries.size())
+      throw std::logic_error("unexpected disk validation capacity");
     for (std::size_t i = 0; i < entries.size(); ++i) {
-      const auto& m = entries[i].manifest_;
-      checkpoints[m.checkpoint.value].push_back(i);
-      auto claim = [&](bool is_private, const DiskPayload& p,
-                       const ComponentDescriptor& d, std::uint64_t first) {
-        const std::vector<std::uint64_t> geometry{
-            m.lineage.value, d.id.value,       d.layout_version,
-            d.row_bytes,     d.rows_per_chunk, first,
-            p.bytes,         p.checksum,       d.window_rows};
-        auto [it, inserted] = claims.try_emplace(
-            {is_private, p.file}, Claim{m.compatibility, geometry, {}, false});
-        auto& value = it->second;
-        if (!inserted &&
-            (is_private || value.compatibility != m.compatibility ||
-             value.geometry != geometry))
-          value.conflict = true;
-        value.entries.push_back(i);
+      const auto check = [&](bool is_private, const DiskPayload& p) {
+        auto [it, inserted] = claims.try_emplace({is_private, p.file});
+        auto& observed = it->second;
+        if (inserted) {
+          ++stats.dependency_stats;
+          platform::FileInfo st{};
+          std::error_code ec;
+          observed.regular =
+              platform::StatAt(is_private ? private_files : chunks,
+                               DiskFileName(p.file), false, &st, ec) &&
+              Regular(st);
+          // Allocation pressure is not evidence of a corrupt dependency.
+          // Abort recovery and relinquish ownership; do not discard owners.
+          if (!observed.regular && ec == std::errc::not_enough_memory)
+            throw std::bad_alloc();
+          observed.observed_bytes = st.size;
+        }
+        // Compare each reference with the actual size, not with whether a
+        // different owner's first claim passed. Bad claims cannot poison
+        // later compatible owners of the same file.
+        rejected[i] |= !observed.regular || observed.observed_bytes != p.bytes;
+      };
+      for (const auto& c : entries[i].manifest_->components) {
+        for (const auto& p : c.chunks)
+          check(false, p);
+        for (const auto* p : {&c.tail, &c.private_state})
+          if (*p)
+            check(true, p->value());
+      }
+    }
+    stats.distinct_dependency_files = claims.size();
+    // Only complete manifests participate in geometry/alias and checkpoint-ID
+    // conflicts, preserving the previous filter-before-conflict behavior.
+    // Reuse observations only within this exclusive-ownership recovery. An
+    // external writer ignoring LOCK is not made safe by repeated stat calls;
+    // restore must still check its opened file, identity and payload checksum.
+    std::size_t available{};
+    const auto geometry = [](const Claim& c) {
+      const auto& d = *c.descriptor;
+      return std::array<std::uint64_t, 9>{c.manifest->lineage.value,
+                                          d.id.value,
+                                          d.layout_version,
+                                          d.row_bytes,
+                                          d.rows_per_chunk,
+                                          c.first,
+                                          c.payload->bytes,
+                                          c.payload->checksum,
+                                          d.window_rows};
+    };
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      const auto& m = *entries[i].manifest_;
+      if (rejected[i])
+        continue;
+      checkpoints[available++] = i;
+      const auto claim = [&](bool is_private, const DiskPayload& p,
+                             const ComponentDescriptor& d, Rows first) {
+        const Claim current{&m, &d, &p, first};
+        auto& previous = claims.at({is_private, p.file});
+        if (!previous.manifest)
+          previous = current;
+        else if (is_private ||
+                 previous.manifest->compatibility != m.compatibility ||
+                 geometry(previous) != geometry(current))
+          previous.conflict = true;
       };
       for (const auto& c : m.components) {
         Rows first = FirstChunkRow(c.descriptor, c.position.valid_rows);
@@ -748,19 +723,41 @@ struct DiskStore::Impl {
           claim(false, p, c.descriptor, first);
           first = Add(first, c.descriptor.rows_per_chunk);
         }
-        for (auto p : {c.tail, c.private_state})
-          if (p)
-            claim(true, *p, c.descriptor, first);
+        for (const auto* p : {&c.tail, &c.private_state})
+          if (*p)
+            claim(true, p->value(), c.descriptor, first);
       }
     }
-    for (const auto& [key, claim] : claims)
-      if (claim.conflict)
-        for (auto i : claim.entries)
-          rejected[i] = true;
-    for (const auto& [id, owners] : checkpoints)
-      if (owners.size() > 1)
-        for (auto i : owners)
-          rejected[i] = true;
+    checkpoints.resize(available);
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      if (rejected[i])
+        continue;
+      const auto conflict = [&](bool is_private, const DiskPayload& p) {
+        return claims.at({is_private, p.file}).conflict;
+      };
+      for (const auto& c : entries[i].manifest_->components) {
+        for (const auto& p : c.chunks)
+          rejected[i] |= conflict(false, p);
+        for (const auto* p : {&c.tail, &c.private_state})
+          if (*p)
+            rejected[i] |= conflict(true, p->value());
+      }
+    }
+    const auto checkpoint = [&](std::size_t i) {
+      return entries[i].manifest_->checkpoint.value;
+    };
+    std::sort(checkpoints.begin(), checkpoints.end(),
+              [&](auto a, auto b) { return checkpoint(a) < checkpoint(b); });
+    for (std::size_t first = 0; first < checkpoints.size();) {
+      auto end = first + 1;
+      while (end < checkpoints.size() &&
+             checkpoint(checkpoints[end]) == checkpoint(checkpoints[first]))
+        ++end;
+      if (end - first > 1)
+        for (auto i = first; i < end; ++i)
+          rejected[checkpoints[i]] = true;
+      first = end;
+    }
     std::size_t i{};
     std::erase_if(entries, [&](const auto&) {
       const bool remove = rejected[i++];
@@ -776,7 +773,7 @@ struct DiskStore::Impl {
   // with the tier and, charged while the RAM cache fills its share of the
   // ledger, would refuse every later publication (#1030).
   void ValidateCandidate() {
-    const auto& candidate = entries.back().manifest_;
+    const auto& candidate = *entries.back().manifest_;
     using Geometry = std::array<std::uint64_t, 9>;
     const auto each_reference = [](const DiskManifest& m, auto&& visit) {
       for (const auto& c : m.components) {
@@ -813,7 +810,7 @@ struct DiskStore::Impl {
         Invalid();
     });
     for (std::size_t i = 0; i + 1 < entries.size(); ++i) {
-      const auto& m = entries[i].manifest_;
+      const auto& m = *entries[i].manifest_;
       if (m.checkpoint == candidate.checkpoint)
         Invalid();
       const bool compatible = m.compatibility == candidate.compatibility;
@@ -838,6 +835,14 @@ struct DiskStore::Impl {
     if (!synced)
       IoError("sync cache file/directory", ec);
   }
+  // Waits for a concurrent sync and records its wall time from the start.
+  void Wait(ConcurrentSync& sync) {
+    const auto failure = sync.Wait();
+    publication_stats.fsync_calls += sync.Files();
+    publication_stats.fsync_ns += sync.ElapsedNs();
+    if (failure)
+      IoError("sync cache file/directory", failure);
+  }
   void Sync(const platform::Directory& directory) {
     auto begin = std::chrono::steady_clock::now();
     std::error_code ec;
@@ -850,16 +855,16 @@ struct DiskStore::Impl {
     if (!synced)
       IoError("sync cache file/directory", ec);
   }
-  void Remove(const platform::Directory& directory, const std::string& name) {
+  bool Remove(const platform::Directory& directory, const std::string& name) {
     platform::FileInfo st{};
     std::error_code ec;
     if (!platform::StatAt(directory, name, false, &st, ec)) {
       if (ec == std::errc::no_such_file_or_directory)
-        return;
+        return false;
       IoError("stat cache removal", ec);
     }
     if (!Regular(st))
-      return;
+      return false;
     if (&directory == &chunks || &directory == &private_files)
       if (auto id = ParseName(name))
         ForgetVerified({&directory == &private_files, *id});
@@ -869,12 +874,14 @@ struct DiskStore::Impl {
       std::lock_guard guard(stats_mutex);
       stats.managed_bytes -= st.size;
     }
+    return true;
   }
   bool Referenced(const platform::Directory& directory, DiskFileId id) const {
     for (const auto& entry : entries) {
-      if (&directory == &manifests && entry.file_ == id)
+      if ((&directory == &manifests || &directory == &uses) &&
+          entry.file_ == id)
         return true;
-      for (const auto& c : entry.manifest_.components) {
+      for (const auto& c : entry.manifest_->components) {
         if (&directory == &chunks)
           for (const auto& p : c.chunks)
             if (p.file == id)
@@ -906,7 +913,7 @@ struct DiskStore::Impl {
     });
     Sync(manifests);
     for (const platform::Directory* directory :
-         {&chunks, &private_files, &temporary}) {
+         {&chunks, &private_files, &temporary, &uses}) {
       Scan(*directory, [&](const auto& name, const auto&) {
         auto id = ParseName(name);
         if (id && !Referenced(*directory, *id))
@@ -918,7 +925,7 @@ struct DiskStore::Impl {
     // conservative charge with the actual namespace after successful cleanup.
     std::uint64_t managed{};
     for (const platform::Directory* directory :
-         {&manifests, &chunks, &private_files, &temporary})
+         {&manifests, &chunks, &private_files, &temporary, &uses})
       Scan(*directory, [&](const auto& name, const auto& st) {
         if (ParseName(name))
           managed = Add(managed, st.size);
@@ -983,7 +990,7 @@ struct DiskStore::Impl {
   void Quarantine(bool private_file, DiskFileId file) {
     std::lock_guard guard(index_mutex);
     for (auto& entry : entries)
-      for (const auto& component : entry.manifest_.components) {
+      for (const auto& component : entry.manifest_->components) {
         bool matches{};
         if (private_file) {
           for (const auto& payload : {component.tail, component.private_state})
@@ -1017,7 +1024,7 @@ struct DiskStore::Impl {
     {
       std::lock_guard guard(index_mutex);
       for (const auto& entry : entries)
-        for (const auto& component : entry.manifest_.components) {
+        for (const auto& component : entry.manifest_->components) {
           if (&directory == &private_files) {
             for (const auto& existing :
                  {component.tail, component.private_state})
@@ -1126,7 +1133,7 @@ struct DiskStore::Impl {
     auto plan = PlanMetadata(bytes);
     auto retained = ledger->Reserve(ResourceCategory::kMetadata, plan.retained);
     DurableEntry candidate;
-    candidate.manifest_ = DecodeManifest(bytes);
+    candidate.manifest_ = std::make_shared<DiskManifest>(DecodeManifest(bytes));
     candidate.file_ = file;
     candidate.durable_ = false;
     candidate.availability_ = NewAvailability();
@@ -1219,7 +1226,7 @@ struct DiskStore::Impl {
             p.checksum = existing.checksum;
           };
           for (const auto& entry : entries)
-            for (const auto& component : entry.manifest_.components) {
+            for (const auto& component : entry.manifest_->components) {
               if (key.first) {
                 for (const auto& payload :
                      {component.tail, component.private_state})
@@ -1230,7 +1237,7 @@ struct DiskStore::Impl {
                   resolve(payload);
               }
             }
-          for (auto& component : candidate.manifest_.components) {
+          for (auto& component : candidate.manifest_->components) {
             if (key.first) {
               for (auto* payload : {&component.tail, &component.private_state})
                 if (*payload && (*payload)->file == p.file)
@@ -1274,7 +1281,7 @@ struct DiskStore::Impl {
     for (const auto& entry : entries) {
       if (entry.available_)
         continue;
-      for (const auto& component : entry.manifest_.components) {
+      for (const auto& component : entry.manifest_->components) {
         for (const auto& chunk : component.chunks)
           if (dependencies.contains({false, chunk.file}))
             throw DiskDependencyError(false, chunk.file);
@@ -1286,7 +1293,7 @@ struct DiskStore::Impl {
     if (entries.size() == entries.capacity()) {
       auto reserve =
           ledger->Reserve(ResourceCategory::kMetadata,
-                          Multiply(entries.size() + 1, sizeof(DurableEntry)));
+                          Multiply(entries.size() + 1, kEntrySlotBytes));
       std::vector<DurableEntry> replacement;
       replacement.reserve(entries.size() + 1);
       auto charge = reserve.Convert();
@@ -1308,6 +1315,47 @@ struct DiskStore::Impl {
       // Candidate is invisible to pinned snapshots until committed. Reuse from
       // filesystem existence after validating claims, never from this
       // candidate.
+      // Each payload is renamed into place only after its own sync. A batch
+      // syncs on helper threads while the next one is written.
+      struct Written {
+        Fd fd;
+        const platform::Directory* directory;
+        std::string name;
+      };
+      std::vector<Written> written, syncing;
+      std::vector<platform::PlatformFile> syncing_files;
+      written.reserve(kPayloadSyncBatch);
+      syncing.reserve(kPayloadSyncBatch);
+      syncing_files.reserve(kPayloadSyncBatch);
+      // Declared after its files: destruction joins its threads first.
+      std::optional<ConcurrentSync> sync;
+      const auto finish_sync = [&] {
+        if (!sync)
+          return;
+        Wait(*sync);
+        sync.reset();
+        for (auto& w : syncing) {
+          {
+            // The payload is durable; drop its clean pages so multi-GB
+            // snapshots don't accumulate in the page cache.
+            CostTimer timer(publication_stats.filesystem_ns);
+            platform::Advise(w.fd.Get(), platform::AdviseHint::kDontNeed, 0, 0);
+          }
+          DISK_STEP(kPayloadSynced);
+          Rename(*w.directory, w.name);
+          DISK_STEP(kPayloadRenamed);
+        }
+        syncing.clear();
+      };
+      const auto start_sync = [&] {
+        finish_sync();
+        syncing.swap(written);
+        syncing_files.clear();
+        for (const auto& w : syncing)
+          syncing_files.push_back(w.fd.Get());
+        if (!syncing.empty())
+          sync.emplace(syncing_files, kPayloadSyncThreads);
+      };
       for (auto& [key, p] : dependencies) {
         const platform::Directory& dir = key.first ? private_files : chunks;
         auto payload_name = DiskFileName(p.file);
@@ -1348,7 +1396,7 @@ struct DiskStore::Impl {
           if (p.checksum && p.checksum != crc)
             Invalid();
           p.checksum = crc;
-          for (auto& c : entries.back().manifest_.components) {
+          for (auto& c : entries.back().manifest_->components) {
             if (!key.first) {
               for (auto& chunk : c.chunks)
                 if (chunk.file == p.file)
@@ -1361,17 +1409,12 @@ struct DiskStore::Impl {
           }
         }
         DISK_STEP(kPayloadWritten);
-        Sync(fd.Get());
-        {
-          // The payload is durable; drop its clean pages so multi-GB snapshots
-          // don't accumulate in the page cache.
-          CostTimer timer(publication_stats.filesystem_ns);
-          platform::Advise(fd.Get(), platform::AdviseHint::kDontNeed, 0, 0);
-        }
-        DISK_STEP(kPayloadSynced);
-        Rename(dir, payload_name);
-        DISK_STEP(kPayloadRenamed);
+        written.push_back({std::move(fd), &dir, std::move(payload_name)});
+        if (written.size() == kPayloadSyncBatch)
+          start_sync();
       }
+      start_sync();
+      finish_sync();
       Sync(temporary);
       DISK_STEP(kTemporaryDirectorySynced);
       Sync(chunks);
@@ -1385,7 +1428,7 @@ struct DiskStore::Impl {
       if (!sources.empty()) {
         // Free the provisional encoding before allocating the final one.
         std::vector<std::uint8_t>().swap(bytes);
-        bytes = EncodeManifest(entries.back().manifest_);
+        bytes = EncodeManifest(*entries.back().manifest_);
       }
       auto fd = Create(name);
       WriteFile(fd.Get(), bytes);
@@ -1485,14 +1528,14 @@ struct DiskStore::Impl {
                                        sizeof(DiskFileId) + 4 * sizeof(void*)))
             : ResourceReservation{};
     DurableEntry entry;
-    entry.manifest_ = DecodeManifest(bytes);
+    entry.manifest_ = std::make_shared<DiskManifest>(DecodeManifest(bytes));
     entry.availability_ = NewAvailability();
     // Decoding explicitly reserves exact capacities with the pinned library.
     std::size_t actual =
-        entry.manifest_.input.capacity() +
-        entry.manifest_.tokens.capacity() * sizeof(Token) +
-        entry.manifest_.components.capacity() * sizeof(DiskComponent);
-    for (const auto& c : entry.manifest_.components)
+        entry.manifest_->input.capacity() +
+        entry.manifest_->tokens.capacity() * sizeof(Token) +
+        entry.manifest_->components.capacity() * sizeof(DiskComponent);
+    for (const auto& c : entry.manifest_->components)
       actual = Add(actual, c.chunks.capacity() * sizeof(DiskPayload));
     if (actual != plan.retained)
       throw std::logic_error("unexpected disk manifest capacity");
@@ -1503,13 +1546,6 @@ struct DiskStore::Impl {
     if (retained)
       entry.metadata_ = retained.Convert();
     return entry;
-  }
-  bool Check(const platform::Directory& directory, const DiskPayload& p) {
-    ++stats.dependency_stats;
-    platform::FileInfo st{};
-    std::error_code ec;
-    return platform::StatAt(directory, DiskFileName(p.file), false, &st, ec) &&
-           Regular(st) && st.size == p.bytes;
   }
 };
 DurableEntry& DurableEntry::operator=(DurableEntry&& other) noexcept {
@@ -1537,6 +1573,28 @@ DiskStore::DiskStore(ResourceLedger& ledger,
 DiskStore::~DiskStore() = default;
 std::span<const DurableEntry> DiskStore::Entries() const {
   return impl_->entries;
+}
+std::size_t DiskStore::OwnedManifestBytes() const {
+  const std::lock_guard guard(impl_->index_mutex);
+  std::size_t owned{};
+  for (const auto& entry : impl_->entries) {
+    const auto& manifest = *entry.manifest_;
+    auto bytes = Add(manifest.input.size(),
+                     Multiply(manifest.tokens.size(), sizeof(Token)));
+    bytes =
+        Add(bytes, Multiply(manifest.components.size(), sizeof(DiskComponent)));
+    for (const auto& component : manifest.components)
+      bytes =
+          Add(bytes, Multiply(component.chunks.size(), sizeof(DiskPayload)));
+    // Decode initialized these elements before converting their admission.
+    // A converted estimate elsewhere in the ledger proves no such backing.
+    if (!entry.metadata_ || bytes > entry.metadata_.Info().bytes)
+      throw std::logic_error("manifest storage exceeds retained charge");
+    if (bytes > std::numeric_limits<std::size_t>::max() - owned)
+      throw std::overflow_error("owned manifest storage overflows");
+    owned += bytes;
+  }
+  return owned;
 }
 DiskStartupStats DiskStore::Stats() const {
   std::lock_guard guard(impl_->stats_mutex);
@@ -1591,13 +1649,11 @@ std::optional<DiskSnapshot> DiskStore::Open(CheckpointId id) const {
   std::lock_guard guard(impl_->index_mutex);
   for (const auto& entry : impl_->entries) {
     if (!entry.durable_ || !entry.available_ ||
-        entry.manifest_.checkpoint != id)
+        entry.manifest_->checkpoint != id)
       continue;
-    auto reservation = impl_->ledger->Reserve(ResourceCategory::kMetadata,
-                                              entry.metadata_.Info().bytes);
     DiskSnapshot snapshot;
     snapshot.manifest_ = entry.manifest_;
-    snapshot.metadata_ = reservation.Convert();
+    snapshot.metadata_ = entry.metadata_;
     snapshot.pin_.token_ = entry.pin_;
     snapshot.pin_.epoch_ = entry.epoch_;
     snapshot.store_ = impl_.get();
@@ -1609,7 +1665,7 @@ void DiskStore::PrefetchPayload(const DiskSnapshot& snapshot, bool private_file,
                                 const DiskPayload& payload,
                                 std::uint64_t bytes) const {
   if (snapshot.store_ != impl_.get() || !snapshot.pin_ ||
-      !Contains(snapshot.manifest_, private_file, payload))
+      !Contains(*snapshot.manifest_, private_file, payload))
     throw std::invalid_argument("invalid disk prefetch dependency");
   bytes = std::min(bytes, payload.bytes);
   if (!bytes)
@@ -1623,16 +1679,54 @@ void DiskStore::PrefetchPayload(const DiskSnapshot& snapshot, bool private_file,
       platform::Stat(file.Get(), &status, ec) && Regular(status))
     platform::Advise(file.Get(), platform::AdviseHint::kWillNeed, 0, bytes);
 }
+std::uint64_t DiskStore::WarmPayload(const DiskSnapshot& snapshot,
+                                     bool private_file,
+                                     const DiskPayload& payload,
+                                     std::span<std::uint8_t> buffer,
+                                     std::stop_token stop) const {
+  if (snapshot.store_ != impl_.get() || !snapshot.pin_ || buffer.empty() ||
+      !Contains(*snapshot.manifest_, private_file, payload))
+    throw std::invalid_argument("invalid disk warm-up dependency");
+  const auto& directory = private_file ? impl_->private_files : impl_->chunks;
+  std::error_code ec;
+  Fd file(platform::OpenAt(directory, DiskFileName(payload.file),
+                           platform::FileMode::kRead, ec));
+  if (!platform::FileValid(file.Get()))
+    return 0;
+  std::uint64_t read{};
+  while (read < payload.bytes && !stop.stop_requested()) {
+    const auto n = platform::Read(
+        file.Get(), buffer.data(),
+        std::min<std::uint64_t>(buffer.size(), payload.bytes - read), ec);
+    if (n == 0 && ec == std::errc::interrupted)
+      continue;
+    if (n == 0)
+      break;
+    read += n;
+  }
+  return read;
+}
 DiskReadStats DiskStore::ReadPayload(
     const DiskSnapshot& snapshot, bool private_file, const DiskPayload& payload,
     std::span<std::uint8_t> staging,
     const std::function<void(std::uint64_t, std::span<const std::uint8_t>)>&
         consume,
     DiskReadStats* observation) {
-  if (snapshot.store_ != impl_.get() || !snapshot.pin_ || staging.empty() ||
-      !consume)
+  if (staging.empty())
     throw std::invalid_argument("invalid disk read lease or staging");
-  if (!Contains(snapshot.manifest_, private_file, payload))
+  return ReadPayload(
+      snapshot, private_file, payload,
+      [staging](std::uint64_t) { return staging; }, consume, observation);
+}
+DiskReadStats DiskStore::ReadPayload(
+    const DiskSnapshot& snapshot, bool private_file, const DiskPayload& payload,
+    const std::function<std::span<std::uint8_t>(std::uint64_t)>& buffer,
+    const std::function<void(std::uint64_t, std::span<const std::uint8_t>)>&
+        consume,
+    DiskReadStats* observation) {
+  if (snapshot.store_ != impl_.get() || !snapshot.pin_ || !buffer || !consume)
+    throw std::invalid_argument("invalid disk read lease or staging");
+  if (!Contains(*snapshot.manifest_, private_file, payload))
     throw std::invalid_argument("payload outside disk snapshot");
   using Clock = std::chrono::steady_clock;
   const auto elapsed = [](auto start) {
@@ -1661,6 +1755,9 @@ DiskReadStats DiskStore::ReadPayload(
   stats.verification_cached = impl_->VerificationCached(key, identity);
   std::uint64_t offset{}, checksum{};
   while (offset < payload.bytes) {
+    const auto staging = buffer(offset);
+    if (staging.empty())
+      throw std::invalid_argument("invalid disk read staging");
     auto piece = staging.first(
         std::min<std::uint64_t>(staging.size(), payload.bytes - offset));
     begin = Clock::now();
@@ -1696,12 +1793,116 @@ DiskReadStats DiskStore::ReadPayload(
     impl_->RememberVerified(key, identity);
   return stats;
 }
+DiskUseHistory DiskStore::UseHistory(CheckpointId id) const {
+  std::lock_guard guard(impl_->mutex);
+  const auto it = std::find_if(
+      impl_->entries.begin(), impl_->entries.end(),
+      [&](const auto& e) { return e.manifest_->checkpoint == id; });
+  if (it == impl_->entries.end())
+    return {};
+  std::error_code ec;
+  const Fd file(platform::OpenAt(impl_->uses, DiskFileName(it->file_),
+                                 platform::FileMode::kRead, ec));
+  platform::FileInfo info{};
+  std::array<std::uint8_t, 40> bytes{};
+  if (!platform::FileValid(file.Get()) ||
+      !platform::Stat(file.Get(), &info, ec) || !Regular(info) ||
+      (info.size != 16 && info.size != bytes.size()))
+    return {};
+  std::size_t offset = 0;
+  while (offset < info.size) {
+    const auto read = platform::Read(file.Get(), bytes.data() + offset,
+                                     info.size - offset, ec);
+    if (!read) {
+      if (ec == std::errc::interrupted)
+        continue;
+      return {};
+    }
+    offset += read;
+  }
+  const auto word = [&](std::size_t offset) {
+    std::uint64_t value = 0;
+    for (unsigned i = 0; i < 8; ++i)
+      value |= std::uint64_t(bytes[offset + i]) << (8 * i);
+    return value;
+  };
+  const auto payload = static_cast<std::size_t>(info.size) - 8;
+  if (word(payload) != DiskChecksum(std::span(bytes).first(payload), id.value))
+    return {};
+  if (info.size == 16)
+    return {word(0), 0, {}};
+  if (word(16) > 1 || (word(16) && word(24) > word(8)))
+    return {};
+  return {word(0), word(8), word(16) ? std::optional(word(24)) : std::nullopt};
+}
+std::uint64_t DiskStore::LastUse(CheckpointId id) const {
+  return UseHistory(id).last_used;
+}
+bool DiskStore::TryRecordUse(CheckpointId id, std::uint64_t used) {
+  return TryRecordUse(id, DiskUseHistory{used, 0, {}});
+}
+bool DiskStore::TryRecordUse(CheckpointId id, const DiskUseHistory& history) {
+  if (history.reused_at && *history.reused_at > history.admitted_bytes)
+    return false;
+  std::unique_lock guard(impl_->mutex, std::try_to_lock);
+  if (!guard.owns_lock() || impl_->recovery_required)
+    return false;
+  std::unique_lock index_guard(impl_->index_mutex);
+  const auto it = std::find_if(
+      impl_->entries.begin(), impl_->entries.end(), [&](const auto& e) {
+        return e.durable_ && e.available_ && e.manifest_->checkpoint == id;
+      });
+  if (it == impl_->entries.end())
+    return false;
+  const auto name = DiskFileName(it->file_);
+  index_guard.unlock();
+  platform::FileInfo prior{};
+  std::error_code ec;
+  const auto released =
+      platform::StatAt(impl_->uses, name, false, &prior, ec) && Regular(prior)
+          ? prior.size
+          : 0;
+  {
+    const std::lock_guard stats_guard(impl_->stats_mutex);
+    const auto after_removal = impl_->stats.managed_bytes -
+                               std::min(impl_->stats.managed_bytes, released);
+    if (after_removal > impl_->budget_bytes ||
+        impl_->budget_bytes - after_removal < 40)
+      return false;
+  }
+  std::array<std::uint8_t, 40> bytes{};
+  const std::array<std::uint64_t, 4> words{
+      history.last_used, history.admitted_bytes,
+      history.reused_at.has_value() ? 1U : 0U, history.reused_at.value_or(0)};
+  for (std::size_t word = 0; word < words.size(); ++word)
+    for (unsigned i = 0; i < 8; ++i)
+      bytes[word * 8 + i] = words[word] >> (8 * i);
+  const auto checksum = DiskChecksum(std::span(bytes).first(32), id.value);
+  for (unsigned i = 0; i < 8; ++i)
+    bytes[32 + i] = checksum >> (8 * i);
+  try {
+    // Use history is advisory: unlinking an old record before replacement may
+    // lose recency on a crash, but never changes restore eligibility.
+    impl_->Remove(impl_->uses, name);
+    impl_->Remove(impl_->temporary, name);
+    auto file = impl_->Create(name);
+    impl_->WriteFile(file.Get(), bytes);
+    impl_->Sync(file.Get());
+    impl_->Rename(impl_->uses, name);
+    impl_->Sync(impl_->uses);
+    return true;
+  } catch (...) {
+    // Account partial files as orphans; normal recovery reclaims them.
+    return false;
+  }
+}
 DiskReadPin DiskStore::Pin(CheckpointId id, std::uint64_t epoch) const {
   std::lock_guard guard(impl_->index_mutex);
   DiskReadPin pin;
   for (const auto& entry : impl_->entries)
     if (entry.durable_ && entry.available_ &&
-        entry.manifest_.checkpoint == id && (!epoch || epoch == entry.epoch_)) {
+        entry.manifest_->checkpoint == id &&
+        (!epoch || epoch == entry.epoch_)) {
       pin.token_ = entry.pin_;
       pin.epoch_ = entry.epoch_;
       break;
@@ -1712,7 +1913,7 @@ DiskRetireResult DiskStore::Impl::Retire(CheckpointId id, std::uint64_t epoch) {
   RequireRecovered();
   std::unique_lock index_guard(index_mutex);
   auto it = std::find_if(entries.begin(), entries.end(), [&](const auto& e) {
-    return e.manifest_.checkpoint == id;
+    return e.manifest_->checkpoint == id;
   });
   if (it == entries.end() || (epoch && it->epoch_ != epoch))
     return DiskRetireResult::kMissing;
@@ -1727,7 +1928,7 @@ DiskRetireResult DiskStore::Impl::Retire(CheckpointId id, std::uint64_t epoch) {
   try {
     Remove(manifests, DiskFileName(retired.file_));
     Sync(manifests);
-    for (const auto& c : retired.manifest_.components) {
+    for (const auto& c : retired.manifest_->components) {
       for (const auto& p : c.chunks)
         if (!Referenced(chunks, p.file))
           Remove(chunks, DiskFileName(p.file));
@@ -1735,6 +1936,8 @@ DiskRetireResult DiskStore::Impl::Retire(CheckpointId id, std::uint64_t epoch) {
         if (p && !Referenced(private_files, p->file))
           Remove(private_files, DiskFileName(p->file));
     }
+    if (Remove(uses, DiskFileName(retired.file_)))
+      Sync(uses);
     Sync(chunks);
     Sync(private_files);
     return DiskRetireResult::kRetired;
@@ -1759,7 +1962,7 @@ DiskRetireResult DiskStore::TryRetire(CheckpointId id, std::uint64_t epoch) {
 void DiskStore::Invalidate(CheckpointId id, std::uint64_t epoch) {
   std::lock_guard guard(impl_->index_mutex);
   for (auto& entry : impl_->entries)
-    if (entry.manifest_.checkpoint == id && entry.epoch_ == epoch) {
+    if (entry.manifest_->checkpoint == id && entry.epoch_ == epoch) {
       entry.available_ = false;
       entry.availability_->quarantined.store(true);
     }
@@ -1771,12 +1974,12 @@ std::shared_ptr<const DiskDescription> DiskStore::Describe(CheckpointId id) {
   std::lock_guard guard(impl_->index_mutex);
   for (const auto& entry : impl_->entries) {
     if (!entry.durable_ || !entry.available_ ||
-        entry.manifest_.checkpoint != id)
+        entry.manifest_->checkpoint != id)
       continue;
-    auto reservation = impl_->ledger->Reserve(
-        ResourceCategory::kMetadata,
-        Add(entry.metadata_.Info().bytes, sizeof(DiskDescription) + 64));
+    auto reservation = impl_->ledger->Reserve(ResourceCategory::kMetadata,
+                                              sizeof(DiskDescription) + 64);
     auto description = std::make_shared<DiskDescription>();
+    description->manifest_metadata_ = entry.metadata_;
     description->manifest_ = entry.manifest_;
     description->store_ = this;
     description->epoch_ = entry.epoch_;
@@ -1790,7 +1993,7 @@ bool DiskDescription::Quarantined() const {
   return availability_->quarantined.load();
 }
 DiskReadPin DiskDescription::Pin() const {
-  return store_->Pin(manifest_.checkpoint, epoch_);
+  return store_->Pin(manifest_->checkpoint, epoch_);
 }
 
 void DiskStore::ReclaimOrphans() {
@@ -1806,6 +2009,9 @@ void DiskStore::WaitForReclamation() {
     impl_->reclamation.get();
 }
 #ifdef GUFO_CACHE_TESTING
+void DiskStore::SetReferenceValidationHook(void (*hook)(bool) noexcept) {
+  reference_validation_hook = hook;
+}
 void DiskStore::SetCrashHook(std::function<void(DiskPublicationStep)> hook) {
   std::lock_guard guard(impl_->mutex);
   impl_->crash_hook = std::move(hook);

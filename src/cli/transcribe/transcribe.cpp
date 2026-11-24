@@ -15,6 +15,7 @@
 #include "gufo/ext/asr.hpp"
 #include "gufo/ext/registry.hpp"
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/provider_options.hpp"
 #include "src/cli/serve/audio_buffer.hpp"
 #include "src/core/json.hpp"
 
@@ -159,8 +160,8 @@ void PrintTranscribeHelp(std::string_view program_name) {
   bool live = false;
   std::vector<std::string> positionals;
   ArgParser parser(
-      std::string(program_name) + " transcribe [OPTIONS] [WAV]",
-      "Transcribe a PCM or float WAV with native HIP speech recognition.");
+      std::string(program_name) + " transcribe [OPTIONS] [AUDIO]",
+      "Transcribe a recording with native HIP speech recognition.");
   parser.AddOption("-m", "--model", "PATH",
                    "Speech recognition model (Qwen3-ASR-1.7B directory, or "
                    "an extension model's artifact)",
@@ -169,7 +170,9 @@ void PrintTranscribeHelp(std::string_view program_name) {
                    "Audio projector sidecar of models that take one (default: "
                    "the model's own lookup)",
                    "Model", &mmproj);
-  parser.AddOption("-f", "--audio", "WAV", "Input WAV path", "Input", &audio);
+  parser.AddOption("-f", "--audio", "PATH",
+                   "Input audio: WAV, FLAC, MP3, Ogg Vorbis or Ogg Opus",
+                   "Input", &audio);
   parser.AddOption("-l", "--language", "NAME",
                    "Optional language name or ISO code; auto-detect by default",
                    "Input", &language);
@@ -196,6 +199,11 @@ void PrintTranscribeHelp(std::string_view program_name) {
                    "Output format: text or json (default: text)", "Output",
                    &format);
   parser.CollectPositionals(&positionals);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions provider_options(registry, "transcribe",
+                                   ext::Capability::kSpeechRecognition);
+  provider_options.Register(parser);
   parser.PrintHelp();
 }
 
@@ -214,8 +222,8 @@ int RunTranscribe(std::span<const char* const> args) {
   std::vector<std::string> positionals;
 
   ArgParser parser(
-      "gufo transcribe [OPTIONS] [WAV]",
-      "Transcribe a PCM or float WAV with native HIP speech recognition.");
+      "gufo transcribe [OPTIONS] [AUDIO]",
+      "Transcribe a recording with native HIP speech recognition.");
   parser.AddOption("-m", "--model", "PATH",
                    "Speech recognition model (Qwen3-ASR-1.7B directory, or "
                    "an extension model's artifact)",
@@ -224,7 +232,9 @@ int RunTranscribe(std::span<const char* const> args) {
                    "Audio projector sidecar of models that take one (default: "
                    "the model's own lookup)",
                    "Model", &mmproj);
-  parser.AddOption("-f", "--audio", "WAV", "Input WAV path", "Input", &audio);
+  parser.AddOption("-f", "--audio", "PATH",
+                   "Input audio: WAV, FLAC, MP3, Ogg Vorbis or Ogg Opus",
+                   "Input", &audio);
   parser.AddOption("-l", "--language", "NAME",
                    "Optional language name or ISO code; auto-detect by default",
                    "Input", &language);
@@ -251,6 +261,11 @@ int RunTranscribe(std::span<const char* const> args) {
                    "Output format: text or json (default: text)", "Output",
                    &format);
   parser.CollectPositionals(&positionals);
+  ext::Registry registry;
+  ext::RegisterBuiltExtensions(registry);
+  ProviderOptions declared_options(registry, "transcribe",
+                                   ext::Capability::kSpeechRecognition);
+  declared_options.Register(parser);
 
   std::string error;
   if (!parser.Parse(args, &error)) {
@@ -262,6 +277,13 @@ int RunTranscribe(std::span<const char* const> args) {
     PrintTranscribeHelp("gufo");
     return 0;
   }
+  ext::ParsedOptions provider_options;
+  try {
+    provider_options = declared_options.Parse();
+  } catch (const std::invalid_argument& parse_error) {
+    std::cerr << "Error: " << parse_error.what() << '\n';
+    return 2;
+  }
   if (model.empty()) {
     std::cerr << "Error: --model <DIR> is required\n";
     return 2;
@@ -269,7 +291,7 @@ int RunTranscribe(std::span<const char* const> args) {
   if (audio.empty() && positionals.size() == 1U) {
     audio = positionals.front();
   } else if (!positionals.empty()) {
-    std::cerr << "Error: supply exactly one WAV path\n";
+    std::cerr << "Error: supply exactly one audio path\n";
     return 2;
   }
   if (audio.empty() || maximum_tokens == 0U || capacity < 32U ||
@@ -285,8 +307,6 @@ int RunTranscribe(std::span<const char* const> args) {
     return 1;
   }
 
-  ext::Registry registry;
-  ext::RegisterBuiltExtensions(registry);
   const ext::AsrProvider* provider = ext::ProbeAsrProvider(model.string());
   if (!provider) {
     provider = ext::FindAsrProvider("qwen3-asr");
@@ -301,13 +321,14 @@ int RunTranscribe(std::span<const char* const> args) {
   }
 
   const auto load_begin = std::chrono::steady_clock::now();
-  auto runtime =
-      provider->create_with_options
-          ? provider->create_with_options({.model_root = model.string(),
-                                           .maximum_context_tokens = capacity,
-                                           .projector_path = mmproj.string()},
-                                          &error)
-          : provider->create(model.string(), capacity, &error);
+  auto runtime = provider->create_with_options
+                     ? provider->create_with_options(
+                           {.model_root = model.string(),
+                            .maximum_context_tokens = capacity,
+                            .projector_path = mmproj.string(),
+                            .provider_options = std::move(provider_options)},
+                           &error)
+                     : provider->create(model.string(), capacity, &error);
   const auto load_end = std::chrono::steady_clock::now();
   if (runtime == nullptr) {
     std::cerr << "Error loading ASR model: " << error << '\n';

@@ -15,20 +15,15 @@ The weights alone take 80.76 GiB, so you need a 128 GiB system with room left
 for each request's context.
 
 ```sh
-hf download antirez/deepseek-v4-gguf \
-  DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf \
-  --revision 1cd7b564460821938add0475a60b942c409295e0 \
-  --local-dir models/deepseek-v4-flash
-hf download antirez/deepseek-v4-gguf \
-  DeepSeek-V4-Flash-DSpark-support-0731.gguf \
-  --revision e7f04037032990db0346398d249baf9fb9df1ccc \
-  --local-dir models/deepseek-v4-flash
+gufo model install deepseek4
 ```
+
+It installs both files and prints the DSpark model's path.
 
 ## Run
 
 ```sh
-MODEL=/path/to/target.gguf
+MODEL=deepseek4
 gufo chat --model "$MODEL"
 gufo serve llm --model "$MODEL" --context 32768 --sessions 1
 ```

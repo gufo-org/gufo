@@ -3,6 +3,9 @@
 Record every public extension API declaration or contract change here. This
 includes public headers and their transitive `SURFACE` closure, the extension
 metadata schema, and public CMake contracts. The PR requires the `ext-api` label.
+Paths reachable only through `include/gufo/ext/experimental/` or
+`include/gufo/ext/families/` (generated into `NO_PROMISE`) carry no promise and
+need no record; a new public CMake contract for them still does.
 
 ## Create a record
 

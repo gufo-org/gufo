@@ -12,6 +12,9 @@ namespace gufo::models::qwen3_tts::hip {
 
 /// End-to-end native HIP synthesis for one supported Qwen3-TTS 12Hz 1.7B
 /// variant.
+/// Where synthesis runs: the GPU, or the XDNA NPU with the CPU (`--npu`).
+enum class SynthesisDevice { kGpu, kNpu };
+
 class SynthesisHipRuntime {
 public:
   ~SynthesisHipRuntime();
@@ -23,7 +26,8 @@ public:
 
   [[nodiscard]] static std::unique_ptr<SynthesisHipRuntime> Create(
       const std::string& model_root, std::size_t maximum_context_tokens,
-      ModelVariant variant, std::string* error = nullptr);
+      ModelVariant variant, std::string* error = nullptr,
+      SynthesisDevice device = SynthesisDevice::kGpu);
 
   [[nodiscard]] bool Generate(const SynthesisRequest& request,
                               const CancellationCheck& is_cancelled,

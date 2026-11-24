@@ -90,11 +90,11 @@ def main():
         stage_report = {"command": launch, "requests": {}, "status": "running"}
         report["stages"][name] = stage_report
         write_json(report_path, report)
-        started = time.monotonic()
+        started = time.perf_counter()
         try:
             with server(launch, stage_path / "server.log",
                         args.startup_timeout, environment):
-                stage_report["startup_ms"] = (time.monotonic() - started) * 1000
+                stage_report["startup_ms"] = (time.perf_counter() - started) * 1000
                 log = (stage_path / "server.log").read_text()
                 assert "schema=component-cache-v1 event=configured" in log, (
                     "requires the loaded Qwen component cache")

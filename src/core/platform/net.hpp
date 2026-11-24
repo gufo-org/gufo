@@ -111,10 +111,15 @@ bool IsSocketAcceptRetryable() noexcept;
 /// Enable SO_REUSEADDR on `socket`.
 bool SetReuseAddr(Socket socket) noexcept;
 
-/// Configure address reuse for a temporary holding listener (`SO_REUSEADDR` on
-/// POSIX; `SO_EXCLUSIVEADDRUSE` on Windows so a second server cannot
-/// double-bind the held port before the holder closes it).
+/// Configure address reuse for a listener (`SO_REUSEADDR` on POSIX, so a
+/// restart binds through TIME_WAIT; `SO_EXCLUSIVEADDRUSE` on Windows, so a
+/// second server cannot double-bind a port another instance still serves:
+/// its bind() fails with the address-in-use error instead). Used by the
+/// HTTP server and the loading responder alike.
 bool SetExclusiveListenerReuse(Socket socket) noexcept;
+
+/// True when `error` (from LastSocketError) says the address is in use.
+bool IsAddressInUseError(int error) noexcept;
 
 /// Disable IPV6_V6ONLY on an AF_INET6 socket so dual-stack binds work when
 /// supported by the OS.

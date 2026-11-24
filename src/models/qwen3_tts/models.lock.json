@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "models": {
+    "qwen3-tts": {
+      "weights": {
+        "source": {
+          "hf": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+          "revision": "fd4b254389122332181a7c3db7f27e918eec64e3"
+        },
+        "include": [
+          "config.json",
+          "model.safetensors",
+          "vocab.json",
+          "merges.txt",
+          "tokenizer_config.json",
+          "speech_tokenizer/config.json",
+          "speech_tokenizer/model.safetensors"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "config.json",
+            "size": 4494,
+            "sha256": "b4f01752d15a488abde3e1ab44723ae4f4b9e68a4037257b098b3737893cc1f9"
+          },
+          {
+            "path": "merges.txt",
+            "size": 1671839,
+            "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+          },
+          {
+            "path": "model.safetensors",
+            "size": 3857413744,
+            "sha256": "38fc7fc51c5e776e840414b6fd443962e9411b9654888fd7913e4da643cb857c"
+          },
+          {
+            "path": "speech_tokenizer/config.json",
+            "size": 2336,
+            "sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167"
+          },
+          {
+            "path": "speech_tokenizer/model.safetensors",
+            "size": 682293092,
+            "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+          },
+          {
+            "path": "tokenizer_config.json",
+            "size": 7344,
+            "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670"
+          },
+          {
+            "path": "vocab.json",
+            "size": 2776833,
+            "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+          }
+        ]
+      }
+    }
+  }
+}

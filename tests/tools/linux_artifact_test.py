@@ -55,6 +55,34 @@ class ArtifactTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'unbundled runtime'):
                     artifact.verify(root, 'a' * 40)
 
+    def test_bundled_test_executables_are_checked_and_linked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, manifest = self.fixture(directory)
+            (root / 'tests/libexec').mkdir(parents=True)
+            (root / 'tests/libexec/ds4_quality_test').write_bytes(b'test ELF')
+            manifest['tests'] = {'ds4_quality_test': hashlib.sha256(b'test ELF').hexdigest()}
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            with patch.object(artifact, 'output', side_effect=[manifest['version'], 'libc.so.6 => runtime',
+                    'libcrypto.so.3 => /nix/store/host-openssl/lib/libcrypto.so.3']) as execute:
+                with self.assertRaisesRegex(ValueError, 'ds4_quality_test depends on an unbundled'):
+                    artifact.verify(root, 'a' * 40)
+                self.assertEqual(execute.call_args.args[-1], str(root / 'tests/libexec/ds4_quality_test'))
+            (root / 'tests/libexec/ds4_quality_test').write_bytes(b'tampered')
+            with patch.object(artifact, 'output', side_effect=[manifest['version'], 'libc.so.6 => runtime']):
+                with self.assertRaisesRegex(ValueError, 'ds4_quality_test checksum mismatch'):
+                    artifact.verify(root, 'a' * 40)
+
+    def test_test_launchers_find_the_bundle_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tests = Path(directory) / 'candidate/tests'
+            tests.mkdir(parents=True)
+            artifact.launcher(tests, 'ds4_quality_test', 'runtime/ld.so', ['runtime/lib'],
+                              {'ROCBLAS_TENSILE_LIBPATH': 'runtime/rocblas'}, depth=2)
+            text = (tests / 'ds4_quality_test').read_text()
+        self.assertIn('root=$(CDPATH= cd -- "$here/../.." && pwd -P)', text)
+        self.assertIn('exec "$root/runtime/ld.so" --library-path "$root/runtime/lib" '
+                      '"$here/libexec/ds4_quality_test" "$@"', text)
+
     def test_missing_library_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root, manifest = self.fixture(directory)
@@ -76,6 +104,30 @@ class ArtifactTest(unittest.TestCase):
             with patch.object(artifact, 'output', return_value=wrong):
                 with self.assertRaisesRegex(ValueError, 'wrong revision'):
                     artifact.verify(root, 'a' * 40)
+
+    def test_missing_npu_program_fails_before_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, manifest = self.fixture(directory)
+            manifest['npu_artifacts'] = ['qwen3pre/qwen3pre_512.bin']
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            with patch.object(artifact, 'output') as execute:
+                with self.assertRaisesRegex(ValueError, 'Missing or empty NPU artifact'):
+                    artifact.verify(root, 'a' * 40)
+                execute.assert_not_called()
+
+    def test_resolved_xrt_directory_precedes_the_base_xrt(self):
+        # The merged XRT package holds the amdxdna driver plugin beside its
+        # libxrt_coreutil; the base XRT's lib/ sorts first in the closure but
+        # has no plugin, and XRT then finds no device.
+        merged = '/nix/store/f1sq-xrt-amdxdna-2.26/lib'
+        lines = ['\tlinux-vdso.so.1 (0x00007ffd)',
+                 f'\tlibxrt_coreutil.so.2 => {merged}/libxrt_coreutil.so.2 (0x7f00)',
+                 '\tlibuuid.so.1 => /nix/store/zsvi-util-linux/lib/libuuid.so.1 (0x7f01)',
+                 f'\tlibxrt_coreutil.so.2 => {merged}/libxrt_coreutil.so.2 (0x7f00)',
+                 '\tlibc.so.6 => /nix/store/pqyi-glibc/lib/libc.so.6 (0x7f02)']
+        self.assertEqual(artifact.resolved_directories(lines),
+                         [Path(merged), Path('/nix/store/zsvi-util-linux/lib'),
+                          Path('/nix/store/pqyi-glibc/lib')])
 
     def test_share_copy_is_removable(self):
         with tempfile.TemporaryDirectory() as directory:

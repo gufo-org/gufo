@@ -24,7 +24,9 @@ inline constexpr ComponentId kTarget{1}, kDraft{2}, kRecurrent{3}, kWindow{4};
 // the same stream is a programming error and terminates instead of deadlocking.
 class FakeStream final : public Stream {
 public:
-  explicit FakeStream(bool delayed = false);
+  explicit FakeStream(bool delayed = false,
+                      std::shared_ptr<void> lease_owner = {},
+                      std::function<void()> before_transfer = {});
   ~FakeStream() override;
   [[nodiscard]] TransferResult Synchronize() noexcept override;
   [[nodiscard]] TransferResult Advance() noexcept;
@@ -118,8 +120,8 @@ private:
   std::vector<ComponentDescriptor> components_;
   Rows ring_rows_{0};
   bool private_state_{true};
-  bool fail_allocation_{false};
-  bool fail_transfer_{false};
+  std::atomic<bool> fail_allocation_{false};
+  std::atomic<bool> fail_transfer_{false};
   std::atomic<std::size_t> invalidations_{};
   Rows prefill_pass_rows_{2048};
 };

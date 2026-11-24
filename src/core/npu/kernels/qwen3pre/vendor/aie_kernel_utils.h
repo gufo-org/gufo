@@ -1,0 +1,115 @@
+/*
+Copyright (C) 2014-2022 Xilinx, Inc.
+Copyright (C) 2022-2025 Advanced Micro Devices, Inc.
+    SPDX-License-Identifier: MIT
+*/
+
+#ifndef _AIE_KERNEL_UTILS_
+#define _AIE_KERNEL_UTILS_
+
+#include "aie_arch.h"
+
+#if defined(__chess__)
+#define AIE_LOOP_UNROLL(x) [[chess::unroll_loop(x)]]
+#define AIE_LOOP_UNROLL_FULL [[chess::unroll_loop()]]
+#define AIE_LOOP_NO_UNROLL [[chess::no_unroll]]
+#define AIE_LOOP_MIN_ITERATION_COUNT(x) [[chess::min_loop_count(x)]]
+#define AIE_LOOP_MAX_ITERATION_COUNT(x) [[chess::max_loop_count(x)]]
+#define AIE_LOOP_RANGE(a, ...)                                                 \
+  [[chess::min_loop_count(a)]] __VA_OPT__(                                     \
+      [[chess::max_loop_count(__VA_ARGS__)]])
+#define AIE_PREPARE_FOR_PIPELINING [[chess::prepare_for_pipelining]]
+#define AIE_NO_PREPARE_FOR_PIPELINING [[chess::no_prepare_for_pipelining]]
+#define AIE_MODULO_SCHEDULING_BUDGET_RATIO(x)                                  \
+  [[chess::modulo_scheduling_budget_ratio(x)]]
+#define AIE_KEEP_SW_LOOP [[chess::keep_sw_loop]]
+#define AIE_PEEL_PIPELINED_LOOP(x) [[chess::peel_pipelined_loop(x)]]
+#define AIE_KEEP_FREE_FOR_PIPELINING(x) [[chess::keep_free_for_pipelining(x)]]
+#define AIE_ALLOCATE(x) [[chess::allocate(x)]]
+#define AIE_NO_HW_LOOP [[chess::no_hw_loop]]
+#define AIE_TRY_INITIATION_INTERVAL(x)
+#define AIE_PREPARE_FOR_POSTPIPELINING
+#define AIE_LOOP_FLATTEN chess_flatten_loop
+#define AIE_LOOP_HINT(k, v)
+#define AIE_LOOP_GPR_REALLOC
+
+#elif defined(__AIECC__)
+#ifndef __STRINGIFY
+#define __STRINGIFY(a) #a
+#endif
+#define AIE_PRAGMA_STR(x) _Pragma(#x)
+#define AIE_PRAGMA(x) AIE_PRAGMA_STR(x)
+#define AIE_LOOP_HINT(k, v) AIE_PRAGMA(clang loop hint(k, v))
+// clang-format off: aie-gpr-realloc is a single pragma hint token, not an
+// arithmetic expression.
+#define AIE_LOOP_GPR_REALLOC AIE_LOOP_HINT(aie-gpr-realloc, 1)
+// clang-format on
+#define AIE_LOOP_UNROLL(x) _Pragma(__STRINGIFY(clang loop unroll_count(x)))
+#define AIE_LOOP_UNROLL_FULL _Pragma("clang loop unroll(full)")
+#define AIE_LOOP_NO_UNROLL _Pragma("clang loop unroll(disable)")
+#define AIE_LOOP_MIN_ITERATION_COUNT(x)                                        \
+  _Pragma(__STRINGIFY(clang loop min_iteration_count(x)))
+#define AIE_LOOP_MAX_ITERATION_COUNT(x)                                        \
+  _Pragma(__STRINGIFY(clang loop max_iteration_count(x)))
+#define AIE_LOOP_RANGE(a, ...)                                                 \
+  AIE_LOOP_MIN_ITERATION_COUNT(a)                                              \
+  __VA_OPT__(AIE_LOOP_MAX_ITERATION_COUNT(__VA_ARGS__))
+#define AIE_PREPARE_FOR_PIPELINING
+#define AIE_NO_PREPARE_FOR_PIPELINING
+#define AIE_MODULO_SCHEDULING_BUDGET_RATIO(x)
+#define AIE_KEEP_SW_LOOP
+#define AIE_PEEL_PIPELINED_LOOP(x)
+#define AIE_KEEP_FREE_FOR_PIPELINING(x)
+#define AIE_ALLOCATE(x)
+#define AIE_NO_HW_LOOP
+#define AIE_TRY_INITIATION_INTERVAL(x)                                         \
+  _Pragma(__STRINGIFY(clang loop pipeline_initiation_interval(x)))
+#define AIE_PREPARE_FOR_POSTPIPELINING _Pragma("clang loop pipeline(disable)")
+#define AIE_LOOP_FLATTEN
+
+#else
+#define AIE_LOOP_UNROLL(x)
+#define AIE_LOOP_UNROLL_FULL
+#define AIE_LOOP_NO_UNROLL
+#define AIE_LOOP_MIN_ITERATION_COUNT(x)
+#define AIE_LOOP_MAX_ITERATION_COUNT(x)
+#define AIE_LOOP_RANGE(a, ...)
+#define AIE_PREPARE_FOR_PIPELINING
+#define AIE_NO_PREPARE_FOR_PIPELINING
+#define AIE_MODULO_SCHEDULING_BUDGET_RATIO(x)
+#define AIE_KEEP_SW_LOOP
+#define AIE_PEEL_PIPELINED_LOOP(x)
+#define AIE_KEEP_FREE_FOR_PIPELINING(x)
+#define AIE_ALLOCATE(x)
+#define AIE_NO_HW_LOOP
+#define AIE_TRY_INITIATION_INTERVAL(x)
+#define AIE_PREPARE_FOR_POSTPIPELINING
+#define AIE_LOOP_FLATTEN
+#define AIE_LOOP_HINT(k, v)
+#define AIE_LOOP_GPR_REALLOC
+#endif
+
+// Runs `body` (a zero-arg lambda) `count` times. `body` cannot reference the
+// internal loop index. When count >= MinIters the loop is eligible for software
+// pipelining (extra pragma macros may be passed after `body`, e.g.
+// AIE_PREPARE_FOR_POSTPIPELINING); otherwise a plain no-unroll loop is emitted,
+// avoiding invalid pipeliner assumptions for tiny trip counts.
+#define VERSIONED_LOOP(MinIters, count, body, ...)                             \
+  do {                                                                         \
+    if ((count) >= (MinIters)) {                                               \
+      __VA_ARGS__                                                              \
+      AIE_LOOP_RANGE(MinIters, )                                               \
+      for (int _vl_i = 0; _vl_i < (count); _vl_i++) {                          \
+        (body)();                                                              \
+      }                                                                        \
+    } else {                                                                   \
+      AIE_NO_PREPARE_FOR_PIPELINING                                            \
+      AIE_LOOP_RANGE(1, )                                                      \
+      AIE_LOOP_NO_UNROLL                                                       \
+      for (int _vl_i = 0; _vl_i < (count); _vl_i++) {                          \
+        (body)();                                                              \
+      }                                                                        \
+    }                                                                          \
+  } while (0)
+
+#endif
