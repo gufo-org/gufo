@@ -1,5 +1,5 @@
 // FROZEN: a verbatim copy of the C++ generation parser before its Rust
-// port (#1352), taken from aead5ef3: src/cli/serve/quote_tracker.hpp and
+// port (#1352), taken from c887222c: src/cli/serve/quote_tracker.hpp and
 // src/cli/serve/openai_chat.cpp lines 75-226, 1098-2218 and 2354-2791.
 // generation_parse_test compares the Rust parser against it event by
 // event. Do not edit it except to keep it compiling; replace both with
