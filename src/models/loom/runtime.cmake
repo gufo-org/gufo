@@ -75,6 +75,10 @@ else()
       -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_C_COMPILER_LAUNCHER}
       -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER})
   endif()
+  if(WIN32 AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    list(APPEND _gufo_loom_args
+      "-DCMAKE_PROJECT_HRX_INCLUDE:FILEPATH=${CMAKE_CURRENT_LIST_DIR}/embed/windows_stl.cmake")
+  endif()
   ExternalProject_Add(gufo_loom_runtime
     URL https://github.com/ROCm/hrx-system/archive/${GUFO_LOOM_HRX_REVISION}.tar.gz
     URL_HASH SHA256=${GUFO_LOOM_HRX_SHA256}
