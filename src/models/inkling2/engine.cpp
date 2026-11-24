@@ -320,9 +320,10 @@ struct Engine::Impl {
   // steps of at least this many rows run the dense Q8 GEMVs through int8
   // WMMA (same outputs; slower for fewer rows, whose tiles are half empty)
   static constexpr int kMmaRows = kChunk + 1;
-  // The LM head takes the int8 WMMA path from a full chunk: at 8 rows its
-  // per-row GEMV runs 4 to 7 waves per SIMD and streams about 150 GB/s, WMMA
-  // about 195 GB/s (the projections and the output matrix stay faster per row)
+  // The LM head and the three-input (global-layer) projections take the int8
+  // WMMA path from a full chunk: at 8 rows the head's per-row GEMV runs 4 to 7
+  // waves per SIMD and streams about 150 GB/s, WMMA about 195 GB/s (the
+  // one-input projections and the output matrix stay faster per row)
   static constexpr int kMmaHeadRows = kChunk;
   static constexpr int kMsgInvTokens = 1024;
   static constexpr int kWideTileTokens =
@@ -1355,7 +1356,7 @@ struct Engine::Impl {
         }
       }
       const int ni = three ? 3 : 1;
-      if (nb >= kMmaRows) {
+      if (nb >= (three ? kChunk : kMmaRows)) {
         // one weight read for all rows, int8 WMMA
         fs::QuantRows(ds, kEmbd, d_in, ni, kSIn, nb, d_qa, d_qs);
         if (!fs::ProjMma(ds, ps, d_qa, d_qs, ni, d_proj, nb, kSIn, kSProj,
