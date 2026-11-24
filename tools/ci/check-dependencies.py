@@ -30,6 +30,8 @@ REQUIRED_SHIPPED_COMPONENTS = {
     "libwebp",
     "libopus",
     "httparse (Rust crate)",
+    "hyper, hyper-util, http-body-util, http (Rust crates)",
+    "tokio, bytes, socket2 (Rust crates)",
     "png (Rust crate)",
     "Rust standard library and crates",
     "symphonia (Rust crates)",
