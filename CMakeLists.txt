@@ -542,6 +542,7 @@ add_library(gufo_http STATIC
   src/cli/serve/voice_page.cpp
   src/cli/serve/decision_service.cpp
   src/cli/serve/tts_websocket.cpp
+  src/cli/serve/chat_request.cpp
   src/cli/serve/generation_parse.cpp
   src/cli/serve/openai_chat.cpp
 )
@@ -1122,6 +1123,15 @@ endfunction()
   add_test(NAME http_request_test COMMAND http_request_test)
   set_tests_properties(http_request_test PROPERTIES
     LABELS "cpu;server;http;correctness")
+
+  # The Rust chat request decoder against frozen C++ decoders; no sockets.
+  add_executable(chat_request_test
+    tests/cli/chat_request_test.cpp
+    tests/cli/chat_request_reference.cpp)
+  target_link_libraries(chat_request_test PRIVATE gufo_http)
+  add_test(NAME chat_request_test COMMAND chat_request_test)
+  set_tests_properties(chat_request_test PROPERTIES
+    LABELS "cpu;server;api;openai;correctness")
 
   add_executable(multipart_test
     tests/cli/multipart_test.cpp

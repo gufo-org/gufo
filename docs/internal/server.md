@@ -1840,6 +1840,8 @@ lazily in the worker. Control characters are escaped in log lines.
   including that `--log-level` and `-v` change the emitted log rather than only
   parsing.
 - `openai_chat_test`: chat parsing, streaming, images, tools and sampling controls.
+- `chat_request_test`: the Rust request decoder for Chat Completions, Responses
+  and Messages against frozen copies of the C++ decoders it replaced.
 - Per-model serving tests: greedy/sampled decoding, batching, cache reuse and
   cancellation. Use the affected model's benchmark README for commands and limits.
 
