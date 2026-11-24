@@ -911,6 +911,11 @@ __global__ void __launch_bounds__(BW* WS)
 // write.
 constexpr int kGrp = 4;
 constexpr int kGgBw = 16;  // waves per grouped-kernel block
+// Blocks per row block of the grouped kernels: they loop over the distinct
+// experts (20 to 64 per step), so a grid sized for every possible slot (8 per
+// row) does not launch hundreds of empty blocks (8-row MoE 5% faster, 16-row
+// 10%).
+constexpr int kGgSlotBlocks = 24;
 // Pairs sorted by expert: ue[k] / ub[k] / un[k] = the k-th used expert, the
 // start of its pairs in `sorted` and their count; *nd = used experts.
 __global__ void __launch_bounds__(256)
@@ -1227,58 +1232,60 @@ __global__ void __launch_bounds__(BW* WS)
                 const int* __restrict__ un, const int* __restrict__ nd,
                 float* __restrict__ a, int FF, int res) {
   constexpr int NU = K / Fm<FMT>::UEL, RPP = WS / LPR / 2;
-  const int k = blockIdx.x, rbk = blockIdx.y;
-  if (k >= *nd)
-    return;
-  const int e = ue[k] & 127, b0 = ub[k], n = un[k];
-  const size_t rb = (size_t)NU * Fm<FMT>::BYTES;
-  const uint8_t* We = W + (size_t)e * 2 * FF * rb;
-  const int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
-            lir = lane % LPR, isup = g & 1, pg = g >> 1;
-  const int j = (rbk * BW + wave) * RPP + pg;
-  const int jj = j < FF ? j : FF - 1;
-  RowRegs<FMT, K, LPR> wr;
-  row_load<FMT, K, LPR, true>(We + rb * (isup ? FF + jj : jj), lir, wr);
-  [[maybe_unused]] RowDec<K, LPR> wd;
-  if constexpr (FMT == FMT_NVFP4)
-    row_decode<K, LPR, true>(wr, lir, wd);
-  const float sc = escale ? escale[e] : 1.f;
-  for (int c0 = 0; c0 < n; c0 += kGrp) {
-    const int cn = min(kGrp, n - c0);
-    int ps[kGrp];
-    const uint8_t* qv[kGrp];
+  // A launch has kGgSlotBlocks blocks per row block, each looping over the
+  // step's distinct experts: most slots of a wide grid would be empty.
+  const int rbk = blockIdx.y, ndv = *nd;
+  for (int k = blockIdx.x; k < ndv; k += gridDim.x) {
+    const int e = ue[k] & 127, b0 = ub[k], n = un[k];
+    const size_t rb = (size_t)NU * Fm<FMT>::BYTES;
+    const uint8_t* We = W + (size_t)e * 2 * FF * rb;
+    const int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
+              lir = lane % LPR, isup = g & 1, pg = g >> 1;
+    const int j = (rbk * BW + wave) * RPP + pg;
+    const int jj = j < FF ? j : FF - 1;
+    RowRegs<FMT, K, LPR> wr;
+    row_load<FMT, K, LPR, true>(We + rb * (isup ? FF + jj : jj), lir, wr);
+    [[maybe_unused]] RowDec<K, LPR> wd;
+    if constexpr (FMT == FMT_NVFP4)
+      row_decode<K, LPR, true>(wr, lir, wd);
+    const float sc = escale ? escale[e] : 1.f;
+    for (int c0 = 0; c0 < n; c0 += kGrp) {
+      const int cn = min(kGrp, n - c0);
+      int ps[kGrp];
+      const uint8_t* qv[kGrp];
 #pragma unroll
-    for (int b = 0; b < kGrp; ++b) {
-      ps[b] = sorted[b0 + c0 + min(b, cn - 1)];
-      qv[b] = qx + (size_t)(ps[b] >> 3) * kQB<K>;
-    }
-    with_rows<FMT, K, LPR, kGrp>(cn, [&](auto nb_) {
-      constexpr int B = decltype(nb_)::value;
-      const uint8_t* qb[B];
-#pragma unroll
-      for (int b = 0; b < B; ++b)
-        qb[b] = qv[b];
-      float acc[B];
-      if constexpr (FMT == FMT_NVFP4)
-        row_dot_g<K, LPR, B>(wd, qb, res, lir, acc);
-      else
-        row_dot_q8g<K, LPR, B>(wr, qb, res, lir, acc);
-      // after the butterfly every lane of a row holds its sums: gate lane b
-      // takes pair b (one SITU per pair instead of one per pair and lane)
-      float gv = acc[0], uv = __shfl_xor(acc[0], LPR, WS);
-      int pb = ps[0];
-#pragma unroll
-      for (int b = 1; b < B; ++b) {
-        const float o = __shfl_xor(acc[b], LPR, WS);
-        if (lir == b) {
-          gv = acc[b];
-          uv = o;
-          pb = ps[b];
-        }
+      for (int b = 0; b < kGrp; ++b) {
+        ps[b] = sorted[b0 + c0 + min(b, cn - 1)];
+        qv[b] = qx + (size_t)(ps[b] >> 3) * kQB<K>;
       }
-      if (!isup && lir < B && j < FF)
-        a[(size_t)pb * FF + j] = situ(gv * sc, uv * sc);
-    });
+      with_rows<FMT, K, LPR, kGrp>(cn, [&](auto nb_) {
+        constexpr int B = decltype(nb_)::value;
+        const uint8_t* qb[B];
+#pragma unroll
+        for (int b = 0; b < B; ++b)
+          qb[b] = qv[b];
+        float acc[B];
+        if constexpr (FMT == FMT_NVFP4)
+          row_dot_g<K, LPR, B>(wd, qb, res, lir, acc);
+        else
+          row_dot_q8g<K, LPR, B>(wr, qb, res, lir, acc);
+        // after the butterfly every lane of a row holds its sums: gate lane b
+        // takes pair b (one SITU per pair instead of one per pair and lane)
+        float gv = acc[0], uv = __shfl_xor(acc[0], LPR, WS);
+        int pb = ps[0];
+#pragma unroll
+        for (int b = 1; b < B; ++b) {
+          const float o = __shfl_xor(acc[b], LPR, WS);
+          if (lir == b) {
+            gv = acc[b];
+            uv = o;
+            pb = ps[b];
+          }
+        }
+        if (!isup && lir < B && j < FF)
+          a[(size_t)pb * FF + j] = situ(gv * sc, uv * sc);
+      });
+    }
   }
 }
 
@@ -1292,48 +1299,50 @@ __global__ void __launch_bounds__(BW* WS)
                   const int* __restrict__ nd, const float* __restrict__ wts,
                   float* __restrict__ yp, int D, int res) {
   constexpr int NU = K / Fm<FMT>::UEL, RPW = WS / LPR;
-  const int k = blockIdx.x, rbk = blockIdx.y;
-  if (k >= *nd)
-    return;
-  const int e = ue[k] & 127, b0 = ub[k], n = un[k];
-  const size_t rb = (size_t)NU * Fm<FMT>::BYTES;
-  const int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
-            lir = lane % LPR;
-  const int row = (rbk * BW + wave) * RPW + g;
-  const int rr = row < D ? row : D - 1;
-  RowRegs<FMT, K, LPR> wr;
-  row_load<FMT, K, LPR, true>(W + ((size_t)e * D + rr) * rb, lir, wr);
-  [[maybe_unused]] RowDec<K, LPR> wd;
-  if constexpr (FMT == FMT_NVFP4)
-    row_decode<K, LPR, true>(wr, lir, wd);
-  const float es = escale ? escale[e] : 1.f;
-  for (int c0 = 0; c0 < n; c0 += kGrp) {
-    const int cn = min(kGrp, n - c0);
-    int ps[kGrp];
-    const uint8_t* qv[kGrp];
+  // A launch has kGgSlotBlocks blocks per row block, each looping over the
+  // step's distinct experts: most slots of a wide grid would be empty.
+  const int rbk = blockIdx.y, ndv = *nd;
+  for (int k = blockIdx.x; k < ndv; k += gridDim.x) {
+    const int e = ue[k] & 127, b0 = ub[k], n = un[k];
+    const size_t rb = (size_t)NU * Fm<FMT>::BYTES;
+    const int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
+              lir = lane % LPR;
+    const int row = (rbk * BW + wave) * RPW + g;
+    const int rr = row < D ? row : D - 1;
+    RowRegs<FMT, K, LPR> wr;
+    row_load<FMT, K, LPR, true>(W + ((size_t)e * D + rr) * rb, lir, wr);
+    [[maybe_unused]] RowDec<K, LPR> wd;
+    if constexpr (FMT == FMT_NVFP4)
+      row_decode<K, LPR, true>(wr, lir, wd);
+    const float es = escale ? escale[e] : 1.f;
+    for (int c0 = 0; c0 < n; c0 += kGrp) {
+      const int cn = min(kGrp, n - c0);
+      int ps[kGrp];
+      const uint8_t* qv[kGrp];
 #pragma unroll
-    for (int b = 0; b < kGrp; ++b) {
-      ps[b] = sorted[b0 + c0 + min(b, cn - 1)];
-      qv[b] = qx + (size_t)ps[b] * kQB<K>;
+      for (int b = 0; b < kGrp; ++b) {
+        ps[b] = sorted[b0 + c0 + min(b, cn - 1)];
+        qv[b] = qx + (size_t)ps[b] * kQB<K>;
+      }
+      with_rows<FMT, K, LPR, kGrp>(cn, [&](auto nb_) {
+        constexpr int B = decltype(nb_)::value;
+        const uint8_t* qb[B];
+#pragma unroll
+        for (int b = 0; b < B; ++b)
+          qb[b] = qv[b];
+        float acc[B];
+        if constexpr (FMT == FMT_NVFP4)
+          row_dot_g<K, LPR, B>(wd, qb, res, lir, acc);
+        else
+          row_dot_q8g<K, LPR, B>(wr, qb, res, lir, acc);
+        if (row < D && lir == 0)
+#pragma unroll
+          for (int b = 0; b < B; ++b) {
+            const int p = ps[b];
+            yp[(size_t)p * D + row] = (wts[p] * es) * acc[b];
+          }
+      });
     }
-    with_rows<FMT, K, LPR, kGrp>(cn, [&](auto nb_) {
-      constexpr int B = decltype(nb_)::value;
-      const uint8_t* qb[B];
-#pragma unroll
-      for (int b = 0; b < B; ++b)
-        qb[b] = qv[b];
-      float acc[B];
-      if constexpr (FMT == FMT_NVFP4)
-        row_dot_g<K, LPR, B>(wd, qb, res, lir, acc);
-      else
-        row_dot_q8g<K, LPR, B>(wr, qb, res, lir, acc);
-      if (row < D && lir == 0)
-#pragma unroll
-        for (int b = 0; b < B; ++b) {
-          const int p = ps[b];
-          yp[(size_t)p * D + row] = (wts[p] * es) * acc[b];
-        }
-    });
   }
 }
 
@@ -4460,8 +4469,9 @@ void MoeGuGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
   auto run = [&](auto fm) {
     constexpr int FM = decltype(fm)::value, RPB = kGgBw * (WS / 16 / 2);
     k_moe_gu_gg<FM, 2304, 16, kGgBw>
-        <<<dim3(slots, (ff + RPB - 1) / RPB), kGgBw * WS, 0, s>>>(
-            W, escale, qx, g.sorted, g.ue, g.ub, g.un, g.nd, a, ff, g_res);
+        <<<dim3(std::min(slots, kGgSlotBlocks), (ff + RPB - 1) / RPB),
+           kGgBw * WS, 0, s>>>(W, escale, qx, g.sorted, g.ue, g.ub, g.un, g.nd,
+                               a, ff, g_res);
   };
   if (fmt == kFmtNvfp4)
     run(I<FMT_NVFP4>{});
@@ -4494,8 +4504,9 @@ void MoeDownGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
   auto run = [&](auto fm) {
     constexpr int FM = decltype(fm)::value, RPB = kGgBw * (WS / 8);
     k_moe_down_gg<FM, 1152, 8, kGgBw>
-        <<<dim3(slots, (d + RPB - 1) / RPB), kGgBw * WS, 0, s>>>(
-            W, escale, qx, g.sorted, g.ue, g.ub, g.un, g.nd, wts, yp, d, g_res);
+        <<<dim3(std::min(slots, kGgSlotBlocks), (d + RPB - 1) / RPB),
+           kGgBw * WS, 0, s>>>(W, escale, qx, g.sorted, g.ue, g.ub, g.un, g.nd,
+                               wts, yp, d, g_res);
   };
   if (fmt == kFmtNvfp4)
     run(I<FMT_NVFP4>{});
