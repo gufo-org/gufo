@@ -38,19 +38,20 @@ fn interpret(
     let typed_schema = |property| schema.zip(Some(property));
     let string_allowed = match property.and_then(typed_schema) {
         None => true,
-        Some((root, property)) => {
-            accepts(root, property, &Value::String(utf8(&parameter.value)?), 0)
-        }
+        Some((root, property)) => accepts(root, property, &Value::String(utf8(&parameter.value)?))?,
     };
     // Prefer text if the schema permits it; parsing ambiguous scalars as JSON
     // would silently change a caller's declared string type. A union also
     // admitting other types tries those first, as llama.cpp's qwen3-coder
     // parser does.
     let mut typed = None;
-    if string_allowed && let Some((root, property)) = property.and_then(typed_schema) {
-        typed = try_parse_json(trim(&parameter.value))?.filter(|value| {
-            !matches!(value, Value::String(_)) && accepts(root, property, value, 0)
-        });
+    if string_allowed
+        && let Some((root, property)) = property.and_then(typed_schema)
+        && let Some(value) = try_parse_json(trim(&parameter.value))?
+        && !matches!(value, Value::String(_))
+        && accepts(root, property, &value)?
+    {
+        typed = Some(value);
     }
     let is_string = string_allowed && typed.is_none();
     let mut raw = if is_string {
@@ -60,11 +61,14 @@ fn interpret(
     };
     if !is_string && typed.is_none() {
         let (root, property) = property.and_then(typed_schema).ok_or(Error::Internal)?;
-        let mut parsed = try_parse_json(&raw)?.filter(|value| accepts(root, property, value, 0));
+        let mut parsed = match try_parse_json(&raw)? {
+            Some(value) if accepts(root, property, &value)? => Some(value),
+            _ => None,
+        };
         if parsed.is_none() {
             let converted = python_literals::to_json(&raw);
             if let Some(alternative) = try_parse_json(&converted)?
-                && accepts(root, property, &alternative, 0)
+                && accepts(root, property, &alternative)?
             {
                 raw = converted;
                 parsed = Some(alternative);
@@ -181,9 +185,11 @@ pub fn parse_calls(
                 let property = properties.and_then(|properties| properties.get(&name));
                 if unfinished.framed
                     && !name.is_empty()
-                    && property.is_none_or(|property| {
-                        schema.is_some_and(|root| string_only(root, property, 0))
-                    })
+                    && match (property, schema) {
+                        (None, _) => true,
+                        (Some(property), Some(root)) => string_only(root, property)?,
+                        (Some(_), None) => false,
+                    }
                 {
                     partial_string(&mut call, &name, &utf8(&unfinished.value)?)?;
                 }
