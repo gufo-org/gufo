@@ -271,6 +271,15 @@ struct FakeControl {
   // Requests share nothing unless asked; a capture observer implies it.
   bool snapshots{false};
   std::function<void()> snapshot_callback;
+  // Like `snapshot_callback`, with the label of the request that captures.
+  std::function<void(TextRunnerToken)> labeled_snapshot_callback;
+  // Each slot's request label, set by its prefill; guarded by `mutex`.
+  std::map<const void*, TextRunnerToken> slot_labels;
+  [[nodiscard]] TextRunnerToken SlotLabel(const void* slot) const {
+    const std::lock_guard<std::mutex> lock(mutex);
+    const auto found = slot_labels.find(slot);
+    return found == slot_labels.end() ? 0 : found->second;
+  }
   // Shared session state (#715): with `shared_full_sessions`, sessions keep
   // demand-mapped state of kFakeStateRowBytes per token in accounts, and
   // the runner's capacity holds that many sessions at full context beside
@@ -281,7 +290,8 @@ struct FakeControl {
   std::map<const void*, std::shared_ptr<gufo::mem::StateAccount>> accounts;
   std::shared_ptr<gufo::mem::StateAccount> AccountFor(const void* slot);
   [[nodiscard]] bool Retains() const {
-    return snapshots || bool(snapshot_callback);
+    return snapshots || bool(snapshot_callback) ||
+           bool(labeled_snapshot_callback);
   }
 };
 
@@ -354,6 +364,8 @@ public:
       gufo::cache::Stream& stream) override {
     if (offset == 0 && control_->snapshot_callback)
       control_->snapshot_callback();
+    if (offset == 0 && control_->labeled_snapshot_callback)
+      control_->labeled_snapshot_callback(control_->SlotLabel(&slot));
     return FakeAdapter::CapturePrivatePiece(slot, id, offset, bytes, stream);
   }
 
@@ -562,6 +574,7 @@ public:
 
     {
       std::unique_lock<std::mutex> lock(control_->mutex);
+      control_->slot_labels[&fake.slot] = fake.label;
       control_->events.push_back({
           .kind = EventKind::kPrefill,
           .label = fake.label,
@@ -3236,10 +3249,13 @@ void TestDeferredAdvanceResumesMultiTokenDecode() {
   control->block_prefill_label = 1;
   std::binary_semaphore entered(0), release(0);
   std::atomic<unsigned> captures{0};
-  control->snapshot_callback = [&] {
-    if (captures.fetch_add(1) == 0) {
+  // Both prompts capture concurrently, so gate the first request's capture by
+  // its label: gating the peer's would keep the peer from finishing.
+  control->labeled_snapshot_callback = [&](TextRunnerToken label) {
+    if (label == 1 && captures.fetch_add(1) == 0) {
       entered.release();
-      release.acquire();
+      if (!release.try_acquire_for(kTestTimeout))
+        throw std::runtime_error("snapshot gate timed out");
     }
   };
   auto scheduler = MakeScheduler(control, 2, 2);
@@ -3250,9 +3266,12 @@ void TestDeferredAdvanceResumesMultiTokenDecode() {
   const bool started = entered.try_acquire_for(kTestTimeout);
   // The peer finishes while the first request still captures, so the first
   // returns to decoding alone with its published token not yet advanced.
-  const auto second_result = second.Wait();
+  auto peer = std::async(std::launch::async, [&] { return second.Wait(); });
+  const bool peer_done =
+      peer.wait_for(kTestTimeout) == std::future_status::ready;
   release.release();
-  Expect(started, "the first capture starts");
+  Expect(started && peer_done, "the peer finishes during the first capture");
+  const auto second_result = peer.get();
   Expect(second_result.tokens == ExpectedTokens(2, 2),
          "peer finishes during the capture");
   const auto first_result = first.Wait();
