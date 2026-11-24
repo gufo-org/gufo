@@ -576,12 +576,25 @@
       "priority": 30,
       "paths": [
         "src/families/qwen/text/chat_template.*",
-        "src/families/qwen/text/tokenizer.*",
-        "src/families/qwen/control_tokens/control_tokens.hpp",
         "src/families/qwen/vision/**"
       ],
       "owners": [
-        "llm"
+        "flash-next-q4",
+        "qwen27-q4"
+      ]
+    },
+    {
+      "id": "shared-qwen-tokens",
+      "priority": 30,
+      "paths": [
+        "src/families/qwen/text/tokenizer.*",
+        "src/families/qwen/control_tokens/control_tokens.hpp"
+      ],
+      "owners": [
+        "flash-next-q4",
+        "qwen27-q4",
+        "image",
+        "tts"
       ]
     },
     {
