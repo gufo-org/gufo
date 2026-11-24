@@ -117,6 +117,10 @@ inline ext::ToolDialect MakeStreamToolDialect() {
   s.close = "}" + std::string(d::kEndMessage);
   s.name_delimiters = "<\"\\";
   s.values.whitespace = false;  // the template and the model write compact JSON
+  // The template declares tools and re-renders call arguments with sorted keys,
+  // and the model writes them so: in schema order it could not go back to a
+  // property declared before one it already wrote.
+  s.values.sorted_keys = true;
   s.reasoning_header = true;
   return t;
 }

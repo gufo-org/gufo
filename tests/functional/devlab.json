@@ -427,6 +427,7 @@
         "tool-choice-cache",
         "tool-type-unions",
         "tool-schema-edges",
+        "tool-parameter-order",
         "sampling-defaults",
         "state-edges",
         "prefill-scheduling",

@@ -168,6 +168,7 @@
         "system-injection": 9.7,
         "tool-choice-cache": 10.4,
         "tool-history": 4.0,
+        "tool-parameter-order": 9.1,
         "tool-schema-edges": 11.7,
         "tool-type-unions": 3.9
       }
