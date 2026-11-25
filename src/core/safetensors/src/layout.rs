@@ -16,13 +16,13 @@ pub fn check_length(header: u64, file_size: u64) -> Result<(), Problem> {
         return Err(SHORT);
     }
     if header == 0 {
-        return Err((Reason::Length, "header length is 0"));
+        return Err((Reason::Length, "length is 0"));
     }
     if header > MAX_HEADER_BYTES {
-        return Err((Reason::Length, "header length is above 32 MiB"));
+        return Err((Reason::Length, "length is above 32 MiB"));
     }
     if header > file_size - LENGTH_BYTES {
-        return Err((Reason::Length, "header runs past the end of the file"));
+        return Err((Reason::Length, "runs past the end of the file"));
     }
     Ok(())
 }
@@ -88,15 +88,15 @@ mod tests {
             |prefix: &[u8], size| header_length(prefix, size).map_err(|(reason, _)| reason);
         assert_eq!(
             header_length(&prefix(2), 9),
-            Err((Reason::Length, "header runs past the end of the file"))
+            Err((Reason::Length, "runs past the end of the file"))
         );
         assert_eq!(
             header_length(&prefix(0), 100),
-            Err((Reason::Length, "header length is 0"))
+            Err((Reason::Length, "length is 0"))
         );
         assert_eq!(
             header_length(&prefix(u64::MAX), u64::MAX),
-            Err((Reason::Length, "header length is above 32 MiB"))
+            Err((Reason::Length, "length is above 32 MiB"))
         );
         let largest = MAX_HEADER_BYTES + LENGTH_BYTES;
         assert_eq!(

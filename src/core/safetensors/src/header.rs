@@ -210,7 +210,7 @@ impl Walk {
             if matches!(event, Event::BeginObject) {
                 return self.open(Place::Root);
             }
-            self.note((Reason::NotObject, "header is not a JSON object"), 0..0);
+            self.note((Reason::NotObject, "not a JSON object"), 0..0);
             return self.skip(&event);
         };
         match (place, event) {
@@ -411,7 +411,7 @@ pub fn parse(header: &[u8], file_size: u64) -> Result<Header, Failure> {
     match gufo_json::parse(header, &mut walk) {
         Ok(()) => walk.finish(),
         Err(gufo_json::Failure::Rejected(reason)) => {
-            reject(Reason::Json, "", &["header is not JSON: ", reason])
+            reject(Reason::Json, "", &["not JSON: ", reason])
         }
         Err(gufo_json::Failure::NoMemory) => Err(Failure::NoMemory),
         Err(gufo_json::Failure::Stopped) => Err(walk.failure.unwrap_or(Failure::Internal)),
@@ -485,17 +485,14 @@ mod tests {
         assert_eq!(rejection("", 1).0, Reason::Length);
         let not_json = rejection(r#"{"a":"#, 0);
         assert_eq!(not_json.0, Reason::Json);
-        assert!(
-            not_json.2.starts_with("header is not JSON: "),
-            "{not_json:?}"
-        );
+        assert!(not_json.2.starts_with("not JSON: "), "{not_json:?}");
         for header in ["[]", "[{}]", "1", "\"x\"", "null"] {
             assert_eq!(
                 rejection(header, 0),
                 (
                     Reason::NotObject,
                     String::new(),
-                    "header is not a JSON object".to_owned()
+                    "not a JSON object".to_owned()
                 ),
                 "{header}"
             );
@@ -604,10 +601,7 @@ mod tests {
         };
         assert_eq!(
             rejected(9),
-            (
-                Reason::Length,
-                "header runs past the end of the file".to_owned()
-            )
+            (Reason::Length, "runs past the end of the file".to_owned())
         );
         assert_eq!(
             rejected(3),

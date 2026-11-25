@@ -24,7 +24,9 @@ typedef enum GufoSafetensorsParse {
   GUFO_SAFETENSORS_INTERNAL = 4,
 } GufoSafetensorsParse;
 
-/* Why a file is rejected. */
+/* Why a file is rejected: it breaks the format, or one of Gufo's limits
+   (a header of at most 32 MiB with at least one tensor, at most 5
+   dimensions, each from 1 to 2^31 - 1). */
 typedef enum GufoSafetensorsReason {
   /* The file is shorter than the length prefix. */
   GUFO_SAFETENSORS_FILE = 1,
@@ -59,7 +61,8 @@ typedef enum GufoSafetensorsReason {
   GUFO_SAFETENSORS_EMPTY = 14,
 } GufoSafetensorsReason;
 
-/* The element types the format names (its spelling in the comments). */
+/* The element types the format names (its spelling in the comments), as in
+   safetensors 0.8. New types take the next values. */
 typedef enum GufoSafetensorsDtype {
   GUFO_SAFETENSORS_BOOL = 0,    /* BOOL, 8 bits */
   GUFO_SAFETENSORS_F4 = 1,      /* F4, 4 bits */
@@ -81,6 +84,8 @@ typedef enum GufoSafetensorsDtype {
   GUFO_SAFETENSORS_F64 = 17,
   GUFO_SAFETENSORS_I64 = 18,
   GUFO_SAFETENSORS_U64 = 19,
+  GUFO_SAFETENSORS_F8_E4M3FNUZ = 20, /* F8_E4M3FNUZ, 8 bits */
+  GUFO_SAFETENSORS_F8_E5M2FNUZ = 21, /* F8_E5M2FNUZ, 8 bits */
 } GufoSafetensorsDtype;
 
 /* Bytes valid during a callback only. */
@@ -90,7 +95,9 @@ typedef struct GufoSafetensorsSlice {
 } GufoSafetensorsSlice;
 
 /* The tensor or metadata key that fails (empty for the file or the header
-   as a whole) and what is wrong, in words. */
+   as a whole) and what is wrong, in words, to follow
+   "invalid safetensors header: " and the name, or
+   "invalid safetensors file: " for GUFO_SAFETENSORS_FILE. */
 typedef struct GufoSafetensorsRejection {
   GufoSafetensorsReason reason;
   GufoSafetensorsSlice name;

@@ -14,9 +14,15 @@
 /// may hold a "__metadata__" object of strings, then the payload the tensors
 /// tile. The Rust reader in src/core/safetensors checks the header; the
 /// tensor data stays in the caller's file or mapping.
+///
+/// The reader accepts the format of safetensors 0.8 within Gufo's limits,
+/// the strictest of the loaders it replaced: a header of at most 32 MiB with
+/// at least one tensor, at most 5 dimensions, each from 1 to 2^31 - 1 (so no
+/// tensor without elements).
 namespace gufo::safetensors {
 
-/// A tensor's element type, as the format names it.
+/// A tensor's element type, as the format names it. New types take the next
+/// values.
 enum class Dtype : std::uint8_t {
   kBool,
   kF4,
@@ -38,18 +44,23 @@ enum class Dtype : std::uint8_t {
   kF64,
   kI64,
   kU64,
+  kF8E4M3Fnuz,
+  kF8E5M2Fnuz,
 };
 
-/// The name the format spells, such as "BF16".
+/// The name the format spells, such as "BF16"; empty for a value that names
+/// no type.
 [[nodiscard]] std::string_view Name(Dtype dtype) noexcept;
-/// The size of one element in bits.
+/// The size of one element in bits; 0 for a value that names no type.
 [[nodiscard]] unsigned Bits(Dtype dtype) noexcept;
 
-/// Why a file is not a well-formed safetensors file.
+/// Why the reader rejects a file: it breaks the format or one of Gufo's
+/// limits above.
 enum class Reason {
   /// The file is shorter than the length prefix.
   kFile = 1,
-  /// The header length is 0, above kMaxHeaderBytes or past the file.
+  /// The header length is 0, above kMaxHeaderBytes (a Gufo limit) or past
+  /// the file.
   kLength,
   /// The header is not JSON.
   kJson,
@@ -62,10 +73,10 @@ enum class Reason {
   /// A type is missing, not a string or not one the format names.
   kDtype,
   /// "shape" or "data_offsets" is missing or not an array, the shape has
-  /// more than 5 dimensions or the offsets are not two.
+  /// more than 5 dimensions (a Gufo limit) or the offsets are not two.
   kLayout,
-  /// A dimension is not an integer from 1 to 2^31 - 1, or the shape holds
-  /// more bytes than the payload.
+  /// A dimension is not an integer from 1 to 2^31 - 1 (Gufo limits), or the
+  /// shape holds more bytes than the payload.
   kDimension,
   /// An offset is not an integer, or the offsets do not span exactly the
   /// tensor's bytes within the payload.
@@ -80,9 +91,10 @@ enum class Reason {
   kEmpty,
 };
 
-/// A rejected file. what() reads "invalid safetensors file: ", the failing
+/// A rejected file. what() reads "invalid safetensors header: ", the failing
 /// member and ": " if there is one, and what is wrong, such as
-/// "invalid safetensors file: w: unsupported dtype "bf16"".
+/// "invalid safetensors header: w: unsupported dtype "bf16"". A file shorter
+/// than the header length reads "invalid safetensors file: " instead.
 class Error : public std::runtime_error {
 public:
   Error(Reason reason, std::string name, std::string_view message);

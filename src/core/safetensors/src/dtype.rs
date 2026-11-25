@@ -1,7 +1,8 @@
 //! The element types the safetensors format names, and their sizes in bits.
 
-/// A tensor's element type. The values are those of `GufoSafetensorsDtype`
-/// in include/gufo/safetensors.h.
+/// A tensor's element type, as in safetensors 0.8. The values are those of
+/// `GufoSafetensorsDtype` in include/gufo/safetensors.h; new types take the
+/// next values, so existing ones never change.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dtype {
@@ -25,10 +26,12 @@ pub enum Dtype {
     F64 = 17,
     I64 = 18,
     U64 = 19,
+    F8E4M3Fnuz = 20,
+    F8E5M2Fnuz = 21,
 }
 
 /// Each type with its name in the header and its size in bits.
-const TYPES: [(Dtype, &str, u64); 20] = [
+const TYPES: [(Dtype, &str, u64); 22] = [
     (Dtype::Bool, "BOOL", 8),
     (Dtype::F4, "F4", 4),
     (Dtype::F6E2M3, "F6_E2M3", 6),
@@ -49,6 +52,8 @@ const TYPES: [(Dtype, &str, u64); 20] = [
     (Dtype::F64, "F64", 64),
     (Dtype::I64, "I64", 64),
     (Dtype::U64, "U64", 64),
+    (Dtype::F8E4M3Fnuz, "F8_E4M3FNUZ", 8),
+    (Dtype::F8E5M2Fnuz, "F8_E5M2FNUZ", 8),
 ];
 
 impl Dtype {
@@ -84,7 +89,7 @@ mod tests {
 
     #[test]
     fn names_are_exact() {
-        for name in ["bf16", "Bf16", "BF16 ", "", "F8", "Q8_0"] {
+        for name in ["bf16", "Bf16", "BF16 ", "", "F8", "Q8_0", "F8_E4M3FN"] {
             assert_eq!(Dtype::parse(name), None, "{name:?}");
         }
     }
@@ -95,5 +100,7 @@ mod tests {
         assert_eq!(Dtype::F6E3M2.bits(), 6);
         assert_eq!(Dtype::BF16.bits(), 16);
         assert_eq!(Dtype::C64.bits(), 64);
+        assert_eq!(Dtype::F8E4M3Fnuz.bits(), 8);
+        assert_eq!(Dtype::F8E5M2Fnuz.bits(), 8);
     }
 }

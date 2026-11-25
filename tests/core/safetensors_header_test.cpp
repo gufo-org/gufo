@@ -252,10 +252,18 @@ bool Same(const ref::Result& a, const ref::Result& b) {
   return true;
 }
 
+// Every type the reader knows, in value order.
+std::vector<st::Dtype> Dtypes() {
+  std::vector<st::Dtype> dtypes;
+  for (unsigned index = 0; !st::Name(static_cast<st::Dtype>(index)).empty();
+       ++index)
+    dtypes.push_back(static_cast<st::Dtype>(index));
+  return dtypes;
+}
+
 // The bits a type token names, or 0 for any other token.
 std::uint64_t TypeBits(std::string_view token) {
-  for (unsigned index = 0; index < 20; ++index) {
-    const auto dtype = static_cast<st::Dtype>(index);
+  for (const auto dtype : Dtypes()) {
     if (token == "\"" + std::string(st::Name(dtype)) + "\"")
       return st::Bits(dtype);
   }
@@ -500,12 +508,18 @@ struct Random {
   std::size_t Below(std::size_t bound) { return Next() % bound; }
 };
 
-constexpr std::array<std::string_view, 21> kTypes{
-    "\"BF16\"", "\"F16\"",  "\"F32\"", "\"I32\"",     "\"I64\"",
-    "\"U8\"",   "\"BOOL\"", "\"F4\"",  "\"F6_E2M3\"", "\"F8_E4M3\"",
-    "\"C64\"",  "\"F64\"",  "\"U64\"", "\"bf16\"",    "\"f32\"",
-    "\"Q8_0\"", "\"\"",     "2",       "null",        "[\"F32\"]",
-    ""};
+constexpr std::array<std::string_view, 22> kTypes{
+    "\"BF16\"",    "\"F16\"",
+    "\"F32\"",     "\"I32\"",
+    "\"I64\"",     "\"U8\"",
+    "\"BOOL\"",    "\"F4\"",
+    "\"F6_E2M3\"", "\"F8_E4M3\"",
+    "\"C64\"",     "\"F64\"",
+    "\"U64\"",     "\"F8_E5M2FNUZ\"",
+    "\"bf16\"",    "\"f32\"",
+    "\"Q8_0\"",    "\"\"",
+    "2",           "null",
+    "[\"F32\"]",   ""};
 
 constexpr std::array<std::string_view, 21> kShapes{"[]",
                                                    "[1]",
@@ -832,10 +846,12 @@ void Interface() {
       st::ParseHeader(std::span(file).subspan(8, length), file.size());
   Check(length == header.size() && stepped.tensors.size() == 2,
         "header length and parse");
-  // Names and sizes as the Rust reader knows them: 8 elements of each type
-  // take exactly its bits in bytes.
-  for (unsigned index = 0; index < 20; ++index) {
-    const auto dtype = static_cast<st::Dtype>(index);
+  // Names and sizes as the Rust reader knows them, for all 22 types of
+  // safetensors 0.8: 8 elements of each type take exactly its bits in bytes.
+  const auto dtypes = Dtypes();
+  Check(dtypes.size() == 22 && dtypes.back() == st::Dtype::kF8E5M2Fnuz,
+        "22 types");
+  for (const auto dtype : dtypes) {
     const auto bits = st::Bits(dtype);
     const auto typed =
         File("{\"t\":" +
@@ -851,6 +867,11 @@ void Interface() {
       Fail("type " + std::string(st::Name(dtype)) + ": " + error.what());
     }
   }
+  // A value that names no type has no name and no size.
+  Check(st::Name(static_cast<st::Dtype>(255)).empty() &&
+            st::Bits(static_cast<st::Dtype>(255)) == 0 &&
+            st::Name(static_cast<st::Dtype>(dtypes.size())).empty(),
+        "unknown type value");
   const auto expect = [](std::span<const std::byte> bad, st::Reason reason,
                          std::string_view name, std::string_view what) {
     try {
@@ -866,28 +887,27 @@ void Interface() {
       File("{\"t\":" + Entry("\"Q4\"", "[1]", "[0,1]") + "}", 1);
   // The reader says what is wrong; the crate's tests cover each message.
   expect(unknown, st::Reason::kDtype, "t",
-         "invalid safetensors file: t: unsupported dtype \"Q4\"");
+         "invalid safetensors header: t: unsupported dtype \"Q4\"");
   expect(File("{\"t\":" + Entry("\"U8\"", "[1]", "[0,1]") + "}", 2),
          st::Reason::kTrailing, "",
-         "invalid safetensors file: payload continues after the last tensor");
+         "invalid safetensors header: payload continues after the last tensor");
   expect(File("{\"a\":" + Entry("\"U8\"", "[2]", "[0,2]") +
                   ",\"b\":" + Entry("\"U8\"", "[1]", "[1,2]") + "}",
               2),
          st::Reason::kOverlap, "b",
-         "invalid safetensors file: b: data overlaps that of a");
+         "invalid safetensors header: b: data overlaps that of a");
   expect(File("[1]", 0), st::Reason::kNotObject, "",
-         "invalid safetensors file: header is not a JSON object");
+         "invalid safetensors header: not a JSON object");
   expect(Bytes(4), st::Reason::kFile, "",
          "invalid safetensors file: shorter than the 8-byte header length");
   try {
     (void)st::Parse(File("{\"t\":", 0));
     Fail("accepted broken JSON");
   } catch (const st::Error& error) {
-    Check(
-        error.reason() == st::Reason::kJson &&
-            std::string_view(error.what())
-                .starts_with("invalid safetensors file: header is not JSON: "),
-        "JSON error: " + std::string(error.what()));
+    Check(error.reason() == st::Reason::kJson &&
+              std::string_view(error.what())
+                  .starts_with("invalid safetensors header: not JSON: "),
+          "JSON error: " + std::string(error.what()));
   }
 }
 

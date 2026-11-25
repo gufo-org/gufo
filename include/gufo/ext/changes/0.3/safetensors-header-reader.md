@@ -11,17 +11,22 @@ reader for the header of a safetensors file.
   the `__metadata__` entries. `safetensors::Tensor`: a tensor's name,
   `safetensors::Dtype`, shape and its byte range in the payload.
 - `safetensors::Dtype`, `safetensors::Name` and `safetensors::Bits`: the
-  element types the format names and their sizes.
+  22 element types of safetensors 0.8 and their sizes. New types take the
+  next values.
 - `safetensors::Error` with `safetensors::Reason` and the tensor or
   metadata key that fails; `what()` says what is wrong, such as
-  `invalid safetensors file: w: unsupported dtype "bf16"`. `std::bad_alloc`
+  `invalid safetensors header: w: unsupported dtype "bf16"`. `std::bad_alloc`
   when memory runs out and `std::logic_error` on a reader bug.
 
-A header is accepted when its length is 1 byte to 32 MiB, it is a JSON
-object, `__metadata__` (if present and not null) maps strings to strings, every other
-member names a type of the format, a shape of at most 5 dimensions from 1 to
-2^31 - 1 and two offsets, all plain integers, and the tensors tile the
-payload exactly. The reader does not know which types a loader supports.
+The reader accepts the safetensors 0.8 format within Gufo's limits, the
+strictest of the loaders it replaced. A header is accepted when its length
+is 1 byte to 32 MiB, it is a JSON object, `__metadata__` (if present and not
+null) maps strings to strings, every other member names a type of the
+format, a shape of at most 5 dimensions from 1 to 2^31 - 1 and two offsets,
+all plain integers, and the tensors tile the payload exactly. So unlike the
+format, it rejects headers above 32 MiB, headers without tensors, tensors
+without elements, more than 5 dimensions and dimensions above 2^31 - 1. The
+reader does not know which types a loader supports.
 
 Linking: executables get it through `gufo_ext_runtime`, which now links
 `gufo_safetensors`; extension modules resolve it from the Gufo executable.

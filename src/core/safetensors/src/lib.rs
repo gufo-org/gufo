@@ -18,14 +18,17 @@ pub use layout::{LENGTH_BYTES, MAX_HEADER_BYTES, header_length};
 use gufo_ffi::guard;
 use std::ffi::{c_int, c_void};
 
-/// Why a file is not a well-formed safetensors file. The values are those of
-/// `GufoSafetensorsReason`.
+/// Why the reader rejects a file: it breaks the format, or one of Gufo's
+/// limits, the strictest of the loaders the reader replaced (a header of at
+/// most 32 MiB with at least one tensor, at most 5 dimensions, each from 1
+/// to 2^31 - 1). The values are those of `GufoSafetensorsReason`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     /// The file is shorter than the length prefix.
     File = 1,
-    /// The header length is 0, above `MAX_HEADER_BYTES` or past the file.
+    /// The header length is 0, above `MAX_HEADER_BYTES` (a Gufo limit) or
+    /// past the file.
     Length = 2,
     /// The header is not JSON.
     Json = 3,
@@ -38,10 +41,12 @@ pub enum Reason {
     /// A type is missing, not a string or not a type the format names.
     Dtype = 7,
     /// `shape` or `data_offsets` is missing or not an array, the shape has
-    /// more than `MAX_RANK` dimensions or the offsets are not two.
+    /// more than `MAX_RANK` dimensions (a Gufo limit) or the offsets are not
+    /// two.
     Layout = 8,
-    /// A dimension is not an integer from 1 to `MAX_DIMENSION`, or the shape
-    /// holds more bytes than the payload.
+    /// A dimension is not an integer from 1 to `MAX_DIMENSION` (Gufo limits:
+    /// the format allows 0 and larger), or the shape holds more bytes than
+    /// the payload.
     Dimension = 9,
     /// An offset is not an integer, or the offsets do not span exactly the
     /// tensor's bytes within the payload.
@@ -88,7 +93,9 @@ impl GufoSafetensorsSlice {
 }
 
 /// A rejected file: why, the tensor or metadata key that fails (empty for
-/// the file or the header as a whole) and what is wrong, in words.
+/// the file or the header as a whole) and what is wrong, in words. Callers
+/// put "invalid safetensors header: " before the name and message, or
+/// "invalid safetensors file: " for `File`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct GufoSafetensorsRejection {
@@ -383,7 +390,7 @@ mod tests {
         assert_eq!(run(b"{", 9, &mut seen), GufoSafetensorsParse::Rejected);
         let (reason, name, message) = seen.rejection.unwrap();
         assert_eq!((reason, name.is_empty()), (Reason::Json, true));
-        assert!(message.starts_with(b"header is not JSON: "));
+        assert!(message.starts_with(b"not JSON: "));
 
         // Without a sink, a rejection is still reported by its status.
         // SAFETY: valid buffer and callbacks; `seen` outlives the call.
@@ -502,7 +509,7 @@ mod tests {
             Some((
                 Reason::Length,
                 Vec::new(),
-                b"header runs past the end of the file".to_vec()
+                b"runs past the end of the file".to_vec()
             ))
         );
     }

@@ -446,7 +446,7 @@ int main() {
   Rejects(Write("r.safetensors", q, "", 2),
           "data_offsets end past the payload");
   Rejects(Write("r.safetensors", q, "", 0, 1ULL << 40),
-          "header length is above 32 MiB");
+          "invalid safetensors header: length is above 32 MiB");
   Rejects(Write("r.safetensors",
                 Pair("transformer_blocks.0.img_mlp.gate_up", ".lora_A.weight",
                      ".lora_B.weight", 2, 36, 8)),
