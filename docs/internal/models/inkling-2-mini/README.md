@@ -185,14 +185,22 @@ The prompt is the official `chat_template.jinja` (byte-identical to the one
 in the GGUF, effort levels none 0, minimal 0.1, low 0.2, medium 0.7, high
 0.9 by default, xhigh and max 0.99) followed by the assistant header the
 model writes first. The template has no off switch: at level 0 (`none`) the
-model thinks for 29 to 345 tokens on short prompts. Gufo renders thinking off
-as level 0 like llama.cpp and lets the model think: the runner reports
-`InitialOutputState::kAuto` for every request, so the parsers and the grammar
-accept a thought that the model opens itself. Forcing it off (an answer block
-or an empty thought in the prompt, the thinking token masked) moved the model
-off its own distribution: with `tool_choice: "auto"`, after the mask it wrote
-the call's arguments as text (`tool-schema-edges` text-only case), where
-llama.cpp thinks briefly and calls.
+model thinks for 29 to 345 tokens on short prompts.
+
+- With tools, Gufo renders thinking off as level 0 like llama.cpp and lets the
+  model think: the runner reports `InitialOutputState::kAuto`, so the parsers
+  and the grammar accept a thought that the model opens itself. Forcing it off
+  (an empty thought in the prompt, the thinking token masked) moved the model
+  off its own distribution: with `tool_choice: "auto"`, after the mask it wrote
+  the call's arguments as text (`tool-schema-edges` text-only case), where
+  llama.cpp thinks briefly and calls.
+- Without tools (`AnswerOnly`) there is no call to misplace, and level 0's
+  thought breaks the clients that ask for thinking off with a small
+  `max_tokens` (session titles, command-approval verdicts): the whole budget
+  goes to the thought and the answer is empty. The prompt ends with the
+  answer block's opener (`<|message_model|><|content_text|>`), the runner
+  reports `kContent`, and the turn ends at the next header (`StopsTurn`), so
+  the model can't open a thought after the answer and then answer again.
 The functional suites ask for thinking off to get short fixed answers;
 Inkling's Devlab entry sets `thinking_off_reasons`, so they bound that thought
 with a reasoning budget and accept it (`tests/functional/thinking.py`).

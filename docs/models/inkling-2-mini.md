@@ -64,11 +64,16 @@ chat template's level:
 | --- | --- | --- | --- | --- | --- | --- |
 | Level | 0 | 0.1 | 0.2 | 0.7 | 0.9 | 0.99 |
 
-Inkling can't switch thinking off. At level 0 (`none`, or
+The template can't switch thinking off. At level 0 (`none`, or
 `enable_thinking: false`) the model still usually writes a short thought, 29 to
-345 tokens on short prompts as of November 2026, as the model card says. Gufo
-follows the template, as llama.cpp does: `none` lowers the effort, and the
-reply may still carry `reasoning_content`.
+345 tokens on short prompts as of November 2026, as the model card says.
+
+- Without tools, thinking off is honoured: Gufo opens the answer in the prompt
+  and ends the reply with it, so a short `max_tokens` (a title, a yes/no
+  verdict) gets an answer rather than a truncated thought.
+- With tools, Gufo follows the template, as llama.cpp does: `none` lowers the
+  effort, and the reply may still carry `reasoning_content`. Forcing the
+  thought shut there made the model write call arguments as text.
 
 `tool_choice: "required"`, named functions and `response_format` let the
 model think first, then force the call or the JSON.

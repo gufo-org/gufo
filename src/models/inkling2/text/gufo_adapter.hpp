@@ -131,6 +131,20 @@ inline std::optional<ReasoningLevel> LevelOf(
   return std::nullopt;
 }
 
+/// The request turns reasoning off (Gufo: enabled=false; reasoning_effort none
+/// maps to it).
+inline bool ReasoningOff(const g::ChatRequest& request) {
+  return request.reasoning.enabled && !*request.reasoning.enabled;
+}
+
+/// Reasoning off and no tools in play: the prompt opens the answer block and
+/// the reply is that one block (see ToRenderOptions).
+inline bool AnswerOnly(const g::ChatRequest& request) {
+  return ReasoningOff(request) &&
+         (request.tools.empty() ||
+          request.tool_choice == g::ChatRequest::ToolChoice::kNone);
+}
+
 /// Tools are in play and the request insists on a call.
 inline bool CallRequired(const g::ChatRequest& request) {
   return !request.tools.empty() &&
@@ -151,6 +165,15 @@ inline RenderOptions ToRenderOptions(const g::ChatRequest& request) {
   // opener, the answer's or a call's, and a reasoning budget starts counting
   // at the opener.
   o.generation_prefix = RenderOptions::Prefix::kHeader;
+  // Without tools there is no call for a forced framing to push into the
+  // text, so thinking off is honoured: the prompt opens the answer block
+  // (<|message_model|><|content_text|>), as Qwen's generation prompt closes
+  // <think>, and the runner ends the turn at the next header (AnswerOnly).
+  // Clients that ask for thinking off with a small max_tokens (titles,
+  // yes/no classifiers) otherwise get an empty answer: level 0 still thinks
+  // for 29 to 345 tokens.
+  if (AnswerOnly(request))
+    o.generation_prefix = RenderOptions::Prefix::kHeaderText;
   return o;
 }
 

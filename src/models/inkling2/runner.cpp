@@ -98,6 +98,11 @@ public:
   bool call_required{false};
   std::vector<std::vector<g::TextRunnerToken>> call_names;
   std::vector<g::TextRunnerToken> call_prefix;
+  /// Reasoning off and no tools: the prompt opened the answer block, which is
+  /// the whole reply. After its <|end_message|> the model may open another
+  /// block (a thought, then the answer again); the turn ends at that header
+  /// instead (StopsTurn). Per request.
+  bool answer_only{false};
   /// The request's images (set by SetPromptContext; null for a text-only
   /// prompt).
   std::shared_ptr<const Inkling2PromptContext> prompt;
@@ -271,6 +276,7 @@ struct ImageEntry {
 /// What a request tells the runner beyond its tokens (SetPromptContext).
 struct Inkling2PromptContext final : g::TextPromptContext {
   bool call_required{false};
+  bool answer_only{false};
   std::vector<std::vector<g::TextRunnerToken>> call_names;
   std::vector<std::unique_ptr<ImageEntry>> images;
   /// The prompt's tokens, for copy drafts (a request whose whole prompt is
@@ -601,6 +607,7 @@ public:
     if (max_draft_ > 0)
       context->tokens.assign(tokens->begin(), tokens->end());
     context->call_required = ga::CallRequired(request);
+    context->answer_only = ga::AnswerOnly(request);
     if (!request.tools.empty() &&
         request.tool_choice != g::ChatRequest::ToolChoice::kNone) {
       for (const auto& tool : request.tools) {
@@ -672,6 +679,7 @@ public:
     st.budget_closed = false;
     st.thought_closed = false;
     st.call_required = c != nullptr && c->call_required;
+    st.answer_only = c != nullptr && c->answer_only;
     st.call_names = c != nullptr ? c->call_names : decltype(st.call_names){};
     st.call_prefix.clear();
     st.pending.reset();
@@ -689,12 +697,24 @@ public:
     st.lookup.BeginRequest();
   }
   [[nodiscard]] g::InitialOutputState InitialOutputState(
-      const g::ChatRequest&) const override {
-    // The prompt ends with the assistant header and the model chooses the
-    // block: a thought, an answer or a call. No effort level turns thinking
-    // off (level 0 is the minimum, per the model card), so reasoning "off"
-    // only lowers the effort and the model may still think.
+      const g::ChatRequest& r) const override {
+    // Reasoning off without tools: the prompt opened the answer block (see
+    // gufo_adapter ToRenderOptions).
+    if (ga::AnswerOnly(r))
+      return g::InitialOutputState::kContent;
+    // Otherwise the prompt ends with the assistant header and the model
+    // chooses the block: a thought, an answer or a call. No effort level
+    // turns thinking off (level 0 is the minimum, per the model card), so
+    // with tools reasoning "off" only lowers the effort and the model may
+    // still think.
     return g::InitialOutputState::kAuto;
+  }
+  /// `t` ends the turn: a stop token, or (answer_only) the header of a block
+  /// after the answer the prompt opened.
+  [[nodiscard]] bool StopsTurn(const Inkling2State& st,
+                               g::TextRunnerToken t) const {
+    return st.stop_at_eos() &&
+           (tok_->IsStop(t) || (st.answer_only && t == t_header_));
   }
   [[nodiscard]] std::string Decode(
       std::span<const g::TextRunnerToken> tokens) const override {
@@ -996,7 +1016,7 @@ public:
     std::vector<float> masked;
     const std::span<const float> logits = ApplyRunnerMasks(st, raw, masked);
     const auto token = static_cast<g::TextRunnerToken>(sampler.Sample(logits));
-    const bool stop = st.stop_at_eos() && tok_->IsStop(token);
+    const bool stop = StopsTurn(st, token);
     return {.stop = stop,
             .token = token,
             .piece = stop ? std::string{} : Piece(st, token),
@@ -1143,7 +1163,8 @@ public:
     int n = 0;
     for (; static_cast<std::size_t>(n) < have; ++n) {
       const std::int32_t t = st.history[m.start + static_cast<std::size_t>(n)];
-      if (tok_->IsStop(static_cast<g::TextRunnerToken>(t)))
+      if (tok_->IsStop(static_cast<g::TextRunnerToken>(t)) ||
+          (st.answer_only && t == static_cast<std::int32_t>(t_header_)))
         break;  // a stop is never kept as a draft
       drafts[n] = t;
       // an established match, or the shorter one that resumes a copy
@@ -1177,7 +1198,8 @@ public:
     int n = 0;
     for (; static_cast<std::size_t>(n) < have; ++n) {
       const std::int32_t t = st.history[m.start + static_cast<std::size_t>(n)];
-      if (tok_->IsStop(static_cast<g::TextRunnerToken>(t)))
+      if (tok_->IsStop(static_cast<g::TextRunnerToken>(t)) ||
+          (st.answer_only && t == static_cast<std::int32_t>(t_header_)))
         break;
       drafts[n] = t;
     }
@@ -1265,7 +1287,7 @@ public:
       g::TextDecodeSelection sel;
       if (gpu_sampled != nullptr && at < max_context_) {
         const auto tk = static_cast<g::TextRunnerToken>(gpu_sampled[j]);
-        const bool stop = st.stop_at_eos() && tok_->IsStop(tk);
+        const bool stop = StopsTurn(st, tk);
         sel = {.stop = stop,
                .token = tk,
                .piece = stop ? std::string{} : Piece(st, tk)};
@@ -1273,7 +1295,7 @@ public:
       } else if (parallel) {
         const auto tk = sampled[j];
         const auto row = out.subspan(static_cast<std::size_t>(j) * V, V);
-        const bool stop = st.stop_at_eos() && tok_->IsStop(tk);
+        const bool stop = StopsTurn(st, tk);
         sel = {.stop = stop,
                .token = tk,
                .piece = stop ? std::string{} : Piece(st, tk),
@@ -1285,8 +1307,7 @@ public:
           if (st.block == Block::kThinking)
             st.budget_closed = true;
           const auto tk = static_cast<g::TextRunnerToken>(*forced);
-          const bool stop =
-              at >= max_context_ || (st.stop_at_eos() && tok_->IsStop(tk));
+          const bool stop = at >= max_context_ || StopsTurn(st, tk);
           sel = {.stop = stop,
                  .token = tk,
                  .piece = stop ? std::string{} : Piece(st, tk)};
@@ -1297,7 +1318,7 @@ public:
                    RunnerAllowsToken(
                        st, static_cast<g::TextRunnerToken>(amax[j]))) {
           const auto tk = static_cast<g::TextRunnerToken>(amax[j]);
-          const bool stop = st.stop_at_eos() && tok_->IsStop(tk);
+          const bool stop = StopsTurn(st, tk);
           sel = {.stop = stop,
                  .token = tk,
                  .piece = stop ? std::string{} : Piece(st, tk)};
@@ -1802,8 +1823,7 @@ public:
             const std::size_t at = l.ss->position();
             if (gpu_lin[k]) {
               const auto tk = static_cast<g::TextRunnerToken>(gpu_samp[k]);
-              const bool stop = at >= max_context_ ||
-                                (l.st->stop_at_eos() && tok_->IsStop(tk));
+              const bool stop = at >= max_context_ || StopsTurn(*l.st, tk);
               l.st->pending = g::TextDecodeSelection{
                   .stop = stop,
                   .token = tk,
@@ -1815,8 +1835,7 @@ public:
                 if (l.st->block == Block::kThinking)
                   l.st->budget_closed = true;
                 const auto tk = static_cast<g::TextRunnerToken>(*forced);
-                const bool stop = at >= max_context_ ||
-                                  (l.st->stop_at_eos() && tok_->IsStop(tk));
+                const bool stop = at >= max_context_ || StopsTurn(*l.st, tk);
                 l.st->pending = g::TextDecodeSelection{
                     .stop = stop,
                     .token = tk,
@@ -1829,7 +1848,7 @@ public:
                          RunnerAllowsToken(
                              *l.st, static_cast<g::TextRunnerToken>(amax[k]))) {
                 const auto tk = static_cast<g::TextRunnerToken>(amax[k]);
-                const bool stop = l.st->stop_at_eos() && tok_->IsStop(tk);
+                const bool stop = StopsTurn(*l.st, tk);
                 l.st->pending = g::TextDecodeSelection{
                     .stop = stop,
                     .token = tk,
