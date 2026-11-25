@@ -1172,11 +1172,14 @@ HttpResponse LlamaMetrics(TextGenerationBackend& b) {
 
 std::function<HttpResponse()> MetricsEndpoint(
     const std::shared_ptr<TextGenerationBackend>& text,
-    const std::shared_ptr<EmbeddingService>& embeddings) {
+    const std::shared_ptr<EmbeddingService>& embeddings,
+    const std::shared_ptr<AsrService>& asr) {
   if (text != nullptr)
     return [text] { return LlamaMetrics(*text); };
   if (embeddings != nullptr)
     return [embeddings] { return PrometheusText(embeddings->RenderMetrics()); };
+  if (asr != nullptr)
+    return [asr] { return PrometheusText(asr->RenderMetrics()); };
   return {};
 }
 
@@ -1272,7 +1275,7 @@ HttpServer::HttpServer(std::string host, int port,
       embeddings_(std::move(embeddings)),
       decisions_(std::move(decisions)),
       options_(std::move(options)),
-      metrics_(MetricsEndpoint(backend_, embeddings_)) {
+      metrics_(MetricsEndpoint(backend_, embeddings_, asr_)) {
   if (options_.max_request_body_bytes == 0 || options_.max_connections == 0) {
     throw std::invalid_argument("HTTP server limits must be positive");
   }
