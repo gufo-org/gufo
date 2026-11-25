@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "gufo/chat_response.h"
 #include "gufo/ext/text.hpp"
 #include "src/cli/serve/chat_request.hpp"
 #include "src/cli/serve/generation_parse.hpp"
@@ -71,22 +72,6 @@ struct ParsedChatRequest {
   sampling::SamplingConfig sampling;
   bool stream{false};
   bool include_usage{false};
-};
-
-struct ParsedToolCall {
-  std::string id;
-  std::string name;
-  std::vector<tokenization::ChatMessage::ToolArgument> arguments;
-  // An append-only JSON prefix; absent on complete calls.
-  std::optional<std::string> partial_arguments;
-};
-
-struct ParsedGeneration {
-  std::string text;
-  std::string reasoning_content;
-  std::vector<ParsedToolCall> tool_calls;
-  bool hide_tool_markup{false};
-  std::vector<TextSourceSpan> text_spans;
 };
 
 constexpr std::array<std::string_view, 7> kToolMarkers{
@@ -213,15 +198,119 @@ std::string RandomId(std::string_view prefix) {
   return result;
 }
 
+GufoChatBytes CBytes(std::string_view text) noexcept {
+  return {text.empty() ? nullptr
+                       : reinterpret_cast<const std::uint8_t*>(text.data()),
+          text.size()};
+}
+
+bool WriteToString(void* ctx, const std::uint8_t* data,
+                   std::size_t len) noexcept {
+  auto* out = static_cast<std::string*>(ctx);
+  if (!out)
+    return false;
+  try {
+    if (len > 0)
+      out->append(reinterpret_cast<const char*>(data), len);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool WriteToBodyWriter(void* ctx, const std::uint8_t* data,
+                       std::size_t len) noexcept {
+  const auto* writer = static_cast<const HttpResponse::BodyWriter*>(ctx);
+  if (!writer || !*writer)
+    return true;
+  try {
+    return (*writer)(
+        len == 0 ? std::string_view{}
+                 : std::string_view(reinterpret_cast<const char*>(data), len));
+  } catch (...) {
+    return false;
+  }
+}
+
+GufoChatFinishReason CFinishReason(
+    TextGenerationBackend::FinishReason reason) noexcept {
+  switch (reason) {
+    case TextGenerationBackend::FinishReason::kLength:
+      return GUFO_CHAT_FINISH_LENGTH;
+    case TextGenerationBackend::FinishReason::kStopSequence:
+      return GUFO_CHAT_FINISH_STOP_SEQUENCE;
+    case TextGenerationBackend::FinishReason::kStop:
+    default:
+      return GUFO_CHAT_FINISH_STOP;
+  }
+}
+
+struct MetricsHolder {
+  std::string component_cache_json;
+  std::string timings_json;
+  GufoChatMetrics raw{};
+
+  MetricsHolder(const MetricsHolder&) = delete;
+  MetricsHolder& operator=(const MetricsHolder&) = delete;
+  MetricsHolder(MetricsHolder&&) = delete;
+  MetricsHolder& operator=(MetricsHolder&&) = delete;
+
+  explicit MetricsHolder(const TextGenerationBackend::Result& result) {
+    if (result.component_cache)
+      component_cache_json = ComponentCacheJson(*result.component_cache).dump();
+    timings_json = GenerationTimings(result).dump();
+    raw = GufoChatMetrics{
+        .prompt_tokens = result.prompt_tokens,
+        .completion_tokens = result.completion_tokens,
+        .cached_prompt_tokens = result.cached_prompt_tokens,
+        .reasoning_tokens = result.reasoning_tokens,
+        .draft_tokens = result.draft_tokens,
+        .draft_accepted_tokens = result.draft_accepted_tokens,
+        .draft_rounds = result.draft_rounds,
+        .prompt_tokens_per_second = PrefillTokensPerSecond(result),
+        .decode_ms = result.decode_ms,
+        .cache_hit = result.cache_hit,
+        .cache_miss_reason = CBytes(result.cache_miss_reason),
+        .cache_common_prefix_tokens = result.cache_common_prefix_tokens,
+        .cache_checkpoint_tokens = result.cache_checkpoint_tokens,
+        .cache_restore_bytes = result.cache_restore_bytes,
+        .cache_snapshot_bytes = result.cache_snapshot_bytes,
+        .cache_disk_queued_bytes = result.cache_disk_queued_bytes,
+        .cache_restore_ms = result.cache_restore_ms,
+        .cache_snapshot_ms = result.cache_snapshot_ms,
+        .cache_disk_enqueue_ms = result.cache_disk_enqueue_ms,
+        .cache_disk_hit = result.cache_disk_hit,
+        .prefill_tokens = result.prefill_tokens,
+        .prefill_chunks = result.prefill_chunks,
+        .active_decode_prefill_chunks = result.active_decode_prefill_chunks,
+        .max_prefill_chunk_tokens = result.max_prefill_chunk_tokens,
+        .max_prefill_layer_groups = result.max_prefill_layer_groups,
+        .prefill_yield_rounds = result.prefill_yield_rounds,
+        .queue_depth_at_submit = result.queue_depth_at_submit,
+        .client_queue_depth_at_submit = result.client_queue_depth_at_submit,
+        .resident_requests_at_admission = result.resident_requests_at_admission,
+        .requested_logical_concurrency = result.requested_logical_concurrency,
+        .physical_execution_width = result.physical_execution_width,
+        .queue_ms = result.queue_ms,
+        .shared_prefix_wait_ms = result.shared_prefix_wait_ms,
+        .prefill_ms = result.prefill_ms,
+        .ttft_ms = result.ttft_ms,
+        .mean_inter_token_ms = result.mean_inter_token_ms,
+        .max_inter_token_ms = result.max_inter_token_ms,
+        .execution_plan = CBytes(result.execution_plan),
+        .component_cache_json = CBytes(component_cache_json),
+        .timings_json = CBytes(timings_json),
+    };
+  }
+};
+
 HttpResponse Error(int status, const char* reason, std::string message,
                    const char* code) {
-  json::Value response = json::Value::object();
-  json::Value error = json::Value::object();
-  error["message"] = std::move(message);
-  error["type"] = "invalid_request_error";
-  error["code"] = code;
-  response["error"] = std::move(error);
-  return {.status = status, .reason = reason, .body = response.dump()};
+  std::string body;
+  (void)gufo_chat_error_response(CBytes(message),
+                                 CBytes("invalid_request_error"), CBytes(code),
+                                 &WriteToString, &body);
+  return {.status = status, .reason = reason, .body = std::move(body)};
 }
 
 const char* StatusReason(int status) noexcept {
@@ -238,45 +327,6 @@ const char* StatusReason(int status) noexcept {
       return "Insufficient Storage";
     default:
       return "Internal Server Error";
-  }
-}
-
-/// Append `text` as the body of a JSON string (without the quotes). The stream
-/// writer builds one frame buffer per token instead of a JSON DOM, so it needs
-/// the same escaping `json::Value::dump` applies, without its allocation.
-void AppendEscapedJson(std::string& out, std::string_view text) {
-  for (const unsigned char c : text) {
-    switch (c) {
-      case '"':
-        out += "\\\"";
-        break;
-      case '\\':
-        out += "\\\\";
-        break;
-      case '\b':
-        out += "\\b";
-        break;
-      case '\f':
-        out += "\\f";
-        break;
-      case '\n':
-        out += "\\n";
-        break;
-      case '\r':
-        out += "\\r";
-        break;
-      case '\t':
-        out += "\\t";
-        break;
-      default:
-        if (c < 0x20) {
-          char escape[8];
-          (void)std::snprintf(escape, sizeof(escape), "\\u%04x", c);
-          out += escape;
-        } else {
-          out += static_cast<char>(c);
-        }
-    }
   }
 }
 
@@ -300,15 +350,6 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   output->stream = decoded.stream;
   output->include_usage = decoded.include_usage;
   return std::nullopt;
-}
-
-// `value` without its trailing whitespace.
-std::string_view TrimTrailing(std::string_view value) {
-  while (!value.empty() &&
-         std::isspace(static_cast<unsigned char>(value.back())) != 0) {
-    value.remove_suffix(1);
-  }
-  return value;
 }
 
 }  // namespace
@@ -347,428 +388,135 @@ GenerationSetup ParseSetup(const ChatRequest& chat,
   };
 }
 
-const char* FinishReason(const TextGenerationBackend::Result& result,
-                         bool has_tool_calls) {
-  if (result.finish_reason ==
-      TextGenerationBackend::FinishReason::kStopSequence)
-    return "stop";
-  if (result.finish_reason == TextGenerationBackend::FinishReason::kLength) {
-    return "length";
-  }
-  if (has_tool_calls) {
-    return "tool_calls";
-  }
-  return "stop";
-}
-
-json::Value Usage(const TextGenerationBackend::Result& result) {
-  json::Value usage = json::Value::object();
-  usage["prompt_tokens"] = result.prompt_tokens;
-  usage["completion_tokens"] = result.completion_tokens;
-  usage["total_tokens"] = result.prompt_tokens + result.completion_tokens;
-  json::Value prompt_details = json::Value::object();
-  prompt_details["cached_tokens"] = result.cached_prompt_tokens;
-  usage["prompt_tokens_details"] = std::move(prompt_details);
-  json::Value completion_details = json::Value::object();
-  completion_details["reasoning_tokens"] = result.reasoning_tokens;
-  usage["completion_tokens_details"] = std::move(completion_details);
-
-  const double prompt_per_second = PrefillTokensPerSecond(result);
-  const double predicted_per_second =
-      (result.decode_ms > 0.0 && result.completion_tokens > 0)
-          ? (static_cast<double>(result.completion_tokens) /
-             (result.decode_ms / 1000.0))
-          : 0.0;
-
-  usage["cached_tokens"] = result.cached_prompt_tokens;
-  usage["prompt_tokens_per_second"] = prompt_per_second;
-  usage["completion_tokens_per_second"] = predicted_per_second;
-  usage["draft_tokens"] = result.draft_tokens;
-  usage["draft_tokens_accepted"] = result.draft_accepted_tokens;
-
-  json::Value metrics = json::Value::object();
-  if (result.component_cache)
-    metrics["component_cache"] = ComponentCacheJson(*result.component_cache);
-  metrics["cache_hit"] = result.cache_hit;
-  if (!result.cache_miss_reason.empty()) {
-    metrics["cache_miss_reason"] = result.cache_miss_reason;
-    metrics["cache_common_prefix_tokens"] = result.cache_common_prefix_tokens;
-    metrics["cache_checkpoint_tokens"] = result.cache_checkpoint_tokens;
-  }
-  metrics["cache_restore_bytes"] = result.cache_restore_bytes;
-  metrics["cache_snapshot_bytes"] = result.cache_snapshot_bytes;
-  metrics["cache_disk_queued_bytes"] = result.cache_disk_queued_bytes;
-  // Deprecated compatibility key; remove at the next breaking release.
-  // See src/deprecated-items-to-remove-at-breaking-release.md.
-  metrics["cache_shared_bytes"] = std::size_t{0};
-  metrics["cache_restore_ms"] = result.cache_restore_ms;
-  metrics["cache_snapshot_ms"] = result.cache_snapshot_ms;
-  metrics["cache_disk_enqueue_ms"] = result.cache_disk_enqueue_ms;
-  metrics["cache_disk_hit"] = result.cache_disk_hit;
-  metrics["draft_rounds"] = result.draft_rounds;
-  metrics["prefill_tokens"] = result.prefill_tokens;
-  metrics["prefill_chunks"] = result.prefill_chunks;
-  metrics["active_decode_prefill_chunks"] = result.active_decode_prefill_chunks;
-  metrics["max_prefill_chunk_tokens"] = result.max_prefill_chunk_tokens;
-  metrics["max_prefill_layer_groups"] = result.max_prefill_layer_groups;
-  metrics["prefill_yield_rounds"] = result.prefill_yield_rounds;
-  metrics["queue_depth_at_submit"] = result.queue_depth_at_submit;
-  metrics["client_queue_depth_at_submit"] = result.client_queue_depth_at_submit;
-  metrics["resident_requests_at_admission"] =
-      result.resident_requests_at_admission;
-  metrics["requested_logical_concurrency"] =
-      result.requested_logical_concurrency;
-  metrics["physical_execution_width"] = result.physical_execution_width;
-  metrics["queue_ms"] = result.queue_ms;
-  metrics["shared_prefix_wait_ms"] = result.shared_prefix_wait_ms;
-  metrics["prefill_ms"] = result.prefill_ms;
-  metrics["decode_ms"] = result.decode_ms;
-  metrics["ttft_ms"] = result.ttft_ms;
-  metrics["mean_inter_token_ms"] = result.mean_inter_token_ms;
-  metrics["max_inter_token_ms"] = result.max_inter_token_ms;
-  metrics["execution_plan"] = result.execution_plan;
-  usage["gufo"] = std::move(metrics);
-  return usage;
-}
-
-json::Value ToolCallsJson(std::span<const GeneratedCall> calls) {
-  json::Value output = json::Value::array();
-  for (const auto& call : calls) {
-    json::Value item = json::Value::object();
-    item["id"] = RandomId("call_");
-    item["type"] = "function";
-    json::Value function = json::Value::object();
-    function["name"] = call.name;
-    function["arguments"] = call.arguments;
-    item["function"] = std::move(function);
-    output.push_back(std::move(item));
-  }
-  return output;
-}
-
-std::string Sse(const json::Value& value) {
-  return "data: " + value.dump() + "\n\n";
-}
-
-json::Value BaseChunk(std::string_view id, long long created,
-                      std::string_view model) {
-  json::Value chunk = json::Value::object();
-  chunk["id"] = std::string(id);
-  chunk["object"] = "chat.completion.chunk";
-  chunk["created"] = created;
-  chunk["model"] = std::string(model);
-  return chunk;
-}
-
-json::Value ChoiceChunk(std::string_view id, long long created,
-                        std::string_view model, json::Value delta,
-                        const char* finish_reason = nullptr,
-                        const json::Value* logprobs = nullptr) {
-  json::Value chunk = BaseChunk(id, created, model);
-  json::Value choices = json::Value::array();
-  json::Value choice = json::Value::object();
-  choice["index"] = 0;
-  choice["delta"] = std::move(delta);
-  if (logprobs)
-    choice["logprobs"] = *logprobs;
-  if (finish_reason == nullptr) {
-    choice["finish_reason"] = json::Value();
-  } else {
-    choice["finish_reason"] = finish_reason;
-  }
-  choices.push_back(std::move(choice));
-  chunk["choices"] = std::move(choices);
-  return chunk;
-}
-
 struct ToolDelta {
   std::size_t index;
   std::string id;
-  std::string name;
-  std::string arguments;
+  std::string_view name;
+  std::string_view arguments;
   bool complete{false};
 };
 
 // Responses uses semantic SSE events, rather than Chat Completions chunks.
-// Build the same output items for streaming and buffered responses.
+// Delegates state and JSON/SSE encoding to Rust (gufo-chat-response).
 class ResponsesOutput {
 public:
   ResponsesOutput(std::string model, HttpResponse::BodyWriter writer,
-                  const ChatRequest& chat)
+                  const ChatRequest& chat,
+                  std::optional<std::uint32_t> top_logprobs = std::nullopt)
       : writer_(std::move(writer)),
-        namespaces_(chat.tool_namespaces),
-        cache_persist_(chat.cache_persist) {
-    response_ = json::Value::object();
-    response_["id"] = RandomId("resp_");
-    response_["object"] = "response";
-    response_["created_at"] = Now();
-    response_["model"] = std::move(model);
-    response_["status"] = "in_progress";
-    response_["error"] = json::Value();
-    response_["incomplete_details"] = json::Value();
-    response_["usage"] = json::Value();
-    response_["output"] = json::Value::array();
-    response_["store"] = false;
-    response_["parallel_tool_calls"] =
-        !chat.tools.empty() && chat.parallel_tool_calls;
-    response_["tool_choice"] =
+        handle_(nullptr, &gufo_responses_output_free) {
+    const std::string id = RandomId("resp_");
+    const std::string tool_choice =
         chat.tools.empty() || chat.tool_choice == ChatRequest::ToolChoice::kNone
             ? "none"
         : chat.tool_choice == ChatRequest::ToolChoice::kRequired ? "required"
                                                                  : "auto";
-    if (!chat.forced_tool_name.empty()) {
-      response_["tool_choice"] = json::Value::object();
-      response_["tool_choice"]["type"] = "function";
-      response_["tool_choice"]["name"] = chat.forced_tool_name;
-    }
-    response_["tools"] = json::Value::array();
-    for (const auto& tool : chat.tools) {
-      const auto definition = json::parse(tool.definition_json);
-      auto function = *definition.find("function");
-      function["type"] = "function";
-      response_["tools"].push_back(std::move(function));
-    }
+    std::vector<GufoChatBytes> tool_defs;
+    tool_defs.reserve(chat.tools.size());
+    for (const auto& tool : chat.tools)
+      tool_defs.push_back(CBytes(tool.definition_json));
+    std::vector<GufoChatNamespaceEntry> ns_entries;
+    ns_entries.reserve(chat.tool_namespaces.size());
+    for (const auto& [name, ns] : chat.tool_namespaces)
+      ns_entries.push_back({CBytes(name), CBytes(ns)});
+    const GufoResponsesConfig cfg{
+        .id = CBytes(id),
+        .created_at = Now(),
+        .model = CBytes(model),
+        .parallel_tool_calls = !chat.tools.empty() && chat.parallel_tool_calls,
+        .tool_choice = CBytes(tool_choice),
+        .forced_tool_name = CBytes(chat.forced_tool_name),
+        .tool_definitions_json = tool_defs.empty() ? nullptr : tool_defs.data(),
+        .tool_definitions_len = tool_defs.size(),
+        .namespaces = ns_entries.empty() ? nullptr : ns_entries.data(),
+        .namespaces_len = ns_entries.size(),
+        .cache_persist = chat.cache_persist,
+        .has_top_logprobs = top_logprobs.has_value(),
+        .top_logprobs = top_logprobs.value_or(0),
+    };
+    handle_.reset(gufo_responses_output_new(&cfg, static_cast<bool>(writer_)));
   }
 
   bool Begin() {
-    return Lifecycle("response.created") && Lifecycle("response.in_progress");
+    return gufo_responses_output_begin(handle_.get(), &WriteToBodyWriter,
+                                       &writer_) == GUFO_CHAT_RESPONSE_OK;
   }
 
   bool Progress(const TextGenerationBackend::PromptProgress& progress) {
-    auto event = json::Value::object();
-    event["type"] = "response.in_progress";
-    event["response"] = response_;
-    event["prompt_progress"] = PromptProgressJson(progress);
-    return Emit(std::move(event));
-  }
-
-  void SetLogprobs(std::optional<std::uint32_t> count) {
-    if (count)
-      response_["top_logprobs"] = static_cast<int>(*count);
+    const std::string pp = PromptProgressJson(progress).dump();
+    return gufo_responses_output_progress(handle_.get(), CBytes(pp),
+                                          &WriteToBodyWriter,
+                                          &writer_) == GUFO_CHAT_RESPONSE_OK;
   }
 
   bool Append(std::string_view text, bool reasoning,
               json::Value logprobs = json::Value::array()) {
     if (text.empty())
       return true;
-    if (!CloseTool("incomplete"))
-      return false;
-    if (!active_ || reasoning_ != reasoning) {
-      if (!CloseItem("completed"))
-        return false;
-      reasoning_ = reasoning;
-      active_ = true;
-      item_ = json::Value::object();
-      item_["id"] = RandomId(reasoning ? "rs_" : "msg_");
-      item_["type"] = reasoning ? "reasoning" : "message";
-      item_["status"] = "in_progress";
-      item_[reasoning ? "summary" : "content"] = json::Value::array();
-      if (!reasoning)
-        item_["role"] = "assistant";
-      auto added = IndexedEvent("response.output_item.added");
-      added["item"] = item_;
-      if (!Emit(std::move(added)))
-        return false;
-      text_.clear();
-      logprobs_ = json::Value::array();
-      auto part = PartEvent(reasoning ? "response.reasoning_summary_part.added"
-                                      : "response.content_part.added");
-      part["part"] = Part();
-      if (!Emit(std::move(part)))
-        return false;
+    std::string item_id;
+    if (!item_open_ || item_reasoning_ != reasoning) {
+      item_id = RandomId(reasoning ? "rs_" : "msg_");
+      item_open_ = true;
+      item_reasoning_ = reasoning;
     }
-    text_.append(text);
-    auto delta = PartEvent(reasoning ? "response.reasoning_summary_text.delta"
-                                     : "response.output_text.delta");
-    delta["delta"] = std::string(text);
-    if (!reasoning) {
-      for (const auto& entry : logprobs.items())
-        logprobs_.push_back(entry);
-      delta["logprobs"] = ResponsesStreamLogprobs(logprobs);
+    std::string lp_json;
+    std::string stream_lp_json;
+    GufoChatBytes stream_lp_bytes = CBytes("[]");
+    if (!reasoning && !logprobs.items().empty()) {
+      lp_json = logprobs.dump();
+      stream_lp_json = ResponsesStreamLogprobs(logprobs).dump();
+      stream_lp_bytes = CBytes(stream_lp_json);
     }
-    return Emit(std::move(delta));
+    return gufo_responses_output_append(handle_.get(), CBytes(text), reasoning,
+                                        CBytes(item_id), CBytes(lp_json),
+                                        stream_lp_bytes, &WriteToBodyWriter,
+                                        &writer_) == GUFO_CHAT_RESPONSE_OK;
   }
 
   bool Tool(const ToolDelta& call) {
-    if (!call.id.empty()) {
-      if (!CloseItem("completed"))
-        return false;
-      tool_ = json::Value::object();
-      tool_["id"] = RandomId("fc_");
-      tool_["type"] = "function_call";
-      tool_["call_id"] = call.id;
-      tool_["name"] = call.name;
-      if (const auto it = namespaces_.find(call.name); it != namespaces_.end())
-        tool_["namespace"] = it->second;
-      tool_["arguments"] = "";
-      tool_["status"] = "in_progress";
-      tool_arguments_.clear();
-      auto added = IndexedEvent("response.output_item.added");
-      added["item"] = tool_;
-      if (!Emit(std::move(added)))
-        return false;
-    }
-    tool_arguments_ += call.arguments;
-    if (!call.arguments.empty()) {
-      auto delta = IndexedEvent("response.function_call_arguments.delta");
-      delta["item_id"] = tool_.member_str("id");
-      delta["delta"] = call.arguments;
-      if (!Emit(std::move(delta)))
-        return false;
-    }
-    return !call.complete || CloseTool("completed");
+    if (!call.id.empty())
+      item_open_ = false;
+    const std::string fc_id = call.id.empty() ? std::string() : RandomId("fc_");
+    const GufoChatToolDelta d{
+        .index = call.index,
+        .begin = !call.id.empty(),
+        .id = CBytes(call.id),
+        .name = CBytes(call.name),
+        .arguments = CBytes(call.arguments),
+        .complete = call.complete,
+    };
+    return gufo_responses_output_tool(handle_.get(), &d, CBytes(fc_id),
+                                      &WriteToBodyWriter,
+                                      &writer_) == GUFO_CHAT_RESPONSE_OK;
   }
 
-  bool CloseTool(const char* status) {
-    if (tool_.is_null())
-      return connected_;
-    unfinished_tool_ |= std::string_view(status) == "incomplete";
-    auto done = IndexedEvent("response.function_call_arguments.done");
-    done["item_id"] = tool_.member_str("id");
-    done["name"] = tool_.member_str("name");
-    done["arguments"] = tool_arguments_;
-    if (!Emit(std::move(done)))
-      return false;
-    tool_["arguments"] = tool_arguments_;
-    tool_["status"] = status;
-    auto closed = IndexedEvent("response.output_item.done");
-    closed["item"] = tool_;
-    response_["output"].push_back(std::move(tool_));
-    tool_ = json::Value();
-    ++output_index_;
-    return Emit(std::move(closed));
-  }
-
-  json::Value Complete(const TextGenerationBackend::Result& result) {
-    const bool limited =
-        result.finish_reason == TextGenerationBackend::FinishReason::kLength;
-    CloseTool("incomplete");
-    CloseItem(limited ? "incomplete" : "completed");
-    response_["status"] =
-        limited || unfinished_tool_ ? "incomplete" : "completed";
-    if (limited)
-      response_["incomplete_details"]["reason"] = "max_output_tokens";
-    else if (unfinished_tool_)
-      response_["incomplete_details"] = json::Value::object();
-    auto usage = json::Value::object();
-    usage["input_tokens"] = result.prompt_tokens;
-    usage["input_tokens_details"]["cached_tokens"] =
-        result.cached_prompt_tokens;
-    usage["input_tokens_details"]["cache_write_tokens"] = result.prefill_tokens;
-    usage["output_tokens"] = result.completion_tokens;
-    usage["output_tokens_details"]["reasoning_tokens"] =
-        result.reasoning_tokens;
-    usage["total_tokens"] = result.prompt_tokens + result.completion_tokens;
-    response_["usage"] = std::move(usage);
-    response_["timings"] = GenerationTimings(result);
-    response_["cache_persist"] = cache_persist_;
-    Lifecycle(limited || unfinished_tool_ ? "response.incomplete"
-                                          : "response.completed");
-    return response_;
+  std::string Complete(const TextGenerationBackend::Result& result) {
+    const MetricsHolder metrics(result);
+    std::string body;
+    (void)gufo_responses_output_complete(
+        handle_.get(), CFinishReason(result.finish_reason), &metrics.raw,
+        &WriteToBodyWriter, &writer_, &WriteToString, &body);
+    return body;
   }
 
   bool Fail(std::string_view message) {
-    response_["status"] = "failed";
-    // Responses defines a closed error-code enum. Keep the specific runtime
-    // code in the request log, rather than emitting an invalid wire value.
-    response_["error"]["code"] = "server_error";
-    response_["error"]["message"] = std::string(message);
-    return Lifecycle("response.failed");
+    return gufo_responses_output_fail(handle_.get(), CBytes(message),
+                                      &WriteToBodyWriter,
+                                      &writer_) == GUFO_CHAT_RESPONSE_OK;
   }
 
 private:
-  json::Value IndexedEvent(std::string_view type) const {
-    auto event = json::Value::object();
-    event["type"] = std::string(type);
-    event["output_index"] = output_index_;
-    return event;
-  }
-
-  json::Value PartEvent(std::string_view type) const {
-    auto event = IndexedEvent(type);
-    event["item_id"] = item_.member_str("id");
-    event[reasoning_ ? "summary_index" : "content_index"] = 0;
-    return event;
-  }
-
-  json::Value Part() const {
-    auto part = json::Value::object();
-    part["type"] = reasoning_ ? "summary_text" : "output_text";
-    part["text"] = text_;
-    if (!reasoning_) {
-      part["annotations"] = json::Value::array();
-      part["logprobs"] = logprobs_;
-    }
-    return part;
-  }
-
-  bool CloseItem(const char* status) {
-    if (!active_)
-      return connected_;
-    auto done = PartEvent(reasoning_ ? "response.reasoning_summary_text.done"
-                                     : "response.output_text.done");
-    done["text"] = text_;
-    if (!reasoning_)
-      done["logprobs"] = ResponsesStreamLogprobs(logprobs_);
-    if (!Emit(std::move(done)))
-      return false;
-    auto part = Part();
-    auto part_done =
-        PartEvent(reasoning_ ? "response.reasoning_summary_part.done"
-                             : "response.content_part.done");
-    part_done["part"] = part;
-    if (!Emit(std::move(part_done)))
-      return false;
-    item_[reasoning_ ? "summary" : "content"].push_back(std::move(part));
-    item_["status"] = status;
-    auto item_done = IndexedEvent("response.output_item.done");
-    item_done["item"] = item_;
-    response_["output"].push_back(item_);
-    active_ = false;
-    ++output_index_;
-    return Emit(std::move(item_done));
-  }
-
-  bool Lifecycle(std::string_view type) {
-    auto event = json::Value::object();
-    event["type"] = std::string(type);
-    event["response"] = response_;
-    return Emit(std::move(event));
-  }
-
-  bool Emit(json::Value event) {
-    if (!writer_)
-      return true;
-    if (!connected_)
-      return false;
-    event["sequence_number"] = sequence_++;
-    connected_ =
-        writer_("event: " + event.member_str("type") + "\n" + Sse(event));
-    return connected_;
-  }
-
   HttpResponse::BodyWriter writer_;
-  std::map<std::string, std::string> namespaces_;
-  // Echoed in the final response, as the applied `cache_persist`.
-  bool cache_persist_;
-  json::Value response_;
-  json::Value item_;
-  json::Value tool_;
-  std::string tool_arguments_;
-  std::string text_;
-  json::Value logprobs_ = json::Value::array();
-  std::size_t sequence_{0};
-  std::size_t output_index_{0};
-  bool active_{false};
-  bool reasoning_{false};
-  bool connected_{true};
-  bool unfinished_tool_{false};
+  std::unique_ptr<GufoResponsesOutput, void (*)(GufoResponsesOutput*)> handle_;
+  bool item_open_{false};
+  bool item_reasoning_{false};
 };
 
 HttpResponse NonStreamingResponse(
     const ParsedChatRequest& request, TextGenerationBackend& backend,
     const std::shared_ptr<TextGenerationBackend::GenerationRequest>& generation,
     TextGenerationBackend::InitialOutputState initial_output_state) {
+  (void)backend;
   const auto result = generation->Wait();
   const auto generated = ParseGeneratedText(
       ParseSetup(request.chat, initial_output_state,
@@ -777,37 +525,37 @@ HttpResponse NonStreamingResponse(
       result.text,
       result.finish_reason == TextGenerationBackend::FinishReason::kStop);
 
-  json::Value response = json::Value::object();
-  response["id"] = RandomId("chatcmpl-");
-  response["object"] = "chat.completion";
-  response["created"] = Now();
-  response["model"] = request.model;
-  json::Value choices = json::Value::array();
-  json::Value choice = json::Value::object();
-  choice["index"] = 0;
-  json::Value message = json::Value::object();
-  message["role"] = "assistant";
-  if (!generated.reasoning.empty()) {
-    message["reasoning_content"] = generated.reasoning;
+  const std::string id = RandomId("chatcmpl-");
+  std::vector<std::string> call_ids;
+  call_ids.reserve(generated.calls.size());
+  std::vector<GufoChatToolCall> c_calls;
+  c_calls.reserve(generated.calls.size());
+  for (const auto& call : generated.calls) {
+    call_ids.push_back(RandomId("call_"));
+    c_calls.push_back(
+        {CBytes(call_ids.back()), CBytes(call.name), CBytes(call.arguments)});
   }
-  if (generated.text.empty() && !generated.calls.empty()) {
-    message["content"] = json::Value();
-  } else {
-    message["content"] = generated.text;
+  std::string logprobs_json;
+  if (request.sampling.logprobs) {
+    logprobs_json =
+        ChatLogprobs(result.logprobs, *request.sampling.logprobs).dump();
   }
-  if (!generated.calls.empty()) {
-    message["tool_calls"] = ToolCallsJson(generated.calls);
-  }
-  if (request.sampling.logprobs)
-    choice["logprobs"] =
-        ChatLogprobs(result.logprobs, *request.sampling.logprobs);
-  choice["message"] = std::move(message);
-  choice["finish_reason"] = FinishReason(result, !generated.calls.empty());
-  choices.push_back(std::move(choice));
-  response["choices"] = std::move(choices);
-  response["usage"] = Usage(result);
-  response["timings"] = GenerationTimings(result);
-  response["cache_persist"] = request.chat.cache_persist;
+  const MetricsHolder metrics(result);
+  const GufoChatNonStreamingInput input{
+      .id = CBytes(id),
+      .created = Now(),
+      .model = CBytes(request.model),
+      .reasoning = CBytes(generated.reasoning),
+      .text = CBytes(generated.text),
+      .calls = c_calls.empty() ? nullptr : c_calls.data(),
+      .calls_len = c_calls.size(),
+      .logprobs_json = CBytes(logprobs_json),
+      .finish_reason = CFinishReason(result.finish_reason),
+      .cache_persist = request.chat.cache_persist,
+      .metrics = &metrics.raw,
+  };
+  std::string body;
+  (void)gufo_chat_non_streaming_response(&input, &WriteToString, &body);
   RecordServerMetrics(result);
 
   std::ostringstream timing;
@@ -818,7 +566,7 @@ HttpResponse NonStreamingResponse(
   return {
       .status = 200,
       .reason = "OK",
-      .body = response.dump(),
+      .body = std::move(body),
       .headers = {{"Server-Timing", timing.str()}},
       .streaming_body = {},
       .log_details = GenerationLogDetails(result),
@@ -829,6 +577,7 @@ HttpResponse StreamingResponse(
     const ParsedChatRequest& request, TextGenerationBackend& backend,
     std::shared_ptr<TextGenerationBackend::GenerationRequest> generation,
     TextGenerationBackend::InitialOutputState initial_output_state) {
+  (void)backend;
   const std::string id = RandomId("chatcmpl-");
   const long long created = Now();
   const std::string model = request.model;
@@ -849,50 +598,27 @@ HttpResponse StreamingResponse(
           [request, generation = std::move(generation), id, created, model,
            initial_output_state, reasoning, markup,
            stream_log](const HttpResponse::BodyWriter& writer) {
+            std::unique_ptr<GufoChatStream, void (*)(GufoChatStream*)> stream(
+                gufo_chat_stream_new(CBytes(id), created, CBytes(model)),
+                &gufo_chat_stream_free);
+            if (!stream)
+              return;
             bool connected = true;
             bool started = false;
-            // The id/object/created/model/choices envelope is identical for
-            // every token. Keeping it serialized avoids building and dumping
-            // a JSON DOM per token; only the delta body changes.
-            std::string chunk_prefix = "data: {\"id\":\"";
-            AppendEscapedJson(chunk_prefix, id);
-            chunk_prefix +=
-                "\",\"object\":\"chat.completion.chunk\",\"created\":";
-            chunk_prefix += std::to_string(created);
-            chunk_prefix += ",\"model\":\"";
-            AppendEscapedJson(chunk_prefix, model);
-            chunk_prefix += "\",\"choices\":[{\"index\":0,\"delta\":";
-            const std::string chunk_suffix = ",\"finish_reason\":null}]}\n\n";
-            std::optional<std::string> pending_logprobs;
-            const auto write_delta = [&](std::string_view delta,
-                                         bool attach_logprobs = true) {
-              std::string frame;
-              frame.reserve(chunk_prefix.size() + delta.size() + 64);
-              frame += chunk_prefix;
-              frame += delta;
-              if (attach_logprobs && pending_logprobs) {
-                frame += ",\"logprobs\":";
-                frame += *pending_logprobs;
-                pending_logprobs.reset();
-              }
-              frame += chunk_suffix;
-              return writer(frame);
-            };
-            const auto write_text = [&](std::string_view field,
-                                        std::string_view text) {
-              std::string delta;
-              delta.reserve(field.size() + text.size() + 8);
-              delta += "{\"";
-              delta += field;
-              delta += "\":\"";
-              AppendEscapedJson(delta, text);
-              delta += "\"}";
-              return write_delta(delta);
+            std::string pending_logprobs;
+            auto take_logprobs = [&]() -> std::string {
+              std::string out;
+              out.swap(pending_logprobs);
+              return out;
             };
             const auto begin = [&] {
               if (!started) {
                 started = true;
-                connected = write_delta("{\"role\":\"assistant\"}", false);
+                connected =
+                    gufo_chat_stream_role(
+                        stream.get(), &WriteToBodyWriter,
+                        const_cast<HttpResponse::BodyWriter*>(&writer)) ==
+                    GUFO_CHAT_RESPONSE_OK;
               }
               return connected;
             };
@@ -900,40 +626,43 @@ HttpResponse StreamingResponse(
               generation->Cancel();
               return;
             }
-            const auto write_choice = [&](json::Value delta) {
-              return write_delta(delta.dump());
-            };
             GenerationStream parser(ParseSetup(
                 request.chat, initial_output_state, reasoning, markup));
             std::size_t final_calls = 0;
+            auto* wctx = const_cast<HttpResponse::BodyWriter*>(&writer);
             const auto on_event = [&](const GenerationEvent& event) {
               using Kind = GenerationEvent::Kind;
               switch (event.kind) {
                 case Kind::kReasoningDelta:
-                case Kind::kContentDelta:
+                case Kind::kContentDelta: {
                   if (event.text.empty())
                     return true;
-                  connected = event.kind == Kind::kReasoningDelta
-                                  ? write_text("reasoning_content", event.text)
-                                  : write_text("content", event.text);
+                  const auto lp = take_logprobs();
+                  connected =
+                      gufo_chat_stream_text_delta(
+                          stream.get(), event.kind == Kind::kReasoningDelta,
+                          CBytes(event.text), CBytes(lp), &WriteToBodyWriter,
+                          wctx) == GUFO_CHAT_RESPONSE_OK;
                   return connected;
+                }
                 case Kind::kToolDelta: {
-                  // Completion without additional arguments needs no Chat
-                  // delta.
                   if (!event.begin && event.arguments.empty())
                     return connected;
-                  auto item = json::Value::object();
-                  item["index"] = event.index;
-                  if (event.begin) {
-                    item["id"] = RandomId("call_");
-                    item["type"] = "function";
-                    item["function"]["name"] = std::string(event.name);
-                  }
-                  item["function"]["arguments"] = std::string(event.arguments);
-                  auto delta = json::Value::object();
-                  delta["tool_calls"] = json::Value::array();
-                  delta["tool_calls"].push_back(std::move(item));
-                  connected = write_choice(std::move(delta));
+                  const std::string call_id =
+                      event.begin ? RandomId("call_") : std::string();
+                  const GufoChatToolDelta td{
+                      .index = event.index,
+                      .begin = event.begin,
+                      .id = CBytes(call_id),
+                      .name = CBytes(event.name),
+                      .arguments = CBytes(event.arguments),
+                      .complete = event.complete,
+                  };
+                  const auto lp = take_logprobs();
+                  connected =
+                      gufo_chat_stream_tool_delta(stream.get(), &td, CBytes(lp),
+                                                  &WriteToBodyWriter, wctx) ==
+                      GUFO_CHAT_RESPONSE_OK;
                   return connected;
                 }
                 case Kind::kFinalCall:
@@ -948,10 +677,11 @@ HttpResponse StreamingResponse(
             if (request.chat.return_progress) {
               on_progress =
                   [&](const TextGenerationBackend::PromptProgress& progress) {
-                    auto chunk =
-                        ChoiceChunk(id, created, model, json::Value::object());
-                    chunk["prompt_progress"] = PromptProgressJson(progress);
-                    connected = begin() && writer(Sse(chunk));
+                    const std::string pp = PromptProgressJson(progress).dump();
+                    connected = begin() && gufo_chat_stream_progress(
+                                               stream.get(), CBytes(pp),
+                                               &WriteToBodyWriter,
+                                               wctx) == GUFO_CHAT_RESPONSE_OK;
                     return connected;
                   };
             }
@@ -959,15 +689,21 @@ HttpResponse StreamingResponse(
             try {
               const auto result = generation->Wait(
                   [&](const TokenPiece& piece) {
-                    if (piece.logprobs && request.sampling.logprobs)
+                    if (piece.logprobs && request.sampling.logprobs) {
                       pending_logprobs =
                           ChatLogprobs(std::span(piece.logprobs, 1),
                                        *request.sampling.logprobs)
                               .dump();
+                    }
                     if (!begin() || !parser.Feed(piece.text, on_event))
                       return false;
-                    if (pending_logprobs)
-                      connected = write_choice(json::Value::object());
+                    if (!pending_logprobs.empty()) {
+                      const auto lp = take_logprobs();
+                      connected =
+                          gufo_chat_stream_empty_delta(
+                              stream.get(), CBytes(lp), &WriteToBodyWriter,
+                              wctx) == GUFO_CHAT_RESPONSE_OK;
+                    }
                     return connected;
                   },
                   on_progress, begin);
@@ -983,57 +719,33 @@ HttpResponse StreamingResponse(
                   TextGenerationBackend::FinishReason::kStop;
               if (!parser.Finish(!interrupted, interrupted, on_event))
                 return;
-              json::Value terminal_delta = json::Value::object();
-              auto terminal_chunk =
-                  ChoiceChunk(id, created, model, std::move(terminal_delta),
-                              FinishReason(result, final_calls > 0));
-              // llama.cpp reports timings on the terminal choice regardless
-              // of the optional OpenAI usage chunk. Proxies need these even
-              // when a client does not request stream_options.include_usage.
-              terminal_chunk["timings"] = GenerationTimings(result);
-              terminal_chunk["cache_persist"] = request.chat.cache_persist;
-              if (!writer(Sse(terminal_chunk))) {
-                return;
-              }
-              if (request.include_usage) {
-                json::Value usage_chunk = BaseChunk(id, created, model);
-                usage_chunk["choices"] = json::Value::array();
-                usage_chunk["usage"] = Usage(result);
-                usage_chunk["timings"] = GenerationTimings(result);
-                usage_chunk["cache_persist"] = request.chat.cache_persist;
-                if (!writer(Sse(usage_chunk))) {
-                  return;
-                }
-              }
-              (void)writer("data: [DONE]\n\n");
+              const MetricsHolder metrics(result);
+              (void)gufo_chat_stream_finish(
+                  stream.get(), CFinishReason(result.finish_reason),
+                  final_calls > 0, request.include_usage,
+                  request.chat.cache_persist, &metrics.raw, &WriteToBodyWriter,
+                  wctx);
             } catch (const TextGenerationError& exception) {
               if (!started)
                 throw;
               stream_log->error_code = exception.stable_code();
-              json::Value error = json::Value::object();
-              json::Value detail = json::Value::object();
-              detail["message"] = exception.what();
-              detail["type"] = "server_error";
-              detail["code"] = exception.stable_code();
-              error["error"] = std::move(detail);
-              stream_log->error_event_sent = writer(Sse(error));
-              (void)writer("data: [DONE]\n\n");
+              stream_log->error_event_sent =
+                  gufo_chat_stream_error(
+                      CBytes(exception.what()), CBytes(exception.stable_code()),
+                      &WriteToBodyWriter, wctx) == GUFO_CHAT_RESPONSE_OK;
             } catch (const std::exception& error) {
               if (!started)
                 throw;
               // Retain the cause in logs alongside the client's stable code.
               Logger::Error("chat", error.what());
               stream_log->error_code = "generation_failed";
-              json::Value err = json::Value::object();
-              json::Value detail = json::Value::object();
               const char* message = error.what();
-              detail["message"] =
-                  message && *message ? message : "generation failed";
-              detail["type"] = "server_error";
-              detail["code"] = "generation_failed";
-              err["error"] = std::move(detail);
-              stream_log->error_event_sent = writer(Sse(err));
-              (void)writer("data: [DONE]\n\n");
+              stream_log->error_event_sent =
+                  gufo_chat_stream_error(
+                      CBytes(message && *message ? message
+                                                 : "generation failed"),
+                      CBytes("generation_failed"), &WriteToBodyWriter,
+                      wctx) == GUFO_CHAT_RESPONSE_OK;
             }
           },
       .stream_log = std::move(stream_log),
@@ -1064,32 +776,24 @@ std::optional<HttpResponse> ParseAnthropicToolControls(const json::Value& body,
 
 namespace {
 
-/// Messages output as Anthropic content blocks. Streamed events follow
-/// message_start, content_block_start/delta/stop and message_delta/stop.
+/// Messages output as Anthropic content blocks. Delegates state and JSON/SSE
+/// encoding to Rust (gufo-chat-response).
 class AnthropicOutput {
 public:
   AnthropicOutput(std::string model, HttpResponse::BodyWriter writer,
-                  const ChatRequest&)
-      : writer_(std::move(writer)) {
-    message_ = json::Value::object();
-    message_["id"] = RandomId("msg_");
-    message_["type"] = "message";
-    message_["role"] = "assistant";
-    message_["model"] = std::move(model);
-    message_["content"] = json::Value::array();
-    message_["stop_reason"] = json::Value();
-    message_["stop_sequence"] = json::Value();
-    // Prompt accounting is final only with the result; message_delta carries
-    // the complete usage.
-    message_["usage"] = json::Value::object();
-    message_["usage"]["input_tokens"] = 0;
-    message_["usage"]["output_tokens"] = 0;
+                  const ChatRequest&,
+                  std::optional<std::uint32_t> = std::nullopt)
+      : writer_(std::move(writer)),
+        handle_(nullptr, &gufo_anthropic_output_free) {
+    const std::string id = RandomId("msg_");
+    handle_.reset(gufo_anthropic_output_new(CBytes(id), CBytes(model),
+                                            static_cast<bool>(writer_)));
   }
 
   bool Begin() {
-    auto event = Event("message_start");
-    event["message"] = message_;
-    return Emit(std::move(event));
+    connected_ = gufo_anthropic_output_begin(handle_.get(), &WriteToBodyWriter,
+                                             &writer_) == GUFO_CHAT_RESPONSE_OK;
+    return connected_;
   }
 
   bool Progress(const TextGenerationBackend::PromptProgress&) {
@@ -1097,196 +801,54 @@ public:
   }
 
   bool Append(std::string_view text, bool reasoning) {
-    if (!text.empty() && !CloseTool(false))
-      return false;
-    // Clear the preceding block's held whitespace before collecting this
-    // block's first piece; otherwise CloseBlock discards its trailing space.
-    if ((!active_ || reasoning_ != reasoning) && !CloseBlock())
-      return false;
-    std::string piece;
-    if (reasoning) {
-      // Thinking blocks carry the reasoning trimmed as Chat reports it: drop
-      // leading whitespace and hold trailing whitespace until more follows.
-      if (!active_ || !reasoning_)
-        while (!text.empty() &&
-               std::isspace(static_cast<unsigned char>(text.front())) != 0)
-          text.remove_prefix(1);
-      const auto body = TrimTrailing(text);
-      if (body.empty()) {
-        held_.append(text);
-        return true;
-      }
-      piece = std::exchange(held_, std::string(text.substr(body.size())));
-      piece.append(body);
-      text = piece;
-    }
-    if (text.empty())
-      return true;
-    if (!active_ || reasoning_ != reasoning) {
-      reasoning_ = reasoning;
-      active_ = true;
-      text_.clear();
-      if (!Emit(BlockStart(Block())))
-        return false;
-    }
-    text_.append(text);
-    auto delta = json::Value::object();
-    delta["type"] = reasoning ? "thinking_delta" : "text_delta";
-    delta[reasoning ? "thinking" : "text"] = std::string(text);
-    return Emit(BlockDelta(std::move(delta)));
-  }
-
-  bool Tool(const ToolDelta& call) {
-    if (!call.id.empty()) {
-      if (!CloseBlock())
-        return false;
-      tool_ = json::Value::object();
-      tool_["type"] = "tool_use";
-      tool_["id"] = call.id;
-      tool_["name"] = call.name;
-      tool_["input"] = json::Value::object();
-      tool_arguments_.clear();
-      if (!Emit(BlockStart(tool_)))
-        return false;
-    }
-    tool_arguments_ += call.arguments;
-    if (!call.arguments.empty()) {
-      auto delta = json::Value::object();
-      delta["type"] = "input_json_delta";
-      delta["partial_json"] = call.arguments;
-      if (!Emit(BlockDelta(std::move(delta))))
-        return false;
-    }
-    return !call.complete || CloseTool(true);
-  }
-
-  bool CloseTool(bool complete) {
-    if (tool_.is_null())
-      return connected_;
-    if (complete) {
-      tool_["input"] = json::parse(tool_arguments_);
-      tool_use_ = true;
-    }
-    message_["content"].push_back(std::move(tool_));
-    tool_ = json::Value();
-    return BlockStop();
-  }
-
-  json::Value Complete(const TextGenerationBackend::Result& result) {
-    CloseTool(false);
-    CloseBlock();
-    if (message_["content"].empty()) {
-      text_.clear();
-      reasoning_ = false;
-      active_ = true;
-      Emit(BlockStart(Block()));
-      CloseBlock();
-    }
-    // Same precedence as Chat finish_reason: a truncated or stopped turn is
-    // reported as such even when complete calls precede the cut.
-    using Finish = TextGenerationBackend::FinishReason;
-    message_["stop_reason"] =
-        result.finish_reason == Finish::kStopSequence ? "stop_sequence"
-        : result.finish_reason == Finish::kLength     ? "max_tokens"
-        : tool_use_                                   ? "tool_use"
-                                                      : "end_turn";
-    message_["stop_sequence"] = result.finish_reason == Finish::kStopSequence
-                                    ? json::Value(result.stop_sequence)
-                                    : json::Value();
-    auto usage = json::Value::object();
-    // Anthropic reports cache reads separately; input_tokens counts only the
-    // uncached prompt, so the three input fields add up to the prompt length.
-    usage["input_tokens"] =
-        result.prompt_tokens -
-        std::min(result.cached_prompt_tokens, result.prompt_tokens);
-    usage["output_tokens"] = result.completion_tokens;
-    usage["cache_creation_input_tokens"] = 0;
-    usage["cache_read_input_tokens"] = result.cached_prompt_tokens;
-    message_["usage"] = usage;
-    message_["timings"] = GenerationTimings(result);
-    auto delta = Event("message_delta");
-    delta["delta"]["stop_reason"] = message_["stop_reason"];
-    delta["delta"]["stop_sequence"] = message_["stop_sequence"];
-    delta["usage"] = std::move(usage);
-    if (Emit(std::move(delta)))
-      Emit(Event("message_stop"));
-    return message_;
-  }
-
-  bool Fail(std::string_view message) {
-    auto event = Event("error");
-    event["error"]["type"] = "api_error";
-    event["error"]["message"] = std::string(message);
-    return Emit(std::move(event));
-  }
-
-private:
-  static json::Value Event(std::string_view type) {
-    auto event = json::Value::object();
-    event["type"] = std::string(type);
-    return event;
-  }
-
-  json::Value Block() const {
-    auto block = json::Value::object();
-    block["type"] = reasoning_ ? "thinking" : "text";
-    block[reasoning_ ? "thinking" : "text"] = text_;
-    // Local reasoning is not signed; clients replay the block unchanged.
-    if (reasoning_)
-      block["signature"] = "";
-    return block;
-  }
-
-  json::Value BlockStart(json::Value block) const {
-    auto event = Event("content_block_start");
-    event["index"] = index_;
-    event["content_block"] = std::move(block);
-    return event;
-  }
-
-  json::Value BlockDelta(json::Value delta) const {
-    auto event = Event("content_block_delta");
-    event["index"] = index_;
-    event["delta"] = std::move(delta);
-    return event;
-  }
-
-  bool BlockStop() {
-    auto event = Event("content_block_stop");
-    event["index"] = index_++;
-    return Emit(std::move(event));
-  }
-
-  bool CloseBlock() {
-    held_.clear();
-    if (!active_)
-      return connected_;
-    message_["content"].push_back(Block());
-    active_ = false;
-    return BlockStop();
-  }
-
-  bool Emit(json::Value event) {
-    if (!writer_)
-      return true;
-    if (!connected_)
-      return false;
-    connected_ =
-        writer_("event: " + event.member_str("type") + "\n" + Sse(event));
+    connected_ = gufo_anthropic_output_append(
+                     handle_.get(), CBytes(text), reasoning, &WriteToBodyWriter,
+                     &writer_) == GUFO_CHAT_RESPONSE_OK;
     return connected_;
   }
 
+  bool Tool(const ToolDelta& call) {
+    const GufoChatToolDelta d{
+        .index = call.index,
+        .begin = !call.id.empty(),
+        .id = CBytes(call.id),
+        .name = CBytes(call.name),
+        .arguments = CBytes(call.arguments),
+        .complete = call.complete,
+    };
+    std::string invalid;
+    const auto status =
+        gufo_anthropic_output_tool(handle_.get(), &d, &WriteToBodyWriter,
+                                   &writer_, &WriteToString, &invalid);
+    // Complete arguments become the block's input object, as json::parse
+    // reads them; malformed ones fail the response.
+    if (status == GUFO_CHAT_RESPONSE_INVALID)
+      throw std::runtime_error(invalid);
+    connected_ = status == GUFO_CHAT_RESPONSE_OK;
+    return connected_;
+  }
+
+  std::string Complete(const TextGenerationBackend::Result& result) {
+    const MetricsHolder metrics(result);
+    std::string body;
+    connected_ =
+        gufo_anthropic_output_complete(
+            handle_.get(), CFinishReason(result.finish_reason),
+            CBytes(result.stop_sequence), &metrics.raw, &WriteToBodyWriter,
+            &writer_, &WriteToString, &body) == GUFO_CHAT_RESPONSE_OK;
+    return body;
+  }
+
+  bool Fail(std::string_view message) {
+    connected_ = gufo_anthropic_output_fail(handle_.get(), CBytes(message),
+                                            &WriteToBodyWriter,
+                                            &writer_) == GUFO_CHAT_RESPONSE_OK;
+    return connected_;
+  }
+
+private:
   HttpResponse::BodyWriter writer_;
-  json::Value message_;
-  json::Value tool_;
-  std::string tool_arguments_;
-  std::string text_;
-  /// Trailing reasoning whitespace, emitted only if more reasoning follows.
-  std::string held_;
-  std::size_t index_{0};
-  bool active_{false};
-  bool reasoning_{false};
-  bool tool_use_{false};
+  std::unique_ptr<GufoAnthropicOutput, void (*)(GufoAnthropicOutput*)> handle_;
   bool connected_{true};
 };
 
@@ -1307,18 +869,16 @@ HttpResponse CreateCompatibilityResponse(
   const auto reasoning = generation->ReasoningDelimiters();
   auto stream_log = std::make_shared<HttpResponse::StreamLog>();
   auto timing = std::make_shared<std::string>();
-  const auto run = [generation, initial, reasoning, chat, markup,
-                    model = requested_model.empty()
-                                ? backend.model_id()
-                                : std::string(requested_model),
-                    stream_log, observe, count = sampling.logprobs,
-                    timing](const HttpResponse::BodyWriter& writer) {
-    Output output(model, writer, chat);
+  const auto run =
+      [generation, initial, reasoning, chat, markup,
+       model = requested_model.empty() ? backend.model_id()
+                                       : std::string(requested_model),
+       stream_log, observe, count = sampling.logprobs,
+       timing](const HttpResponse::BodyWriter& writer) -> std::string {
+    Output output(model, writer, chat, count);
     std::optional<ResponsesLogprobs> probabilities;
     if (observe)
       probabilities.emplace(*count);
-    if constexpr (std::is_same_v<Output, ResponsesOutput>)
-      output.SetLogprobs(count);
     bool started = false;
     const auto begin = [&] {
       if (started)
@@ -1330,7 +890,7 @@ HttpResponse CreateCompatibilityResponse(
       return false;
     };
     if (writer && chat.return_progress && !begin())
-      return json::Value();
+      return {};
     // A buffered response reads the whole text at the end, so only the
     // final parse produces its calls.
     GenerationStream parser(ParseSetup(chat, initial, reasoning, markup,
@@ -1340,21 +900,21 @@ HttpResponse CreateCompatibilityResponse(
       bool connected = true;
       if (event.kind == Kind::kReasoningDelta ||
           event.kind == Kind::kContentDelta) {
-        const bool reasoning = event.kind == Kind::kReasoningDelta;
+        const bool is_reasoning = event.kind == Kind::kReasoningDelta;
         if constexpr (std::is_same_v<Output, ResponsesOutput>) {
-          connected = output.Append(event.text, reasoning,
-                                    probabilities && !reasoning
+          connected = output.Append(event.text, is_reasoning,
+                                    probabilities && !is_reasoning
                                         ? probabilities->Take(event.spans)
                                         : json::Value::array());
         } else {
-          connected = output.Append(event.text, reasoning);
+          connected = output.Append(event.text, is_reasoning);
         }
       } else if (event.kind == Kind::kToolDelta) {
         connected = output.Tool({
             .index = event.index,
             .id = event.begin ? RandomId("call_") : std::string(),
-            .name = std::string(event.name),
-            .arguments = std::string(event.arguments),
+            .name = event.name,
+            .arguments = event.arguments,
             .complete = event.complete,
         });
       }
@@ -1392,18 +952,18 @@ HttpResponse CreateCompatibilityResponse(
         *timing = value.str();
       }
       if (result.cancelled)
-        return json::Value();
+        return {};
       if (!begin())
-        return json::Value();
+        return {};
       if (!writer && !observe && !parser.Feed(result.text, on_event))
-        return json::Value();
+        return {};
       if (probabilities)
         probabilities->Push(TokenPiece(""), true);
       const bool interrupted =
           result.finish_reason != TextGenerationBackend::FinishReason::kStop;
       if (!parser.Finish(!interrupted, interrupted, on_event)) {
         generation->Cancel();
-        return json::Value();
+        return {};
       }
       return output.Complete(result);
     } catch (const std::exception& error) {
@@ -1421,7 +981,7 @@ HttpResponse CreateCompatibilityResponse(
       stream_log->error_event_sent =
           output.Fail(message && *message ? message : "generation failed");
       generation->Cancel();
-      return json::Value();
+      return {};
     }
   };
   if (stream) {
@@ -1438,10 +998,10 @@ HttpResponse CreateCompatibilityResponse(
             .stream_log = std::move(stream_log),
             .defer_stream_headers = !chat.return_progress};
   }
-  auto response = run({});
+  auto body = run({});
   return {.status = 200,
           .reason = "OK",
-          .body = response.dump(),
+          .body = std::move(body),
           .headers = {{"Server-Timing", *timing}},
           .log_details = stream_log->details};
 }
@@ -1449,32 +1009,17 @@ HttpResponse CreateCompatibilityResponse(
 }  // namespace
 
 HttpResponse TextGenerationErrorResponse(const TextGenerationError& exception) {
-  json::Value response = json::Value::object();
-  json::Value error = json::Value::object();
-  error["message"] = exception.what();
-  error["type"] = "server_error";
-  error["code"] = exception.stable_code();
-  if (exception.required_bytes().has_value())
-    error["required_bytes"] = *exception.required_bytes();
-  if (exception.remaining_bytes().has_value())
-    error["remaining_bytes"] = *exception.remaining_bytes();
-  response["error"] = std::move(error);
-  if (exception.required_bytes().has_value() ||
-      exception.remaining_bytes().has_value()) {
-    json::Value gufo = json::Value::object();
-    gufo["code"] = exception.stable_code();
-    if (exception.required_bytes().has_value())
-      gufo["required_bytes"] = *exception.required_bytes();
-    if (exception.remaining_bytes().has_value())
-      gufo["remaining_bytes"] = *exception.remaining_bytes();
-    json::Value usage = json::Value::object();
-    usage["gufo"] = std::move(gufo);
-    response["usage"] = std::move(usage);
-  }
+  std::string body;
+  (void)gufo_chat_text_generation_error_response(
+      CBytes(exception.what()), CBytes(exception.stable_code()),
+      exception.required_bytes().has_value(),
+      exception.required_bytes().value_or(0),
+      exception.remaining_bytes().has_value(),
+      exception.remaining_bytes().value_or(0), &WriteToString, &body);
   HttpResponse output{
       .status = exception.http_status(),
       .reason = StatusReason(exception.http_status()),
-      .body = response.dump(),
+      .body = std::move(body),
       .headers = {},
       .streaming_body = {},
   };
@@ -1539,20 +1084,18 @@ HttpResponse CountOpenAiInputTokens(const ChatRequest& chat,
   try {
     const auto tokens = backend.count_chat_tokens(chat);
     if (!tokens) {
-      json::Value response = json::Value::object();
-      json::Value error = json::Value::object();
-      error["message"] = "endpoint not implemented on this text model";
-      error["type"] = "server_error";
-      error["code"] = "not_implemented";
-      response["error"] = std::move(error);
+      std::string body;
+      (void)gufo_chat_error_response(
+          CBytes("endpoint not implemented on this text model"),
+          CBytes("server_error"), CBytes("not_implemented"), &WriteToString,
+          &body);
       return {
-          .status = 501, .reason = "Not Implemented", .body = response.dump()};
+          .status = 501, .reason = "Not Implemented", .body = std::move(body)};
     }
-    json::Value response = json::Value::object();
-    response["object"] = "response.input_tokens";
-    response["input_tokens"] = *tokens;
+    std::string body;
+    (void)gufo_chat_input_tokens_response(*tokens, &WriteToString, &body);
     HttpResponse counted;
-    counted.body = response.dump();
+    counted.body = std::move(body);
     return counted;
   } catch (const TextGenerationError& exception) {
     return TextGenerationErrorResponse(exception);
@@ -1584,22 +1127,22 @@ HttpResponse HandleApplyTemplate(const HttpRequest& request,
   try {
     auto prompt = backend.render_chat_prompt(parsed.chat);
     if (!prompt) {
-      json::Value response = json::Value::object();
-      json::Value error = json::Value::object();
-      error["message"] = "endpoint not implemented on this text model";
-      error["type"] = "server_error";
-      error["code"] = "not_implemented";
-      response["error"] = std::move(error);
+      std::string body;
+      (void)gufo_chat_error_response(
+          CBytes("endpoint not implemented on this text model"),
+          CBytes("server_error"), CBytes("not_implemented"), &WriteToString,
+          &body);
       HttpResponse unavailable;
       unavailable.status = 501;
       unavailable.reason = "Not Implemented";
-      unavailable.body = response.dump();
+      unavailable.body = std::move(body);
       return unavailable;
     }
-    json::Value response = json::Value::object();
-    response["prompt"] = std::move(*prompt);
+    std::string body;
+    (void)gufo_chat_rendered_prompt_response(CBytes(*prompt), &WriteToString,
+                                             &body);
     HttpResponse rendered;
-    rendered.body = response.dump();
+    rendered.body = std::move(body);
     return rendered;
   } catch (const std::invalid_argument& exception) {
     return Error(400, "Bad Request", exception.what(), "invalid_prompt");
