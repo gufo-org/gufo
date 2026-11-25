@@ -65,13 +65,19 @@ public:
   /// Whether layer l keeps only a window (a ring of `ring` rows).
   [[nodiscard]] static bool WindowLayer(int l) { return l != 1; }
 
+  /// Optional in-pass capture of a row's Markov context vector (`dst`: device
+  /// [2304] floats) during Inject.
+  struct InjectCapture {
+    int row = 0;
+    float* dst = nullptr;
+  };
   /// Injects the features [n][4][2304] of positions [pos0, pos0 + n). After a
   /// gap (pos0 > valid) the context restarts at pos0.
   void Inject(hipStream_t s, State& st, const float* feats, std::size_t pos0,
-              int n);
+              int n, std::span<const InjectCapture> captures = {});
   /// Inject for several sessions' rows (kMaxRows in all) at once: every
   /// context weight is read once for all of them.
-  static constexpr int kMaxRows = 8;
+  static constexpr int kMaxRows = 16;
   struct Rows {
     State* st = nullptr;
     const float* feats = nullptr;  // [n][4][2304]

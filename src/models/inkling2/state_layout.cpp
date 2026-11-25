@@ -250,6 +250,12 @@ void SessionStateAccess::PrepareRestore(Session& s, std::size_t rows) {
   s.PrepareRestore(rows);
 }
 
+void SessionStateAccess::DeviceBytesOut(const void* src, std::size_t n,
+                                        std::byte* dst) {
+  const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+  Settle(hip::CopySnapshotToHost(dst, src, n, nullptr), "checkpoint out");
+}
+
 void SessionStateAccess::ConvVisitOut(const Session& s, std::uint32_t visit,
                                       std::size_t inner, std::size_t n,
                                       std::byte* dst) {

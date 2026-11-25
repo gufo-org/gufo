@@ -164,6 +164,9 @@ public:
                                                            cache::Rows first,
                                                            cache::Rows end);
   static void PrepareRestore(Session&, std::size_t rows);
+  /// Copies `n` bytes from an arbitrary device pointer (e.g. an in-pass
+  /// checkpoint buffer) to a cache host buffer via the snapshot copy path.
+  static void DeviceBytesOut(const void* src, std::size_t n, std::byte* dst);
 
 private:
   /// One K or V row stream: a target visit's slot, or (visit >= kVisits) a

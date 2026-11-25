@@ -565,6 +565,95 @@ int main(int argc, char** argv) {
                  "within the noise floor)\n",
                  yields2);
   }
+
+  // ---- 4. in-pass prefill checkpoints ----
+  // Single Forward call over 5,000 tokens (three 2048-token ubatches; the
+  // pass writes more rows than the 3,072-row SWA ring holds, so it wraps)
+  // capturing interior and ubatch-end boundaries in place, the last one after
+  // the wrap. Restoring each checkpoint must yield bit-identical logits,
+  // continuations, and (with --dspark) draft proposals to stopping prefill at
+  // that boundary.
+  constexpr std::size_t kInPassLen = 5000;
+  if (n < kInPassLen) {
+    std::fprintf(stderr, "SKIP in-pass checkpoints: needs --n %zu\n",
+                 kInPassLen);
+  } else {
+    const std::span<const std::int32_t> ip_prompt(ids.data(), kInPassLen);
+    const std::size_t ip_len = ip_prompt.size();
+    const std::vector<std::size_t> bounds = {700, 1500, 2048, 2600, 4096, 4200};
+    const std::vector<i2::Block> blocks = {
+        i2::Block::kIdle, i2::Block::kAfterHeader, i2::Block::kText,
+        i2::Block::kIdle, i2::Block::kText,        i2::Block::kIdle};
+    REQUIRE(ip_len > eng.ring_rows() && bounds.back() > eng.ring_rows(),
+            "in-pass test no longer wraps the %u-row ring", eng.ring_rows());
+    for (const std::size_t b : bounds)
+      REQUIRE(eng.CanCaptureInPass(0, ip_len, b),
+              "CanCaptureInPass rejected %zu", b);
+    // Boundary whose FirstChunkRow would be evicted from the 3072-row SWA ring
+    // (offset=2049, u_end=4097, boundary=2050 -> first_chunk=1024, span=3073)
+    // must be rejected.
+    REQUIRE(!eng.CanCaptureInPass(2049, 2048, 2050),
+            "CanCaptureInPass accepted evicted window boundary");
+
+    auto slot_ip = adapter.CreateSlot(guard);
+    std::vector<Checkpoint> cps(bounds.size());
+    std::vector<bool> seen(bounds.size(), false);
+    adapter.PrefillThrough(*slot_ip, ip_prompt, bounds, blocks,
+                           [&](std::size_t idx) {
+                             REQUIRE(idx < bounds.size() && !seen[idx],
+                                     "bad checkpoint index %zu", idx);
+                             const auto pos = adapter.Positions(*slot_ip);
+                             REQUIRE(pos.front().valid_rows == bounds[idx],
+                                     "checkpoint position %zu != %zu",
+                                     pos.front().valid_rows, bounds[idx]);
+                             cps[idx] = Capture(adapter, *slot_ip);
+                             seen[idx] = true;
+                           });
+    for (std::size_t i = 0; i < bounds.size(); ++i)
+      REQUIRE(seen[i], "checkpoint %zu not delivered", i);
+
+    for (std::size_t i = 0; i < bounds.size(); ++i) {
+      const std::size_t b = bounds[i];
+      auto slot_ref = adapter.CreateSlot(guard);
+      auto& sref = adapter.GetSession(*slot_ref);
+      eng.Forward(sref, ip_prompt.first(b));
+      const auto ref_logits = sref.logits();
+      const auto cont = std::span<const std::int32_t>(
+          ids.data() + b, std::min<std::size_t>(24, ids.size() - b));
+      const auto ref_cont = Run(eng, sref, cont);
+
+      auto slot_res = adapter.CreateSlot(guard);
+      Restore(adapter, *slot_res, cps[i]);
+      auto& sres = adapter.GetSession(*slot_res);
+      REQUIRE(sres.position() == b, "restored in-pass pos %zu != %zu",
+              sres.position(), b);
+      REQUIRE(static_cast<i2::Inkling2Slot&>(*slot_res).block == blocks[i],
+              "restored in-pass block mismatch at %zu", b);
+      REQUIRE(Same(sres.logits(), ref_logits),
+              "in-pass checkpoint logits differ at %zu", b);
+      if (eng.has_drafter()) {
+        auto slot_dref = adapter.CreateSlot(guard);
+        auto& sdref = adapter.GetSession(*slot_dref);
+        eng.Forward(sdref, ip_prompt.first(b));
+        REQUIRE(eng.DraftReady(sres), "no drafter context at in-pass %zu", b);
+        std::int32_t pa[7] = {}, pb[7] = {};
+        float ca[7] = {}, cb[7] = {};
+        const int na = eng.Propose(sdref, cont[0], 7, pa, ca);
+        const int nb = eng.Propose(sres, cont[0], 7, pb, cb);
+        REQUIRE(na == nb && std::memcmp(pa, pb, sizeof pa) == 0 &&
+                    std::memcmp(ca, cb, sizeof ca) == 0,
+                "in-pass drafter proposals differ at %zu (%d vs %d)", b, na,
+                nb);
+      }
+      const auto got_cont = Run(eng, sres, cont);
+      REQUIRE(Same(got_cont, ref_cont),
+              "in-pass continuation logits differ at %zu", b);
+    }
+    std::fprintf(stderr,
+                 "PASS in-pass checkpoints: %zu boundaries (interior + "
+                 "ubatch-end, SWA wrap%s) identical\n",
+                 bounds.size(), eng.has_drafter() ? " + DSpark" : "");
+  }
   (void)V;
   std::fprintf(stderr, "worst compared max |dlogit| %.3e (noise %.3e)\n",
                g_worst, g_noise);

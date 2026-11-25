@@ -136,7 +136,45 @@ std::vector<cache::ComponentPosition> Inkling2CacheAdapter::Positions(
   auto& s = AsSlot(const_cast<cache::Slot&>(slot));
   if (!s.IsValid())
     throw std::logic_error("cannot query an invalid Inkling 2 slot");
-  return layout_.Positions(SessionStateAccess::Position(s.session()));
+  const std::size_t pos = s.boundary != nullptr
+                              ? s.boundary->cp->position
+                              : SessionStateAccess::Position(s.session());
+  return layout_.Positions(pos);
+}
+
+std::vector<cache::ComponentPosition>
+Inkling2CacheAdapter::PrefillCheckpointPositions(const cache::Slot& slot,
+                                                 Rows boundary) const {
+  auto& s = AsSlot(const_cast<cache::Slot&>(slot));
+  if (!s.IsValid() || s.boundary != nullptr)
+    throw std::logic_error("Inkling 2 slot is not ready for checkpoint plan");
+  if (boundary <= SessionStateAccess::Position(s.session()) ||
+      boundary > engine_->max_context())
+    throw std::invalid_argument("unsupported Inkling 2 in-pass boundary");
+  return layout_.Positions(boundary);
+}
+
+void Inkling2CacheAdapter::PrefillThrough(
+    cache::Slot& slot, std::span<const std::int32_t> tokens,
+    std::span<const std::size_t> boundaries, std::span<const Block> blocks,
+    const std::function<void(std::size_t)>& consume, const PrefillYield* yield,
+    std::span<const InputRows> rows) const {
+  auto& s = AsSlot(slot);
+  if (!s.IsValid() || s.boundary != nullptr)
+    throw std::logic_error("Inkling 2 slot is not ready for PrefillThrough");
+  if (!consume || boundaries.empty() || blocks.size() != boundaries.size())
+    throw std::invalid_argument("invalid Inkling 2 PrefillThrough request");
+  engine_->Forward(s.session(), tokens, {}, yield, rows, boundaries,
+                   [&](std::size_t index, const Engine::PrefillCheckpoint& cp) {
+                     const Inkling2Slot::BoundaryView view{&cp, blocks[index]};
+                     struct Scope {
+                       Inkling2Slot& slot;
+                       const Inkling2Slot::BoundaryView* saved;
+                       ~Scope() { slot.boundary = saved; }
+                     } scope{s, s.boundary};
+                     s.boundary = &view;
+                     consume(index);
+                   });
 }
 
 std::vector<Rows> Inkling2CacheAdapter::PlanPrefill(const cache::Slot& slot,
@@ -166,26 +204,56 @@ void Inkling2CacheAdapter::CapturePrivateInto(const Inkling2Slot& slot,
     throw std::invalid_argument("invalid Inkling 2 private capture range");
   if (out.empty())
     return;
+  const auto* bv = slot.boundary;
   switch (c.part) {
     case Part::kMeta: {
       StateMeta m;
-      m.position = SessionStateAccess::Position(session);
-      m.block = static_cast<std::uint32_t>(slot.block);
-      m.logits_valid = SessionStateAccess::HasLogits(session) ? 1U : 0U;
-      m.ring_rows = layout_.ring_rows();
-      if (layout_.drafter())
-        SessionStateAccess::DraftOut(session, m);
+      if (bv != nullptr) {
+        m.position = bv->cp->position;
+        m.block = static_cast<std::uint32_t>(bv->block);
+        m.logits_valid = 1U;
+        m.ring_rows = layout_.ring_rows();
+        if (layout_.drafter()) {
+          m.draft_first = bv->cp->draft_first;
+          m.draft_valid = bv->cp->draft_valid;
+          m.draft_f_pos = bv->cp->draft_f_pos;
+        }
+      } else {
+        m.position = SessionStateAccess::Position(session);
+        m.block = static_cast<std::uint32_t>(slot.block);
+        m.logits_valid = SessionStateAccess::HasLogits(session) ? 1U : 0U;
+        m.ring_rows = layout_.ring_rows();
+        if (layout_.drafter())
+          SessionStateAccess::DraftOut(session, m);
+      }
       std::memcpy(out.data(), reinterpret_cast<const std::byte*>(&m) + offset,
                   out.size());
       break;
     }
     case Part::kLogits: {
+      if (bv != nullptr && !bv->cp->logits.empty()) {
+        if (bv->cp->logits.size() * sizeof(float) != total)
+          std::memset(out.data(), 0, out.size());
+        else
+          std::memcpy(
+              out.data(),
+              reinterpret_cast<const std::byte*>(bv->cp->logits.data()) +
+                  offset,
+              out.size());
+        break;
+      }
       std::vector<std::byte> all(total);
       SessionStateAccess::LogitsOut(session, all.data(), total);
       std::memcpy(out.data(), all.data() + offset, out.size());
       break;
     }
     case Part::kConv: {
+      if (bv != nullptr && bv->cp->conv != nullptr) {
+        SessionStateAccess::DeviceBytesOut(
+            reinterpret_cast<const std::byte*>(bv->cp->conv) + offset,
+            out.size(), out.data());
+        break;
+      }
       // Copy only the visits the piece touches.
       std::size_t done = 0;
       while (done < out.size()) {
@@ -200,7 +268,12 @@ void Inkling2CacheAdapter::CapturePrivateInto(const Inkling2Slot& slot,
       break;
     }
     case Part::kDraftF:
-      SessionStateAccess::DraftFOut(session, offset, out.size(), out.data());
+      if (bv != nullptr && bv->cp->draft_f != nullptr)
+        SessionStateAccess::DeviceBytesOut(
+            reinterpret_cast<const std::byte*>(bv->cp->draft_f) + offset,
+            out.size(), out.data());
+      else
+        SessionStateAccess::DraftFOut(session, offset, out.size(), out.data());
       break;
     default:
       throw std::invalid_argument("component is not private state");
@@ -247,9 +320,13 @@ cache::Completion Inkling2CacheAdapter::CopyRowsOut(const cache::Slot& slot,
   const auto& c = layout_.Component(id);
   if (!HasRows(c.descriptor.kind))
     throw std::invalid_argument("component has no rows");
-  const Rows pos = SessionStateAccess::Position(s.session());
-  const Rows oldest =
-      c.global || pos <= layout_.ring_rows() ? 0 : pos - layout_.ring_rows();
+  const Rows pos = s.boundary != nullptr
+                       ? s.boundary->cp->position
+                       : SessionStateAccess::Position(s.session());
+  const Rows written = s.boundary != nullptr ? s.boundary->cp->valid_end : pos;
+  const Rows oldest = c.global || written <= layout_.ring_rows()
+                          ? 0
+                          : written - layout_.ring_rows();
   if (first > end || end > pos || (first < end && first < oldest) ||
       bytes.size() != (end - first) * kKvRowBytes)
     throw std::invalid_argument("invalid Inkling 2 row capture");
@@ -272,7 +349,10 @@ std::span<const std::byte> Inkling2CacheAdapter::BorrowRowsView(
   const auto& c = layout_.Component(id);
   if (!c.global || !HasRows(c.descriptor.kind))
     return {};
-  if (first >= end || end > SessionStateAccess::Position(s.session()))
+  const Rows pos = s.boundary != nullptr
+                       ? s.boundary->cp->position
+                       : SessionStateAccess::Position(s.session());
+  if (first >= end || end > pos)
     throw std::invalid_argument("invalid Inkling 2 borrowed range");
   return SessionStateAccess::RowsView(s.session(), c.visit,
                                       c.part == Part::kValue, first, end);

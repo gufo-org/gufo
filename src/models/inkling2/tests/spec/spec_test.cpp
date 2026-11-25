@@ -24,6 +24,7 @@
 //    byte.
 // Exit 0 on success, 1 on a mismatch, 77 (skip) without a model.
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -252,8 +253,8 @@ int main(int argc, char** argv) {
 
   {
     // Session 0 is `ref`'s prompt; the others are longer filler prompts.
-    constexpr int kS = 3;
-    const int lens[kS] = {prompt, prompt + 1700, prompt + 3900};
+    constexpr int kS = 4;
+    const int lens[kS] = {prompt, prompt + 1700, prompt + 3900, prompt + 900};
     std::vector<std::vector<std::int32_t>> pr(kS), wt(kS);
     std::vector<std::vector<std::vector<float>>> rl(kS);
     for (int g = 0; g < kS; ++g) {
@@ -466,6 +467,64 @@ int main(int argc, char** argv) {
     std::printf("propose batch: 3 sessions, %d differ from lone proposals\n",
                 bad);
     failures += bad != 0;
+  }
+  {
+    // GPU linear sampling vs host FP64 reference + ReadVerifyRows check
+    auto s = engine->NewSession();
+    engine->Forward(*s, p);
+    std::vector<std::int32_t> toks(want.begin(), want.begin() + 8);
+    std::span<const float> out;
+    std::int32_t gpu_toks[8] = {};
+    Engine::LinearSample ls[8];
+    for (int j = 0; j < 8; ++j)
+      ls[j] = {.temperature = 1.0f,
+               .min_p = j % 2 ? 0.05f : 0.0f,
+               .u = 0.07 + 0.11 * j};
+    engine->Verify(*s, toks, &out, nullptr,
+                   std::span<const Engine::LinearSample>(ls, 8), gpu_toks);
+    int ls_bad = 0;
+    for (int j = 0; j < 8; ++j) {
+      const auto row = out.subspan(static_cast<std::size_t>(j) * V, V);
+      double mx = -INFINITY;
+      for (float v : row)
+        if (std::isfinite(v) && v > mx)
+          mx = v;
+      const double thr =
+          ls[j].min_p > 0 ? mx + ls[j].temperature *
+                                     std::log(static_cast<double>(ls[j].min_p))
+                          : -INFINITY;
+      double z = 0.0;
+      for (float v : row)
+        if (std::isfinite(v) && v >= thr)
+          z += std::exp((static_cast<double>(v) - mx) / ls[j].temperature);
+      const double target = ls[j].u * z;
+      double run = 0.0;
+      int cpu_tok = static_cast<int>(V) - 1;
+      for (std::size_t i = 0; i < V; ++i) {
+        if (std::isfinite(row[i]) && row[i] >= thr) {
+          run +=
+              std::exp((static_cast<double>(row[i]) - mx) / ls[j].temperature);
+          if (target < run) {
+            cpu_tok = static_cast<int>(i);
+            break;
+          }
+        }
+      }
+      if (gpu_toks[j] != cpu_tok)
+        ++ls_bad;
+    }
+    // ReadVerifyRows must copy the row from the device again: Verify's
+    // output lives in the same host buffer, so poison the row first.
+    const std::vector<float> want3(out.begin() + 3 * V, out.begin() + 4 * V);
+    std::fill_n(const_cast<float*>(out.data()) + 3 * V, V, std::nanf(""));
+    std::span<const float> row3;
+    engine->ReadVerifyRows(3, 1, &row3);
+    ls_bad +=
+        row3.size() != V || std::memcmp(row3.data(), want3.data(), V * 4) != 0;
+    engine->CommitVerify(*s, 1, {});
+    std::printf("gpu linear sample + lazy row read: 8 rows, %d errors\n",
+                ls_bad);
+    failures += ls_bad != 0;
   }
   std::printf(failures ? "FAIL\n" : "ALL PASS\n");
   return failures ? 1 : 0;

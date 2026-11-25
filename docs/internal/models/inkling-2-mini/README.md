@@ -25,6 +25,14 @@ and `THIRD_PARTY.md` carry its license and attributions. Changes made here:
 - Checkpoints keep the global K/V pages instead of copying them
   (`BorrowRowsView`; writes call `PrepareWrite`/`SettleRemaps`, restores
   `Region::Restore`).
+- Up to eight checkpoints are captured inside one prefill pass
+  (`Engine::Forward` with `checkpoints`). The window rings (window + ubatch
+  rows) still hold a boundary's last 1,024 rows at the end of its ubatch and
+  the global rows are append-only, so each visit copies only its convolution
+  history at the boundary as it computes it, the head writes the boundary
+  row's logits, and the drafter's Markov context comes from the same row.
+  `CanCaptureInPass` refuses a boundary whose window rows the ubatch would
+  overwrite; the host then ends the pass there.
 - The runner claims demand-mapped state and exposes the state account, so
   `--sessions` share memory when they do not all fit at full context. The
   default context is the model's native 1,048,576 tokens.
@@ -32,9 +40,11 @@ and `THIRD_PARTY.md` carry its license and attributions. Changes made here:
   removed with the code paths only they reached (MALL prefetch, second decode
   stream, alternative MoE-down kernel, tap printing, slow generic prefill
   paths).
-- Decode reads the router and loop-controller weights as exact BF16 copies of
-  the file's BF16-valued F32 tensors (the extension rounded them to F16, which
-  changes every router value and 99% of the controller values).
+- Prefill and decode read the router and loop-controller weights as exact
+  BF16 copies of the file's BF16-valued F32 tensors (the extension rounded
+  them to F16, which changes every router value and 99% of the controller
+  values). The device checks at load that every value is BF16-exact; a tensor
+  that is not stays F32.
 - Faster exact prefill and decode kernels; see [Benchmarks](BENCHMARKS.md).
 
 ## DSpark
@@ -68,7 +78,10 @@ weights (`dspark_fuse`, `dflare_norm`, padded `markov_w1`, `hidden_out`; now
   change). A row's logits are W_U h_i + `markov_w2` lat + bias: one 8-row
   pass over the head per draft gives every W_U h_i, and each Markov step
   reads only those tokens' 65,536 x 256 `markov_w2` rows (int8, one scale per
-  row, 16.8 MB) instead of the 160 MB head.
+  row, 16.8 MB) instead of the 160 MB head. The drafter's Q8_0 matrix
+  products quantize their F16 activations to int8 (one scale per 32 values)
+  and run on int8 WMMA; this changes only the proposals, never the verified
+  tokens.
 - **Verification.** `Engine::Verify` evaluates the anchor and up to seven
   proposals of one session in one batched-decode graph (decode steps are 8
   rows wide; batches of sessions stay at 4). On global visits up to five rows
@@ -84,8 +97,11 @@ weights (`dspark_fuse`, `dflare_norm`, padded `markov_w1`, `hidden_out`; now
   crosses an attention-split bucket (`VerifyRows`).
 - **Selection.** `Inkling2Runner::DecodeStep` selects each verified row's
   token exactly as `SelectNext` would after the tokens before it (masks, the
-  request's sampler on a working copy; plain greedy requests take the device
-  argmax and leave the logits on the device until something reads them) and
+  request's sampler on a working copy; greedy requests take the device
+  argmax and leave the logits on the device until something reads them; with
+  a grammar, a closed reasoning budget or a required call the argmax is kept
+  when the grammar and the runner's masks allow it, else that row's logits
+  are read) and
   keeps a proposal while it equals that selection. The first selection that
   differs becomes the next cycle's anchor (`pending`). The emitted tokens and
   draws are therefore those of AR decoding.
@@ -95,25 +111,30 @@ weights (`dspark_fuse`, `dflare_norm`, padded `markov_w1`, `hidden_out`; now
   use for that row (read in advance from a copy of the request's RNG). The
   sampler's linear draw walks tokens in id order, as the proposal head's rows
   are stored, so the proposal equals the target's draw whenever the two
-  distributions agree around the uniform. Other sampled requests get greedy
-  proposals. When every draw takes exactly one uniform (temperature 0.1 or
-  more, no min-p, penalties or constraint), the rows' host samplings run in
-  parallel with their draws known in advance.
+  distributions agree around the uniform. Other sampled requests (top-k,
+  top-p) get greedy proposals and keep a proposal only when the request's own
+  draw selects it, so their tokens are those of AR decoding. When every draw
+  takes exactly one uniform (temperature 0.1 or more, no min-p, penalties,
+  constraint or reasoning budget), the device samples each row with its
+  uniform known in advance and the logits stay on the device; with logprobs
+  the rows' host samplings run in parallel instead.
 - **Copy drafts.** A sampled request whose last generated tokens repeat an
   earlier stretch of its context (`speculative::PromptLookup`: 24 tokens, 5
   where the last accepted copy left off) proposes the tokens that followed
   that stretch instead of the drafter's; a copy that keeps fewer than half
   of its tokens skips the next opportunities. Greedy requests do not copy.
 - **Several requests.** `DecodeBatch` (2 to 8 requests) drafts for all of
-  them in one drafter pass and verifies their rows in one step of up to eight
-  rows; without proposals it runs one batched one-token step of their
-  anchors. Each next token is selected as the request's next anchor, so a
+  them in one drafter pass and verifies their rows in one step of up to 16
+  rows; from 6 rows the step groups the MoE pairs by expert, since
+  consecutive rows of a session share most of their experts. Without
+  proposals it runs one batched one-token step of their anchors. Each next token is selected as the request's next anchor, so a
   request moves between single and batched steps with the same draws. Every
   eight drafted cycles, a batch width whose cycles emitted fewer tokens per
   millisecond than its measured plain steps stops drafting for a while.
-- **Selection.** Greedy rows take the device argmax. Sampled rows come back
-  through a pinned buffer; up to three are selected one after another on the
-  calling thread, more on persistent threads.
+- **Selection.** Greedy rows take the device argmax and device-sampled rows
+  their device token. Other sampled rows come back through a pinned buffer;
+  up to three are selected one after another on the calling thread, more on
+  persistent threads.
 - **Width.** `dspark_policy.hpp`: the drafter's probability for each proposal,
   through a calibration of acceptance per probability bin that keeps learning,
   gives the survival of each prefix; the width maximises expected tokens per
@@ -128,9 +149,11 @@ weights (`dspark_fuse`, `dflare_norm`, padded `markov_w1`, `hidden_out`; now
 
 - **Loading.** The target and drafter weights stream to the device through
   `hip::WeightUpload`, which reads the files without faulting their mappings.
-  The tensors the engine converts on the host (router, loop controllers,
-  bias tables, drafter tables) are read through the mapping, and its pages
-  are released once the engine is built (`platform::ReleaseMappedPages`).
+  The router, loop controllers, bias tables and padded sink projections are
+  converted on the device from their uploaded copies, and the drafter's
+  `markov_w1` row norms are computed there; only the selected `markov_w2`
+  rows and bias are read through the mapping, whose pages are released once
+  the engine is built (`platform::ReleaseMappedPages`).
   A loaded server with DSpark holds 0.38 GB of host memory (18.1 GB before
   on Linux, 17.6 GB on Windows, where a mapping's touched pages stay in the
   working set and the RAM prompt cache, sized from free memory, got 0.53 GB
@@ -211,13 +234,6 @@ The GPU tests need the model and run by hand; hosted CI builds the model
 
 Exact, not done yet:
 
-- **In-pass checkpoints.** The host ends a pass at each checkpoint boundary
-  (a pass of N tokens becomes two; pp512 runs at 1,618 tokens/s against
-  2,268 at 2,048). A capture inside the pass can be exact: the window rings
-  (window + ubatch rows) still hold the boundary's last 1,024 rows at the end
-  of its ubatch and the global rows are append-only, so only the
-  convolution histories at the boundary need copying as each visit computes
-  them.
 - **Required calls through the grammar.** With reasoning on, the prompt ends
   in a header and the shared grammar writes its call opener before every
   call, so it cannot describe the call; the runner's mask (Select) does.

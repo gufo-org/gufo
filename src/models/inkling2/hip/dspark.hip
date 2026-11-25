@@ -192,7 +192,8 @@ __global__ void __launch_bounds__(256) k_attn(AttnArgs a) {
   const int pos = *a.pos;
   const int lo = max(a.first, a.window ? max(0, pos - a.window) : 0);
   const int nctx = pos - lo, nkeys = nctx + kBlock;
-  const int per = (nkeys + kAttnSplits - 1) / kAttnSplits;
+  const int nsplits = a.nsplits;
+  const int per = (nkeys + nsplits - 1) / nsplits;
   const int k0 = split * per, k1 = min(nkeys, k0 + per);
   float4 qv[NQ];
 #pragma unroll
@@ -238,48 +239,57 @@ __global__ void __launch_bounds__(256) k_attn(AttnArgs a) {
     }
   }
   __shared__ float sm[8][NQ][2];
-  __shared__ float so[8][NQ][kHead];
+  __shared__ float so[8][4][kHead];
 #pragma unroll
   for (int r = 0; r < NQ; ++r) {
     if (l == 0) {
       sm[w][r][0] = m[r];
       sm[w][r][1] = s[r];
     }
-    so[w][r][4 * l] = o[r].x;
-    so[w][r][4 * l + 1] = o[r].y;
-    so[w][r][4 * l + 2] = o[r].z;
-    so[w][r][4 * l + 3] = o[r].w;
   }
-  __syncthreads();
-  float* ws = a.ws + ((size_t)h * kAttnSplits + split) * NQ * (kHead + 2);
-  for (int e = threadIdx.x; e < NQ * kHead; e += 256) {
-    const int r = e / kHead, d = e % kHead;
-    float mm = -INFINITY;
-    for (int x = 0; x < 8; ++x)
-      mm = fmaxf(mm, sm[x][r][0]);
-    float ss = 0.f, oo = 0.f;
-    if (mm > -INFINITY)
-      for (int x = 0; x < 8; ++x) {
-        const float f = __expf(sm[x][r][0] - mm);
-        ss += sm[x][r][1] * f;
-        oo += so[x][r][d] * f;
+  float* ws = a.ws + ((size_t)h * nsplits + split) * NQ * (kHead + 2);
+  for (int half = 0; half < 2; ++half) {
+    if (half > 0)
+      __syncthreads();
+#pragma unroll
+    for (int ri = 0; ri < 4; ++ri) {
+      const int r = half * 4 + ri;
+      so[w][ri][4 * l] = o[r].x;
+      so[w][ri][4 * l + 1] = o[r].y;
+      so[w][ri][4 * l + 2] = o[r].z;
+      so[w][ri][4 * l + 3] = o[r].w;
+    }
+    __syncthreads();
+    for (int e = threadIdx.x; e < 4 * kHead; e += 256) {
+      const int ri = e / kHead, r = half * 4 + ri, d = e % kHead;
+      float mm = -INFINITY;
+      for (int x = 0; x < 8; ++x)
+        mm = fmaxf(mm, sm[x][r][0]);
+      float ss = 0.f, oo = 0.f;
+      if (mm > -INFINITY)
+        for (int x = 0; x < 8; ++x) {
+          const float f = __expf(sm[x][r][0] - mm);
+          ss += sm[x][r][1] * f;
+          oo += so[x][ri][d] * f;
+        }
+      ws[(size_t)r * (kHead + 2) + 2 + d] = oo;
+      if (d == 0) {
+        ws[(size_t)r * (kHead + 2)] = mm;
+        ws[(size_t)r * (kHead + 2) + 1] = ss;
       }
-    ws[(size_t)r * (kHead + 2) + 2 + d] = oo;
-    if (d == 0) {
-      ws[(size_t)r * (kHead + 2)] = mm;
-      ws[(size_t)r * (kHead + 2) + 1] = ss;
     }
   }
 }
 __global__ void __launch_bounds__(128) k_attn_combine(AttnArgs a) {
   constexpr int NQ = kBlock;
   const int h = blockIdx.x, r = blockIdx.y, d = threadIdx.x;
-  const float* ws = a.ws + (size_t)h * kAttnSplits * NQ * (kHead + 2);
+  const int nsplits = a.nsplits;
+  const float* ws = a.ws + (size_t)h * nsplits * NQ * (kHead + 2);
   float mm = -INFINITY;
-  for (int x = 0; x < kAttnSplits; ++x)
+  for (int x = 0; x < nsplits; ++x)
     mm = fmaxf(mm, ws[((size_t)x * NQ + r) * (kHead + 2)]);
   float ss = 0.f, oo = 0.f;
-  for (int x = 0; x < kAttnSplits; ++x) {
+  for (int x = 0; x < nsplits; ++x) {
     const float* e = ws + ((size_t)x * NQ + r) * (kHead + 2);
     if (e[0] == -INFINITY)
       continue;
@@ -399,6 +409,42 @@ struct Gemv8Set {  // up to three matrices of the same input, one launch
   int blocks[3];  // row blocks of 32 of each
   int n;
 };
+// Row-wise squared L2 norms of BF16 [rows][256], 8 rows per 256-thread block.
+__global__ void __launch_bounds__(256)
+    k_row_norm_sq_bf16(const uint16_t* __restrict__ src, int rows,
+                       float* __restrict__ out) {
+  const int row = blockIdx.x * 8 + threadIdx.x / 32;
+  const int l = threadIdx.x % 32;
+  if (row >= rows)
+    return;
+  const uint16_t* p = src + (size_t)row * kRank;
+  float s = 0.f;
+#pragma unroll
+  for (int c = l; c < kRank; c += 32) {
+    const float v = bf16f(p[c]);
+    s += v * v;
+  }
+  s = wsum(s);
+  if (l == 0)
+    out[row] = s;
+}
+// Quantize + transpose row-major BF16 [n][256] into int8 [256][n] + [n] scales.
+__global__ void __launch_bounds__(256)
+    k_quant_pt_bf16(const uint16_t* __restrict__ src, int n,
+                    int8_t* __restrict__ q, float* __restrict__ scale) {
+  const int r = blockIdx.x * 256 + threadIdx.x;
+  if (r >= n)
+    return;
+  const uint16_t* row = src + (size_t)r * kRank;
+  float mx = 0.f;
+  for (int j = 0; j < kRank; ++j)
+    mx = fmaxf(mx, fabsf(bf16f(row[j])));
+  const float sc = mx > 0.f ? mx / 127.f : 1.f;
+  const float inv = 1.f / sc;
+  for (int j = 0; j < kRank; ++j)
+    q[(size_t)j * n + r] = (int8_t)__float2int_rn(bf16f(row[j]) * inv);
+  scale[r] = sc;
+}
 // int8 table with one scale per row r (over the 256 ranks)
 __global__ void __launch_bounds__(256)
     k_quant_pt(const float* __restrict__ src, int n, int8_t* __restrict__ q,
@@ -414,105 +460,199 @@ __global__ void __launch_bounds__(256)
     q[(size_t)j * n + r] = (int8_t)__float2int_rn(src[(size_t)j * n + r] / sc);
   scale[r] = sc;
 }
-// k_lr_logits from the int8 table: four rows per thread
+// k_lr_logits from the int8 table: four rows per thread, shared across NS
+// sessions so `pt` (16 MB) is read once per Markov step.
+template<int NS>
 __global__ void __launch_bounds__(256)
-    k_lr_logits8(const int8_t* __restrict__ pt, const float* __restrict__ ps,
-                 const float* __restrict__ cb, const float* __restrict__ base,
-                 const float* __restrict__ lat, float* __restrict__ out,
-                 int n) {
-  __shared__ float sl[kRank];
-  sl[threadIdx.x] = lat[threadIdx.x];
+    k_lr_logits8_batch(const int8_t* __restrict__ pt,
+                       const float* __restrict__ ps,
+                       const float* __restrict__ cb, LrBatch batch, int n) {
+  __shared__ float sl[NS][kRank];
+#pragma unroll
+  for (int s = 0; s < NS; ++s)
+    if (s < batch.count)
+      sl[s][threadIdx.x] = batch.lat[s][threadIdx.x];
   __syncthreads();
   const int r = (blockIdx.x * 256 + threadIdx.x) * 4;
   if (r >= n)
     return;
-  float a[4] = {0.f, 0.f, 0.f, 0.f};
+  if constexpr (NS == 1) {
+    float a[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll 16
+    for (int j = 0; j < kRank; ++j) {
+      const char4 p = *(const char4*)(pt + (size_t)j * n + r);
+      const float l = sl[0][j];
+      a[0] += (float)p.x * l;
+      a[1] += (float)p.y * l;
+      a[2] += (float)p.z * l;
+      a[3] += (float)p.w * l;
+    }
+    const float* b = batch.base[0];
+    float* o = batch.out[0];
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      o[r + i] = b[r + i] + ps[r + i] * a[i] + cb[r + i];
+    return;
+  }
+  float a[NS][4];
+#pragma unroll
+  for (int s = 0; s < NS; ++s)
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      a[s][i] = 0.f;
+#pragma unroll 8
   for (int j = 0; j < kRank; ++j) {
     const char4 p = *(const char4*)(pt + (size_t)j * n + r);
-    const float l = sl[j];
-    a[0] += (float)p.x * l;
-    a[1] += (float)p.y * l;
-    a[2] += (float)p.z * l;
-    a[3] += (float)p.w * l;
-  }
+    const float p0 = (float)p.x, p1 = (float)p.y, p2 = (float)p.z,
+                p3 = (float)p.w;
 #pragma unroll
-  for (int i = 0; i < 4; ++i)
-    out[r + i] = base[r + i] + ps[r + i] * a[i] + cb[r + i];
+    for (int s = 0; s < NS; ++s)
+      if (s < batch.count) {
+        const float l = sl[s][j];
+        a[s][0] += p0 * l;
+        a[s][1] += p1 * l;
+        a[s][2] += p2 * l;
+        a[s][3] += p3 * l;
+      }
+  }
+  const float4 psv = *(const float4*)(ps + r);
+  const float4 cbv = *(const float4*)(cb + r);
+#pragma unroll
+  for (int s = 0; s < NS; ++s)
+    if (s < batch.count) {
+      const float* b = batch.base[s] + r;
+      float* o = batch.out[s] + r;
+      o[0] = b[0] + psv.x * a[s][0] + cbv.x;
+      o[1] = b[1] + psv.y * a[s][1] + cbv.y;
+      o[2] = b[2] + psv.z * a[s][2] + cbv.z;
+      o[3] = b[3] + psv.w * a[s][3] + cbv.w;
+    }
 }
-template<int KC>
+typedef int v4i __attribute__((ext_vector_type(4)));
+typedef int v8i __attribute__((ext_vector_type(8)));
+typedef int v4i_a2 __attribute__((ext_vector_type(4), aligned(2)));
+
+// Per-32-element Q8_0 quantization of F16 activations [nrows][K] into
+// WMMA-coalesced tiles [ntiles][K/32][2][16] (v4i) and [ntiles][K/32][16] (f32).
 __global__ void __launch_bounds__(256)
-    k_gemv8(Gemv8Set set, int K, const _Float16* __restrict__ x) {
-  constexpr int NBK = KC / 32, RW = 4;
-  __shared__ __attribute__((aligned(16))) _Float16 xs[kBlock][KC];
-  const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
-  int by = blockIdx.y, mi = 0;
+    k_quant_q8(const _Float16* __restrict__ x, int nrows, int K,
+               v4i* __restrict__ qa, float* __restrict__ qs) {
+  __shared__ __attribute__((aligned(16))) int8_t sb[8][32];
+  const int nb = K / 32;
+  const int ntiles = (nrows + 15) / 16;
+  const int total_warps = ntiles * 16 * nb;
+  const int wid = blockIdx.x * 8 + threadIdx.x / 32;
+  const int w = threadIdx.x / 32;
+  const int l = threadIdx.x % 32;
+  if (wid >= total_warps)
+    return;
+  const int b = wid % nb;
+  const int row = wid / nb;
+  const int tile = row / 16;
+  const int r = row % 16;
+  const size_t qbase = ((size_t)tile * nb + b) * 32 + r;
+  const size_t sidx = ((size_t)tile * nb + b) * 16 + r;
+  if (row >= nrows) {
+    if (l == 0) {
+      const v4i z = {0, 0, 0, 0};
+      qa[qbase] = z;
+      qa[qbase + 16] = z;
+      qs[sidx] = 0.f;
+    }
+    return;
+  }
+  const float v = (float)x[(size_t)row * K + b * 32 + l];
+  float mx = fabsf(v);
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1)
+    mx = fmaxf(mx, __shfl_xor(mx, o, 32));
+  const float sc = mx > 0.f ? mx / 127.f : 0.f;
+  const float inv = mx > 0.f ? 127.f / mx : 0.f;
+  sb[w][l] = (int8_t)__float2int_rn(v * inv);
+  __builtin_amdgcn_wave_barrier();
+  if (l == 0) {
+    qa[qbase] = *(const v4i*)&sb[w][0];
+    qa[qbase + 16] = *(const v4i*)&sb[w][16];
+    qs[sidx] = sc;
+  }
+}
+
+// Int8 WMMA Q8_0 GEMM: 16 output rows per block, NW waves split K/32 in
+// lockstep, reading each weight block once across all NTILES x 16 token rows.
+template<int NW, int NTILES, int MAX_I>
+__global__ void __launch_bounds__(NW * 32)
+    k_gemv_wmma(Gemv8Set set, int K, const v4i* __restrict__ qa,
+                const float* __restrict__ qs, int nrows) {
+  const int wave = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  const int c16 = lane & 15;
+  const int half = lane >> 4;
+  int by = blockIdx.x, mi = 0;
   while (mi + 1 < set.n && by >= set.blocks[mi])
     by -= set.blocks[mi++];
   const uint8_t* __restrict__ W = set.w[mi];
   const int M = set.m[mi];
   float* __restrict__ y = set.y[mi];
-  // blockIdx.x: the session (its 8 rows of x and y); the sessions of one
-  // weight block run next to each other, so the later ones read it from L2.
-  const int r0 = (by * 8 + wave) * RW;
-  x += (size_t)blockIdx.x * kBlock * K;
-  y += (size_t)blockIdx.x * kBlock * M;
-  const size_t rb = (size_t)(K / 32) * 34;
-  float acc[RW][kBlock];
+  const int r0 = by * 16;
+  const int nb = K / 32;
+  const size_t rb = (size_t)nb * 34;
+  const uint8_t* Wrow = W + (size_t)(r0 + c16) * rb;
+
+  float acc[NTILES][MAX_I];
 #pragma unroll
-  for (int r = 0; r < RW; ++r)
+  for (int t = 0; t < NTILES; ++t)
 #pragma unroll
-    for (int i = 0; i < kBlock; ++i)
-      acc[r][i] = 0.f;
-  for (int k0 = 0; k0 < K; k0 += KC) {
-    __syncthreads();
-    for (int e = threadIdx.x; e < kBlock * KC / 8; e += 256) {
-      const int i = e / (KC / 8), c = (e % (KC / 8)) * 8;
-      *(uint4*)&xs[i][c] = *(const uint4*)(x + (size_t)i * K + k0 + c);
-    }
-    __syncthreads();
-    for (int b = lane; b < NBK; b += 32) {
-      h2 wq[RW][16];
-      float d[RW];
+    for (int i = 0; i < MAX_I; ++i)
+      acc[t][i] = 0.f;
+
+  const v8i z = {0, 0, 0, 0, 0, 0, 0, 0};
+  for (int b = wave; b < nb; b += NW) {
+    const uint8_t* pu = Wrow + (size_t)b * 34;
+    const float dw = __half2float(*(const __half*)pu);
+    const v4i w0 = *(const v4i_a2*)(pu + 2);
+    const v4i w1 = *(const v4i_a2*)(pu + 18);
 #pragma unroll
-      for (int r = 0; r < RW; ++r) {
-        const uint8_t* p =
-            W + (size_t)(r0 + r) * rb + (size_t)(k0 / 32 + b) * 34;
-        d[r] = __half2float(*(const __half*)p);
-        const uint16_t* q = (const uint16_t*)(p + 2);
+    for (int t = 0; t < NTILES; ++t) {
+      const size_t qbase = ((size_t)t * nb + b) * 32 + c16;
+      const v4i a0 = qa[qbase];
+      const v4i a1 = qa[qbase + 16];
+      const float sa = qs[((size_t)t * nb + b) * 16 + c16];
+      v8i c = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a0, true, w0, z,
+                                                         false);
+      c = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(true, a1, true, w1, c,
+                                                     false);
 #pragma unroll
-        for (int j = 0; j < 16; ++j) {
-          const uint16_t v = q[j];
-          wq[r][j] =
-              h2{(_Float16)(int8_t)(v & 0xFF), (_Float16)(int8_t)(v >> 8)};
-        }
+      for (int i = 0; i < MAX_I; ++i) {
+        const float s_row = __shfl(sa, 2 * i + half, 16);
+        acc[t][i] += (dw * s_row) * (float)c[i];
       }
+    }
+  }
+
+  constexpr int RPT = MAX_I * 2;
+  __shared__ float red[NW][RPT][16];
+  for (int t = 0; t < NTILES; ++t) {
+    if (t > 0)
+      __syncthreads();
 #pragma unroll
-      for (int i = 0; i < kBlock; ++i) {
-        const h2* xp = (const h2*)&xs[i][b * 32];
-        h2 xv[16];
+    for (int i = 0; i < MAX_I; ++i)
+      red[wave][2 * i + half][c16] = acc[t][i];
+    __syncthreads();
+    if (wave == 0) {
 #pragma unroll
-        for (int j = 0; j < 16; ++j)
-          xv[j] = xp[j];
+      for (int i = 0; i < MAX_I; ++i) {
+        const int tr = 2 * i + half;
+        const int gr = t * 16 + tr;
+        if (gr < nrows && r0 + c16 < M) {
+          float sum = 0.f;
 #pragma unroll
-        for (int r = 0; r < RW; ++r) {
-          float s = 0.f;
-#pragma unroll
-          for (int j = 0; j < 16; ++j)
-            s = __builtin_amdgcn_fdot2(wq[r][j], xv[j], s, false);
-          acc[r][i] += d[r] * s;
+          for (int w = 0; w < NW; ++w)
+            sum += red[w][tr][c16];
+          y[(size_t)gr * M + r0 + c16] = sum;
         }
       }
     }
   }
-#pragma unroll
-  for (int r = 0; r < RW; ++r)
-#pragma unroll
-    for (int i = 0; i < kBlock; ++i) {
-      const float v = wsum(acc[r][i]);
-      if (lane == 0 && r0 + r < M)
-        y[(size_t)i * M + r0 + r] = v;
-    }
 }
 
 // ---- coupled sampling over contiguous chunks
@@ -760,7 +900,7 @@ void QkNormRope(hipStream_t s, float* q, float* k, const float* qnorm,
   Chk("qk");
 }
 void Attn(hipStream_t s, const AttnArgs& a) {
-  k_attn<<<dim3(kHeads, kAttnSplits), 256, 0, s>>>(a);
+  k_attn<<<dim3(kHeads, a.nsplits), 256, 0, s>>>(a);
   k_attn_combine<<<dim3(kHeads, kBlock), 128, 0, s>>>(a);
   Chk("attn");
 }
@@ -790,12 +930,37 @@ void QuantPt(hipStream_t s, const float* src, int n, int8_t* q, float* scale) {
   k_quant_pt<<<(n + 255) / 256, 256, 0, s>>>(src, n, q, scale);
   Chk("quant pt");
 }
+void RowNormSqBf16(hipStream_t s, const uint16_t* src, int rows, float* out) {
+  k_row_norm_sq_bf16<<<(rows + 7) / 8, 256, 0, s>>>(src, rows, out);
+  Chk("row norm");
+}
+void QuantPtBf16(hipStream_t s, const uint16_t* src, int n, int8_t* q,
+                 float* scale) {
+  k_quant_pt_bf16<<<(n + 255) / 256, 256, 0, s>>>(src, n, q, scale);
+  Chk("quant pt bf16");
+}
+void LrLogits8Batch(hipStream_t s, const int8_t* pt, const float* ps,
+                    const float* cb, const LrBatch& batch, int n) {
+  const int grid = (n / 4 + 255) / 256;
+  if (batch.count <= 1)
+    k_lr_logits8_batch<1><<<grid, 256, 0, s>>>(pt, ps, cb, batch, n);
+  else if (batch.count <= 2)
+    k_lr_logits8_batch<2><<<grid, 256, 0, s>>>(pt, ps, cb, batch, n);
+  else if (batch.count <= 4)
+    k_lr_logits8_batch<4><<<grid, 256, 0, s>>>(pt, ps, cb, batch, n);
+  else
+    k_lr_logits8_batch<8><<<grid, 256, 0, s>>>(pt, ps, cb, batch, n);
+  Chk("lr logits");
+}
 void LrLogits8(hipStream_t s, const int8_t* pt, const float* ps,
                const float* cb, const float* base, const float* lat,
                float* logits, int n) {
-  k_lr_logits8<<<(n / 4 + 255) / 256, 256, 0, s>>>(pt, ps, cb, base, lat,
-                                                   logits, n);
-  Chk("lr logits");
+  LrBatch b{};
+  b.base[0] = base;
+  b.lat[0] = lat;
+  b.out[0] = logits;
+  b.count = 1;
+  LrLogits8Batch(s, pt, ps, cb, b, n);
 }
 void Argmax(hipStream_t s, const float* logits, int n, const int* map,
             float* ws, int* tokens, int row, int* prev, float* conf) {
@@ -805,30 +970,42 @@ void Argmax(hipStream_t s, const float* logits, int n, const int* map,
   Chk("argmax");
 }
 void Gemv8N(hipStream_t s, int n, const void* const* w, const int* m, int k,
-            const _Float16* x, float* const* y, int sessions) {
+            const _Float16* x, float* const* y, int nrows, void* qa,
+            float* qs) {
+  if (nrows < 1 || nrows > 64 || k % 32 != 0)
+    throw std::runtime_error("inkling2 dspark: gemv8 shape");
   Gemv8Set set{};
   set.n = n;
   int blocks = 0;
   for (int i = 0; i < n; ++i) {
-    if (m[i] % 32)
+    if (m[i] % 16)
       throw std::runtime_error("inkling2 dspark: gemv8 shape");
     set.w[i] = static_cast<const uint8_t*>(w[i]);
     set.y[i] = y[i];
     set.m[i] = m[i];
-    set.blocks[i] = m[i] / 32;
-    blocks += m[i] / 32;
+    set.blocks[i] = m[i] / 16;
+    blocks += m[i] / 16;
   }
-  if (k % 2304 == 0)
-    k_gemv8<2304><<<dim3(sessions, blocks), 256, 0, s>>>(set, k, x);
-  else if (k == 3072)
-    k_gemv8<3072><<<dim3(sessions, blocks), 256, 0, s>>>(set, k, x);
+  const int ntiles = (nrows + 15) / 16;
+  const int qwarps = ntiles * 16 * (k / 32);
+  v4i* qap = static_cast<v4i*>(qa);
+  k_quant_q8<<<(qwarps + 7) / 8, 256, 0, s>>>(x, nrows, k, qap, qs);
+  constexpr int NW = 4;
+  if (nrows <= 8)
+    k_gemv_wmma<NW, 1, 4><<<blocks, NW * 32, 0, s>>>(set, k, qap, qs, nrows);
+  else if (nrows <= 16)
+    k_gemv_wmma<NW, 1, 8><<<blocks, NW * 32, 0, s>>>(set, k, qap, qs, nrows);
+  else if (nrows <= 32)
+    k_gemv_wmma<NW, 2, 8><<<blocks, NW * 32, 0, s>>>(set, k, qap, qs, nrows);
+  else if (nrows <= 48)
+    k_gemv_wmma<NW, 3, 8><<<blocks, NW * 32, 0, s>>>(set, k, qap, qs, nrows);
   else
-    throw std::runtime_error("inkling2 dspark: gemv8 shape");
+    k_gemv_wmma<NW, 4, 8><<<blocks, NW * 32, 0, s>>>(set, k, qap, qs, nrows);
   Chk("gemv8");
 }
 void Gemv8(hipStream_t s, const void* w, int m, int k, const _Float16* x,
-           float* y, int sessions) {
-  Gemv8N(s, 1, &w, &m, k, x, &y, sessions);
+           float* y, int nrows, void* qa, float* qs) {
+  Gemv8N(s, 1, &w, &m, k, x, &y, nrows, qa, qs);
 }
 void CoupledSample(hipStream_t s, const float* logits, int n, const int* map,
                    float softcap, float temperature, float min_p, float u,

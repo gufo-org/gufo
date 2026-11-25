@@ -1847,16 +1847,15 @@ __global__ void __launch_bounds__(1024)
     sorted[atomicAdd(&cur[ids[p]], 1)] = p;
 }
 
-// ---------------- prefill: tiled SIMT kernels for the skinny F32 matrices
+// ---------------- prefill: tiled SIMT kernels for the skinny F32/BF16 matrices
 // ---------------- out[t][r] = sum_k W[r][k] * in[t][k] with the input read
 // from up to two segments (x, msg), each RMS-normalised per token when `rms`.
-// Block: 8 tokens x 64 rows, K in chunks of 128.
 struct GateP {
   const float* x;
   int ldx;
   const float* msg;
   int ldm;
-  const float* W;
+  const void* W;
   int ldw;
   int k1, k2, rms;
   float* out;
@@ -1864,93 +1863,24 @@ struct GateP {
   int rows;  // valid output rows of the tile range (<= 64 per tile; 0 = all)
   const float* inv2 = nullptr;  // precomputed per-token msg inverse RMS
   const float* inv1 = nullptr;  // precomputed per-token x inverse RMS
+  int half = 0;                 // 1: BF16 weights (exact F32 high 16 bits)
 };
 struct GateJobs {
   GateP j[3];
 };
-__global__ void __launch_bounds__(256)
-    k_gate_p(GateJobs jobs, int T, float eps) {
-  const GateP& p = jobs.j[blockIdx.z];
-  __shared__ float Wt[64][129];
-  __shared__ float xs[8][128];
-  __shared__ float inv[2][8];
-  const int tid = threadIdx.x, t0 = blockIdx.x * 8, r0 = blockIdx.y * 64;
-  const int wave = tid / 32, lane = tid % 32;
-  // per-token inverse RMS of each segment (wave = token)
-  {
-    const int t = min(t0 + wave, T - 1);
-    float s1 = 1.f, s2 = 1.f;
-    if (p.rms) {
-      float a = 0.f, b = 0.f;
-      for (int i = lane; i < p.k1; i += 32) {
-        float v = p.x[(size_t)t * p.ldx + i];
-        a += v * v;
-      }
-      for (int i = lane; i < p.k2; i += 32) {
-        float v = p.msg[(size_t)t * p.ldm + i];
-        b += v * v;
-      }
-      a = wsum(a);
-      b = wsum(b);
-      s1 = rsqrtf(a / p.k1 + eps);
-      s2 = p.k2 ? rsqrtf(b / p.k2 + eps) : 1.f;
-    }
-    if (lane == 0) {
-      inv[0][wave] = s1;
-      inv[1][wave] = s2;
-    }
-  }
-  __syncthreads();
-  const int r = tid & 63, tg = tid >> 6;
-  float a0 = 0.f, a1 = 0.f;
-  const int ktot = p.k1 + p.k2;
-  for (int kc = 0; kc < ktot; kc += 128) {
-    __syncthreads();
-    // weight tile 64 x 128
-    for (int i = tid; i < 64 * 32; i += 256) {
-      const int row = i >> 5, c4 = i & 31;
-      const float4 v =
-          *(const float4*)(p.W + (size_t)(r0 + row) * p.ldw + kc + c4 * 4);
-      Wt[row][c4 * 4] = v.x;
-      Wt[row][c4 * 4 + 1] = v.y;
-      Wt[row][c4 * 4 + 2] = v.z;
-      Wt[row][c4 * 4 + 3] = v.w;
-    }
-    // activation tile 8 x 128
-    const bool seg2 = kc >= p.k1;
-    const float* src = seg2 ? p.msg : p.x;
-    const int ld = seg2 ? p.ldm : p.ldx, kk = seg2 ? kc - p.k1 : kc;
-    for (int i = tid; i < 8 * 32; i += 256) {
-      const int tk = i >> 5, c4 = i & 31;
-      const int t = min(t0 + tk, T - 1);
-      float4 v = *(const float4*)(src + (size_t)t * ld + kk + c4 * 4);
-      const float sc = inv[seg2 ? 1 : 0][tk];
-      xs[tk][c4 * 4] = v.x * sc;
-      xs[tk][c4 * 4 + 1] = v.y * sc;
-      xs[tk][c4 * 4 + 2] = v.z * sc;
-      xs[tk][c4 * 4 + 3] = v.w * sc;
-    }
-    __syncthreads();
-#pragma unroll 8
-    for (int k = 0; k < 128; ++k) {
-      const float w = Wt[r][k];
-      a0 += w * xs[2 * tg][k];
-      a1 += w * xs[2 * tg + 1][k];
-    }
-  }
-  const int ta = t0 + 2 * tg, tb = ta + 1;
-  if (p.rows && r0 + r >= p.rows)
-    return;
-  if (ta < T)
-    p.out[(size_t)ta * p.ldo + r0 + r] = a0;
-  if (tb < T)
-    p.out[(size_t)tb * p.ldo + r0 + r] = a1;
+
+__device__ __forceinline__ float4 load_w4(const void* W, size_t off, int half) {
+  if (!half)
+    return *(const float4*)(static_cast<const float*>(W) + off);
+  const uint2 u = *(const uint2*)(static_cast<const uint16_t*>(W) + off);
+  return make_float4(__uint_as_float(u.x << 16),
+                     __uint_as_float(u.x & 0xFFFF0000u),
+                     __uint_as_float(u.y << 16),
+                     __uint_as_float(u.y & 0xFFFF0000u));
 }
 
-// Same products as k_gate_p, register-tiled: a block computes 64 tokens x 64
-// rows, each thread 4 x 4 of them (rows tr + 16i, tokens tt + 16j), so a weight
-// tile serves 64 tokens instead of 8. Every output accumulates k in the same
-// ascending order, so the results equal k_gate_p's.
+// Register-tiled: a block computes 64 tokens x 64 rows, each thread 4 x 4 of
+// them (rows tr + 16i, tokens tt + 16j), accumulating k in ascending order.
 __global__ void __launch_bounds__(256)
     k_gate_p64(GateJobs jobs, int T, float eps) {
   const GateP& p = jobs.j[blockIdx.z];
@@ -1993,7 +1923,7 @@ __global__ void __launch_bounds__(256)
     for (int i = tid; i < 64 * 8; i += 256) {
       const int row = i >> 3, c4 = i & 7;
       const float4 v =
-          *(const float4*)(p.W + (size_t)(r0 + row) * p.ldw + kc + c4 * 4);
+          load_w4(p.W, (size_t)(r0 + row) * p.ldw + kc + c4 * 4, p.half);
       Wt[row][c4 * 4] = v.x;
       Wt[row][c4 * 4 + 1] = v.y;
       Wt[row][c4 * 4 + 2] = v.z;
@@ -2049,7 +1979,7 @@ __global__ void __launch_bounds__(256)
 // and reads each operand as a float4 along k from LDS (one read per four
 // k-steps instead of four), the next 32-k chunk is fetched into registers
 // while the current one is consumed from the other LDS buffer (one barrier per
-// chunk), and a wave computes the inverse RMS of its tokens interleaved.
+// chunk).
 template<int TT, int RB>
 __global__ void __launch_bounds__(256)
     k_gate_v2(GateJobs jobs, int T, float eps) {
@@ -2066,46 +1996,33 @@ __global__ void __launch_bounds__(256)
   const int wave = tid / 32, lane = tid % 32;
   {
     constexpr int TW = TT / 8;
-    float a[TW], b[TW];
-    const float* xr[TW];
-    const float* mr[TW];
-#pragma unroll
     for (int q = 0; q < TW; ++q) {
-      const int t = min(t0 + wave * TW + q, T - 1);
-      xr[q] = p.x + (size_t)t * p.ldx;
-      mr[q] = p.msg + (size_t)t * p.ldm;
-      a[q] = b[q] = 0.f;
-    }
-    if (p.rms) {
-      if (!p.inv1)
-        for (int i = lane; i < p.k1; i += 32)
-#pragma unroll
-          for (int q = 0; q < TW; ++q) {
-            float v = xr[q][i];
-            a[q] += v * v;
-          }
-      if (!p.inv2)
-        for (int i = lane; i < p.k2; i += 32)
-#pragma unroll
-          for (int q = 0; q < TW; ++q) {
-            float v = mr[q][i];
-            b[q] += v * v;
-          }
-    }
-#pragma unroll
-    for (int q = 0; q < TW; ++q) {
+      const int tk = wave * TW + q;
+      const int t = min(t0 + tk, T - 1);
       float s1 = 1.f, s2 = 1.f;
       if (p.rms) {
-        const float sa = wsum(a[q]), sb = wsum(b[q]);
-        s1 = p.inv1 ? p.inv1[min(t0 + wave * TW + q, T - 1)]
-                    : rsqrtf(sa / p.k1 + eps);
-        s2 = p.inv2 ? p.inv2[min(t0 + wave * TW + q, T - 1)]
-             : p.k2 ? rsqrtf(sb / p.k2 + eps)
-                    : 1.f;
+        float a = 0.f, b = 0.f;
+        if (!p.inv1) {
+          const float* xr = p.x + (size_t)t * p.ldx;
+          for (int i = lane; i < p.k1; i += 32) {
+            const float v = xr[i];
+            a += v * v;
+          }
+        }
+        if (!p.inv2) {
+          const float* mr = p.msg + (size_t)t * p.ldm;
+          for (int i = lane; i < p.k2; i += 32) {
+            const float v = mr[i];
+            b += v * v;
+          }
+        }
+        const float sa = wsum(a), sb = wsum(b);
+        s1 = p.inv1 ? p.inv1[t] : rsqrtf(sa / p.k1 + eps);
+        s2 = p.inv2 ? p.inv2[t] : p.k2 ? rsqrtf(sb / p.k2 + eps) : 1.f;
       }
       if (lane == 0) {
-        inv[0][wave * TW + q] = s1;
-        inv[1][wave * TW + q] = s2;
+        inv[0][tk] = s1;
+        inv[1][tk] = s2;
       }
     }
   }
@@ -2117,7 +2034,7 @@ __global__ void __launch_bounds__(256)
 #pragma unroll
     for (int m = 0; m < WL; ++m) {
       const int i = tid + 256 * m, row = i >> 3, c4 = i & 7;
-      wr[m] = *(const float4*)(p.W + (size_t)(r0 + row) * p.ldw + kc + c4 * 4);
+      wr[m] = load_w4(p.W, (size_t)(r0 + row) * p.ldw + kc + c4 * 4, p.half);
     }
     const bool seg2 = kc >= p.k1;
     const float* src = seg2 ? p.msg : p.x;
@@ -2214,63 +2131,86 @@ __global__ void __launch_bounds__(256)
   }
 }
 
-// Same products as k_ctl_apply_p, register-tiled over 64 tokens x 64 channels
-// (each thread 4 x 4) in the same k order (ascending, the same fused
-// multiply-adds; same epilogue). The operands are read from LDS as float4 along
-// k (three reads per four k-steps feed 32 multiply-adds per thread), and the
-// epilogue's inputs load before the products.
+// Register-tiled over 64 tokens x 64 channels (each thread 4 x 4) in ascending
+// k order (2 chunks of 32 k so LDS stays <= 28 KiB -> >= 2 blocks/CU; BF16
+// weights stored as uint16 in LDS -> 18 KiB).
+template<bool H>
+struct CtlWType {
+  using T = float;
+};
+template<>
+struct CtlWType<true> {
+  using T = uint16_t;
+};
+
+template<bool H>
 __global__ void __launch_bounds__(256) k_ctl_apply_v4(CtlPJobs jobs, int T) {
-  constexpr int LS = 68;
+  constexpr int LS = 36;
   const CtlPJob& p = jobs.j[blockIdx.z];
-  __shared__ float wg[64 * LS], wf[64 * LS], gs[64 * LS];
+  using WT = typename CtlWType<H>::T;
+  __shared__ __attribute__((aligned(16))) WT wg[64 * LS], wf[64 * LS];
+  __shared__ __attribute__((aligned(16))) float gs[64 * LS];
   const int tid = threadIdx.x, t0 = blockIdx.y * 64, c0 = blockIdx.x * 64;
-  for (int i = tid; i < 64 * 16; i += 256) {
-    const int row = i >> 4, c4 = i & 15;
-    *(float4*)&wg[row * LS + c4 * 4] =
-        *(const float4*)(p.gain + (size_t)(c0 + row) * 64 + c4 * 4);
-    *(float4*)&wf[row * LS + c4 * 4] =
-        *(const float4*)(p.forget + (size_t)(c0 + row) * 64 + c4 * 4);
-    const int t = min(t0 + row, T - 1);
-    *(float4*)&gs[row * LS + c4 * 4] =
-        *(const float4*)(p.g64 + (size_t)t * 64 + c4 * 4);
-  }
   const int tr = tid & 15, tt = tid >> 4;
-  // The epilogue's inputs load while the products run.
-  float cv[4][4], mv[4][4];
-#pragma unroll
-  for (int j = 0; j < 4; ++j) {
-    const int t = min(t0 + tt + 16 * j, T - 1);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      const int c = c0 + tr + 16 * i;
-      cv[i][j] = p.x[(size_t)t * p.ldx + c];
-      mv[i][j] = p.msg[(size_t)t * p.ldm + c];
-    }
-  }
-  __syncthreads();
   float ga[4][4] = {}, fo[4][4] = {};
-#pragma unroll 2
-  for (int k4 = 0; k4 < 64; k4 += 4) {
-    float4 a[4], b[4], g[4];
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      a[i] = *(const float4*)&wg[(tr + 16 * i) * LS + k4];
-      b[i] = *(const float4*)&wf[(tr + 16 * i) * LS + k4];
+  for (int k0 = 0; k0 < 64; k0 += 32) {
+    if (k0 > 0)
+      __syncthreads();
+    for (int i = tid; i < 64 * 8; i += 256) {
+      const int row = i >> 3, c4 = i & 7;
+      const size_t woff = (size_t)(c0 + row) * 64 + k0 + c4 * 4;
+      if constexpr (H) {
+        *(uint2*)&wg[row * LS + c4 * 4] =
+            *(const uint2*)(static_cast<const uint16_t*>(p.gain) + woff);
+        *(uint2*)&wf[row * LS + c4 * 4] =
+            *(const uint2*)(static_cast<const uint16_t*>(p.forget) + woff);
+      } else {
+        *(float4*)&wg[row * LS + c4 * 4] =
+            *(const float4*)(static_cast<const float*>(p.gain) + woff);
+        *(float4*)&wf[row * LS + c4 * 4] =
+            *(const float4*)(static_cast<const float*>(p.forget) + woff);
+      }
+      const int t = min(t0 + row, T - 1);
+      *(float4*)&gs[row * LS + c4 * 4] =
+          *(const float4*)(p.g64 + (size_t)t * 64 + k0 + c4 * 4);
     }
+    __syncthreads();
+#pragma unroll 2
+    for (int k4 = 0; k4 < 32; k4 += 4) {
+      float4 a[4], b[4], g[4];
 #pragma unroll
-    for (int j = 0; j < 4; ++j)
-      g[j] = *(const float4*)&gs[(tt + 16 * j) * LS + k4];
+      for (int i = 0; i < 4; ++i) {
+        if constexpr (H) {
+          const uint2 ug = *(const uint2*)&wg[(tr + 16 * i) * LS + k4];
+          const uint2 uf = *(const uint2*)&wf[(tr + 16 * i) * LS + k4];
+          a[i] = make_float4(__uint_as_float(ug.x << 16),
+                             __uint_as_float(ug.x & 0xFFFF0000u),
+                             __uint_as_float(ug.y << 16),
+                             __uint_as_float(ug.y & 0xFFFF0000u));
+          b[i] = make_float4(__uint_as_float(uf.x << 16),
+                             __uint_as_float(uf.x & 0xFFFF0000u),
+                             __uint_as_float(uf.y << 16),
+                             __uint_as_float(uf.y & 0xFFFF0000u));
+        } else {
+          a[i] = *(const float4*)&wg[(tr + 16 * i) * LS + k4];
+          b[i] = *(const float4*)&wf[(tr + 16 * i) * LS + k4];
+        }
+      }
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+        g[j] = *(const float4*)&gs[(tt + 16 * j) * LS + k4];
 #define CTL_STEP(F)                                   \
   _Pragma("unroll") for (int i = 0; i < 4; ++i)       \
       _Pragma("unroll") for (int j = 0; j < 4; ++j) { \
     ga[i][j] += a[i].F * g[j].F;                      \
     fo[i][j] += b[i].F * g[j].F;                      \
   }
-    CTL_STEP(x)
-    CTL_STEP(y)
-    CTL_STEP(z)
-    CTL_STEP(w)
+      CTL_STEP(x)
+      CTL_STEP(y)
+      CTL_STEP(z)
+      CTL_STEP(w)
 #undef CTL_STEP
+    }
   }
 #pragma unroll
   for (int j = 0; j < 4; ++j) {
@@ -2280,58 +2220,10 @@ __global__ void __launch_bounds__(256) k_ctl_apply_v4(CtlPJobs jobs, int T) {
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       const int c = c0 + tr + 16 * i;
+      const float cv = p.x[(size_t)t * p.ldx + c];
+      const float mv = p.msg[(size_t)t * p.ldm + c];
       p.out[(size_t)t * 2304 + c] =
-          cv[i][j] - tanhf(fo[i][j]) * cv[i][j] + tanhf(ga[i][j]) * mv[i][j];
-    }
-  }
-}
-
-// out = x - tanh(forget) x + tanh(gain) msg with gain/forget = W g64 (K = 64).
-// Block: 8 tokens x 64 channels.
-__global__ void __launch_bounds__(256) k_ctl_apply_p(CtlPJobs jobs, int T) {
-  const CtlPJob& p = jobs.j[blockIdx.z];
-  __shared__ float wg[64][65], wf[64][65];
-  __shared__ float gs[8][64];
-  const int tid = threadIdx.x, t0 = blockIdx.x * 8, c0 = blockIdx.y * 64;
-  for (int i = tid; i < 64 * 16; i += 256) {
-    const int row = i >> 4, c4 = i & 15;
-    const float4 a =
-        *(const float4*)(p.gain + (size_t)(c0 + row) * 64 + c4 * 4);
-    const float4 b =
-        *(const float4*)(p.forget + (size_t)(c0 + row) * 64 + c4 * 4);
-    wg[row][c4 * 4] = a.x;
-    wg[row][c4 * 4 + 1] = a.y;
-    wg[row][c4 * 4 + 2] = a.z;
-    wg[row][c4 * 4 + 3] = a.w;
-    wf[row][c4 * 4] = b.x;
-    wf[row][c4 * 4 + 1] = b.y;
-    wf[row][c4 * 4 + 2] = b.z;
-    wf[row][c4 * 4 + 3] = b.w;
-  }
-  for (int i = tid; i < 8 * 16; i += 256) {
-    const int tk = i >> 4, c4 = i & 15;
-    const int t = min(t0 + tk, T - 1);
-    const float4 v = *(const float4*)(p.g64 + (size_t)t * 64 + c4 * 4);
-    gs[tk][c4 * 4] = v.x;
-    gs[tk][c4 * 4 + 1] = v.y;
-    gs[tk][c4 * 4 + 2] = v.z;
-    gs[tk][c4 * 4 + 3] = v.w;
-  }
-  __syncthreads();
-  const int c = tid & 63, tg = tid >> 6;
-#pragma unroll
-  for (int u = 0; u < 2; ++u) {
-    const int tk = 2 * tg + u, t = t0 + tk;
-    float ga = 0.f, fo = 0.f;
-#pragma unroll 16
-    for (int k = 0; k < 64; ++k) {
-      ga += wg[c][k] * gs[tk][k];
-      fo += wf[c][k] * gs[tk][k];
-    }
-    if (t < T) {
-      const float cv = p.x[(size_t)t * p.ldx + c0 + c];
-      p.out[(size_t)t * 2304 + c0 + c] =
-          cv - tanhf(fo) * cv + tanhf(ga) * p.msg[(size_t)t * p.ldm + c0 + c];
+          cv - tanhf(fo[i][j]) * cv + tanhf(ga[i][j]) * mv;
     }
   }
 }
@@ -3594,6 +3486,29 @@ __global__ void k_moe_tail_state(const float* __restrict__ pairs,
     state[(size_t)c * 3 + j] = nw[j];
 }
 
+template<int SL>
+__global__ void k_moe_tail_state_capture(const float* __restrict__ pairs,
+                                         const float* __restrict__ old_state,
+                                         float* __restrict__ dst_state, int T,
+                                         int C) {
+  const int c = blockIdx.x * blockDim.x + threadIdx.x;
+  if (c >= C)
+    return;
+  for (int j = 0; j < 3; ++j) {
+    const int idx = T + j;
+    if (idx < 3) {
+      dst_state[(size_t)c * 3 + j] = old_state[(size_t)c * 3 + idx];
+    } else {
+      const size_t t = idx - 3;
+      float a = pairs[(t * SL) * C + c];
+#pragma unroll
+      for (int k = 1; k < SL; k++)
+        a += pairs[(t * SL + k) * C + c];
+      dst_state[(size_t)c * 3 + j] = a;
+    }
+  }
+}
+
 __global__ void k_cvt_f16(const float* __restrict__ x, _Float16* __restrict__ h,
                           size_t n) {
   size_t i = ((size_t)blockIdx.x * blockDim.x + threadIdx.x) * 4;
@@ -4762,6 +4677,190 @@ void RowsArgmax(hipStream_t s, const float* x, int rows, int n, float* ws,
   Chk("rows_argmax");
 }
 
+namespace {
+constexpr int kLsBlocks = 64;
+constexpr int kLsStride = 2 * kLsBlocks + 1;
+
+__device__ __forceinline__ double wsum_d(double v) {
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1)
+    v += __shfl_xor(v, o, 32);
+  return v;
+}
+
+__global__ void __launch_bounds__(256) k_ls_max(LinearSampleArgs a) {
+  const int r = blockIdx.y;
+  if (!(a.temp[r] > 0.f))
+    return;
+  const int per = (a.vocab + kLsBlocks - 1) / kLsBlocks;
+  const int lo = blockIdx.x * per, hi = min(a.vocab, lo + per);
+  const float* x = a.logits + (size_t)r * a.vocab;
+  float v = -INFINITY;
+  for (int i = lo + threadIdx.x; i < hi; i += 256) {
+    const float y = x[i];
+    if (isfinite(y) && y > v)
+      v = y;
+  }
+  __shared__ float red[8];
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1)
+    v = fmaxf(v, __shfl_xor(v, o, 32));
+  if (threadIdx.x % 32 == 0)
+    red[threadIdx.x / 32] = v;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    for (int w = 1; w < 8; ++w)
+      v = fmaxf(v, red[w]);
+    a.ws[(size_t)r * kLsStride + blockIdx.x] = static_cast<double>(v);
+  }
+}
+
+__global__ void __launch_bounds__(256) k_ls_sum(LinearSampleArgs a) {
+  const int r = blockIdx.y;
+  const float t_f = a.temp[r];
+  if (!(t_f > 0.f))
+    return;
+  __shared__ double red[8];
+  __shared__ double mx_s;
+  double* ws = a.ws + (size_t)r * kLsStride;
+  if (threadIdx.x == 0) {
+    double m = -INFINITY;
+    for (int b = 0; b < kLsBlocks; ++b)
+      if (ws[b] > m)
+        m = ws[b];
+    mx_s = m;
+  }
+  __syncthreads();
+  const double m = mx_s;
+  const double inv_t = 1.0 / static_cast<double>(t_f);
+  const float mp = a.min_p[r];
+  const double thr =
+      mp > 0.f ? m + static_cast<double>(t_f) * log(static_cast<double>(mp))
+               : -INFINITY;
+  const int per = (a.vocab + kLsBlocks - 1) / kLsBlocks;
+  const int lo = blockIdx.x * per, hi = min(a.vocab, lo + per);
+  const float* x = a.logits + (size_t)r * a.vocab;
+  double z = 0.0;
+  for (int i = lo + threadIdx.x; i < hi; i += 256) {
+    const float y = x[i];
+    if (isfinite(y) && static_cast<double>(y) >= thr)
+      z += exp((static_cast<double>(y) - m) * inv_t);
+  }
+  z = wsum_d(z);
+  if (threadIdx.x % 32 == 0)
+    red[threadIdx.x / 32] = z;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    double s = 0.0;
+    for (int w = 0; w < 8; ++w)
+      s += red[w];
+    ws[kLsBlocks + blockIdx.x] = s;
+    if (blockIdx.x == 0)
+      ws[2 * kLsBlocks] = m;
+  }
+}
+
+__global__ void __launch_bounds__(256) k_ls_pick(LinearSampleArgs a) {
+  const int r = blockIdx.x;
+  const float t_f = a.temp[r];
+  if (!(t_f > 0.f))
+    return;
+  __shared__ int chunk;
+  __shared__ double before, total;
+  __shared__ double part[256];
+  const double* ws = a.ws + (size_t)r * kLsStride;
+  const double m = ws[2 * kLsBlocks];
+  const double inv_t = 1.0 / static_cast<double>(t_f);
+  const float mp = a.min_p[r];
+  const double thr =
+      mp > 0.f ? m + static_cast<double>(t_f) * log(static_cast<double>(mp))
+               : -INFINITY;
+  if (threadIdx.x == 0) {
+    double z = 0.0;
+    for (int b = 0; b < kLsBlocks; ++b)
+      z += ws[kLsBlocks + b];
+    const double target = a.u[r] * z;
+    // Rounding can leave the target at or past the last running sum: pick
+    // the last chunk holding any allowed token then, never an empty one.
+    double run = 0.0, run_last = 0.0;
+    int c = -1, last = kLsBlocks - 1;
+    for (int b = 0; b < kLsBlocks; ++b) {
+      const double w = ws[kLsBlocks + b];
+      const double nxt = run + w;
+      if (w > 0.0) {
+        last = b;
+        run_last = run;
+      }
+      if (target < nxt) {
+        c = b;
+        break;
+      }
+      run = nxt;
+    }
+    chunk = c >= 0 ? c : last;
+    before = c >= 0 ? run : run_last;
+    total = z;
+  }
+  __syncthreads();
+  const int per = (a.vocab + kLsBlocks - 1) / kLsBlocks;
+  const int lo = chunk * per, hi = min(a.vocab, lo + per);
+  const int len = hi - lo, sl = (len + 255) / 256;
+  const int a0 = lo + threadIdx.x * sl, a1 = min(hi, a0 + sl);
+  const float* x = a.logits + (size_t)r * a.vocab;
+  double s = 0.0;
+  for (int i = a0; i < a1; ++i) {
+    const float y = x[i];
+    if (isfinite(y) && static_cast<double>(y) >= thr)
+      s += exp((static_cast<double>(y) - m) * inv_t);
+  }
+  part[threadIdx.x] = s;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    const double target = a.u[r] * total;
+    double run = before;
+    // The selected slice is the one whose sum crosses the target, else (when
+    // rounding leaves the target past every sum) the last non-empty slice;
+    // within it the crossing token, else its last allowed token. Every
+    // fallback is an allowed token.
+    int sel = -1, last = -1;
+    for (int th = 0; th < 256; ++th) {
+      if (part[th] > 0.0)
+        last = th;
+      if (target < run + part[th]) {
+        sel = th;
+        break;
+      }
+      run += part[th];
+    }
+    if (sel < 0)
+      sel = last;
+    int tok = hi - 1;  // only when the row allows no token at all
+    if (sel >= 0) {
+      const int b0 = lo + sel * sl, b1 = min(hi, b0 + sl);
+      for (int i = b0; i < b1; ++i) {
+        const float y = x[i];
+        if (isfinite(y) && static_cast<double>(y) >= thr) {
+          tok = i;
+          run += exp((static_cast<double>(y) - m) * inv_t);
+          if (target < run)
+            break;
+        }
+      }
+    }
+    a.out[r] = tok;
+  }
+}
+}  // namespace
+
+void RowsLinearSample(hipStream_t s, const LinearSampleArgs& a) {
+  if (a.rows <= 0)
+    return;
+  k_ls_max<<<dim3(kLsBlocks, a.rows), 256, 0, s>>>(a);
+  k_ls_sum<<<dim3(kLsBlocks, a.rows), 256, 0, s>>>(a);
+  k_ls_pick<<<a.rows, 256, 0, s>>>(a);
+  Chk("rows_linear_sample");
+}
+
 void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
                       int keep, int row0) {
   k_conv_commit<<<dim3(26, 48), 256, 0, s>>>(tbl, cap, keep, row0);
@@ -4779,6 +4878,84 @@ void CvtF16(hipStream_t s, const float* x, void* h, size_t n) {
   k_cvt_f16<<<(unsigned)((n / 4 + 255) / 256), 256, 0, s>>>(
       x, static_cast<_Float16*>(h), n);
   Chk("cvt_f16");
+}
+
+namespace {
+__global__ void __launch_bounds__(256)
+    k_check_bf16_exact(const uint32_t* __restrict__ x, size_t n,
+                       unsigned* non_exact) {
+  const size_t i = (size_t)blockIdx.x * 256 + threadIdx.x;
+  const size_t n4 = n / 4;
+  if (i < n4) {
+    const uint4 v = reinterpret_cast<const uint4*>(x)[i];
+    if (((v.x | v.y | v.z | v.w) & 0xFFFFu) != 0u)
+      *non_exact = 1u;
+  } else if (i == n4) {
+    for (size_t k = n4 * 4; k < n; ++k)
+      if ((x[k] & 0xFFFFu) != 0u)
+        *non_exact = 1u;
+  }
+}
+
+__global__ void __launch_bounds__(256)
+    k_f32_to_bf16(const uint32_t* __restrict__ x, uint16_t* __restrict__ dst,
+                  size_t n) {
+  const size_t i = (size_t)blockIdx.x * 256 + threadIdx.x;
+  const size_t n4 = n / 4;
+  if (i < n4) {
+    const uint4 v = reinterpret_cast<const uint4*>(x)[i];
+    const uint2 out = make_uint2((v.x >> 16) | (v.y & 0xFFFF0000u),
+                                 (v.z >> 16) | (v.w & 0xFFFF0000u));
+    reinterpret_cast<uint2*>(dst)[i] = out;
+  } else if (i == n4) {
+    for (size_t k = n4 * 4; k < n; ++k)
+      dst[k] = static_cast<uint16_t>(x[k] >> 16);
+  }
+}
+
+__global__ void __launch_bounds__(256)
+    k_pad_rows_to_f32(const void* __restrict__ src, int type, int rows,
+                      int padded_rows, int cols, float* __restrict__ dst) {
+  const size_t total = (size_t)padded_rows * cols;
+  const size_t idx = (size_t)blockIdx.x * 256 + threadIdx.x;
+  if (idx >= total)
+    return;
+  const size_t valid = (size_t)rows * cols;
+  if (idx >= valid) {
+    dst[idx] = 0.f;
+    return;
+  }
+  if (type == 0)
+    dst[idx] = static_cast<const float*>(src)[idx];
+  else if (type == 1)
+    dst[idx] = __half2float(static_cast<const __half*>(src)[idx]);
+  else
+    dst[idx] = __uint_as_float(
+        static_cast<uint32_t>(static_cast<const uint16_t*>(src)[idx]) << 16);
+}
+}  // namespace
+
+void CheckBf16Exact(hipStream_t s, const float* x, size_t n,
+                    unsigned* non_exact) {
+  const size_t threads = n / 4 + 1;
+  k_check_bf16_exact<<<(unsigned)((threads + 255) / 256), 256, 0, s>>>(
+      reinterpret_cast<const uint32_t*>(x), n, non_exact);
+  Chk("check_bf16_exact");
+}
+
+void F32ToBf16(hipStream_t s, const float* x, void* dst, size_t n) {
+  const size_t threads = n / 4 + 1;
+  k_f32_to_bf16<<<(unsigned)((threads + 255) / 256), 256, 0, s>>>(
+      reinterpret_cast<const uint32_t*>(x), static_cast<uint16_t*>(dst), n);
+  Chk("f32_to_bf16");
+}
+
+void PadRowsToF32(hipStream_t s, const void* src, int type, int rows,
+                  int padded_rows, int cols, float* dst) {
+  const size_t total = (size_t)padded_rows * cols;
+  k_pad_rows_to_f32<<<(unsigned)((total + 255) / 256), 256, 0, s>>>(
+      src, type, rows, padded_rows, cols, dst);
+  Chk("pad_rows_to_f32");
 }
 
 void GemmDense(hipStream_t s, const void* w, int m, int k, const void* ah,
@@ -4925,6 +5102,13 @@ void MoeTail(hipStream_t s, const float* pairs, float* state, const float* w,
   k_moe_tail_state<8><<<(c + 127) / 128, 128, 0, s>>>(pairs, state, t, c);
   Chk("moe_tail");
 }
+void MoeTailStateCapture(hipStream_t s, const float* pairs,
+                         const float* old_state, float* dst_state, int t,
+                         int c) {
+  k_moe_tail_state_capture<8>
+      <<<(c + 127) / 128, 128, 0, s>>>(pairs, old_state, dst_state, t, c);
+  Chk("moe_tail_state_capture");
+}
 
 void ConvAdd(hipStream_t s, const float* x, float* state, const float* w,
              float* cur, int t, int c, float scale) {
@@ -4978,8 +5162,8 @@ void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
   GateJobs g{};
   for (int i = 0; i < jobs.n; ++i) {
     const CtlPJob& c = jobs.j[i];
-    g.j[i] = {c.x,  c.ldx, c.msg, c.ldm, c.down, 4608,   2304,
-              2304, 1,     c.g64, 64,    0,      c.minv, c.xinv};
+    g.j[i] = {c.x,    c.ldx, c.msg,  c.ldm,  c.down, 4608, 2304, 2304,
+              1,      c.g64, 64,     0,      c.minv, c.xinv, c.half};
   }
   // One job has too few token blocks for k_gate_p64's serial chunks; three
   // jobs keep the GPU busy and k_gate_p64 moves fewer bytes.
@@ -4987,14 +5171,20 @@ void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
     k_gate_v2<64, 64><<<dim3((t + 63) / 64, 1, 1), 256, 0, s>>>(g, t, eps);
   else
     k_gate_p64<<<dim3((t + 63) / 64, 1, jobs.n), 256, 0, s>>>(g, t, eps);
-  k_ctl_apply_v4<<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs, t);
+  if (jobs.n > 0 && jobs.j[0].half)
+    k_ctl_apply_v4<true><<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs,
+                                                                         t);
+  else
+    k_ctl_apply_v4<false><<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs,
+                                                                          t);
   Chk("ctl_prefill");
 }
 
-void RouterPrefill(hipStream_t s, const float* w, const float* x, float* logits,
-                   int t) {
+void RouterPrefill(hipStream_t s, const void* w, const float* x, float* logits,
+                   int t, bool half) {
   GateJobs g{};
-  g.j[0] = {x, 2304, nullptr, 0, w, 2304, 2304, 0, 0, logits, 128, 0};
+  g.j[0] = {x, 2304, nullptr, 0,       w,       2304,        2304, 0,
+            0, logits, 128,   0, nullptr, nullptr, half ? 1 : 0};
   k_gate_p64<<<dim3((t + 63) / 64, 2, 1), 256, 0, s>>>(g, t, 0.f);
   Chk("router_prefill");
 }

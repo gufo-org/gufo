@@ -63,6 +63,8 @@ struct Drafter::Impl {
   void* head = nullptr;
   int* head_ids = nullptr;
   _Float16 *h16, *o16, *a16, *mix16;
+  void* qa = nullptr;
+  float* qs = nullptr;
   float* ikv;  // injection K | V [n][2048]
   int *d_anchor, *d_pos, *d_prev, *d_tokens;
   // pinned host staging: [anchor, pos] in, [tokens 8 | confidences 8] out
@@ -128,14 +130,15 @@ struct Drafter::Impl {
         Upload(Need(n, GgmlType::kBF16, e), tot));
   }
 
-  fs::GemmItems Items(int* n_items, int* e, int* s, int* c, int rows) {
+  fs::GemmItems Items(int* n_items, int* e, int* s, int* c, int rows,
+                      int tile = 64) {
     fs::GemmItems it{};
     it.nitems = n_items;
     it.item_e = e;
     it.item_start = s;
     it.item_n = c;
-    it.max_items = (rows + 63) / 64;
-    it.tile = 64;
+    it.max_items = (rows + tile - 1) / tile;
+    it.tile = tile;
     return it;
   }
   void Gemm(hipStream_t s, const void* w, int m, int k, const void* a,
@@ -263,29 +266,33 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     I.g = I.Alloc<float>(S * B * 9216);
     I.u = I.Alloc<float>(S * B * 9216);
     I.a16 = I.Alloc<_Float16>(S * B * 9216);
+    I.qa = I.Alloc<char>(static_cast<std::size_t>(S) * B * 9216);
+    I.qs = I.Alloc<float>(static_cast<std::size_t>(S) * B * (9216 / 32));
     I.logits = I.Alloc<float>(static_cast<std::size_t>(S) * Impl::kHeadRows);
     I.state = I.Alloc<float>(S * 256);
     I.joint = I.Alloc<float>(S * 1024);
     I.ws = I.Alloc<float>(S * (3 * 128 + 1));
     I.d_conf = I.Alloc<float>(S * 8);
     {
-      // the kHeadRows text tokens with the largest markov_w1 rows
-      const auto& w1t =
-          I.Need("markov_w1.weight", GgmlType::kBF16, 256ull * w1_rows);
-      const auto* w1h = static_cast<const std::uint16_t*>(w1t.data);
+      // the kHeadRows text tokens with the largest markov_w1 rows (computed on
+      // the device from the already-uploaded I.w1 so the host mapping is not
+      // scanned)
       const int V = target.vocab;
+      float* d_norms = nullptr;
+      Check(hipMalloc(reinterpret_cast<void**>(&d_norms),
+                      static_cast<std::size_t>(V) * sizeof(float)),
+            "w1 norms");
+      dsp::RowNormSqBf16(nullptr, I.w1, V, d_norms);
+      std::vector<float> h_norms(static_cast<std::size_t>(V));
+      Check(hipMemcpy(h_norms.data(), d_norms,
+                      static_cast<std::size_t>(V) * sizeof(float),
+                      hipMemcpyDeviceToHost),
+            "w1 norms");
+      (void)hipFree(d_norms);
       std::vector<std::pair<float, int>> norm(static_cast<std::size_t>(V));
-      for (int t = 0; t < V; ++t) {
-        float s = 0.f;
-        for (int c = 0; c < 256; ++c) {
-          std::uint32_t u =
-              static_cast<std::uint32_t>(w1h[(std::size_t)t * 256 + c]) << 16;
-          float f;
-          std::memcpy(&f, &u, 4);
-          s += f * f;
-        }
-        norm[static_cast<std::size_t>(t)] = {s, t};
-      }
+      for (int t = 0; t < V; ++t)
+        norm[static_cast<std::size_t>(t)] = {
+            h_norms[static_cast<std::size_t>(t)], t};
       const int keep = std::min(Impl::kHeadRows, V);
       std::partial_sort(norm.begin(), norm.begin() + keep, norm.end(),
                         [](const auto& a, const auto& b) {
@@ -304,11 +311,10 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
       I.head = I.Alloc<char>(ids.size() * (2304 / 32) * 34);
       dsp::GatherQ8Rows(nullptr, target.output, I.head_ids,
                         static_cast<int>(ids.size()), I.head);
-      Check(hipDeviceSynchronize(), "head copy");
       tot += ids.size() * (2304 / 32) * 34;
 
-      // (W_U W_o)^T and W_U b_o as [257][R]: the folded markov_w2 rows and
-      // bias of the selected tokens.
+      // (W_U W_o)^T and W_U b_o as [256][R] int8 + [R] bias: gather the
+      // selected BF16 rows in row-major order and transpose+quantize on device.
       const int R = static_cast<int>(ids.size());
       const auto& w2t = I.Need("markov_w2.weight", GgmlType::kBF16,
                                256ull * static_cast<std::uint64_t>(V));
@@ -316,38 +322,34 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
                                static_cast<std::uint64_t>(V));
       const auto* w2h = static_cast<const std::uint16_t*>(w2t.data);
       const auto* b2h = static_cast<const float*>(b2t.data);
-      std::vector<float> lr(static_cast<std::size_t>(257) * R);
+      std::vector<std::uint16_t> w2_sel(static_cast<std::size_t>(R) * 256);
+      std::vector<float> cb_sel(static_cast<std::size_t>(R));
       for (int i = 0; i < R; ++i) {
         const auto t =
             static_cast<std::size_t>(ids[static_cast<std::size_t>(i)]);
-        for (int j = 0; j < 256; ++j) {
-          const std::uint32_t u =
-              static_cast<std::uint32_t>(
-                  w2h[t * 256 + static_cast<std::size_t>(j)])
-              << 16;
-          std::memcpy(&lr[static_cast<std::size_t>(j) * R +
-                          static_cast<std::size_t>(i)],
-                      &u, 4);
-        }
-        lr[static_cast<std::size_t>(256) * R + static_cast<std::size_t>(i)] =
-            b2h[t];
+        std::memcpy(&w2_sel[static_cast<std::size_t>(i) * 256], w2h + t * 256,
+                    256 * sizeof(std::uint16_t));
+        cb_sel[static_cast<std::size_t>(i)] = b2h[t];
       }
-      float* dout = nullptr;
-      Check(hipMalloc(reinterpret_cast<void**>(&dout), lr.size() * 4),
+      std::uint16_t* dw2 = nullptr;
+      Check(hipMalloc(reinterpret_cast<void**>(&dw2),
+                      w2_sel.size() * sizeof(std::uint16_t)),
             "lr out");
-      Check(hipMemcpy(dout, lr.data(), lr.size() * 4, hipMemcpyHostToDevice),
+      Check(hipMemcpy(dw2, w2_sel.data(), w2_sel.size() * sizeof(std::uint16_t),
+                      hipMemcpyHostToDevice),
             "lr tables");
       I.pt = I.Alloc<std::int8_t>(static_cast<std::size_t>(256) * R);
       I.ps = I.Alloc<float>(static_cast<std::size_t>(R));
       I.cb = I.Alloc<float>(static_cast<std::size_t>(R));
       I.base = I.Alloc<float>(static_cast<std::size_t>(kMaxSessions) *
                               dsp::kBlock * R);
-      dsp::QuantPt(nullptr, dout, R, I.pt, I.ps);
-      Check(hipMemcpy(I.cb, dout + static_cast<std::size_t>(256) * R,
-                      static_cast<std::size_t>(R) * 4, hipMemcpyDeviceToDevice),
+      dsp::QuantPtBf16(nullptr, dw2, R, I.pt, I.ps);
+      Check(hipMemcpy(I.cb, cb_sel.data(),
+                      static_cast<std::size_t>(R) * sizeof(float),
+                      hipMemcpyHostToDevice),
             "lr bias");
       Check(hipDeviceSynchronize(), "lr tables");
-      (void)hipFree(dout);
+      (void)hipFree(dw2);
       tot += static_cast<std::size_t>(256) * R +
              static_cast<std::size_t>(R) * 4 + static_cast<std::size_t>(R) * 4;
     }
@@ -409,7 +411,8 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
 Drafter::~Drafter() = default;
 
 void Drafter::Inject(hipStream_t s, State& st, const float* feats,
-                     std::size_t pos0, int n) {
+                     std::size_t pos0, int n,
+                     std::span<const InjectCapture> captures) {
   Impl& I = *impl_;
   if (n <= 0)
     return;
@@ -424,26 +427,26 @@ void Drafter::Inject(hipStream_t s, State& st, const float* feats,
     fs::GemmItems it{};
     if (m <= 8) {
       int* b = I.small_items + (m - 1) * 4;
-      it = I.Items(b, b + 1, b + 2, b + 3, m);
+      it = I.Items(b, b + 1, b + 2, b + 3, m, 64);
     } else {
-      const int ni = (m + 63) / 64;
-      std::vector<int> host(1 + 2 * ni);
-      host[0] = ni;
+      const int tile = m >= 256 ? 128 : 64;
+      const int ni = (m + tile - 1) / tile;
+      // Pageable stack buffer: hipMemcpyAsync stages it before returning, so
+      // back-to-back ubatches never overwrite each other's item lists.
+      int items[1 + 2 * (Impl::kMaxInject / 64)];
+      items[0] = ni;
       for (int i = 0; i < ni; ++i) {
-        host[1 + i] = i * 64;
-        host[1 + ni + i] = std::min(64, m - i * 64);
+        items[1 + i] = i * tile;
+        items[1 + ni + i] = std::min(tile, m - i * tile);
       }
-      Check(hipMemcpyAsync(I.it_n, host.data(), 4, hipMemcpyHostToDevice, s),
+      Check(hipMemcpyAsync(I.it_n, items, 4, hipMemcpyHostToDevice, s),
             "items");
-      Check(hipMemcpyAsync(I.it_s, host.data() + 1, ni * 4,
+      Check(hipMemcpyAsync(I.it_s, items + 1, ni * 4, hipMemcpyHostToDevice, s),
+            "items");
+      Check(hipMemcpyAsync(I.it_c, items + 1 + ni, ni * 4,
                            hipMemcpyHostToDevice, s),
             "items");
-      Check(hipMemcpyAsync(I.it_c, host.data() + 1 + ni, ni * 4,
-                           hipMemcpyHostToDevice, s),
-            "items");
-      // the pageable copies above are staged: wait before `host` goes away
-      Check(hipStreamSynchronize(s), "items");
-      it = I.Items(I.it_n, I.it_e, I.it_s, I.it_c, m);
+      it = I.Items(I.it_n, I.it_e, I.it_s, I.it_c, m, tile);
     }
     dsp::MixArgs ma{};
     ma.feat = f;
@@ -456,6 +459,15 @@ void Drafter::Inject(hipStream_t s, State& st, const float* feats,
     ma.n = m;
     ma.eps = I.eps;
     dsp::Mix(s, ma);
+    for (const auto& cap : captures) {
+      if (cap.dst != nullptr && cap.row >= done && cap.row < done + m)
+        Check(
+            hipMemcpyAsync(
+                cap.dst,
+                I.mix + (static_cast<std::size_t>(cap.row - done) * 4 + 3) * kE,
+                kE * 4, hipMemcpyDeviceToDevice, s),
+            "markov checkpoint");
+    }
     for (int l = 0; l < 3; ++l) {
       const _Float16* a = I.mix16 + static_cast<std::size_t>(l) * m * kE;
       float* kraw = I.ikv;
@@ -499,8 +511,7 @@ void Drafter::InjectRows(hipStream_t s, std::span<const Rows> rows) {
     return;
   }
   // mix of each request's rows into rows [off, off + n) of the step;
-  // F16 layers 8 rows apart, the GEMV operand
-  constexpr int B = dsp::kBlock;
+  // F16 layers `m` rows apart, the GEMV operand
   int off = 0;
   for (const auto& r : rows) {
     if (r.n <= 0)
@@ -514,20 +525,20 @@ void Drafter::InjectRows(hipStream_t s, std::span<const Rows> rows) {
     ma.out = I.mix + static_cast<std::size_t>(off) * 4 * kE;
     ma.out16 = I.mix16 + static_cast<std::size_t>(off) * kE;
     ma.n = r.n;
-    ma.ld16 = B;
+    ma.ld16 = m;
     ma.eps = I.eps;
     dsp::Mix(s, ma);
     off += r.n;
   }
   float* kraw = I.ikv;
-  float* vraw = I.ikv + static_cast<std::size_t>(B) * 1024;
+  float* vraw = I.ikv + static_cast<std::size_t>(m) * 1024;
   for (int l = 0; l < 3; ++l) {
-    const _Float16* a = I.mix16 + static_cast<std::size_t>(l) * B * kE;
+    const _Float16* a = I.mix16 + static_cast<std::size_t>(l) * m * kE;
     {
       const void* w[2] = {I.layer[l].wk_ctx, I.layer[l].wv_ctx};
-      const int m[2] = {1024, 1024};
+      const int mm[2] = {1024, 1024};
       float* y[2] = {kraw, vraw};
-      dsp::Gemv8N(s, 2, w, m, kE, a, y);
+      dsp::Gemv8N(s, 2, w, mm, kE, a, y, m, I.qa, I.qs);
     }
     off = 0;
     for (const auto& r : rows) {
@@ -618,13 +629,14 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
                I.x + static_cast<std::size_t>(g) * B * kE,
                I.h + static_cast<std::size_t>(g) * B * kE,
                I.h16 + static_cast<std::size_t>(g) * B * kE, I.eps);
+  const int nrows = B * S;
   for (int l = 0; l < 3; ++l) {
     const auto& L = I.layer[l];
     {
       const void* w[3] = {L.wq, L.wk, L.wv};
       const int m[3] = {3072, 1024, 1024};
       float* y[3] = {I.q, I.k, I.v};
-      dsp::Gemv8N(s, 3, w, m, kE, I.h16, y, S);
+      dsp::Gemv8N(s, 3, w, m, kE, I.h16, y, nrows, I.qa, I.qs);
     }
     for (int g = 0; g < S; ++g) {
       State& st = *req[g].st;
@@ -644,23 +656,29 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
       aa.first = static_cast<int>(st.first);
       aa.ws = I.wsa;
       aa.out16 = I.o16 + static_cast<std::size_t>(g) * B * 3072;
+      const int pos_i = static_cast<int>(req[g].pos);
+      const int lo =
+          std::max(aa.first, aa.window ? std::max(0, pos_i - aa.window) : 0);
+      const int nkeys = std::max(0, pos_i - lo) + B;
+      aa.nsplits = std::clamp((nkeys + 127) / 128, 2, dsp::kAttnSplits);
       dsp::Attn(s, aa);
     }
-    dsp::Gemv8(s, L.wo, kE, 3072, I.o16, I.y, S);
-    dsp::AddNorm(s, I.x, I.y, L.ffn_norm, I.h, I.h16, B * S, I.eps);
+    dsp::Gemv8(s, L.wo, kE, 3072, I.o16, I.y, nrows, I.qa, I.qs);
+    dsp::AddNorm(s, I.x, I.y, L.ffn_norm, I.h, I.h16, nrows, I.eps);
     {
       const void* w[2] = {L.wg, L.wu};
       const int m[2] = {9216, 9216};
       float* y[2] = {I.g, I.u};
-      dsp::Gemv8N(s, 2, w, m, kE, I.h16, y, S);
+      dsp::Gemv8N(s, 2, w, m, kE, I.h16, y, nrows, I.qa, I.qs);
     }
-    dsp::Swiglu(s, I.g, I.u, I.a16, B * S * 9216);
-    dsp::Gemv8(s, L.wd, kE, 9216, I.a16, I.y, S);
+    dsp::Swiglu(s, I.g, I.u, I.a16, nrows * 9216);
+    dsp::Gemv8(s, L.wd, kE, 9216, I.a16, I.y, nrows, I.qa, I.qs);
     dsp::AddNorm(s, I.x, I.y, l < 2 ? I.layer[l + 1].attn_norm : I.out_norm,
-                 I.h, I.h16, B * S, I.eps);
+                 I.h, I.h16, nrows, I.eps);
   }
   // W_U h_i of every block row, one pass over the proposal head
-  dsp::Gemv8(s, I.head, static_cast<int>(R), kE, I.h16, I.base, S);
+  dsp::Gemv8(s, I.head, static_cast<int>(R), kE, I.h16, I.base, nrows, I.qa,
+             I.qs);
   Check(hipMemsetAsync(I.state, 0, static_cast<std::size_t>(S) * 256 * 4, s),
         "rnn state");
   std::array<bool, kMaxSessions> live{};
@@ -668,6 +686,8 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
     live[g] = req[g].n > 0;
   for (int i = 1; i <= nmax; ++i) {
     bool any_more = false;
+    dsp::LrBatch lrb{};
+    lrb.count = 0;
     for (int g = 0; g < S; ++g) {
       if (!live[g])
         continue;
@@ -683,11 +703,19 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
       ma.prev = I.d_prev + g;
       ma.row = i;
       dsp::MarkovStep(s, ma);
+      lrb.base[lrb.count] = I.base + (static_cast<std::size_t>(g) * B + i) * R;
+      lrb.lat[lrb.count] = ma.joint + 3 * dsp::kRank;
+      lrb.out[lrb.count] = I.logits + static_cast<std::size_t>(g) * R;
+      ++lrb.count;
+    }
+    if (lrb.count > 0)
+      dsp::LrLogits8Batch(s, I.pt, I.ps, I.cb, lrb, static_cast<int>(R));
+    for (int g = 0; g < S; ++g) {
+      if (!live[g])
+        continue;
+      Request& rq = req[g];
       float* logits = I.logits + static_cast<std::size_t>(g) * R;
       float* ws = I.ws + g * (3 * 128 + 1);
-      dsp::LrLogits8(s, I.pt, I.ps, I.cb,
-                     I.base + (static_cast<std::size_t>(g) * B + i) * R,
-                     ma.joint + 3 * dsp::kRank, logits, static_cast<int>(R));
       if (rq.coupled != nullptr)
         dsp::CoupledSample(
             s, logits, static_cast<int>(R), I.head_ids, I.target.softcap,

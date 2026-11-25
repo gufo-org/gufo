@@ -92,6 +92,32 @@ int main() {
     if (drafted > 2000)
       ++failures;
   }
+  // Batched verification up to kMaxRows = 16: an 8-session batch with high
+  // draft confidence allocates drafts beyond 8 total rows.
+  {
+    DsparkCalibration cal;
+    const DsparkCosts costs = DsparkCosts::Batched();
+    constexpr int kB = 8;
+    float p_hi[kB][2];
+    const float* pp[kB];
+    int n[kB], w[kB];
+    const DsparkCalibration* cp[kB];
+    for (int i = 0; i < kB; ++i) {
+      p_hi[i][0] = 0.95f;
+      p_hi[i][1] = 0.95f;
+      pp[i] = p_hi[i];
+      n[i] = 2;
+      cp[i] = &cal;
+    }
+    ChooseDsparkBatchWidths(kB, pp, n, cp, costs, 3.0, w);
+    int total_drafts = 0;
+    for (int i = 0; i < kB; ++i)
+      total_drafts += w[i];
+    std::printf("batch B=8 high-conf: %d drafts (total rows %d)\n",
+                total_drafts, kB + total_drafts);
+    if (total_drafts == 0 || kB + total_drafts > DsparkCosts::kMaxRows)
+      ++failures;
+  }
   std::printf("%s\n", failures ? "FAIL" : "ok");
   return failures ? 1 : 0;
 }

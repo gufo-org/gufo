@@ -55,13 +55,14 @@ private:
 /// Cycle costs in milliseconds, as running averages of the measured times.
 class DsparkCosts {
 public:
-  static constexpr int kMaxRows = 8;
+  static constexpr int kMaxRows = 16;
   [[nodiscard]] double Verify(int rows) const { return verify_[rows]; }
   /// Starting costs of steps whose rows belong to several sessions (their
   /// rows route to more distinct experts than one session's).
   static DsparkCosts Batched() {
     DsparkCosts c;
-    c.start_ = {0, 21.9, 29.3, 35.5, 42.8, 47.8, 53.0, 58.0, 63.0};
+    c.start_ = {0,    21.9, 29.3, 35.5, 42.8, 47.8, 53.0, 58.0, 63.0,
+                67.5, 72.0, 76.5, 81.0, 85.5, 90.0, 94.5, 99.0};
     c.verify_ = c.start_;
     return c;
   }
@@ -97,8 +98,9 @@ private:
   static constexpr int kStale = 256;
   static void Ema(double& v, double x) { v += 0.05 * (x - v); }
   // Strix Halo, short context (inkling2_bench --spec / --dspark)
-  std::array<double, kMaxRows + 1> start_{0,    20.2, 26.2, 31.0, 35.5,
-                                          40.5, 45.3, 50.0, 54.9};
+  std::array<double, kMaxRows + 1> start_{0,    20.2, 26.2, 31.0, 35.5, 40.5,
+                                          45.3, 50.0, 54.9, 58.0, 60.5, 63.0,
+                                          65.5, 67.5, 69.5, 71.5, 73.5};
   std::array<double, kMaxRows + 1> verify_ = start_;
   std::array<int, kMaxRows + 1> age_{};
   double draft_base_ = 2.8, draft_step_ = 0.25;

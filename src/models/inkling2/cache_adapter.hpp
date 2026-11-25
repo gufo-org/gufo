@@ -38,12 +38,17 @@ public:
 
 private:
   friend class Inkling2CacheAdapter;
+  struct BoundaryView {
+    const Engine::PrefillCheckpoint* cp = nullptr;
+    Block block = Block::kIdle;
+  };
   void GuardAll();  // BeforeOverwrite for every row component, whole context
   void ReleaseAll() noexcept;  // BeforeRelease likewise
 
   Inkling2CacheAdapter& adapter_;
   cache::MutationGuard& guard_;
   std::unique_ptr<Session> session_;
+  const BoundaryView* boundary = nullptr;
   bool restoring = false;
   std::atomic<bool> failed{false};
   std::mutex restore_mutex;
@@ -88,6 +93,17 @@ public:
       const cache::Slot&) const override;
   [[nodiscard]] std::vector<cache::Rows> PlanPrefill(
       const cache::Slot&, cache::Rows first, cache::Rows end) const override;
+  [[nodiscard]] std::vector<cache::ComponentPosition>
+  PrefillCheckpointPositions(const cache::Slot&,
+                             cache::Rows boundary) const override;
+  /// Runs `Engine::Forward` with in-pass checkpoints, exposing each boundary
+  /// synchronously through the slot while `consume(index)` reads it.
+  void PrefillThrough(cache::Slot&, std::span<const std::int32_t> tokens,
+                      std::span<const std::size_t> boundaries,
+                      std::span<const Block> blocks,
+                      const std::function<void(std::size_t)>& consume,
+                      const PrefillYield* yield = nullptr,
+                      std::span<const InputRows> rows = {}) const;
   void BeginRestore(cache::Slot&,
                     std::span<const cache::ComponentPosition>) override;
   [[nodiscard]] cache::Completion CapturePrivate(const cache::Slot&,

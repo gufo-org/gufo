@@ -148,6 +148,20 @@ void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
 /// (ws: rows * 64 * 2 floats).
 void RowsArgmax(hipStream_t s, const float* x, int rows, int n, float* ws,
                 int* out);
+/// GPU linear sampling (temperature + optional min_p, FP64 softmax weights)
+/// for `rows` rows of `vocab` logits. Only rows with `temp[r] > 0` are
+/// sampled; `ws` holds rows * (64 * 2 + 1) doubles.
+struct LinearSampleArgs {
+  const float* logits;  // [rows][vocab]
+  int rows;
+  int vocab;
+  const float* temp;   // [rows] (device; <= 0 skips row)
+  const float* min_p;  // [rows] (device)
+  const double* u;     // [rows] (device)
+  double* ws;          // [rows][129] (device)
+  int* out;            // [rows] (device)
+};
+void RowsLinearSample(hipStream_t s, const LinearSampleArgs& a);
 
 /// Attention-residual mix: states (<= 8 vectors of 2304) RMS-normalised,
 /// softmax of query . state / sqrt(2304), out[q] = sum_j p_j S_j / rms_j. One
@@ -291,6 +305,15 @@ struct MoeWs {  // device scratch of the expert grouping
   float* posw;
 };
 void CvtF16(hipStream_t s, const float* x, void* h, size_t n);
+/// Sets `*non_exact = 1` if any of the `n` F32 values has non-zero low 16 bits.
+void CheckBf16Exact(hipStream_t s, const float* x, size_t n,
+                    unsigned* non_exact);
+/// Exact high-16-bit truncation of `n` F32 values to BF16 (`uint16_t`).
+void F32ToBf16(hipStream_t s, const float* x, void* dst, size_t n);
+/// Copies `rows x cols` weights of ggml type `type` (0=F32, 1=F16, 30=BF16)
+/// into `padded_rows x cols` F32, zero-padding rows `[rows, padded_rows)`.
+void PadRowsToF32(hipStream_t s, const void* src, int type, int rows,
+                  int padded_rows, int cols, float* dst);
 /// out[t][r] = W[r] . x[t] (Q8_0, K 2304 or 3072, m % 64 == 0); activations f16
 /// [T][k].
 void GemmDense(hipStream_t s, const void* w, int m, int k, const void* ah,
@@ -335,36 +358,44 @@ void AttnPrefill(hipStream_t s, const PrefillAttn& a);
 /// by the t inputs.
 void MoeTail(hipStream_t s, const float* pairs, float* state, const float* w,
              float* cur, int t, int c, float scale);
+/// Captures the MoE post-convolution history after the first `t` tokens of
+/// `pairs` ([T][8][c]) without modifying `old_state`.
+void MoeTailStateCapture(hipStream_t s, const float* pairs,
+                         const float* old_state, float* dst_state, int t,
+                         int c);
 /// cur[t] += post conv of x with the history `state`, which is then advanced
 /// (hip::Conv + ConvStateUpdate + Add in one pass).
 void ConvAdd(hipStream_t s, const float* x, float* state, const float* w,
              float* cur, int t, int c, float scale);
 
-/// Prefill loop controller and router over T tokens (F32 weights, tiled SIMT).
+/// Prefill loop controller and router over T tokens (F32 or exact-BF16 weights,
+/// tiled SIMT).
 struct CtlPJob {
   const float* x;  // [T][ldx]
   int ldx;
   const float* msg;  // [T][ldm]
   int ldm;
-  const float* down;    // [64][4608]
-  const float* gain;    // [2304][64]
-  const float* forget;  // [2304][64]
-  float* g64;           // [T][64] scratch
-  float* out;           // [T][2304]
+  const void* down;    // [64][4608]  F32, or BF16 when `half`
+  const void* gain;    // [2304][64]
+  const void* forget;  // [2304][64]
+  float* g64;          // [T][64] scratch
+  float* out;          // [T][2304]
   // optional [T] inverse RMS of each msg row (from hip::Mix), else computed
   // here
   const float* minv = nullptr;
   // optional [T] inverse RMS of each x row, summed as the gate prologue sums it
   const float* xinv = nullptr;
+  int half = 0;
 };
 struct CtlPJobs {
   CtlPJob j[3];
   int n;
 };
 void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps);
-/// logits[t][r] = W[r] . x[t] for the F32 [128][2304] router.
-void RouterPrefill(hipStream_t s, const float* w, const float* x, float* logits,
-                   int t);
+/// logits[t][r] = W[r] . x[t] for the [128][2304] router (F32, or BF16 when
+/// `half`).
+void RouterPrefill(hipStream_t s, const void* w, const float* x, float* logits,
+                   int t, bool half = false);
 /// Sigmoid, biased top-8 and renormalisation of router logits [t][128] (wave
 /// per token).
 void TopkPrefill(hipStream_t s, const float* logits, const float* bias,

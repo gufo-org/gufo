@@ -189,6 +189,31 @@ public:
   using LogitsSink = std::function<void(std::size_t first, std::size_t count,
                                         const float* data)>;
 
+  /// Maximum in-pass checkpoints accepted in a single Forward call.
+  static constexpr std::size_t kMaxPassCheckpoints = 8;
+  /// Captured private state at an in-pass checkpoint boundary `position` inside
+  /// a Forward ubatch ending at `valid_end`. When `conv`/`draft_f` are null or
+  /// `logits` is empty, the live session itself stands at `position`.
+  struct PrefillCheckpoint {
+    std::size_t position = 0;
+    std::size_t valid_end = 0;
+    const float* conv = nullptr;     // device [48][6656][3]
+    std::span<const float> logits;   // host [vocab_text]
+    const float* draft_f = nullptr;  // device [2304]
+    std::size_t draft_first = 0;
+    std::size_t draft_valid = 0;
+    std::size_t draft_f_pos = static_cast<std::size_t>(-1);
+  };
+  using PrefillCheckpointConsumer =
+      std::function<void(std::size_t index, const PrefillCheckpoint&)>;
+  /// Whether `boundary` can be captured in-pass inside a Forward of `consumed`
+  /// tokens starting at `offset` (all window rows for `boundary` remain intact
+  /// at the end of its ubatch).
+  [[nodiscard]] bool CanCaptureInPass(std::size_t offset, std::size_t consumed,
+                                      std::size_t boundary) const;
+  /// Temporary device bytes needed to capture one interior boundary in-pass.
+  [[nodiscard]] std::size_t PrefillCheckpointScratchBytes() const;
+
   /// Evaluates prompt `tokens` at the session position (ubatched). Afterwards
   /// `s.logits()` holds the last token's logits. With `sink`, the logits of
   /// every token are also delivered. Throws std::runtime_error on failure or
@@ -200,7 +225,9 @@ public:
   /// prefix plus a tail equals one call over the whole prompt, bit for bit.
   void Forward(Session& s, std::span<const std::int32_t> tokens,
                const LogitsSink& sink = {}, const PrefillYield* yield = nullptr,
-               std::span<const InputRows> rows = {});
+               std::span<const InputRows> rows = {},
+               std::span<const std::size_t> checkpoints = {},
+               const PrefillCheckpointConsumer& on_checkpoint = {});
   /// One decode step of `token` (the decode arithmetic, as Step); afterwards
   /// `s.logits()` holds its logits on the host.
   void Decode(Session& s, std::int32_t token);
@@ -214,7 +241,7 @@ public:
   /// (up to 63 copied ones).
   static constexpr std::size_t kMaxVerifyRows = 64;
   /// Rows of a verification step of several sessions, in all.
-  static constexpr std::size_t kMaxBatchVerifyRows = 8;
+  static constexpr std::size_t kMaxBatchVerifyRows = 16;
   /// One decode step (one token each) for up to 8 distinct sessions under a
   /// single lock. The runner's `AdvanceBatch` calls it. M3: one graph launch
   /// reads the weights once for all tokens (GEMV -> small GEMM over the tokens,
@@ -226,14 +253,24 @@ public:
   [[nodiscard]] bool batch_capable() const;
   void DecodeBatch(std::span<Session* const> sessions,
                    std::span<const std::int32_t> tokens);
+  /// Per-row parameters for GPU-side linear sampling (temperature <= 0 skips
+  /// the row).
+  struct LinearSample {
+    float temperature = 0.f;
+    float min_p = 0.f;
+    double u = 0.0;
+  };
   /// DecodeBatch (batch_capable() only) whose logits stay on the device
   /// (`logits()` reads them when asked): `argmax` (when non-null) receives
-  /// each row's argmax, and the rows with host[i] set are also copied to
-  /// `rows` ([sessions][vocab_text], valid until the next step).
+  /// each row's argmax, `sampled` (with `linear`) receives GPU linear samples
+  /// for rows with temperature > 0, and the rows with host[i] set are also
+  /// copied to `rows` ([sessions][vocab_text], valid until the next step).
   void DecodeBatchRows(std::span<Session* const> sessions,
                        std::span<const std::int32_t> tokens,
                        std::span<const bool> host, std::span<const float>* rows,
-                       std::int32_t* argmax);
+                       std::int32_t* argmax,
+                       std::span<const LinearSample> linear = {},
+                       std::int32_t* sampled = nullptr);
 
   /// Speculative verification. `Verify` evaluates up to VerifyRows() tokens
   /// at the session's next positions in one step; row i's logits (`tokens`
@@ -246,19 +283,30 @@ public:
   [[nodiscard]] std::size_t VerifyRows(const Session& s) const;
   /// `logits` (may be null) receives the rows (engine memory, valid until the
   /// next Verify), `argmax` (may be null) each row's first maximum (as the
-  /// greedy sampler picks it) without copying the rows.
+  /// greedy sampler picks it) without copying the rows, and `sampled` (with
+  /// `linear`) GPU linear samples without copying the rows.
   void Verify(Session& s, std::span<const std::int32_t> tokens,
-              std::span<const float>* logits, std::int32_t* argmax = nullptr);
+              std::span<const float>* logits, std::int32_t* argmax = nullptr,
+              std::span<const LinearSample> linear = {},
+              std::int32_t* sampled = nullptr);
   /// Verification of several distinct sessions in one step: counts[g] rows
   /// of sessions[g] (each within VerifyRows of its session), tokens laid out
   /// session after session, at most kMaxVerifyRows in all; `logits` /
-  /// `argmax` cover every row in that order. Each session is then committed
-  /// with its own CommitVerify (logits: its rows' subspan) before the next
-  /// step. Every row's result is the one a lone Verify of its session gives.
+  /// `argmax` / `sampled` cover every row in that order. Each session is then
+  /// committed with its own CommitVerify (logits: its rows' subspan) before the
+  /// next step. Every row's result is the one a lone Verify of its session
+  /// gives.
   void VerifyBatch(std::span<Session* const> sessions,
                    std::span<const std::size_t> counts,
                    std::span<const std::int32_t> tokens,
-                   std::span<const float>* logits, std::int32_t* argmax);
+                   std::span<const float>* logits, std::int32_t* argmax,
+                   std::span<const LinearSample> linear = {},
+                   std::int32_t* sampled = nullptr);
+  /// Copies rows [first, first + count) of the last Verify/DecodeBatchRows
+  /// step's device logits into host memory on demand (e.g. when a constrained
+  /// greedy argmax is rejected).
+  void ReadVerifyRows(std::size_t first, std::size_t count,
+                      std::span<const float>* out);
   /// Empty `logits`: row keep - 1 comes from the device.
   void CommitVerify(Session& s, std::size_t keep,
                     std::span<const float> logits);

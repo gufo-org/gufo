@@ -78,6 +78,10 @@ void Conv(hipStream_t s, const float* x, const float* state, const float* w,
           float scale);
 void ConvStateUpdate(hipStream_t s, const float* x, float* state, int t_count,
                      int channels);
+/// Same state advance as ConvStateUpdate, reading the pre-ubatch `old_state`
+/// and writing the state after `t_count` tokens into a separate `dst_state`.
+void ConvStateCapture(hipStream_t s, const float* x, const float* old_state,
+                      float* dst_state, int t_count, int channels);
 
 void Add(hipStream_t s, const float* a, const float* b, float* out, int n);
 void Copy(hipStream_t s, const float* a, float* out, int n);
