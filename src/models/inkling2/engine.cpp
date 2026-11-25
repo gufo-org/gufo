@@ -290,11 +290,20 @@ struct Engine::Impl {
   // rows, each run through the per-row attention kernel)
   bool verify_one_session = true;
   float* d_vcap = nullptr;  // [48][6656][kVerifyRows] conv inputs of a step
-  // device argmax of the rows of a verification (greedy requests)
+  // device argmax and GPU linear sampler workspaces
   float* d_amax_ws = nullptr;
   int* d_amax = nullptr;
   int* h_amax = nullptr;    // pinned
   float* h_rows = nullptr;  // pinned [kMaxB][vocab]: a verification's logits
+  float* d_ls_temp = nullptr;
+  float* d_ls_minp = nullptr;
+  double* d_ls_u = nullptr;
+  double* d_ls_ws = nullptr;
+  int* d_ls_out = nullptr;
+  float* h_ls_temp = nullptr;  // pinned
+  float* h_ls_minp = nullptr;  // pinned
+  double* h_ls_u = nullptr;    // pinned
+  int* h_ls_out = nullptr;     // pinned
   /// The verification capture of slot `slot_idx` (null outside verification).
   float* VCap(int slot_idx) const {
     return verify_mode ? d_vcap + static_cast<std::size_t>(slot_idx) *
@@ -506,6 +515,14 @@ struct Engine::Impl {
       (void)hipHostFree(h_amax);
     if (h_rows)
       (void)hipHostFree(h_rows);
+    if (h_ls_temp)
+      (void)hipHostFree(h_ls_temp);
+    if (h_ls_minp)
+      (void)hipHostFree(h_ls_minp);
+    if (h_ls_u)
+      (void)hipHostFree(h_ls_u);
+    if (h_ls_out)
+      (void)hipHostFree(h_ls_out);
     if (ev_fork)
       (void)hipEventDestroy(ev_fork);
     if (ev_join)
@@ -728,6 +745,24 @@ struct Engine::Impl {
           "pinned");
     Check(hipHostMalloc(reinterpret_cast<void**>(&h_rows),
                         B * cfg->n_vocab_text * sizeof(float)),
+          "pinned");
+    d_ls_temp = NewBuf(B);
+    d_ls_minp = NewBuf(B);
+    d_ls_u = static_cast<double*>(AllocDevice(B * sizeof(double), "ls u"));
+    scratch_allocs.push_back(d_ls_u);
+    d_ls_ws =
+        static_cast<double*>(AllocDevice(B * 129 * sizeof(double), "ls ws"));
+    scratch_allocs.push_back(d_ls_ws);
+    d_ls_out = NewInts(B);
+    Check(
+        hipHostMalloc(reinterpret_cast<void**>(&h_ls_temp), B * sizeof(float)),
+        "pinned");
+    Check(
+        hipHostMalloc(reinterpret_cast<void**>(&h_ls_minp), B * sizeof(float)),
+        "pinned");
+    Check(hipHostMalloc(reinterpret_cast<void**>(&h_ls_u), B * sizeof(double)),
+          "pinned");
+    Check(hipHostMalloc(reinterpret_cast<void**>(&h_ls_out), B * sizeof(int)),
           "pinned");
     d_counter = reinterpret_cast<unsigned*>(NewInts(B));
     Check(hipMemset(d_counter, 0, B * 4), "counter");
@@ -1789,12 +1824,50 @@ struct Engine::Impl {
     DecodeN(&sp, &token, &op, 1);
   }
 
+  void LaunchLinearSample(std::span<const Engine::LinearSample> linear, int n) {
+    if (linear.empty())
+      return;
+    for (int r = 0; r < n; ++r) {
+      h_ls_temp[r] = linear[r].temperature;
+      h_ls_minp[r] = linear[r].min_p;
+      h_ls_u[r] = linear[r].u;
+    }
+    Check(hipMemcpyAsync(d_ls_temp, h_ls_temp,
+                         static_cast<std::size_t>(n) * sizeof(float),
+                         hipMemcpyHostToDevice, ds),
+          "ls temp");
+    Check(hipMemcpyAsync(d_ls_minp, h_ls_minp,
+                         static_cast<std::size_t>(n) * sizeof(float),
+                         hipMemcpyHostToDevice, ds),
+          "ls minp");
+    Check(hipMemcpyAsync(d_ls_u, h_ls_u,
+                         static_cast<std::size_t>(n) * sizeof(double),
+                         hipMemcpyHostToDevice, ds),
+          "ls u");
+    fs::LinearSampleArgs la{};
+    la.logits = logits_d;
+    la.rows = n;
+    la.vocab = static_cast<int>(cfg->n_vocab_text);
+    la.temp = d_ls_temp;
+    la.min_p = d_ls_minp;
+    la.u = d_ls_u;
+    la.ws = d_ls_ws;
+    la.out = d_ls_out;
+    fs::RowsLinearSample(ds, la);
+    Check(hipMemcpyAsync(h_ls_out, d_ls_out,
+                         static_cast<std::size_t>(n) * sizeof(int),
+                         hipMemcpyDeviceToHost, ds),
+          "ls out");
+  }
+
   /// One decode step of `n` (<= kMaxB) distinct sessions, one token each, as
   /// one graph launch: the weights are read once for all tokens.
   void DecodeN(Session* const* sess, const std::int32_t* tokens,
                std::vector<float>* const* outs, int n,
                std::int32_t* step_argmax = nullptr,
-               const bool* pinned = nullptr) {
+               const bool* pinned = nullptr,
+               std::span<const Engine::LinearSample> linear = {},
+               std::int32_t* step_sampled = nullptr) {
     nb = n;
     int maxpos = 0;
     std::int32_t step[2 * kMaxB] = {};
@@ -1850,6 +1923,8 @@ struct Engine::Impl {
                            hipMemcpyDeviceToHost, ds),
             "argmax copy");
     }
+    if (!linear.empty() && step_sampled != nullptr)
+      LaunchLinearSample(linear, n);
     if (dsp) {
       Drafter::Rows rows[kMaxB];
       for (int b = 0; b < n; ++b)
@@ -1863,6 +1938,8 @@ struct Engine::Impl {
     Check(hipStreamSynchronize(ds), "decode sync");
     if (step_argmax != nullptr)
       std::memcpy(step_argmax, h_amax, static_cast<std::size_t>(n) * 4);
+    if (!linear.empty() && step_sampled != nullptr)
+      std::memcpy(step_sampled, h_ls_out, static_cast<std::size_t>(n) * 4);
     for (int b = 0; b < n; ++b)
       sess[b]->pos_ += 1;
     nb = 1;
@@ -1876,7 +1953,9 @@ struct Engine::Impl {
   /// prefix of a session's rows.
   void VerifyN(Session* const* sess, const int* counts, int ng,
                const std::int32_t* tokens, std::span<const float>* out,
-               std::int32_t* argmax) {
+               std::int32_t* argmax,
+               std::span<const Engine::LinearSample> linear = {},
+               std::int32_t* sampled = nullptr) {
     int n = 0;
     std::int32_t step[3 * kMaxB] = {};
     int maxpos = 0;
@@ -1940,9 +2019,13 @@ struct Engine::Impl {
                            hipMemcpyDeviceToHost, ds),
             "argmax copy");
     }
+    if (!linear.empty() && sampled != nullptr)
+      LaunchLinearSample(linear, n);
     Check(hipStreamSynchronize(ds), "verify sync");
     if (argmax != nullptr)
       std::memcpy(argmax, h_amax, static_cast<std::size_t>(n) * 4);
+    if (!linear.empty() && sampled != nullptr)
+      std::memcpy(sampled, h_ls_out, static_cast<std::size_t>(n) * 4);
     nb = 1;
   }
 
@@ -2420,11 +2503,13 @@ void Engine::DecodeBatch(std::span<Session* const> sessions,
 void Engine::DecodeBatchRows(std::span<Session* const> sessions,
                              std::span<const std::int32_t> tokens,
                              std::span<const bool> host,
-                             std::span<const float>* rows,
-                             std::int32_t* argmax) {
+                             std::span<const float>* rows, std::int32_t* argmax,
+                             std::span<const LinearSample> linear,
+                             std::int32_t* sampled) {
   if (!batch_capable() || sessions.empty() ||
       sessions.size() != tokens.size() || host.size() != sessions.size() ||
-      sessions.size() > kMaxDecodeBatch)
+      sessions.size() > kMaxDecodeBatch ||
+      (!linear.empty() && linear.size() != sessions.size()))
     throw std::runtime_error("inkling2: bad decode batch");
   const std::lock_guard lock(mutex_);
   for (std::size_t i = 0; i < sessions.size(); ++i) {
@@ -2449,7 +2534,8 @@ void Engine::DecodeBatchRows(std::span<Session* const> sessions,
   for (std::size_t i = 0; i < sessions.size(); ++i)
     pinned[i] = host[i];
   impl_->DecodeN(sessions.data(), tokens.data(), outs,
-                 static_cast<int>(sessions.size()), argmax, pinned);
+                 static_cast<int>(sessions.size()), argmax, pinned, linear,
+                 sampled);
   if (rows != nullptr)
     *rows = {impl_->h_rows, sessions.size() * weights_.config.n_vocab_text};
 }
@@ -2471,17 +2557,22 @@ std::size_t Engine::VerifyRows(const Session& s) const {
 }
 
 void Engine::Verify(Session& s, std::span<const std::int32_t> tokens,
-                    std::span<const float>* logits, std::int32_t* argmax) {
+                    std::span<const float>* logits, std::int32_t* argmax,
+                    std::span<const LinearSample> linear,
+                    std::int32_t* sampled) {
   Session* sp = &s;
   const std::size_t n = tokens.size();
   VerifyBatch(std::span<Session* const>(&sp, 1),
-              std::span<const std::size_t>(&n, 1), tokens, logits, argmax);
+              std::span<const std::size_t>(&n, 1), tokens, logits, argmax,
+              linear, sampled);
 }
 
 void Engine::VerifyBatch(std::span<Session* const> sessions,
                          std::span<const std::size_t> counts,
                          std::span<const std::int32_t> tokens,
-                         std::span<const float>* logits, std::int32_t* argmax) {
+                         std::span<const float>* logits, std::int32_t* argmax,
+                         std::span<const LinearSample> linear,
+                         std::int32_t* sampled) {
   const std::lock_guard lock(mutex_);
   std::size_t total = 0;
   if (sessions.empty() || sessions.size() != counts.size())
@@ -2496,7 +2587,8 @@ void Engine::VerifyBatch(std::span<Session* const> sessions,
     total += counts[g];
   }
   if (total != tokens.size() ||
-      total > (sessions.size() == 1 ? kMaxVerifyRows : kMaxBatchVerifyRows))
+      total > (sessions.size() == 1 ? kMaxVerifyRows : kMaxBatchVerifyRows) ||
+      (!linear.empty() && linear.size() != total))
     throw std::runtime_error("inkling2: bad verification width");
   for (auto t : tokens)
     if (t < 0 || static_cast<std::uint32_t>(t) >= weights_.config.n_vocab_text)
@@ -2514,7 +2606,22 @@ void Engine::VerifyBatch(std::span<Session* const> sessions,
     row0 += counts[g];
   }
   impl_->VerifyN(sessions.data(), cnt, static_cast<int>(sessions.size()),
-                 tokens.data(), logits, argmax);
+                 tokens.data(), logits, argmax, linear, sampled);
+}
+
+void Engine::ReadVerifyRows(std::size_t first, std::size_t count,
+                            std::span<const float>* out) {
+  const std::lock_guard lock(mutex_);
+  const std::size_t V = weights_.config.n_vocab_text;
+  if (count == 0 || first + count > kMaxVerifyRows)
+    throw std::runtime_error("inkling2: bad verify row read");
+  const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+  Check(hipMemcpyAsync(impl_->h_rows + first * V, impl_->logits_d + first * V,
+                       count * V * sizeof(float), hipMemcpyDeviceToHost,
+                       impl_->ds),
+        "verify row read");
+  Check(hipStreamSynchronize(impl_->ds), "verify row read");
+  *out = {impl_->h_rows + first * V, count * V};
 }
 
 void Engine::CommitVerify(Session& s, std::size_t keep,

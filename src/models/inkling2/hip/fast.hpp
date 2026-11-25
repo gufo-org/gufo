@@ -148,6 +148,20 @@ void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
 /// (ws: rows * 64 * 2 floats).
 void RowsArgmax(hipStream_t s, const float* x, int rows, int n, float* ws,
                 int* out);
+/// GPU linear sampling (temperature + optional min_p, FP64 softmax weights)
+/// for `rows` rows of `vocab` logits. Only rows with `temp[r] > 0` are
+/// sampled; `ws` holds rows * (64 * 2 + 1) doubles.
+struct LinearSampleArgs {
+  const float* logits;  // [rows][vocab]
+  int rows;
+  int vocab;
+  const float* temp;   // [rows] (device; <= 0 skips row)
+  const float* min_p;  // [rows] (device)
+  const double* u;     // [rows] (device)
+  double* ws;          // [rows][129] (device)
+  int* out;            // [rows] (device)
+};
+void RowsLinearSample(hipStream_t s, const LinearSampleArgs& a);
 
 /// Attention-residual mix: states (<= 8 vectors of 2304) RMS-normalised,
 /// softmax of query . state / sqrt(2304), out[q] = sum_j p_j S_j / rms_j. One

@@ -4654,6 +4654,172 @@ void RowsArgmax(hipStream_t s, const float* x, int rows, int n, float* ws,
   Chk("rows_argmax");
 }
 
+namespace {
+constexpr int kLsBlocks = 64;
+constexpr int kLsStride = 2 * kLsBlocks + 1;
+
+__device__ __forceinline__ double wsum_d(double v) {
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1)
+    v += __shfl_xor(v, o, 32);
+  return v;
+}
+
+__global__ void __launch_bounds__(256) k_ls_max(LinearSampleArgs a) {
+  const int r = blockIdx.y;
+  if (!(a.temp[r] > 0.f))
+    return;
+  const int per = (a.vocab + kLsBlocks - 1) / kLsBlocks;
+  const int lo = blockIdx.x * per, hi = min(a.vocab, lo + per);
+  const float* x = a.logits + (size_t)r * a.vocab;
+  float v = -INFINITY;
+  for (int i = lo + threadIdx.x; i < hi; i += 256) {
+    const float y = x[i];
+    if (isfinite(y) && y > v)
+      v = y;
+  }
+  __shared__ float red[8];
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1)
+    v = fmaxf(v, __shfl_xor(v, o, 32));
+  if (threadIdx.x % 32 == 0)
+    red[threadIdx.x / 32] = v;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    for (int w = 1; w < 8; ++w)
+      v = fmaxf(v, red[w]);
+    a.ws[(size_t)r * kLsStride + blockIdx.x] = static_cast<double>(v);
+  }
+}
+
+__global__ void __launch_bounds__(256) k_ls_sum(LinearSampleArgs a) {
+  const int r = blockIdx.y;
+  const float t_f = a.temp[r];
+  if (!(t_f > 0.f))
+    return;
+  __shared__ double red[8];
+  __shared__ double mx_s;
+  double* ws = a.ws + (size_t)r * kLsStride;
+  if (threadIdx.x == 0) {
+    double m = -INFINITY;
+    for (int b = 0; b < kLsBlocks; ++b)
+      if (ws[b] > m)
+        m = ws[b];
+    mx_s = m;
+  }
+  __syncthreads();
+  const double m = mx_s;
+  const double inv_t = 1.0 / static_cast<double>(t_f);
+  const float mp = a.min_p[r];
+  const double thr =
+      mp > 0.f ? m + static_cast<double>(t_f) * log(static_cast<double>(mp))
+               : -INFINITY;
+  const int per = (a.vocab + kLsBlocks - 1) / kLsBlocks;
+  const int lo = blockIdx.x * per, hi = min(a.vocab, lo + per);
+  const float* x = a.logits + (size_t)r * a.vocab;
+  double z = 0.0;
+  for (int i = lo + threadIdx.x; i < hi; i += 256) {
+    const float y = x[i];
+    if (isfinite(y) && static_cast<double>(y) >= thr)
+      z += exp((static_cast<double>(y) - m) * inv_t);
+  }
+  z = wsum_d(z);
+  if (threadIdx.x % 32 == 0)
+    red[threadIdx.x / 32] = z;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    double s = 0.0;
+    for (int w = 0; w < 8; ++w)
+      s += red[w];
+    ws[kLsBlocks + blockIdx.x] = s;
+    if (blockIdx.x == 0)
+      ws[2 * kLsBlocks] = m;
+  }
+}
+
+__global__ void __launch_bounds__(256) k_ls_pick(LinearSampleArgs a) {
+  const int r = blockIdx.x;
+  const float t_f = a.temp[r];
+  if (!(t_f > 0.f))
+    return;
+  __shared__ int chunk;
+  __shared__ double before, total;
+  __shared__ double part[256];
+  const double* ws = a.ws + (size_t)r * kLsStride;
+  const double m = ws[2 * kLsBlocks];
+  const double inv_t = 1.0 / static_cast<double>(t_f);
+  const float mp = a.min_p[r];
+  const double thr =
+      mp > 0.f ? m + static_cast<double>(t_f) * log(static_cast<double>(mp))
+               : -INFINITY;
+  if (threadIdx.x == 0) {
+    double z = 0.0;
+    for (int b = 0; b < kLsBlocks; ++b)
+      z += ws[kLsBlocks + b];
+    const double target = a.u[r] * z;
+    double run = 0.0;
+    int c = kLsBlocks - 1;
+    for (int b = 0; b < kLsBlocks; ++b) {
+      const double nxt = run + ws[kLsBlocks + b];
+      if (target < nxt) {
+        c = b;
+        break;
+      }
+      run = nxt;
+    }
+    chunk = c;
+    before = run;
+    total = z;
+  }
+  __syncthreads();
+  const int per = (a.vocab + kLsBlocks - 1) / kLsBlocks;
+  const int lo = chunk * per, hi = min(a.vocab, lo + per);
+  const int len = hi - lo, sl = (len + 255) / 256;
+  const int a0 = lo + threadIdx.x * sl, a1 = min(hi, a0 + sl);
+  const float* x = a.logits + (size_t)r * a.vocab;
+  double s = 0.0;
+  for (int i = a0; i < a1; ++i) {
+    const float y = x[i];
+    if (isfinite(y) && static_cast<double>(y) >= thr)
+      s += exp((static_cast<double>(y) - m) * inv_t);
+  }
+  part[threadIdx.x] = s;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    const double target = a.u[r] * total;
+    double run = before;
+    int tok = hi - 1;
+    for (int th = 0; th < 256; ++th) {
+      if (target < run + part[th]) {
+        const int b0 = lo + th * sl, b1 = min(hi, b0 + sl);
+        for (int i = b0; i < b1; ++i) {
+          const float y = x[i];
+          if (isfinite(y) && static_cast<double>(y) >= thr) {
+            run += exp((static_cast<double>(y) - m) * inv_t);
+            if (target < run) {
+              tok = i;
+              break;
+            }
+          }
+        }
+        break;
+      }
+      run += part[th];
+    }
+    a.out[r] = tok;
+  }
+}
+}  // namespace
+
+void RowsLinearSample(hipStream_t s, const LinearSampleArgs& a) {
+  if (a.rows <= 0)
+    return;
+  k_ls_max<<<dim3(kLsBlocks, a.rows), 256, 0, s>>>(a);
+  k_ls_sum<<<dim3(kLsBlocks, a.rows), 256, 0, s>>>(a);
+  k_ls_pick<<<a.rows, 256, 0, s>>>(a);
+  Chk("rows_linear_sample");
+}
+
 void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
                       int keep, int row0) {
   k_conv_commit<<<dim3(26, 48), 256, 0, s>>>(tbl, cap, keep, row0);

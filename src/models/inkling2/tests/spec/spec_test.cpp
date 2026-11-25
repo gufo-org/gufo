@@ -513,6 +513,60 @@ int main(int argc, char** argv) {
     std::printf("shortlist top-K: 3 sessions, %d errors\n", sl_bad);
     failures += sl_bad != 0;
   }
+  {
+    // GPU linear sampling vs host FP64 reference + ReadVerifyRows check
+    auto s = engine->NewSession();
+    engine->Forward(*s, p);
+    std::vector<std::int32_t> toks(want.begin(), want.begin() + 8);
+    std::span<const float> out;
+    std::int32_t gpu_toks[8] = {};
+    Engine::LinearSample ls[8];
+    for (int j = 0; j < 8; ++j)
+      ls[j] = {.temperature = 1.0f,
+               .min_p = j % 2 ? 0.05f : 0.0f,
+               .u = 0.07 + 0.11 * j};
+    engine->Verify(*s, toks, &out, nullptr,
+                   std::span<const Engine::LinearSample>(ls, 8), gpu_toks);
+    int ls_bad = 0;
+    for (int j = 0; j < 8; ++j) {
+      const auto row = out.subspan(static_cast<std::size_t>(j) * V, V);
+      double mx = -INFINITY;
+      for (float v : row)
+        if (std::isfinite(v) && v > mx)
+          mx = v;
+      const double thr =
+          ls[j].min_p > 0 ? mx + ls[j].temperature *
+                                     std::log(static_cast<double>(ls[j].min_p))
+                          : -INFINITY;
+      double z = 0.0;
+      for (float v : row)
+        if (std::isfinite(v) && v >= thr)
+          z += std::exp((static_cast<double>(v) - mx) / ls[j].temperature);
+      const double target = ls[j].u * z;
+      double run = 0.0;
+      int cpu_tok = static_cast<int>(V) - 1;
+      for (std::size_t i = 0; i < V; ++i) {
+        if (std::isfinite(row[i]) && row[i] >= thr) {
+          run +=
+              std::exp((static_cast<double>(row[i]) - mx) / ls[j].temperature);
+          if (target < run) {
+            cpu_tok = static_cast<int>(i);
+            break;
+          }
+        }
+      }
+      if (gpu_toks[j] != cpu_tok)
+        ++ls_bad;
+    }
+    // ReadVerifyRows must match the full Verify output byte-for-byte
+    std::span<const float> row3;
+    engine->ReadVerifyRows(3, 1, &row3);
+    ls_bad += std::memcmp(row3.data(), out.data() + 3 * V, V * 4) != 0;
+    engine->CommitVerify(*s, 1, {});
+    std::printf("gpu linear sample + lazy row read: 8 rows, %d errors\n",
+                ls_bad);
+    failures += ls_bad != 0;
+  }
   std::printf(failures ? "FAIL\n" : "ALL PASS\n");
   return failures ? 1 : 0;
 }

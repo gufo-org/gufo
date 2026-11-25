@@ -818,6 +818,44 @@ public:
       throw std::runtime_error("Inkling 2 Mini token selection has no logits");
     return Select(st, sampler, raw, st.session().position());
   }
+  /// Whether Inkling's runner-level masks (`budget_closed`, `call_required`)
+  /// allow `tok` in the current block state.
+  [[nodiscard]] bool RunnerAllowsToken(const Inkling2State& st,
+                                       g::TextRunnerToken tok) const {
+    if (st.budget_closed && st.block == Block::kAfterHeader &&
+        tok == t_thinking_)
+      return false;
+    if (st.call_required &&
+        (st.block == Block::kAfterHeader || st.block == Block::kTool)) {
+      const auto& prefix = st.call_prefix;
+      const std::size_t V = engine_->config().n_vocab_text;
+      bool any_allowed = false;
+      auto check = [&](g::TextRunnerToken t) {
+        if (t < V) {
+          any_allowed = true;
+          if (t == tok)
+            return true;
+        }
+        return false;
+      };
+      if (prefix.empty() && check(t_invoke_))
+        return true;
+      if (prefix.empty() && st.block == Block::kAfterHeader &&
+          !st.budget_closed && !st.thought_closed && check(t_thinking_))
+        return true;
+      for (const auto& name : st.call_names) {
+        if (name.size() < prefix.size() ||
+            !std::equal(prefix.begin(), prefix.end(), name.begin()))
+          continue;
+        if (check(name.size() == prefix.size() ? t_invoke_
+                                               : name[prefix.size()]))
+          return true;
+      }
+      return !any_allowed;
+    }
+    return true;
+  }
+
   /// Applies Inkling's runner-level token masks (`budget_closed`,
   /// `call_required`) to `raw`; returns `raw` unchanged when no mask applies.
   [[nodiscard]] std::span<const float> ApplyRunnerMasks(
@@ -1001,18 +1039,26 @@ public:
   /// Filtered sampled requests (top_p < 1 or bounded top_k) get exact p/q
   /// rejection sampling with residual correction.
   struct RowMode {
-    bool greedy = false, coupled = false, stochastic = false;
+    bool greedy = false, coupled = false, stochastic = false,
+         gpu_linear = false;
     Drafter::Coupled cp;
   };
   [[nodiscard]] RowMode ModeOf(const Inkling2State& st,
                                const sampling::SamplerState& working) const {
     RowMode m;
     const auto& cfg = working.config();
-    m.greedy = cfg.can_use_unmodified_argmax() && !cfg.logprobs &&
-               !working.ForcedToken() && !st.budget_closed && !st.call_required;
+    // Device argmax fast path for all greedy requests without penalties or
+    // logprobs; constrained / budget_closed / call_required rows lazily read
+    // logits only if the argmax is forbidden.
+    m.greedy = !cfg.uses_random_sampling() && !cfg.penalties_enabled() &&
+               !cfg.logprobs;
     m.coupled = !m.greedy && cfg.temperature > 0 && !cfg.constraint &&
                 !working.ForcedToken() && cfg.top_k == 0 && cfg.top_p == 1 &&
                 !(cfg.min_p > 0 && cfg.min_keep > 1);
+    m.gpu_linear = m.coupled && cfg.temperature >= 0.1F &&
+                   !cfg.reasoning_budget && !cfg.penalties_enabled() &&
+                   cfg.min_p == 0.0F && !cfg.logprobs && !st.budget_closed &&
+                   !st.call_required;
     m.stochastic = !m.greedy && !m.coupled && cfg.uses_random_sampling() &&
                    !working.ForcedToken() &&
                    (cfg.top_p < 1.0F || (cfg.top_k > 0 && cfg.top_k <= 256));
@@ -1135,8 +1181,10 @@ public:
                       g::TextDecodeStep& step, std::size_t& budget,
                       std::size_t pos, int width, const std::int32_t* drafts,
                       std::span<const float> out, const std::int32_t* amax,
-                      bool greedy,
-                      const StochasticProposal* proposals = nullptr) const {
+                      bool greedy, std::size_t row0 = 0,
+                      const StochasticProposal* proposals = nullptr,
+                      const std::int32_t* gpu_sampled = nullptr,
+                      const std::uint64_t* gpu_draws = nullptr) const {
     const auto& cfg = working.config();
     const std::size_t V = engine_->config().n_vocab_text;
     std::size_t keep = 1;
@@ -1146,11 +1194,11 @@ public:
     // host sampler runs on all rows at once; tokens, draws and the published
     // RNG state are those of the rows one after another.
     const bool parallel =
-        !greedy && proposals == nullptr && width > 0 &&
-        cfg.temperature >= 0.1F && !cfg.constraint && !working.ForcedToken() &&
-        !cfg.reasoning_budget && !cfg.penalties_enabled() && cfg.top_k == 0 &&
-        cfg.top_p == 1 && cfg.min_p == 0 && !st.budget_closed &&
-        !st.call_required &&
+        !greedy && gpu_sampled == nullptr && proposals == nullptr &&
+        width > 0 && cfg.temperature >= 0.1F && !cfg.constraint &&
+        !working.ForcedToken() && !cfg.reasoning_budget &&
+        !cfg.penalties_enabled() && cfg.top_k == 0 && cfg.top_p == 1 &&
+        cfg.min_p == 0 && !st.budget_closed && !st.call_required &&
         pos + static_cast<std::size_t>(width) + 1 < max_context_;
     std::array<std::uint64_t, Engine::kMaxVerifyRows + 1> draws{};
     std::array<g::TextRunnerToken, Engine::kMaxVerifyRows> sampled{};
@@ -1174,14 +1222,21 @@ public:
                     sampled[j] = sample_row(static_cast<int>(j));
                   });
     }
-    int used = 0;  // rows whose selection drew (parallel)
+    int used = 0;  // rows whose selection drew (parallel / gpu_sampled)
     for (int j = 0; j <= width; ++j) {
       const std::size_t at = pos + static_cast<std::size_t>(j) + 1;
       g::TextDecodeSelection sel;
       bool stoch_accepted = false;
       bool used_stoch = false;
-      if (proposals != nullptr && j < width && proposals[j].size > 1 &&
-          !working.ForcedToken() && at < max_context_) {
+      if (gpu_sampled != nullptr && at < max_context_) {
+        const auto tk = static_cast<g::TextRunnerToken>(gpu_sampled[j]);
+        const bool stop = st.stop_at_eos() && tok_->IsStop(tk);
+        sel = {.stop = stop,
+               .token = tk,
+               .piece = stop ? std::string{} : Piece(st, tk)};
+        used = j + 1;
+      } else if (proposals != nullptr && j < width && proposals[j].size > 1 &&
+                 !working.ForcedToken() && at < max_context_) {
         used_stoch = true;
         const auto row = out.subspan(static_cast<std::size_t>(j) * V, V);
         std::vector<float> masked;
@@ -1211,18 +1266,32 @@ public:
                .logprobs = sampling::CollectLogprobs(row, tk, cfg.logprobs)};
         used = j + 1;
       } else if (greedy) {
-        // A token the sampler forces (a reasoning budget's close) replaces
-        // the row's argmax, as Sample would.
         const auto forced = working.ForcedToken();
-        if (forced && st.block == Block::kThinking)
-          st.budget_closed = true;
-        const auto tk = forced ? static_cast<g::TextRunnerToken>(*forced)
-                               : static_cast<g::TextRunnerToken>(amax[j]);
-        const bool stop =
-            at >= max_context_ || (st.stop_at_eos() && tok_->IsStop(tk));
-        sel = {.stop = stop,
-               .token = tk,
-               .piece = stop ? std::string{} : Piece(st, tk)};
+        if (forced) {
+          if (st.block == Block::kThinking)
+            st.budget_closed = true;
+          const auto tk = static_cast<g::TextRunnerToken>(*forced);
+          const bool stop =
+              at >= max_context_ || (st.stop_at_eos() && tok_->IsStop(tk));
+          sel = {.stop = stop,
+                 .token = tk,
+                 .piece = stop ? std::string{} : Piece(st, tk)};
+        } else if (at >= max_context_) {
+          sel = {.stop = true, .piece = {}};
+        } else if (working.CanSelectArgmax(
+                       static_cast<sampling::TokenId>(amax[j]), false) &&
+                   RunnerAllowsToken(
+                       st, static_cast<g::TextRunnerToken>(amax[j]))) {
+          const auto tk = static_cast<g::TextRunnerToken>(amax[j]);
+          const bool stop = st.stop_at_eos() && tok_->IsStop(tk);
+          sel = {.stop = stop,
+                 .token = tk,
+                 .piece = stop ? std::string{} : Piece(st, tk)};
+        } else {
+          std::span<const float> row;
+          engine_->ReadVerifyRows(row0 + static_cast<std::size_t>(j), 1, &row);
+          sel = Select(st, working, row, at);
+        }
       } else {
         sel = Select(st, working, out.subspan(j * V, V), at);
       }
@@ -1235,7 +1304,7 @@ public:
           used_stoch
               ? stoch_accepted
               : (sel.token == static_cast<g::TextRunnerToken>(drafts[j]));
-      if (j < width && budget > 0 && !(greedy && st.budget_closed) && match) {
+      if (j < width && budget > 0 && match) {
         working.Accept(sel.token);
         CommitToken(st, sel.token);
         step.selections.push_back(std::move(sel));
@@ -1246,7 +1315,9 @@ public:
       st.pending = std::move(sel);
       break;
     }
-    if (parallel)
+    if (gpu_sampled != nullptr && gpu_draws != nullptr)
+      working.SetRngState(gpu_draws[used]);
+    else if (parallel)
       working.SetRngState(draws[used]);
     return keep;
   }
@@ -1388,12 +1459,38 @@ public:
     rows.insert(rows.end(), drafts, drafts + width);
     std::span<const float> out;
     std::int32_t amax[Engine::kMaxVerifyRows] = {};
+    std::int32_t gpu_samp[Engine::kMaxVerifyRows] = {};
+    std::array<std::uint64_t, Engine::kMaxVerifyRows + 1> gpu_draws{};
     const std::size_t pos = ss.position();
+    const bool use_gpu_linear =
+        mode.gpu_linear &&
+        pos + static_cast<std::size_t>(width) + 1 < max_context_;
+    std::array<Engine::LinearSample, Engine::kMaxVerifyRows> ls{};
+    if (use_gpu_linear) {
+      auto ahead = working;
+      const auto& scfg = working.config();
+      for (int j = 0; j <= width; ++j) {
+        gpu_draws[j] = ahead.rng_state();
+        ls[j] = {.temperature = scfg.temperature,
+                 .min_p = scfg.min_p,
+                 .u = ahead.Uniform()};
+      }
+      gpu_draws[width + 1] = ahead.rng_state();
+    }
     if (width == 0) {
       // Nothing to verify: a plain decode step (logits left on the device
-      // when greedy).
+      // when greedy or GPU-sampled).
       if (greedy) {
         engine_->Step(ss, static_cast<std::int32_t>(a), amax);
+      } else if (use_gpu_linear) {
+        const std::int32_t id = static_cast<std::int32_t>(a);
+        Session* const sp = &ss;
+        const bool host = false;
+        engine_->DecodeBatchRows(
+            std::span<Session* const>(&sp, 1),
+            std::span<const std::int32_t>(&id, 1),
+            std::span<const bool>(&host, 1), nullptr, nullptr,
+            std::span<const Engine::LinearSample>(ls.data(), 1), gpu_samp);
       } else {
         // the row's logits through the pinned buffer (the session keeps its
         // copy on the device)
@@ -1406,15 +1503,21 @@ public:
                                  nullptr);
       }
     } else {
-      engine_->Verify(ss, rows, greedy ? nullptr : &out,
-                      greedy ? amax : nullptr);
+      engine_->Verify(ss, rows, (greedy || use_gpu_linear) ? nullptr : &out,
+                      greedy ? amax : nullptr,
+                      use_gpu_linear ? std::span<const Engine::LinearSample>(
+                                           ls.data(), rows.size())
+                                     : std::span<const Engine::LinearSample>{},
+                      use_gpu_linear ? gpu_samp : nullptr);
     }
     const auto t2 = Clock::now();
     const std::size_t keep = Resolve(
-        st, working, step, budget, pos, width, drafts, out, amax, greedy,
-        (!copied && mode.stochastic && n > 0) ? stoch_props.data() : nullptr);
+        st, working, step, budget, pos, width, drafts, out, amax, greedy, 0,
+        (!copied && mode.stochastic && n > 0) ? stoch_props.data() : nullptr,
+        use_gpu_linear ? gpu_samp : nullptr,
+        use_gpu_linear ? gpu_draws.data() : nullptr);
     if (width > 0)
-      engine_->CommitVerify(ss, keep, out);  // empty: from the device
+      engine_->CommitVerify(ss, keep, {});  // lazy: keep logits on device
     sampler.CopyDrawStateFrom(working);
     const auto t3 = Clock::now();
     const int kept = static_cast<int>(keep) - 1;  // proposals kept
@@ -1655,22 +1758,43 @@ public:
         ids.push_back(l.anchor);
       }
       bool ok = !sessions.empty();
-      // greedy rows take the device argmax; only sampled rows' logits come
-      // to the host
+      // greedy and GPU-linear rows avoid D2H logits; only host-sampled rows
+      // come to the host
       std::vector<RowMode> modes(lanes.size());
       bool host[Engine::kMaxDecodeBatch] = {};
+      bool gpu_lin[Engine::kMaxDecodeBatch] = {};
       std::int32_t amax[Engine::kMaxDecodeBatch] = {};
+      std::int32_t gpu_samp[Engine::kMaxDecodeBatch] = {};
+      Engine::LinearSample ls[Engine::kMaxDecodeBatch] = {};
+      std::uint64_t next_rng[Engine::kMaxDecodeBatch] = {};
+      bool any_greedy = false, any_gpu_lin = false;
       std::span<const float> out;
       const std::size_t V = engine_->config().n_vocab_text;
       if (ok) {
         try {
           for (std::size_t k = 0; k < lanes.size(); ++k) {
             modes[k] = ModeOf(*lanes[k].st, working[lanes[k].i]);
-            host[k] = !modes[k].greedy;
+            gpu_lin[k] = modes[k].gpu_linear &&
+                         lanes[k].ss->position() + 1 < max_context_;
+            host[k] = !modes[k].greedy && !gpu_lin[k];
+            any_greedy = any_greedy || modes[k].greedy;
+            any_gpu_lin = any_gpu_lin || gpu_lin[k];
+            if (gpu_lin[k]) {
+              auto ahead = working[lanes[k].i];
+              const auto& scfg = ahead.config();
+              ls[k] = {.temperature = scfg.temperature,
+                       .min_p = scfg.min_p,
+                       .u = ahead.Uniform()};
+              next_rng[k] = ahead.rng_state();
+            }
           }
-          engine_->DecodeBatchRows(sessions, ids,
-                                   std::span<const bool>(host, lanes.size()),
-                                   &out, amax);
+          engine_->DecodeBatchRows(
+              sessions, ids, std::span<const bool>(host, lanes.size()), &out,
+              any_greedy ? amax : nullptr,
+              any_gpu_lin
+                  ? std::span<const Engine::LinearSample>(ls, lanes.size())
+                  : std::span<const Engine::LinearSample>{},
+              any_gpu_lin ? gpu_samp : nullptr);
         } catch (...) {
           for (const auto& l : lanes)
             steps[l.i].failure = std::current_exception();
@@ -1687,20 +1811,45 @@ public:
           const auto& l = lanes[k];
           try {
             const std::size_t at = l.ss->position();
-            if (modes[k].greedy) {
-              // as Resolve's greedy rows: a token the sampler forces (a
-              // reasoning budget's close) replaces the argmax, as Sample would
-              const auto forced = working[l.i].ForcedToken();
-              if (forced && l.st->block == Block::kThinking)
-                l.st->budget_closed = true;
-              const auto tk = forced ? static_cast<g::TextRunnerToken>(*forced)
-                                     : static_cast<g::TextRunnerToken>(amax[k]);
+            if (gpu_lin[k]) {
+              const auto tk = static_cast<g::TextRunnerToken>(gpu_samp[k]);
               const bool stop = at >= max_context_ ||
                                 (l.st->stop_at_eos() && tok_->IsStop(tk));
               l.st->pending = g::TextDecodeSelection{
                   .stop = stop,
                   .token = tk,
                   .piece = stop ? std::string{} : Piece(*l.st, tk)};
+              working[l.i].SetRngState(next_rng[k]);
+            } else if (modes[k].greedy) {
+              const auto forced = working[l.i].ForcedToken();
+              if (forced) {
+                if (l.st->block == Block::kThinking)
+                  l.st->budget_closed = true;
+                const auto tk = static_cast<g::TextRunnerToken>(*forced);
+                const bool stop = at >= max_context_ ||
+                                  (l.st->stop_at_eos() && tok_->IsStop(tk));
+                l.st->pending = g::TextDecodeSelection{
+                    .stop = stop,
+                    .token = tk,
+                    .piece = stop ? std::string{} : Piece(*l.st, tk)};
+              } else if (at >= max_context_) {
+                l.st->pending =
+                    g::TextDecodeSelection{.stop = true, .piece = {}};
+              } else if (working[l.i].CanSelectArgmax(
+                             static_cast<sampling::TokenId>(amax[k]), false) &&
+                         RunnerAllowsToken(
+                             *l.st, static_cast<g::TextRunnerToken>(amax[k]))) {
+                const auto tk = static_cast<g::TextRunnerToken>(amax[k]);
+                const bool stop = l.st->stop_at_eos() && tok_->IsStop(tk);
+                l.st->pending = g::TextDecodeSelection{
+                    .stop = stop,
+                    .token = tk,
+                    .piece = stop ? std::string{} : Piece(*l.st, tk)};
+              } else {
+                std::span<const float> row;
+                engine_->ReadVerifyRows(k, 1, &row);
+                l.st->pending = Select(*l.st, working[l.i], row, at);
+              }
             } else {
               l.st->pending =
                   Select(*l.st, working[l.i], out.subspan(k * V, V), at);
@@ -1727,35 +1876,62 @@ public:
       std::vector<Session*> sessions;
       std::vector<std::size_t> counts;
       std::vector<std::int32_t> rows;
-      bool any_greedy = false, any_host = false;
-      for (auto& l : lanes) {
+      std::vector<std::size_t> first(lanes.size()), keeps(lanes.size(), 0);
+      std::vector<bool> use_gpu_lin(lanes.size(), false);
+      std::vector<std::array<std::uint64_t, Engine::kMaxVerifyRows + 1>>
+          lane_draws(lanes.size());
+      std::array<Engine::LinearSample, Engine::kMaxVerifyRows> ls{};
+      bool any_greedy = false, any_host = false, any_gpu_lin = false;
+      for (std::size_t k = 0; k < lanes.size(); ++k) {
+        auto& l = lanes[k];
+        first[k] = rows.size();
         sessions.push_back(l.ss);
         counts.push_back(static_cast<std::size_t>(1 + l.width));
         rows.push_back(l.anchor);
         rows.insert(rows.end(), l.drafts, l.drafts + l.width);
         l.pos = l.ss->position();
-        (l.mode.greedy ? any_greedy : any_host) = true;
+        use_gpu_lin[k] =
+            l.mode.gpu_linear &&
+            l.pos + static_cast<std::size_t>(l.width) + 1 < max_context_;
+        if (use_gpu_lin[k]) {
+          auto ahead = working[l.i];
+          const auto& scfg = ahead.config();
+          for (int j = 0; j <= l.width; ++j) {
+            lane_draws[k][j] = ahead.rng_state();
+            ls[first[k] + static_cast<std::size_t>(j)] = {
+                .temperature = scfg.temperature,
+                .min_p = scfg.min_p,
+                .u = ahead.Uniform()};
+          }
+          lane_draws[k][l.width + 1] = ahead.rng_state();
+          any_gpu_lin = true;
+        } else if (l.mode.greedy) {
+          any_greedy = true;
+        } else {
+          any_host = true;
+        }
       }
       std::span<const float> out;
       std::int32_t amax[Engine::kMaxVerifyRows] = {};
+      std::int32_t gpu_samp[Engine::kMaxVerifyRows] = {};
       bool ok = true;
       try {
-        engine_->VerifyBatch(sessions, counts, rows, any_host ? &out : nullptr,
-                             any_greedy ? amax : nullptr);
+        engine_->VerifyBatch(
+            sessions, counts, rows, any_host ? &out : nullptr,
+            any_greedy ? amax : nullptr,
+            any_gpu_lin
+                ? std::span<const Engine::LinearSample>(ls.data(), rows.size())
+                : std::span<const Engine::LinearSample>{},
+            any_gpu_lin ? gpu_samp : nullptr);
       } catch (...) {
         for (const auto& l : lanes)
           steps[l.i].failure = std::current_exception();
         ok = false;
       }
       const std::size_t V = engine_->config().n_vocab_text;
-      std::vector<std::size_t> first(lanes.size()), keeps(lanes.size(), 0);
-      for (std::size_t k = 0, r0 = 0; k < lanes.size(); ++k) {
-        first[k] = r0;
-        r0 += static_cast<std::size_t>(1 + lanes[k].width);
-      }
       const auto rows_of = [&](std::size_t k) {
         const auto& l = lanes[k];
-        return l.mode.greedy
+        return (l.mode.greedy || use_gpu_lin[k])
                    ? std::span<const float>{}
                    : out.subspan(first[k] * V,
                                  static_cast<std::size_t>(1 + l.width) * V);
@@ -1765,23 +1941,27 @@ public:
         // selections on a thread per request (disjoint states), then the
         // commits in order
         std::size_t host_rows = 0;
-        for (const auto& l : lanes)
-          host_rows +=
-              l.mode.greedy ? 0 : static_cast<std::size_t>(1 + l.width);
+        for (std::size_t k = 0; k < lanes.size(); ++k)
+          host_rows += (lanes[k].mode.greedy || use_gpu_lin[k])
+                           ? 0
+                           : static_cast<std::size_t>(1 + lanes[k].width);
         ForEachLane(lanes.size(), host_rows, [&](std::size_t k) {
           auto& l = lanes[k];
           try {
             keeps[k] = Resolve(*l.st, working[l.i], steps[l.i], l.budget, l.pos,
                                l.width, l.drafts, rows_of(k), amax + first[k],
-                               l.mode.greedy,
+                               l.mode.greedy, first[k],
                                (!l.copied && l.mode.stochastic && l.n > 0)
                                    ? l.stoch_props.data()
-                                   : nullptr);
+                                   : nullptr,
+                               use_gpu_lin[k] ? (gpu_samp + first[k]) : nullptr,
+                               use_gpu_lin[k] ? lane_draws[k].data() : nullptr);
           } catch (...) {
             steps[l.i].failure = std::current_exception();
           }
         });
-        // one commit for every lane that resolved (failed lanes keep 0)
+        // one commit for every lane that resolved (failed lanes keep 0); keep
+        // logits lazily on device since Resolve already populated st.pending
         std::vector<Session*> cs;
         std::vector<std::size_t> ck;
         std::vector<std::span<const float>> cl;
@@ -1789,7 +1969,7 @@ public:
           if (keeps[k] > 0) {
             cs.push_back(lanes[k].ss);
             ck.push_back(keeps[k]);
-            cl.push_back(rows_of(k));
+            cl.emplace_back();
           }
         bool committed = true;
         try {
