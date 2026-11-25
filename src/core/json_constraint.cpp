@@ -14,6 +14,7 @@
 #include <string_view>
 #include <tuple>
 
+#include "src/core/json_constraint_describe.hpp"
 #include "src/core/json_number_limits.hpp"
 
 namespace gufo::sampling {
@@ -28,6 +29,11 @@ constexpr std::size_t kMaxDepth = 16;
 constexpr std::size_t kMaxStates = 8192;
 constexpr std::size_t kMaxStack = 16384;
 constexpr std::size_t kMaxWork = 2000000;
+// Schema intersections one compiler may form. Each distributes sibling
+// constraints into a copy of its operands, so a chain of definitions that
+// reference one another several times expands exponentially before the rule
+// limit can see it. Schemas within the rule limit form a few per rule.
+constexpr std::size_t kMaxConjunctions = 8 * kMaxRules;
 
 [[noreturn]] void Invalid(std::string_view message) {
   throw std::invalid_argument("JSON Schema: " + std::string(message));
@@ -135,6 +141,8 @@ const json::Value* JsonConstraint::ResolveReference(
 
 class JsonConstraintCompiler {
 public:
+  // DescribeJsonConstraint's text; the compiler may read the grammar.
+  static std::string Describe(const JsonConstraint& grammar);
   using Sequence = JsonConstraint::Sequence;
   using Rule = JsonConstraint::Rule;
   // `values` spells the compiled values; the default is JSON.
@@ -381,7 +389,7 @@ public:
         // (#383). Keep native framing as llama.cpp common/parsers/
         // qwen3-coder.cpp does at 46ca246de: a union admitting strings is raw
         // text, and the HTTP parser tries its typed alternatives first.
-        const auto types = ValueTypes(original, 0);
+        const auto types = ValueTypes(original);
         if (types.none())
           return {};
         const bool text = types[kStringType];
@@ -503,10 +511,17 @@ public:
       }
     }
     const auto* properties = root->find("properties");
-    if (!properties || !properties->is_object() || root->contains("anyOf") ||
-        root->contains("oneOf") || root->contains("const") ||
-        root->contains("enum"))
+    if (!properties || !properties->is_object() || root->contains("oneOf") ||
+        root->contains("const") || root->contains("enum"))
       properties = nullptr;
+    std::set<std::set<std::string>> required_alternatives;
+    if (const auto* any = root->find("anyOf")) {
+      if (properties)
+        required_alternatives =
+            RequiredAlternatives(*any, *properties, key_end);
+      if (required_alternatives.empty())
+        properties = nullptr;
+    }
     std::set<std::string> required;
     if (const auto* fields = root->find("required");
         properties && fields && fields->is_array())
@@ -524,7 +539,7 @@ public:
         required.erase(name);
         continue;
       }
-      auto types = ValueTypes(original, 0);
+      auto types = ValueTypes(original);
       if (types.none())
         types.set();
       const bool text = types[kStringType];
@@ -596,7 +611,7 @@ public:
       members.emplace_back(
           name, Seq({value, Literal(close + tags.parameter_separator)}));
     }
-    grammar_->root_ = Arguments(members, required);
+    grammar_->root_ = Arguments(members, required, required_alternatives);
     return Finish();
   }
 
@@ -607,14 +622,66 @@ public:
   }
 
 private:
+  // Tagged parsers get field types from the root properties. Alternatives
+  // here can change only which of those fields must occur.
+  static std::set<std::set<std::string>> RequiredAlternatives(
+      const json::Value& any, const json::Value& properties,
+      std::string_view key_end) {
+    if (!any.is_array())
+      return {};
+    std::set<std::set<std::string>> alternatives;
+    for (const auto& branch : any.items()) {
+      if (!branch.is_object() ||
+          std::ranges::any_of(branch.members(), [](const auto& member) {
+            return member.first != "required" && !Annotation(member.first);
+          }))
+        return {};
+      std::set<std::string> names;
+      if (const auto* fields = branch.find("required")) {
+        if (!fields->is_array())
+          return {};
+        for (const auto& name : fields->items()) {
+          if (!name.is_string() || !properties.contains(name.str()) ||
+              name.str().empty() ||
+              name.str().find_first_of(key_end) != std::string::npos)
+            return {};
+          names.insert(name.str());
+        }
+      }
+      alternatives.insert(std::move(names));
+    }
+    return alternatives;
+  }
+
   // Native models choose argument order. Keep the small-object grammar, but
   // represent wide objects with a request-local subset instead of compiling
   // all 2^N subsets or forcing declaration order. Required fields and one-use
   // parameter names keep the same contract in both representations.
   std::uint32_t Arguments(
       const std::vector<std::pair<std::string, std::uint32_t>>& members,
-      const std::set<std::string>& required) {
+      const std::set<std::string>& required,
+      const std::set<std::set<std::string>>& required_alternatives = {}) {
     if (members.size() > 10) {
+      if (!required_alternatives.empty()) {
+        std::set<std::set<std::string>> remaining;
+        for (auto names : required_alternatives) {
+          std::erase_if(
+              names, [&](const auto& name) { return required.contains(name); });
+          if (names.empty())
+            return Arguments(members, required);
+          remaining.insert(std::move(names));
+        }
+        // Wide lists have a request-local state per alternative. Bound the
+        // initial expansion to the same budget as the ordinary matcher.
+        if (remaining.size() > kMaxStates / members.size())
+          Invalid("native argument alternatives exceed the state limit");
+        Sequence alternatives;
+        for (auto names : remaining) {
+          names.insert(required.begin(), required.end());
+          alternatives.push_back(Arguments(members, names));
+        }
+        return Alt(alternatives);
+      }
       JsonConstraint::ArgumentSet arguments;
       arguments.required.resize((members.size() + 63) / 64);
       for (std::size_t i = 0; i < members.size(); ++i) {
@@ -626,20 +693,33 @@ private:
       grammar_->argument_sets_.push_back(std::move(arguments));
       return Seq({static_cast<std::uint32_t>(kArguments | id)});
     }
+    const auto mask = [&](const std::set<std::string>& names) {
+      unsigned result = 0;
+      for (unsigned i = 0; i < members.size(); ++i)
+        if (names.contains(members[i].first))
+          result |= 1U << i;
+      return result;
+    };
+    const auto common = mask(required);
+    std::set<unsigned> requirements;
+    for (const auto& names : required_alternatives)
+      requirements.insert(common | mask(names));
+    if (requirements.empty())
+      requirements.insert(common);
     std::map<unsigned, std::uint32_t> suffixes;
     auto suffix = [&](auto&& self, unsigned used) -> std::uint32_t {
       if (auto found = suffixes.find(used); found != suffixes.end())
         return found->second;
       Rule alternatives;
-      bool complete = true;
       for (unsigned i = 0; i < members.size(); ++i) {
         if (used & (1U << i))
           continue;
-        complete &= !required.contains(members[i].first);
         alternatives.push_back(
             {members[i].second, self(self, used | (1U << i))});
       }
-      if (complete)
+      if (std::ranges::any_of(requirements, [&](unsigned needed) {
+            return (used & needed) == needed;
+          }))
         alternatives.push_back({});
       return suffixes[used] = New(std::move(alternatives));
     };
@@ -684,7 +764,20 @@ private:
   // value_types() computes them: unions add, untyped schemas admit all.
   static constexpr std::size_t kStringType = 0;
   using ValueTypeSet = std::bitset<6>;
-  ValueTypeSet ValueTypes(const json::Value& schema, std::size_t depth) const {
+  // Kinds already computed for a union or intersection during one call, by
+  // schema node and the depth it was reached at. Within a call the result is
+  // a function of these alone, so a definition that a union or intersection
+  // names many times (or that names itself) is classified once per depth
+  // instead of once per path: the work stays polynomial in the schema size
+  // and every answer, including the depth cap's, is unchanged.
+  using ValueTypeMemo =
+      std::map<std::pair<const json::Value*, std::size_t>, ValueTypeSet>;
+  ValueTypeSet ValueTypes(const json::Value& schema) const {
+    ValueTypeMemo memo;
+    return ValueTypes(schema, 0, memo);
+  }
+  ValueTypeSet ValueTypes(const json::Value& schema, std::size_t depth,
+                          ValueTypeMemo& memo) const {
     static constexpr std::array<std::string_view, 6> kNames{
         "string", "number", "boolean", "null", "array", "object"};
     const auto of = [&](const json::Value& value) {
@@ -704,7 +797,7 @@ private:
     if (const auto* reference = schema.find("$ref")) {
       try {
         if (const auto* target = Reference(*reference))
-          return ValueTypes(*target, depth + 1);
+          return ValueTypes(*target, depth + 1, memo);
       } catch (const std::invalid_argument&) {
       }
       return ValueTypeSet().set();
@@ -734,13 +827,16 @@ private:
         add(*type);
       return types;
     }
-    for (const auto* key : {"anyOf", "oneOf"}) {
-      if (const auto* choices = schema.find(key);
+    const std::pair key{&schema, depth};
+    for (const auto* name : {"anyOf", "oneOf"}) {
+      if (const auto* choices = schema.find(name);
           choices && choices->is_array()) {
+        if (const auto found = memo.find(key); found != memo.end())
+          return found->second;
         ValueTypeSet types;
         for (const auto& choice : choices->items())
-          types |= ValueTypes(choice, depth + 1);
-        return types;
+          types |= ValueTypes(choice, depth + 1, memo);
+        return memo[key] = types;
       }
     }
     if (schema.contains("properties") ||
@@ -749,10 +845,12 @@ private:
            schema.find("additionalProperties")->as_bool())))
       return ValueTypeSet().set(5);
     if (const auto* parts = schema.find("allOf"); parts && parts->is_array()) {
+      if (const auto found = memo.find(key); found != memo.end())
+        return found->second;
       auto types = ValueTypeSet().set();
       for (const auto& part : parts->items())
-        types &= ValueTypes(part, depth + 1);
-      return types;
+        types &= ValueTypes(part, depth + 1, memo);
+      return memo[key] = types;
     }
     if (schema.contains("items") || schema.contains("prefixItems"))
       return ValueTypeSet().set(4);
@@ -982,6 +1080,8 @@ private:
                       unsigned depth = 0) {
     if (depth > 64)
       Invalid("schema intersection exceeds its reference budget");
+    if (++conjunctions_ > kMaxConjunctions)
+      Invalid("schema intersection exceeds its resource budget");
     Keys(left);
     Keys(right);
     if (const auto* ref = left.find("$ref"))
@@ -1996,6 +2096,7 @@ private:
            std::shared_ptr<const JsonSchemaLexeme>>
       value_checks_;
   std::size_t properties_{0}, enum_values_{0}, string_characters_{0};
+  std::size_t conjunctions_{0};
 };
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::Compile(
@@ -3029,5 +3130,83 @@ std::shared_ptr<const TokenBitmask> TokenConstraint::LookupCachedBitmask(
     return nullptr;
   lru_.splice(lru_.begin(), lru_, found->second.lru);
   return found->second.entry.bits;
+}
+
+std::string JsonConstraintCompiler::Describe(const JsonConstraint& grammar) {
+  std::string out;
+  const auto number = [&](std::uint64_t value) {
+    out += std::to_string(value);
+    out += ' ';
+  };
+  const auto bytes = [&](const std::bitset<256>& set) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    for (std::size_t i = 0; i < 256; i += 4)
+      out += kHex[(set[i] ? 1 : 0) | (set[i + 1] ? 2 : 0) |
+                  (set[i + 2] ? 4 : 0) | (set[i + 3] ? 8 : 0)];
+    out += '\n';
+  };
+  out += "root ";
+  number(grammar.root_);
+  out += "\nprompt " + json::Value(grammar.prompt_).dump() + "\nflags ";
+  number(grammar.stop_only_when_complete_);
+  number(grammar.automatic_tools_);
+  number(grammar.reasoning_tool_root_);
+  number(grammar.reasoning_rules_);
+  number(grammar.reasoning_lexemes_);
+  out += json::Value(grammar.reasoning_tool_prefix_).dump() + '\n';
+  for (std::size_t i = 0; i < grammar.rules_.size(); ++i) {
+    out += "rule ";
+    number(i);
+    for (const auto& sequence : grammar.rules_[i]) {
+      out += "| ";
+      for (const auto symbol : sequence)
+        number(symbol);
+    }
+    out += '\n';
+  }
+  for (std::size_t i = 0; i < grammar.classes_.size(); ++i) {
+    out += "class ";
+    number(i);
+    bytes(grammar.classes_[i]);
+  }
+  // Lexemes are opaque; their alphabet and verdicts on probes that
+  // cover strings, numbers, raw text and reasoning stand in for them.
+  static const std::array<std::string_view, 24> kProbes{
+      "",         "\"",   "\"a\"",         "\"\\u00e9\"", "\"abcdefgh\"",
+      "a",        "abc",  "x</parameter>", "0",           "-0",
+      "1",        "-1",   "1.5",           "1e3",         "12345678901",
+      "-0.25",    "true", "null",          " ",           "\n\t ",
+      "</think>", "plan", "<tool_call>",   "\"x\" "};
+  for (std::size_t i = 0; i < grammar.lexemes_.size(); ++i) {
+    const auto& lexeme = *grammar.lexemes_[i];
+    out += "lexeme ";
+    number(i);
+    number(lexeme.CacheTransitions());
+    for (const auto probe : kProbes) {
+      const auto match = lexeme.Check(probe);
+      out += match.prefix ? 'p' : '-';
+      out += match.complete ? 'c' : '-';
+    }
+    out += ' ';
+    std::bitset<256> alphabet;
+    for (std::size_t byte = 0; byte < 256; ++byte)
+      alphabet[byte] = lexeme.AllowsByte(static_cast<unsigned char>(byte));
+    bytes(alphabet);
+  }
+  for (std::size_t i = 0; i < grammar.argument_sets_.size(); ++i) {
+    out += "arguments ";
+    number(i);
+    for (const auto member : grammar.argument_sets_[i].members)
+      number(member);
+    out += "| ";
+    for (const auto required : grammar.argument_sets_[i].required)
+      number(required);
+    out += '\n';
+  }
+  return out;
+}
+
+std::string DescribeJsonConstraint(const JsonConstraint& grammar) {
+  return JsonConstraintCompiler::Describe(grammar);
 }
 }  // namespace gufo::sampling

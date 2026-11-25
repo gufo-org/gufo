@@ -255,6 +255,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True,
                         help="New report directory; existing results are never overwritten")
+    parser.add_argument("--thinking-off-reasons", action="store_true",
+                        help="The model still thinks with thinking off (tests/functional/thinking.py)")
     parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4", "provider"), required=True,
                         help="Expected text defaults; provider reads the served model's own from /props")
     parser.add_argument("--suite", action="append", choices=("all", *SUITES), required=True,
@@ -383,7 +385,11 @@ def main():
         write_json(report_path, report)
         try:
             with (output / (label + ".log")).open("w") as log:
-                result = subprocess.run([sys.executable, str(TESTS / script), *arguments],
+                # openai_sdk.py receives the flag with its own arguments.
+                extra = (["--thinking-off-reasons"] if args.thinking_off_reasons
+                         and script != "openai_sdk.py" else [])
+                result = subprocess.run([sys.executable, str(TESTS / script), *arguments,
+                                         *extra],
                     stdout=log, stderr=subprocess.STDOUT, timeout=args.suite_timeout)
             if result.returncode:
                 raise RuntimeError(f"exit {result.returncode}; see {label}.log")
@@ -467,6 +473,8 @@ def main():
                     sdk_args += ["--expected-input-modalities", args.expected_input_modalities]
                 if option(command, "--think") is not None:
                     sdk_args += ["--server-thinking", option(command, "--think")]
+                if args.thinking_off_reasons:
+                    sdk_args += ["--thinking-off-reasons"]
                 if suite in ("cache-bridge", "cache-pressure") and configured:
                     sdk_args += ["--snapshot-capacity-bytes", configured[1]]
                 if suite == through_suite:

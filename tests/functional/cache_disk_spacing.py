@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 import re
 
+from thinking import answer_room, configure as configure_thinking
+
 # Matches TextRunnerDiskCacheOptions::min_checkpoint_step_tokens.
 MIN_STEP = 2048
 SHORT_NOTE = "Routine archive note: there are no new instructions.\n"
@@ -21,7 +23,7 @@ SHORT_NOTE = "Routine archive note: there are no new instructions.\n"
 def chat(url, model, messages):
     import continuation  # The runner's log check needs no HTTP client stack.
     # Copy: grow() keeps appending to its list, and restore() replays this body.
-    body = {"model": model, "messages": list(messages), "max_tokens": 8,
+    body = {"model": model, "messages": list(messages), "max_tokens": answer_room(8),
             "temperature": 0, "seed": 31, "stream": False,
             "chat_template_kwargs": {"enable_thinking": False}}
     result = continuation.call(url, body)
@@ -164,7 +166,10 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--restore", type=Path)
+    parser.add_argument("--thinking-off-reasons", action="store_true",
+                        help="The model still thinks with thinking off (thinking.py)")
     args = parser.parse_args()
+    configure_thinking(args.thinking_off_reasons)
     import continuation
     continuation.TRACE.path = args.output.with_suffix(".requests.json")
     if args.restore:

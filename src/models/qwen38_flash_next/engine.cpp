@@ -5,29 +5,31 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <gufo/ext/families/qwen/draft_vocab/draft_vocab.hpp>
 #include <gufo/ext/gguf_reader.hpp>
 #include <limits>
 #include <optional>
 #include <type_traits>
 
-#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/models/qwen38_flash_next/stages.hpp"
+#include "src/models/qwen38_flash_next/weight_source.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 namespace {
 
-// gfx1151, served repository prompts: 4096-token chunks prefill 24K-102K
-// tokens 6-11% faster than 2048 (pp4096 +5% at d0, +6% at d32K). Each
-// chunk's n-gram gather grows with it; next-chunk prefetch overlaps that
-// read. Prefill logits do not depend on the chunk size (pre-budget queries
-// always take the dense attention tiles).
-constexpr std::uint32_t kPrefillChunkTokens = 4096;
+// The narrow prompt pass is the weight source's PreferredPrefillChunk():
+// 4096 rows for GGUF. gfx1151, served repository prompts: 4096-token chunks
+// prefill 24K-102K tokens 6-11% faster than 2048 (pp4096 +5% at d0, +6% at
+// d32K). Each chunk's n-gram gather grows with it; next-chunk prefetch
+// overlaps that read. Prefill logits do not depend on the chunk size
+// (pre-budget queries always take the dense attention tiles).
 // A prompt pass the scheduler leaves unbounded (no session decoding beside
 // it, none free to admit an arrival) takes up to this many rows when the
 // host has the memory: served prompts of 28K-85K tokens
@@ -85,6 +87,14 @@ Model::~Model() = default;
 std::shared_ptr<Model> Model::Load(const std::string& model_path,
                                    const ModelOptions& options,
                                    std::string* error_msg) {
+  return Load(model_path, options, nullptr, nullptr, error_msg);
+}
+
+std::shared_ptr<Model> Model::Load(
+    const std::string& model_path, const ModelOptions& options,
+    std::unique_ptr<ext::qwen::flash_next::Stages> stages,
+    std::unique_ptr<ext::qwen::flash_next::WeightSource> weights,
+    std::string* error_msg) {
   std::shared_ptr<Model> m(new Model());
   if (options.decode_concurrency == 0 || options.decode_concurrency > 8) {
     AssignError(error_msg, "decode concurrency must be between one and eight");
@@ -101,15 +111,22 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
   m->options_ = options;
-  m->reader_ = core::GgufReader::OpenFile(model_path, error_msg);
-  if (!m->reader_) {
+  m->source_ = weights ? std::move(weights)
+                       : ext::qwen::flash_next::CreateGgufWeightSource();
+  m->stages_ = stages ? std::move(stages)
+                      : std::make_unique<ext::qwen::flash_next::Stages>();
+  m->prefill_chunk_ = m->source_->PreferredPrefillChunk();
+  if (m->prefill_chunk_ == 0) {
+    AssignError(error_msg, "weight source prefill chunk must be positive");
     return nullptr;
   }
-  auto weights = ModelWeights::Bind(*m->reader_, error_msg);
-  if (!weights) {
+  if (!m->source_->Open(model_path, options.mtp_model_path, error_msg)) {
     return nullptr;
   }
-  m->weights_ = std::make_unique<ModelWeights>(std::move(*weights));
+  m->weights_ = std::make_unique<ModelWeights>();
+  if (!m->source_->BindTrunk(m->weights_.get(), error_msg)) {
+    return nullptr;
+  }
   if (options.rope_scaling.has_value()) {
     if (!ValidateRopeScaling(*options.rope_scaling,
                              m->weights_->config.context_length, error_msg)) {
@@ -125,43 +142,42 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
   try {
-    m->vision_ = qwen::vision::Encoder::Open(
-        model_path, options.vision_model_path, c.hidden_size);
+    m->vision_ =
+        qwen::vision::Encoder::Open(m->source_->VisionPath(model_path),
+                                    options.vision_model_path, c.hidden_size);
   } catch (const std::exception& e) {
     AssignError(error_msg, e.what());
     return nullptr;
   }
-  m->tokenizer_ =
-      tokenization::QwenTokenizer::CreateFromGguf(*m->reader_, error_msg);
+  m->tokenizer_ = m->source_->Tokenizer(c, error_msg);
   if (!m->tokenizer_) {
     return nullptr;
   }
   if (c.ple_layer >= 0) {
-    const auto& t = m->weights_->ple_table;
-    m->ngram_ = NgramTable::Open(
-        m->reader_->GetMappedRegions()[t.shard].file_descriptor, t.file_offset,
-        t.rows, c.ple_head_dim, t.type, error_msg);
+    m->ngram_ = m->source_->Ngram(*m->weights_, error_msg);
     if (!m->ngram_) {
       return nullptr;
     }
   }
   if (!options.mtp_model_path.empty()) {
-    m->mtp_reader_ =
-        core::GgufReader::OpenFile(options.mtp_model_path, error_msg);
-    if (!m->mtp_reader_) {
+    m->mtp_weights_ = std::make_unique<MtpWeights>();
+    if (!m->source_->BindMtp(c, m->mtp_weights_.get(), error_msg)) {
       return nullptr;
     }
-    auto mtp = MtpWeights::Bind(*m->mtp_reader_, c, error_msg);
-    if (!mtp) {
-      return nullptr;
-    }
-    m->mtp_weights_ = std::make_unique<MtpWeights>(std::move(*mtp));
   }
-  m->device_ = rocm::DeviceModel::Upload(*m->weights_, *m->reader_,
-                                         m->mtp_weights_.get(),
-                                         m->mtp_reader_.get(), error_msg);
+  m->device_ = rocm::DeviceModel::Upload(*m->weights_, m->mtp_weights_.get(),
+                                         *m->source_, error_msg);
   if (!m->device_) {
     return nullptr;
+  }
+  if (m->mtp_weights_ && m->device_->output().format_state != nullptr) {
+    // Draft tables copy head rows, which only a GGUF matrix addresses.
+    ext::qwen::flash_next::Tensor head;
+    if (!m->source_->DraftHead(rocm::ToTensor(m->device_->output()), &head,
+                               error_msg) ||
+        (!head.empty() &&
+         !m->device_->UseDraftSource(rocm::FromTensor(head), error_msg)))
+      return nullptr;
   }
   if (m->mtp_weights_ &&
       m->device_->output().rows > speculative::kDraftVocabPrefix) {
@@ -191,6 +207,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
           : 1;
   exec.max_speculative = exec.max_logit_rows;
   exec.max_context = options.max_context;
+  exec.stages = m->stages_.get();
   m->executor_ =
       rocm::Executor::Create(*m->device_, m->ngram_.get(), exec, error_msg);
   if (!m->executor_) {
@@ -255,12 +272,11 @@ std::uint32_t Model::VocabSize() const noexcept {
 }
 
 std::uint32_t Model::PrefillCapacity() const noexcept {
-  return std::min(kPrefillChunkTokens, options_.max_context);
+  return std::min(prefill_chunk_, options_.max_context);
 }
 
 std::uint32_t Model::PrefillThroughCapacity() const noexcept {
-  return std::min(kPrefillChunkTokens + kPrefillTailTokens,
-                  options_.max_context);
+  return std::min(prefill_chunk_ + kPrefillTailTokens, options_.max_context);
 }
 
 std::size_t Model::StepThrough(std::size_t remaining,
@@ -324,8 +340,15 @@ bool Model::InDraftSubset(std::int32_t token) const {
 }
 
 std::string Model::ModelName() const {
-  return std::string(reader_->GetMetadataString("general.name")
-                         .value_or("Qwen3.8-Flash-Next"));
+  return source_->ModelName();
+}
+
+std::string Model::ArtifactIdentity() const {
+  return source_->Identity();
+}
+
+std::string Model::DraftIdentity() const {
+  return source_->DraftIdentity();
 }
 
 const Config& Model::config() const noexcept {

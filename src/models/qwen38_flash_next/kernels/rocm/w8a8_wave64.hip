@@ -1,4 +1,4 @@
-#include "src/families/qwen/kernels/prefill_quant_gemm.hpp"
+#include "gufo/ext/families/qwen/kernels/prefill_quant_gemm.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {

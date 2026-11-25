@@ -35,9 +35,20 @@ struct MtpTrace {
   }
 };
 
+/// `TensorRef::shard` of a payload in host memory the weight source prepared
+/// (a converted tensor), not in a mapped file region.
+inline constexpr std::uint32_t kHostShard = 0xFFFFFFFFU;
+
 /// Non-owning view of one GGUF tensor. `rows` x `cols` follows the GGUF
 /// convention: cols (ne[0]) is the contiguous reduction dimension, rows
 /// (ne[1]) the output dimension, and `experts` (ne[2]) stacks whole matrices.
+/// A tensor in another encoding sets `format_state`, which its weight source
+/// owns and uploads (WeightSource::Upload); the device stores it as kI32.
+/// Only projections the stages run may carry it (ssm_qkv/gate/out,
+/// attn_q/k/v/out, indexer_q/k, routed and shared experts, the output head,
+/// nextn_fc_embedding/hidden); the upload rejects it on every other tensor,
+/// which is stacked, split or read by raw kernels. `type` then only sizes
+/// host-shard payloads.
 struct TensorRef {
   const void* data{nullptr};
   core::GgmlType type{core::GgmlType::kF32};
@@ -47,8 +58,11 @@ struct TensorRef {
   std::uint64_t file_offset{0};  ///< Byte offset inside the owning shard.
   std::uint32_t shard{0};        ///< Mapped region index in the reader.
   std::string_view name;
+  const void* format_state{nullptr};
 
-  [[nodiscard]] bool empty() const noexcept { return data == nullptr; }
+  [[nodiscard]] bool empty() const noexcept {
+    return data == nullptr && format_state == nullptr;
+  }
   [[nodiscard]] std::uint64_t ElementCount() const noexcept {
     return cols * rows * experts;
   }
@@ -122,7 +136,11 @@ struct LayerWeights {
   TensorRef nextn_enorm;  ///< [hidden]
   TensorRef nextn_hnorm;  ///< [hc_dim], one RMS denominator across all streams
   TensorRef nextn_eh_proj;  ///< GGUF rows: [fc_embedding | fc_hidden]
-  HcMixer nextn_head;       ///< Output mixer of the draft block.
+  /// The two halves of nextn_eh_proj, for sources that store them apart
+  /// (nextn_eh_proj is then empty).
+  TensorRef nextn_fc_embedding;
+  TensorRef nextn_fc_hidden;
+  HcMixer nextn_head;  ///< Output mixer of the draft block.
 };
 
 struct ModelWeights {

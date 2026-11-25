@@ -333,7 +333,9 @@ Selections from separate paths are combined:
 
 | Changes | Automatic model coverage |
 | --- | --- |
-| Shared LLM behavior, cache, sampling or Qwen framing/vision | Every LLM: Flash-Next Q4/MTP, Qwen27 Q4/DFlash2, DeepSeek V4/DSpark |
+| Shared LLM behavior, cache, sampling | Every LLM: Flash-Next Q4/MTP, Qwen27 Q4/DFlash2, DeepSeek V4/DSpark |
+| Shared Qwen chat template or vision | Flash-Next Q4/MTP and Qwen27 Q4/DFlash2; DeepSeek V4 renders its own template, and hosted `openai_chat_test` covers the shared JSON-fallback tool parser |
+| Shared Qwen tokenizer or control tokens | Flash-Next Q4/MTP, Qwen27 Q4/DFlash2, the Qwen-Image representative and every TTS model |
 | Private Qwen27, Flash-Next or DeepSeek implementation | That model |
 | Embedding, ASR or TTS code | Every model in the category, NPU variants included |
 | Image generation code | Qwen-Image-2.1-Turbo smoke; both image models in the full tier |
@@ -733,6 +735,12 @@ writes, so the budget must hold what the suite publishes before the restart:
 about 6 GiB of 130–300 MB checkpoints on Flash-Next, but 15 GiB of 256–676 MB
 checkpoints on Qwen27. A model whose checkpoints are that large sets
 `cache_disk_bytes` in its `devlab.json` entry; Qwen27 uses 24 GiB.
+A model that can't switch thinking off (Inkling 2 Mini: its lowest effort still
+thinks) sets `thinking_off_reasons` in its entry; the run passes
+`--thinking-off-reasons`. Suites then bound a thinking-off request's thought
+with a reasoning budget, give replies that must finish room for it, accept a
+thought where they asserted none, and replay it where they check reuse of the
+generated frontier (`thinking.py`).
 Flash-Next allocates that staging as pinned host memory at startup, beyond its
 RAM budget, although its default 1 MiB transfer buffer suffices. The runner
 keeps 1 GiB so results stay comparable with retained runs and other models.

@@ -132,14 +132,16 @@ std::optional<ChatRequest> ConstrainChatRequest(
   }
   // The reasoning phase uses the provider's delimiters, as the response
   // parsers do. Reasoning the prompt opened may still repeat the opener;
-  // otherwise the model may open it itself unless the request disabled it.
+  // otherwise the model may open it itself. A runner whose prompt closed
+  // reasoning reports a text state, so kAuto with reasoning disabled is a
+  // model whose lowest effort still thinks (Inkling): the grammar leaves it
+  // room, as the response parsers do.
   const auto initial = runner.InitialOutputState(request);
   const auto reasoning = runner.ReasoningGrammarMarkers(request).value_or(
       runner.ReasoningDelimiters());
   if (initial == ext::InitialOutputState::kReasoning)
     grammar = sampling::JsonConstraint::WithReasoning(grammar, reasoning.close);
-  else if (initial == ext::InitialOutputState::kAuto &&
-           request.reasoning.enabled.value_or(true) && !reasoning.open.empty())
+  else if (initial == ext::InitialOutputState::kAuto && !reasoning.open.empty())
     grammar = sampling::JsonConstraint::WithReasoning(grammar, reasoning.close,
                                                       reasoning.open);
   sampling->constraint = runner.BindConstraint(grammar);

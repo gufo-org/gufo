@@ -3,6 +3,7 @@
 #include <array>
 #include <cassert>
 #include <cstring>
+#include <exception>
 #include <gufo/ext/experimental/hip_utils.hpp>
 #include <gufo/ext/experimental/snapshot_transfer.hpp>
 #include <gufo/ext/experimental/state_memory.hpp>
@@ -55,6 +56,16 @@ void ThrowOnHipError(hipError_t error, std::string_view operation) {
                              hipGetErrorString(error));
   }
 }
+
+// Keep borrowed snapshot storage alive until any submitted pieces finish.
+struct DrainOnRestoreError {
+  hipStream_t stream;
+  int exceptions{std::uncaught_exceptions()};
+  ~DrainOnRestoreError() {
+    if (std::uncaught_exceptions() > exceptions)
+      (void)hipStreamSynchronize(stream);
+  }
+};
 
 template<typename T>
   requires(std::is_unsigned_v<T>)
@@ -493,6 +504,41 @@ std::size_t QwenGpuArena::SnapshotPayloadBytes(
   return GetMemoryUsage().request_state_bytes - unused;
 }
 
+void CopyKvRows(void* destination, std::size_t dst_pitch, const void* source,
+                std::size_t src_pitch, std::size_t width, std::size_t rows,
+                hipMemcpyKind kind, hipStream_t stream) {
+  auto* dst = static_cast<std::byte*>(destination);
+  auto* src = static_cast<const std::byte*>(source);
+  auto page_left = [](const void* p) {
+    return mem::kPageBytes -
+           reinterpret_cast<std::uintptr_t>(p) % mem::kPageBytes;
+  };
+  for (std::size_t row = 0; row < rows;) {
+    auto* out = dst + row * dst_pitch;
+    auto* in = src + row * src_pitch;
+    const auto src_left = page_left(in);
+    const auto dst_left = page_left(out);
+    if (width > std::min(src_left, dst_left)) {
+      for (std::size_t offset = 0; offset < width;) {
+        const auto part = std::min(
+            {width - offset, page_left(in + offset), page_left(out + offset)});
+        HIP_CHECK(
+            hipMemcpyAsync(out + offset, in + offset, part, kind, stream));
+        offset += part;
+      }
+      ++row;
+    } else {
+      // The last row must fit at its pitched offset on both sides.
+      const auto count =
+          std::min({rows - row, 1 + (src_left - width) / src_pitch,
+                    1 + (dst_left - width) / dst_pitch});
+      HIP_CHECK(hipMemcpy2DAsync(out, dst_pitch, in, src_pitch, width, count,
+                                 kind, stream));
+      row += count;
+    }
+  }
+}
+
 std::unique_ptr<QwenGpuSnapshot> QwenGpuArena::SaveSnapshot(
     std::uint32_t valid_context) {
   if (valid_context > max_context_) {
@@ -558,7 +604,14 @@ std::unique_ptr<QwenGpuSnapshot> QwenGpuArena::SaveSnapshot(
          d_ssm_deltanet_state == d_ssm_deltanet_buffers_[live_recurrent_]);
   ThrowOnHipError(hipStreamSynchronize(stream),
                   "failed to synchronize Qwen snapshot capture");
-  SnapshotTransfer transfer;
+  // CopyKvRows needs the stream. Create it here because exposing
+  // SnapshotTransfer's internal stream would change the extension API.
+  hipStream_t capture_stream;
+  HIP_CHECK(hipStreamCreateWithFlags(&capture_stream, hipStreamNonBlocking));
+  SnapshotTransfer transfer(
+      capture_stream, +[](hipStream_t finished) {
+        LogCleanupError(hipStreamDestroy(finished));
+      });
   if (kv_f32_bytes != 0) {
     const auto element_bytes =
         policy_.UsesFp16AttentionKv() ? sizeof(std::uint16_t) : sizeof(float);
@@ -580,10 +633,12 @@ std::unique_ptr<QwenGpuSnapshot> QwenGpuArena::SaveSnapshot(
     auto* destination = static_cast<std::uint8_t*>(policy_.UsesFp16AttentionKv()
                                                        ? snapshot->d_kv_f16_
                                                        : snapshot->d_kv_f32_);
-    for (std::size_t plane = 0; plane < 2; ++plane)
-      transfer.Copy2D(destination + plane * target_plane, target_pitch,
-                      source + plane * source_plane, source_pitch, target_pitch,
-                      rows, hipMemcpyDeviceToDevice);
+    for (std::size_t plane = 0; plane < 2; ++plane) {
+      CopyKvRows(destination + plane * target_plane, target_pitch,
+                 source + plane * source_plane, source_pitch, target_pitch,
+                 rows, hipMemcpyDeviceToDevice, capture_stream);
+      transfer.Finish();
+    }
   }
   transfer.Copy(snapshot->d_ssm_conv_, d_ssm_conv_state, conv_bytes,
                 hipMemcpyDeviceToDevice);
@@ -614,6 +669,7 @@ void QwenGpuArena::RestoreSnapshot(const QwenGpuSnapshot& snapshot) {
     throw std::invalid_argument("Qwen snapshot is incompatible with the arena");
   }
 
+  const DrainOnRestoreError drain{stream};
   Reset();
   EnsureKvRows(snapshot.valid_context_);
   const std::size_t kv_f32_bytes = CheckedMultiply(
@@ -639,11 +695,9 @@ void QwenGpuArena::RestoreSnapshot(const QwenGpuSnapshot& snapshot) {
         policy_.UsesFp16AttentionKv() ? d_attention_kv_f16
                                       : static_cast<void*>(d_kv_cache));
     for (std::size_t plane = 0; plane < 2; ++plane)
-      ThrowOnHipError(
-          hipMemcpy2DAsync(destination + plane * target_plane, target_pitch,
-                           source + plane * source_plane, source_pitch,
-                           source_pitch, rows, hipMemcpyDeviceToDevice, stream),
-          "failed to restore Qwen KV snapshot");
+      CopyKvRows(destination + plane * target_plane, target_pitch,
+                 source + plane * source_plane, source_pitch, source_pitch,
+                 rows, hipMemcpyDeviceToDevice, stream);
   }
   ThrowOnHipError(hipMemcpyAsync(d_ssm_conv_state, snapshot.d_ssm_conv_,
                                  snapshot.conv_elements_ * sizeof(float),
@@ -687,6 +741,7 @@ void QwenGpuArena::RestoreCompactSnapshot(
         "Qwen compact snapshot is incompatible with the arena");
   }
 
+  const DrainOnRestoreError drain{stream};
   Reset();
   EnsureKvRows(layout.valid_context);
   if (layout.live_kv_bytes_per_plane != 0) {
@@ -707,16 +762,11 @@ void QwenGpuArena::RestoreCompactSnapshot(
         CheckedMultiply(CheckedMultiply(attention_layers, max_context_),
                         kv_width),
         kv_element_bytes);
-    ThrowOnHipError(
-        hipMemcpy2DAsync(destination, destination_pitch,
-                         payload.data() + layout.k_offset, source_pitch,
-                         source_pitch, rows, hipMemcpyHostToDevice, stream),
-        "failed to restore compact Qwen K cache");
-    ThrowOnHipError(
-        hipMemcpy2DAsync(destination + full_plane_bytes, destination_pitch,
-                         payload.data() + layout.v_offset, source_pitch,
-                         source_pitch, rows, hipMemcpyHostToDevice, stream),
-        "failed to restore compact Qwen V cache");
+    CopyKvRows(destination, destination_pitch, payload.data() + layout.k_offset,
+               source_pitch, source_pitch, rows, hipMemcpyHostToDevice, stream);
+    CopyKvRows(destination + full_plane_bytes, destination_pitch,
+               payload.data() + layout.v_offset, source_pitch, source_pitch,
+               rows, hipMemcpyHostToDevice, stream);
   }
   if (layout.conv_bytes != 0)
     ThrowOnHipError(

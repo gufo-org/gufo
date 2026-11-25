@@ -17,16 +17,16 @@ set(gufo_pr_targets
   cache_retention_test
   sched_policy_test
   extension_runtime_test extension_role_test
-  arg_parser_test transcribe_cli_test json_test json_parse_test json_constraint_test json_schema_test gguf_reader_test gguf_header_test qwen_config_test qwen_draft_vocab_test
+  arg_parser_test transcribe_cli_test json_test json_parse_test json_write_test json_constraint_test json_schema_test gguf_reader_test gguf_header_test qwen_config_test qwen_draft_vocab_test
   gguf_identity_test
-  png_decode_test jpeg_decode_test wav_decode_test audio_decode_test base64_test websocket_frame_test
-  http_request_test multipart_test
+  png_test jpeg_decode_test wav_decode_test audio_decode_test base64_test websocket_frame_test
+  http_request_test multipart_test chat_request_test
   heap_placement_test
   admission_memory_test
   platform_publish_test platform_prefault_test platform_mapped_file_test
   platform_fs_test platform_library_test npu_test npu_host_ops_test
   logit_sampler_test ggml_dequant_test
-  quote_tracker_test logprobs_test sampling_test image_api_test sdapi_test
+  generation_parse_test logprobs_test sampling_test image_api_test sdapi_test
   openai_chat_test http_server_test http_server_signals_test trace_test
   audio_websocket_test
   text_generation_scheduler_test layered_prefill_conformance_test
@@ -37,38 +37,44 @@ set(gufo_pr_targets
   deepseek_v4_flash_continuation_identity_test ds4_chat_template_test ds4_cli_test
   ds4_sampling_test embedding_gemma2_batch_scheduler_test embedding_gemma2_config_test
   embedding_gemma2_embeddings_api_test embedding_gemma2_image_processor_test
-  embedding_gemma2_video_processor_test loom_package_test loom_runner_logits_test
-  minimax_h3_runtime_test minimax_h3_sampling_test qwen27b_continuation_identity_test
-  qwen27b_continuation_layout_test qwen27b_prefill_groups_test qwen38_flash_next_config_test
-  qwen38_flash_next_continuation_identity_test qwen38_flash_next_continuation_layout_test
-  qwen38_flash_next_mtp_sampling_test qwen38_flash_next_probe_test qwen38_flash_next_rope_scaling_test
-  qwen38_flash_next_runner_options_test qwen3_asr_audio_api_test qwen3_asr_config_test
-  qwen3_asr_decode_test qwen3_tts_audio_api_test qwen3_tts_config_test qwen_chat_template_test
-  qwen_image_21_lora_test qwen_image_21_test qwen_image_21_weights_test qwen_tokenizer_test
-  video_api_test
+  embedding_gemma2_video_processor_test inkling2_policy_test inkling2_probe_test
+  inkling2_text_test loom_package_test loom_runner_logits_test minimax_h3_runtime_test
+  minimax_h3_sampling_test qwen27b_continuation_identity_test qwen27b_continuation_layout_test
+  qwen27b_prefill_groups_test qwen38_flash_next_config_test qwen38_flash_next_continuation_identity_test
+  qwen38_flash_next_continuation_layout_test qwen38_flash_next_mtp_sampling_test
+  qwen38_flash_next_probe_test qwen38_flash_next_rope_scaling_test qwen38_flash_next_runner_options_test
+  qwen3_asr_audio_api_test qwen3_asr_config_test qwen3_asr_decode_test qwen3_tts_audio_api_test
+  qwen3_tts_config_test qwen_chat_template_test qwen_image_21_lora_test qwen_image_21_test
+  qwen_image_21_weights_test qwen_tokenizer_test video_api_test
   # END GENERATED MODEL PR TARGETS
 )
 set(gufo_pr_tests ${gufo_pr_targets})
 list(REMOVE_ITEM gufo_pr_tests text_cli_dispatch_test)
 list(APPEND gufo_pr_tests text_cli_dispatch_prompt text_cli_dispatch_chat text_cli_dispatch_bench)
+# One test per generation parse corpus file.
+list(REMOVE_ITEM gufo_pr_tests generation_parse_test)
+list(APPEND gufo_pr_tests "generation_parse_.*_test")
 if(NOT WIN32)
   list(APPEND gufo_pr_tests platform_library_relocated_test extension_schema_test)
 endif()
 # BEGIN GENERATED MODEL CTEST OVERRIDES
 list(REMOVE_ITEM gufo_pr_tests
-  ds4_chat_template_test ds4_cli_test ds4_sampling_test qwen38_flash_next_config_test
-  qwen38_flash_next_continuation_layout_test qwen38_flash_next_mtp_sampling_test
-  qwen38_flash_next_probe_test qwen38_flash_next_rope_scaling_test qwen38_flash_next_runner_options_test)
+  ds4_chat_template_test ds4_cli_test ds4_sampling_test inkling2_policy_test
+  inkling2_probe_test inkling2_text_test qwen38_flash_next_config_test qwen38_flash_next_continuation_layout_test
+  qwen38_flash_next_mtp_sampling_test qwen38_flash_next_probe_test qwen38_flash_next_rope_scaling_test
+  qwen38_flash_next_runner_options_test)
 list(APPEND gufo_pr_tests
-  "ds4\.template" "ds4\.cli" "ds4\.sampling" "qwen38_flash_next\.config"
-  "qwen38_flash_next\.continuation_layout" "qwen38_flash_next\.mtp_sampling"
-  "qwen38_flash_next\.probe" "qwen38_flash_next\.rope_scaling" "qwen38_flash_next\.runner_options")
+  "ds4\.template" "ds4\.cli" "ds4\.sampling" "inkling2\.policy" "inkling2\.probe"
+  "inkling2\.text" "qwen38_flash_next\.config" "qwen38_flash_next\.continuation_layout"
+  "qwen38_flash_next\.mtp_sampling" "qwen38_flash_next\.probe" "qwen38_flash_next\.rope_scaling"
+  "qwen38_flash_next\.runner_options")
 # END GENERATED MODEL CTEST OVERRIDES
 list(APPEND gufo_pr_tests
   gufo_version gufo_help serve_cli_test eval_http_test functional_runner_test
   cache_workloads_test cache_disk_faults_test
   cache_boundary_test sched_boundary_test
   npu_decoder_plan_test npu_prefill_plan_test kernel_resources_parser_test check_docs_test check_pr_title_test
+  cache_growth_test prune_caches_test
   generate_infrastructure_test extension_distribution_test
   check_extension_isolation_test extension_isolation_report
   extension_core_model_includes_gate extension_serving_boundary_gate

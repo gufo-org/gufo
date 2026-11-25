@@ -86,6 +86,8 @@ anything:
   (`target`) and registration function.
 - `targets[].requires`: what a library needs to build, such as `hip` or
   `testing`. Test libraries use `role: "test"`.
+- `depends`: the extensions yours builds on; see
+  [depend on another extension](#depend-on-another-extension).
 - `options`: command-line options your providers add, with their types.
 - `models`: the weights `gufo model` can install, one entry per model. Each
   component names its role, the option its path fills (one fills `--model`),
@@ -100,6 +102,58 @@ anything:
 Keep host code (probes, metadata parsing) apart from HIP code, so diagnostics
 and probes work on machines without a GPU, and keep test code under the
 `testing` condition. Declare only the platforms you test.
+
+## Depend on another extension
+
+An extension can build on another one's code, such as a new checkpoint format
+for a model another extension already runs. List it in `depends`:
+
+```json
+{ "depends": ["qwen38_flash_next"] }
+```
+
+Gufo then builds it before yours, in-tree or from `GUFO_EXTENSION_DIRS`, and
+refuses to configure if it's missing or unselected, if a lock build locks
+yours without it, or if the dependencies form a cycle.
+
+Link only what the other extension **exports**: a library it publishes as
+`gufo::<name>` from its `extension.cmake`:
+
+```cmake
+gufo_extension_export(TARGET gufo_qwen38_flash_next_hip NAME qwen38_flash_next_hip)
+```
+
+`<name>` is the exporting extension's name or starts with it and `_`, and
+mustn't fall in a longer extension name's namespace. Only the extension's own
+`extension.cmake` can export its targets. For Flash-Next, include only the
+experimental `<gufo/ext/families/qwen/models/flash_next/...>` headers; a new
+format serves through `CreateQwenFlashNextTextRunner(options, stages, weights,
+error)`. Your targets then link the alias:
+
+```cmake
+gufo_extension_target(
+  NAME my_extension_hip
+  SOURCES src/provider.cpp
+  LINK_LIBRARIES gufo_ext_runtime gufo::qwen38_flash_next_hip
+)
+```
+
+After every extension is built, Gufo checks the direct links of each target
+your `extension.cmake` defines, helper targets and `INTERFACE` links included:
+a link to another extension's library, by export or target name, fails unless
+you list that extension in `depends`. For an extension outside Gufo's tree,
+every transitive link is checked too. A target disabled by its `requires`
+exports nothing, so give targets that link it the same `requires`. A module
+may depend only on in-tree extensions its Gufo compiles in, and link only their
+exports; not on Windows yet. See [modules](internal/extension-build.md#modules).
+
+> **Warning:** Depending on an export takes you outside the versioned
+> [extension API](extension-api.md#the-boundary): its headers and libraries are
+> the exporting extension's code, with no compatibility promise, like an
+> experimental header. An export from Gufo's own tree passes the external
+> include and link checks whole, so it can expose private Gufo headers. Pin the
+> dependency to the exact revision you tested. These checks catch mistakes,
+> not hostile build code, which runs with your permissions.
 
 ## Implement a capability
 

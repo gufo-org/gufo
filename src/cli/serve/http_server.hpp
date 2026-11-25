@@ -17,6 +17,11 @@
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 
+struct GufoHttpServer;
+struct GufoHttpRequestView;
+struct GufoHttpResponder;
+struct GufoLoadingResponder;
+
 namespace gufo::server {
 
 class VideoJobService;
@@ -151,14 +156,10 @@ public:
   [[nodiscard]] int port() const noexcept { return port_; }
 
 private:
-  struct ConnectionWorker;
-
   HttpResponse handle_request(const HttpRequest& req);
   bool device_lost();
-  void handle_connection(int client_fd, std::atomic<bool>& response_sent,
-                         std::atomic<bool>& parked,
-                         std::chrono::steady_clock::time_point& parked_since);
-  void reap_workers();
+  void dispatch_request(const GufoHttpRequestView& view,
+                        GufoHttpResponder* responder);
   void register_routes();
 
   std::string host_;
@@ -171,11 +172,9 @@ private:
   std::shared_ptr<EmbeddingService> embeddings_;
   std::shared_ptr<DecisionService> decisions_;
   HttpServerOptions options_;
-  int listen_fd_ = -1;
+  GufoHttpServer* server_ = nullptr;
   std::atomic<bool> stopped_{false};
   std::atomic<bool> device_lost_reported_{false};
-  std::mutex workers_mutex_;
-  std::vector<std::unique_ptr<ConnectionWorker>> workers_;
   std::vector<std::pair<std::pair<std::string, std::string>, Handler>> routes_;
 };
 
@@ -203,7 +202,9 @@ public:
   LoadingResponder& operator=(LoadingResponder&&) = delete;
 
   /// True while the responder owns the listen socket.
-  [[nodiscard]] bool listening() const noexcept { return listen_fd_ >= 0; }
+  [[nodiscard]] bool listening() const noexcept {
+    return listening_.load(std::memory_order_acquire);
+  }
 
   /// Stops answering and releases the port. Returns within one poll interval
   /// plus the bounded waits for a request that is still arriving and for the
@@ -215,15 +216,8 @@ public:
   void SetProgress(double progress, std::string_view message);
 
 private:
-  void serve();
-  [[nodiscard]] std::string Reply() const;
-
-  int listen_fd_ = -1;
-  std::atomic<bool> stopped_{false};
-  mutable std::mutex progress_mutex_;
-  double progress_ = 0.0;
-  std::string message_ = "Loading model";
-  std::thread thread_;
+  GufoLoadingResponder* responder_ = nullptr;
+  std::atomic<bool> listening_{false};
 };
 
 /// Scheduled requests are recorded by the scheduler when they finish. Other

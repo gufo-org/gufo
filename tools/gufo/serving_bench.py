@@ -323,6 +323,16 @@ def benchmark_sampling(temperature: float, endpoint_profile: str) -> dict[str, A
     return config
 
 
+def _completion_sha256(reasoning: list[str], content: list[str]) -> str:
+    """Hash of a completion's text. A model that streamed reasoning (one that
+    thinks even with thinking off) hashes it too, so its exactness checks are
+    not vacuous; text-only completions keep their plain content hash."""
+    text = "".join(content)
+    if reasoning:
+        text = "reasoning:" + "".join(reasoning) + "\ncontent:" + text
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def run_request(
     *,
     base_url: str,
@@ -380,6 +390,7 @@ def run_request(
     timings: dict[str, Any] | None = None
     useful_event_times: list[float] = []
     completion_parts: list[str] = []
+    reasoning_parts: list[str] = []
     saw_done = False
     try:
         with urllib.request.urlopen(
@@ -410,6 +421,9 @@ def run_request(
                     if isinstance(delta, dict):
                         content = delta.get("content")
                         tool_calls = delta.get("tool_calls")
+                        reasoning = delta.get("reasoning_content")
+                        if isinstance(reasoning, str) and reasoning:
+                            reasoning_parts.append(reasoning)
                         if isinstance(content, str) and content:
                             completion_parts.append(content)
                         if content or tool_calls:
@@ -587,9 +601,7 @@ def run_request(
         ),
         case_id=case_id,
         category=category,
-        completion_sha256=hashlib.sha256(
-            "".join(completion_parts).encode("utf-8")
-        ).hexdigest(),
+        completion_sha256=_completion_sha256(reasoning_parts, completion_parts),
         prefill_tokens_per_second=(
             None if prefill_ms is None else _rate(prefill_tokens, prefill_ms)
         ),
@@ -1370,8 +1382,9 @@ def run_corpus_benchmark(
                 "individual rounds"
             ),
             "completion_sha256": (
-                "SHA-256 of generated text for cross-concurrency exactness "
-                "checks; generated text itself is omitted"
+                "SHA-256 of generated text (and of the reasoning, when the "
+                "model streamed any) for cross-concurrency exactness checks; "
+                "generated text itself is omitted"
             ),
         },
         "results": results,

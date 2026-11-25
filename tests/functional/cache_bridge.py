@@ -19,6 +19,7 @@ pressure.
 from copy import deepcopy
 import json
 import sys
+from thinking import answer_room
 
 TURNS = 6
 SIDE_REQUESTS = 2
@@ -74,8 +75,8 @@ def notice(index):
 def check_cache_bridge(client, model, checks, chat_result, capacity_bytes):
     if not capacity_bytes:
         raise AssertionError("cache-bridge needs the server's snapshot capacity")
-    request = dict(model=model, temperature=0, seed=31, max_completion_tokens=16,
-                   reasoning_effort="none")
+    request = dict(model=model, temperature=0, seed=31,
+                   max_completion_tokens=answer_room(16), reasoning_effort="none")
 
     def chat(label, messages, cold=False):
         body = {**deepcopy(request), "messages": deepcopy(messages)}

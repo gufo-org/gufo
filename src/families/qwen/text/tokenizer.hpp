@@ -49,6 +49,16 @@ public:
   [[nodiscard]] static std::unique_ptr<QwenTokenizer> CreateFromGguf(
       const core::GgufReader& reader, std::string* error_msg = nullptr);
 
+  /// Creates a tokenizer from a Hugging Face `tokenizer.json`, padding the
+  /// table to `vocab_size` ids (when nonzero) as GGUF conversions do. Special
+  /// tokens, pre-tokenizer and BOS/EOS/padding match CreateFromGguf on the
+  /// GGUF conversion of the same tokenizer. Only the Qwen3.5 pipeline (NFC,
+  /// its split, byte-level BPE with default options) is accepted; any other
+  /// file, or ids at or past `vocab_size`, fails with `error_msg` set.
+  [[nodiscard]] static std::unique_ptr<QwenTokenizer> CreateFromTokenizerJson(
+      std::string_view text, std::size_t vocab_size,
+      std::string* error_msg = nullptr);
+
   /// Creates a tokenizer directly from token and merge lists (useful for tests
   /// and custom models).
   [[nodiscard]] static std::unique_ptr<QwenTokenizer> CreateFromVocabulary(

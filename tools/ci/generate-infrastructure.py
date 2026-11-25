@@ -59,7 +59,38 @@ def load_manifests(root: Path) -> List[Dict[str, Any]]:
         data["_manifest_path"] = path
         manifests.append(data)
     manifests.sort(key=lambda m: m["name"])
+    check_dependencies(manifests)
     return manifests
+
+
+def check_dependencies(manifests: List[Dict[str, Any]]) -> None:
+    """Reject in-tree `depends` that name no in-tree extension, or form a cycle.
+
+    CMake checks the same at configure time, but only for selected manifests;
+    this covers every in-tree manifest. Gufo's tree must build on its own, so
+    an in-tree extension never depends on an external one.
+    """
+    graph = {m["name"]: m.get("depends", []) for m in manifests}
+    for manifest in manifests:
+        for dependency in graph[manifest["name"]]:
+            if dependency not in graph:
+                raise ValueError(f"Manifest {manifest['_manifest_path']}: unknown dependency "
+                                 f"'{dependency}' (no in-tree extension has that name)")
+    state: Dict[str, str] = {}
+
+    def visit(name: str, path: List[str]) -> None:
+        if state.get(name) == "done":
+            return
+        if state.get(name) == "visiting":
+            cycle = path[path.index(name):] + [name]
+            raise ValueError("Cyclic extension dependency: " + " -> ".join(cycle))
+        state[name] = "visiting"
+        for dependency in sorted(graph[name]):
+            visit(dependency, path + [name])
+        state[name] = "done"
+
+    for name in sorted(graph):
+        visit(name, [])
 
 
 def replace_marked_block(
@@ -340,7 +371,7 @@ def generate_devlab_registry(root: Path, manifests: List[Dict[str, Any]]) -> str
     # 1. documentation (from core)
     # 2. outside-current-scope (from core)
     # 3. model rules (qwen27, flash-next, deepseek, embedding, asr, tts, image)
-    # 4. shared rules (shared-audio, service-harness, shared-qwen, shared-text, functional-text, hosted-checks, shared-infrastructure, devlab-orchestration)
+    # 4. shared rules (shared-audio, service-harness, shared-qwen, shared-qwen-tokens, shared-text, functional-text, hosted-checks, shared-infrastructure, devlab-orchestration)
     RULE_ORDER = [
         "documentation",
         "outside-current-scope",
@@ -355,6 +386,7 @@ def generate_devlab_registry(root: Path, manifests: List[Dict[str, Any]]) -> str
         "npu",
         "service-harness",
         "shared-qwen",
+        "shared-qwen-tokens",
         "shared-text",
         "functional-text",
         "hosted-checks",

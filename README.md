@@ -29,6 +29,7 @@ that resend long conversations, and extensions let you bring your own model.
 | [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next.md) | Text and images | [Qwen Community License 1.0](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE) |
 | [Qwen3.8 27B](docs/models/qwen3.8-27b.md) | Text and images | Apache 2.0 |
 | [DeepSeek V4 Flash](docs/models/deepseek-v4-flash.md) | Text | MIT |
+| [Inkling 2 Mini](docs/models/inkling-2-mini.md) | Text and images | Apache 2.0 |
 | [EmbeddingGemma 2](docs/models/embeddinggemma-2.md) | Embeddings for text, images, audio and video | Apache 2.0 |
 | [Qwen3-ASR 1.7B](docs/models/qwen3-asr.md) | Speech to text | Apache 2.0 |
 | [Qwen3-TTS 1.7B](docs/models/qwen3-tts.md) | Text to speech and voice cloning | Apache 2.0 |

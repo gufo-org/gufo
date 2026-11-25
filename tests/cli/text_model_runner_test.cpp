@@ -1451,11 +1451,15 @@ void TestProviderToolDialectSelection() {
     Expect(!accepts(*automatic, "<think>\nPlan.</think>" + answer) &&
                !accepts(*automatic, "[[ponder>>Plan.<<ponder]]" + answer),
            "other reasoning framing is no reasoning of this provider");
+    // A runner that cannot turn reasoning off keeps kAuto when the request
+    // disables it (Inkling's lowest effort still thinks); one that can closes
+    // it in the prompt and reports content (below).
     const auto disabled = constrain(
         DialectRunner("ledger-runner", ponder, Initial::kAuto), tools, false);
-    Expect(!accepts(*disabled, "[[ponder>>\nPlan.<<ponder]]" + answer) &&
-               accepts(*disabled, answer),
-           "disabled reasoning admits no reasoning phase");
+    Expect(
+        accepts(*disabled, "[[ponder>>\nPlan.<<ponder]]" + answer) &&
+            accepts(*disabled, answer),
+        "kAuto keeps the model's own reasoning when the request disables it");
     for (const auto initial :
          {Initial::kContent, Initial::kContentAfterReasoning}) {
       const auto content =

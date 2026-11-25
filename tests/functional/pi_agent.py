@@ -354,7 +354,10 @@ def run_case(args, recorder, env, index, name):
     proc = None
     try:
         with (case / "stdout.jsonl").open("w") as out, (case / "stderr.log").open("w") as err:
-            proc = subprocess.Popen(command, cwd=cwd, env=env, stdout=out, stderr=err, start_new_session=True)
+            # Pi's print mode reads piped stdin: an inherited pipe that never
+            # closes (a backgrounded run) stalls it before its first request.
+            proc = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=out, stderr=err, start_new_session=True)
             while proc.poll() is None:
                 if time.perf_counter() - start > args.timeout:
                     raise AssertionError("Pi task timeout")

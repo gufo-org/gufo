@@ -467,6 +467,216 @@ void {name}_register(gufo::ext::Registry&) {{}}
         self.configure(directories, '-DGUFO_EXTENSION_DIR_REVISIONS=v1.0@a"b\\c;unknown')
         self.assertEqual(built()["plain_ext"]["revision"], 'v1.0@a"b\\c')
 
+    def fresh(self):
+        """A new fixture tree within one case, keeping the case's timings."""
+        timings, calls = self.timings, self.calls
+        self.setUp()
+        self.timings, self.calls = timings, calls
+
+    EXPORT_BASE = "gufo_extension_export(TARGET base_registration NAME base)\n"
+
+    def dependent(self, depends=("base",), link="gufo::base", base_extra=EXPORT_BASE,
+                  aext_extra="", aext_targets=None, name="aext"):
+        """External `name`, sorted before base, links what base exports."""
+        base = self.source / "src/families/test/base"
+        (base / "base.hpp").write_text("int base_value();\n")
+        with (base / "extension.cmake").open("a") as out:
+            # The header lives under src/: an external target may see it only
+            # through the audited in-tree export.
+            out.write("target_include_directories(base_registration PUBLIC ${GUFO_EXTENSION_BUILD_ROOT})\n"
+                      + base_extra)
+        directory = self.external(name)
+        path = directory / "extension.json"
+        manifest = dict(json.loads(path.read_text()), depends=list(depends))
+        manifest["targets"].update(aext_targets or {})
+        path.write_text(json.dumps(manifest))
+        (directory / "src/external.cpp").write_text(f"""#include "gufo/ext/registry.hpp"
+#include "base.hpp"
+void {name}_provider_register(gufo::ext::Registry&) {{ (void)base_value(); }}
+void {name}_register(gufo::ext::Registry&) {{}}
+""")
+        guard = ('if(NOT TARGET base_registration)\nmessage(FATAL_ERROR "dependency build order")\nendif()\n'
+                 if "base" in depends else "")
+        (directory / "extension.cmake").write_text(
+            guard + f"gufo_extension_target(NAME gufo_{name} SOURCES src/external.cpp "
+            f"LINK_LIBRARIES gufo_ext_runtime {link})\n" + aext_extra)
+        return directory
+
+    def test_external_dependency_links_export(self):
+        # Locked and discovered external extensions build after their in-tree
+        # dependency and link its gufo:: export, headers included.
+        # A Gufo link contract may share a dependency's gufo:: namespace, as
+        # gufo::qwen_family shares the qwen extension's.
+        cmake = self.source / "CMakeLists.txt"
+        cmake.write_text(cmake.read_text().replace(
+            "gufo_build_discovered_extensions()",
+            "add_library(base_contract INTERFACE)\nadd_library(gufo::base_contract ALIAS base_contract)\n"
+            "gufo_build_discovered_extensions()"))
+        directories = f"-DGUFO_EXTENSION_DIRS={self.dependent(link='gufo::base gufo::base_contract').as_posix()}"
+        self.lock(["aext", "base"])
+        output = self.configure(directories, "-DGUFO_EXTENSIONS_FROM_LOCK=ON")
+        self.assertIn("mode=lock; included=[base;aext]", output)
+        self.assertEqual([e["name"] for e in self.run_fixture()["builtExtensions"]], ["base", "aext"])
+        output = self.configure(directories, "-DGUFO_EXTENSIONS_FROM_LOCK=OFF")
+        self.assertIn("mode=discovery; included=[base;aext;alpha;beta]", output)
+        self.lock(["aext"])
+        self.configure(directories, "-DGUFO_EXTENSIONS_FROM_LOCK=ON",
+                       error="extension lock: missing dependency base required by aext")
+
+    def test_dependency_link_failures(self):
+        for depends, link, error in [
+                ((), "gufo::base", 'exported by extension base; add "base" to depends'),
+                ((), "base_registration", 'base_registration, a target of extension base; add "base" to depends'),
+                (("base",), "gufo::base_hip", "gufo::base_hip, which extension base does not export"),
+                (("absent",), "gufo::base", "missing dependency absent required by aext; no extension"),
+        ]:
+            with self.subTest(depends=depends, link=link):
+                self.fresh()
+                self.configure(f"-DGUFO_EXTENSION_DIRS={self.dependent(depends, link).as_posix()}", error=error)
+        # The cycle is named in full, from where the visit entered it.
+        self.fresh()
+        path = self.source / "src/families/test/base/extension.json"
+        path.write_text(json.dumps(dict(json.loads(path.read_text()), depends=["alpha"])))
+        self.configure(error="cyclic dependency alpha -> base -> alpha")
+
+    def edit_manifest(self, path, **fields):
+        data = json.loads(path.read_text())
+        data.update(fields)
+        path.write_text(json.dumps(data))
+
+    def test_dependency_isolation_failures(self):
+        base = self.source / "src/families/test/base"
+        hip_target = {"base_registration": {"requires": []}, "base_hip": {"requires": ["hip"]}}
+        helper = ("add_library(aext_helper STATIC ${GUFO_EXTENSION_BUILD_ROOT}/src/external.cpp)\n"
+                  "target_link_libraries(aext_helper PRIVATE gufo_aext)\n")
+        cases = [
+            # A transitive INTERFACE hop from a helper target, without depends.
+            ("transitive", dict(depends=(), link="",
+                                aext_extra="target_link_libraries(gufo_aext INTERFACE base_registration)\n" + helper),
+             None, 'base_registration, a target of extension base; add "base" to depends'),
+            ("genex", dict(depends=(), link="",
+                           aext_extra="target_link_libraries(gufo_aext PRIVATE $<BUILD_INTERFACE:base_registration>)\n"),
+             None, 'base_registration, a target of extension base; add "base" to depends'),
+            # Only an extension's own, discovery-run extension.cmake exports it,
+            # whatever its variables say.
+            ("stolen", dict(base_extra="", link="", aext_extra=(
+                "unset(GUFO_EXTENSION_BUILD_ROOT)\ngufo_extension_export(TARGET base_registration NAME base_stolen)\n")),
+             None, "base_registration belongs to extension base; only its extension.cmake can export it, not aext's"),
+            ("test target", dict(link="", aext_targets={"gufo_aext_test": {"requires": [], "role": "test"}},
+                                 aext_extra="gufo_extension_target(NAME gufo_aext_test SOURCES src/external.cpp)\n"
+                                            "gufo_extension_export(TARGET gufo_aext_test NAME aext_test)\n"),
+             None, "gufo_aext_test is a test target"),
+            ("duplicate", dict(base_extra=self.EXPORT_BASE * 2), None, "duplicate export gufo::base"),
+            # base may not take a name in the namespace of base_more.
+            ("squat", dict(link="", base_extra="gufo_extension_export(TARGET base_registration NAME base_more_x)\n"),
+             lambda: self.add("base_more", family=True), "NAME base_more_x is in the namespace of extension base_more, not base"),
+            ("prefix", dict(link="", base_extra="gufo_extension_export(TARGET base_registration NAME other)\n"),
+             None, "NAME other must be base or start with base_"),
+            # An export disabled by its requires reaches the unavailable path.
+            ("disabled", dict(link="gufo::base_hip", base_extra=(
+                "gufo_extension_target(NAME base_hip SOURCES registration.cpp LINK_LIBRARIES gufo_ext_runtime)\n"
+                "gufo_extension_export(TARGET base_hip NAME base_hip)\n")),
+             lambda: self.edit_manifest(base / "extension.json", targets=hip_target),
+             "requires unavailable dependency gufo::base_hip"),
+            # A dependency's target that is not an export gets no audit.
+            ("unexported", dict(base_extra="", link="base_registration"), None, "include allowlist"),
+        ]
+        for label, arguments, setup, error in cases:
+            with self.subTest(label):
+                self.fresh()
+                base = self.source / "src/families/test/base"
+                if setup:
+                    setup()
+                directory = self.dependent(**arguments)
+                self.configure(f"-DGUFO_EXTENSION_DIRS={directory.as_posix()}", error=error)
+
+    def test_module_dependency_rules(self):
+        # A module may depend on an in-tree extension built into the host and
+        # links its export compile-only; the SDK records the host extensions
+        # and the build identity pins the exporter.
+        cmake = self.source / "CMakeLists.txt"
+        cmake.write_text(cmake.read_text().replace(
+            "gufo_target_extensions(fixture EXTENSIONS ${selected})",
+            "list(REMOVE_ITEM selected ${GUFO_EXTENSION_MODULES})\n"
+            "gufo_target_extensions(fixture EXTENSIONS ${selected})\n"
+            "set(GUFO_EXTENSION_MODULE_HOST fixture)\n"
+            # The build identity digests Gufo's own surface headers.
+            f"set(PROJECT_SOURCE_DIR \"{ROOT.as_posix()}\")\n"
+            "gufo_extension_modules(EXTENSIONS ${GUFO_EXTENSION_MODULES})\n"
+            "set(PROJECT_SOURCE_DIR \"${discovery_root}\")\n"
+            "if(TARGET gufo_aext)\n"
+            "  get_target_property(links gufo_aext LINK_LIBRARIES)\n"
+            "  message(STATUS \"aext links: ${links}\")\n"
+            "endif()\n"
+            f"include(\"{ROOT.as_posix()}/cmake/GufoExtensionHost.cmake\")\n"
+            "_gufo_host_export_libraries(kept)\n"
+            "message(STATUS \"host keeps: ${kept}\")\n"
+            "_gufo_host_extensions_record(record)\n"
+            "file(WRITE \"${CMAKE_BINARY_DIR}/host-extensions.cmake\" \"${record}\")\n"))
+        directory = f"-DGUFO_EXTENSION_DIRS={self.dependent().as_posix()}"
+        if os.name == "nt":
+            self.configure(directory, "-DGUFO_EXTENSION_MODULES=aext",
+                           error="which loadable extension modules do not support on Windows yet")
+            return
+        output = self.configure(directory, "-DGUFO_EXTENSION_MODULES=aext")
+        # The module links the stand-in the SDK would give it, not base's library.
+        self.assertIn("aext links: $<COMPILE_ONLY:gufo_ext_runtime>;gufo_module_export_aext_base", output)
+        self.assertIn("host keeps: base_registration", output)
+        record = (self.build / "host-extensions.cmake").read_text()
+        self.assertIn("gufo_host_extension(NAME base IDENTITY \"1.2.3:", record)
+        self.assertIn("gufo_host_export(NAME base EXTENSION base COMPILE_FEATURES [==[cxx_std_20]==])", record)
+        self.assertNotIn("NAME aext", record)
+        # Only the dependent module's identity covers base; the host's does not.
+        module_id = (self.build / "extension-modules/gufo-ext-aext-build-id.txt").read_text()
+        self.assertRegex(module_id, r"host_extension=base:1\.2\.3:[0-9a-f]{64}")
+        self.assertNotIn("host_extension", (self.build / "extension-build-id.txt").read_text())
+        # The dependency must stay in the host, and only exports cross.
+        self.configure(directory, "-DGUFO_EXTENSION_MODULES=aext;base",
+                       error="links gufo::base of extension base, which this gufo does not build in")
+        for label, extra, error in [
+                ("by name", None, "a module links only its gufo:: exports"),
+                # Usage requirements a module could not reproduce fail closed.
+                ("genex", "target_compile_definitions(base_registration INTERFACE $<$<CONFIG:Debug>:BASE_DEBUG>)\n",
+                 "a generator expression a loadable module could not reproduce"),
+                ("sources", "target_sources(base_registration INTERFACE ${GUFO_EXTENSION_BUILD_ROOT}/registration.cpp)\n",
+                 "sets INTERFACE_SOURCES, which loadable modules cannot reproduce"),
+                # The host keeps only gufo_* libraries behind an export.
+                ("helper", "add_library(helper STATIC ${GUFO_EXTENSION_BUILD_ROOT}/registration.cpp)\n"
+                           "target_link_libraries(base_registration PRIVATE helper)\n",
+                 "gufo::base links helper, a STATIC_LIBRARY outside Gufo's gufo_* and manifest libraries"),
+        ]:
+            with self.subTest(label):
+                self.fresh()
+                cmake = self.source / "CMakeLists.txt"
+                cmake.write_text(cmake.read_text().replace(
+                    "gufo_target_extensions(fixture EXTENSIONS ${selected})",
+                    "list(REMOVE_ITEM selected ${GUFO_EXTENSION_MODULES})\n"
+                    "gufo_target_extensions(fixture EXTENSIONS ${selected})\n"
+                    f"include(\"{ROOT.as_posix()}/cmake/GufoExtensionHost.cmake\")\n"
+                    "_gufo_host_export_libraries(kept)\n"))
+                if extra is None:
+                    aext = self.dependent(link="base_registration")
+                else:
+                    aext = self.dependent(base_extra=self.EXPORT_BASE + extra)
+                self.configure(f"-DGUFO_EXTENSION_DIRS={aext.as_posix()}",
+                               "-DGUFO_EXTENSION_MODULES=aext", error=error)
+
+    def test_external_export_is_checked(self):
+        # One external extension's export is checked like any external target.
+        bext = self.external("bext")
+        with (bext / "extension.cmake").open("a") as out:
+            out.write("gufo_extension_export(TARGET gufo_bext NAME bext)\n")
+        aext = self.dependent(depends=("bext",), link="gufo::bext", base_extra="")
+        directories = f"-DGUFO_EXTENSION_DIRS={aext.as_posix()};{bext.as_posix()}"
+        (aext / "src/external.cpp").write_text("""#include "gufo/ext/registry.hpp"
+void aext_provider_register(gufo::ext::Registry&) {}
+void aext_register(gufo::ext::Registry&) {}
+""")
+        self.assertIn("included=[bext;aext;base;alpha;beta]", self.configure(directories))
+        with (bext / "extension.cmake").open("a") as out:
+            out.write(f"target_include_directories(gufo_bext INTERFACE {(self.source / 'src/families/test/base').as_posix()})\n")
+        self.configure(directories, error="violates include allowlist")
+
     def test_external_extension_allowlist_violation(self):
         external_dir = Path(self.temporary.name) / "bad_ext"
         external_dir.mkdir(parents=True, exist_ok=True)

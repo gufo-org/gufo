@@ -283,7 +283,11 @@
             fi
           '';
 
-          rustCheck = pkgsSys.runCommand "check-rust" {
+          # compileOnly builds what the check compiles and runs nothing, to
+          # fill the compiler caches; warm-caches.yml builds it on main. It
+          # renders the check's script unchanged when false.
+          mkRustCheck = { compileOnly ? false }: pkgsSys.runCommand
+            (if compileOnly then "check-rust-compile" else "check-rust") {
             nativeBuildInputs = [ rustToolchain pkgsSys.stdenv.cc pkgsSys.pkg-config pkgsSys.python3 pkgsSys.sccache pkgsSys.rsync ];
             buildInputs = [ pkgsSys.libopus ];
             src = mkFilteredSource {
@@ -304,6 +308,12 @@
             cp -r "$src" source
             chmod -R u+w source
             cd source
+          '' + (if compileOnly then ''
+            cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+            cargo test --workspace --locked --offline --no-run
+            mkdir -p $out
+            echo "Compiled the Rust checks; ran no tests" > $out/result.txt
+          '' else ''
             python3 tools/ci/check-rust-workspace.py
             python3 tests/tools/check_rust_workspace_test.py
             cargo fmt --all --check
@@ -311,7 +321,9 @@
             cargo test --workspace --locked --offline
             mkdir -p $out
             echo "PASS: Rust formatting, clippy and unit tests clean" > $out/result.txt
-          '');
+          ''));
+
+          rustCheck = mkRustCheck { };
 
           formatCheck = pkgsSys.runCommand "check-format" {
             nativeBuildInputs = [ pkgsSys.clang-tools pkgsSys.python3 ];
@@ -334,7 +346,6 @@
               pkgsSys.findutils
               pkgsSys.icu
               pkgsSys.curl
-              pkgsSys.libpng
               pkgsSys.libwebp
               pkgsSys.libopus
               rustToolchain
@@ -443,7 +454,10 @@
             echo "PASS: MiniMax H3 pinned teacher and offline LPIPS clean" > $out/result.txt
           '';
 
-          testCheck = pkgsSys.runCommand "check-tests" {
+          # As mkRustCheck: compileOnly builds both trees with the check's
+          # compiler, flags and paths, so its ccache entries are the check's.
+          mkTestCheck = { compileOnly ? false }: pkgsSys.runCommand
+            (if compileOnly then "check-tests-compile" else "check-tests") {
             nativeBuildInputs = [
               pkgsSys.stdenv.cc
               pkgsSys.ccache
@@ -457,7 +471,6 @@
               (pkgsSys.python3.withPackages (ps: [ ps.jsonschema ps.numpy ]))
               pkgsSys.icu
               pkgsSys.curl
-              pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
               pkgsSys.libopus
@@ -501,6 +514,7 @@
             mkdir -p build && cd build
             cmake "$src" -GNinja $ccache_launcher -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON -DENGINE_ENABLE_HIP=OFF
             cmake --build . --parallel "$NIX_BUILD_CORES"
+          '' + pkgsSys.lib.optionalString (!compileOnly) ''
             test_jobs="$NIX_BUILD_CORES"
             if [[ "$test_jobs" -eq 0 || "$test_jobs" -gt 4 ]]; then test_jobs=4; fi
             ctest --output-on-failure --parallel "$test_jobs" --timeout 120 \
@@ -508,18 +522,26 @@
 
             # Build the real CPU lock-mode executable, using the same source
             # and toolchain. This does not replace shipped HIP qualification.
+          '' + ''
             cmake "$src" -B ../lock-build -GNinja $ccache_launcher -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF -DENGINE_ENABLE_HIP=OFF -DGUFO_EXTENSIONS_FROM_LOCK=ON
             cmake --build ../lock-build --target gufo --parallel "$NIX_BUILD_CORES"
+          '' + pkgsSys.lib.optionalString (!compileOnly) ''
             ../lock-build/gufo diagnose --section extensions --json
             ../lock-build/gufo --version | grep -Fx 'Extension selection: lock'
+          '' + ''
 
             if [[ -n "$ccache_launcher" ]]; then
               ccache --show-stats
             fi
 
             mkdir -p $out
+          '' + (if compileOnly then ''
+            echo "Compiled the CPU suite; ran no tests" > $out/result.txt
+          '' else ''
             echo "PASS: CPU suite passed" > $out/result.txt
-          '');
+          ''));
+
+          testCheck = mkTestCheck { };
 
 
           mkServeCheck =
@@ -687,6 +709,9 @@
           h3-quality = h3QualityCheck;
           h3-ml-quality = h3MlQualityCheck;
           tests = testCheck;
+          # Compiler-cache warmers, outside `nix flake check`; see packages.
+          rust-compile = mkRustCheck { compileOnly = true; };
+          tests-compile = mkTestCheck { compileOnly = true; };
           model-sync =
             assert import ./.devops/nix/model-sync-tests.nix {
               pkgs = pkgsSys;
@@ -750,6 +775,7 @@
       checks = forAllSystems (system:
         builtins.removeAttrs allChecks.${system} [
           "h3-manifest" "h3-quality" "h3-ml-quality" "static-analysis"
+          "rust-compile" "tests-compile"
         ]);
 
       packages = forAllSystems (
@@ -761,6 +787,11 @@
           default = base;
           # Explicit qualification suites stay out of `nix flake check`.
           inherit (allChecks.${system}) h3-manifest h3-quality h3-ml-quality static-analysis;
+          # check-rust and check-tests compiled without running anything, to
+          # fill main's compiler caches (docs/internal/ci.md). Never pushed
+          # to Cachix: no workflow that pushes builds them.
+          check-rust-compile = allChecks.${system}.rust-compile;
+          check-tests-compile = allChecks.${system}.tests-compile;
           # Official artifacts select this output from a tagged source. The
           # default package remains visibly developmental on moving branches.
           release = base.override { inherit releaseVersion; extensionsFromLock = true; };

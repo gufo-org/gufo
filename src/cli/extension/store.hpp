@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "src/core/json.hpp"
@@ -34,6 +35,14 @@ struct Installed {
 
 // This executable's extension build identity.
 std::string_view HostBuildId();
+// The in-tree extensions built into this executable that a module may list in
+// `depends`, each with the identity its dependents are built against ("" for
+// one that exports nothing). Empty where modules cannot have dependencies.
+const std::vector<std::pair<std::string, std::string>>& HostExtensions();
+// The build identity of the module `manifest` describes: HostBuildId(), plus
+// the identities of the host extensions it depends on that export anything,
+// as cmake/GufoExtension.cmake's _gufo_module_build_id computes it.
+std::string ModuleBuildId(const json::Value& manifest);
 
 std::filesystem::path StoreDirectory();
 std::vector<Installed> Read(const std::filesystem::path& store);
@@ -46,6 +55,10 @@ std::filesystem::path ModulePath(const std::filesystem::path& store,
                                  std::string_view build_id);
 // The pinned manifest; throws when the source is missing or malformed.
 json::Value Manifest(const std::filesystem::path& source);
+// The module path of installed extension `name` for this executable, from its
+// pinned manifest; throws when the source is missing or malformed.
+std::filesystem::path InstalledModulePath(const std::filesystem::path& store,
+                                          std::string_view name);
 
 // The SDK installed with this executable, or staged beside it in a build tree.
 struct Sdk {

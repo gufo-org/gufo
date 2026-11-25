@@ -133,6 +133,12 @@ headers included), the manifest schema or the public CMake contracts needs the
 `ext-api` label and one new, descriptively named record under
 `include/gufo/ext/changes/<major>.<minor>/`, as the
 [record instructions](../../include/gufo/ext/changes/README.md) describe.
+Paths reachable only through the no-promise headers under
+`include/gufo/ext/experimental/` and `include/gufo/ext/families/`, listed in
+[NO_PROMISE](../../include/gufo/ext/NO_PROMISE), stay in `SURFACE` but need no
+label or record and don't advance the revision; a path a versioned header also
+reaches keeps the rule. All `SURFACE` paths still feed the extension build ID,
+so a module rebuilds when any of them changes.
 Records are never edited, renamed or removed. In-tree extensions are fixed in
 the same pull request.
 

@@ -91,12 +91,25 @@
       "priority": 30,
       "paths": [
         "src/families/qwen/text/chat_template.*",
-        "src/families/qwen/text/tokenizer.*",
-        "src/families/qwen/control_tokens/control_tokens.hpp",
         "src/families/qwen/vision/**"
       ],
       "owners": [
-        "llm"
+        "flash-next-q4",
+        "qwen27-q4"
+      ]
+    },
+    {
+      "id": "shared-qwen-tokens",
+      "priority": 30,
+      "paths": [
+        "src/families/qwen/text/tokenizer.*",
+        "src/families/qwen/control_tokens/control_tokens.hpp"
+      ],
+      "owners": [
+        "flash-next-q4",
+        "qwen27-q4",
+        "image",
+        "tts"
       ]
     },
     {
@@ -116,7 +129,8 @@
         "src/cli/serve/messages*",
         "src/cli/serve/response*",
         "src/cli/serve/stop_sequences*",
-        "src/cli/serve/quote_tracker*",
+        "src/cli/serve/generation_parse*",
+        "src/core/generation_parse/**",
         "src/cli/sampling_options.hpp",
         "src/cli/serve/sampling_request.hpp",
         "src/cli/serve/chat*",
@@ -150,9 +164,9 @@
         "tests/cli/http_server_test.cpp",
         "tests/cli/http_server_test_support.hpp",
         "tests/cli/logit_sampler_test.cpp",
+        "tests/cli/generation_parse_*",
         "tests/cli/openai_chat_test.cpp",
         "tests/cli/prompt_test.cpp",
-        "tests/cli/quote_tracker_test.cpp",
         "tests/cli/serve_test.py",
         "tests/cli/text_generation_scheduler_test.cpp",
         "tests/cli/text_model_runner_test.cpp",

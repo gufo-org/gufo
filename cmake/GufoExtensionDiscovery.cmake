@@ -171,10 +171,12 @@ function(gufo_discover_extensions)
       set_property(GLOBAL PROPERTY "GUFO_EXT_${name}_EXCLUDED_REASON" "${reason}")
     endif()
   endforeach()
+  # The SDK's host extensions are built into its gufo executable already.
+  get_property(hosts GLOBAL PROPERTY GUFO_HOST_EXTENSIONS)
   foreach(name IN LISTS selected)
     get_property(depends GLOBAL PROPERTY "GUFO_EXT_${name}_DEPENDS")
     foreach(dependency IN LISTS depends)
-      if(NOT dependency IN_LIST selected)
+      if(NOT dependency IN_LIST selected AND NOT dependency IN_LIST hosts)
         message(FATAL_ERROR "GUFO_EXTENSIONS: missing selected dependency ${dependency} required by ${name}")
       endif()
     endforeach()
@@ -352,7 +354,7 @@ function(_gufo_external_property tgt current property kind)
   endif()
 endfunction()
 
-function(_gufo_validate_external_target tgt)
+function(_gufo_validate_external_target tgt owner)
   set(prohibited_private_targets
       gufo_core gufo_cache gufo_serving gufo_http gufo_test_support
       gufo_qwen_config gufo_qwen_common gufo_qwen_vision gufo_llm_cli
@@ -360,7 +362,7 @@ function(_gufo_validate_external_target tgt)
       gufo_runtime_storage gufo_prompt_cache gufo_audio_cache gufo_tool_calls
       gufo_kernel_bench_support)
   # Audited link contracts: their closure reaches private targets by design.
-  set(public_link_targets gufo_ext_core gufo_ext_cache gufo_ext_hip)
+  set(public_link_targets gufo_ext_core gufo_ext_cache gufo_ext_hip gufo_qwen_family)
   get_target_property(directory "${tgt}" SOURCE_DIR)
   set(base "${CMAKE_BINARY_DIR}")
   _gufo_external_property("${tgt}" "${tgt}" INCLUDE_DIRECTORIES paths)
@@ -423,6 +425,9 @@ function(_gufo_validate_external_target tgt)
     _gufo_external_items(direct "${tgt}" "${libs}")
     list(APPEND queue ${direct})
   endif()
+  # Every hop, transitive and INTERFACE ones included, may reach another
+  # extension only if that extension is in this one's dependency closure.
+  _gufo_depends_closure(closure "${owner}")
   set(visited)
   while(queue)
     list(POP_FRONT queue current)
@@ -439,6 +444,21 @@ function(_gufo_validate_external_target tgt)
     endif()
     if(current IN_LIST public_link_targets)
       continue()
+    endif()
+    _gufo_target_owner(current_owner "${current}")
+    if(NOT current_owner STREQUAL "" AND NOT current_owner STREQUAL owner AND NOT current_owner IN_LIST closure)
+      message(FATAL_ERROR "external extension target ${tgt} reaches ${current}, a target of extension ${current_owner}; "
+        "add \"${current_owner}\" to depends in the extension.json of ${owner}")
+    endif()
+    # An in-tree dependency's export is an audited link contract like the ones
+    # above: its closure reaches private targets by design. Any other target
+    # of a dependency, and every external export, is checked normally.
+    get_property(exporter GLOBAL PROPERTY "GUFO_EXT_EXPORTED_${current}")
+    if(exporter AND exporter STREQUAL current_owner AND exporter IN_LIST closure)
+      get_property(exporter_external GLOBAL PROPERTY "GUFO_EXT_${exporter}_IS_EXTERNAL")
+      if(NOT exporter_external)
+        continue()
+      endif()
     endif()
     if(current IN_LIST prohibited_private_targets)
       message(FATAL_ERROR "external extension target ${tgt} violates allowlist: links prohibited target '${current}'")
@@ -477,21 +497,110 @@ endfunction()
 
 # Include helper targets and nested directories, even if the manifest target
 # does not link them directly (OBJECT libraries may supply sources instead).
-function(_gufo_validate_external_directory directory)
+function(_gufo_validate_external_directory directory owner)
   get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
   foreach(tgt IN LISTS targets)
-    _gufo_validate_external_target("${tgt}")
+    _gufo_validate_external_target("${tgt}" "${owner}")
   endforeach()
   get_property(children DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
   foreach(child IN LISTS children)
-    _gufo_validate_external_directory("${child}")
+    _gufo_validate_external_directory("${child}" "${owner}")
   endforeach()
 endfunction()
 
 function(_gufo_validate_external_directories)
   get_property(wrappers GLOBAL PROPERTY GUFO_EXTERNAL_WRAPPERS)
   foreach(wrapper IN LISTS wrappers)
-    _gufo_validate_external_directory("${wrapper}")
+    get_property(owner GLOBAL PROPERTY "GUFO_EXT_WRAPPER_OWNER_${wrapper}")
+    _gufo_validate_external_directory("${wrapper}" "${owner}")
+  endforeach()
+endfunction()
+
+# Link items with their generator-expression wrappers removed, leniently:
+# in-tree targets may use expressions the external allowlist rejects, and an
+# unrecognised one is left to that allowlist.
+function(_gufo_link_names out)
+  set(names)
+  foreach(item IN LISTS ARGN)
+    if(item MATCHES "^\\$<(BUILD_INTERFACE|BUILD_LOCAL_INTERFACE|LINK_ONLY|COMPILE_ONLY):(.*)>$")
+      _gufo_link_names(nested "${CMAKE_MATCH_2}")
+      list(APPEND names ${nested})
+    elseif(item MATCHES "^\\$<\\$<[^<>]+>:(.*)>$")
+      _gufo_link_names(nested "${CMAKE_MATCH_1}")
+      list(APPEND names ${nested})
+    elseif(NOT item MATCHES "\\$<" AND NOT item MATCHES "^::@")
+      list(APPEND names "${item}")
+    endif()
+  endforeach()
+  set(${out} "${names}" PARENT_SCOPE)
+endfunction()
+
+# Every target an extension directory defines, gufo_extension_target or not,
+# links another extension only if its manifest lists that extension in
+# `depends`, and links gufo:: names only as real exports. Runs once all
+# extensions are built, so the result does not depend on build order.
+function(_gufo_check_extension_link_directory directory owner)
+  get_property(depends GLOBAL PROPERTY "GUFO_EXT_${owner}_DEPENDS")
+  get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(tgt IN LISTS targets)
+    set(items)
+    foreach(property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+      get_target_property(values "${tgt}" ${property})
+      if(values)
+        list(APPEND items ${values})
+      endif()
+    endforeach()
+    _gufo_link_names(items ${items})
+    foreach(item IN LISTS items)
+      if(item MATCHES "^gufo::([a-z][a-z0-9_]*)$")
+        set(export "${CMAKE_MATCH_1}")
+        get_property(exported GLOBAL PROPERTY "GUFO_EXT_EXPORT_${export}_OWNER" SET)
+        if(exported)
+          get_property(exporter GLOBAL PROPERTY "GUFO_EXT_EXPORT_${export}_OWNER")
+          if(NOT exporter STREQUAL owner AND NOT exporter IN_LIST depends)
+            message(FATAL_ERROR "extension target ${tgt} links ${item}, exported by extension ${exporter}; "
+              "add \"${exporter}\" to depends in the extension.json of ${owner}")
+          endif()
+          get_property(available GLOBAL PROPERTY "GUFO_EXT_EXPORT_${export}_ENABLED")
+          if(NOT available)
+            message(FATAL_ERROR "extension target ${tgt} requires unavailable dependency ${item} (disabled by the requires of ${exporter})")
+          endif()
+          continue()
+        endif()
+        _gufo_target_owner(alias_owner "${item}")
+        if(NOT alias_owner STREQUAL "")
+          message(FATAL_ERROR "extension target ${tgt} links ${item}, an alias of a target of extension ${alias_owner} "
+            "that gufo_extension_export did not create")
+        endif()
+        if(TARGET "${item}")
+          # A Gufo link contract: defined outside every extension directory.
+          continue()
+        endif()
+        _gufo_namespace_owner(namespace "${export}")
+        if(NOT namespace STREQUAL "")
+          message(FATAL_ERROR "extension target ${tgt} links ${item}, which extension ${namespace} does not export; "
+            "${namespace} must call gufo_extension_export(TARGET <target> NAME ${export})")
+        endif()
+        continue()
+      endif()
+      _gufo_target_owner(item_owner "${item}")
+      if(NOT item_owner STREQUAL "" AND NOT item_owner STREQUAL owner AND NOT item_owner IN_LIST depends)
+        message(FATAL_ERROR "extension target ${tgt} links ${item}, a target of extension ${item_owner}; "
+          "add \"${item_owner}\" to depends in the extension.json of ${owner} and link its gufo:: export")
+      endif()
+    endforeach()
+  endforeach()
+  get_property(children DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+  foreach(child IN LISTS children)
+    _gufo_check_extension_link_directory("${child}" "${owner}")
+  endforeach()
+endfunction()
+
+function(_gufo_check_extension_links)
+  get_property(wrappers GLOBAL PROPERTY GUFO_EXTENSION_WRAPPERS)
+  foreach(wrapper IN LISTS wrappers)
+    get_property(owner GLOBAL PROPERTY "GUFO_EXT_WRAPPER_OWNER_${wrapper}")
+    _gufo_check_extension_link_directory("${wrapper}" "${owner}")
   endforeach()
 endfunction()
 
@@ -537,9 +646,13 @@ function(gufo_build_discovered_extensions)
       message(FATAL_ERROR "extension ${name}: missing ${root}/extension.cmake")
     endif()
     # An isolated directory gives each manifest its own current source/binary
-    # root. Dependency-first add_subdirectory preserves normal CMake semantics.
+    # root. Selected names follow GUFO_EXTENSION_ORDER, so each dependency's
+    # targets and gufo:: exports exist before its dependents' extension.cmake.
     set(wrapper "${CMAKE_CURRENT_BINARY_DIR}/extensions/build/${name}")
     file(MAKE_DIRECTORY "${wrapper}")
+    # Target ownership comes from the directory a target is defined in.
+    set_property(GLOBAL PROPERTY "GUFO_EXT_WRAPPER_OWNER_${wrapper}" "${name}")
+    set_property(GLOBAL APPEND PROPERTY GUFO_EXTENSION_WRAPPERS "${wrapper}")
     set(equals "=")
     string(FIND "${root}" "]${equals}]" closing)
     while(NOT closing EQUAL -1)
@@ -561,5 +674,6 @@ function(gufo_build_discovered_extensions)
   endforeach()
   # Validate after all manifests and host targets have finished mutating the
   # graph, so later declarations cannot change an already accepted target.
+  cmake_language(DEFER CALL _gufo_check_extension_links)
   cmake_language(DEFER CALL _gufo_validate_external_directories)
 endfunction()

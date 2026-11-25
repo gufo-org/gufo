@@ -60,6 +60,22 @@ GufoJsonParse gufo_json_parse(const uint8_t* data, size_t len,
                               GufoJsonEventFn event, GufoJsonBytesFn error,
                               void* context);
 
+/* gufo_json_dump writes numbers as parsed (json::Value::Numbers::kAsParsed)
+   instead of canonically. */
+#define GUFO_JSON_DUMP_AS_PARSED 1u
+/* gufo_json_dump writes ", " and ": " as json::Value::tojson does, instead of
+   "," and ":" as dump does. */
+#define GUFO_JSON_DUMP_SPACED 2u
+
+/* Parses data[0, len) as gufo_json_parse does into the Rust value tree and
+   passes the text the Rust writer makes of it, in the style flags select, to
+   out. On GUFO_JSON_REJECTED, error got the reason unless it is null. Unknown
+   flags are GUFO_JSON_INTERNAL. json_write_test compares it with
+   json::Value::dump; Gufo itself does not call it. */
+GufoJsonParse gufo_json_dump(const uint8_t* data, size_t len, uint32_t flags,
+                             GufoJsonBytesFn out, GufoJsonBytesFn error,
+                             void* context);
+
 #ifdef __cplusplus
 }
 #endif

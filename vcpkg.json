@@ -6,7 +6,6 @@
     "icu",
     "curl",
     "openssl",
-    "libpng",
     "libjpeg-turbo",
     "libwebp",
     "opus",

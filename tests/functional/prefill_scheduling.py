@@ -6,12 +6,13 @@ import threading
 
 from progress import ProgressTrace
 from stream_start import cold_prompt
+from thinking import answer_room
 
 
 def check_prefill_scheduling(client, model, checks, chat_result, width, context):
     assert width >= 2 and context >= 16384, "use --sessions 2 --context 32768 or larger"
     common = dict(model=model, temperature=0, seed=31, top_p=1,
-                  max_completion_tokens=8, presence_penalty=0, frequency_penalty=0,
+                  max_completion_tokens=answer_room(8), presence_penalty=0, frequency_penalty=0,
                   reasoning_effort="none", extra_body={
                       "top_k": 0, "min_p": 0, "repeat_penalty": 1,
                       "cache_prompt": False, "return_progress": True,

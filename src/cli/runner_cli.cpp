@@ -3,8 +3,12 @@
 #include <algorithm>
 #include <exception>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "src/cli/serve/text_generation_backend.hpp"
+#include "src/cli/speculative_settings.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/cli/serve/inference_backend.hpp"
@@ -18,39 +22,23 @@ double Seconds(std::chrono::steady_clock::time_point start) {
       .count();
 }
 
-#if defined(ENGINE_ENABLE_HIP)
-// The server's backend with one session, for the provider's runner.
-bool LoadBackend(server::InferenceBackend* backend, const std::string& model,
-                 const std::string& vision_model,
-                 const ext::ParsedOptions& provider_options,
-                 std::chrono::steady_clock::time_point start) {
-  std::string error;
-  const bool loaded =
-      backend->load(model, &error, 0, 1, {}, {}, {}, vision_model, {}, false,
-                    [&](const ext::TextProvider&, const core::GgufReader*,
-                        ext::TextRunnerOptions* options, std::string*) {
-                      options->provider_options = provider_options;
-                      return true;
-                    });
-  if (!loaded) {
-    std::cerr << "Error loading model '" << model << "': " << error << "\n";
+template<typename Options>
+bool PrepareFor(const Options& command, const ext::TextProvider& provider,
+                ext::TextRunnerOptions* options, std::string* error) {
+  try {
+    options->provider_options = command.provider_options;
+    options->speculative = SpeculativeConfigFor(
+        command.speculative_backend, command.mtp_model_path,
+        command.dflash_model_path, command.dspark_model_path);
+    ApplySpeculativeSettings(
+        ResolveSpeculativeSettings(provider, command.speculative_backend, {}),
+        &options->speculative);
+    return true;
+  } catch (const std::invalid_argument& exception) {
+    if (error != nullptr)
+      *error = exception.what();
     return false;
   }
-  std::cerr << "Model loaded in " << Seconds(start) << " s\n";
-  return true;
-}
-
-void PrintStats(const server::TextGenerationBackend::Result& result) {
-  const double prefill = result.prefill_ms > 0
-                             ? result.prompt_tokens / (result.prefill_ms / 1000)
-                             : 0;
-  const double decode =
-      result.decode_ms > 0 && result.completion_tokens > 1
-          ? (result.completion_tokens - 1) / (result.decode_ms / 1000)
-          : 0;
-  std::cerr << "\n[" << result.prompt_tokens << " prompt tokens, "
-            << result.completion_tokens << " generated; prefill " << prefill
-            << " tok/s, decode " << decode << " tok/s]\n";
 }
 
 // Splits "<open>reasoning<close>answer" with the request's own delimiters,
@@ -72,17 +60,105 @@ void SplitReasoning(const std::string& text, const ext::ReasoningMarkup& markup,
   *content =
       first == std::string::npos ? std::string() : content->substr(first);
 }
+#if defined(ENGINE_ENABLE_HIP)
+// The server's backend with one session, for the provider's runner.
+template<typename Options>
+bool LoadBackend(server::InferenceBackend* backend, const Options& opt,
+                 const std::string& vision_model,
+                 std::chrono::steady_clock::time_point start) {
+  std::string error;
+  const bool loaded = backend->load(
+      opt.model_path, &error, 0, 1, {}, {}, {}, vision_model, {}, false,
+      [&](const ext::TextProvider& provider, const core::GgufReader*,
+          ext::TextRunnerOptions* options, std::string* message) {
+        return PrepareRunnerOptions(opt, provider, options, message);
+      });
+  if (!loaded) {
+    std::cerr << "Error loading model '" << opt.model_path << "': " << error
+              << "\n";
+    return false;
+  }
+  std::cerr << "Model loaded in " << Seconds(start) << " s\n";
+  return true;
+}
+
+void PrintStats(const server::TextGenerationBackend::Result& result) {
+  const double prefill = result.prefill_ms > 0
+                             ? result.prompt_tokens / (result.prefill_ms / 1000)
+                             : 0;
+  const double decode =
+      result.decode_ms > 0 && result.completion_tokens > 1
+          ? (result.completion_tokens - 1) / (result.decode_ms / 1000)
+          : 0;
+  std::cerr << "\n[" << result.prompt_tokens << " prompt tokens, "
+            << result.completion_tokens << " generated; prefill " << prefill
+            << " tok/s, decode " << decode << " tok/s]\n";
+  if (result.draft_rounds > 0) {
+    std::cerr << "[Speculative]: cycles=" << result.draft_rounds
+              << " drafted=" << result.draft_tokens
+              << " accepted=" << result.draft_accepted_tokens
+              << " lookup_proposed=" << result.lookup_tokens
+              << " lookup_accepted=" << result.lookup_accepted_tokens << '\n';
+  }
+}
+
 #endif
 
 }  // namespace
+
+bool PrepareRunnerOptions(const ext::TextPromptOptions& command,
+                          const ext::TextProvider& provider,
+                          ext::TextRunnerOptions* options, std::string* error) {
+  return PrepareFor(command, provider, options, error);
+}
+
+bool PrepareRunnerOptions(const ext::TextBenchOptions& command,
+                          const ext::TextProvider& provider,
+                          ext::TextRunnerOptions* options, std::string* error) {
+  return PrepareFor(command, provider, options, error);
+}
+
+int RunChatSession(server::TextGenerationBackend& backend,
+                   const ext::TextPromptOptions& opt, std::istream& in,
+                   std::ostream& out, const ChatResultCallback& on_result) {
+  server::ChatRequest request;
+  request.reasoning.enabled = opt.thinking_mode();
+  if (!opt.system_prompt.empty())
+    request.messages.emplace_back(ext::ChatRole::kSystem, opt.system_prompt);
+  const auto print = [&out](const server::TokenPiece& piece) {
+    out << piece.text << std::flush;
+    return true;
+  };
+  for (std::string line;;) {
+    out << "\n> " << std::flush;
+    if (!std::getline(in, line) || line == "/exit" || line == "/quit")
+      break;
+    if (line.empty())
+      continue;
+    request.messages.emplace_back(ext::ChatRole::kUser, line);
+    // Streamed: without it the scheduler hands Wait no pieces to print.
+    const auto pending =
+        backend.start_chat(request, opt.max_tokens, opt.sampling, {},
+                           /*stream_output=*/true);
+    const auto result = pending->Wait(print);
+    std::string thought, content;
+    SplitReasoning(result.text, pending->ReasoningDelimiters(), &thought,
+                   &content);
+    request.messages.emplace_back(ext::ChatRole::kAssistant, content,
+                                  std::string(), thought);
+    out << "\n";
+    if (on_result)
+      on_result(result);
+  }
+  return 0;
+}
 
 int RunRunnerPrompt(const ext::TextPromptOptions& opt,
                     std::chrono::steady_clock::time_point start) {
 #if defined(ENGINE_ENABLE_HIP)
   try {
     server::InferenceBackend backend;
-    if (!LoadBackend(&backend, opt.model_path, opt.vision_model_path,
-                     opt.provider_options, start))
+    if (!LoadBackend(&backend, opt, opt.vision_model_path, start))
       return 1;
     const auto print = [](const server::TokenPiece& piece) {
       std::cout << piece.text << std::flush;
@@ -122,37 +198,13 @@ int RunRunnerChat(const ext::TextPromptOptions& opt,
 #if defined(ENGINE_ENABLE_HIP)
   try {
     server::InferenceBackend backend;
-    if (!LoadBackend(&backend, opt.model_path, opt.vision_model_path,
-                     opt.provider_options, start))
+    if (!LoadBackend(&backend, opt, opt.vision_model_path, start))
       return 1;
-    server::ChatRequest request;
-    request.reasoning.enabled = opt.thinking_mode();
-    if (!opt.system_prompt.empty())
-      request.messages.emplace_back(ext::ChatRole::kSystem, opt.system_prompt);
-    const auto print = [](const server::TokenPiece& piece) {
-      std::cout << piece.text << std::flush;
-      return true;
-    };
-    for (std::string line;;) {
-      std::cout << "\n> " << std::flush;
-      if (!std::getline(std::cin, line) || line == "/exit" || line == "/quit")
-        break;
-      if (line.empty())
-        continue;
-      request.messages.emplace_back(ext::ChatRole::kUser, line);
-      const auto pending =
-          backend.start_chat(request, opt.max_tokens, opt.sampling);
-      const auto result = pending->Wait(print);
-      std::string thought, content;
-      SplitReasoning(result.text, pending->ReasoningDelimiters(), &thought,
-                     &content);
-      request.messages.emplace_back(ext::ChatRole::kAssistant, content,
-                                    std::string(), thought);
-      std::cout << "\n";
-      if (opt.verbose)
-        PrintStats(result);
-    }
-    return 0;
+    return RunChatSession(backend, opt, std::cin, std::cout,
+                          [&](const server::TextGenerationBackend::Result& r) {
+                            if (opt.verbose)
+                              PrintStats(r);
+                          });
   } catch (const std::exception& exception) {
     std::cerr << "\nError: " << exception.what() << "\n";
     return 1;
@@ -170,7 +222,7 @@ int RunRunnerBench(const ext::TextBenchOptions& opt,
 #if defined(ENGINE_ENABLE_HIP)
   try {
     server::InferenceBackend backend;
-    if (!LoadBackend(&backend, opt.model_path, {}, opt.provider_options, start))
+    if (!LoadBackend(&backend, opt, {}, start))
       return 1;
     // A prompt of exactly `tokens` tokens, from repeated text.
     const auto prompt_of = [&](std::size_t tokens) {
