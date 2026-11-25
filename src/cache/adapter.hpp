@@ -119,6 +119,16 @@ public:
     return {};
   }
 
+  // Optional checkpoint of the current executable prompt. Its storage is
+  // bounded slot state, and any append rows it omits must remain readable
+  // in this same slot until restore, reset, or reassignment.
+  [[nodiscard]] virtual bool SaveLivePrompt(Slot&, Rows) { return false; }
+  // Restore that exact prompt in the same slot. On an exception the caller
+  // invalidates the slot before attempting any other restore or execution.
+  virtual void RestoreLivePrompt(Slot&, Rows) {
+    throw std::logic_error("live prompt restore is unsupported");
+  }
+
   // Prepare one complete restore, including an exact shorter frontier. On the
   // host, allocate/check capacity and guard every range that will be replaced
   // while the old slot is still readable. Only then disable execution and

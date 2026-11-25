@@ -234,6 +234,7 @@ int main(int argc, char** argv) {
                   48;  // n > ring rows (1024 + ubatch), so the SWA rings wrap
   std::size_t chunk_prompt = 1853;  // over 1K keys, under one ubatch
   bool chunks_only = false;
+  bool live_prompt_only = false;
   std::string dspark;  // drafter GGUF: its context is checkpointed too
   for (int i = 1; i < argc; ++i) {
     const std::string k = argv[i];
@@ -252,14 +253,16 @@ int main(int argc, char** argv) {
       chunk_prompt = std::strtoull(next().c_str(), nullptr, 10);
     else if (k == "--chunks-only")
       chunks_only = true;
+    else if (k == "--live-prompt-only")
+      live_prompt_only = true;
     else if (k == "--dspark")
       dspark = next();
   }
   if (model.empty() || idsf.empty()) {
     std::fprintf(stderr,
                  "usage: inkling2_cache_test --model GGUF --ids ids.bin [--n "
-                 "N] [--tail T] [--chunk-prompt P] [--chunks-only] [--dspark "
-                 "DRAFT]\n");
+                 "N] [--tail T] [--chunk-prompt P] [--chunks-only] "
+                 "[--live-prompt-only] [--dspark DRAFT]\n");
     return 2;
   }
   std::ifstream f(idsf, std::ios::binary);
@@ -282,8 +285,10 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "open: %s\n", err.c_str());
     return 1;
   }
+  const auto tested_tail =
+      live_prompt_only ? std::max<std::size_t>(tail, 4096) : tail;
   auto engine = i2::Engine::Create(
-      reader, static_cast<std::uint32_t>(n + tail + 512), &err);
+      reader, static_cast<std::uint32_t>(n + tested_tail + 512), &err);
   if (!engine) {
     std::fprintf(stderr, "engine: %s\n", err.c_str());
     return 1;
@@ -303,6 +308,49 @@ int main(int argc, char** argv) {
 
   const std::span<const std::int32_t> prompt(ids.data(), n),
       more(ids.data() + n, tail);
+
+  if (live_prompt_only) {
+    REQUIRE(
+        n >= i2::Inkling2CacheAdapter::kMinLivePromptTokens && dspark.empty(),
+        "live prompt test needs a long autoregressive prompt");
+    auto slot = adapter.CreateSlot(guard);
+    auto& original = adapter.GetSession(*slot);
+    eng.Forward(original, prompt);
+    const auto prompt_logits = original.logits();
+    REQUIRE(adapter.SaveLivePrompt(*slot, n), "save live prompt");
+    // Advance far enough to overwrite the old window rows.
+    REQUIRE(eng.ring_rows() <= 4096, "test continuation must wrap the ring");
+    eng.Forward(original, prompt.first(4096));
+    adapter.RestoreLivePrompt(*slot, n);
+    REQUIRE(original.position() == n && original.logits() == prompt_logits,
+            "restore the exact prompt logits and position");
+
+    auto reference = adapter.CreateSlot(guard);
+    auto& fresh = adapter.GetSession(*reference);
+    eng.Forward(fresh, prompt);
+    eng.Forward(fresh, more);
+    eng.Forward(original, more);
+    REQUIRE(original.logits() == fresh.logits(),
+            "replay after local restore matches clean prefill");
+    for (const auto token : prompt.first(4)) {
+      eng.Step(original, token, nullptr);
+      eng.Step(fresh, token, nullptr);
+      REQUIRE(original.logits() == fresh.logits(),
+              "decode after local restore matches clean prefill");
+    }
+    REQUIRE(adapter.SaveLivePrompt(*slot, original.position()),
+            "save a new prompt on a reused slot");
+    REQUIRE(adapter.Invalidate(*slot), "invalidate the old slot");
+    bool refused = false;
+    try {
+      adapter.RestoreLivePrompt(*slot, n + tail + 4);
+    } catch (const std::logic_error&) {
+      refused = true;
+    }
+    REQUIRE(refused, "reset must retire the old prompt");
+    std::puts("live prompt restore logits match after a wrapped window");
+    return 0;
+  }
 
   // ---- 0. chunk invariance ----
   // A restored prefix plus a tail prefill must equal one prefill of the whole

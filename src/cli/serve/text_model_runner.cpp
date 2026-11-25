@@ -674,6 +674,8 @@ struct TextRunnerPool::Request::Impl {
         return;
       FinishSnapshot();
     }
+    if (!snapshot_future.valid() && prefill_offset == prompt.size())
+      lease->SaveLivePrompt();
     if (!prompt_snapshot_attempted)
       StartPromptSnapshot(wait);
     if (snapshot_future.valid()) {

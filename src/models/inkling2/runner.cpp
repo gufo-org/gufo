@@ -362,6 +362,12 @@ public:
     // --sessions/--context pair that cannot fit is refused at load with a
     // message that names both.
     c.per_request_state_bytes = engine_->session_bytes();
+    if (!engine_->has_drafter() &&
+        engine_->max_context() >= Inkling2CacheAdapter::kMinLivePromptTokens) {
+      const StateLayout layout(engine_->config(), engine_->ring_rows());
+      *c.per_request_state_bytes +=
+          Inkling2CacheAdapter::LivePromptBytes(layout);
+    }
     // Activations and MoE staging are shared by all sessions and already
     // allocated by the engine.
     c.temporary_scratch_bytes = 0;

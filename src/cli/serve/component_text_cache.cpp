@@ -248,6 +248,9 @@ struct ComponentTextCache::Impl {
     // The live frontier's prompt, to tell whether any checkpoint covers it.
     std::vector<cache::Token> live_tokens;
     cache::Identity live_input;
+    // This earlier boundary is restorable only in this live slot.
+    std::size_t local_prompt{};
+    cache::BorrowedLocation local_location{};
     // Edges of replies within live_tokens, where a chat template trims
     // whitespace from message content: where a reply begins, and where it
     // ends or its final token begins. Kept across live continuations.
@@ -1192,6 +1195,8 @@ struct ComponentTextCache::Lease::Impl {
   // False keeps every checkpoint this lease captures in RAM only.
   bool persist{true};
   bool generated_frontier{false};
+  bool save_local_prompt{}, local_prompt_attempted{};
+  std::size_t local_prompt{};
   cache::CheckpointId source{};
   std::array<cache::CheckpointId, cache::RetentionPolicy::kRecordLimit>
       edit_boundaries{};
@@ -1596,6 +1601,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
   cache::PrefixLookup found;
   Impl::Entry* entry = nullptr;
   std::optional<cache::BorrowedLocation> live;
+  std::size_t local_prompt = 0;
   std::vector<std::size_t> reply_starts, reply_ends;
   std::size_t common = 0;
   {
@@ -1621,6 +1627,21 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       if (!selected_entry.busy) {
         entry = &selected_entry;
         live = location;
+      }
+    }
+    if (reuse && input.At(prompt.size()).empty()) {
+      const auto indexed = found.selected ? found.selected->boundary : 0;
+      for (const auto& candidate : impl_->entries) {
+        const auto depth = candidate->local_prompt;
+        if (candidate->busy || !candidate->live || depth <= indexed ||
+            depth <= local_prompt || depth >= prompt.size() ||
+            depth > candidate->live_tokens.size() ||
+            !std::ranges::equal(std::span(candidate->live_tokens).first(depth),
+                                prompt.first(depth)))
+          continue;
+        entry = candidate.get();
+        live = entry->local_location;
+        local_prompt = depth;
       }
     }
     if (!entry) {
@@ -1707,7 +1728,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       throw cache::SlotBusy();
     entry->busy = true;
     entry->used = ++impl_->clock;
-    if (!live) {
+    if (!live || local_prompt) {
       entry->branch = std::make_shared<const std::uint8_t>(0);
       entry->durable.reset();
     }
@@ -1716,7 +1737,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       entry->live.reset();
       entry->live_tokens.clear();
     }
-    if (live) {
+    entry->local_prompt = 0;
+    if (live && !local_prompt) {
       reply_starts = std::move(entry->reply_starts);
       reply_ends = std::move(entry->reply_ends);
     }
@@ -1732,6 +1754,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
         impl_.get(), entry, std::move(slot), prompt, input, stable));
     auto& request = *lease->impl_;
     request.persist = persist;
+    request.save_local_prompt =
+        reuse && impl_->ram_enabled && input.At(prompt.size()).empty();
     // Claim the request's tokens before a restore or prefill writes them.
     // An older frontier's need falls to them; its pages past them stay
     // charged until reclaimed.
@@ -1762,14 +1786,37 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     const auto whole_inputs = [&](std::size_t boundary) {
       return !context || context->PrefillStop(boundary, false) == boundary;
     };
-    if (live && (!decodable(found.selected->boundary) ||
-                 !whole_inputs(found.selected->boundary))) {
+    if (live && !local_prompt &&
+        (!decodable(found.selected->boundary) ||
+         !whole_inputs(found.selected->boundary))) {
       live.reset();
       const std::lock_guard lock(impl_->mutex);
       entry->branch = std::make_shared<const std::uint8_t>(0);
       entry->durable.reset();
     }
-    bool restored = bool(live);
+    bool restored_local = false;
+    if (local_prompt) {
+      try {
+        impl_->resources->adapter->RestoreLivePrompt(request.slot.Execution(),
+                                                     local_prompt);
+        if (!whole_inputs(local_prompt) || !decodable(local_prompt))
+          throw std::logic_error("local prompt cannot continue");
+        entry->history = std::make_unique<cache::ExecutionHistory>(
+            cache::ExecutionHistory::Cold(
+                impl_->ledger, impl_->resources->adapter->Components(),
+                impl_->identity));
+        request.cached = local_prompt;
+        restored_local = true;
+      } catch (const std::exception& error) {
+        Logger::Info("cache",
+                     std::string("event=local_prompt_restore_refused reason=") +
+                         error.what());
+        request.slot.Reset();
+        clean = true;
+      }
+      live.reset();
+    }
+    bool restored = bool(live) || restored_local;
     if (live) {
       request.cached = found.selected->boundary;
       request.reply_starts = std::move(reply_starts);
@@ -2101,11 +2148,12 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     impl_->runner->SetPromptContext(*request.state, context);
     impl_->runner->ReconcileComponentState(*request.state, request.cached);
     request.restore_time =
-        request.restored
+        (request.restored || restored_local)
             ? std::chrono::duration<double, std::milli>(Clock::now() - started)
                   .count()
             : 0;
-    request.metrics.reuse = live               ? "live"
+    request.metrics.reuse = restored_local     ? "local"
+                            : live             ? "live"
                             : request.disk_hit ? "disk"
                             : request.cached   ? "ram"
                                                : "none";
@@ -2130,7 +2178,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
                              request.cached ? request.cached : nearest};
     Logger::Info("cache",
                  "schema=component-cache-v1 event=acquire reuse=" +
-                     std::string(live               ? "live"
+                     std::string(restored_local     ? "local"
+                                 : live             ? "live"
                                  : request.disk_hit ? "disk"
                                  : request.cached   ? "ram"
                                                     : "none") +
@@ -2648,6 +2697,22 @@ void ComponentTextCache::Lease::SkipSnapshot(SnapshotEventReason reason,
   } catch (...) {
   }
 }
+void ComponentTextCache::Lease::SaveLivePrompt() noexcept {
+  auto& request = *impl_;
+  if (!request.save_local_prompt || request.local_prompt_attempted)
+    return;
+  request.local_prompt_attempted = true;
+  try {
+    if (request.cache->resources->adapter->SaveLivePrompt(
+            request.slot.Execution(), request.prompt.size()))
+      request.local_prompt = request.prompt.size();
+  } catch (const std::exception& error) {
+    Logger::Info(
+        "cache",
+        std::string("event=local_prompt_save_refused reason=") + error.what());
+  }
+}
+
 void ComponentTextCache::Lease::PreparePrefill(std::size_t tokens) {
   // Between this thread's launches: nothing of the model's is in flight.
   if (impl_->cache->resources->settle)
@@ -3066,6 +3131,9 @@ std::size_t ComponentTextCache::Lease::Commit(
       ends.push_back(live.size());
     }
     impl_->entry->live_tokens = live;
+    impl_->entry->local_prompt =
+        impl_->local_prompt <= live.size() ? impl_->local_prompt : 0;
+    impl_->entry->local_location = location;
     // The idle session keeps its frontier's pages.
     if (impl_->account)
       (void)impl_->account->SetNeed(live.size());

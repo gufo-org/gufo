@@ -529,6 +529,20 @@ Qwen3.8-27B **(measured)**.
 RAM eviction follows the checkpoint priorities above. Disk eviction remains
 global least-recently-used, without conversation or rebuild-cost awareness.
 
+### Inkling 2 Mini same-slot prompt restore
+
+With the RAM cache enabled, autoregressive Inkling saves the rolling
+attention window and private state for the last text prompt of at least
+16,384 tokens in each live slot. Full-attention rows stay in the slot.
+If a later prompt matches that saved prefix and falls short of the live
+frontier, Gufo can restore the saved state and prefill the remaining tail.
+This also works when a full snapshot exceeds the RAM cache budget.
+
+The fixed storage bound is charged as session state. Gufo releases the
+saved boundary on slot reassignment and uses the ordinary cache for
+cross-slot and disk restores. The request metrics report `cache_reuse=local`
+when a same-slot restore supplied the prefix.
+
 ### Component-cache budgets
 
 Qwen27B and Flash-Next use the same options with these meanings:
@@ -813,7 +827,7 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | `schema=component-cache-v1 event=staging_waited` | `--cache-ram-bytes off`: a disk capture waited `waited_ms` for queued writes to release the capture backing |
 | `schema=component-cache-v1 event=staging_exhausted` | `--cache-ram-bytes off`: a disk capture found no room in the capture backing; reports `staged_bytes`, `held_bytes` by other captures, `backing_bytes`, `waited_ms` and whether it was an exact `frontier` |
 | `schema=component-cache-v1 event=row_storage` | At startup: `mode=shared_pages` when checkpoints keep the session pages that hold their rows, `mode=backing` when rows are copied or borrowed |
-| `schema=component-cache-v1 event=acquire` | The reuse a request got: `reuse` (`live`, `ram`, `disk`, `none`), `selected_tokens`, `restored_bytes`, and `remapped_bytes`, the part of them restored by mapping shared pages instead of a copy |
+| `schema=component-cache-v1 event=acquire` | The reuse a request got: `reuse` (`live`, `local`, `ram`, `disk`, `none`), `selected_tokens`, `restored_bytes`, and `remapped_bytes`, the part of them restored by mapping shared pages instead of a copy |
 | `schema=component-cache-v1 event=in_pass_unsupported` | The adapter could not take a checkpoint at `tokens` inside a prefill pass (`cached_tokens` is the reused prefix); the pass ends there and the checkpoint is captured after it |
 | `schema=component-cache-v1 event=published` | A checkpoint finished disk publication; `checkpoint_id` identifies the capture and `tokens` its boundary |
 | `schema=component-cache-v1 event=disk_restore` | A checkpoint was restored from disk: `tokens`, `bytes`, `pieces` and timings. `filesystem_ms` and `checksum_ms` add up the parallel readers' time, so they can exceed the restore's wall time; `stream_wait_ms` is the restoring thread's wait for copies |

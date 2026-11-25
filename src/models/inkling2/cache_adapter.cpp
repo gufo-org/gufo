@@ -361,9 +361,87 @@ std::span<const std::byte> Inkling2CacheAdapter::BorrowRowsView(
 // ---- restore
 // ---------------------------------------------------------------------------------
 
+std::size_t Inkling2CacheAdapter::LivePromptBytes(const StateLayout& layout) {
+  auto bytes = layout.PrivateBytes();
+  for (const auto& c : layout.components()) {
+    const auto& d = c.descriptor;
+    if (d.kind == cache::ComponentKind::kWindowRows)
+      bytes += (d.window_rows + d.rows_per_chunk - 1) * d.row_bytes;
+  }
+  return bytes;
+}
+
+bool Inkling2CacheAdapter::SaveLivePrompt(cache::Slot& slot, Rows position) {
+  auto& s = AsSlot(slot);
+  if (layout_.drafter() || position < kMinLivePromptTokens || s.boundary ||
+      !s.IsValid() || s.session().position() != position ||
+      !s.session().has_logits())
+    return false;
+  s.live_prompt_position = 0;
+  if (!s.live_prompt_state) {
+    s.live_prompt_capacity = LivePromptBytes(layout_);
+    s.live_prompt_state =
+        std::make_unique_for_overwrite<std::byte[]>(s.live_prompt_capacity);
+  }
+  engine_->Synchronize();
+  auto bytes = std::span(s.live_prompt_state.get(), s.live_prompt_capacity);
+  for (const auto& c : layout_.components()) {
+    const auto& d = c.descriptor;
+    if (d.kind == cache::ComponentKind::kAppendRows)
+      continue;
+    const auto [first, end] = StateLayout::RestoreRange(d, position);
+    const auto size = d.kind == cache::ComponentKind::kPrivateState
+                          ? d.state_bytes
+                          : (end - first) * d.row_bytes;
+    if (d.kind == cache::ComponentKind::kPrivateState)
+      CapturePrivateInto(s, c, 0, bytes.first(size));
+    else
+      SessionStateAccess::RowsOut(s.session(), c.visit, c.part == Part::kValue,
+                                  first, end, bytes.data());
+    bytes = bytes.subspan(size);
+  }
+  s.live_prompt_position = position;
+  return true;
+}
+
+void Inkling2CacheAdapter::RestoreLivePrompt(cache::Slot& slot, Rows position) {
+  auto& s = AsSlot(slot);
+  if (position == 0 || s.live_prompt_position != position ||
+      position > s.session().position())
+    throw std::logic_error("stale Inkling 2 live prompt");
+  const auto positions = layout_.Positions(position);
+  PrepareRestore(s, positions, true);
+  auto bytes = std::span<const std::byte>(s.live_prompt_state.get(),
+                                          s.live_prompt_capacity);
+  for (const auto& c : layout_.components()) {
+    const auto& d = c.descriptor;
+    if (d.kind == cache::ComponentKind::kAppendRows)
+      continue;
+    const auto [first, end] = StateLayout::RestoreRange(d, position);
+    const auto size = d.kind == cache::ComponentKind::kPrivateState
+                          ? d.state_bytes
+                          : (end - first) * d.row_bytes;
+    if (d.kind == cache::ComponentKind::kPrivateState) {
+      LoadPrivateFrom(s, c, 0, bytes.first(size));
+    } else {
+      SessionStateAccess::RowsIn(s.session(), c.visit, c.part == Part::kValue,
+                                 first, end, bytes.data());
+      s.coverage[d.id.value - 1].emplace_back(first, end);
+    }
+    bytes = bytes.subspan(size);
+  }
+  if (!Validate(slot, positions))
+    throw std::runtime_error("invalid Inkling 2 live prompt");
+}
+
 void Inkling2CacheAdapter::BeginRestore(
     cache::Slot& slot, std::span<const cache::ComponentPosition> positions) {
-  auto& s = AsSlot(slot);
+  PrepareRestore(AsSlot(slot), positions, false);
+}
+
+void Inkling2CacheAdapter::PrepareRestore(
+    Inkling2Slot& s, std::span<const cache::ComponentPosition> positions,
+    bool keep_append_rows) {
   if (s.restoring || s.failed)
     throw std::logic_error("Inkling 2 slot is not ready for a restore");
   if (positions.size() != descriptors_.size())
@@ -383,11 +461,24 @@ void Inkling2CacheAdapter::BeginRestore(
     throw std::invalid_argument("inconsistent Inkling 2 component frontiers");
   // Guard every range that will be replaced while the old state is still
   // readable.
-  s.GuardAll();
+  if (keep_append_rows) {
+    for (const auto& d : descriptors_)
+      if (d.kind == cache::ComponentKind::kWindowRows)
+        s.guard_.BeforeOverwrite(d.id, 0, engine_->max_context());
+  } else {
+    s.GuardAll();
+  }
   engine_->Synchronize();
-  SessionStateAccess::PrepareRestore(s.session(), target);
+  if (!keep_append_rows)
+    SessionStateAccess::PrepareRestore(s.session(), target);
+  s.live_prompt_position = 0;
   s.expected = std::move(ordered);
   s.coverage.assign(descriptors_.size(), {});
+  if (keep_append_rows && target != 0) {
+    for (std::size_t i = 0; i < descriptors_.size(); ++i)
+      if (descriptors_[i].kind == cache::ComponentKind::kAppendRows)
+        s.coverage[i].emplace_back(0, target);
+  }
   s.meta = StateMeta{};
   s.meta.version = 0;  // unset until the metadata component is loaded
   s.logits.assign(layout_.vocab(), 0.0F);
@@ -442,49 +533,56 @@ cache::Completion Inkling2CacheAdapter::LoadPrivatePiece(
   if (!s.restoring || s.failed)
     throw std::logic_error("Inkling 2 load requires an unfailed restore");
   try {
-    const auto& c = layout_.Component(id);
-    const auto total = c.descriptor.state_bytes;
-    if (c.descriptor.kind != cache::ComponentKind::kPrivateState ||
-        offset > total || bytes.size() > total - offset)
-      throw std::invalid_argument("invalid Inkling 2 private piece");
-    switch (c.part) {
-      case Part::kMeta:
-        std::memcpy(reinterpret_cast<std::byte*>(&s.meta) + offset,
-                    bytes.data(), bytes.size());
-        break;
-      case Part::kLogits:
-        std::memcpy(reinterpret_cast<std::byte*>(s.logits.data()) + offset,
-                    bytes.data(), bytes.size());
-        break;
-      case Part::kConv: {
-        std::size_t done = 0;
-        while (done < bytes.size()) {
-          const std::size_t at = offset + done, v = at / kConvBytesPerVisit,
-                            inner = at % kConvBytesPerVisit;
-          const std::size_t n =
-              std::min(bytes.size() - done, kConvBytesPerVisit - inner);
-          SessionStateAccess::ConvVisitIn(s.session(),
-                                          static_cast<std::uint32_t>(v), inner,
-                                          n, bytes.data() + done);
-          done += n;
-        }
-        break;
-      }
-      case Part::kDraftF:
-        SessionStateAccess::DraftFIn(s.session(), offset, bytes.size(),
-                                     bytes.data());
-        break;
-      default:
-        throw std::invalid_argument("component is not private state");
-    }
-    if (!bytes.empty()) {
-      const std::lock_guard lock(s.restore_mutex);
-      s.coverage[id.value - 1].emplace_back(offset, offset + bytes.size());
-    }
+    LoadPrivateFrom(s, layout_.Component(id), offset, bytes);
     return Done();
   } catch (...) {
     s.failed = true;
     throw;
+  }
+}
+
+void Inkling2CacheAdapter::LoadPrivateFrom(Inkling2Slot& s,
+                                           const StateComponent& c,
+                                           std::size_t offset,
+                                           std::span<const std::byte> bytes) {
+  const auto total = c.descriptor.state_bytes;
+  if (c.descriptor.kind != cache::ComponentKind::kPrivateState ||
+      offset > total || bytes.size() > total - offset)
+    throw std::invalid_argument("invalid Inkling 2 private piece");
+  switch (c.part) {
+    case Part::kMeta:
+      std::memcpy(reinterpret_cast<std::byte*>(&s.meta) + offset, bytes.data(),
+                  bytes.size());
+      break;
+    case Part::kLogits:
+      std::memcpy(reinterpret_cast<std::byte*>(s.logits.data()) + offset,
+                  bytes.data(), bytes.size());
+      break;
+    case Part::kConv: {
+      std::size_t done = 0;
+      while (done < bytes.size()) {
+        const std::size_t at = offset + done, v = at / kConvBytesPerVisit,
+                          inner = at % kConvBytesPerVisit;
+        const std::size_t n =
+            std::min(bytes.size() - done, kConvBytesPerVisit - inner);
+        SessionStateAccess::ConvVisitIn(s.session(),
+                                        static_cast<std::uint32_t>(v), inner, n,
+                                        bytes.data() + done);
+        done += n;
+      }
+      break;
+    }
+    case Part::kDraftF:
+      SessionStateAccess::DraftFIn(s.session(), offset, bytes.size(),
+                                   bytes.data());
+      break;
+    default:
+      throw std::invalid_argument("component is not private state");
+  }
+  if (!bytes.empty()) {
+    const std::lock_guard lock(s.restore_mutex);
+    s.coverage[c.descriptor.id.value - 1].emplace_back(offset,
+                                                       offset + bytes.size());
   }
 }
 
@@ -532,6 +630,7 @@ bool Inkling2CacheAdapter::Invalidate(cache::Slot& slot) noexcept {
   try {
     auto& s = AsSlot(slot);
     s.ReleaseAll();
+    s.live_prompt_position = 0;
     engine_->Reset(s.session());
     s.block = Block::kIdle;
     s.failed = false;

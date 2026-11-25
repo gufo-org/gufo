@@ -56,6 +56,9 @@ private:
   std::vector<std::vector<std::pair<std::size_t, std::size_t>>> coverage;
   StateMeta meta{};
   std::vector<float> logits;
+  std::unique_ptr<std::byte[]> live_prompt_state;
+  std::size_t live_prompt_capacity{};
+  cache::Rows live_prompt_position{};
 };
 
 class Inkling2CacheAdapter final : public cache::Adapter {
@@ -69,6 +72,10 @@ public:
 
   [[nodiscard]] Session& GetSession(cache::Slot&) const;
   [[nodiscard]] Inkling2Slot& AsSlot(cache::Slot&) const;
+  static constexpr std::size_t kMinLivePromptTokens = 16 * 1024;
+  [[nodiscard]] bool SaveLivePrompt(cache::Slot&, cache::Rows) override;
+  void RestoreLivePrompt(cache::Slot&, cache::Rows) override;
+  [[nodiscard]] static std::size_t LivePromptBytes(const StateLayout&);
   [[nodiscard]] const StateLayout& layout() const { return layout_; }
   /// For the tests/cache tool.
   [[nodiscard]] Engine* engine_for_test() const { return engine_.get(); }
@@ -140,6 +147,10 @@ public:
 
 private:
   friend class Inkling2Slot;
+  void PrepareRestore(Inkling2Slot&, std::span<const cache::ComponentPosition>,
+                      bool keep_append_rows);
+  void LoadPrivateFrom(Inkling2Slot&, const StateComponent&, std::size_t,
+                       std::span<const std::byte>);
   void CapturePrivateInto(const Inkling2Slot&, const StateComponent&,
                           std::size_t offset, std::span<std::byte>) const;
   std::shared_ptr<Engine> engine_;

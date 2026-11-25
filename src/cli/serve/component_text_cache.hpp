@@ -68,6 +68,7 @@ public:
     [[nodiscard]] std::optional<std::size_t> CaptureBytes(
         std::size_t boundary) const;
     [[nodiscard]] std::unique_ptr<ContinuationSnapshot> Capture();
+    void SaveLivePrompt() noexcept;
     void PreparePrefill(std::size_t tokens);
     [[nodiscard]] ComponentCacheMetrics Metrics() const;
     [[nodiscard]] std::vector<std::size_t> PlannedCaptures(
