@@ -279,6 +279,13 @@ void TestSdk() {
         R"({"sdk": {"hrx_loom": "0.2.0", "source": "pypi"}})");
   CHECK(!refused("0.2.0") && !refused("0.2.1"), "same series serves");
   CHECK(!refused("0.3.0"), "SDK 0.3 still serves published 0.2 packages");
+  Write(root / "llm_config.json",
+        R"({"sdk": {"hrx_loom": "0.3.0", "source": "pypi"}})");
+  CHECK(!refused("0.3.0") && !refused("0.3.1"),
+        "a 0.3.0 package on the 0.3 runtime serves");
+  CHECK(refused("0.2.0"), "an older runtime refuses a newer package");
+  Write(root / "llm_config.json", R"({"chat": {}})");
+  CHECK(refused("0.3.0"), "a 0.1.0 package on the 0.3.0 runtime is refused");
   CHECK(!refused(""), "no runtime version: nothing to check");
   CHECK(package::SdkSeries("0.2.0") == "0.2" &&
             package::SdkSeries("1.10.3") == "1.10",
