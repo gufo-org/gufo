@@ -35,16 +35,34 @@ void Check(GufoMetricsStatus status, std::string_view what,
   throw std::logic_error("Rust metrics registry failed internally");
 }
 
+GufoMetricsKind ToC(detail::Kind kind) {
+  switch (kind) {
+    case detail::Kind::kCounterU64:
+      return GUFO_METRICS_COUNTER_U64;
+    case detail::Kind::kCounterF64:
+      return GUFO_METRICS_COUNTER_F64;
+    case detail::Kind::kGaugeU64:
+      return GUFO_METRICS_GAUGE_U64;
+    case detail::Kind::kGaugeF64:
+      return GUFO_METRICS_GAUGE_F64;
+    case detail::Kind::kGaugeI64:
+      return GUFO_METRICS_GAUGE_I64;
+    case detail::Kind::kHistogram:
+      return GUFO_METRICS_HISTOGRAM;
+  }
+  throw std::logic_error("unknown metric kind");
+}
+
 }  // namespace
 
 namespace detail {
 
 const GufoMetricsFamily* AddFamily(const GufoMetricsRegistry* registry,
-                                   int kind, std::string_view name,
+                                   Kind kind, std::string_view name,
                                    std::string_view help,
                                    std::span<const double> bounds) {
   const GufoMetricsFamily* family = nullptr;
-  Check(gufo_metrics_family_new(registry, static_cast<GufoMetricsKind>(kind),
+  Check(gufo_metrics_family_new(registry, ToC(kind),
                                 Bytes(name), name.size(), Bytes(help),
                                 help.size(), bounds.data(), bounds.size(),
                                 &family),

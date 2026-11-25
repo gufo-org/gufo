@@ -1,8 +1,3 @@
-// Pins the text server's GET /metrics body byte for byte. Each scenario sets
-// known values through the server's public metric entry points, scrapes
-// /metrics and appends the body to the golden file in
-// tests/fixtures/metrics/text_server.golden. GUFO_METRICS_GOLDEN_WRITE=1
-// rewrites the golden instead of comparing against it.
 #include <cassert>
 #include <cstdlib>
 #include <fstream>
@@ -19,7 +14,6 @@ namespace {
 using gufo::server::TextGenerationBackend;
 using Result = TextGenerationBackend::Result;
 
-// The scheduler owns these three values; the test sets them directly.
 void SeedSchedulerCounters(std::uint64_t device_lost, std::int64_t processing,
                            std::int64_t deferred) {
   auto& metrics = gufo::server::Metrics();

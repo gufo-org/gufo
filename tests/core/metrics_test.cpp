@@ -1,5 +1,3 @@
-// The C++ metrics wrapper over the Rust registry: registration, typed
-// updates, exposition text, and the float format against C++'s ostream.
 #include "src/core/metrics.hpp"
 
 #include <bit>

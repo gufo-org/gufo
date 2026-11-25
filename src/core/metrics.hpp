@@ -14,23 +14,23 @@ struct GufoMetricsRegistry;
 
 namespace gufo::core::metrics {
 
-// A metrics registry in Rust, rendered in the Prometheus text format. Register
-// every family once, at startup, then update the returned metrics from any
-// thread: an update is one lock-free call that neither locks nor allocates. A
-// metric is a pointer into its Registry, so the Registry must outlive every
-// thread that updates one; a process-wide Registry should never be destroyed.
-//
-// A default-constructed metric ignores updates.
-
-// A label as registered: a fixed name and value.
 struct Label {
   std::string_view name;
   std::string_view value;
 };
 
 namespace detail {
+enum class Kind {
+  kCounterU64,
+  kCounterF64,
+  kGaugeU64,
+  kGaugeF64,
+  kGaugeI64,
+  kHistogram,
+};
+
 const GufoMetricsFamily* AddFamily(const GufoMetricsRegistry* registry,
-                                   int kind, std::string_view name,
+                                   Kind kind, std::string_view name,
                                    std::string_view help,
                                    std::span<const double> bounds);
 const GufoMetricsCell* AddSeries(const GufoMetricsFamily* family,
@@ -39,7 +39,6 @@ const GufoMetricsCell* AddSeries(const GufoMetricsFamily* family,
 void SetVisible(const GufoMetricsFamily* family, bool visible) noexcept;
 }  // namespace detail
 
-// A count that only grows. Set mirrors a total another component keeps.
 class Counter {
 public:
   Counter() = default;
@@ -50,12 +49,11 @@ private:
   template<class>
   friend class Family;
   friend class Registry;
-  static constexpr int kKind = 0;
+  static constexpr detail::Kind kKind = detail::Kind::kCounterU64;
   explicit Counter(const GufoMetricsCell* cell) : cell_(cell) {}
   const GufoMetricsCell* cell_ = nullptr;
 };
 
-// A fractional count that only grows, such as seconds.
 class FloatCounter {
 public:
   FloatCounter() = default;
@@ -65,12 +63,11 @@ private:
   template<class>
   friend class Family;
   friend class Registry;
-  static constexpr int kKind = 1;
+  static constexpr detail::Kind kKind = detail::Kind::kCounterF64;
   explicit FloatCounter(const GufoMetricsCell* cell) : cell_(cell) {}
   const GufoMetricsCell* cell_ = nullptr;
 };
 
-// The largest value observed, reported as a counter.
 class MaxCounter {
 public:
   MaxCounter() = default;
@@ -80,12 +77,11 @@ private:
   template<class>
   friend class Family;
   friend class Registry;
-  static constexpr int kKind = 0;
+  static constexpr detail::Kind kKind = detail::Kind::kCounterU64;
   explicit MaxCounter(const GufoMetricsCell* cell) : cell_(cell) {}
   const GufoMetricsCell* cell_ = nullptr;
 };
 
-// A non-negative integer level, such as bytes.
 class UintGauge {
 public:
   UintGauge() = default;
@@ -95,12 +91,11 @@ private:
   template<class>
   friend class Family;
   friend class Registry;
-  static constexpr int kKind = 2;
+  static constexpr detail::Kind kKind = detail::Kind::kGaugeU64;
   explicit UintGauge(const GufoMetricsCell* cell) : cell_(cell) {}
   const GufoMetricsCell* cell_ = nullptr;
 };
 
-// A fractional level, such as a ratio or a rate.
 class Gauge {
 public:
   Gauge() = default;
@@ -111,12 +106,11 @@ private:
   template<class>
   friend class Family;
   friend class Registry;
-  static constexpr int kKind = 3;
+  static constexpr detail::Kind kKind = detail::Kind::kGaugeF64;
   explicit Gauge(const GufoMetricsCell* cell) : cell_(cell) {}
   const GufoMetricsCell* cell_ = nullptr;
 };
 
-// A signed integer level that several owners adjust by deltas.
 class IntGauge {
 public:
   IntGauge() = default;
@@ -127,12 +121,11 @@ private:
   template<class>
   friend class Family;
   friend class Registry;
-  static constexpr int kKind = 4;
+  static constexpr detail::Kind kKind = detail::Kind::kGaugeI64;
   explicit IntGauge(const GufoMetricsCell* cell) : cell_(cell) {}
   const GufoMetricsCell* cell_ = nullptr;
 };
 
-// Observations counted into fixed buckets, with their sum.
 class Histogram {
 public:
   Histogram() = default;
@@ -142,15 +135,13 @@ private:
   template<class>
   friend class Family;
   friend class Registry;
-  static constexpr int kKind = 5;
+  static constexpr detail::Kind kKind = detail::Kind::kHistogram;
   explicit Histogram(const GufoMetricsCell* cell) : cell_(cell) {}
   const GufoMetricsCell* cell_ = nullptr;
 };
 
-// Shows or hides a family without naming its metric type.
 class Visibility {
 public:
-  // A hidden family renders nothing until shown again.
   void Set(bool visible) const noexcept {
     detail::SetVisible(family_, visible);
   }
@@ -162,12 +153,9 @@ private:
   const GufoMetricsFamily* family_;
 };
 
-// One named metric whose series differ by label values.
 template<class Metric>
 class Family {
 public:
-  // Adds the series with these labels; throws std::invalid_argument on a
-  // repeated label set or an unusable label.
   Metric Add(std::initializer_list<Label> labels = {}) const;
 
   [[nodiscard]] Visibility visibility() const { return Visibility(family_); }
@@ -187,10 +175,6 @@ public:
   Registry(const Registry&) = delete;
   Registry& operator=(const Registry&) = delete;
 
-  // Registers a family after the earlier ones; the text lists families in
-  // this order. Throws std::invalid_argument for a name the text format
-  // cannot carry, a name already registered, or histogram bounds that are not
-  // finite and strictly increasing (and for bounds on any other kind).
   template<class Metric>
   Family<Metric> AddFamily(std::string_view name, std::string_view help,
                            std::span<const double> bounds = {}) {
@@ -199,14 +183,12 @@ public:
         name);
   }
 
-  // A family with one unlabeled series.
   template<class Metric>
   Metric Add(std::string_view name, std::string_view help,
              std::span<const double> bounds = {}) {
     return AddFamily<Metric>(name, help, bounds).Add();
   }
 
-  // The text exposition of every visible family that has a series.
   [[nodiscard]] std::string Render() const;
 
 private:

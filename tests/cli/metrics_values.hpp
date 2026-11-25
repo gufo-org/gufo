@@ -1,9 +1,6 @@
 #ifndef GUFO_TESTS_CLI_METRICS_VALUES_HPP_
 #define GUFO_TESTS_CLI_METRICS_VALUES_HPP_
 
-// Reads the text server's metric values from its rendered exposition, as a
-// scraper does.
-
 #include <cstdint>
 #include <stdexcept>
 #include <string>

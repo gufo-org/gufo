@@ -1,10 +1,4 @@
-//! Sample values in the Prometheus text format.
-
-/// Digits of a finite value laid out as C's `%g` does for `precision`
-/// significant digits when the digits come from `{:e}`: fixed notation for
-/// decimal exponents in `-4..precision`, scientific otherwise, trailing zeros
-/// removed.
-fn layout(negative: bool, digits: &str, exponent: i32, precision: i32) -> String {
+fn layout_like_printf_g(negative: bool, digits: &str, exponent: i32, precision: i32) -> String {
     let digits = digits.trim_end_matches('0');
     let digits = if digits.is_empty() { "0" } else { digits };
     let mut text = String::with_capacity(digits.len() + 8);
@@ -46,7 +40,6 @@ fn layout(negative: bool, digits: &str, exponent: i32, precision: i32) -> String
     text
 }
 
-/// Splits `{:e}` output such as `1.2345e-7` into its digits and exponent.
 fn split_scientific(text: &str) -> (String, i32) {
     let (mantissa, exponent) = text.split_once('e').unwrap_or((text, "0"));
     let digits = mantissa.replace('.', "");
@@ -65,25 +58,20 @@ fn non_finite(value: f64) -> Option<&'static str> {
     }
 }
 
-/// A value as C++ prints it through an `ostream` with
-/// `std::numeric_limits<double>::max_digits10` (17) significant digits, which
-/// is `printf("%.17g")`. Counter and gauge samples use it.
-pub fn sample(value: f64) -> String {
+pub fn printf_17g(value: f64) -> String {
     if let Some(text) = non_finite(value) {
         return text.to_string();
     }
     let (digits, exponent) = split_scientific(&format!("{:.16e}", value.abs()));
-    layout(value.is_sign_negative(), &digits, exponent, 17)
+    layout_like_printf_g(value.is_sign_negative(), &digits, exponent, 17)
 }
 
-/// The shortest text that parses back to `value`, in the same layout. Bucket
-/// bounds and histogram sums use it, so `le="0.1"` stays `0.1`.
-pub fn shortest(value: f64) -> String {
+pub fn shortest_round_trip(value: f64) -> String {
     if let Some(text) = non_finite(value) {
         return text.to_string();
     }
     let (digits, exponent) = split_scientific(&format!("{:e}", value.abs()));
-    layout(value.is_sign_negative(), &digits, exponent, 17)
+    layout_like_printf_g(value.is_sign_negative(), &digits, exponent, 17)
 }
 
 #[cfg(test)]
@@ -91,8 +79,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sample_matches_printf_17g() {
-        // Expected strings are printf("%.17g").
+    fn printf_17g_matches_c() {
         let cases: [(f64, &str); 18] = [
             (0.0, "0"),
             (-0.0, "-0"),
@@ -114,28 +101,28 @@ mod tests {
             (-2.5, "-2.5"),
         ];
         for (value, expected) in cases {
-            assert_eq!(sample(value), expected, "{value:e}");
+            assert_eq!(printf_17g(value), expected, "{value:e}");
         }
     }
 
     #[test]
     fn non_finite_values_use_exposition_names() {
-        assert_eq!(sample(f64::NAN), "NaN");
-        assert_eq!(sample(f64::INFINITY), "+Inf");
-        assert_eq!(sample(f64::NEG_INFINITY), "-Inf");
-        assert_eq!(shortest(f64::INFINITY), "+Inf");
+        assert_eq!(printf_17g(f64::NAN), "NaN");
+        assert_eq!(printf_17g(f64::INFINITY), "+Inf");
+        assert_eq!(printf_17g(f64::NEG_INFINITY), "-Inf");
+        assert_eq!(shortest_round_trip(f64::INFINITY), "+Inf");
     }
 
     #[test]
-    fn shortest_round_trips_and_stays_short() {
-        assert_eq!(shortest(0.1), "0.1");
-        assert_eq!(shortest(0.005), "0.005");
-        assert_eq!(shortest(1.0), "1");
-        assert_eq!(shortest(10.0), "10");
-        assert_eq!(shortest(2.5e-7), "2.5e-07");
-        assert_eq!(shortest(1e21), "1e+21");
+    fn shortest_round_trip_stays_short() {
+        assert_eq!(shortest_round_trip(0.1), "0.1");
+        assert_eq!(shortest_round_trip(0.005), "0.005");
+        assert_eq!(shortest_round_trip(1.0), "1");
+        assert_eq!(shortest_round_trip(10.0), "10");
+        assert_eq!(shortest_round_trip(2.5e-7), "2.5e-07");
+        assert_eq!(shortest_round_trip(1e21), "1e+21");
         for value in [0.1, 1234.5678, 1e-9, 7.0e22, 123456.789] {
-            assert_eq!(shortest(value).parse::<f64>().unwrap(), value);
+            assert_eq!(shortest_round_trip(value).parse::<f64>().unwrap(), value);
         }
     }
 }

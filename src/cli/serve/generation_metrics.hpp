@@ -16,12 +16,8 @@
 
 namespace gufo::server {
 
-/// The text server's `/metrics` values, kept in one process-wide registry.
-/// Token counters advance per prefill chunk and per generated token, so
-/// scrapes see work while requests are still running. Request totals are added
-/// once per request when it finishes. Schedulers add their own deltas to the
-/// request gauges, so a draining scheduler and its replacement can both
-/// contribute during a model reload.
+/// Schedulers add their own deltas to the request gauges, so a draining
+/// scheduler and its replacement can both contribute during a model reload.
 struct TextMetrics {
   TextMetrics();
 
@@ -42,11 +38,8 @@ struct TextMetrics {
   core::metrics::Gauge last_gen_speed;
   core::metrics::IntGauge requests_processing;
   core::metrics::IntGauge requests_deferred;
-  /// Set at scrape time.
   core::metrics::Gauge kv_cache_usage_ratio;
 
-  /// Present in the text only for backends that report them; set at scrape
-  /// time.
   struct SharedState {
     core::metrics::UintGauge bytes;
     core::metrics::UintGauge charged_bytes;

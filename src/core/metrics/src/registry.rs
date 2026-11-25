@@ -1,13 +1,9 @@
-//! The metrics registry: ordered families, each holding labelled series whose
-//! values are atomic cells. Registration and rendering lock; updates do not.
-
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::format;
 
-/// What a family holds and how its samples are typed and stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     CounterU64,
@@ -30,20 +26,14 @@ impl Kind {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
-    /// A metric or label name the text format cannot carry, a repeated or
-    /// reserved label name, or histogram bounds that are not finite, sorted
-    /// and distinct.
     Invalid,
-    /// The family name, or the label set within the family, is taken.
     Duplicate,
 }
 
-/// A histogram's atomic state. `buckets[i]` counts observations at most
-/// `bounds[i]` and above `bounds[i - 1]`; the last bucket takes the rest.
 pub struct Histogram {
     bounds: Box<[f64]>,
     buckets: Box<[AtomicU64]>,
-    sum: AtomicU64,
+    sum: AtomicF64,
 }
 
 impl Histogram {
@@ -51,7 +41,7 @@ impl Histogram {
         Self {
             bounds: bounds.into(),
             buckets: (0..=bounds.len()).map(|_| AtomicU64::new(0)).collect(),
-            sum: AtomicU64::new(0f64.to_bits()),
+            sum: AtomicF64::new(0.0),
         }
     }
 
@@ -62,28 +52,44 @@ impl Histogram {
             self.bounds.partition_point(|&bound| bound < value)
         };
         self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
-        add_f64(&self.sum, value);
+        if value.is_finite() {
+            self.sum.add(value);
+        }
     }
 }
 
-/// A series value. Each variant is one lock-free cell.
 pub enum Value {
     U64(AtomicU64),
-    /// The bits of an `f64`.
-    F64(AtomicU64),
+    F64(AtomicF64),
     I64(AtomicI64),
     Histogram(Histogram),
 }
 
-fn add_f64(cell: &AtomicU64, delta: f64) {
-    let mut current = cell.load(Ordering::Relaxed);
-    while let Err(seen) = cell.compare_exchange_weak(
-        current,
-        (f64::from_bits(current) + delta).to_bits(),
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-    ) {
-        current = seen;
+pub struct AtomicF64(AtomicU64);
+
+impl AtomicF64 {
+    fn new(value: f64) -> Self {
+        Self(AtomicU64::new(value.to_bits()))
+    }
+
+    fn load(&self) -> f64 {
+        f64::from_bits(self.0.load(Ordering::Relaxed))
+    }
+
+    fn store(&self, value: f64) {
+        self.0.store(value.to_bits(), Ordering::Relaxed);
+    }
+
+    fn add(&self, delta: f64) {
+        let mut current = self.0.load(Ordering::Relaxed);
+        while let Err(seen) = self.0.compare_exchange_weak(
+            current,
+            (f64::from_bits(current) + delta).to_bits(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            current = seen;
+        }
     }
 }
 
@@ -91,14 +97,12 @@ impl Value {
     fn new(kind: Kind, bounds: &[f64]) -> Self {
         match kind {
             Kind::CounterU64 | Kind::GaugeU64 => Value::U64(AtomicU64::new(0)),
-            Kind::CounterF64 | Kind::GaugeF64 => Value::F64(AtomicU64::new(0f64.to_bits())),
+            Kind::CounterF64 | Kind::GaugeF64 => Value::F64(AtomicF64::new(0.0)),
             Kind::GaugeI64 => Value::I64(AtomicI64::new(0)),
             Kind::Histogram => Value::Histogram(Histogram::new(bounds)),
         }
     }
 
-    /// An update on a cell of another kind does nothing; the typed C++
-    /// wrappers cannot make one.
     pub fn add_u64(&self, delta: u64) {
         if let Value::U64(cell) = self {
             cell.fetch_add(delta, Ordering::Relaxed);
@@ -119,13 +123,13 @@ impl Value {
 
     pub fn add_f64(&self, delta: f64) {
         if let Value::F64(cell) = self {
-            add_f64(cell, delta);
+            cell.add(delta);
         }
     }
 
     pub fn set_f64(&self, value: f64) {
         if let Value::F64(cell) = self {
-            cell.store(value.to_bits(), Ordering::Relaxed);
+            cell.store(value);
         }
     }
 
@@ -148,10 +152,9 @@ impl Value {
     }
 }
 
-/// One labelled stream of samples, its labels fixed at registration.
 pub struct Series {
-    /// `name="value"` pairs, comma separated and escaped, as rendered.
     label_text: String,
+    sorted_labels: Vec<(String, String)>,
     pub value: Value,
 }
 
@@ -165,22 +168,20 @@ pub struct Family {
 }
 
 impl Family {
-    /// Hidden families are skipped when rendering.
     pub fn set_visible(&self, visible: bool) {
         self.visible.store(visible, Ordering::Relaxed);
     }
 
-    /// Adds a series with these labels, or reports that the family has one.
     pub fn add_series(&self, labels: &[(&str, &str)]) -> Result<Arc<Series>, Error> {
-        let mut seen: Vec<&str> = Vec::with_capacity(labels.len());
+        let mut sorted_labels: Vec<(String, String)> = Vec::with_capacity(labels.len());
         let mut label_text = String::new();
         for (name, value) in labels {
             let reserved =
                 name.starts_with("__") || (self.kind == Kind::Histogram && *name == "le");
-            if !valid_label_name(name) || reserved || seen.contains(name) {
+            if !valid_name(name, false) || reserved {
                 return Err(Error::Invalid);
             }
-            seen.push(name);
+            sorted_labels.push((name.to_string(), value.to_string()));
             if !label_text.is_empty() {
                 label_text.push(',');
             }
@@ -189,15 +190,26 @@ impl Family {
             escape(value, true, &mut label_text);
             label_text.push('"');
         }
+        sorted_labels.sort();
+        if sorted_labels.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(Error::Invalid);
+        }
         let mut series = lock(&self.series);
+        if let Some(first) = series.first() {
+            let names = first.sorted_labels.iter().map(|(name, _)| name);
+            if !names.eq(sorted_labels.iter().map(|(name, _)| name)) {
+                return Err(Error::Invalid);
+            }
+        }
         if series
             .iter()
-            .any(|existing| existing.label_text == label_text)
+            .any(|existing| existing.sorted_labels == sorted_labels)
         {
             return Err(Error::Duplicate);
         }
         let added = Arc::new(Series {
             label_text,
+            sorted_labels,
             value: Value::new(self.kind, &self.bounds),
         });
         series.push(Arc::clone(&added));
@@ -219,12 +231,6 @@ fn valid_name(name: &str, allow_colon: bool) -> bool {
     chars.next().is_some_and(head) && chars.all(|c| head(c) || c.is_ascii_digit())
 }
 
-fn valid_label_name(name: &str) -> bool {
-    valid_name(name, false)
-}
-
-/// Escapes help text (backslash, newline) or, with `quote`, a label value
-/// (backslash, double quote, newline).
 fn escape(text: &str, quote: bool, out: &mut String) {
     for c in text.chars() {
         match c {
@@ -243,9 +249,6 @@ impl Registry {
         }
     }
 
-    /// Adds a family after those already registered; rendering follows that
-    /// order. `bounds` are the histogram upper bounds, in increasing order,
-    /// and must be empty for other kinds.
     pub fn add_family(
         &self,
         kind: Kind,
@@ -264,7 +267,18 @@ impl Registry {
             return Err(Error::Invalid);
         }
         let mut families = lock(&self.families);
-        if families.iter().any(|family| family.name == name) {
+        let taken = |family: &Family| {
+            let derived = |histogram: bool, name: &str, candidate: &str| {
+                name == candidate
+                    || (histogram
+                        && ["_bucket", "_sum", "_count"]
+                            .iter()
+                            .any(|suffix| candidate.strip_suffix(suffix) == Some(name)))
+            };
+            derived(family.kind == Kind::Histogram, &family.name, name)
+                || derived(kind == Kind::Histogram, name, &family.name)
+        };
+        if families.iter().any(|family| taken(family)) {
             return Err(Error::Duplicate);
         }
         let family = Arc::new(Family {
@@ -279,8 +293,6 @@ impl Registry {
         Ok(family)
     }
 
-    /// The text exposition of every visible family, each with at least one
-    /// series, in registration order.
     pub fn render(&self) -> String {
         let families: Vec<Arc<Family>> = lock(&self.families).clone();
         let mut out = String::new();
@@ -338,13 +350,7 @@ fn render_series(name: &str, series: &Series, out: &mut String) {
             &cell.load(Ordering::Relaxed).to_string(),
             out,
         ),
-        Value::F64(cell) => sample_line(
-            name,
-            "",
-            labels,
-            &format::sample(f64::from_bits(cell.load(Ordering::Relaxed))),
-            out,
-        ),
+        Value::F64(cell) => sample_line(name, "", labels, &format::printf_17g(cell.load()), out),
         Value::I64(cell) => sample_line(
             name,
             "",
@@ -357,9 +363,8 @@ fn render_series(name: &str, series: &Series, out: &mut String) {
             let bounds = histogram
                 .bounds
                 .iter()
-                .map(|&bound| format::shortest(bound))
+                .map(|&bound| format::shortest_round_trip(bound))
                 .chain(std::iter::once("+Inf".to_string()));
-            let bucket_name = format!("{name}_bucket");
             for (bound, bucket) in bounds.zip(histogram.buckets.iter()) {
                 cumulative += bucket.load(Ordering::Relaxed);
                 let mut with_le = String::from(labels);
@@ -367,9 +372,9 @@ fn render_series(name: &str, series: &Series, out: &mut String) {
                     with_le.push(',');
                 }
                 let _ = write!(with_le, "le=\"{bound}\"");
-                sample_line(&bucket_name, "", &with_le, &cumulative.to_string(), out);
+                sample_line(name, "_bucket", &with_le, &cumulative.to_string(), out);
             }
-            let sum = format::shortest(f64::from_bits(histogram.sum.load(Ordering::Relaxed)));
+            let sum = format::shortest_round_trip(histogram.sum.load());
             sample_line(name, "_sum", labels, &sum, out);
             sample_line(name, "_count", labels, &cumulative.to_string(), out);
         }

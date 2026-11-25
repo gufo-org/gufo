@@ -75,13 +75,34 @@ fn u64_max_set_and_f64_add_and_set() {
 }
 
 #[test]
-fn wrong_kind_updates_do_nothing() {
+fn an_update_on_a_cell_of_another_kind_is_ignored() {
     let registry = Registry::new();
     let cell = series(&registry, Kind::CounterU64, "c", "c");
     cell.value.add_f64(1.5);
     cell.value.set_i64(9);
     cell.value.observe(1.0);
     assert!(registry.render().ends_with("\nc 0\n"));
+}
+
+#[test]
+fn non_finite_observations_are_counted_but_never_summed() {
+    let registry = Registry::new();
+    let cell = registry
+        .add_family(Kind::Histogram, "h", "h", &[1.0])
+        .unwrap()
+        .add_series(&[])
+        .unwrap();
+    for value in [0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        cell.value.observe(value);
+    }
+    assert_eq!(
+        registry.render(),
+        "# HELP h h\n# TYPE h histogram\n\
+         h_bucket{le=\"1\"} 2\n\
+         h_bucket{le=\"+Inf\"} 4\n\
+         h_sum 0.5\n\
+         h_count 4\n"
+    );
 }
 
 #[test]
@@ -108,7 +129,7 @@ fn histogram_buckets_are_cumulative() {
          latency_seconds_bucket{status=\"ok\",le=\"0.5\"} 4\n\
          latency_seconds_bucket{status=\"ok\",le=\"1\"} 4\n\
          latency_seconds_bucket{status=\"ok\",le=\"+Inf\"} 6\n\
-         latency_seconds_sum{status=\"ok\"} NaN\n\
+         latency_seconds_sum{status=\"ok\"} 2.95\n\
          latency_seconds_count{status=\"ok\"} 6\n\
          latency_seconds_bucket{status=\"error\",le=\"0.1\"} 0\n\
          latency_seconds_bucket{status=\"error\",le=\"0.5\"} 0\n\
@@ -198,6 +219,65 @@ fn duplicate_names_and_label_sets_are_rejected() {
         Some(Error::Duplicate)
     );
     family.add_series(&[("a", "2")]).unwrap();
+}
+
+#[test]
+fn label_order_does_not_make_a_series_distinct() {
+    let registry = Registry::new();
+    let family = registry.add_family(Kind::CounterU64, "m", "", &[]).unwrap();
+    family.add_series(&[("a", "1"), ("b", "2")]).unwrap();
+    assert_eq!(
+        family.add_series(&[("b", "2"), ("a", "1")]).err(),
+        Some(Error::Duplicate)
+    );
+    family.add_series(&[("b", "1"), ("a", "2")]).unwrap();
+    assert!(
+        registry
+            .render()
+            .contains("m{a=\"1\",b=\"2\"} 0\nm{b=\"1\",a=\"2\"} 0\n")
+    );
+}
+
+#[test]
+fn a_series_must_use_the_label_names_of_the_first() {
+    let registry = Registry::new();
+    let family = registry.add_family(Kind::CounterU64, "m", "", &[]).unwrap();
+    family.add_series(&[("a", "1")]).unwrap();
+    for labels in [&[][..], &[("b", "1")], &[("a", "2"), ("b", "1")]] {
+        assert_eq!(family.add_series(labels).err(), Some(Error::Invalid));
+    }
+    family.add_series(&[("a", "2")]).unwrap();
+}
+
+#[test]
+fn histogram_sample_names_are_reserved() {
+    let registry = Registry::new();
+    registry
+        .add_family(Kind::Histogram, "h_seconds", "", &[1.0])
+        .unwrap();
+    for name in [
+        "h_seconds",
+        "h_seconds_bucket",
+        "h_seconds_sum",
+        "h_seconds_count",
+    ] {
+        assert_eq!(
+            registry.add_family(Kind::CounterU64, name, "", &[]).err(),
+            Some(Error::Duplicate),
+            "{name}"
+        );
+    }
+    registry
+        .add_family(Kind::CounterU64, "h_seconds_total", "", &[])
+        .unwrap();
+
+    registry
+        .add_family(Kind::CounterU64, "g_count", "", &[])
+        .unwrap();
+    assert_eq!(
+        registry.add_family(Kind::Histogram, "g", "", &[1.0]).err(),
+        Some(Error::Duplicate)
+    );
 }
 
 #[test]
@@ -367,6 +447,189 @@ mod c_interface {
             assert_eq!(hidden, "");
             gufo_metrics_registry_free(registry);
             gufo_metrics_registry_free(std::ptr::null_mut());
+        }
+    }
+
+    fn new_family(registry: *const c_void, name: &[u8]) -> (u32, *const c_void) {
+        let mut family: *const c_void = std::ptr::null();
+        // SAFETY: the registry is live, the name buffer matches its length,
+        // and `family` is writable.
+        let status = unsafe {
+            gufo_metrics_family_new(
+                registry,
+                0,
+                name.as_ptr(),
+                name.len(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                &mut family,
+            )
+        };
+        (status, family)
+    }
+
+    #[test]
+    fn rejects_a_null_registry_family_or_output() {
+        let mut out: *const c_void = std::ptr::null();
+        // SAFETY: null handles are the case under test; `out` is writable.
+        unsafe {
+            assert_eq!(
+                gufo_metrics_family_new(
+                    std::ptr::null(),
+                    0,
+                    b"n".as_ptr(),
+                    1,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    &mut out
+                ),
+                4
+            );
+            assert_eq!(
+                gufo_metrics_series_new(std::ptr::null(), std::ptr::null(), 0, &mut out),
+                4
+            );
+            assert_eq!(
+                gufo_metrics_render(std::ptr::null(), Some(collect), std::ptr::null_mut()),
+                4
+            );
+            gufo_metrics_family_set_visible(std::ptr::null(), false);
+            gufo_metrics_histogram_observe(std::ptr::null(), 1.0);
+            gufo_metrics_i64_set(std::ptr::null(), 1);
+        }
+        let registry = gufo_metrics_registry_new();
+        // SAFETY: the registry is live and freed once; a null `out` is the
+        // case under test.
+        unsafe {
+            assert_eq!(
+                gufo_metrics_family_new(
+                    registry,
+                    0,
+                    b"n".as_ptr(),
+                    1,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null_mut()
+                ),
+                4
+            );
+            gufo_metrics_registry_free(registry);
+        }
+    }
+
+    #[test]
+    fn rejects_kinds_beyond_the_last() {
+        let registry = gufo_metrics_registry_new();
+        for kind_value in [6, 7, u32::MAX] {
+            let mut family: *const c_void = std::ptr::null();
+            // SAFETY: the registry is live and `family` is writable.
+            let status = unsafe {
+                gufo_metrics_family_new(
+                    registry,
+                    kind_value,
+                    b"n".as_ptr(),
+                    1,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    &mut family,
+                )
+            };
+            assert_eq!(status, 1, "kind {kind_value}");
+        }
+        // SAFETY: the registry is live and freed once.
+        unsafe { gufo_metrics_registry_free(registry) };
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_names() {
+        let registry = gufo_metrics_registry_new();
+        assert_eq!(new_family(registry, &[0xff, 0xfe]).0, 1);
+        let (status, family) = new_family(registry, b"n");
+        assert_eq!(status, 0);
+        let mut cell: *const c_void = std::ptr::null();
+        let label = GufoMetricsLabel {
+            name: [0xffu8].as_ptr(),
+            name_len: 1,
+            value: b"v".as_ptr(),
+            value_len: 1,
+        };
+        // SAFETY: the family is live, the label buffers match their lengths,
+        // and `cell` is writable.
+        unsafe {
+            assert_eq!(gufo_metrics_series_new(family, &label, 1, &mut cell), 1);
+            gufo_metrics_registry_free(registry);
+        }
+    }
+
+    #[test]
+    fn accepts_null_pointers_with_zero_lengths() {
+        let registry = gufo_metrics_registry_new();
+        let mut family: *const c_void = std::ptr::null();
+        let mut cell: *const c_void = std::ptr::null();
+        let empty_text = GufoMetricsLabel {
+            name: b"k".as_ptr(),
+            name_len: 1,
+            value: std::ptr::null(),
+            value_len: 0,
+        };
+        // SAFETY: the registry and family are live, every nonzero length
+        // matches its buffer, and the outputs are writable.
+        unsafe {
+            assert_eq!(
+                gufo_metrics_family_new(
+                    registry,
+                    0,
+                    b"n".as_ptr(),
+                    1,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    &mut family
+                ),
+                0
+            );
+            assert_eq!(
+                gufo_metrics_series_new(family, std::ptr::null(), 0, &mut cell),
+                0
+            );
+            assert_eq!(
+                gufo_metrics_series_new(family, &empty_text, 1, &mut cell),
+                1
+            );
+            let mut nonnull_len_without_data = GufoMetricsLabel {
+                name: std::ptr::null(),
+                name_len: 1,
+                value: std::ptr::null(),
+                value_len: 0,
+            };
+            assert_eq!(
+                gufo_metrics_series_new(family, &raw mut nonnull_len_without_data, 1, &mut cell),
+                1
+            );
+            gufo_metrics_registry_free(registry);
+        }
+    }
+
+    #[test]
+    fn a_failing_write_callback_reports_callback() {
+        let registry = gufo_metrics_registry_new();
+        // SAFETY: the registry is live and freed once; `refuse` ignores its
+        // arguments.
+        unsafe {
+            assert_eq!(
+                gufo_metrics_render(registry, Some(refuse), std::ptr::null_mut()),
+                3
+            );
+            gufo_metrics_registry_free(registry);
         }
     }
 }

@@ -1,9 +1,3 @@
-//! The C interface of the registry. Handles are raw pointers into the
-//! registry's own allocations: a family or cell stays valid until its registry
-//! is freed, which the caller must outlive.
-
-#![allow(unsafe_code)]
-
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
@@ -48,14 +42,14 @@ type WriteFn = extern "C" fn(*mut c_void, *const u8, usize) -> c_int;
 
 /// # Safety
 /// `data` and `len` satisfy `gufo_ffi::input`.
+#[allow(unsafe_code)]
 unsafe fn text<'a>(data: *const u8, len: usize) -> Option<&'a str> {
     // SAFETY: forwarded from the caller.
     let bytes = unsafe { gufo_ffi::input(data, len) }?;
     std::str::from_utf8(bytes).ok()
 }
 
-/// Returns a new registry, or null on failure; free it with
-/// `gufo_metrics_registry_free`.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn gufo_metrics_registry_new() -> *mut c_void {
     guard(std::ptr::null_mut(), || {
@@ -66,6 +60,7 @@ pub extern "C" fn gufo_metrics_registry_new() -> *mut c_void {
 /// # Safety
 /// `registry` is null or from `gufo_metrics_registry_new`, not freed before,
 /// and no other thread uses it or any handle taken from it during or after.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gufo_metrics_registry_free(registry: *mut c_void) {
     guard((), || {
@@ -79,6 +74,7 @@ pub unsafe extern "C" fn gufo_metrics_registry_free(registry: *mut c_void) {
 /// # Safety
 /// `registry` is live; `name`, `help` and `bounds` satisfy `gufo_ffi::input`
 /// with their lengths; `out` is writable.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gufo_metrics_family_new(
     registry: *const c_void,
@@ -125,6 +121,7 @@ pub unsafe extern "C" fn gufo_metrics_family_new(
 /// `family` is from `gufo_metrics_family_new` on a live registry; `labels`
 /// holds `labels_len` entries whose strings satisfy `gufo_ffi::input`; `out`
 /// is writable.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gufo_metrics_series_new(
     family: *const c_void,
@@ -165,6 +162,7 @@ pub unsafe extern "C" fn gufo_metrics_series_new(
 
 /// # Safety
 /// `family` is from `gufo_metrics_family_new` on a live registry.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gufo_metrics_family_set_visible(family: *const c_void, visible: bool) {
     guard((), || {
@@ -175,11 +173,9 @@ pub unsafe extern "C" fn gufo_metrics_family_set_visible(family: *const c_void, 
     })
 }
 
-/// Hands the text exposition to `write` once, as bytes valid during the call.
-/// `write` returns nonzero to fail the render with `GUFO_METRICS_CALLBACK`.
-///
 /// # Safety
 /// `registry` is live; `write` is callable with `context`.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gufo_metrics_render(
     registry: *const c_void,
@@ -202,10 +198,9 @@ pub unsafe extern "C" fn gufo_metrics_render(
     })
 }
 
-/// Runs `update` on the cell, ignoring null.
-///
 /// # Safety
 /// `cell` is null or from `gufo_metrics_series_new` on a live registry.
+#[allow(unsafe_code)]
 unsafe fn with_cell(cell: *const c_void, update: impl FnOnce(&Series)) {
     guard((), || {
         // SAFETY: the caller supplies a live cell or null.
@@ -219,6 +214,7 @@ macro_rules! cell_update {
     ($name:ident, $arg:ty, $method:ident) => {
         /// # Safety
         /// `cell` is null or from `gufo_metrics_series_new` on a live registry.
+        #[allow(unsafe_code)]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(cell: *const c_void, value: $arg) {
             // SAFETY: forwarded from the caller.
