@@ -155,7 +155,9 @@ void TestProductionMemoryScaling() {
 
 void TestCanonicalMemoryAccountingAndSnapshot() {
   const auto config = gufo::models::qwen::make_small_qwen_config();
-  constexpr std::uint32_t context = 32;
+  // The second FP32 head starts one token before a state-page boundary.
+  const std::uint32_t context =
+      gufo::mem::kPageBytes / (config.head_dim * sizeof(float)) - 1;
   const auto fp32 = Fp32Policy();
   const auto fp16 = Fp16Policy();
   const auto fp32_usage =
@@ -181,6 +183,7 @@ void TestCanonicalMemoryAccountingAndSnapshot() {
   Expect(fp16_arena.d_attention_kv_f16 != nullptr,
          "FP16-only arena must allocate its canonical KV plane");
   HIP_CHECK(hipStreamSynchronize(fp16_arena.stream));
+  fp16_arena.EnsureKvRows(7);
   auto snapshot = fp16_arena.SaveSnapshot(7);
   Expect(snapshot->KvStorage() == QwenKvCacheStorage::kFp16,
          "snapshot must record the canonical FP16 KV format");
@@ -189,6 +192,7 @@ void TestCanonicalMemoryAccountingAndSnapshot() {
 
   // FP32 reference KV is head-major, unlike the production FP16 plane.
   QwenGpuArena fp32_arena(config, context, fp32);
+  fp32_arena.EnsureKvRows(context);
   HIP_CHECK(hipStreamSynchronize(fp32_arena.stream));
   std::vector<float> source(kv_elements), actual(kv_elements);
   for (std::size_t i = 0; i < source.size(); ++i)
@@ -222,6 +226,35 @@ void TestCanonicalMemoryAccountingAndSnapshot() {
              "FP32 snapshot lost a head's valid prefix or restored its tail");
     }
   }
+
+  // Use disjoint ranges of the backed KV reservation. Different pitches put
+  // the first source row and the second destination row across page edges.
+  const auto page = gufo::mem::kPageBytes / sizeof(float);
+  auto* src = fp32_arena.d_kv_cache + 3 * page - 2;
+  const auto dst_pitch = page / 2 + 3;
+  auto* dst = fp32_arena.d_kv_cache + page - dst_pitch - 2;
+  constexpr std::size_t width = 5, rows = 5, src_pitch = 7;
+  auto copy = [&](float* out, std::size_t out_pitch, const float* in,
+                  std::size_t in_pitch) {
+    gufo::hip::CopyKvRows(out, out_pitch * sizeof(float), in,
+                          in_pitch * sizeof(float), width * sizeof(float), rows,
+                          hipMemcpyDeviceToDevice, fp32_arena.stream);
+    HIP_CHECK(hipStreamSynchronize(fp32_arena.stream));
+  };
+  copy(dst, dst_pitch, src, src_pitch);
+  HIP_CHECK(hipMemset(src, 0, rows * src_pitch * sizeof(float)));
+  HIP_CHECK(hipDeviceSynchronize());
+  copy(src, src_pitch, dst, dst_pitch);
+  HIP_CHECK(hipMemcpy(actual.data(), src, rows * src_pitch * sizeof(float),
+                      hipMemcpyDeviceToHost));
+  for (std::size_t row = 0; row < rows; ++row) {
+    Expect(std::memcmp(actual.data() + row * src_pitch,
+                       source.data() + 3 * page - 2 + row * src_pitch,
+                       width * sizeof(float)) == 0,
+           "mapped KV copies changed row bytes");
+    for (std::size_t i = width; i < src_pitch; ++i)
+      Expect(actual[row * src_pitch + i] == 0, "mapped KV copy wrote padding");
+  }
 }
 
 void TestCompactPersistentSnapshotRoundTrip() {
@@ -231,6 +264,7 @@ void TestCompactPersistentSnapshotRoundTrip() {
   constexpr std::size_t header_bytes = 80;
   const auto policy = Fp16Policy();
   QwenGpuArena source(config, context, policy);
+  source.EnsureKvRows(context);
   HIP_CHECK(hipStreamSynchronize(source.stream));
 
   const std::size_t attention_layers = config.FullAttentionLayerCount();
@@ -298,6 +332,7 @@ void TestCompactPersistentSnapshotRoundTrip() {
          "compact snapshot must overwrite every destination byte");
 
   QwenGpuArena restored(config, context, policy);
+  restored.EnsureKvRows(context);
   HIP_CHECK(hipMemset(restored.d_attention_kv_f16, 0xA5,
                       source_kv.size() * sizeof(std::uint16_t)));
   // The arena restores on a nonblocking stream; finish the default-stream
