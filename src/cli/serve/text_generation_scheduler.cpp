@@ -1874,9 +1874,33 @@ struct TextGenerationScheduler::Impl {
     }
   }
 
+  /// Advances a token that PrepareDecode published and then deferred.
+  /// Returns whether the request can keep decoding.
+  [[nodiscard]] bool AdvancePending(
+      const std::shared_ptr<ScheduledRequest>& request) {
+    try {
+      const auto decode_start = PrepareDecode(request);
+      if (!decode_start.has_value())
+        return false;
+      request->runner_request.Advance();
+      FinishAdvanced(request, *decode_start);
+    } catch (...) {
+      const auto failure = std::current_exception();
+      if (!CompleteIfStopped(request))
+        CompleteFailure(request, failure);
+      return false;
+    }
+    return !IsTerminal(request);
+  }
+
   void StepDecode(const std::shared_ptr<ScheduledRequest>& request) {
     consecutive_active_prefill_chunks = 0;
     if (multi_token_decode) {
+      // A batched plain advance can defer a published token for snapshot
+      // capture. The multi-token step rejects a pending token, so advance it
+      // first, as the plain path below does through PrepareDecode.
+      if (request->advance_pending && !AdvancePending(request))
+        return;
       StepMultiTokenDecode(request);
       return;
     }
