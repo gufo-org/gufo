@@ -205,10 +205,11 @@ buckets run from 1 ms to 1,200 s. `/slots` shows what each session is doing,
 `POST /apply-template` the prompt a chat request becomes.
 [Troubleshooting](troubleshooting.md) covers the logs.
 
-`gufo serve embedding` also answers `/metrics`, with `gufo_embedding_*`
-families instead of the llama-server ones: requests by outcome, input parts by
-modality, tokens embedded, request latency and requests in flight. Requests
-rejected as too long or malformed by the service count as `invalid`.
+`gufo serve embedding` and `gufo serve asr` answer `/metrics` with
+`gufo_embedding_*` or `gufo_asr_*` families instead of the llama-server ones:
+outcomes, latency, requests in flight, tokens embedded or audio transcribed, and
+open realtime sessions. Only calls that reach the service count, and the ASR
+server has no `gufo_device_lost_total`. [Internals](internal/server.md) has all.
 
 ## llama-swap
 

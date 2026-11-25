@@ -72,6 +72,10 @@ a time in arrival order, and cancelling a request removes its queued pieces.
 `--served-model-name` sets the model ID clients send; repeat it to accept
 aliases. Speech synthesis runs as a separate server, `gufo serve tts`.
 
+`GET /metrics` returns Prometheus `gufo_asr_*` metrics: requests by outcome,
+audio seconds transcribed, request latency, real-time factor, requests in
+flight and open live sessions. See [Metrics](../server.md#metrics).
+
 ## Performance
 
 As of September 21, 2026, on Strix Halo, transcription runs at **15.27×

@@ -498,7 +498,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/v1/completions` | Optional legacy text completion adapter |
 | `GET` | `/health` | Process liveness and GPU context (aliases: `/v1/health`, `/healthz`, `/`) |
 | `GET` | `/ready` | Model and backend readiness (aliases: `/v1/ready`, `/readyz`) |
-| `GET` | `/metrics` | Prometheus-format operational metrics (text LLM and embedding serving) |
+| `GET` | `/metrics` | Prometheus-format operational metrics (text LLM, embedding and ASR serving) |
 
 ### Other model services
 
@@ -1620,12 +1620,12 @@ for C++ by `src/core/metrics.hpp`) in the Prometheus text format. A process
 serves one model class, and `HttpServer` answers `GET /metrics` and
 `GET /v1/metrics` from that class's registry. `MetricsEndpoint` in
 `http_server.cpp` picks the registry once, from the text backend, then the
-embedding service. A server with neither of them, such as the ASR, TTS, image,
-video and decision servers, answers 404.
+embedding service, then the ASR service. A server with none of them, such as
+the TTS, image, video and decision servers, answers 404.
 
 The text server registers its families once, in `TextMetrics`
 (`src/cli/serve/generation_metrics.hpp`), and the scheduler and request paths
-update them through typed handles. An embedding server never constructs
+update them through typed handles. An embedding or ASR server never constructs
 `TextMetrics`, so no `llamacpp:*` family appears there. An update neither locks
 nor allocates. A text scrape sets the process-global gauges and renders them
 under one mutex, so concurrent scrapes do not interleave.
@@ -1673,6 +1673,33 @@ norm. Tokens count only for calls that end `ok`.
 
 Batching happens inside the extension's runner, so the service has no device
 batch to time and exports no per-batch histogram.
+
+The ASR service owns its registry the same way, built in `AsrMetrics`
+(`src/cli/serve/asr_metrics.hpp`) when the service is constructed. It records
+in `AsrService::Transcribe` and where the service creates realtime sessions, so
+the HTTP and WebSocket paths and extension callers count alike. A `Transcribe`
+call counts once. It ends `ok`, `cancelled` when it fails and the caller's
+cancellation check is true afterwards, `invalid` when it fails with
+`result.invalid_audio` set and was not cancelled, or `error` otherwise,
+including a service that is not ready. The counters cover calls that reach the
+service. The readiness gate (503) in `HttpServer` and the handlers' 400
+rejections of a malformed request run before the service, so those answers
+count nowhere.
+
+| Family | Type | Meaning |
+|---|---|---|
+| `gufo_asr_requests_total{status}` | counter | `Transcribe` calls by `ok`, `error`, `cancelled` or `invalid`. |
+| `gufo_asr_audio_seconds_total{kind}` | counter | Seconds of audio transcribed. `batch` adds `audio_samples / sample_rate` from the runner's result for each successful call. `live` adds the samples of each `Push` that succeeds, at the rate the session was created with. Voice conversations add nothing. |
+| `gufo_asr_request_seconds` | histogram | Wall time from admission to the end of a call, in buckets from 50 ms to 120 s. It includes time queued behind other requests. An injected runner waits at the transcription gate. The native runtime takes no gate and waits at its own per-chunk admission. |
+| `gufo_asr_real_time_factor` | histogram | Processing seconds divided by audio seconds for successful calls, in buckets from 0.01 to 2. Processing time is the runner's `timings.total_ms` when it is nonzero and wall time otherwise, so queue and gate waits stay out of it for a runner that reports its own timing. |
+| `gufo_asr_requests_in_flight` | gauge | Calls admitted and not yet finished. |
+| `gufo_asr_live_sessions`, `gufo_asr_voice_sessions` | gauge | Realtime sessions that are open. |
+| `gufo_asr_sessions_total{kind}` | counter | Realtime sessions opened, by `live` or `voice`. |
+
+The service returns each realtime session wrapped in an object that holds the
+gauge for the session's lifetime, so every path that destroys the session
+releases it. The ASR path does not detect a lost device, so an ASR server
+exports no `gufo_device_lost_total`.
 
 `/metrics` exposes total prompt/generated tokens and the latest prompt/decode
 speeds. The token counters advance as each prefill chunk and generated token
