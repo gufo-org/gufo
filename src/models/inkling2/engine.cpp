@@ -221,7 +221,7 @@ struct Engine::Impl {
   int pos0 = 0;  // position of the first token of the running ubatch
 
   // activations (all [U][dim] F32 unless noted)
-  float *cur, *prelude, *bankout, *tau;
+  float *cur, *prelude, *bankout;
   float* blocks[6];
   float* bank[4];
   float *mixed, *ctl[3], *in[3], *msgs, *msgs_next, *minv[2], *xinv, *gbuf,
@@ -376,9 +376,8 @@ struct Engine::Impl {
     std::size_t k = 1;  // next group boundary index
   };
   // Live between two visits of a ubatch: cur, prelude, bankout, blocks[6],
-  // bank[4], tau.
+  // bank[4].
   float* spill_buf[13] = {};
-  float* spill_tau = nullptr;
   float** LiveBufs(float** out) {
     int n = 0;
     out[n++] = cur;
@@ -398,9 +397,6 @@ struct Engine::Impl {
       Check(hipMemcpyAsync(spill_buf[i], live[i], rows, hipMemcpyDeviceToDevice,
                            s),
             "spill");
-    Check(hipMemcpyAsync(spill_tau, tau, static_cast<std::size_t>(T) * 4,
-                         hipMemcpyDeviceToDevice, s),
-          "spill");
   }
   void Unspill() {
     float* live[13];
@@ -410,9 +406,6 @@ struct Engine::Impl {
       Check(hipMemcpyAsync(live[i], spill_buf[i], rows, hipMemcpyDeviceToDevice,
                            s),
             "unspill");
-    Check(hipMemcpyAsync(tau, spill_tau, static_cast<std::size_t>(T) * 4,
-                         hipMemcpyDeviceToDevice, s),
-          "unspill");
   }
   /// Called after every visit unit; yields at the group boundaries. `mid`:
   /// transient activations are live (inside a ubatch), so they are spilled
@@ -548,10 +541,8 @@ struct Engine::Impl {
     cur = NewBuf(u * kEmbd);
     prelude = NewBuf(u * kEmbd);
     bankout = NewBuf(u * kEmbd);
-    tau = NewBuf(u);
     for (auto& b : spill_buf)
       b = NewBuf(u * kEmbd);  // layered prefill spill area
-    spill_tau = NewBuf(u);
     for (auto& b : blocks)
       b = NewBuf(u * kEmbd);
     for (auto& b : bank)
@@ -912,13 +903,14 @@ struct Engine::Impl {
             inp[j].ld,
             msg + j * kEmbd,
             4 * kEmbd,
-            DF(c.down),
-            DF(c.gain),
-            DF(c.forget),
+            HW(c.down),
+            HW(c.gain),
+            HW(c.forget),
             gate64 + static_cast<std::size_t>(j) * U * 64,
             ctl[j],
             msg_inv ? msg_inv + static_cast<std::size_t>(j) * T : nullptr,
-            xinv + static_cast<std::size_t>(is_swa ? 0 : j) * T};
+            xinv + static_cast<std::size_t>(is_swa ? 0 : j) * T,
+            ctl_half ? 1 : 0};
       }
       fs::CtlPrefill(s, cj, T, cfg->rms_eps);
       for (int j = 0; j < 3; ++j)
@@ -1107,13 +1099,14 @@ struct Engine::Impl {
                  kEmbd,
                  msg + 3 * kEmbd,
                  4 * kEmbd,
-                 DF(c.down),
-                 DF(c.gain),
-                 DF(c.forget),
+                 HW(c.down),
+                 HW(c.gain),
+                 HW(c.forget),
                  gate64,
                  ctl[0],
                  msg_inv ? msg_inv + 3 * static_cast<std::size_t>(T) : nullptr,
-                 xinv};
+                 xinv,
+                 ctl_half ? 1 : 0};
       fs::CtlPrefill(s, cj, T, cfg->rms_eps);
       hin = ctl[0];
     }
@@ -1174,7 +1167,7 @@ struct Engine::Impl {
     const int E = static_cast<int>(cfg->n_expert),
               K = static_cast<int>(cfg->n_expert_used);
     const int nff = static_cast<int>(cfg->n_ff_expert);
-    fs::RouterPrefill(s, DF(L.ffn_gate_inp), h, rlog, T);
+    fs::RouterPrefill(s, HW(L.ffn_gate_inp), h, rlog, T, ctl_half);
     if (K == 8 && E == 128)
       fs::TopkPrefill(s, rlog, DF(L.exp_probs_b), ids_d, wts, T,
                       cfg->expert_weights_scale);
@@ -1183,7 +1176,7 @@ struct Engine::Impl {
                      cfg->expert_weights_scale);
     const int P = T * K;
     if (F.moe >= 0) {
-      const int tile = T >= kWideTileTokens ? 128 : T >= 1024 ? 64 : 32;
+      const int tile = T >= 512 ? 128 : 32;
       const int max_items = (P + tile - 1) / tile + E;
       fs::MoeRoute(s, ids_d, wts, P, tile, mws);  // h's F16 copy is in p_h16
       if (side)
@@ -2031,8 +2024,6 @@ struct Engine::Impl {
                            hipMemcpyDeviceToDevice, s),
             "input rows copy");
     }
-    kk::LogScale(s, tau, pos0, T, static_cast<float>(cfg->log_scale_floor),
-                 cfg->log_scale_alpha);
     nblocks = 0;
     UploadDenseItems();
     int visit = 0;
@@ -2113,8 +2104,18 @@ struct Engine::Impl {
       return;
 
     // output: attention-residual mix, norm, lm head, soft cap, crop
-    FMix(States(cur), DF(w->output_res_query), 1, mixf);
-    kk::RmsNorm(s, mixf, kEmbd, DF(w->output_norm), hn, kEmbd, kEmbd, T,
+    const bool need_all = dsp || sink;
+    const int out_n = need_all ? T : 1;
+    const std::size_t out_off =
+        need_all ? 0 : static_cast<std::size_t>(T - 1) * kEmbd;
+    {
+      kk::MixStates st = States(cur);
+      for (int i = 0; i < st.n; ++i)
+        st.ptr[i] += out_off;
+      kk::Mix(s, st, DF(w->output_res_query), 1, kEmbd, out_n, mixf,
+              cfg->rms_eps, nullptr);
+    }
+    kk::RmsNorm(s, mixf, kEmbd, DF(w->output_norm), hn, kEmbd, kEmbd, out_n,
                 cfg->rms_eps);
     if (dsp) {
       CaptureFeature(s, hn, T, 3, p_feat);
@@ -2145,7 +2146,7 @@ struct Engine::Impl {
         ss.logits_stale_ = false;
       }
     } else {
-      chunk(T - 1, 1, &host);
+      chunk(need_all ? T - 1 : 0, 1, &host);
       ss.logits_ = std::move(host);
       ss.logits_stale_ = false;
     }

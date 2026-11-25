@@ -67,9 +67,11 @@ struct Drafter::Impl {
   float* qs = nullptr;
   float* ikv;  // injection K | V [n][2048]
   int *d_anchor, *d_pos, *d_prev, *d_tokens;
-  // pinned host staging: [anchor, pos] in, [tokens 8 | confidences 8] out
+  // pinned host staging: [anchor, pos] in, [tokens 8 | confidences 8] out,
+  // and prefill GEMM item list
   int* h_in = nullptr;
   float* h_out = nullptr;
+  int* h_items = nullptr;
   // work items of n = 1 .. 8 rows (one item each) for injections
   int* small_items = nullptr;
   int *it_n, *it_e, *it_s, *it_c;  // GEMM work items (n rows)
@@ -97,6 +99,8 @@ struct Drafter::Impl {
       (void)hipHostFree(h_in);
     if (h_out)
       (void)hipHostFree(h_out);
+    if (h_items)
+      (void)hipHostFree(h_items);
   }
 
   const GgufTensorInfo& Need(std::string_view name, GgmlType type,
@@ -130,14 +134,15 @@ struct Drafter::Impl {
         Upload(Need(n, GgmlType::kBF16, e), tot));
   }
 
-  fs::GemmItems Items(int* n_items, int* e, int* s, int* c, int rows) {
+  fs::GemmItems Items(int* n_items, int* e, int* s, int* c, int rows,
+                      int tile = 64) {
     fs::GemmItems it{};
     it.nitems = n_items;
     it.item_e = e;
     it.item_start = s;
     it.item_n = c;
-    it.max_items = (rows + 63) / 64;
-    it.tile = 64;
+    it.max_items = (rows + tile - 1) / tile;
+    it.tile = tile;
     return it;
   }
   void Gemm(hipStream_t s, const void* w, int m, int k, const void* a,
@@ -376,6 +381,9 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_out),
                         16 * kMaxSessions * sizeof(float)),
           "pinned");
+    Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_items),
+                        (1 + 2 * (Impl::kMaxInject / 64)) * sizeof(int)),
+          "pinned");
     I.small_items = I.Alloc<int>(8 * 4);
     {
       int host[8 * 4];
@@ -428,26 +436,24 @@ void Drafter::Inject(hipStream_t s, State& st, const float* feats,
     fs::GemmItems it{};
     if (m <= 8) {
       int* b = I.small_items + (m - 1) * 4;
-      it = I.Items(b, b + 1, b + 2, b + 3, m);
+      it = I.Items(b, b + 1, b + 2, b + 3, m, 64);
     } else {
-      const int ni = (m + 63) / 64;
-      std::vector<int> host(1 + 2 * ni);
-      host[0] = ni;
+      const int tile = m >= 256 ? 128 : 64;
+      const int ni = (m + tile - 1) / tile;
+      I.h_items[0] = ni;
       for (int i = 0; i < ni; ++i) {
-        host[1 + i] = i * 64;
-        host[1 + ni + i] = std::min(64, m - i * 64);
+        I.h_items[1 + i] = i * tile;
+        I.h_items[1 + ni + i] = std::min(tile, m - i * tile);
       }
-      Check(hipMemcpyAsync(I.it_n, host.data(), 4, hipMemcpyHostToDevice, s),
+      Check(hipMemcpyAsync(I.it_n, I.h_items, 4, hipMemcpyHostToDevice, s),
             "items");
-      Check(hipMemcpyAsync(I.it_s, host.data() + 1, ni * 4,
+      Check(hipMemcpyAsync(I.it_s, I.h_items + 1, ni * 4, hipMemcpyHostToDevice,
+                           s),
+            "items");
+      Check(hipMemcpyAsync(I.it_c, I.h_items + 1 + ni, ni * 4,
                            hipMemcpyHostToDevice, s),
             "items");
-      Check(hipMemcpyAsync(I.it_c, host.data() + 1 + ni, ni * 4,
-                           hipMemcpyHostToDevice, s),
-            "items");
-      // the pageable copies above are staged: wait before `host` goes away
-      Check(hipStreamSynchronize(s), "items");
-      it = I.Items(I.it_n, I.it_e, I.it_s, I.it_c, m);
+      it = I.Items(I.it_n, I.it_e, I.it_s, I.it_c, m, tile);
     }
     dsp::MixArgs ma{};
     ma.feat = f;

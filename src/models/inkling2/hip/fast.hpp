@@ -340,31 +340,34 @@ void MoeTail(hipStream_t s, const float* pairs, float* state, const float* w,
 void ConvAdd(hipStream_t s, const float* x, float* state, const float* w,
              float* cur, int t, int c, float scale);
 
-/// Prefill loop controller and router over T tokens (F32 weights, tiled SIMT).
+/// Prefill loop controller and router over T tokens (F32 or exact-BF16 weights,
+/// tiled SIMT).
 struct CtlPJob {
   const float* x;  // [T][ldx]
   int ldx;
   const float* msg;  // [T][ldm]
   int ldm;
-  const float* down;    // [64][4608]
-  const float* gain;    // [2304][64]
-  const float* forget;  // [2304][64]
-  float* g64;           // [T][64] scratch
-  float* out;           // [T][2304]
+  const void* down;    // [64][4608]  F32, or BF16 when `half`
+  const void* gain;    // [2304][64]
+  const void* forget;  // [2304][64]
+  float* g64;          // [T][64] scratch
+  float* out;          // [T][2304]
   // optional [T] inverse RMS of each msg row (from hip::Mix), else computed
   // here
   const float* minv = nullptr;
   // optional [T] inverse RMS of each x row, summed as the gate prologue sums it
   const float* xinv = nullptr;
+  int half = 0;
 };
 struct CtlPJobs {
   CtlPJob j[3];
   int n;
 };
 void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps);
-/// logits[t][r] = W[r] . x[t] for the F32 [128][2304] router.
-void RouterPrefill(hipStream_t s, const float* w, const float* x, float* logits,
-                   int t);
+/// logits[t][r] = W[r] . x[t] for the [128][2304] router (F32, or BF16 when
+/// `half`).
+void RouterPrefill(hipStream_t s, const void* w, const float* x, float* logits,
+                   int t, bool half = false);
 /// Sigmoid, biased top-8 and renormalisation of router logits [t][128] (wave
 /// per token).
 void TopkPrefill(hipStream_t s, const float* logits, const float* bias,
