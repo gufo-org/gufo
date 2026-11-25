@@ -272,6 +272,100 @@ fn messages_split_tool_turns() {
 }
 
 #[test]
+fn messages_apply_tool_changes_and_references() {
+    let mut host = Fake::default();
+    let tool = |name: &str| format!(r#"{{"name":"{name}","input_schema":{{"type":"object"}}}}"#);
+    let body = format!(
+        r#"{{"tools":[{},{}],"messages":[{{"role":"user","content":"find"}},
+            {{"role":"assistant","content":[{{"type":"tool_use","id":"c","name":"a","input":{{}}}}]}},
+            {{"role":"user","content":[{{"type":"tool_result","tool_use_id":"c","content":[
+              {{"type":"text","text":"found"}},{{"type":"tool_reference","tool_name":"b"}}]}}]}},
+            {{"role":"system","content":[{{"type":"tool_removal","tool":{{"type":"tool_reference","name":"a"}}}},
+              {{"type":"tool_addition","tool":{{"type":"tool_definition","definition":{}}}}}]}},
+            {{"role":"system","content":[{{"type":"text","text":"note"}},
+              {{"type":"tool_addition","tool":{{"type":"tool_reference","name":"a"}}}}]}},
+            {{"role":"user","content":"go"}}]}}"#,
+        tool("a"),
+        tool("b"),
+        tool("c")
+    );
+    let draft = run_api(Api::Messages, &body, &mut host).unwrap();
+    let names: Vec<&str> = draft.tools.added.iter().map(|t| t.name.as_str()).collect();
+    // A removed tool added back keeps its place; a defined tool follows.
+    assert_eq!(names, ["a", "b", "c"]);
+    assert_eq!(draft.messages[2].role, Role::Tool);
+    assert_eq!(draft.messages[2].content, "found\nTool loaded: b\n");
+    // The turn that held only changes adds no message; the other keeps its text.
+    let roles: Vec<Role> = draft.messages.iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        [
+            Role::User,
+            Role::Assistant,
+            Role::Tool,
+            Role::System,
+            Role::User
+        ]
+    );
+    assert_eq!(draft.messages[3].content, "note");
+
+    let removed = format!(
+        r#"{{"tools":[{},{}],"messages":[{{"role":"system","content":[
+            {{"type":"tool_removal","tool":{{"type":"tool_reference","name":"b"}}}}]}},
+            {{"role":"user","content":"go"}}]}}"#,
+        tool("a"),
+        tool("b")
+    );
+    let draft = run_api(Api::Messages, &removed, &mut host).unwrap();
+    let names: Vec<&str> = draft.tools.added.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["a"]);
+    // Removed, then defined again: declared, with the new definition.
+    let redefined = format!(
+        r#"{{"tools":[{}],"messages":[{{"role":"system","content":[
+            {{"type":"tool_removal","tool":{{"type":"tool_reference","name":"a"}}}}]}},
+            {{"role":"system","content":[{{"type":"tool_addition","tool":{{"type":"tool_definition",
+              "definition":{{"name":"a","description":"new","input_schema":{{"type":"object"}}}}}}}}]}},
+            {{"role":"user","content":"go"}}]}}"#,
+        tool("a")
+    );
+    let draft = run_api(Api::Messages, &redefined, &mut host).unwrap();
+    assert_eq!(draft.tools.added.len(), 1);
+    assert_eq!(draft.tools.added[0].name, "a");
+    assert_eq!(draft.tools.added[0].description, "new");
+
+    for (body, message) in [
+        (
+            r#"{"messages":[{"role":"system","content":[{"type":"tool_removal","tool":{"type":"tool_reference","name":"x"}}]},{"role":"user","content":"go"}]}"#,
+            "tool change references tool 'x', which is not declared in tools",
+        ),
+        (
+            r#"{"messages":[{"role":"user","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"x"}}]}]}"#,
+            "tool_addition and tool_removal blocks are only allowed in messages with role \"system\"",
+        ),
+        (
+            r#"{"messages":[{"role":"system","content":[{"type":"tool_removal","tool":{"type":"tool_reference","name":""}}]}]}"#,
+            "a tool change needs a tool_reference with a name, or (tool_addition only) a tool_definition",
+        ),
+        (
+            r#"{"messages":[{"role":"system","content":[{"type":"tool_removal","tool":{"type":"tool_definition","definition":{}}}]}]}"#,
+            "a tool change needs a tool_reference with a name, or (tool_addition only) a tool_definition",
+        ),
+    ] {
+        assert_eq!(
+            run_api(Api::Messages, body, &mut host).err(),
+            Some(rejected(400, "invalid_tools", message))
+        );
+    }
+    let missing = r#"{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c","name":"a","input":{}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":[{"type":"tool_reference"}]}]}]}"#;
+    assert!(matches!(
+        run_api(Api::Messages, missing, &mut host).err(),
+        Some(Failure::Rejected(Rejection { status: 400, ref message, .. }))
+            if message == "tool_reference blocks require a tool_name"
+    ));
+}
+
+#[test]
 fn fragments_start_from_the_request() {
     let mut host = Fake::default();
     let defaults = Defaults {
