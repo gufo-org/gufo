@@ -1154,6 +1154,12 @@ endfunction()
   add_test(NAME http_server_test COMMAND http_server_test)
   set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30)
 
+  add_executable(asr_metrics_test tests/cli/asr_metrics_test.cpp)
+  target_link_libraries(asr_metrics_test PRIVATE gufo_http)
+  add_test(NAME asr_metrics_test COMMAND asr_metrics_test)
+  set_tests_properties(asr_metrics_test PROPERTIES
+    LABELS "cpu;server;http;correctness" TIMEOUT 30)
+
   add_executable(embedding_metrics_test tests/cli/embedding_metrics_test.cpp)
   target_link_libraries(embedding_metrics_test PRIVATE gufo_http)
   add_test(NAME embedding_metrics_test COMMAND embedding_metrics_test)
