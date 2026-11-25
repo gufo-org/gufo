@@ -1149,6 +1149,14 @@ endfunction()
   add_test(NAME http_server_test COMMAND http_server_test)
   set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30)
 
+  add_executable(metrics_golden_test tests/cli/metrics_golden_test.cpp)
+  target_link_libraries(metrics_golden_test PRIVATE gufo_http)
+  target_compile_definitions(metrics_golden_test PRIVATE
+    GUFO_METRICS_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/metrics")
+  add_test(NAME metrics_golden_test COMMAND metrics_golden_test)
+  set_tests_properties(metrics_golden_test PROPERTIES
+    LABELS "cpu;server;http;correctness" TIMEOUT 30)
+
   add_executable(http_server_signals_test tests/cli/http_server_signals_test.cpp)
   target_link_libraries(http_server_signals_test PRIVATE gufo_http)
   add_test(NAME http_server_signals_test COMMAND http_server_signals_test)

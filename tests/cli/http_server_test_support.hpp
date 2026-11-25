@@ -98,6 +98,8 @@ public:
     return prompt_budget;
   }
   std::optional<PromptAdmissionBudget> prompt_budget;
+  std::optional<SharedState> shared_state() const override { return shared; }
+  std::optional<SharedState> shared;
   std::string model_path() const override { return served_path; }
   std::string build_info() const override { return served_build; }
   std::string served_path;
