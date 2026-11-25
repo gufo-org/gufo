@@ -2,8 +2,8 @@
 
 #include <bit>
 #include <cmath>
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -96,9 +96,9 @@ void TestRegistrationErrors() {
             registry.AddFamily<metrics::Histogram>("h", "h", bounds);
           }),
           "unsorted bounds throw");
-  Require(ThrowsInvalid(
-              [&] { registry.AddFamily<metrics::Histogram>("h2", "h"); }),
-          "a histogram without bounds throws");
+  Require(
+      ThrowsInvalid([&] { registry.AddFamily<metrics::Histogram>("h2", "h"); }),
+      "a histogram without bounds throws");
   family.Add({{"k", "v"}});
   Require(ThrowsInvalid([&] { family.Add({{"k", "v"}}); }),
           "duplicate label set throws");
@@ -137,17 +137,17 @@ void TestFloatFormatMatchesOstream() {
   auto gauge = registry.Add<metrics::Gauge>("v", "v");
   const auto check = [&](double value) {
     gauge.Set(value);
-    const std::string expected = "# HELP v v\n# TYPE v gauge\nv " +
-                                 Ostream(value) + "\n";
+    const std::string expected =
+        "# HELP v v\n# TYPE v gauge\nv " + Ostream(value) + "\n";
     if (registry.Render() != expected) {
       std::cerr << "got " << registry.Render() << "want " << expected;
       Require(false, "float text matches ostream");
     }
   };
   for (const double value :
-       {0.0, -0.0, 1.0, 0.1, 1e-9, 1234.5678, 1e16, 1e17, 1e20, 1e300,
-        5e-324, std::numeric_limits<double>::max(),
-        std::numeric_limits<double>::min(), 0.0001, 0.00001, 123456.789}) {
+       {0.0, -0.0, 1.0, 0.1, 1e-9, 1234.5678, 1e16, 1e17, 1e20, 1e300, 5e-324,
+        std::numeric_limits<double>::max(), std::numeric_limits<double>::min(),
+        0.0001, 0.00001, 123456.789}) {
     check(value);
     check(-value);
   }

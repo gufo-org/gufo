@@ -22,12 +22,11 @@ void Check(GufoMetricsStatus status, std::string_view what,
     case GUFO_METRICS_OK:
       return;
     case GUFO_METRICS_INVALID:
-      throw std::invalid_argument(std::string(what) + " is invalid: " +
-                                  std::string(name));
-    case GUFO_METRICS_DUPLICATE:
       throw std::invalid_argument(std::string(what) +
-                                  " is already registered: " +
-                                  std::string(name));
+                                  " is invalid: " + std::string(name));
+    case GUFO_METRICS_DUPLICATE:
+      throw std::invalid_argument(
+          std::string(what) + " is already registered: " + std::string(name));
     case GUFO_METRICS_CALLBACK:
     case GUFO_METRICS_INTERNAL:
       break;
@@ -62,10 +61,9 @@ const GufoMetricsFamily* AddFamily(const GufoMetricsRegistry* registry,
                                    std::string_view help,
                                    std::span<const double> bounds) {
   const GufoMetricsFamily* family = nullptr;
-  Check(gufo_metrics_family_new(registry, ToC(kind),
-                                Bytes(name), name.size(), Bytes(help),
-                                help.size(), bounds.data(), bounds.size(),
-                                &family),
+  Check(gufo_metrics_family_new(registry, ToC(kind), Bytes(name), name.size(),
+                                Bytes(help), help.size(), bounds.data(),
+                                bounds.size(), &family),
         "metric family", name);
   return family;
 }

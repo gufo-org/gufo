@@ -1034,8 +1034,7 @@ void TestParkedFollowersReserveVisibleSessions() {
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
   while (std::chrono::steady_clock::now() < deadline) {
-    exceeded_capacity |=
-        metrics::RequestsProcessing() - processing_before > 2;
+    exceeded_capacity |= metrics::RequestsProcessing() - processing_before > 2;
     std::this_thread::yield();
   }
   const auto states = scheduler->SessionStates();
@@ -1329,11 +1328,10 @@ void TestRequestTotalsDoNotNeedAConsumer() {
     const auto accepted_before = metrics::TotalDraftAcceptedTokens();
     auto request = scheduler->Submit({7}, 5, 0.0F);
     wait_terminal(request);
-    Expect(
-        metrics::TotalDraftRounds() - rounds_before == 2 &&
-            metrics::TotalDraftTokens() - drafts_before == 7 &&
-            metrics::TotalDraftAcceptedTokens() - accepted_before == 5,
-        "draft totals count at completion");
+    Expect(metrics::TotalDraftRounds() - rounds_before == 2 &&
+               metrics::TotalDraftTokens() - drafts_before == 7 &&
+               metrics::TotalDraftAcceptedTokens() - accepted_before == 5,
+           "draft totals count at completion");
   }
 }
 
@@ -2500,8 +2498,7 @@ void TestMetricsDuringCacheAdmission() {
     failed = true;
   }
   Expect(failed, "unsupported prompt context fails during admission");
-  Expect(metrics::RequestsProcessing() == 0 &&
-             metrics::RequestsDeferred() == 0,
+  Expect(metrics::RequestsProcessing() == 0 && metrics::RequestsDeferred() == 0,
          "failed admission retires its processing count");
   Expect(scheduler->Submit({4}, 1, 0.0F).Wait().tokens == ExpectedTokens(4, 1),
          "failed admission releases the session for replacement work");

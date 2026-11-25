@@ -39,8 +39,7 @@ std::string Scrape(RunningServer& server) {
   ExpectStatus(response, 200);
   const auto split = response.find("\r\n\r\n");
   assert(split != std::string::npos);
-  assert(response.find("Content-Type: text/plain; version=0.0.4\r\n") <
-         split);
+  assert(response.find("Content-Type: text/plain; version=0.0.4\r\n") < split);
   return response.substr(split + 4);
 }
 
@@ -82,8 +81,8 @@ int main() {
   gufo::server::RecordServerMetrics(Finished(1, 0, 1, 1e4, 1, 1e4));
   scrape("speeds of 0.1 tokens per second");
 
-  gufo::server::RecordServerMetrics(Finished(
-      123456789012, 0, 123456789012, 1.0, 123456789012, 1.0));
+  gufo::server::RecordServerMetrics(
+      Finished(123456789012, 0, 123456789012, 1.0, 123456789012, 1.0));
   scrape("speeds of 1.23456789012e14 tokens per second");
 
   gufo::server::RecordServerMetrics(
@@ -126,12 +125,11 @@ int main() {
       .preemptions = 1,
   };
   scrape("shared state only");
-  server.backend->prompt_budget =
-      TextGenerationBackend::PromptAdmissionBudget{
-          .budget_bytes = 4096,
-          .used_bytes = 1024,
-          .available_bytes = 3072,
-      };
+  server.backend->prompt_budget = TextGenerationBackend::PromptAdmissionBudget{
+      .budget_bytes = 4096,
+      .used_bytes = 1024,
+      .available_bytes = 3072,
+  };
   scrape("shared state and prompt budget");
   server.backend->shared.reset();
   scrape("prompt budget only");

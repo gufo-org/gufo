@@ -84,42 +84,38 @@ inline TextMetrics::TextMetrics() {
                                      "Total tokens generated");
   gen_seconds = registry.Add<FloatCounter>(
       "llamacpp:tokens_predicted_seconds_total", "Predict process time");
-  max_sequence_tokens = registry.Add<MaxCounter>(
-      "llamacpp:n_tokens_max", "Largest observed n_tokens.");
-  draft_rounds =
-      registry.Add<Counter>("llamacpp:spec_decode_num_drafts_total",
-                            "Total speculative verification rounds");
+  max_sequence_tokens = registry.Add<MaxCounter>("llamacpp:n_tokens_max",
+                                                 "Largest observed n_tokens.");
+  draft_rounds = registry.Add<Counter>("llamacpp:spec_decode_num_drafts_total",
+                                       "Total speculative verification rounds");
   draft_tokens =
       registry.Add<Counter>("llamacpp:spec_decode_num_draft_tokens_total",
                             "Total draft tokens proposed");
   draft_accepted_tokens =
       registry.Add<Counter>("llamacpp:spec_decode_num_accepted_tokens_total",
                             "Total draft tokens accepted");
-  lookup_tokens = registry.Add<Counter>(
-      "gufo_spec_lookup_tokens_total", "Total prompt-lookup copies proposed");
+  lookup_tokens = registry.Add<Counter>("gufo_spec_lookup_tokens_total",
+                                        "Total prompt-lookup copies proposed");
   lookup_accepted_tokens =
       registry.Add<Counter>("gufo_spec_lookup_accepted_tokens_total",
                             "Total prompt-lookup copies accepted");
   last_prompt_speed =
       registry.Add<Gauge>("llamacpp:prompt_tokens_seconds",
                           "Prompt processing speed in tokens per second");
-  last_gen_speed = registry.Add<Gauge>(
-      "llamacpp:predicted_tokens_seconds",
-      "Generation speed in tokens per second");
+  last_gen_speed = registry.Add<Gauge>("llamacpp:predicted_tokens_seconds",
+                                       "Generation speed in tokens per second");
   requests_processing = registry.Add<IntGauge>(
       "llamacpp:requests_processing",
       "Number of admitted requests, including cache preparation");
   requests_deferred = registry.Add<IntGauge>(
-      "llamacpp:requests_deferred",
-      "Number of requests waiting for a session");
+      "llamacpp:requests_deferred", "Number of requests waiting for a session");
   kv_cache_usage_ratio = registry.Add<Gauge>(
       "llamacpp:kv_cache_usage_ratio",
       "In-flight prompt and generated tokens over sessions times context; "
       "excludes retained cache");
 
-  const auto optional = [this](std::vector<Visibility>& group,
-                               auto& metric, std::string_view name,
-                               std::string_view help) {
+  const auto optional = [this](std::vector<Visibility>& group, auto& metric,
+                               std::string_view name, std::string_view help) {
     using Metric = std::remove_reference_t<decltype(metric)>;
     const auto family = registry.AddFamily<Metric>(name, help);
     metric = family.Add();
