@@ -2,87 +2,176 @@
 #define GUFO_SERVER_GENERATION_METRICS_HPP_
 
 #include <algorithm>
-#include <atomic>
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <vector>
 
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/core/json.hpp"
+#include "src/core/metrics.hpp"
 
 namespace gufo::server {
 
-// Process-wide `/metrics` values. Token counters advance per prefill chunk and
-// per generated token, so scrapes see work while requests are still running.
-namespace detail {
-inline std::atomic<std::uint64_t>& DeviceLostTotal() {
-  static std::atomic<std::uint64_t> count{0};
-  return count;
+/// The text server's `/metrics` values, kept in one process-wide registry.
+/// Token counters advance per prefill chunk and per generated token, so
+/// scrapes see work while requests are still running. Request totals are added
+/// once per request when it finishes. Schedulers add their own deltas to the
+/// request gauges, so a draining scheduler and its replacement can both
+/// contribute during a model reload.
+struct TextMetrics {
+  TextMetrics();
+
+  core::metrics::Registry registry;
+  core::metrics::Counter device_lost;
+  core::metrics::Counter prompt_tokens;
+  core::metrics::Counter cached_prompt_tokens;
+  core::metrics::FloatCounter prompt_seconds;
+  core::metrics::Counter gen_tokens;
+  core::metrics::FloatCounter gen_seconds;
+  core::metrics::MaxCounter max_sequence_tokens;
+  core::metrics::Counter draft_rounds;
+  core::metrics::Counter draft_tokens;
+  core::metrics::Counter draft_accepted_tokens;
+  core::metrics::Counter lookup_tokens;
+  core::metrics::Counter lookup_accepted_tokens;
+  core::metrics::Gauge last_prompt_speed;
+  core::metrics::Gauge last_gen_speed;
+  core::metrics::IntGauge requests_processing;
+  core::metrics::IntGauge requests_deferred;
+  /// Set at scrape time.
+  core::metrics::Gauge kv_cache_usage_ratio;
+
+  /// Present in the text only for backends that report them; set at scrape
+  /// time.
+  struct SharedState {
+    core::metrics::UintGauge bytes;
+    core::metrics::UintGauge charged_bytes;
+    core::metrics::UintGauge reclaimable_bytes;
+    core::metrics::UintGauge max_prompt_tokens;
+    core::metrics::Counter waits;
+    core::metrics::Counter pauses;
+    core::metrics::Counter preemptions;
+    std::vector<core::metrics::Visibility> families;
+
+    void Show(bool visible) const {
+      for (const auto& family : families)
+        family.Set(visible);
+    }
+  } shared_state;
+  struct PromptState {
+    core::metrics::UintGauge budget_bytes;
+    core::metrics::UintGauge reserved_bytes;
+    core::metrics::UintGauge available_bytes;
+    std::vector<core::metrics::Visibility> families;
+
+    void Show(bool visible) const {
+      for (const auto& family : families)
+        family.Set(visible);
+    }
+  } prompt_state;
+};
+
+inline TextMetrics::TextMetrics() {
+  using namespace core::metrics;
+  device_lost = registry.Add<Counter>("gufo_device_lost_total",
+                                      "Confirmed GPU context losses");
+  prompt_tokens = registry.Add<Counter>(
+      "llamacpp:prompt_tokens_total",
+      "Total prompt tokens processed, excluding cache hits");
+  cached_prompt_tokens =
+      registry.Add<Counter>("llamacpp:prompt_tokens_cached_total",
+                            "Total prompt tokens reused from cache");
+  prompt_seconds = registry.Add<FloatCounter>("llamacpp:prompt_seconds_total",
+                                              "Prompt process time");
+  gen_tokens = registry.Add<Counter>("llamacpp:tokens_predicted_total",
+                                     "Total tokens generated");
+  gen_seconds = registry.Add<FloatCounter>(
+      "llamacpp:tokens_predicted_seconds_total", "Predict process time");
+  max_sequence_tokens = registry.Add<MaxCounter>(
+      "llamacpp:n_tokens_max", "Largest observed n_tokens.");
+  draft_rounds =
+      registry.Add<Counter>("llamacpp:spec_decode_num_drafts_total",
+                            "Total speculative verification rounds");
+  draft_tokens =
+      registry.Add<Counter>("llamacpp:spec_decode_num_draft_tokens_total",
+                            "Total draft tokens proposed");
+  draft_accepted_tokens =
+      registry.Add<Counter>("llamacpp:spec_decode_num_accepted_tokens_total",
+                            "Total draft tokens accepted");
+  lookup_tokens = registry.Add<Counter>(
+      "gufo_spec_lookup_tokens_total", "Total prompt-lookup copies proposed");
+  lookup_accepted_tokens =
+      registry.Add<Counter>("gufo_spec_lookup_accepted_tokens_total",
+                            "Total prompt-lookup copies accepted");
+  last_prompt_speed =
+      registry.Add<Gauge>("llamacpp:prompt_tokens_seconds",
+                          "Prompt processing speed in tokens per second");
+  last_gen_speed = registry.Add<Gauge>(
+      "llamacpp:predicted_tokens_seconds",
+      "Generation speed in tokens per second");
+  requests_processing = registry.Add<IntGauge>(
+      "llamacpp:requests_processing",
+      "Number of admitted requests, including cache preparation");
+  requests_deferred = registry.Add<IntGauge>(
+      "llamacpp:requests_deferred",
+      "Number of requests waiting for a session");
+  kv_cache_usage_ratio = registry.Add<Gauge>(
+      "llamacpp:kv_cache_usage_ratio",
+      "In-flight prompt and generated tokens over sessions times context; "
+      "excludes retained cache");
+
+  const auto optional = [this](std::vector<Visibility>& group,
+                               auto& metric, std::string_view name,
+                               std::string_view help) {
+    using Metric = std::remove_reference_t<decltype(metric)>;
+    const auto family = registry.AddFamily<Metric>(name, help);
+    metric = family.Add();
+    group.push_back(family.visibility());
+  };
+  optional(shared_state.families, shared_state.bytes, "gufo_shared_state_bytes",
+           "Session state the configured sessions share when they do not all "
+           "fit at full context");
+  optional(shared_state.families, shared_state.charged_bytes,
+           "gufo_shared_state_charged_bytes",
+           "Shared session state charged to sessions");
+  optional(shared_state.families, shared_state.reclaimable_bytes,
+           "gufo_shared_state_reclaimable_bytes",
+           "Charged session state held by idle sessions or mapped past a "
+           "session's need");
+  optional(shared_state.families, shared_state.max_prompt_tokens,
+           "gufo_shared_state_max_prompt_tokens",
+           "Longest prompt the shared session state holds");
+  optional(shared_state.families, shared_state.waits,
+           "gufo_shared_state_waits_total",
+           "Requests that waited for shared session state");
+  optional(shared_state.families, shared_state.pauses,
+           "gufo_shared_state_pauses_total",
+           "Decoding requests paused until shared session state freed");
+  optional(shared_state.families, shared_state.preemptions,
+           "gufo_shared_state_preemptions_total",
+           "Requests stopped with memory_pressure so others could continue");
+  optional(prompt_state.families, prompt_state.budget_bytes,
+           "gufo_prompt_state_budget_bytes",
+           "Host RAM prompt state may claim before admission refuses");
+  optional(prompt_state.families, prompt_state.reserved_bytes,
+           "gufo_prompt_state_reserved_bytes",
+           "Host prompt state charged to in-flight requests");
+  optional(prompt_state.families, prompt_state.available_bytes,
+           "gufo_prompt_state_available_bytes",
+           "Remaining host prompt state budget");
+  shared_state.Show(false);
+  prompt_state.Show(false);
 }
-inline std::atomic<std::uint64_t>& TotalPromptTokens() {
-  static std::atomic<std::uint64_t> count{0};
-  return count;
+
+/// Never destroyed, so late updates during process shutdown stay valid.
+inline TextMetrics& Metrics() {
+  static TextMetrics* const metrics = new TextMetrics;
+  return *metrics;
 }
-inline std::atomic<std::uint64_t>& TotalGenTokens() {
-  static std::atomic<std::uint64_t> count{0};
-  return count;
-}
-// Request totals below are added once per request when it finishes.
-inline std::atomic<std::uint64_t>& TotalCachedPromptTokens() {
-  static std::atomic<std::uint64_t> count{0};
-  return count;
-}
-inline std::atomic<double>& TotalPromptSeconds() {
-  static std::atomic<double> seconds{0.0};
-  return seconds;
-}
-inline std::atomic<double>& TotalGenSeconds() {
-  static std::atomic<double> seconds{0.0};
-  return seconds;
-}
-inline std::atomic<std::uint64_t>& MaxSequenceTokens() {
-  static std::atomic<std::uint64_t> count{0};
-  return count;
-}
-inline std::atomic<std::uint64_t>& TotalDraftRounds() {
-  static std::atomic<std::uint64_t> count{0};
-  return count;
-}
-inline std::atomic<std::uint64_t>& TotalDraftTokens() {
-  static std::atomic<std::uint64_t> count{0};
-  return count;
-}
-inline std::atomic<std::uint64_t>& TotalDraftAcceptedTokens() {
-  static std::atomic<std::uint64_t> count{0};
-  return count;
-}
-inline std::atomic<std::uint64_t>& TotalLookupTokens() {
-  static std::atomic<std::uint64_t> count{0};
-  return count;
-}
-inline std::atomic<std::uint64_t>& TotalLookupAcceptedTokens() {
-  static std::atomic<std::uint64_t> count{0};
-  return count;
-}
-inline std::atomic<double>& LastPromptSpeed() {
-  static std::atomic<double> val{0.0};
-  return val;
-}
-inline std::atomic<double>& LastGenSpeed() {
-  static std::atomic<double> val{0.0};
-  return val;
-}
-// Schedulers add their own deltas, so a draining scheduler and its
-// replacement can both contribute during a model reload.
-inline std::atomic<std::int64_t>& RequestsProcessing() {
-  static std::atomic<std::int64_t> count{0};
-  return count;
-}
-inline std::atomic<std::int64_t>& RequestsDeferred() {
-  static std::atomic<std::int64_t> count{0};
-  return count;
-}
-}  // namespace detail
 
 inline double PrefillTokensPerSecond(
     const TextGenerationBackend::Result& result) {
@@ -95,35 +184,18 @@ inline double PrefillTokensPerSecond(
 /// scheduler calls this when a request ends, whether or not its client reads
 /// the result; failed requests are not added.
 inline void RecordRequestMetrics(const TextGenerationBackend::Result& result) {
-  const auto add_seconds = [](std::atomic<double>& total, double ms) {
-    double current = total.load(std::memory_order_relaxed);
-    while (!total.compare_exchange_weak(current, current + ms / 1000.0,
-                                        std::memory_order_relaxed)) {
-    }
-  };
-  detail::TotalCachedPromptTokens().fetch_add(
-      std::min(result.cached_prompt_tokens, result.prompt_tokens),
-      std::memory_order_relaxed);
-  add_seconds(detail::TotalPromptSeconds(), result.prefill_ms);
-  add_seconds(detail::TotalGenSeconds(), result.decode_ms);
-  const std::uint64_t sequence_tokens =
-      result.prompt_tokens + result.completion_tokens;
-  std::uint64_t max_tokens =
-      detail::MaxSequenceTokens().load(std::memory_order_relaxed);
-  while (max_tokens < sequence_tokens &&
-         !detail::MaxSequenceTokens().compare_exchange_weak(
-             max_tokens, sequence_tokens, std::memory_order_relaxed)) {
-  }
-  detail::TotalDraftRounds().fetch_add(result.draft_rounds,
-                                       std::memory_order_relaxed);
-  detail::TotalDraftTokens().fetch_add(result.draft_tokens,
-                                       std::memory_order_relaxed);
-  detail::TotalDraftAcceptedTokens().fetch_add(result.draft_accepted_tokens,
-                                               std::memory_order_relaxed);
-  detail::TotalLookupTokens().fetch_add(result.lookup_tokens,
-                                        std::memory_order_relaxed);
-  detail::TotalLookupAcceptedTokens().fetch_add(result.lookup_accepted_tokens,
-                                                std::memory_order_relaxed);
+  TextMetrics& metrics = Metrics();
+  metrics.cached_prompt_tokens.Add(
+      std::min(result.cached_prompt_tokens, result.prompt_tokens));
+  metrics.prompt_seconds.Add(result.prefill_ms / 1000.0);
+  metrics.gen_seconds.Add(result.decode_ms / 1000.0);
+  metrics.max_sequence_tokens.Observe(result.prompt_tokens +
+                                      result.completion_tokens);
+  metrics.draft_rounds.Add(result.draft_rounds);
+  metrics.draft_tokens.Add(result.draft_tokens);
+  metrics.draft_accepted_tokens.Add(result.draft_accepted_tokens);
+  metrics.lookup_tokens.Add(result.lookup_tokens);
+  metrics.lookup_accepted_tokens.Add(result.lookup_accepted_tokens);
   const double prompt_per_second = PrefillTokensPerSecond(result);
   const double tok_per_sec =
       (result.decode_ms > 0.0 && result.completion_tokens > 0)
@@ -131,13 +203,10 @@ inline void RecordRequestMetrics(const TextGenerationBackend::Result& result) {
              (result.decode_ms / 1000.0))
           : 0.0;
 
-  if (prompt_per_second > 0.0) {
-    detail::LastPromptSpeed().store(prompt_per_second,
-                                    std::memory_order_relaxed);
-  }
-  if (tok_per_sec > 0.0) {
-    detail::LastGenSpeed().store(tok_per_sec, std::memory_order_relaxed);
-  }
+  if (prompt_per_second > 0.0)
+    metrics.last_prompt_speed.Set(prompt_per_second);
+  if (tok_per_sec > 0.0)
+    metrics.last_gen_speed.Set(tok_per_sec);
 }
 
 inline std::string GenerationLogDetails(

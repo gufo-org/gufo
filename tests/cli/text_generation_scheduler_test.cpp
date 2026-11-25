@@ -41,6 +41,7 @@
 #include "src/mem/ledger.hpp"
 #include "tests/cache/fake_adapter.hpp"
 #include "tests/cli/fake_cache_resources.hpp"
+#include "tests/cli/metrics_values.hpp"
 
 namespace {
 thread_local bool fail_prompt_enqueue_allocation{};
@@ -1007,7 +1008,7 @@ void TestSharedPrefixWaitRequiresPrefixReuse() {
 }
 
 void TestParkedFollowersReserveVisibleSessions() {
-  namespace metrics = gufo::server::detail;
+  namespace metrics = gufo::server::testing;
   auto control = SharedPrefixControl(true);
   control->block_prefill_label = 1;
   std::binary_semaphore entered(0), release(0);
@@ -1020,7 +1021,7 @@ void TestParkedFollowersReserveVisibleSessions() {
     }
   };
   auto scheduler = MakeScheduler(control, 2);
-  const auto processing_before = metrics::RequestsProcessing().load();
+  const auto processing_before = metrics::RequestsProcessing();
   const auto prompt = SharedPrompt(1200, 7000, 100);
   auto leader = scheduler->Submit(prompt, 2, 0.0F);
   control->WaitForPrefill(1);
@@ -1034,7 +1035,7 @@ void TestParkedFollowersReserveVisibleSessions() {
       std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
   while (std::chrono::steady_clock::now() < deadline) {
     exceeded_capacity |=
-        metrics::RequestsProcessing().load() - processing_before > 2;
+        metrics::RequestsProcessing() - processing_before > 2;
     std::this_thread::yield();
   }
   const auto states = scheduler->SessionStates();
@@ -1287,7 +1288,7 @@ void TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse() {
 }
 
 void TestRequestTotalsDoNotNeedAConsumer() {
-  namespace metrics = gufo::server::detail;
+  namespace metrics = gufo::server::testing;
   const auto wait_terminal =
       [](const TextGenerationScheduler::Request& request) {
         const auto deadline =
@@ -1304,16 +1305,16 @@ void TestRequestTotalsDoNotNeedAConsumer() {
     auto scheduler = MakeScheduler(control, 1);
     gufo::server::RecordServerMetrics(
         scheduler->Submit({1, 10}, 1, 0.0F).Wait());
-    const auto cached_before = metrics::TotalCachedPromptTokens().load();
+    const auto cached_before = metrics::TotalCachedPromptTokens();
     // Never waited on, like a stream whose first write fails.
     auto abandoned = scheduler->Submit({1, 10, 100, 11}, 1, 0.0F);
     wait_terminal(abandoned);
-    Expect(metrics::TotalCachedPromptTokens().load() - cached_before == 3,
+    Expect(metrics::TotalCachedPromptTokens() - cached_before == 3,
            "a finished request counts before anyone reads it");
     abandoned = {};
     const auto consumed = scheduler->Submit({1, 10, 100, 11}, 1, 0.0F).Wait();
     gufo::server::RecordServerMetrics(consumed);
-    Expect(metrics::TotalCachedPromptTokens().load() - cached_before ==
+    Expect(metrics::TotalCachedPromptTokens() - cached_before ==
                3 + consumed.cached_prompt_tokens,
            "reading the result does not count it again");
   }
@@ -1323,15 +1324,15 @@ void TestRequestTotalsDoNotNeedAConsumer() {
     control->multi_token_decode = true;
     control->prefix_reuse = false;
     auto scheduler = MakeScheduler(control, 1);
-    const auto rounds_before = metrics::TotalDraftRounds().load();
-    const auto drafts_before = metrics::TotalDraftTokens().load();
-    const auto accepted_before = metrics::TotalDraftAcceptedTokens().load();
+    const auto rounds_before = metrics::TotalDraftRounds();
+    const auto drafts_before = metrics::TotalDraftTokens();
+    const auto accepted_before = metrics::TotalDraftAcceptedTokens();
     auto request = scheduler->Submit({7}, 5, 0.0F);
     wait_terminal(request);
     Expect(
-        metrics::TotalDraftRounds().load() - rounds_before == 2 &&
-            metrics::TotalDraftTokens().load() - drafts_before == 7 &&
-            metrics::TotalDraftAcceptedTokens().load() - accepted_before == 5,
+        metrics::TotalDraftRounds() - rounds_before == 2 &&
+            metrics::TotalDraftTokens() - drafts_before == 7 &&
+            metrics::TotalDraftAcceptedTokens() - accepted_before == 5,
         "draft totals count at completion");
   }
 }
@@ -1426,10 +1427,10 @@ void TestBatchDeviceLossFailsSuccessfulPeers() {
 
 void TestModelOwnedBatchMetrics() {
   for (const std::size_t actual_width : {1U, 2U}) {
-    namespace metrics = gufo::server::detail;
-    const auto prompt_before = metrics::TotalPromptTokens().load();
-    const auto generated_before = metrics::TotalGenTokens().load();
-    const auto rounds_before = metrics::TotalDraftRounds().load();
+    namespace metrics = gufo::server::testing;
+    const auto prompt_before = metrics::TotalPromptTokens();
+    const auto generated_before = metrics::TotalGenTokens();
+    const auto rounds_before = metrics::TotalDraftRounds();
     auto control = std::make_shared<FakeControl>();
     control->multi_token_decode = true;
     control->batched_multi_token_decode = true;
@@ -1452,9 +1453,9 @@ void TestModelOwnedBatchMetrics() {
       Expect(result.token_metrics_recorded, "scheduled tokens counted live");
       gufo::server::RecordServerMetrics(result);
     }
-    Expect(metrics::TotalPromptTokens().load() - prompt_before == 2 &&
-               metrics::TotalGenTokens().load() - generated_before == 24 &&
-               metrics::TotalDraftRounds().load() - rounds_before == 8,
+    Expect(metrics::TotalPromptTokens() - prompt_before == 2 &&
+               metrics::TotalGenTokens() - generated_before == 24 &&
+               metrics::TotalDraftRounds() - rounds_before == 8,
            "speculative batches and HTTP completion count each token once");
   }
 }
@@ -2392,14 +2393,11 @@ void TestFifoReplacementAdmissionWithOneSlot() {
 }
 
 void TestServerMetricsAreLive() {
-  namespace metrics = gufo::server::detail;
-  const auto read = [](const auto& value) {
-    return value.load(std::memory_order_relaxed);
-  };
-  const auto prompt_before = read(metrics::TotalPromptTokens());
-  const auto generated_before = read(metrics::TotalGenTokens());
-  const auto processing_before = read(metrics::RequestsProcessing());
-  const auto deferred_before = read(metrics::RequestsDeferred());
+  namespace metrics = gufo::server::testing;
+  const auto prompt_before = metrics::TotalPromptTokens();
+  const auto generated_before = metrics::TotalGenTokens();
+  const auto processing_before = metrics::RequestsProcessing();
+  const auto deferred_before = metrics::RequestsDeferred();
   {
     auto control = std::make_shared<FakeControl>();
     control->block_advance_label = 1;
@@ -2407,15 +2405,15 @@ void TestServerMetricsAreLive() {
 
     auto active = scheduler->Submit({1, 10}, 3, 0.0F);
     control->WaitForAdvance(1);
-    Expect(read(metrics::TotalPromptTokens()) - prompt_before == 2,
+    Expect(metrics::TotalPromptTokens() - prompt_before == 2,
            "prompt tokens are counted when prefill executes");
-    Expect(read(metrics::TotalGenTokens()) - generated_before == 1,
+    Expect(metrics::TotalGenTokens() - generated_before == 1,
            "generated tokens are counted before the request completes");
-    Expect(read(metrics::RequestsProcessing()) - processing_before == 1,
+    Expect(metrics::RequestsProcessing() - processing_before == 1,
            "the running request is reported");
 
     auto queued = scheduler->Submit({2, 20}, 1, 0.0F);
-    Expect(read(metrics::RequestsDeferred()) - deferred_before == 1,
+    Expect(metrics::RequestsDeferred() - deferred_before == 1,
            "the waiting request is reported");
     control->ReleaseAdvance();
     const auto active_result = active.Wait();
@@ -2427,21 +2425,21 @@ void TestServerMetricsAreLive() {
            "scheduler results identify live token accounting");
     gufo::server::RecordServerMetrics(active_result);
     gufo::server::RecordServerMetrics(queued_result);
-    Expect(read(metrics::TotalPromptTokens()) - prompt_before == 4,
+    Expect(metrics::TotalPromptTokens() - prompt_before == 4,
            "HTTP completion does not count the prompt again");
-    Expect(read(metrics::TotalGenTokens()) - generated_before == 4,
+    Expect(metrics::TotalGenTokens() - generated_before == 4,
            "every generated token is counted once");
   }
-  Expect(read(metrics::RequestsProcessing()) == processing_before &&
-             read(metrics::RequestsDeferred()) == deferred_before,
+  Expect(metrics::RequestsProcessing() == processing_before &&
+             metrics::RequestsDeferred() == deferred_before,
          "a stopped scheduler withdraws its load");
 }
 
 void TestMetricsDuringCacheAdmission() {
-  namespace metrics = gufo::server::detail;
+  namespace metrics = gufo::server::testing;
   for (const bool cancel : {false, true}) {
-    const auto processing_before = metrics::RequestsProcessing().load();
-    const auto deferred_before = metrics::RequestsDeferred().load();
+    const auto processing_before = metrics::RequestsProcessing();
+    const auto deferred_before = metrics::RequestsDeferred();
     auto control = std::make_shared<FakeControl>();
     std::binary_semaphore entered(0), release(0);
     std::atomic<bool> arm{false};
@@ -2456,7 +2454,7 @@ void TestMetricsDuringCacheAdmission() {
     auto scheduler = MakeScheduler(control, 1);
     const auto first = scheduler->Submit({1, 10}, 1, 0.0F).Wait();
     Expect(first.tokens == ExpectedTokens(1, 1), "first request completes");
-    Expect(metrics::RequestsProcessing().load() == processing_before,
+    Expect(metrics::RequestsProcessing() == processing_before,
            "completed requests retire before Wait returns");
 
     arm.store(true);
@@ -2467,14 +2465,14 @@ void TestMetricsDuringCacheAdmission() {
     // before the scheduler pops this request; admission then waits for it.
     const auto admitted_deadline =
         std::chrono::steady_clock::now() + kTestTimeout;
-    while (metrics::RequestsProcessing().load() != processing_before + 1 &&
+    while (metrics::RequestsProcessing() != processing_before + 1 &&
            std::chrono::steady_clock::now() < admitted_deadline)
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    Expect(metrics::RequestsProcessing().load() == processing_before + 1 &&
-               metrics::RequestsDeferred().load() == deferred_before,
+    Expect(metrics::RequestsProcessing() == processing_before + 1 &&
+               metrics::RequestsDeferred() == deferred_before,
            "cache preparation remains visible as processing");
     auto queued = scheduler->Submit({2, 20}, 1, 0.0F);
-    Expect(metrics::RequestsDeferred().load() == deferred_before + 1,
+    Expect(metrics::RequestsDeferred() == deferred_before + 1,
            "requests waiting behind cache preparation remain deferred");
     if (cancel) {
       next.Cancel();
@@ -2488,8 +2486,8 @@ void TestMetricsDuringCacheAdmission() {
     if (!cancel)
       Expect(result.cache_hit && result.cached_prompt_tokens == 3,
              "continuation still reuses the live frontier");
-    Expect(metrics::RequestsProcessing().load() == processing_before &&
-               metrics::RequestsDeferred().load() == deferred_before,
+    Expect(metrics::RequestsProcessing() == processing_before &&
+               metrics::RequestsDeferred() == deferred_before,
            "completion and cancellation retire their gauges exactly once");
   }
   auto scheduler = MakeScheduler(std::make_shared<FakeControl>(), 1);
@@ -2502,16 +2500,16 @@ void TestMetricsDuringCacheAdmission() {
     failed = true;
   }
   Expect(failed, "unsupported prompt context fails during admission");
-  Expect(metrics::RequestsProcessing().load() == 0 &&
-             metrics::RequestsDeferred().load() == 0,
+  Expect(metrics::RequestsProcessing() == 0 &&
+             metrics::RequestsDeferred() == 0,
          "failed admission retires its processing count");
   Expect(scheduler->Submit({4}, 1, 0.0F).Wait().tokens == ExpectedTokens(4, 1),
          "failed admission releases the session for replacement work");
 }
 
 void TestSessionStatesFollowAdmittedRequests() {
-  namespace metrics = gufo::server::detail;
-  const auto processing_before = metrics::RequestsProcessing().load();
+  namespace metrics = gufo::server::testing;
+  const auto processing_before = metrics::RequestsProcessing();
   auto control = std::make_shared<FakeControl>();
   control->block_advance_label = 1;
   control->block_prefill_label = 2;
@@ -2548,7 +2546,7 @@ void TestSessionStatesFollowAdmittedRequests() {
              states[1].processed_prompt_tokens == 0 &&
              states[1].generated_tokens == 0 && states[1].remaining_tokens == 1,
          "concurrent requests hold distinct sessions");
-  Expect(metrics::RequestsProcessing().load() - processing_before == 2,
+  Expect(metrics::RequestsProcessing() - processing_before == 2,
          "processing sessions match the processing gauge");
   control->ReleasePrefill();
   Expect(first.Wait().tokens.size() == 8 && second.Wait().tokens.size() == 1,
@@ -2796,7 +2794,7 @@ void TestIdleDeviceProbe() {
   control->idle_probe_status = Status::kPending;
   TextSchedulerPolicy policy{.device_probe_interval =
                                  std::chrono::milliseconds(10)};
-  const auto before = gufo::server::detail::DeviceLostTotal().load();
+  const auto before = gufo::server::testing::DeviceLostTotal();
   auto scheduler = MakeScheduler(control, 1, {}, policy);
   {
     std::unique_lock lock(control->mutex);
@@ -2806,7 +2804,7 @@ void TestIdleDeviceProbe() {
         "an idle scheduler submits/polls without generation or HTTP traffic");
   }
   Expect(!scheduler->device_lost(), "pending probe is inconclusive");
-  Expect(gufo::server::detail::DeviceLostTotal() == before,
+  Expect(gufo::server::testing::DeviceLostTotal() == before,
          "pending probes do not count as losses");
   control->block_prefill_label = 1;
   auto request = scheduler->Submit({1}, 2, 0.0F);
@@ -2825,13 +2823,13 @@ void TestIdleDeviceProbe() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   Expect(scheduler->device_lost(), "idle probe loss is fatal and sticky");
   scheduler.reset();
-  Expect(gufo::server::detail::DeviceLostTotal() == before + 1,
+  Expect(gufo::server::testing::DeviceLostTotal() == before + 1,
          "confirmed idle loss increments the counter once");
 }
 
 void TestStallMonitor() {
   const auto stall_timeout = std::chrono::milliseconds(500);
-  const auto before = gufo::server::detail::DeviceLostTotal().load();
+  const auto before = gufo::server::testing::DeviceLostTotal();
   {
     auto control = std::make_shared<FakeControl>();
     control->block_prefill_label = 1;
@@ -2864,7 +2862,7 @@ void TestStallMonitor() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   Expect(scheduler->device_lost(),
          "a work unit that never returns is reported as a lost device");
-  Expect(gufo::server::detail::DeviceLostTotal() == before + 1,
+  Expect(gufo::server::testing::DeviceLostTotal() == before + 1,
          "a stall increments the loss counter once");
   bool rejected = false;
   try {
@@ -4496,8 +4494,8 @@ int main() {
   TestHostShortfallRefusesAdmission();
   TestStallMonitor();
   Expect(
-      gufo::server::detail::RequestsProcessing().load() == 0 &&
-          gufo::server::detail::RequestsDeferred().load() == 0,
+      gufo::server::testing::RequestsProcessing() == 0 &&
+          gufo::server::testing::RequestsDeferred() == 0,
       "all success, failure, cancellation and shutdown paths balance gauges");
   std::cout << "All text generation scheduler tests passed\n";
   return 0;

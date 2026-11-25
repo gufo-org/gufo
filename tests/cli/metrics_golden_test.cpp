@@ -22,9 +22,10 @@ using Result = TextGenerationBackend::Result;
 // The scheduler owns these three values; the test sets them directly.
 void SeedSchedulerCounters(std::uint64_t device_lost, std::int64_t processing,
                            std::int64_t deferred) {
-  gufo::server::detail::DeviceLostTotal().store(device_lost);
-  gufo::server::detail::RequestsProcessing().store(processing);
-  gufo::server::detail::RequestsDeferred().store(deferred);
+  auto& metrics = gufo::server::Metrics();
+  metrics.device_lost.Set(device_lost);
+  metrics.requests_processing.Set(processing);
+  metrics.requests_deferred.Set(deferred);
 }
 
 Result Finished(std::size_t prompt, std::size_t cached, std::size_t prefill,
