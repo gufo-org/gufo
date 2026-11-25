@@ -37,7 +37,7 @@ class RegistrationTest(unittest.TestCase):
 
     def test_unlinked_crate(self):
         path = self.root / 'src/core/rust/Cargo.toml'
-        path.write_text(path.read_text().replace('gufo-base64 = { path = "../base64" }', ''))
+        path.write_text(path.read_text().replace('gufo-realtime-voice = { path = "../realtime_voice" }', ''))
         self.assertTrue(any('not linked' in error for error in checker.check(self.root)))
 
     def test_missing_extern(self):

@@ -22,4 +22,5 @@ gufo-jpeg-decode = { path = "../jpeg_decode" }
 gufo-json = { path = "../json" }
 gufo-json-schema = { path = "../json_schema" }
 gufo-png = { path = "../png" }
+gufo-realtime-voice = { path = "../realtime_voice" }
 gufo-websocket = { path = "../websocket" }
