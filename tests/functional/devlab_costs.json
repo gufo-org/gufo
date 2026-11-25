@@ -134,6 +134,45 @@
       "timing_s": 246,
       "warm_load_s": 26
     },
+    "inkling-2-mini": {
+      "load_s": 13,
+      "warm_load_s": 5,
+      "suites": {
+        "cache": 32.9,
+        "cache-bridge": 39.6,
+        "cache-concurrency": 51.8,
+        "cache-depth": 26.3,
+        "cache-edits": 15.9,
+        "cache-growth": 43.7,
+        "cache-rotation": 23.4,
+        "cache-shared-prefix": 39.6,
+        "conversation": 11.7,
+        "discovery": 1.8,
+        "logprobs": 42.7,
+        "long-context": 18.5,
+        "messages-count-tokens": 4.7,
+        "messages-image-counts": 13.8,
+        "messages-tools": 3.4,
+        "metrics": 7.2,
+        "openai-count-tokens": 7.7,
+        "prefill-scheduling": 5.8,
+        "progress": 5.8,
+        "responses": 2.3,
+        "responses-logprobs": 12.1,
+        "sampling-defaults": 30.4,
+        "sampling-ranges": 4.6,
+        "state-edges": 7.8,
+        "stops": 13.0,
+        "stream-start": 14.3,
+        "structured": 22.6,
+        "system-injection": 9.7,
+        "tool-choice-cache": 10.4,
+        "tool-history": 4.0,
+        "tool-parameter-order": 9.1,
+        "tool-schema-edges": 11.7,
+        "tool-type-unions": 3.9
+      }
+    },
     "qwen-image-turbo": {
       "suites": {
         "image-smoke": 90

@@ -57,6 +57,16 @@
       "model": "deepseek4",
       "mode": "dspark",
       "vision": false
+    },
+    "inkling-2-mini/dspark": {
+      "model": "inkling-2-mini",
+      "mode": "dspark",
+      "vision": true
+    },
+    "inkling-2-mini/off": {
+      "model": "inkling-2-mini",
+      "mode": "off",
+      "vision": true
     }
   },
   "suites": {
@@ -1316,7 +1326,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "*"
@@ -1341,7 +1353,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "*"
@@ -1370,7 +1384,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "*"
@@ -1531,7 +1547,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "continuation"
@@ -1555,7 +1573,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "structured",
@@ -1581,7 +1601,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "sampling"
@@ -1605,7 +1627,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "framing",
@@ -1631,6 +1655,22 @@
         "Run the changed model family's numerical, functional and speed checks; text suites do not qualify it."
       ],
       "ignored": false
+    },
+    {
+      "id": "inkling2-runtime",
+      "paths": [
+        "src/models/inkling2/**"
+      ],
+      "priority": 10,
+      "profiles": [
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
+      ],
+      "affects": [
+        "*"
+      ],
+      "obligations": [],
+      "ignored": false
     }
   ],
   "baseline_suites": [
@@ -1646,7 +1686,9 @@
       "flash-next-q4/off",
       "flash-next-q4/mtp",
       "deepseek4/off",
-      "deepseek4/dspark"
+      "deepseek4/dspark",
+      "inkling-2-mini/off",
+      "inkling-2-mini/dspark"
     ],
     "affects": [
       "*"

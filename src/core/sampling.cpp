@@ -1,10 +1,14 @@
 #include "src/core/sampling.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <limits>
+#include <mutex>
 #include <random>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -34,6 +38,222 @@ struct Candidate {
 
 void SortCandidates(std::vector<Candidate>* candidates) {
   std::ranges::sort(*candidates, IsBetterCandidate);
+}
+
+/// A few threads that share one element-wise pass over a logit row with the
+/// caller. Every element is computed by the same code as in a serial pass,
+/// so the values do not depend on who computes them. The caller starts at
+/// once and the workers take chunks as they wake (they sleep between rows);
+/// one row at a time, a second caller runs its pass alone.
+class RowWorkers {
+public:
+  static RowWorkers& Get() {
+    static RowWorkers workers;
+    return workers;
+  }
+
+  /// body(first, end) over [0, size) in chunks.
+  template<typename Body>
+  void Run(std::size_t size, Body&& body) {
+    std::unique_lock<std::mutex> owner(owner_, std::try_to_lock);
+    if (!owner.owns_lock() || threads_.empty() || size < 2 * kChunk) {
+      body(0, size);
+      return;
+    }
+    // on its own cache lines: every chunk taken writes it
+    struct alignas(128) Next {
+      std::atomic<std::size_t> value{0};
+    } cursor;
+    std::atomic<std::size_t>& next = cursor.value;
+    const auto share = [&] {
+      for (;;) {
+        const std::size_t first = next.fetch_add(kChunk);
+        if (first >= size)
+          return;
+        body(first, std::min(size, first + kChunk));
+      }
+    };
+    using Share = decltype(share);
+    {
+      const std::lock_guard<std::mutex> lock(mutex_);
+      invoke_ = [](const void* self) { (*static_cast<const Share*>(self))(); };
+      argument_ = &share;
+      open_ = true;
+      ++generation_;
+    }
+    wake_.notify_all();
+    share();
+    // Workers that wake from here on find the row closed.
+    std::unique_lock<std::mutex> lock(mutex_);
+    open_ = false;
+    done_.wait(lock, [&] { return active_ == 0; });
+  }
+
+private:
+  static constexpr std::size_t kChunk = 8192;
+
+  RowWorkers() {
+    const unsigned cores = std::thread::hardware_concurrency();
+    const unsigned count = cores >= 16  ? 7
+                           : cores >= 8 ? 3
+                           : cores >= 4 ? 1
+                                        : 0;
+    for (unsigned i = 0; i < count; ++i)
+      threads_.emplace_back([this] { Work(); });
+  }
+  ~RowWorkers() {
+    {
+      const std::lock_guard<std::mutex> lock(mutex_);
+      stop_ = true;
+    }
+    wake_.notify_all();
+    for (auto& thread : threads_)
+      thread.join();
+  }
+
+  void Work() {
+    std::uint64_t seen = 0;
+    std::unique_lock<std::mutex> lock(mutex_);
+    for (;;) {
+      wake_.wait(lock, [&] { return stop_ || generation_ != seen; });
+      if (stop_)
+        return;
+      seen = generation_;
+      if (!open_)
+        continue;
+      const auto invoke = invoke_;
+      const void* argument = argument_;
+      ++active_;
+      lock.unlock();
+      invoke(argument);
+      lock.lock();
+      if (--active_ == 0)
+        done_.notify_one();
+    }
+  }
+
+  std::mutex owner_;
+  std::mutex mutex_;
+  std::condition_variable wake_, done_;
+  std::vector<std::thread> threads_;
+  void (*invoke_)(const void*){nullptr};
+  const void* argument_{nullptr};
+  std::size_t active_{0};
+  std::uint64_t generation_{0};
+  bool open_{false};
+  bool stop_{false};
+};
+
+/// SamplerState::LinearDistribution(logits).Sample(rng) without the list of
+/// candidates: the same weights (each exp from the same operands), their sum
+/// taken in token order, the same quotients subtracted from the same uniform
+/// in token order, and no draw when a single token keeps a non-zero
+/// probability. `adjust` applies the penalties (LinearDistribution's
+/// AdjustedLogit) when `penalized`. The exps are spread over a few threads;
+/// the buffer of weights belongs to the calling thread.
+template<typename Adjust>
+[[nodiscard]] TokenId SampleLinearRow(std::span<const float> logits,
+                                      float temperature, float min_p,
+                                      bool penalized, Adjust&& adjust,
+                                      std::uint64_t* rng_state) {
+  constexpr double kSkipped = -std::numeric_limits<double>::infinity();
+  thread_local std::vector<double> buffer;
+  const std::size_t size = logits.size();
+  buffer.resize(size);
+  double* const weight = buffer.data();
+  double maximum = -std::numeric_limits<double>::infinity();
+  std::size_t finite = 0;
+  if (penalized) {
+    for (std::size_t i = 0; i < size; ++i) {
+      if (!std::isfinite(logits[i])) {
+        weight[i] = kSkipped;  // not a candidate: its weight below is zero
+        continue;
+      }
+      const double value = adjust(static_cast<TokenId>(i), logits[i]);
+      if (!std::isfinite(value))
+        throw std::runtime_error(
+            "sampling penalties produced a non-finite logit");
+      maximum = std::max(maximum, value);
+      weight[i] = value;
+      ++finite;
+    }
+  } else {
+    // The maximum of the finite entries does not depend on the order they
+    // are compared in (nor on taking it before widening), so eight
+    // independent chains take it.
+    constexpr std::size_t kChains = 8;
+    float best[kChains];
+    std::size_t count[kChains] = {};
+    std::ranges::fill(best, -std::numeric_limits<float>::infinity());
+    const auto entry = [&](std::size_t i, std::size_t chain) {
+      const float logit = logits[i];
+      const bool ok = std::abs(logit) <= std::numeric_limits<float>::max();
+      const float value = ok ? logit : -std::numeric_limits<float>::infinity();
+      best[chain] = value > best[chain] ? value : best[chain];
+      count[chain] += ok;
+    };
+    std::size_t i = 0;
+    for (; i + kChains <= size; i += kChains)
+      for (std::size_t chain = 0; chain < kChains; ++chain)
+        entry(i + chain, chain);
+    for (; i < size; ++i)
+      entry(i, 0);
+    for (std::size_t chain = 0; chain < kChains; ++chain) {
+      maximum = std::max(maximum, static_cast<double>(best[chain]));
+      finite += count[chain];
+    }
+  }
+  if (finite == 0)
+    throw std::runtime_error("logit distribution contains no finite values");
+  const double threshold =
+      min_p > 0 ? maximum + static_cast<double>(temperature) *
+                                std::log(static_cast<double>(min_p))
+                : -std::numeric_limits<double>::infinity();
+  RowWorkers::Get().Run(size, [&](std::size_t first, std::size_t end) {
+    for (std::size_t i = first; i < end; ++i) {
+      // a skipped entry (-inf) is below every threshold or has exp(-inf) = 0
+      const double value =
+          penalized ? weight[i]
+          : std::abs(logits[i]) <= std::numeric_limits<float>::max()
+              ? static_cast<double>(logits[i])
+              : kSkipped;
+      weight[i] =
+          value >= threshold ? std::exp((value - maximum) / temperature) : 0;
+    }
+  });
+  double total = 0;
+  for (std::size_t i = 0; i < size; ++i)
+    total += weight[i];
+  if (!(total > 0) || !std::isfinite(total))
+    throw std::runtime_error("logit softmax normalization failed");
+  // The distribution keeps the tokens whose quotient is not zero.
+  std::size_t first = size, second = size;
+  for (std::size_t i = 0; i < size; ++i) {
+    if (weight[i] / total == 0)
+      continue;
+    if (first == size) {
+      first = i;
+    } else {
+      second = i;
+      break;
+    }
+  }
+  if (first == size)
+    throw std::logic_error("sampling distribution is empty");
+  if (second == size)
+    return static_cast<TokenId>(first);
+  double sample = gufo::sampling::Uniform(rng_state);
+  std::size_t last = first;
+  for (std::size_t i = first; i < size; ++i) {
+    const double value = weight[i] / total;
+    if (value == 0)
+      continue;
+    sample -= value;
+    if (sample < 0.0)
+      return static_cast<TokenId>(i);
+    last = i;
+  }
+  return static_cast<TokenId>(last);
 }
 
 [[nodiscard]] std::vector<double> SoftmaxWeights(
@@ -1110,6 +1330,16 @@ TokenId SamplerState::Sample(std::span<const float> logits) {
   if (config_.temperature == 0.0F) {
     return SampleGreedy(logits);
   }
+  // Distribution()'s linear case (the whole row, temperature and min-p
+  // only), drawn without materializing the distribution.
+  const bool needs_floor = config_.min_p > 0 && config_.min_keep > 1;
+  if (config_.top_k == 0 && config_.top_p == 1 && !needs_floor)
+    return SampleLinearRow(
+        logits, config_.temperature, config_.min_p, !penalty_counts_.empty(),
+        [this](TokenId token, float logit) {
+          return AdjustedLogit(token, logit);
+        },
+        &rng_state_);
   return Distribution(logits).Sample(&rng_state_);
 }
 

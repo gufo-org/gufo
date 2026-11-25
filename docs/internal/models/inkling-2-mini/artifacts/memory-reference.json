@@ -1,0 +1,85 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 40,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.3.3",
+      "memoryTotalBytes": 134308986880,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "10.1.0",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "3fcf92f8dd18973504c217987816f8b05b87a86f30533006c31337b79a56978b",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-11-24",
+  "mode": null,
+  "model": {
+    "id": "Inkling-2-Mini",
+    "variant": null
+  },
+  "notes": [
+    "llama.cpp: llama-server version: 1.0.0-dev (build 1627, commit 4c92c5bfb)",
+    "peak device-global hipMemGetInfo used bytes (total - free), sampled every 250 ms during the request; idle_gib is the same counter before the server started",
+    "server mode: ar"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "16K prefix, pp4096 + tg128": {
+      "command": "llama-server -m Inkling-2-Mini-UD-Q4_K_XL.gguf -c 133121 -np 1 --port 59895 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "gib": 37.49,
+      "idle_gib": 2.38
+    },
+    "pp2048 + tg128": {
+      "command": "llama-server -m Inkling-2-Mini-UD-Q4_K_XL.gguf -c 133121 -np 1 --port 59895 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "gib": 36.97,
+      "idle_gib": 2.38
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+      "-c",
+      "133121",
+      "-np",
+      "1",
+      "--port",
+      "59895",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "82645e0a4d96a474f26f6b04ee5df7b02c39b714"
+  },
+  "table": "memory",
+  "target": "reference"
+}

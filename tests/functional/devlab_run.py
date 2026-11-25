@@ -36,7 +36,8 @@ def jobs(plan, shard_id=None):
     """(selection, correctness groups, run timing, run GPU tests) per model; a shard runs only its part."""
     if shard_id is None:
         return [(selection, [group for group in plan['groups'] if group['profile'].split('/')[0] == selection['id']],
-                 selection['category'] != 'loom', bool(selection.get('ctest'))) for selection in plan['models']]
+                 selection['category'] != 'loom' and not selection.get('new'), bool(selection.get('ctest')))
+                for selection in plan['models']]
     shard = next((row for row in plan.get('shards', []) if row['id'] == shard_id), None)
     if shard is None:
         raise ValueError('Unknown shard: ' + shard_id)

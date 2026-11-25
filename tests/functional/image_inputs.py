@@ -1,6 +1,7 @@
 """Image upload formats and errors through Chat and Responses."""
 
 import base64
+from thinking import answer_room
 import re
 import struct
 import sys
@@ -85,7 +86,7 @@ def messages_color_requests(png):
     """Anthropic Messages image blocks: in the user turn and in a tool result."""
     source = {"type": "base64", "media_type": "image/png", "data": png.split(",", 1)[1]}
     question = "Name the dominant color in the image. Reply with one lowercase English color name only."
-    common = {"max_tokens": 16, "temperature": 0, "thinking": {"type": "disabled"}}
+    common = {"max_tokens": answer_room(16), "temperature": 0, "thinking": {"type": "disabled"}}
     user_turn = {**common, "messages": [{"role": "user", "content": [
         {"type": "image", "source": source}, {"type": "text", "text": question}]}]}
     tool_result = {**common, "messages": [

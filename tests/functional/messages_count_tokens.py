@@ -3,6 +3,8 @@
 from copy import deepcopy
 import sys
 
+from thinking import answer_room, reasons_when_off
+
 from server_metrics import COUNTERS, DEFERRED, PROCESSING, ServerMetrics
 
 
@@ -191,8 +193,12 @@ def check_messages_image_counts(client, model, checks, context, image_content,
         record(label, response)
         assert_prompt_count(expected, response["usage"])
         assert response["finish"] == "end_turn", response
-        assert all(block["type"] == "text" for block in response["blocks"]), response
-        text = "".join(block["text"] for block in response["blocks"])
+        # A model that thinks with thinking off (thinking.py) opens a thought.
+        assert all(block["type"] == "text"
+                   or (block["type"] == "thinking" and reasons_when_off())
+                   for block in response["blocks"]), response
+        text = "".join(block["text"] for block in response["blocks"]
+                       if block["type"] == "text")
         assert text.strip().lower().rstrip(".!") == color, response
         return response
 
@@ -244,7 +250,7 @@ def check_messages_image_counts(client, model, checks, context, image_content,
         reject("corrupt_count", "/messages/count_tokens", corrupt)
         reject("corrupt_generation", "/messages", corrupt)
 
-    recovery = {"model": model, "max_tokens": 16, "temperature": 0,
+    recovery = {"model": model, "max_tokens": answer_room(16), "temperature": 0,
                 "thinking": {"type": "disabled"},
                 "messages": [{"role": "user", "content": "Reply with only BETA."}]}
     generate("text_recovery_generated", recovery, count("text_recovery", recovery), "beta")

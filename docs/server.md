@@ -83,7 +83,9 @@ itself:
 | Token budget | `reasoning_budget_tokens` | `reasoning_budget_tokens` | `thinking.budget_tokens` |
 
 Effort is one of `minimal`, `low`, `medium`, `high`, `xhigh` and `max`; it is an
-instruction to the model, not a limit. The budget forces the end of reasoning
+instruction to the model, not a limit. Some models can't switch thinking off
+(Inkling 2 Mini): for them, thinking off selects the lowest effort, and a short
+thought may still come back. The budget forces the end of reasoning
 after that many tokens; `--reasoning-budget` sets the server default.
 
 Reasoning comes back separately from the answer: as `reasoning_content` in

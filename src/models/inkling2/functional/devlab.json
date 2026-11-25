@@ -1,0 +1,70 @@
+{
+  "assets": {
+    "inkling2": {
+      "repo": "unsloth/Inkling-2-Mini-GGUF",
+      "revision": "8078d149286eec7193795413b9e0643da6d11fa1",
+      "patterns": [
+        "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+        "mmproj-BF16.gguf",
+        "dspark-Inkling-2-Mini-Q8_0.gguf"
+      ],
+      "required": [
+        "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+        "mmproj-BF16.gguf",
+        "dspark-Inkling-2-Mini-Q8_0.gguf"
+      ]
+    }
+  },
+  "models": {
+    "inkling-2-mini": {
+      "title": "Inkling 2 Mini",
+      "category": "llm",
+      "asset": "inkling2",
+      "target": "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+      "projector": "mmproj-BF16.gguf",
+      "draft_asset": "inkling2",
+      "draft": "dspark-Inkling-2-Mini-Q8_0.gguf",
+      "draft_option": "--dspark-model",
+      "mode": "dspark",
+      "sampling": "provider",
+      "thinking_off_reasons": true,
+      "suites": [
+        "logprobs",
+        "discovery",
+        "messages-image-counts",
+        "responses",
+        "stops",
+        "conversation",
+        "structured",
+        "tool-history",
+        "messages-tools",
+        "tool-choice-cache",
+        "tool-type-unions",
+        "tool-schema-edges",
+        "tool-parameter-order",
+        "sampling-defaults",
+        "state-edges",
+        "prefill-scheduling",
+        "long-context",
+        "cache-edits",
+        "cache-depth",
+        "cache-concurrency",
+        "cache-bridge",
+        "system-injection",
+        "cache"
+      ]
+    }
+  },
+  "rules": [
+    {
+      "id": "private-inkling2",
+      "priority": 20,
+      "paths": [
+        "src/models/inkling2/**"
+      ],
+      "owners": [
+        "inkling-2-mini"
+      ]
+    }
+  ]
+}

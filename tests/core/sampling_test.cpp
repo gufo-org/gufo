@@ -672,7 +672,71 @@ void TestConstrainedTopKMatchesMaskedRow() {
   Expect(compared > 300 && compact > 50, "fuzz covered both paths");
 }
 
+// Sample() draws the whole-row (temperature and min-p only) case without
+// building the distribution: token and RNG state must equal
+// Distribution(logits).Sample() for every row, including rows with one
+// surviving token (no draw), masked entries, penalties and rows long enough
+// for the threaded pass.
+void TestLinearSampleMatchesDistribution() {
+  std::uint64_t rng = 0x243F6A8885A308D3ULL;
+  const auto next = [&] {
+    rng ^= rng << 13;
+    rng ^= rng >> 7;
+    rng ^= rng << 17;
+    return rng;
+  };
+  std::size_t draws = 0, single = 0;
+  for (int trial = 0; trial < 400; ++trial) {
+    const std::size_t vocab = trial % 8 == 0   ? 200058
+                              : trial % 8 == 1 ? 16384 + next() % 40000
+                                               : 2 + next() % 5000;
+    SamplingConfig config;
+    config.temperature = 0.1F + static_cast<float>(next() % 200) / 100.0F;
+    if (next() % 3 == 0)
+      config.min_p = static_cast<float>(1 + next() % 30) / 100.0F;
+    config.min_keep = next() % 2;
+    if (next() % 3 == 0)
+      config.presence_penalty = static_cast<float>(next() % 41) / 10.0F - 2.0F;
+    if (next() % 3 == 0)
+      config.frequency_penalty = static_cast<float>(next() % 41) / 10.0F - 2.0F;
+    if (next() % 4 == 0)
+      config.repeat_penalty = 1.0F + static_cast<float>(next() % 5) / 10.0F;
+    config.seed = static_cast<std::int64_t>(next() % 100000);
+    std::vector<TokenId> prompt(next() % 60);
+    for (auto& token : prompt)
+      token = static_cast<TokenId>(next() % vocab);
+    std::vector<float> logits(vocab);
+    const int shape = static_cast<int>(next() % 4);
+    for (auto& v : logits)
+      v = shape == 0
+              ? static_cast<float>(next() % 16) / 4.0F - 2.0F
+              : static_cast<float>(
+                    static_cast<double>(next() % 600000) / 10000.0 - 30.0);
+    if (shape == 2)  // one token far above the rest
+      logits[next() % vocab] = 2000.0F;
+    if (shape == 3)
+      for (std::size_t i = 0; i < vocab; i += 1 + next() % 7)
+        logits[i] = -std::numeric_limits<float>::infinity();
+    logits[next() % vocab] = 1.0F;  // at least one finite entry
+    SamplerState fast(config, prompt), reference(config, prompt);
+    for (int step = 0; step < 3; ++step) {
+      const auto before = reference.rng_state();
+      const TokenId expected =
+          reference.Distribution(logits).Sample(reference.mutable_rng_state());
+      const TokenId token = fast.Sample(logits);
+      Expect(token == expected, "linear sample differs from its distribution");
+      Expect(fast.rng_state() == reference.rng_state(),
+             "linear sample advanced the RNG differently");
+      (reference.rng_state() == before ? single : draws) += 1;
+      fast.Accept(token);
+      reference.Accept(expected);
+    }
+  }
+  Expect(draws > 600 && single > 30, "linear sample cases not covered");
+}
+
 int main() {
+  TestLinearSampleMatchesDistribution();
   TestConstrainedTopKMatchesMaskedRow();
   TestBlockMaximum();
   TestRawLogprobs();
