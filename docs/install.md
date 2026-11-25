@@ -43,16 +43,13 @@ BIOS:
    service, or `memlock unlimited` in `/etc/security/limits.d/` for your
    user.
 
-Reboot and check:
+Reboot and check (`gufo diagnose` warns on a low GTT and prints these values):
 
 ```sh
 cat /sys/class/drm/card*/device/mem_info_vram_total   # 536870912 (512 MiB)
 cat /sys/class/drm/card*/device/mem_info_gtt_total    # about your RAM minus 4 GiB
 ulimit -l                                             # unlimited
 ```
-
-`gufo diagnose` warns when the GTT limit is well below this and prints the
-values for your RAM.
 
 Gufo runs with other values, but with a GTT limit well below your RAM the RAM
 cache cannot borrow memory that sessions have reserved and not used yet, and
