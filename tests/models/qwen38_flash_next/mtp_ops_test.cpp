@@ -654,6 +654,32 @@ void CheckQ4KDraftHead() {
            "single-row draft logits");
   if (std::memcmp(batched.data(), rows.data(), rows.size() * sizeof(float)))
     throw std::runtime_error("Q4_K draft logits depend on the batch width");
+  // Executor::Dense projects the draft head with the dense kernel at 1..8
+  // rows; every width must round each row like the routed single-row
+  // projection, or a seeded sampled draft depends on concurrent sessions.
+  const std::size_t q8_row = qfn_mmq_q8_1_bytes(kTokens, kCols) / kTokens;
+  auto device_q8_1 = Allocate<std::uint8_t>(q8_row * kTokens);
+  auto dense = Allocate<float>(std::size_t{kTokens} * kRows);
+  if (qfn_mmq_quantize_q8_1(device_x.get(), device_q8_1.get(), kTokens, kCols,
+                            nullptr) != 0)
+    throw std::runtime_error("draft head input quantization");
+  std::vector<float> got(std::size_t{kTokens} * kRows);
+  for (int width = 1; width <= kTokens; ++width)
+    for (int start = 0; start + width <= kTokens; start += width) {
+      if (qfn_mmq_q4_K_dense_vec_preq(
+              device_q4.get(), device_q8_1.get() + start * q8_row, dense.get(),
+              kRows, width, kCols, nullptr) != 0)
+        throw std::runtime_error("dense Q4_K draft head projection");
+      const std::size_t count = std::size_t(width) * kRows;
+      CheckHip(hipMemcpy(got.data(), dense.get(), count * sizeof(float),
+                         hipMemcpyDeviceToHost),
+               "dense draft logits");
+      if (std::memcmp(got.data(), rows.data() + start * kRows,
+                      count * sizeof(float)) != 0)
+        throw std::runtime_error("dense Q4_K draft logits of width " +
+                                 std::to_string(width) +
+                                 " differ from the single-row projection");
+    }
   std::cout << "Q4_K draft head: reference bytes, reconstruction and "
                "batch-width invariance passed\n";
 }

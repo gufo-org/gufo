@@ -1302,9 +1302,8 @@ struct Q4MoeFragment {
     q4_K_scale_pair(w, offset / 2, aux);
   }
 
-  __device__ __forceinline__ float Dot(const block_q8_1* x, int iqs) const {
-    int u[4];
-    float d8[2];
+  __device__ __forceinline__ void Load(const block_q8_1* x, int iqs, int u[4],
+                                      float d8[2]) const {
     const int offset = QR4_K * ((iqs / 2) / (QI8_1 / 2));
 #pragma unroll
     for (int i = 0; i < 2; ++i) {
@@ -1314,7 +1313,41 @@ struct Q4MoeFragment {
       u[2 * i] = q[0];
       u[2 * i + 1] = q[4];
     }
+  }
+
+  __device__ __forceinline__ float Dot(const block_q8_1* x, int iqs) const {
+    int u[4];
+    float d8[2];
+    Load(x, iqs, u, d8);
     const auto* sc = reinterpret_cast<const uint8_t*>(aux);
     return vec_dot_q4_K_q8_1_impl_vmmq(v, u, sc, sc + 2, dm, d8);
+  }
+
+  // sum + Dot(x, iqs) as fast-math contracts `sum += Dot` in the routed
+  // kernels: sum + d * sumf_d, then - dmin * sumf_m, as two FMAs. Written out
+  // because the contraction otherwise depends on the surrounding code (the
+  // one-row dense kernel formed the difference first), so every batch width
+  // rounds a row alike.
+  __device__ __forceinline__ float Accumulate(float sum, const block_q8_1* x,
+                                              int iqs) const {
+    int u[4];
+    float d8[2];
+    Load(x, iqs, u, d8);
+    const auto* sc = reinterpret_cast<const uint8_t*>(aux);
+    float sumf_d = 0.0f;
+    float sumf_m = 0.0f;
+#pragma unroll
+    for (int i = 0; i < QR4_K; ++i) {
+      const int v0i = (v[0] >> (4 * i)) & 0x0F0F0F0F;
+      const int v1i = (v[1] >> (4 * i)) & 0x0F0F0F0F;
+      const int dot1 = ggml_hip_dp4a(v1i, u[2 * i + 1],
+                                     ggml_hip_dp4a(v0i, u[2 * i], 0));
+      const int dot2 = ggml_hip_dp4a(0x01010101, u[2 * i + 1],
+                                     ggml_hip_dp4a(0x01010101, u[2 * i], 0));
+      sumf_d += d8[i] * (dot1 * sc[i]);
+      sumf_m += d8[i] * (dot2 * sc[2 + i]);
+    }
+    const float2 dmf = __half22float2(dm);
+    return __builtin_fmaf(-dmf.y, sumf_m, __builtin_fmaf(dmf.x, sumf_d, sum));
   }
 };
