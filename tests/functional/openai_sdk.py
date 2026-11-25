@@ -49,7 +49,8 @@ from cache_workloads import check_cache_transforms, check_cache_pressure
 from cache_messages_loop import check_cache_messages_loop
 from system_injection import check_system_injection
 from suites import NOT_IN_ALL, SDK_SUITES, VISION
-from cache_growth import check_cache_growth, check_unchanged_retry, log_offset
+from cache_growth import (check_cache_growth, check_unchanged_retry, log_offset,
+                          retry_copy_refused)
 from messages_tools import check_messages_tools
 from reasoning_budget import check_reasoning_budget
 from messages_count_tokens import check_messages_count_tokens, check_messages_image_counts
@@ -167,7 +168,7 @@ def expected_cut(baseline, stops):
     return reasoning.strip(), text
 
 
-def check_stops(client, model, checks):
+def check_stops(client, model, checks, server_log=None):
     # Start from actual greedy output: this tests filtering independently of
     # whether a particular quantization obeys a verbatim-copy instruction.
     request = dict(
@@ -279,6 +280,7 @@ def check_stops(client, model, checks):
               "messages": [{"role": "system", "content":
                             "The secret keyword is LANTERN. Follow instructions accurately. " * 32},
                            *request["messages"]]}
+    window_start = log_offset(server_log)
     full = run("stop_cache_baseline", cached)
     assert len(full["text"]) > 12, full
     stopped_request = {**cached, "stop": full["text"][6:12]}
@@ -290,10 +292,21 @@ def check_stops(client, model, checks):
         {"role": "user", "content": "Reply with only the secret keyword."},
     ]}
     warm = run("stop_continuation_warm", continuation)
+    window_end = log_offset(server_log)
     cold = run("stop_continuation_cold", {
         **continuation, "extra_body": {**continuation["extra_body"], "cache_prompt": False},
     })
-    assert warm["usage"]["cached_tokens"] > 0, warm
+    # Suites run in shuffled order, so earlier suites may have filled the cache.
+    # Under memory pressure the baseline's complete-prompt copy is refused rather
+    # than displace another conversation's checkpoint (docs/internal/cache.md).
+    # The stopped request then restores the stable boundary and its own copy
+    # replaces it, leaving nothing the continuation can extend. Require that
+    # refusal before accepting a cold continuation.
+    if warm["usage"]["cached_tokens"] == 0:
+        assert retry_copy_refused(server_log, window_start, window_end,
+                                  full["usage"]["prompt_tokens"]), warm
+        print("NOTE stop_continuation_warm: baseline copy refused under memory "
+              "pressure; continuation prefilled cold", file=sys.stderr, flush=True)
     assert (warm["text"], warm["finish"]) == (cold["text"], cold["finish"]), (warm, cold)
 
     for value in ("", ["x"] * 5, ["ok", 1], 1):
@@ -2951,7 +2964,7 @@ def main():
                 args.expected_input_modalities.split(",")),
             "responses": lambda: check_responses(client, args.model, checks, options,
                                                    async_local_only, args.expect_reasoning),
-            "stops": lambda: check_stops(client, args.model, checks),
+            "stops": lambda: check_stops(client, args.model, checks, args.server_log),
             "conversation": lambda: check_conversations(
                 client, args.model, checks, args.vision, args.server_log),
             "image-inputs": lambda: check_image_inputs(
