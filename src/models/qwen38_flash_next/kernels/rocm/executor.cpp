@@ -2438,8 +2438,24 @@ bool Executor::RouteHints(std::uint32_t n_tokens,
   std::uint32_t n_tiles = 0;
   routed_tile_rows_ = RoutedTileRows(
       static_cast<std::size_t>(n_tokens) * c.num_experts_used, c);
+  std::uint64_t routed = 0;
   for (std::uint32_t e = 0; e < c.num_experts; ++e) {
     max_rows = std::max(max_rows, counts_host_[e]);
+    routed += counts_host_[e];
+  }
+  // Top-k over softmax probabilities picks an expert for every slot unless
+  // a token's router logits are not finite: then it picks none, and the
+  // expert GEMMs would run without that token (or, for a whole pass, with
+  // no tiles at all). Name the cause rather than a GEMM failure. A last-row
+  // catch-up reads the counts of the whole batch it follows.
+  const std::uint64_t slots =
+      static_cast<std::uint64_t>(n_tokens) * c.num_experts_used;
+  if (counts_tokens_ == n_tokens && routed != slots) {
+    AssignError(error_msg, "router selected no expert for " +
+                               std::to_string(slots - routed) + " of " +
+                               std::to_string(slots) +
+                               " token slots: non-finite router logits");
+    return false;
   }
   routed_max_rows_ = std::max<std::uint32_t>(1, max_rows);
   const auto append = [&](std::uint32_t tile_rows) {
@@ -3484,6 +3500,7 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   if (ExpertMatrixRows(n_tokens)) {
     ExpertCounts(s_.ids, s_.expert_counts, n_tokens, c.num_experts, used,
                  stream_);
+    counts_tokens_ = n_tokens;
     if (!Check(hipMemcpyAsync(counts_host_, s_.expert_counts,
                               c.num_experts * sizeof(std::uint32_t),
                               hipMemcpyDeviceToHost, stream_),
@@ -3679,6 +3696,11 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   const std::uint32_t used = c.num_experts_used;
   const std::uint32_t slots = n_tokens * used;
   if (!RouteHints(n_tokens, error_msg)) {
+    const auto index = LayerHandle(l).index();
+    if (error_msg)
+      *error_msg += index == ext::qwen::flash_next::Layer::kMtp
+                        ? " (MTP layer)"
+                        : " (layer " + std::to_string(index) + ")";
     return false;
   }
   // Tiled batches take the WMMA route: assignments compacted by expert
