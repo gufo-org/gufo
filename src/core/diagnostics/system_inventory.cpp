@@ -108,6 +108,7 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
     inv.gpu.pci_id = primary_gpu.pci_id;
     inv.gpu.pci_slot = primary_gpu.pci_slot;
     inv.gpu.power_mode = primary_gpu.power_mode;
+    inv.gpu.gtt = primary_gpu.gtt;
     inv.gpu.temperatures = primary_gpu.hwmon_sensors;
     if (primary_gpu.compute_units != 0)
       inv.gpu.compute_units = primary_gpu.compute_units;

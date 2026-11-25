@@ -8,6 +8,9 @@
 #include <gufo/ext/experimental/managed_alloc.hpp>
 #include <gufo/ext/experimental/weight_upload.hpp>
 #include <initializer_list>
+#include <iomanip>
+#include <sstream>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -63,6 +66,8 @@ struct Uploader {
   std::uint64_t requested{0};
   /// Uploads the tensors with format_state; null for a GGUF upload.
   flash_next::WeightSource* source{nullptr};
+  /// Bytes the measuring walk requested: the whole upload.
+  std::uint64_t measured{0};
 
   [[nodiscard]] bool Measuring() const noexcept { return weights == nullptr; }
 
@@ -144,6 +149,27 @@ struct Uploader {
     return true;
   }
 
+  /// A failed allocation of `size` bytes for `name`. The placement and the
+  /// share already allocated tell a full device heap (hipMalloc) from
+  /// system-wide GPU memory that other processes hold (managed).
+  void FailAllocation(std::string_view name, std::size_t size) {
+    std::ostringstream message;
+    message << "device allocation failed for " << name << " (" << size
+            << " bytes";
+    if (weights != nullptr) {
+      constexpr double kGib = 1024.0 * 1024.0 * 1024.0;
+      message << std::fixed << std::setprecision(1) << "; "
+              << static_cast<double>(requested - size) / kGib << " of "
+              << static_cast<double>(measured) / kGib
+              << " GiB of weights allocated, as "
+              << (weights->placement() == hip::Placement::kMalloc
+                      ? "device memory"
+                      : "managed memory");
+    }
+    message << ')';
+    Fail(message.str());
+  }
+
   void Fail(const std::string& message) {
     if (ok && error != nullptr) {
       *error = message;
@@ -178,8 +204,7 @@ struct Uploader {
     const std::size_t size = t.SizeBytes();
     void* ptr = nullptr;
     if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
-      Fail("device allocation failed for " + std::string(t.name) + " (" +
-           std::to_string(size) + " bytes)");
+      FailAllocation(t.name, size + kTailMargin);
       return d;
     }
     if (Measuring()) {
@@ -228,9 +253,11 @@ struct Uploader {
     DeviceTensor d = Copy(t);
     const std::size_t count = t.cols * t.rows * t.experts;
     void* f32 = nullptr;
-    if (!ok ||
-        Allocate(&f32, count * sizeof(float) + kTailMargin) != hipSuccess) {
-      Fail("device allocation failed for " + std::string(t.name));
+    if (!ok) {
+      return {};
+    }
+    if (Allocate(&f32, count * sizeof(float) + kTailMargin) != hipSuccess) {
+      FailAllocation(t.name, count * sizeof(float) + kTailMargin);
       return {};
     }
     if (Measuring()) {
@@ -251,7 +278,7 @@ struct Uploader {
     const std::size_t count = t.cols * t.rows * t.experts;
     void* f32 = nullptr;
     if (Allocate(&f32, count * sizeof(float) + kTailMargin) != hipSuccess) {
-      Fail("device allocation failed for " + std::string(t.name));
+      FailAllocation(t.name, count * sizeof(float) + kTailMargin);
       return d;
     }
     if (Measuring()) {
@@ -681,6 +708,7 @@ std::unique_ptr<DeviceModel> DeviceModel::UploadShards(
   std::vector<Conversion> conversions;
   Uploader up{*stager,   &weights,          conversions,     m->allocations_,
               m->bytes_, m->max_half_cols_, m->max_q8_cols_, error_msg};
+  up.measured = measured;
   up.source = source;
   Uploaded uploaded = up.Model(w, mtp, shard_count);
   // The source hears of the walk's end only once its queued region reads

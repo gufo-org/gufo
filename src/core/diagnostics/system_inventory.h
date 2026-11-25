@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -39,6 +40,8 @@ struct GpuInventory {
   std::string pci_id{"1002:1586"};
   std::string pci_slot;
   std::string power_mode{"auto"};
+  /// The amdgpu GTT pool; absent without DRM sysfs (Windows).
+  std::optional<GttInfo> gtt;
   std::string clock_state{"unavailable (sysfs unreadable or power-managed)"};
   std::map<std::string, std::string> temperatures;
   std::string availability{"available"};

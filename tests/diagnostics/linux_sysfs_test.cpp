@@ -1,5 +1,6 @@
 #include "src/core/diagnostics/linux_sysfs.h"
 
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -57,6 +58,38 @@ int main() {
   const auto gpus = sysfs.QueryDrmGpuDevices();
   Expect(gpus.size() == 1 && gpus[0].compute_units == 40,
          "the DRM card carries its KFD compute units");
+
+  Expect(!gpus[0].gtt && !sysfs.QueryGtt(),
+         "a card without GTT counters reports no GTT");
+
+  // The amdgpu default GTT on a 128 GB Strix Halo (62.5 GiB), and a card
+  // without counters listed first that QueryGtt skips.
+  Write(card / "mem_info_gtt_total", "67147419648\n");
+  Write(card / "mem_info_gtt_used", "19386368\n");
+  Write(sys / "class" / "drm" / "card0" / "device" / "uevent",
+        "DRIVER=simpledrm\n");
+  const auto gtt = sysfs.QueryGtt();
+  Expect(gtt && gtt->total_bytes == 67147419648ull &&
+             gtt->used_bytes == 19386368ull,
+         "QueryGtt reads the first card with GTT counters");
+  bool card_gtt = false;
+  for (const auto& gpu : sysfs.QueryDrmGpuDevices())
+    card_gtt |= gpu.card_name == "card1" && gpu.gtt &&
+                gpu.gtt->total_bytes == 67147419648ull;
+  Expect(card_gtt, "the DRM card carries its GTT counters");
+  Write(card / "mem_info_gtt_used", "not-a-number\n");
+  Expect(!sysfs.QueryGtt(), "unparsable GTT counters report no GTT");
+
+  // MemTotal 128073 MiB: the recommended GTT is 123977 MiB.
+  constexpr std::uint64_t kMiB = 1ull << 20;
+  constexpr std::uint64_t ram = 128073 * kMiB;
+  static_assert(gufo::diagnostics::RecommendedGttBytes(ram) == 123977 * kMiB);
+  static_assert(gufo::diagnostics::GttBelowRecommended(67147419648ull, ram));
+  static_assert(!gufo::diagnostics::GttBelowRecommended(123977 * kMiB, ram));
+  static_assert(!gufo::diagnostics::GttBelowRecommended(126976 * kMiB, ram));
+  static_assert(!gufo::diagnostics::GttBelowRecommended(
+      123977 * kMiB - 1000 * kMiB, ram));
+  static_assert(gufo::diagnostics::RecommendedGttBytes(1ull << 30) == 0);
 
   std::filesystem::remove_all(root);
   std::cout << "linux_sysfs_test: all checks passed\n";

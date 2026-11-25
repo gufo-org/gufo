@@ -51,6 +51,9 @@ cat /sys/class/drm/card*/device/mem_info_gtt_total    # about your RAM minus 4 G
 ulimit -l                                             # unlimited
 ```
 
+`gufo diagnose` warns when the GTT limit is well below this and prints the
+values for your RAM.
+
 Gufo runs with other values, but with a GTT limit well below your RAM the RAM
 cache cannot borrow memory that sessions have reserved and not used yet, and
 with locked memory limited, GPU work can stall for seconds while the kernel
