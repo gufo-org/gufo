@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -176,8 +177,23 @@ void TestFileDigestCache() {
   bytes[PayloadBase(bytes) + kWindow + 100] ^= 0xff;
   write();
   const timespec times[] = {before.st_atim, before.st_mtim};
-  Expect(utimensat(AT_FDCWD, path.c_str(), times, 0) == 0,
-         "restore original mtime");
+  // Filesystems without multigrain timestamps (ZFS, ramfs) give every change
+  // within one coarse tick the same ctime, and the cache key cannot tell such
+  // an edit apart. Restore the mtime again until the ctime reaches a later
+  // tick, as it does for any edit made after the digest was cached.
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  for (;;) {
+    Expect(utimensat(AT_FDCWD, path.c_str(), times, 0) == 0,
+           "restore original mtime");
+    struct stat after{};
+    Expect(stat(path.c_str(), &after) == 0, "stat edited file");
+    if (after.st_ctim.tv_sec != before.st_ctim.tv_sec ||
+        after.st_ctim.tv_nsec != before.st_ctim.tv_nsec)
+      break;
+    Expect(std::chrono::steady_clock::now() < deadline,
+           "edited file reaches a later ctime");
+  }
   Expect(read() != first,
          "same-size edit with restored mtime invalidates cache");
   Expect(read() == Identity(bytes),
