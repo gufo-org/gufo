@@ -2,11 +2,11 @@
 
 use std::fmt::Write;
 
-use gufo_json::{Object, Value};
+use gufo_json::{Limits, Object, Value, ValueError, parse_value};
 
 use crate::chat::{FinishReason, ToolDelta};
 use crate::format::{
-    dump_json, named_sse_frame, num_usize, parse_json, push_json_escaped, push_member, set_member,
+    dump_json, named_sse_frame, num_usize, push_json_escaped, push_member, set_member,
 };
 use crate::metrics::Metrics;
 
@@ -22,6 +22,8 @@ pub struct AnthropicOutput {
     reasoning: bool,
     tool_use: bool,
     connected: bool,
+    /// Why the arguments of a complete call are not JSON.
+    invalid_arguments: Option<String>,
     scratch: String,
 }
 
@@ -53,6 +55,7 @@ impl AnthropicOutput {
             reasoning: false,
             tool_use: false,
             connected: true,
+            invalid_arguments: None,
             scratch: String::with_capacity(256),
         }
     }
@@ -169,6 +172,11 @@ impl AnthropicOutput {
         !call.complete || self.close_tool(true, write)
     }
 
+    /// The parse error of a complete call's arguments, once `tool` failed on it.
+    pub fn take_invalid_arguments(&mut self) -> Option<String> {
+        self.invalid_arguments.take()
+    }
+
     pub fn complete(
         &mut self,
         finish_reason: FinishReason,
@@ -266,8 +274,16 @@ impl AnthropicOutput {
             return self.connected;
         };
         if complete {
-            if let Some(parsed) = parse_json(&self.tool_arguments) {
-                set_member(&mut tool, "input", parsed);
+            match parse_value(self.tool_arguments.as_bytes(), Limits::NONE) {
+                Ok(parsed) => set_member(&mut tool, "input", parsed),
+                Err(error) => {
+                    self.invalid_arguments = Some(match error {
+                        ValueError::Rejected(reason) => format!("JSON parse error: {reason}"),
+                        ValueError::TooLarge | ValueError::NoMemory => "out of memory".to_string(),
+                        ValueError::Internal => "JSON parser failed".to_string(),
+                    });
+                    return false;
+                }
             }
             self.tool_use = true;
         }
@@ -389,5 +405,37 @@ mod tests {
         assert!(body.contains(r#""thinking":"think more""#));
         assert!(body.contains(r#""text":"Hi""#));
         assert!(frames.last().unwrap().starts_with("event: message_stop\n"));
+    }
+
+    fn call<'a>(id: &'a str, arguments: &'a str, complete: bool) -> ToolDelta<'a> {
+        ToolDelta {
+            index: 0,
+            begin: !id.is_empty(),
+            id,
+            name: "f",
+            arguments,
+            complete,
+        }
+    }
+
+    #[test]
+    fn anthropic_tool_input_spells_numbers_canonically() {
+        let mut out = AnthropicOutput::new("msg_1".into(), "qwen".into(), false);
+        let mut ignore = |_: &str| true;
+        assert!(out.tool(&call("toolu_1", r#"{"x":1.0,"#, false), &mut ignore));
+        assert!(out.tool(&call("", r#""y":1e3}"#, true), &mut ignore));
+        let (body, _) = out.complete(FinishReason::Stop, "", &Metrics::default(), &mut ignore);
+        assert!(body.contains(r#""input":{"x":1,"y":1000}"#), "{body}");
+        assert!(body.contains(r#""stop_reason":"tool_use""#));
+    }
+
+    #[test]
+    fn anthropic_invalid_complete_arguments_fail() {
+        let mut out = AnthropicOutput::new("msg_1".into(), "qwen".into(), false);
+        let mut ignore = |_: &str| true;
+        assert!(!out.tool(&call("toolu_1", r#"{"x":"#, true), &mut ignore));
+        let reason = out.take_invalid_arguments().expect("parse error");
+        assert!(reason.starts_with("JSON parse error: "), "{reason}");
+        assert!(out.take_invalid_arguments().is_none());
     }
 }

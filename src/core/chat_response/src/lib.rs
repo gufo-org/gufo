@@ -37,6 +37,8 @@ pub enum GufoChatResponseStatus {
     Ok = 0,
     Closed = 1,
     Internal = 2,
+    /// The input is malformed; the reason went to the error writer.
+    Invalid = 3,
 }
 
 #[repr(C)]
@@ -1149,6 +1151,8 @@ pub unsafe extern "C" fn gufo_anthropic_output_tool(
     delta: *const GufoChatToolDelta,
     write_fn: Option<GufoChatWriteFn>,
     write_ctx: *mut c_void,
+    error_fn: Option<GufoChatWriteFn>,
+    error_ctx: *mut c_void,
 ) -> GufoChatResponseStatus {
     guard(GufoChatResponseStatus::Internal, || {
         // SAFETY: caller guarantees exclusive access to live `output`.
@@ -1179,10 +1183,16 @@ pub unsafe extern "C" fn gufo_anthropic_output_tool(
             None => true,
         };
         if output.inner.tool(&td, &mut write) {
-            GufoChatResponseStatus::Ok
-        } else {
-            GufoChatResponseStatus::Closed
+            return GufoChatResponseStatus::Ok;
         }
+        let Some(reason) = output.inner.take_invalid_arguments() else {
+            return GufoChatResponseStatus::Closed;
+        };
+        if let Some(f) = error_fn {
+            // SAFETY: caller guarantees `error_fn` and `error_ctx` are valid.
+            let _ = unsafe { call_write(f, error_ctx, &reason) };
+        }
+        GufoChatResponseStatus::Invalid
     })
 }
 

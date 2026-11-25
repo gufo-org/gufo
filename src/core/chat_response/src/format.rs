@@ -8,12 +8,12 @@ use gufo_json::{
 
 pub const SSE_DONE: &str = "data: [DONE]\n\n";
 const COMPACT_STYLE: Style = Style {
-    numbers: Numbers::AsParsed,
+    numbers: Numbers::Canonical,
     spacing: Spacing::Compact,
 };
 
 pub fn dump_json(value: &Value) -> String {
-    dump(value, Numbers::AsParsed).expect("JSON serialization out of memory")
+    dump(value, Numbers::Canonical).expect("JSON serialization out of memory")
 }
 
 const JSON_LIMITS: Limits = Limits {

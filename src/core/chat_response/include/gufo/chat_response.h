@@ -17,6 +17,8 @@ typedef enum GufoChatResponseStatus {
   GUFO_CHAT_RESPONSE_OK = 0,
   GUFO_CHAT_RESPONSE_CLOSED = 1,
   GUFO_CHAT_RESPONSE_INTERNAL = 2,
+  /* The input is malformed; the reason went to the error writer. */
+  GUFO_CHAT_RESPONSE_INVALID = 3,
 } GufoChatResponseStatus;
 
 typedef enum GufoChatFinishReason {
@@ -237,9 +239,12 @@ GufoChatResponseStatus gufo_anthropic_output_append(GufoAnthropicOutput* output,
                                                     GufoChatWriteFn write_fn,
                                                     void* write_ctx);
 
+/* GUFO_CHAT_RESPONSE_INVALID when a complete call's arguments are not JSON;
+ * the parse error goes to error_fn. */
 GufoChatResponseStatus gufo_anthropic_output_tool(
     GufoAnthropicOutput* output, const GufoChatToolDelta* delta,
-    GufoChatWriteFn write_fn, void* write_ctx);
+    GufoChatWriteFn write_fn, void* write_ctx, GufoChatWriteFn error_fn,
+    void* error_ctx);
 
 GufoChatResponseStatus gufo_anthropic_output_complete(
     GufoAnthropicOutput* output, GufoChatFinishReason finish_reason,

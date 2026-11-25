@@ -816,9 +816,15 @@ public:
         .arguments = CBytes(call.arguments),
         .complete = call.complete,
     };
-    connected_ =
+    std::string invalid;
+    const auto status =
         gufo_anthropic_output_tool(handle_.get(), &d, &WriteToBodyWriter,
-                                   &writer_) == GUFO_CHAT_RESPONSE_OK;
+                                   &writer_, &WriteToString, &invalid);
+    // Complete arguments become the block's input object, as json::parse
+    // reads them; malformed ones fail the response.
+    if (status == GUFO_CHAT_RESPONSE_INVALID)
+      throw std::runtime_error(invalid);
+    connected_ = status == GUFO_CHAT_RESPONSE_OK;
     return connected_;
   }
 
