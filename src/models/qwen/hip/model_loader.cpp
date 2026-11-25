@@ -5,6 +5,7 @@
 #include <gufo/ext/experimental/heap_placement.hpp>
 #include <gufo/ext/experimental/state_memory.hpp>
 #include <gufo/ext/experimental/weight_upload.hpp>
+#include <gufo/ext/families/qwen/text/chat_template.hpp>
 #include <gufo/ext/platform/pages.hpp>
 #include <gufo/ext/platform/prefault.hpp>
 #include <limits>
@@ -15,7 +16,6 @@
 #include <vector>
 
 #include "src/families/qwen/kernels/ops/gemm.hpp"
-#include "src/families/qwen/text/chat_template.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 
 namespace gufo::hip {

@@ -1768,7 +1768,11 @@ Each request to `/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
   miss detail the completion log also reports, `generated_tokens`, `finish`,
   `error` when generation failed, the `prompt` decoded from its tokens with
   special tokens spelled out, and the raw `output` before reasoning and
-  tool-call parsing.
+  tool-call parsing. The parser's inputs follow: the model's `tool_dialect`,
+  its `reasoning` markup (`open` and `close`), the chat's
+  `initial_output_state` and `pieces`, the end offset in bytes of each piece
+  the parser read. `tools/generation_parse/corpus.py` turns a trace into
+  cases for `generation_parse_test`, without the prompts.
 - `response`: `status`, `outcome`, whether the reply was a `stream`, and the
   `body` the client received. For a stream this is the event stream as
   written, `: ping` keepalives included, so a difference between streaming and
@@ -1836,6 +1840,8 @@ lazily in the worker. Control characters are escaped in log lines.
   including that `--log-level` and `-v` change the emitted log rather than only
   parsing.
 - `openai_chat_test`: chat parsing, streaming, images, tools and sampling controls.
+- `chat_request_test`: the Rust request decoder for Chat Completions, Responses
+  and Messages against frozen copies of the C++ decoders it replaced.
 - Per-model serving tests: greedy/sampled decoding, batching, cache reuse and
   cancellation. Use the affected model's benchmark README for commands and limits.
 

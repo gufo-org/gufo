@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from urllib.parse import urlsplit
+from thinking import answer_room
 
 CODES = ("ALPHA", "BETA", "GAMMA", "DELTA")
 # Tokens after the point where two prompts diverge that a follower may still
@@ -23,7 +24,8 @@ TAIL_ALLOWANCE = 96
 
 
 def system_prompt(label, lines):
-    return (f"{label}\nReply with only the requested code word.\n" +
+    # A bare label line reads as the code word to a model that thinks first.
+    return (f"Session label: {label}\nReply with only the requested code word.\n" +
             "".join(f"Reference note {index}: the build uses CMake presets and every "
                     f"model package owns its tests and numerical contracts.\n"
                     for index in range(lines)))
@@ -53,8 +55,8 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
                             abandon=abandon_request):
     failures = []
     width = max(2, min(concurrency, len(CODES)))
-    request = dict(model=model, temperature=0, seed=31, max_completion_tokens=16,
-                   reasoning_effort="none")
+    request = dict(model=model, temperature=0, seed=31,
+                   max_completion_tokens=answer_room(16), reasoning_effort="none")
 
     def body_for(messages, cold=False):
         body = {**deepcopy(request), "messages": deepcopy(messages)}
@@ -169,10 +171,13 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
                     for index, code in enumerate(CODES[:width])]
     group("short_shared", short_shared, CODES[:width], share=False)
 
-    # Unrelated prompts share nothing beyond template framing.
-    unrelated = [[{"role": "system", "content": system_prompt(f"cache_concurrency_{code}", 120)},
+    # Unrelated prompts share nothing beyond template framing. Label them by
+    # index, never by the code: a model that thinks first reads a labeled
+    # "cache_concurrency_BETA" as the code word it was asked for (#670).
+    unrelated = [[{"role": "system",
+                   "content": system_prompt(f"cache_concurrency_unrelated_{index}", 120)},
                   {"role": "user", "content": f"Reply with only the code {code}."}]
-                 for code in CODES[:width]]
+                 for index, code in enumerate(CODES[:width])]
     group("unrelated", unrelated, CODES[:width], share=False)
 
     # A retained conversation continues from its own history and never waits

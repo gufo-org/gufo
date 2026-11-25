@@ -1,0 +1,77 @@
+name: Actions caches
+
+# Keeps the repository's 10 GB Actions cache for main's warm caches. GitHub
+# evicts the least recently used entries once the budget is full, and a pull
+# request can restore only its own entries and main's.
+#
+# - A closed pull request's entries are deleted: nothing can restore them.
+# - A caller prunes its own ref after saving: per-run keys end in
+#   -<run id>-<attempt>, and only the newest entry of each family survives.
+#   It then evicts other refs' entries, large and idle ones first, until the
+#   cache is under the budget below, so main's entries are never what LRU
+#   removes. Callers grant this job's permissions: actions: write,
+#   contents: read, pull-requests: read.
+# - The nightly run does all of this for every ref, catching missed events, and
+#   deletes entries of refs other than main that no run used for two days.
+#
+# An entry created or used in the last 15 minutes is never pruned: a concurrent
+# run may have resolved it and still be downloading it.
+#
+# tools/ci/prune_caches.py holds the logic, its rate-limit retries and the
+# per-run delete cap. Under pull_request_target the job checks out the base
+# branch, so it runs nothing from the PR.
+
+on:
+  pull_request_target:
+    types: [ closed ]
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      # A called workflow sees its caller's event, so the caller's mode is an
+      # input: a dispatched caller must not run the nightly sweep.
+      mode:
+        description: Prune mode for a calling workflow
+        required: false
+        default: caller
+        type: string
+
+permissions: {}
+
+jobs:
+  prune:
+    name: Prune caches
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      MODE: ${{ inputs.mode || github.event_name }}
+      CLOSED_PR: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || '' }}
+      CALLER_REF: ${{ github.ref }}
+      PROTECTED_REF: refs/heads/main
+      # Below the 10 GB limit, leaving room for the saves of runs in flight.
+      BUDGET_BYTES: '7516192768'
+      STALE_SECONDS: '172800'
+      RECENT_SECONDS: '900'
+      # Deletes are rate-limited: stop well inside the job's 10 minutes and
+      # leave the rest to the next run or the nightly sweep.
+      MAX_DELETES: '100'
+      RETRY_SECONDS: '240'
+    steps:
+      # Only the prune script: under pull_request_target this is the base
+      # branch's copy, never the pull request's.
+      - name: Check out the prune script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/ci/prune_caches.py
+          sparse-checkout-cone-mode: false
+
+      - name: Prune Actions caches
+        run: python3 tools/ci/prune_caches.py

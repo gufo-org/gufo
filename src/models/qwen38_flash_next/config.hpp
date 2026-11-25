@@ -152,6 +152,12 @@ struct Config {
   [[nodiscard]] static std::optional<Config> FromGguf(
       const core::GgufReader& reader, bool require_trunk,
       std::string* error_msg = nullptr);
+
+  /// Checks the runtime's structural limits and kernel geometry: what every
+  /// artifact format must satisfy. FromGguf ends with it; a WeightSource
+  /// that reads another format calls it on the Config it builds.
+  [[nodiscard]] static std::optional<Config> Validated(
+      Config c, bool require_trunk, std::string* error_msg = nullptr);
 };
 
 }  // namespace gufo::models::qwen38_flash_next

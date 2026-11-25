@@ -36,7 +36,7 @@ endif()
 find_package(Threads REQUIRED)
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-foreach(package CURL PNG ZLIB OpenMP)
+foreach(package CURL ZLIB OpenMP)
   find_package(${package} QUIET)
 endforeach()
 # Extension-only libraries come from each extension's manifest `packages`.
@@ -46,6 +46,8 @@ if(PkgConfig_FOUND)
 endif()
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/GufoExtensionDiscovery.cmake)
+# The extensions built into the host, before discovery checks `depends`.
+include(${CMAKE_CURRENT_LIST_DIR}/host-extensions.cmake)
 gufo_discover_extensions()
 if(EXISTS /opt/rocm)
   list(APPEND CMAKE_SYSTEM_PREFIX_PATH /opt/rocm)
@@ -113,6 +115,13 @@ if(ENGINE_ENABLE_HIP)
     ${HIPCUB_INCLUDE_DIR} ${ROCPRIM_INCLUDE_DIR})
   # `hip_utils.hpp` in the public surface includes hipBLAS.
   target_link_libraries(gufo_ext_hip INTERFACE hip::host roc::hipblas)
+endif()
+
+if(NOT WIN32)
+  # The experimental Qwen family library: like gufo_ext_core, its headers come
+  # with gufo_ext_runtime and its code from the gufo executable.
+  add_library(gufo_qwen_family INTERFACE)
+  add_library(gufo::qwen_family ALIAS gufo_qwen_family)
 endif()
 
 if(WIN32)

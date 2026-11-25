@@ -45,11 +45,13 @@ class PlanTest(unittest.TestCase):
     def test_disabled_models_are_named_and_not_planned(self):
         data = {**self.registry, 'disabled': {'deepseek4': 'reason'}}
         plan = devlab_plan.select(['src/models/deepseek_v4_flash/model.cpp', 'src/core/sampling.cpp'], data)
-        self.assertEqual({item['id'] for item in plan['models']}, {'flash-next-q4', 'qwen27-q4'})
+        self.assertEqual({item['id'] for item in plan['models']},
+                         {'flash-next-q4', 'qwen27-q4', 'inkling-2-mini'})
         self.assertNotIn('deepseek4', {group['profile'].split('/')[0] for group in plan['groups']})
         self.assertEqual([row['id'] for row in plan['disabled']], ['deepseek4'])
         self.assertTrue(plan['disabled'][0]['reason'])
-        self.assertEqual(devlab_models.asset_keys(plan, data), ['dflash2', 'flash-next', 'qwen27'])
+        self.assertEqual(devlab_models.asset_keys(plan, data),
+                         ['dflash2', 'flash-next', 'inkling2', 'qwen27'])
         broken = {**self.registry, 'disabled': {'deepseek-typo': 'reason'}}
         with patch('devlab_models.json.loads', return_value=broken):
             with self.assertRaises(ValueError):
@@ -113,21 +115,49 @@ class PlanTest(unittest.TestCase):
 
     def test_shared_llm_covers_every_llm(self):
         for path in ('src/core/sampling.cpp', 'src/cache/cache.cpp',
-                     'src/families/qwen/text/tokenizer.cpp', 'src/families/qwen/vision/encoder.hip',
                      'src/cli/serve/text_model_runner.cpp'):
             with self.subTest(path=path):
-                self.assertEqual(self.models(path), {'flash-next-q4', 'qwen27-q4', 'deepseek4'})
+                self.assertEqual(self.models(path), {'flash-next-q4', 'qwen27-q4', 'deepseek4', 'inkling-2-mini'})
+
+    def test_shared_qwen_covers_its_consumers(self):
+        # DeepSeek has its own tokenizer and template, and no shared-Qwen profile.
+        # Qwen-Image takes the tokenizer and Qwen3-TTS the control tokens.
+        text = {'flash-next-q4', 'qwen27-q4'}
+        tts = {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design', 'qwen3-tts-custom-npu'}
+        for path, expected in [('src/families/qwen/text/chat_template.hpp', text),
+                               ('src/families/qwen/vision/encoder.hip', text),
+                               ('src/families/qwen/text/tokenizer.cpp', text | {'qwen-image-turbo'} | tts),
+                               ('src/families/qwen/control_tokens/control_tokens.hpp',
+                                text | {'qwen-image-turbo'} | tts)]:
+            with self.subTest(path=path):
+                self.assertEqual(self.models(path), expected)
+
+    def test_every_selected_llm_has_correctness_suites(self):
+        # A selected text model without a planned suite reports missing correctness.
+        # Sample both registries' patterns, so a narrow suite rule under a broad
+        # selection rule is planned too.
+        manifest = json.loads((devlab_models.HERE / 'impact.json').read_text())
+        patterns = {pattern for rules in (self.data['rules'], manifest['rules'])
+                    for rule in rules for pattern in rule['paths']}
+        for pattern in sorted(patterns):
+            path = pattern.replace('**', 'x').replace('*', 'x')
+            plan = self.plan(path)
+            planned = {group['profile'].split('/')[0] for group in plan['groups']}
+            for model in plan['models']:
+                if model['category'] == 'llm':
+                    with self.subTest(path=path, model=model['id']):
+                        self.assertIn(model['id'], planned)
 
     def test_private_model_and_mixed_paths_preserve_both(self):
         private = 'src/models/deepseek_v4_flash/model.cpp'
         self.assertEqual(self.models(private), {'deepseek4'})
-        self.assertEqual(self.models(private, 'src/core/sampling.cpp'), {'flash-next-q4', 'qwen27-q4', 'deepseek4'})
+        self.assertEqual(self.models(private, 'src/core/sampling.cpp'), {'flash-next-q4', 'qwen27-q4', 'deepseek4', 'inkling-2-mini'})
         self.assertEqual(self.models('src/models/qwen/hip/attention.hip'), {'qwen27-q4'})
         self.assertEqual(self.models('src/models/qwen38_flash_next/engine.cpp'), {'flash-next-q4'})
 
     def test_global_changes_cover_every_model_but_one_image_representative(self):
         self.assertEqual(self.models('src/cli/serve/serve.cpp'),
-                         {'flash-next-q4', 'qwen27-q4', 'deepseek4'} | {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design', 'qwen3-tts-custom-npu'} | NPU_MODELS |
+                         {'flash-next-q4', 'qwen27-q4', 'deepseek4', 'inkling-2-mini'} | {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design', 'qwen3-tts-custom-npu'} | NPU_MODELS |
                          {'embedding-gemma2', 'qwen3-asr', 'qwen-image-turbo'})
         self.assertIn('qwen-image', self.models('src/cli/serve/serve.cpp', tier='full'))
         self.assertEqual(self.models('new-unclassified-file'), self.models('CMakeLists.txt'))
@@ -141,7 +171,7 @@ class PlanTest(unittest.TestCase):
         # Its CPU test sources need no model either; the code they test still selects.
         self.assertEqual(self.models('tests/cli/openai_chat_test.cpp', 'tests/cli/http_server_test.cpp'), set())
         self.assertEqual(self.models('tests/cli/openai_chat_test.cpp', 'src/cli/serve/openai_chat.cpp'),
-                         {'flash-next-q4', 'qwen27-q4', 'deepseek4'})
+                         {'flash-next-q4', 'qwen27-q4', 'deepseek4', 'inkling-2-mini'})
         self.assertEqual(self.models('tests/cli/audio_websocket_test.cpp'),
                          {'qwen3-asr', 'qwen3-asr-npu'} | {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design', 'qwen3-tts-custom-npu'})
         self.assertEqual(self.models('tests/cli/unlisted_test.cpp'), self.models('CMakeLists.txt'))
@@ -358,6 +388,20 @@ class ShardTest(unittest.TestCase):
     @staticmethod
     def parts(shards, model):
         return [part for row in shards for part in row['parts'] if part['model'] == model]
+
+    def test_model_new_on_the_change_has_no_timing_arm(self):
+        # The base revision cannot serve a model the change adds: nothing to time.
+        data = without_npu(devlab_models.registry())
+        plan = devlab_plan.select(['src/models/inkling2/runner.cpp'], data, 'full',
+                                  base_models=set(data['models']) - {'inkling-2-mini'})
+        plan.update(base='a' * 40, head='b' * 40)
+        selection = next(row for row in plan['models'] if row['id'] == 'inkling-2-mini')
+        self.assertTrue(selection['new'])
+        self.assertEqual(selection['timing_checks'], [])
+        parts = self.parts(devlab_plan.shard(plan, self.TABLE), 'inkling-2-mini')
+        self.assertTrue(parts)
+        self.assertFalse(any(part['timing'] for part in parts))
+        self.assertTrue(any(part['groups'] for part in parts))
 
     def test_loom_has_no_timing_arm(self):
         shards = devlab_plan.shard(self.plan('src/models/loom/loom_runner.cpp'), self.TABLE)

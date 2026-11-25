@@ -1,0 +1,142 @@
+name: Compiler cache warming
+
+# Keeps main's CPU-check compiler caches warm, so a pull request's first
+# `nix flake check` restores real objects instead of compiling from scratch.
+#
+# On main, checks.yml substitutes every check from Cachix and compiles nothing,
+# so it has no compiler cache to save. This workflow builds the compile-only
+# variants of check-tests and check-rust (`.#check-tests-compile`,
+# `.#check-rust-compile`): the same compilers, flags, cache settings and
+# sandbox paths as the checks, so their ccache and sccache entries are the
+# ones a pull request's checks look up. The variants run no tests.
+#
+# Nothing waits on this workflow, and it never pushes to Cachix: the variants
+# are not outputs main's checks push, so the substituter is configured
+# pull-only and no Cachix token is given.
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+# One run at a time; a newer revision cancels the older run, whose caches
+# still save what it compiled.
+concurrency:
+  group: warm-caches
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  warm:
+    name: Warm check compiler caches
+    if: github.repository == 'gufo-org/gufo' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compute compiler cache key
+        id: ccache-key
+        shell: bash
+        run: echo "epoch-week=$(( $(date -u +%s) / 604800 ))" >> "$GITHUB_OUTPUT"
+
+      # The keys match checks.yml's, so its restore prefixes find these saves.
+      - name: Restore compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/gufo-ccache
+          key: gufo-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ steps.ccache-key.outputs.epoch-week }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gufo-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-
+
+      - name: Restore Rust compiler cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/gufo-rust-cache
+          key: gufo-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gufo-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-
+            gufo-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'rust-toolchain.toml') }}-
+
+      - name: Prepare compiler cache
+        shell: bash
+        run: |
+          mkdir -p /tmp/gufo-ccache
+          chmod -R a+rwX /tmp/gufo-ccache
+          chmod 1777 /tmp/gufo-ccache
+          mkdir -p /tmp/gufo-rust-cache
+          # The checks publish Rust objects with rsync --ignore-existing and
+          # never delete, and the restore survives Cargo.lock changes. Past
+          # 1 GiB, start over: this run then saves only what main compiles.
+          if (( $(du -sb /tmp/gufo-rust-cache | cut -f1) > 1073741824 )); then
+            echo "::notice::Rust compiler cache over 1 GiB; clearing it"
+            rm -rf /tmp/gufo-rust-cache/objects-v1
+          fi
+          chmod -R a+rwX /tmp/gufo-rust-cache
+          chmod 1777 /tmp/gufo-rust-cache
+
+      # A revision that compiles nothing new, such as a docs change or the
+      # nightly run, keeps the previous entry instead of saving a copy.
+      - name: Snapshot restored compiler caches
+        continue-on-error: true
+        run: |
+          python3 tools/ci/cache_growth.py snapshot /tmp/gufo-ccache "$RUNNER_TEMP/cache-growth/ccache.json"
+          python3 tools/ci/cache_growth.py snapshot /tmp/gufo-rust-cache "$RUNNER_TEMP/cache-growth/rust.json"
+
+      # Dependencies come from Cachix, pull-only; the check variants build.
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          determinate: false
+          extra-conf: |
+            extra-substituters = https://gufo.cachix.org
+            extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
+            extra-sandbox-paths = /tmp/gufo-ccache /tmp/gufo-rust-cache
+
+      # Stop below the job limit so the saves below keep a slow run's work.
+      # --keep-going: a failing variant must not stop the other's warm-up.
+      - name: Compile the CPU and Rust checks
+        id: compile
+        timeout-minutes: 45
+        run: |
+          nix build --no-link --print-build-logs --keep-going --cores "$(nproc)" --max-jobs 2 \
+            .#check-tests-compile .#check-rust-compile
+
+      - name: Measure compiler cache growth
+        continue-on-error: true
+        id: growth
+        if: always() && contains(fromJSON('["success", "failure", "cancelled"]'), steps.compile.outcome)
+        run: |
+          echo "ccache-$(python3 tools/ci/cache_growth.py check /tmp/gufo-ccache "$RUNNER_TEMP/cache-growth/ccache.json")" >> "$GITHUB_OUTPUT"
+          echo "rust-$(python3 tools/ci/cache_growth.py check /tmp/gufo-rust-cache "$RUNNER_TEMP/cache-growth/rust.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Save compiler cache
+        if: always() && contains(fromJSON('["success", "failure", "cancelled"]'), steps.compile.outcome) && steps.growth.outputs.ccache-save != 'false'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/gufo-ccache
+          key: gufo-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ steps.ccache-key.outputs.epoch-week }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save Rust compiler cache
+        if: always() && contains(fromJSON('["success", "failure", "cancelled"]'), steps.compile.outcome) && steps.growth.outputs.rust-save != 'false'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/gufo-rust-cache
+          key: gufo-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # Keep only main's newest entry of each per-run cache.
+  prune-caches:
+    name: Prune superseded caches
+    needs: [ warm ]
+    if: always() && needs.warm.result != 'skipped'
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/caches.yml

@@ -244,7 +244,11 @@ around them (dates, acceptance notes, caveats) is hand-maintained.
 
 ## LLM (GGUF text and vision models)
 
-Models: `deepseek-v4-flash`, `qwen3.8-27b`, `qwen3.8-flash-next`.
+Models: `deepseek-v4-flash`, `inkling-2-mini`, `qwen3.8-27b`, `qwen3.8-flash-next`.
+Inkling reference: llama.cpp `4c92c5bfb` (the pinned b11069 predates the
+model), passed with `--reference-binary`; it cannot load the DSpark drafter,
+so its DSpark and loading cells are N/A. Inkling thinks even with thinking off;
+completion hashes include the streamed reasoning.
 Qwen reference: **llama.cpp** `llama-server`, same GGUF, ROCm build,
 `-ngl 999 -fa on --cache-reuse 0 --cache-ram 0 --jinja --reasoning off`,
 `-np C` and total `-c` covering every session's context. `--cache-ram 0`

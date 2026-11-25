@@ -3,9 +3,9 @@
 
 #include <cstdint>
 
+#include "gufo/ext/families/qwen/text/tokenizer.hpp"
+#include "gufo/ext/families/qwen/vision/device_input.hpp"
 #include "src/families/qwen/kernels/ops/ssm.hpp"
-#include "src/families/qwen/text/tokenizer.hpp"
-#include "src/families/qwen/vision/device_input.hpp"
 
 namespace gufo::models {
 struct QwenModelWeights;

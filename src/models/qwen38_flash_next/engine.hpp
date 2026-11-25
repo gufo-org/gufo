@@ -4,6 +4,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <gufo/ext/families/qwen/draft_vocab/draft_vocab.hpp>
+#include <gufo/ext/families/qwen/text/tokenizer.hpp>
+#include <gufo/ext/families/qwen/vision/encoder.hpp>
+#include <gufo/ext/families/qwen/vision/prompt.hpp>
 #include <gufo/ext/prompt_lookup.hpp>
 #include <gufo/ext/sampling.hpp>
 #include <gufo/ext/session_mode.hpp>
@@ -14,10 +18,6 @@
 #include <string_view>
 #include <vector>
 
-#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
-#include "src/families/qwen/text/tokenizer.hpp"
-#include "src/families/qwen/vision/encoder.hpp"
-#include "src/families/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
@@ -135,6 +135,8 @@ public:
   /// Cache identity the weight source reports; empty for GGUF artifacts,
   /// whose callers hash the reader.
   [[nodiscard]] std::string ArtifactIdentity() const;
+  /// WeightSource::DraftIdentity: the bound MTP block's cache identity.
+  [[nodiscard]] std::string DraftIdentity() const;
   [[nodiscard]] const Config& config() const noexcept;
   [[nodiscard]] const tokenization::QwenTokenizer& tokenizer() const noexcept {
     return *tokenizer_;

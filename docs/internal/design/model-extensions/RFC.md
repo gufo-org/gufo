@@ -294,7 +294,7 @@ Model knowledge that is not a model-name reference but must still move:
 | Location | What it encodes |
 | --- | --- |
 | `src/core/json_constraint.hpp` / `.cpp` | `ToolFormat { kJson, kQwen, kDeepSeek }`; the Qwen XML and DeepSeek DSML tool grammars are interleaved with schema-driven value grammars through the schema compiler. |
-| `src/cli/serve/openai_chat.cpp` | Streaming tool-call marker scanning per dialect, a JSON fallback that recognizes every dialect's markers plus client envelope closers, per-dialect reasoning-separator rules, and parsers using core helpers (`SchemaAccepts`, `PythonLiteralsToJson`, `QuoteTracker`). |
+| `src/cli/serve/openai_chat.cpp` | Streaming tool-call marker scanning per dialect, a JSON fallback that recognizes every dialect's markers plus client envelope closers, per-dialect reasoning-separator rules, and parsers using core helpers (`SchemaAccepts`, `PythonLiteralsToJson`, `QuoteTracker`). Since #1352 the parsers and helpers are the Rust crate `src/core/generation_parse`, which takes every marker from this file's dialect selection. |
 | `src/core/text_sampling_defaults.hpp` | `TextModelPreset { kQwen38, kDeepSeekV4Flash }`, selected by architecture string and layer shape. |
 | `src/core/model_config.hpp`, `src/core/gguf_reader.cpp` | `ModelConfig` and `GgufReader::ExtractModelConfig` are shaped for Qwen hybrids (`ssm.*`, `full_attention_interval`, `nextn_predict_layers`, fallback architecture `"qwen"`); `architecture` defaults to `"qwen35"`. |
 | `src/cli/serve/inference_backend.hpp` | `TextSpeculativeBackend { kDisabled, kDFlash, kDSpark, kMtp }`: valid `--speculative` values and their validation are model-specific. |

@@ -1,0 +1,77 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 40,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.3.3",
+      "memoryTotalBytes": 134308986880,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "10.1.0",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "3fcf92f8dd18973504c217987816f8b05b87a86f30533006c31337b79a56978b",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-11-24",
+  "mode": "dspark",
+  "model": {
+    "id": "Inkling-2-Mini",
+    "variant": null
+  },
+  "notes": [
+    "file cache reset before each launch with the supplied --drop-caches command",
+    "readiness = HTTP 200 on /ready"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "default": {
+      "command": "gufo serve --port 46099 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
+      "ready_s": 4.655,
+      "ready_s_sd": null,
+      "samples": 1
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "gufo",
+      "serve",
+      "--port",
+      "46099",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+      "--context",
+      "262144",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--speculative",
+      "dspark",
+      "--dspark-model",
+      "dspark-Inkling-2-Mini-Q8_0.gguf"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "82645e0a4d96a474f26f6b04ee5df7b02c39b714"
+  },
+  "table": "loading",
+  "target": "gufo"
+}

@@ -5,6 +5,7 @@ from copy import deepcopy
 import json
 import sys
 
+from thinking import answer_room, no_reasoning
 from tool_reasoning import response_result
 from cache_growth import check_unchanged_retry, log_offset
 
@@ -33,7 +34,7 @@ def check_tool_history(client, model, checks, chat_result, vision, image_content
                  {"role": "user", "content": "Call finish once with value RECOVERED. No explanation."}]
     chat = dict(model=model, messages=messages, tools=tools, tool_choice="required",
                 parallel_tool_calls=False, temperature=0, seed=41,
-                reasoning_effort="none", max_completion_tokens=128)
+                reasoning_effort="none", max_completion_tokens=answer_room(128))
     # Use actual Responses function_call items, not Chat-shaped message items.
     items = deepcopy(messages[:-4])
     if vision:
@@ -49,7 +50,7 @@ def check_tool_history(client, model, checks, chat_result, vision, image_content
                      tools=[{"type": "function", **t["function"], "strict": False} for t in tools],
                      tool_choice="required", parallel_tool_calls=False,
                      temperature=0, extra_body={"seed": 41}, reasoning={"effort": "none"},
-                     max_output_tokens=128, store=False)
+                     max_output_tokens=answer_room(128), store=False)
 
     # Agent histories retain the prefix before the final user turn, which
     # clients may replace. Count that turn plus its assistant opening with an
@@ -69,7 +70,7 @@ def check_tool_history(client, model, checks, chat_result, vision, image_content
         function = result["tools"][0]["function"]
         assert function["name"] == "finish", result
         assert json.loads(function["arguments"]) == {"value": "RECOVERED"}, result
-        assert not result["text"].strip() and not result["reasoning"], result
+        assert not result["text"].strip() and no_reasoning(result["reasoning"]), result
         if cached:
             usage = result["usage"]
             details = usage.get("input_tokens_details", usage.get("prompt_tokens_details"))
@@ -151,10 +152,10 @@ def check_untyped_agent_tools(client, model, checks, chat_result, vision, image_
         function = result["tools"][0]["function"]
         assert function["name"] == name, result
         assert json.loads(function["arguments"]) == expected, result
-        assert not result["text"].strip() and not result["reasoning"], result
+        assert not result["text"].strip() and no_reasoning(result["reasoning"]), result
 
     common = dict(model=model, tool_choice="auto", parallel_tool_calls=False,
-                  temperature=0, seed=41, max_completion_tokens=128,
+                  temperature=0, seed=41, max_completion_tokens=answer_room(128),
                   reasoning_effort="none", presence_penalty=0)
     prompt = ("Call record exactly once with one parameter named value. "
               "Its value is the string alpha, not a nested object. Then stop.")
@@ -170,7 +171,7 @@ def check_untyped_agent_tools(client, model, checks, chat_result, vision, image_
     base_edit = {**base_request, "messages": [{"role": "user", "content": edit_prompt}]}
     base_responses = dict(model=model, input=prompt, tool_choice="auto",
                          parallel_tool_calls=False, store=False, temperature=0,
-                         reasoning={"effort": "none"}, max_output_tokens=128,
+                         reasoning={"effort": "none"}, max_output_tokens=answer_room(128),
                          extra_body={"seed": 41, "presence_penalty": 0})
     for name, keyword in (("open_object", "additionalProperties"),
                           ("unsupported_keyword", "unevaluatedProperties")):
@@ -565,7 +566,7 @@ def check_tool_schema_edges(client, model, checks, chat_result, vision, image_co
         content = ([image_content("red"), {"type": "text", "text": prompt}]
                    if vision and name == "wildcard" else prompt)
         chat = dict(model=model, tools=tools, tool_choice=choice, parallel_tool_calls=False,
-                    temperature=0, presence_penalty=0, seed=41, max_completion_tokens=192,
+                    temperature=0, presence_penalty=0, seed=41, max_completion_tokens=answer_room(192),
                     reasoning_effort="none", messages=[{"role": "user", "content": content}],
                     extra_body={"cache_prompt": True})
         input_content = ([{"role": "user", "content": [
@@ -574,7 +575,7 @@ def check_tool_schema_edges(client, model, checks, chat_result, vision, image_co
             if vision and name == "wildcard" else prompt)
         responses = dict(model=model, input=input_content, tool_choice=choice,
                          parallel_tool_calls=False, temperature=0,
-                         reasoning={"effort": "none"}, max_output_tokens=192, store=False,
+                         reasoning={"effort": "none"}, max_output_tokens=answer_room(192), store=False,
                          extra_body={"seed": 41, "presence_penalty": 0, "cache_prompt": True},
                          tools=[{"type": "function", **t["function"]} for t in tools])
         declared = {"wildcard": {"value"}, "conditional": {"kind"},
@@ -623,7 +624,7 @@ def check_tool_agent(client, model, checks, chat_result, vision, image_content):
 
     tools = agent_tools()
     common = dict(model=model, tools=tools, tool_choice="auto", parallel_tool_calls=False,
-                  temperature=0, seed=41, max_completion_tokens=192,
+                  temperature=0, seed=41, max_completion_tokens=answer_room(192),
                   extra_body={"chat_template_kwargs": {"enable_thinking": False}})
     # Catch the format/prompt regression independently of model behavior.
     # Closing one nested object adds a few schema tokens, not instructions
@@ -685,7 +686,7 @@ def check_tool_agent(client, model, checks, chat_result, vision, image_content):
     responses = dict(model=model, input=prompt,
                      tools=[{"type": "function", **t["function"], "strict": False} for t in tools],
                      tool_choice="auto", parallel_tool_calls=False, store=False,
-                     reasoning={"effort": "none"}, temperature=0, max_output_tokens=192,
+                     reasoning={"effort": "none"}, temperature=0, max_output_tokens=answer_room(192),
                      extra_body={"seed": 41})
     for streaming in (False, True):
         result = record(f"agent_responses_{streaming}", response_result(client, responses, streaming))
@@ -711,7 +712,7 @@ def check_tool_agent_loop(client, model, checks, chat_result):
         return result
 
     common = dict(model=model, tools=agent_tools(), tool_choice="auto", parallel_tool_calls=False,
-                  temperature=0, seed=41, max_completion_tokens=192,
+                  temperature=0, seed=41, max_completion_tokens=answer_room(192),
                   extra_body={"chat_template_kwargs": {"enable_thinking": False}})
     old, new = "    return a - b", "    return a + b"
     # Advance from tool results alone, like a coding agent. Each action is

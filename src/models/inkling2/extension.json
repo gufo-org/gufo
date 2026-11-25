@@ -1,0 +1,201 @@
+{
+  "schema": 1,
+  "name": "inkling2",
+  "version": "0.1.0",
+  "api_version": ">= 0.3.0",
+  "entry": "inkling2_register",
+  "registration_target": "gufo_inkling2",
+  "depends": [],
+  "platforms": [
+    "linux",
+    "windows"
+  ],
+  "providers": [
+    {
+      "id": "inkling2",
+      "capability": "text_generation",
+      "keys": [
+        "gguf:inkling2",
+        "gguf:inkling2_loop"
+      ],
+      "model_ids": [
+        "inkling-2-mini"
+      ],
+      "target": "gufo_inkling2_hip",
+      "entry": "inkling2_provider_register",
+      "speculative": [
+        "dspark"
+      ],
+      "serving": {
+        "draft_options": {
+          "dspark": "--dspark-model"
+        }
+      }
+    }
+  ],
+  "models": [
+    {
+      "id": "inkling-2-mini",
+      "provider": "inkling2",
+      "license": "apache-2.0",
+      "description": "Inkling 2 Mini, Unsloth UD-Q4_K_XL GGUF and BF16 vision projector",
+      "components": [
+        {
+          "role": "weights",
+          "option": "--model",
+          "install": "required",
+          "source": {
+            "hf": "unsloth/Inkling-2-Mini-GGUF",
+            "revision": "8078d149286eec7193795413b9e0643da6d11fa1"
+          },
+          "include": [
+            "Inkling-2-Mini-UD-Q4_K_XL.gguf"
+          ]
+        },
+        {
+          "role": "mmproj",
+          "option": "--mmproj",
+          "install": "default",
+          "source": {
+            "hf": "unsloth/Inkling-2-Mini-GGUF",
+            "revision": "8078d149286eec7193795413b9e0643da6d11fa1"
+          },
+          "include": [
+            "mmproj-BF16.gguf"
+          ]
+        },
+        {
+          "role": "dspark",
+          "option": "--dspark-model",
+          "install": "default",
+          "source": {
+            "hf": "unsloth/Inkling-2-Mini-GGUF",
+            "revision": "8078d149286eec7193795413b9e0643da6d11fa1"
+          },
+          "include": [
+            "dspark-Inkling-2-Mini-Q8_0.gguf"
+          ]
+        }
+      ]
+    }
+  ],
+  "options": [
+    {
+      "name": "--dspark-model",
+      "type": "path",
+      "commands": [
+        "serve",
+        "bench",
+        "prompt"
+      ],
+      "providers": [
+        "inkling2"
+      ],
+      "help": "DSpark draft model path for speculative decoding"
+    }
+  ],
+  "targets": {
+    "gufo_inkling2": {
+      "requires": []
+    },
+    "gufo_inkling2_hip": {
+      "requires": [
+        "hip"
+      ]
+    },
+    "inkling2_probe_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
+    },
+    "inkling2_text_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
+    },
+    "inkling2_policy_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
+    },
+    "inkling2_oracle": {
+      "requires": [
+        "hip",
+        "testing"
+      ],
+      "role": "test"
+    },
+    "inkling2_bench": {
+      "requires": [
+        "hip",
+        "testing"
+      ],
+      "role": "test"
+    },
+    "inkling2_spec_test": {
+      "requires": [
+        "hip",
+        "testing"
+      ],
+      "role": "test"
+    },
+    "inkling2_cache_test": {
+      "requires": [
+        "hip",
+        "testing"
+      ],
+      "role": "test"
+    }
+  },
+  "licenses": [
+    "src/models/inkling2/LICENSE.inkling2"
+  ],
+  "production_paths": {
+    "include": [
+      "**/*.cpp",
+      "**/*.h",
+      "**/*.hpp",
+      "**/*.hip",
+      "extension.*",
+      "models.lock.json"
+    ],
+    "exclude": [
+      "tests/",
+      "functional/",
+      "tools/",
+      "fixtures/"
+    ]
+  },
+  "docs": {
+    "title": "Inkling 2 Mini",
+    "inputs": "Unsloth UD-Q4_K_XL GGUF; text/images",
+    "guide": "docs/models/inkling-2-mini.md"
+  },
+  "tests": [
+    {
+      "target": "inkling2_probe_test",
+      "ctest": "inkling2\\.probe",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "inkling2_text_test",
+      "ctest": "inkling2\\.text",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "inkling2_policy_test",
+      "ctest": "inkling2\\.policy",
+      "check_pr": true,
+      "windows_build": true
+    }
+  ],
+  "test_labels": [
+    "inkling2"
+  ],
+  "functional": "functional/"
+}

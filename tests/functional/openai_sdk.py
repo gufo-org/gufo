@@ -26,6 +26,8 @@ import openai
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, OpenAI
 from openai.types import Completion, CompletionChoice
 from metrics import CaseComplete, Recorder
+from thinking import answer_room, bound_thought, no_reasoning
+from thinking import configure as configure_thinking
 from tool_reasoning import check_reasoning_separator, check_tool_reasoning, response_result
 from tool_streaming import check_tool_streaming
 from discovery import check_discovery
@@ -147,6 +149,24 @@ def chat_result(client, request, streaming=False, on_chunk=None, on_open=None):
     return result
 
 
+def expected_cut(baseline, stops):
+    """The (reasoning, text) of `baseline` cut at its first stop. Stops apply to
+    everything the model writes: a model that thinks with thinking off
+    (thinking.py) stops inside its thought when the thought holds a stop.
+    Buffered chat trims reasoning and streamed deltas keep whitespace, so the
+    reasoning is compared stripped."""
+    sequences = [stops] if isinstance(stops, str) else list(stops or [])
+    reasoning, text = baseline["reasoning"], baseline["text"]
+    for value in (reasoning, text):
+        hits = [(value.index(s) + len(s), value.index(s)) for s in sequences if s in value]
+        if hits:
+            cut = min(hits)[1]
+            if value is reasoning:
+                return reasoning[:cut].strip(), ""
+            return reasoning.strip(), text[:cut]
+    return reasoning.strip(), text
+
+
 def check_stops(client, model, checks):
     # Start from actual greedy output: this tests filtering independently of
     # whether a particular quantization obeys a verbatim-copy instruction.
@@ -154,7 +174,7 @@ def check_stops(client, model, checks):
         model=model,
         messages=[{"role": "user", "content":
                    "Copy exactly, without explanation: ALPHA BETA GAMMA DELTA"}],
-        temperature=0, seed=42, max_completion_tokens=32,
+        temperature=0, seed=42, max_completion_tokens=answer_room(32),
         extra_body={"chat_template_kwargs": {"enable_thinking": False},
                     "cache_prompt": False},
     )
@@ -169,7 +189,8 @@ def check_stops(client, model, checks):
 
     baseline = run("stop_baseline", request)
     text = baseline["text"]
-    assert len(text) > 15 and not baseline["reasoning"] and not baseline["tools"], baseline
+    assert (len(text) > 15 and no_reasoning(baseline["reasoning"])
+            and not baseline["tools"]), baseline
     marker = text[6:12]
     for streaming in (False, True):
         suffix = "stream" if streaming else "buffered"
@@ -179,13 +200,10 @@ def check_stops(client, model, checks):
             ("overlap", [text[6:12], text[6:9]]),
             ("empty_answer", text[0]),
         ):
-            sequences = [stops] if isinstance(stops, str) else stops
-            matches = [(text.index(s) + len(s), text.index(s))
-                       for s in sequences if s in text]
-            _, cut = min(matches)
+            reasoning, cut = expected_cut(baseline, stops)
             result = run(f"stop_{label}_{suffix}", {**request, "stop": stops}, streaming)
-            assert result["text"] == text[:cut] and result["finish"] == "stop", result
-            assert not result["tools"] and not result["reasoning"], result
+            assert result["text"] == cut and result["finish"] == "stop", result
+            assert not result["tools"] and result["reasoning"].strip() == reasoning, result
         # The withheld prefix must be flushed when EOS/length wins.
         for label, stops in (
             ("partial_prefix", text[-4:] + "__NEVER_MATCH__"),
@@ -201,7 +219,7 @@ def check_stops(client, model, checks):
     for streaming in (False, True):
         result = run(f"stop_unicode_{streaming}",
                      {**unicode_request, "stop": "乙"}, streaming)
-        assert result["text"] == unicode_full["text"].split("乙")[0], result
+        assert result["text"] == expected_cut(unicode_full, "乙")[1], result
         assert result["finish"] == "stop", result
 
     sampled = {**request, "temperature": .7, "top_p": .9,
@@ -211,7 +229,7 @@ def check_stops(client, model, checks):
     assert len(full["text"]) > 8, full
     marker_sampled = full["text"][4:8]
     result = run("stop_sampled", {**sampled, "stop": marker_sampled}, True)
-    assert result["text"] == full["text"].split(marker_sampled)[0], result
+    assert result["text"] == expected_cut(full, marker_sampled)[1], result
 
     thinking = {
         **request, "messages": [{"role": "user", "content": "Compute 123 times 456."}],
@@ -230,7 +248,7 @@ def check_stops(client, model, checks):
         assert not result["text"] and not result["tools"] and result["finish"] == "stop", result
 
     tool_request = {
-        **request, "max_completion_tokens": 96,
+        **request, "max_completion_tokens": answer_room(96),
         "messages": [{"role": "user", "content":
                       "Call echo once with text exactly 'alpha SDK_STOP omega'."}],
         "tools": [{"type": "function", "function": {
@@ -246,13 +264,14 @@ def check_stops(client, model, checks):
                      {**tool_request, "stop": "SDK_STOP"}, streaming)
         assert not result["tools"] and result["finish"] == "stop", result
         # DSML may have whitespace before the call; stopping must preserve it.
-        assert not result["text"].strip() and not result["reasoning"], result
+        assert not result["text"].strip() and no_reasoning(result["reasoning"]), result
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         stopped = pool.submit(chat_result, client, {**request, "stop": marker}, True)
         peer = pool.submit(chat_result, client, request, True)
         stopped, peer = stopped.result(), peer.result()
-    assert stopped["text"] == text.split(marker)[0] and stopped["finish"] == "stop", stopped
+    assert (stopped["text"] == expected_cut(baseline, marker)[1]
+            and stopped["finish"] == "stop"), stopped
     assert peer["text"] == text and peer["finish"] == baseline["finish"], peer
     record("stop_concurrent_isolation", [stopped, peer])
 
@@ -266,7 +285,7 @@ def check_stops(client, model, checks):
     stopped = run("stop_cached", stopped_request)
     replay = run("stop_cached_replay", stopped_request, True)
     assert replay["text"] == stopped["text"] and replay["usage"]["cached_tokens"] > 0, replay
-    continuation = {**cached, "max_completion_tokens": 16, "messages": [
+    continuation = {**cached, "max_completion_tokens": answer_room(16), "messages": [
         *cached["messages"], {"role": "assistant", "content": stopped["text"]},
         {"role": "user", "content": "Reply with only the secret keyword."},
     ]}
@@ -477,7 +496,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
                  "Reply with exactly two English color names in image order, separated by a comma."},
             ]}]
             # Allow a complete visual answer; reasoning remains deliberately bounded.
-            response_request["max_output_tokens"] = 8 if thinking else 32
+            response_request["max_output_tokens"] = 8 if thinking else answer_room(32)
         if not inherited_seed:
             response_request["extra_body"]["seed"] = 73
         explicit_response = {
@@ -540,7 +559,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
         schema = {"type": "object", "properties": {"ok": {"type": "boolean"}},
                   "required": ["ok"], "additionalProperties": False}
         constrained = {
-            **request, "max_completion_tokens": 32 if not thinking else 2,
+            **request, "max_completion_tokens": answer_room(32) if not thinking else 2,
             "messages": [{"role": "user", "content": "Return a JSON object with ok true."}],
             "response_format": {"type": "json_schema", "json_schema": {
                 "name": "sampling_defaults", "strict": True, "schema": schema}},
@@ -869,7 +888,7 @@ def check_conversations(client, model, checks, vision=False, server_log=None):
         request["extra_body"] = {"cache_prompt": False}
         request["reasoning_effort"] = effort
         r = chat("effort_" + effort, request, True)
-        assert bool(r["reasoning"]) == (effort != "off"), r
+        assert (r["reasoning"] if effort != "off" else no_reasoning(r["reasoning"])), r
     for enabled in (False, True):
         for shape in ("kwargs", "thinking"):
             request = body(thinking=enabled)
@@ -879,7 +898,7 @@ def check_conversations(client, model, checks, vision=False, server_log=None):
                     "thinking": {"type": "enabled" if enabled else "disabled"},
                 }
             r = chat(f"{shape}_{enabled}", request)
-            assert bool(r["reasoning"]) == enabled, r
+            assert (r["reasoning"] if enabled else no_reasoning(r["reasoning"])), r
     for override in (
         {"reasoning_effort": "bogus"},
         {
@@ -902,7 +921,7 @@ def check_conversations(client, model, checks, vision=False, server_log=None):
                 if thinking
                 else "Count from one to one hundred, separated by commas.",
                 thinking=thinking,
-                max_completion_tokens=128,
+                max_completion_tokens=128 if thinking else answer_room(128),
             )
             request["messages"].insert(
                 0,
@@ -967,7 +986,7 @@ def check_conversations(client, model, checks, vision=False, server_log=None):
                         "text": "Name the dominant color in the image in a full sentence.",
                     },
                 ],
-                max_completion_tokens=24,
+                max_completion_tokens=answer_room(24),
             )
             request["messages"].insert(
                 0,
@@ -977,7 +996,7 @@ def check_conversations(client, model, checks, vision=False, server_log=None):
                 },
             )
             cold = chat("vision_" + color + "_cold", request)
-            assert color in cold["text"].lower() and not cold["reasoning"], cold
+            assert color in cold["text"].lower() and no_reasoning(cold["reasoning"]), cold
             request["extra_body"]["cache_prompt"] = True
             replay_start = log_offset(server_log)
             warm = chat("vision_" + color + "_warm", request)
@@ -1010,7 +1029,7 @@ def check_conversations(client, model, checks, vision=False, server_log=None):
         assert marker
         r = chat("vision_stop", {**request, "stop": marker}, True)
         assert (
-            r["text"] == expected["text"].split(marker)[0] and r["finish"] == "stop"
+            r["text"] == expected_cut(expected, marker)[1] and r["finish"] == "stop"
         ), r
 
         # Close after SSE headers, before consuming output from a longer image
@@ -1054,7 +1073,7 @@ def check_long_context(client, model, checks, context, vision=False, server_log=
              "top_k": 20, "min_p": 0}
     request = dict(model=model, messages=messages, temperature=0, top_p=.95,
                    presence_penalty=0, frequency_penalty=0, seed=42,
-                   max_completion_tokens=32, extra_body=extra,
+                   max_completion_tokens=answer_room(32), extra_body=extra,
                    response_format={"type": "json_schema", "json_schema": {
                        "name": "remembered_keyword", "strict": True, "schema": schema}})
 
@@ -1094,8 +1113,8 @@ def check_long_context(client, model, checks, context, vision=False, server_log=
     history += [{"role": "assistant", "content": first["text"]},
                 {"role": "user", "content": "Give the same keyword again as JSON."}]
     responses = dict(model=model, input=history, temperature=.7, top_p=.9,
-                     presence_penalty=0, seed=42, max_output_tokens=32, store=False,
-                     reasoning={"effort": "none"}, extra_body={"top_k": 20},
+                     presence_penalty=0, seed=42, max_output_tokens=answer_room(32),
+                     store=False, reasoning={"effort": "none"}, extra_body={"top_k": 20},
                      text={"format": {"type": "json_schema", "name": "remembered_keyword",
                                       "strict": True, "schema": schema}})
     # seed/presence are Gufo extensions on Responses, not SDK keyword arguments.
@@ -1147,7 +1166,7 @@ def check_long_context(client, model, checks, context, vision=False, server_log=
     assert signature(resumed) == signature(repeated), (resumed, repeated)
     stopped = chat("long_json_stop", {**request, "stop": "TERN"}, True)
     assert stopped["finish"] == "stop" and "TERN" not in stopped["text"], stopped
-    assert stopped["text"] == first["text"].split("TERN")[0], stopped
+    assert stopped["text"] == expected_cut(first, "TERN")[1], stopped
 
 
 def check_structured_outputs(client, model, checks, vision=False):
@@ -1174,7 +1193,7 @@ def check_structured_outputs(client, model, checks, vision=False):
 
     common = dict(model=model, messages=[{"role": "user", "content":
                   "Return one item named cat with count 1, and a null note."}],
-                  temperature=0, seed=31, max_completion_tokens=128,
+                  temperature=0, seed=31, max_completion_tokens=answer_room(128),
                   extra_body={"chat_template_kwargs": {"enable_thinking": False}})
     for label, options in (
         ("greedy", {}),
@@ -1209,6 +1228,19 @@ def check_structured_outputs(client, model, checks, vision=False):
         result = client.chat.completions.parse(**body, response_format=Measurement)
         assert result.choices[0].message.parsed is not None, result
         record(f"schema_bounds_thinking_{thinking}", sdk_result(result))
+
+    class Person(BaseModel):
+        name: str
+        age: int
+
+    # The model's default reasoning under a schema (Inkling 2 Mini's grammar
+    # once kept its thought from opening, and the answer was lost).
+    result = client.chat.completions.parse(
+        model=model, messages=[{"role": "user", "content": "Invent a person named Ada who is 36."}],
+        temperature=0, seed=31, max_completion_tokens=768, response_format=Person)
+    parsed = result.choices[0].message.parsed
+    assert parsed is not None and (parsed.name, parsed.age) == ("Ada", 36), result
+    record("schema_default_reasoning", sdk_result(result))
     response = client.responses.parse(
         model=model, input=measured["messages"][0]["content"],
         text_format=Measurement, reasoning={"effort": "none"},
@@ -1279,7 +1311,7 @@ def check_structured_outputs(client, model, checks, vision=False):
     for streaming in (False, True):
         result = chat_result(client, constrained, streaming)
         assert result["finish"] == "stop" and json.loads(result["text"]) == {"text": literal}, result
-        assert not result["reasoning"] and not result["tools"], result
+        assert no_reasoning(result["reasoning"]) and not result["tools"], result
         record(f"schema_literal_{streaming}", result)
 
     # A new grammar starts at its root even when prompt/model state is reused.
@@ -1927,7 +1959,7 @@ def check_state_edges(client, model, checks, speculative, vision=False, server_l
     options["extra_body"] = {key: value for key, value in common["extra_body"].items()
                              if key != "chat_template_kwargs"}
     options["extra_body"]["seed"] = common["seed"]
-    options.update(reasoning={"effort": "none"}, store=False, max_output_tokens=96)
+    options.update(reasoning={"effort": "none"}, store=False, max_output_tokens=answer_room(96))
     with client.responses.stream(**{
             **options, "input": "Call ping.", "tools": [{"type": "function", **empty}],
             "tool_choice": {"type": "function", "name": "ping"}}) as events:
@@ -1968,7 +2000,7 @@ def check_state_edges(client, model, checks, speculative, vision=False, server_l
     request = {**common, "messages": [{"role": "user", "content": content}],
                "tools": [{"type": "function", "function": function("alpha")}],
                "tool_choice": {"type": "function", "function": {"name": "record"}},
-               "parallel_tool_calls": False, "max_completion_tokens": 96}
+               "parallel_tool_calls": False, "max_completion_tokens": answer_room(96)}
     stopped = chat_result(client, {**request, "stop": "alpha"}, True)
     assert stopped["finish"] == "stop" and not stopped["tools"], stopped
     checks["tool_argument_stop"] = stopped
@@ -1985,7 +2017,7 @@ def check_state_edges(client, model, checks, speculative, vision=False, server_l
     quoted_request = {**common, "messages": [{"role": "user", "content": "Call record."}],
                       "tools": [{"type": "function", "function": quoted}],
                       "tool_choice": {"type": "function", "function": {"name": "record"}},
-                      "max_completion_tokens": 96}
+                      "max_completion_tokens": answer_room(96)}
     for stream in (False, True):
         result = chat_result(client, {**quoted_request, "stop": "ZZSTOP"}, stream)
         assert result["finish"] == "stop" and not result["tools"], result
@@ -2370,7 +2402,7 @@ def check_response(response, reasoning):
     assert usage.input_tokens_details.cache_write_tokens >= 0
     count = usage.output_tokens_details.reasoning_tokens
     assert 0 <= count <= usage.output_tokens
-    assert (count > 0) == reasoning, usage
+    assert count > 0 if reasoning else no_reasoning(count), usage
     if response.status == "completed":
         assert response.output_text.strip(), response
     else:
@@ -2456,7 +2488,7 @@ def check_responses(client, model, checks, options, async_local_only, expect_rea
     checks["after_disconnect"] = check_response(after, expect_reasoning)
     chat_request = dict(
         model=model, messages=[{"role": "user", "content": prompt}],
-        temperature=0, max_completion_tokens=16,
+        temperature=0, max_completion_tokens=answer_room(16),
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
     chat = client.chat.completions.create(**chat_request)
@@ -2842,6 +2874,8 @@ def main():
                         help="JSON object of explicit server sampling CLI values")
     parser.add_argument("--server-thinking", choices=("on", "off"),
                         help="Explicit --think setting on the server, if any")
+    parser.add_argument("--thinking-off-reasons", action="store_true",
+                        help="The model still thinks with thinking off (see thinking.py)")
     parser.add_argument("--output", type=Path, help="Write a partial report after every case")
     parser.add_argument("--through-case",
                         help="Replay the suite prefix and stop before the next request")
@@ -2858,6 +2892,7 @@ def main():
     parser.add_argument("--server-log", type=Path,
                         help="Server log; shows retry copies refused under memory pressure")
     args = parser.parse_args()
+    configure_thinking(args.thinking_off_reasons)
     if args.suite in ("discovery", "openai-count-tokens", "messages-image-counts", "all") and args.expected_input_modalities is None:
         parser.error("discovery, openai-count-tokens and messages-image-counts require --expected-input-modalities text or text,image")
     if args.suite in ("image-inputs", "image-count", "tool-images", "image-detail") and not args.vision:
@@ -2898,7 +2933,8 @@ def main():
     report["checks"] = checks
     checks.save()
     with OpenAI(**options, http_client=DefaultHttpxClient(
-        trust_env=False, event_hooks={"request": [local_only, recorder.request_hook],
+        trust_env=False, event_hooks={"request": [local_only, bound_thought,
+                                                  recorder.request_hook],
                                      "response": [recorder.response_hook]}
     )) as client:
         suites = {

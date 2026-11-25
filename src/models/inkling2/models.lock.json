@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "models": {
+    "inkling-2-mini": {
+      "weights": {
+        "source": {
+          "hf": "unsloth/Inkling-2-Mini-GGUF",
+          "revision": "8078d149286eec7193795413b9e0643da6d11fa1"
+        },
+        "include": [
+          "Inkling-2-Mini-UD-Q4_K_XL.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+            "size": 17629760736,
+            "sha256": "e64276656f072e9b2197a61723667cbdb71da66a716ffd966e572c21088f3cd3"
+          }
+        ]
+      },
+      "mmproj": {
+        "source": {
+          "hf": "unsloth/Inkling-2-Mini-GGUF",
+          "revision": "8078d149286eec7193795413b9e0643da6d11fa1"
+        },
+        "include": [
+          "mmproj-BF16.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "mmproj-BF16.gguf",
+            "size": 641805760,
+            "sha256": "2c165c78790e78a3f45a2d1e9e931083e52ee69d45ff2a0dc9c281fdf1a666e7"
+          }
+        ]
+      },
+      "dspark": {
+        "source": {
+          "hf": "unsloth/Inkling-2-Mini-GGUF",
+          "revision": "8078d149286eec7193795413b9e0643da6d11fa1"
+        },
+        "include": [
+          "dspark-Inkling-2-Mini-Q8_0.gguf"
+        ],
+        "exclude": [],
+        "files": [
+          {
+            "path": "dspark-Inkling-2-Mini-Q8_0.gguf",
+            "size": 503889952,
+            "sha256": "3da00cf7c31bbe5662b3c0d373ecf782d74d32ef43990acc158ce60c2add72e0"
+          }
+        ]
+      }
+    }
+  }
+}

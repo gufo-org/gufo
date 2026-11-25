@@ -112,7 +112,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "*"
@@ -137,7 +139,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "*"
@@ -166,7 +170,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "*"
@@ -237,7 +243,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "continuation"
@@ -261,7 +269,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "structured",
@@ -287,7 +297,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "sampling"
@@ -298,7 +310,8 @@
     {
       "id": "framing-and-stops",
       "paths": [
-        "src/cli/serve/quote_tracker.hpp",
+        "src/cli/serve/generation_parse.*",
+        "src/core/generation_parse/**",
         "src/cli/serve/stop_sequences.hpp"
       ],
       "priority": 20,
@@ -310,7 +323,9 @@
         "flash-next-q4/off",
         "flash-next-q4/mtp",
         "deepseek4/off",
-        "deepseek4/dspark"
+        "deepseek4/dspark",
+        "inkling-2-mini/off",
+        "inkling-2-mini/dspark"
       ],
       "affects": [
         "framing",
@@ -351,7 +366,9 @@
       "flash-next-q4/off",
       "flash-next-q4/mtp",
       "deepseek4/off",
-      "deepseek4/dspark"
+      "deepseek4/dspark",
+      "inkling-2-mini/off",
+      "inkling-2-mini/dspark"
     ],
     "affects": [
       "*"

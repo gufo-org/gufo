@@ -5,12 +5,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <gufo/ext/families/qwen/draft_vocab/draft_vocab.hpp>
 #include <gufo/ext/gguf_reader.hpp>
 #include <limits>
 #include <optional>
 #include <type_traits>
 
-#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
@@ -345,6 +345,10 @@ std::string Model::ModelName() const {
 
 std::string Model::ArtifactIdentity() const {
   return source_->Identity();
+}
+
+std::string Model::DraftIdentity() const {
+  return source_->DraftIdentity();
 }
 
 const Config& Model::config() const noexcept {

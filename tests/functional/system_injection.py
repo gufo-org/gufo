@@ -9,6 +9,8 @@ required. The message then stays put, so the following turn must reuse it all.
 from copy import deepcopy
 import sys
 
+from thinking import answer_room
+
 
 def history(label):
     # A long conversation body after a short system prompt, as in agent
@@ -64,7 +66,7 @@ def check_system_injection(client, model, checks, chat_result):
     for role in ("system", "developer"):
         label = f"system_injection_chat_{role}"
         request = dict(model=model, messages=history(label), temperature=0, seed=37,
-                       max_completion_tokens=16, extra_body={
+                       max_completion_tokens=answer_room(16), extra_body={
                            "chat_template_kwargs": {"enable_thinking": False}})
         first = record(label + "_first", chat_result(client, request))
         first_total, _, _ = chat_work(first)
@@ -97,7 +99,7 @@ def check_system_injection(client, model, checks, chat_result):
     # an already-served request.
     label = "system_injection_chat_before_last_user"
     request = dict(model=model, messages=history(label), temperature=0, seed=37,
-                   max_completion_tokens=16, extra_body={
+                   max_completion_tokens=answer_room(16), extra_body={
                        "chat_template_kwargs": {"enable_thinking": False}})
     first_total = chat_work(record(label + "_first", chat_result(client, request)))[0]
     request["messages"][-1:-1] = [{"role": "system", "content": REMINDER}]
@@ -110,7 +112,7 @@ def check_system_injection(client, model, checks, chat_result):
     label = "system_injection_responses"
     messages = history(label)
     request = dict(model=model, instructions=messages[0]["content"], input=messages[1:],
-                   temperature=0, max_output_tokens=16, reasoning={"effort": "none"},
+                   temperature=0, max_output_tokens=answer_room(16), reasoning={"effort": "none"},
                    store=False)
     first = client.responses.create(**request)
     record(label + "_first", first.to_dict())

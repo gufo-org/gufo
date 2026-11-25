@@ -1,0 +1,229 @@
+{
+  "schema": "gufo-model-bench/1",
+  "category": "llm",
+  "model": {
+    "id": "Inkling-2-Mini",
+    "docs": "inkling-2-mini",
+    "label": "Inkling 2 Mini UD-Q4_K_XL"
+  },
+  "files": {
+    "gguf": "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+    "dspark": "dspark-Inkling-2-Mini-Q8_0.gguf"
+  },
+  "variants": {
+    "default": {
+      "label": "UD-Q4_K_XL",
+      "requires": [
+        "gguf"
+      ]
+    }
+  },
+  "sampling": {
+    "temperature": 0,
+    "seed": 1
+  },
+  "speculative": {
+    "mode": "dspark",
+    "label": "DSpark",
+    "gufo_args": [
+      "--speculative",
+      "dspark",
+      "--dspark-model",
+      "{dspark}"
+    ],
+    "reference": {
+      "args": [
+        "--spec-type",
+        "draft-dspark",
+        "--spec-draft-model",
+        "{dspark}",
+        "--spec-draft-ngl",
+        "999"
+      ]
+    }
+  },
+  "tables": {
+    "single-ar": {
+      "title": "Single user, autoregressive",
+      "per_variant": false,
+      "prompt_tokens": 2048,
+      "output_tokens": 128,
+      "depths": [
+        0,
+        4096,
+        8192,
+        12288,
+        16384,
+        32768,
+        65536,
+        131072
+      ],
+      "context": 134400,
+      "depth_tolerance": 0.005,
+      "prefix": {
+        "generator": "synthetic-paragraphs",
+        "seed": 1
+      },
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher"
+    },
+    "single-dspark": {
+      "title": "Single user, DSpark",
+      "per_variant": false,
+      "speculative": true,
+      "prompt_tokens": 2048,
+      "output_tokens": 128,
+      "depths": [
+        0,
+        4096,
+        8192,
+        12288,
+        16384,
+        32768,
+        65536,
+        131072
+      ],
+      "context": 134400,
+      "depth_tolerance": 0.005,
+      "prefix": {
+        "generator": "synthetic-paragraphs",
+        "seed": 1
+      },
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher",
+      "workloads": {
+        "single-dspark": {
+          "label": "mixed",
+          "workload": "prose"
+        },
+        "single-dspark-repetition": {
+          "label": "repetitive",
+          "workload": "repetition"
+        }
+      }
+    },
+    "multi-ar": {
+      "title": "Multiple users, autoregressive",
+      "per_variant": false,
+      "modes": [
+        "ar"
+      ],
+      "corpus_layout": "homogeneous",
+      "concurrency": [
+        1,
+        2,
+        4,
+        6,
+        8
+      ],
+      "context": 4096,
+      "output_tokens": 128,
+      "cache_prompt": true,
+      "warmup": 1,
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher",
+      "prompt_tokens": 2048,
+      "workload": "prose",
+      "prefill_first": true
+    },
+    "multi-dspark": {
+      "per_variant": false,
+      "modes": [
+        "dspark"
+      ],
+      "concurrency": [
+        1,
+        2,
+        4,
+        6,
+        8
+      ],
+      "context": 4096,
+      "output_tokens": 128,
+      "cache_prompt": true,
+      "warmup": 1,
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher",
+      "title": "Multiple users, DSpark",
+      "workloads": {
+        "multi-mixed": {
+          "label": "mixed",
+          "corpus_layout": "homogeneous",
+          "workload": "prose"
+        },
+        "multi-repetition": {
+          "label": "repetitive",
+          "corpus_layout": "homogeneous",
+          "workload": "repetition"
+        }
+      },
+      "prompt_tokens": 2048,
+      "prefill_first": true
+    },
+    "loading": {
+      "title": "Loading time",
+      "per_variant": false,
+      "sessions": 1,
+      "repetitions": 1,
+      "metric": "seconds",
+      "better": "lower",
+      "rows": "variants",
+      "context": 262144
+    },
+    "memory": {
+      "title": "Memory occupation",
+      "per_variant": false,
+      "context": 133121,
+      "workloads": [
+        {
+          "id": "pp2048 + tg128",
+          "depth": 0,
+          "prompt_tokens": 2048,
+          "output_tokens": 128
+        },
+        {
+          "id": "16K prefix, pp4096 + tg128",
+          "depth": 16384,
+          "prompt_tokens": 4096,
+          "output_tokens": 128
+        }
+      ],
+      "metric": "GiB",
+      "better": "lower",
+      "mode": "ar"
+    }
+  },
+  "gufo": {
+    "serve": [],
+    "llm": [
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8"
+    ],
+    "readiness": "/ready"
+  },
+  "reference": {
+    "name": "llama.cpp",
+    "server": "llama-server",
+    "args": [
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0"
+    ],
+    "endpoint_profile": "openai",
+    "readiness": "/health"
+  }
+}

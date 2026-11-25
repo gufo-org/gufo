@@ -1,6 +1,7 @@
 #include "src/cli/serve/http_server.hpp"
 
 #include <gufo/http.h>
+#include <gufo/http_server.h>
 
 #include <algorithm>
 #include <cctype>
@@ -32,6 +33,7 @@
 #include "src/cli/serve/audio_asr_api.hpp"
 #include "src/cli/serve/audio_tts_api.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
+#include "src/cli/serve/chat_request.hpp"
 #include "src/cli/serve/decision_service.hpp"
 #include "src/cli/serve/embedding_service.hpp"
 #include "src/cli/serve/embeddings_api.hpp"
@@ -48,7 +50,6 @@
 #include "src/cli/serve/video_jobs.hpp"
 #include "src/cli/serve/websocket.hpp"
 #include "src/core/json.hpp"
-#include "src/core/platform/net.hpp"
 #include "src/core/platform/shutdown_signal.hpp"
 #include "src/core/rust/callback.hpp"
 #include "src/core/utf8.hpp"
@@ -78,128 +79,6 @@ public:
 private:
   platform::ShutdownSignalGuard guard_;
 };
-
-// ---------------------------------------------------------------------------
-// Socket I/O helpers
-// ---------------------------------------------------------------------------
-
-// Reads until the Rust parser finds a complete request head or rejects it
-// (GUFO_HTTP_MALFORMED, or GUFO_HTTP_TOO_MANY_FIELDS beyond 100 fields);
-// GUFO_HTTP_PARTIAL when the connection ends first or more than 16 MiB arrive
-// without one. `out` keeps the body bytes read with the head. On
-// GUFO_HTTP_COMPLETE, `request` has the head's header fields. A failure on the
-// server's side (memory, a parser bug) throws, so the caller answers 500.
-GufoHttpParse ReadHead(std::string& out, int fd, HttpRequest& request,
-                       GufoHttpHead& head) {
-  struct FieldContext {
-    HttpRequest* request;
-    core::ffi::CallbackFailure failure;
-  } context{&request, {}};
-  const GufoHttpFieldFn add_field =
-      [](void* opaque, const std::uint8_t* name, std::size_t name_len,
-         const std::uint8_t* value, std::size_t value_len) noexcept -> int {
-    auto& context = *static_cast<FieldContext*>(opaque);
-    return context.failure.Guard(1, [&] {
-      context.request->headers.emplace_back(
-          std::string(reinterpret_cast<const char*>(name), name_len),
-          std::string(reinterpret_cast<const char*>(value), value_len));
-      return 0;
-    });
-  };
-  char buf[64 * 1024];
-  std::size_t known_partial = 0;
-  while (true) {
-    // A pipelined request already read with the previous body needs no new
-    // syscall before parsing.
-    if (!out.empty()) {
-      const GufoHttpParse parsed = gufo_http_parse_head(
-          reinterpret_cast<const std::uint8_t*>(out.data()), out.size(),
-          known_partial, &head, add_field, &context);
-      context.failure.Rethrow();
-      if (parsed == GUFO_HTTP_INTERNAL)
-        throw std::runtime_error("Rust HTTP request parser failed internally");
-      if (parsed != GUFO_HTTP_PARTIAL)
-        return parsed;
-      known_partial = out.size();
-    }
-    const std::intptr_t n = net::Receive(fd, buf, sizeof(buf), 0);
-    if (n < 0 && net::IsSocketInterrupted())
-      continue;
-    if (n <= 0)
-      return GUFO_HTTP_PARTIAL;
-    out.append(buf, static_cast<std::size_t>(n));
-    if (out.size() > (static_cast<std::size_t>(16) * 1024 * 1024))
-      return GUFO_HTTP_PARTIAL;
-  }
-}
-
-bool ReadN(std::string& out, int fd, std::size_t n) {
-  out.reserve(out.size() + n);
-  std::size_t got = 0;
-  char buf[64 * 1024];
-  while (got < n) {
-    const std::size_t want = std::min(sizeof(buf), n - got);
-    const std::intptr_t r = net::Receive(fd, buf, want, 0);
-    if (r < 0 && net::IsSocketInterrupted())
-      continue;
-    if (r <= 0)
-      return false;
-    out.append(buf, static_cast<std::size_t>(r));
-    got += static_cast<std::size_t>(r);
-  }
-  return true;
-}
-
-bool SendAll(int fd, std::string_view data) {
-  std::size_t sent = 0;
-  while (sent < data.size()) {
-    const std::intptr_t n =
-        net::SendNoSignal(fd, data.data() + sent, data.size() - sent);
-    if (n < 0 && net::IsSocketInterrupted())
-      continue;
-    if (n <= 0)
-      return false;
-    sent += static_cast<std::size_t>(n);
-  }
-  return true;
-}
-
-bool SendChunk(int fd, std::string_view data, std::string_view prefix = {}) {
-  if (data.empty())
-    return prefix.empty() || SendAll(fd, prefix);
-  char header[2 * sizeof(std::size_t) + 2];
-  const auto length =
-      std::to_chars(header, header + sizeof(header) - 2, data.size(), 16);
-  *length.ptr = '\r';
-  *(length.ptr + 1) = '\n';
-  const std::string_view chunk_header(header, length.ptr + 2 - header);
-  // A large payload (audio, images) already fills segments; copying it into
-  // a frame would only cost a memcpy and keep the buffer's high-water size
-  // for the life of the connection.
-  constexpr std::size_t kCoalesceLimit = 16 * 1024;
-  if (data.size() > kCoalesceLimit) {
-    std::string lead;
-    lead.reserve(prefix.size() + chunk_header.size());
-    lead.append(prefix);
-    lead.append(chunk_header);
-    return SendAll(fd, lead) && SendAll(fd, data) && SendAll(fd, "\r\n");
-  }
-  // One frame, one send. Deferred headers, the chunk header, payload and
-  // terminator used to be separate writes; keeping them together stops a
-  // single SSE event from becoming three segments and three syscalls.
-  thread_local std::string frame;
-  frame.clear();
-  frame.reserve(prefix.size() + chunk_header.size() + data.size() + 2);
-  frame.append(prefix);
-  frame.append(chunk_header);
-  frame.append(data);
-  frame.append("\r\n");
-  return SendAll(fd, frame);
-}
-
-bool IsPeerDisconnected(int fd) noexcept {
-  return net::IsPeerDisconnected(fd);
-}
 
 // ---------------------------------------------------------------------------
 // Request / response helpers
@@ -255,46 +134,39 @@ bool IsEventStream(const HttpResponse& response) {
   });
 }
 
-std::string BuildResponseHead(const HttpResponse& resp,
-                              std::optional<std::size_t> content_length,
-                              bool keep_alive = false) {
-  std::string out;
-  out.reserve(256);
-  out += "HTTP/1.1 ";
-  out += std::to_string(resp.status);
-  out += ' ';
-  out += resp.reason;
-  out += "\r\n";
+std::vector<std::pair<std::string, std::string>> BuildResponseHeaders(
+    const HttpResponse& resp) {
+  std::vector<std::pair<std::string, std::string>> out;
+  out.reserve(resp.headers.size() + 4);
   if (resp.status != 101 && !HasHeader(resp, "content-type")) {
-    out += "Content-Type: application/json\r\n";
+    out.emplace_back("Content-Type", "application/json");
   }
-  if (content_length.has_value()) {
-    out += "Content-Length: " + std::to_string(*content_length) + "\r\n";
-  }
-  out += "Access-Control-Allow-Origin: *\r\n";
-  out += "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n";
+  out.emplace_back("Access-Control-Allow-Origin", "*");
+  out.emplace_back("Access-Control-Allow-Methods",
+                   "GET, POST, DELETE, OPTIONS");
   // Authorization is accepted (and ignored) so browser SDKs that always send
   // it still pass their CORS preflight.
-  out += "Access-Control-Allow-Headers: Content-Type, Authorization, Range\r\n";
-  for (const auto& [name, value] : resp.headers) {
-    out += name;
-    out += ": ";
-    out += value;
-    out += "\r\n";
+  out.emplace_back("Access-Control-Allow-Headers",
+                   "Content-Type, Authorization, Range");
+  for (const auto& header : resp.headers) {
+    out.push_back(header);
   }
-  if (!HasHeader(resp, "connection"))
-    out += keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
-  out += "\r\n";
   return out;
 }
 
-std::string BuildResponse(const HttpResponse& resp, bool keep_alive = false) {
-  // RFC 9110 section 8.6 forbids Content-Length even when the value is zero.
-  if ((resp.status >= 100 && resp.status < 200) || resp.status == 204)
-    return BuildResponseHead(resp, std::nullopt, keep_alive);
-  std::string out = BuildResponseHead(resp, resp.body.size(), keep_alive);
-  out += resp.body;
-  return out;
+std::vector<GufoHttpHeaderView> ToHeaderViews(
+    const std::vector<std::pair<std::string, std::string>>& headers) {
+  std::vector<GufoHttpHeaderView> views;
+  views.reserve(headers.size());
+  for (const auto& [name, value] : headers) {
+    views.push_back(GufoHttpHeaderView{
+        .name = {reinterpret_cast<const std::uint8_t*>(name.data()),
+                 name.size()},
+        .value = {reinterpret_cast<const std::uint8_t*>(value.data()),
+                  value.size()},
+    });
+  }
+  return views;
 }
 
 // ---------------------------------------------------------------------------
@@ -388,197 +260,6 @@ HttpResponse NotImplemented(const HttpRequest&, TextGenerationBackend&) {
   return Err(501, "Not Implemented",
              "endpoint not implemented on this text model", "server_error",
              "not_implemented");
-}
-
-// Parse a role string into a ChatRole.
-tokenization::ChatRole RoleFrom(const std::string& r) {
-  if (r == "system")
-    return tokenization::ChatRole::kSystem;
-  if (r == "developer")
-    return tokenization::ChatRole::kDeveloper;
-  if (r == "assistant")
-    return tokenization::ChatRole::kAssistant;
-  if (r == "tool")
-    return tokenization::ChatRole::kTool;
-  return tokenization::ChatRole::kUser;
-}
-
-// Messages replays assistant reasoning as thinking blocks. Restore it as the
-// turn's thought so the prompt reproduces the generated tokens.
-bool ReadTextContent(const json::Value* content, std::string* out,
-                     std::string* thought = nullptr,
-                     tokenization::ChatMessage* image_message = nullptr,
-                     core::ImageReadBudget* image_budget = nullptr,
-                     std::string* error = nullptr) {
-  if (content == nullptr)
-    return false;
-  if (content->is_string()) {
-    *out = content->get_str();
-  } else if (content->is_array()) {
-    for (const auto& part : content->items()) {
-      if (thought != nullptr && part.is_object() &&
-          part.member_str("type") == "thinking") {
-        const auto* thinking = part.find("thinking");
-        if (thinking == nullptr || !thinking->is_string())
-          return false;
-        *thought += thinking->str();
-        continue;
-      }
-      // Messages images ride along with the text of a user turn; `out` is
-      // that message's content, so the image lands at its current end.
-      if (image_message != nullptr && part.is_object() &&
-          part.member_str("type") == "image") {
-        std::string ignored;
-        if (!ParseAnthropicImage(part, image_message, *image_budget,
-                                 error != nullptr ? error : &ignored))
-          return false;
-        continue;
-      }
-      const auto* text = part.find("text");
-      const auto type = part.member_str("type");
-      if (!part.is_object() || text == nullptr || !text->is_string() ||
-          (type != "text" && type != "input_text" && type != "output_text")) {
-        return false;
-      }
-      *out += text->str();
-    }
-  } else {
-    return false;
-  }
-  return true;
-}
-
-bool ReadTextMessages(const json::Value* input,
-                      std::vector<tokenization::ChatMessage>* messages,
-                      bool images_supported, bool responses = false,
-                      std::string* parse_error = nullptr) {
-  core::ImageReadBudget image_budget;
-  image_budget.accepts_images = images_supported;
-  if (input == nullptr || !input->is_array() || input->empty())
-    return false;
-  // Responses replays one assistant turn as several reasoning, message and
-  // function_call items. A system/developer item between them would split
-  // that turn, so it waits until the next item that starts a new message.
-  std::vector<tokenization::ChatMessage> deferred;
-  const auto push = [&](tokenization::ChatMessage message) {
-    for (auto& system : deferred)
-      messages->push_back(std::move(system));
-    deferred.clear();
-    messages->push_back(std::move(message));
-  };
-  for (const auto& item : input->items()) {
-    if (!responses && item.is_object() && item.find("content") &&
-        item.find("content")->is_array() &&
-        std::ranges::any_of(item.find("content")->items(),
-                            [](const auto& part) {
-                              return part.is_object() &&
-                                     (part.member_str("type") == "tool_use" ||
-                                      part.member_str("type") == "tool_result");
-                            })) {
-      std::string error;
-      if (!ParseAnthropicToolMessage(item, messages, image_budget, &error)) {
-        if (parse_error && !error.empty())
-          *parse_error = std::move(error);
-        return false;
-      }
-      continue;
-    }
-    if (responses && (item.member_str("type") == "function_call" ||
-                      item.member_str("type") == "function_call_output" ||
-                      item.member_str("type") == "custom_tool_call" ||
-                      item.member_str("type") == "custom_tool_call_output")) {
-      tokenization::ChatMessage message;
-      std::string error;
-      if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error)) {
-        if (parse_error && !error.empty())
-          *parse_error = std::move(error);
-        return false;
-      }
-      if (message.role == tokenization::ChatRole::kAssistant &&
-          !messages->empty() &&
-          messages->back().role == tokenization::ChatRole::kAssistant) {
-        auto& calls = messages->back().tool_calls;
-        calls.insert(calls.end(), message.tool_calls.begin(),
-                     message.tool_calls.end());
-      } else {
-        push(std::move(message));
-      }
-      continue;
-    }
-    if (responses && item.member_str("type") == "reasoning") {
-      const auto* summary = item.find("summary");
-      const auto* encrypted = item.find("encrypted_content");
-      const auto* content = item.find("content");
-      // Codex replays null-valued content and encrypted_content echoed by
-      // OpenAI; only non-null payload carries reasoning we cannot restore.
-      if (summary == nullptr || !summary->is_array() ||
-          (encrypted != nullptr && !encrypted->is_null()) ||
-          (content != nullptr && !content->is_null()))
-        return false;
-      tokenization::ChatMessage reasoning;
-      reasoning.role = tokenization::ChatRole::kAssistant;
-      for (const auto& part : summary->items()) {
-        const auto* text = part.find("text");
-        if (part.member_str("type") != "summary_text" || text == nullptr ||
-            !text->is_string())
-          return false;
-        reasoning.thought += text->str();
-      }
-      push(std::move(reasoning));
-      continue;
-    }
-    const auto role = item.member_str("role");
-    if (!item.is_object() ||
-        (role != "user" && role != "assistant" && role != "system" &&
-         role != "developer") ||
-        item.member_str("type", "message") != "message" ||
-        item.contains("tool_calls")) {
-      return false;
-    }
-    tokenization::ChatMessage message;
-    message.role = RoleFrom(role);
-    if (responses) {
-      std::string error;
-      if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error)) {
-        if (parse_error && !error.empty())
-          *parse_error = std::move(error);
-        return false;
-      }
-    } else {
-      std::string error;
-      if (!ReadTextContent(item.find("content"), &message.content,
-                           message.role == tokenization::ChatRole::kAssistant
-                               ? &message.thought
-                               : nullptr,
-                           message.role == tokenization::ChatRole::kUser
-                               ? &message
-                               : nullptr,
-                           &image_budget, &error)) {
-        if (parse_error && !error.empty())
-          *parse_error = std::move(error);
-        return false;
-      }
-    }
-    if (responses &&
-        (message.role == tokenization::ChatRole::kSystem ||
-         message.role == tokenization::ChatRole::kDeveloper) &&
-        !messages->empty() &&
-        messages->back().role == tokenization::ChatRole::kAssistant) {
-      deferred.push_back(std::move(message));
-      continue;
-    }
-    if (responses && message.role == tokenization::ChatRole::kAssistant &&
-        !messages->empty() &&
-        messages->back().role == tokenization::ChatRole::kAssistant &&
-        messages->back().content.empty() && !messages->back().thought.empty()) {
-      messages->back().content = std::move(message.content);
-    } else {
-      push(std::move(message));
-    }
-  }
-  for (auto& system : deferred)
-    messages->push_back(std::move(system));
-  return true;
 }
 
 HttpResponse InvalidCompatibilityRequest(std::string_view message) {
@@ -1113,66 +794,44 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
              "invalid_prompt");
 }
 
-std::optional<HttpResponse> ReadOpenAiResponseChat(
-    const json::Value& body, TextGenerationBackend& b, ChatRequest* chat,
-    std::size_t* max_tokens, sampling::SamplingConfig* sampling_config) {
-  chat->reasoning = b.reasoning_defaults();
-  if (auto error = ParseOpenAiResponseControls(body, chat))
+// Responses and Messages bodies decode in Rust (src/core/chat_request) from
+// the server's reasoning defaults, with this file's compatibility validator
+// at the point each API checks it.
+std::optional<HttpResponse> DecodeCompatibilityChat(
+    ChatApi api, const HttpRequest& req, TextGenerationBackend& b,
+    DecodedChatRequest* decoded) {
+  auto environment = ChatEnvironment(b);
+  environment.compatibility =
+      [&b](ChatApi api, const json::Value& body, std::optional<bool> thinking,
+           std::size_t* max_tokens, sampling::SamplingConfig* sampling) {
+        if (api == ChatApi::kResponses)
+          return ReadCompatibilityOptions(
+              body, b, "max_output_tokens", max_tokens, sampling, thinking,
+              {.stream = true, .response_controls = true});
+        return ReadCompatibilityOptions(body, b, "max_tokens", max_tokens,
+                                        sampling, thinking,
+                                        {.stop_field = "stop_sequences",
+                                         .stream = true,
+                                         .thinking = true,
+                                         .output_config = true,
+                                         .tools = true});
+      };
+  if (auto error = DecodeChatRequest(api, req.body, environment,
+                                     /*require_model=*/true, decoded))
     return error;
-  if (auto error = ReadCompatibilityOptions(
-          body, b, "max_output_tokens", max_tokens, sampling_config,
-          chat->reasoning.enabled,
-          {.stream = true, .response_controls = true})) {
-    return error;
-  }
-  if (const auto error = ParseResponsesLogprobs(body, sampling_config))
-    return Err(400, "Bad Request", error->message.c_str(),
-               "invalid_request_error", error->code.c_str());
-
-  std::vector<tokenization::ChatMessage> messages;
-  if (const auto* instructions = body.find("instructions")) {
-    if (!instructions->is_string()) {
-      return InvalidCompatibilityRequest("'instructions' must be a string");
-    }
-    messages.push_back(
-        {tokenization::ChatRole::kSystem, instructions->str(), "", ""});
-  }
-  const auto* input = body.find("input");
-  std::string input_error =
-      "'input' must contain text, message items with text/images, reasoning "
-      "items, function calls or function outputs";
-  if (input != nullptr && input->is_string() && !input->str().empty()) {
-    messages.push_back({tokenization::ChatRole::kUser, input->str(), "", ""});
-  } else if (!ReadTextMessages(input, &messages, b.supports_images(), true,
-                               &input_error)) {
-    return InvalidCompatibilityRequest(input_error);
-  }
-
-  chat->messages = std::move(messages);
   return std::nullopt;
 }
 
 HttpResponse OpenAiResponses(const HttpRequest& req,
                              TextGenerationBackend& b) try {
-  json::Value body;
-  try {
-    body = json::parse(req.body);
-  } catch (const std::exception& e) {
-    return Err(400, "Bad Request", e.what(), "invalid_request_error",
-               "parse_error");
-  }
-
-  ChatRequest chat;
-  std::size_t max_tokens = 0;
-  sampling::SamplingConfig sampling_config;
+  DecodedChatRequest decoded;
   if (auto error =
-          ReadOpenAiResponseChat(body, b, &chat, &max_tokens, &sampling_config))
+          DecodeCompatibilityChat(ChatApi::kResponses, req, b, &decoded))
     return std::move(*error);
-  chat.client_id = req.client_id;
+  decoded.chat.client_id = req.client_id;
   return CreateOpenAiResponse(
-      req, b, chat, max_tokens, sampling_config,
-      body.find("stream") != nullptr && body.find("stream")->as_bool(),
-      RequestedModel(body, b));
+      req, b, decoded.chat, decoded.max_tokens.value_or(0), decoded.sampling,
+      decoded.stream, decoded.model ? *decoded.model : b.model_id());
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1183,22 +842,12 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
 
 HttpResponse OpenAiResponsesInputTokens(const HttpRequest& req,
                                         TextGenerationBackend& b) try {
-  json::Value body;
-  try {
-    body = json::parse(req.body);
-  } catch (const std::exception& e) {
-    return Err(400, "Bad Request", e.what(), "invalid_request_error",
-               "parse_error");
-  }
-
-  ChatRequest chat;
-  std::size_t max_tokens = 0;
-  sampling::SamplingConfig sampling_config;
+  DecodedChatRequest decoded;
   if (auto error =
-          ReadOpenAiResponseChat(body, b, &chat, &max_tokens, &sampling_config))
+          DecodeCompatibilityChat(ChatApi::kResponses, req, b, &decoded))
     return std::move(*error);
-  chat.client_id = req.client_id;
-  return CountOpenAiInputTokens(chat, b);
+  decoded.chat.client_id = req.client_id;
+  return CountOpenAiInputTokens(decoded.chat, b);
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1207,144 +856,16 @@ HttpResponse OpenAiResponsesInputTokens(const HttpRequest& req,
              "invalid_prompt");
 }
 
-// Messages selects reasoning with thinking.type; adaptive leaves the choice to
-// the server's default. With enabled thinking, budget_tokens caps the
-// reasoning tokens, as llama.cpp does; enabled thinking keeps the server's
-// effort unless output_config.effort sets it.
-// Reasoning is returned for every display, because replayed thinking blocks
-// restore the cached thought.
-std::optional<HttpResponse> ReadThinking(const json::Value& body,
-                                         ReasoningOptions* reasoning) {
-  const auto* thinking = body.find("thinking");
-  if (thinking == nullptr)
-    return {};
-  const auto* type = thinking->is_object() ? thinking->find("type") : nullptr;
-  if (type == nullptr || !type->is_string() ||
-      (type->str() != "enabled" && type->str() != "adaptive" &&
-       type->str() != "disabled"))
-    return InvalidCompatibilityRequest(
-        "'thinking.type' must be enabled, adaptive, or disabled");
-  if (const auto* budget = thinking->find("budget_tokens");
-      budget != nullptr &&
-      (!budget->is_number() || !std::isfinite(budget->as_double()) ||
-       budget->as_double() < 1 ||
-       budget->as_double() > std::numeric_limits<std::int32_t>::max() ||
-       std::floor(budget->as_double()) != budget->as_double()))
-    return InvalidCompatibilityRequest(
-        "'thinking.budget_tokens' must be a positive integer at most "
-        "2147483647");
-  else if (budget != nullptr && type->str() == "enabled")
-    reasoning->budget_tokens = static_cast<std::size_t>(budget->as_double());
-  if (const auto* display = thinking->find("display");
-      display != nullptr &&
-      (!display->is_string() ||
-       (display->str() != "summarized" && display->str() != "omitted" &&
-        display->str() != "updates")))
-    return InvalidCompatibilityRequest(
-        "'thinking.display' must be summarized, omitted, or updates");
-  if (type->str() != "adaptive")
-    reasoning->enabled = type->str() == "enabled";
-  return {};
-}
-
-std::optional<HttpResponse> ReadMessagesOutputConfig(
-    const json::Value& body, ReasoningOptions* options) {
-  const auto* config = body.find("output_config");
-  if (config == nullptr || config->is_null())
-    return {};
-  if (!config->is_object())
-    return InvalidCompatibilityRequest("'output_config' must be an object");
-  for (const auto& [key, value] : config->members()) {
-    if (key != "effort")
-      return InvalidCompatibilityRequest("unsupported output_config member: " +
-                                         key);
-    if (value.is_null())
-      continue;
-    // Anthropic effort does not select thinking, so it never enables it;
-    // formatters apply it only while thinking is on. Anthropic has no minimal
-    // effort.
-    const auto effort = value.is_string() && value.str() != "minimal"
-                            ? ParseReasoningEffortName(value.str())
-                            : std::nullopt;
-    if (!effort.has_value())
-      return InvalidCompatibilityRequest(
-          "'output_config.effort' must be low, medium, high, xhigh, or max");
-    options->effort = effort;
-  }
-  return {};
-}
-
-// The request fields Messages and count_tokens share: sampling and reasoning
-// controls, tools, system text and the turns.
-std::optional<HttpResponse> ReadAnthropicChat(
-    const json::Value& body, TextGenerationBackend& b, ChatRequest* chat,
-    std::size_t* max_tokens, sampling::SamplingConfig* sampling_config) {
-  chat->reasoning = b.reasoning_defaults();
-  if (body.is_object()) {
-    if (auto error = ReadThinking(body, &chat->reasoning))
-      return error;
-    if (auto error = ReadMessagesOutputConfig(body, &chat->reasoning))
-      return error;
-  }
-  if (auto error =
-          ReadCompatibilityOptions(body, b, "max_tokens", max_tokens,
-                                   sampling_config, chat->reasoning.enabled,
-                                   {.stop_field = "stop_sequences",
-                                    .stream = true,
-                                    .thinking = true,
-                                    .output_config = true,
-                                    .tools = true})) {
-    return error;
-  }
-  if (auto error = ParseAnthropicToolControls(body, chat))
-    return error;
-
-  std::vector<tokenization::ChatMessage> messages;
-  if (const auto* system = body.find("system")) {
-    std::string text;
-    if (!ReadTextContent(system, &text)) {
-      return InvalidCompatibilityRequest("'system' must contain only text");
-    }
-    messages.push_back(
-        {tokenization::ChatRole::kSystem, std::move(text), "", ""});
-  }
-  std::string messages_error =
-      "'messages' must contain text, image, thinking, tool_use or tool_result "
-      "blocks";
-  if (!ReadTextMessages(body.find("messages"), &messages, b.supports_images(),
-                        false, &messages_error)) {
-    return InvalidCompatibilityRequest(messages_error);
-  }
-
-  chat->messages = std::move(messages);
-  if (const auto error = ParseStopSequences(body.find("stop_sequences"),
-                                            StopSequenceFormat::kAnthropic,
-                                            &chat->stop_sequences))
-    return InvalidCompatibilityRequest(*error);
-  return std::nullopt;
-}
-
 HttpResponse AnthropicMessages(const HttpRequest& req,
                                TextGenerationBackend& b) try {
-  json::Value body;
-  try {
-    body = json::parse(req.body);
-  } catch (const std::exception& e) {
-    return Err(400, "Bad Request", e.what(), "invalid_request_error",
-               "parse_error");
-  }
-
-  ChatRequest chat;
-  std::size_t max_tokens = 0;
-  sampling::SamplingConfig sampling_config;
+  DecodedChatRequest decoded;
   if (auto error =
-          ReadAnthropicChat(body, b, &chat, &max_tokens, &sampling_config))
+          DecodeCompatibilityChat(ChatApi::kMessages, req, b, &decoded))
     return std::move(*error);
-  chat.client_id = req.client_id;
+  decoded.chat.client_id = req.client_id;
   return CreateAnthropicMessage(
-      req, b, chat, max_tokens, sampling_config,
-      body.find("stream") != nullptr && body.find("stream")->as_bool(),
-      RequestedModel(body, b));
+      req, b, decoded.chat, decoded.max_tokens.value_or(0), decoded.sampling,
+      decoded.stream, decoded.model ? *decoded.model : b.model_id());
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1356,23 +877,13 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
 // The prompt size a Messages request would have, without generating.
 HttpResponse AnthropicCountTokens(const HttpRequest& req,
                                   TextGenerationBackend& b) try {
-  json::Value body;
-  try {
-    body = json::parse(req.body);
-  } catch (const std::exception& e) {
-    return Err(400, "Bad Request", e.what(), "invalid_request_error",
-               "parse_error");
-  }
-
-  ChatRequest chat;
-  std::size_t max_tokens = 0;
-  sampling::SamplingConfig sampling_config;
+  DecodedChatRequest decoded;
   if (auto error =
-          ReadAnthropicChat(body, b, &chat, &max_tokens, &sampling_config))
+          DecodeCompatibilityChat(ChatApi::kMessages, req, b, &decoded))
     return std::move(*error);
-  if (body.find("stream") != nullptr && body.find("stream")->as_bool())
+  if (decoded.stream)
     return InvalidCompatibilityRequest("'stream' must be false");
-  const auto tokens = b.count_chat_tokens(chat);
+  const auto tokens = b.count_chat_tokens(decoded.chat);
   if (!tokens)
     return NotImplemented(req, b);
   json::Value resp = json::Value::object();
@@ -1754,97 +1265,6 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
           .headers = {{"Content-Type", "text/plain; version=0.0.4"}}};
 }
 
-// Numeric literals only, so the listener never depends on name resolution.
-// IPv4 is parsed strictly, without inet_aton shorthand such as `127.1`; IPv6
-// goes through getaddrinfo so link-local scopes (`fe80::1%eth0`) resolve.
-bool ParseListenAddress(const std::string& host, int port,
-                        sockaddr_storage* address, net::SocklenT* length) {
-  *address = {};
-  // Bracketed literals are a URI convention, not a listen host; Winsock's
-  // getaddrinfo would accept them and glibc would not.
-  if (host.find('[') != std::string::npos ||
-      host.find(']') != std::string::npos)
-    return false;
-  const auto network_port = htons(static_cast<std::uint16_t>(port));
-  auto* ipv4 = reinterpret_cast<sockaddr_in*>(address);
-  if (::inet_pton(AF_INET, host.c_str(), &ipv4->sin_addr) == 1) {
-    ipv4->sin_family = AF_INET;
-    ipv4->sin_port = network_port;
-    *length = sizeof(sockaddr_in);
-    return true;
-  }
-  addrinfo hints{};
-  hints.ai_family = AF_INET6;
-  hints.ai_socktype = SOCK_STREAM;
-  hints.ai_flags = AI_NUMERICHOST;
-  addrinfo* result = nullptr;
-  if (::getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0) {
-    // Another host's interface name in a link-local scope (`fe80::1%eth0` on
-    // a machine without it) still names a well-formed listener; validate the
-    // address part and resolve the zone best effort. An unknown zone fails
-    // at bind() with the usual error instead of here.
-    const auto zone = host.rfind('%');
-    if (zone == std::string::npos)
-      return false;
-    const std::string bare = host.substr(0, zone);
-    const std::string scope = host.substr(zone + 1);
-    auto* ipv6 = reinterpret_cast<sockaddr_in6*>(address);
-    if (scope.empty() ||
-        ::inet_pton(AF_INET6, bare.c_str(), &ipv6->sin6_addr) != 1)
-      return false;
-    ipv6->sin6_family = AF_INET6;
-    ipv6->sin6_port = network_port;
-    ipv6->sin6_scope_id =
-        std::ranges::all_of(
-            scope,
-            [](char character) {
-              return std::isdigit(static_cast<unsigned char>(character));
-            })
-            ? static_cast<std::uint32_t>(
-                  std::strtoul(scope.c_str(), nullptr, 10))
-            : ::if_nametoindex(scope.c_str());
-    *length = sizeof(sockaddr_in6);
-    return true;
-  }
-  const bool parsed = result != nullptr && result->ai_family == AF_INET6 &&
-                      result->ai_addrlen <= sizeof(sockaddr_storage);
-  if (parsed) {
-    std::memcpy(address, result->ai_addr, result->ai_addrlen);
-    reinterpret_cast<sockaddr_in6*>(address)->sin6_port = network_port;
-    *length = static_cast<net::SocklenT>(result->ai_addrlen);
-  }
-  ::freeaddrinfo(result);
-  return parsed;
-}
-
-// Client IDs key per-client scheduling, so one client keeps one ID whichever
-// listener it reaches: an IPv4 peer of a dual-stack `::` listener arrives as
-// `::ffff:a.b.c.d` and is reported as `a.b.c.d`. Empty when unavailable.
-std::string PeerAddress(int client_fd) {
-  sockaddr_storage peer{};
-  net::SocklenT length = sizeof(peer);
-  if (::getpeername(client_fd, reinterpret_cast<sockaddr*>(&peer), &length) !=
-      0)
-    return {};
-  if (peer.ss_family == AF_INET6) {
-    const auto& ipv6 = reinterpret_cast<const sockaddr_in6&>(peer);
-    if (IN6_IS_ADDR_V4MAPPED(&ipv6.sin6_addr)) {
-      sockaddr_in ipv4{};
-      ipv4.sin_family = AF_INET;
-      ipv4.sin_port = ipv6.sin6_port;
-      std::memcpy(&ipv4.sin_addr, &ipv6.sin6_addr.s6_addr[12],
-                  sizeof(ipv4.sin_addr));
-      std::memcpy(&peer, &ipv4, sizeof(ipv4));
-      length = sizeof(ipv4);
-    }
-  }
-  char text[NI_MAXHOST]{};
-  if (::getnameinfo(reinterpret_cast<const sockaddr*>(&peer), length, text,
-                    sizeof(text), nullptr, 0, NI_NUMERICHOST) != 0)
-    return {};
-  return text;
-}
-
 }  // namespace
 
 bool HasToken(std::string_view value, std::string_view token) {
@@ -1857,128 +1277,36 @@ bool HasToken(std::string_view value, std::string_view token) {
 }
 
 LoadingResponder::LoadingResponder(const std::string& host, int port) {
-  net::EnsureSocketRuntimeStarted();
-  sockaddr_storage addr{};
-  net::SocklenT addr_length = 0;
-  if (port <= 0 || port > 65535 ||
-      !ParseListenAddress(host, port, &addr, &addr_length))
-    return;
-  const int fd = static_cast<int>(net::CreateStreamSocket(addr.ss_family));
-  if (fd < 0)
-    return;
-  // Match HttpServer::start, which binds the same address after stop().
-  if (!net::SetExclusiveListenerReuse(fd)) {
-    net::CloseSocket(fd);
-    return;
-  }
-  if ((addr.ss_family == AF_INET6 && !net::ClearIpv6Only(fd)) ||
-      ::bind(fd, reinterpret_cast<sockaddr*>(&addr), addr_length) < 0 ||
-      ::listen(fd, 16) < 0) {
-    const int error = net::LastSocketError();
-    Logger::Debug("server", "event=loading_listener_unavailable host=" + host +
-                                " port=" + std::to_string(port) +
-                                " errno=" + std::to_string(error));
-    net::CloseSocket(fd);
-    return;
-  }
-  listen_fd_ = fd;
-  thread_ = std::thread([this] { serve(); });
+  responder_ = gufo_loading_responder_start(
+      reinterpret_cast<const std::uint8_t*>(host.data()), host.size(), port);
+  listening_.store(responder_ != nullptr, std::memory_order_release);
 }
 
 LoadingResponder::~LoadingResponder() {
   stop();
+  gufo_loading_responder_free(responder_);
+  responder_ = nullptr;
 }
 
 void LoadingResponder::stop() {
-  stopped_.store(true, std::memory_order_release);
-  if (thread_.joinable())
-    thread_.join();
-  if (listen_fd_ >= 0) {
-    net::CloseSocket(listen_fd_);
-    listen_fd_ = -1;
+  if (listening_.exchange(false, std::memory_order_acq_rel) &&
+      responder_ != nullptr) {
+    gufo_loading_responder_stop(responder_);
   }
 }
 
 void LoadingResponder::SetProgress(double progress, std::string_view message) {
-  // NaN fails both comparisons and would serialise as invalid JSON.
-  progress = std::isnan(progress) ? 0.0 : std::clamp(progress, 0.0, 1.0);
-  const std::lock_guard lock(progress_mutex_);
-  progress_ = progress;
-  message_.assign(message);
-}
-
-std::string LoadingResponder::Reply() const {
-  json::Value error = json::Value::object();
-  error["message"] = "Loading model";
-  error["type"] = "unavailable_error";
-  error["code"] = "loading";
-  json::Value body = json::Value::object();
-  body["error"] = std::move(error);
-  {
-    const std::lock_guard lock(progress_mutex_);
-    body["progress"] = progress_;
-    body["message"] = message_;
-  }
-  HttpResponse loading;
-  loading.status = 503;
-  loading.reason = "Service Unavailable";
-  loading.body = body.dump();
-  loading.headers.emplace_back("Retry-After", "1");
-  return BuildResponse(loading);
-}
-
-void LoadingResponder::serve() {
-  // One connection at a time is enough for probes. Read the request head
-  // before replying, and after replying read what the client still sends (a
-  // request body) until it closes: closing with unread data resets the
-  // connection, and the client can lose the reply. Bound both waits: a client
-  // that connects and sends nothing must not delay stop().
-  constexpr auto kRequestWait = std::chrono::milliseconds(500);
-  while (!stopped_.load(std::memory_order_acquire)) {
-    if (net::PollReadable(listen_fd_, 100) <= 0)
-      continue;
-    const int client_fd = static_cast<int>(net::AcceptClientSocket(listen_fd_));
-    if (client_fd < 0)
-      continue;
-    // Appends one read to `into` (when set); false once the deadline passes,
-    // the client closes or stop() runs.
-    const auto receive = [&](std::chrono::steady_clock::time_point deadline,
-                             std::string* into) {
-      const auto remaining =
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              deadline - std::chrono::steady_clock::now())
-              .count();
-      if (stopped_.load(std::memory_order_acquire) || remaining <= 0 ||
-          net::PollReadable(client_fd, static_cast<int>(remaining)) <= 0)
-        return false;
-      char buffer[4096];
-      const std::intptr_t received =
-          net::Receive(client_fd, buffer, sizeof(buffer), 0);
-      if (received <= 0)
-        return false;
-      if (into != nullptr)
-        into->append(buffer, static_cast<std::size_t>(received));
-      return true;
-    };
-    std::string head;
-    const auto head_deadline = std::chrono::steady_clock::now() + kRequestWait;
-    while (head.find("\r\n\r\n") == std::string::npos && head.size() < 8192 &&
-           receive(head_deadline, &head)) {
-    }
-    (void)SendAll(client_fd, Reply());
-    (void)net::ShutdownSocket(client_fd, net::ShutdownHow::kWrite);
-    const auto drain_deadline = std::chrono::steady_clock::now() + kRequestWait;
-    while (receive(drain_deadline, nullptr)) {
-    }
-    net::CloseSocket(client_fd);
+  if (responder_ != nullptr) {
+    gufo_loading_responder_set_progress(
+        responder_, progress,
+        reinterpret_cast<const std::uint8_t*>(message.data()), message.size());
   }
 }
 
 bool IsListenAddress(const std::string& host) {
-  net::EnsureSocketRuntimeStarted();
-  sockaddr_storage address{};
-  net::SocklenT length = 0;
-  return ParseListenAddress(host, 0, &address, &length);
+  return gufo_http_is_listen_address(
+             reinterpret_cast<const std::uint8_t*>(host.data()), host.size()) !=
+         0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2010,23 +1338,6 @@ std::string HttpRequest::query_param(const std::string& key) const {
 // HttpServer
 // ---------------------------------------------------------------------------
 
-struct HttpServer::ConnectionWorker {
-  int fd{-1};  // Protected by workers_mutex_, including shutdown and close.
-  // Set after the final response is written. The server reads nothing more,
-  // so the connection only logs and closes and no longer counts toward the
-  // limit.
-  std::atomic<bool> response_sent{false};
-  // Set while a kept-alive connection waits for its next request. A parked
-  // connection holds no request, so it does not count toward the limit and
-  // the listener may close it to admit a new connection. Changed only under
-  // workers_mutex_.
-  std::atomic<bool> parked{false};
-  // When `parked` was last set; protected by workers_mutex_.
-  std::chrono::steady_clock::time_point parked_since{};
-  std::atomic<bool> done{false};
-  std::jthread thread;
-};
-
 HttpServer::HttpServer(std::string host, int port,
                        std::shared_ptr<TextGenerationBackend> backend,
                        std::shared_ptr<VideoJobService> video_jobs,
@@ -2054,9 +1365,8 @@ HttpServer::HttpServer(std::string host, int port,
 
 HttpServer::~HttpServer() {
   stop();
-  if (listen_fd_ >= 0) {
-    net::CloseSocket(listen_fd_);
-  }
+  gufo_http_server_free(server_);
+  server_ = nullptr;
 }
 
 void HttpServer::add(const std::string& method, const std::string& path,
@@ -2101,96 +1411,97 @@ void HttpServer::register_routes() {
 }
 
 bool HttpServer::start(std::string* error) {
-  net::EnsureSocketRuntimeStarted();
-  if (listen_fd_ >= 0 || stopped_.load(std::memory_order_acquire)) {
+  if (server_ != nullptr || stopped_.load(std::memory_order_acquire)) {
     if (error != nullptr) {
       *error = "HTTP server has already been started or stopped";
     }
     return false;
   }
-  sockaddr_storage addr{};
-  net::SocklenT addr_length = 0;
-  if (port_ < 0 || port_ > 65535 ||
-      !ParseListenAddress(host_, port_, &addr, &addr_length)) {
-    if (error != nullptr) {
-      *error =
-          "host must be an IPv4 or IPv6 address and port must be between "
-          "0 and 65535";
-    }
-    return false;
-  }
-  platform::IgnoreSocketPipeSignal();
-  listen_fd_ = static_cast<int>(net::CreateStreamSocket(addr.ss_family));
-  if (listen_fd_ < 0) {
-    if (error != nullptr)
-      *error = "socket() failed";
-    return false;
-  }
-  // Exclusive on Windows, where SO_REUSEADDR alone lets a second server bind
-  // a port this one still serves; its bind() fails instead. POSIX keeps
-  // SO_REUSEADDR, so a restart binds through TIME_WAIT as before.
-  (void)net::SetExclusiveListenerReuse(listen_fd_);
-  // `::` serves IPv4 clients too. Set it explicitly: the kernel default
-  // follows net.ipv6.bindv6only, which differs between hosts.
-  if (addr.ss_family == AF_INET6 && !net::ClearIpv6Only(listen_fd_)) {
-    if (error != nullptr)
-      *error = "setsockopt(IPV6_V6ONLY) failed";
-    net::CloseSocket(listen_fd_);
-    listen_fd_ = -1;
-    return false;
-  }
-
-  if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), addr_length) < 0) {
-    const int code = net::LastSocketError();
-    if (error != nullptr) {
-      *error = "bind() failed on " + host_ + ":" + std::to_string(port_) +
-               " (error " + std::to_string(code) + ")";
-      if (net::IsAddressInUseError(code))
-        *error +=
-            ": the port is already in use, another server (gufo?) "
-            "listens on it";
-    }
-    net::CloseSocket(listen_fd_);
-    listen_fd_ = -1;
-    return false;
-  }
-  if (::listen(listen_fd_, 16) < 0) {
-    if (error != nullptr)
-      *error = "listen() failed";
-    net::CloseSocket(listen_fd_);
-    listen_fd_ = -1;
-    return false;
-  }
-  if (port_ == 0) {
-    sockaddr_storage bound{};
-    net::SocklenT length = sizeof(bound);
-    if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound),
-                      &length) != 0) {
-      if (error != nullptr) {
-        *error = "getsockname() failed";
+  const auto on_request = [](void* context, const GufoHttpRequestView* view,
+                             GufoHttpResponder* responder) noexcept {
+    auto* self = static_cast<HttpServer*>(context);
+    if (self != nullptr && view != nullptr && responder != nullptr) {
+      try {
+        self->dispatch_request(*view, responder);
+      } catch (const std::exception& e) {
+        Logger::Error(
+            "http", std::string("event=dispatch_exception reason=") + e.what());
+      } catch (...) {
+        Logger::Error("http", "event=dispatch_exception reason=unknown");
       }
-      net::CloseSocket(listen_fd_);
-      listen_fd_ = -1;
-      return false;
     }
-    port_ = ntohs(bound.ss_family == AF_INET6
-                      ? reinterpret_cast<sockaddr_in6&>(bound).sin6_port
-                      : reinterpret_cast<sockaddr_in&>(bound).sin_port);
+  };
+  const auto on_device_lost = [](void* context) noexcept -> int {
+    auto* self = static_cast<HttpServer*>(context);
+    if (self == nullptr)
+      return 0;
+    try {
+      return self->device_lost() ? 1 : 0;
+    } catch (...) {
+      return 0;
+    }
+  };
+  const auto on_error = [](void* context, const std::uint8_t* data,
+                           std::size_t len) noexcept {
+    if (context == nullptr)
+      return;
+    auto* out = static_cast<std::string*>(context);
+    out->assign(reinterpret_cast<const char*>(data), len);
+  };
+
+  GufoHttpServerConfig config{};
+  config.host = reinterpret_cast<const std::uint8_t*>(host_.data());
+  config.host_len = host_.size();
+  config.port = port_;
+  config.max_request_body_bytes = options_.max_request_body_bytes;
+  config.max_connections = options_.max_connections;
+  config.sse_heartbeat_interval_ms =
+      options_.sse_heartbeat_interval.count() > 0
+          ? static_cast<std::uint64_t>(options_.sse_heartbeat_interval.count())
+          : 0;
+  config.keep_alive = options_.keep_alive ? 1 : 0;
+  config.keep_alive_idle_timeout_ms =
+      options_.keep_alive_idle_timeout.count() > 0
+          ? static_cast<std::uint64_t>(options_.keep_alive_idle_timeout.count())
+          : 0;
+  config.max_requests_per_connection = options_.max_requests_per_connection;
+  config.handler = on_request;
+  config.handler_context = this;
+  config.device_lost = on_device_lost;
+  config.device_lost_context = this;
+
+  std::string err_msg;
+  server_ = gufo_http_server_start(&config, on_error, &err_msg);
+  if (server_ == nullptr) {
+    if (error != nullptr) {
+      *error = err_msg.empty() ? "failed to start HTTP server" : err_msg;
+    }
+    return false;
   }
+  port_ = gufo_http_server_port(server_);
   return true;
 }
 
 void HttpServer::run(bool handle_signals) {
   std::optional<ShutdownSignals> signals;
+  std::jthread signal_watcher;
   if (handle_signals) {
     signals.emplace();
+    signal_watcher = std::jthread([this](std::stop_token stop_token) {
+      while (!stop_token.stop_requested() &&
+             !stopped_.load(std::memory_order_acquire)) {
+        const int signal = shutdown_signal.load(std::memory_order_relaxed);
+        if (signal != 0) {
+          Logger::Info("server", "event=shutdown_requested signal=" +
+                                     std::to_string(signal));
+          stop();
+          platform::NotifyShutdownHandled();
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    });
   }
-  // Poll even without signal handling so device loss is observed while a
-  // request worker is blocked writing to a slow client. Nonblocking accept
-  // also keeps a vanished connection from wedging this observation loop.
-  if (!net::SetNonBlocking(listen_fd_))
-    throw std::system_error(net::LastSocketError(), std::system_category(),
-                            "configure HTTP listener");
   Logger::Info(
       "server",
       "event=listening monotonic_us=" +
@@ -2203,129 +1514,19 @@ void HttpServer::run(bool handle_signals) {
           ":" + std::to_string(port_) +
           " max_connections=" + std::to_string(options_.max_connections) +
           " max_body_bytes=" + std::to_string(options_.max_request_body_bytes));
-  while (!stopped_.load(std::memory_order_acquire)) {
-    (void)device_lost();
-    if (handle_signals) {
-      const int signal = shutdown_signal.load(std::memory_order_relaxed);
-      if (signal != 0) {
-        Logger::Info("server", "event=shutdown_requested signal=" +
-                                   std::to_string(signal));
-        stop();
-        platform::NotifyShutdownHandled();
-        break;
-      }
-    }
-    const int ready = net::PollReadable(listen_fd_, 100);
-    if (ready < 0 && !net::IsSocketInterrupted())
-      throw std::system_error(net::LastSocketError(), std::system_category(),
-                              "poll HTTP listener");
-    if (ready <= 0)
-      continue;
-    const int client_fd = static_cast<int>(net::AcceptClientSocket(listen_fd_));
-    if (client_fd < 0) {
-      if (stopped_.load(std::memory_order_acquire)) {
-        break;
-      }
-      continue;
-    }
-    if (stopped_.load(std::memory_order_acquire)) {
-      net::CloseSocket(client_fd);
-      break;
-    }
-
-    reap_workers();
-    auto worker = std::make_unique<ConnectionWorker>();
-    ConnectionWorker* const worker_ptr = worker.get();
-    bool overloaded = false;
-    {
-      const std::lock_guard<std::mutex> lock(workers_mutex_);
-      const auto serving = static_cast<std::size_t>(std::ranges::count_if(
-          workers_, [](const std::unique_ptr<ConnectionWorker>& existing) {
-            return !existing->response_sent.load(std::memory_order_acquire);
-          }));
-      const auto parked = static_cast<std::size_t>(std::ranges::count_if(
-          workers_, [](const std::unique_ptr<ConnectionWorker>& existing) {
-            return existing->parked.load(std::memory_order_acquire);
-          }));
-      overloaded = stopped_.load(std::memory_order_acquire) ||
-                   serving >= options_.max_connections;
-      // Parked keep-alive connections are bounded by the same limit, but they
-      // never refuse a new client: the one idle longest is closed to make
-      // room. Its worker sees the shutdown as an idle close.
-      if (!overloaded && serving + parked >= options_.max_connections) {
-        ConnectionWorker* idlest = nullptr;
-        for (const auto& existing : workers_) {
-          if (existing->parked.load(std::memory_order_acquire) &&
-              existing->fd >= 0 &&
-              (idlest == nullptr ||
-               existing->parked_since < idlest->parked_since))
-            idlest = existing.get();
-        }
-        if (idlest != nullptr) {
-          idlest->parked.store(false, std::memory_order_release);
-          (void)net::ShutdownSocket(idlest->fd, net::ShutdownHow::kReadWrite);
-        }
-      }
-      if (!overloaded) {
-        worker_ptr->fd = client_fd;
-        worker_ptr->thread = std::jthread([this, worker_ptr, client_fd] {
-          handle_connection(client_fd, worker_ptr->response_sent,
-                            worker_ptr->parked, worker_ptr->parked_since);
-          {
-            const std::lock_guard<std::mutex> lock(workers_mutex_);
-            net::CloseSocket(worker_ptr->fd);
-            worker_ptr->fd = -1;
-          }
-          worker_ptr->done.store(true, std::memory_order_release);
-        });
-        workers_.push_back(std::move(worker));
-      }
-    }
-    if (overloaded) {
-      HttpResponse response =
-          Err(503, "Service Unavailable", "connection limit reached",
-              "server_error", "overloaded");
-      response.headers.emplace_back("Retry-After", "1");
-      (void)SendAll(client_fd, BuildResponse(response));
-      net::CloseSocket(client_fd);
-    }
+  if (server_ != nullptr) {
+    (void)gufo_http_server_run(server_);
   }
-  reap_workers();
+  if (signal_watcher.joinable()) {
+    signal_watcher.request_stop();
+    signal_watcher.join();
+  }
 }
 
 void HttpServer::stop() {
   const bool was_stopped = stopped_.exchange(true, std::memory_order_acq_rel);
-  if (!was_stopped && listen_fd_ >= 0) {
-    // Keep the descriptor owned until destruction: run() may still be inside
-    // accept(). Closing here allows it to observe a reused descriptor.
-    (void)net::ShutdownSocket(listen_fd_, net::ShutdownHow::kReadWrite);
-  }
-
-  std::vector<std::unique_ptr<ConnectionWorker>> workers;
-  {
-    const std::lock_guard<std::mutex> lock(workers_mutex_);
-    workers = std::move(workers_);
-    for (const auto& worker : workers) {
-      if (worker->fd >= 0) {
-        (void)net::ShutdownSocket(worker->fd, net::ShutdownHow::kReadWrite);
-      }
-    }
-  }
-}
-
-void HttpServer::reap_workers() {
-  std::vector<std::unique_ptr<ConnectionWorker>> finished;
-  {
-    const std::lock_guard<std::mutex> lock(workers_mutex_);
-    auto iterator = workers_.begin();
-    while (iterator != workers_.end()) {
-      if ((*iterator)->done.load(std::memory_order_acquire)) {
-        finished.push_back(std::move(*iterator));
-        iterator = workers_.erase(iterator);
-      } else {
-        ++iterator;
-      }
-    }
+  if (!was_stopped && server_ != nullptr) {
+    gufo_http_server_stop(server_);
   }
 }
 
@@ -2516,431 +1717,287 @@ bool HttpServer::device_lost() {
   return true;
 }
 
-void HttpServer::handle_connection(
-    int client_fd, std::atomic<bool>& response_sent, std::atomic<bool>& parked,
-    std::chrono::steady_clock::time_point& parked_since) {
-  (void)net::SetSocketTimeouts(client_fd, 120'000);
-  // SSE events are small writes and the WebSocket path already disables
-  // Nagle for the same reason: waiting for a delayed acknowledgement turns
-  // token arrivals into 40 ms bursts on some clients.
-  (void)net::SetNoDelay(client_fd);
-
+void HttpServer::dispatch_request(const GufoHttpRequestView& view,
+                                  GufoHttpResponder* responder) {
   static std::atomic<std::uint64_t> next_request{0};
-  // Bytes a previous request read past its body, which already belong to the
-  // next request on a reused connection.
-  std::string pending;
-  std::size_t served = 0;
-  // Whether the previous response parked this connection; a parked flag
-  // cleared by someone else then means the listener evicted it.
-  bool was_parked = false;
-  while (true) {
-    if (served > 0) {
-      (void)net::SetSocketTimeouts(
-          client_fd,
-          static_cast<int>(options_.keep_alive_idle_timeout.count()));
+  const auto start_time = std::chrono::steady_clock::now();
+
+  const auto view_str = [](GufoHttpSliceView slice) {
+    return slice.data != nullptr && slice.len > 0
+               ? std::string(reinterpret_cast<const char*>(slice.data),
+                             slice.len)
+               : std::string{};
+  };
+
+  HttpRequest req;
+  req.method = view_str(view.method);
+  req.path = view_str(view.path);
+  req.query = view_str(view.query);
+  req.body = view_str(view.body);
+  req.headers.reserve(view.headers_len);
+  for (std::size_t i = 0; i < view.headers_len; ++i) {
+    req.headers.emplace_back(view_str(view.headers[i].name),
+                             view_str(view.headers[i].value));
+  }
+  if (auto peer = view_str(view.peer_addr); !peer.empty()) {
+    req.client_id = std::move(peer);
+  }
+  req.request_id = "r" + std::to_string(next_request.fetch_add(1) + 1);
+  GufoHttpCancel* cancel = view.cancel;
+  req.is_cancelled = [cancel] {
+    return cancel != nullptr && gufo_http_cancel_is_cancelled(cancel) != 0;
+  };
+
+  bool traced = false;
+  std::string traced_stream;
+  std::mutex traced_mutex;
+  bool response_started = false;
+  int response_status = 0;
+
+  const auto elapsed_ms = [&] {
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::steady_clock::now() - start_time)
+        .count();
+  };
+
+  const auto send_buffered = [&](const HttpResponse& resp) {
+    const auto headers = BuildResponseHeaders(resp);
+    const auto header_views = ToHeaderViews(headers);
+    return gufo_http_respond_buffered(
+               responder, resp.status,
+               header_views.empty() ? nullptr : header_views.data(),
+               header_views.size(),
+               reinterpret_cast<const std::uint8_t*>(resp.body.data()),
+               resp.body.size()) != 0;
+  };
+
+  const auto trace_failure = [&](const HttpResponse& error) {
+    if (traced) {
+      std::string captured;
+      if (response_started) {
+        const std::lock_guard lock(traced_mutex);
+        captured = traced_stream;
+      }
+      TraceResponse(req.request_id,
+                    response_started ? response_status : error.status,
+                    response_started ? "stream_error" : "failed",
+                    response_started, response_started ? captured : error.body);
     }
-    const auto start_time = std::chrono::steady_clock::now();
-    HttpRequest req;
-    if (auto peer = PeerAddress(client_fd); !peer.empty())
-      req.client_id = std::move(peer);
-    req.request_id = "r" + std::to_string(next_request.fetch_add(1) + 1);
-    // Set for routes `--trace` records; `traced_stream` collects the body
-    // bytes a streaming reply delivered.
-    bool traced = false;
-    std::string traced_stream;
-    bool response_started = false;
-    bool http11 = false;
-    int response_status = 0;
-    bool keep_request = false;
-    // An upgrade request keeps its trailing bytes for the WebSocket, so a
-    // route that declines the upgrade cannot hand them to a next request.
-    bool upgrade_request = false;
-    bool close_connection = true;
-    const auto elapsed_ms = [&] {
-      return std::chrono::duration<double, std::milli>(
-                 std::chrono::steady_clock::now() - start_time)
-          .count();
-    };
-    // A failure after a stream started keeps the bytes it already delivered.
-    const auto trace_failure = [&](const HttpResponse& error) {
-      if (traced)
-        TraceResponse(
-            req.request_id, response_started ? response_status : error.status,
-            response_started ? "stream_error" : "failed", response_started,
-            response_started ? traced_stream : error.body);
-    };
-    // Generation submitted on this thread, by the handler or by a stream body
-    // that defers it, names this request in its trace record.
-    const Trace::RequestScope trace_scope(req.request_id);
-    try {
-      bool idle_close = false;
-      bool ok = false;
-      bool payload_too_large = false;
-      bool too_many_fields = false;
-      {
-        std::string buffer = std::move(pending);
-        pending.clear();
-        GufoHttpHead head{};
-        const GufoHttpParse parsed = ReadHead(buffer, client_fd, req, head);
-        // A connection that ends or times out before sending any request byte
-        // closes quietly instead of answering 400 to nobody.
-        idle_close = parsed == GUFO_HTTP_PARTIAL && buffer.empty();
-        if (served > 0) {
-          // Leave the parked state under the lock the listener evicts with, so
-          // an evicted connection never serves the request it raced in, and a
-          // served one is counted again before it does any work.
-          const std::lock_guard<std::mutex> lock(workers_mutex_);
-          if (was_parked && !parked.load(std::memory_order_acquire)) {
-            idle_close = true;  // Evicted by the listener.
-          } else {
-            parked.store(false, std::memory_order_release);
-            if (!idle_close)
-              response_sent.store(false, std::memory_order_release);
-          }
+  };
+
+  const Trace::RequestScope trace_scope(req.request_id);
+  try {
+    // The transport refuses a request it could not read whole; the reply
+    // carries the usual headers and log line.
+    const int rejection = view.rejection;
+    const bool log_request =
+        req.method == "POST" || req.method == "DELETE" ||
+        req.path == "/v1/models" || req.path.ends_with("/content") ||
+        req.path == "/v1/realtime" || req.path == "/v1/audio/speech/stream";
+    const LogLevel request_level =
+        log_request ? LogLevel::kInfo : LogLevel::kDebug;
+    if (rejection == 0 && Logger::Enabled(request_level)) {
+      Logger::Log(request_level, "http",
+                  "request=" + req.request_id + " event=received method=" +
+                      req.method + " path=" + req.path +
+                      " body_bytes=" + std::to_string(req.body.size()));
+    }
+
+    HttpResponse resp;
+    if (rejection == 413) {
+      resp = Err(413, "Payload Too Large", "request body is too large",
+                 "invalid_request_error", "payload_too_large");
+    } else if (rejection == 431) {
+      resp = Err(431, "Request Header Fields Too Large",
+                 "request has more than 100 header fields",
+                 "invalid_request_error", "request_header_fields_too_large");
+    } else if (rejection == 400) {
+      resp = Err(400, "Bad Request", "malformed request",
+                 "invalid_request_error", "bad_request");
+    } else if (rejection != 0) {
+      resp = Err(500, "Internal Server Error", "internal server error",
+                 "internal_error", "server_exception");
+    } else if (req.method == "OPTIONS") {
+      resp = {.status = 204, .reason = "No Content"};
+    } else {
+      traced = Trace::Enabled() && IsTracedRoute(req);
+      if (traced) {
+        TraceRequest(req);
+      }
+      resp = handle_request(req);
+    }
+
+    resp.headers.emplace_back("X-Request-ID", req.request_id);
+    response_status = resp.status;
+    bool connected = true;
+
+    if (resp.websocket) {
+      response_started = true;
+      const auto headers = BuildResponseHeaders(resp);
+      const auto header_views = ToHeaderViews(headers);
+      // The session runs on this thread inside the call, within this
+      // request's trace scope; the request is logged once it ends.
+      struct WebSocketRun {
+        std::function<void(WebSocket&)>* handler;
+        std::exception_ptr failure;
+      } run{&resp.websocket, nullptr};
+      const auto ws_trampoline = [](void* ctx,
+                                    GufoWsSession* session) noexcept {
+        auto& run = *static_cast<WebSocketRun*>(ctx);
+        try {
+          WebSocket socket(session);
+          (*run.handler)(socket);
+        } catch (...) {
+          run.failure = std::current_exception();
         }
-        too_many_fields = parsed == GUFO_HTTP_TOO_MANY_FIELDS;
-        if (parsed == GUFO_HTTP_COMPLETE) {
-          (void)net::SetSocketTimeouts(client_fd, 120'000);
-          // ReadHead over-reads: `buffer` holds the head and possibly some body
-          // bytes already. Carry those forward so we only read the remainder
-          // from the socket.
-          std::string body = buffer.substr(head.len);
-          const auto text = [](GufoHttpSlice slice) {
-            return std::string(reinterpret_cast<const char*>(slice.data),
-                               slice.len);
-          };
-          req.method = text(head.method);
-          req.path = text(head.path);
-          req.query = text(head.query);
-          http11 = head.http11 != 0;
-          const std::string connection = req.header("connection");
-          keep_request = options_.keep_alive &&
-                         (http11 ? !HasToken(connection, "close")
-                                 : HasToken(connection, "keep-alive"));
-          upgrade_request = IsWebSocketUpgrade(req);
-          const bool websocket = upgrade_request;
-
-          const bool framing_valid =
-              head.framing_valid != 0 &&
-              std::in_range<std::size_t>(head.content_length);
-          const std::size_t content_length =
-              framing_valid ? static_cast<std::size_t>(head.content_length) : 0;
-          const std::size_t remaining =
-              content_length > body.size() ? content_length - body.size() : 0;
-          if (!framing_valid) {
-            ok = false;
-          } else if (content_length > options_.max_request_body_bytes) {
-            payload_too_large = true;
-          } else if (content_length > 0) {
-            if (remaining > 0) {
-              // A HTTP/1.0 request's expectation is ignored (RFC 9110 10.1.1).
-              ok = (!http11 || head.expect_continue == 0 ||
-                    SendAll(client_fd, "HTTP/1.1 100 Continue\r\n\r\n")) &&
-                   ReadN(body, client_fd, remaining);
-            } else {
-              ok = true;
+      };
+      connected = gufo_http_respond_websocket(
+                      responder, resp.status,
+                      header_views.empty() ? nullptr : header_views.data(),
+                      header_views.size(), ws_trampoline, &run) != 0;
+      if (run.failure)
+        std::rethrow_exception(run.failure);
+    } else if (resp.streaming_body) {
+      const auto headers = BuildResponseHeaders(resp);
+      const auto header_views = ToHeaderViews(headers);
+      const bool is_sse = IsEventStream(resp);
+      struct HeartbeatTraceCtx {
+        std::mutex* mutex;
+        std::string* stream;
+      } hb_ctx{&traced_mutex, &traced_stream};
+      const GufoHttpBytesSink hb_sink =
+          traced ? static_cast<GufoHttpBytesSink>([](void* ctx,
+                                                     const std::uint8_t* data,
+                                                     std::size_t len) noexcept {
+            auto* h = static_cast<HeartbeatTraceCtx*>(ctx);
+            try {
+              const std::lock_guard lock(*h->mutex);
+              h->stream->append(reinterpret_cast<const char*>(data), len);
+            } catch (...) {
             }
-            if (body.size() > content_length) {
-              pending.assign(body.data() + content_length,
-                             body.size() - content_length);
-              body.resize(content_length);
-            }
-          } else {
-            ok = true;
-            if (!websocket) {
-              // Everything after the head is the next pipelined request.
-              pending = std::move(body);
-              body.clear();
-            }
-          }
-          if (ok) {
-            req.body = std::move(body);
-            req.is_cancelled = [client_fd] {
-              return IsPeerDisconnected(client_fd);
-            };
-          }
-        }
-      }
-      if (idle_close) {
-        break;
-      }
-      if (!ok || payload_too_large || too_many_fields) {
-        // A framing failure may leave unread bytes on the socket.
-        keep_request = false;
-      }
+          })
+                 : nullptr;
 
-      // Successful health/metrics polling and video status polling stay quiet
-      // at the default level. Under --log-level=debug they become visible,
-      // because "is anything actually arriving?" is the first question an
-      // operator asks when a client reports a hang.
-      const bool log_request =
-          req.method == "POST" || req.method == "DELETE" ||
-          req.path == "/v1/models" || req.path.ends_with("/content") ||
-          req.path == "/v1/realtime" || req.path == "/v1/audio/speech/stream";
-      const LogLevel request_level =
-          log_request ? LogLevel::kInfo : LogLevel::kDebug;
-      // The tier check subsumes the method test: receipt lines are kInfo for
-      // the methods above and kDebug otherwise, so a quiet tier that discards
-      // the line also skips the concatenation that would build it.
-      if (ok && Logger::Enabled(request_level)) {
-        Logger::Log(request_level, "http",
-                    "request=" + req.request_id + " event=received method=" +
-                        req.method + " path=" + req.path +
-                        " body_bytes=" + std::to_string(req.body.size()));
-      }
-
-      HttpResponse resp;
-      if (payload_too_large) {
-        resp = Err(413, "Payload Too Large", "request body is too large",
-                   "invalid_request_error", "payload_too_large");
-      } else if (too_many_fields) {
-        resp = Err(431, "Request Header Fields Too Large",
-                   "request has more than 100 header fields",
-                   "invalid_request_error", "request_header_fields_too_large");
-      } else if (!ok) {
-        resp = Err(400, "Bad Request", "malformed request",
-                   "invalid_request_error", "bad_request");
-      } else if (req.method == "OPTIONS") {
-        resp = {.status = 204, .reason = "No Content"};
+      GufoHttpStream* stream = gufo_http_respond_stream_begin(
+          responder, resp.status,
+          header_views.empty() ? nullptr : header_views.data(),
+          header_views.size(), is_sse ? 1 : 0,
+          resp.defer_stream_headers ? 1 : 0, hb_sink, &hb_ctx);
+      if (stream == nullptr) {
+        connected = false;
       } else {
-        traced = Trace::Enabled() && IsTracedRoute(req);
-        if (traced) {
-          TraceRequest(req);
-        }
-        resp = handle_request(req);
-      }
-
-      resp.headers.emplace_back("X-Request-ID", req.request_id);
-      response_status = resp.status;
-      bool response_keep_alive =
-          keep_request && !resp.websocket && !upgrade_request;
-      // A HEAD response carries no body, so a streamed one cannot be framed
-      // for reuse.
-      const bool head_request = req.method == "HEAD";
-      if (head_request && resp.streaming_body)
-        response_keep_alive = false;
-      // The slot budget is part of the promise: the response that reaches the
-      // request limit says close, so a pooled client does not send a request
-      // the server has already decided to drop.
-      response_keep_alive = response_keep_alive &&
-                            served + 1 < options_.max_requests_per_connection;
-      bool connected = true;
-      if (resp.websocket) {
-        response_started = true;
-        connected = SendAll(client_fd, BuildResponseHead(resp, std::nullopt));
-        if (connected) {
-          WebSocket socket(client_fd, std::move(req.body));
-          resp.websocket(socket);
-        }
-      } else if (resp.streaming_body) {
-        const bool chunked = http11 && !HasHeader(resp, "content-length");
-        // Without chunked framing only the connection close marks the end.
-        response_keep_alive = response_keep_alive && chunked;
-        if (chunked)
-          resp.headers.emplace_back("Transfer-Encoding", "chunked");
-        const auto head =
-            BuildResponseHead(resp, std::nullopt, response_keep_alive);
         if (!resp.defer_stream_headers) {
           response_started = true;
-          connected = SendAll(client_fd, head);
         }
-        if (connected) {
-          std::mutex write_mutex;
-          std::condition_variable_any write_cv;
-          auto last_write = std::chrono::steady_clock::now();
+        try {
           const auto send_body = [&](std::string_view chunk) {
-            const std::lock_guard lock(write_mutex);
             if (!connected)
               return false;
-            if (!response_started) {
-              response_started = true;
-              connected = chunked
-                              ? SendChunk(client_fd, chunk, head)
-                              : SendAll(client_fd, head + std::string(chunk));
-              write_cv.notify_all();
-            } else {
-              connected = chunked ? SendChunk(client_fd, chunk)
-                                  : SendAll(client_fd, chunk);
-            }
-            if (connected && !chunk.empty()) {
-              last_write = std::chrono::steady_clock::now();
-              if (traced)
-                traced_stream.append(chunk);
+            response_started = true;
+            connected =
+                gufo_http_stream_write(
+                    stream, reinterpret_cast<const std::uint8_t*>(chunk.data()),
+                    chunk.size()) != 0;
+            if (connected && !chunk.empty() && traced) {
+              const std::lock_guard lock(traced_mutex);
+              traced_stream.append(chunk);
             }
             return connected;
           };
-          std::jthread heartbeat;
-          if (IsEventStream(resp) &&
-              options_.sse_heartbeat_interval.count() > 0) {
-            heartbeat = std::jthread([&](std::stop_token stop) {
-              std::unique_lock lock(write_mutex);
-              write_cv.wait(lock, stop,
-                            [&] { return response_started || !connected; });
-              while (!stop.stop_requested() && connected) {
-                const auto deadline =
-                    last_write + options_.sse_heartbeat_interval;
-                // Stop-aware waiting cannot miss a stop requested just before
-                // sleeping. Ordinary writes only move the deadline; they need
-                // not wake a second thread for every generated token.
-                write_cv.wait_until(lock, stop, deadline,
-                                    [&] { return !connected; });
-                if (!stop.stop_requested() && connected &&
-                    std::chrono::steady_clock::now() >=
-                        last_write + options_.sse_heartbeat_interval) {
-                  // SSE comments carry bytes without changing the API event
-                  // stream.
-                  connected = chunked ? SendChunk(client_fd, ": ping\n\n")
-                                      : SendAll(client_fd, ": ping\n\n");
-                  last_write = std::chrono::steady_clock::now();
-                  if (traced && connected)
-                    traced_stream.append(": ping\n\n");
-                }
-              }
-            });
-          }
           resp.streaming_body(send_body);
-          heartbeat.request_stop();
-          if (heartbeat.joinable())
-            heartbeat.join();
-          // An SSE error is a complete protocol response. A failed raw PCM
-          // stream must remain incomplete, or it looks like valid shorter
-          // audio.
-          bool terminated = false;
-          if (connected && response_started && chunked &&
-              (!resp.stream_log || resp.stream_log->error_code.empty() ||
-               resp.stream_log->error_event_sent)) {
-            connected = SendAll(client_fd, "0\r\n\r\n");
-            terminated = connected;
+        } catch (...) {
+          if (!response_started) {
+            gufo_http_stream_abort_deferred(stream, responder);
+          } else {
+            (void)gufo_http_stream_end(stream, 0);
           }
-          // An unterminated body ends only when the connection closes, so a
-          // reused connection would leave the client waiting for the idle
-          // timeout before it sees the failure.
-          response_keep_alive = response_keep_alive && terminated;
+          throw;
         }
-      } else {
-        // HEAD gets the headers, including the body's Content-Length, but
-        // never the body: on a reused connection those bytes would be read
-        // as the start of the next response.
-        const auto payload =
-            head_request
-                ? BuildResponseHead(resp, resp.body.size(), response_keep_alive)
-                : BuildResponse(resp, response_keep_alive);
-        response_started = true;
-        connected = SendAll(client_fd, payload);
+        (void)device_lost();
+        const bool complete = !resp.stream_log ||
+                              resp.stream_log->error_code.empty() ||
+                              resp.stream_log->error_event_sent;
+        connected =
+            gufo_http_stream_end(stream, complete ? 1 : 0) != 0 && connected;
       }
-      // The response is on the wire. Mark it before logging or tracing, which
-      // can park this worker while another connection waits for a slot. A
-      // connection kept for another request is parked from here: it holds no
-      // request, so it does not count toward the limit, and the listener may
-      // close it to admit a new client.
-      {
-        const std::lock_guard<std::mutex> lock(workers_mutex_);
-        // A pipelined request already read is not idle: it stays counted as
-        // serving and is never evicted.
-        const bool continues =
-            connected && response_started && response_keep_alive;
-        was_parked = continues && pending.empty();
-        if (was_parked)
-          parked_since = std::chrono::steady_clock::now();
-        parked.store(was_parked, std::memory_order_release);
-        response_sent.store(!continues || was_parked,
-                            std::memory_order_release);
-      }
-      std::string outcome = connected ? "completed" : "disconnected";
-      if (resp.stream_log) {
-        resp.log_details = resp.stream_log->details;
-        if (!resp.stream_log->error_code.empty()) {
-          outcome = "stream_error";
-          resp.log_details += " error_code=" + resp.stream_log->error_code;
-        }
-      }
-      if (resp.status >= 400) {
-        try {
-          const auto body = json::parse(resp.body);
-          if (const auto* error = body.find("error"))
-            resp.log_details += " error_code=" + error->member_str("code");
-        } catch (const std::exception&) {
-          // The status remains useful for an endpoint returning a non-JSON
-          // error.
-        }
-      }
-      if (Logger::Enabled(request_level) || resp.status >= 400 || !connected) {
-        Logger::LogRequest(req.request_id, req.method, req.path, resp.status,
-                           elapsed_ms(), resp.log_details, outcome,
-                           request_level);
-      }
-      if (traced) {
-        const bool stream = static_cast<bool>(resp.streaming_body);
-        TraceResponse(req.request_id, resp.status, outcome, stream,
-                      stream ? traced_stream : resp.body);
-      }
-      ++served;
-      close_connection =
-          !connected || !response_keep_alive || !response_started;
-    } catch (const TextGenerationError& exception) {
-      const auto duration_ms =
-          std::chrono::duration<double, std::milli>(
-              std::chrono::steady_clock::now() - start_time)
-              .count();
-      HttpResponse resp = TextGenerationErrorResponse(exception);
-      resp.headers.emplace_back("X-Request-ID", req.request_id);
-      Logger::LogRequest(req.request_id, req.method, req.path,
-                         response_started ? response_status : resp.status,
-                         duration_ms,
-                         std::string("error_code=") + exception.stable_code(),
-                         response_started ? "stream_error" : "failed");
-      trace_failure(resp);
-      if (!response_started)
-        (void)SendAll(client_fd, BuildResponse(resp));
-      response_sent.store(true, std::memory_order_release);
-    } catch (const std::exception& e) {
-      const auto duration_ms =
-          std::chrono::duration<double, std::milli>(
-              std::chrono::steady_clock::now() - start_time)
-              .count();
-      const char* message = *e.what() ? e.what() : "generation failed";
-      // Retain the cause in logs alongside the client's stable code.
-      Logger::Error("http", "request=" + req.request_id +
-                                " event=server_exception reason=" + message);
-      HttpResponse resp = Err(500, "Internal Server Error", message,
-                              "internal_error", "server_exception");
-      resp.headers.emplace_back("X-Request-ID", req.request_id);
-      Logger::LogRequest(req.request_id, req.method, req.path,
-                         response_started ? response_status : resp.status,
-                         duration_ms, "error_code=server_exception",
-                         response_started ? "stream_error" : "failed");
-      trace_failure(resp);
-      if (!response_started)
-        (void)SendAll(client_fd, BuildResponse(resp));
-      response_sent.store(true, std::memory_order_release);
-    } catch (...) {
-      const auto duration_ms =
-          std::chrono::duration<double, std::milli>(
-              std::chrono::steady_clock::now() - start_time)
-              .count();
-      HttpResponse resp =
-          Err(500, "Internal Server Error", "unknown server error",
-              "internal_error", "server_exception");
-      resp.headers.emplace_back("X-Request-ID", req.request_id);
-      Logger::LogRequest(req.request_id, req.method, req.path,
-                         response_started ? response_status : resp.status,
-                         duration_ms, "error_code=server_exception",
-                         response_started ? "stream_error" : "failed");
-      trace_failure(resp);
-      if (!response_started)
-        (void)SendAll(client_fd, BuildResponse(resp));
-      response_sent.store(true, std::memory_order_release);
+    } else {
+      (void)device_lost();
+      response_started = true;
+      connected = send_buffered(resp);
     }
-    if (close_connection) {
-      break;
+
+    std::string outcome = connected ? "completed" : "disconnected";
+    if (resp.stream_log) {
+      resp.log_details = resp.stream_log->details;
+      if (!resp.stream_log->error_code.empty()) {
+        outcome = "stream_error";
+        resp.log_details += " error_code=" + resp.stream_log->error_code;
+      }
     }
+    if (resp.status >= 400) {
+      try {
+        const auto body = json::parse(resp.body);
+        if (const auto* error = body.find("error"))
+          resp.log_details += " error_code=" + error->member_str("code");
+      } catch (const std::exception&) {
+      }
+    }
+    if (Logger::Enabled(request_level) || resp.status >= 400 || !connected) {
+      Logger::LogRequest(req.request_id, req.method, req.path, resp.status,
+                         elapsed_ms(), resp.log_details, outcome,
+                         request_level);
+    }
+    if (traced) {
+      const bool stream = static_cast<bool>(resp.streaming_body);
+      std::string captured;
+      if (stream) {
+        const std::lock_guard lock(traced_mutex);
+        captured = traced_stream;
+      }
+      TraceResponse(req.request_id, resp.status, outcome, stream,
+                    stream ? captured : resp.body);
+    }
+  } catch (const TextGenerationError& exception) {
+    const auto duration_ms = elapsed_ms();
+    HttpResponse resp = TextGenerationErrorResponse(exception);
+    resp.headers.emplace_back("X-Request-ID", req.request_id);
+    Logger::LogRequest(req.request_id, req.method, req.path,
+                       response_started ? response_status : resp.status,
+                       duration_ms,
+                       std::string("error_code=") + exception.stable_code(),
+                       response_started ? "stream_error" : "failed");
+    trace_failure(resp);
+    if (!response_started)
+      (void)send_buffered(resp);
+  } catch (const std::exception& e) {
+    const auto duration_ms = elapsed_ms();
+    const char* message = *e.what() ? e.what() : "generation failed";
+    Logger::Error("http", "request=" + req.request_id +
+                              " event=server_exception reason=" + message);
+    HttpResponse resp = Err(500, "Internal Server Error", message,
+                            "internal_error", "server_exception");
+    resp.headers.emplace_back("X-Request-ID", req.request_id);
+    Logger::LogRequest(req.request_id, req.method, req.path,
+                       response_started ? response_status : resp.status,
+                       duration_ms, "error_code=server_exception",
+                       response_started ? "stream_error" : "failed");
+    trace_failure(resp);
+    if (!response_started)
+      (void)send_buffered(resp);
+  } catch (...) {
+    const auto duration_ms = elapsed_ms();
+    HttpResponse resp =
+        Err(500, "Internal Server Error", "unknown server error",
+            "internal_error", "server_exception");
+    resp.headers.emplace_back("X-Request-ID", req.request_id);
+    Logger::LogRequest(req.request_id, req.method, req.path,
+                       response_started ? response_status : resp.status,
+                       duration_ms, "error_code=server_exception",
+                       response_started ? "stream_error" : "failed");
+    trace_failure(resp);
+    if (!response_started)
+      (void)send_buffered(resp);
   }
-  {
-    const std::lock_guard<std::mutex> lock(workers_mutex_);
-    parked.store(false, std::memory_order_release);
-  }
-  response_sent.store(true, std::memory_order_release);
-  // Act on a loss found by this request now, not at the next health probe.
   (void)device_lost();
 }
 

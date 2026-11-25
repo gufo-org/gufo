@@ -26,9 +26,13 @@ if(TARGET gufo_qwen38_flash_next)
 endif()
 # Extensions that list qwen38_flash_next in `depends` link these: the host
 # library (config, weights, probes) and, in HIP builds, the runtime.
-# TODO: export a narrower include set than ${PROJECT_SOURCE_DIR} once
-# Flash-Next publishes its own headers; until then dependents see private
-# Gufo headers through these exports.
+# Dependents should include only the experimental public headers under
+# include/gufo/ext/families/qwen/models/flash_next/ (SURFACE, from
+# gufo_ext_runtime). TODO: export a narrower include set than
+# ${PROJECT_SOURCE_DIR}. An export is an ALIAS of the implementation target,
+# whose PUBLIC root the in-tree tests and kernels rely on, so narrowing needs
+# a separate interface target; until then dependents also see private Gufo
+# headers through these exports.
 gufo_extension_export(TARGET gufo_qwen38_flash_next NAME qwen38_flash_next)
 
 add_library(gufo_qwen38_flash_next_reference STATIC EXCLUDE_FROM_ALL
@@ -88,8 +92,7 @@ gufo_extension_target(
   LINK_LIBRARIES
     gufo_qwen38_flash_next
     gufo_cache_hip
-    gufo_qwen_vision
-    gufo_qwen_draft_vocab
+    gufo::qwen_family
     gufo_qwen38_flash_next_mmq
     gufo_compare
     hip::host

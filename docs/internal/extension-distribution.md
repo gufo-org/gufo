@@ -123,13 +123,20 @@ Module builds need the SDK and its toolchain: `<build>/sdk` or
 packages (`#sdk`, `#release-sdk`), or the `gufo-runtime` image, which carries
 both. `GUFO_SDK_DIR` points elsewhere. In a build tree, `GUFO_EXTENSION_MODULES`
 builds listed extensions as `extension-modules/gufo-ext-<name>.so` instead of
-linking them. Modules may use only the public `<gufo/ext/...>` surface, cannot
-have `depends`, and cannot be `kind: library`.
+linking them. Modules may use only the public `<gufo/ext/...>` surface and
+cannot be `kind: library`. Their `depends` may name only in-tree extensions
+built into the host, whose exports they link as stand-ins; `sdk.json` lists
+those names under `host_extensions`, and `install` and `update` refuse any other
+dependency before building. A dependent module's build identity covers each
+such extension that exports anything, so a change to it makes only its
+dependents `needs update` (see [modules](extension-build.md#modules)).
 
 On Windows, `gufo.exe` exports its symbols through a generated `.def` file and
 the SDK ships `lib/gufo.lib`; modules are DLLs that load only into `gufo.exe`.
 Exported data symbols need `__declspec(dllimport)`, so an extension using such
-data doesn't link on Windows yet.
+data doesn't link on Windows yet. Windows modules can't have `depends` or link
+`gufo::qwen_family` yet: `gufo.exe` doesn't export that code. The Windows SDK
+lists no `host_extensions` and says why, so `install` refuses before building.
 
 ## Linux source and CMake recipe
 

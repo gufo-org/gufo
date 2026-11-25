@@ -135,8 +135,8 @@ toolchain: GCC 16.2 and ROCm 10.1.0. Without Nix, install these first:
 | C++20 compiler, CMake 3.21+, Ninja, pkg-config | Building |
 | ROCm HIP, hipBLAS, hipBLASLt, rocBLAS, hipCUB, rocPRIM, rocWMMA | GPU execution |
 | XRT with the amdxdna plugin | NPU execution |
-| ICU, libcurl, OpenSSL, libpng, libwebp | Tokenization, HTTPS, hashing, images |
-| Rust 1.88 or newer, libopus | PNG, JPEG, WAV and audio decoding |
+| ICU, libcurl, OpenSSL, libwebp | Tokenization, HTTPS, hashing, images |
+| Rust 1.88 or newer, libopus | PNG encoding; PNG, JPEG, WAV and audio decoding |
 | FFmpeg libraries | EmbeddingGemma 2 only |
 | CMake 3.26+ (4.2+ on Windows), Python 3.12+, network access | Building the [Loom runtime](models/loom.md#platforms) from its pinned release |
 | `ffmpeg` and `ffprobe` | Video and audio output |
@@ -147,7 +147,7 @@ set up:
 
 ```sh
 sudo apt install build-essential cmake ninja-build pkg-config \
-  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libwebp-dev \
+  libicu-dev libcurl4-openssl-dev libssl-dev libwebp-dev \
   libopus-dev \
   libavformat-dev libavcodec-dev libavutil-dev libswscale-dev ffmpeg \
   hipblas-dev hipblaslt-dev rocblas-dev \

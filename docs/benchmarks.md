@@ -20,7 +20,7 @@ of memory, and each one carries the date it was measured.
 
 Measurements go through the HTTP server, as a client would see them, and
 repeat the same workload on the reference project of each model: llama.cpp
-for the Qwen models and antirez/ds4 for DeepSeek. A comparison the reference
+for the Qwen models and Inkling 2 Mini, and antirez/ds4 for DeepSeek. A comparison the reference
 can't run is marked N/A; a cell still being measured is marked TODO.
 
 Speculative modes are faster on text that is easy to predict. The tables say

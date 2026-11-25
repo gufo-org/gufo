@@ -12,6 +12,10 @@ import re
 import subprocess
 
 SURFACE = "include/gufo/ext/SURFACE"
+# The SURFACE paths reachable only through the no-promise headers. They stay in
+# SURFACE so their diffs remain visible, but do not need a record.
+NO_PROMISE = "include/gufo/ext/NO_PROMISE"
+NO_PROMISE_ROOTS = ("include/gufo/ext/experimental/", "include/gufo/ext/families/")
 SERIES = "include/gufo/ext/api-series.json"
 RECORDS = "include/gufo/ext/changes"
 VERSION = "include/gufo/ext/version.hpp"
@@ -36,7 +40,6 @@ LEGACY_RECORD_NAMES = {
 GUIDANCE = {f"{RECORDS}/{name}" for name in ("README.md", "AGENTS.md", "CLAUDE.md")}
 CONTRACTS = {"cmake/GufoExtension.cmake", "cmake/GufoExtensionDiscovery.cmake", "schemas/extension.schema.json",
              "cmake/GufoExtensionVersion.cmake", "cmake/GufoExtensionVersion.hpp.in"}
-INCLUDE = re.compile(r'^\s*#\s*include\s*["<]([^">]+)[">]', re.M)
 TOKEN = re.compile(r'R"(?P<raw>[^ ()\\\t\r\n]{0,16})\([\s\S]*?\)(?P=raw)"|' + r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|\w+|[^\s]')
 
 
@@ -51,25 +54,155 @@ def tokens(text, path=""):
     return [match[0] for match in pattern.finditer(text) if not match[0].startswith(comments)]
 
 
-def closure(root):
-    pending = [path for path in (root / "include/gufo/ext").rglob("*")
-               if path.is_file() and path.suffix in (".h", ".hh", ".hpp", ".hxx", ".inc", ".def")]
+HEADER_SUFFIXES = (".h", ".hh", ".hpp", ".hxx", ".inc", ".def")
+FAMILIES = "include/gufo/ext/families"
+# Public model layers and the one src/models/ directory each may forward to.
+# A model layer without an entry may not reach src/models/ at all.
+MODEL_SOURCES = {("qwen", "flash_next"): "src/models/qwen38_flash_next"}
+COMMENT_OR_STRING = re.compile(r'R"(?P<raw>[^ ()\\\t\r\n]{0,16})\([\s\S]*?\)(?P=raw)"|'
+                               r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'')
+DIRECTIVE = re.compile(r'^[ \t]*#[ \t]*include(?:_next)?\b[ \t]*(.*)$', re.M)
+OPERAND = re.compile(r'"([^"\n]+)"|<([^>\n]+)>')
+
+
+def strip_comments(text):
+    """Blank comments, keeping strings and line breaks, so directives keep their lines."""
+    def blank(match):
+        token = match[0]
+        if token.startswith(("//", "/*")):
+            return re.sub(r"[^\n]", " ", token)
+        return token
+    return COMMENT_OR_STRING.sub(blank, text)
+
+
+def includes(text):
+    """Yield (quoted, path) per include directive, or (None, operand) for a macro include."""
+    for match in DIRECTIVE.finditer(strip_comments(text)):
+        operand = OPERAND.match(match[1].strip())
+        if operand is None:
+            yield None, match[1].strip()
+        else:
+            yield operand[1] is not None, operand[1] or operand[2]
+
+
+def reach(root, starts, errors=None):
+    """Return the repository headers starts include, transitively.
+
+    A quoted include that resolves nowhere and a macro include are reported in
+    errors; an unresolved angle include is a system header.
+    """
+    errors = [] if errors is None else errors
+    pending = list(starts)
     seen = set()
     while pending:
         path = pending.pop().resolve()
         relative = path.relative_to(root.resolve()).as_posix()
         if relative in seen: continue
         seen.add(relative)
-        for include in INCLUDE.findall(path.read_text()):
-            for candidate in (path.parent / include, root / "include" / include, root / include):
+        for quoted, include in includes(path.read_text()):
+            if quoted is None:
+                errors.append(f"{relative}: macro include {include} cannot be audited; spell the path")
+                continue
+            bases = (path.parent, root / "include", root) if quoted else (root / "include", root)
+            for candidate in (base / include for base in bases):
                 if candidate.is_file():
                     pending.append(candidate)
                     break
-    return sorted(seen)
+            else:
+                if quoted:
+                    errors.append(f"{relative}: unresolved include \"{include}\"")
+    return seen
+
+
+def scan_errors(root):
+    errors = []
+    reach(root, public_headers(root), errors)
+    return sorted(set(errors))
+
+
+def public_headers(root):
+    return [path for path in (root / "include/gufo/ext").rglob("*")
+            if path.is_file() and path.suffix in HEADER_SUFFIXES]
+
+
+def closure(root):
+    return sorted(reach(root, public_headers(root)))
+
+
+def layer_of(path):
+    """Classify a path for the family layer rules.
+
+    Returns ("family", family, None), ("model", family, model), ("other",) or
+    ("invalid", reason). Public and source model directories are
+    families/<family>/models/<model>/ under include/gufo/ext/ and src/.
+    """
+    for prefix in (FAMILIES + "/", "src/families/"):
+        if not path.startswith(prefix):
+            continue
+        parts = path[len(prefix):].split("/")
+        if len(parts) < 2:
+            return ("invalid", "a family header belongs in families/<family>/")
+        if parts[1] != "models":
+            return ("family", parts[0], None)
+        if len(parts) < 4:
+            return ("invalid", "a model header belongs in families/<family>/models/<model>/")
+        return ("model", parts[0], parts[2])
+    return ("other",)
+
+
+def layer_errors(root):
+    """Family headers never reach a model, and a model reaches no other model.
+
+    Each public header under families/ is checked through its transitive
+    include closure, which also covers the src/ headers it forwards to.
+    """
+    errors = []
+    starts = sorted(p for p in (root / FAMILIES).rglob("*")
+                    if p.is_file() and p.suffix in HEADER_SUFFIXES) if (root / FAMILIES).is_dir() else []
+    for start in starts:
+        source = start.relative_to(root).as_posix()
+        layer = layer_of(source)
+        if layer[0] == "invalid":
+            errors.append(f"{source}: {layer[1]}")
+            continue
+        _, family, model = layer
+        for target in sorted(reach(root, [start], errors) - {source}):
+            owner = layer_of(target)
+            in_models = owner[0] == "model" or any(
+                target.startswith(prefix) and target[len(prefix):].split("/")[1:2] == ["models"]
+                for prefix in (FAMILIES + "/", "src/families/"))
+            if model is None:
+                if in_models or target.startswith("src/models/"):
+                    errors.append(f"{source}: the {family} family layer reaches model header {target}")
+            elif in_models and owner[1:] != (family, model):
+                errors.append(f"{source}: model {family}/{model} reaches another model's header {target}")
+            elif target.startswith("src/models/"):
+                allowed = MODEL_SOURCES.get((family, model))
+                if allowed is None or not target.startswith(allowed.rstrip("/") + "/"):
+                    errors.append(f"{source}: model {family}/{model} reaches {target}, outside its "
+                                  "declared source directory (MODEL_SOURCES)")
+    return sorted(set(errors))
 
 
 def inventory(root):
     return "# Generated by tools/ci/check-extension-api.py --write; transitive source API paths.\n" + "".join(path + "\n" for path in closure(root))
+
+
+def no_promise(root):
+    """SURFACE paths no versioned public header reaches."""
+    versioned = [path for path in public_headers(root)
+                 if not path.relative_to(root).as_posix().startswith(NO_PROMISE_ROOTS)]
+    return sorted(set(closure(root)) - reach(root, versioned))
+
+
+def no_promise_inventory(root):
+    return ("# Generated by tools/ci/check-extension-api.py --write; SURFACE paths reachable only\n"
+            "# through include/gufo/ext/experimental/ or families/. Their changes need no record.\n"
+            + "".join(path + "\n" for path in no_promise(root)))
+
+
+def listed(text):
+    return {p for p in text.splitlines() if p and not p.startswith("#")}
 
 
 def api_version(text):
@@ -162,13 +295,19 @@ def check_diff(read_old, read_new, labels, old_records=None, new_records=None):
                     normalized_records.add(normalized)
                     continue
             errors.append(f"extension API change records are permanent and immutable: {path}")
-    old_surface = {p for p in read_old(SURFACE).splitlines() if p and not p.startswith("#")}
-    new_surface = {p for p in read_new(SURFACE).splitlines() if p and not p.startswith("#")}
+    old_surface = listed(read_old(SURFACE))
+    new_surface = listed(read_new(SURFACE))
+    new_free = listed(read_new(NO_PROMISE))
+    # Before NO_PROMISE existed, the old surface is classified like the new one.
+    old_free = listed(read_old(NO_PROMISE)) if read_old(NO_PROMISE) else new_free & old_surface
+    def free(path):
+        return path in (new_free if path in new_surface else old_free)
     changed = sorted(path for path in old_surface | new_surface | CONTRACTS
-                     if tokens(read_old(path), path) != tokens(read_new(path), path))
+                     if tokens(read_old(path), path) != tokens(read_new(path), path) and not free(path))
     series_changed = read_old(SERIES) != read_new(SERIES)
     added = set(new_records) - set(old_records) - normalized_records
-    if not changed and old_surface == new_surface and not series_changed and not added: return errors
+    promised_same = old_surface - old_free == new_surface - new_free
+    if not changed and promised_same and not series_changed and not added: return errors
     if "ext-api" not in labels: errors.append("extension API changes require the ext-api PR label")
     if not added: errors.append("extension API changes require a new permanent change record")
     try:
@@ -212,13 +351,19 @@ def main():
     args = parser.parse_args()
     root = args.root.resolve()
     expected = inventory(root)
-    if args.write: (root / SURFACE).write_text(expected)
-    if not (root / SURFACE).is_file() or (root / SURFACE).read_text() != expected:
-        parser.exit(1, "extension SURFACE drift: run tools/ci/check-extension-api.py --write\n")
+    expected_free = no_promise_inventory(root)
+    if args.write:
+        (root / SURFACE).write_text(expected)
+        (root / NO_PROMISE).write_text(expected_free)
+    for path, text in ((SURFACE, expected), (NO_PROMISE, expected_free)):
+        if not (root / path).is_file() or (root / path).read_text() != text:
+            parser.exit(1, f"extension {Path(path).name} drift: run tools/ci/check-extension-api.py --write\n")
     try:
         version = version_for_root(root)
     except (ValueError, KeyError, TypeError) as exc:
         parser.exit(1, f"extension API: {exc}\n")
+    if errors := sorted(set(scan_errors(root) + layer_errors(root))):
+        parser.exit(1, "\n".join(errors) + "\n")
     if args.changelog:
         args.changelog.parent.mkdir(parents=True, exist_ok=True)
         args.changelog.write_text(changelog(root))

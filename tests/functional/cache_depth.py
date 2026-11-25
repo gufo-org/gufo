@@ -5,6 +5,7 @@ from copy import deepcopy
 import sys
 
 from cache_growth import check_unchanged_retry, log_offset
+from thinking import answer_room, no_reasoning
 
 # The first turn's history must be at least this deep.
 MIN_TOKENS = 16384
@@ -12,7 +13,7 @@ MIN_TOKENS = 16384
 
 def check_cache_depth(client, model, checks, chat_result, concurrency=4, server_log=None):
     request = dict(model=model, temperature=0, seed=31,
-                   max_completion_tokens=16, reasoning_effort="none")
+                   max_completion_tokens=answer_room(16), reasoning_effort="none")
     controls = []
 
     def signature(result):
@@ -33,7 +34,7 @@ def check_cache_depth(client, model, checks, chat_result, concurrency=4, server_
                                     usage["gufo"]["prefill_tokens"])
         assert all(type(n) is int and n >= 0 for n in (total, reused, prefilled)), usage
         assert reused + prefilled == total, usage
-        assert result["text"].strip() == code and not result["reasoning"] \
+        assert result["text"].strip() == code and no_reasoning(result["reasoning"]) \
             and not result["tools"] and result["finish"] == "stop", result
         if cold:
             assert reused == 0 and prefilled == total, result

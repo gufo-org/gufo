@@ -49,8 +49,9 @@ This control is for kernel iteration; the default 40-step performance remains
 TODO and quality is measured separately in [QUALITY.md](QUALITY.md).
 
 PNG uses low compression with adaptive filters and preserves every RGBA pixel.
-The control's response PNG is approximately 1.00 MB; compression trades response
-size for lower CPU latency.
+The control's response PNG was approximately 1.00 MB with the libpng encoder;
+the Rust encoder that replaced it wrote 3-16% smaller files on test images.
+Compression trades response size for lower CPU latency.
 
 ## LoRA adapters
 

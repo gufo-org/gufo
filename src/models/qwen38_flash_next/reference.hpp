@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "src/families/qwen/vision/prompt.hpp"
+#include "gufo/ext/families/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 

@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <gufo/ext/families/qwen/control_tokens/control_tokens.hpp>
 #include <gufo/ext/json.hpp>
 #include <limits>
 #include <optional>
@@ -18,8 +19,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
-#include "src/families/qwen/control_tokens/control_tokens.hpp"
 
 namespace gufo::models::qwen3_tts {
 namespace {

@@ -4,6 +4,7 @@
 import argparse
 import fnmatch
 import json
+import subprocess
 from pathlib import Path, PurePosixPath
 
 import impact
@@ -50,7 +51,10 @@ def curated(planned, suites):
     return rows
 
 
-def select(paths, data, tier='pr', ar=False, benchmark=False):
+def select(paths, data, tier='pr', ar=False, benchmark=False, base_models=None):
+    """`base_models`: the model ids the base revision's registry lists, or None
+    when unknown. A model the base lacks (added by the change) has no main
+    server to time against, so it gets correctness only."""
     manifest = json.loads((HERE / 'impact.json').read_text())
     names = impact.suite_names(HERE / 'suites.py')
     impact.validate(manifest, names)
@@ -95,8 +99,11 @@ def select(paths, data, tier='pr', ar=False, benchmark=False):
               'timing_qualification': 'paired main/candidate server phases; no averaging across requests'}
     for key, reasons in sorted(selected.items()):
         model = data['models'][key]
+        new = base_models is not None and key not in base_models
         result['models'].append({'id': key, 'category': model['category'], 'reasons': reasons,
-                                 'timing_checks': timing_checks(model, reasons)})
+                                 'timing_checks': [] if new else timing_checks(model, reasons)})
+        if new:
+            result['models'][-1]['new'] = 'not on the base revision: no main server to time against'
         # The model's CTest labels (GPU tests from the checked package) run when
         # its private paths change, and on release runs.
         config = model.get('ctest')
@@ -180,7 +187,7 @@ def units(plan, table, budget, isolation):
             # One service command runs every suite; its timing arms follow on the same device.
             seconds = sum(suite_cost(table, key, suite) for group in groups for suite in group['suites'])
             # Loom packages have a smoke check only, no timing arms.
-            timed = selection['category'] != 'loom'
+            timed = selection['category'] != 'loom' and not selection.get('new')
             rows.append({'label': key, 'pool': 'services', 'seconds': seconds + (timing if timed else 0),
                          'part': {'model': key, 'groups': groups, 'timing': timed}})
             continue
@@ -206,8 +213,9 @@ def units(plan, table, budget, isolation):
                              'part': {'model': key, 'timing': False, 'groups': [
                                  {**group, 'suites': server['suites'],
                                   **({'server': number} if len(servers) > 1 else {})}]}})
-        rows.append({'label': key + '-timing', 'pool': key, 'seconds': timing,
-                     'part': {'model': key, 'groups': [], 'timing': True}})
+        if not selection.get('new'):
+            rows.append({'label': key + '-timing', 'pool': key, 'seconds': timing,
+                         'part': {'model': key, 'groups': [], 'timing': True}})
     return rows
 
 
@@ -279,7 +287,13 @@ def main():
         paths = impact.changed_paths(args.repo, args.base, args.head)
     else:
         paths = args.paths
-    planned = select(paths, registry(), args.tier, args.ar, args.benchmark)
+    base_models = None
+    if args.repo and args.base:
+        listed = subprocess.run(['git', '-C', str(args.repo), 'show', args.base + ':tests/functional/devlab.json'],
+                                capture_output=True, text=True)
+        if listed.returncode == 0:
+            base_models = set(json.loads(listed.stdout)['models'])
+    planned = select(paths, registry(), args.tier, args.ar, args.benchmark, base_models)
     planned.update(base=args.base, head=args.head, shards=shard(planned),
                    # The hosted checked build bundles these labels' test executables.
                    ctest_labels=sorted({label for model in planned['models']

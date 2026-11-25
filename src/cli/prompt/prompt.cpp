@@ -227,19 +227,12 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
     return std::nullopt;
   }
 
-  if (opt.speculative_backend == "mtp" && opt.mtp_model_path.empty()) {
+  try {
+    (void)SpeculativeConfigFor(opt.speculative_backend, opt.mtp_model_path,
+                               opt.dflash_model_path, opt.dspark_model_path);
+  } catch (const std::invalid_argument& exception) {
     if (error_msg != nullptr)
-      *error_msg = "MTP requires --mtp-model";
-    return std::nullopt;
-  }
-  if (opt.speculative_backend == "dflash2" && opt.dflash_model_path.empty()) {
-    if (error_msg != nullptr)
-      *error_msg = "DFlash2 requires --dflash-model";
-    return std::nullopt;
-  }
-  if (opt.speculative_backend == "dspark" && opt.dspark_model_path.empty()) {
-    if (error_msg != nullptr)
-      *error_msg = "DSpark requires --dspark-model";
+      *error_msg = exception.what();
     return std::nullopt;
   }
   // Each model sets its draft settings (TextSpeculativeDefaults).
@@ -283,11 +276,16 @@ std::optional<PromptOptions> ParseTextOptions(std::span<const char* const> args,
 }
 
 // Delivers the selected provider's options and resolves its draft settings;
-// false after reporting an error.
+// false after reporting an error. The provider's own `driver` reads the draft
+// model from the command line, so it needs one; a runner may carry its draft.
 bool PrepareForProvider(const ProviderOptions& provider,
-                        const ext::TextProvider& selected, PromptOptions* opt) {
+                        const ext::TextProvider& selected, bool driver,
+                        PromptOptions* opt) {
   try {
     opt->provider_options = provider.Select(selected.id);
+    if (driver)
+      RequireDraftModel(opt->speculative_backend, opt->mtp_model_path,
+                        opt->dflash_model_path, opt->dspark_model_path);
     const auto settings =
         ResolveSpeculativeSettings(selected, opt->speculative_backend, {});
     opt->draft_tokens = settings.max_draft_tokens;
@@ -409,7 +407,7 @@ int RunPrompt(std::span<const char* const> args) {
                 << opt.model_path << "'\n";
       return 1;
     }
-    if (!PrepareForProvider(provider_options, *provider, &opt))
+    if (!PrepareForProvider(provider_options, *provider, false, &opt))
       return 2;
     return RunRunnerPrompt(opt, model_load_start);
   }
@@ -434,7 +432,7 @@ int RunPrompt(std::span<const char* const> args) {
   }
   if (provider != nullptr && provider->prompt_driver == nullptr &&
       provider->create != nullptr) {
-    if (!PrepareForProvider(provider_options, *provider, &opt))
+    if (!PrepareForProvider(provider_options, *provider, false, &opt))
       return 2;
     return RunRunnerPrompt(opt, model_load_start);
   }
@@ -443,7 +441,7 @@ int RunPrompt(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  if (!PrepareForProvider(provider_options, *provider, &opt)) {
+  if (!PrepareForProvider(provider_options, *provider, true, &opt)) {
     PrintModelLoadTime(model_load_start, false);
     return 2;
   }
@@ -487,7 +485,7 @@ int RunChat(std::span<const char* const> args) {
                 << opt.model_path << "'\n";
       return 1;
     }
-    if (!PrepareForProvider(provider_options, *provider, &opt))
+    if (!PrepareForProvider(provider_options, *provider, false, &opt))
       return 2;
     return RunRunnerChat(opt, model_load_start);
   }
@@ -512,7 +510,7 @@ int RunChat(std::span<const char* const> args) {
   }
   if (provider != nullptr && provider->chat_driver == nullptr &&
       provider->create != nullptr) {
-    if (!PrepareForProvider(provider_options, *provider, &opt))
+    if (!PrepareForProvider(provider_options, *provider, false, &opt))
       return 2;
     return RunRunnerChat(opt, model_load_start);
   }
@@ -521,7 +519,7 @@ int RunChat(std::span<const char* const> args) {
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
-  if (!PrepareForProvider(provider_options, *provider, &opt)) {
+  if (!PrepareForProvider(provider_options, *provider, true, &opt)) {
     PrintModelLoadTime(model_load_start, false);
     return 2;
   }

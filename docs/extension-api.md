@@ -15,14 +15,14 @@ prints the exact version.
   any later 0.2 revision.
 - A **minor** bump may break extensions. The minor in your `api_version` must
   equal the host's, so `">= 0.1.12"` doesn't build against 0.2.
-- Headers under `include/gufo/ext/experimental/` carry no promise; check them
-  whenever you update.
+- Headers under `include/gufo/ext/experimental/` and `families/`, and what only
+  they include, carry no promise and change without a record; check them when
+  you update. Family headers reach no model and models no other model; a model
+  forwards only to its directory in `MODEL_SOURCES` (check-extension-api.py).
 
 The promise is source compatibility: rebuild against a new Gufo and your
 extension compiles. Binaries built for one Gufo don't load into another.
-
-Every change to the API adds a record under
-[`include/gufo/ext/changes/`](../include/gufo/ext/changes/README.md), and the
+Every change to the API adds a record under [`include/gufo/ext/changes/`](../include/gufo/ext/changes/README.md), and the
 revision is the number of records, so the records are the changelog.
 
 ## The boundary
@@ -40,6 +40,7 @@ uses:
 | `gufo_ext_core` | GGUF reading, sampling, JSON constraints, dequantization, SHA-256, image decoding, hipBLASLt plans and, with HIP, `WeightUpload` | all |
 | `gufo_ext_cache` | The component cache and, with HIP, its transfer and host-memory helpers | all |
 | `gufo_ext_hip` | The HIP compile definitions and include paths the public HIP headers need | HIP only |
+| `gufo::qwen_family` | Experimental: the Qwen tokenizer, chat template, control tokens, draft vocabulary, vision and, with HIP, kernels behind `<gufo/ext/families/qwen/...>`. Extensions and Linux loadable modules link it too | all |
 | `gufo::<name>` | Another extension's export, outside this boundary with no API promise ([depend on another extension](writing-extensions.md#depend-on-another-extension)) | per export |
 
 ## Model directories

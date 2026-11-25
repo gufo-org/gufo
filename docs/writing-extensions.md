@@ -125,7 +125,10 @@ gufo_extension_export(TARGET gufo_qwen38_flash_next_hip NAME qwen38_flash_next_h
 
 `<name>` is the exporting extension's name or starts with it and `_`, and
 mustn't fall in a longer extension name's namespace. Only the extension's own
-`extension.cmake` can export its targets. Your targets then link the alias:
+`extension.cmake` can export its targets. For Flash-Next, include only the
+experimental `<gufo/ext/families/qwen/models/flash_next/...>` headers; a new
+format serves through `CreateQwenFlashNextTextRunner(options, stages, weights,
+error)`. Your targets then link the alias:
 
 ```cmake
 gufo_extension_target(
@@ -140,8 +143,9 @@ your `extension.cmake` defines, helper targets and `INTERFACE` links included:
 a link to another extension's library, by export or target name, fails unless
 you list that extension in `depends`. For an extension outside Gufo's tree,
 every transitive link is checked too. A target disabled by its `requires`
-exports nothing, so give targets that link it the same `requires`. Modules (`gufo extension install`) don't support dependencies yet;
-compile both extensions in.
+exports nothing, so give targets that link it the same `requires`. A module
+may depend only on in-tree extensions its Gufo compiles in, and link only their
+exports; not on Windows yet. See [modules](internal/extension-build.md#modules).
 
 > **Warning:** Depending on an export takes you outside the versioned
 > [extension API](extension-api.md#the-boundary): its headers and libraries are

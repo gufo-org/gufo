@@ -5,7 +5,7 @@
 #include <stdexcept>
 
 #include "gufo/ext/continuation.hpp"
-#include "src/families/qwen/text/chat_template.hpp"
+#include "gufo/ext/families/qwen/text/chat_template.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 
 namespace gufo::models::qwen38_flash_next {
@@ -20,7 +20,8 @@ bool IsSha256Hex(std::string_view value) noexcept {
 std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
     std::string_view artifact_fingerprint, std::string_view mtp_fingerprint,
     bool has_mtp, std::uint32_t max_context, std::uint32_t max_draft_tokens,
-    std::uint32_t decode_concurrency, std::string_view position_policy) {
+    std::uint32_t decode_concurrency, std::string_view position_policy,
+    std::string_view artifact_scheme, std::string_view draft_scheme) {
   if (!IsSha256Hex(artifact_fingerprint)) {
     throw std::invalid_argument(
         "Qwen3.8-Flash-Next disk cache requires an artifact fingerprint");
@@ -33,8 +34,8 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
            << "model_kind=qwen38-flash-next\n"
-           << "artifact_id=" << ext::kGgufIdentityScheme << ':'
-           << artifact_fingerprint << '\n'
+           << "artifact_id=" << artifact_scheme << ':' << artifact_fingerprint
+           << '\n'
            << "tokenizer=embedded-in-artifact\n"
            << "chat_template=qwen38-reasoning-compiled-v3\n"
            << "chat_template_reference_sha256="
@@ -47,8 +48,8 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
            << "adapters=none\n";
   if (has_mtp) {
     identity << "draft_backend=qfn-mtp-v1\n"
-             << "draft_artifact_id=" << ext::kGgufIdentityScheme << ':'
-             << mtp_fingerprint << '\n'
+             << "draft_artifact_id=" << draft_scheme << ':' << mtp_fingerprint
+             << '\n'
              << "draft_max_tokens=" << max_draft_tokens << '\n'
              << "draft_cost_concurrency=" << decode_concurrency << '\n';
   }

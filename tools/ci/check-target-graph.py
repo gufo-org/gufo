@@ -28,6 +28,7 @@ PROTECTED = (
     "gufo_ext_core",
     "gufo_ext_cache",
     "gufo_ext_hip",
+    "gufo_qwen_family",
 )
 
 

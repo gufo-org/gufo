@@ -20,6 +20,8 @@ from tool_agent import agent_tools
 from urllib.parse import urlsplit
 from metrics import Recorder
 
+from thinking import answer_room, bounded, configure as configure_thinking
+
 TRACE = Recorder(None)
 # Matches TextRunnerDiskCacheOptions::min_checkpoint_step_tokens.
 DISK_CHECKPOINT_STEP = 2048
@@ -31,6 +33,7 @@ CASES = tuple(f"{field}-preserve{preserve}-sampled{sampled}"
 
 
 def call(url, body, stop_field=None):
+    body = bounded(body)
     target = urlsplit(url)
     cls = http.client.HTTPSConnection if target.scheme == "https" else http.client.HTTPConnection
     connection = cls(target.hostname, target.port, timeout=180)
@@ -130,7 +133,10 @@ def main():
                         help="Length of the synthetic shared system prefix")
     parser.add_argument("--case", action="append", choices=CASES,
                         help="Run only this case (repeatable for focused checks)")
+    parser.add_argument("--thinking-off-reasons", action="store_true",
+                        help="The model still thinks with thinking off (thinking.py)")
     args = parser.parse_args()
+    configure_thinking(args.thinking_off_reasons)
     TRACE.path = args.output.with_suffix(".requests.json")
     if args.append_image and not args.image:
         parser.error("--append-image requires --image")
@@ -218,7 +224,8 @@ def main():
                                 "function": {"name": "…", "arguments": "{}"}}]},
                             {"role": "tool", "tool_call_id": "legacy-call",
                              "content": "Unknown tool; no action taken. Continue the user's request."}])
-                body = {"model": args.model, "messages": messages, "max_tokens": 256,
+                body = {"model": args.model, "messages": messages,
+                        "max_tokens": 256 if thinking else answer_room(256),
                         "temperature": 0.8 if sampled else 0, "seed": 1234,
                         "top_k": 20, "top_p": 0.95,
                         "chat_template_kwargs": {"enable_thinking": thinking,

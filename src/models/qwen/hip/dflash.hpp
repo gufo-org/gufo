@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <functional>
 #include <gufo/ext/draft_backend.hpp>
+#include <gufo/ext/families/qwen/draft_vocab/draft_vocab.hpp>
+#include <gufo/ext/families/qwen/text/tokenizer.hpp>
 #include <gufo/ext/gguf_reader.hpp>
 #include <gufo/ext/prompt_lookup.hpp>
 #include <memory>
@@ -14,8 +16,6 @@
 #include <string_view>
 #include <vector>
 
-#include "src/families/qwen/draft_vocab/draft_vocab.hpp"
-#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/dflash_policy.hpp"
 #include "src/models/qwen/dflash_weights.hpp"
 #include "src/models/qwen/hip/executor.hpp"

@@ -670,6 +670,8 @@ std::unique_ptr<DeviceModel> DeviceModel::UploadShards(
                      bytes,   max_half_cols, max_q8_cols, error_msg};
     measure.source = source;
     (void)measure.Model(w, mtp, shard_count);
+    if (source != nullptr)
+      source->UploadDone(true);
     if (!measure.ok) {
       return nullptr;
     }
@@ -681,7 +683,16 @@ std::unique_ptr<DeviceModel> DeviceModel::UploadShards(
               m->bytes_, m->max_half_cols_, m->max_q8_cols_, error_msg};
   up.source = source;
   Uploaded uploaded = up.Model(w, mtp, shard_count);
-  if (!up.ok || !stager->Finish(error_msg)) {
+  // The source hears of the walk's end only once its queued region reads
+  // have landed, so it may free what they read into.
+  bool finished = false;
+  if (up.ok)
+    finished = stager->Finish(error_msg);
+  else if (source != nullptr)
+    (void)stager->Finish(nullptr);
+  if (source != nullptr)
+    source->UploadDone(false);
+  if (!up.ok || !finished) {
     return nullptr;
   }
   assert(up.requested == measured);

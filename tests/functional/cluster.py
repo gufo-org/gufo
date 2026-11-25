@@ -77,6 +77,8 @@ def command(group, binary, weights, output, assets=None, order_seed=None):
             args += ['--order-seed', str(order_seed)]
         if 'cache_disk_bytes' in model:
             args += ['--cache-disk-bytes', str(model['cache_disk_bytes'])]
+        if model.get('thinking_off_reasons'):
+            args += ['--thinking-off-reasons']
         args += ['--'] + llm_command(key, binary, assets, mode=mode,
                                     context=settings['context'], sessions=settings['sessions'])
         if 'cache_ram_bytes' in settings:

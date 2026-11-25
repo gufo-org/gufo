@@ -99,6 +99,10 @@ public:
     /// A chat template rendered the prompt, trimming whitespace from the
     /// edges of message content.
     bool chat_template{false};
+    /// What the rendered chat left open, which `--trace` records for the
+    /// output parser; absent for raw completions.
+    std::optional<TextGenerationBackend::InitialOutputState>
+        initial_output_state;
   };
 
   class Request {

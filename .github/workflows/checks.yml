@@ -15,7 +15,7 @@ jobs:
   build-and-test:
     name: Run CPU and repository checks
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,8 +33,10 @@ jobs:
 
       # Actions cache entries are immutable: save each run under a fresh key
       # so an early empty archive cannot freeze the compiler cache for a week.
+      # Restore and save separately: the combined action saves only after a
+      # successful job, so a cold run that times out would never seed a cache.
       - name: Restore compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/gufo-ccache
           key: gufo-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ steps.ccache-key.outputs.epoch-week }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -42,7 +44,7 @@ jobs:
             gufo-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-
 
       - name: Restore Rust compiler cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/gufo-rust-cache
           key: gufo-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -59,6 +61,16 @@ jobs:
           mkdir -p /tmp/gufo-rust-cache
           chmod -R a+rwX /tmp/gufo-rust-cache
           chmod 1777 /tmp/gufo-rust-cache
+
+      # A pull request saves its compiler caches only when the run added at
+      # least 32 MiB to them; otherwise a rerun restores the same copy and
+      # recompiles little, and the PR keeps no duplicate of main's cache.
+      - name: Snapshot restored compiler caches
+        continue-on-error: true
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 tools/ci/cache_growth.py snapshot /tmp/gufo-ccache "$RUNNER_TEMP/cache-growth/ccache.json"
+          python3 tools/ci/cache_growth.py snapshot /tmp/gufo-rust-cache "$RUNNER_TEMP/cache-growth/rust.json"
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -85,9 +97,46 @@ jobs:
           use-flakehub: false
           use-gha-cache: true
 
+      # Stop below the job limit so the caches below still save what a cold
+      # or slow run compiled; the rerun then starts warm. Cold runs take about
+      # 25 minutes and warm ones about 16.
       - name: Run CPU and repository checks
+        id: check
+        timeout-minutes: 32
         run: |
           nix flake check --print-build-logs --cores "$(nproc)" --max-jobs 2
+
+      # An empty result, such as from a failed measurement, saves.
+      - name: Measure compiler cache growth
+        continue-on-error: true
+        id: growth
+        if: always() && github.event_name == 'pull_request' && contains(fromJSON('["success", "failure", "cancelled"]'), steps.check.outcome)
+        run: |
+          echo "ccache-$(python3 tools/ci/cache_growth.py check /tmp/gufo-ccache "$RUNNER_TEMP/cache-growth/ccache.json")" >> "$GITHUB_OUTPUT"
+          # Rust objects are only ever added. Past 1 GiB, keep the restored
+          # entry; warm-caches.yml starts main's over again at that size.
+          if (( $(du -sb /tmp/gufo-rust-cache | cut -f1) > 1073741824 )); then
+            echo "rust-save=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust-$(python3 tools/ci/cache_growth.py check /tmp/gufo-rust-cache "$RUNNER_TEMP/cache-growth/rust.json")" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Only pull requests save here. On main every check comes from Cachix
+      # and compiles nothing, and a newer empty entry would supersede the one
+      # warm-caches.yml saves; that workflow owns main's compiler caches.
+      - name: Save compiler cache
+        if: always() && github.event_name == 'pull_request' && contains(fromJSON('["success", "failure", "cancelled"]'), steps.check.outcome) && steps.growth.outputs.ccache-save != 'false'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/gufo-ccache
+          key: gufo-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}-${{ steps.ccache-key.outputs.epoch-week }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save Rust compiler cache
+        if: always() && github.event_name == 'pull_request' && contains(fromJSON('["success", "failure", "cancelled"]'), steps.check.outcome) && steps.growth.outputs.rust-save != 'false'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/gufo-rust-cache
+          key: gufo-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   # Populate the shared production-package cache on main for later builds.
   cache-package:
@@ -99,3 +148,17 @@ jobs:
       artifact-name: linux-${{ github.sha }}
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  # Keep only this ref's newest entry of each per-run cache so pull requests
+  # do not push main's caches out of the 10 GB repository budget.
+  prune-caches:
+    name: Prune superseded caches
+    needs: [ build-and-test, cache-package ]
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/caches.yml

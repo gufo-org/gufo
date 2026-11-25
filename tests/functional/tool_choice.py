@@ -43,15 +43,23 @@ def check_tool_choice_cache(client, model, checks, chat_result, server_log=None)
         call = first["tools"][0]
         assert call["function"]["name"] == "read", first
         assert json.loads(call["function"]["arguments"]) == {"path": "fixture.txt"}, first
+        # A model that thinks with thinking off (thinking.py) generated a
+        # thought: the client replays and keeps it, so the generated frontier
+        # is the same tokens.
+        thought = ({"reasoning_content": first["reasoning"]} if first["reasoning"] else {})
         continued = {**common, "messages": [
             *messages,
-            {"role": "assistant", "content": first["text"] or None, "tool_calls": [call]},
+            {"role": "assistant", "content": first["text"] or None, "tool_calls": [call],
+             **thought},
             {"role": "tool", "tool_call_id": call["id"], "content": "The file says DONE."},
             {"role": "user", "content": (
                 "Call read once more with path verified.txt." if after == "required"
                 else "Reply with only DONE. Do not call a tool.")}]}
         if after is not None:
             continued["tool_choice"] = after
+        if thought:
+            continued["extra_body"] = {**common["extra_body"],
+                                       "chat_template_kwargs": {"preserve_thinking": True}}
         # Clients may replace the final user turn of an agent history. Count
         # that turn and its assistant opening in a separate request, as
         # tool-history does.

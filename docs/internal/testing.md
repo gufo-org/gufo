@@ -66,12 +66,18 @@ configured `rustc` reports for its standard library. The C++
 sanitizer preset does not instrument the Rust library; it uses the development
 profile when configured as Debug.
 
-`png_decode_test` checks expected RGB bytes across color types, sample depths,
-transparency, Adam7 interlacing and EXIF orientations. It fixes the PNG port's intentional framing
-behavior: missing Adler trailers and unknown non-letter chunks are accepted;
-bad IEND CRCs, nonempty IEND and stray IDAT after text are rejected.
-APNG metadata is ignored while decoding the default image. Libpng only
-writes fixtures; no frozen decoder remains.
+`png_test` checks expected RGB and RGBA bytes across color types, sample
+depths, transparency, Adam7 interlacing, filters and EXIF orientations, and
+encoder round trips. Its RGBA gamma, sBIT and chunk-precedence values were
+recorded from libpng 1.6.59's simplified API (`png_image_begin_read_from_memory`
+and `png_image_finish_read` with `PNG_FORMAT_RGBA`, from
+`nix shell nixpkgs#libpng`); re-record them the same way after changing the
+RGBA conversion.
+It fixes the PNG port's intentional framing behavior: missing Adler trailers
+and unknown non-letter chunks are accepted; bad IEND CRCs, nonempty IEND and
+stray IDAT after text are rejected. APNG metadata is ignored while decoding
+the default image. The test writes its own fixtures with stored deflate
+blocks; no frozen decoder remains.
 
 `jpeg_decode_test` compares the Rust JPEG decoder with the libjpeg-turbo path
 it replaced, frozen in `tests/core/jpeg_reference.cpp`. libjpeg-turbo writes
@@ -185,6 +191,25 @@ number schemas over bound, exclusivity and `multipleOf` grids must agree on
 every prefix of up to three bytes and on generated longer ones. It runs in
 `check-pr`; the crate's Rust tests cover the decimal arithmetic, the keywords,
 a few languages and rejections, and the C ABI.
+
+`chat_request_test` compares the Rust chat request decoder
+(`src/core/chat_request`), through `src/cli/serve/chat_request.cpp`, with
+frozen copies of the 0.35.0 C++ decoders in
+`tests/cli/chat_request_reference.cpp`: Chat Completions, Responses and
+Messages bodies, and the three fragment shims `openai_chat_test` calls. Both
+run through one fake environment that serves fixed model names, fails chosen
+image URLs, rejects chosen schemas and logs every call. Generated bodies, half
+of them built only from valid members, cover roles, content parts, images,
+historical tool calls, tools, namespaces, tool choices, reasoning controls,
+budgets, token limits and the shared sampling, stop and format fields; seeded
+mutations change a value's type, drop, rename or repeat a member, respell a
+number and insert NUL or non-ASCII bytes, and byte edits make parse errors. Each must give
+the same request, the same rejection (status, code and message) and the same
+log, under three server settings. A rejected fragment alone may differ: the
+shim leaves its request unchanged where C++ filled part of it. It runs in
+`check-pr` in under half a second; the crate's Rust tests cover the check
+order, the body view the C++ helpers get, the C ABI and, under a failing
+allocator, `NO_MEMORY` instead of an abort for copies of large values.
 
 `cache_disk_manifest_test` compares the Rust disk manifest codec and CRC-64
 (`src/core/cache_manifest`), through `src/cache/disk.hpp`, with a frozen copy

@@ -2,7 +2,6 @@
 
 #include <curl/curl.h>
 #include <gufo/jpeg_decode.h>
-#include <gufo/png_decode.h>
 #include <webp/decode.h>
 
 #include <algorithm>
@@ -17,6 +16,7 @@
 
 #include "src/core/base64.hpp"
 #include "src/core/platform/socket.hpp"
+#include "src/core/png.hpp"
 
 namespace gufo::core {
 namespace {
@@ -54,32 +54,6 @@ Image DecodeJpeg(std::span<const std::uint8_t> bytes, unsigned& orientation) {
   image.pixels.resize(std::size_t{image.width} * image.height * 3);
   CheckJpeg(gufo_jpeg_decode_rgb8(decoder.get(), image.pixels.data(),
                                   image.pixels.size()));
-  return image;
-}
-
-void CheckPng(GufoPngStatus status) {
-  if (status == GUFO_PNG_INVALID)
-    throw std::invalid_argument("invalid PNG image");
-  if (status != GUFO_PNG_OK)
-    throw std::runtime_error("PNG decoder failed");
-}
-
-struct PngDecoderClose {
-  void operator()(GufoPngDecoder* decoder) const { gufo_png_close(decoder); }
-};
-
-Image DecodePng(std::span<const std::uint8_t> bytes) {
-  GufoPngDecoder* opened = nullptr;
-  GufoPngDimensions size{};
-  const GufoPngStatus status =
-      gufo_png_open(bytes.data(), bytes.size(), &opened, &size);
-  const std::unique_ptr<GufoPngDecoder, PngDecoderClose> decoder(opened);
-  CheckPng(status);
-  ValidateDimensions(size.width, size.height);
-  Image image{size.width, size.height, {}};
-  image.pixels.resize(std::size_t{image.width} * image.height * 3);
-  CheckPng(gufo_png_decode_rgb8(decoder.get(), image.pixels.data(),
-                                image.pixels.size()));
   return image;
 }
 
@@ -232,13 +206,8 @@ Image DecodeImage(std::span<const std::uint8_t> bytes) {
   if (bytes.empty() || bytes.size() > kMaxEncodedImageBytes) {
     throw std::invalid_argument("image exceeds encoded byte limit or is empty");
   }
-  constexpr std::array<std::uint8_t, 8> kPngSignature{0x89, 'P',  'N',  'G',
-                                                      '\r', '\n', 0x1a, '\n'};
-  if (bytes.size() >= kPngSignature.size() &&
-      std::memcmp(bytes.data(), kPngSignature.data(), kPngSignature.size()) ==
-          0) {
-    return Orient(DecodePng(bytes), PngOrientation(bytes));
-  }
+  if (IsPng(bytes))
+    return Orient(DecodePngRgb(bytes), PngOrientation(bytes));
   if (bytes.size() >= 2 && bytes[0] == 0xff && bytes[1] == 0xd8) {
     unsigned orientation = 1;
     Image image = DecodeJpeg(bytes, orientation);

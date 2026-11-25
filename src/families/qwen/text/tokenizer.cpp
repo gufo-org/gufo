@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/core/json.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
 
 namespace gufo::tokenization {
@@ -326,7 +327,251 @@ std::size_t Qwen35PieceEnd(std::string_view text, std::size_t offset) {
   return offset + first.length;
 }
 
+// Whether a vocabulary entry is one of the control tokens matched before BPE.
+bool IsSpecialTokenName(std::string_view t) noexcept {
+  return t == kEndOfText || t == kImStart || t == kImEnd ||
+         t == "<tool_call>" || t == "</tool_call>" || t == "<tool_response>" ||
+         t == "</tool_response>" || t == "<think>" || t == "</think>" ||
+         t == "<tts_pad>" || t == "<tts_text_bos>" || t == "<tts_text_eod>" ||
+         t == "<tts_text_bos_single>" || t == kObjectRefStart ||
+         t == kObjectRefEnd || t == kVisionStart || t == kVisionEnd ||
+         t == kImagePad || t == kVideoPad || t == kQuadStart || t == kQuadEnd ||
+         (t.size() >= 4 && t.starts_with("<|") && t.ends_with("|>"));
+}
+
+// The Qwen3.5 tokenizer.json split, which Qwen35PieceEnd implements after NFC
+// (the pre-tokenizer GGUF conversions name "qwen35").
+constexpr std::string_view kQwen35SplitRegex =
+    R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
+
+bool IsNullOr(const json::Value* value, auto&& accepted) {
+  return value == nullptr || value->is_null() || accepted(*value);
+}
+
+bool IsFalse(const json::Value* value) {
+  return IsNullOr(
+      value, [](const json::Value& v) { return v.is_bool() && !v.as_bool(); });
+}
+
+bool HasType(const json::Value& value, std::string_view type) {
+  return value.is_object() && value.member_str("type") == type;
+}
+
+// The byte-level stage this tokenizer implements: no prefix space, and no
+// GPT-2 split of its own after the Qwen split.
+bool IsPlainByteLevel(const json::Value& value) {
+  return HasType(value, "ByteLevel") &&
+         IsFalse(value.find("add_prefix_space")) &&
+         IsFalse(value.find("use_regex"));
+}
+
+// Only the Qwen3.5 normalization and split are implemented; any other would
+// encode differently from the reference tokenizer.
+std::optional<std::string> UnsupportedTokenizerJsonPipeline(
+    const json::Value& root) {
+  const json::Value* normalizer = root.find("normalizer");
+  if (normalizer == nullptr || !HasType(*normalizer, "NFC") ||
+      normalizer->size() != 1) {
+    return "tokenizer.json normalizer is not NFC";
+  }
+  const json::Value* pre = root.find("pre_tokenizer");
+  const json::Value* stages = pre != nullptr && HasType(*pre, "Sequence")
+                                  ? pre->find("pretokenizers")
+                                  : nullptr;
+  if (stages == nullptr || !stages->is_array() || stages->size() != 2) {
+    return "tokenizer.json pre-tokenizer is not the Qwen3.5 split and byte "
+           "level";
+  }
+  const json::Value& split = stages->items()[0];
+  const json::Value* pattern =
+      HasType(split, "Split") ? split.find("pattern") : nullptr;
+  const json::Value* regex =
+      pattern != nullptr ? pattern->find("Regex") : nullptr;
+  if (regex == nullptr || !regex->is_string() ||
+      regex->str() != kQwen35SplitRegex ||
+      split.member_str("behavior") != "Isolated" ||
+      !IsFalse(split.find("invert"))) {
+    return "tokenizer.json split is not the Qwen3.5 pattern";
+  }
+  if (!IsPlainByteLevel(stages->items()[1])) {
+    return "tokenizer.json pre-tokenizer does not end in plain byte level";
+  }
+  if (!IsNullOr(root.find("decoder"), IsPlainByteLevel) ||
+      !IsNullOr(root.find("post_processor"), IsPlainByteLevel)) {
+    return "tokenizer.json decoder or post-processor is not byte level";
+  }
+  const json::Value& model = *root.find("model");
+  const auto empty_string = [](const json::Value& v) {
+    return v.is_string() && v.str().empty();
+  };
+  if (!IsNullOr(model.find("dropout"),
+                [](const json::Value&) { return false; }) ||
+      !IsNullOr(model.find("unk_token"),
+                [](const json::Value&) { return false; }) ||
+      !IsNullOr(model.find("continuing_subword_prefix"), empty_string) ||
+      !IsNullOr(model.find("end_of_word_suffix"), empty_string) ||
+      !IsFalse(model.find("byte_fallback")) ||
+      !IsFalse(model.find("ignore_merges"))) {
+    return "tokenizer.json BPE options are not the defaults";
+  }
+  return std::nullopt;
+}
+
 }  // namespace
+
+std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromTokenizerJson(
+    std::string_view text, std::size_t vocab_size, std::string* error_msg) {
+  const auto fail = [&](std::string message) -> std::unique_ptr<QwenTokenizer> {
+    if (error_msg != nullptr) {
+      *error_msg = std::move(message);
+    }
+    return nullptr;
+  };
+  json::Value root;
+  try {
+    root = json::parse(text);
+  } catch (const std::exception& e) {
+    return fail(std::string("invalid tokenizer.json: ") + e.what());
+  }
+  const json::Value* model = root.find("model");
+  if (model == nullptr || model->member_str("type") != "BPE") {
+    return fail("tokenizer.json is not a BPE tokenizer");
+  }
+  const json::Value* vocab = model->find("vocab");
+  const json::Value* merge_list = model->find("merges");
+  if (vocab == nullptr || !vocab->is_object() || merge_list == nullptr ||
+      !merge_list->is_array()) {
+    return fail("tokenizer.json misses its vocabulary or merges");
+  }
+  const json::Value* added = root.find("added_tokens");
+  if (added != nullptr && !added->is_array()) {
+    return fail("tokenizer.json added_tokens is not an array");
+  }
+  if (auto unsupported = UnsupportedTokenizerJsonPipeline(root)) {
+    return fail(std::move(*unsupported));
+  }
+  // Every id addresses an embedding row: below `vocab_size` when it is given,
+  // otherwise dense over the entries.
+  const std::size_t id_limit =
+      vocab_size != 0 ? vocab_size
+                      : vocab->size() + (added ? added->size() : 0);
+  // GGUF conversions pad unused ids to the model's vocabulary size with
+  // "[PAD<id>]"; the same table keeps ids and decoding identical.
+  std::vector<std::string> tokens;
+  std::vector<bool> present;
+  std::string place_error;
+  const auto place = [&](const json::Value& id_value,
+                         const std::string& token) {
+    constexpr std::size_t kInvalid = std::numeric_limits<std::size_t>::max();
+    const std::size_t id = id_value.as_size(kInvalid);
+    if (id >= id_limit || id >= kInvalidTokenId) {
+      place_error = "tokenizer.json id out of range: " + token;
+      return false;
+    }
+    if (id >= tokens.size()) {
+      tokens.resize(id + 1);
+      present.resize(id + 1, false);
+    }
+    // An added token repeats its vocabulary entry; anything else is a
+    // conflict.
+    if (present[id] && tokens[id] != token) {
+      place_error = "tokenizer.json assigns id " + std::to_string(id) +
+                    " to both " + tokens[id] + " and " + token;
+      return false;
+    }
+    tokens[id] = token;
+    present[id] = true;
+    return true;
+  };
+  for (const auto& [token, id] : vocab->members()) {
+    if (!place(id, token)) {
+      return fail(place_error);
+    }
+  }
+  if (added != nullptr) {
+    for (const auto& entry : added->items()) {
+      const json::Value* id = entry.find("id");
+      const json::Value* content = entry.find("content");
+      if (id == nullptr || content == nullptr || !content->is_string()) {
+        return fail("tokenizer.json has an invalid added token");
+      }
+      // Only control tokens are matched whole before BPE.
+      if (!IsSpecialTokenName(content->str()) ||
+          !IsFalse(entry.find("lstrip")) || !IsFalse(entry.find("rstrip")) ||
+          !IsFalse(entry.find("single_word"))) {
+        return fail("tokenizer.json has an unsupported added token: " +
+                    content->str());
+      }
+      if (!place(*id, content->str())) {
+        return fail(place_error);
+      }
+    }
+  }
+  if (tokens.size() < vocab_size) {
+    tokens.resize(vocab_size);
+    present.resize(vocab_size, false);
+  }
+  std::unordered_map<std::string_view, TokenId> ids;
+  ids.reserve(tokens.size());
+  for (std::size_t i = 0; i < tokens.size(); ++i) {
+    if (!present[i]) {
+      tokens[i] = "[PAD" + std::to_string(i) + "]";
+    }
+  }
+  for (std::size_t i = 0; i < tokens.size(); ++i) {
+    if (!ids.emplace(tokens[i], static_cast<TokenId>(i)).second) {
+      return fail("tokenizer.json repeats the token " + tokens[i]);
+    }
+  }
+  // CreateFromVocabulary splits each merge at its single space, so neither
+  // part may hold one; both parts and their concatenation are entries.
+  std::vector<std::string> merges;
+  merges.reserve(merge_list->size());
+  for (const auto& m : merge_list->items()) {
+    std::string left;
+    std::string right;
+    if (m.is_string()) {
+      const std::string& merge = m.str();
+      const auto space = merge.find(' ');
+      if (space == std::string::npos) {
+        return fail("tokenizer.json has an invalid merge: " + merge);
+      }
+      left = merge.substr(0, space);
+      right = merge.substr(space + 1);
+    } else if (m.is_array() && m.size() == 2 && m.items()[0].is_string() &&
+               m.items()[1].is_string()) {
+      left = m.items()[0].str();
+      right = m.items()[1].str();
+    } else {
+      return fail("tokenizer.json has an invalid merge");
+    }
+    if (left.empty() || right.empty() || left.find(' ') != std::string::npos ||
+        right.find(' ') != std::string::npos || !ids.contains(left) ||
+        !ids.contains(right) || !ids.contains(left + right)) {
+      return fail("tokenizer.json has an invalid merge: " + left + " " + right);
+    }
+    merges.push_back(left + " " + right);
+  }
+  // The same scan as CreateFromGguf over the same table.
+  std::unordered_map<std::string, TokenId> special_tokens;
+  for (std::size_t i = 0; i < tokens.size(); ++i) {
+    if (IsSpecialTokenName(tokens[i])) {
+      special_tokens[tokens[i]] = static_cast<TokenId>(i);
+    }
+  }
+  auto tokenizer =
+      CreateFromVocabulary(tokens, merges, special_tokens, error_msg);
+  if (tokenizer == nullptr) {
+    return nullptr;
+  }
+  tokenizer->pre_tokenizer_ = PreTokenizer::kQwen35;
+  // As the official GGUF metadata: <|endoftext|> is both BOS and padding.
+  if (tokenizer->endoftext_token_id_ != kInvalidTokenId) {
+    tokenizer->bos_token_id_ = tokenizer->endoftext_token_id_;
+    tokenizer->pad_token_id_ = tokenizer->endoftext_token_id_;
+  }
+  return tokenizer;
+}
 
 std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
     const core::GgufReader& reader, std::string* error_msg) {
@@ -356,16 +601,8 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromGguf(
   std::unordered_map<std::string, TokenId> special_tokens;
   // Dynamic lookup of special tokens from GGUF vocabulary table
   for (std::size_t i = 0; i < tokens.size(); ++i) {
-    const auto& t = tokens[i];
-    if (t == kEndOfText || t == kImStart || t == kImEnd || t == "<tool_call>" ||
-        t == "</tool_call>" || t == "<tool_response>" ||
-        t == "</tool_response>" || t == "<think>" || t == "</think>" ||
-        t == "<tts_pad>" || t == "<tts_text_bos>" || t == "<tts_text_eod>" ||
-        t == "<tts_text_bos_single>" || t == kObjectRefStart ||
-        t == kObjectRefEnd || t == kVisionStart || t == kVisionEnd ||
-        t == kImagePad || t == kVideoPad || t == kQuadStart || t == kQuadEnd ||
-        (t.size() >= 4 && t.starts_with("<|") && t.ends_with("|>"))) {
-      special_tokens[t] = static_cast<TokenId>(i);
+    if (IsSpecialTokenName(tokens[i])) {
+      special_tokens[tokens[i]] = static_cast<TokenId>(i);
     }
   }
 
