@@ -4,6 +4,73 @@ Notable user-facing changes are recorded here. Gufo follows
 [Semantic Versioning](https://semver.org/) under the compatibility policy in
 [the release guide](docs/internal/releasing.md).
 
+## [0.37.0](https://github.com/gufo-org/gufo/compare/v0.36.0...v0.37.0) (2026-11-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** encode PNG images in Rust and drop libpng ([#1390](https://github.com/gufo-org/gufo/issues/1390))
+* **tools:** bound tool grammar value-kind checks on recursive schemas ([#1388](https://github.com/gufo-org/gufo/issues/1388))
+* **serve:** serve HTTP with tokio and hyper ([#1366](https://github.com/gufo-org/gufo/issues/1366))
+
+### Features
+
+* **diagnose:** warn on a small GTT and log GPU memory when a load fails ([#1396](https://github.com/gufo-org/gufo/issues/1396)) ([db6ad4f](https://github.com/gufo-org/gufo/commit/db6ad4ff940dbef73aa770c3c823eb5ba9d1d9a2))
+* **ext:** expose Flash-Next stages and weight sources as experimental extension headers ([#1372](https://github.com/gufo-org/gufo/issues/1372)) ([d3a7bab](https://github.com/gufo-org/gufo/commit/d3a7bab1563e7266c52c426a149db00841b6d4d6))
+* **ext:** expose the Qwen family as an experimental extension library ([#1361](https://github.com/gufo-org/gufo/issues/1361)) ([91f11c8](https://github.com/gufo-org/gufo/commit/91f11c8605632b7f5b9cf8b095a136db3496c600))
+* **ext:** let extensions depend on and link other extensions ([#1360](https://github.com/gufo-org/gufo/issues/1360)) ([8c64645](https://github.com/gufo-org/gufo/commit/8c646451d91f1dd2234c9a763a2c68715f32f506))
+* **ext:** let loadable modules depend on in-tree extensions ([#1376](https://github.com/gufo-org/gufo/issues/1376)) ([831c55d](https://github.com/gufo-org/gufo/commit/831c55d3ef943f675805dca8bf6b0c5fb4b5d812))
+* **ext:** stream mixture-of-experts weights from disk into a bounded device cache ([#1318](https://github.com/gufo-org/gufo/issues/1318)) ([60c4892](https://github.com/gufo-org/gufo/commit/60c48924a040edc0f025e8d27e6236fcaecc22fd))
+* **inkling2:** add Inkling 2 Mini ([#1340](https://github.com/gufo-org/gufo/issues/1340)) ([e90fbad](https://github.com/gufo-org/gufo/commit/e90fbadc15ad971e8b3c069e2ab783bc33a7be9c))
+* **qwen:** load the Qwen tokenizer from a Hugging Face tokenizer.json ([#1359](https://github.com/gufo-org/gufo/issues/1359)) ([784891e](https://github.com/gufo-org/gufo/commit/784891ede060aebe5e71554310b71c14c096d491))
+
+
+### Bug Fixes
+
+* **ci:** wait out GitHub rate limits while waiting for Devlab artifacts ([#1365](https://github.com/gufo-org/gufo/issues/1365)) ([012bd62](https://github.com/gufo-org/gufo/commit/012bd62761b41d8d2532725e1918ea6f63f3600c))
+* **cli:** let runner providers supply their own speculative draft ([#1374](https://github.com/gufo-org/gufo/issues/1374)) ([87e72ff](https://github.com/gufo-org/gufo/commit/87e72ff7bbf9c45f04922fb43cf94288ab05fed8))
+* **cli:** pass speculative settings to providers loaded by prompt ([#1373](https://github.com/gufo-org/gufo/issues/1373)) ([7c9fb4a](https://github.com/gufo-org/gufo/commit/7c9fb4aefe6fa84bd582d481ac5819a0e3dfec9b))
+* **cli:** stream chat answers from runner-only providers ([#1375](https://github.com/gufo-org/gufo/issues/1375)) ([abebd1c](https://github.com/gufo-org/gufo/commit/abebd1c08e9c57996f963715695e6c1f1410a7da))
+* **devlab:** select the actual consumers of shared Qwen family paths ([#1370](https://github.com/gufo-org/gufo/issues/1370)) ([38a1589](https://github.com/gufo-org/gufo/commit/38a1589c48ad4436e3d9f60e7c3db85a819f4dc3))
+* **loom:** constrain Inkling 2 tool calls, keep its automatic tool use on the device ([#1347](https://github.com/gufo-org/gufo/issues/1347)) ([7fcbd60](https://github.com/gufo-org/gufo/commit/7fcbd60b634ef4482eeb8b1acf821eebb2e1f6ce))
+* **qwen38-flash-next:** round the one-row dense Q4_K draft head like wider batches ([#1397](https://github.com/gufo-org/gufo/issues/1397)) ([b8c1f09](https://github.com/gufo-org/gufo/commit/b8c1f09032c60d87edf4b1527d6acc2849ab2bc3))
+* **qwen:** report non-finite router logits instead of a routed GEMM failure ([#1399](https://github.com/gufo-org/gufo/issues/1399)) ([b96df97](https://github.com/gufo-org/gufo/commit/b96df97231db3ac003c0f73dc2a4cf6479744247))
+* **qwen:** split snapshot copies at KV mapping boundaries ([#1368](https://github.com/gufo-org/gufo/issues/1368)) ([9c585ac](https://github.com/gufo-org/gufo/commit/9c585ace58c63f9be1ffd38d04e4263278ae4096))
+* **serve:** bound tool schema checks on recursive allOf ([#1387](https://github.com/gufo-org/gufo/issues/1387)) ([4203ab3](https://github.com/gufo-org/gufo/commit/4203ab3adc6505289ce2d498b1ae81fc2cebbd7f))
+* **server:** advance a deferred token before a multi-token decode step ([#1369](https://github.com/gufo-org/gufo/issues/1369)) ([3a6897b](https://github.com/gufo-org/gufo/commit/3a6897bb881d93f0b32d17a46a9958de083ae0a7))
+* **tools:** bound tool grammar value-kind checks on recursive schemas ([#1388](https://github.com/gufo-org/gufo/issues/1388)) ([a3d7d93](https://github.com/gufo-org/gufo/commit/a3d7d934d60fed8abc124a451e40be1b2fc52c48))
+* **tools:** honor required alternatives in native tool schemas ([#1343](https://github.com/gufo-org/gufo/issues/1343)) ([773cdc8](https://github.com/gufo-org/gufo/commit/773cdc88287ebf66aa9c10dae5e43ad50af1066a))
+
+
+### Performance
+
+* **inkling2:** speed up concurrent and sampled DSpark, capture prefill checkpoints in-pass ([#1403](https://github.com/gufo-org/gufo/issues/1403)) ([4060f39](https://github.com/gufo-org/gufo/commit/4060f3973527e7ae7c8640dfaa92ef95bb537968))
+* **inkling2:** speed up the vision encoder 2-2.5x with bit-identical output ([#1401](https://github.com/gufo-org/gufo/issues/1401)) ([ab48828](https://github.com/gufo-org/gufo/commit/ab4882858bf6c58fecd881d675f1b8e291a4dba4))
+
+
+### Documentation
+
+* install the Debian package from apt.gufo.blog ([#1367](https://github.com/gufo-org/gufo/issues/1367)) ([888e5af](https://github.com/gufo-org/gufo/commit/888e5af36804480ca564bd712908b173f1958676))
+* **windows:** correct the ROCm 10.1 device-optimisation note ([#1357](https://github.com/gufo-org/gufo/issues/1357)) ([c5d2ea4](https://github.com/gufo-org/gufo/commit/c5d2ea4d8776710ddcb55a20b7ae2bf60295da9e))
+
+
+### Code Refactoring
+
+* **core:** load tokenizer.json files in Rust ([#1400](https://github.com/gufo-org/gufo/issues/1400)) ([9db32e4](https://github.com/gufo-org/gufo/commit/9db32e445d9e192bc61fde545a33e3ee51ccdafa))
+* **ds4:** drop the IQ2 sign table for the arithmetic fold ([#1342](https://github.com/gufo-org/gufo/issues/1342)) ([e228a4c](https://github.com/gufo-org/gufo/commit/e228a4c7fb751ba01f5fb22d11b1758a0856e392))
+* **json:** expose the Rust parser, value tree and writer ([#1379](https://github.com/gufo-org/gufo/issues/1379)) ([c887222](https://github.com/gufo-org/gufo/commit/c887222caf6c2e1eeeae8363d763d13dc4852399))
+* **qwen38-flash-next:** route layers through overridable stages and weight sources ([#1364](https://github.com/gufo-org/gufo/issues/1364)) ([8de28b7](https://github.com/gufo-org/gufo/commit/8de28b7f663bfb970bb8dca8d16137583519c790))
+* **serve:** decode chat requests in Rust ([#1380](https://github.com/gufo-org/gufo/issues/1380)) ([1b774d6](https://github.com/gufo-org/gufo/commit/1b774d61f708c70d5f37304523d807a7429ac270))
+* **serve:** encode chat responses and SSE in Rust ([#1398](https://github.com/gufo-org/gufo/issues/1398)) ([743ef68](https://github.com/gufo-org/gufo/commit/743ef684e5b52bbf24aca5af819f515e513073d6))
+* **serve:** parse generated reasoning and tool calls in Rust ([#1381](https://github.com/gufo-org/gufo/issues/1381)) ([5c02fcb](https://github.com/gufo-org/gufo/commit/5c02fcb6752484eae504650bb293784d5b8c4241))
+* **serve:** run the Realtime voice protocol in Rust ([#1395](https://github.com/gufo-org/gufo/issues/1395)) ([7b298d9](https://github.com/gufo-org/gufo/commit/7b298d961c887476f2bda5db34dafc9a0877a02f))
+* **serve:** serve HTTP with tokio and hyper ([#1366](https://github.com/gufo-org/gufo/issues/1366)) ([282be27](https://github.com/gufo-org/gufo/commit/282be272acecd2089ef6372c1757bc2f4b19c96c))
+
+
+### Build System
+
+* **core:** encode PNG images in Rust and drop libpng ([#1390](https://github.com/gufo-org/gufo/issues/1390)) ([be751ce](https://github.com/gufo-org/gufo/commit/be751ce75f0fc64ca4d450a1cfcba74ac865f6ed))
+
 ## [0.36.0](https://github.com/gufo-org/gufo/compare/v0.35.0...v0.36.0) (2026-11-23)
 
 
