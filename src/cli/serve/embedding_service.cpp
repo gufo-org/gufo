@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <fstream>
@@ -9,12 +10,14 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
 
 #include "gufo/ext/embeddings.hpp"
 #include "gufo/ext/registry.hpp"
+#include "src/cli/serve/embedding_metrics.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/core/json.hpp"
 
@@ -99,7 +102,7 @@ struct EmbeddingService::Impl {
       EmbeddingStatus status =
           runner_->EmbedInputs(inputs, is_cancelled, batch, error, request);
       if (runner_->device_lost()) {
-        device_lost.store(true);
+        MarkDeviceLost();
       }
       return status;
     }
@@ -107,6 +110,12 @@ struct EmbeddingService::Impl {
       *error = initialization_error;
     }
     return EmbeddingStatus::kFailed;
+  }
+
+  void MarkDeviceLost() {
+    if (!device_lost.exchange(true)) {
+      metrics.device_lost.Add(1);
+    }
   }
 
   static constexpr const char* kInvalidModel =
@@ -118,8 +127,45 @@ struct EmbeddingService::Impl {
   // Serializes the injected runner, which has no device turns of its own.
   std::mutex runner_mutex;
   std::atomic<bool> device_lost{false};
+  EmbeddingMetrics metrics;
   bool ready{false};
 };
+
+namespace {
+
+bool HasUsablePrefixNorm(std::span<const float> values,
+                         std::size_t dimensions) {
+  double sum = 0.0;
+  for (std::size_t i = 0; i < dimensions; ++i) {
+    sum += static_cast<double>(values[i]) * static_cast<double>(values[i]);
+  }
+  return sum > 0.0 && std::isfinite(sum);
+}
+
+const char* BatchProblem(std::size_t inputs, const EmbeddingBatch& batch,
+                         std::size_t truncate_to) {
+  if (batch.embeddings.size() != inputs ||
+      batch.token_counts.size() != inputs) {
+    return "embedding runtime returned an inconsistent batch";
+  }
+  for (const auto& values : batch.embeddings) {
+    if (values.empty()) {
+      return "embedding runtime returned an empty embedding";
+    }
+    for (const float value : values) {
+      if (!std::isfinite(value)) {
+        return "embedding runtime returned a non-finite value";
+      }
+    }
+    if (truncate_to != 0 && truncate_to < values.size() &&
+        !HasUsablePrefixNorm(values, truncate_to)) {
+      return "embedding cannot be truncated to the requested size";
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
 
 bool TruncateKeepingImages(std::vector<std::uint32_t>* tokens,
                            std::size_t max_tokens, std::uint32_t image_token) {
@@ -250,10 +296,27 @@ EmbeddingStatus EmbeddingService::Embed(
   return EmbedInputs(inputs, is_cancelled, batch, error);
 }
 
+std::string EmbeddingService::RenderMetrics() const {
+  return impl_->metrics.registry.Render();
+}
+
 EmbeddingStatus EmbeddingService::EmbedInputs(
     const std::vector<EmbeddingInput>& inputs,
     const std::function<bool()>& is_cancelled, EmbeddingBatch* batch,
-    std::string* error, const EmbeddingRequestOptions& request) {
+    std::string* error, const EmbeddingRequestOptions& request,
+    std::size_t truncate_to) {
+  EmbeddingRequestScope scope(impl_->metrics);
+  const EmbeddingStatus status = EmbedAdmitted(
+      inputs, is_cancelled, batch, error, request, truncate_to, scope);
+  scope.Finish(status, *batch);
+  return status;
+}
+
+EmbeddingStatus EmbeddingService::EmbedAdmitted(
+    const std::vector<EmbeddingInput>& inputs,
+    const std::function<bool()>& is_cancelled, EmbeddingBatch* batch,
+    std::string* error, const EmbeddingRequestOptions& request,
+    std::size_t truncate_to, EmbeddingRequestScope& scope) {
   if (!ready()) {
     if (error) {
       *error = initialization_error();
@@ -272,10 +335,26 @@ EmbeddingStatus EmbeddingService::EmbedInputs(
     batch->token_counts.clear();
     return EmbeddingStatus::kOk;
   }
+  scope.Accepted(inputs);
   EmbeddingStatus status =
       impl_->Run(inputs, request, is_cancelled, batch, error);
   if (status == EmbeddingStatus::kDeviceLost) {
-    impl_->device_lost.store(true);
+    impl_->MarkDeviceLost();
+  }
+  if (status != EmbeddingStatus::kOk) {
+    return status;
+  }
+  if (is_cancelled && is_cancelled()) {
+    if (error) {
+      *error = "embedding request cancelled";
+    }
+    return EmbeddingStatus::kCancelled;
+  }
+  if (const char* problem = BatchProblem(inputs.size(), *batch, truncate_to)) {
+    if (error) {
+      *error = problem;
+    }
+    return EmbeddingStatus::kFailed;
   }
   return status;
 }

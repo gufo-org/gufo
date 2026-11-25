@@ -1126,7 +1126,14 @@ double KvCacheUsageRatio(const TextGenerationBackend& b) {
   return static_cast<double>(used) / static_cast<double>(capacity);
 }
 
-HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
+HttpResponse PrometheusText(std::string body) {
+  return {.status = 200,
+          .reason = "OK",
+          .body = std::move(body),
+          .headers = {{"Content-Type", "text/plain; version=0.0.4"}}};
+}
+
+HttpResponse LlamaMetrics(TextGenerationBackend& b) {
   // The cells are process-global, so a concurrent scrape could Show or Set
   // between this scrape's updates and its render.
   static std::mutex scrape_mutex;
@@ -1151,10 +1158,17 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
     metrics.prompt_state.reserved_bytes.Set(budget->used_bytes);
     metrics.prompt_state.available_bytes.Set(budget->available_bytes);
   }
-  return {.status = 200,
-          .reason = "OK",
-          .body = metrics.registry.Render(),
-          .headers = {{"Content-Type", "text/plain; version=0.0.4"}}};
+  return PrometheusText(metrics.registry.Render());
+}
+
+std::function<HttpResponse()> MetricsEndpoint(
+    const std::shared_ptr<TextGenerationBackend>& text,
+    const std::shared_ptr<EmbeddingService>& embeddings) {
+  if (text != nullptr)
+    return [text] { return LlamaMetrics(*text); };
+  if (embeddings != nullptr)
+    return [embeddings] { return PrometheusText(embeddings->RenderMetrics()); };
+  return {};
 }
 
 }  // namespace
@@ -1248,7 +1262,8 @@ HttpServer::HttpServer(std::string host, int port,
       images_(std::move(images)),
       embeddings_(std::move(embeddings)),
       decisions_(std::move(decisions)),
-      options_(std::move(options)) {
+      options_(std::move(options)),
+      metrics_(MetricsEndpoint(backend_, embeddings_)) {
   if (options_.max_request_body_bytes == 0 || options_.max_connections == 0) {
     throw std::invalid_argument("HTTP server limits must be positive");
   }
@@ -1293,8 +1308,6 @@ void HttpServer::register_routes() {
   add("GET", "/props", LlamaProps);
   add("GET", "/slots", LlamaSlots);
   add("GET", "/v1/slots", LlamaSlots);
-  add("GET", "/metrics", LlamaMetrics);
-  add("GET", "/v1/metrics", LlamaMetrics);
 
   // ---- sdapi ----
   add("POST", "/sdapi/v1/txt2img", NotImplemented);
@@ -1579,6 +1592,10 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     if (device_lost())
       return DeviceLost();
     return response;
+  }
+  if (metrics_ && req.method == "GET" &&
+      (req.path == "/metrics" || req.path == "/v1/metrics")) {
+    return metrics_();
   }
   for (const auto& entry : routes_) {
     if (entry.first.first == req.method && entry.first.second == req.path) {

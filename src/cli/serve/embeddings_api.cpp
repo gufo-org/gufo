@@ -99,22 +99,18 @@ void AppendFloats(std::string* out, std::span<const float> values) {
 }
 
 /// Matryoshka truncation keeps the leading components and renormalizes them.
-/// Returns false when the prefix has no usable norm.
-bool TruncateAndNormalize(std::span<const float> full, std::size_t dimensions,
+/// The service has already checked that the prefix has a usable norm.
+void TruncateAndNormalize(std::span<const float> full, std::size_t dimensions,
                           std::vector<float>* out) {
   double sum = 0.0;
   for (std::size_t i = 0; i < dimensions; ++i) {
     sum += static_cast<double>(full[i]) * static_cast<double>(full[i]);
-  }
-  if (!(sum > 0.0) || !std::isfinite(sum)) {
-    return false;
   }
   const double scale = 1.0 / std::sqrt(sum);
   out->resize(dimensions);
   for (std::size_t i = 0; i < dimensions; ++i) {
     (*out)[i] = static_cast<float>(static_cast<double>(full[i]) * scale);
   }
-  return true;
 }
 
 /// Whether a base64 `multimodal_data` file looks like audio, as llama.cpp's
@@ -534,7 +530,7 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
   EmbeddingBatch batch;
   std::string error;
   switch (service.EmbedInputs(inputs, request.is_cancelled, &batch, &error,
-                              options)) {
+                              options, dimensions)) {
     case EmbeddingStatus::kOk:
       break;
     case EmbeddingStatus::kCancelled:
@@ -559,15 +555,7 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
     case EmbeddingStatus::kDeviceLost:
       return Error(503, "GPU device lost; restart the server", "device_lost");
   }
-  if (request.is_cancelled && request.is_cancelled()) {
-    return Error(499, "embedding request cancelled", "cancelled");
-  }
 
-  if (batch.embeddings.size() != inputs.size() ||
-      batch.token_counts.size() != inputs.size()) {
-    return Error(500, "embedding runtime returned an inconsistent batch",
-                 "embedding_failed");
-  }
   std::size_t prompt_tokens = 0;
   for (const std::size_t count : batch.token_counts) {
     prompt_tokens += count;
@@ -579,21 +567,8 @@ HttpResponse Embed(const HttpRequest& request, EmbeddingService& service,
   std::vector<float> truncated;
   for (std::size_t index = 0; index < batch.embeddings.size(); ++index) {
     std::span<const float> values = batch.embeddings[index];
-    if (values.empty()) {
-      return Error(500, "embedding runtime returned an empty embedding",
-                   "embedding_failed");
-    }
-    for (const float value : values) {
-      if (!std::isfinite(value)) {
-        return Error(500, "embedding runtime returned a non-finite value",
-                     "embedding_failed");
-      }
-    }
     if (dimensions != 0 && dimensions < values.size()) {
-      if (!TruncateAndNormalize(values, dimensions, &truncated)) {
-        return Error(500, "embedding cannot be truncated to the requested size",
-                     "embedding_failed");
-      }
+      TruncateAndNormalize(values, dimensions, &truncated);
       values = truncated;
     }
     if (index != 0) {

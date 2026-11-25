@@ -14,6 +14,8 @@
 
 namespace gufo::server {
 
+class EmbeddingRequestScope;
+
 using ext::EmbeddingBatch;
 using ext::EmbeddingInput;
 using ext::EmbeddingPart;
@@ -110,14 +112,24 @@ public:
                                       EmbeddingBatch* batch,
                                       std::string* error = nullptr);
 
+  /// A nonzero `truncate_to` is the dimension count the caller keeps. The
+  /// call fails when an embedding's prefix of that length has no usable norm.
   [[nodiscard]] EmbeddingStatus EmbedInputs(
       const std::vector<EmbeddingInput>& inputs,
       const std::function<bool()>& is_cancelled, EmbeddingBatch* batch,
-      std::string* error = nullptr,
-      const EmbeddingRequestOptions& request = {});
+      std::string* error = nullptr, const EmbeddingRequestOptions& request = {},
+      std::size_t truncate_to = 0);
+
+  [[nodiscard]] std::string RenderMetrics() const;
 
 private:
   struct Impl;
+  EmbeddingStatus EmbedAdmitted(const std::vector<EmbeddingInput>& inputs,
+                                const std::function<bool()>& is_cancelled,
+                                EmbeddingBatch* batch, std::string* error,
+                                const EmbeddingRequestOptions& request,
+                                std::size_t truncate_to,
+                                EmbeddingRequestScope& scope);
   std::unique_ptr<Impl> impl_;
 };
 
