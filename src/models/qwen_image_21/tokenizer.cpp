@@ -4,62 +4,103 @@
 #include <unicode/regex.h>
 #include <unicode/unistr.h>
 
-#include <algorithm>
-#include <cmath>
+#include <fstream>
+#include <memory>
 #include <stdexcept>
+#include <string_view>
 
-#include "src/models/qwen_image_21/weights.hpp"
+#include "gufo/tokenizer_json.h"
 
 namespace gufo::models::qwen_image_21 {
 
+namespace {
+
+constexpr std::uintmax_t kMaximumTokenizerBytes = 512ULL << 20U;
+
+std::string_view View(GufoTokenizerJsonBytes b) noexcept {
+  return b.len == 0
+             ? std::string_view{}
+             : std::string_view(reinterpret_cast<const char*>(b.data), b.len);
+}
+
+void CopyError(void* ctx, const std::uint8_t* data, std::size_t len) noexcept {
+  auto* out = static_cast<std::string*>(ctx);
+  if (!out)
+    return;
+  if (!data || len == 0) {
+    out->clear();
+    return;
+  }
+  try {
+    out->assign(reinterpret_cast<const char*>(data), len);
+  } catch (...) {
+    out->clear();
+  }
+}
+
+std::string ReadTokenizerFile(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary | std::ios::ate);
+  if (!input)
+    throw std::runtime_error("cannot open " + path.string());
+  const auto size = input.tellg();
+  if (size < 0 || static_cast<std::uintmax_t>(size) > kMaximumTokenizerBytes)
+    throw std::runtime_error("cannot stat " + path.string());
+  input.seekg(0);
+  std::string contents(static_cast<std::size_t>(size), '\0');
+  if (size > 0 && !input.read(contents.data(), size))
+    throw std::runtime_error("cannot read " + path.string());
+  return contents;
+}
+
+}  // namespace
+
 Tokenizer::Tokenizer(const std::filesystem::path& root) {
-  const auto config = ReadJson(root / "processor/tokenizer.json");
-  const auto* model = config.find("model");
-  const auto* vocab = model ? model->find("vocab") : nullptr;
-  const auto* merges = model ? model->find("merges") : nullptr;
-  const auto* added = config.find("added_tokens");
-  const auto* pre = config.find("pre_tokenizer");
-  const auto* sequence = pre ? pre->find("pretokenizers") : nullptr;
-  if (!vocab || !vocab->is_object() || !merges || !merges->is_array() ||
-      !added || !added->is_array() || !sequence || !sequence->is_array() ||
-      sequence->size() != 2)
+  const std::string contents =
+      ReadTokenizerFile(root / "processor/tokenizer.json");
+  GufoTokenizerJson* raw = nullptr;
+  std::string parse_err;
+  if (gufo_tokenizer_json_parse(
+          reinterpret_cast<const std::uint8_t*>(contents.data()),
+          contents.size(), 151936, &raw, &CopyError,
+          &parse_err) != GUFO_TOKENIZER_JSON_OK) {
+    throw std::runtime_error(parse_err.empty() ? "invalid Qwen-Image tokenizer"
+                                               : parse_err);
+  }
+  std::unique_ptr<GufoTokenizerJson, void (*)(GufoTokenizerJson*)> parsed(
+      raw, &gufo_tokenizer_json_free);
+
+  GufoTokenizerJsonMeta meta{};
+  if (gufo_tokenizer_json_meta(parsed.get(), &meta) != GUFO_TOKENIZER_JSON_OK ||
+      !meta.has_vocab || !meta.has_merges || !meta.has_added_tokens ||
+      meta.pre_tokenizer_sub_count != 2) {
     throw std::runtime_error("invalid Qwen-Image tokenizer");
-  const auto& split = sequence->items()[0];
-  const auto require_false = [](const json::Value& object, const char* key) {
-    const auto* value = object.find(key);
-    if (!value || !value->is_bool() || value->as_bool())
+  }
+  const auto require_false = [](bool present, bool value, const char* key) {
+    if (!present || value)
       throw std::runtime_error(std::string("unsupported tokenizer setting: ") +
                                key);
   };
-  const auto* regex = split.find("pattern");
-  if (split.member_str("type") != "Split" || !regex ||
-      sequence->items()[1].member_str("type") != "ByteLevel")
+  if (View(meta.split_type) != "Split" ||
+      View(meta.byte_level_type) != "ByteLevel")
     throw std::runtime_error("unsupported Qwen-Image pre-tokenizer");
-  if (model->member_str("type") != "BPE" ||
-      split.member_str("behavior") != "Isolated" || !model->find("dropout") ||
-      !model->find("dropout")->is_null() ||
-      !model->member_str("continuing_subword_prefix").empty() ||
-      !model->member_str("end_of_word_suffix").empty())
+  if (View(meta.model_type) != "BPE" ||
+      View(meta.split_behavior) != "Isolated" || !meta.has_dropout ||
+      !meta.dropout_is_null || !View(meta.continuing_subword_prefix).empty() ||
+      !View(meta.end_of_word_suffix).empty())
     throw std::runtime_error("unsupported Qwen-Image BPE configuration");
-  require_false(split, "invert");
-  require_false(sequence->items()[1], "add_prefix_space");
-  require_false(sequence->items()[1], "use_regex");
-  require_false(*model, "byte_fallback");
-  require_false(*model, "ignore_merges");
-  pattern_ = regex->member_str("Regex");
+  require_false(meta.has_split_invert, meta.split_invert, "invert");
+  require_false(meta.has_add_prefix_space, meta.add_prefix_space,
+                "add_prefix_space");
+  require_false(meta.has_use_regex, meta.use_regex, "use_regex");
+  require_false(meta.has_byte_fallback, meta.byte_fallback, "byte_fallback");
+  require_false(meta.has_ignore_merges, meta.ignore_merges, "ignore_merges");
+  pattern_ = std::string(View(meta.split_regex));
   if (pattern_.empty())
     throw std::runtime_error("missing tokenizer regex");
-  if (const auto* normalizer = config.find("normalizer");
-      !normalizer || normalizer->member_str("type") != "NFC")
+  if (!meta.has_normalizer || View(meta.normalizer_type) != "NFC")
     throw std::runtime_error("unsupported Qwen-Image tokenizer normalizer");
+
   std::vector<std::string> tokens(151669);
-  const auto token_id = [](const json::Value* value) {
-    if (!value || !value->is_number() || !std::isfinite(value->as_double()) ||
-        value->as_double() < 0 || value->as_double() >= 151936 ||
-        value->as_double() != std::floor(value->as_double()))
-      throw std::runtime_error("invalid tokenizer ID");
-    return static_cast<std::uint32_t>(value->as_double());
-  };
   const auto install = [&](std::size_t id, const std::string& word) {
     if (id >= 151936 || word.empty())
       throw std::runtime_error("invalid tokenizer entry");
@@ -69,27 +110,44 @@ Tokenizer::Tokenizer(const std::filesystem::path& root) {
       throw std::runtime_error("duplicate tokenizer entry");
     tokens[id] = word;
   };
-  for (const auto& [word, id] : vocab->members())
-    install(token_id(&id), word);
-  for (const auto& entry : added->items()) {
-    for (const char* key : {"single_word", "lstrip", "rstrip", "normalized"})
-      require_false(entry, key);
-    const auto id = token_id(entry.find("id"));
-    const auto word = entry.member_str("content");
-    install(static_cast<std::size_t>(id), word);
-    specials_.emplace(word, static_cast<std::uint32_t>(id));
+  const std::size_t vocab_len = gufo_tokenizer_json_vocab_len(parsed.get());
+  for (std::size_t i = 0; i < vocab_len; ++i) {
+    GufoTokenizerJsonVocabEntry entry{};
+    if (gufo_tokenizer_json_vocab_at(parsed.get(), i, &entry) !=
+        GUFO_TOKENIZER_JSON_OK)
+      throw std::runtime_error("invalid tokenizer entry");
+    install(entry.id, std::string(View(entry.token)));
+  }
+  const std::size_t added_len = gufo_tokenizer_json_added_len(parsed.get());
+  for (std::size_t i = 0; i < added_len; ++i) {
+    GufoTokenizerJsonAddedToken entry{};
+    if (gufo_tokenizer_json_added_at(parsed.get(), i, &entry) !=
+        GUFO_TOKENIZER_JSON_OK)
+      throw std::runtime_error("invalid tokenizer entry");
+    require_false(entry.has_single_word && entry.flags_valid, entry.single_word,
+                  "single_word");
+    require_false(entry.has_lstrip && entry.flags_valid, entry.lstrip,
+                  "lstrip");
+    require_false(entry.has_rstrip && entry.flags_valid, entry.rstrip,
+                  "rstrip");
+    require_false(entry.has_normalized && entry.flags_valid, entry.normalized,
+                  "normalized");
+    const std::string word(View(entry.content));
+    install(static_cast<std::size_t>(entry.id), word);
+    specials_.emplace(word, entry.id);
   }
   while (!tokens.empty() && tokens.back().empty())
     tokens.pop_back();
+  const std::size_t merges_len = gufo_tokenizer_json_merges_len(parsed.get());
   std::vector<std::string> pairs;
-  for (const auto& merge : merges->items()) {
-    if (merge.is_string())
-      pairs.push_back(merge.str());
-    else if (merge.is_array() && merge.size() == 2 &&
-             merge.items()[0].is_string() && merge.items()[1].is_string())
-      pairs.push_back(merge.items()[0].str() + " " + merge.items()[1].str());
-    else
+  pairs.reserve(merges_len);
+  for (std::size_t i = 0; i < merges_len; ++i) {
+    GufoTokenizerJsonMergeEntry entry{};
+    if (gufo_tokenizer_json_merge_at(parsed.get(), i, &entry) !=
+        GUFO_TOKENIZER_JSON_OK)
       throw std::runtime_error("invalid tokenizer merge");
+    pairs.push_back(std::string(View(entry.left)) + " " +
+                    std::string(View(entry.right)));
   }
   std::string error;
   bpe_ = tokenization::QwenTokenizer::CreateFromVocabulary(

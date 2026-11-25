@@ -24,4 +24,5 @@ gufo-json = { path = "../json" }
 gufo-json-schema = { path = "../json_schema" }
 gufo-png = { path = "../png" }
 gufo-realtime-voice = { path = "../realtime_voice" }
+gufo-tokenizer-json = { path = "../tokenizer_json" }
 gufo-websocket = { path = "../websocket" }

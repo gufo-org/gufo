@@ -10,10 +10,13 @@
 
 #include <algorithm>
 #include <array>
+#include <fstream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <utility>
 
+#include "gufo/tokenizer_json.h"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/models/minimax_h3/json.hpp"
 
@@ -33,15 +36,6 @@ void SetError(std::string* error, std::string message) {
   if (error != nullptr) {
     *error = std::move(message);
   }
-}
-
-const json::Value& RequireField(const json::Value& object,
-                                std::string_view name) {
-  const json::Value* value = object.Find(name);
-  if (value == nullptr) {
-    throw json::Error("missing tokenizer field " + std::string(name));
-  }
-  return *value;
 }
 
 std::string AppendCodepoint(std::uint32_t value) {
@@ -301,11 +295,6 @@ std::vector<std::string> SplitCodepoints(std::string_view text) {
   return result;
 }
 
-bool OptionalFalse(const json::Value& object, std::string_view name) {
-  const json::Value* value = object.Find(name);
-  return value == nullptr || (value->IsBool() && !value->AsBool());
-}
-
 }  // namespace
 
 void Tokenizer::ValidatePinnedContract(const Tokenizer& tokenizer) {
@@ -352,79 +341,115 @@ bool Tokenizer::Load(const std::filesystem::path& path,
     return false;
   }
   try {
-    const json::Value root = json::ParseFile(path, kMaximumTokenizerBytes);
-    const json::Value& model = RequireField(root, "model");
-    const json::Value& normalizer = RequireField(root, "normalizer");
-    if (RequireField(model, "type").AsString() != "BPE" ||
-        !RequireField(model, "unk_token").IsNull() ||
-        RequireField(normalizer, "type").AsString() != "NFC") {
+    std::error_code ec;
+    const std::uintmax_t file_size = std::filesystem::file_size(path, ec);
+    if (ec || file_size > kMaximumTokenizerBytes) {
+      throw json::Error("cannot read tokenizer file");
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+      throw json::Error("cannot open tokenizer file");
+    }
+    std::string contents(static_cast<std::size_t>(file_size), '\0');
+    if (file_size > 0 &&
+        !input.read(contents.data(), static_cast<std::streamsize>(file_size))) {
+      throw json::Error("cannot read tokenizer file");
+    }
+    const auto view = [](GufoTokenizerJsonBytes b) noexcept {
+      return b.len == 0 ? std::string_view{}
+                        : std::string_view(
+                              reinterpret_cast<const char*>(b.data), b.len);
+    };
+    const auto copy_err = [](void* ctx, const std::uint8_t* data,
+                             std::size_t len) noexcept {
+      auto* out = static_cast<std::string*>(ctx);
+      if (!out)
+        return;
+      if (!data || len == 0) {
+        out->clear();
+        return;
+      }
+      try {
+        out->assign(reinterpret_cast<const char*>(data), len);
+      } catch (...) {
+        out->clear();
+      }
+    };
+    GufoTokenizerJson* raw = nullptr;
+    std::string parse_err;
+    constexpr std::uint32_t kMaximumTokenId = 1U << 24U;
+    if (gufo_tokenizer_json_parse(
+            reinterpret_cast<const std::uint8_t*>(contents.data()),
+            contents.size(), kMaximumTokenId, &raw, copy_err,
+            &parse_err) != GUFO_TOKENIZER_JSON_OK) {
+      throw json::Error(parse_err.empty() ? "invalid tokenizer.json"
+                                          : parse_err);
+    }
+    std::unique_ptr<GufoTokenizerJson, void (*)(GufoTokenizerJson*)> parsed(
+        raw, &gufo_tokenizer_json_free);
+    GufoTokenizerJsonMeta meta{};
+    if (gufo_tokenizer_json_meta(parsed.get(), &meta) !=
+            GUFO_TOKENIZER_JSON_OK ||
+        !meta.has_model || !meta.has_normalizer || !meta.has_vocab ||
+        !meta.has_merges || view(meta.model_type) != "BPE" ||
+        !meta.has_unk_token || !meta.unk_token_is_null ||
+        view(meta.normalizer_type) != "NFC") {
       throw json::Error("unexpected tokenizer specification");
     }
 
     Tokenizer tokenizer;
     std::uint32_t maximum_id = 0;
-    for (const auto& [symbol, identifier] :
-         RequireField(model, "vocab").AsObject()) {
-      const std::uint64_t parsed = identifier.AsUint64();
-      if (parsed > std::numeric_limits<std::uint32_t>::max()) {
-        throw json::Error("tokenizer vocabulary ID is out of range");
+    const std::size_t vocab_len = gufo_tokenizer_json_vocab_len(parsed.get());
+    for (std::size_t i = 0; i < vocab_len; ++i) {
+      GufoTokenizerJsonVocabEntry entry{};
+      if (gufo_tokenizer_json_vocab_at(parsed.get(), i, &entry) !=
+          GUFO_TOKENIZER_JSON_OK) {
+        throw json::Error("invalid tokenizer vocabulary entry");
       }
-      const auto id = static_cast<std::uint32_t>(parsed);
-      if (!tokenizer.vocab_.emplace(symbol, id).second) {
+      if (!tokenizer.vocab_.emplace(std::string(view(entry.token)), entry.id)
+               .second) {
         throw json::Error("duplicate tokenizer vocabulary symbol");
       }
-      maximum_id = std::max(maximum_id, id);
+      maximum_id = std::max(maximum_id, entry.id);
     }
 
-    std::uint32_t rank = 0;
-    for (const json::Value& entry : RequireField(model, "merges").AsArray()) {
-      std::string left;
-      std::string right;
-      if (entry.IsString()) {
-        const std::string& merged = entry.AsString();
-        const std::size_t separator = merged.find(' ');
-        if (separator == std::string::npos) {
-          throw json::Error("invalid tokenizer merge");
-        }
-        left = merged.substr(0, separator);
-        right = merged.substr(separator + 1);
-      } else {
-        const auto& pair = entry.AsArray();
-        if (pair.size() != 2) {
-          throw json::Error("invalid tokenizer merge");
-        }
-        left = pair[0].AsString();
-        right = pair[1].AsString();
+    const std::size_t merges_len = gufo_tokenizer_json_merges_len(parsed.get());
+    for (std::size_t rank = 0; rank < merges_len; ++rank) {
+      GufoTokenizerJsonMergeEntry entry{};
+      if (gufo_tokenizer_json_merge_at(parsed.get(), rank, &entry) !=
+          GUFO_TOKENIZER_JSON_OK) {
+        throw json::Error("invalid tokenizer merge");
       }
+      const std::string_view left = view(entry.left);
+      const std::string_view right = view(entry.right);
       if (left.empty() || right.empty() ||
-          !tokenizer.merge_ranks_.emplace(PairKey(left, right), rank).second) {
+          !tokenizer.merge_ranks_
+               .emplace(PairKey(left, right), static_cast<std::uint32_t>(rank))
+               .second) {
         throw json::Error("invalid or duplicate tokenizer merge");
       }
-      ++rank;
     }
 
-    const json::Value* added_value = root.Find("added_tokens");
-    if (added_value != nullptr) {
-      for (const json::Value& entry : added_value->AsArray()) {
-        if (!OptionalFalse(entry, "single_word") ||
-            !OptionalFalse(entry, "lstrip") ||
-            !OptionalFalse(entry, "rstrip") ||
-            !OptionalFalse(entry, "normalized")) {
-          throw json::Error("unsupported added-token policy");
-        }
-        const std::string content = RequireField(entry, "content").AsString();
-        const std::uint64_t parsed = RequireField(entry, "id").AsUint64();
-        if (content.empty() ||
-            parsed > std::numeric_limits<std::uint32_t>::max()) {
-          throw json::Error("invalid added token");
-        }
-        const auto id = static_cast<std::uint32_t>(parsed);
-        if (!tokenizer.added_tokens_.emplace(content, id).second) {
-          throw json::Error("duplicate added-token content");
-        }
-        tokenizer.added_alternatives_.push_back({content, id});
-        maximum_id = std::max(maximum_id, id);
+    const std::size_t added_len = gufo_tokenizer_json_added_len(parsed.get());
+    for (std::size_t i = 0; i < added_len; ++i) {
+      GufoTokenizerJsonAddedToken entry{};
+      if (gufo_tokenizer_json_added_at(parsed.get(), i, &entry) !=
+          GUFO_TOKENIZER_JSON_OK) {
+        throw json::Error("invalid added token");
       }
+      if (!entry.flags_valid || entry.single_word || entry.lstrip ||
+          entry.rstrip || entry.normalized) {
+        throw json::Error("unsupported added-token policy");
+      }
+      const std::string content(view(entry.content));
+      if (content.empty()) {
+        throw json::Error("invalid added token");
+      }
+      if (!tokenizer.added_tokens_.emplace(content, entry.id).second) {
+        throw json::Error("duplicate added-token content");
+      }
+      tokenizer.added_alternatives_.push_back({content, entry.id});
+      maximum_id = std::max(maximum_id, entry.id);
     }
 
     tokenizer.inverse_vocab_.resize(static_cast<std::size_t>(maximum_id) + 1);

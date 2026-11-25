@@ -17,6 +17,7 @@ gufo_extension_target(
   LINK_LIBRARIES
     gufo_ext_runtime
     gufo_platform
+    gufo_rust
     Threads::Threads
 )
 
