@@ -246,17 +246,22 @@ __global__ void __launch_bounds__(WM * WN * 32)
     }
 #pragma unroll
     for (int kk = 0; kk < BK; kk += 16) {
-      v16h b[TN];
+      // A struct per fragment: clang 24 (ROCm 10.1) promotes a plain
+      // two-fragment array to one <32 x half> vector and extracts each
+      // fragment through i256, 16 extra VALU instructions per fragment.
+      struct {
+        v16h v;
+      } b[TN];
 #pragma unroll
       for (int r = 0; r < TN; r++)
-        b[r] = ld16h(fb + r * 16 * LDK + kk);
+        b[r].v = ld16h(fb + r * 16 * LDK + kk);
 #pragma unroll
       for (int t = 0; t < TM; t++) {
         const v16h a = ld16h(fa + t * 16 * LDK + kk);
 #pragma unroll
         for (int r = 0; r < TN; r++)
           acc[t][r] =
-              __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b[r], acc[t][r]);
+              __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b[r].v, acc[t][r]);
       }
     }
     __syncthreads();
