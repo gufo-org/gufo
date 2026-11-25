@@ -293,8 +293,17 @@ dependencies = [
  "gufo-metrics",
  "gufo-png",
  "gufo-realtime-voice",
+ "gufo-safetensors",
  "gufo-tokenizer-json",
  "gufo-websocket",
+]
+
+[[package]]
+name = "gufo-safetensors"
+version = "0.0.0"
+dependencies = [
+ "gufo-ffi",
+ "gufo-json",
 ]
 
 [[package]]

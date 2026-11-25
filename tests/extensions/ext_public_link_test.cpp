@@ -3,6 +3,7 @@
 // public service whose implementation drops out of them fails to link here.
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <gufo/ext/cache.hpp>
 #include <gufo/ext/crypto.hpp>
 #include <gufo/ext/experimental/ggml_dequant.hpp>
@@ -10,13 +11,16 @@
 #include <gufo/ext/gguf_reader.hpp>
 #include <gufo/ext/image.hpp>
 #include <gufo/ext/json.hpp>
+#include <gufo/ext/safetensors.hpp>
 #include <gufo/ext/sampling.hpp>
 #include <gufo/ext/sha256.hpp>
 #include <iostream>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <gufo/ext/component_cache_resources.hpp>
@@ -30,6 +34,9 @@
 #error "a private header is reachable through the public link targets"
 #endif
 #if __has_include(<gufo/json.h>)
+#error "the Rust C interface is reachable through the public link targets"
+#endif
+#if __has_include(<gufo/safetensors.h>)
 #error "the Rust C interface is reachable through the public link targets"
 #endif
 
@@ -68,6 +75,14 @@ int main() {
         "dequantization");
 
   Check(json::parse(R"({"a":[1]})")["a"].size() == 1, "json parsing");
+  {
+    constexpr std::string_view kHeader =
+        R"({"t":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}})";
+    std::vector<std::byte> file(8 + kHeader.size() + 1);
+    file[0] = static_cast<std::byte>(kHeader.size());
+    std::memcpy(file.data() + 8, kHeader.data(), kHeader.size());
+    Check(safetensors::Parse(file).tensors.size() == 1, "safetensors header");
+  }
   Check(sampling::JsonConstraint::Object() != nullptr, "json constraint");
   sampling::SamplerState sampler;
   sampling::SamplerState copy = sampler;

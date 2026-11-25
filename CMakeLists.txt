@@ -358,6 +358,12 @@ if (BUILD_TESTING)
   endif()
 endif()
 
+# safetensors::Parse (src/core/safetensors.hpp), which checks headers with the
+# Rust reader. The extension host keeps and exports it. The Rust header stays
+# private, since extensions reach this library through gufo_ext_runtime.
+add_library(gufo_safetensors STATIC src/core/safetensors.cpp)
+target_link_libraries(gufo_safetensors PRIVATE gufo_rust)
+
 add_library(gufo_diagnostics STATIC
   src/core/diagnostics/gpu_queues.cpp
   src/core/diagnostics/linux_sysfs.cpp
@@ -416,7 +422,8 @@ add_library(gufo_core STATIC
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(gufo_core PUBLIC gufo_platform gufo_npu ICU::uc ICU::i18n
-  Threads::Threads gufo_json gufo_rust PkgConfig::WEBP CURL::libcurl
+  Threads::Threads gufo_json gufo_safetensors gufo_rust PkgConfig::WEBP
+  CURL::libcurl
   OpenSSL::Crypto)
 
 # Family libraries come before the model that needs them; they may depend on
@@ -489,10 +496,10 @@ target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_compare gufo_ext_runtim
   gufo_serving)
 
 add_subdirectory(src/ext)
-# The extension surface includes json::parse; programs that link the runtime
-# without gufo_core get it here. Projects that build src/ext on its own stay
-# free of Rust.
-target_link_libraries(gufo_ext_runtime PUBLIC gufo_json)
+# The extension surface includes json::parse and safetensors::Parse; programs
+# that link the runtime without gufo_core get them here. Projects that build
+# src/ext on its own stay free of Rust.
+target_link_libraries(gufo_ext_runtime PUBLIC gufo_json gufo_safetensors)
 
 # RFC step 6: the text-serving tier the gufo executable used to compile into
 # itself. Scheduler, runner pool, component text cache and InferenceBackend
@@ -1538,6 +1545,12 @@ endfunction()
   add_test(NAME gguf_header_test COMMAND gguf_header_test)
   set_tests_properties(gguf_header_test PROPERTIES
     LABELS "cpu;core;gguf;correctness")
+
+  add_executable(safetensors_header_test tests/core/safetensors_header_test.cpp)
+  target_link_libraries(safetensors_header_test PRIVATE gufo_core)
+  add_test(NAME safetensors_header_test COMMAND safetensors_header_test)
+  set_tests_properties(safetensors_header_test PROPERTIES
+    LABELS "cpu;core;safetensors;correctness")
 
   # the prefetch fixture uses mkstemp and mmap
   if (NOT WIN32)

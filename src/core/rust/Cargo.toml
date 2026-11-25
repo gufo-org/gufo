@@ -25,5 +25,6 @@ gufo-json-schema = { path = "../json_schema" }
 gufo-metrics = { path = "../metrics" }
 gufo-png = { path = "../png" }
 gufo-realtime-voice = { path = "../realtime_voice" }
+gufo-safetensors = { path = "../safetensors" }
 gufo-tokenizer-json = { path = "../tokenizer_json" }
 gufo-websocket = { path = "../websocket" }

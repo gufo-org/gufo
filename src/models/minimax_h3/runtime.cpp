@@ -4,9 +4,11 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <gufo/ext/safetensors.hpp>
 #include <limits>
 #include <map>
 #include <set>
+#include <span>
 #include <sstream>
 #include <utility>
 
@@ -24,7 +26,6 @@ constexpr std::string_view kRevision =
 constexpr std::string_view kSourceManifestSha256 =
     "00a83367b87017f1f3d5547a963b20567a46d7aea44f0aac495c816147720d89";
 constexpr std::size_t kMaximumJsonBytes = 64U << 20U;
-constexpr std::uint64_t kMaximumHeaderBytes = 64U << 20U;
 constexpr std::size_t kDeviceAlignment = 256;
 
 void SetError(std::string* error, std::string message) {
@@ -54,14 +55,6 @@ std::filesystem::path SafeRelativePath(std::string_view value) {
     }
   }
   return path;
-}
-
-std::uint64_t CheckedMultiply(std::uint64_t left, std::uint64_t right,
-                              std::string_view description) {
-  if (left != 0 && right > std::numeric_limits<std::uint64_t>::max() / left) {
-    throw json::Error(std::string(description) + " overflows uint64");
-  }
-  return left * right;
 }
 
 DType ParseDType(std::string_view value) {
@@ -113,16 +106,6 @@ bool ReadExact(platform::PlatformFile descriptor, void* output,
   return true;
 }
 
-std::uint64_t DecodeLittleEndian64(const std::array<std::byte, 8>& bytes) {
-  std::uint64_t value = 0;
-  for (std::size_t index = 0; index < bytes.size(); ++index) {
-    value |=
-        static_cast<std::uint64_t>(std::to_integer<unsigned char>(bytes[index]))
-        << (index * 8U);
-  }
-  return value;
-}
-
 struct HeaderTensor {
   DType dtype{DType::kBFloat16};
   std::vector<std::uint64_t> shape;
@@ -146,20 +129,27 @@ ParsedHeader ParseSafetensorsHeader(const std::filesystem::path& path,
                                          : open_error);
   }
   const auto file_size = platform::FileSizeBytes(descriptor);
-  if (!file_size.has_value() || *file_size < 8) {
+  if (!file_size.has_value()) {
     platform::CloseFile(descriptor);
-    throw json::Error("invalid safetensors file " + path.string());
+    throw json::Error("cannot stat " + path.string());
   }
-  std::array<std::byte, 8> encoded_length{};
-  if (!ReadExact(descriptor, encoded_length.data(), encoded_length.size(), 0)) {
+  // A file shorter than the length gives a shorter prefix, which the reader
+  // rejects.
+  std::array<std::byte, safetensors::kLengthBytes> encoded_length{};
+  const auto prefix =
+      std::span(encoded_length)
+          .first(static_cast<std::size_t>(
+              std::min<std::uint64_t>(*file_size, encoded_length.size())));
+  if (!ReadExact(descriptor, prefix.data(), prefix.size(), 0)) {
     platform::CloseFile(descriptor);
     throw json::Error("cannot read safetensors length " + path.string());
   }
-  const std::uint64_t header_bytes = DecodeLittleEndian64(encoded_length);
-  if (header_bytes == 0 || header_bytes > kMaximumHeaderBytes ||
-      header_bytes > *file_size - 8U) {
+  std::uint64_t header_bytes = 0;
+  try {
+    header_bytes = safetensors::HeaderLength(prefix, *file_size);
+  } catch (const safetensors::Error& error) {
     platform::CloseFile(descriptor);
-    throw json::Error("invalid safetensors header length " + path.string());
+    throw json::Error(path.string() + ": " + error.what());
   }
   std::string header(static_cast<std::size_t>(header_bytes), '\0');
   if (!ReadExact(descriptor, header.data(), header.size(), 8)) {
@@ -169,49 +159,22 @@ ParsedHeader ParseSafetensorsHeader(const std::filesystem::path& path,
   platform::CloseFile(descriptor);
   telemetry->safetensors_header_bytes_read += 8U + header_bytes;
 
-  const json::Value root = json::Parse(header);
-  const auto& object = root.AsObject();
-  ParsedHeader parsed;
-  parsed.payload_offset = 8U + header_bytes;
-  parsed.file_bytes = *file_size;
-  std::vector<std::pair<std::uint64_t, std::uint64_t>> intervals;
-  for (const auto& [name, value] : object) {
-    if (name == "__metadata__") {
-      continue;
-    }
-    const DType dtype = ParseDType(RequireField(value, "dtype").AsString());
-    std::vector<std::uint64_t> shape;
-    std::uint64_t elements = 1;
-    for (const auto& dimension : RequireField(value, "shape").AsArray()) {
-      const std::uint64_t parsed_dimension = dimension.AsUint64();
-      elements = CheckedMultiply(elements, parsed_dimension, "tensor elements");
-      shape.push_back(parsed_dimension);
-    }
-    const auto& offsets = RequireField(value, "data_offsets").AsArray();
-    if (offsets.size() != 2) {
-      throw json::Error("tensor " + name + " has invalid data_offsets");
-    }
-    const std::uint64_t begin = offsets[0].AsUint64();
-    const std::uint64_t end = offsets[1].AsUint64();
-    const std::uint64_t expected_bytes =
-        CheckedMultiply(elements, DTypeSize(dtype), "tensor bytes");
-    if (begin >= end || end - begin != expected_bytes ||
-        end > parsed.file_bytes - parsed.payload_offset) {
-      throw json::Error("tensor " + name + " has invalid payload bounds");
-    }
-    const auto [unused, inserted] = parsed.tensors.emplace(
-        name, HeaderTensor{dtype, std::move(shape), begin, end});
-    (void)unused;
-    if (!inserted) {
-      throw json::Error("duplicate tensor " + name);
-    }
-    intervals.emplace_back(begin, end);
+  safetensors::Header checked;
+  try {
+    checked =
+        safetensors::ParseHeader(std::as_bytes(std::span(header)), *file_size);
+  } catch (const safetensors::Error& error) {
+    throw json::Error(path.string() + ": " + error.what());
   }
-  std::sort(intervals.begin(), intervals.end());
-  for (std::size_t index = 1; index < intervals.size(); ++index) {
-    if (intervals[index].first < intervals[index - 1].second) {
-      throw json::Error("overlapping safetensors payloads in " + path.string());
-    }
+  ParsedHeader parsed;
+  parsed.payload_offset = checked.payload_offset;
+  parsed.file_bytes = *file_size;
+  for (auto& entry : checked.tensors) {
+    const DType dtype = ParseDType(safetensors::Name(entry.dtype));
+    // The reader rejects duplicate names, so every emplace inserts.
+    parsed.tensors.emplace(
+        std::move(entry.name),
+        HeaderTensor{dtype, std::move(entry.shape), entry.begin, entry.end});
   }
   return parsed;
 }
