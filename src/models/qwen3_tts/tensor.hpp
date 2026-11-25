@@ -41,7 +41,6 @@ public:
   [[nodiscard]] const Tensor* Find(std::string_view name) const;
   [[nodiscard]] std::size_t size() const { return tensors_.size(); }
   void Add(Tensor tensor);
-  void SetData(const std::string& name, const void* data, std::uint64_t bytes);
   void Clear() { tensors_.clear(); }
 
 private:

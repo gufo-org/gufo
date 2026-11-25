@@ -51,15 +51,4 @@ void TensorStore::Add(Tensor tensor) {
   tensors_.push_back(std::move(tensor));
 }
 
-void TensorStore::SetData(const std::string& name, const void* data,
-                          std::uint64_t bytes) {
-  for (auto& tensor : tensors_) {
-    if (tensor.name == name) {
-      tensor.data = static_cast<const std::byte*>(data);
-      tensor.byte_count = bytes;
-      return;
-    }
-  }
-}
-
 }  // namespace gufo::models::qwen3_tts

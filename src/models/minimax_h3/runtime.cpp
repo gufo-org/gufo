@@ -559,18 +559,6 @@ std::vector<const TensorDescriptor*> ModelInventory::TensorsForPhase(
   return result;
 }
 
-std::uint64_t ModelInventory::TensorBytesForPhase(Phase phase) const noexcept {
-  std::uint64_t result = 0;
-  for (const auto& tensor : tensors_) {
-    if (tensor.phase == phase &&
-        tensor.payload_bytes <=
-            std::numeric_limits<std::uint64_t>::max() - result) {
-      result += tensor.payload_bytes;
-    }
-  }
-  return result;
-}
-
 bool FailureInjector::ShouldFail(std::string_view operation) {
   last_operation_ = operation;
   const bool result = fail_after_.has_value() && operations_ == *fail_after_;

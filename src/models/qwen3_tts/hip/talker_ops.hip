@@ -392,17 +392,6 @@ __global__ void Bfloat16ToFloatKernel(const hip_bfloat16* input, float* output,
   }
 }
 
-__global__ void Bfloat16ResidualAddKernel(const float* residual,
-                                          const float* update, float* output,
-                                          std::size_t count) {
-  const std::size_t index = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (index < count) {
-    const float left = static_cast<float>(hip_bfloat16(residual[index]));
-    const float right = static_cast<float>(hip_bfloat16(update[index]));
-    output[index] = static_cast<float>(hip_bfloat16(left + right));
-  }
-}
-
 __global__ void Bfloat16SwiGluKernel(const float* gate, const float* up,
                                      float* output,
                                      hip_bfloat16* output_bfloat16,
@@ -764,16 +753,6 @@ void LaunchBfloat16ToFloat(const void* input_bfloat16, float* output,
   }
   Bfloat16ToFloatKernel<<<Grid(count), 256, 0, stream>>>(
       static_cast<const hip_bfloat16*>(input_bfloat16), output, count);
-}
-
-void LaunchBfloat16ResidualAdd(const float* residual, const float* update,
-                               float* output, std::size_t count,
-                               hipStream_t stream) {
-  if (count == 0) {
-    return;
-  }
-  Bfloat16ResidualAddKernel<<<Grid(count), 256, 0, stream>>>(residual, update,
-                                                             output, count);
 }
 
 void LaunchBfloat16SwiGlu(const float* gate, const float* up, float* output,

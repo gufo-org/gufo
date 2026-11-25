@@ -125,10 +125,6 @@ int VideoLatentFrameCount(int frame_count) noexcept {
   return ((frame_count - 5) / 17) * 5 + 2;
 }
 
-int VideoEncoderLatentFrameCount(int frame_count) noexcept {
-  return frame_count > 0 ? (frame_count + 3) / 4 : 0;
-}
-
 namespace {
 
 // Python round() on a double: nearest, ties to even.

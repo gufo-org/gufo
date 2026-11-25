@@ -669,9 +669,6 @@ std::size_t RowBytes(int type, std::size_t k) {
       return bytes;
   }
 }
-bool TypeSupported(int type) {
-  return RowBytes(type, 256 * 4) != 0;
-}
 
 void Gemm(hipStream_t s, int type, const void* w, int n, int k, const float* x,
           int ldx, float* out, int ldo, int t_count) {

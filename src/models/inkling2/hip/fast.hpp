@@ -215,9 +215,8 @@ struct CtlJobs {  // loop controllers of up to 4 streams
       os[4];  // token strides of x, msg, g64, out (decode batches)
 };
 void CtlGate(hipStream_t s, const CtlJobs& j, float eps, int nb = 1);
-void CtlApply(hipStream_t s, const CtlJobs& j, int nb = 1);
-/// CtlApply, then Rms of norm job i on stream i's output (nj.n == j.n) in the
-/// same launch. cnt: [nb][4] zero, self-resetting.
+/// The Ctl apply step, then Rms of norm job i on stream i's output
+/// (nj.n == j.n) in the same launch. cnt: [nb][4] zero, self-resetting.
 void CtlApplyRms(hipStream_t s, const CtlJobs& j, const NormJobs& nj,
                  unsigned* cnt, float eps, int nb = 1);
 

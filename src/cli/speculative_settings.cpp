@@ -56,33 +56,6 @@ SpeculativeFlags SpeculativeFlags::Given(const ArgParser& parser,
   return flags;
 }
 
-void CheckSpeculativeFlags(const ext::Registry& registry,
-                           std::string_view backend,
-                           const SpeculativeFlags& flags) {
-  if (flags.max_draft_tokens && flags.min_draft_tokens) {
-    CheckRange(*flags.max_draft_tokens, *flags.min_draft_tokens);
-  }
-  if (!flags.draft_policy) {
-    return;
-  }
-  const auto& policy = *flags.draft_policy;
-  if (backend.empty()) {
-    throw std::invalid_argument("--draft-policy requires --speculative");
-  }
-  bool accepted = Accepts(HostDefaults(backend), policy);
-  for (const auto& info : registry.Providers()) {
-    const auto* provider = ext::FindTextProvider(info.id);
-    if (info.available && provider != nullptr) {
-      accepted = accepted || Accepts(DefaultsFor(*provider, backend), policy);
-    }
-  }
-  if (!accepted) {
-    throw std::invalid_argument("--draft-policy " + policy +
-                                " is not supported by --speculative " +
-                                std::string(backend));
-  }
-}
-
 SpeculativeSettings ResolveSpeculativeSettings(
     const ext::TextProvider& provider, std::string_view backend,
     const SpeculativeFlags& flags) {

@@ -30,7 +30,6 @@ enum GgmlTypeId : int {
 /// Bytes of one row of `k` elements of `type`; 0 when the type is not supported
 /// or k does not fill whole blocks.
 std::size_t RowBytes(int type, std::size_t k);
-bool TypeSupported(int type);
 
 /// out[t*ldo + r] = sum_k W[r][k] * x[t*ldx + k] for r < n, t < t_count.
 /// `w` is n rows of RowBytes(type, k) bytes.

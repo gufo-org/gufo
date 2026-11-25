@@ -51,7 +51,6 @@ public:
   /// slower at large ones; for tests).
   bool Load(const std::string& mmproj_path, std::string* err,
             bool exact_reference = false);
-  void set_options(const Options& o);
   int embedding_dim() const;    // text-model width the projector outputs (2304)
   size_t device_bytes() const;  // weights + current workspace
   /// Frees the workspace an Encode grew (up to ~0.5 GiB for the largest

@@ -74,36 +74,11 @@ std::string_view ToString(DiagnosticStatus status) {
   return "UNKNOWN";
 }
 
-DiagnosticStatus FromString(std::string_view str) {
-  if (str == "PASS" || str == "pass") {
-    return DiagnosticStatus::kPass;
-  }
-  if (str == "WARN" || str == "warn") {
-    return DiagnosticStatus::kWarn;
-  }
-  return DiagnosticStatus::kFail;
-}
-
 DiagnosticReport::DiagnosticReport() : timestamp_(CurrentIso8601Utc()) {}
-
-void DiagnosticReport::SetEngineRevision(std::string_view revision) {
-  engine_revision_ = std::string(revision);
-}
-
-void DiagnosticReport::SetTimestamp(std::string_view iso8601_utc) {
-  timestamp_ = std::string(iso8601_utc);
-}
 
 void DiagnosticReport::AddCheck(DiagnosticCheck check) {
   checks_.push_back(std::move(check));
   RecomputeStatus();
-}
-
-void DiagnosticReport::AddWarning(std::string_view warning) {
-  warnings_.emplace_back(warning);
-  if (overall_status_ == DiagnosticStatus::kPass) {
-    overall_status_ = DiagnosticStatus::kWarn;
-  }
 }
 
 void DiagnosticReport::AddError(std::string_view error) {
