@@ -196,6 +196,11 @@ acceptance. `/slots` shows what each session is doing, `/props` which model,
 build and settings are running, and `POST /apply-template` the prompt a chat
 request becomes. [Troubleshooting](troubleshooting.md) covers the logs.
 
+`gufo serve embedding` also answers `/metrics`, with `gufo_embedding_*`
+families instead of the llama-server ones: requests by outcome, input parts by
+modality, tokens embedded, request latency and requests in flight. Requests
+rejected as too long or malformed by the service count as `invalid`.
+
 ## llama-swap
 
 [llama-swap](https://github.com/mostlygeek/llama-swap) starts Gufo on demand
