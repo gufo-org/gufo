@@ -135,6 +135,13 @@
       ],
       "role": "test"
     },
+    "inkling2_vision_bench": {
+      "requires": [
+        "hip",
+        "testing"
+      ],
+      "role": "test"
+    },
     "inkling2_spec_test": {
       "requires": [
         "hip",

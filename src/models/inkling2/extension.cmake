@@ -106,6 +106,14 @@ gufo_extension_target(
     gufo_inkling2_hip
 )
 gufo_extension_target(
+  NAME inkling2_vision_bench
+  SOURCES
+    tests/bench/vision_bench.cpp
+  LINK_LIBRARIES
+    gufo_inkling2_hip
+    hip::host
+)
+gufo_extension_target(
   NAME inkling2_spec_test
   SOURCES
     tests/spec/spec_test.cpp
