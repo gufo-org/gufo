@@ -55,25 +55,23 @@ release packaging builds the upstream runtime instead.
   setx VCPKG_ROOT C:\vcpkg
   ```
 
-- **TheRock 10.0.0 for gfx1151**, `therock-dist-windows-gfx1151-10.0.0.tar.gz`
-  (sha256 `1293927b06b3b8d4bd7e0265823fb998bc9e0d83c68f33dcfa5d32663b30ce38`),
+- **TheRock 10.1.0 for gfx1151**, AMD's
+  [`therock-dist-windows-gfx1151-10.1.0.tar.gz`](https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-gfx1151-10.1.0.tar.gz)
+  (sha256 `42698635d66eee273fd0ef580b68494aa2363a4fa6cf733db7806438863a8136`),
   extracted anywhere, with `HIP_PATH` set to that directory:
 
   ```cmd
   mkdir C:\TheRock\build
-  tar -xzf therock-dist-windows-gfx1151-10.0.0.tar.gz -C C:\TheRock\build
+  tar -xzf therock-dist-windows-gfx1151-10.1.0.tar.gz -C C:\TheRock\build
   setx HIP_PATH C:\TheRock\build
   ```
 
-  AMD's index no longer serves 10.0.0; CI downloads it from the
-  [Windows port's mirror](https://github.com/endyjasmi/gufo/releases/tag/toolchain/therock-10.0.0).
-  It is the only SDK that CI builds and validates. Later SDKs used to stall on
-  this GPU: from clang 24 (ROCm 10.1), `clang-cl` stops passing its optimisation
-  level to the device compile, so HIP sources that set no level of their own
-  built device code at `-O0`, and decode ran up to hundreds of times slower. The
-  build adds `/clang:-O3` for both compiles, so as of November 2026 a 10.1.0
-  build of these sources runs at 10.0.0 speed; keep 10.0.0 until CI covers a
-  later SDK. The `windows-base` preset chain-loads
+  It is the ROCm release the Linux build uses, and the only SDK that CI builds
+  and validates on Windows. From clang 24 (ROCm 10.1), `clang-cl` no longer
+  passes its optimisation level to the device compile, so HIP sources that set
+  no level of their own would build device code at `-O0` and decode up to
+  hundreds of times slower; the build adds `/clang:-O3` for both compiles.
+  The `windows-base` preset chain-loads
   `cmake/toolchains/windows-therock.cmake`, which takes `clang-cl` and the
   runtime from `HIP_PATH`. `clang-cl` ignores GCC-style options such as
   `-ffast-math`, `-ffp-contract=off` or `-fno-slp-vectorize`, with only a
@@ -170,7 +168,7 @@ tools\windows\vs-env.cmd cmake --preset windows-release -DCMAKE_POLICY_DEFAULT_C
 build\windows-release\gufo.exe diagnose
 ```
 
-On a Strix Halo it reports `x86_64-windows`, the gfx1151 GPU and ROCm 10.0.0.
+On a Strix Halo it reports `x86_64-windows`, the gfx1151 GPU and ROCm 10.1.0.
 Then run a real model (a GGUF from Hugging Face, for example an unsloth
 UD-Q4_K_XL build):
 

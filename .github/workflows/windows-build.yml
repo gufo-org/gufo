@@ -49,12 +49,12 @@ jobs:
       run:
         shell: pwsh
     env:
-      # TheRock 10.0.0, the SDK validated at full speed on gfx1151. AMD's
-      # index no longer serves it: the job restores it from the Actions cache
-      # and downloads the Windows port's mirror only on a miss.
-      SDK_TARBALL: therock-dist-windows-gfx1151-10.0.0.tar.gz
-      SDK_URL: https://github.com/endyjasmi/gufo/releases/download/toolchain/therock-10.0.0/therock-dist-windows-gfx1151-10.0.0.tar.gz
-      SDK_SHA256: 1293927b06b3b8d4bd7e0265823fb998bc9e0d83c68f33dcfa5d32663b30ce38
+      # TheRock 10.1.0, the ROCm release the Linux build uses. The job
+      # restores it from the Actions cache and downloads AMD's archive only on
+      # a miss.
+      SDK_TARBALL: therock-dist-windows-gfx1151-10.1.0.tar.gz
+      SDK_URL: https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-gfx1151-10.1.0.tar.gz
+      SDK_SHA256: 42698635d66eee273fd0ef580b68494aa2363a4fa6cf733db7806438863a8136
       # Forward slashes: CMake reads backslashes in -D values as escapes.
       SDK_ROOT: C:/TheRock/build
       # Xilinx's Windows XRT SDK: headers and import library for the NPU
