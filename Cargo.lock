@@ -247,6 +247,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gufo-realtime-voice"
+version = "0.0.0"
+dependencies = [
+ "gufo-base64",
+ "gufo-ffi",
+ "gufo-json",
+]
+
+[[package]]
 name = "gufo-resample"
 version = "0.0.0"
 
@@ -266,6 +275,7 @@ dependencies = [
  "gufo-json",
  "gufo-json-schema",
  "gufo-png",
+ "gufo-realtime-voice",
  "gufo-websocket",
 ]
 

@@ -3,9 +3,9 @@
 
 mod codec;
 
-use gufo_ffi::guard;
+pub use codec::{Error, decode, decoded_capacity, encode, encoded_len};
 
-use codec::Error;
+use gufo_ffi::guard;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
