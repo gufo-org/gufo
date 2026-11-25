@@ -6,11 +6,12 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
 #include "src/cache/streaming.hpp"
-#include "src/core/hip/staging.hpp"
+#include "src/core/hip/host_allocations.hpp"
 #include "src/core/hip/transfer_pool.hpp"
 
 using namespace gufo;
@@ -32,6 +33,26 @@ struct Device {
       (void)hipFree(data);
   }
 };
+struct PinnedStorage {
+  cache::ResourceCharge metadata;
+  hip::HostAllocations allocations;
+  void* data{};
+};
+// Pinned staging for the streamed store, charged to the ledger and committed
+// once so the transfer worker never takes a first-touch fault.
+cache::StagingAllocator PinnedStagingAllocator(cache::ResourceLedger& ledger) {
+  return [&ledger](std::size_t bytes) {
+    auto admission = ledger.Reserve(cache::ResourceCategory::kMetadata,
+                                    sizeof(PinnedStorage) + 64);
+    auto storage = std::make_shared<PinnedStorage>();
+    storage->metadata = admission.Convert();
+    Check(storage->allocations.Allocate(&storage->data, bytes,
+                                        hipHostMallocCoherent));
+    std::memset(storage->data, 0, bytes);
+    return cache::StagingAllocation{
+        storage, {static_cast<std::uint8_t*>(storage->data), bytes}};
+  };
+}
 cache::DiskFileId Id(unsigned n) {
   cache::DiskFileId id{};
   id[0] = n;
@@ -79,7 +100,7 @@ int main(int argc, char** argv) {
     return device;
   };
   auto source = make_device(), destination = make_device();
-  auto allocator = hip::PinnedStagingAllocator(ledger);
+  auto allocator = PinnedStagingAllocator(ledger);
   // Initialization and readback use the same bounded allocation, outside the
   // measured publication/restore scopes. Fully initialize device pages first.
   {

@@ -1,4 +1,4 @@
-# Evaluation dataset, answer extraction and regrading.
+# Evaluation dataset and answer extraction.
 #
 # Card 08 (RFC step 5) extracted these from gufo_core into the eval target the
 # `gufo eval` command and the eval tests link. The HTTP client stays compiled
@@ -7,8 +7,7 @@
 # so `gufo eval` keeps working in builds without DeepSeek.
 add_library(gufo_eval STATIC
   dataset.cpp
-  extract.cpp
-  regrade.cpp)
+  extract.cpp)
 
 target_include_directories(gufo_eval PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(gufo_eval PUBLIC gufo_core)

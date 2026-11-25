@@ -16,7 +16,6 @@ gufo_extension_target(
     modules/quant_gemm.cpp
     modules/residual.cpp
     modules/rope.cpp
-    modules/sample.cpp
     modules/ssm.cpp
     modules/unembed.cpp
     generator.cpp

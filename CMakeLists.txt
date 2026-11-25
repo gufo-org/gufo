@@ -314,7 +314,6 @@ if (ENGINE_ENABLE_HIP)
     "$<$<NOT:$<PLATFORM_ID:Windows>>:${PROJECT_SOURCE_DIR}/src/core/hip/copy_engine.cpp>"
     "$<$<PLATFORM_ID:Windows>:${PROJECT_SOURCE_DIR}/src/core/hip/copy_engine_windows.cpp>"
     src/core/hip/snapshot_copy.hip
-    src/core/hip/staging.cpp
     src/core/hip/transfer_pool.cpp)
   target_link_libraries(gufo_cache_hip PUBLIC gufo_cache gufo_hip_host hip::host)
   # The copy engine resolves ROCr's functions from the runtime HIP loaded, so
@@ -1682,11 +1681,6 @@ endfunction()
   target_link_libraries(exact_token_test PRIVATE gufo_core ${GUFO_QWEN_LIBRARIES})
   add_test(NAME exact_token_test COMMAND exact_token_test)
   set_tests_properties(exact_token_test PROPERTIES LABELS "cpu;quality;tokens")
-
-  add_executable(eval_regrade_test tests/quality/eval_regrade_test.cpp)
-  target_link_libraries(eval_regrade_test PRIVATE gufo_core gufo_eval)
-  add_test(NAME eval_regrade_test COMMAND eval_regrade_test)
-  set_tests_properties(eval_regrade_test PROPERTIES LABELS "cpu;quality;eval")
 
   add_test(NAME eval_http_test
     COMMAND ${Python3_EXECUTABLE}
