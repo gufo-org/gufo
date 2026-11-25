@@ -285,7 +285,16 @@ dependencies = [
  "gufo-json-schema",
  "gufo-png",
  "gufo-realtime-voice",
+ "gufo-tokenizer-json",
  "gufo-websocket",
+]
+
+[[package]]
+name = "gufo-tokenizer-json"
+version = "0.0.0"
+dependencies = [
+ "gufo-ffi",
+ "gufo-json",
 ]
 
 [[package]]
