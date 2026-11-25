@@ -55,10 +55,11 @@ namespace gufo::cli {
 namespace {
 
 /// GPU memory at a failed load, after its partial allocations are freed.
-/// The runtime's free bytes are what the kernel still lets this process map
-/// (GTT, TTM and the system-wide GPU limit, which counts other processes);
-/// with plenty of host memory available, a small value names another GPU
-/// user. GTT counters come from amdgpu sysfs and are absent on Windows.
+/// On Linux the runtime's free bytes are what the kernel still lets this
+/// process map (GTT, TTM and the system-wide GPU limit, which counts other
+/// processes); with plenty of host memory available, a small value names
+/// another GPU user. On Windows they count only this process's allocations.
+/// GTT counters come from amdgpu sysfs and are absent on Windows.
 std::string GpuMemoryStatus() {
   std::ostringstream out;
 #if defined(ENGINE_ENABLE_HIP)

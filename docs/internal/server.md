@@ -1820,9 +1820,10 @@ speculative mode and memory. `rss_mib` is process resident memory;
 `gpu_device_used_mib` is device-wide HIP usage. These overlap on unified memory
 and must not be added together. A failed load adds `gpu_device_free_mib` and
 `gpu_device_total_mib`, read after the partial upload is freed, and on Linux
-`gtt_used_mib` and `gtt_total_mib`. The free value counts GPU memory held by
-other processes, which `host_available_mib` can miss: a small free value with
-plenty of host memory available means another GPU process holds the memory.
+`gtt_used_mib` and `gtt_total_mib`. On Linux the free value counts GPU memory
+held by other processes, which `host_available_mib` can miss: a small free value
+with plenty of host memory available means another GPU process holds the
+memory. On Windows it counts only this process's allocations.
 With disk caching enabled, `phase=artifact_identity` identifies full-file
 SHA-256 work. Digests are cached against the open file's identity, size and
 modification/change timestamps; unchanged artifacts avoid another scan.
