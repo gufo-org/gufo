@@ -14,6 +14,7 @@ gufo-audio-decode = { path = "../audio_decode" }
 gufo-base64 = { path = "../base64" }
 gufo-cache-manifest = { path = "../cache_manifest" }
 gufo-chat-request = { path = "../chat_request" }
+gufo-chat-response = { path = "../chat_response" }
 gufo-generation-parse = { path = "../generation_parse" }
 gufo-gguf = { path = "../gguf" }
 gufo-http = { path = "../http" }
