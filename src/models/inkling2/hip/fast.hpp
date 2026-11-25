@@ -310,6 +310,9 @@ void CheckBf16Exact(hipStream_t s, const float* x, size_t n,
                     unsigned* non_exact);
 /// Exact high-16-bit truncation of `n` F32 values to BF16 (`uint16_t`).
 void F32ToBf16(hipStream_t s, const float* x, void* dst, size_t n);
+/// BF16 copy of a BF16-exact F32 [rows][64] controller gain/forget matrix in
+/// the k-interleaved layout k_ctl_apply_norm reads: [16][rows][4].
+void CtlWeightsK4(hipStream_t s, const float* x, void* dst, int rows);
 /// Copies `rows x cols` weights of ggml type `type` (0=F32, 1=F16, 30=BF16)
 /// into `padded_rows x cols` F32, zero-padding rows `[rows, padded_rows)`.
 void PadRowsToF32(hipStream_t s, const void* src, int type, int rows,
@@ -386,6 +389,15 @@ struct CtlPJob {
   // optional [T] inverse RMS of each x row, summed as the gate prologue sums it
   const float* xinv = nullptr;
   int half = 0;
+  // Optional RMS norm of the controlled rows (weight `nw`), fused into the
+  // apply: writes `nout` (F32, may be null) and `nout16` (F16) instead of
+  // `out`. Same values as hip::RmsNorm of `out`. Reads `gain4`/`forget4` (the
+  // CtlWeightsK4 copies) instead of `gain`/`forget`.
+  const float* nw = nullptr;
+  const void* gain4 = nullptr;
+  const void* forget4 = nullptr;
+  float* nout = nullptr;
+  void* nout16 = nullptr;
 };
 struct CtlPJobs {
   CtlPJob j[3];
