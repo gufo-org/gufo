@@ -985,24 +985,12 @@ int RunServe(std::span<const char* const> args) {
   if (const char* env_host = std::getenv("HOST");
       env_host != nullptr && *env_host != '\0') {
     host = env_host;
-  } else if (const char* env_strix_host = std::getenv("GUFO_HOST");
-             env_strix_host != nullptr && *env_strix_host != '\0') {
-    host = env_strix_host;
   }
 
   int port = 8080;
   if (const char* env_port = std::getenv("PORT");
       env_port != nullptr && *env_port != '\0') {
     const std::string_view sv(env_port);
-    int parsed_port = 0;
-    auto [ptr, ec] =
-        std::from_chars(sv.data(), sv.data() + sv.size(), parsed_port);
-    if (ec == std::errc{} && ptr == sv.data() + sv.size()) {
-      port = parsed_port;
-    }
-  } else if (const char* env_strix_port = std::getenv("GUFO_PORT");
-             env_strix_port != nullptr && *env_strix_port != '\0') {
-    const std::string_view sv(env_strix_port);
     int parsed_port = 0;
     auto [ptr, ec] =
         std::from_chars(sv.data(), sv.data() + sv.size(), parsed_port);

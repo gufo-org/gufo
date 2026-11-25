@@ -10,7 +10,7 @@ import tempfile
 def main():
     binary = sys.argv[1]
     env = {key: value for key, value in os.environ.items()
-           if key not in {"HOST", "PORT", "GUFO_HOST", "GUFO_PORT"}}
+           if key not in {"HOST", "PORT"}}
 
     def check(args, status, message):
         result = subprocess.run([binary, *args], env=env, text=True,
