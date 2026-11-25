@@ -43,7 +43,7 @@ BIOS:
    service, or `memlock unlimited` in `/etc/security/limits.d/` for your
    user.
 
-Reboot and check:
+Reboot and check (`gufo diagnose` warns on a low GTT and prints these values):
 
 ```sh
 cat /sys/class/drm/card*/device/mem_info_vram_total   # 536870912 (512 MiB)

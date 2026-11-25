@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <span>
 #include <sstream>
@@ -88,6 +89,13 @@ std::vector<std::string> SplitCommaSeparated(std::string_view csv) {
     start = end + 1;
   }
   return result;
+}
+
+std::string FormatGib(std::uint64_t bytes) {
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(1)
+      << static_cast<double>(bytes) / static_cast<double>(1ull << 30);
+  return out.str();
 }
 
 }  // namespace
@@ -180,6 +188,37 @@ diagnostics::DiagnosticReport CollectDiagnostics(
                       inventory.gpu.architecture);
     }
     report.AddCheck(std::move(check));
+
+    // The GTT pool caps how much system memory the GPU can map. The amdgpu
+    // default is half of RAM; docs/install.md recommends RAM less 4 GiB.
+    if (inventory.gpu.gtt && inventory.memory.total_bytes != 0) {
+      diagnostics::DiagnosticCheck gtt_check;
+      gtt_check.name = "gtt";
+      const auto& gtt = *inventory.gpu.gtt;
+      const auto recommended =
+          diagnostics::RecommendedGttBytes(inventory.memory.total_bytes);
+      gtt_check.details["totalBytes"] = std::to_string(gtt.total_bytes);
+      gtt_check.details["usedBytes"] = std::to_string(gtt.used_bytes);
+      gtt_check.details["recommendedBytes"] = std::to_string(recommended);
+      if (diagnostics::GttBelowRecommended(gtt.total_bytes,
+                                           inventory.memory.total_bytes)) {
+        const auto recommended_mib = recommended >> 20;
+        gtt_check.status = diagnostics::DiagnosticStatus::kWarn;
+        gtt_check.message =
+            "GTT limit " + FormatGib(gtt.total_bytes) +
+            " GiB is well below RAM less 4 GiB (" + FormatGib(recommended) +
+            " GiB); boot with amdgpu.gttsize=" +
+            std::to_string(recommended_mib) +
+            " ttm.pages_limit=" + std::to_string(recommended_mib * 256) +
+            " (see docs/install.md)";
+      } else {
+        gtt_check.status = diagnostics::DiagnosticStatus::kPass;
+        gtt_check.message = "GTT limit " + FormatGib(gtt.total_bytes) +
+                            " GiB reaches RAM less 4 GiB (" +
+                            FormatGib(recommended) + " GiB)";
+      }
+      report.AddCheck(std::move(gtt_check));
+    }
   }
 
   // 4. NPU Check: XDNA accel nodes (sysfs) and whether XRT opens the device.
