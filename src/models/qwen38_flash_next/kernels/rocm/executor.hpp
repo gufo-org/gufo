@@ -1150,6 +1150,8 @@ private:
   Session::Control* control_host_{nullptr};
   std::int32_t* tokens_host_{nullptr};
   std::uint32_t* counts_host_{nullptr};
+  /// Token rows the last expert-count download covers.
+  mutable std::uint32_t counts_tokens_{0};
   std::int32_t* tiles_host_{nullptr};           ///< routed tile map staging
   std::size_t tiles_host_capacity_{0};          ///< entries of tiles_host_
   mutable std::uint32_t routed_max_rows_{0};    ///< 0 = no readback yet
