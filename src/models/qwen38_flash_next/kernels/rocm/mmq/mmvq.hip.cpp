@@ -708,8 +708,9 @@ int prepare_q8_decode() {
 }
 
 // Q4_K dense projection (the MTP draft head) of 1..8 rows: each wave reads a
-// weight row once and keeps the routed-expert Q4MoeFragment dot and 32-lane
-// reduction per input, so a row's logits do not depend on the batch width.
+// weight row once and keeps the routed-expert Q4MoeFragment dot, its
+// accumulation (Accumulate) and the 32-lane reduction per input, so a row's
+// logits do not depend on the batch width.
 template<int ncols_dst>
 __launch_bounds__(32, 1) static __global__
     void mul_mat_vec_q4k_dense(const void* __restrict__ weights,
@@ -732,7 +733,7 @@ __launch_bounds__(32, 1) static __global__
     const Q4MoeFragment w(weights, row_offset + kbx, kqs);
 #pragma unroll
     for (int j = 0; j < ncols_dst; ++j)
-      sum[j] += w.Dot(input + j * stride_col_y + kby, kqs);
+      sum[j] = w.Accumulate(sum[j], input + j * stride_col_y + kby, kqs);
   }
 #pragma unroll
   for (int j = 0; j < ncols_dst; ++j) {
