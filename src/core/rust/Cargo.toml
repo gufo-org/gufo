@@ -22,6 +22,7 @@ gufo-http-server = { path = "../http_server" }
 gufo-jpeg-decode = { path = "../jpeg_decode" }
 gufo-json = { path = "../json" }
 gufo-json-schema = { path = "../json_schema" }
+gufo-metrics = { path = "../metrics" }
 gufo-png = { path = "../png" }
 gufo-realtime-voice = { path = "../realtime_voice" }
 gufo-tokenizer-json = { path = "../tokenizer_json" }

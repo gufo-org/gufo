@@ -18,6 +18,7 @@ extern crate gufo_http_server;
 extern crate gufo_jpeg_decode;
 extern crate gufo_json;
 extern crate gufo_json_schema;
+extern crate gufo_metrics;
 extern crate gufo_png;
 extern crate gufo_realtime_voice;
 extern crate gufo_tokenizer_json;
