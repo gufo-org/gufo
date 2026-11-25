@@ -202,6 +202,16 @@ struct Engine::Impl {
   static int FeatureIndex(int slot_idx) {
     return slot_idx == 5 ? 0 : slot_idx == 29 ? 1 : slot_idx == 47 ? 2 : -1;
   }
+  struct UbatchCheckpoint {
+    std::size_t index = 0;
+    std::size_t position = 0;
+    int local_t = 0;  // tokens from ubatch start (1..T)
+    float* conv = nullptr;
+    float* draft_f = nullptr;
+    std::vector<float> logits;
+  };
+  std::vector<UbatchCheckpoint>* ubatch_cps = nullptr;
+
   void CaptureFeature(hipStream_t st, const float* src, int rows, int f,
                       float* dst) {
     Check(hipMemcpy2DAsync(dst + static_cast<std::size_t>(f) * kEmbd,
@@ -440,6 +450,8 @@ struct Engine::Impl {
     while (y->k < g && (y->k * y->total + g - 1) / g <= y->done)
       ++y->k;
     const int saved_T = T, saved_pos0 = pos0, saved_nblocks = nblocks;
+    auto* const saved_cps = ubatch_cps;
+    ubatch_cps = nullptr;
     if (mid)
       Spill();
     // The decode graphs run on another (non-blocking) stream and share scratch
@@ -453,12 +465,14 @@ struct Engine::Impl {
       y->spec->yield();
     } catch (...) {
       y->lock->lock();
+      ubatch_cps = saved_cps;
       throw;
     }
     y->lock->lock();
     T = saved_T;
     pos0 = saved_pos0;
     nblocks = saved_nblocks;
+    ubatch_cps = saved_cps;
     if (mid) {
       Unspill();
       // The dense-GEMM work items are per ubatch and shared: another session's
@@ -1064,6 +1078,18 @@ struct Engine::Impl {
       pa.tau_floor = static_cast<float>(cfg->log_scale_floor);
       pa.tau_alpha = cfg->log_scale_alpha;
       fs::AttnPrefill(s, pa);
+      if (ubatch_cps != nullptr) {
+        for (const auto& cp : *ubatch_cps) {
+          if (cp.conv == nullptr)
+            continue;
+          float* dst =
+              cp.conv + static_cast<std::size_t>(slot_idx) * kConvChannels * 3;
+          kk::ConvStateCapture(s, Kb, cs + kConvOffK * 3, dst + kConvOffK * 3,
+                               cp.local_t, kKV);
+          kk::ConvStateCapture(s, Vb, cs + kConvOffV * 3, dst + kConvOffV * 3,
+                               cp.local_t, kKV);
+        }
+      }
       kk::ConvStateUpdate(s, Kb, cs + kConvOffK * 3, T, kKV);
       kk::ConvStateUpdate(s, Vb, cs + kConvOffV * 3, T, kKV);
     }
@@ -1073,6 +1099,16 @@ struct Engine::Impl {
       G(L.attn_output, Ob, kQ, AOp, kEmbd, T);
     }
     // E. residual / block bookkeeping
+    if (ubatch_cps != nullptr) {
+      for (const auto& cp : *ubatch_cps) {
+        if (cp.conv == nullptr)
+          continue;
+        float* dst =
+            cp.conv + static_cast<std::size_t>(slot_idx) * kConvChannels * 3;
+        kk::ConvStateCapture(s, AOp, cs + kConvOffAttn * 3,
+                             dst + kConvOffAttn * 3, cp.local_t, kEmbd);
+      }
+    }
     if (ip % cfg->attn_res_block != 0) {
       fs::ConvAdd(s, AOp, cs + kConvOffAttn * 3, DF(L.attn_post_conv), cur, T,
                   kEmbd, 1.0f / std::sqrt(5.0f));
@@ -1132,9 +1168,29 @@ struct Engine::Impl {
 
     // G. MoE
     if (Moe(L, lf[ip], side)) {
+      if (ubatch_cps != nullptr) {
+        for (const auto& cp : *ubatch_cps) {
+          if (cp.conv == nullptr)
+            continue;
+          float* dst =
+              cp.conv + static_cast<std::size_t>(slot_idx) * kConvChannels * 3;
+          fs::MoeTailStateCapture(s, ye, cs + kConvOffFfn * 3,
+                                  dst + kConvOffFfn * 3, cp.local_t, kEmbd);
+        }
+      }
       fs::MoeTail(s, ye, cs + kConvOffFfn * 3, DF(L.ffn_post_conv), cur, T,
                   kEmbd, 1.0f / std::sqrt(5.0f));
     } else {
+      if (ubatch_cps != nullptr) {
+        for (const auto& cp : *ubatch_cps) {
+          if (cp.conv == nullptr)
+            continue;
+          float* dst =
+              cp.conv + static_cast<std::size_t>(slot_idx) * kConvChannels * 3;
+          kk::ConvStateCapture(s, moe, cs + kConvOffFfn * 3,
+                               dst + kConvOffFfn * 3, cp.local_t, kEmbd);
+        }
+      }
       kk::Conv(s, moe, cs + kConvOffFfn * 3, DF(L.ffn_post_conv), nullptr, AO,
                T, kEmbd, 128, 1.0f / std::sqrt(5.0f));
       kk::ConvStateUpdate(s, moe, cs + kConvOffFfn * 3, T, kEmbd);
@@ -2164,11 +2220,21 @@ struct Engine::Impl {
                    true);  // (the last visit is followed by the head)
     }
     ss.pos_ += T;
-    if (!last_ubatch && !sink && !dsp)
+    const bool has_cps = ubatch_cps != nullptr && !ubatch_cps->empty();
+    bool has_interior = false, has_at_end = false;
+    if (has_cps) {
+      for (const auto& cp : *ubatch_cps) {
+        if (cp.local_t < T)
+          has_interior = true;
+        else
+          has_at_end = true;
+      }
+    }
+    if (!last_ubatch && !sink && !dsp && !has_cps)
       return;
 
     // output: attention-residual mix, norm, lm head, soft cap, crop
-    const bool need_all = dsp || sink;
+    const bool need_all = dsp || sink || has_interior;
     const int out_n = need_all ? T : 1;
     const std::size_t out_off =
         need_all ? 0 : static_cast<std::size_t>(T - 1) * kEmbd;
@@ -2183,14 +2249,20 @@ struct Engine::Impl {
                 cfg->rms_eps);
     if (dsp) {
       CaptureFeature(s, hn, T, 3, p_feat);
-      dsp->Inject(s, ss.draft_, p_feat, static_cast<std::size_t>(pos0), T);
-      if (!last_ubatch && !sink)
+      std::vector<Drafter::InjectCapture> dcaps;
+      if (has_interior) {
+        for (const auto& cp : *ubatch_cps)
+          if (cp.draft_f != nullptr)
+            dcaps.push_back({cp.local_t - 1, cp.draft_f});
+      }
+      dsp->Inject(s, ss.draft_, p_feat, static_cast<std::size_t>(pos0), T,
+                  dcaps);
+      if (!last_ubatch && !sink && !has_cps)
         return;
     }
     const int V = static_cast<int>(cfg->n_vocab_text);
-    auto chunk = [&](int a, int n, std::vector<float>* host) {
-      G(w->output, hn + static_cast<std::size_t>(a) * kEmbd, kEmbd, logits_d, V,
-        n, V);
+    auto chunk = [&](const float* src_hn, int n, std::vector<float>* host) {
+      G(w->output, src_hn, kEmbd, logits_d, V, n, V);
       kk::Softcap(s, logits_d, static_cast<std::int64_t>(n) * V,
                   cfg->logit_softcap);
       host->resize(static_cast<std::size_t>(n) * V);
@@ -2203,14 +2275,57 @@ struct Engine::Impl {
     if (sink) {
       for (int a = 0; a < T; a += kLogitChunk) {
         const int n = std::min(kLogitChunk, T - a);
-        chunk(a, n, &host);
+        chunk(hn + static_cast<std::size_t>(a) * kEmbd, n, &host);
         sink(static_cast<std::size_t>(first_idx + a), n, host.data());
-        if (last_ubatch && a + n == T)
+        if (has_interior) {
+          for (auto& cp : *ubatch_cps) {
+            const int r = cp.local_t - 1;
+            if (cp.local_t < T && r >= a && r < a + n)
+              cp.logits.assign(
+                  host.begin() + static_cast<std::ptrdiff_t>(r - a) * V,
+                  host.begin() + static_cast<std::ptrdiff_t>(r - a + 1) * V);
+          }
+        }
+        if ((last_ubatch || has_at_end) && a + n == T)
           ss.logits_.assign(host.end() - V, host.end());
         ss.logits_stale_ = false;
       }
+    } else if (has_interior) {
+      // Pack every interior checkpoint's final hidden row (and the ubatch end
+      // row when needed) so the LM head weights are read once.
+      std::vector<UbatchCheckpoint*> interior_ptrs;
+      int n_out = 0;
+      for (auto& cp : *ubatch_cps) {
+        if (cp.local_t < T) {
+          Check(hipMemcpyAsync(
+                    mixf + static_cast<std::size_t>(n_out) * kEmbd,
+                    hn + static_cast<std::size_t>(cp.local_t - 1) * kEmbd,
+                    kEmbd * sizeof(float), hipMemcpyDeviceToDevice, s),
+                "cp hn copy");
+          interior_ptrs.push_back(&cp);
+          ++n_out;
+        }
+      }
+      const bool need_end = last_ubatch || has_at_end;
+      if (need_end) {
+        Check(hipMemcpyAsync(mixf + static_cast<std::size_t>(n_out) * kEmbd,
+                             hn + static_cast<std::size_t>(T - 1) * kEmbd,
+                             kEmbd * sizeof(float), hipMemcpyDeviceToDevice, s),
+              "cp end hn copy");
+        ++n_out;
+      }
+      chunk(mixf, n_out, &host);
+      for (std::size_t i = 0; i < interior_ptrs.size(); ++i)
+        interior_ptrs[i]->logits.assign(
+            host.begin() + static_cast<std::ptrdiff_t>(i) * V,
+            host.begin() + static_cast<std::ptrdiff_t>(i + 1) * V);
+      if (need_end) {
+        ss.logits_.assign(host.end() - V, host.end());
+        ss.logits_stale_ = false;
+      }
     } else {
-      chunk(need_all ? T - 1 : 0, 1, &host);
+      chunk(hn + static_cast<std::size_t>(need_all ? T - 1 : 0) * kEmbd, 1,
+            &host);
       ss.logits_ = std::move(host);
       ss.logits_stale_ = false;
     }
@@ -2797,15 +2912,50 @@ void Engine::Synchronize() {
   Check(hipStreamSynchronize(impl_->s), "synchronize");
 }
 
+bool Engine::CanCaptureInPass(std::size_t offset, std::size_t consumed,
+                              std::size_t boundary) const {
+  if (consumed == 0 || boundary <= offset || boundary >= offset + consumed)
+    return false;
+  const std::size_t u_idx = (boundary - offset - 1) / ubatch_;
+  const std::size_t u_start = offset + u_idx * ubatch_;
+  const std::size_t u_end = std::min(offset + consumed, u_start + ubatch_);
+  if (boundary == u_end)
+    return true;
+  // Every sliding-window ring holds `ring_rows()` rows; rows needed at
+  // `boundary` start at `FirstChunkRow` (256-row chunks covering 1024 window
+  // rows). They stay intact at `u_end` iff `u_end - first_chunk <= ring_rows`.
+  constexpr std::size_t kWin = 1024, kChunk = 256;
+  const std::size_t first_chunk =
+      boundary <= kWin ? 0 : ((boundary - kWin) / kChunk) * kChunk;
+  return u_end - first_chunk <= ring_rows();
+}
+
+std::size_t Engine::PrefillCheckpointScratchBytes() const {
+  return static_cast<std::size_t>(48) * kConvChannels * 3 * sizeof(float) +
+         (has_drafter() ? static_cast<std::size_t>(kEmbd) * sizeof(float) : 0);
+}
+
 void Engine::Forward(Session& s, std::span<const std::int32_t> tokens,
                      const LogitsSink& sink, const PrefillYield* yield,
-                     std::span<const InputRows> rows) {
+                     std::span<const InputRows> rows,
+                     std::span<const std::size_t> checkpoints,
+                     const PrefillCheckpointConsumer& on_checkpoint) {
   std::unique_lock<std::mutex> lock(mutex_);
   if (s.pos_ + tokens.size() > max_context_)
     throw std::runtime_error("inkling2: context exhausted");
   for (auto t : tokens)
     if (t < 0 || static_cast<std::uint32_t>(t) >= weights_.config.n_vocab_text)
       throw std::runtime_error("inkling2: token id out of range");
+  if (!checkpoints.empty()) {
+    if (!on_checkpoint || checkpoints.size() > kMaxPassCheckpoints)
+      throw std::invalid_argument("inkling2: invalid in-pass checkpoints");
+    const std::size_t start_pos = s.pos_;
+    for (std::size_t i = 0; i < checkpoints.size(); ++i) {
+      if ((i > 0 && checkpoints[i] <= checkpoints[i - 1]) ||
+          !CanCaptureInPass(start_pos, tokens.size(), checkpoints[i]))
+        throw std::invalid_argument("inkling2: unsupported in-pass boundary");
+    }
+  }
   Impl::YieldRun run;
   Impl::YieldRun* yr = nullptr;
   if (yield != nullptr &&
@@ -2823,18 +2973,97 @@ void Engine::Forward(Session& s, std::span<const std::int32_t> tokens,
                       // to this call only
     Impl* i;
     std::span<const InputRows> saved;
-    ~RowsScope() { i->input_rows = saved; }
-  } rows_scope{impl_.get(), impl_->input_rows};
+    std::vector<Impl::UbatchCheckpoint>* saved_cps;
+    ~RowsScope() {
+      i->input_rows = saved;
+      i->ubatch_cps = saved_cps;
+    }
+  } rows_scope{impl_.get(), impl_->input_rows, impl_->ubatch_cps};
   impl_->input_rows = rows;
   std::size_t done = 0;
+  std::size_t next_cp = 0;
   while (done < tokens.size()) {
     const std::size_t n = std::min<std::size_t>(ubatch_, tokens.size() - done);
+    const std::size_t u_start = s.pos_;
+    const std::size_t u_end = u_start + n;
+    std::vector<Impl::UbatchCheckpoint> u_cps;
+    std::size_t n_interior = 0;
+    while (next_cp < checkpoints.size() && checkpoints[next_cp] <= u_end) {
+      const std::size_t pos = checkpoints[next_cp];
+      Impl::UbatchCheckpoint item{};
+      item.index = next_cp;
+      item.position = pos;
+      item.local_t = static_cast<int>(pos - u_start);
+      u_cps.push_back(std::move(item));
+      if (pos < u_end)
+        ++n_interior;
+      ++next_cp;
+    }
+    struct CpDevScope {
+      float* conv = nullptr;
+      float* draft_f = nullptr;
+      ~CpDevScope() {
+        if (conv != nullptr || draft_f != nullptr) {
+          const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+          if (conv != nullptr)
+            (void)hipFree(conv);
+          if (draft_f != nullptr)
+            (void)hipFree(draft_f);
+        }
+      }
+    } cp_dev;
+    constexpr std::size_t kConvFloats =
+        static_cast<std::size_t>(48) * kConvChannels * 3;
+    if (n_interior > 0) {
+      const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+      Check(hipMalloc(reinterpret_cast<void**>(&cp_dev.conv),
+                      n_interior * kConvFloats * sizeof(float)),
+            "cp conv alloc");
+      if (impl_->dsp)
+        Check(hipMalloc(reinterpret_cast<void**>(&cp_dev.draft_f),
+                        n_interior * kEmbd * sizeof(float)),
+              "cp draft_f alloc");
+      std::size_t slot = 0;
+      for (auto& cp : u_cps) {
+        if (cp.position < u_end) {
+          cp.conv = cp_dev.conv + slot * kConvFloats;
+          if (cp_dev.draft_f != nullptr)
+            cp.draft_f = cp_dev.draft_f + slot * kEmbd;
+          ++slot;
+        }
+      }
+    }
     if (s.hooks_ != nullptr)
       s.hooks_->BeforeWrite(s.pos_, s.pos_ + n);
     s.BackRows(s.pos_, s.pos_ + n);
+    // Record drafter first position after gap-restart check for this ubatch.
+    const std::size_t draft_first =
+        impl_->dsp ? ((u_start > s.draft_.valid || u_start < s.draft_.first)
+                          ? u_start
+                          : s.draft_.first)
+                   : 0;
+    impl_->ubatch_cps = u_cps.empty() ? nullptr : &u_cps;
     impl_->Ubatch(s, tokens.subspan(done, n), static_cast<int>(done),
                   done + n == tokens.size(), sink, yr);
+    impl_->ubatch_cps = nullptr;
     done += n;
+    if (!u_cps.empty()) {
+      Check(hipStreamSynchronize(impl_->s), "checkpoint sync");
+      for (const auto& cp : u_cps) {
+        PrefillCheckpoint pub{};
+        pub.position = cp.position;
+        pub.valid_end = u_end;
+        pub.conv = cp.conv;
+        pub.logits = cp.logits;
+        pub.draft_f = cp.draft_f;
+        if (impl_->dsp) {
+          pub.draft_first = draft_first;
+          pub.draft_valid = cp.position;
+          pub.draft_f_pos = cp.position - 1;
+        }
+        on_checkpoint(cp.index, pub);
+      }
+    }
     if (yr != nullptr && done < tokens.size())
       impl_->MaybeYield(yr, false);  // between ubatches
   }

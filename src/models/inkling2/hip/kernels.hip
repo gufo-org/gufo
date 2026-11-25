@@ -548,6 +548,21 @@ __global__ void conv_state_k(const float* __restrict__ x,
     state[static_cast<size_t>(c) * 3 + j] = nw[j];
 }
 
+__global__ void conv_state_capture_k(const float* __restrict__ x,
+                                     const float* __restrict__ old_state,
+                                     float* __restrict__ dst_state, int t_count,
+                                     int C) {
+  const int c = blockIdx.x * blockDim.x + threadIdx.x;
+  if (c >= C)
+    return;
+  for (int j = 0; j < 3; ++j) {
+    const int idx = t_count + j;
+    dst_state[static_cast<size_t>(c) * 3 + j] =
+        idx < 3 ? old_state[static_cast<size_t>(c) * 3 + idx]
+                : x[static_cast<size_t>(idx - 3) * C + c];
+  }
+}
+
 __global__ void add_k(const float* a, const float* b, float* o, int n) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n)
@@ -754,6 +769,12 @@ void ConvStateUpdate(hipStream_t s, const float* x, float* state, int t_count,
   conv_state_k<<<(channels + 127) / 128, 128, 0, s>>>(x, state, t_count,
                                                       channels);
   Check(hipGetLastError(), "conv_state");
+}
+void ConvStateCapture(hipStream_t s, const float* x, const float* old_state,
+                      float* dst_state, int t_count, int channels) {
+  conv_state_capture_k<<<(channels + 127) / 128, 128, 0, s>>>(
+      x, old_state, dst_state, t_count, channels);
+  Check(hipGetLastError(), "conv_state_capture");
 }
 void Add(hipStream_t s, const float* a, const float* b, float* out, int n) {
   add_k<<<(n + 255) / 256, 256, 0, s>>>(a, b, out, n);

@@ -3486,6 +3486,29 @@ __global__ void k_moe_tail_state(const float* __restrict__ pairs,
     state[(size_t)c * 3 + j] = nw[j];
 }
 
+template<int SL>
+__global__ void k_moe_tail_state_capture(const float* __restrict__ pairs,
+                                         const float* __restrict__ old_state,
+                                         float* __restrict__ dst_state, int T,
+                                         int C) {
+  const int c = blockIdx.x * blockDim.x + threadIdx.x;
+  if (c >= C)
+    return;
+  for (int j = 0; j < 3; ++j) {
+    const int idx = T + j;
+    if (idx < 3) {
+      dst_state[(size_t)c * 3 + j] = old_state[(size_t)c * 3 + idx];
+    } else {
+      const size_t t = idx - 3;
+      float a = pairs[(t * SL) * C + c];
+#pragma unroll
+      for (int k = 1; k < SL; k++)
+        a += pairs[(t * SL + k) * C + c];
+      dst_state[(size_t)c * 3 + j] = a;
+    }
+  }
+}
+
 __global__ void k_cvt_f16(const float* __restrict__ x, _Float16* __restrict__ h,
                           size_t n) {
   size_t i = ((size_t)blockIdx.x * blockDim.x + threadIdx.x) * 4;
@@ -5060,6 +5083,13 @@ void MoeTail(hipStream_t s, const float* pairs, float* state, const float* w,
       pairs, state, w, cur, t, c, scale);
   k_moe_tail_state<8><<<(c + 127) / 128, 128, 0, s>>>(pairs, state, t, c);
   Chk("moe_tail");
+}
+void MoeTailStateCapture(hipStream_t s, const float* pairs,
+                         const float* old_state, float* dst_state, int t,
+                         int c) {
+  k_moe_tail_state_capture<8>
+      <<<(c + 127) / 128, 128, 0, s>>>(pairs, old_state, dst_state, t, c);
+  Chk("moe_tail_state_capture");
 }
 
 void ConvAdd(hipStream_t s, const float* x, float* state, const float* w,

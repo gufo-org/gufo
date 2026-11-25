@@ -71,7 +71,6 @@ struct Drafter::Impl {
   // prefill GEMM item list, and top-K shortlist staging
   int* h_in = nullptr;
   float* h_out = nullptr;
-  int* h_items = nullptr;
   float* tk_ws = nullptr;
   dsp::ShortlistOut* d_shortlist = nullptr;
   dsp::ShortlistOut* h_shortlist = nullptr;
@@ -103,8 +102,6 @@ struct Drafter::Impl {
       (void)hipHostFree(h_in);
     if (h_out)
       (void)hipHostFree(h_out);
-    if (h_items)
-      (void)hipHostFree(h_items);
     if (h_shortlist)
       (void)hipHostFree(h_shortlist);
     if (h_prev)
@@ -386,9 +383,6 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_out),
                         16 * kMaxSessions * sizeof(float)),
           "pinned");
-    Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_items),
-                        (1 + 2 * (Impl::kMaxInject / 64)) * sizeof(int)),
-          "pinned");
     I.tk_ws = I.Alloc<float>(static_cast<std::size_t>(kMaxSessions) * 64 *
                              (2 * dsp::kShortlist + 2));
     I.d_shortlist = I.Alloc<dsp::ShortlistOut>(kMaxSessions);
@@ -435,7 +429,8 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
 Drafter::~Drafter() = default;
 
 void Drafter::Inject(hipStream_t s, State& st, const float* feats,
-                     std::size_t pos0, int n) {
+                     std::size_t pos0, int n,
+                     std::span<const InjectCapture> captures) {
   Impl& I = *impl_;
   if (n <= 0)
     return;
@@ -454,17 +449,19 @@ void Drafter::Inject(hipStream_t s, State& st, const float* feats,
     } else {
       const int tile = m >= 256 ? 128 : 64;
       const int ni = (m + tile - 1) / tile;
-      I.h_items[0] = ni;
+      // Pageable stack buffer: hipMemcpyAsync stages it before returning, so
+      // back-to-back ubatches never overwrite each other's item lists.
+      int items[1 + 2 * (Impl::kMaxInject / 64)];
+      items[0] = ni;
       for (int i = 0; i < ni; ++i) {
-        I.h_items[1 + i] = i * tile;
-        I.h_items[1 + ni + i] = std::min(tile, m - i * tile);
+        items[1 + i] = i * tile;
+        items[1 + ni + i] = std::min(tile, m - i * tile);
       }
-      Check(hipMemcpyAsync(I.it_n, I.h_items, 4, hipMemcpyHostToDevice, s),
+      Check(hipMemcpyAsync(I.it_n, items, 4, hipMemcpyHostToDevice, s),
             "items");
-      Check(hipMemcpyAsync(I.it_s, I.h_items + 1, ni * 4, hipMemcpyHostToDevice,
-                           s),
+      Check(hipMemcpyAsync(I.it_s, items + 1, ni * 4, hipMemcpyHostToDevice, s),
             "items");
-      Check(hipMemcpyAsync(I.it_c, I.h_items + 1 + ni, ni * 4,
+      Check(hipMemcpyAsync(I.it_c, items + 1 + ni, ni * 4,
                            hipMemcpyHostToDevice, s),
             "items");
       it = I.Items(I.it_n, I.it_e, I.it_s, I.it_c, m, tile);
@@ -480,6 +477,15 @@ void Drafter::Inject(hipStream_t s, State& st, const float* feats,
     ma.n = m;
     ma.eps = I.eps;
     dsp::Mix(s, ma);
+    for (const auto& cap : captures) {
+      if (cap.dst != nullptr && cap.row >= done && cap.row < done + m)
+        Check(
+            hipMemcpyAsync(
+                cap.dst,
+                I.mix + (static_cast<std::size_t>(cap.row - done) * 4 + 3) * kE,
+                kE * 4, hipMemcpyDeviceToDevice, s),
+            "markov checkpoint");
+    }
     for (int l = 0; l < 3; ++l) {
       const _Float16* a = I.mix16 + static_cast<std::size_t>(l) * m * kE;
       float* kraw = I.ikv;

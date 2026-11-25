@@ -358,6 +358,11 @@ void AttnPrefill(hipStream_t s, const PrefillAttn& a);
 /// by the t inputs.
 void MoeTail(hipStream_t s, const float* pairs, float* state, const float* w,
              float* cur, int t, int c, float scale);
+/// Captures the MoE post-convolution history after the first `t` tokens of
+/// `pairs` ([T][8][c]) without modifying `old_state`.
+void MoeTailStateCapture(hipStream_t s, const float* pairs,
+                         const float* old_state, float* dst_state, int t,
+                         int c);
 /// cur[t] += post conv of x with the history `state`, which is then advanced
 /// (hip::Conv + ConvStateUpdate + Add in one pass).
 void ConvAdd(hipStream_t s, const float* x, float* state, const float* w,

@@ -73,6 +73,10 @@ public:
         block(slot.block) {}
   void Invalidate() noexcept override { (void)adapter_->Invalidate(*slot_); }
   [[nodiscard]] Session& session() const { return *session_; }
+  [[nodiscard]] Inkling2Slot& slot() const { return *slot_; }
+  [[nodiscard]] Inkling2CacheAdapter& adapter() const {
+    return static_cast<Inkling2CacheAdapter&>(*adapter_);
+  }
   /// Where the generated text stands inside the model's block structure (see
   /// Piece()). Lives in the slot: it is part of a checkpoint's metadata.
   Block& block;
@@ -320,8 +324,8 @@ public:
     d.capabilities.incremental_text_is_exact =
         true;  // the streamed pieces are the text (Piece())
     d.capabilities.prefix_reuse = true;
-    d.capabilities.in_pass_checkpoint =
-        false;  // checkpoints are taken between prefill passes
+    d.capabilities.in_pass_checkpoint = true;
+    d.capabilities.max_in_pass_checkpoints = Engine::kMaxPassCheckpoints;
     // A lone decoding request runs DecodeStep (with DSpark several tokens a
     // step; greedy rows' argmax on the device); concurrent ones keep batched
     // one-token steps.
@@ -802,6 +806,93 @@ public:
     }
     return {.consumed_tokens = consumed,
             .decode_ready = offset + consumed == prompt.size()};
+  }
+
+  [[nodiscard]] Block BlockAt(std::span<const g::TextRunnerToken> prompt,
+                              std::size_t pos) const {
+    if (pos >= 2 && prompt[pos - 2] == t_header_ && prompt[pos - 1] == t_text_)
+      return Block::kText;
+    if (pos >= 1 && prompt[pos - 1] == t_header_)
+      return Block::kAfterHeader;
+    return Block::kIdle;
+  }
+
+  [[nodiscard]] std::optional<std::size_t> PrefillCheckpointBytes(
+      const g::TextRunnerState& state,
+      std::span<const g::TextRunnerToken> prompt, std::size_t offset,
+      std::size_t max_input_tokens, std::size_t boundary) const override {
+    const auto& st = Require(state);
+    if (offset != st.session().position() || offset >= prompt.size())
+      return std::nullopt;
+    const std::size_t consumed = std::min<std::size_t>(
+        {prompt.size() - offset, std::max<std::size_t>(max_input_tokens, 1),
+         kMaxStepTokens});
+    if (!engine_->CanCaptureInPass(offset, consumed, boundary))
+      return std::nullopt;
+    return engine_->PrefillCheckpointScratchBytes();
+  }
+
+  [[nodiscard]] g::TextPrefillStep PrefillThrough(
+      g::TextRunnerState& state, std::span<const g::TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens,
+      std::span<const std::size_t> boundaries,
+      const InPassConsumer& consume) const override {
+    auto& st = Require(state);
+    if (!consume || boundaries.empty() ||
+        boundaries.size() > Engine::kMaxPassCheckpoints ||
+        offset != st.session().position() || offset >= prompt.size())
+      throw std::logic_error(
+          "invalid Inkling 2 Mini in-pass checkpoint request");
+    const std::size_t consumed = std::min<std::size_t>(
+        {prompt.size() - offset, std::max<std::size_t>(max_input_tokens, 1),
+         kMaxStepTokens});
+    for (std::size_t i = 0; i < boundaries.size(); ++i) {
+      if ((i > 0 && boundaries[i] <= boundaries[i - 1]) ||
+          !engine_->CanCaptureInPass(offset, consumed, boundaries[i]))
+        throw std::logic_error(
+            "invalid Inkling 2 Mini in-pass checkpoint boundary");
+    }
+    const auto ids = ToIds(prompt.subspan(offset, consumed));
+    PrefillYield yield{st.prefill_yield_groups(), [&st] { st.YieldPrefill(); },
+                       st.cancelled};
+    std::vector<InputRows> rows;
+    if (st.prompt) {
+      for (const auto& e : st.prompt->images) {
+        const std::size_t lo = std::max(e->first, offset),
+                          hi = std::min(e->first + e->count, offset + consumed);
+        if (lo >= hi)
+          continue;
+        EnsureRows(*e);
+        rows.push_back({lo - offset, hi - lo,
+                        e->rows->device + (lo - e->first) * kVisionDim});
+      }
+    }
+    std::vector<Block> blocks;
+    blocks.reserve(boundaries.size());
+    for (const std::size_t b : boundaries)
+      blocks.push_back(BlockAt(prompt, b));
+    double capture_ms = 0.0;
+    st.adapter().PrefillThrough(
+        st.slot(), ids, boundaries, blocks,
+        [&](std::size_t index) {
+          const auto t0 = std::chrono::steady_clock::now();
+          consume(index);
+          capture_ms += std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+        },
+        yield.groups >= 2 || yield.cancelled ? &yield : nullptr, rows);
+    st.block = Block::kIdle;
+    const auto done = offset + consumed;
+    if (done == prompt.size() && max_draft_ > 0) {
+      st.history.assign(prompt.begin(), prompt.end());
+      st.history_ok = true;
+    }
+    if (done == prompt.size())
+      st.block = BlockAt(prompt, done);
+    return {.consumed_tokens = consumed,
+            .decode_ready = done == prompt.size(),
+            .checkpoint_ms = capture_ms};
   }
 
   [[nodiscard]] g::TextDecodeSelection SelectNext(

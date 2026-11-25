@@ -189,6 +189,31 @@ public:
   using LogitsSink = std::function<void(std::size_t first, std::size_t count,
                                         const float* data)>;
 
+  /// Maximum in-pass checkpoints accepted in a single Forward call.
+  static constexpr std::size_t kMaxPassCheckpoints = 8;
+  /// Captured private state at an in-pass checkpoint boundary `position` inside
+  /// a Forward ubatch ending at `valid_end`. When `conv`/`draft_f` are null or
+  /// `logits` is empty, the live session itself stands at `position`.
+  struct PrefillCheckpoint {
+    std::size_t position = 0;
+    std::size_t valid_end = 0;
+    const float* conv = nullptr;     // device [48][6656][3]
+    std::span<const float> logits;   // host [vocab_text]
+    const float* draft_f = nullptr;  // device [2304]
+    std::size_t draft_first = 0;
+    std::size_t draft_valid = 0;
+    std::size_t draft_f_pos = static_cast<std::size_t>(-1);
+  };
+  using PrefillCheckpointConsumer =
+      std::function<void(std::size_t index, const PrefillCheckpoint&)>;
+  /// Whether `boundary` can be captured in-pass inside a Forward of `consumed`
+  /// tokens starting at `offset` (all window rows for `boundary` remain intact
+  /// at the end of its ubatch).
+  [[nodiscard]] bool CanCaptureInPass(std::size_t offset, std::size_t consumed,
+                                      std::size_t boundary) const;
+  /// Temporary device bytes needed to capture one interior boundary in-pass.
+  [[nodiscard]] std::size_t PrefillCheckpointScratchBytes() const;
+
   /// Evaluates prompt `tokens` at the session position (ubatched). Afterwards
   /// `s.logits()` holds the last token's logits. With `sink`, the logits of
   /// every token are also delivered. Throws std::runtime_error on failure or
@@ -200,7 +225,9 @@ public:
   /// prefix plus a tail equals one call over the whole prompt, bit for bit.
   void Forward(Session& s, std::span<const std::int32_t> tokens,
                const LogitsSink& sink = {}, const PrefillYield* yield = nullptr,
-               std::span<const InputRows> rows = {});
+               std::span<const InputRows> rows = {},
+               std::span<const std::size_t> checkpoints = {},
+               const PrefillCheckpointConsumer& on_checkpoint = {});
   /// One decode step of `token` (the decode arithmetic, as Step); afterwards
   /// `s.logits()` holds its logits on the host.
   void Decode(Session& s, std::int32_t token);
