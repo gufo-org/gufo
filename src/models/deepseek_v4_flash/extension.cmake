@@ -43,9 +43,7 @@ if (ENGINE_ENABLE_HIP)
   set(DEEPSEEK_V4_FLASH_MMQ_SOURCES
     ${DEEPSEEK_V4_FLASH_MMQ_DIR}/ds4_ggml_stubs.hip.cpp
     ${DEEPSEEK_V4_FLASH_MMQ_DIR}/ds4_mmq.hip.cpp
-    ${DEEPSEEK_V4_FLASH_MMQ_DIR}/ds4_mmq_d2r.hip.cpp
     ${DEEPSEEK_V4_FLASH_MMQ_DIR}/mmid.hip.cpp
-    ${DEEPSEEK_V4_FLASH_MMQ_DIR}/mmvq.hip.cpp
     ${DEEPSEEK_V4_FLASH_MMQ_DIR}/quantize.hip.cpp)
 
   add_library(gufo_deepseek_v4_flash_mmq STATIC

@@ -15,9 +15,11 @@ small ggml type and allocation interface needed by the templates. Quantization
 layouts, tables and active AMD arithmetic remain from the imported kernels.
 Unused NVIDIA/MUSA preprocessing paths, ggml graph support and full ggml
 tensor entry points are removed; DS4 owns its HIP graph execution separately.
+The C ABI keeps only what the DS4 runtime calls: dense Q8_0 and the paired
+IQ2_XXS MoE matmuls.
 
 When importing upstream changes, retain the HIP implementation and rerun the
-focused DS4 projection/attention checks through Nix. The backend and all six
+focused DS4 projection/attention checks through Nix. The backend and all
 matrix translation units were also compared before and after preprocessing
 for `gfx1151`; only private symbol names and unsupported-kernel diagnostics
 changed. Current measurements belong in the model benchmark README.
