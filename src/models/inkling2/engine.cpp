@@ -339,8 +339,8 @@ struct Engine::Impl {
   // waves per SIMD and streams about 150 GB/s, WMMA about 195 GB/s (the
   // one-input projections and the output matrix stay faster per row)
   static constexpr int kMmaHeadRows = kChunk;
-  // one-session verification steps from this many rows group the MoE pairs by
-  // expert (consecutive rows share most of their experts)
+  // verification steps from this many rows group the MoE pairs by expert
+  // (consecutive rows of a session share most of their experts)
   static constexpr int kGroupedVerifyRows = 6;
   static constexpr int kMsgInvTokens = 1024;
   static constexpr int kWideTileTokens =
@@ -1603,8 +1603,8 @@ struct Engine::Impl {
     // (which share most experts): each used expert's weights read once for all
     // its pairs. Fewer rows, and other sessions' rows (which share fewer
     // experts), run per pair.
-    if (F.moe >= 0 && (nb >= kChunk || (verify_mode && verify_one_session &&
-                                        nb >= kGroupedVerifyRows))) {
+    if (F.moe >= 0 &&
+        (nb >= kChunk || (verify_mode && nb >= kGroupedVerifyRows))) {
       const int slots = std::min(E, 8 * nb);
       fs::MoeRouteGroup(ds, d_ids8, 8 * nb, d_groups);
       fs::MoeQuantGrouped(ds, F.moe, d_h, nb, kEmbd, d_groups);

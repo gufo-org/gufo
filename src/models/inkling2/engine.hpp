@@ -214,7 +214,7 @@ public:
   /// (up to 63 copied ones).
   static constexpr std::size_t kMaxVerifyRows = 64;
   /// Rows of a verification step of several sessions, in all.
-  static constexpr std::size_t kMaxBatchVerifyRows = 8;
+  static constexpr std::size_t kMaxBatchVerifyRows = 16;
   /// One decode step (one token each) for up to 8 distinct sessions under a
   /// single lock. The runner's `AdvanceBatch` calls it. M3: one graph launch
   /// reads the weights once for all tokens (GEMV -> small GEMM over the tokens,

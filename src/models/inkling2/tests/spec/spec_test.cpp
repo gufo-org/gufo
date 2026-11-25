@@ -252,8 +252,8 @@ int main(int argc, char** argv) {
 
   {
     // Session 0 is `ref`'s prompt; the others are longer filler prompts.
-    constexpr int kS = 3;
-    const int lens[kS] = {prompt, prompt + 1700, prompt + 3900};
+    constexpr int kS = 4;
+    const int lens[kS] = {prompt, prompt + 1700, prompt + 3900, prompt + 900};
     std::vector<std::vector<std::int32_t>> pr(kS), wt(kS);
     std::vector<std::vector<std::vector<float>>> rl(kS);
     for (int g = 0; g < kS; ++g) {

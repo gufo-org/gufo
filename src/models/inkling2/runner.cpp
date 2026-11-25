@@ -1495,8 +1495,10 @@ public:
                                 const double per_token =
                                     costs_batch_.Verify(B) / B;
                                 const double extra =
-                                    costs_batch_.Verify(std::min(B + i, 8)) -
-                                    costs_batch_.Verify(std::min(B + i - 1, 8));
+                                    costs_batch_.Verify(std::min(
+                                        B + i, DsparkCosts::kMaxRows)) -
+                                    costs_batch_.Verify(std::min(
+                                        B + i - 1, DsparkCosts::kMaxRows));
                                 return sv * per_token > extra;
                               },
                           .coupled = l.mode.coupled ? &l.mode.cp : nullptr});
