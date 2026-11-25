@@ -289,6 +289,18 @@ struct Engine::Impl {
       return dw.Ptr(t);
     return half_of.at(t.data);
   }
+  /// k-interleaved BF16 copy of a controller gain/forget matrix [2304][64]
+  /// (prefill apply + norm).
+  std::map<const void*, void*> k4_of;
+  const void* HW4(const TensorRef& t) const { return k4_of.at(t.data); }
+  void MakeK4(const TensorRef& t) {
+    if (t.size_bytes == 0 || k4_of.count(t.data))
+      return;
+    void* d = AllocDevice(t.size_bytes / 2, "ctl k4 weights");
+    scratch_allocs.push_back(d);
+    fs::CtlWeightsK4(s, DF(t), d, static_cast<int>(t.ne[1]));
+    k4_of[t.data] = d;
+  }
   /// BF16 copy of a BF16-exact F32 tensor on the device: the same values in
   /// half the bytes, without reading back from the host mapping.
   void MakeHalf(const TensorRef& t) {
@@ -357,6 +369,10 @@ struct Engine::Impl {
   // (consecutive rows of a session share most of their experts)
   static constexpr int kGroupedVerifyRows = 6;
   static constexpr int kMsgInvTokens = 1024;
+  // From this ubatch size the loop controllers' apply also normalises the rows
+  // (fewer bytes moved); below it the separate kernels have more blocks
+  // (measured: pp64 -1%, pp256 equal, pp512 +0.7%).
+  static constexpr int kFusedCtlNormTokens = 512;
   static constexpr int kWideTileTokens =
       256;  // ubatches at least this long use 128-token GEMM tiles
   // token strides (floats) of the decode buffers
@@ -707,6 +723,8 @@ struct Engine::Impl {
           MakeHalf(c.down);
           MakeHalf(c.gain);
           MakeHalf(c.forget);
+          MakeK4(c.gain);
+          MakeK4(c.forget);
         }
       }
     }
@@ -952,6 +970,23 @@ struct Engine::Impl {
             xinv + static_cast<std::size_t>(is_swa ? 0 : j) * T,
             ctl_half ? 1 : 0};
       }
+      // The input norms run inside the controllers' apply (same values).
+      if (ctl_half && F.proj && T >= kFusedCtlNormTokens) {
+        for (int j = 0; j < 3; ++j) {
+          cj.j[j].nw = DF(is_swa   ? L.attn_norm
+                          : j == 0 ? L.attn_q_inp_norm
+                          : j == 1 ? L.attn_k_inp_norm
+                                   : L.attn_v_inp_norm);
+          // Only the sink projection reads an F32 window-layer input (q's).
+          cj.j[j].nout = is_swa && j ? nullptr : in[j];
+          cj.j[j].nout16 = in16[j];
+          const LoopController& c = L.loop[kStreamQ + j];
+          cj.j[j].gain4 = HW4(c.gain);
+          cj.j[j].forget4 = HW4(c.forget);
+        }
+        normed = true;
+        have16 = true;
+      }
       fs::CtlPrefill(s, cj, T, cfg->rms_eps);
       for (int j = 0; j < 3; ++j)
         inp[j] = {ctl[j], kEmbd};
@@ -959,7 +994,11 @@ struct Engine::Impl {
     const float* iq;
     const float* ik;
     const float* iv;
-    if (normed) {
+    if (normed && msg) {
+      iq = in[0];
+      ik = in[1];
+      iv = in[2];
+    } else if (normed) {
       iq = in[0];
       ik = is_swa ? in[0] : in[1];
       iv = is_swa ? in[0] : in[2];
@@ -1169,6 +1208,14 @@ struct Engine::Impl {
                  msg_inv ? msg_inv + 3 * static_cast<std::size_t>(T) : nullptr,
                  xinv,
                  ctl_half ? 1 : 0};
+      if (ctl_half && F.moe >= 0 && T >= kFusedCtlNormTokens) {
+        cj.j[0].nw = DF(L.ffn_norm);
+        cj.j[0].nout = h;
+        cj.j[0].nout16 = p_h16;
+        cj.j[0].gain4 = HW4(c.gain);
+        cj.j[0].forget4 = HW4(c.forget);
+        h_done = true;
+      }
       fs::CtlPrefill(s, cj, T, cfg->rms_eps);
       hin = ctl[0];
     }

@@ -2228,6 +2228,101 @@ __global__ void __launch_bounds__(256) k_ctl_apply_v4(CtlPJobs jobs, int T) {
   }
 }
 
+// k_ctl_apply_v4<true> followed by hip::RmsNorm of each controlled row, in
+// one pass: a block takes R tokens of one job and all 2304 channels, thread
+// tid the channels tid + 256 m (m = 0..8) as rmsnorm_k does. Each output
+// accumulates k = 0..63 in ascending order with the same products, the row's
+// squares are summed per thread in m order, then per wave and over the eight
+// waves as rmsnorm_k sums them, so the values are identical. The un-normalised
+// rows are not written.
+template<int R>
+__global__ void __launch_bounds__(256)
+    k_ctl_apply_norm(CtlPJobs jobs, int T, float eps) {
+  // The jobs of a token block are consecutive blocks (they share x rows).
+  const CtlPJob& p = jobs.j[blockIdx.x % jobs.n];
+  const int tid = threadIdx.x, t0 = (blockIdx.x / jobs.n) * R;
+  const uint16_t* gw = static_cast<const uint16_t*>(p.gain4);
+  const uint16_t* fw = static_cast<const uint16_t*>(p.forget4);
+  __shared__ float red[R][8];
+  float ga[R][9], fo[R][9];
+#pragma unroll
+  for (int r = 0; r < R; ++r)
+#pragma unroll
+    for (int m = 0; m < 9; ++m)
+      ga[r][m] = fo[r][m] = 0.f;
+  int tr[R];
+#pragma unroll
+  for (int r = 0; r < R; ++r)
+    tr[r] = min(t0 + r, T - 1);
+  for (int k4 = 0; k4 < 64; k4 += 4) {
+    float4 g[R];
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+      g[r] = *(const float4*)(p.g64 + (size_t)tr[r] * 64 + k4);
+#pragma unroll
+    for (int m = 0; m < 9; ++m) {
+      const size_t woff = ((size_t)(k4 >> 2) * 2304 + tid + 256 * m) * 4;
+      const uint2 ug = *(const uint2*)(gw + woff);
+      const uint2 uf = *(const uint2*)(fw + woff);
+      const float4 a = make_float4(
+          __uint_as_float(ug.x << 16), __uint_as_float(ug.x & 0xFFFF0000u),
+          __uint_as_float(ug.y << 16), __uint_as_float(ug.y & 0xFFFF0000u));
+      const float4 b = make_float4(
+          __uint_as_float(uf.x << 16), __uint_as_float(uf.x & 0xFFFF0000u),
+          __uint_as_float(uf.y << 16), __uint_as_float(uf.y & 0xFFFF0000u));
+#pragma unroll
+      for (int r = 0; r < R; ++r) {
+        ga[r][m] = __fmaf_rn(a.x, g[r].x, ga[r][m]);
+        fo[r][m] = __fmaf_rn(b.x, g[r].x, fo[r][m]);
+        ga[r][m] = __fmaf_rn(a.y, g[r].y, ga[r][m]);
+        fo[r][m] = __fmaf_rn(b.y, g[r].y, fo[r][m]);
+        ga[r][m] = __fmaf_rn(a.z, g[r].z, ga[r][m]);
+        fo[r][m] = __fmaf_rn(b.z, g[r].z, fo[r][m]);
+        ga[r][m] = __fmaf_rn(a.w, g[r].w, ga[r][m]);
+        fo[r][m] = __fmaf_rn(b.w, g[r].w, fo[r][m]);
+      }
+    }
+  }
+  const int wave = tid >> 5, lane = tid & 31;
+#pragma unroll
+  for (int r = 0; r < R; ++r) {
+    float ss = 0.f;
+#pragma unroll
+    for (int m = 0; m < 9; ++m) {
+      const int c = tid + 256 * m;
+      const float cv = p.x[(size_t)tr[r] * p.ldx + c];
+      const float mv = p.msg[(size_t)tr[r] * p.ldm + c];
+      const float o = cv - tanhf(fo[r][m]) * cv + tanhf(ga[r][m]) * mv;
+      ga[r][m] = o;
+      ss = __fmaf_rn(o, o, ss);
+    }
+    ss = wsum(ss);
+    if (lane == 0)
+      red[r][wave] = ss;
+  }
+  __syncthreads();
+#pragma unroll
+  for (int r = 0; r < R; ++r) {
+    if (t0 + r >= T)
+      break;
+    float tot = 0.f;
+#pragma unroll
+    for (int i = 0; i < 8; ++i)
+      tot += red[r][i];
+    const float inv = rsqrtf(tot / 2304.f + eps);
+    float* orow = p.nout ? p.nout + (size_t)(t0 + r) * 2304 : nullptr;
+    _Float16* hrow = static_cast<_Float16*>(p.nout16) + (size_t)(t0 + r) * 2304;
+#pragma unroll
+    for (int m = 0; m < 9; ++m) {
+      const int c = tid + 256 * m;
+      const float o = ga[r][m] * inv * p.nw[c];
+      if (orow)
+        orow[c] = o;
+      hrow[c] = (_Float16)o;
+    }
+  }
+}
+
 // sigmoid + biased top-8 + renormalise, one wave per token (router logits
 // [T][128])
 __global__ void __launch_bounds__(256)
@@ -3257,7 +3352,7 @@ __global__ void __launch_bounds__(256) k_gu128(GP3 p, int rgn) {
 // epilogue arithmetic per output as k_gemm4<FMT, EPI, ...>.
 template<int FMT, int EPI, int K>
 __device__ __forceinline__ void g128_unit(const GP3& p, int unit, int rgn,
-                                          _Float16* Ws) {
+                                          _Float16* Ws, int* Ps, float* Pw) {
   constexpr int STR = 72, BM = 128, NK = K / 64;
   constexpr size_t RB = FMT == FMT_Q8 ? (K / 32) * 34 : (K / 64) * 36;
   const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5, ln = lane & 15,
@@ -3322,6 +3417,13 @@ __device__ __forceinline__ void g128_unit(const GP3& p, int unit, int rgn,
 #pragma unroll
       for (int r = 0; r < 4; r++)
         facc[t][r] = (v8f){0, 0, 0, 0, 0, 0, 0, 0};
+    // MoE down: the item's (token, slot) rows and weights for the epilogue,
+    // loaded now instead of beside the stores.
+    if (EPI == 2 && tid < 128) {
+      const int pd = start + (tid < n ? tid : 0);
+      Ps[tid] = p.pair[pd];
+      Pw[tid] = p.posw[pd];
+    }
     gload(0);
     sstore();
     __syncthreads();
@@ -3384,14 +3486,16 @@ __device__ __forceinline__ void g128_unit(const GP3& p, int unit, int rgn,
         if (pl >= n)
           continue;
         const int pd = start + pl;
+        const size_t prow = EPI == 2 ? (size_t)Ps[pl] * p.ldo : 0;
+        const float pw = EPI == 2 ? Pw[pl] : 0.f;
 #pragma unroll
         for (int r = 0; r < 4; r++) {
           const int row = rgi * BM + cg * 64 + 16 * r + ln;
           if (EPI == 0) {
             p.out[(size_t)pd * p.ldo + row] = facc[t][r][i];
           } else {
-            const float w = p.posw[pd] * esc;
-            p.out[(size_t)p.pair[pd] * p.ldo + row] = w * facc[t][r][i];
+            const float w = pw * esc;
+            p.out[prow + row] = w * facc[t][r][i];
           }
         }
       }
@@ -3401,9 +3505,12 @@ __device__ __forceinline__ void g128_unit(const GP3& p, int unit, int rgn,
 template<int FMT, int EPI, int K>
 __global__ void __launch_bounds__(256) k_g128(GP3 p, int rgn) {
   __shared__ _Float16 Ws[128 * 72];
+  __shared__ int Ps[EPI == 2 ? 128 : 1];
+  __shared__ float Pw[EPI == 2 ? 128 : 1];
   const int total = *p.nitems * rgn;
   for (int unit = blockIdx.x; unit < total; unit += gridDim.x) {
-    g128_unit<FMT, EPI, K>(p, unit, rgn, Ws);
+    g128_unit<FMT, EPI, K>(p, unit, rgn, Ws, Ps, Pw);
+    __syncthreads();
   }
 }
 
@@ -4950,6 +5057,20 @@ void F32ToBf16(hipStream_t s, const float* x, void* dst, size_t n) {
   Chk("f32_to_bf16");
 }
 
+__global__ void k_ctl_weights_k4(const uint32_t* __restrict__ x,
+                                 uint16_t* __restrict__ d, int rows) {
+  const int i = blockIdx.x * 256 + threadIdx.x;  // source index c * 64 + k
+  if (i >= rows * 64)
+    return;
+  const int c = i >> 6, k = i & 63;
+  d[((size_t)(k >> 2) * rows + c) * 4 + (k & 3)] = (uint16_t)(x[i] >> 16);
+}
+void CtlWeightsK4(hipStream_t s, const float* x, void* dst, int rows) {
+  k_ctl_weights_k4<<<(rows * 64 + 255) / 256, 256, 0, s>>>(
+      reinterpret_cast<const uint32_t*>(x), static_cast<uint16_t*>(dst), rows);
+  Chk("ctl_weights_k4");
+}
+
 void PadRowsToF32(hipStream_t s, const void* src, int type, int rows,
                   int padded_rows, int cols, float* dst) {
   const size_t total = (size_t)padded_rows * cols;
@@ -5171,9 +5292,14 @@ void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
     k_gate_v2<64, 64><<<dim3((t + 63) / 64, 1, 1), 256, 0, s>>>(g, t, eps);
   else
     k_gate_p64<<<dim3((t + 63) / 64, 1, jobs.n), 256, 0, s>>>(g, t, eps);
-  if (jobs.n > 0 && jobs.j[0].half)
-    k_ctl_apply_v4<true><<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs,
-                                                                         t);
+  if (jobs.n > 0 && jobs.j[0].nw) {
+    // 4 tokens per block (2 and 8 measured slower)
+    constexpr int R = 4;
+    k_ctl_apply_norm<R>
+        <<<dim3((t + R - 1) / R * jobs.n), 256, 0, s>>>(jobs, t, eps);
+  } else if (jobs.n > 0 && jobs.j[0].half)
+    k_ctl_apply_v4<true>
+        <<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs, t);
   else
     k_ctl_apply_v4<false><<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs,
                                                                           t);

@@ -18,6 +18,11 @@ changes are in Git history; current speeds are in [benchmarks](BENCHMARKS.md).
 | 32-query attention blocks | pp32768 −11% |
 | 128-query blocks on window visits too | equal within noise |
 | Message mixes as their own side-stream launch | pp512 −1.5%; folded into the message mix from 1,024-token ubatches |
+| Router and controller gates with smaller token tiles, or blocks reordered so jobs sharing x run together (Nov 25) | equal or up to 2.5× slower: the gates are LDS-bandwidth bound, not DRAM or occupancy bound |
+| Gate GEMMs with wave-uniform scalar weights, one token per lane (Nov 25) | 2 to 10× slower |
+| Controller apply + norm below 512-token ubatches (Nov 25) | pp64 −1%: too few blocks; the separate kernels are kept there |
+| MoE items of ≤64 tokens in a lean kernel beside the full items (Nov 25) | gate/up −2.4% only: small items are bound by their expert weight reads and barely overlap |
+| MoE gate/up with activations staged in LDS, a two-deep weight prefetch, or 4 waves of 32 tokens × 128 rows (Nov 25) | full items up to +2.6%, overall 2 to 19% slower |
 
 ## Decode and verification
 

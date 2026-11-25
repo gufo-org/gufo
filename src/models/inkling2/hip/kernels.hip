@@ -495,6 +495,105 @@ __global__ void mix_k(MixStates st, const float* __restrict__ query, int nq,
   }
 }
 
+// mix_k for dim 2304 with the same arithmetic in fewer dependent load
+// phases: a wave keeps its state row in registers for the sum of squares and
+// every query's dot product (each sums lane-strided, in i order, then a wave
+// sum, as mix_k does), and the output loop issues all of its state loads at
+// once. Identical results.
+__global__ void __launch_bounds__(256)
+    mix2304_k(MixStates st, const float* __restrict__ query, int nq, int dim,
+              float* __restrict__ out, float eps, float* __restrict__ inv_out,
+              int t_count) {
+  constexpr int D = 2304, M = D / kWave, R = D / 256;
+  const int t = blockIdx.x;
+  const int wid = threadIdx.x / kWave, lane = threadIdx.x % kWave;
+  __shared__ float inv[8];
+  __shared__ float score[4][8];
+  // dim is the runtime 2304: rsqrtf and the divisions see the same operands
+  // as in mix_k.
+  const float fdim = static_cast<float>(dim);
+  if (wid < st.n) {
+    const float* xr = st.ptr[wid] + static_cast<size_t>(t) * D;
+    float x[M];
+#pragma unroll
+    for (int m = 0; m < M; ++m)
+      x[m] = xr[lane + kWave * m];
+    float ss = 0.f;
+#pragma unroll
+    for (int m = 0; m < M; ++m)
+      ss = __fmaf_rn(x[m], x[m], ss);
+    ss = wave_sum(ss);
+    const float iv = rsqrtf(ss / fdim + eps);
+    if (lane == 0)
+      inv[wid] = iv;
+    for (int q = 0; q < nq; ++q) {
+      const float* qr = query + static_cast<size_t>(q) * D;
+      float d = 0.f;
+#pragma unroll
+      for (int m = 0; m < M; ++m)
+        d = __fmaf_rn(qr[lane + kWave * m], x[m], d);
+      d = wave_sum(d);
+      if (lane == 0)
+        score[q][wid] = d * iv * rsqrtf(fdim);
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x < nq) {
+    const int q = threadIdx.x;
+    float m = -INFINITY;
+    for (int j = 0; j < st.n; ++j)
+      m = fmaxf(m, score[q][j]);
+    float z = 0.f;
+    for (int j = 0; j < st.n; ++j) {
+      score[q][j] = expf(score[q][j] - m);
+      z += score[q][j];
+    }
+    for (int j = 0; j < st.n; ++j)
+      score[q][j] /= z;
+  }
+  __syncthreads();
+  float x[R][8];
+#pragma unroll
+  for (int r = 0; r < R; ++r)
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+      if (j < st.n)
+        x[r][j] = st.ptr[j][static_cast<size_t>(t) * D + threadIdx.x + 256 * r];
+  for (int q = 0; q < nq; ++q) {
+    float c[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+      c[j] = j < st.n ? score[q][j] * inv[j] : 0.f;
+#pragma unroll
+    for (int r = 0; r < R; ++r) {
+      float a = 0.f;
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+        if (j < st.n)
+          a = __fmaf_rn(c[j], x[r][j], a);
+      out[(static_cast<size_t>(t) * nq + q) * D + threadIdx.x + 256 * r] = a;
+    }
+  }
+  if (inv_out) {
+    __threadfence_block();
+    __syncthreads();
+    if (wid < nq) {
+      const float* o = out + (static_cast<size_t>(t) * nq + wid) * D;
+      float v[M];
+#pragma unroll
+      for (int m = 0; m < M; ++m)
+        v[m] = o[lane + kWave * m];
+      float b = 0.f;
+#pragma unroll
+      for (int m = 0; m < M; ++m)
+        b = __fmaf_rn(v[m], v[m], b);
+      b = wave_sum(b);
+      if (lane == 0)
+        inv_out[static_cast<size_t>(wid) * t_count + t] = rsqrtf(b / dim + eps);
+    }
+  }
+}
+
 __global__ void logscale_k(float* tau, int pos0, int t_count, float floor_,
                            float alpha) {
   const int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -760,8 +859,12 @@ void Mix(hipStream_t s, const MixStates& states, const float* query, int nq,
          int dim, int t_count, float* out, float eps, float* inv_out) {
   if (nq > 4 || states.n > 8)
     throw std::runtime_error("inkling2: mix too large");
-  mix_k<<<t_count, 256, 0, s>>>(states, query, nq, dim, out, eps, inv_out,
-                                t_count);
+  if (dim == 2304)
+    mix2304_k<<<t_count, 256, 0, s>>>(states, query, nq, dim, out, eps, inv_out,
+                                      t_count);
+  else
+    mix_k<<<t_count, 256, 0, s>>>(states, query, nq, dim, out, eps, inv_out,
+                                  t_count);
   Check(hipGetLastError(), "mix");
 }
 void ConvStateUpdate(hipStream_t s, const float* x, float* state, int t_count,
