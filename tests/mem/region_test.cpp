@@ -308,9 +308,15 @@ void Lending() {
   // Last case: stop the pool thread so it never borrows on its own (it does
   // below the free floor) and pages move only through this test's calls.
   pool->Stop();
+  constexpr std::size_t kPages = 16;
+  // Lenders get pages only from free 2 MiB blocks above the free floor: a
+  // host below it lends nothing, by design.
+  if (!gufo::mem::CanCreatePagesWithoutReclaim(kPages * kPageBytes)) {
+    std::puts("mem_region_test: host below the free floor; lending skipped");
+    return;
+  }
   auto& ledger = StateLedger::Process();
   const auto before = ledger.Totals();
-  constexpr std::size_t kPages = 16;
   auto range = gufo::mem::CreateLendableRange(kPages * kPageBytes - 1);
   assert(range && range->bytes() == kPages * kPageBytes);
   assert(range->page_bytes() == kPageBytes);

@@ -566,6 +566,9 @@ void PagePool::Run() {
         // may have freed.
         ++skipped_below_floor_;
         warm_bytes_ = 0;
+        // Nothing more this thread can do until memory frees: Drain() must
+        // not wait for a refill that may never come.
+        idle_.notify_all();
         wake_.wait_for(lock, std::chrono::milliseconds(250), [&] {
           return stop_ || !jobs_.empty() ||
                  free_.size() + recycled_.size() < free;
@@ -578,6 +581,7 @@ void PagePool::Run() {
       lock.lock();
       if (!created) {
         warm_bytes_ = 0;
+        idle_.notify_all();
         wake_.wait_for(lock, std::chrono::milliseconds(250),
                        [&] { return stop_ || !jobs_.empty(); });
         continue;
