@@ -68,10 +68,14 @@ struct Drafter::Impl {
   float* ikv;  // injection K | V [n][2048]
   int *d_anchor, *d_pos, *d_prev, *d_tokens;
   // pinned host staging: [anchor, pos] in, [tokens 8 | confidences 8] out,
-  // and prefill GEMM item list
+  // prefill GEMM item list, and top-K shortlist staging
   int* h_in = nullptr;
   float* h_out = nullptr;
   int* h_items = nullptr;
+  float* tk_ws = nullptr;
+  dsp::ShortlistOut* d_shortlist = nullptr;
+  dsp::ShortlistOut* h_shortlist = nullptr;
+  int* h_prev = nullptr;
   // work items of n = 1 .. 8 rows (one item each) for injections
   int* small_items = nullptr;
   int *it_n, *it_e, *it_s, *it_c;  // GEMM work items (n rows)
@@ -101,6 +105,10 @@ struct Drafter::Impl {
       (void)hipHostFree(h_out);
     if (h_items)
       (void)hipHostFree(h_items);
+    if (h_shortlist)
+      (void)hipHostFree(h_shortlist);
+    if (h_prev)
+      (void)hipHostFree(h_prev);
   }
 
   const GgufTensorInfo& Need(std::string_view name, GgmlType type,
@@ -381,6 +389,15 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_items),
                         (1 + 2 * (Impl::kMaxInject / 64)) * sizeof(int)),
           "pinned");
+    I.tk_ws = I.Alloc<float>(static_cast<std::size_t>(kMaxSessions) * 64 *
+                             (2 * dsp::kShortlist + 2));
+    I.d_shortlist = I.Alloc<dsp::ShortlistOut>(kMaxSessions);
+    Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_shortlist),
+                        kMaxSessions * sizeof(dsp::ShortlistOut)),
+          "pinned");
+    Check(hipHostMalloc(reinterpret_cast<void**>(&I.h_prev),
+                        kMaxSessions * sizeof(int)),
+          "pinned");
     I.small_items = I.Alloc<int>(8 * 4);
     {
       int host[8 * 4];
@@ -578,7 +595,7 @@ void Drafter::InjectRows(hipStream_t s, std::span<const Rows> rows) {
 int Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
                      std::size_t pos, int n, std::int32_t* out,
                      float* confidence, const More& more,
-                     const Coupled* coupled) {
+                     const Coupled* coupled, const PickFromShortlist& pick) {
   Request r{.st = &st,
             .anchor = anchor,
             .pos = pos,
@@ -586,7 +603,8 @@ int Drafter::Propose(hipStream_t s, State& st, std::int32_t anchor,
             .out = out,
             .confidence = confidence,
             .more = more ? &more : nullptr,
-            .coupled = coupled};
+            .coupled = coupled,
+            .pick = pick ? &pick : nullptr};
   ProposeBatch(s, std::span<Request>(&r, 1));
   return r.done;
 }
@@ -680,7 +698,7 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
   for (int g = 0; g < S; ++g)
     live[g] = req[g].n > 0;
   for (int i = 1; i <= nmax; ++i) {
-    bool any_more = false;
+    bool any_more = false, any_pick = false;
     dsp::LrBatch lrb{};
     lrb.count = 0;
     for (int g = 0; g < S; ++g) {
@@ -705,44 +723,90 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
     }
     if (lrb.count > 0)
       dsp::LrLogits8Batch(s, I.pt, I.ps, I.cb, lrb, static_cast<int>(R));
+    std::array<bool, kMaxSessions> picked{};
     for (int g = 0; g < S; ++g) {
       if (!live[g])
         continue;
       Request& rq = req[g];
       float* logits = I.logits + static_cast<std::size_t>(g) * R;
       float* ws = I.ws + g * (3 * 128 + 1);
-      if (rq.coupled != nullptr)
+      if (rq.pick != nullptr) {
+        dsp::TopKShortlist(s, logits, static_cast<int>(R), I.head_ids,
+                           I.target.softcap,
+                           I.tk_ws + static_cast<std::size_t>(g) * 64 *
+                                         (2 * dsp::kShortlist + 2),
+                           I.d_shortlist + g);
+        picked[g] = true;
+        any_pick = true;
+      } else if (rq.coupled != nullptr) {
         dsp::CoupledSample(
             s, logits, static_cast<int>(R), I.head_ids, I.target.softcap,
             rq.coupled->temperature, rq.coupled->min_p, rq.coupled->u[i - 1],
             ws, I.d_tokens + g * 8, i - 1, I.d_prev + g, I.d_conf + g * 8);
-      else
+      } else {
         dsp::Argmax(s, logits, static_cast<int>(R), I.head_ids, ws,
                     I.d_tokens + g * 8, i - 1, I.d_prev + g, I.d_conf + g * 8);
+      }
       rq.done = i;
       if (i >= rq.n)
         live[g] = false;
       else if (rq.more != nullptr)
         any_more = true;
     }
-    if (any_more) {  // read this step's probabilities to decide on the next
-      for (int g = 0; g < S; ++g)
-        if (live[g] && req[g].more != nullptr)
+    if (any_pick || any_more) {
+      for (int g = 0; g < S; ++g) {
+        if (picked[g])
+          Check(hipMemcpyAsync(I.h_shortlist + g, I.d_shortlist + g,
+                               sizeof(dsp::ShortlistOut), hipMemcpyDeviceToHost,
+                               s),
+                "shortlist");
+        else if (live[g] && req[g].more != nullptr)
           Check(hipMemcpyAsync(I.h_out + 16 * g + 8, I.d_conf + g * 8,
                                static_cast<std::size_t>(i) * 4,
                                hipMemcpyDeviceToHost, s),
                 "confidence");
+      }
       Check(hipStreamSynchronize(s), "propose step");
-      for (int g = 0; g < S; ++g)
-        if (live[g] && req[g].more != nullptr &&
-            !(*req[g].more)(i, I.h_out + 16 * g + 8))
+      for (int g = 0; g < S; ++g) {
+        if (picked[g]) {
+          Shortlist sl{};
+          static_assert(Shortlist::kSize == dsp::kShortlist);
+          std::memcpy(sl.ids, I.h_shortlist[g].ids, sizeof sl.ids);
+          std::memcpy(sl.logits, I.h_shortlist[g].logits, sizeof sl.logits);
+          sl.confidence = I.h_shortlist[g].conf;
+          const std::int32_t tok = (*req[g].pick)(i - 1, sl);
+          req[g].out[i - 1] = tok;
+          if (req[g].confidence != nullptr)
+            req[g].confidence[i - 1] = sl.confidence;
+          I.h_out[16 * g + 8 + i - 1] = sl.confidence;
+          if (live[g]) {
+            if (req[g].more != nullptr &&
+                !(*req[g].more)(i, I.h_out + 16 * g + 8)) {
+              live[g] = false;
+            } else {
+              I.h_prev[g] = tok;
+              Check(hipMemcpyAsync(I.d_prev + g, I.h_prev + g, sizeof(int),
+                                   hipMemcpyHostToDevice, s),
+                    "prev");
+            }
+          }
+        } else if (live[g] && req[g].more != nullptr &&
+                   !(*req[g].more)(i, I.h_out + 16 * g + 8)) {
           live[g] = false;
+        }
+      }
     }
     if (std::none_of(live.begin(), live.begin() + S, [](bool b) { return b; }))
       break;
   }
+  bool any_dev_out = false;
   for (int g = 0; g < S; ++g) {
+    if (req[g].pick != nullptr)
+      continue;
     const std::size_t d = static_cast<std::size_t>(req[g].done);
+    if (d == 0)
+      continue;
+    any_dev_out = true;
     Check(hipMemcpyAsync(I.h_out + 16 * g, I.d_tokens + g * 8, d * 4,
                          hipMemcpyDeviceToHost, s),
           "drafts");
@@ -750,12 +814,16 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
                          hipMemcpyDeviceToHost, s),
           "confidence");
   }
-  Check(hipStreamSynchronize(s), "propose sync");
-  for (int g = 0; g < S; ++g) {
-    const std::size_t d = static_cast<std::size_t>(req[g].done);
-    std::memcpy(req[g].out, I.h_out + 16 * g, d * 4);
-    if (req[g].confidence != nullptr)
-      std::memcpy(req[g].confidence, I.h_out + 16 * g + 8, d * 4);
+  if (any_dev_out) {
+    Check(hipStreamSynchronize(s), "propose sync");
+    for (int g = 0; g < S; ++g) {
+      if (req[g].pick != nullptr)
+        continue;
+      const std::size_t d = static_cast<std::size_t>(req[g].done);
+      std::memcpy(req[g].out, I.h_out + 16 * g, d * 4);
+      if (req[g].confidence != nullptr)
+        std::memcpy(req[g].confidence, I.h_out + 16 * g + 8, d * 4);
+    }
   }
 }
 

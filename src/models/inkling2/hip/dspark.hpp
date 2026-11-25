@@ -133,6 +133,18 @@ void QuantPtBf16(hipStream_t s, const uint16_t* src, int n, int8_t* q,
 void Argmax(hipStream_t s, const float* logits, int n, const int* map,
             float* ws, int* tokens, int row, int* prev, float* conf);
 
+inline constexpr int kShortlist = 16;
+struct ShortlistOut {
+  int ids[kShortlist];
+  float logits[kShortlist];
+  float conf;
+};
+/// Extracts the top-kShortlist soft-capped logits (and their mapped token IDs)
+/// plus the softmax probability of the top token. ws: 64 * (2 * kShortlist + 2)
+/// floats.
+void TopKShortlist(hipStream_t s, const float* logits, int n, const int* map,
+                   float softcap, float* ws, ShortlistOut* out);
+
 /// y[r][m] = W[m] . x[r] for `nrows` (1..64) rows: W Q8_0 [M][K], x F16
 /// [nrows][K] (K a multiple of 32, M of 16). `qa` ([ntiles][K/32][2][16] v4i)
 /// and `qs` ([ntiles][K/32][16] float) are device quantization scratch.

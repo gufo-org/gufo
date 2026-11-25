@@ -2612,7 +2612,8 @@ bool Engine::DraftReady(const Session& s) const {
 
 int Engine::Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
                     float* confidence, const Drafter::More& more,
-                    const Drafter::Coupled* coupled) {
+                    const Drafter::Coupled* coupled,
+                    const Drafter::PickFromShortlist& pick) {
   const std::lock_guard lock(mutex_);
   if (!DraftReady(s))
     throw std::runtime_error("inkling2: no draft context at this position");
@@ -2621,7 +2622,7 @@ int Engine::Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
     throw std::runtime_error("inkling2: token id out of range");
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
   return impl_->dsp->Propose(impl_->ds, s.draft_, anchor, s.pos_, n, out,
-                             confidence, more, coupled);
+                             confidence, more, coupled, pick);
 }
 
 void Engine::ProposeBatch(std::span<ProposeRequest> requests) {
@@ -2646,7 +2647,8 @@ void Engine::ProposeBatch(std::span<ProposeRequest> requests) {
             .out = q.out,
             .confidence = q.confidence,
             .more = q.more ? &q.more : nullptr,
-            .coupled = q.coupled};
+            .coupled = q.coupled,
+            .pick = q.pick ? &q.pick : nullptr};
   }
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
   impl_->dsp->ProposeBatch(

@@ -24,6 +24,7 @@
 //    byte.
 // Exit 0 on success, 1 on a mismatch, 77 (skip) without a model.
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -466,6 +467,51 @@ int main(int argc, char** argv) {
     std::printf("propose batch: 3 sessions, %d differ from lone proposals\n",
                 bad);
     failures += bad != 0;
+
+    // top-K shortlist extraction: top-1 equals greedy proposal, logits are
+    // finite & non-increasing with unique token IDs, and batched shortlist
+    // equals lone shortlist.
+    int sl_bad = 0;
+    std::int32_t sl_solo[3][8] = {}, sl_both[3][8] = {};
+    for (int g = 0; g < 3; ++g) {
+      int nsl = engine->Propose(
+          *ss[g], anchors[g], 7, sl_solo[g], nullptr, {}, nullptr,
+          [&](int step_i,
+              const gufo::models::inkling2::Drafter::Shortlist& sl) {
+            for (int k = 0;
+                 k < gufo::models::inkling2::Drafter::Shortlist::kSize; ++k) {
+              if (!std::isfinite(sl.logits[k]) || sl.ids[k] < 0)
+                ++sl_bad;
+              if (k > 0 && sl.logits[k] > sl.logits[k - 1])
+                ++sl_bad;
+              for (int j = 0; j < k; ++j)
+                if (sl.ids[j] == sl.ids[k])
+                  ++sl_bad;
+            }
+            if (sl.ids[0] != solo[g][step_i])
+              ++sl_bad;
+            return sl.ids[0];
+          });
+      if (nsl != 7)
+        ++sl_bad;
+    }
+    std::vector<Engine::ProposeRequest> srq(3);
+    for (int g = 0; g < 3; ++g)
+      srq[g] = {
+          .session = ss[g].get(),
+          .anchor = anchors[g],
+          .n = 7,
+          .out = sl_both[g],
+          .pick = [](int,
+                     const gufo::models::inkling2::Drafter::Shortlist& sl) {
+            return sl.ids[0];
+          }};
+    engine->ProposeBatch(srq);
+    for (int g = 0; g < 3; ++g)
+      sl_bad += srq[g].done != 7 ||
+                std::memcmp(sl_solo[g], sl_both[g], sizeof sl_solo[g]) != 0;
+    std::printf("shortlist top-K: 3 sessions, %d errors\n", sl_bad);
+    failures += sl_bad != 0;
   }
   std::printf(failures ? "FAIL\n" : "ALL PASS\n");
   return failures ? 1 : 0;
