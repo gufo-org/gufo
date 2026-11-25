@@ -270,29 +270,15 @@ struct Engine::Impl {
       return dw.Ptr(t);
     return half_of.at(t.data);
   }
-  /// Whether every value of an F32 tensor is a BF16 value (the checkpoint's own
-  /// dtype).
-  static bool Bf16Exact(const TensorRef& t) {
-    if (static_cast<int>(t.type) != kk::kTF32)
-      return false;
-    const auto* src = static_cast<const std::uint32_t*>(t.data);
-    for (std::size_t i = 0; i < t.size_bytes / 4; ++i)
-      if ((src[i] & 0xFFFFu) != 0)
-        return false;
-    return true;
-  }
-  /// BF16 copy of a BF16-exact F32 tensor: the same values in half the bytes.
+  /// BF16 copy of a BF16-exact F32 tensor on the device: the same values in
+  /// half the bytes, without reading back from the host mapping.
   void MakeHalf(const TensorRef& t) {
     if (t.size_bytes == 0 || half_of.count(t.data))
       return;
     const std::size_t n = t.size_bytes / 4;
-    std::vector<std::uint16_t> h(n);
-    const auto* src = static_cast<const std::uint32_t*>(t.data);
-    for (std::size_t i = 0; i < n; ++i)
-      h[i] = static_cast<std::uint16_t>(src[i] >> 16);
     void* d = AllocDevice(n * 2, "f16 weights");
     scratch_allocs.push_back(d);
-    Check(hipMemcpy(d, h.data(), n * 2, hipMemcpyHostToDevice), "f16 weights");
+    fs::F32ToBf16(s, DF(t), d, n);
     half_of[t.data] = d;
   }
   std::map<int, hipGraphExec_t> graphs;
@@ -639,16 +625,38 @@ struct Engine::Impl {
     }
     // Decode reads the router and loop-controller weights as BF16 when that
     // loses nothing (checkpoints store them in BF16; the GGUF widens them to
-    // F32), otherwise as F32.
-    for (std::uint32_t il = 0; il < 24 && ctl_half; ++il) {
-      const LayerWeights& L = w->layers[il];
-      if (!Bf16Exact(L.ffn_gate_inp))
-        ctl_half = false;
-      for (const auto& c : L.loop)
-        if ((c.down.size_bytes && !Bf16Exact(c.down)) ||
-            (c.gain.size_bytes && !Bf16Exact(c.gain)) ||
-            (c.forget.size_bytes && !Bf16Exact(c.forget)))
+    // F32), otherwise as F32. Checked on the device so the host mapping is not
+    // faulted back in.
+    {
+      unsigned* d_non_exact = reinterpret_cast<unsigned*>(NewInts(1));
+      Check(hipMemsetAsync(d_non_exact, 0, sizeof(unsigned), s), "bf16 flag");
+      auto check_t = [&](const TensorRef& t) {
+        if (t.size_bytes == 0)
+          return;
+        if (static_cast<int>(t.type) != kk::kTF32) {
           ctl_half = false;
+          return;
+        }
+        fs::CheckBf16Exact(s, DF(t), t.size_bytes / 4, d_non_exact);
+      };
+      for (std::uint32_t il = 0; il < 24 && ctl_half; ++il) {
+        const LayerWeights& L = w->layers[il];
+        check_t(L.ffn_gate_inp);
+        for (const auto& c : L.loop) {
+          check_t(c.down);
+          check_t(c.gain);
+          check_t(c.forget);
+        }
+      }
+      if (ctl_half) {
+        unsigned non_exact = 0;
+        Check(hipMemcpyAsync(&non_exact, d_non_exact, sizeof(unsigned),
+                             hipMemcpyDeviceToHost, s),
+              "bf16 flag");
+        Check(hipStreamSynchronize(s), "bf16 flag");
+        if (non_exact != 0)
+          ctl_half = false;
+      }
     }
     if (ctl_half) {
       for (std::uint32_t il = 0; il < 24; ++il) {
@@ -748,15 +756,10 @@ struct Engine::Impl {
         if (tg == kk::kTNVFP4)
           f.moe = fs::kFmtNvfp4;
       }
-      // relative bias table: F32 [1024][16] -> f16
-      std::vector<__half> bt(1024 * 16);
-      const float* src = static_cast<const float*>(L.attn_rel_bias.data);
-      for (int i = 0; i < 1024 * 16; ++i)
-        bt[i] = __float2half(src[i]);
-      f.bt = AllocDevice(bt.size() * 2, "bias table");
+      // relative bias table: F32 [1024][16] -> f16 on device
+      f.bt = AllocDevice(1024 * 16 * 2, "bias table");
       scratch_allocs.push_back(f.bt);
-      Check(hipMemcpy(f.bt, bt.data(), bt.size() * 2, hipMemcpyHostToDevice),
-            "bias table");
+      fs::CvtF16(s, DF(L.attn_rel_bias), f.bt, 1024 * 16);
     }
     for (std::uint32_t il = 0; il < 24; ++il) {
       const LayerWeights& L = w->layers[il];
@@ -764,26 +767,10 @@ struct Engine::Impl {
       if (!f.tiny)
         continue;
       auto make = [&](const TensorRef& t, int rows) {
-        std::vector<float> host(64 * 2304, 0.f);
-        const int ty = static_cast<int>(t.type);
-        for (int i = 0; i < rows * 2304; ++i) {
-          if (ty == kk::kTF32)
-            host[i] = static_cast<const float*>(t.data)[i];
-          else if (ty == kk::kTF16)
-            host[i] = __half2float(static_cast<const __half*>(t.data)[i]);
-          else {
-            const std::uint32_t bits =
-                static_cast<std::uint32_t>(
-                    static_cast<const std::uint16_t*>(t.data)[i])
-                << 16;
-            std::memcpy(&host[i], &bits, 4);
-          }
-        }
-        auto* d =
-            static_cast<float*>(AllocDevice(host.size() * 4, "padded weights"));
+        auto* d = static_cast<float*>(
+            AllocDevice(64 * 2304 * sizeof(float), "padded weights"));
         scratch_allocs.push_back(d);
-        Check(hipMemcpy(d, host.data(), host.size() * 4, hipMemcpyHostToDevice),
-              "padded weights");
+        fs::PadRowsToF32(s, D(t), static_cast<int>(t.type), rows, 64, 2304, d);
         return d;
       };
       f.sink_f = make(L.attn_sink_proj, 24);
@@ -793,14 +780,8 @@ struct Engine::Impl {
       }
       f.tiny_pad = true;
     }
+    Check(hipStreamSynchronize(s), "init decode weights");
     head_fast = IsType(w->output, kk::kTQ8_0);
-    // Capture the short-context graphs now (single-threaded, before any cache
-    // thread exists).
-    if (BatchCapable()) {
-      for (nb = 1; nb <= static_cast<int>(Engine::kMaxDecodeBatch); ++nb)
-        (void)CaptureGraph(2048, 2048 * 128 + nb);
-      nb = 1;
-    }
   }
 
   // ---- helpers ----
@@ -2256,7 +2237,7 @@ void Engine::CalibrateDecodePrefetch() {
   double best[2] = {std::numeric_limits<double>::infinity(),
                     std::numeric_limits<double>::infinity()};
   std::int32_t token = 0;
-  for (int round = 0; round < 6; ++round) {
+  for (int round = 0; round < 4; ++round) {
     for (int layout = 0; layout < 2; ++layout) {
       I.decode_prefetch = layout == 1;
       std::int32_t argmax = 0;
@@ -2269,9 +2250,14 @@ void Engine::CalibrateDecodePrefetch() {
         best[layout] = std::min(best[layout], elapsed.count());
     }
   }
-  // A tie keeps the plain layout.
+  // A tie keeps the plain layout. Drop only the losing layout's graph so the
+  // winning short-context graph stays ready.
   I.decode_prefetch = best[1] < best[0];
-  I.DropGraphs();
+  const int lose_key = 2048 * 128 + 1 + (I.decode_prefetch ? 0 : (1 << 29));
+  if (auto it = I.graphs.find(lose_key); it != I.graphs.end()) {
+    (void)hipGraphExecDestroy(it->second);
+    I.graphs.erase(it);
+  }
   std::fprintf(stderr,
                "inkling2: decode weight prefetch %s (step %.2f ms with it, "
                "%.2f ms without)\n",

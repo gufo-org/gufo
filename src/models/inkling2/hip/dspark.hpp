@@ -120,6 +120,12 @@ struct LrBatch {
 void LrLogits8Batch(hipStream_t s, const int8_t* pt, const float* ps,
                     const float* cb, const LrBatch& batch, int n);
 void QuantPt(hipStream_t s, const float* src, int n, int8_t* q, float* scale);
+/// Row-wise squared L2 norms of BF16 [rows][256] into `out` [rows].
+void RowNormSqBf16(hipStream_t s, const uint16_t* src, int rows, float* out);
+/// Quantizes and transposes row-major BF16 [n][256] into int8 [256][n] + [n]
+/// scales.
+void QuantPtBf16(hipStream_t s, const uint16_t* src, int n, int8_t* q,
+                 float* scale);
 
 /// tokens[row] = map[argmax(logits[0, n))] (first maximum; map null: the
 /// index itself), also *prev; conf[row] = the softmax probability of that

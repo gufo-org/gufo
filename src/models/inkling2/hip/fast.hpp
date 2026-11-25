@@ -291,6 +291,15 @@ struct MoeWs {  // device scratch of the expert grouping
   float* posw;
 };
 void CvtF16(hipStream_t s, const float* x, void* h, size_t n);
+/// Sets `*non_exact = 1` if any of the `n` F32 values has non-zero low 16 bits.
+void CheckBf16Exact(hipStream_t s, const float* x, size_t n,
+                    unsigned* non_exact);
+/// Exact high-16-bit truncation of `n` F32 values to BF16 (`uint16_t`).
+void F32ToBf16(hipStream_t s, const float* x, void* dst, size_t n);
+/// Copies `rows x cols` weights of ggml type `type` (0=F32, 1=F16, 30=BF16)
+/// into `padded_rows x cols` F32, zero-padding rows `[rows, padded_rows)`.
+void PadRowsToF32(hipStream_t s, const void* src, int type, int rows,
+                  int padded_rows, int cols, float* dst);
 /// out[t][r] = W[r] . x[t] (Q8_0, K 2304 or 3072, m % 64 == 0); activations f16
 /// [T][k].
 void GemmDense(hipStream_t s, const void* w, int m, int k, const void* ah,

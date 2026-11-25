@@ -278,23 +278,25 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     I.ws = I.Alloc<float>(S * (3 * 128 + 1));
     I.d_conf = I.Alloc<float>(S * 8);
     {
-      // the kHeadRows text tokens with the largest markov_w1 rows
-      const auto& w1t =
-          I.Need("markov_w1.weight", GgmlType::kBF16, 256ull * w1_rows);
-      const auto* w1h = static_cast<const std::uint16_t*>(w1t.data);
+      // the kHeadRows text tokens with the largest markov_w1 rows (computed on
+      // the device from the already-uploaded I.w1 so the host mapping is not
+      // scanned)
       const int V = target.vocab;
+      float* d_norms = nullptr;
+      Check(hipMalloc(reinterpret_cast<void**>(&d_norms),
+                      static_cast<std::size_t>(V) * sizeof(float)),
+            "w1 norms");
+      dsp::RowNormSqBf16(nullptr, I.w1, V, d_norms);
+      std::vector<float> h_norms(static_cast<std::size_t>(V));
+      Check(hipMemcpy(h_norms.data(), d_norms,
+                      static_cast<std::size_t>(V) * sizeof(float),
+                      hipMemcpyDeviceToHost),
+            "w1 norms");
+      (void)hipFree(d_norms);
       std::vector<std::pair<float, int>> norm(static_cast<std::size_t>(V));
-      for (int t = 0; t < V; ++t) {
-        float s = 0.f;
-        for (int c = 0; c < 256; ++c) {
-          std::uint32_t u =
-              static_cast<std::uint32_t>(w1h[(std::size_t)t * 256 + c]) << 16;
-          float f;
-          std::memcpy(&f, &u, 4);
-          s += f * f;
-        }
-        norm[static_cast<std::size_t>(t)] = {s, t};
-      }
+      for (int t = 0; t < V; ++t)
+        norm[static_cast<std::size_t>(t)] = {
+            h_norms[static_cast<std::size_t>(t)], t};
       const int keep = std::min(Impl::kHeadRows, V);
       std::partial_sort(norm.begin(), norm.begin() + keep, norm.end(),
                         [](const auto& a, const auto& b) {
@@ -313,11 +315,10 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
       I.head = I.Alloc<char>(ids.size() * (2304 / 32) * 34);
       dsp::GatherQ8Rows(nullptr, target.output, I.head_ids,
                         static_cast<int>(ids.size()), I.head);
-      Check(hipDeviceSynchronize(), "head copy");
       tot += ids.size() * (2304 / 32) * 34;
 
-      // (W_U W_o)^T and W_U b_o as [257][R]: the folded markov_w2 rows and
-      // bias of the selected tokens.
+      // (W_U W_o)^T and W_U b_o as [256][R] int8 + [R] bias: gather the
+      // selected BF16 rows in row-major order and transpose+quantize on device.
       const int R = static_cast<int>(ids.size());
       const auto& w2t = I.Need("markov_w2.weight", GgmlType::kBF16,
                                256ull * static_cast<std::uint64_t>(V));
@@ -325,38 +326,34 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
                                static_cast<std::uint64_t>(V));
       const auto* w2h = static_cast<const std::uint16_t*>(w2t.data);
       const auto* b2h = static_cast<const float*>(b2t.data);
-      std::vector<float> lr(static_cast<std::size_t>(257) * R);
+      std::vector<std::uint16_t> w2_sel(static_cast<std::size_t>(R) * 256);
+      std::vector<float> cb_sel(static_cast<std::size_t>(R));
       for (int i = 0; i < R; ++i) {
         const auto t =
             static_cast<std::size_t>(ids[static_cast<std::size_t>(i)]);
-        for (int j = 0; j < 256; ++j) {
-          const std::uint32_t u =
-              static_cast<std::uint32_t>(
-                  w2h[t * 256 + static_cast<std::size_t>(j)])
-              << 16;
-          std::memcpy(&lr[static_cast<std::size_t>(j) * R +
-                          static_cast<std::size_t>(i)],
-                      &u, 4);
-        }
-        lr[static_cast<std::size_t>(256) * R + static_cast<std::size_t>(i)] =
-            b2h[t];
+        std::memcpy(&w2_sel[static_cast<std::size_t>(i) * 256], w2h + t * 256,
+                    256 * sizeof(std::uint16_t));
+        cb_sel[static_cast<std::size_t>(i)] = b2h[t];
       }
-      float* dout = nullptr;
-      Check(hipMalloc(reinterpret_cast<void**>(&dout), lr.size() * 4),
+      std::uint16_t* dw2 = nullptr;
+      Check(hipMalloc(reinterpret_cast<void**>(&dw2),
+                      w2_sel.size() * sizeof(std::uint16_t)),
             "lr out");
-      Check(hipMemcpy(dout, lr.data(), lr.size() * 4, hipMemcpyHostToDevice),
+      Check(hipMemcpy(dw2, w2_sel.data(), w2_sel.size() * sizeof(std::uint16_t),
+                      hipMemcpyHostToDevice),
             "lr tables");
       I.pt = I.Alloc<std::int8_t>(static_cast<std::size_t>(256) * R);
       I.ps = I.Alloc<float>(static_cast<std::size_t>(R));
       I.cb = I.Alloc<float>(static_cast<std::size_t>(R));
       I.base = I.Alloc<float>(static_cast<std::size_t>(kMaxSessions) *
                               dsp::kBlock * R);
-      dsp::QuantPt(nullptr, dout, R, I.pt, I.ps);
-      Check(hipMemcpy(I.cb, dout + static_cast<std::size_t>(256) * R,
-                      static_cast<std::size_t>(R) * 4, hipMemcpyDeviceToDevice),
+      dsp::QuantPtBf16(nullptr, dw2, R, I.pt, I.ps);
+      Check(hipMemcpy(I.cb, cb_sel.data(),
+                      static_cast<std::size_t>(R) * sizeof(float),
+                      hipMemcpyHostToDevice),
             "lr bias");
       Check(hipDeviceSynchronize(), "lr tables");
-      (void)hipFree(dout);
+      (void)hipFree(dw2);
       tot += static_cast<std::size_t>(256) * R +
              static_cast<std::size_t>(R) * 4 + static_cast<std::size_t>(R) * 4;
     }

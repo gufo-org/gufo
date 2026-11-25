@@ -409,6 +409,42 @@ struct Gemv8Set {  // up to three matrices of the same input, one launch
   int blocks[3];  // row blocks of 32 of each
   int n;
 };
+// Row-wise squared L2 norms of BF16 [rows][256], 8 rows per 256-thread block.
+__global__ void __launch_bounds__(256)
+    k_row_norm_sq_bf16(const uint16_t* __restrict__ src, int rows,
+                       float* __restrict__ out) {
+  const int row = blockIdx.x * 8 + threadIdx.x / 32;
+  const int l = threadIdx.x % 32;
+  if (row >= rows)
+    return;
+  const uint16_t* p = src + (size_t)row * kRank;
+  float s = 0.f;
+#pragma unroll
+  for (int c = l; c < kRank; c += 32) {
+    const float v = bf16f(p[c]);
+    s += v * v;
+  }
+  s = wsum(s);
+  if (l == 0)
+    out[row] = s;
+}
+// Quantize + transpose row-major BF16 [n][256] into int8 [256][n] + [n] scales.
+__global__ void __launch_bounds__(256)
+    k_quant_pt_bf16(const uint16_t* __restrict__ src, int n,
+                    int8_t* __restrict__ q, float* __restrict__ scale) {
+  const int r = blockIdx.x * 256 + threadIdx.x;
+  if (r >= n)
+    return;
+  const uint16_t* row = src + (size_t)r * kRank;
+  float mx = 0.f;
+  for (int j = 0; j < kRank; ++j)
+    mx = fmaxf(mx, fabsf(bf16f(row[j])));
+  const float sc = mx > 0.f ? mx / 127.f : 1.f;
+  const float inv = 1.f / sc;
+  for (int j = 0; j < kRank; ++j)
+    q[(size_t)j * n + r] = (int8_t)__float2int_rn(bf16f(row[j]) * inv);
+  scale[r] = sc;
+}
 // int8 table with one scale per row r (over the 256 ranks)
 __global__ void __launch_bounds__(256)
     k_quant_pt(const float* __restrict__ src, int n, int8_t* __restrict__ q,
@@ -893,6 +929,15 @@ void LrLogits(hipStream_t s, const _Float16* pt, const float* cb,
 void QuantPt(hipStream_t s, const float* src, int n, int8_t* q, float* scale) {
   k_quant_pt<<<(n + 255) / 256, 256, 0, s>>>(src, n, q, scale);
   Chk("quant pt");
+}
+void RowNormSqBf16(hipStream_t s, const uint16_t* src, int rows, float* out) {
+  k_row_norm_sq_bf16<<<(rows + 7) / 8, 256, 0, s>>>(src, rows, out);
+  Chk("row norm");
+}
+void QuantPtBf16(hipStream_t s, const uint16_t* src, int n, int8_t* q,
+                 float* scale) {
+  k_quant_pt_bf16<<<(n + 255) / 256, 256, 0, s>>>(src, n, q, scale);
+  Chk("quant pt bf16");
 }
 void LrLogits8Batch(hipStream_t s, const int8_t* pt, const float* ps,
                     const float* cb, const LrBatch& batch, int n) {

@@ -4673,6 +4673,84 @@ void CvtF16(hipStream_t s, const float* x, void* h, size_t n) {
   Chk("cvt_f16");
 }
 
+namespace {
+__global__ void __launch_bounds__(256)
+    k_check_bf16_exact(const uint32_t* __restrict__ x, size_t n,
+                       unsigned* non_exact) {
+  const size_t i = (size_t)blockIdx.x * 256 + threadIdx.x;
+  const size_t n4 = n / 4;
+  if (i < n4) {
+    const uint4 v = reinterpret_cast<const uint4*>(x)[i];
+    if (((v.x | v.y | v.z | v.w) & 0xFFFFu) != 0u)
+      *non_exact = 1u;
+  } else if (i == n4) {
+    for (size_t k = n4 * 4; k < n; ++k)
+      if ((x[k] & 0xFFFFu) != 0u)
+        *non_exact = 1u;
+  }
+}
+
+__global__ void __launch_bounds__(256)
+    k_f32_to_bf16(const uint32_t* __restrict__ x, uint16_t* __restrict__ dst,
+                  size_t n) {
+  const size_t i = (size_t)blockIdx.x * 256 + threadIdx.x;
+  const size_t n4 = n / 4;
+  if (i < n4) {
+    const uint4 v = reinterpret_cast<const uint4*>(x)[i];
+    const uint2 out = make_uint2((v.x >> 16) | (v.y & 0xFFFF0000u),
+                                 (v.z >> 16) | (v.w & 0xFFFF0000u));
+    reinterpret_cast<uint2*>(dst)[i] = out;
+  } else if (i == n4) {
+    for (size_t k = n4 * 4; k < n; ++k)
+      dst[k] = static_cast<uint16_t>(x[k] >> 16);
+  }
+}
+
+__global__ void __launch_bounds__(256)
+    k_pad_rows_to_f32(const void* __restrict__ src, int type, int rows,
+                      int padded_rows, int cols, float* __restrict__ dst) {
+  const size_t total = (size_t)padded_rows * cols;
+  const size_t idx = (size_t)blockIdx.x * 256 + threadIdx.x;
+  if (idx >= total)
+    return;
+  const size_t valid = (size_t)rows * cols;
+  if (idx >= valid) {
+    dst[idx] = 0.f;
+    return;
+  }
+  if (type == 0)
+    dst[idx] = static_cast<const float*>(src)[idx];
+  else if (type == 1)
+    dst[idx] = __half2float(static_cast<const __half*>(src)[idx]);
+  else
+    dst[idx] = __uint_as_float(
+        static_cast<uint32_t>(static_cast<const uint16_t*>(src)[idx]) << 16);
+}
+}  // namespace
+
+void CheckBf16Exact(hipStream_t s, const float* x, size_t n,
+                    unsigned* non_exact) {
+  const size_t threads = n / 4 + 1;
+  k_check_bf16_exact<<<(unsigned)((threads + 255) / 256), 256, 0, s>>>(
+      reinterpret_cast<const uint32_t*>(x), n, non_exact);
+  Chk("check_bf16_exact");
+}
+
+void F32ToBf16(hipStream_t s, const float* x, void* dst, size_t n) {
+  const size_t threads = n / 4 + 1;
+  k_f32_to_bf16<<<(unsigned)((threads + 255) / 256), 256, 0, s>>>(
+      reinterpret_cast<const uint32_t*>(x), static_cast<uint16_t*>(dst), n);
+  Chk("f32_to_bf16");
+}
+
+void PadRowsToF32(hipStream_t s, const void* src, int type, int rows,
+                  int padded_rows, int cols, float* dst) {
+  const size_t total = (size_t)padded_rows * cols;
+  k_pad_rows_to_f32<<<(unsigned)((total + 255) / 256), 256, 0, s>>>(
+      src, type, rows, padded_rows, cols, dst);
+  Chk("pad_rows_to_f32");
+}
+
 void GemmDense(hipStream_t s, const void* w, int m, int k, const void* ah,
                float* out, const GemmItems& it) {
   GP3 p{};
