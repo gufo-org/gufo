@@ -20,8 +20,8 @@ use std::ffi::{c_int, c_void};
 
 /// Why the reader rejects a file: it breaks the format, or one of Gufo's
 /// limits, the strictest of the loaders the reader replaced (a header of at
-/// most 32 MiB with at least one tensor, at most 5 dimensions, each from 1
-/// to 2^31 - 1). The values are those of `GufoSafetensorsReason`.
+/// most 32 MiB with at least one tensor, at most 5 dimensions, each at most
+/// 2^31 - 1). The values are those of `GufoSafetensorsReason`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
@@ -44,14 +44,16 @@ pub enum Reason {
     /// more than `MAX_RANK` dimensions (a Gufo limit) or the offsets are not
     /// two.
     Layout = 8,
-    /// A dimension is not an integer from 1 to `MAX_DIMENSION` (Gufo limits:
-    /// the format allows 0 and larger), or the shape holds more bytes than
-    /// the payload.
+    /// A dimension is not an integer from 0 to `MAX_DIMENSION` (a Gufo
+    /// limit: the format allows larger), the shape holds more bytes than the
+    /// payload, or, without elements, its dimensions multiplied in order
+    /// overflow 64 bits before the first 0.
     Dimension = 9,
     /// An offset is not an integer, or the offsets do not span exactly the
     /// tensor's bytes within the payload.
     Extent = 10,
-    /// Two tensors share bytes.
+    /// Two tensors share bytes, or a tensor without elements lies inside
+    /// another's bytes.
     Overlap = 11,
     /// Payload bytes before a tensor belong to none.
     Gap = 12,

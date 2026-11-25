@@ -160,9 +160,9 @@ the budget and the C ABI.
 replaced in `tests/core/safetensors_reference.hpp`: LoRA, EmbeddingGemma 2,
 Qwen3-ASR, Qwen3-TTS, Qwen-Image and MiniMax H3, whose own JSON number rules
 are rebuilt on the core parser. Headers from a grid of types, shapes and
-offsets, metadata, length fields and the layouts of three tensors, every
-truncation of three files and their deterministic mutations must give each
-loader the tensors its old parser gave. A file the reader rejects that an old
+offsets, metadata, length fields, the layouts of three tensors and tensors
+without elements among them, every truncation of four files and their
+deterministic mutations must give each loader the tensors its old parser gave. A file the reader rejects that an old
 parser accepted must break one of the stricter rules that loader takes on, which
 the test confirms from the header itself; any other difference fails. Accepted
 headers are checked against the rules independently. It runs in `check-pr`; the

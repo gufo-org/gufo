@@ -76,8 +76,10 @@ pub fn integer(token: &[u8]) -> Option<u64> {
 
 /// Checks one tensor entry of a header whose payload holds `payload` bytes:
 /// its type, then the shape and offset arrays, each dimension, and finally
-/// the extent, which must span exactly the tensor's bytes. An unknown type
-/// is reported without its name, which the caller adds.
+/// the extent, which must span exactly the tensor's bytes. A tensor without
+/// elements spans none: its offsets are equal and within the payload, and
+/// its element count multiplied in order fits 64 bits. An unknown type is
+/// reported without its name, which the caller adds.
 pub fn check(raw: &Raw, payload: u64) -> Result<Entry, Problem> {
     let dtype = match raw.dtype {
         Member::Read(Ok(dtype)) => dtype,
@@ -101,23 +103,39 @@ pub fn check(raw: &Raw, payload: u64) -> Result<Entry, Problem> {
     if offsets.len != 2 {
         return Err((Reason::Layout, "data_offsets does not hold 2 values"));
     }
-    // The bits of the tensor so far. A shape larger than the payload is
-    // rejected as soon as it is, which also keeps the product in range.
-    let room = u128::from(payload) * 8;
-    let mut bits = u128::from(dtype.bits());
     let mut dimensions = [0; MAX_RANK];
     for (slot, dimension) in dimensions.iter_mut().zip(&shape.values[..shape.len]) {
-        let dimension = dimension
-            .filter(|dimension| (1..=MAX_DIMENSION).contains(dimension))
+        *slot = dimension
+            .filter(|dimension| *dimension <= MAX_DIMENSION)
             .ok_or((
                 Reason::Dimension,
-                "shape holds a dimension that is not an integer from 1 to 2147483647",
+                "shape holds a dimension that is not an integer from 0 to 2147483647",
             ))?;
-        bits *= u128::from(dimension);
-        if bits > room {
-            return Err((Reason::Dimension, "shape holds more bytes than the payload"));
+    }
+    let shape = &dimensions[..shape.len];
+    // The bits of the tensor, none without elements. A shape larger than the
+    // payload is rejected as soon as it is, which also keeps the product in
+    // range. Without elements, the element count multiplied in order must
+    // still fit 64 bits before the first 0, as in safetensors 0.8.
+    let room = u128::from(payload) * 8;
+    let mut bits = 0;
+    if !shape.contains(&0) {
+        bits = u128::from(dtype.bits());
+        for &dimension in shape {
+            bits *= u128::from(dimension);
+            if bits > room {
+                return Err((Reason::Dimension, "shape holds more bytes than the payload"));
+            }
         }
-        *slot = dimension;
+    } else if shape
+        .iter()
+        .try_fold(1u64, |count, &dimension| count.checked_mul(dimension))
+        .is_none()
+    {
+        return Err((
+            Reason::Dimension,
+            "shape's element count overflows 64 bits before its 0 dimension",
+        ));
     }
     let [Some(begin), Some(end)] = [offsets.values[0], offsets.values[1]] else {
         return Err((Reason::Extent, "data_offsets are not unsigned integers"));
@@ -125,8 +143,8 @@ pub fn check(raw: &Raw, payload: u64) -> Result<Entry, Problem> {
     if bits % 8 != 0 {
         return Err((Reason::Extent, "shape does not fill whole bytes"));
     }
-    if begin >= end {
-        return Err((Reason::Extent, "data_offsets do not increase"));
+    if begin > end {
+        return Err((Reason::Extent, "data_offsets decrease"));
     }
     if end > payload {
         return Err((Reason::Extent, "data_offsets end past the payload"));
@@ -141,7 +159,7 @@ pub fn check(raw: &Raw, payload: u64) -> Result<Entry, Problem> {
     Ok(Entry {
         dtype,
         dimensions,
-        rank: shape.len,
+        rank: shape.len(),
         begin,
         end,
     })
@@ -236,6 +254,64 @@ mod tests {
     }
 
     #[test]
+    fn reads_tensors_without_elements() {
+        // Equal offsets anywhere in the payload, up to its end.
+        for (shape, offset) in [("[0]", 0), ("[2,0]", 3), ("[0,4]", 8)] {
+            let text =
+                format!(r#"{{"dtype":"F32","shape":{shape},"data_offsets":[{offset},{offset}]}}"#);
+            assert!(check_text(&text, 8).is_ok(), "{text}");
+        }
+        // The other dimensions keep their bound, but not the payload's.
+        let wide = r#"{"dtype":"C64","shape":[2147483647,2147483647,0,2147483647,2147483647],"data_offsets":[0,0]}"#;
+        assert_eq!(
+            check_text(wide, 0),
+            Ok((
+                Dtype::C64,
+                vec![2147483647, 2147483647, 0, 2147483647, 2147483647],
+                0,
+                0
+            ))
+        );
+        // Multiplied in order, they must fit 64 bits up to the first 0.
+        let first =
+            r#"{"dtype":"U8","shape":[0,2147483647,2147483647,2147483647],"data_offsets":[0,0]}"#;
+        assert!(check_text(first, 0).is_ok());
+        let late =
+            r#"{"dtype":"U8","shape":[2147483647,2147483647,2147483647,0],"data_offsets":[0,0]}"#;
+        assert_eq!(
+            check_text(late, 0),
+            Err((
+                Reason::Dimension,
+                "shape's element count overflows 64 bits before its 0 dimension"
+            ))
+        );
+        for (text, expected) in [
+            (
+                r#"{"dtype":"U8","shape":[0,2147483648],"data_offsets":[0,0]}"#,
+                Reason::Dimension,
+            ),
+            (
+                r#"{"dtype":"U8","shape":[0,1,1,1,1,1],"data_offsets":[0,0]}"#,
+                Reason::Layout,
+            ),
+            (
+                r#"{"dtype":"U8","shape":[0],"data_offsets":[9,9]}"#,
+                Reason::Extent,
+            ),
+            (
+                r#"{"dtype":"U8","shape":[0],"data_offsets":[0,1]}"#,
+                Reason::Extent,
+            ),
+            (
+                r#"{"dtype":"U8","shape":[0],"data_offsets":[1,0]}"#,
+                Reason::Extent,
+            ),
+        ] {
+            assert_eq!(reason(text, 8), expected, "{text}");
+        }
+    }
+
+    #[test]
     fn rejects_bad_types() {
         for text in [
             r#"{"dtype":"bf16","shape":[1],"data_offsets":[0,2]}"#,
@@ -272,7 +348,6 @@ mod tests {
     #[test]
     fn rejects_bad_dimensions() {
         for shape in [
-            "0",
             "-1",
             "1.0",
             "1e0",
@@ -368,9 +443,9 @@ mod tests {
                 "data_offsets does not hold 2 values",
             ),
             (
-                r#"{"dtype":"U8","shape":[0],"data_offsets":[0,1]}"#,
+                r#"{"dtype":"U8","shape":[-1],"data_offsets":[0,1]}"#,
                 1,
-                "shape holds a dimension that is not an integer from 1 to 2147483647",
+                "shape holds a dimension that is not an integer from 0 to 2147483647",
             ),
             (
                 r#"{"dtype":"U8","shape":[2],"data_offsets":[0,2]}"#,
@@ -388,9 +463,9 @@ mod tests {
                 "shape does not fill whole bytes",
             ),
             (
-                r#"{"dtype":"U8","shape":[1],"data_offsets":[1,1]}"#,
+                r#"{"dtype":"U8","shape":[1],"data_offsets":[1,0]}"#,
                 1,
-                "data_offsets do not increase",
+                "data_offsets decrease",
             ),
             (
                 r#"{"dtype":"U8","shape":[1],"data_offsets":[1,2]}"#,
@@ -406,17 +481,22 @@ mod tests {
             assert_eq!(message(text, payload), expected, "{text}");
         }
         // The message names the largest dimension.
-        let zero = r#"{"dtype":"U8","shape":[0],"data_offsets":[0,1]}"#;
-        assert!(message(zero, 1).ends_with(&MAX_DIMENSION.to_string()));
+        let large = r#"{"dtype":"U8","shape":[2147483648],"data_offsets":[0,1]}"#;
+        assert!(message(large, 1).ends_with(&MAX_DIMENSION.to_string()));
+        // Equal offsets span no bytes.
+        assert_eq!(
+            message(r#"{"dtype":"U8","shape":[1],"data_offsets":[1,1]}"#, 1),
+            "data_offsets do not span exactly the shape's bytes"
+        );
     }
 
     #[test]
     fn checks_type_first() {
         // An entry with several faults reports the first in check order.
-        assert_eq!(reason(r#"{"dtype":"X","shape":[0]}"#, 8), Reason::Dtype);
-        assert_eq!(reason(r#"{"dtype":"U8","shape":[0]}"#, 8), Reason::Layout);
+        assert_eq!(reason(r#"{"dtype":"X","shape":[-1]}"#, 8), Reason::Dtype);
+        assert_eq!(reason(r#"{"dtype":"U8","shape":[-1]}"#, 8), Reason::Layout);
         assert_eq!(
-            reason(r#"{"dtype":"U8","shape":[0],"data_offsets":[1,0]}"#, 8),
+            reason(r#"{"dtype":"U8","shape":[-1],"data_offsets":[1,0]}"#, 8),
             Reason::Dimension
         );
     }

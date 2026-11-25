@@ -69,6 +69,10 @@ bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
       *error = "unsupported dtype for " + name;
       return false;
     }
+    if (entry.begin == entry.end) {
+      *error = path.string() + ": " + name + ": tensor has no elements";
+      return false;
+    }
     tensor.shape = std::move(entry.shape);
     tensor.data = bytes + header.payload_offset + entry.begin;
     tensor.byte_count = entry.end - entry.begin;

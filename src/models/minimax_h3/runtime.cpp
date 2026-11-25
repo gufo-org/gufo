@@ -128,9 +128,13 @@ ParsedHeader ParseSafetensorsHeader(const std::filesystem::path& path,
     throw json::Error(open_error.empty() ? "cannot open " + path.string()
                                          : open_error);
   }
+  // Closes the file on every way out, exceptions included.
+  struct Closer {
+    platform::PlatformFile file;
+    ~Closer() { platform::CloseFile(file); }
+  } const closer{descriptor};
   const auto file_size = platform::FileSizeBytes(descriptor);
   if (!file_size.has_value()) {
-    platform::CloseFile(descriptor);
     throw json::Error("cannot stat " + path.string());
   }
   // A file shorter than the length gives a shorter prefix, which the reader
@@ -141,22 +145,18 @@ ParsedHeader ParseSafetensorsHeader(const std::filesystem::path& path,
           .first(static_cast<std::size_t>(
               std::min<std::uint64_t>(*file_size, encoded_length.size())));
   if (!ReadExact(descriptor, prefix.data(), prefix.size(), 0)) {
-    platform::CloseFile(descriptor);
     throw json::Error("cannot read safetensors length " + path.string());
   }
   std::uint64_t header_bytes = 0;
   try {
     header_bytes = safetensors::HeaderLength(prefix, *file_size);
   } catch (const safetensors::Error& error) {
-    platform::CloseFile(descriptor);
     throw json::Error(path.string() + ": " + error.what());
   }
   std::string header(static_cast<std::size_t>(header_bytes), '\0');
   if (!ReadExact(descriptor, header.data(), header.size(), 8)) {
-    platform::CloseFile(descriptor);
     throw json::Error("cannot read safetensors header " + path.string());
   }
-  platform::CloseFile(descriptor);
   telemetry->safetensors_header_bytes_read += 8U + header_bytes;
 
   safetensors::Header checked;
@@ -171,6 +171,10 @@ ParsedHeader ParseSafetensorsHeader(const std::filesystem::path& path,
   parsed.file_bytes = *file_size;
   for (auto& entry : checked.tensors) {
     const DType dtype = ParseDType(safetensors::Name(entry.dtype));
+    if (entry.begin == entry.end) {
+      throw json::Error(path.string() + ": " + entry.name +
+                        ": tensor has no elements");
+    }
     // The reader rejects duplicate names, so every emplace inserts.
     parsed.tensors.emplace(
         std::move(entry.name),

@@ -49,9 +49,10 @@ pub enum Untiled {
     Trailing,
 }
 
-/// Checks that the extents, each `(begin, end, tensor)`, tile a payload of
-/// `payload` bytes exactly: sorted by offset, each starts where the one
-/// before ended and the last ends with the payload.
+/// Checks that the extents of the tensors with data, each `(begin, end,
+/// tensor)`, tile a payload of `payload` bytes exactly: sorted by offset,
+/// each starts where the one before ended and the last ends with the
+/// payload, which is empty when no tensor has data. Leaves them sorted.
 pub fn tile(extents: &mut [(u64, u64, usize)], payload: u64) -> Result<(), Untiled> {
     extents.sort_unstable();
     let mut cursor = 0;
@@ -69,10 +70,22 @@ pub fn tile(extents: &mut [(u64, u64, usize)], payload: u64) -> Result<(), Until
         cursor = end;
         previous = Some(tensor);
     }
-    if cursor != payload && !extents.is_empty() {
+    if cursor != payload {
         return Err(Untiled::Trailing);
     }
     Ok(())
+}
+
+/// The tensor whose data holds `at`, an offset within the payload, if any:
+/// `extents` are those `tile` accepted. Offsets between two tensors and at
+/// either end of the payload lie in none.
+pub fn holder(extents: &[(u64, u64, usize)], at: u64) -> Option<usize> {
+    // The last extent that begins at or before `at`.
+    let last = extents
+        .partition_point(|&(begin, _, _)| begin <= at)
+        .checked_sub(1)?;
+    let (begin, end, tensor) = extents[last];
+    (begin < at && at < end).then_some(tensor)
 }
 
 #[cfg(test)]
@@ -118,6 +131,7 @@ mod tests {
     #[test]
     fn tiles() {
         assert_eq!(tile(&mut [], 0), Ok(()));
+        assert_eq!(tile(&mut [], 1), Err(Untiled::Trailing));
         assert_eq!(tile(&mut [(4, 6, 0), (0, 4, 1)], 6), Ok(()));
         assert_eq!(tile(&mut [(0, 4, 0), (5, 6, 1)], 6), Err(Untiled::Gap(1)));
         assert_eq!(tile(&mut [(1, 6, 0)], 6), Err(Untiled::Gap(0)));
@@ -136,5 +150,15 @@ mod tests {
             })
         );
         assert_eq!(tile(&mut [(0, 4, 0), (4, 5, 1)], 6), Err(Untiled::Trailing));
+    }
+
+    #[test]
+    fn holders() {
+        let mut extents = [(4, 6, 1), (0, 4, 0)];
+        assert_eq!(tile(&mut extents, 6), Ok(()));
+        let holders: Vec<_> = (0..=6).map(|at| holder(&extents, at)).collect();
+        let expected = [None, Some(0), Some(0), Some(0), None, Some(1), None];
+        assert_eq!(holders, expected);
+        assert_eq!(holder(&[], 0), None);
     }
 }

@@ -153,7 +153,9 @@ bool Among(std::string_view name,
 }
 
 // What each ported loader does with the reader's tensors: the types it
-// takes, and the tensors it skips.
+// takes, the tensors it skips, and tensors without elements, which Qwen3-ASR
+// and Qwen3-TTS skip, EmbeddingGemma 2 ignores outside its towers and the
+// others reject.
 ref::Result Policy(Loader loader, const st::Header& header) {
   ref::Result result;
   for (const auto& tensor : header.tensors) {
@@ -167,6 +169,8 @@ ref::Result Policy(Loader loader, const st::Header& header) {
       case Loader::kLora:
         if (!Among(dtype, {"BF16", "F16", "F32"}))
           return ref::Failed("unsupported adapter dtype");
+        if (tensor.begin == tensor.end)
+          return ref::Failed("tensor has no elements");
         break;
       case Loader::kEmbeddingGemma2:
         if (!(kept.name.starts_with("language_model.") ||
@@ -177,19 +181,26 @@ ref::Result Policy(Loader loader, const st::Header& header) {
           continue;
         if (!Among(dtype, {"F32", "BF16", "F16"}))
           return ref::Failed("unsupported dtype");
+        if (tensor.begin == tensor.end)
+          return ref::Failed("tensor has no elements");
         break;
       case Loader::kQwen3Asr:
       case Loader::kQwen3Tts:
-        if (!Among(dtype, {"F32", "BF16", "F16", "I64", "I32", "U8"}))
+        if (!Among(dtype, {"F32", "BF16", "F16", "I64", "I32", "U8"}) ||
+            tensor.begin == tensor.end)
           continue;
         break;
       case Loader::kQwenImage:
         if (!Among(dtype, {"BF16", "F32"}))
           return ref::Failed("unsupported Qwen-Image weight dtype");
+        if (tensor.begin == tensor.end)
+          return ref::Failed("tensor has no elements");
         break;
       case Loader::kMinimax:
         if (!Among(dtype, {"BF16", "F32", "I32"}))
           return ref::Failed("unsupported H3 tensor dtype");
+        if (tensor.begin == tensor.end)
+          return ref::Failed("tensor has no elements");
         break;
     }
     result.tensors.push_back(std::move(kept));
@@ -216,8 +227,9 @@ const std::set<st::Reason>& Stricter(Loader loader) {
   // Also no header without tensors.
   static const std::set<st::Reason> image{kMetadata, kDimension, kExtent,
                                           kEmpty};
-  // Every entry is checked instead of skipped, the payload is tiled and the
-  // header length capped.
+  // Every entry is checked instead of skipped, the payload is tiled, with
+  // tensors without elements between the others, and the header length
+  // capped.
   static const std::set<st::Reason> lenient{
       kLength, kMetadata, kEntry, kDtype,    kLayout, kDimension,
       kExtent, kOverlap,  kGap,   kTrailing, kEmpty};
@@ -303,18 +315,29 @@ bool KnownType(const gufo::json::Value* dtype) {
   return dtype && dtype->is_string() && TypeBits("\"" + dtype->str() + "\"");
 }
 
-// The bits of an entry's shape, unless a dimension is not a plain integer
-// from 1 to 2^31 - 1; saturated above 64 bits.
+// The bits of an entry's shape, saturated above 64 bits, unless a dimension
+// is not a plain integer from 0 to 2^31 - 1 or the element count multiplied
+// in order overflows 64 bits, as safetensors 0.8 checks it.
 std::optional<std::uint64_t> ShapeBits(const gufo::json::Value& entry) {
   std::uint64_t bits = TypeBits("\"" + entry.member_str("dtype") + "\"");
+  bool empty = false;
+  std::optional<std::uint64_t> count = 1;
   for (const auto& item : entry.find("shape")->items()) {
     const auto dimension = Plain(item);
-    if (!dimension || *dimension < 1 || *dimension > 0x7fffffff)
+    if (!dimension || *dimension > 0x7fffffff)
       return std::nullopt;
-    bits = bits > ~std::uint64_t{0} / *dimension ? ~std::uint64_t{0}
-                                                 : bits * *dimension;
+    empty = empty || *dimension == 0;
+    if (count && *dimension != 0 && *count > ~std::uint64_t{0} / *dimension)
+      count.reset();
+    else if (count)
+      *count *= *dimension;
+    if (*dimension != 0)
+      bits = bits > ~std::uint64_t{0} / *dimension ? ~std::uint64_t{0}
+                                                   : bits * *dimension;
   }
-  return bits;
+  if (!count)
+    return std::nullopt;
+  return empty ? 0 : bits;
 }
 
 // Whether the header shows the fault the reader reports, checked with the
@@ -350,11 +373,18 @@ bool Explains(std::span<const std::byte> file, const Fresh& fresh) {
   if (fresh.reason == kOverlap || fresh.reason == kGap ||
       fresh.reason == kTrailing) {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> extents;
+    std::vector<std::uint64_t> empty;
     for (const auto& [key, value] : root.members()) {
       if (key == "__metadata__")
         continue;
+      // Tensors without elements, whose offsets are equal, hold no bytes.
       const auto& offsets = value.find("data_offsets")->items();
-      extents.emplace_back(*Plain(offsets[0]), *Plain(offsets[1]));
+      const auto begin = *Plain(offsets[0]);
+      const auto end = *Plain(offsets[1]);
+      if (begin == end)
+        empty.push_back(begin);
+      else
+        extents.emplace_back(begin, end);
     }
     std::sort(extents.begin(), extents.end());
     std::uint64_t cursor = 0;
@@ -363,7 +393,15 @@ bool Explains(std::span<const std::byte> file, const Fresh& fresh) {
         return fresh.reason == (begin < cursor ? kOverlap : kGap);
       cursor = end;
     }
-    return fresh.reason == kTrailing && cursor != payload;
+    if (cursor != payload)
+      return fresh.reason == kTrailing;
+    // A tensor without elements inside another's data.
+    return fresh.reason == kOverlap &&
+           std::ranges::any_of(empty, [&](std::uint64_t at) {
+             return std::ranges::any_of(extents, [at](const auto& extent) {
+               return extent.first < at && at < extent.second;
+             });
+           });
   }
   const auto* entry = root.find(fresh.name);
   if (!entry)
@@ -392,7 +430,7 @@ bool Explains(std::span<const std::byte> file, const Fresh& fresh) {
       const auto bits = ShapeBits(*entry);
       const auto begin = Plain(offsets->items()[0]);
       const auto end = Plain(offsets->items()[1]);
-      return bits && (!begin || !end || *begin >= *end || *end > payload ||
+      return bits && (!begin || !end || *begin > *end || *end > payload ||
                       *bits % 8 != 0 || (*end - *begin) != *bits / 8);
     }
     default:
@@ -408,18 +446,26 @@ void CheckAccepted(std::string_view label, std::span<const std::byte> file,
   const auto payload = file.size() - header.payload_offset;
   std::vector<std::pair<std::uint64_t, std::uint64_t>> extents;
   for (const auto& tensor : header.tensors) {
-    // Accepted tensors fit the payload, so their bits fit 64 bits.
-    std::uint64_t bits = st::Bits(tensor.dtype);
+    // Accepted tensors fit the payload, so their bits fit 64 bits, unless
+    // they have no elements.
+    // For all, the element count multiplied in order fits 64 bits.
+    const bool empty = std::ranges::find(tensor.shape, 0) != tensor.shape.end();
+    std::uint64_t bits = empty ? 0 : st::Bits(tensor.dtype);
+    std::uint64_t count = 1;
     for (const auto dimension : tensor.shape) {
-      Check(dimension >= 1 && dimension <= 0x7fffffff &&
-                bits <= ~std::uint64_t{0} / dimension,
+      Check(dimension <= 0x7fffffff &&
+                (dimension == 0 || count <= ~std::uint64_t{0} / dimension) &&
+                (empty || bits <= ~std::uint64_t{0} / dimension),
             std::string(label) + ": dimension");
+      count *= dimension;
       bits *= dimension;
     }
-    Check(tensor.shape.size() <= 5 && tensor.begin < tensor.end &&
-              bits / 8 == tensor.end - tensor.begin && bits % 8 == 0,
+    Check(tensor.shape.size() <= 5 && tensor.begin <= tensor.end &&
+              tensor.end <= payload && bits / 8 == tensor.end - tensor.begin &&
+              bits % 8 == 0,
           std::string(label) + ": extent of " + tensor.name);
-    extents.emplace_back(tensor.begin, tensor.end);
+    if (!empty)
+      extents.emplace_back(tensor.begin, tensor.end);
   }
   std::sort(extents.begin(), extents.end());
   std::uint64_t cursor = 0;
@@ -427,8 +473,14 @@ void CheckAccepted(std::string_view label, std::span<const std::byte> file,
     Check(begin == cursor, std::string(label) + ": tiling");
     cursor = end;
   }
-  Check(!extents.empty() && cursor == payload,
+  Check(!header.tensors.empty() && cursor == payload,
         std::string(label) + ": payload");
+  // Those without elements lie between the others or at either end.
+  for (const auto& tensor : header.tensors)
+    if (tensor.begin == tensor.end)
+      for (const auto& [begin, end] : extents)
+        Check(tensor.begin <= begin || tensor.begin >= end,
+              std::string(label) + ": " + tensor.name + " inside data");
   const auto root = HeaderOf(file);
   std::size_t members = 0;
   for (const auto& [key, value] : root.members()) {
@@ -593,6 +645,9 @@ void SingleEntries() {
           {Offsets(bytes, 0), bytes},
           {"", bytes},
           {"[0,\"" + std::to_string(bytes) + "\"]", bytes},
+          {Offsets(0, 0), 0},
+          {Offsets(1, 1), 1},
+          {Offsets(2, 2), 1},
       };
       for (const auto& layout : layouts) {
         const auto name = kNames[index++ % kNames.size()];
@@ -695,6 +750,74 @@ void Layouts() {
   } while (std::next_permutation(order.begin(), order.end()));
 }
 
+// Tensors without elements before, inside, between, after and past three
+// tensors with data, at every place in the header, and alone. Inside one's
+// data the reader rejects them, as safetensors 0.8 does; the old Qwen3-ASR,
+// Qwen3-TTS and EmbeddingGemma 2 parsers did not check the layout.
+void EmptyTensors() {
+  // The last overflows 64 bits before its 0, which safetensors 0.8 rejects.
+  constexpr std::array<std::string_view, 5> kEmptyShapes{
+      "[0]", "[3,0]", "[2147483647,2147483647,0]",
+      "[0,2147483647,2147483647,2147483647,2147483647]",
+      "[2147483647,2147483647,2147483647,0]"};
+  // EmbeddingGemma 2 reads the first and ignores the second.
+  constexpr std::array<std::string_view, 2> kEmptyNames{"language_model.e",
+                                                        "other.e"};
+  const std::array<std::string, 3> data{
+      "\"language_model.a\":" + Entry("\"BF16\"", "[1]", "[0,2]"),
+      "\"language_model.b\":" + Entry("\"F32\"", "[1]", "[2,6]"),
+      "\"vision_tower.c\":" + Entry("\"BF16\"", "[2]", "[6,10]")};
+  std::size_t index = 0;
+  for (const std::uint64_t at : {0, 1, 2, 4, 6, 10, 11}) {
+    for (const auto shape : kEmptyShapes) {
+      for (const auto name : kEmptyNames) {
+        const auto type = index++ % 2 ? "\"F32\"" : "\"BF16\"";
+        const auto empty = "\"" + std::string(name) +
+                           "\":" + Entry(type, shape, Offsets(at, at));
+        for (std::size_t place = 0; place <= data.size(); ++place) {
+          std::string header = "{";
+          for (std::size_t slot = 0; slot <= data.size(); ++slot) {
+            if (slot)
+              header += ',';
+            header +=
+                slot == place ? empty : data[slot - (slot > place ? 1 : 0)];
+          }
+          header += "}";
+          Compare(header, header, 10);
+        }
+      }
+    }
+  }
+  const auto empty = [](std::string_view name, std::uint64_t at) {
+    return "\"" + std::string(name) +
+           "\":" + Entry("\"F32\"", "[0,8]", Offsets(at, at));
+  };
+  // Two at one offset.
+  Compare("two at one offset",
+          "{" + data[0] + "," + empty("language_model.e", 2) + "," +
+              empty("other.f", 2) + "," + data[1] + "," + data[2] + "}",
+          10);
+  // Alone, with and without a payload.
+  for (const std::uint64_t payload : {0, 1}) {
+    for (const std::uint64_t at : {0, 1}) {
+      Compare("alone", "{" + empty("other.e", at) + "}", payload);
+      Compare(
+          "two alone",
+          "{" + empty("language_model.e", at) + "," + empty("other.f", 0) + "}",
+          payload);
+    }
+  }
+  // Beside a gap and an overlap among the others.
+  Compare("gap",
+          "{" + empty("other.e", 3) + "," + data[0] +
+              ",\"language_model.b\":" + Entry("\"F32\"", "[1]", "[3,7]") + "}",
+          7);
+  Compare("overlap",
+          "{" + empty("other.e", 1) + "," + data[0] +
+              ",\"language_model.b\":" + Entry("\"F32\"", "[1]", "[1,5]") + "}",
+          5);
+}
+
 // Members nothing reads, holding nested values, at every place in an entry
 // and in the header.
 void Extras() {
@@ -756,6 +879,14 @@ Bytes Base(std::string& header, std::uint64_t& payload, int which) {
           ",\"language_model.y\":" + Entry("\"U8\"", "[4]", "[0,4]") + "}";
       payload = 8;
       break;
+    case 3:
+      header = "{\"language_model.a\":" + Entry("\"BF16\"", "[1]", "[0,2]") +
+               ",\"other.e\":" + Entry("\"F32\"", "[0,3]", "[2,2]") +
+               ",\"language_model.b\":" + Entry("\"F32\"", "[1]", "[2,6]") +
+               ",\"language_model.e\":" + Entry("\"BF16\"", "[2,0]", "[6,6]") +
+               "}";
+      payload = 6;
+      break;
     default:
       header = "{\"lora.lora_A.weight\":" + Entry("\"F32\"", "[1]", "[0,4]") +
                ",\"__metadata__\":{\"lora_adapter_metadata\":\"{}\"}}";
@@ -766,7 +897,7 @@ Bytes Base(std::string& header, std::uint64_t& payload, int which) {
 }
 
 void Truncations() {
-  for (int which = 0; which < 3; ++which) {
+  for (int which = 0; which < 4; ++which) {
     std::string header;
     std::uint64_t payload = 0;
     const auto file = Base(header, payload, which);
@@ -784,7 +915,7 @@ void Truncations() {
 void Mutations() {
   constexpr std::string_view kAlphabet = "0123456789-.eE,:[]{}\" _FIUBabtrx";
   Random random{0x9e3779b97f4a7c15ULL};
-  for (int which = 0; which < 3; ++which) {
+  for (int which = 0; which < 4; ++which) {
     std::string base;
     std::uint64_t payload = 0;
     (void)Base(base, payload, which);
@@ -846,6 +977,20 @@ void Interface() {
       st::ParseHeader(std::span(file).subspan(8, length), file.size());
   Check(length == header.size() && stepped.tensors.size() == 2,
         "header length and parse");
+  // A tensor without elements holds no bytes, here at the end of the
+  // payload.
+  try {
+    const auto empty =
+        st::Parse(File("{\"a\":" + Entry("\"U8\"", "[2]", "[0,2]") +
+                           ",\"e\":" + Entry("\"F32\"", "[3,0]", "[2,2]") + "}",
+                       2));
+    Check(empty.tensors.size() == 2 &&
+              empty.tensors[1].shape == std::vector<std::uint64_t>{3, 0} &&
+              empty.tensors[1].begin == 2 && empty.tensors[1].end == 2,
+          "tensor without elements");
+  } catch (const st::Error& error) {
+    Fail(std::string("tensor without elements: ") + error.what());
+  }
   // Names and sizes as the Rust reader knows them, for all 22 types of
   // safetensors 0.8: 8 elements of each type take exactly its bits in bytes.
   const auto dtypes = Dtypes();
@@ -896,6 +1041,11 @@ void Interface() {
               2),
          st::Reason::kOverlap, "b",
          "invalid safetensors header: b: data overlaps that of a");
+  expect(File("{\"a\":" + Entry("\"U8\"", "[2]", "[0,2]") +
+                  ",\"e\":" + Entry("\"F32\"", "[0]", "[1,1]") + "}",
+              2),
+         st::Reason::kOverlap, "e",
+         "invalid safetensors header: e: offset lies inside the data of a");
   expect(File("[1]", 0), st::Reason::kNotObject, "",
          "invalid safetensors header: not a JSON object");
   expect(Bytes(4), st::Reason::kFile, "",
@@ -968,6 +1118,7 @@ int main(int argc, char** argv) {
   Metadata();
   Headers();
   Layouts();
+  EmptyTensors();
   Extras();
   Truncations();
   Mutations();

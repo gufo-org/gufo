@@ -195,6 +195,8 @@ Adapter::Adapter(const std::filesystem::path& path, const Schema& schema) {
              "unsupported adapter dtype " +
                  std::string(safetensors::Name(entry.dtype)));
     }
+    if (entry.begin == entry.end)
+      Fail(path, key, "tensor has no elements");
     // The reader bounds each dimension by the int range.
     for (const auto dim : entry.shape)
       tensor.shape.push_back(static_cast<int>(dim));

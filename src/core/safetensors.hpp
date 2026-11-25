@@ -17,8 +17,15 @@
 ///
 /// The reader accepts the format of safetensors 0.8 within Gufo's limits,
 /// the strictest of the loaders it replaced: a header of at most 32 MiB with
-/// at least one tensor, at most 5 dimensions, each from 1 to 2^31 - 1 (so no
-/// tensor without elements).
+/// at least one tensor, at most 5 dimensions, each at most 2^31 - 1.
+///
+/// A tensor without elements (a 0 dimension) holds no bytes and takes no
+/// part in the tiling. As in safetensors 0.8, its offsets are equal and lie
+/// between the other tensors or at either end of the payload, not inside
+/// another tensor's bytes, and its dimensions multiplied in order fit 64
+/// bits up to the first 0. The product of all its other dimensions can still
+/// exceed 64 bits, as in [0, 2^31 - 1, 2^31 - 1, 2^31 - 1]. Whether a loader
+/// can use such a tensor is its own choice.
 namespace gufo::safetensors {
 
 /// A tensor's element type, as the format names it. New types take the next
@@ -75,13 +82,15 @@ enum class Reason {
   /// "shape" or "data_offsets" is missing or not an array, the shape has
   /// more than 5 dimensions (a Gufo limit) or the offsets are not two.
   kLayout,
-  /// A dimension is not an integer from 1 to 2^31 - 1 (Gufo limits), or the
-  /// shape holds more bytes than the payload.
+  /// A dimension is not an integer from 0 to 2^31 - 1 (a Gufo limit), the
+  /// shape holds more bytes than the payload, or, without elements, its
+  /// dimensions multiplied in order overflow 64 bits before the first 0.
   kDimension,
   /// An offset is not an integer, or the offsets do not span exactly the
   /// tensor's bytes within the payload.
   kExtent,
-  /// Two tensors share bytes.
+  /// Two tensors share bytes, or a tensor without elements lies inside
+  /// another's bytes.
   kOverlap,
   /// Payload bytes before a tensor belong to none.
   kGap,
@@ -113,7 +122,8 @@ struct Tensor {
   std::string name;
   Dtype dtype{Dtype::kU8};
   std::vector<std::uint64_t> shape;
-  /// The tensor's bytes are [begin, end) of the payload.
+  /// The tensor's bytes are [begin, end) of the payload; begin == end for a
+  /// tensor without elements.
   std::uint64_t begin{0};
   std::uint64_t end{0};
 };
@@ -121,7 +131,7 @@ struct Tensor {
 struct Header {
   /// Where the payload starts in the file, after the length and header.
   std::uint64_t payload_offset{0};
-  /// In header order. Together they tile the payload without gaps.
+  /// In header order. Those with elements tile the payload without gaps.
   std::vector<Tensor> tensors;
   /// The "__metadata__" entries in header order.
   std::vector<std::pair<std::string, std::string>> metadata;

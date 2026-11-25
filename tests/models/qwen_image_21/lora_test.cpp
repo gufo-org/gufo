@@ -443,6 +443,12 @@ int main() {
                 {{std::string(kQ) + ".lora_A.weight", {2, 8}, "F64"},
                  {std::string(kQ) + ".lora_B.weight", {8, 2}}}),
           "to_q.lora_A.weight: unsupported adapter dtype F64");
+  // The reader accepts a tensor without elements; an adapter rejects it.
+  Rejects(
+      Write("r.safetensors",
+            Join({q,
+                  {{"transformer_blocks.0.attn.to_k.lora_A.weight", {0, 8}}}})),
+      "to_k.lora_A.weight: tensor has no elements");
   Rejects(Write("r.safetensors", q, "", 2),
           "data_offsets end past the payload");
   Rejects(Write("r.safetensors", q, "", 0, 1ULL << 40),

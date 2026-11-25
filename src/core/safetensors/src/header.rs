@@ -358,12 +358,15 @@ impl Walk {
         if self.tensors.is_empty() {
             return reject(Reason::Empty, "", &["no tensors"]);
         }
+        // Tensors without elements hold no bytes, so only the others tile
+        // the payload.
         let mut extents = Vec::new();
         extents.try_reserve_exact(self.tensors.len())?;
         extents.extend(
             self.tensors
                 .iter()
                 .enumerate()
+                .filter(|(_, (_, entry))| entry.begin != entry.end)
                 .map(|(index, (_, entry))| (entry.begin, entry.end, index)),
         );
         let name = |index: usize| &self.text[self.tensors[index].0.clone()];
@@ -380,6 +383,19 @@ impl Walk {
             Err(Untiled::Trailing) => {
                 let message = ["payload continues after the last tensor"];
                 return reject(Reason::Trailing, "", &message);
+            }
+        }
+        // As in safetensors 0.8, a tensor without elements lies between the
+        // others or at either end of the payload, not inside one's data.
+        let empty = self
+            .tensors
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, entry))| entry.begin == entry.end);
+        for (index, (_, entry)) in empty {
+            if let Some(other) = layout::holder(&extents, entry.begin) {
+                let message = ["offset lies inside the data of ", name(other)];
+                return reject(Reason::Overlap, name(index), &message);
             }
         }
         Ok(Header {
@@ -560,7 +576,7 @@ mod tests {
             (Reason::Dtype, "t".to_owned(), "missing dtype".to_owned())
         );
         // The first fault in header order wins.
-        let two = r#"{"a":{"dtype":"U8","shape":[0],"data_offsets":[0,1]},"__metadata__":[]}"#;
+        let two = r#"{"a":{"dtype":"U8","shape":[-1],"data_offsets":[0,1]},"__metadata__":[]}"#;
         let (reason, name, _) = rejection(two, 1);
         assert_eq!((reason, name.as_str()), (Reason::Dimension, "a"));
         let gap = r#"{"x":{"dtype":"U8","shape":[1],"data_offsets":[0,1]},"y":{"dtype":"U8","shape":[1],"data_offsets":[2,3]}}"#;
@@ -591,6 +607,51 @@ mod tests {
                 "payload continues after the last tensor".to_owned()
             )
         );
+    }
+
+    #[test]
+    fn places_tensors_without_elements_between_the_others() {
+        let data = r#""a":{"dtype":"U8","shape":[4],"data_offsets":[0,4]},"b":{"dtype":"U8","shape":[4],"data_offsets":[4,8]}"#;
+        let empty =
+            |at: u64| format!(r#""e":{{"dtype":"F32","shape":[0,4],"data_offsets":[{at},{at}]}}"#);
+        // Before, between and after the tensors with data, and sharing an
+        // offset with another empty tensor.
+        for at in [0, 4, 8] {
+            let header = format!("{{{},{data}}}", empty(at));
+            let read = check(&header, 8).unwrap();
+            let (name, entry) = read.tensors().next().unwrap();
+            assert_eq!((name, entry.begin, entry.end), ("e", at, at));
+            assert_eq!(read.tensors().count(), 3);
+        }
+        // Inside the data of one.
+        for (at, other) in [(1, "a"), (3, "a"), (6, "b")] {
+            let header = format!("{{{data},{}}}", empty(at));
+            let message = format!("offset lies inside the data of {other}");
+            assert_eq!(
+                rejection(&header, 8),
+                (Reason::Overlap, "e".to_owned(), message)
+            );
+        }
+        let two = format!(
+            r#"{{{},{data},"f":{{"dtype":"U8","shape":[0],"data_offsets":[4,4]}}}}"#,
+            empty(4)
+        );
+        assert_eq!(check(&two, 8).unwrap().tensors().count(), 4);
+        // Past the payload.
+        let past = format!("{{{data},{}}}", empty(9));
+        let (reason, name, _) = rejection(&past, 8);
+        assert_eq!((reason, name.as_str()), (Reason::Extent, "e"));
+        // Only tensors without elements: the payload must be empty.
+        let only = format!("{{{}}}", empty(0));
+        assert_eq!(check(&only, 0).unwrap().tensors().count(), 1);
+        assert_eq!(rejection(&only, 1).0, Reason::Trailing);
+        // The others still tile the payload.
+        let gap = format!(
+            r#"{{{},"a":{{"dtype":"U8","shape":[4],"data_offsets":[1,5]}}}}"#,
+            empty(0)
+        );
+        let (reason, name, _) = rejection(&gap, 5);
+        assert_eq!((reason, name.as_str()), (Reason::Gap, "a"));
     }
 
     #[test]

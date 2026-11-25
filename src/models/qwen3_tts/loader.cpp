@@ -100,7 +100,7 @@ bool LoadSafetensorsFile(const std::filesystem::path& path, TensorStore* store,
     header = safetensors::Parse(std::span(bytes, mapped->size()));
   } catch (const std::exception& failure) {
     if (error != nullptr)
-      *error = path.string() + ": " + failure.what();
+      *error = failure.what();
     return false;
   }
   const std::size_t count_before = store->size();
@@ -108,8 +108,9 @@ bool LoadSafetensorsFile(const std::filesystem::path& path, TensorStore* store,
     Tensor tensor;
     tensor.name = std::move(entry.name);
     tensor.dtype = DTypeFromSafetensors(entry.dtype);
-    // Types this model has no use for are skipped.
-    if (DTypeSize(tensor.dtype) == 0) {
+    // Types this model has no use for are skipped, as are tensors without
+    // elements.
+    if (DTypeSize(tensor.dtype) == 0 || entry.begin == entry.end) {
       continue;
     }
     tensor.shape = std::move(entry.shape);

@@ -26,7 +26,7 @@ typedef enum GufoSafetensorsParse {
 
 /* Why a file is rejected: it breaks the format, or one of Gufo's limits
    (a header of at most 32 MiB with at least one tensor, at most 5
-   dimensions, each from 1 to 2^31 - 1). */
+   dimensions, each at most 2^31 - 1). */
 typedef enum GufoSafetensorsReason {
   /* The file is shorter than the length prefix. */
   GUFO_SAFETENSORS_FILE = 1,
@@ -45,13 +45,15 @@ typedef enum GufoSafetensorsReason {
   /* "shape" or "data_offsets" is missing or not an array, the shape has
      more than 5 dimensions or the offsets are not two. */
   GUFO_SAFETENSORS_LAYOUT = 8,
-  /* A dimension is not an integer from 1 to 2^31 - 1, or the shape holds
-     more bytes than the payload. */
+  /* A dimension is not an integer from 0 to 2^31 - 1, the shape holds more
+     bytes than the payload, or, without elements, its dimensions multiplied
+     in order overflow 64 bits before the first 0. */
   GUFO_SAFETENSORS_DIMENSION = 9,
   /* An offset is not an integer, or the offsets do not span exactly the
      tensor's bytes within the payload. */
   GUFO_SAFETENSORS_EXTENT = 10,
-  /* Two tensors share bytes. */
+  /* Two tensors share bytes, or a tensor without elements lies inside
+     another's bytes. */
   GUFO_SAFETENSORS_OVERLAP = 11,
   /* Payload bytes before a tensor belong to none. */
   GUFO_SAFETENSORS_GAP = 12,
@@ -110,7 +112,9 @@ typedef struct GufoSafetensorsMetadata {
 } GufoSafetensorsMetadata;
 
 /* One tensor: its shape holds rank dimensions, valid during the callback
-   only; begin and end are offsets in the payload. */
+   only; begin and end are offsets in the payload. A tensor without elements
+   has begin == end between the others or at either end of the payload and
+   takes no part in the tiling. */
 typedef struct GufoSafetensorsTensor {
   GufoSafetensorsSlice name;
   GufoSafetensorsDtype dtype;

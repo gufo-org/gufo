@@ -289,6 +289,9 @@ void Weights::Load(const std::filesystem::path& path,
         entry.dtype != safetensors::Dtype::kF32)
       throw std::runtime_error("unsupported Qwen-Image weight dtype " +
                                std::string(safetensors::Name(entry.dtype)));
+    if (entry.begin == entry.end)
+      throw std::runtime_error(path.string() + ": " + name +
+                               ": tensor has no elements");
     Weight weight;
     weight.bf16 = entry.dtype == safetensors::Dtype::kBF16;
     // The reader bounds each dimension by the int range.

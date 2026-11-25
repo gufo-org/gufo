@@ -22,11 +22,14 @@ The reader accepts the safetensors 0.8 format within Gufo's limits, the
 strictest of the loaders it replaced. A header is accepted when its length
 is 1 byte to 32 MiB, it is a JSON object, `__metadata__` (if present and not
 null) maps strings to strings, every other member names a type of the
-format, a shape of at most 5 dimensions from 1 to 2^31 - 1 and two offsets,
-all plain integers, and the tensors tile the payload exactly. So unlike the
-format, it rejects headers above 32 MiB, headers without tensors, tensors
-without elements, more than 5 dimensions and dimensions above 2^31 - 1. The
-reader does not know which types a loader supports.
+format, a shape of at most 5 dimensions from 0 to 2^31 - 1 and two offsets,
+all plain integers, and the tensors with elements tile the payload exactly.
+So unlike the format, it rejects headers above 32 MiB, headers without
+tensors, more than 5 dimensions and dimensions above 2^31 - 1. A tensor
+without elements has equal offsets between the other tensors or at either
+end of the payload, and its dimensions multiplied in order fit 64 bits up to
+the first 0, as in safetensors 0.8. The reader does not know which types a
+loader supports or whether it can use a tensor without elements.
 
 Linking: executables get it through `gufo_ext_runtime`, which now links
 `gufo_safetensors`; extension modules resolve it from the Gufo executable.
