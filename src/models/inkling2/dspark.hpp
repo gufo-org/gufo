@@ -71,7 +71,7 @@ public:
               int n);
   /// Inject for several sessions' rows (kMaxRows in all) at once: every
   /// context weight is read once for all of them.
-  static constexpr int kMaxRows = 8;
+  static constexpr int kMaxRows = 16;
   struct Rows {
     State* st = nullptr;
     const float* feats = nullptr;  // [n][4][2304]

@@ -63,6 +63,8 @@ struct Drafter::Impl {
   void* head = nullptr;
   int* head_ids = nullptr;
   _Float16 *h16, *o16, *a16, *mix16;
+  void* qa = nullptr;
+  float* qs = nullptr;
   float* ikv;  // injection K | V [n][2048]
   int *d_anchor, *d_pos, *d_prev, *d_tokens;
   // pinned host staging: [anchor, pos] in, [tokens 8 | confidences 8] out
@@ -263,6 +265,8 @@ std::unique_ptr<Drafter> Drafter::Open(const std::string& path,
     I.g = I.Alloc<float>(S * B * 9216);
     I.u = I.Alloc<float>(S * B * 9216);
     I.a16 = I.Alloc<_Float16>(S * B * 9216);
+    I.qa = I.Alloc<char>(static_cast<std::size_t>(S) * B * 9216);
+    I.qs = I.Alloc<float>(static_cast<std::size_t>(S) * B * (9216 / 32));
     I.logits = I.Alloc<float>(static_cast<std::size_t>(S) * Impl::kHeadRows);
     I.state = I.Alloc<float>(S * 256);
     I.joint = I.Alloc<float>(S * 1024);
@@ -499,8 +503,7 @@ void Drafter::InjectRows(hipStream_t s, std::span<const Rows> rows) {
     return;
   }
   // mix of each request's rows into rows [off, off + n) of the step;
-  // F16 layers 8 rows apart, the GEMV operand
-  constexpr int B = dsp::kBlock;
+  // F16 layers `m` rows apart, the GEMV operand
   int off = 0;
   for (const auto& r : rows) {
     if (r.n <= 0)
@@ -514,20 +517,20 @@ void Drafter::InjectRows(hipStream_t s, std::span<const Rows> rows) {
     ma.out = I.mix + static_cast<std::size_t>(off) * 4 * kE;
     ma.out16 = I.mix16 + static_cast<std::size_t>(off) * kE;
     ma.n = r.n;
-    ma.ld16 = B;
+    ma.ld16 = m;
     ma.eps = I.eps;
     dsp::Mix(s, ma);
     off += r.n;
   }
   float* kraw = I.ikv;
-  float* vraw = I.ikv + static_cast<std::size_t>(B) * 1024;
+  float* vraw = I.ikv + static_cast<std::size_t>(m) * 1024;
   for (int l = 0; l < 3; ++l) {
-    const _Float16* a = I.mix16 + static_cast<std::size_t>(l) * B * kE;
+    const _Float16* a = I.mix16 + static_cast<std::size_t>(l) * m * kE;
     {
       const void* w[2] = {I.layer[l].wk_ctx, I.layer[l].wv_ctx};
-      const int m[2] = {1024, 1024};
+      const int mm[2] = {1024, 1024};
       float* y[2] = {kraw, vraw};
-      dsp::Gemv8N(s, 2, w, m, kE, a, y);
+      dsp::Gemv8N(s, 2, w, mm, kE, a, y, m, I.qa, I.qs);
     }
     off = 0;
     for (const auto& r : rows) {
@@ -618,13 +621,14 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
                I.x + static_cast<std::size_t>(g) * B * kE,
                I.h + static_cast<std::size_t>(g) * B * kE,
                I.h16 + static_cast<std::size_t>(g) * B * kE, I.eps);
+  const int nrows = B * S;
   for (int l = 0; l < 3; ++l) {
     const auto& L = I.layer[l];
     {
       const void* w[3] = {L.wq, L.wk, L.wv};
       const int m[3] = {3072, 1024, 1024};
       float* y[3] = {I.q, I.k, I.v};
-      dsp::Gemv8N(s, 3, w, m, kE, I.h16, y, S);
+      dsp::Gemv8N(s, 3, w, m, kE, I.h16, y, nrows, I.qa, I.qs);
     }
     for (int g = 0; g < S; ++g) {
       State& st = *req[g].st;
@@ -644,23 +648,29 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
       aa.first = static_cast<int>(st.first);
       aa.ws = I.wsa;
       aa.out16 = I.o16 + static_cast<std::size_t>(g) * B * 3072;
+      const int pos_i = static_cast<int>(req[g].pos);
+      const int lo =
+          std::max(aa.first, aa.window ? std::max(0, pos_i - aa.window) : 0);
+      const int nkeys = std::max(0, pos_i - lo) + B;
+      aa.nsplits = std::clamp((nkeys + 127) / 128, 2, dsp::kAttnSplits);
       dsp::Attn(s, aa);
     }
-    dsp::Gemv8(s, L.wo, kE, 3072, I.o16, I.y, S);
-    dsp::AddNorm(s, I.x, I.y, L.ffn_norm, I.h, I.h16, B * S, I.eps);
+    dsp::Gemv8(s, L.wo, kE, 3072, I.o16, I.y, nrows, I.qa, I.qs);
+    dsp::AddNorm(s, I.x, I.y, L.ffn_norm, I.h, I.h16, nrows, I.eps);
     {
       const void* w[2] = {L.wg, L.wu};
       const int m[2] = {9216, 9216};
       float* y[2] = {I.g, I.u};
-      dsp::Gemv8N(s, 2, w, m, kE, I.h16, y, S);
+      dsp::Gemv8N(s, 2, w, m, kE, I.h16, y, nrows, I.qa, I.qs);
     }
-    dsp::Swiglu(s, I.g, I.u, I.a16, B * S * 9216);
-    dsp::Gemv8(s, L.wd, kE, 9216, I.a16, I.y, S);
+    dsp::Swiglu(s, I.g, I.u, I.a16, nrows * 9216);
+    dsp::Gemv8(s, L.wd, kE, 9216, I.a16, I.y, nrows, I.qa, I.qs);
     dsp::AddNorm(s, I.x, I.y, l < 2 ? I.layer[l + 1].attn_norm : I.out_norm,
-                 I.h, I.h16, B * S, I.eps);
+                 I.h, I.h16, nrows, I.eps);
   }
   // W_U h_i of every block row, one pass over the proposal head
-  dsp::Gemv8(s, I.head, static_cast<int>(R), kE, I.h16, I.base, S);
+  dsp::Gemv8(s, I.head, static_cast<int>(R), kE, I.h16, I.base, nrows, I.qa,
+             I.qs);
   Check(hipMemsetAsync(I.state, 0, static_cast<std::size_t>(S) * 256 * 4, s),
         "rnn state");
   std::array<bool, kMaxSessions> live{};
@@ -668,6 +678,8 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
     live[g] = req[g].n > 0;
   for (int i = 1; i <= nmax; ++i) {
     bool any_more = false;
+    dsp::LrBatch lrb{};
+    lrb.count = 0;
     for (int g = 0; g < S; ++g) {
       if (!live[g])
         continue;
@@ -683,11 +695,19 @@ void Drafter::ProposeBatch(hipStream_t s, std::span<Request> req) {
       ma.prev = I.d_prev + g;
       ma.row = i;
       dsp::MarkovStep(s, ma);
+      lrb.base[lrb.count] = I.base + (static_cast<std::size_t>(g) * B + i) * R;
+      lrb.lat[lrb.count] = ma.joint + 3 * dsp::kRank;
+      lrb.out[lrb.count] = I.logits + static_cast<std::size_t>(g) * R;
+      ++lrb.count;
+    }
+    if (lrb.count > 0)
+      dsp::LrLogits8Batch(s, I.pt, I.ps, I.cb, lrb, static_cast<int>(R));
+    for (int g = 0; g < S; ++g) {
+      if (!live[g])
+        continue;
+      Request& rq = req[g];
       float* logits = I.logits + static_cast<std::size_t>(g) * R;
       float* ws = I.ws + g * (3 * 128 + 1);
-      dsp::LrLogits8(s, I.pt, I.ps, I.cb,
-                     I.base + (static_cast<std::size_t>(g) * B + i) * R,
-                     ma.joint + 3 * dsp::kRank, logits, static_cast<int>(R));
       if (rq.coupled != nullptr)
         dsp::CoupledSample(
             s, logits, static_cast<int>(R), I.head_ids, I.target.softcap,
