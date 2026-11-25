@@ -567,18 +567,25 @@ int main(int argc, char** argv) {
   }
 
   // ---- 4. in-pass prefill checkpoints ----
-  // Single Forward call over 3,000 tokens (> one 2048-token ubatch, wrapping
-  // the 1024-token SWA window) capturing multiple interior + ubatch-end
-  // boundaries in place. Restoring each checkpoint must yield bit-identical
-  // logits, continuations, and (with --dspark) draft proposals to stopping
-  // prefill at that boundary.
-  {
-    const std::size_t ip_len = std::min<std::size_t>(n, 3000);
-    const std::span<const std::int32_t> ip_prompt(ids.data(), ip_len);
-    const std::vector<std::size_t> bounds = {700, 1500, 2048, 2600};
-    const std::vector<i2::Block> blocks = {i2::Block::kIdle,
-                                           i2::Block::kAfterHeader,
-                                           i2::Block::kText, i2::Block::kIdle};
+  // Single Forward call over 5,000 tokens (three 2048-token ubatches; the
+  // pass writes more rows than the 3,072-row SWA ring holds, so it wraps)
+  // capturing interior and ubatch-end boundaries in place, the last one after
+  // the wrap. Restoring each checkpoint must yield bit-identical logits,
+  // continuations, and (with --dspark) draft proposals to stopping prefill at
+  // that boundary.
+  constexpr std::size_t kInPassLen = 5000;
+  if (n < kInPassLen) {
+    std::fprintf(stderr, "SKIP in-pass checkpoints: needs --n %zu\n",
+                 kInPassLen);
+  } else {
+    const std::span<const std::int32_t> ip_prompt(ids.data(), kInPassLen);
+    const std::size_t ip_len = ip_prompt.size();
+    const std::vector<std::size_t> bounds = {700, 1500, 2048, 2600, 4096, 4200};
+    const std::vector<i2::Block> blocks = {
+        i2::Block::kIdle, i2::Block::kAfterHeader, i2::Block::kText,
+        i2::Block::kIdle, i2::Block::kText,        i2::Block::kIdle};
+    REQUIRE(ip_len > eng.ring_rows() && bounds.back() > eng.ring_rows(),
+            "in-pass test no longer wraps the %u-row ring", eng.ring_rows());
     for (const std::size_t b : bounds)
       REQUIRE(eng.CanCaptureInPass(0, ip_len, b),
               "CanCaptureInPass rejected %zu", b);

@@ -4780,18 +4780,25 @@ __global__ void __launch_bounds__(256) k_ls_pick(LinearSampleArgs a) {
     for (int b = 0; b < kLsBlocks; ++b)
       z += ws[kLsBlocks + b];
     const double target = a.u[r] * z;
-    double run = 0.0;
-    int c = kLsBlocks - 1;
+    // Rounding can leave the target at or past the last running sum: pick
+    // the last chunk holding any allowed token then, never an empty one.
+    double run = 0.0, run_last = 0.0;
+    int c = -1, last = kLsBlocks - 1;
     for (int b = 0; b < kLsBlocks; ++b) {
-      const double nxt = run + ws[kLsBlocks + b];
+      const double w = ws[kLsBlocks + b];
+      const double nxt = run + w;
+      if (w > 0.0) {
+        last = b;
+        run_last = run;
+      }
       if (target < nxt) {
         c = b;
         break;
       }
       run = nxt;
     }
-    chunk = c;
-    before = run;
+    chunk = c >= 0 ? c : last;
+    before = c >= 0 ? run : run_last;
     total = z;
   }
   __syncthreads();
@@ -4811,23 +4818,34 @@ __global__ void __launch_bounds__(256) k_ls_pick(LinearSampleArgs a) {
   if (threadIdx.x == 0) {
     const double target = a.u[r] * total;
     double run = before;
-    int tok = hi - 1;
+    // The selected slice is the one whose sum crosses the target, else (when
+    // rounding leaves the target past every sum) the last non-empty slice;
+    // within it the crossing token, else its last allowed token. Every
+    // fallback is an allowed token.
+    int sel = -1, last = -1;
     for (int th = 0; th < 256; ++th) {
+      if (part[th] > 0.0)
+        last = th;
       if (target < run + part[th]) {
-        const int b0 = lo + th * sl, b1 = min(hi, b0 + sl);
-        for (int i = b0; i < b1; ++i) {
-          const float y = x[i];
-          if (isfinite(y) && static_cast<double>(y) >= thr) {
-            run += exp((static_cast<double>(y) - m) * inv_t);
-            if (target < run) {
-              tok = i;
-              break;
-            }
-          }
-        }
+        sel = th;
         break;
       }
       run += part[th];
+    }
+    if (sel < 0)
+      sel = last;
+    int tok = hi - 1;  // only when the row allows no token at all
+    if (sel >= 0) {
+      const int b0 = lo + sel * sl, b1 = min(hi, b0 + sl);
+      for (int i = b0; i < b1; ++i) {
+        const float y = x[i];
+        if (isfinite(y) && static_cast<double>(y) >= thr) {
+          tok = i;
+          run += exp((static_cast<double>(y) - m) * inv_t);
+          if (target < run)
+            break;
+        }
+      }
     }
     a.out[r] = tok;
   }

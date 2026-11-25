@@ -1073,65 +1073,13 @@ public:
     lane_pool_.Run(n, f);
   }
 
-  /// Exact bounded proposal distribution q for stochastic p/q rejection
-  /// sampling with residual correction (mirrors deepseek_v4_flash's bridge).
-  struct StochasticProposal {
-    std::array<sampling::TokenId, Drafter::Shortlist::kSize> ids{};
-    std::array<float, Drafter::Shortlist::kSize> probabilities{};
-    sampling::TokenId token{};
-    float probability{};
-    std::size_t size{};
-  };
-
-  static std::int32_t PickStochastic(sampling::SamplerState& rng,
-                                     const Drafter::Shortlist& sl,
-                                     StochasticProposal& prop) {
-    const auto dist = sampling::BuildDistribution(
-        sl.logits, {.temperature = rng.config().temperature});
-    prop = {};
-    // Concentrated proposals do better as a point mass (retains fast AR
-    // sampling without materializing dense target p); diffuse proposals use
-    // exact 24-bit fixed-point q for p/q acceptance + residual correction.
-    if (dist.entries().front().value >= 0.7) {
-      const auto id = sl.ids[dist.best_token()];
-      prop.size = 1;
-      prop.ids[0] = prop.token = static_cast<sampling::TokenId>(id);
-      prop.probabilities[0] = prop.probability = 1.F;
-      return id;
-    }
-    constexpr std::uint32_t kUnits = 1U << 24;
-    std::array<std::uint32_t, Drafter::Shortlist::kSize> masses{};
-    std::uint32_t total = 0;
-    for (const auto& entry : dist.entries()) {
-      prop.ids[prop.size] = static_cast<sampling::TokenId>(sl.ids[entry.token]);
-      masses[prop.size] =
-          static_cast<std::uint32_t>(std::floor(entry.value * kUnits));
-      total += masses[prop.size++];
-    }
-    masses[0] += kUnits - total;
-    const auto draw = static_cast<std::uint32_t>(rng.Uniform() * kUnits);
-    std::uint32_t cumulative = 0;
-    for (std::size_t i = 0; i < prop.size; ++i) {
-      prop.probabilities[i] = static_cast<float>(masses[i]) / kUnits;
-      cumulative += masses[i];
-      if (prop.probability == 0 && draw < cumulative) {
-        prop.token = prop.ids[i];
-        prop.probability = prop.probabilities[i];
-      }
-    }
-    return static_cast<std::int32_t>(prop.token);
-  }
-
   /// How a request's verified rows are selected and its drafts proposed.
   /// Plain greedy requests take each row's argmax from the device (the token
   /// Select would pick) and copy only the kept row's logits. Requests that
   /// sample with temperature only get coupled proposals: the drafter draws
   /// each with the uniform the request's sampler will use for that row.
-  /// Filtered sampled requests (top_p < 1 or bounded top_k) get exact p/q
-  /// rejection sampling with residual correction.
   struct RowMode {
-    bool greedy = false, coupled = false, stochastic = false,
-         gpu_linear = false;
+    bool greedy = false, coupled = false, gpu_linear = false;
     Drafter::Coupled cp;
   };
   [[nodiscard]] RowMode ModeOf(const Inkling2State& st,
@@ -1141,8 +1089,10 @@ public:
     // Device argmax fast path for all greedy requests without penalties or
     // logprobs; constrained / budget_closed / call_required rows lazily read
     // logits only if the argmax is forbidden.
-    m.greedy = !cfg.uses_random_sampling() && !cfg.penalties_enabled() &&
-               !cfg.logprobs;
+    // (temperature 0 only: CanSelectArgmax refuses a top_k = 1 request with a
+    // temperature, which would read every row back on its own)
+    m.greedy =
+        cfg.temperature == 0.0F && !cfg.penalties_enabled() && !cfg.logprobs;
     m.coupled = !m.greedy && cfg.temperature > 0 && !cfg.constraint &&
                 !working.ForcedToken() && cfg.top_k == 0 && cfg.top_p == 1 &&
                 !(cfg.min_p > 0 && cfg.min_keep > 1);
@@ -1150,9 +1100,6 @@ public:
                    !cfg.reasoning_budget && !cfg.penalties_enabled() &&
                    cfg.min_p == 0.0F && !cfg.logprobs && !st.budget_closed &&
                    !st.call_required;
-    m.stochastic = !m.greedy && !m.coupled && cfg.uses_random_sampling() &&
-                   !working.ForcedToken() &&
-                   (cfg.top_p < 1.0F || (cfg.top_k > 0 && cfg.top_k <= 256));
     if (m.coupled) {
       m.cp.temperature = cfg.temperature;
       m.cp.min_p = cfg.min_p;
@@ -1273,7 +1220,6 @@ public:
                       std::size_t pos, int width, const std::int32_t* drafts,
                       std::span<const float> out, const std::int32_t* amax,
                       bool greedy, std::size_t row0 = 0,
-                      const StochasticProposal* proposals = nullptr,
                       const std::int32_t* gpu_sampled = nullptr,
                       const std::uint64_t* gpu_draws = nullptr) const {
     const auto& cfg = working.config();
@@ -1285,11 +1231,11 @@ public:
     // host sampler runs on all rows at once; tokens, draws and the published
     // RNG state are those of the rows one after another.
     const bool parallel =
-        !greedy && gpu_sampled == nullptr && proposals == nullptr &&
-        width > 0 && cfg.temperature >= 0.1F && !cfg.constraint &&
-        !working.ForcedToken() && !cfg.reasoning_budget &&
-        !cfg.penalties_enabled() && cfg.top_k == 0 && cfg.top_p == 1 &&
-        cfg.min_p == 0 && !st.budget_closed && !st.call_required &&
+        !greedy && gpu_sampled == nullptr && width > 0 &&
+        cfg.temperature >= 0.1F && !cfg.constraint && !working.ForcedToken() &&
+        !cfg.reasoning_budget && !cfg.penalties_enabled() && cfg.top_k == 0 &&
+        cfg.top_p == 1 && cfg.min_p == 0 && !st.budget_closed &&
+        !st.call_required &&
         pos + static_cast<std::size_t>(width) + 1 < max_context_;
     std::array<std::uint64_t, Engine::kMaxVerifyRows + 1> draws{};
     std::array<g::TextRunnerToken, Engine::kMaxVerifyRows> sampled{};
@@ -1317,8 +1263,6 @@ public:
     for (int j = 0; j <= width; ++j) {
       const std::size_t at = pos + static_cast<std::size_t>(j) + 1;
       g::TextDecodeSelection sel;
-      bool stoch_accepted = false;
-      bool used_stoch = false;
       if (gpu_sampled != nullptr && at < max_context_) {
         const auto tk = static_cast<g::TextRunnerToken>(gpu_sampled[j]);
         const bool stop = st.stop_at_eos() && tok_->IsStop(tk);
@@ -1326,27 +1270,6 @@ public:
                .token = tk,
                .piece = stop ? std::string{} : Piece(st, tk)};
         used = j + 1;
-      } else if (proposals != nullptr && j < width && proposals[j].size > 1 &&
-                 !working.ForcedToken() && at < max_context_) {
-        used_stoch = true;
-        const auto row = out.subspan(static_cast<std::size_t>(j) * V, V);
-        std::vector<float> masked;
-        const std::span<const float> logits = ApplyRunnerMasks(st, row, masked);
-        const auto& prop = proposals[j];
-        const auto target = working.Distribution(logits);
-        stoch_accepted = working.Uniform() * prop.probability <
-                         target.probability(prop.token);
-        const auto tk = static_cast<g::TextRunnerToken>(
-            stoch_accepted ? prop.token
-                           : target.SampleResidual(
-                                 std::span(prop.ids).first(prop.size),
-                                 std::span(prop.probabilities).first(prop.size),
-                                 working.mutable_rng_state()));
-        const bool stop = st.stop_at_eos() && tok_->IsStop(tk);
-        sel = {.stop = stop,
-               .token = tk,
-               .piece = stop ? std::string{} : Piece(st, tk),
-               .logprobs = sampling::CollectLogprobs(row, tk, cfg.logprobs)};
       } else if (parallel) {
         const auto tk = sampled[j];
         const auto row = out.subspan(static_cast<std::size_t>(j) * V, V);
@@ -1391,11 +1314,8 @@ public:
         step.terminal_logprobs = std::move(sel.logprobs);
         break;
       }
-      const bool match =
-          used_stoch
-              ? stoch_accepted
-              : (sel.token == static_cast<g::TextRunnerToken>(drafts[j]));
-      if (j < width && budget > 0 && match) {
+      if (j < width && budget > 0 &&
+          sel.token == static_cast<g::TextRunnerToken>(drafts[j])) {
         working.Accept(sel.token);
         CommitToken(st, sel.token);
         step.selections.push_back(std::move(sel));
@@ -1495,27 +1415,19 @@ public:
     const bool copied = copy_width > 0;
     DsparkCalibration& cal = copy_only && sampled ? cal_copy_sampled_
                              : mode.coupled       ? cal_coupled_
-                             : mode.stochastic    ? cal_stochastic_
                                                   : cal_;
-    std::array<StochasticProposal, Drafter::kMaxDraft> stoch_props{};
     if (!copied && budget > 0 && engine_->DraftReady(ss) &&
         st.backoff.Draft()) {
       n = static_cast<int>(std::min<std::size_t>(
           {static_cast<std::size_t>(max_draft_), budget, rows_room}));
-      if (n > 0) {  // stop once the width policy would not verify another
-        Drafter::PickFromShortlist pick;
-        if (mode.stochastic)
-          pick = [&](int step_idx, const Drafter::Shortlist& sl) {
-            return PickStochastic(working, sl, stoch_props[step_idx]);
-          };
+      if (n > 0)  // stop once the width policy would not verify another
         n = engine_->Propose(
             ss, static_cast<std::int32_t>(a), n, drafts, conf,
             [&](int i, const float* p) {
               const std::lock_guard lock(dsp_mutex_);
               return ChooseDsparkWidth(p, i, cal, costs_) == i;
             },
-            mode.coupled ? &mode.cp : nullptr, pick);
-      }
+            mode.coupled ? &mode.cp : nullptr);
     }
     const auto t1 = Clock::now();
     int width = 0;
@@ -1602,11 +1514,10 @@ public:
                       use_gpu_linear ? gpu_samp : nullptr);
     }
     const auto t2 = Clock::now();
-    const std::size_t keep = Resolve(
-        st, working, step, budget, pos, width, drafts, out, amax, greedy, 0,
-        (!copied && mode.stochastic && n > 0) ? stoch_props.data() : nullptr,
-        use_gpu_linear ? gpu_samp : nullptr,
-        use_gpu_linear ? gpu_draws.data() : nullptr);
+    const std::size_t keep =
+        Resolve(st, working, step, budget, pos, width, drafts, out, amax,
+                greedy, 0, use_gpu_linear ? gpu_samp : nullptr,
+                use_gpu_linear ? gpu_draws.data() : nullptr);
     if (width > 0)
       engine_->CommitVerify(ss, keep, {});  // lazy: keep logits on device
     sampler.CopyDrawStateFrom(working);
@@ -1690,16 +1601,14 @@ public:
       int n = 0, width = 0;
       std::int32_t drafts[Drafter::kMaxDraft] = {};
       float conf[Drafter::kMaxDraft] = {};
-      std::array<StochasticProposal, Drafter::kMaxDraft> stoch_props{};
       bool copied = false, sampled = false;  // proposals copied (prompt lookup)
       std::size_t copy_start = 0;
     };
     std::vector<Lane> lanes;
     const auto cal_of = [this](const Lane& l) -> DsparkCalibration* {
-      return l.copied            ? (l.sampled ? &cal_copy_sampled_ : &cal_copy_)
-             : l.mode.coupled    ? &cal_coupled_
-             : l.mode.stochastic ? &cal_stochastic_
-                                 : &cal_;
+      return l.copied         ? (l.sampled ? &cal_copy_sampled_ : &cal_copy_)
+             : l.mode.coupled ? &cal_coupled_
+                              : &cal_;
     };
     for (std::size_t i = 0; i < decodes.size(); ++i) {
       working.emplace_back(decodes[i].sampler.get());
@@ -1761,17 +1670,7 @@ public:
           if (!draft || !engine_->DraftReady(*l.ss))
             continue;
           l.n = limit;
-          const DsparkCalibration* cal = l.mode.coupled      ? &cal_coupled_
-                                         : l.mode.stochastic ? &cal_stochastic_
-                                                             : &cal_;
-          Drafter::PickFromShortlist pick;
-          if (l.mode.stochastic) {
-            Lane* lp = &l;
-            sampling::SamplerState* wp = &working[l.i];
-            pick = [lp, wp](int step_idx, const Drafter::Shortlist& sl) {
-              return PickStochastic(*wp, sl, lp->stoch_props[step_idx]);
-            };
-          }
+          const DsparkCalibration* cal = l.mode.coupled ? &cal_coupled_ : &cal_;
           reqs.push_back({.session = l.ss,
                           .anchor = l.anchor,
                           .n = l.n,
@@ -1794,8 +1693,7 @@ public:
                                         B + i - 1, DsparkCosts::kMaxRows));
                                 return sv * per_token > extra;
                               },
-                          .coupled = l.mode.coupled ? &l.mode.cp : nullptr,
-                          .pick = std::move(pick)});
+                          .coupled = l.mode.coupled ? &l.mode.cp : nullptr});
           owners.push_back(&l);
         } catch (...) {
           steps[l.i].failure = std::current_exception();
@@ -2042,9 +1940,6 @@ public:
             keeps[k] = Resolve(*l.st, working[l.i], steps[l.i], l.budget, l.pos,
                                l.width, l.drafts, rows_of(k), amax + first[k],
                                l.mode.greedy, first[k],
-                               (!l.copied && l.mode.stochastic && l.n > 0)
-                                   ? l.stoch_props.data()
-                                   : nullptr,
                                use_gpu_lin[k] ? (gpu_samp + first[k]) : nullptr,
                                use_gpu_lin[k] ? lane_draws[k].data() : nullptr);
           } catch (...) {
@@ -2204,7 +2099,7 @@ private:
       t_invoke_{};
   // DSpark width policy, shared by the requests
   mutable std::mutex dsp_mutex_;
-  mutable DsparkCalibration cal_, cal_coupled_, cal_stochastic_;
+  mutable DsparkCalibration cal_, cal_coupled_;
   // copied proposals (prompt lookup) of greedy and of sampled requests
   mutable DsparkCalibration cal_copy_, cal_copy_sampled_;
   mutable double plain_greedy_ms_ = 20.2, plain_sampled_ms_ = 20.8;

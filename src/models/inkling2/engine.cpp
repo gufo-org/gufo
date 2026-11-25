@@ -211,6 +211,15 @@ struct Engine::Impl {
     std::vector<float> logits;
   };
   std::vector<UbatchCheckpoint>* ubatch_cps = nullptr;
+  // Interior checkpoint state for Engine::kMaxPassCheckpoints boundaries,
+  // allocated once (convolution histories at Init, drafter features at
+  // AttachDrafter). A prefill run inside another's yield finds it busy and
+  // allocates its own.
+  static constexpr std::size_t kCpConvFloats =
+      static_cast<std::size_t>(48) * kConvChannels * 3;
+  float* cp_conv = nullptr;
+  float* cp_draft_f = nullptr;
+  bool cp_busy = false;
 
   void CaptureFeature(hipStream_t st, const float* src, int rows, int f,
                       float* dst) {
@@ -556,6 +565,7 @@ struct Engine::Impl {
     U = static_cast<int>(e->ubatch_);
     const std::size_t u = static_cast<std::size_t>(U);
     cur = NewBuf(u * kEmbd);
+    cp_conv = NewBuf(Engine::kMaxPassCheckpoints * kCpConvFloats);
     prelude = NewBuf(u * kEmbd);
     bankout = NewBuf(u * kEmbd);
     for (auto& b : spill_buf)
@@ -2816,6 +2826,8 @@ bool Engine::AttachDrafter(const std::string& path, std::string* error) {
     if (I.p_feat == nullptr)
       I.p_feat =
           I.NewBuf(static_cast<std::size_t>(ubatch_) * Drafter::kFeatureFloats);
+    if (I.cp_draft_f == nullptr)
+      I.cp_draft_f = I.NewBuf(kMaxPassCheckpoints * kEmbd);
   }
   // the decode graphs gain the feature copies: capture them again
   I.DropGraphs();
@@ -2834,8 +2846,7 @@ bool Engine::DraftReady(const Session& s) const {
 
 int Engine::Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
                     float* confidence, const Drafter::More& more,
-                    const Drafter::Coupled* coupled,
-                    const Drafter::PickFromShortlist& pick) {
+                    const Drafter::Coupled* coupled) {
   const std::lock_guard lock(mutex_);
   if (!DraftReady(s))
     throw std::runtime_error("inkling2: no draft context at this position");
@@ -2844,7 +2855,7 @@ int Engine::Propose(Session& s, std::int32_t anchor, int n, std::int32_t* out,
     throw std::runtime_error("inkling2: token id out of range");
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
   return impl_->dsp->Propose(impl_->ds, s.draft_, anchor, s.pos_, n, out,
-                             confidence, more, coupled, pick);
+                             confidence, more, coupled);
 }
 
 void Engine::ProposeBatch(std::span<ProposeRequest> requests) {
@@ -2869,8 +2880,7 @@ void Engine::ProposeBatch(std::span<ProposeRequest> requests) {
             .out = q.out,
             .confidence = q.confidence,
             .more = q.more ? &q.more : nullptr,
-            .coupled = q.coupled,
-            .pick = q.pick ? &q.pick : nullptr};
+            .coupled = q.coupled};
   }
   const std::shared_lock<std::shared_mutex> gate(CaptureGate());
   impl_->dsp->ProposeBatch(
@@ -2999,11 +3009,15 @@ void Engine::Forward(Session& s, std::span<const std::int32_t> tokens,
         ++n_interior;
       ++next_cp;
     }
-    struct CpDevScope {
+    struct CpDevScope {  // the interior checkpoints' device state
+      Impl* impl = nullptr;
+      bool shared = false;  // impl's preallocated state, else owned below
       float* conv = nullptr;
       float* draft_f = nullptr;
       ~CpDevScope() {
-        if (conv != nullptr || draft_f != nullptr) {
+        if (shared) {
+          impl->cp_busy = false;
+        } else if (conv != nullptr || draft_f != nullptr) {
           const std::shared_lock<std::shared_mutex> gate(CaptureGate());
           if (conv != nullptr)
             (void)hipFree(conv);
@@ -3011,24 +3025,32 @@ void Engine::Forward(Session& s, std::span<const std::int32_t> tokens,
             (void)hipFree(draft_f);
         }
       }
-    } cp_dev;
-    constexpr std::size_t kConvFloats =
-        static_cast<std::size_t>(48) * kConvChannels * 3;
+    } cp_dev{.impl = impl_.get()};
+    constexpr std::size_t kConvFloats = Impl::kCpConvFloats;
     if (n_interior > 0) {
-      const std::shared_lock<std::shared_mutex> gate(CaptureGate());
-      Check(hipMalloc(reinterpret_cast<void**>(&cp_dev.conv),
-                      n_interior * kConvFloats * sizeof(float)),
-            "cp conv alloc");
-      if (impl_->dsp)
-        Check(hipMalloc(reinterpret_cast<void**>(&cp_dev.draft_f),
-                        n_interior * kEmbd * sizeof(float)),
-              "cp draft_f alloc");
+      float* conv = impl_->cp_conv;
+      float* draft_f = impl_->dsp ? impl_->cp_draft_f : nullptr;
+      if (impl_->cp_busy) {  // a prefill inside another's yield
+        const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+        Check(hipMalloc(reinterpret_cast<void**>(&cp_dev.conv),
+                        n_interior * kConvFloats * sizeof(float)),
+              "cp conv alloc");
+        if (impl_->dsp)
+          Check(hipMalloc(reinterpret_cast<void**>(&cp_dev.draft_f),
+                          n_interior * kEmbd * sizeof(float)),
+                "cp draft_f alloc");
+        conv = cp_dev.conv;
+        draft_f = cp_dev.draft_f;
+      } else {
+        impl_->cp_busy = true;
+        cp_dev.shared = true;
+      }
       std::size_t slot = 0;
       for (auto& cp : u_cps) {
         if (cp.position < u_end) {
-          cp.conv = cp_dev.conv + slot * kConvFloats;
-          if (cp_dev.draft_f != nullptr)
-            cp.draft_f = cp_dev.draft_f + slot * kEmbd;
+          cp.conv = conv + slot * kConvFloats;
+          if (draft_f != nullptr)
+            cp.draft_f = draft_f + slot * kEmbd;
           ++slot;
         }
       }

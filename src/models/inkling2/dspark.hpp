@@ -100,23 +100,12 @@ public:
     float temperature = 1.f, min_p = 0.f;
     float u[kMaxDraft] = {};
   };
-  /// Top-K soft-capped proposal shortlist for exact p/q rejection sampling.
-  struct Shortlist {
-    static constexpr int kSize = 16;
-    std::int32_t ids[kSize] = {};
-    float logits[kSize] = {};
-    float confidence = 0.f;
-  };
-  /// Called after each Markov step (0-based) with the drafter's shortlist;
-  /// returns the drawn token id (fed back as the next step's previous token).
-  using PickFromShortlist = std::function<std::int32_t(int, const Shortlist&)>;
-  /// Up to `n` (<= kMaxDraft) proposals after `anchor` at `pos`, and
+  /// Up to `n` (<= kMaxDraft) greedy proposals after `anchor` at `pos`, and
   /// optionally each one's draft probability (the softmax maximum over the
   /// proposal head). Returns how many were drafted.
   int Propose(hipStream_t s, State& st, std::int32_t anchor, std::size_t pos,
               int n, std::int32_t* out, float* confidence = nullptr,
-              const More& more = {}, const Coupled* coupled = nullptr,
-              const PickFromShortlist& pick = {});
+              const More& more = {}, const Coupled* coupled = nullptr);
   /// Proposals of several sessions at once (up to kMaxSessions): each
   /// request's drafts are those a lone Propose gives, and every weight row is
   /// read once for all of them.
@@ -130,7 +119,6 @@ public:
     float* confidence = nullptr;
     const More* more = nullptr;
     const Coupled* coupled = nullptr;
-    const PickFromShortlist* pick = nullptr;
     int done = 0;  // out: drafts written
   };
   void ProposeBatch(hipStream_t s, std::span<Request> requests);
