@@ -145,9 +145,24 @@ void BoundedWait() {
 
 }  // namespace
 
+// The TLB flush runs once at the end of every Settle(), after the idle time.
+void TlbFlush() {
+  static std::atomic<int> flushes{0};
+  RemapBarrier::SetTlbFlush(+[]() noexcept { ++flushes; });
+  const int before = flushes.load();
+  RemapBarrier::Settle();
+  assert(flushes.load() == before + 1);
+  RemapBarrier::Settle();
+  assert(flushes.load() == before + 2);
+  RemapBarrier::SetTlbFlush(nullptr);
+  RemapBarrier::Settle();
+  assert(flushes.load() == before + 2);
+}
+
 int main() {
   Stamps();
   Drain();
+  TlbFlush();
   HoldsOthersBack();
   HoldAndRelease();
   BoundedWait();

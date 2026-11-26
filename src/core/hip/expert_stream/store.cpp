@@ -1400,11 +1400,21 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
   store->device_pages = DevicePagesAvailable(device);
   // A cache that lost pages maps new ones at the same addresses, which must
   // wait for the device's work (RemapBarrier), as Gufo's page pool does.
-  if (store->device_pages)
+  if (store->device_pages) {
     mem::RemapBarrier::SetDeviceDrain(+[]() noexcept {
       (void)hipDeviceSynchronize();
       (void)hipGetLastError();
     });
+    mem::RemapBarrier::SetTlbFlush(+[]() noexcept {
+      // 4 MiB reaches the driver (a 64 KiB block stays in the runtime's
+      // sub-allocator and flushes nothing): its map and unmap ioctls flush
+      // the process's TLB (gufo-org/gufo#1425).
+      void* block = nullptr;
+      if (hipMalloc(&block, std::size_t{4} << 20) == hipSuccess)
+        (void)hipFree(block);
+      (void)hipGetLastError();
+    });
+  }
   try {
     store->readers = std::make_unique<ReadPool>(store->read_buffers, device);
   } catch (const std::exception&) {

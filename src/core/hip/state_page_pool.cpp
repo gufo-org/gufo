@@ -146,6 +146,15 @@ PagePool::PagePool(int device, std::function<bool(std::uint64_t)> may_create,
     (void)hipDeviceSynchronize();
     (void)hipGetLastError();
   });
+  RemapBarrier::SetTlbFlush(+[]() noexcept {
+    // 4 MiB reaches the driver (a 64 KiB block stays in the runtime's
+    // sub-allocator and flushes nothing): its map and unmap ioctls flush
+    // the process's TLB (gufo-org/gufo#1425).
+    void* block = nullptr;
+    if (hipMalloc(&block, std::size_t{4} << 20) == hipSuccess)
+      (void)hipFree(block);
+    (void)hipGetLastError();
+  });
   access_.location = prop_.location;
   access_.flags = hipMemAccessFlagsProtReadWrite;
   thread_ = std::thread([this] { Run(); });

@@ -27,6 +27,7 @@ struct State {
   // Hold() nobody follows with a Settle() must not stop other threads.
   std::atomic<std::int64_t> gate_until{0};
   std::atomic<void (*)() noexcept> drain{nullptr};
+  std::atomic<void (*)() noexcept> tlb_flush{nullptr};
   std::atomic<std::uint64_t> settles{0}, unquiet{0}, micros{0};
   std::atomic<std::thread::id> settler{};
   // One Settle() at a time; `gate` wakes the threads Enter() held back.
@@ -149,6 +150,10 @@ void RemapBarrier::SetDeviceDrain(void (*drain)() noexcept) noexcept {
   Shared().drain.store(drain, std::memory_order_release);
 }
 
+void RemapBarrier::SetTlbFlush(void (*flush)() noexcept) noexcept {
+  Shared().tlb_flush.store(flush, std::memory_order_release);
+}
+
 RemapBarrier::Counts RemapBarrier::Stats() noexcept {
   const auto& s = Shared();
   return {s.settles.load(std::memory_order_relaxed),
@@ -196,6 +201,10 @@ void RemapBarrier::Settle() noexcept {
     if (quiet || Clock::now() >= deadline)
       break;
   }
+  // Another process's work keeps the old translations alive however long
+  // this one idles; the flush is what makes the remapped addresses clean.
+  if (const auto flush = s.tlb_flush.load(std::memory_order_acquire))
+    flush();
   s.settles.fetch_add(1, std::memory_order_relaxed);
   if (!quiet)
     s.unquiet.fetch_add(1, std::memory_order_relaxed);

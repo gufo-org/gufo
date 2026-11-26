@@ -76,6 +76,14 @@ public:
   /// HIP-free, like the rest of this library.
   static void SetDeviceDrain(void (*drain)() noexcept) noexcept;
 
+  /// The device backend installs how to flush this process's GPU TLB, run at
+  /// the end of every Settle(). Idle time alone does not drop a remapped
+  /// address's old translation while another process keeps the GPU busy
+  /// (amdgpu creates no TLB invalidation fence for CPU page-table updates
+  /// before Linux 7.4-rc3, gufo-org/gufo#1425); a KFD allocation and free
+  /// does. Never called during stream capture: Settle() drains the device.
+  static void SetTlbFlush(void (*flush)() noexcept) noexcept;
+
   /// Idle time that drops the cached translations: the largest time any
   /// remap needed was under 200 us (copy engine: 2 of 30 old at 100 us, 0 of
   /// 400 at 200 us).
