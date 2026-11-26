@@ -200,8 +200,11 @@ private:
 };
 // Replies "Hi" with three samples of speech; "call" asks for a tool and
 // "wait" runs until cancelled.
+// With `deleted`, it lists voices and deletes turns, counting them there;
+// without, it keeps the interface's defaults.
 class FakeVoice final : public VoiceConversation {
 public:
+  explicit FakeVoice(std::atomic<int>* deleted = nullptr) : deleted_(deleted) {}
   bool Configure(const Settings& settings, std::string*) override {
     settings_ = settings;
     return true;
@@ -227,13 +230,16 @@ public:
   }
   std::size_t truncated{0};
   std::vector<std::string> voices() const override {
+    if (!deleted_)
+      return {};
     return {"female", "male"};
   }
-  bool DeleteUserTurn(std::string*) override {
-    ++deleted;
+  bool DeleteUserTurn(std::string* error) override {
+    if (!deleted_)
+      return VoiceConversation::DeleteUserTurn(error);
+    ++*deleted_;
     return true;
   }
-  inline static std::atomic<int> deleted{0};
   bool AddUserText(std::string_view text, std::string*) override {
     last_ = text;
     return true;
@@ -263,6 +269,7 @@ public:
       reply->cancelled = callbacks.cancelled();
       return true;
     }
+    assert(!deleted_ || settings.voice == "female");
     const std::vector<float> speech{-.5F, 0, .5F};
     reply->text = "Hi";
     reply->audio_samples = speech.size();
@@ -271,6 +278,7 @@ public:
   }
 
 private:
+  std::atomic<int>* deleted_;
   Settings settings_;
   std::size_t audio_{0};
   std::string last_;
@@ -531,6 +539,20 @@ void RealtimeStreams() {
     client.Text(
         R"({"type":"session.update","session":{"audio":{"input":{"turn_detection":{"type":"semantic_vad"}}}}})");
     client.Event("error");
+    // Conversations without voices or deletion keep rejecting both.
+    client.Text(
+        R"({"type":"session.update","session":{"audio":{"output":{"voice":"female"}}}})");
+    assert(client.Event("error")["error"].member_str("message") ==
+           "audio.output.voice female is not available: this model speaks "
+           "its own voice");
+    client.Text(
+        R"({"type":"conversation.item.create","item":{"type":"message","role":"user","content":[{"type":"input_text","text":"x"}]}})");
+    const auto text_item =
+        client.Event("conversation.item.created")["item"].member_str("id");
+    client.Text(R"({"type":"conversation.item.delete","item_id":")" +
+                text_item + R"("})");
+    assert(client.Event("error")["error"].member_str("message") ==
+           "this conversation cannot delete items");
     // Server turn detection: speech commits itself and gets a reply.
     client.Text(
         R"({"type":"session.update","session":{"output_modalities":["audio"],"tools":[],"audio":{"input":{"turn_detection":{"type":"server_vad","silence_duration_ms":200}}}}})");
@@ -638,13 +660,16 @@ void RealtimeStreams() {
 // for each turn before the client asks for the reply, and deletion of turns
 // without one. The llama-swap playground asks for both output modalities.
 void OpenWebUiVoiceCall() {
-  std::atomic<int> turns{0};
+  std::atomic<int> turns{0}, deleted{0};
   auto asr = std::make_shared<AsrService>(AsrServiceOptions{
       .validate_model = false,
       .model_id = "voice",
       .runner =
           [&](const auto& request, const auto&, auto* result, auto* error) {
-            assert(request.wav.empty() && !request.pcm16k.empty());
+            // The turn from its prefix padding to the end of the silence
+            // that ends it, at 16 kHz.
+            assert(request.wav.empty() && request.pcm16k.size() >= 14400 &&
+                   request.pcm16k.size() <= 30400);
             assert(request.language == std::optional<std::string>("en"));
             if (turns++ > 0) {
               *error = "decoder failed";
@@ -654,8 +679,8 @@ void OpenWebUiVoiceCall() {
             return true;
           },
       .voice =
-          [](std::uint32_t, std::string*) {
-            return std::unique_ptr<VoiceConversation>(new FakeVoice);
+          [&](std::uint32_t, std::string*) {
+            return std::unique_ptr<VoiceConversation>(new FakeVoice(&deleted));
           }});
   HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, asr, {});
   std::string error;
@@ -714,7 +739,7 @@ void OpenWebUiVoiceCall() {
               R"("})");
   assert(client.Event("conversation.item.deleted").member_str("item_id") ==
          item);
-  assert(FakeVoice::deleted == 1);
+  assert(deleted == 1);
   // Voices are the conversation's; another model cannot transcribe.
   client.Text(
       R"({"type":"session.update","session":{"audio":{"output":{"voice":"robot"}}}})");

@@ -111,7 +111,8 @@ pub trait Host {
     fn send_event(&mut self, json: &str) -> bool;
     fn configure(&mut self, settings: &Settings) -> Result<(), String>;
     fn on_vad_settings(&mut self, vad: Option<VadSettings>);
-    fn append_audio(&mut self, pcm: &[u8]) -> Result<(), String>;
+    /// `record`: the host keeps the turn's audio for `transcribe_turn`.
+    fn append_audio(&mut self, pcm: &[u8], record: bool) -> Result<(), String>;
     fn commit_audio(&mut self) -> Result<bool, String>;
     fn clear_audio(&mut self) -> Result<(), String>;
     fn truncate_reply(&mut self, samples: usize) -> Result<(), String>;
@@ -119,7 +120,7 @@ pub trait Host {
     fn add_tool_outputs(&mut self, outputs: &[String]) -> Result<(), String>;
     /// Whether `name` names the served model (`audio.input.transcription.model`).
     fn serves_model(&mut self, name: &str) -> bool;
-    /// Transcribes the audio of the user turn committed last.
+    /// Transcribes the recorded audio of the user turn committed last.
     fn transcribe_turn(&mut self, transcription: &Transcription) -> Result<String, String>;
     /// Removes the latest user turn, which nothing has followed.
     fn delete_user_turn(&mut self) -> Result<(), String>;
@@ -184,6 +185,9 @@ struct ActiveResponse {
     transcript: String,
     reasoning: String,
     scratch: String,
+    /// The deletable user message the reply follows; deletable again when
+    /// the reply adds no item.
+    deletable: Option<(String, String)>,
 }
 
 struct State {
@@ -828,6 +832,9 @@ impl Session {
                 );
             }
         }
+        if active.item.is_empty() && outcome.calls.is_empty() {
+            state.deletable = active.deletable;
+        }
         let ev = self.shared.simple_event(
             "response.done",
             Some(("response", Value::Object(active.response))),
@@ -1077,7 +1084,7 @@ impl Session {
                         "only the latest item, a user message, can be deleted".to_string(),
                     ));
                 };
-                if item_id != latest {
+                if item_id.is_empty() || item_id != latest {
                     return Err(DispatchError::Protocol(
                         "only the latest item, a user message, can be deleted".to_string(),
                     ));
@@ -1160,6 +1167,15 @@ impl Session {
                     .ok_or_else(|| DispatchError::Protocol("item must be an object".to_string()))?;
                 let item_kind = member_str(item_obj, "type");
                 let mut echo = item_obj.clone();
+                if let Some(id) = item_obj.get("id")
+                    && !id
+                        .as_str()
+                        .is_some_and(|id| !id.is_empty() && id.len() <= MAX_NAME_BYTES)
+                {
+                    return Err(DispatchError::Protocol(
+                        "item.id must be a non-empty string of at most 64 bytes".to_string(),
+                    ));
+                }
                 if item_obj.get("id").is_none() {
                     set_member(&mut echo, "id", Value::String(self.shared.next_item_id()));
                 }
@@ -1231,7 +1247,9 @@ impl Session {
                     ));
                 }
                 if let Some(pcm) = spoken {
-                    let res = host.append_audio(&pcm).and_then(|()| host.commit_audio());
+                    let res = host
+                        .append_audio(&pcm, false)
+                        .and_then(|()| host.commit_audio());
                     match res {
                         Ok(true) => {}
                         Ok(false) => {
@@ -1300,7 +1318,8 @@ impl Session {
         if !audio_open {
             flush_outputs(state, host)?;
         }
-        host.append_audio(pcm).map_err(DispatchError::Protocol)?;
+        host.append_audio(pcm, state.transcription.is_some())
+            .map_err(DispatchError::Protocol)?;
         state.turn_samples += samples;
         Ok(())
     }
@@ -1459,7 +1478,7 @@ impl Session {
         state.responses += 1;
         let response_id = format!("resp_{}_{}", self.shared.id, state.responses);
         state.last_reply_item.clear();
-        state.deletable = None;
+        let deletable = state.deletable.take();
         let mut response = Object::new();
         push_member(&mut response, "id", Value::String(response_id.clone()));
         push_member(
@@ -1493,6 +1512,7 @@ impl Session {
             transcript: String::new(),
             reasoning: String::new(),
             scratch: String::new(),
+            deletable,
         });
     }
 }
@@ -1840,7 +1860,7 @@ fn parse_transcription(
     let obj = check_object_members(value, &["model", "language", "prompt"], "transcription")?;
     let mut transcription = Transcription::default();
     for (name, field) in obj.members() {
-        if is_null(field) && name != "model" {
+        if is_null(field) {
             continue;
         }
         let Some(text) = field.as_str() else {
@@ -2024,6 +2044,8 @@ mod tests {
         transcripts: Vec<Transcription>,
         transcript: Option<String>,
         deleted_turns: usize,
+        delete_fails: bool,
+        recorded_bytes: usize,
     }
 
     impl Host for FakeHost {
@@ -2041,8 +2063,11 @@ mod tests {
             self.vad_updates.push(vad);
         }
 
-        fn append_audio(&mut self, pcm: &[u8]) -> Result<(), String> {
+        fn append_audio(&mut self, pcm: &[u8], record: bool) -> Result<(), String> {
             self.audio_bytes += pcm.len();
+            if record {
+                self.recorded_bytes += pcm.len();
+            }
             Ok(())
         }
 
@@ -2086,6 +2111,9 @@ mod tests {
         }
 
         fn delete_user_turn(&mut self) -> Result<(), String> {
+            if self.delete_fails {
+                return Err("cannot delete".to_string());
+            }
             self.deleted_turns += 1;
             Ok(())
         }
@@ -2228,6 +2256,130 @@ mod tests {
         );
         assert_eq!(event_types(&host), vec!["error", "error"]);
         assert_eq!(host.deleted_turns, 1);
+        assert_eq!(host.recorded_bytes, 9600);
+    }
+
+    fn finish(session: &Session, ok: bool) {
+        let mut send = |_: &str| true;
+        session.response_start(&mut send).unwrap();
+        let outcome = ResponseOutcome {
+            ok,
+            cancelled: false,
+            incomplete: false,
+            input_tokens: 1,
+            output_tokens: 1,
+            calls: Vec::new(),
+            failure: if ok {
+                String::new()
+            } else {
+                "failed".to_string()
+            },
+        };
+        session.response_finish(&outcome, &mut send).unwrap();
+    }
+
+    fn commit_spoken_turn(session: &Session, host: &mut FakeHost) -> String {
+        host.events.clear();
+        session
+            .handle_client_event(append_event(4800).as_bytes(), false, host)
+            .unwrap();
+        session
+            .handle_client_event(br#"{"type":"input_audio_buffer.commit"}"#, true, host)
+            .unwrap();
+        let committed = parse_value(host.events[0].as_bytes(), Limits::NONE).unwrap();
+        member_str(committed.as_object().unwrap(), "item_id").to_string()
+    }
+
+    fn delete(session: &Session, host: &mut FakeHost, item: &str, audio_open: bool) -> String {
+        host.events.clear();
+        let event = format!(r#"{{"type":"conversation.item.delete","item_id":"{item}"}}"#);
+        session
+            .handle_client_event(event.as_bytes(), audio_open, host)
+            .unwrap();
+        event_type(host.events.last().unwrap())
+    }
+
+    #[test]
+    fn transcripts_precede_replies_and_deletion_keeps_state() {
+        let session = Session::new("d".to_string(), "voice".to_string());
+        let mut host = FakeHost {
+            transcript: Some("Hi.".to_string()),
+            ..FakeHost::default()
+        };
+        session
+            .handle_client_event(
+                br#"{"type":"session.update","session":{"output_modalities":["text","audio"],"audio":{"input":{"transcription":{"model":null}},"output":{"voice":"female"}}}}"#,
+                false,
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(event_types(&host), vec!["session.updated"]);
+        assert!(host.configured.last().unwrap().audio_output);
+        session
+            .handle_client_event(
+                br#"{"type":"session.update","session":{"audio":{"output":{"voice":null}}}}"#,
+                false,
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.configured.last().unwrap().voice, "");
+
+        // With create_response the transcript still comes before the reply.
+        host.events.clear();
+        let (item, _) = session.vad_speech_started(0);
+        session
+            .handle_vad_audio(&[1u8; 4800], false, &mut host)
+            .unwrap();
+        assert_eq!(
+            session.handle_vad_commit(&item, true, false, &mut host),
+            Ok(true)
+        );
+        assert_eq!(
+            event_types(&host).last().unwrap(),
+            "conversation.item.input_audio_transcription.completed"
+        );
+        // A reply that adds no item leaves the turn deletable.
+        finish(&session, false);
+        assert_eq!(
+            delete(&session, &mut host, &item, false),
+            "conversation.item.deleted"
+        );
+
+        // Open audio and a failing conversation keep the turn and the state.
+        let turn = commit_spoken_turn(&session, &mut host);
+        assert_eq!(delete(&session, &mut host, &turn, true), "error");
+        host.delete_fails = true;
+        assert_eq!(delete(&session, &mut host, &turn, false), "error");
+        assert_eq!(session.state.lock().unwrap().previous_item, turn);
+        host.delete_fails = false;
+        assert_eq!(delete(&session, &mut host, "", false), "error");
+        assert_eq!(
+            delete(&session, &mut host, &turn, false),
+            "conversation.item.deleted"
+        );
+        assert_eq!(host.deleted_turns, 2);
+
+        // Text messages can be deleted; client item ids are checked.
+        host.events.clear();
+        session
+            .handle_client_event(
+                br#"{"type":"conversation.item.create","item":{"type":"message","role":"user","id":"","content":[{"type":"input_text","text":"x"}]}}"#,
+                false,
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(event_types(&host), vec!["error"]);
+        session
+            .handle_client_event(
+                br#"{"type":"conversation.item.create","item":{"type":"message","role":"user","id":"mine","content":[{"type":"input_text","text":"x"}]}}"#,
+                false,
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(
+            delete(&session, &mut host, "mine", false),
+            "conversation.item.deleted"
+        );
     }
 
     #[test]
@@ -2289,6 +2441,7 @@ mod tests {
             vec!["input_audio_buffer.committed", "conversation.item.created"]
         );
         assert!(host.transcripts.is_empty());
+        assert_eq!(host.recorded_bytes, 0);
     }
 
     fn event_type(raw: &str) -> String {

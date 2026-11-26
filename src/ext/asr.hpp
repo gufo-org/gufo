@@ -127,9 +127,9 @@ public:
   /// Names a client may select as Settings::voice. Empty: replies speak only
   /// the conversation's own voice, which has no name.
   virtual std::vector<std::string> voices() const { return {}; }
-  /// Removes the latest user turn from the context when it is closed and no
-  /// reply or other item followed it. Conversations that cannot remove turns
-  /// keep the default, which fails.
+  /// Removes the latest user turn (audio or text) from the context. Gufo calls
+  /// it only when that turn is closed and nothing followed it. Conversations
+  /// that cannot remove turns keep the default, which fails.
   virtual bool DeleteUserTurn(std::string* error) {
     *error = "this conversation cannot delete items";
     return false;

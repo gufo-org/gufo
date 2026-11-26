@@ -5,7 +5,8 @@ Voice conversations (`src/ext/asr.hpp`):
   `audio.output.voice`. It is empty for the conversation's own voice, or one
   of `voices()`.
 - `VoiceConversation::voices()` lists the voices a client may select. The
-  default lists none, and `session.update` rejects any `audio.output.voice`.
+  default lists none, and `session.update` rejects any named
+  `audio.output.voice`.
 - `VoiceConversation::DeleteUserTurn()` removes the latest user turn when it
   is closed and nothing followed it (`conversation.item.delete`). The default
   fails, and the client receives an error event.

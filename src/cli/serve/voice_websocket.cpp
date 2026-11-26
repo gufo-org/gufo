@@ -33,7 +33,8 @@ constexpr std::uint32_t kRate = 24000;
 // Queued client events while a reply runs: one minute of 24 kHz PCM16 in
 // base64, plus framing.
 constexpr std::size_t kQueueBytes = 8U << 20;
-// Transcript budget of one user turn (at most two minutes of speech).
+// Transcript tokens of a user turn (at most two minutes of speech); models
+// that transcribe in windows may apply it to each window.
 constexpr std::size_t kTranscriptTokens = 1024;
 
 std::string_view View(const std::uint8_t* data, std::size_t len) noexcept {
@@ -368,14 +369,15 @@ private:
   }
 
   static bool HostAppendAudio(void* ctx, const std::uint8_t* pcm,
-                              std::size_t len,
+                              std::size_t len, bool record,
                               GufoRealtimeVoiceErrorSetFn set_error,
                               void* error_ctx) noexcept {
     auto* self = static_cast<Session*>(ctx);
     try {
       std::string failure;
       if (self->conversation_->AppendAudio(Pcm16(View(pcm, len)), &failure)) {
-        self->turn_pcm_.append(View(pcm, len));
+        if (record)
+          self->turn_pcm_.append(View(pcm, len));
         return true;
       }
       SetError(set_error, error_ctx, failure);
@@ -396,15 +398,16 @@ private:
     try {
       std::size_t samples = 0;
       std::string failure;
-      const bool ok = self->conversation_->CommitAudio(&samples, &failure);
-      // The committed turn's audio stays for its transcript.
-      self->committed_pcm_ = std::move(self->turn_pcm_);
-      self->turn_pcm_.clear();
-      if (ok) {
+      if (self->conversation_->CommitAudio(&samples, &failure)) {
+        // The committed turn's recorded audio stays for its transcript.
+        self->committed_pcm_ = std::move(self->turn_pcm_);
+        self->turn_pcm_.clear();
         *committed = true;
         return true;
       }
-      self->committed_pcm_.clear();
+      // A failed commit keeps the turn open with its audio.
+      if (failure.empty())
+        self->turn_pcm_.clear();
       if (!failure.empty()) {
         SetError(set_error, error_ctx, failure);
         return false;
@@ -541,8 +544,11 @@ private:
       ext::TranscriptionResult result;
       std::string failure;
       const bool ok = self->service_.Transcribe(
-          request, [self] { return self->stopping_.load(); }, &result,
-          &failure);
+          request,
+          [self] {
+            return self->stopping_.load() || self->socket_.cancelled();
+          },
+          &result, &failure);
       Logger::Info("asr", "request=" + self->id_ +
                               " event=turn_transcribed audio_samples=" +
                               std::to_string(pcm.size()) +

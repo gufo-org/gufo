@@ -121,6 +121,7 @@ pub struct GufoRealtimeVoiceHost {
             context: *mut c_void,
             pcm: *const u8,
             len: usize,
+            record: bool,
             set_error: GufoRealtimeVoiceErrorSetFn,
             error_ctx: *mut c_void,
         ) -> bool,
@@ -168,8 +169,9 @@ pub struct GufoRealtimeVoiceHost {
     >,
     pub serves_model:
         Option<unsafe extern "C" fn(context: *mut c_void, name: *const u8, len: usize) -> bool>,
-    /// Transcribes the user turn committed last; `language` is empty when
-    /// the model detects it. The transcript goes to `on_transcript`.
+    /// Transcribes the recorded audio of the user turn committed last;
+    /// `language` is empty when the model detects it. The host calls
+    /// `on_transcript` once with the whole transcript.
     pub transcribe_turn: Option<
         unsafe extern "C" fn(
             context: *mut c_void,
@@ -318,7 +320,7 @@ impl Host for CHost {
     }
 
     #[allow(unsafe_code)]
-    fn append_audio(&mut self, pcm: &[u8]) -> Result<(), String> {
+    fn append_audio(&mut self, pcm: &[u8], record: bool) -> Result<(), String> {
         let cb = self.raw.append_audio.expect("validated append_audio");
         let mut err = String::new();
         let b = as_c_bytes(pcm);
@@ -328,6 +330,7 @@ impl Host for CHost {
                 self.raw.context,
                 b.data,
                 b.len,
+                record,
                 set_error_string,
                 (&raw mut err).cast::<c_void>(),
             )
