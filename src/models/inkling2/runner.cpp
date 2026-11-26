@@ -280,6 +280,13 @@ struct Inkling2PromptContext final : g::TextPromptContext {
   /// The prompt's tokens, for copy drafts (a request whose whole prompt is
   /// restored from the cache never prefills).
   std::vector<std::int32_t> tokens;
+  /// Tool names and the call requirement come from the request, not its
+  /// tokens. Image rows sit at token positions. Copy drafts only propose, so
+  /// another tokenization of the same text costs drafts, never output (and
+  /// prefill replaces the copy history with the tokens it ran).
+  [[nodiscard]] bool TokenizationIndependent() const override {
+    return images.empty();
+  }
 };
 
 std::vector<std::int32_t> ToIds(std::span<const g::TextRunnerToken> t) {
@@ -500,8 +507,12 @@ public:
     // The streamed text carries the open framing and one <|end_message|>
     // closing the block (see Piece(); a text block's own header is dropped, so
     // no <|content_text|> follows the close).
+    // A turn is a list of blocks: the model can think again after an answer
+    // block (text, thought, text). The later thought streams the same opener
+    // and joins the reasoning, as llama.cpp, vLLM and SGLang return it.
     return {std::string(::inkling2::text::dialect::kReasoningOpen),
-            std::string(::inkling2::text::dialect::kEndMessage)};
+            std::string(::inkling2::text::dialect::kEndMessage),
+            /*repeats=*/true};
   }
   /// Grammars see the tokens' own bytes. The prompt already wrote the
   /// thought's header, so the model opens it with <|content_thinking|> alone

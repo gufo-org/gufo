@@ -1,7 +1,7 @@
 //! Chat messages: roles, content, reasoning and historical tool calls.
 
 use crate::content::{Rewrite, chat_content, parts, rewritten};
-use crate::draft::{Argument, Call, Message, Role};
+use crate::draft::{Argument, Call, Message, Part, Role};
 use crate::error::{Failure, Outcome, invalid};
 use crate::fields::{copy, member_str, member_str_or, push, take_text};
 use crate::host::Host;
@@ -122,7 +122,27 @@ pub fn message(value: &mut Value, content: Content, host: &mut impl Host) -> Out
         if role != Role::Assistant || !matches!(reasoning, Value::String(_)) {
             return invalid("'reasoning_content' is only valid as a string on assistant messages");
         }
-        message.thought = take_text(reasoning);
+        let mut thought = take_text(reasoning);
+        if !message.parts.is_empty() && !thought.is_empty() {
+            // It is the first thought, before the content's parts.
+            let shift = thought.len();
+            for part in &mut message.parts {
+                if part.thought {
+                    part.end += shift;
+                }
+            }
+            message.parts.try_reserve(1)?;
+            message.parts.insert(
+                0,
+                Part {
+                    thought: true,
+                    end: shift,
+                },
+            );
+            thought.try_reserve(message.thought.len())?;
+            thought.push_str(&message.thought);
+        }
+        message.thought = thought;
     }
 
     let Some(tool_calls) = value.get("tool_calls") else {

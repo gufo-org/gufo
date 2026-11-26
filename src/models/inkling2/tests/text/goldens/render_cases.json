@@ -1893,7 +1893,7 @@
 }
 ],
 "error": false,
-"expected": "<|message_system|>tool_declare<|content_xml|>[{\"description\":\"d\",\"name\":\"f\",\"parameters\":{\"properties\":{\"x\":{\"default\":1.0,\"maximum\":1e+21,\"minimum\":-0.5,\"multipleOf\":1e-07,\"t\":0.1,\"type\":\"number\",\"w\":123456789.12345679,\"z\":100000000000000000000}},\"type\":\"object\"},\"type\":\"function\"}]<|end_message|><|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>x<|end_message|>",
+"expected": "<|message_system|>tool_declare<|content_xml|>[{\"description\":\"d\",\"name\":\"f\",\"parameters\":{\"properties\":{\"x\":{\"default\":1.0,\"maximum\":1e+21,\"minimum\":-0.5,\"multipleOf\":1e-7,\"t\":0.1,\"type\":\"number\",\"w\":123456789.12345679,\"z\":100000000000000000000}},\"type\":\"object\"},\"type\":\"function\"}]<|end_message|><|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>x<|end_message|>",
 "tokens": [
 200002,
 2251,
@@ -1967,7 +1967,7 @@
 16,
 68,
 12,
-68620,
+22,
 11,
 1,
 83,
@@ -2070,7 +2070,8 @@
 }
 }
 }
-]
+],
+"spelling": "tml-renderers"
 },
 {
 "name": "tool_call_basic",
@@ -3675,7 +3676,7 @@ true,
 }
 ],
 "error": false,
-"expected": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>x<|end_message|><|message_model|>f<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":{\"a\":[1,2.5,\"s\",null,true,{\"y\":1,\"b\":[3]}],\"big\":12345678901234567890123,\"e\":\"\",\"exp\":1e-07,\"exp2\":1e+22,\"f\":false,\"fl2\":1.2345678901234568e+17,\"float\":0.1,\"i\":1000000000000000,\"m\":{\"k2\":\"v\",\"k1\":1.0},\"n\":null,\"neg\":-0.0,\"u\":\"héllo 你好 😀 \\\"q\\\" \\\\ \\n\\t \\u0001\",\"z\":1}}<|end_message|><|content_model_end_sampling|>",
+"expected": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>x<|end_message|><|message_model|>f<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":{\"a\":[1,2.5,\"s\",null,true,{\"y\":1,\"b\":[3]}],\"big\":12345678901234567890123,\"e\":\"\",\"exp\":1e-7,\"exp2\":1e22,\"f\":false,\"fl2\":1.2345678901234568e17,\"float\":0.1,\"i\":1000000000000000,\"m\":{\"k2\":\"v\",\"k1\":1.0},\"n\":null,\"neg\":-0.0,\"u\":\"héllo 你好 😀 \\\"q\\\" \\\\ \\n\\t \\u0001\",\"z\":1}}<|end_message|><|content_model_end_sampling|>",
 "tokens": [
 200002,
 200004,
@@ -3772,7 +3773,7 @@ true,
 16,
 68,
 12,
-68620,
+22,
 11,
 1,
 4841,
@@ -3781,7 +3782,6 @@ true,
 25,
 16,
 68,
-10,
 68160,
 11,
 1,
@@ -3804,7 +3804,6 @@ true,
 81554,
 23,
 68,
-10,
 68107,
 11,
 1,
@@ -3902,7 +3901,8 @@ true,
 92,
 200010,
 200006
-]
+],
+"spelling": "tml-renderers"
 },
 {
 "name": "tool_call_key_sort",
@@ -5792,7 +5792,7 @@ true,
 }
 ],
 "error": false,
-"expected": "<|message_system|><|content_text|>Thinking effort level: 1e-05<|end_message|><|message_user|><|content_text|>hi<|end_message|>",
+"expected": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>hi<|end_message|>",
 "tokens": [
 200002,
 200004,
@@ -5802,17 +5802,15 @@ true,
 150628,
 25,
 220,
-16,
-68,
-12,
-68435,
+15,
 200010,
 200000,
 200004,
 1910,
 200010
 ],
-"reasoning_effort": 1e-05
+"reasoning_effort": 1e-05,
+"spelling": "tml-renderers"
 },
 {
 "name": "effort_long",
@@ -5823,7 +5821,7 @@ true,
 }
 ],
 "error": false,
-"expected": "<|message_system|><|content_text|>Thinking effort level: 0.123456789<|end_message|><|message_user|><|content_text|>hi<|end_message|>",
+"expected": "<|message_system|><|content_text|>Thinking effort level: 0.12<|end_message|><|message_user|><|content_text|>hi<|end_message|>",
 "tokens": [
 200002,
 200004,
@@ -5835,16 +5833,15 @@ true,
 220,
 15,
 13,
-70904,
-81554,
-91927,
+68040,
 200010,
 200000,
 200004,
 1910,
 200010
 ],
-"reasoning_effort": 0.123456789
+"reasoning_effort": 0.123456789,
+"spelling": "tml-renderers"
 },
 {
 "name": "effort_one_error",

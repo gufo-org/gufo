@@ -3025,8 +3025,13 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->cache_prefix_tokens = metadata.cache_prefix_tokens;
   // A client replays the previous answer as text, and the next prompt's
   // tokenization of it need not match the sampled tokens (#1154). Comparing
-  // that text needs exact per-token decoding.
-  if (metadata.cache_prompt && request->prompt_context == nullptr &&
+  // that text needs exact per-token decoding, and a prompt context must
+  // allow the rewrite.
+  const auto* prompt_context = request->prompt_context.get();
+  if (metadata.cache_prompt &&
+      (prompt_context == nullptr ||
+       (prompt_context->TokenizationIndependent() &&
+        prompt_context->cache_identity.empty())) &&
       impl_->incremental_text_is_exact)
     request->align_frontier = metadata.chat_template;
   request->stop_at_eos = metadata.stop_at_eos;

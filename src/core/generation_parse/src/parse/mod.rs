@@ -96,28 +96,88 @@ pub fn parse(
     // call.
     let partial = partial && config.markup.native;
     match config.mode {
-        Mode::Plain => plain::parse(
-            raw,
-            config.initial,
-            config,
-            enforce_required,
-            quotes,
-            partial,
-            track,
-            host,
-        ),
-        Mode::Structured | Mode::ToolOnly => structured::parse(
-            raw,
-            config.initial,
-            config,
-            enforce_required,
-            config.mode == Mode::ToolOnly,
-            quotes,
-            partial,
-            track,
-            host,
-        ),
+        Mode::Plain => {
+            let mut parsed = plain::parse(
+                raw,
+                config.initial,
+                config,
+                enforce_required,
+                quotes,
+                partial,
+                track,
+                host,
+            )?;
+            if config.reasoning.repeats {
+                later_thoughts(&mut parsed, config)?;
+            }
+            Ok(parsed)
+        }
+        Mode::Structured | Mode::ToolOnly => {
+            let mut parsed = structured::parse(
+                raw,
+                config.initial,
+                config,
+                enforce_required,
+                config.mode == Mode::ToolOnly,
+                quotes,
+                partial,
+                track,
+                host,
+            )?;
+            // A response format is one value; only tool turns hold blocks.
+            if config.mode == Mode::ToolOnly && config.reasoning.repeats {
+                later_thoughts(&mut parsed, config)?;
+            }
+            Ok(parsed)
+        }
     }
+}
+
+/// Moves the thoughts content opened (`Reasoning::repeats`) from the content
+/// to the reasoning, in order, as the streamed filter separates them: each
+/// runs from an opener to its close (or the end), and the framing whitespace
+/// after a close is dropped.
+fn later_thoughts(parsed: &mut Parsed, config: &Config) -> Result<(), Error> {
+    use crate::text::{NPOS, find, trim};
+    let open = &config.reasoning.open;
+    let close = &config.reasoning.close;
+    if open.is_empty() || find(&parsed.text, open, 0) == NPOS {
+        return Ok(());
+    }
+    let text = std::mem::take(&mut parsed.text);
+    let spans = std::mem::take(&mut parsed.spans);
+    let mut content = Vec::new();
+    content.try_reserve(text.len())?;
+    let mut content_spans = Vec::new();
+    let mut keep = |from: usize, to: usize| {
+        content.extend_from_slice(&text[from..to]);
+        append_spans(&mut content_spans, &spans, from, to - from);
+    };
+    let mut at = 0;
+    loop {
+        let opener = find(&text, open, at);
+        if opener == NPOS {
+            keep(at, text.len());
+            break;
+        }
+        keep(at, opener);
+        let begin = opener + open.len();
+        let end = find(&text, close, begin);
+        let thought = trim(&text[begin..if end == NPOS { text.len() } else { end }]);
+        parsed.reasoning.try_reserve(thought.len())?;
+        parsed.reasoning.extend_from_slice(thought);
+        if end == NPOS {
+            break;
+        }
+        let rest = crate::reasoning::after_separator(
+            &text[end + close.len()..],
+            &config.markup.reasoning_separator,
+        );
+        at = text.len() - rest.len();
+    }
+    parsed.text = content;
+    parsed.spans = content_spans;
+    Ok(())
 }
 
 /// Reports `parsed` as final events.

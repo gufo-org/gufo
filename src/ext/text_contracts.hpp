@@ -27,6 +27,12 @@ struct ReasoningTags {
 struct ReasoningMarkup {
   std::string open;
   std::string close;
+  /// Unconstrained output may open further thoughts after content, as a model
+  /// that writes its turn as a list of blocks can. The parsers move each later
+  /// `open`...`close` span to the reasoning, in order, and join the content
+  /// around it; without it a later `open` is content. Requires a non-empty
+  /// `open`.
+  bool repeats{false};
 
   friend bool operator==(const ReasoningMarkup&,
                          const ReasoningMarkup&) = default;

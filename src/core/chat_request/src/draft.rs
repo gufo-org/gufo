@@ -36,6 +36,14 @@ pub struct Call {
     pub arguments: Vec<Argument>,
 }
 
+/// One text or thought part of a message, in the order the client sent them
+/// (`ChatMessage::Part`): it ends at `end` bytes of `content` or `thought`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Part {
+    pub thought: bool,
+    pub end: usize,
+}
+
 /// `tokenization::ChatMessage`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
@@ -46,6 +54,8 @@ pub struct Message {
     pub tool_call_id: String,
     pub images: Vec<Image>,
     pub calls: Vec<Call>,
+    /// The text and thought parts in order, when the content was a list.
+    pub parts: Vec<Part>,
 }
 
 impl Message {
@@ -58,7 +68,43 @@ impl Message {
             tool_call_id: String::new(),
             images: Vec::new(),
             calls: Vec::new(),
+            parts: Vec::new(),
         }
+    }
+
+    /// Appends one text part.
+    pub fn text_part(&mut self, text: &str) -> Outcome<()> {
+        crate::fields::append(&mut self.content, text)?;
+        crate::fields::push(
+            &mut self.parts,
+            Part {
+                thought: false,
+                end: self.content.len(),
+            },
+        )
+    }
+
+    /// Appends one thought part.
+    pub fn thought_part(&mut self, text: &str) -> Outcome<()> {
+        crate::fields::append(&mut self.thought, text)?;
+        crate::fields::push(
+            &mut self.parts,
+            Part {
+                thought: true,
+                end: self.thought.len(),
+            },
+        )
+    }
+
+    /// The parts, when their order says more than the legacy shape (a thought
+    /// before the text, each one block at most).
+    pub fn ordered_parts(&self) -> &[Part] {
+        let legacy = match self.parts.as_slice() {
+            [] | [_] => true,
+            [first, second] => first.thought && !second.thought,
+            _ => false,
+        };
+        if legacy { &[] } else { &self.parts }
     }
 }
 
@@ -307,6 +353,10 @@ pub fn emit_message(host: &mut impl Host, message: &Message) -> Outcome<()> {
         let op = if image.low { Op::ImageLow } else { Op::Image };
         let offset = i64::try_from(image.offset).map_err(|_| crate::error::Failure::Internal)?;
         host.emit(op, image.id, offset, &[])?;
+    }
+    for part in message.ordered_parts() {
+        let end = i64::try_from(part.end).map_err(|_| crate::error::Failure::Internal)?;
+        host.emit(Op::Part, u32::from(part.thought), end, &[])?;
     }
     for call in &message.calls {
         host.emit(Op::Call, 0, 0, call.id.as_bytes())?;

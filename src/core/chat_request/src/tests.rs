@@ -487,3 +487,110 @@ fn caller_errors_are_internal() {
         );
     }
 }
+
+/// The text and thought parts a message emits, as (thought, end).
+fn parts_of(host: &Fake) -> Vec<(bool, i64)> {
+    host.events
+        .iter()
+        .filter(|event| event.0 == Op::Part)
+        .map(|event| (event.1 != 0, event.2))
+        .collect()
+}
+
+// A turn written as blocks (Inkling 2) replays its thoughts in place: a Chat
+// assistant message takes `thinking` parts among its text parts, after its
+// `reasoning_content`, as the reference renderer reads them.
+#[test]
+fn chat_assistant_thinking_parts_keep_their_order() {
+    let mut host = Fake::default();
+    let draft = run_api(
+        Api::Chat,
+        r#"{"model":"m","messages":[{"role":"user","content":"q"},
+            {"role":"assistant","reasoning_content":"R","content":[
+            {"type":"text","text":"ab"},{"type":"thinking","thinking":"T"},
+            {"type":"text","text":"c"}]}]}"#,
+        &mut host,
+    )
+    .unwrap();
+    let message = &draft.messages[1];
+    assert_eq!(
+        (message.thought.as_str(), message.content.as_str()),
+        ("RT", "abc")
+    );
+    draft.emit(&mut host).unwrap();
+    assert_eq!(
+        parts_of(&host),
+        [(true, 1), (false, 2), (true, 2), (false, 3)]
+    );
+
+    let mut host = Fake::default();
+    let refused = run_api(
+        Api::Chat,
+        r#"{"model":"m","messages":[{"role":"user","content":[
+            {"type":"thinking","thinking":"T"}]}]}"#,
+        &mut host,
+    );
+    assert!(
+        format!("{refused:?}").contains("thinking content parts require an assistant message"),
+        "{refused:?}"
+    );
+}
+
+// Text parts keep their boundaries; the legacy shape (a thought, then one
+// text) emits none.
+#[test]
+fn parts_emit_only_when_their_order_says_more() {
+    let mut host = Fake::default();
+    let draft = run_api(
+        Api::Chat,
+        r#"{"model":"m","messages":[
+            {"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"bc"}]},
+            {"role":"assistant","reasoning_content":"R","content":[{"type":"text","text":"x"}]},
+            {"role":"user","content":[{"type":"text","text":"only"}]}]}"#,
+        &mut host,
+    )
+    .unwrap();
+    draft.emit(&mut host).unwrap();
+    assert_eq!(parts_of(&host), [(false, 1), (false, 3)]);
+}
+
+#[test]
+fn messages_thinking_blocks_keep_their_order() {
+    let mut host = Fake::default();
+    let draft = run_api(
+        Api::Messages,
+        r#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"q"},
+            {"role":"assistant","content":[{"type":"text","text":"A"},
+            {"type":"thinking","thinking":"T","signature":""},{"type":"text","text":"B"}]}]}"#,
+        &mut host,
+    )
+    .unwrap();
+    draft.emit(&mut host).unwrap();
+    assert_eq!(parts_of(&host), [(false, 1), (true, 1), (false, 2)]);
+}
+
+// The Responses output of such a turn (reasoning, message, reasoning,
+// message) replays as one assistant turn with its blocks in order.
+#[test]
+fn responses_later_thoughts_join_their_turn() {
+    let mut host = Fake::default();
+    let draft = run_api(
+        Api::Responses,
+        r#"{"model":"m","input":[{"role":"user","content":"q"},
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"R"}]},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"A"}]},
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"T"}]},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"B"}]},
+            {"role":"user","content":"next"}]}"#,
+        &mut host,
+    )
+    .unwrap();
+    assert_eq!(draft.messages.len(), 3);
+    let turn = &draft.messages[1];
+    assert_eq!((turn.thought.as_str(), turn.content.as_str()), ("RT", "AB"));
+    draft.emit(&mut host).unwrap();
+    assert_eq!(
+        parts_of(&host),
+        [(true, 1), (false, 1), (true, 2), (false, 2)]
+    );
+}

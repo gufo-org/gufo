@@ -153,14 +153,18 @@ std::string QuoteString(std::string_view s) {
 }
 
 std::string PythonFloatRepr(double d) {
+  return FloatRepr(d, FloatStyle::kPython);
+}
+
+std::string FloatRepr(double d, FloatStyle style) {
   if (std::isnan(d))
     return "nan";
   if (std::isinf(d))
     return d < 0 ? "-inf" : "inf";
   if (d == 0)
     return std::signbit(d) ? "-0.0" : "0.0";
-  // Shortest round-trip digits, then Python's repr layout (float_repr_style
-  // 'short').
+  // Shortest round-trip digits, then the style's layout (Python's is
+  // float_repr_style 'short').
   char buf[64];
   const auto r =
       std::to_chars(buf, buf + sizeof(buf), d, std::chars_format::scientific);
@@ -177,14 +181,20 @@ std::string PythonFloatRepr(double d) {
       digits.push_back(c);
   const int decpt =
       exp10 + 1;  // position of the decimal point relative to digits
+  const bool python = style == FloatStyle::kPython;
+  const int min_positional = python ? -4 : -5;
   std::string out;
-  if (decpt > 16 || decpt < -3) {
+  if (exp10 >= 16 || exp10 < min_positional) {
     out = digits.substr(0, 1);
     if (digits.size() > 1)
       out += "." + digits.substr(1);
     char eb[16];
-    std::snprintf(eb, sizeof(eb), "e%c%02d", exp10 < 0 ? '-' : '+',
-                  std::abs(exp10));
+    if (python)
+      std::snprintf(eb, sizeof(eb), "e%c%02d", exp10 < 0 ? '-' : '+',
+                    std::abs(exp10));
+    else
+      std::snprintf(eb, sizeof(eb), "e%s%d",
+                    exp10 >= 0 && style == FloatStyle::kTml ? "+" : "", exp10);
     out += eb;
   } else if (decpt <= 0) {
     out = "0." + std::string(static_cast<std::size_t>(-decpt), '0') + digits;
@@ -214,7 +224,7 @@ void DumpTo(std::string* out, const Value& v, const DumpOptions& o) {
       else if (std::isinf(d))
         *out += d < 0 ? "-Infinity" : "Infinity";
       else
-        *out += PythonFloatRepr(d);
+        *out += FloatRepr(d, o.floats);
       break;
     }
     case Value::Kind::kString:

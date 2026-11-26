@@ -3,7 +3,7 @@
 
 use crate::draft::{Image, Message, Role};
 use crate::error::{Outcome, invalid};
-use crate::fields::{append, member_str, member_str_or, push, take_text};
+use crate::fields::{member_str, member_str_or, push, take_text};
 use crate::host::Host;
 use gufo_json::Value;
 
@@ -86,6 +86,20 @@ pub fn parts<'a>(
             push(&mut message.images, Image { id, offset, low })?;
             continue;
         }
+        if kind == "thinking" {
+            // An earlier thought of an assistant turn, in its place among the
+            // text parts (the reference Inkling renderer's form).
+            let thinking = sent
+                .and_then(|value| value.get("thinking"))
+                .and_then(Value::as_str);
+            let (Role::Assistant, Some(thinking)) = (message.role, thinking) else {
+                return invalid(
+                    "thinking content parts require an assistant message and a string 'thinking'",
+                );
+            };
+            message.thought_part(thinking)?;
+            continue;
+        }
         if kind != "text" && kind != "input_text" {
             return invalid("message content parts must use text or image_url");
         }
@@ -95,7 +109,7 @@ pub fn parts<'a>(
         else {
             return invalid("text message content parts require a string 'text'");
         };
-        append(&mut message.content, part_text)?;
+        message.text_part(part_text)?;
     }
     Ok(())
 }
@@ -209,7 +223,7 @@ pub fn read_text_content(
                     let Some(thinking) = part.get("thinking").and_then(Value::as_str) else {
                         return Ok(false);
                     };
-                    append(&mut message.thought, thinking)?;
+                    message.thought_part(thinking)?;
                     continue;
                 }
                 if images && object && kind == "image" {
@@ -221,7 +235,7 @@ pub fn read_text_content(
                     Some(part_text)
                         if object && matches!(kind, "text" | "input_text" | "output_text") =>
                     {
-                        append(&mut message.content, part_text)?;
+                        message.text_part(part_text)?;
                     }
                     _ => return Ok(false),
                 }

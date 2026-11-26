@@ -8,7 +8,7 @@ use crate::chat::{field, parse_body, thinking_argument};
 use crate::content::{anthropic_image, read_text_content};
 use crate::draft::{Draft, Message, Role, ToolChoice, Tools};
 use crate::error::{Failure, Outcome, bad_request, compatibility, invalid};
-use crate::fields::{append, body_view, copy, dump, member_str, member_str_or, push, string};
+use crate::fields::{body_view, copy, dump, member_str, member_str_or, push, string};
 use crate::host::{Host, HostField};
 use crate::message::{historical, role_from};
 use crate::reasoning;
@@ -217,10 +217,10 @@ pub fn tool_controls(body: &mut Value, draft: &mut Draft, host: &mut impl Host) 
     )
 }
 
-/// A text block of a tool turn.
-fn read_text(part: &Value, out: &mut String) -> Outcome<()> {
+/// A text block of a tool turn, one part of `message`.
+fn read_text(part: &Value, message: &mut Message) -> Outcome<()> {
     match part.get("text").and_then(Value::as_str) {
-        Some(text) if member_str(part, "type") == "text" => append(out, text),
+        Some(text) if member_str(part, "type") == "text" => message.text_part(text),
         _ => invalid("unsupported Messages content block"),
     }
 }
@@ -248,7 +248,7 @@ fn read_part(part: &Value, target: &mut Message, host: &mut impl Host) -> Outcom
     if matches!(part, Value::Object(_)) && member_str(part, "type") == "image" {
         return anthropic_image(part, target, host);
     }
-    read_text(part, &mut target.content)
+    read_text(part, target)
 }
 
 /// `ParseAnthropicToolMessage`: each tool_result becomes a tool message,
@@ -274,7 +274,7 @@ fn tool_message(item: &Value, messages: &mut Vec<Message>, host: &mut impl Host)
                     let Some(thinking) = part.get("thinking").and_then(Value::as_str) else {
                         return invalid("thinking blocks require thinking text");
                     };
-                    append(&mut message.thought, thinking)?;
+                    message.thought_part(thinking)?;
                 }
                 "tool_use" => {
                     let id = part
@@ -293,7 +293,7 @@ fn tool_message(item: &Value, messages: &mut Vec<Message>, host: &mut impl Host)
                     let call = historical(copy(id)?, part.get("name"), Some(&arguments))?;
                     push(&mut message.calls, call)?;
                 }
-                _ => read_text(part, &mut message.content)?,
+                _ => read_text(part, &mut message)?,
             }
         }
         return push(messages, message);

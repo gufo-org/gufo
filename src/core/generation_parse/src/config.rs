@@ -66,6 +66,10 @@ pub struct Markup {
 pub struct Reasoning {
     pub open: Vec<u8>,
     pub close: Vec<u8>,
+    /// Unconstrained output may open further thoughts after content, as
+    /// models that write a turn as a list of blocks do. Their text joins the
+    /// reasoning, and the content around them joins the content.
+    pub repeats: bool,
 }
 
 /// A declared tool and its parameter schema, parsed once.

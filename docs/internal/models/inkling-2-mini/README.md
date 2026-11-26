@@ -223,6 +223,50 @@ tokens the next turn's render writes; the host's grammar constrains the
 streamed call (`stream_dialect.hpp`). The template writes call arguments
 with sorted keys, so the model emits them alphabetically.
 
+The template differs from Thinking Machines' renderer (`tml-renderers`
+0.5.0, `renderers.Inkling2()`) in how it spells numbers, and Gufo follows the
+renderer, as vLLM and SGLang do. Floats are positional for decimal exponents
+in [-5, 16) and otherwise use unpadded exponents: tool declarations write
+`1e+20`, call arguments `1e20`, and `1e-5` is `0.00001` in both (Python's
+`repr` writes `1e-05`). A numeric effort is rounded to thousandths, then to
+hundredths, halves to even (0.125 is "0.12"). The reference refuses integers
+over 64 bits; Gufo keeps them, as the template does. The four render goldens
+that hold such numbers are marked `"spelling": "tml-renderers"`. As of
+November 26, 2026, every other checked prompt matched the renderer's token
+IDs, apart from the header Gufo appends. Across 92 agent prompts the model
+writes that header first with probability at least 1 - 1.1e-8.
+
+vLLM and SGLang add a `tool_choice` instruction that `tml-renderers` does
+not write. The text is the same in both: a required call, a named function
+and `parallel_tool_calls: false` each append one sentence to a leading system
+message, or else to the effort directive. Gufo keeps `tool_choice` out of the
+prompt, so a conversation that switches it stays cached (#619); the grammar
+forces the call. Sampled without a grammar, the model called a tool 0 times
+in 12 for "Hi" and "17 × 23" without the sentence and 12 times in 12 with it.
+Under the grammar alone, its thought decided against a call, and 3 of 6
+forced calls on the arithmetic question asked for the weather in some city.
+With the sentence, every forced call was a search, but thoughts before a
+required call grew (greeting 41-151 tokens without it, 324-757 with it).
+
+A turn is a list of blocks, and the model can think again after an answer
+block: text, then a thought, then text. A block-boundary probe over 184 agent
+replies found this only where the model doubted a finished answer, at 21% in
+that context and about 0 elsewhere. After a call, only further calls followed.
+The reasoning markup sets `repeats`: the parsers move each later thought to
+the reasoning in order, as llama.cpp, vLLM and SGLang return it, so Chat
+Completions joins the thoughts and the text. Responses and Messages stream
+the blocks as separate items. `ChatMessage::parts` replays them in place,
+from Chat `thinking` parts, Messages blocks or consecutive Responses items,
+and each text part renders as its own block, as in the reference.
+`tml-renderers` itself refuses to write a thought after text in OpenAI Chat
+form ("a thinking part after content has no OpenAI Chat form"); its
+`bridge_to_next_turn` keeps the sampled tokens.
+
+The prompt context declares itself independent of the tokenization when it
+holds no images. The host then aligns a replayed answer to the frontier's
+sampled tokens (#1154). The model sometimes samples splits that differ from
+the tokenizer's own, for example " cha", "î", "nes" for "chaînes".
+
 ## Numerical contract
 
 Every optimisation kept the per-output arithmetic: the same dequantisation,

@@ -50,6 +50,53 @@ inline std::string ArgumentsJson(const g::ChatMessage::ToolCall& call) {
   return json::Dump(obj);
 }
 
+/// Whether `m.parts` cover its content and thought in order: ends grow, each
+/// kind's last end is its string's size, and a non-empty string has parts.
+inline bool PartsCover(const g::ChatMessage& m) {
+  std::size_t text = 0, thought = 0;
+  bool any_text = false, any_thought = false;
+  for (const auto& part : m.parts) {
+    auto& at = part.thought ? thought : text;
+    const auto size = part.thought ? m.thought.size() : m.content.size();
+    if (part.end < at || part.end > size)
+      return false;
+    at = part.end;
+    (part.thought ? any_thought : any_text) = true;
+  }
+  return text == m.content.size() && thought == m.thought.size() &&
+         (any_text || m.content.empty()) && (any_thought || m.thought.empty());
+}
+
+/// A message whose parts keep their order: thoughts and text in place, and
+/// images at their content offsets.
+inline void OrderedParts(const g::ChatMessage& m, Message* r) {
+  r->content_kind = Message::Content::kParts;
+  std::size_t text = 0, thought = 0, image = 0;
+  const auto images_to = [&](std::size_t offset) {
+    for (; image < m.images.size() && m.images[image].offset <= offset; ++image)
+      r->parts.push_back({ContentPart::Kind::kImage, {}});
+  };
+  for (const auto& part : m.parts) {
+    if (part.thought) {
+      r->parts.push_back({ContentPart::Kind::kThinking,
+                          m.thought.substr(thought, part.end - thought)});
+      thought = part.end;
+      continue;
+    }
+    images_to(text);
+    r->parts.push_back(
+        {ContentPart::Kind::kText, m.content.substr(text, part.end - text)});
+    text = part.end;
+  }
+  images_to(m.content.size());
+  if (!m.framing_suffix.empty()) {
+    if (!r->parts.empty() && r->parts.back().kind == ContentPart::Kind::kText)
+      r->parts.back().text += m.framing_suffix;
+    else
+      r->parts.push_back({ContentPart::Kind::kText, m.framing_suffix});
+  }
+}
+
 inline std::vector<Message> ToMessages(const g::ChatRequest& request) {
   std::vector<Message> out;
   out.reserve(request.messages.size());
@@ -57,7 +104,10 @@ inline std::vector<Message> ToMessages(const g::ChatRequest& request) {
     Message r;
     r.role = RoleName(m.role);
     const std::string text = m.content + m.framing_suffix;
-    if (m.images.empty()) {
+    const bool ordered = !m.parts.empty() && PartsCover(m);
+    if (ordered) {
+      OrderedParts(m, &r);
+    } else if (m.images.empty()) {
       r.content_kind = Message::Content::kString;
       r.content = text;
     } else {
@@ -77,7 +127,9 @@ inline std::vector<Message> ToMessages(const g::ChatRequest& request) {
         r.parts.push_back({ContentPart::Kind::kText, text.substr(cursor)});
     }
     r.name = m.name;
-    r.reasoning_content = m.thought;
+    // Ordered parts carry the thoughts in their place.
+    if (!ordered)
+      r.reasoning_content = m.thought;
     r.tool_call_id = m.tool_call_id;
     for (const auto& c : m.tool_calls)
       r.tool_calls.push_back({c.id, c.name, ArgumentsJson(c)});

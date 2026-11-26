@@ -621,6 +621,44 @@ void TestTemplateExtras(const Tokenizer* tokp) {
     CHECK(text_for("none").find("level: 0<|end") != std::string::npos,
           "none prints 0");
   }
+  // Effort quantized as tml-renderers does: milli-effort, then hundredths,
+  // halves to even.
+  {
+    const auto level = [&](double e) {
+      RenderOptions o;
+      o.effort_number = e;
+      Rendered r;
+      CHECK(RenderChat({Message::Text("user", "x")}, {}, o, &r, nullptr),
+            "render");
+      const auto t = r.Text();
+      const auto at = t.find("level: ") + 7;
+      return t.substr(at, t.find('<', at) - at);
+    };
+    CHECK(level(0.125) == "0.12" && level(0.135) == "0.14" &&
+              level(0.555) == "0.56" && level(0.0015) == "0" &&
+              level(0.7) == "0.7" && level(0.99) == "0.99",
+          "effort quantization");
+  }
+  // Numbers as tml-renderers spells them: declarations keep the exponent
+  // sign, call arguments drop it.
+  {
+    using json::FloatRepr;
+    using json::FloatStyle;
+    CHECK(
+        FloatRepr(1e20, FloatStyle::kTml) == "1e+20" &&
+            FloatRepr(1e20, FloatStyle::kTmlUnsigned) == "1e20" &&
+            FloatRepr(1e15, FloatStyle::kTmlUnsigned) == "1000000000000000.0" &&
+            FloatRepr(1e-5, FloatStyle::kTmlUnsigned) == "0.00001" &&
+            FloatRepr(2.5e-5, FloatStyle::kTml) == "0.000025" &&
+            FloatRepr(1.5e-7, FloatStyle::kTml) == "1.5e-7" &&
+            FloatRepr(5e-324, FloatStyle::kTml) == "5e-324" &&
+            FloatRepr(-2.5e300, FloatStyle::kTml) == "-2.5e+300" &&
+            FloatRepr(-0.0, FloatStyle::kTml) == "-0.0",
+        "tml float spelling");
+    CHECK(json::PythonFloatRepr(1e-5) == "1e-05" &&
+              json::PythonFloatRepr(1e20) == "1e+20",
+          "python spelling unchanged");
+  }
   // preserve_thinking=false drops thoughts before the last user message only.
   {
     std::vector<Message> m = {

@@ -42,6 +42,7 @@ pub enum Op {
     CallName = 48,
     Argument = 49,
     ArgumentValue = 50,
+    Part = 51,
 }
 
 /// `GufoChatHostField`: a C++ helper and the value it reads.

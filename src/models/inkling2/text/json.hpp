@@ -102,15 +102,26 @@ private:
 [[nodiscard]] bool Parse(std::string_view text, Value* out,
                          std::string* error = nullptr);
 
+/// How a float is spelled. Python's repr writes positional notation for
+/// decimal exponents in [-4, 16) and a sign and two digits in exponents
+/// (1e-05, 1e+20). Thinking Machines' renderer (tml-renderers) writes
+/// positional notation for exponents in [-5, 16) and unpadded exponents: tool
+/// declarations keep the sign of positive ones (1e+20), call arguments drop
+/// it (1e20).
+enum class FloatStyle : std::uint8_t { kPython, kTml, kTmlUnsigned };
+
 struct DumpOptions {
   bool sort_keys{false};
   std::string item_separator{", "};  // Python json.dumps default
   std::string key_separator{": "};
+  FloatStyle floats{FloatStyle::kPython};
 };
 /// json.dumps(value, ensure_ascii=False, ...).
 [[nodiscard]] std::string Dump(const Value& v, const DumpOptions& options = {});
 void DumpTo(std::string* out, const Value& v, const DumpOptions& options);
 
+/// A finite float in `style`; PythonFloatRepr is kPython.
+[[nodiscard]] std::string FloatRepr(double d, FloatStyle style);
 /// Python repr(float) / str(float).
 [[nodiscard]] std::string PythonFloatRepr(double d);
 /// JSON string literal as json.dumps(s, ensure_ascii=False).

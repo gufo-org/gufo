@@ -122,7 +122,9 @@ the next turn restores from a retained checkpoint, if any, or prefills.
 A client replays the previous answer as text, and the next prompt can tokenize
 it differently from the sampled tokens (#1154). At admission, after earlier
 requests have committed their frontiers, a text-only prompt whose text repeats
-a frontier is rewritten to that frontier's tokens. An unchanged retry of such a
+a frontier is rewritten to that frontier's tokens. Text-only means no prompt
+context, or one whose runner declares it independent of the tokenization, as
+Inkling 2 does for prompts without images. An unchanged retry of such a
 prompt is rewritten to the same tokens when a checkpoint retains them, so an
 identical request samples identical output. A prompt whose own tokens already
 begin a frontier is never rewritten.

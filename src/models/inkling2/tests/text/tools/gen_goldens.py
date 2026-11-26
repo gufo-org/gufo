@@ -6,7 +6,10 @@
 Needs: tokenizers, tiktoken, transformers (+jinja2). Tokenization expectations come
 from the HF tokenizer.json (special tokens parsed) and tiktoken (plain text);
 the script cross-checks the two and reports disagreements. Rendering expectations
-come from transformers' apply_chat_template on the official chat_template.jinja.
+come from transformers' apply_chat_template on the official chat_template.jinja,
+except where the template's Python spelling of numbers differs from Thinking
+Machines' renderer (tml-renderers), which Gufo, vLLM and SGLang follow: see
+TML_SPELLED.
 """
 import base64
 import json
@@ -198,6 +201,20 @@ T = lambda t, **k: {"role": "tool", "content": t, **k}
 IMG = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
 
 
+# Cases whose expectation is tml-renderers' spelling, not the Jinja template's:
+# floats positional for decimal exponents in [-5, 16), unpadded exponents with
+# a sign only in tool declarations, and the effort quantized to hundredths.
+# Checked against tml-renderers 0.5.0 Inkling2(), which refuses the integers
+# over 64 bits these cases hold (checked with 64-bit stand-ins); Gufo, like the
+# template, keeps them.
+TML_SPELLED = {
+    "tool_floats": "<|message_system|>tool_declare<|content_xml|>[{\"description\":\"d\",\"name\":\"f\",\"parameters\":{\"properties\":{\"x\":{\"default\":1.0,\"maximum\":1e+21,\"minimum\":-0.5,\"multipleOf\":1e-7,\"t\":0.1,\"type\":\"number\",\"w\":123456789.12345679,\"z\":100000000000000000000}},\"type\":\"object\"},\"type\":\"function\"}]<|end_message|><|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>x<|end_message|>",
+    "tool_call_arg_types": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>x<|end_message|><|message_model|>f<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":{\"a\":[1,2.5,\"s\",null,true,{\"y\":1,\"b\":[3]}],\"big\":12345678901234567890123,\"e\":\"\",\"exp\":1e-7,\"exp2\":1e22,\"f\":false,\"fl2\":1.2345678901234568e17,\"float\":0.1,\"i\":1000000000000000,\"m\":{\"k2\":\"v\",\"k1\":1.0},\"n\":null,\"neg\":-0.0,\"u\":\"héllo 你好 😀 \\\"q\\\" \\\\ \\n\\t \\u0001\",\"z\":1}}<|end_message|><|content_model_end_sampling|>",
+    "effort_tiny": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>hi<|end_message|>",
+    "effort_long": "<|message_system|><|content_text|>Thinking effort level: 0.12<|end_message|><|message_user|><|content_text|>hi<|end_message|>"
+}
+
+
 def case(name, messages, tools=None, effort="__unset__", cpp_skip=False):
     kw = {}
     if effort != "__unset__":
@@ -207,6 +224,7 @@ def case(name, messages, tools=None, effort="__unset__", cpp_skip=False):
     toks = None
     try:
         exp = tok.apply_chat_template(messages, tools=tools, tokenize=False, **kw)
+        exp = TML_SPELLED.get(name, exp)
         toks = hf.encode(exp, add_special_tokens=False).ids
     except Exception as e:  # raise_exception from the template
         err = True
@@ -218,6 +236,8 @@ def case(name, messages, tools=None, effort="__unset__", cpp_skip=False):
         c["reasoning_effort"] = effort
     if cpp_skip:
         c["cpp_skip"] = True
+    if name in TML_SPELLED:
+        c["spelling"] = "tml-renderers"
     render.append(c)
 
 
