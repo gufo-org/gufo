@@ -260,31 +260,23 @@ __device__ __forceinline__ void row_dot(const uint8_t* row, const v4u* aq,
 #pragma unroll
   for (int b = 0; b < B; b++)
     acc[b] = 0.f;
-  // One loop per value of the uniform `res`: clang 24 (ROCm 10.1) otherwise
-  // tests it with a scalar branch in every unit (Inkling 2 decode -0.8%).
-  const auto units = [&](auto with_res) {
 #pragma unroll
-    for (int u0 = 0; u0 < NU; u0 += LPR) {
-      int u = u0 + lir;
-      if ((NU % LPR == 0) || u < NU) {
-        if (FMT == FMT_Q8) {
-          q8_unit<B, K, VS>(row + (size_t)u * BY, aq, asc, u, vb, acc);
-          if constexpr (decltype(with_res)::value)
-            q8_unit<B, K, VS>(row + (size_t)u * BY, aq + plq, asc + pls, u, vb,
-                              acc);
-        } else {
-          nv_unit<B, K, VS>(row + (size_t)u * BY, aq, asc, u, vb, acc);
-          if constexpr (decltype(with_res)::value)
-            nv_unit<B, K, VS>(row + (size_t)u * BY, aq + plq, asc + pls, u, vb,
-                              acc);
-        }
+  for (int u0 = 0; u0 < NU; u0 += LPR) {
+    int u = u0 + lir;
+    if ((NU % LPR == 0) || u < NU) {
+      if (FMT == FMT_Q8) {
+        q8_unit<B, K, VS>(row + (size_t)u * BY, aq, asc, u, vb, acc);
+        if (res)
+          q8_unit<B, K, VS>(row + (size_t)u * BY, aq + plq, asc + pls, u, vb,
+                            acc);
+      } else {
+        nv_unit<B, K, VS>(row + (size_t)u * BY, aq, asc, u, vb, acc);
+        if (res)
+          nv_unit<B, K, VS>(row + (size_t)u * BY, aq + plq, asc + pls, u, vb,
+                            acc);
       }
     }
-  };
-  if (res)
-    units(std::true_type{});
-  else
-    units(std::false_type{});
+  }
 #pragma unroll
   for (int b = 0; b < B; b++)
 #pragma unroll
