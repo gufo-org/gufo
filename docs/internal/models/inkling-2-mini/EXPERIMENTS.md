@@ -1,6 +1,6 @@
 # Inkling 2 Mini experiments
 
-Rejected or neutral changes, measured November 22–24, 2026 on Strix Halo
+Rejected or neutral changes, measured November 22–26, 2026 on Strix Halo
 against the build they modified. Every variant is exact unless noted. Kept
 changes are in Git history; current speeds are in [benchmarks](BENCHMARKS.md).
 
@@ -23,6 +23,10 @@ changes are in Git history; current speeds are in [benchmarks](BENCHMARKS.md).
 | Controller apply + norm below 512-token ubatches (Nov 25) | pp64 −1%: too few blocks; the separate kernels are kept there |
 | MoE items of ≤64 tokens in a lean kernel beside the full items (Nov 25) | gate/up −2.4% only: small items are bound by their expert weight reads and barely overlap |
 | MoE gate/up with activations staged in LDS, a two-deep weight prefetch, or 4 waves of 32 tokens × 128 rows (Nov 25) | full items up to +2.6%, overall 2 to 19% slower |
+| MoE gate/up with each wave dequantising its own weight tile in registers, no LDS or barriers (Nov 26) | 15 to 23 TFLOPS against 29: the wave then loads four times the activation tiles per WMMA, and the weight rows no longer arrive ahead of their use |
+| MoE gate/up waves of 64 tokens × 64 rows, or 64 tokens × 32 rows (Nov 26) | 64 × 64 fills all 256 VGPRs (full items 32.8 TFLOPS against 35.6); 64 × 32 doubles the activation loads (29.2) |
+| MoE gate/up with 32-k LDS slabs (10 KiB per block), another LDS row stride, activations loaded per 16 k, or the `iterative-ilp`, `max-ilp` and `iterative-minreg` schedulers (Nov 26) | 3 to 9% slower or equal; a 64-element row stride (no padding) is 2.4 times slower |
+| Expert items of at most 16 tokens in a kernel of their own, with or without LDS (Nov 26) | equal to 27% slower: an item's cost is its 18 LDS loads of the expert's weights, whatever its tokens |
 
 ## Decode and verification
 
@@ -77,4 +81,3 @@ Each would need its own quality qualification.
 | F16 MoE slot rows instead of F32 | about 45 ms less per pp2048 |
 | Rejection sampling of sampled proposals | more accepted drafts at T > 0; output distributed as AR's, not equal to it |
 | Expert layers 20–23 as NVFP4, expert pruning, sparse attention from 32K (mikealanni/gufo) | faster decode/prefill at KL ~1e-3 |
-| Larger prefill batches (4,096) | changes the chunking the byte comparison uses |

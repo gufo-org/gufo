@@ -174,6 +174,11 @@ public:
   [[nodiscard]] std::size_t session_bytes() const;
   /// The part of session_bytes() in demand-mapped regions (0 without them).
   [[nodiscard]] std::size_t demand_mapped_bytes() const;
+  /// Tokens of one prefill pass. A pass costs about 115 ms however few tokens
+  /// it carries (every routed expert is dequantised once per visit), so wider
+  /// passes are faster per token; the activations and every session's window
+  /// rings grow with it. Prefill is bit-identical for any split.
+  static constexpr std::uint32_t kUbatch = 4096;
   [[nodiscard]] std::uint32_t ubatch() const { return ubatch_; }
   [[nodiscard]] std::uint32_t max_context() const { return max_context_; }
   /// Rows of one sliding-window ring (window + ubatch); the cache layer
@@ -235,6 +240,10 @@ public:
   /// Waits for all queued device work (M2: the cache adapter copies state with
   /// hipMemcpy).
   void Synchronize();
+  /// Allocates the area a prefill pass spills its live activations to while
+  /// another session runs in its yield (13 x ubatch x 2304 F32). A host with
+  /// several sessions calls it at load; otherwise the first such yield does.
+  void ReserveYieldSpill();
 
   static constexpr std::size_t kMaxDecodeBatch = 8;
   /// Rows of one session's verification step: the anchor and its drafts
@@ -375,7 +384,7 @@ private:
   std::shared_ptr<const core::GgufReader> reader_;
   std::size_t weight_bytes_ = 0;
   std::uint32_t max_context_ = 0;
-  std::uint32_t ubatch_ = 2048;
+  std::uint32_t ubatch_ = kUbatch;
   Tap tap_;
   std::mutex mutex_;
 };

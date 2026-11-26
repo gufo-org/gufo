@@ -243,8 +243,7 @@ struct Engine::Impl {
   float *cur, *prelude, *bankout;
   float* blocks[6];
   float* bank[4];
-  float *mixed, *ctl[3], *in[3], *msgs, *msgs_next, *minv[2], *xinv, *gbuf,
-      *gate64, *gainb, *forgetb;
+  float *mixed, *ctl[3], *in[3], *msgs, *msgs_next, *minv[2], *xinv, *gate64;
   float *Qb, *Kb, *Vb, *Rb, *Gb, *Sb, *Ob, *AOp, *AO, *h, *hn, *mixf, *rlog,
       *wts;
   float *dynK, *dynV, *gu, *act, *ye, *moe;
@@ -369,6 +368,10 @@ struct Engine::Impl {
   // (consecutive rows of a session share most of their experts)
   static constexpr int kGroupedVerifyRows = 6;
   static constexpr int kMsgInvTokens = 1024;
+  // A visit of a longer ubatch also checks for cancellation between its
+  // attention and expert halves: a pass then stops as soon as one of this
+  // width does.
+  static constexpr int kMidVisitCancelTokens = 2048;
   // From this ubatch size the loop controllers' apply also normalises the rows
   // (fewer bytes moved); below it the separate kernels have more blocks
   // (measured: pp64 -1%, pp256 equal, pp512 +0.7%).
@@ -403,11 +406,47 @@ struct Engine::Impl {
     std::size_t total =
         0;  // visit units of the whole Forward call (48 per ubatch)
     std::size_t done = 0;
-    std::size_t k = 1;  // next group boundary index
+    std::size_t k = 1;       // next group boundary index
+    std::size_t checks = 0;  // cancellation points passed
   };
+  // The cancellable pass that is running (Ubatch), for the cancellation point
+  // inside a visit.
+  YieldRun* run = nullptr;
+  /// A cancellation point. Kernels run far behind their launches (a pass is
+  /// queued in a few milliseconds): the launches stay one point ahead of the
+  /// device, so a cancellation stops the pass within about two points. The
+  /// device stays busy; the arithmetic is unchanged.
+  void CancelPoint(YieldRun* y) {
+    if (y == nullptr || y->spec == nullptr || !y->spec->cancelled)
+      return;
+    ++y->checks;
+    Check(hipEventRecord(ev_visit[y->checks & 1], s), "visit event");
+    if (y->checks >= 2)
+      Check(hipEventSynchronize(ev_visit[(y->checks - 1) & 1]), "visit wait");
+    bool stop = true;
+    try {
+      stop = y->spec->cancelled();
+    } catch (...) {
+    }
+    if (stop) {
+      // No queued work of this pass may outlive it: the next Forward reuses
+      // the scratch (both streams).
+      Check(hipStreamSynchronize(s), "cancel sync");
+      Check(hipStreamSynchronize(ps), "cancel sync");
+      throw PrefillCancelled();
+    }
+  }
   // Live between two visits of a ubatch: cur, prelude, bankout, blocks[6],
-  // bank[4].
+  // bank[4]. Only a yield to another session spills them, so the area exists
+  // from the first one (Engine::ReserveYieldSpill makes it at load).
   float* spill_buf[13] = {};
+  void EnsureSpill() {
+    if (spill_buf[0] != nullptr)
+      return;
+    const std::shared_lock<std::shared_mutex> gate(CaptureGate());
+    for (auto& b : spill_buf)
+      b = NewBuf(static_cast<std::size_t>(U) * kEmbd);
+  }
   float** LiveBufs(float** out) {
     int n = 0;
     out[n++] = cur;
@@ -420,6 +459,7 @@ struct Engine::Impl {
     return out;
   }
   void Spill() {
+    EnsureSpill();
     float* live[13];
     LiveBufs(live);
     const std::size_t rows = static_cast<std::size_t>(T) * kEmbd * 4;
@@ -446,27 +486,7 @@ struct Engine::Impl {
     if (y == nullptr || y->spec == nullptr)
       return false;
     ++y->done;
-    if (y->spec->cancelled) {
-      // Kernels run far behind their launches (a pass is queued in a few
-      // milliseconds): keep one visit queued ahead of the device, so a
-      // cancellation stops the pass within about two visits. The device
-      // stays busy; the arithmetic is unchanged.
-      Check(hipEventRecord(ev_visit[y->done & 1], s), "visit event");
-      if (y->done >= 2)
-        Check(hipEventSynchronize(ev_visit[(y->done - 1) & 1]), "visit wait");
-      bool stop = true;
-      try {
-        stop = y->spec->cancelled();
-      } catch (...) {
-      }
-      if (stop) {
-        // No queued work of this pass may outlive it: the next Forward reuses
-        // the scratch (both streams).
-        Check(hipStreamSynchronize(s), "cancel sync");
-        Check(hipStreamSynchronize(ps), "cancel sync");
-        throw PrefillCancelled();
-      }
-    }
+    CancelPoint(y);
     const std::size_t g = y->spec->groups;
     if (!y->spec->yield || g < 2 || y->done >= y->total || y->k >= g)
       return false;
@@ -498,6 +518,7 @@ struct Engine::Impl {
     pos0 = saved_pos0;
     nblocks = saved_nblocks;
     ubatch_cps = saved_cps;
+    run = y;
     if (mid) {
       Unspill();
       // The dense-GEMM work items are per ubatch and shared: another session's
@@ -584,8 +605,6 @@ struct Engine::Impl {
     cp_conv = NewBuf(Engine::kMaxPassCheckpoints * kCpConvFloats);
     prelude = NewBuf(u * kEmbd);
     bankout = NewBuf(u * kEmbd);
-    for (auto& b : spill_buf)
-      b = NewBuf(u * kEmbd);  // layered prefill spill area
     for (auto& b : blocks)
       b = NewBuf(u * kEmbd);
     for (auto& b : bank)
@@ -600,10 +619,7 @@ struct Engine::Impl {
     minv[0] = NewBuf(u * 4);
     minv[1] = NewBuf(u * 4);
     xinv = NewBuf(u * 3);
-    gbuf = NewBuf(u * 2 * kEmbd);
     gate64 = NewBuf(u * 64 * 3);
-    gainb = NewBuf(u * kEmbd);
-    forgetb = NewBuf(u * kEmbd);
     Qb = NewBuf(u * kQ);
     Kb = NewBuf(u * kKV);
     Vb = NewBuf(u * kKV);
@@ -620,10 +636,7 @@ struct Engine::Impl {
     wts = NewBuf(u * 8);
     dynK = NewBuf(u * 32);
     dynV = NewBuf(u * 32);
-    gu = NewBuf(u * 8 * 2 * 1152);
-    act = NewBuf(u * 8 * 1152);
     ye = NewBuf(u * 8 * kEmbd);
-    moe = NewBuf(u * kEmbd);
     ids_d = NewInts(u * 8);
     tok_d = NewInts(u);
     off_d = NewInts(129);
@@ -859,6 +872,15 @@ struct Engine::Impl {
     }
     Check(hipStreamSynchronize(s), "init decode weights");
     head_fast = IsType(w->output, kk::kTQ8_0);
+    // The generic expert kernels stage F32 gate/up and activation rows: a whole
+    // ubatch of pairs when a layer's prefill takes them, else only a decode
+    // step's eight.
+    const bool generic_moe =
+        std::ranges::any_of(lf, [](const LayerFast& f) { return f.moe < 0; });
+    const std::size_t pairs = generic_moe ? static_cast<std::size_t>(U) * 8 : 8;
+    gu = NewBuf(pairs * 2 * static_cast<std::size_t>(ff));
+    act = NewBuf(pairs * static_cast<std::size_t>(ff));
+    moe = NewBuf((generic_moe ? static_cast<std::size_t>(U) : 1) * kEmbd);
   }
 
   // ---- helpers ----
@@ -1172,6 +1194,8 @@ struct Engine::Impl {
       std::swap(cur, AO);
     }
     // ffn_inp = cur
+    if (T > kMidVisitCancelTokens)
+      CancelPoint(run);
 
     // F. MoE input
     const float* hin = mixf;
@@ -2181,6 +2205,7 @@ struct Engine::Impl {
               YieldRun* yr = nullptr) {
     T = static_cast<int>(tok.size());
     pos0 = static_cast<int>(ss.pos_);
+    run = yr;
     Check(hipMemcpyAsync(tok_d, tok.data(), tok.size() * 4,
                          hipMemcpyHostToDevice, s),
           "token copy");
@@ -2962,6 +2987,11 @@ void Engine::Decode(Session& s, std::int32_t token) {
     s.hooks_->BeforeWrite(s.pos_, s.pos_ + 1);
   s.BackRows(s.pos_, s.pos_ + 1);
   impl_->Decode(s, token, &s.logits_);
+}
+
+void Engine::ReserveYieldSpill() {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  impl_->EnsureSpill();
 }
 
 void Engine::Synchronize() {

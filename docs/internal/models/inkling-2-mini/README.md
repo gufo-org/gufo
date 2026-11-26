@@ -160,13 +160,32 @@ weights (`dspark_fuse`, `dflare_norm`, padded `markov_w1`, `hidden_out`; now
   against 10.7 GB for Qwen 27B on the same binary).
   Weights and scratch are `hipMalloc`ed only: no managed fallback, which on
   Windows would be host RAM outside the GPU carve-out.
-- **Cancellation.** A cancelled request's prefill stops at the next layer
-  visit. While a cancellation check is set, the pass keeps one visit queued
-  ahead of the device (an event per visit), so the check runs while the
-  device works instead of milliseconds after the whole pass was queued. After
-  a client disconnects mid-prefill the next request starts within 42 to
-  60 ms (up to 1.7 s before); a 34K-token cold prefill runs at 1,972 tokens/s
-  against 1,978 without the waits.
+- **Cancellation.** A cancelled request's prefill stops at the next
+  cancellation point: the end of a layer visit and, in passes over 2,048
+  tokens, also between a visit's attention and expert halves. While a
+  cancellation check is set, the pass keeps one point queued ahead of the
+  device (an event per point), so the check runs while the device works
+  instead of milliseconds after the whole pass was queued. After a client
+  disconnects mid-prefill the next request starts within 42 to 64 ms (up to
+  1.7 s before; 63 to 103 ms with one point per visit of a 4,096-token pass);
+  a 34K-token cold prefill runs at 1,972 tokens/s against 1,978 without the
+  waits.
+- **Pass width.** A prompt that no other request can join prefills in passes
+  of up to 4,096 tokens (`Engine::kUbatch`). While a session is free for an
+  arrival, or another one decodes, passes stay at 2,048 tokens
+  (`kSharedPassTokens`, the scheduling profile's `pass_tokens`), so an
+  arrival still waits for at most one 0.9 s pass. Every pass costs about
+  115 ms plus 0.38 ms per token: each visit dequantises every routed expert
+  once, however few tokens it serves. As of November 26, 2026,
+  `inkling2_bench` prefills 2,090 tokens at
+  2,292 tokens/s (2,033 with 2,048-token passes, which needed a second pass
+  for 42 tokens), 4,096 at 2,404 (2,227) and 8,192 at 2,323 (2,177); 8,192-token
+  passes would add 4% at 8,192 tokens and double the scratch again. Against
+  2,048-token passes the server holds 0.5 GiB more GPU memory with one
+  session and 1.8 GiB more with four (33.7 and 36.2 GiB after two 8,192-token
+  prompts): every session's window rings grow by 336 MiB, and the area a
+  pass spills its live rows to while another session prefills in its yield
+  (0.5 GiB) is allocated only when the server has more than one session.
 - **Layered prefill.** A pass yields to the decoders between up to 16 visit
   groups, and every decoding session steps in each yield
   (`max_yield_decode_width = Engine::kMaxDecodeBatch`): batched decode and
