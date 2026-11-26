@@ -4,11 +4,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <gufo/ext/json.hpp>
 #include <gufo/ext/platform/mapped_file.hpp>
 #include <gufo/ext/platform/prefault.hpp>
-#include <limits>
+#include <gufo/ext/safetensors.hpp>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -61,94 +61,54 @@ private:
   std::size_t size_{0};
 };
 
-DType ParseDType(std::string_view name) noexcept {
-  if (name == "F32") {
-    return DType::kF32;
+DType ParseDType(safetensors::Dtype dtype) noexcept {
+  switch (dtype) {
+    case safetensors::Dtype::kF32:
+      return DType::kF32;
+    case safetensors::Dtype::kBF16:
+      return DType::kBF16;
+    case safetensors::Dtype::kF16:
+      return DType::kF16;
+    case safetensors::Dtype::kI64:
+      return DType::kI64;
+    case safetensors::Dtype::kI32:
+      return DType::kI32;
+    case safetensors::Dtype::kU8:
+      return DType::kU8;
+    default:
+      return DType::kUnknown;
   }
-  if (name == "BF16") {
-    return DType::kBF16;
-  }
-  if (name == "F16") {
-    return DType::kF16;
-  }
-  if (name == "I64") {
-    return DType::kI64;
-  }
-  if (name == "I32") {
-    return DType::kI32;
-  }
-  if (name == "U8") {
-    return DType::kU8;
-  }
-  return DType::kUnknown;
-}
-
-std::uint64_t ReadLittleEndian64(const std::byte* bytes) noexcept {
-  std::uint64_t value = 0;
-  for (unsigned index = 0; index < 8; ++index) {
-    value |=
-        static_cast<std::uint64_t>(std::to_integer<unsigned char>(bytes[index]))
-        << (index * 8U);
-  }
-  return value;
 }
 
 bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
                      std::vector<std::shared_ptr<void>>* mappings,
                      std::vector<MappedRegion>* regions, std::string* error) {
   auto mapping = std::make_shared<MappedFile>();
-  if (!mapping->Open(path) || mapping->size() < 8U) {
+  if (!mapping->Open(path)) {
     if (error != nullptr && !mapping->open_error().empty())
       *error = "cannot open " + path.string() + ": " + mapping->open_error();
     return false;
   }
-  const std::uint64_t header_size = ReadLittleEndian64(mapping->data());
-  if (header_size == 0 || header_size > mapping->size() - 8U) {
-    return false;
-  }
-  json::Value header;
+  safetensors::Header header;
   try {
-    header = json::parse(
-        std::string_view(reinterpret_cast<const char*>(mapping->data() + 8),
-                         static_cast<std::size_t>(header_size)));
-  } catch (const std::exception&) {
+    header = safetensors::Parse(std::span(mapping->data(), mapping->size()));
+  } catch (const std::exception& failure) {
+    if (error != nullptr)
+      *error = failure.what();
     return false;
   }
-  if (!header.is_object()) {
-    return false;
-  }
-
-  const std::uint64_t payload_offset = 8U + header_size;
   const std::size_t before = store->size();
-  for (const auto& [name, specification] : header.members()) {
-    if (name == "__metadata__" || !specification.is_object()) {
-      continue;
-    }
+  for (auto& entry : header.tensors) {
     Tensor tensor;
-    tensor.name = name;
-    tensor.dtype = ParseDType(specification.member_str("dtype"));
-    if (const json::Value* shape = specification.find("shape");
-        shape != nullptr && shape->is_array()) {
-      for (const auto& dimension : shape->items()) {
-        tensor.shape.push_back(dimension.as_size());
-      }
-    }
-    const json::Value* offsets = specification.find("data_offsets");
-    if (offsets == nullptr || !offsets->is_array() || offsets->size() != 2) {
+    tensor.name = std::move(entry.name);
+    tensor.dtype = ParseDType(entry.dtype);
+    // Types this model has no use for are skipped, as are tensors without
+    // elements.
+    if (DTypeSize(tensor.dtype) == 0 || entry.begin == entry.end)
       continue;
-    }
-    const std::uint64_t begin = offsets->items()[0].as_size();
-    const std::uint64_t end = offsets->items()[1].as_size();
-    const auto elements = tensor.NumElements();
-    const std::size_t element_size = DTypeSize(tensor.dtype);
-    if (!elements.has_value() || element_size == 0 || begin >= end ||
-        end > mapping->size() - payload_offset ||
-        *elements > std::numeric_limits<std::uint64_t>::max() / element_size ||
-        end - begin != static_cast<std::uint64_t>(*elements) * element_size) {
-      continue;
-    }
-    tensor.data = mapping->data() + payload_offset + begin;
-    tensor.byte_count = end - begin;
+    tensor.shape = std::move(entry.shape);
+    tensor.data = mapping->data() + header.payload_offset + entry.begin;
+    tensor.byte_count = entry.end - entry.begin;
     if (!store->Add(std::move(tensor))) {
       return false;
     }
@@ -159,7 +119,7 @@ bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
   regions->push_back({
       .data = mapping->data(),
       .size = mapping->size(),
-      .payload_offset = static_cast<std::size_t>(payload_offset),
+      .payload_offset = static_cast<std::size_t>(header.payload_offset),
       .file_descriptor = mapping->file_descriptor(),
   });
   mappings->push_back(std::move(mapping));

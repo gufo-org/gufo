@@ -70,6 +70,7 @@ include/gufo/ext/platform/publish.hpp
 include/gufo/ext/prompt_lookup.hpp
 include/gufo/ext/reasoning.hpp
 include/gufo/ext/registry.hpp
+include/gufo/ext/safetensors.hpp
 include/gufo/ext/sampling.hpp
 include/gufo/ext/scheduling.hpp
 include/gufo/ext/session_mode.hpp
@@ -149,6 +150,7 @@ src/core/platform/publish.hpp
 src/core/quant/ggml_dequant.hpp
 src/core/quant/ggml_gemm.hpp
 src/core/reasoning.hpp
+src/core/safetensors.hpp
 src/core/sampling.hpp
 src/core/session_mode.hpp
 src/core/speculative/draft_backend.hpp

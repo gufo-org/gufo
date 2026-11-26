@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <fstream>
 #include <gufo/ext/mapped_prefetch.hpp>
 #include <gufo/ext/platform/mapped_file.hpp>
+#include <gufo/ext/safetensors.hpp>
 #include <limits>
 #include <set>
+#include <span>
 #include <stdexcept>
 
 namespace gufo::models::qwen_image_21 {
@@ -265,70 +268,42 @@ void Weights::Load(const std::filesystem::path& path,
   std::string open_error;
   auto mapped = std::make_shared<platform::ReadOnlyMappedFile>(
       platform::ReadOnlyMappedFile::Open(path, &open_error));
-  if (!mapped->valid() || mapped->size() < 8) {
-    throw std::runtime_error(open_error.empty()
-                                 ? "invalid safetensors file " + path.string()
-                                 : "cannot open " + path.string() + ": " +
-                                       open_error);
-  }
+  if (!mapped->valid())
+    throw std::runtime_error("cannot open " + path.string() +
+                             (open_error.empty() ? "" : ": " + open_error));
   const auto size = mapped->size();
   const void* data = mapped->data();
   // Retain the handle backing the mapping: reopening the pathname could read
   // a replacement file with different tensor contents or offsets.
   const auto file = mapped->PlatformHandle();
-  std::uint64_t header_size;
-  std::memcpy(&header_size, data, 8);
-  if (!header_size || header_size > (32U << 20U) || header_size > size - 8)
-    throw std::runtime_error("invalid safetensors header");
-  const auto header = json::parse(
-      std::string_view(static_cast<const char*>(data) + 8, header_size));
-  if (!header.is_object())
-    throw std::runtime_error("invalid safetensors header");
-  const auto payload_size = size - 8 - header_size;
-  std::vector<std::pair<std::size_t, std::size_t>> ranges;
-  for (const auto& [name, entry] : header.members()) {
-    if (name == "__metadata__")
-      continue;
-    const auto dtype = entry.member_str("dtype");
-    if (dtype != "BF16" && dtype != "F32")
-      throw std::runtime_error("unsupported Qwen-Image weight dtype " + dtype);
-    const auto* shape = entry.find("shape");
-    const auto* offsets = entry.find("data_offsets");
-    if (!shape || !shape->is_array() || shape->size() > 5 || !offsets ||
-        !offsets->is_array() || offsets->size() != 2)
-      throw std::runtime_error("invalid tensor layout " + name);
+  safetensors::Header header;
+  try {
+    header = safetensors::Parse(
+        std::span(static_cast<const std::byte*>(data), size));
+  } catch (const safetensors::Error& error) {
+    throw std::runtime_error(path.string() + ": " + error.what());
+  }
+  for (const auto& entry : header.tensors) {
+    const auto& name = entry.name;
+    if (entry.dtype != safetensors::Dtype::kBF16 &&
+        entry.dtype != safetensors::Dtype::kF32)
+      throw std::runtime_error("unsupported Qwen-Image weight dtype " +
+                               std::string(safetensors::Name(entry.dtype)));
+    if (entry.begin == entry.end)
+      throw std::runtime_error(path.string() + ": " + name +
+                               ": tensor has no elements");
     Weight weight;
-    weight.bf16 = dtype == "BF16";
-    std::size_t bytes = weight.bf16 ? 2 : 4;
-    for (const auto& dim : shape->items()) {
-      const auto value = Integer(dim);
-      if (!value || value > std::numeric_limits<int>::max() ||
-          bytes > payload_size / value)
-        throw std::runtime_error("invalid tensor shape " + name);
-      weight.shape.push_back(static_cast<int>(value));
-      bytes *= value;
-    }
-    const auto begin = Integer(offsets->items()[0]);
-    const auto end = Integer(offsets->items()[1]);
-    if (begin > end || end > payload_size || end - begin != bytes)
-      throw std::runtime_error("invalid tensor extent " + name);
-    weight.data = static_cast<const char*>(data) + 8 + header_size + begin;
-    weight.bytes = bytes;
+    weight.bf16 = entry.dtype == safetensors::Dtype::kBF16;
+    // The reader bounds each dimension by the int range.
+    for (const auto dim : entry.shape)
+      weight.shape.push_back(static_cast<int>(dim));
+    weight.offset = header.payload_offset + entry.begin;
+    weight.data = static_cast<const char*>(data) + weight.offset;
+    weight.bytes = entry.end - entry.begin;
     weight.file = static_cast<std::uint32_t>(files_.size());
-    weight.offset = 8 + header_size + begin;
-    ranges.emplace_back(begin, end);
     if (!weights_.emplace(prefix + name, std::move(weight)).second)
       throw std::runtime_error("duplicate tensor " + name);
   }
-  std::sort(ranges.begin(), ranges.end());
-  std::size_t cursor = 0;
-  for (auto [begin, end] : ranges) {
-    if (begin != cursor)
-      throw std::runtime_error("noncontiguous safetensors payload");
-    cursor = end;
-  }
-  if (cursor != payload_size)
-    throw std::runtime_error("unexpected safetensors data");
   mappings_.push_back(std::move(mapped));
   regions_.emplace_back(static_cast<const std::byte*>(data), size);
   files_.push_back({.data = data,

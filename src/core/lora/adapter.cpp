@@ -15,11 +15,12 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <limits>
 #include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -27,6 +28,7 @@
 #include "src/core/json.hpp"
 #include "src/core/platform/mapped_file.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/core/safetensors.hpp"
 
 namespace gufo::lora {
 namespace {
@@ -61,15 +63,6 @@ constexpr Suffix kSuffixes[] = {
 constexpr std::string_view kLayouts[] = {
     "peft",    "peft-default", "peft-bare",       "kohya",
     "down-up", "down-up-bare", "diffusers-legacy"};
-
-std::optional<std::size_t> Integer(const json::Value& value) {
-  const double number = value.as_double(-1);
-  if (!value.is_number() || !std::isfinite(number) || number < 0 ||
-      number > (1ULL << 40) ||
-      number != static_cast<double>(static_cast<std::uint64_t>(number)))
-    return std::nullopt;
-  return static_cast<std::size_t>(number);
-}
 
 [[noreturn]] void Fail(const std::filesystem::path& path, std::string_view key,
                        std::string_view reason) {
@@ -152,23 +145,15 @@ Adapter::Adapter(const std::filesystem::path& path, const Schema& schema) {
     file->Close();
     delete file;
   });
-  if (size < 8)
-    Fail(path, "", "invalid safetensors file");
-  std::uint64_t header_size;
-  std::memcpy(&header_size, data, 8);
-  if (!header_size || header_size > (32U << 20U) || header_size > size - 8)
-    Fail(path, "", "invalid safetensors header");
-  json::Value header;
+  // The reader checks the header and that the tensors tile the payload.
+  safetensors::Header header;
   try {
-    header = json::parse(
-        std::string_view(static_cast<const char*>(data) + 8, header_size));
-  } catch (const std::exception&) {
-    Fail(path, "", "invalid safetensors header");
+    header = safetensors::Parse(
+        std::span(static_cast<const std::byte*>(data), size));
+  } catch (const safetensors::Error& error) {
+    Fail(path, "", error.what());
   }
-  if (!header.is_object())
-    Fail(path, "", "invalid safetensors header");
-  const auto payload_size = size - 8 - header_size;
-  const char* payload = static_cast<const char*>(data) + 8 + header_size;
+  const char* payload = static_cast<const char*>(data) + header.payload_offset;
 
   std::map<std::string, std::string, std::less<>> kohya;
   for (const auto& [module, slices] : schema.modules)
@@ -176,16 +161,8 @@ Adapter::Adapter(const std::filesystem::path& path, const Schema& schema) {
 
   std::map<std::string, Module, std::less<>> modules;
   std::set<std::string_view> layouts;
-  std::set<std::string, std::less<>> keys;
-  std::vector<std::pair<std::size_t, std::size_t>> ranges;
-  const json::Value* metadata = nullptr;
-  for (const auto& [key, entry] : header.members()) {
-    if (key == "__metadata__") {
-      metadata = &entry;
-      continue;
-    }
-    if (!keys.insert(key).second)
-      Fail(path, key, "duplicate tensor");
+  for (const auto& entry : header.tensors) {
+    const std::string& key = entry.name;
     for (auto text : {"lora_te", "text_encoder", "te1_", "te2_"})
       if (key.find(text) != std::string::npos)
         Fail(path, key, "text-encoder adapters are unsupported");
@@ -202,42 +179,28 @@ Adapter::Adapter(const std::filesystem::path& path, const Schema& schema) {
       if (key.find(text) != std::string::npos)
         Fail(path, key, "unsupported adapter tensor");
 
-    // Tensor extent, as in the base checkpoint loaders, but this one also
-    // accepts F16, reports the offending key and leaves the payload check
-    // to after the loop.
-    const auto dtype = entry.member_str("dtype");
     Tensor tensor;
-    std::size_t bytes = 2;
-    if (dtype == "BF16") {
-      tensor.dtype = Dtype::kBf16;
-    } else if (dtype == "F16") {
-      tensor.dtype = Dtype::kF16;
-    } else if (dtype == "F32") {
-      tensor.dtype = Dtype::kF32;
-      bytes = 4;
-    } else {
-      Fail(path, key, "unsupported adapter dtype " + dtype);
+    switch (entry.dtype) {
+      case safetensors::Dtype::kBF16:
+        tensor.dtype = Dtype::kBf16;
+        break;
+      case safetensors::Dtype::kF16:
+        tensor.dtype = Dtype::kF16;
+        break;
+      case safetensors::Dtype::kF32:
+        tensor.dtype = Dtype::kF32;
+        break;
+      default:
+        Fail(path, key,
+             "unsupported adapter dtype " +
+                 std::string(safetensors::Name(entry.dtype)));
     }
-    const auto* shape = entry.find("shape");
-    const auto* offsets = entry.find("data_offsets");
-    if (!shape || !shape->is_array() || shape->size() > 5 || !offsets ||
-        !offsets->is_array() || offsets->size() != 2)
-      Fail(path, key, "invalid tensor layout");
-    for (const auto& dim : shape->items()) {
-      const auto value = Integer(dim).value_or(0);
-      if (!value || value > std::numeric_limits<int>::max() ||
-          bytes > payload_size / value)
-        Fail(path, key, "invalid tensor shape");
-      tensor.shape.push_back(static_cast<int>(value));
-      bytes *= value;
-    }
-    const auto begin = Integer(offsets->items()[0]);
-    const auto end = Integer(offsets->items()[1]);
-    if (!begin || !end || *begin > *end || *end > payload_size ||
-        *end - *begin != bytes)
-      Fail(path, key, "invalid tensor extent");
-    tensor.data = payload + *begin;
-    ranges.emplace_back(*begin, *end);
+    if (entry.begin == entry.end)
+      Fail(path, key, "tensor has no elements");
+    // The reader bounds each dimension by the int range.
+    for (const auto dim : entry.shape)
+      tensor.shape.push_back(static_cast<int>(dim));
+    tensor.data = payload + entry.begin;
 
     const Suffix* suffix = nullptr;
     for (const auto& candidate : kSuffixes)
@@ -277,25 +240,16 @@ Adapter::Adapter(const std::filesystem::path& path, const Schema& schema) {
     slot.keys[suffix->role] = key;
     slot.tensors[suffix->role] = std::move(tensor);
   }
-  std::sort(ranges.begin(), ranges.end());
-  std::size_t cursor = 0;
-  for (auto [begin, end] : ranges) {
-    if (begin != cursor)
-      Fail(path, "", "noncontiguous safetensors payload");
-    cursor = end;
-  }
-  if (cursor != payload_size)
-    Fail(path, "", "unexpected safetensors data");
 
   // diffusers/PEFT `lora_adapter_metadata`; other metadata alphas are
   // ignored like ComfyUI and diffusers do.
   std::optional<double> metadata_alpha;
   bool rslora = false;
-  if (metadata && metadata->is_object())
-    if (const auto* text = metadata->find("lora_adapter_metadata")) {
+  for (const auto& [name, text] : header.metadata)
+    if (name == "lora_adapter_metadata") {
       json::Value config;
       try {
-        config = json::parse(text->str());
+        config = json::parse(text);
       } catch (const std::exception&) {
         Fail(path, "__metadata__", "invalid lora_adapter_metadata");
       }

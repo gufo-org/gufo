@@ -155,6 +155,19 @@ tensors inside the buffer. GGUF files given as arguments must open and are
 timed. It runs in `check-pr`; the crate's Rust tests cover the check order,
 the budget and the C ABI.
 
+`safetensors_header_test` compares the Rust safetensors header reader, through
+`safetensors::Parse`, with frozen copies of the six 0.35.0 C++ parsers it
+replaced in `tests/core/safetensors_reference.hpp`: LoRA, EmbeddingGemma 2,
+Qwen3-ASR, Qwen3-TTS, Qwen-Image and MiniMax H3, whose own JSON number rules
+are rebuilt on the core parser. Headers from a grid of types, shapes and
+offsets, metadata, length fields, the layouts of three tensors and tensors
+without elements among them, every truncation of four files and their
+deterministic mutations must give each loader the tensors its old parser gave. A file the reader rejects that an old
+parser accepted must break one of the stricter rules that loader takes on, which
+the test confirms from the header itself; any other difference fails. Accepted
+headers are checked against the rules independently. It runs in `check-pr`; the
+crate's Rust tests cover each rule, the check order and the C ABI.
+
 `json_parse_test` checks expected values, number tokens and member order, or
 the message of each of the parser's 21 rejections, through `json::parse`:
 whitespace and trailing input, NUL bytes, duplicate keys compared decoded,

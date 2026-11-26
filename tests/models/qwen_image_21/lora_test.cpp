@@ -370,7 +370,8 @@ int main() {
   {
     const auto path = Directory() / "short.safetensors";
     std::ofstream(path, std::ios::binary) << "abcd";
-    Rejects(path, "invalid safetensors file");
+    Rejects(path,
+            "invalid safetensors file: shorter than the 8-byte header length");
   }
 
   // Rejections name the offending key.
@@ -442,9 +443,16 @@ int main() {
                 {{std::string(kQ) + ".lora_A.weight", {2, 8}, "F64"},
                  {std::string(kQ) + ".lora_B.weight", {8, 2}}}),
           "to_q.lora_A.weight: unsupported adapter dtype F64");
-  Rejects(Write("r.safetensors", q, "", 2), "invalid tensor extent");
+  // The reader accepts a tensor without elements; an adapter rejects it.
+  Rejects(
+      Write("r.safetensors",
+            Join({q,
+                  {{"transformer_blocks.0.attn.to_k.lora_A.weight", {0, 8}}}})),
+      "to_k.lora_A.weight: tensor has no elements");
+  Rejects(Write("r.safetensors", q, "", 2),
+          "data_offsets end past the payload");
   Rejects(Write("r.safetensors", q, "", 0, 1ULL << 40),
-          "invalid safetensors header");
+          "invalid safetensors header: length is above 32 MiB");
   Rejects(Write("r.safetensors",
                 Pair("transformer_blocks.0.img_mlp.gate_up", ".lora_A.weight",
                      ".lora_B.weight", 2, 36, 8)),

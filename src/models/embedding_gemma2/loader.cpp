@@ -2,11 +2,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
-#include <gufo/ext/json.hpp>
 #include <gufo/ext/platform/mapped_file.hpp>
-#include <limits>
+#include <gufo/ext/safetensors.hpp>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,30 +17,21 @@ namespace {
 
 using MappedFile = platform::RawMappedFile;
 
-DType ParseDType(std::string_view name) noexcept {
-  if (name == "F32") {
-    return DType::kF32;
+DType ParseDType(safetensors::Dtype dtype) noexcept {
+  switch (dtype) {
+    case safetensors::Dtype::kF32:
+      return DType::kF32;
+    case safetensors::Dtype::kBF16:
+      return DType::kBF16;
+    case safetensors::Dtype::kF16:
+      return DType::kF16;
+    default:
+      return DType::kUnknown;
   }
-  if (name == "BF16") {
-    return DType::kBF16;
-  }
-  if (name == "F16") {
-    return DType::kF16;
-  }
-  return DType::kUnknown;
 }
 
-std::uint64_t ReadLittleEndian64(const std::byte* bytes) noexcept {
-  std::uint64_t value = 0;
-  for (unsigned index = 0; index < 8; ++index) {
-    value |=
-        static_cast<std::uint64_t>(std::to_integer<unsigned char>(bytes[index]))
-        << (index * 8U);
-  }
-  return value;
-}
-
-/// Indexes the requested backbones. Unused towers are skipped.
+/// Indexes the requested backbones. Unused towers are skipped, though the
+/// reader checks every entry.
 bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
                      std::vector<std::shared_ptr<void>>* mappings,
                      std::string* error, bool include_vision,
@@ -49,79 +41,43 @@ bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
     m->Close();
     delete m;
   });
-  if (!mapping->Open(path) || mapping->size < 8U) {
+  if (!mapping->Open(path)) {
     *error = "cannot map " + path.string();
     return false;
   }
-  const std::uint64_t header_size =
-      ReadLittleEndian64(static_cast<const std::byte*>(mapping->data));
-  if (header_size == 0 || header_size > mapping->size - 8U) {
-    *error = "invalid safetensors header in " + path.string();
-    return false;
-  }
-  json::Value header;
+  const auto* bytes = static_cast<const std::byte*>(mapping->data);
+  safetensors::Header header;
   try {
-    header = json::parse(
-        std::string_view(reinterpret_cast<const char*>(
-                             static_cast<const std::byte*>(mapping->data) + 8),
-                         static_cast<std::size_t>(header_size)));
-  } catch (const std::exception&) {
-    *error = "unparsable safetensors header in " + path.string();
+    header = safetensors::Parse(std::span(bytes, mapping->size));
+  } catch (const std::exception& failure) {
+    *error = path.string() + ": " + failure.what();
     return false;
   }
-  if (!header.is_object()) {
-    *error = "invalid safetensors header in " + path.string();
-    return false;
-  }
-
-  const std::uint64_t payload_offset = 8U + header_size;
-  for (const auto& [name, specification] : header.members()) {
-    if (name == "__metadata__" ||
-        !(name.starts_with(kTextTensorPrefix) ||
+  for (auto& entry : header.tensors) {
+    const auto& name = entry.name;
+    if (!(name.starts_with(kTextTensorPrefix) ||
           (include_vision && (name.starts_with("vision_tower.") ||
                               name.starts_with("embed_vision."))) ||
           (include_audio && (name.starts_with("audio_tower.") ||
                              name.starts_with("embed_audio."))))) {
       continue;
     }
-    if (!specification.is_object()) {
-      *error = "invalid tensor entry " + name;
-      return false;
-    }
     Tensor tensor;
     tensor.name = name;
-    tensor.dtype = ParseDType(specification.member_str("dtype"));
-    if (const json::Value* shape = specification.find("shape");
-        shape != nullptr && shape->is_array()) {
-      for (const auto& dimension : shape->items()) {
-        tensor.shape.push_back(dimension.as_size());
-      }
-    }
-    const json::Value* offsets = specification.find("data_offsets");
-    if (offsets == nullptr || !offsets->is_array() || offsets->size() != 2) {
-      *error = "missing data_offsets for " + name;
+    tensor.dtype = ParseDType(entry.dtype);
+    if (tensor.dtype == DType::kUnknown) {
+      *error = path.string() + ": " + name + ": unsupported dtype";
       return false;
     }
-    const std::uint64_t begin = offsets->items()[0].as_size();
-    const std::uint64_t end = offsets->items()[1].as_size();
-    const auto elements = tensor.NumElements();
-    const std::size_t element_size = DTypeSize(tensor.dtype);
-    if (element_size == 0) {
-      *error = "unsupported dtype for " + name;
+    if (entry.begin == entry.end) {
+      *error = path.string() + ": " + name + ": tensor has no elements";
       return false;
     }
-    if (!elements.has_value() || begin >= end ||
-        end > mapping->size - payload_offset ||
-        *elements > std::numeric_limits<std::uint64_t>::max() / element_size ||
-        end - begin != static_cast<std::uint64_t>(*elements) * element_size) {
-      *error = "inconsistent tensor extent for " + name;
-      return false;
-    }
-    tensor.data =
-        static_cast<const std::byte*>(mapping->data) + payload_offset + begin;
-    tensor.byte_count = end - begin;
+    tensor.shape = std::move(entry.shape);
+    tensor.data = bytes + header.payload_offset + entry.begin;
+    tensor.byte_count = entry.end - entry.begin;
     if (!store->Add(std::move(tensor))) {
-      *error = "duplicate tensor " + name;
+      *error = path.string() + ": " + name + ": duplicate tensor";
       return false;
     }
   }
