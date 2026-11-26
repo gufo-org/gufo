@@ -15,6 +15,7 @@
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
+#include "src/core/prompt_too_long.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
 #include "src/families/qwen/vision/prompt.hpp"
@@ -740,6 +741,21 @@ void TestVisionPreparationReadsContentAsText() {
              std::find(prepared.tokens.begin(), prepared.tokens.end(),
                        *framing) != prepared.tokens.end(),
          "template framing still tokenizes as control tokens");
+
+  // A prompt one token over the context reports its length and the longest
+  // prompt the context accepts, which the Messages API names to the client.
+  const auto size = prepared.tokens.size();
+  bool rejected = false;
+  try {
+    (void)gufo::models::qwen::vision::Prepare(
+        *tokenizer, messages, {}, opts, {},
+        static_cast<std::uint32_t>(size - 1));
+  } catch (const gufo::core::PromptTooLong& error) {
+    rejected = true;
+    Expect(error.tokens() == size && error.maximum() == size - 2,
+           "the rejection reports the prompt and accepted sizes");
+  }
+  Expect(rejected, "a prompt longer than the context is rejected");
 }
 
 /// A picture in the message changes the framing the prompt is built from, and

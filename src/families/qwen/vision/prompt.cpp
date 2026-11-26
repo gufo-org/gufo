@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "src/core/crypto/sha256.hpp"
+#include "src/core/prompt_too_long.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/families/qwen/vision/image_cache.hpp"
 
@@ -301,9 +302,14 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
     auto tokens = tokenization::QwenChatTemplate::EncodeRendered(
         tokenizer, *rendered, begin, end, content_spans, tok_options);
     if (tokens.size() > max_context - prompt.tokens.size()) {
-      throw std::length_error(
+      // Tokenization stops at the first part that overflows, so the count is
+      // a lower bound. The scheduler rejects a prompt that fills the context.
+      throw core::PromptTooLong(
+          prompt.tokens.size() + tokens.size(),
+          max_context == 0 ? 0 : max_context - 1,
           "prompt exceeds the " + std::to_string(max_context) +
-          "-token context; increase --context or shorten the conversation");
+              "-token context; increase --context or shorten the "
+              "conversation");
     }
     prompt.tokens.insert(prompt.tokens.end(), tokens.begin(), tokens.end());
   };
@@ -334,7 +340,9 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
                            pixels->width / kResizeFactor};
       const auto count = std::size_t{grid.height} * grid.width;
       if (count > max_context - prompt.tokens.size()) {
-        throw std::length_error("image tokens exceed model context");
+        throw core::PromptTooLong(prompt.tokens.size() + count,
+                                  max_context == 0 ? 0 : max_context - 1,
+                                  "image tokens exceed model context");
       }
       HashU32(identity, grid.offset);
       HashU32(identity, grid.height);
