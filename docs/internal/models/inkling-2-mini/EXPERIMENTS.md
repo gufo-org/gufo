@@ -17,6 +17,7 @@ changes are in Git history; current speeds are in [benchmarks](BENCHMARKS.md).
 | Prefill attention with register-prefetched K/V tiles | spills; pp32768 −5% |
 | 32-query attention blocks | pp32768 −11% |
 | 128-query blocks on window visits too | equal within noise |
+| Accumulator rescale skipped in window and near attention steps too, as in the far tiles | equal within noise |
 | Message mixes as their own side-stream launch | pp512 −1.5%; folded into the message mix from 1,024-token ubatches |
 | Router and controller gates with smaller token tiles, or blocks reordered so jobs sharing x run together (Nov 25) | equal or up to 2.5× slower: the gates are LDS-bandwidth bound, not DRAM or occupancy bound |
 | Gate GEMMs with wave-uniform scalar weights, one token per lane (Nov 25) | 2 to 10× slower |
@@ -33,6 +34,7 @@ changes are in Git history; current speeds are in [benchmarks](BENCHMARKS.md).
 | Variant | Result |
 | --- | --- |
 | Quantising each activation once (`k_quant`) instead of per GEMV block | tg −3%: about 240 more launches per token |
+| A block's first weight rows loaded before it quantises its input, in the expert gate/up and down GEMVs (Nov 26) | tg −1.6% (22.03 against 21.68 ms per token): the decode GEMVs already read their weights at 197 to 238 GB/s, so the prologue is not their bound |
 | Two row iterations per wave, or 16 waves per block, in the expert GEMVs | equal or −2% |
 | Expert weights held in registers, or MoE inputs read from L2 | 2% slower per token |
 | Predictive expert prefetch (60% top-1 reuse between tokens) | 0.5% slower: the reads compete with latency-bound kernels |

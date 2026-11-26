@@ -2,7 +2,7 @@
 
 AMD Strix Halo `gfx1151`, 128 GB unified memory, ROCm 10.1. Unsloth
 `UD-Q4_K_XL` (revision `8078d149`) with its Q8_0 DSpark drafter. HTTP, greedy,
-thinking off (Inkling may still think briefly). Gufo `82645e0a`; llama.cpp
+thinking off (Inkling may still think briefly). Gufo `1d61903a` (November 26, 2026); llama.cpp
 `4c92c5bfb` ROCm (November 24, 2026). Positive gain favors Gufo. **TODO**
 means unmeasured.
 [Quality and measurement details](QUALITY.md#benchmark-method)
@@ -14,14 +14,14 @@ pp2048 / tg128; depth is the cached prefix in tokens.
 <!-- bench:single-ar -->
 | Inkling 2 Mini UD-Q4_K_XL AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 1916.44 | 346.56 | +453.0% | 47.42 | 21.95 | +116.0% |
-| 4,096 | 1962.26 | 275.54 | +612.2% | 45.90 | 21.11 | +117.4% |
-| 8,192 | 1894.84 | 236.43 | +701.4% | 44.44 | 20.26 | +119.3% |
-| 12,288 | 1840.88 | 207.41 | +787.6% | 42.75 | 19.61 | +118.0% |
-| 16,384 | 1654.53 | 185.51 | +791.9% | 41.95 | 18.76 | +123.6% |
-| 32,768 | 1601.97 | 129.53 | +1136.8% | 37.91 | 15.88 | +138.7% |
-| 65,536 | 1219.22 | 78.20 | +1459.1% | 31.88 | 12.11 | +163.3% |
-| 131,072 | 989.29 | 42.46 | +2229.9% | 24.30 | 7.74 | +214.0% |
+| 0 | 2295.93 | 346.56 | +562.5% | 47.42 | 21.95 | +116.0% |
+| 4,096 | 2170.23 | 275.54 | +687.6% | 45.95 | 21.11 | +117.7% |
+| 8,192 | 2104.73 | 236.43 | +790.2% | 44.49 | 20.26 | +119.6% |
+| 12,288 | 2053.84 | 207.41 | +890.2% | 43.17 | 19.61 | +120.1% |
+| 16,384 | 1996.69 | 185.51 | +976.3% | 42.00 | 18.76 | +123.9% |
+| 32,768 | 1818.12 | 129.53 | +1303.6% | 37.95 | 15.88 | +139.0% |
+| 65,536 | 1550.29 | 78.20 | +1882.5% | 31.91 | 12.11 | +163.5% |
+| 131,072 | 1189.05 | 42.46 | +2700.4% | 24.32 | 7.74 | +214.2% |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar.svg)
@@ -37,14 +37,14 @@ included). llama.cpp cannot load the DSpark drafter: N/A.
 <!-- bench:single-dspark -->
 | Inkling 2 Mini UD-Q4_K_XL DSpark<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 1916.28 | N/A | N/A | 59.14 | N/A | N/A | 62.58 | N/A | N/A |
-| 4,096 | 1961.21 | N/A | N/A | 57.39 | N/A | N/A | 54.73 | N/A | N/A |
-| 8,192 | 1889.51 | N/A | N/A | 58.73 | N/A | N/A | 58.78 | N/A | N/A |
-| 12,288 | 1832.42 | N/A | N/A | 61.79 | N/A | N/A | 60.25 | N/A | N/A |
-| 16,384 | 1644.73 | N/A | N/A | 57.10 | N/A | N/A | 56.43 | N/A | N/A |
-| 32,768 | 1593.40 | N/A | N/A | 51.30 | N/A | N/A | 50.71 | N/A | N/A |
-| 65,536 | 1209.49 | N/A | N/A | 43.14 | N/A | N/A | 40.29 | N/A | N/A |
-| 131,072 | 953.87 | N/A | N/A | 35.11 | N/A | N/A | 28.69 | N/A | N/A |
+| 0 | 2298.49 | N/A | N/A | 59.35 | N/A | N/A | 63.63 | N/A | N/A |
+| 4,096 | 2158.32 | N/A | N/A | 57.55 | N/A | N/A | 56.05 | N/A | N/A |
+| 8,192 | 2101.51 | N/A | N/A | 59.46 | N/A | N/A | 59.03 | N/A | N/A |
+| 12,288 | 2045.97 | N/A | N/A | 63.26 | N/A | N/A | 57.14 | N/A | N/A |
+| 16,384 | 1985.45 | N/A | N/A | 52.87 | N/A | N/A | 57.94 | N/A | N/A |
+| 32,768 | 1812.56 | N/A | N/A | 54.10 | N/A | N/A | 50.10 | N/A | N/A |
+| 65,536 | 1541.95 | N/A | N/A | 44.71 | N/A | N/A | 40.98 | N/A | N/A |
+| 131,072 | 1181.88 | N/A | N/A | 35.96 | N/A | N/A | 31.51 | N/A | N/A |
 <!-- /bench -->
 
 ![Single user, DSpark](artifacts/charts/single-dspark.svg)
@@ -57,11 +57,11 @@ Prefill every session before timed decoding; sum individual request decode rates
 <!-- bench:multi-ar -->
 | Inkling 2 Mini UD-Q4_K_XL AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
-| 1 | 47.39 | 22.89 | +107.0% |
-| 2 | 83.34 | 34.78 | +139.6% |
-| 4 | 116.76 | 51.70 | +125.8% |
-| 6 | 133.54 | 62.26 | +114.5% |
-| 8 | 188.35 | 68.33 | +175.6% |
+| 1 | 47.52 | 22.89 | +107.6% |
+| 2 | 83.32 | 34.78 | +139.6% |
+| 4 | 117.68 | 51.70 | +127.6% |
+| 6 | 134.26 | 62.26 | +115.6% |
+| 8 | 189.74 | 68.33 | +177.7% |
 <!-- /bench -->
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar.svg)
@@ -76,11 +76,11 @@ above.
 <!-- bench:multi-dspark -->
 | Inkling 2 Mini UD-Q4_K_XL DSpark<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 56.98 | N/A | N/A | 62.90 | N/A | N/A |
-| 2 | 91.33 | N/A | N/A | 93.63 | N/A | N/A |
-| 4 | 126.89 | N/A | N/A | 132.33 | N/A | N/A |
-| 6 | 126.74 | N/A | N/A | 131.03 | N/A | N/A |
-| 8 | 187.31 | N/A | N/A | 187.38 | N/A | N/A |
+| 1 | 57.80 | N/A | N/A | 63.13 | N/A | N/A |
+| 2 | 103.04 | N/A | N/A | 100.40 | N/A | N/A |
+| 4 | 144.92 | N/A | N/A | 154.28 | N/A | N/A |
+| 6 | 157.05 | N/A | N/A | 167.81 | N/A | N/A |
+| 8 | 196.54 | N/A | N/A | 194.71 | N/A | N/A |
 <!-- /bench -->
 
 ![Multiple users, DSpark](artifacts/charts/multi-dspark.svg)
@@ -93,7 +93,7 @@ readiness. llama.cpp: N/A (it cannot load the drafter).
 <!-- bench:loading -->
 | Inkling 2 Mini UD-Q4_K_XL<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |
 | --- | ---: | ---: | ---: |
-| UD-Q4_K_XL | 4.66 | N/A | N/A |
+| UD-Q4_K_XL | 3.88 | N/A | N/A |
 <!-- /bench -->
 
 ![Loading time](artifacts/charts/loading.svg)
@@ -106,8 +106,8 @@ cache, so its footprint does not grow with the prefix.
 <!-- bench:memory -->
 | Inkling 2 Mini UD-Q4_K_XL AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
-| pp2048 + tg128 | 28.42 | 36.97 | +30.1% |
-| 16K prefix, pp4096 + tg128 | 30.44 | 37.49 | +23.2% |
+| pp2048 + tg128 | 28.57 | 36.97 | +29.4% |
+| 16K prefix, pp4096 + tg128 | 30.35 | 37.49 | +23.5% |
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory.svg)

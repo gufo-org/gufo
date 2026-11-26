@@ -22,7 +22,7 @@
     "fingerprintId": "3fcf92f8dd18973504c217987816f8b05b87a86f30533006c31337b79a56978b",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-11-24",
+  "measuredOn": "2026-11-26",
   "mode": "dspark",
   "model": {
     "id": "Inkling-2-Mini",
@@ -35,186 +35,186 @@
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "acceptance": 64.71,
+      "acceptance": 65.69,
       "acceptance_sd": null,
-      "accepted_per_step": 1.06,
+      "accepted_per_step": 1.1,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 60929 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
+      "command": "gufo serve --port 45947 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 0,
           "completion_sha256": "5dd3a4c728747442e1442c695713f91f11dd411bcd95e4ceff706a3396ccb183",
           "draft_n": 102,
-          "draft_n_accepted": 66,
+          "draft_n_accepted": 67,
           "predicted_n": 128,
           "prompt_n": 2056
         }
       ],
-      "pp": 1916.28,
+      "pp": 2298.49,
       "pp_sd": null,
       "samples": 1,
-      "tg": 62.58,
+      "tg": 63.63,
       "tg_sd": null,
       "workload": "repetition"
     },
     "12288": {
-      "acceptance": 72.04,
+      "acceptance": 62.63,
       "acceptance_sd": null,
-      "accepted_per_step": 1.1,
+      "accepted_per_step": 0.94,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 60929 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
+      "command": "gufo serve --port 45947 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 12339,
           "completion_sha256": "1bb57c23710178450b5102def56d133a80311de682a7511c0f061e035684bfe6",
-          "draft_n": 93,
-          "draft_n_accepted": 67,
+          "draft_n": 99,
+          "draft_n_accepted": 62,
           "predicted_n": 128,
           "prompt_n": 2046
         }
       ],
-      "pp": 1830.45,
+      "pp": 2045.97,
       "pp_sd": null,
       "samples": 1,
-      "tg": 60.25,
+      "tg": 57.14,
       "tg_sd": null,
       "workload": "repetition"
     },
     "131072": {
-      "acceptance": 38.93,
+      "acceptance": 41.78,
       "acceptance_sd": null,
-      "accepted_per_step": 0.66,
+      "accepted_per_step": 0.91,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 60929 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
+      "command": "gufo serve --port 45947 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 131618,
           "completion_sha256": "405621ade713fca2ca0c16f7c26868dc1503aa162823562a3c1c720b33d5291e",
-          "draft_n": 131,
-          "draft_n_accepted": 51,
+          "draft_n": 146,
+          "draft_n_accepted": 61,
           "predicted_n": 128,
           "prompt_n": 2033
         }
       ],
-      "pp": 951.32,
+      "pp": 1128.95,
       "pp_sd": null,
       "samples": 1,
-      "tg": 28.69,
+      "tg": 31.51,
       "tg_sd": null,
       "workload": "repetition"
     },
     "16384": {
-      "acceptance": 61.82,
+      "acceptance": 61.4,
       "acceptance_sd": null,
-      "accepted_per_step": 1.13,
+      "accepted_per_step": 1.21,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 60929 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
+      "command": "gufo serve --port 45947 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 16411,
           "completion_sha256": "02ae536227880ff90c17d755c1ff552029d922685099e0d40c3fce93895011bf",
-          "draft_n": 110,
-          "draft_n_accepted": 68,
+          "draft_n": 114,
+          "draft_n_accepted": 70,
           "predicted_n": 128,
           "prompt_n": 2055
         }
       ],
-      "pp": 1624.64,
+      "pp": 1975.67,
       "pp_sd": null,
       "samples": 1,
-      "tg": 56.43,
+      "tg": 57.94,
       "tg_sd": null,
       "workload": "repetition"
     },
     "32768": {
-      "acceptance": 64.0,
+      "acceptance": 56.64,
       "acceptance_sd": null,
       "accepted_per_step": 1.0,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 60929 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
+      "command": "gufo serve --port 45947 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 32751,
           "completion_sha256": "7ab0162cc4c7e5ebe705845cc6432a04e27a3386ee294994638df450a034bb31",
-          "draft_n": 100,
+          "draft_n": 113,
           "draft_n_accepted": 64,
           "predicted_n": 128,
           "prompt_n": 2019
         }
       ],
-      "pp": 1561.04,
+      "pp": 1747.51,
       "pp_sd": null,
       "samples": 1,
-      "tg": 50.71,
+      "tg": 50.1,
       "tg_sd": null,
       "workload": "repetition"
     },
     "4096": {
-      "acceptance": 55.56,
+      "acceptance": 55.88,
       "acceptance_sd": null,
-      "accepted_per_step": 0.75,
+      "accepted_per_step": 0.8,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 60929 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
+      "command": "gufo serve --port 45947 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 4104,
           "completion_sha256": "bffea927d12ebf3d912b15253d91bb4fef60149c90de3a293d58b1d9c8fe472b",
-          "draft_n": 99,
-          "draft_n_accepted": 55,
+          "draft_n": 102,
+          "draft_n_accepted": 57,
           "predicted_n": 128,
           "prompt_n": 2038
         }
       ],
-      "pp": 1961.21,
+      "pp": 2158.32,
       "pp_sd": null,
       "samples": 1,
-      "tg": 54.73,
+      "tg": 56.05,
       "tg_sd": null,
       "workload": "repetition"
     },
     "65536": {
-      "acceptance": 46.56,
+      "acceptance": 46.92,
       "acceptance_sd": null,
       "accepted_per_step": 0.91,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 60929 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
+      "command": "gufo serve --port 45947 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 65626,
           "completion_sha256": "8dbefe1649b08b584d5a9af590035f89f1632755c49546c12127918f42372c89",
-          "draft_n": 131,
+          "draft_n": 130,
           "draft_n_accepted": 61,
           "predicted_n": 128,
           "prompt_n": 2059
         }
       ],
-      "pp": 1181.15,
+      "pp": 1478.01,
       "pp_sd": null,
       "samples": 1,
-      "tg": 40.29,
+      "tg": 40.98,
       "tg_sd": null,
       "workload": "repetition"
     },
     "8192": {
-      "acceptance": 62.5,
+      "acceptance": 59.46,
       "acceptance_sd": null,
-      "accepted_per_step": 1.03,
+      "accepted_per_step": 1.06,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 60929 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
+      "command": "gufo serve --port 45947 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 134400 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 8202,
           "completion_sha256": "e955910eb8b252fda501282056e675c8231e616aa60ffe736e721b8deabfceee",
-          "draft_n": 104,
-          "draft_n_accepted": 65,
+          "draft_n": 111,
+          "draft_n_accepted": 66,
           "predicted_n": 128,
           "prompt_n": 2019
         }
       ],
-      "pp": 1889.51,
+      "pp": 2101.51,
       "pp_sd": null,
       "samples": 1,
-      "tg": 58.78,
+      "tg": 59.03,
       "tg_sd": null,
       "workload": "repetition"
     }
@@ -225,7 +225,7 @@
       "gufo",
       "serve",
       "--port",
-      "60929",
+      "45947",
       "--sessions",
       "1",
       "llm",
@@ -247,8 +247,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "82645e0a4d96a474f26f6b04ee5df7b02c39b714"
+    "dirty": false,
+    "revision": "1d61903a2ba61deec0d8b529439e587b4a4d3130"
   },
   "table": "single-dspark-repetition",
   "target": "gufo"
