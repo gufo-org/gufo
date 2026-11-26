@@ -36,6 +36,7 @@ typedef struct GufoRealtimeVoiceSettings {
   size_t tools_len;
   size_t max_output_tokens;
   bool reasoning;
+  GufoRealtimeVoiceBytes voice;
 } GufoRealtimeVoiceSettings;
 
 typedef struct GufoRealtimeVoiceVadSettings {
@@ -81,8 +82,10 @@ typedef struct GufoRealtimeVoiceHost {
                     GufoRealtimeVoiceErrorSetFn set_error, void* error_ctx);
   void (*on_vad_settings)(void* context, bool has_vad,
                           const GufoRealtimeVoiceVadSettings* vad);
+  /* `record`: keep the turn's audio for `transcribe_turn`. */
   bool (*append_audio)(void* context, const uint8_t* pcm, size_t len,
-                       GufoRealtimeVoiceErrorSetFn set_error, void* error_ctx);
+                       bool record, GufoRealtimeVoiceErrorSetFn set_error,
+                       void* error_ctx);
   bool (*commit_audio)(void* context, bool* committed,
                        GufoRealtimeVoiceErrorSetFn set_error, void* error_ctx);
   bool (*clear_audio)(void* context, GufoRealtimeVoiceErrorSetFn set_error,
@@ -94,6 +97,18 @@ typedef struct GufoRealtimeVoiceHost {
                         GufoRealtimeVoiceErrorSetFn set_error, void* error_ctx);
   bool (*add_tool_outputs)(void* context, const GufoRealtimeVoiceBytes* outputs,
                            size_t count, GufoRealtimeVoiceErrorSetFn set_error,
+                           void* error_ctx);
+  bool (*serves_model)(void* context, const uint8_t* name, size_t len);
+  /* Transcribes the recorded audio of the user turn committed last;
+     `language` is empty when the model detects it. The host calls
+     `on_transcript` once with the whole transcript. */
+  bool (*transcribe_turn)(void* context, GufoRealtimeVoiceBytes language,
+                          GufoRealtimeVoiceBytes prompt,
+                          GufoRealtimeVoiceBytesFn on_transcript,
+                          void* transcript_ctx,
+                          GufoRealtimeVoiceErrorSetFn set_error,
+                          void* error_ctx);
+  bool (*delete_user_turn)(void* context, GufoRealtimeVoiceErrorSetFn set_error,
                            void* error_ctx);
 } GufoRealtimeVoiceHost;
 

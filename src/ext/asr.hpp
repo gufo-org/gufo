@@ -82,6 +82,8 @@ public:
     bool reasoning{false};
     std::size_t max_output_tokens{4096};
     std::optional<std::uint64_t> seed;
+    /// One of voices() for spoken replies; empty: the conversation's own.
+    std::string voice;
   };
   struct ToolCall {
     std::string name;
@@ -122,6 +124,16 @@ public:
   /// Keeps only the first samples (24 kHz) of the last reply's speech in the
   /// context, as far as the user heard it; the turn stays closed.
   virtual bool TruncateReply(std::size_t samples, std::string* error) = 0;
+  /// Names a client may select as Settings::voice. Empty: replies speak only
+  /// the conversation's own voice, which has no name.
+  virtual std::vector<std::string> voices() const { return {}; }
+  /// Removes the latest user turn (audio or text) from the context. Gufo calls
+  /// it only when that turn is closed and nothing followed it. Conversations
+  /// that cannot remove turns keep the default, which fails.
+  virtual bool DeleteUserTurn(std::string* error) {
+    *error = "this conversation cannot delete items";
+    return false;
+  }
 };
 
 /// Abstract capability runner for speech recognition models.

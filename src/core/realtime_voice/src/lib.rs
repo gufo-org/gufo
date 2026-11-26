@@ -8,7 +8,8 @@ use std::ffi::c_void;
 
 use gufo_ffi::{guard, input};
 use session::{
-    ClientDecision, FunctionCall, Host, ResponseOutcome, Session, Settings, VadSettings,
+    ClientDecision, FunctionCall, Host, ResponseOutcome, Session, Settings, Transcription,
+    VadSettings,
 };
 
 /// Opaque Realtime voice session handle.
@@ -49,6 +50,7 @@ pub struct GufoRealtimeVoiceSettings {
     pub tools_len: usize,
     pub max_output_tokens: usize,
     pub reasoning: bool,
+    pub voice: GufoRealtimeVoiceBytes,
 }
 
 #[repr(C)]
@@ -119,6 +121,7 @@ pub struct GufoRealtimeVoiceHost {
             context: *mut c_void,
             pcm: *const u8,
             len: usize,
+            record: bool,
             set_error: GufoRealtimeVoiceErrorSetFn,
             error_ctx: *mut c_void,
         ) -> bool,
@@ -164,6 +167,29 @@ pub struct GufoRealtimeVoiceHost {
             error_ctx: *mut c_void,
         ) -> bool,
     >,
+    pub serves_model:
+        Option<unsafe extern "C" fn(context: *mut c_void, name: *const u8, len: usize) -> bool>,
+    /// Transcribes the recorded audio of the user turn committed last;
+    /// `language` is empty when the model detects it. The host calls
+    /// `on_transcript` once with the whole transcript.
+    pub transcribe_turn: Option<
+        unsafe extern "C" fn(
+            context: *mut c_void,
+            language: GufoRealtimeVoiceBytes,
+            prompt: GufoRealtimeVoiceBytes,
+            on_transcript: GufoRealtimeVoiceBytesFn,
+            transcript_ctx: *mut c_void,
+            set_error: GufoRealtimeVoiceErrorSetFn,
+            error_ctx: *mut c_void,
+        ) -> bool,
+    >,
+    pub delete_user_turn: Option<
+        unsafe extern "C" fn(
+            context: *mut c_void,
+            set_error: GufoRealtimeVoiceErrorSetFn,
+            error_ctx: *mut c_void,
+        ) -> bool,
+    >,
 }
 
 fn as_c_bytes(bytes: &[u8]) -> GufoRealtimeVoiceBytes {
@@ -194,6 +220,7 @@ fn with_c_settings<R>(settings: &Settings, f: impl FnOnce(&GufoRealtimeVoiceSett
         tools_len: tools.len(),
         max_output_tokens: settings.max_output_tokens,
         reasoning: settings.reasoning,
+        voice: as_c_bytes(settings.voice.as_bytes()),
     };
     f(&c_settings)
 }
@@ -236,6 +263,9 @@ impl CHost {
             || raw.truncate_reply.is_none()
             || raw.add_user_text.is_none()
             || raw.add_tool_outputs.is_none()
+            || raw.serves_model.is_none()
+            || raw.transcribe_turn.is_none()
+            || raw.delete_user_turn.is_none()
         {
             return None;
         }
@@ -290,7 +320,7 @@ impl Host for CHost {
     }
 
     #[allow(unsafe_code)]
-    fn append_audio(&mut self, pcm: &[u8]) -> Result<(), String> {
+    fn append_audio(&mut self, pcm: &[u8], record: bool) -> Result<(), String> {
         let cb = self.raw.append_audio.expect("validated append_audio");
         let mut err = String::new();
         let b = as_c_bytes(pcm);
@@ -300,6 +330,7 @@ impl Host for CHost {
                 self.raw.context,
                 b.data,
                 b.len,
+                record,
                 set_error_string,
                 (&raw mut err).cast::<c_void>(),
             )
@@ -393,6 +424,53 @@ impl Host for CHost {
                 self.raw.context,
                 ptr,
                 c_outputs.len(),
+                set_error_string,
+                (&raw mut err).cast::<c_void>(),
+            )
+        };
+        if ok { Ok(()) } else { Err(err) }
+    }
+
+    #[allow(unsafe_code)]
+    fn serves_model(&mut self, name: &str) -> bool {
+        let cb = self.raw.serves_model.expect("validated serves_model");
+        let b = as_c_bytes(name.as_bytes());
+        // SAFETY: caller guarantees `serves_model` and `context` are valid.
+        unsafe { cb(self.raw.context, b.data, b.len) }
+    }
+
+    #[allow(unsafe_code)]
+    fn transcribe_turn(&mut self, transcription: &Transcription) -> Result<String, String> {
+        let cb = self.raw.transcribe_turn.expect("validated transcribe_turn");
+        let mut transcript = String::new();
+        let mut err = String::new();
+        // SAFETY: caller guarantees `transcribe_turn` and `context` are valid;
+        // `transcript` and `err` outlive the call.
+        let ok = unsafe {
+            cb(
+                self.raw.context,
+                as_c_bytes(transcription.language.as_bytes()),
+                as_c_bytes(transcription.prompt.as_bytes()),
+                set_error_string,
+                (&raw mut transcript).cast::<c_void>(),
+                set_error_string,
+                (&raw mut err).cast::<c_void>(),
+            )
+        };
+        if ok { Ok(transcript) } else { Err(err) }
+    }
+
+    #[allow(unsafe_code)]
+    fn delete_user_turn(&mut self) -> Result<(), String> {
+        let cb = self
+            .raw
+            .delete_user_turn
+            .expect("validated delete_user_turn");
+        let mut err = String::new();
+        // SAFETY: caller guarantees `delete_user_turn` and `context` are valid.
+        let ok = unsafe {
+            cb(
+                self.raw.context,
                 set_error_string,
                 (&raw mut err).cast::<c_void>(),
             )
