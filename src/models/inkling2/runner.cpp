@@ -60,6 +60,10 @@ constexpr std::string_view kStateAbi = "inkling2-hip-m2-v2";
 /// Layer groups one pass may be split into (48 visits; the host caps it by pass
 /// length).
 constexpr std::size_t kMaxLayerGroups = 16;
+/// Prompt tokens of a pass while another request could join or decodes: an
+/// arrival waits for at most one such pass (about 0.9 s). A prompt nobody can
+/// join takes the engine's wider passes (Engine::kUbatch).
+constexpr std::size_t kSharedPassTokens = 2048;
 constexpr std::string_view kModelId = "inkling-2-mini";
 
 struct Inkling2PromptContext;
@@ -348,7 +352,7 @@ public:
     // costs little more than a lone one (inkling2_spec_test checks that
     // decoding inside a yield equals decoding alone).
     d.scheduling = g::TextSchedulingProfile{
-        .pass_tokens = engine_->ubatch(),
+        .pass_tokens = kSharedPassTokens,
         .max_layer_groups = kMaxLayerGroups,
         .max_yield_decode_width = Engine::kMaxDecodeBatch};
     return d;
@@ -712,6 +716,9 @@ public:
   CreateComponentCacheResourcesForSessions(
       cache::ResourceLedger& ledger, std::size_t,
       std::size_t sessions) const override {
+    // Several sessions prefill in each other's yields.
+    if (sessions > 1)
+      engine_->ReserveYieldSpill();
     return MakeResources(ledger, gufo::hip::PlanComponentTransfers(sessions));
   }
   [[nodiscard]] std::unique_ptr<g::ComponentCacheResources> MakeResources(
