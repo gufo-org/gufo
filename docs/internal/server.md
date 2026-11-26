@@ -672,7 +672,14 @@ turns (`input_audio_buffer.speech_started`/`speech_stopped`, then the
 commit). Without `intent`, models that hear and speak hold an OpenAI Realtime
 conversation on the same path: audio and text input, streamed text and 24 kHz
 speech replies, function tools, `response.cancel`, interruption by user
-speech and `conversation.item.truncate`. The handshake selects the
+speech and `conversation.item.truncate`. With
+`audio.input.transcription` (whose `model`, when present, names the served
+model), the served model transcribes each committed user turn before any
+reply, sending `conversation.item.input_audio_transcription.delta` and
+`.completed`, or `.failed`. `output_modalities` `["audio", "text"]` speaks,
+as `["audio"]` does. `audio.output.voice` and `conversation.item.delete` of the
+latest user message work when the model's conversation supports them; other
+models reject them with an error event. The handshake selects the
 `realtime` subprotocol a client offers. `GET /voice`, served when the model
 holds conversations, is a browser client for it. Event-level behavior is
 documented by the model's provider (for example the LFM3-Audio extension).

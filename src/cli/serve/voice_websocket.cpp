@@ -20,6 +20,7 @@
 
 #include "gufo/realtime_voice.h"
 #include "src/cli/serve/asr_service.hpp"
+#include "src/cli/serve/audio_buffer.hpp"
 #include "src/cli/serve/audio_stream.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
 #include "src/cli/serve/logging.hpp"
@@ -32,6 +33,8 @@ constexpr std::uint32_t kRate = 24000;
 // Queued client events while a reply runs: one minute of 24 kHz PCM16 in
 // base64, plus framing.
 constexpr std::size_t kQueueBytes = 8U << 20;
+// Transcript budget of one user turn (at most two minutes of speech).
+constexpr std::size_t kTranscriptTokens = 1024;
 
 std::string_view View(const std::uint8_t* data, std::size_t len) noexcept {
   return len == 0 ? std::string_view{}
@@ -69,6 +72,7 @@ VoiceConversation::Settings FromCSettings(
     settings.tools.emplace_back(View(raw.tools[i]));
   settings.max_output_tokens = raw.max_output_tokens;
   settings.reasoning = raw.reasoning;
+  settings.voice = std::string(View(raw.voice));
   return settings;
 }
 
@@ -102,6 +106,7 @@ public:
   Session(WebSocket& socket, AsrService& service, std::string id,
           std::unique_ptr<VoiceConversation> conversation)
       : socket_(socket),
+        service_(service),
         id_(std::move(id)),
         conversation_(std::move(conversation)),
         protocol_(nullptr, &gufo_realtime_voice_free) {
@@ -295,6 +300,9 @@ private:
         .truncate_reply = &HostTruncateReply,
         .add_user_text = &HostAddUserText,
         .add_tool_outputs = &HostAddToolOutputs,
+        .serves_model = &HostServesModel,
+        .transcribe_turn = &HostTranscribeTurn,
+        .delete_user_turn = &HostDeleteUserTurn,
     };
   }
 
@@ -310,8 +318,24 @@ private:
                             void* error_ctx) noexcept {
     auto* self = static_cast<Session*>(ctx);
     try {
+      auto next = FromCSettings(*settings);
+      if (!next.voice.empty()) {
+        const auto voices = self->conversation_->voices();
+        if (std::ranges::find(voices, next.voice) == voices.end()) {
+          std::string message = "audio.output.voice " + next.voice + " is ";
+          if (voices.empty()) {
+            message += "not available: this model speaks its own voice";
+          } else {
+            message += "not one of";
+            for (const auto& voice : voices)
+              message += " " + voice;
+          }
+          SetError(set_error, error_ctx, message);
+          return false;
+        }
+      }
       std::string failure;
-      if (self->conversation_->Configure(FromCSettings(*settings), &failure))
+      if (self->conversation_->Configure(next, &failure))
         return true;
       SetError(set_error, error_ctx, failure);
       return false;
@@ -350,8 +374,10 @@ private:
     auto* self = static_cast<Session*>(ctx);
     try {
       std::string failure;
-      if (self->conversation_->AppendAudio(Pcm16(View(pcm, len)), &failure))
+      if (self->conversation_->AppendAudio(Pcm16(View(pcm, len)), &failure)) {
+        self->turn_pcm_.append(View(pcm, len));
         return true;
+      }
       SetError(set_error, error_ctx, failure);
       return false;
     } catch (const std::exception& e) {
@@ -370,10 +396,15 @@ private:
     try {
       std::size_t samples = 0;
       std::string failure;
-      if (self->conversation_->CommitAudio(&samples, &failure)) {
+      const bool ok = self->conversation_->CommitAudio(&samples, &failure);
+      // The committed turn's audio stays for its transcript.
+      self->committed_pcm_ = std::move(self->turn_pcm_);
+      self->turn_pcm_.clear();
+      if (ok) {
         *committed = true;
         return true;
       }
+      self->committed_pcm_.clear();
       if (!failure.empty()) {
         SetError(set_error, error_ctx, failure);
         return false;
@@ -394,6 +425,7 @@ private:
     auto* self = static_cast<Session*>(ctx);
     try {
       std::string failure;
+      self->turn_pcm_.clear();
       if (self->conversation_->ClearAudio(&failure))
         return true;
       SetError(set_error, error_ctx, failure);
@@ -461,6 +493,84 @@ private:
         items.emplace_back(View(outputs[i]));
       std::string failure;
       if (self->conversation_->AddToolOutputs(items, &failure))
+        return true;
+      SetError(set_error, error_ctx, failure);
+      return false;
+    } catch (const std::exception& e) {
+      SetError(set_error, error_ctx, e.what());
+      return false;
+    } catch (...) {
+      SetError(set_error, error_ctx, "internal error");
+      return false;
+    }
+  }
+
+  static bool HostServesModel(void* ctx, const std::uint8_t* name,
+                              std::size_t len) noexcept {
+    auto* self = static_cast<Session*>(ctx);
+    try {
+      return self->service_.serves_model(View(name, len));
+    } catch (...) {
+      return false;
+    }
+  }
+
+  // The served model transcribes the committed turn, as a transcription
+  // session would.
+  static bool HostTranscribeTurn(void* ctx, GufoRealtimeVoiceBytes language,
+                                 GufoRealtimeVoiceBytes prompt,
+                                 GufoRealtimeVoiceBytesFn on_transcript,
+                                 void* transcript_ctx,
+                                 GufoRealtimeVoiceErrorSetFn set_error,
+                                 void* error_ctx) noexcept {
+    auto* self = static_cast<Session*>(ctx);
+    try {
+      AudioBuffer audio{.sample_rate = kRate, .channels = 1, .samples = {}};
+      audio.samples = Pcm16(self->committed_pcm_);
+      self->committed_pcm_.clear();
+      const auto pcm = ResampleMono16k(audio);
+      const auto lang = View(language);
+      const ext::TranscriptionRequest request{
+          .wav = {},
+          .context = std::string(View(prompt)),
+          .language =
+              lang.empty() ? std::nullopt : std::optional<std::string>(lang),
+          .max_new_tokens = kTranscriptTokens,
+          .pcm16k = pcm,
+          .on_text = {}};
+      ext::TranscriptionResult result;
+      std::string failure;
+      const bool ok = self->service_.Transcribe(
+          request, [self] { return self->stopping_.load(); }, &result,
+          &failure);
+      Logger::Info("asr", "request=" + self->id_ +
+                              " event=turn_transcribed audio_samples=" +
+                              std::to_string(pcm.size()) +
+                              " outcome=" + (ok ? "completed" : "failed"));
+      if (!ok) {
+        SetError(set_error, error_ctx,
+                 failure.empty() ? "transcription failed" : failure);
+        return false;
+      }
+      const auto text = Bytes(result.text);
+      on_transcript(transcript_ctx, text.data, text.len);
+      return true;
+    } catch (const std::exception& e) {
+      SetError(set_error, error_ctx, e.what());
+      return false;
+    } catch (...) {
+      SetError(set_error, error_ctx, "internal error");
+      return false;
+    }
+  }
+
+  static bool HostDeleteUserTurn(void* ctx,
+                                 GufoRealtimeVoiceErrorSetFn set_error,
+                                 void* error_ctx) noexcept {
+    auto* self = static_cast<Session*>(ctx);
+    try {
+      std::string failure;
+      if (self->conversation_->DeleteUserTurn(&failure))
         return true;
       SetError(set_error, error_ctx, failure);
       return false;
@@ -624,6 +734,7 @@ private:
   }
 
   WebSocket& socket_;
+  AsrService& service_;
   std::string id_;
   std::unique_ptr<VoiceConversation> conversation_;
   std::unique_ptr<GufoRealtimeVoice, void (*)(GufoRealtimeVoice*)> protocol_;
@@ -638,6 +749,9 @@ private:
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
   }
+  // Worker state: PCM16 of the open user turn and of the turn committed
+  // last, which its transcript reads.
+  std::string turn_pcm_, committed_pcm_;
   std::mutex mutex_;
   std::condition_variable ready_;
   std::deque<QueueItem> queue_;

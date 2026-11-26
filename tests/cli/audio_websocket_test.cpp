@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -225,6 +226,14 @@ public:
     return true;
   }
   std::size_t truncated{0};
+  std::vector<std::string> voices() const override {
+    return {"female", "male"};
+  }
+  bool DeleteUserTurn(std::string*) override {
+    ++deleted;
+    return true;
+  }
+  inline static std::atomic<int> deleted{0};
   bool AddUserText(std::string_view text, std::string*) override {
     last_ = text;
     return true;
@@ -625,6 +634,101 @@ void RealtimeStreams() {
   server.stop();
   worker.join();
 }
+// Open WebUI 0.13 voice calls: the session.update it sends, a transcript
+// for each turn before the client asks for the reply, and deletion of turns
+// without one. The llama-swap playground asks for both output modalities.
+void OpenWebUiVoiceCall() {
+  std::atomic<int> turns{0};
+  auto asr = std::make_shared<AsrService>(AsrServiceOptions{
+      .validate_model = false,
+      .model_id = "voice",
+      .runner =
+          [&](const auto& request, const auto&, auto* result, auto* error) {
+            assert(request.wav.empty() && !request.pcm16k.empty());
+            assert(request.language == std::optional<std::string>("en"));
+            if (turns++ > 0) {
+              *error = "decoder failed";
+              return false;
+            }
+            result->text = "Hello there.";
+            return true;
+          },
+      .voice =
+          [](std::uint32_t, std::string*) {
+            return std::unique_ptr<VoiceConversation>(new FakeVoice);
+          }});
+  HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, asr, {});
+  std::string error;
+  assert(server.start(&error));
+  std::jthread worker([&] { server.run(); });
+  Client client(server.port(), "/v1/realtime?model=voice");
+  client.Event("session.created");
+  client.Text(
+      R"({"type":"session.update","session":{"type":"realtime","output_modalities":["audio"],"instructions":"Be brief.","audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"transcription":{"model":"voice","language":"en"},"turn_detection":{"type":"server_vad","interrupt_response":false,"create_response":false}},"output":{"format":{"type":"audio/pcm","rate":24000},"voice":"female"}},"tools":[{"type":"function","name":"generate_chat_completion","parameters":{"type":"object"}}],"tool_choice":"auto"}})");
+  auto updated = client.Event("session.updated");
+  assert(updated["session"]["audio"]["output"].member_str("voice") == "female");
+  assert(updated["session"]["audio"]["input"]["transcription"].member_str(
+             "model") == "voice");
+  const auto speak = [&](const std::string& pcm) {
+    for (std::size_t at = 0; at < pcm.size(); at += 4800)
+      client.Text(R"({"type":"input_audio_buffer.append","audio":")" +
+                  EncodeAudioBase64(pcm.substr(at, 4800)) + "\"}");
+  };
+  const auto turn = [&] {
+    speak(Pcm(0.5, false) + Pcm(0.6, true) + Pcm(0.8, false));
+    const auto item =
+        client.Event("input_audio_buffer.speech_started").member_str("item_id");
+    client.Event("input_audio_buffer.speech_stopped");
+    assert(client.Event("input_audio_buffer.committed").member_str("item_id") ==
+           item);
+    client.Event("conversation.item.created");
+    return item;
+  };
+  auto item = turn();
+  assert(client.Event("conversation.item.input_audio_transcription.delta")
+             .member_str("delta") == "Hello there.");
+  auto done =
+      client.Event("conversation.item.input_audio_transcription.completed");
+  assert(done.member_str("item_id") == item &&
+         done.member_str("transcript") == "Hello there.");
+  // No reply starts by itself: the next event answers the next request.
+  client.Text(R"({"type":"conversation.item.delete","item_id":"missing"})");
+  client.Event("error");
+  client.Text(R"({"type":"response.create"})");
+  for (const auto* type :
+       {"response.created", "response.output_item.added",
+        "response.content_part.added", "response.output_audio_transcript.delta",
+        "response.output_audio.delta", "response.output_audio.done",
+        "response.output_audio_transcript.done", "response.content_part.done",
+        "response.output_item.done"})
+    client.Event(type);
+  assert(client.Event("response.done")["response"].member_str("status") ==
+         "completed");
+  // A failed transcript; the client deletes the turn.
+  item = turn();
+  auto failed =
+      client.Event("conversation.item.input_audio_transcription.failed");
+  assert(failed.member_str("item_id") == item &&
+         failed["error"].member_str("message") == "decoder failed");
+  client.Text(R"({"type":"conversation.item.delete","item_id":")" + item +
+              R"("})");
+  assert(client.Event("conversation.item.deleted").member_str("item_id") ==
+         item);
+  assert(FakeVoice::deleted == 1);
+  // Voices are the conversation's; another model cannot transcribe.
+  client.Text(
+      R"({"type":"session.update","session":{"audio":{"output":{"voice":"robot"}}}})");
+  assert(client.Event("error")["error"].member_str("message") ==
+         "audio.output.voice robot is not one of female male");
+  client.Text(
+      R"({"type":"session.update","session":{"audio":{"input":{"transcription":{"model":"whisper-1"}}}}})");
+  client.Event("error");
+  client.Text(
+      R"({"type":"session.update","session":{"output_modalities":["audio","text"]}})");
+  client.Event("session.updated");
+  server.stop();
+  worker.join();
+}
 }  // namespace
 
 int main() {
@@ -930,4 +1034,5 @@ int main() {
     hybrid_worker.join();
   }
   RealtimeStreams();
+  OpenWebUiVoiceCall();
 }
