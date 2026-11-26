@@ -60,6 +60,12 @@ inline std::int64_t RequestsProcessing() {
 inline std::int64_t RequestsDeferred() {
   return std::stoll(Sample("llamacpp:requests_deferred"));
 }
+inline std::uint64_t HistogramCount(std::string_view name) {
+  return Unsigned(std::string(name) + "_count");
+}
+inline double HistogramSum(std::string_view name) {
+  return std::stod(Sample(std::string(name) + "_sum"));
+}
 
 }  // namespace gufo::server::testing
 

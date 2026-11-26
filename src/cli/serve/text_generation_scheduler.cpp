@@ -1623,6 +1623,7 @@ struct TextGenerationScheduler::Impl {
         request->result.queue_ms = std::chrono::duration<double, std::milli>(
                                        Clock::now() - request->request_start)
                                        .count();
+        Metrics().queue_seconds.Observe(request->result.queue_ms / 1e3);
         request->result.resident_requests_at_admission =
             prefilling.size() + decoding.size() + capturing.size() + 1;
         PublishAdmission(request);
@@ -1808,6 +1809,7 @@ struct TextGenerationScheduler::Impl {
       request->result.ttft_ms = std::chrono::duration<double, std::milli>(
                                     now - request->request_start)
                                     .count();
+      Metrics().first_token_seconds.Observe(request->result.ttft_ms / 1e3);
     } else {
       const auto inter_token = now - *request->previous_token;
       request->inter_token_total += inter_token;

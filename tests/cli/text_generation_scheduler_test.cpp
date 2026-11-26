@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
@@ -1456,6 +1457,45 @@ void TestModelOwnedBatchMetrics() {
                metrics::TotalDraftRounds() - rounds_before == 8,
            "speculative batches and HTTP completion count each token once");
   }
+}
+
+void TestRequestLatencyMetrics() {
+  namespace metrics = gufo::server::testing;
+  constexpr auto kQueue = "gufo_request_queue_seconds";
+  constexpr auto kFirstToken = "gufo_time_to_first_token_seconds";
+  const auto queue_count = metrics::HistogramCount(kQueue);
+  const auto queue_sum = metrics::HistogramSum(kQueue);
+  const auto first_count = metrics::HistogramCount(kFirstToken);
+  const auto first_sum = metrics::HistogramSum(kFirstToken);
+  auto control = std::make_shared<FakeControl>();
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 1);
+  auto first = scheduler->Submit({1}, 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto second = scheduler->Submit({2}, 2, 0.0F);
+  const auto held_from = std::chrono::steady_clock::now();
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  const auto held_ms = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - held_from)
+                           .count();
+  control->ReleasePrefill();
+  const auto first_result = first.Wait();
+  const auto second_result = second.Wait();
+  const double expected_queue =
+      (first_result.queue_ms + second_result.queue_ms) / 1e3;
+  const double expected_first =
+      (first_result.ttft_ms + second_result.ttft_ms) / 1e3;
+  Expect(metrics::HistogramCount(kQueue) - queue_count == 2 &&
+             metrics::HistogramCount(kFirstToken) - first_count == 2,
+         "each request is observed once in each latency histogram");
+  Expect(std::abs(metrics::HistogramSum(kQueue) - queue_sum - expected_queue) <
+                 1e-6 &&
+             std::abs(metrics::HistogramSum(kFirstToken) - first_sum -
+                      expected_first) < 1e-6,
+         "histogram sums match the per-request queue and first-token times");
+  Expect(second_result.queue_ms >= held_ms,
+         "the request that waited for the only session queued at least as "
+         "long as the prefill was held");
 }
 
 void TestMultiResidentPrefillUsesBoundedWorkUnits() {
@@ -4435,6 +4475,7 @@ int main() {
   TestRequestTotalsDoNotNeedAConsumer();
   TestMultiTokenRunnerCanSwitchToBatchedExecution();
   TestModelOwnedBatchMetrics();
+  TestRequestLatencyMetrics();
   TestBatchFailureIsolation();
   TestBatchDeviceLossFailsSuccessfulPeers();
   TestMultiResidentPrefillUsesBoundedWorkUnits();
