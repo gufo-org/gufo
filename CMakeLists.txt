@@ -1061,13 +1061,10 @@ endfunction()
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")
 
-  # The Rust generation parser against a frozen copy of the C++ one it
-  # replaced, over the corpus in tests/fixtures/generation_parse, with the
-  # real Qwen and DeepSeek scanners and tool grammar.
-  add_executable(generation_parse_test
-    tests/cli/generation_parse_test.cpp
-    tests/cli/generation_parse_frozen.cpp
-  )
+  # Expected results of the generation parser over the corpus in
+  # tests/fixtures/generation_parse, with the real Qwen and DeepSeek scanners
+  # and tool grammar.
+  add_executable(generation_parse_test tests/cli/generation_parse_test.cpp)
   target_link_libraries(generation_parse_test PRIVATE gufo_core gufo_http
     gufo_deepseek_v4_flash_text ${GUFO_QWEN_LIBRARIES})
   # One test per corpus file, so a parallel ctest spreads them.

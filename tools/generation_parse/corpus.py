@@ -17,14 +17,11 @@ Two sources, neither of which keeps a prompt:
   corpus.py normalize IN.json OUT.json
       Rewrites an existing corpus file in the current layout.
 
-  corpus.py long OUT.json --bytes 13000 --bytes 52000
-      Writes synthetic Qwen `write` calls of about the given sizes, split
-      into four-byte pieces, for `generation_parse_test --bench` on long
-      arguments. Not part of the CTest corpus.
-
 A case whose text is a prefix of another case with the same setup is
 dropped: the test truncates every case at every byte anyway. Each distinct
-tool list is stored once in `tool_sets`, and cases name it by index.
+tool list is stored once in `tool_sets`, and cases name it by index. Write
+the expected results of a new file with `generation_parse_test OUT.json
+--write` and review them.
 """
 
 import argparse
@@ -198,28 +195,6 @@ def from_corpus(path):
     return cases, corpus["source"]
 
 
-def long_calls(sizes):
-    write = {"name": "write", "parameters_json": json.dumps({
-        "type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-        "required": ["path", "content"]}, separators=(",", ":"))}
-    cases = []
-    for size in sizes:
-        lines = []
-        while sum(len(line) + 1 for line in lines) < size:
-            index = len(lines)
-            lines.append(f"    total += values[{index}] * {index % 7}  # step {index}")
-        text = ("<tool_call>\n<function=write>\n<parameter=path>\nsrc/long.py\n</parameter>\n"
-                "<parameter=content>\n" + "\n".join(lines) + "\n</parameter>\n</function>\n</tool_call>")
-        data = text.encode("utf-8")
-        cases.append({
-            "dialect": "qwen", "reasoning": ["<think>", "</think>"], "initial": "content",
-            "response_format": False, "constrained_tools": True, "tool_choice": "auto",
-            "tools": [write], "track_spans": False, "buffered": False, "interrupted": False,
-            "pieces": [piece(data[i:i + 4]) for i in range(0, len(data), 4)],
-        })
-    return cases
-
-
 def write_corpus(path, source, cases):
     sets = []
     keys = {}
@@ -246,16 +221,12 @@ def write_corpus(path, source, cases):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("kind", choices=["trace", "capture", "normalize", "long"])
+    parser.add_argument("kind", choices=["trace", "capture", "normalize"])
     parser.add_argument("input", nargs="?")
     parser.add_argument("output")
     parser.add_argument("--source")
     parser.add_argument("--max-bytes", type=int, default=0, help="drop cases longer than this")
-    parser.add_argument("--bytes", type=int, action="append", default=[], help="long: a call size")
     args = parser.parse_args()
-    if args.kind == "long":
-        write_corpus(args.output, args.source or "synthetic long Qwen write calls", long_calls(args.bytes))
-        return
     if args.kind == "normalize":
         cases, source = from_corpus(args.input)
         source = args.source or source
