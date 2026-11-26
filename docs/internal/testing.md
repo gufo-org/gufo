@@ -170,20 +170,19 @@ caller. It runs in `check-pr`; the crate's Rust tests cover the integer fast
 path, the string scan, the switch to a key set, long mantissas that offset
 large exponents, failed allocations and the C ABI.
 
-`json_schema_test` compares the Rust JSON Schema compiler, through
-`JsonSchemaRegex` and the string and number lexemes, with a frozen copy of
-the 0.35.0 C++ compiler in `tests/core/json_schema_reference.hpp`. Patterns
-from a grid of atoms and quantifiers, every string format, fixtures and their
-deterministic mutations, properties of strings such as
-`\p{RGI_Emoji_Flag_Sequence}`, ill-formed UTF-8 and the size, nesting, repetition
-and state limits must compile to the same DFA tables, step the same way in
-`Advance`, `CanFinish` and `CanAdvance`, or fail with the same exception and
-message. String schemas over length, `pattern` and `format` grids must match
-generated JSON strings byte by byte with the same canonical mask states;
-number schemas over bound, exclusivity and `multipleOf` grids must agree on
-every prefix of up to three bytes and on generated longer ones. It runs in
-`check-pr`; the crate's Rust tests cover the decimal arithmetic, the keywords,
-a few languages and rejections, and the C ABI.
+`json_schema_test` checks expected results of the Rust JSON Schema compiler
+through its C++ callers: `JsonSchemaRegex` with ICU's sets, the string and
+number lexemes, `IntersectMultipleOf` and `Format`. Patterns must accept, keep
+alive or reject listed texts: ECMAScript classes and escapes, Unicode
+properties, properties of strings such as `\p{RGI_Emoji_Flag_Sequence}`,
+ill-formed UTF-8 read as U+FFFD, assertions, length bounds with their
+`MaximumSuffix`, and `CanFinish` and `CanAdvance` far beyond the states.
+Rejections and the size, nesting, repetition and state limits must give their
+exception and message. String schemas check lengths in codepoints, escapes,
+patterns, formats and canonical mask states; number schemas check bounds,
+exclusivity, `multipleOf`, the plain-decimal spelling and `AcceptValue`. It
+runs in `check-pr`; the crate's Rust tests cover the decimal arithmetic, the
+keywords, a few languages and rejections, and the C ABI.
 
 `chat_request_test` checks the Rust chat request decoder
 (`src/core/chat_request`) through its C++ caller,
