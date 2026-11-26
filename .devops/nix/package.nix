@@ -69,6 +69,9 @@ let
   hasRustAudio = builtins.pathExists (sourceRoot + "/src/core/audio_decode/Cargo.toml");
   # Before the Rust JPEG decoder, every build linked libjpeg-turbo.
   hasRustJpeg = builtins.pathExists (sourceRoot + "/src/core/jpeg_decode/Cargo.toml");
+  # Until its fixtures were committed, the JPEG decoder test wrote its cases
+  # and checked them with libjpeg-turbo.
+  hasJpegReference = builtins.pathExists (sourceRoot + "/tests/core/jpeg_reference.cpp");
   # Before the Rust PNG encoder, the image service and Qwen-Image linked libpng.
   hasRustPng = builtins.pathExists (sourceRoot + "/src/core/png/Cargo.toml");
   # A store path has no Git metadata. A flake input or fetcher result still
@@ -187,8 +190,7 @@ stdenv.mkDerivation ({
     rocmPackages.rocwmma
     rocmPackages.rocblas
   ]
-  # The JPEG decoder test writes its cases and checks them with libjpeg-turbo.
-  ++ lib.optional (checked || !hasRustJpeg) libjpeg
+  ++ lib.optional ((checked && hasJpegReference) || !hasRustJpeg) libjpeg
   ++ lib.optional (!hasRustPng) libpng
   ++ lib.optionals (!hasRustAudio) [
     libsndfile

@@ -976,10 +976,8 @@ endfunction()
   add_test(NAME json_constraint_test COMMAND json_constraint_test)
   set_tests_properties(json_constraint_test PROPERTIES LABELS "cpu;json;sampling")
 
-  # Compares the Rust JSON Schema compiler with the frozen C++ one in
-  # tests/core/json_schema_reference.hpp; the Rust headers come from gufo_rust.
   add_executable(json_schema_test tests/core/json_schema_test.cpp)
-  target_link_libraries(json_schema_test PRIVATE gufo_core gufo_rust ICU::uc)
+  target_link_libraries(json_schema_test PRIVATE gufo_core)
   add_test(NAME json_schema_test COMMAND json_schema_test)
   set_tests_properties(json_schema_test PROPERTIES LABELS "cpu;json;sampling;correctness")
 
@@ -1006,13 +1004,10 @@ endfunction()
   add_test(NAME png_test COMMAND png_test)
   set_tests_properties(png_test PROPERTIES LABELS "cpu;image;correctness")
 
-  # libjpeg-turbo writes the cases and is the frozen reference decoder; the
-  # shipped binary decodes JPEG in Rust.
-  find_package(JPEG REQUIRED)
-  add_executable(jpeg_decode_test
-    tests/core/jpeg_decode_test.cpp
-    tests/core/jpeg_reference.cpp)
-  target_link_libraries(jpeg_decode_test PRIVATE gufo_core JPEG::JPEG)
+  add_executable(jpeg_decode_test tests/core/jpeg_decode_test.cpp)
+  target_link_libraries(jpeg_decode_test PRIVATE gufo_core)
+  target_compile_definitions(jpeg_decode_test PRIVATE
+    GUFO_JPEG_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/jpeg")
   add_test(NAME jpeg_decode_test COMMAND jpeg_decode_test)
   set_tests_properties(jpeg_decode_test PROPERTIES LABELS "cpu;image;correctness")
 
@@ -1061,13 +1056,10 @@ endfunction()
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")
 
-  # The Rust generation parser against a frozen copy of the C++ one it
-  # replaced, over the corpus in tests/fixtures/generation_parse, with the
-  # real Qwen and DeepSeek scanners and tool grammar.
-  add_executable(generation_parse_test
-    tests/cli/generation_parse_test.cpp
-    tests/cli/generation_parse_frozen.cpp
-  )
+  # Expected results of the generation parser over the corpus in
+  # tests/fixtures/generation_parse, with the real Qwen and DeepSeek scanners
+  # and tool grammar.
+  add_executable(generation_parse_test tests/cli/generation_parse_test.cpp)
   target_link_libraries(generation_parse_test PRIVATE gufo_core gufo_http
     gufo_deepseek_v4_flash_text ${GUFO_QWEN_LIBRARIES})
   # One test per corpus file, so a parallel ctest spreads them.
@@ -1128,18 +1120,16 @@ endfunction()
   set_tests_properties(http_request_test PROPERTIES
     LABELS "cpu;server;http;correctness")
 
-  # The Rust chat request decoder against frozen C++ decoders; no sockets.
+  # The Rust chat request decoder through its C++ caller; no sockets.
   add_executable(chat_request_test
-    tests/cli/chat_request_test.cpp
-    tests/cli/chat_request_reference.cpp)
+    tests/cli/chat_request_test.cpp)
   target_link_libraries(chat_request_test PRIVATE gufo_http)
   add_test(NAME chat_request_test COMMAND chat_request_test)
   set_tests_properties(chat_request_test PROPERTIES
     LABELS "cpu;server;api;openai;correctness")
 
   add_executable(multipart_test
-    tests/cli/multipart_test.cpp
-    tests/cli/multipart_reference.cpp)
+    tests/cli/multipart_test.cpp)
   target_link_libraries(multipart_test PRIVATE gufo_http)
   target_compile_definitions(multipart_test PRIVATE
     GUFO_MULTIPART_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/multipart")
@@ -1540,9 +1530,7 @@ endfunction()
   set_tests_properties(allocation_benchmark_test PROPERTIES
     LABELS "gpu;hip;gfx1151;diagnostics;allocation;opt-c091")
 
-  add_executable(gguf_header_test
-    tests/core/gguf_header_test.cpp
-    tests/core/gguf_header_reference.cpp)
+  add_executable(gguf_header_test tests/core/gguf_header_test.cpp)
   target_link_libraries(gguf_header_test PRIVATE gufo_core)
   add_test(NAME gguf_header_test COMMAND gguf_header_test)
   set_tests_properties(gguf_header_test PROPERTIES

@@ -1876,7 +1876,7 @@ lazily in the worker. Control characters are escaped in log lines.
   parsing.
 - `openai_chat_test`: chat parsing, streaming, images, tools and sampling controls.
 - `chat_request_test`: the Rust request decoder for Chat Completions, Responses
-  and Messages against frozen copies of the C++ decoders it replaced.
+  and Messages through its C++ caller: expected requests, rejections and calls.
 - Per-model serving tests: greedy/sampled decoding, batching, cache reuse and
   cancellation. Use the affected model's benchmark README for commands and limits.
 

@@ -1,52 +1,54 @@
-// Compares the Rust chat request decoder (src/core/chat_request, through
-// src/cli/serve/chat_request.cpp) with frozen copies of the C++ decoders it
-// replaced (tests/cli/chat_request_reference.cpp). Both run through the same
-// fake environment, which serves fixed model names, logs every model check,
-// image read, schema compile and compatibility check, fails chosen image
-// URLs and rejects chosen schemas. Generated grids of Chat Completions,
-// Responses and Messages bodies, seeded mutations of them and raw byte edits
-// must give the same request, rejection (status, code and message) and log.
-// The fragment shims (ParseOpenAiResponseControls,
-// ParseAnthropicToolControls, ParseOpenAiResponseMessage) are compared too.
-// The only difference allowed: a rejected fragment leaves its request or
-// message unchanged, where the C++ one could have filled part of it.
+// Checks DecodeChatRequest, the C++ caller of the Rust chat request decoder
+// (src/core/chat_request), and the three fragment shims openai_chat_test
+// calls (ParseOpenAiResponseControls, ParseAnthropicToolControls,
+// ParseOpenAiResponseMessage). A fake environment serves fixed model names,
+// fails chosen image URLs, rejects chosen schemas and logs every model check,
+// image read, schema compile and compatibility check. Each case gives the
+// expected request (the fields that differ from their defaults) or rejection
+// (status, code and message) and the log, under three server settings. The
+// C++ caller fills the response format, stop sequences, sampling and
+// logprobs, runs the compatibility check where each API asks for it, answers
+// an image read that runs out of memory with 400 and rethrows a hook's other
+// exceptions. The crate's Rust tests cover the decoder's own steps and its
+// C ABI; openai_chat_test and http_server_test the endpoints.
+//
+// One difference from the 0.35.0 C++ decoders is kept on purpose: a rejected
+// fragment leaves its request or message unchanged, where C++ could have
+// filled part of it (TestFragments).
 #include "src/cli/serve/chat_request.hpp"
 
 #include <cstdint>
 #include <cstdio>
-#include <functional>
+#include <cstdlib>
 #include <new>
-#include <random>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 #include "src/cli/serve/openai_chat.hpp"
 #include "src/core/json.hpp"
-#include "tests/cli/chat_request_reference.hpp"
 
 namespace {
 
 using gufo::json::Value;
 using gufo::server::ChatApi;
 using gufo::server::ChatDecodeEnvironment;
+using gufo::server::ChatRequest;
 using gufo::server::DecodedChatRequest;
 using gufo::server::HttpResponse;
-namespace reference = gufo::server::chat_request_reference;
 namespace tokenization = gufo::tokenization;
 
 int failures = 0;
-int cases = 0;
-// Accepted bodies per API, so a grid that only exercises rejections shows.
-int accepted[3] = {};
+// Set CHAT_REQUEST_PRINT to print every case's result.
+const bool print = std::getenv("CHAT_REQUEST_PRINT") != nullptr;
 
-std::string Printable(std::string_view text, std::size_t limit = 600) {
+std::string Printable(std::string_view text) {
   std::string out;
-  for (const unsigned char c : text.substr(0, limit)) {
-    if (c < 0x20 || c >= 0x7F) {
+  for (const unsigned char c : text) {
+    if ((c < 0x20 && c != '\n') || c >= 0x7F) {
       char escape[8];
       std::snprintf(escape, sizeof(escape), "\\x%02x", c);
       out += escape;
@@ -54,30 +56,55 @@ std::string Printable(std::string_view text, std::size_t limit = 600) {
       out += static_cast<char>(c);
     }
   }
-  if (text.size() > limit)
-    out += "...";
   return out;
 }
+
+void Check(std::string_view name, const std::string& actual,
+           std::string_view expected) {
+  if (print)
+    std::printf("== %.*s\n%s\n", static_cast<int>(name.size()), name.data(),
+                Printable(actual).c_str());
+  if (actual == expected)
+    return;
+  ++failures;
+  std::fprintf(stderr, "FAIL %.*s\n  expected:\n%.*s\n  actual:\n%s\n",
+               static_cast<int>(name.size()), name.data(),
+               static_cast<int>(expected.size()), expected.data(),
+               Printable(actual).c_str());
+}
+
+// The server settings a decode runs under.
+struct Setting {
+  bool images = true;
+  gufo::ReasoningOptions defaults;
+  // Provider sampling defaults, one temperature per thinking mode.
+  bool provider = false;
+  bool require_model = true;
+};
 
 // One decode's environment and the calls it made.
 struct Fixture {
   std::vector<std::string> log;
   ChatDecodeEnvironment environment;
 
-  Fixture(bool images, gufo::ReasoningOptions defaults, bool provider) {
+  explicit Fixture(const Setting& setting) {
     environment.model_id = "m";
-    environment.accepts_images = images;
-    environment.reasoning_defaults = defaults;
+    environment.accepts_images = setting.images;
+    environment.reasoning_defaults = setting.defaults;
     environment.sampling_defaults.max_tokens = 77;
-    if (provider) {
+    if (setting.provider) {
       gufo::sampling::TextSamplingDefaults values;
       values.thinking_unspecified.temperature = 0.25F;
       values.thinking_enabled.temperature = 0.5F;
       values.thinking_disabled.temperature = 0.75F;
       environment.sampling_defaults.provider = values;
+      // The model supplies no control, so the provider's apply.
+      environment.sampling_defaults.supplied = {};
     }
     environment.serves_model = [this](std::string_view name) {
       log.push_back("model:" + std::string(name));
+      if (name == "throw")
+        throw std::runtime_error("backend gone");
       return name == "m" || name == "alias";
     };
     environment.read_image = [this](std::string_view url,
@@ -97,15 +124,24 @@ struct Fixture {
       if (text.find("reject") != std::string::npos)
         throw std::invalid_argument("schema rejected");
     };
-    environment.compatibility =
-        [this](ChatApi api, const Value& body, std::optional<bool> thinking,
-               std::size_t* max_tokens,
-               gufo::sampling::SamplingConfig* sampling) {
-          log.push_back("compatibility:" +
-                        std::string(thinking ? (*thinking ? "1" : "0") : "-"));
-          return reference::Compatibility(api, body, thinking, max_tokens,
-                                          sampling, environment);
-        };
+    // Stands in for ReadCompatibilityOptions (http_server.cpp), which
+    // http_server_test checks: it gets the thinking mode, sets the limit and
+    // resolves the sampling defaults.
+    environment.compatibility = [this](ChatApi api, const Value& body,
+                                       std::optional<bool> thinking,
+                                       std::size_t* max_tokens,
+                                       gufo::sampling::SamplingConfig* sampling)
+        -> std::optional<HttpResponse> {
+      log.push_back(std::string("compatibility:") +
+                    (api == ChatApi::kResponses ? "responses" : "messages") +
+                    ":" + (thinking ? (*thinking ? "1" : "0") : "-"));
+      if (body.find("reject_compatibility") != nullptr)
+        return gufo::server::ChatRejection(400, "compatibility rejected",
+                                           "invalid_request");
+      *max_tokens = 33;
+      *sampling = environment.sampling_defaults.Resolve(thinking);
+      return std::nullopt;
+    };
   }
   Fixture(const Fixture&) = delete;
   Fixture& operator=(const Fixture&) = delete;
@@ -113,85 +149,119 @@ struct Fixture {
 
 void Put(std::ostringstream& out, std::string_view name,
          std::string_view value) {
-  out << name << '=' << value.size() << ':' << value << ';';
+  if (!value.empty())
+    out << ' ' << name << '=' << value;
 }
 
 std::string Describe(const tokenization::ChatMessage& message) {
   std::ostringstream out;
-  out << "role=" << static_cast<int>(message.role) << ';';
+  const char* roles[] = {"system", "developer", "user", "assistant", "tool"};
+  out << "  " << roles[static_cast<int>(message.role)];
   Put(out, "content", message.content);
   Put(out, "suffix", message.framing_suffix);
   Put(out, "name", message.name);
   Put(out, "thought", message.thought);
   Put(out, "call_id", message.tool_call_id);
   for (const auto& image : message.images) {
-    out << "image@" << image.offset << '/' << static_cast<int>(image.detail);
-    Put(out, "",
-        image.bytes ? std::string(image.bytes->begin(), image.bytes->end())
-                    : "<null>");
+    out << " image@" << image.offset
+        << (image.detail == tokenization::ChatMessage::ImageDetail::kLow
+                ? "/low"
+                : "")
+        << '='
+        << (image.bytes ? std::string(image.bytes->begin(), image.bytes->end())
+                        : "<null>");
   }
   for (const auto& call : message.tool_calls) {
-    Put(out, "call", call.id);
-    Put(out, "fn", call.name);
-    for (const auto& argument : call.arguments) {
-      Put(out, "arg", argument.name);
-      Put(out, argument.is_string ? "s" : "j", argument.value);
-    }
-    out << (call.partial_arguments ? "partial;" : "");
+    out << " call(" << call.id << ' ' << call.name;
+    for (const auto& argument : call.arguments)
+      out << ' ' << argument.name << (argument.is_string ? "=s:" : "=j:")
+          << argument.value;
+    out << (call.partial_arguments ? " partial" : "") << ')';
   }
   return out.str();
 }
 
-std::string Describe(const gufo::server::ChatRequest& chat) {
+std::string Optional(const std::optional<bool>& value) {
+  return value ? (*value ? "1" : "0") : "-";
+}
+
+// The fields of `chat` that differ from a default request, one per line.
+std::string Describe(const ChatRequest& chat) {
   std::ostringstream out;
   for (const auto& message : chat.messages)
-    out << "[" << Describe(message) << "]\n";
+    out << Describe(message) << '\n';
   for (const auto& tool : chat.tools) {
-    Put(out, "tool", tool.name);
+    out << "  tool " << tool.name;
     Put(out, "description", tool.description);
     Put(out, "parameters", tool.parameters_json);
     Put(out, "definition", tool.definition_json);
     out << '\n';
   }
-  Put(out, "client", chat.client_id);
-  out << "choice=" << static_cast<int>(chat.tool_choice) << ';';
-  Put(out, "forced", chat.forced_tool_name);
-  for (const auto& [name, space] : chat.tool_namespaces) {
-    Put(out, "ns", name);
-    Put(out, "in", space);
-  }
+  const ChatRequest defaults;
+  if (chat.client_id != defaults.client_id)
+    out << "  client=" << chat.client_id << '\n';
+  if (chat.tool_choice != defaults.tool_choice)
+    out << "  choice=" << static_cast<int>(chat.tool_choice) << '\n';
+  if (!chat.forced_tool_name.empty())
+    out << "  forced=" << chat.forced_tool_name << '\n';
+  for (const auto& [name, space] : chat.tool_namespaces)
+    out << "  namespace " << name << '=' << space << '\n';
+  if (chat.constrained_tools)
+    out << "  constrained\n";
+  if (!chat.parallel_tool_calls)
+    out << "  serial\n";
   const auto& reasoning = chat.reasoning;
-  out << "constrained=" << chat.constrained_tools
-      << ";parallel=" << chat.parallel_tool_calls << ";enabled="
-      << (reasoning.enabled ? std::to_string(*reasoning.enabled) : "-")
-      << ";effort="
-      << (reasoning.effort ? std::to_string(static_cast<int>(*reasoning.effort))
-                           : "-")
-      << ";preserve="
-      << (reasoning.preserve_thinking
-              ? std::to_string(*reasoning.preserve_thinking)
-              : "-")
-      << ";budget="
-      << (reasoning.budget_tokens ? std::to_string(*reasoning.budget_tokens)
-                                  : "-")
-      << ";vision=" << chat.add_vision_id << ";cache=" << chat.cache_prompt
-      << chat.cache_persist << ";progress=" << chat.return_progress << ';';
+  if (reasoning.enabled || reasoning.effort || reasoning.preserve_thinking ||
+      reasoning.budget_tokens)
+    out << "  reasoning enabled=" << Optional(reasoning.enabled) << " effort="
+        << (reasoning.effort
+                ? std::to_string(static_cast<int>(*reasoning.effort))
+                : "-")
+        << " preserve=" << Optional(reasoning.preserve_thinking) << " budget="
+        << (reasoning.budget_tokens ? std::to_string(*reasoning.budget_tokens)
+                                    : "-")
+        << '\n';
+  if (chat.add_vision_id)
+    out << "  vision_id\n";
+  if (!chat.cache_prompt)
+    out << "  no cache_prompt\n";
+  if (!chat.cache_persist)
+    out << "  no cache_persist\n";
+  if (chat.return_progress)
+    out << "  progress\n";
   for (const auto& stop : chat.stop_sequences)
-    Put(out, "stop", stop);
-  out << "format=" << (chat.response_format != nullptr) << ';';
-  Put(out, "format_description", chat.response_format_description);
+    out << "  stop " << stop << '\n';
+  if (chat.response_format != nullptr)
+    out << "  format " << chat.response_format_description << '\n';
   return out.str();
 }
 
+// Sampling fields that differ from a default SamplingConfig.
 std::string Describe(const gufo::sampling::SamplingConfig& s) {
+  const gufo::sampling::SamplingConfig d;
   std::ostringstream out;
-  out << "logprobs=" << (s.logprobs ? std::to_string(*s.logprobs) : "-")
-      << ";t=" << s.temperature << ";k=" << s.top_k << ";p=" << s.top_p
-      << ";min_p=" << s.min_p << ";keep=" << s.min_keep << ";seed=" << s.seed
-      << ";rp=" << s.repeat_penalty << ";rn=" << s.repeat_last_n
-      << ";fp=" << s.frequency_penalty << ";pp=" << s.presence_penalty
-      << ";constraint=" << (s.constraint != nullptr)
-      << ";budget=" << (s.reasoning_budget != nullptr);
+  if (s.logprobs)
+    out << " logprobs=" << *s.logprobs;
+  if (s.temperature != d.temperature)
+    out << " t=" << s.temperature;
+  if (s.top_k != d.top_k)
+    out << " k=" << s.top_k;
+  if (s.top_p != d.top_p)
+    out << " p=" << s.top_p;
+  if (s.min_p != d.min_p)
+    out << " min_p=" << s.min_p;
+  if (s.seed != d.seed)
+    out << " seed=" << s.seed;
+  if (s.repeat_penalty != d.repeat_penalty)
+    out << " rp=" << s.repeat_penalty;
+  if (s.frequency_penalty != d.frequency_penalty)
+    out << " fp=" << s.frequency_penalty;
+  if (s.presence_penalty != d.presence_penalty)
+    out << " pp=" << s.presence_penalty;
+  if (s.constraint != nullptr)
+    out << " constraint";
+  if (s.reasoning_budget != nullptr)
+    out << " reasoning_budget";
   return out.str();
 }
 
@@ -200,850 +270,769 @@ std::string Describe(const HttpResponse& response) {
          " " + response.body;
 }
 
-std::string Describe(const std::optional<HttpResponse>& rejection,
-                     const DecodedChatRequest& decoded) {
-  if (rejection)
-    return Describe(*rejection);
+std::string Describe(const DecodedChatRequest& decoded) {
   std::ostringstream out;
-  out << "accepted\n" << Describe(decoded.chat) << '\n';
-  Put(out, "model", decoded.model ? *decoded.model : "<none>");
-  out << "max="
+  out << "accepted model=" << (decoded.model ? *decoded.model : "-") << " max="
       << (decoded.max_tokens ? std::to_string(*decoded.max_tokens) : "-")
-      << ";stream=" << decoded.stream << ";usage=" << decoded.include_usage
-      << '\n'
-      << Describe(decoded.sampling);
+      << (decoded.stream ? " stream" : "")
+      << (decoded.include_usage ? " usage" : "") << '\n'
+      << Describe(decoded.chat) << "  sampling" << Describe(decoded.sampling);
   return out.str();
 }
 
-std::string Run(Fixture& fixture, bool rust, ChatApi api, std::string_view body,
-                bool require_model) {
+std::string Decode(ChatApi api, std::string_view body, const Setting& setting) {
+  Fixture fixture(setting);
   DecodedChatRequest decoded;
   std::string result;
   try {
-    const auto rejection =
-        rust ? gufo::server::DecodeChatRequest(api, body, fixture.environment,
-                                               require_model, &decoded)
-             : reference::Decode(api, body, fixture.environment, require_model,
-                                 &decoded);
-    result = Describe(rejection, decoded);
+    const auto rejection = gufo::server::DecodeChatRequest(
+        api, body, fixture.environment, setting.require_model, &decoded);
+    result = rejection ? Describe(*rejection) : Describe(decoded);
   } catch (const std::exception& exception) {
     result = std::string("threw ") + exception.what();
   }
   result += "\nlog:";
   for (const auto& entry : fixture.log)
-    result += "\n  " + entry;
+    result += " " + entry;
   return result;
 }
 
-void Report(std::string_view what, std::string_view input,
-            const std::string& old_result, const std::string& new_result) {
-  ++failures;
-  if (failures > 10)
-    return;
-  std::fprintf(stderr, "FAIL %.*s\n  body: %s\n  C++:  %s\n  Rust: %s\n",
-               static_cast<int>(what.size()), what.data(),
-               Printable(input).c_str(), Printable(old_result, 2000).c_str(),
-               Printable(new_result, 2000).c_str());
-}
-
-struct Setting {
-  bool images;
-  gufo::ReasoningOptions defaults;
-  bool provider;
-  bool require_model;
+struct Case {
+  const char* name;
+  ChatApi api;
+  Setting setting;
+  std::string body;
+  std::string expected;
 };
 
-const std::vector<Setting>& Settings() {
-  static const std::vector<Setting> settings = [] {
-    gufo::ReasoningOptions thinking;
-    thinking.enabled = true;
-    thinking.effort = gufo::ReasoningEffort::kHigh;
-    thinking.preserve_thinking = false;
-    thinking.budget_tokens = 100;
-    gufo::ReasoningOptions plain;
-    plain.enabled = false;
-    return std::vector<Setting>{
-        {true, {}, false, true},
-        {false, thinking, true, true},
-        {true, plain, true, false},
-    };
-  }();
-  return settings;
+Setting ThinkingServer() {
+  Setting setting;
+  setting.images = false;
+  setting.defaults.enabled = true;
+  setting.defaults.effort = gufo::ReasoningEffort::kHigh;
+  setting.defaults.preserve_thinking = false;
+  setting.defaults.budget_tokens = 100;
+  setting.provider = true;
+  return setting;
 }
 
-void Compare(ChatApi api, std::string_view body, const Setting& setting) {
-  ++cases;
-  Fixture old_fixture(setting.images, setting.defaults, setting.provider);
-  Fixture new_fixture(setting.images, setting.defaults, setting.provider);
-  const auto old_result =
-      Run(old_fixture, false, api, body, setting.require_model);
-  const auto new_result =
-      Run(new_fixture, true, api, body, setting.require_model);
-  if (old_result.starts_with("accepted"))
-    ++accepted[static_cast<int>(api)];
-  if (old_result != new_result) {
-    const char* names[] = {"chat", "responses", "messages"};
-    Report(names[static_cast<int>(api)], body, old_result, new_result);
-  }
+Setting OptionalModelServer() {
+  Setting setting;
+  setting.defaults.enabled = false;
+  setting.provider = true;
+  setting.require_model = false;
+  return setting;
 }
 
-// A chat with tools and choices the fragments start from.
-gufo::server::ChatRequest SeedChat(int variant) {
-  gufo::server::ChatRequest chat;
-  if (variant == 1) {
-    gufo::tokenization::ChatTool tool;
-    tool.name = "f";
-    chat.tools.push_back(tool);
-    chat.tool_choice = gufo::server::ChatRequest::ToolChoice::kRequired;
-    chat.forced_tool_name = "f";
-    chat.reasoning.enabled = true;
-    chat.reasoning.effort = gufo::ReasoningEffort::kLow;
-  } else if (variant == 2) {
-    chat.tool_choice = gufo::server::ChatRequest::ToolChoice::kRequired;
-    chat.reasoning.budget_tokens = 9;
-  }
+std::string User(std::string_view content) {
+  return R"({"model":"m","messages":[{"role":"user","content":)" +
+         std::string(content) + "}]";
+}
+
+// Chat Completions.
+const std::vector<Case>& ChatCases() {
+  static const std::vector<Case> cases = {
+      {"chat: every field",
+       ChatApi::kChat,
+       {},
+       R"({"model":"alias","messages":[
+           {"role":"system","content":"s"},
+           {"role":"user","content":[{"type":"text","text":"a"},
+             {"type":"image_url","image_url":{"url":"u1","detail":"low"}},
+             {"type":"text","text":"b"},
+             {"type":"image_url","image_url":{"url":"u2"}}]},
+           {"role":"assistant","content":null,"reasoning_content":"why",
+            "tool_calls":[{"id":"c1","type":"function","function":{"name":"f",
+              "arguments":"{\"a\":1.0,\"b\":\"x\",\"c\":[1e2,-0]}"}}]},
+           {"role":"tool","content":"r","tool_call_id":"c1","name":"n"}],
+         "tools":[{"type":"function","function":{"name":"f","description":"d",
+           "strict":true,"parameters":{"type":"object","properties":{"a":{"type":"number","minimum":1.0}}}}},
+           {"type":"function","function":{"name":"g"}}],
+         "tool_choice":{"type":"function","function":{"name":"f"}},
+         "chat_template_kwargs":{"enable_thinking":true,"reasoning_effort":"low",
+           "preserve_thinking":true,"add_vision_id":true},
+         "reasoning_budget_tokens":5.0,
+         "max_completion_tokens":null,"max_tokens":2,
+         "stream":true,"stream_options":{"include_usage":true},
+         "stop":["a","b"],
+         "response_format":{"type":"json_schema","json_schema":{"name":"n","description":"fd","schema":{"type":"object"}}},
+         "temperature":0.5,"top_p":0.9,"top_k":4,"seed":3,
+         "logprobs":true,"top_logprobs":2,
+         "cache_prompt":false,"cache_persist":false,"return_progress":true})",
+       "accepted model=alias max=2 stream usage\n"
+       "  system content=s\n"
+       "  user content=ab image@1/low=u1 image@2=u2\n"
+       "  assistant thought=why call(c1 f a=j:1.0 b=s:x c=j:[1e2, -0])\n"
+       "  tool content=r name=n call_id=c1\n"
+       "  tool f description=d "
+       "parameters={\"type\":\"object\",\"properties\":{\"a\":{\"type\":"
+       "\"number\",\"minimum\":1}}} "
+       "definition={\"type\":\"function\",\"function\":{\"name\":\"f\","
+       "\"description\":\"d\",\"strict\":true,\"parameters\":{\"type\":"
+       "\"object\",\"properties\":{\"a\":{\"type\":\"number\",\"minimum\":1}}}}"
+       "}\n"
+       "  choice=2\n"
+       "  forced=f\n"
+       "  constrained\n"
+       "  serial\n"
+       "  reasoning enabled=1 effort=1 preserve=1 budget=5\n"
+       "  vision_id\n"
+       "  no cache_prompt\n"
+       "  no cache_persist\n"
+       "  progress\n"
+       "  stop a\n"
+       "  stop b\n"
+       "  format fd\n"
+       "  sampling logprobs=2 t=0.5 k=4 p=0.9 seed=3\n"
+       "log: model:alias image:u1 image:u2 "
+       "schema:{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"number\","
+       "\"minimum\":1.0}}}"},
+      {"chat: optional model and defaults", ChatApi::kChat,
+       OptionalModelServer(),
+       R"({"messages":[{"role":"user","content":"hi"}]})",
+       "accepted model=m max=-\n"
+       "  user content=hi\n"
+       "  reasoning enabled=0 effort=- preserve=- budget=-\n"
+       "  sampling t=0.75\n"
+       "log: model:m"},
+      {"chat: thinking defaults", ChatApi::kChat, ThinkingServer(),
+       R"({"model":"m","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"}})",
+       "accepted model=m max=-\n"
+       "  user content=hi\n"
+       "  reasoning enabled=0 effort=3 preserve=0 budget=100\n"
+       "  sampling t=0.75\n"
+       "log: model:m"},
+      {"chat: namespace tools",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") +
+           R"(,"tools":[{"type":"namespace","name":"ns","tools":[{"type":"function","name":"f"}]}]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"only function tools "
+       "are "
+       "supported\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "tools\"}}\n"
+       "log: model:m"},
+      {"chat: parse error",
+       ChatApi::kChat,
+       {},
+       "{",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"JSON parse error: "
+       "expected object key "
+       "string\",\"type\":\"invalid_request_error\",\"code\":\"parse_error\"}}"
+       "\n"
+       "log:"},
+      {"chat: not an object",
+       ChatApi::kChat,
+       {},
+       "[]",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"request body must "
+       "be a JSON "
+       "object\",\"type\":\"invalid_request_error\",\"code\":\"invalid_body\"}}"
+       "\n"
+       "log:"},
+      {"chat: empty body",
+       ChatApi::kChat,
+       {},
+       "",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"JSON parse error: "
+       "unexpected end of "
+       "input\",\"type\":\"invalid_request_error\",\"code\":\"parse_error\"}}\n"
+       "log:"},
+      {"chat: unknown model",
+       ChatApi::kChat,
+       {},
+       R"({"model":"x","messages":[]})",
+       "rejected 404 Not Found {\"error\":{\"message\":\"model 'x' is not "
+       "served by this "
+       "process\",\"type\":\"invalid_request_error\",\"code\":\"model_not_"
+       "found\"}}\n"
+       "log: model:x"},
+      {"chat: model required",
+       ChatApi::kChat,
+       {},
+       R"({"messages":[{"role":"user","content":"hi"}]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'model' is "
+       "required\",\"type\":\"invalid_request_error\",\"code\":\"missing_"
+       "model\"}}\n"
+       "log:"},
+      {"chat: no messages",
+       ChatApi::kChat,
+       {},
+       R"({"model":"m","messages":[]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'messages' must be "
+       "a non-empty "
+       "array\",\"type\":\"invalid_request_error\",\"code\":\"missing_"
+       "messages\"}}\n"
+       "log: model:m"},
+      {"chat: unknown role",
+       ChatApi::kChat,
+       {},
+       R"({"model":"m","messages":[{"role":"bot","content":"x"}]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"message role must "
+       "be system, developer, user, assistant, or "
+       "tool\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "messages\"}}\n"
+       "log: model:m"},
+      {"chat: assistant image",
+       ChatApi::kChat,
+       {},
+       R"({"model":"m","messages":[{"role":"assistant","content":[{"type":"image_url","image_url":{"url":"u"}}]}]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"image_url requires "
+       "a user or tool message and a string "
+       "URL\",\"type\":\"invalid_request_error\",\"code\":\"invalid_messages\"}"
+       "}\n"
+       "log: model:m"},
+      {"chat: image detail",
+       ChatApi::kChat,
+       {},
+       User(
+           R"([{"type":"image_url","image_url":{"url":"u","detail":"tiny"}}])") +
+           "}",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"image_url.detail "
+       "must be 'auto', 'low', 'high' or "
+       "'original'\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "messages\"}}\n"
+       "log: model:m"},
+      {"chat: failed image",
+       ChatApi::kChat,
+       {},
+       User(R"([{"type":"image_url","image_url":{"url":"fail"}}])") + "}",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"image fetch "
+       "failed\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "messages\"}}\n"
+       "log: model:m image:fail"},
+      {"chat: image out of memory",
+       ChatApi::kChat,
+       {},
+       User(R"([{"type":"image_url","image_url":{"url":"oom"}}])") + "}",
+       // The message is the standard library's what(), which differs
+       // between libstdc++ and the MSVC STL.
+       std::string("rejected 400 Bad Request {\"error\":{\"message\":\"") +
+           std::bad_alloc().what() +
+           "\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+           "messages\"}}\n"
+           "log: model:m image:oom"},
+      {"chat: text-only model", ChatApi::kChat, ThinkingServer(),
+       User(R"([{"type":"image_url","image_url":{"url":"u"}}])") + "}",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"model does not "
+       "support image "
+       "input\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "messages\"}}\n"
+       "log: model:m image:u"},
+      {"chat: rejected strict schema",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") +
+           R"(,"tools":[{"type":"function","function":{"name":"f","strict":true,"parameters":{"reject":1}}}]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"schema "
+       "rejected\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "tools\"}}\n"
+       "log: model:m schema:{\"reject\":1}"},
+      {"chat: repeated tool",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") +
+           R"(,"tools":[{"type":"function","function":{"name":"f"}},{"type":"function","function":{"name":"f"}}]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"function names must "
+       "be "
+       "unique\",\"type\":\"invalid_request_error\",\"code\":\"invalid_tools\"}"
+       "}\n"
+       "log: model:m"},
+      {"chat: tool name",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") +
+           R"(,"tools":[{"type":"function","function":{"name":"bad name"}}]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"function names "
+       "require 1-64 printable ASCII characters other than spaces, '<', '>', "
+       "'\\\"' and "
+       "'\\\\'\",\"type\":\"invalid_request_error\",\"code\":\"invalid_tools\"}"
+       "}\n"
+       "log: model:m"},
+      {"chat: historical call arguments",
+       ChatApi::kChat,
+       {},
+       R"({"model":"m","messages":[{"role":"assistant","tool_calls":[{"function":{"name":"f","arguments":"[1]"}}]}]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"tool arguments must "
+       "encode a JSON "
+       "object\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "messages\"}}\n"
+       "log: model:m"},
+      {"chat: required without tools",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") + R"(,"tool_choice":"required"})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'tool_choice' "
+       "cannot be required without "
+       "tools\",\"type\":\"invalid_request_error\",\"code\":\"invalid_tool_"
+       "choice\"}}\n"
+       "log: model:m"},
+      {"chat: choice names no tool",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") +
+           R"(,"tools":[{"type":"function","function":{"name":"f"}}],"tool_choice":{"type":"function","function":{"name":"missing"}}})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'tool_choice' must "
+       "name a declared "
+       "function\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "tools\"}}\n"
+       "log: model:m"},
+      {"chat: conflicting reasoning",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") +
+           R"(,"thinking":{"type":"disabled"},"reasoning_effort":"high"})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"reasoning controls "
+       "disagree about whether thinking is "
+       "enabled\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "reasoning\"}}\n"
+       "log: model:m"},
+      {"chat: reasoning budget",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") + R"(,"reasoning_budget_tokens":2147483648})",
+       "rejected 400 Bad Request "
+       "{\"error\":{\"message\":\"'reasoning_budget_tokens' must be an integer "
+       "between -1 and "
+       "2147483647\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "reasoning\"}}\n"
+       "log: model:m"},
+      {"chat: max tokens",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") + R"(,"max_tokens":4294967296})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'max_tokens' must "
+       "be a positive "
+       "integer\",\"type\":\"invalid_request_error\",\"code\":\"invalid_max_"
+       "tokens\"}}\n"
+       "log: model:m"},
+      {"chat: stream",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") + R"(,"stream":"yes"})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'stream' must be a "
+       "boolean\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "stream\"}}\n"
+       "log: model:m"},
+      {"chat: n",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") + R"(,"n":2})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"only n=1 is "
+       "supported\",\"type\":\"invalid_request_error\",\"code\":\"unsupported_"
+       "n\"}}\n"
+       "log: model:m"},
+      {"chat: audio",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") + R"(,"modalities":["audio"]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"request field "
+       "'modalities' is not "
+       "implemented\",\"type\":\"invalid_request_error\",\"code\":"
+       "\"unsupported_field\"}}\n"
+       "log: model:m"},
+      {"chat: response format",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") + R"(,"response_format":{"type":"xml"}})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"response_format "
+       "type must be text, json_object or "
+       "json_schema\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "response_format\"}}\n"
+       "log: model:m"},
+      {"chat: stop",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") + R"(,"stop":[1]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"stop sequences must "
+       "be "
+       "strings\",\"type\":\"invalid_request_error\",\"code\":\"invalid_stop\"}"
+       "}\n"
+       "log: model:m"},
+      {"chat: temperature",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") + R"(,"temperature":"hot"})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'temperature' must "
+       "be a finite "
+       "number\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "temperature\"}}\n"
+       "log: model:m"},
+      {"chat: logprobs",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") + R"(,"logprobs":"x"})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'logprobs' must be "
+       "a "
+       "boolean\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "logprobs\"}}\n"
+       "log: model:m"},
+      {"chat: mirostat",
+       ChatApi::kChat,
+       {},
+       User(R"("hi")") + R"(,"mirostat":1})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"request field "
+       "'mirostat' is not supported with a value that enables "
+       "it\",\"type\":\"invalid_request_error\",\"code\":\"unsupported_"
+       "sampling\"}}\n"
+       "log: model:m"},
+      {"chat: model check throws",
+       ChatApi::kChat,
+       {},
+       R"({"model":"throw","messages":[]})",
+       "threw backend gone\n"
+       "log: model:throw"},
+  };
+  return cases;
+}
+
+// Responses and Messages, with the compatibility check.
+const std::vector<Case>& CompatibilityCases() {
+  static const std::vector<Case> cases = {
+      {"responses: every field",
+       ChatApi::kResponses,
+       {},
+       R"({"model":"m","instructions":"sys","input":[
+           {"type":"reasoning","summary":[{"type":"summary_text","text":"t"}]},
+           {"role":"developer","content":"d"},
+           {"role":"assistant","content":[{"type":"output_text","text":"answer"}]},
+           {"type":"function_call","call_id":"c1","name":"f","arguments":"{\"a\":1.0}"},
+           {"type":"function_call_output","call_id":"c1","output":[{"type":"input_text","text":"l "},{"type":"input_image","image_url":"u3"}]},
+           {"role":"user","content":[{"type":"input_text","text":"a"},{"type":"input_image","image_url":"u1","detail":"low"}]}],
+         "tools":[{"type":"namespace","name":"ns","tools":[{"type":"function","name":"f"},{"type":"web_search"}]},
+           {"type":"function","name":"g","strict":true}],
+         "tool_choice":"required","reasoning":{"effort":"high","summary":"auto"},
+         "text":{"format":{"type":"json_schema","name":"n","description":"d","schema":{"type":"object"}}},
+         "include":["message.output_text.logprobs"],"top_logprobs":3,
+         "stream":true,"store":false})",
+       "accepted model=m max=33 stream\n"
+       "  system content=sys\n"
+       "  assistant content=answer thought=t call(c1 f a=j:1.0)\n"
+       "  developer content=d\n"
+       "  tool content=l  call_id=c1 image@2=u3\n"
+       "  user content=a image@1/low=u1\n"
+       "  tool f parameters={} "
+       "definition={\"type\":\"function\",\"function\":{\"name\":\"f\","
+       "\"parameters\":{}}}\n"
+       "  tool g "
+       "parameters={\"type\":\"object\",\"properties\":{},\"required\":[],"
+       "\"additionalProperties\":false} "
+       "definition={\"type\":\"function\",\"function\":{\"name\":\"g\","
+       "\"strict\":true,\"parameters\":{\"type\":\"object\",\"properties\":{},"
+       "\"required\":[],\"additionalProperties\":false}}}\n"
+       "  choice=2\n"
+       "  namespace f=ns\n"
+       "  constrained\n"
+       "  reasoning enabled=1 effort=3 preserve=- budget=-\n"
+       "  format d\n"
+       "  sampling logprobs=3\n"
+       "log: "
+       "schema:{\"type\":\"object\",\"properties\":{},\"required\":[],"
+       "\"additionalProperties\":false} compatibility:responses:1 image:u3 "
+       "image:u1"},
+      {"responses: thinking defaults", ChatApi::kResponses, ThinkingServer(),
+       R"({"input":"hello","reasoning":{"effort":"none"}})",
+       "accepted model=- max=33\n"
+       "  user content=hello\n"
+       "  reasoning enabled=0 effort=3 preserve=0 budget=100\n"
+       "  sampling t=0.75\n"
+       "log: compatibility:responses:0"},
+      {"responses: empty input",
+       ChatApi::kResponses,
+       {},
+       R"({"input":""})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'input' must "
+       "contain text, message items with text/images, reasoning items, "
+       "function calls or function "
+       "outputs\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "request\"}}\n"
+       "log: compatibility:responses:-"},
+      {"responses: failed image",
+       ChatApi::kResponses,
+       {},
+       R"({"input":[{"role":"user","content":[{"type":"input_image","image_url":"fail"}]}]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"image fetch "
+       "failed\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "request\"}}\n"
+       "log: compatibility:responses:- image:fail"},
+      {"responses: historical call arguments",
+       ChatApi::kResponses,
+       {},
+       R"({"input":[{"type":"function_call","call_id":"c3","name":"f","arguments":"nope"}]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"tool arguments are "
+       "not valid JSON: JSON parse error: bad "
+       "literal\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "request\"}}\n"
+       "log: compatibility:responses:-"},
+      {"responses: namespace name",
+       ChatApi::kResponses,
+       {},
+       R"({"input":"x","tools":[{"type":"namespace","name":"","tools":[{"type":"function","name":"f"}]}]})",
+       "accepted model=- max=33\n"
+       "  user content=x\n"
+       "  tool f parameters={} "
+       "definition={\"type\":\"function\",\"function\":{\"name\":\"f\","
+       "\"parameters\":{}}}\n"
+       "  constrained\n"
+       "  sampling\n"
+       "log: compatibility:responses:-"},
+      {"responses: compatibility rejection",
+       ChatApi::kResponses,
+       {},
+       R"({"input":"x","reject_compatibility":1})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"compatibility "
+       "rejected\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "request\"}}\n"
+       "log: compatibility:responses:-"},
+      {"responses: logprobs",
+       ChatApi::kResponses,
+       {},
+       R"({"input":"x","include":"x"})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'include' must be "
+       "an array of "
+       "strings\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "include\"}}\n"
+       "log: compatibility:responses:-"},
+      {"responses: text format",
+       ChatApi::kResponses,
+       {},
+       R"({"input":"x","text":{"format":{"type":"json_schema","name":"bad name","schema":{}}}})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"json_schema.name "
+       "must contain 1\xe2"
+       "\x80"
+       "\x93"
+       "64 letters, digits, '_' or "
+       "'-'\",\"type\":\"invalid_request_error\",\"code\":\"invalid_response_"
+       "format\"}}\n"
+       "log:"},
+      {"messages: every field",
+       ChatApi::kMessages,
+       {},
+       R"({"model":"m","system":[{"type":"text","text":"a"},{"type":"text","text":"b"}],
+         "thinking":{"type":"enabled","budget_tokens":9},
+         "output_config":{"effort":"high"},
+         "tools":[{"name":"f","description":"d","input_schema":{"type":"object","properties":{}}}],
+         "tool_choice":{"type":"any","disable_parallel_tool_use":true},
+         "stop_sequences":["x"],
+         "messages":[
+           {"role":"user","content":[{"type":"text","text":"a"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}},{"type":"image","source":{"type":"url","url":"u1"}}]},
+           {"role":"assistant","content":[{"type":"thinking","thinking":"t"},{"type":"tool_use","id":"c1","name":"f","input":{"a":1.0,"b":[1e2]}}]},
+           {"role":"user","content":[{"type":"text","text":"before"},{"type":"tool_result","tool_use_id":"c1","is_error":true,"content":[{"type":"text","text":"x"},{"type":"image","source":{"type":"url","url":"u3"}}]},{"type":"text","text":"after"}]}]})",
+       "accepted model=m max=33\n"
+       "  system content=ab\n"
+       "  user content=a image@1=data:image/png;base64,AQID image@1=u1\n"
+       "  assistant thought=t call(c1 f a=j:1 b=j:[100])\n"
+       "  user content=before\n"
+       "  tool content=x call_id=c1 image@1=u3\n"
+       "  user content=after\n"
+       "  tool f description=d "
+       "parameters={\"type\":\"object\",\"properties\":{}} "
+       "definition={\"type\":\"function\",\"function\":{\"name\":\"f\","
+       "\"description\":\"d\",\"parameters\":{\"type\":\"object\","
+       "\"properties\":{}}}}\n"
+       "  choice=2\n"
+       "  constrained\n"
+       "  serial\n"
+       "  reasoning enabled=1 effort=3 preserve=- budget=9\n"
+       "  stop x\n"
+       "  sampling\n"
+       "log: compatibility:messages:1 image:data:image/png;base64,AQID "
+       "image:u1 image:u3"},
+      {"messages: thinking defaults", ChatApi::kMessages, ThinkingServer(),
+       R"({"model":"m","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}})",
+       "accepted model=m max=33\n"
+       "  user content=hi\n"
+       "  reasoning enabled=1 effort=3 preserve=0 budget=100\n"
+       "  sampling t=0.5\n"
+       "log: compatibility:messages:1"},
+      {"messages: thinking type",
+       ChatApi::kMessages,
+       {},
+       R"({"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"sometimes"}})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'thinking.type' "
+       "must be enabled, adaptive, or "
+       "disabled\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "request\"}}\n"
+       "log:"},
+      {"messages: choice names no tool",
+       ChatApi::kMessages,
+       {},
+       R"({"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"f","input_schema":{}}],"tool_choice":{"type":"tool","name":"missing"}})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'tool_choice' must "
+       "name a declared "
+       "function\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "tools\"}}\n"
+       "log: compatibility:messages:-"},
+      {"messages: tool use without a name",
+       ChatApi::kMessages,
+       {},
+       R"({"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c2","input":{}}]}]})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"historical function "
+       "calls require a non-empty name and string "
+       "arguments\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "request\"}}\n"
+       "log: compatibility:messages:-"},
+      {"messages: stop sequences",
+       ChatApi::kMessages,
+       {},
+       R"({"messages":[{"role":"user","content":"hi"}],"stop_sequences":"x"})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'stop_sequences' "
+       "must be an array of "
+       "strings\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "request\"}}\n"
+       "log: compatibility:messages:-"},
+      {"messages: compatibility rejection",
+       ChatApi::kMessages,
+       {},
+       R"({"messages":[{"role":"user","content":"hi"}],"reject_compatibility":1})",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"compatibility "
+       "rejected\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "request\"}}\n"
+       "log: compatibility:messages:-"},
+      {"responses: not an object",
+       ChatApi::kResponses,
+       {},
+       "1",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"'input' must "
+       "contain text, message items with text/images, reasoning items, "
+       "function calls or function "
+       "outputs\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+       "request\"}}\n"
+       "log: compatibility:responses:-"},
+      {"messages: parse error",
+       ChatApi::kMessages,
+       {},
+       "{",
+       "rejected 400 Bad Request {\"error\":{\"message\":\"JSON parse error: "
+       "expected object key "
+       "string\",\"type\":\"invalid_request_error\",\"code\":\"parse_error\"}}"
+       "\n"
+       "log:"},
+  };
+  return cases;
+}
+
+void TestDecoding() {
+  for (const auto* cases : {&ChatCases(), &CompatibilityCases()})
+    for (const Case& c : *cases)
+      Check(c.name, Decode(c.api, c.body, c.setting), c.expected);
+}
+
+// A request with tools and choices the fragments start from.
+ChatRequest Seed() {
+  ChatRequest chat;
+  tokenization::ChatTool tool;
+  tool.name = "f";
+  chat.tools.push_back(tool);
+  chat.tool_choice = ChatRequest::ToolChoice::kRequired;
+  chat.forced_tool_name = "f";
+  chat.reasoning.enabled = true;
+  chat.reasoning.effort = gufo::ReasoningEffort::kLow;
   return chat;
 }
 
-std::string Fragment(bool rust, bool anthropic, const Value& body,
-                     int seed_variant, const ChatDecodeEnvironment& env) {
-  auto chat = SeedChat(seed_variant);
-  try {
-    std::optional<HttpResponse> rejection;
-    if (anthropic)
-      rejection = rust ? gufo::server::ParseAnthropicToolControls(body, &chat)
-                       : reference::AnthropicToolControls(body, &chat, env);
-    else
-      rejection = rust ? gufo::server::ParseOpenAiResponseControls(body, &chat)
-                       : reference::ResponseControls(body, &chat, env);
-    // A rejected C++ fragment may have filled part of the request.
-    return rejection ? Describe(*rejection) : Describe(chat);
-  } catch (const std::exception& exception) {
-    return std::string("threw ") + exception.what();
-  }
+std::string Fragment(bool anthropic, std::string_view text) {
+  ChatRequest chat = Seed();
+  const Value body = gufo::json::parse(text);
+  const auto rejection =
+      anthropic ? gufo::server::ParseAnthropicToolControls(body, &chat)
+                : gufo::server::ParseOpenAiResponseControls(body, &chat);
+  return (rejection ? Describe(*rejection) + "\n" : std::string("accepted\n")) +
+         Describe(chat);
 }
 
-std::string Item(bool rust, const Value& item,
-                 const ChatDecodeEnvironment& env) {
+std::string Item(std::string_view text) {
   tokenization::ChatMessage message;
+  message.content = "unchanged";
   gufo::core::ImageReadBudget budget;
   std::string error;
-  try {
-    const bool accepted =
-        rust ? gufo::server::ParseOpenAiResponseMessage(item, &message, budget,
-                                                        &error)
-             : reference::ResponseItem(item, &message, budget, &error, env);
-    // A rejected C++ item may have filled part of the message.
-    return accepted ? "accepted " + Describe(message) : "rejected " + error;
-  } catch (const std::exception& exception) {
-    return std::string("threw ") + exception.what();
-  }
+  const bool accepted = gufo::server::ParseOpenAiResponseMessage(
+      gufo::json::parse(text), &message, budget, &error);
+  return (accepted ? "accepted" : "rejected " + error) + "\n" +
+         Describe(message);
 }
 
-// The production hooks the fragment shims use.
-const ChatDecodeEnvironment& RealEnvironment() {
-  static const ChatDecodeEnvironment environment = [] {
-    ChatDecodeEnvironment hooks;
-    hooks.read_image = [](std::string_view url,
-                          gufo::core::ImageReadBudget& budget) {
-      return gufo::core::ReadImageUrl(url, budget);
-    };
-    hooks.compile_schema = [](const Value& schema) {
-      (void)gufo::sampling::JsonConstraint::Compile(schema, true);
-    };
-    return hooks;
-  }();
-  return environment;
-}
-
-void CompareFragments(ChatApi api, std::string_view text) {
-  Value body;
-  try {
-    body = gufo::json::parse(text);
-  } catch (const std::exception&) {
-    return;
-  }
-  const auto& env = RealEnvironment();
-  if (api != ChatApi::kChat) {
-    const bool anthropic = api == ChatApi::kMessages;
-    for (int seed = 0; seed < 3; ++seed) {
-      ++cases;
-      const auto old_result = Fragment(false, anthropic, body, seed, env);
-      const auto new_result = Fragment(true, anthropic, body, seed, env);
-      if (old_result != new_result)
-        Report(anthropic ? "anthropic tools" : "response controls", text,
-               old_result, new_result);
-    }
-  }
-  if (api == ChatApi::kResponses) {
-    if (const auto* input = body.find("input"); input && input->is_array()) {
-      for (const auto& item : input->items()) {
-        ++cases;
-        const auto old_result = Item(false, item, env);
-        const auto new_result = Item(true, item, env);
-        if (old_result != new_result)
-          Report("response item", item.dump(), old_result, new_result);
-      }
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Generated bodies: each dimension is a list of member spellings ("" leaves
-// the member out); a body takes one spelling per dimension.
-
-// A dimension's spellings and the indices of the ones a valid body may use.
-struct Dimension {
-  std::vector<std::string> spellings;
-  std::vector<std::size_t> valid;
-};
-
-std::string Join(const std::vector<std::string>& members) {
-  std::string out = "{";
-  for (const auto& member : members) {
-    if (member.empty())
-      continue;
-    if (out.size() > 1)
-      out += ',';
-    out += member;
-  }
-  return out + "}";
-}
-
-const Dimension kChatContents{
-    {
-        R"("content":null)",
-        R"("content":"hello")",
-        R"("content":5)",
-        R"("content":[])",
-        R"("content":[{"type":"text","text":"a"},{"text":"b"}])",
-        R"("content":[{"type":"input_text","text":"a"}])",
-        R"("content":[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"u1"}},{"type":"text","text":"b"}])",
-        R"("content":[{"type":"image_url","image_url":{"url":"u2","detail":"low"}}])",
-        R"("content":[{"type":"image_url","image_url":{"url":"u3","detail":"high"}}])",
-        R"("content":[{"type":"image_url","image_url":{"url":"u4","detail":"tiny"}}])",
-        R"("content":[{"type":"image_url","image_url":{"url":"fail"}}])",
-        R"("content":[{"type":"image_url","image_url":{"url":"oom"}}])",
-        R"("content":[{"type":"image_url","image_url":"u5"}])",
-        R"("content":[{"type":"text","text":1}])",
-        R"("content":[{"type":"audio"}])",
-        R"("content":["text"])",
-    },
-    {0, 1, 3, 4, 5, 6, 7, 8}};
-
-const Dimension kRoles{
-    {R"("role":"user")", R"("role":"system")", R"("role":"developer")",
-     R"("role":"assistant")", R"("role":"tool")", R"("role":"bot")",
-     R"("role":7)", ""},
-    {0, 1, 2, 3, 4}};
-
-const Dimension kChatExtras{
-    {
-        "",
-        R"("name":"n","tool_call_id":"c")",
-        R"("reasoning_content":"why")",
-        R"("reasoning_content":null)",
-        R"("reasoning_content":3)",
-        R"("tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\"a\":1.0,\"b\":\"x\",\"c\":[1e2,-0]}"}}])",
-        R"("tool_calls":[{"function":{"name":"f","arguments":"{}"}},{"id":"c2","function":{"name":"g","arguments":"{\"n\":9007199254740993}"}}])",
-        R"("tool_calls":[{"type":"custom","function":{}}])",
-        R"("tool_calls":[{"function":"f"}])",
-        R"("tool_calls":[{"function":{"name":"","arguments":"{}"}}])",
-        R"("tool_calls":[{"function":{"name":"f","arguments":"[1]"}}])",
-        R"("tool_calls":[{"function":{"name":"f","arguments":"{\"a\":"}}])",
-        R"("tool_calls":[{"function":{"name":"f\u0000g","arguments":"{}"}}])",
-        R"("tool_calls":{})",
-        R"("tool_calls":null)",
-    },
-    {0, 1, 2, 3, 5, 6}};
-
-const Dimension kChatTools{
-    {
-        "",
-        R"("tools":null)",
-        R"("tools":{})",
-        R"("tools":[1])",
-        R"("tools":[{"type":"function","function":{"name":"f","description":"d","parameters":{"type":"object","properties":{"a":{"type":"number","minimum":1.0}}}}}])",
-        R"("tools":[{"type":"function","name":"f","strict":true,"parameters":{"type":"object","properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false}}])",
-        R"("tools":[{"type":"function","function":{"name":"f","strict":true}},{"type":"function","function":{"name":"g","strict":null,"parametersJsonSchema":{"type":"object"}}}])",
-        R"("tools":[{"type":"function","function":{"name":"f","strict":true,"parameters":{"reject":1}}}])",
-        R"("tools":[{"type":"function","function":{"name":"f","strict":"yes"}}])",
-        R"("tools":[{"type":"function","function":{"name":"f"}},{"type":"function","function":{"name":"f"}}])",
-        R"("tools":[{"type":"function","function":{"name":"bad name"}}])",
-        R"("tools":[{"type":"function","function":{"name":"f","parameters":[]}}])",
-        R"("tools":[{"type":"function","function":"f"}])",
-        R"("tools":[{"type":"web_search"}])",
-        R"("tools":[{"type":"namespace","name":"ns","tools":[{"type":"function","name":"f"}]}])",
-        R"("tools":[{"type":"function","function":{"name":"f","parameters":null,"parametersJsonSchema":{"type":"object","x":1e2}},"extra":true}])",
-    },
-    {0, 1, 4, 5, 6, 15}};
-
-const Dimension kChoices{
-    {
-        "",
-        R"("tool_choice":null)",
-        R"("tool_choice":"auto")",
-        R"("tool_choice":"none")",
-        R"("tool_choice":"required")",
-        R"("tool_choice":"bogus")",
-        R"("tool_choice":{"type":"function","function":{"name":"f"}})",
-        R"("tool_choice":{"type":"function","name":"g"})",
-        R"("tool_choice":{"type":"function","function":{"name":"missing"}})",
-        R"("tool_choice":{"type":"custom"})",
-        R"("tool_choice":3)",
-    },
-    {0, 1, 2, 3, 4, 6}};
-
-const Dimension kParallel{
-    {"", R"("parallel_tool_calls":false)", R"("parallel_tool_calls":null)",
-     R"("parallel_tool_calls":1)"},
-    {0, 1}};
-
-const Dimension kThinking{{
-                              "",
-                              R"("thinking":{"type":"enabled"})",
-                              R"("thinking":{"type":"disabled"})",
-                              R"("thinking":{"type":"adaptive"})",
-                              R"("thinking":null)",
-                              R"("thinking":{})",
-                          },
-                          {0, 1, 2}};
-
-const Dimension kEffort{{
-                            "",
-                            R"("reasoning_effort":"high")",
-                            R"("reasoning_effort":"none")",
-                            R"("reasoning_effort":"bogus")",
-                            R"("reasoning_effort":1)",
-                            R"("reasoning_effort":null)",
-                        },
-                        {0, 1, 2, 5}};
-
-const Dimension kKwargs{
-    {
-        "",
-        R"("chat_template_kwargs":{"enable_thinking":false})",
-        R"("chat_template_kwargs":{"enable_thinking":true,"reasoning_effort":"low","preserve_thinking":true})",
-        R"("chat_template_kwargs":{"thinking_mode":"chat","reasoning_effort":"max"})",
-        R"("chat_template_kwargs":{"thinking_mode":"thinking"})",
-        R"("chat_template_kwargs":{"thinking_mode":"maybe"})",
-        R"("chat_template_kwargs":{"thinking_mode":1})",
-        R"("chat_template_kwargs":{"reasoning_effort":"medium"})",
-        R"("chat_template_kwargs":{"reasoning_effort":"high"})",
-        R"("chat_template_kwargs":{"preserve_thinking":"yes"})",
-        R"("chat_template_kwargs":{"enable_thinking":"yes"})",
-        R"("chat_template_kwargs":{"add_vision_id":true})",
-        R"("chat_template_kwargs":{"add_vision_id":1})",
-        R"("chat_template_kwargs":[])",
-    },
-    {0, 1, 2, 3, 4, 7, 11}};
-
-const Dimension kBudgets{
-    {
-        "",
-        R"("reasoning_budget_tokens":-1)",
-        R"("reasoning_budget_tokens":0)",
-        R"("reasoning_budget_tokens":5.0)",
-        R"("reasoning_budget_tokens":2147483647)",
-        R"("reasoning_budget_tokens":2147483648)",
-        R"("reasoning_budget_tokens":1.5)",
-        R"("reasoning_budget_tokens":"5")",
-        R"("reasoning_budget_tokens":null,"thinking_budget_tokens":7)",
-        R"("thinking_budget_tokens":-2)",
-    },
-    {0, 1, 2, 3, 4, 8}};
-
-const Dimension kMaxTokens{{
-                               "",
-                               R"("max_tokens":1)",
-                               R"("max_tokens":0)",
-                               R"("max_tokens":1.5)",
-                               R"("max_tokens":4294967295)",
-                               R"("max_tokens":4294967296)",
-                               R"("max_tokens":"3")",
-                               R"("max_completion_tokens":null,"max_tokens":2)",
-                               R"("max_completion_tokens":1e2)",
-                               R"("max_completion_tokens":-0)",
-                           },
-                           {0, 1, 4, 7, 8}};
-
-const Dimension kChatMisc{
-    {
-        "",
-        R"("stream":true,"stream_options":{"include_usage":true})",
-        R"("stream":"yes")",
-        R"("stream":null,"stream_options":null)",
-        R"("stream_options":{"include_usage":1})",
-        R"("stream_options":[])",
-        R"("return_progress":true)",
-        R"("return_progress":"x")",
-        R"("cache_prompt":false,"cache_persist":false)",
-        R"("cache_prompt":1)",
-        R"("cache_persist":"no")",
-        R"("n":1.0)",
-        R"("n":2)",
-        R"("n":"1")",
-        R"("ignore_eos":true)",
-        R"("modalities":["text"])",
-        R"("modalities":["audio"])",
-        R"("audio":{})",
-        R"("response_format":{"type":"json_object"})",
-        R"("response_format":{"type":"json_schema","json_schema":{"name":"n","description":"d","schema":{"type":"object"}}})",
-        R"("response_format":{"type":"xml"})",
-        R"("response_format":null)",
-        R"("stop":"x")",
-        R"("stop":["a","b"])",
-        R"("stop":[1])",
-        R"("stop":5)",
-        R"("temperature":0.5,"top_p":0.9,"top_k":4)",
-        R"("temperature":3)",
-        R"("temperature":"hot")",
-        R"("logprobs":true,"top_logprobs":2)",
-        R"("logprobs":"x")",
-        R"("top_logprobs":2)",
-        R"("seed":-1)",
-        R"("logit_bias":{})",
-        R"("logit_bias":{"1":2})",
-        R"("draft_n":4)",
-        R"("mirostat":1)",
-        R"("mirostat":0)",
-    },
-    {0, 1, 3, 6, 8, 11, 15, 18, 19, 21, 22, 23, 26, 29, 32, 33, 36}};
-
-const Dimension kModels{
-    {R"("model":"m")", R"("model":"alias")", R"("model":"x")",
-     R"("model":null)", R"("model":1)", "", R"("model":"")"},
-    {0, 1}};
-
-// Bodies alternate between any spelling and valid ones only, so the grids
-// reach accepted requests as well as each rejection.
-bool valid_only = false;
-
-std::string Pick(std::mt19937_64& random, const Dimension& dimension) {
-  const auto& all = dimension.spellings;
-  if (valid_only)
-    return all.at(dimension.valid[random() % dimension.valid.size()]);
-  return all[random() % all.size()];
-}
-
-// A dimension member half the time, absent otherwise.
-std::string Maybe(std::mt19937_64& random, const Dimension& dimension) {
-  return random() % 2 ? Pick(random, dimension) : "";
-}
-
-std::string ChatMessage(std::mt19937_64& random) {
-  if (!valid_only)
-    return Join({Pick(random, kRoles), Pick(random, kChatContents),
-                 Pick(random, kChatExtras)});
-  // Images only on user and tool turns, history only on assistant ones.
-  const std::string role = Pick(random, kRoles);
-  const bool images = role.find("user") != std::string::npos ||
-                      role.find("tool") != std::string::npos;
-  const bool assistant = role.find("assistant") != std::string::npos;
-  const std::size_t content = images ? random() % 8 : random() % 5;
-  const std::size_t extras = assistant ? random() % 6 : random() % 2;
-  return Join({role, kChatContents.spellings[kChatContents.valid[content]],
-               kChatExtras.spellings[kChatExtras.valid[extras]]});
-}
-
-std::string ChatBody(std::mt19937_64& random) {
-  std::string messages = R"("messages":[)";
-  const int count = static_cast<int>(random() % 3) + (valid_only ? 1 : 0);
-  for (int i = 0; i < count; ++i)
-    messages += (i ? "," : "") + ChatMessage(random);
-  messages += "]";
-  if (!valid_only && random() % 20 == 0)
-    messages = R"("messages":{})";
-  if (!valid_only)
-    return Join({Pick(random, kModels), messages, Maybe(random, kChatTools),
-                 Maybe(random, kChoices), Maybe(random, kParallel),
-                 Maybe(random, kThinking), Maybe(random, kEffort),
-                 Maybe(random, kKwargs), Maybe(random, kBudgets),
-                 Maybe(random, kMaxTokens), Maybe(random, kChatMisc),
-                 Maybe(random, kChatMisc)});
-  // A choice names a declared function only with tools that declare f, and
-  // one reasoning control at a time cannot disagree with another.
-  const std::string tools = Maybe(random, kChatTools);
-  const bool declares = tools.find("\"f\"") != std::string::npos;
-  const std::string choice =
-      declares ? Maybe(random, kChoices)
-               : kChoices.spellings[kChoices.valid[random() % 4]];
-  const Dimension* reasoning[] = {&kThinking, &kEffort, &kKwargs};
-  return Join({Pick(random, kModels), messages, tools, choice,
-               Maybe(random, kParallel),
-               Maybe(random, *reasoning[random() % 3]), Maybe(random, kBudgets),
-               Maybe(random, kMaxTokens), Maybe(random, kChatMisc)});
-}
-
-const Dimension kResponseItems{
-    {
-        R"({"role":"user","content":"hi"})",
-        R"({"role":"user","content":[{"type":"input_text","text":"a"},{"type":"input_image","image_url":"u1","detail":"low"},{"type":"input_text","text":"b"}]})",
-        R"({"type":"message","role":"user","content":[{"type":"input_image","image_url":"fail"}]})",
-        R"({"role":"user","content":[{"type":"input_image","file_id":"x","image_url":"u"}]})",
-        R"({"role":"user","content":[{"type":"input_image"}]})",
-        R"({"role":"user","content":[{"type":"input_file"}]})",
-        R"({"role":"user","content":[{"type":"text","text":"t"}]})",
-        R"({"role":"assistant","content":[{"type":"output_text","text":"answer"}]})",
-        R"({"role":"assistant","content":[{"type":"input_image","image_url":"u2"}]})",
-        R"({"role":"system","content":"s"})",
-        R"({"role":"developer","content":[{"type":"input_text","text":"d"}]})",
-        R"({"role":"tool","content":"t"})",
-        R"({"role":"user","content":"x","tool_calls":[]})",
-        R"({"role":"user","type":"other","content":"x"})",
-        R"({"role":"assistant","content":"x","reasoning_content":"r"})",
-        R"({"type":"reasoning","summary":[{"type":"summary_text","text":"think"}]})",
-        R"({"type":"reasoning","summary":[],"encrypted_content":null,"content":null})",
-        R"({"type":"reasoning","summary":[],"encrypted_content":"opaque"})",
-        R"({"type":"reasoning","summary":[{"type":"other","text":"x"}]})",
-        R"({"type":"function_call","call_id":"c1","name":"f","arguments":"{\"a\":1.0}"})",
-        R"({"type":"function_call","call_id":"c2","name":"g","arguments":"{\"b\":[1,{\"c\":2.50}]}"})",
-        R"({"type":"function_call","call_id":"","name":"f","arguments":"{}"})",
-        R"({"type":"function_call","call_id":"c3","name":"f","arguments":"nope"})",
-        R"({"type":"function_call","call_id":"c4","name":"f\u0000x","arguments":"{}"})",
-        R"({"type":"custom_tool_call","call_id":"c5","name":"apply","input":"line\n\"q\""})",
-        R"({"type":"custom_tool_call","call_id":"c6","name":"apply"})",
-        R"({"type":"function_call_output","call_id":"c1","output":"done"})",
-        R"({"type":"function_call_output","call_id":"c1","output":[{"type":"input_text","text":"l "},{"type":"input_image","image_url":"u3"}]})",
-        R"({"type":"function_call_output","call_id":"c1","output":5})",
-        R"({"type":"custom_tool_call_output","call_id":"c5","output":"ok"})",
-        R"("text item")",
-    },
-    {0, 1, 6, 7, 9, 10, 14, 15, 16, 19, 20, 24, 26, 27, 29}};
-
-const Dimension kResponseTools{
-    {
-        "",
-        R"("tools":[{"type":"function","name":"f","parameters":{"type":"object"}}])",
-        R"("tools":[{"type":"function","name":"f","strict":true}])",
-        R"("tools":[{"type":"namespace","name":"ns","tools":[{"type":"function","name":"f"},{"type":"web_search"}]},{"type":"function","name":"g"}])",
-        R"("tools":[{"type":"namespace","name":"","tools":[{"type":"function","name":"f"}]}])",
-        R"("tools":[{"type":"namespace","name":"ns"}])",
-        R"("tools":[{"type":"web_search"},{"type":"mcp"}])",
-        R"("tools":[{"type":"function","name":"f"},{"type":"namespace","name":"n2","tools":[{"type":"function","name":"f"}]}])",
-    },
-    {0, 1, 2, 3, 4, 6}};
-
-const Dimension kResponseReasoning{
-    {
-        "",
-        R"("reasoning":{"effort":"high"})",
-        R"("reasoning":{"effort":"none","summary":"auto"})",
-        R"("reasoning":{"effort":null})",
-        R"("reasoning":{"effort":5})",
-        R"("reasoning":{"effort":"bogus"})",
-        R"("reasoning":{"x\u0000y":1})",
-        R"("reasoning":"high")",
-        R"("reasoning":null)",
-    },
-    {0, 1, 2, 3}};
-
-const Dimension kResponseText{
-    {
-        "",
-        R"("text":{"format":{"type":"json_schema","name":"n","description":"d","schema":{"type":"object"}}})",
-        R"("text":{"format":{"type":"text"},"verbosity":"low"})",
-        R"("text":{"format":{"type":"json_schema","name":"bad name","schema":{}}})",
-        R"("text":{"color":1})",
-        R"("text":5)",
-        R"("text":null)",
-    },
-    {0, 1, 2}};
-
-const Dimension kResponseMisc{
-    {
-        "",
-        R"("max_output_tokens":5)",
-        R"("max_output_tokens":0)",
-        R"("max_tokens":5)",
-        R"("stream":true)",
-        R"("stream":"yes")",
-        R"("store":false)",
-        R"("store":true)",
-        R"("include":["message.output_text.logprobs"],"top_logprobs":3)",
-        R"("include":"x")",
-        R"("temperature":0.5)",
-        R"("temperature":9)",
-        R"("return_progress":true,"cache_prompt":false,"cache_persist":false)",
-        R"("return_progress":1)",
-        R"("reasoning_budget_tokens":3)",
-        R"("parallel_tool_calls":null)",
-        R"("parallel_tool_calls":"x")",
-        R"("tool_choice":"required")",
-        R"("tool_choice":{"type":"function","name":"f"})",
-        R"("tool_choice":"none")",
-        R"("previous_response_id":"r")",
-        R"("stop":["x"])",
-    },
-    {0, 1, 4, 6, 8, 10, 12, 14, 15}};
-
-std::string ResponsesBody(std::mt19937_64& random) {
-  std::string input;
-  switch (valid_only ? 0 + 3 * (random() % 2) : random() % 6) {
-    case 0:
-      input = R"("input":"hello")";
-      break;
-    case 1:
-      input = R"("input":"")";
-      break;
-    case 2:
-      input = R"("input":{})";
-      break;
-    default: {
-      input = R"("input":[)";
-      const int count = static_cast<int>(random() % 4);
-      for (int i = 0; i < count; ++i)
-        input += (i ? "," : "") + Pick(random, kResponseItems);
-      input += "]";
-    }
-  }
-  const Dimension instructions{
-      {"", R"("instructions":"sys")", R"("instructions":1)"}, {0, 1}};
-  const std::string extra = valid_only ? "" : Maybe(random, kResponseMisc);
-  return Join({Maybe(random, kModels), Maybe(random, instructions), input,
-               Maybe(random, kResponseTools), Maybe(random, kResponseReasoning),
-               Maybe(random, kResponseText), Maybe(random, kResponseMisc),
-               extra});
-}
-
-const Dimension kMessageTurns{
-    {
-        R"({"role":"user","content":"hi"})",
-        R"({"role":"user","content":[{"type":"text","text":"a"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}},{"type":"text","text":"b"}]})",
-        R"({"role":"user","content":[{"type":"image","source":{"type":"url","url":"u1"}}]})",
-        R"({"role":"user","content":[{"type":"image","source":{"type":"url","url":"fail"}}]})",
-        R"({"role":"user","content":[{"type":"image","source":{"type":"file"}}]})",
-        R"({"role":"user","content":[{"type":"image","source":{"type":"base64","data":"x"}}]})",
-        R"({"role":"assistant","content":[{"type":"thinking","thinking":"t"},{"type":"text","text":"x"}]})",
-        R"({"role":"assistant","content":[{"type":"thinking"}]})",
-        R"({"role":"assistant","content":[{"type":"image","source":{"type":"url","url":"u2"}}]})",
-        R"({"role":"assistant","content":[{"type":"thinking","thinking":"t"},{"type":"tool_use","id":"c1","name":"f","input":{"a":1.0,"b":[1e2]}}]})",
-        R"({"role":"assistant","content":[{"type":"tool_use","id":"","name":"f","input":{}}]})",
-        R"({"role":"assistant","content":[{"type":"tool_use","id":"c2","input":{}}]})",
-        R"({"role":"assistant","content":[{"type":"tool_use","id":"c3","name":"f","input":[]}]})",
-        R"({"role":"assistant","content":[{"type":"tool_use","id":"c4","name":"f","input":{}},{"type":"redacted"}]})",
-        R"({"role":"user","content":[{"type":"text","text":"before"},{"type":"tool_result","tool_use_id":"c1","content":"r"},{"type":"text","text":"after"}]})",
-        R"({"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","is_error":true,"content":[{"type":"text","text":"x"},{"type":"image","source":{"type":"url","url":"u3"}}]}]})",
-        R"({"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":5}]})",
-        R"({"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","is_error":"x"}]})",
-        R"({"role":"user","content":[{"type":"tool_result"}]})",
-        R"({"role":"tool","content":[{"type":"tool_result","tool_use_id":"c1"}]})",
-        R"({"role":"system","content":"s"})",
-        R"({"role":"developer","content":[{"type":"input_text","text":"d"}]})",
-        R"({"role":"user","content":[{"type":"output_text","text":"o"}]})",
-        R"({"role":"user","content":null})",
-        R"({"role":"bot","content":"x"})",
-        R"({"role":"user","type":"other","content":"x"})",
-        R"({"role":"user","content":"x","tool_calls":[]})",
-        R"(7)",
-    },
-    {0, 1, 2, 6, 9, 14, 15, 20, 21, 22}};
-
-const Dimension kMessagesMisc{
-    {
-        "",
-        R"("system":"sys")",
-        R"("system":[{"type":"text","text":"a"},{"type":"input_text","text":"b"}])",
-        R"("system":[{"type":"image","source":{"type":"url","url":"u"}}])",
-        R"("system":null)",
-        R"("system":5)",
-        R"("thinking":{"type":"enabled","budget_tokens":9})",
-        R"("thinking":{"type":"adaptive","budget_tokens":9,"display":"omitted"})",
-        R"("thinking":{"type":"disabled"})",
-        R"("thinking":{"type":"enabled","budget_tokens":0})",
-        R"("thinking":{"type":"enabled","display":"full"})",
-        R"("thinking":{"type":"sometimes"})",
-        R"("thinking":null)",
-        R"("output_config":{"effort":"high"})",
-        R"("output_config":{"effort":"minimal"})",
-        R"("output_config":{"effort":null})",
-        R"("output_config":{"format":1})",
-        R"("output_config":7)",
-        R"("tools":[{"name":"f","description":"d","input_schema":{"type":"object","properties":{}}}])",
-        R"("tools":[{"type":"custom","name":"f","input_schema":{"type":"object"}},{"name":"g","input_schema":{}}])",
-        R"("tools":[{"name":"f"}])",
-        R"("tools":[{"type":"bash_20250124","name":"bash"}])",
-        R"("tools":{})",
-        R"("tool_choice":{"type":"auto"})",
-        R"("tool_choice":{"type":"any","disable_parallel_tool_use":true})",
-        R"("tool_choice":{"type":"tool","name":"f","disable_parallel_tool_use":false})",
-        R"("tool_choice":{"type":"tool","name":"missing"})",
-        R"("tool_choice":{"type":"none"})",
-        R"("tool_choice":{"type":"auto","disable_parallel_tool_use":"x"})",
-        R"("tool_choice":"auto")",
-        R"("stop_sequences":["x"])",
-        R"("stop_sequences":"x")",
-        R"("stream":true)",
-        R"("stream":"x")",
-        R"("temperature":0.5,"top_k":3)",
-        R"("max_tokens":0)",
-        R"("max_tokens":10)",
-        R"("max_output_tokens":10)",
-        R"("response_format":{})",
-        R"("metadata":{})",
-    },
-    {0, 1, 2, 6, 7, 8, 13, 14, 15, 18, 19, 23, 24, 25, 27, 30, 32, 35, 36, 39}};
-
-std::string MessagesBody(std::mt19937_64& random) {
-  std::string messages = R"("messages":[)";
-  const int count = static_cast<int>(random() % 4) + (valid_only ? 1 : 0);
-  for (int i = 0; i < count; ++i)
-    messages += (i ? "," : "") + Pick(random, kMessageTurns);
-  messages += "]";
-  // Valid bodies take fewer members, which rarely repeat one.
-  const std::string extra = valid_only ? "" : Maybe(random, kMessagesMisc);
-  return Join({Maybe(random, kModels), messages, Maybe(random, kMessagesMisc),
-               Maybe(random, kMessagesMisc), Maybe(random, kMessagesMisc),
-               extra});
-}
-
-// ---------------------------------------------------------------------------
-// Mutations of a body: a value at a random path changes type, an object
-// loses, renames or repeats a member, a number changes spelling, or a string
-// or key gains a NUL or non-ASCII byte.
-
-const char* const kNumbers[] = {"1.0",        "1e2", "-0",  "9007199254740993",
-                                "4294967296", "-1",  "0.5", "2147483648"};
-const char* const kValues[] = {"null",  "true", "false", "1",
-                               "\"s\"", "[]",   "{}",    "\"fail\""};
-
-std::size_t Count(const Value& value) {
-  std::size_t count = 1;
-  for (const auto& item : value.items())
-    count += Count(item);
-  for (const auto& [key, member] : value.members())
-    count += Count(member);
-  return count;
-}
-
-std::string Spice(std::mt19937_64& random, std::string text) {
-  // A NUL, é, a zero-width space, a space or a framing character.
-  static const char* const kInserts[] = {"", "\xC3\xA9", "\xE2\x80\x8B", " ",
-                                         "<"};
-  const std::size_t choice = random() % 5;
-  const std::string insert =
-      choice == 0 ? std::string(1, '\0') : std::string(kInserts[choice]);
-  const std::size_t at = text.empty() ? 0 : random() % (text.size() + 1);
-  text.insert(at, insert);
-  return text;
-}
-
-Value Mutate(std::mt19937_64& random, const Value& value, std::size_t& target) {
-  if (target-- == 0) {
-    switch (random() % 4) {
-      case 0:
-        return gufo::json::parse(kValues[random() % std::size(kValues)]);
-      case 1:
-        if (value.is_object() && !value.empty()) {
-          Value out = Value::object();
-          const std::size_t pick = random() % value.size();
-          // Drop, rename or repeat the member at `pick`.
-          const std::size_t edit = random() % 3;
-          std::size_t index = 0;
-          for (const auto& [key, member] : value.members()) {
-            const bool picked = index++ == pick;
-            if (picked && edit == 0)
-              continue;
-            out.append_member(picked && edit == 1 ? Spice(random, key) : key,
-                              member);
-            if (picked && edit == 2)
-              out.append_member(key, member);
-          }
-          return out;
-        }
-        break;
-      case 2:
-        if (value.is_number() || value.is_bool() || value.is_null())
-          return gufo::json::parse(kNumbers[random() % std::size(kNumbers)]);
-        break;
-      default:
-        if (value.is_string())
-          return Value(Spice(random, value.str()));
-        break;
-    }
-    return gufo::json::parse(kValues[random() % std::size(kValues)]);
-  }
-  if (value.is_array()) {
-    Value out = Value::array();
-    for (const auto& item : value.items())
-      out.push_back(Mutate(random, item, target));
-    return out;
-  }
-  if (value.is_object()) {
-    Value out = Value::object();
-    for (const auto& [key, member] : value.members())
-      out.append_member(key, Mutate(random, member, target));
-    return out;
-  }
-  return value;
-}
-
-std::string EditBytes(std::mt19937_64& random, std::string text) {
-  static const char kBytes[] = {'"',  '{',    '}',    ',', '\\', ':',
-                                '\0', '\xC3', '\xFF', '1', ']',  'n'};
-  const std::size_t at = random() % (text.size() + 1);
-  switch (random() % 3) {
-    case 0:
-      text.resize(at);
-      break;
-    case 1:
-      if (at < text.size())
-        text.erase(at, 1);
-      break;
-    default:
-      text.insert(at, 1, kBytes[random() % sizeof(kBytes)]);
-  }
-  return text;
-}
-
-std::string MutateText(std::mt19937_64& random, const std::string& text) {
-  Value value;
-  try {
-    value = gufo::json::parse(text);
-  } catch (const std::exception&) {
-    return EditBytes(random, text);  // A body that repeats a member.
-  }
-  std::size_t target = random() % Count(value);
-  return Mutate(random, value, target).dump(Value::Numbers::kAsParsed);
-}
-
-void CompareAll(ChatApi api, const std::string& body, std::size_t index) {
-  const auto& setting = Settings()[index % Settings().size()];
-  Compare(api, body, setting);
-  CompareFragments(api, body);
+// The shims through the production image reader and schema compiler. A
+// rejected fragment leaves its request or message as it was.
+void TestFragments() {
+  Check(
+      "response controls",
+      Fragment(
+          false,
+          R"({"tool_choice":{"type":"function","name":"f"},"reasoning":{"effort":"high"},"parallel_tool_calls":false})"),
+      "accepted\n"
+      "  tool f parameters={}\n"
+      "  choice=2\n"
+      "  forced=f\n"
+      "  constrained\n"
+      "  serial\n"
+      "  reasoning enabled=1 effort=3 preserve=- budget=-\n");
+  Check(
+      "response controls: rejected",
+      Fragment(
+          false,
+          R"({"reasoning":{"effort":"high"},"tool_choice":{"type":"function","name":"missing"}})"),
+      "rejected 400 Bad Request {\"error\":{\"message\":\"'tool_choice' must "
+      "name a declared "
+      "function\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+      "tools\"}}\n"
+      "  tool f parameters={}\n"
+      "  choice=2\n"
+      "  forced=f\n"
+      "  reasoning enabled=1 effort=1 preserve=- budget=-\n");
+  Check(
+      "anthropic tools",
+      Fragment(
+          true,
+          R"({"tools":[{"name":"g","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"g"}})"),
+      "accepted\n"
+      "  tool g parameters={\"type\":\"object\"} "
+      "definition={\"type\":\"function\",\"function\":{\"name\":\"g\","
+      "\"parameters\":{\"type\":\"object\"}}}\n"
+      "  choice=2\n"
+      "  forced=g\n"
+      "  constrained\n"
+      "  serial\n"
+      "  reasoning enabled=1 effort=1 preserve=- budget=-\n");
+  Check(
+      "anthropic tools: rejected",
+      Fragment(
+          true,
+          R"({"tools":[{"name":"g"},{"name":"bad name"}],"tool_choice":{"type":"auto"}})"),
+      "rejected 400 Bad Request {\"error\":{\"message\":\"only custom tools "
+      "with an input_schema are "
+      "supported\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+      "tools\"}}\n"
+      "  tool f parameters={}\n"
+      "  choice=2\n"
+      "  forced=f\n"
+      "  reasoning enabled=1 effort=1 preserve=- budget=-\n");
+  Check(
+      "response item",
+      Item(
+          R"({"type":"function_call","call_id":"c","name":"f","arguments":"{\"b\":[1,{\"c\":2.50}]}"})"),
+      "accepted\n"
+      "  assistant call(c f b=j:[1, {\"c\": 2.50}])");
+  Check("response item: rejected",
+        Item(R"({"type":"function_call_output","call_id":"c1","output":5})"),
+        "rejected function output requires a string or content array\n"
+        "  user content=unchanged");
 }
 
 }  // namespace
 
 int main() {
-  std::mt19937_64 random(1351);
-  constexpr int kBodies = 1500;
-  constexpr int kMutations = 3;
-  const std::pair<ChatApi, std::function<std::string(std::mt19937_64&)>>
-      generators[] = {
-          {ChatApi::kChat, ChatBody},
-          {ChatApi::kResponses, ResponsesBody},
-          {ChatApi::kMessages, MessagesBody},
-      };
-  std::size_t index = 0;
-  for (const auto& [api, generate] : generators) {
-    // Each body, its mutations and a byte edit; settings rotate.
-    for (int body = 0; body < kBodies; ++body) {
-      valid_only = body % 2 == 1;
-      const std::string text = generate(random);
-      CompareAll(api, text, index++);
-      for (int mutation = 0; mutation < kMutations; ++mutation)
-        CompareAll(api, MutateText(random, text), index++);
-      CompareAll(api, EditBytes(random, text), index++);
-    }
-    // Bodies that are not objects.
-    for (const char* text : {"[]", "1", "\"x\"", "null", "", "{"})
-      for (std::size_t setting = 0; setting < Settings().size(); ++setting)
-        CompareAll(api, text, setting);
+  try {
+    TestDecoding();
+    TestFragments();
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "%s\n", error.what());
+    return 1;
   }
-  std::printf(
-      "%d cases, %d differences; accepted chat %d, responses %d, messages "
-      "%d\n",
-      cases, failures, accepted[0], accepted[1], accepted[2]);
-  return failures == 0 ? 0 : 1;
+  if (failures != 0) {
+    std::fprintf(stderr, "%d chat request checks failed\n", failures);
+    return 1;
+  }
+  std::printf("chat request checks passed\n");
+  return 0;
 }

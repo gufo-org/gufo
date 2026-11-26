@@ -1,24 +1,29 @@
-// Compares the Rust generation parser (src/core/generation_parse, through
-// src/cli/serve/generation_parse.hpp) with a frozen copy of the C++ parser it
-// replaced, event by event, over the corpus in tests/fixtures/generation_parse:
-// each case whole, at its recorded token boundaries, one byte at a time and at
-// every two-piece split, buffered, and under deterministic mutations. Both use
-// the real Qwen and DeepSeek scanners and tool grammar.
+// Expected results of the generation parser (src/core/generation_parse,
+// through the C ABI and src/cli/serve/generation_parse.hpp) over the corpus
+// in tests/fixtures/generation_parse, with the real Qwen and DeepSeek
+// scanners and tool grammar and a registered extension dialect.
 //
-// Usage: generation_parse_test CORPUS_FILE_OR_DIR [--bench | --exhaustive]
-// --bench replays every case at its recorded boundaries and prints the cost
-// per token (p50 and p99) of each parser. --exhaustive splits and truncates
-// long responses at every byte too, not only at a stride.
+// Each case's events at its recorded token boundaries, buffered, and from
+// the whole-response parse must equal tests/fixtures/generation_parse/
+// expected/<corpus>.json. Split one byte at a time and at two-piece splits,
+// and under deterministic mutations (truncation, quoting, malformed UTF-8,
+// Python literals), what a client assembles must not depend on the split
+// except in the documented ways counted in the expected file, and a
+// stream's final events must equal the whole-response parse.
+//
+// Usage: generation_parse_test CORPUS_FILE_OR_DIR [--exhaustive | --write]
+// --exhaustive splits and truncates long responses at every byte too, not
+// only at a stride, and does not check the split-dependence counts. --write
+// rewrites the expected files from the current parser; review the diff.
 
 #include "src/cli/serve/generation_parse.hpp"
 
 #include <algorithm>
-#include <chrono>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -33,7 +38,6 @@
 
 #include "src/core/json.hpp"
 #include "src/core/json_constraint.hpp"
-#include "tests/cli/generation_parse_frozen.hpp"
 
 namespace gufo::models::deepseek_v4_flash {
 void RegisterToolDialect();
@@ -41,12 +45,9 @@ void RegisterToolDialect();
 
 namespace {
 
-using gufo::server::frozen::Event;
-using gufo::server::frozen::EventKind;
-using gufo::server::frozen::Outcome;
-using gufo::server::frozen::Setup;
 using Initial = gufo::server::TextGenerationBackend::InitialOutputState;
 using Choice = gufo::server::ChatRequest::ToolChoice;
+using EventKind = gufo::server::GenerationEvent::Kind;
 
 void Expect(bool condition, std::string_view message) {
   if (!condition) {
@@ -277,11 +278,48 @@ void RegisterLedgerToolDialect() {
       .syntax = LedgerSyntax(),
   });
 }
+
+/// The request as the parser reads it.
+struct Setup {
+  std::optional<std::string> dialect;
+  gufo::ext::ReasoningMarkup reasoning;
+  Initial initial{Initial::kContent};
+  bool response_format{false};
+  bool constrained_tools{false};
+  Choice choice{Choice::kAuto};
+  std::vector<gufo::tokenization::ChatTool> tools;
+  bool track_spans{false};
+  bool buffered{false};
+};
+
 struct Case {
   std::string name;
   Setup setup;
   bool interrupted{false};
   std::vector<std::string> pieces;
+};
+
+/// One parser event, owning its text.
+struct Event {
+  EventKind kind{EventKind::kFinalEnd};
+  std::string text;
+  std::string name;
+  std::string arguments;
+  std::vector<gufo::server::TextSourceSpan> spans;
+  std::size_t index{0};
+  bool begin{false};
+  bool complete{false};
+  bool hide_tool_markup{false};
+};
+
+/// How a parse ended: completely, with tool_choice required unmet (no call
+/// produced, or a constrained call not completed), or with a streamed call
+/// the final parse did not accept.
+enum class Outcome : std::uint8_t {
+  kComplete,
+  kNotProduced,
+  kNotCompleted,
+  kUnsafeStream,
 };
 
 struct Run {
@@ -307,41 +345,58 @@ std::string Unhex(std::string_view hex) {
   return out;
 }
 
-std::string Show(std::string_view text) {
-  std::string out = "\"";
-  for (const unsigned char byte : text) {
-    if (byte == '\n')
-      out += "\\n";
-    else if (byte == '"' || byte == '\\')
-      out += {'\\', static_cast<char>(byte)};
-    else if (byte < 0x20 || byte == 0x7f)
-      out += "\\x" + Hex(std::string(1, static_cast<char>(byte)));
-    else
-      out += static_cast<char>(byte);
+bool ValidUtf8(std::string_view text) {
+  for (std::size_t i = 0; i < text.size();) {
+    const auto byte = static_cast<unsigned char>(text[i]);
+    std::size_t length = 1;
+    std::uint32_t point = byte;
+    if (byte >= 0xf0 && byte <= 0xf4) {
+      length = 4;
+      point = byte & 0x07;
+    } else if (byte >= 0xe0) {
+      length = byte <= 0xef ? 3 : 0;
+      point = byte & 0x0f;
+    } else if (byte >= 0xc2) {
+      length = 2;
+      point = byte & 0x1f;
+    } else if (byte >= 0x80) {
+      length = 0;
+    }
+    if (length == 0 || i + length > text.size())
+      return false;
+    for (std::size_t k = 1; k < length; ++k) {
+      const auto next = static_cast<unsigned char>(text[i + k]);
+      if ((next & 0xc0) != 0x80)
+        return false;
+      point = (point << 6) | (next & 0x3f);
+    }
+    if ((length == 3 &&
+         (point < 0x800 || (point >= 0xd800 && point <= 0xdfff))) ||
+        (length == 4 && (point < 0x10000 || point > 0x10ffff)))
+      return false;
+    i += length;
   }
-  return out + "\"";
+  return true;
 }
 
-std::string Show(const Event& event) {
+// Text as a JSON string, or {"hex": ...} when it is not UTF-8, as pieces are
+// stored in the corpus.
+gufo::json::Value Text(std::string_view text) {
+  if (ValidUtf8(text))
+    return gufo::json::Value(std::string(text));
+  auto hex = gufo::json::Value::object();
+  hex["hex"] = Hex(text);
+  return hex;
+}
+
+std::string_view Name(EventKind kind) {
   static constexpr std::array<std::string_view, 7> kNames{
       "reasoning",     "content",    "tool",     "final_reasoning",
       "final_content", "final_call", "final_end"};
-  std::ostringstream out;
-  out << kNames[static_cast<std::size_t>(event.kind)] << " "
-      << Show(event.text);
-  if (event.kind == EventKind::kToolDelta ||
-      event.kind == EventKind::kFinalCall)
-    out << " #" << event.index << " " << Show(event.name) << " "
-        << Show(event.arguments) << (event.begin ? " begin" : "")
-        << (event.complete ? " complete" : "");
-  if (event.kind == EventKind::kFinalEnd)
-    out << (event.hide_tool_markup ? " hide" : " show");
-  for (const auto& span : event.spans)
-    out << " [" << span.begin << "+" << span.size << "]";
-  return out.str();
+  return kNames[static_cast<std::size_t>(kind)];
 }
 
-std::string Show(Outcome outcome) {
+std::string_view Name(Outcome outcome) {
   switch (outcome) {
     case Outcome::kComplete:
       return "complete";
@@ -355,36 +410,60 @@ std::string Show(Outcome outcome) {
   return "?";
 }
 
-bool Same(const Event& a, const Event& b) {
-  return a.kind == b.kind && a.text == b.text && a.name == b.name &&
-         a.arguments == b.arguments && a.index == b.index &&
-         a.begin == b.begin && a.complete == b.complete &&
-         a.hide_tool_markup == b.hide_tool_markup &&
-         a.spans.size() == b.spans.size() &&
-         std::equal(a.spans.begin(), a.spans.end(), b.spans.begin(),
-                    [](const auto& x, const auto& y) {
-                      return x.begin == y.begin && x.size == y.size;
-                    });
+// One event as the expected files spell it: [kind, fields..., spans].
+// Reasoning and content: [kind, text]; tool deltas: ["tool", index, name,
+// arguments, "begin"?, "complete"?]; final calls: ["final_call", index, name,
+// arguments]; ["final_end", "hide" | "show"]. Source spans follow as
+// [[begin, size], ...] when there are any.
+gufo::json::Value Json(const Event& event) {
+  auto out = gufo::json::Value::array();
+  out.push_back(std::string(Name(event.kind)));
+  switch (event.kind) {
+    case EventKind::kToolDelta:
+    case EventKind::kFinalCall:
+      out.push_back(event.index);
+      out.push_back(Text(event.name));
+      out.push_back(Text(event.arguments));
+      if (event.begin)
+        out.push_back("begin");
+      if (event.complete)
+        out.push_back("complete");
+      break;
+    case EventKind::kFinalEnd:
+      out.push_back(event.hide_tool_markup ? "hide" : "show");
+      break;
+    default:
+      out.push_back(Text(event.text));
+  }
+  if (!event.spans.empty()) {
+    auto spans = gufo::json::Value::array();
+    for (const auto& span : event.spans) {
+      auto pair = gufo::json::Value::array();
+      pair.push_back(span.begin);
+      pair.push_back(span.size);
+      spans.push_back(std::move(pair));
+    }
+    out.push_back(std::move(spans));
+  }
+  return out;
 }
 
-// The first difference between two runs, or nothing.
-std::optional<std::string> Difference(const Run& expected, const Run& actual) {
-  if (expected.outcome != actual.outcome)
-    return "outcome: frozen " + Show(expected.outcome) + ", rust " +
-           Show(actual.outcome);
-  const auto count = std::min(expected.events.size(), actual.events.size());
-  for (std::size_t i = 0; i < count; ++i)
-    if (!Same(expected.events[i], actual.events[i]))
-      return "event " + std::to_string(i) + ": frozen " +
-             Show(expected.events[i]) + "\n    rust   " +
-             Show(actual.events[i]);
-  if (expected.events.size() != actual.events.size()) {
-    const auto& longer = expected.events.size() > count ? expected : actual;
-    return "event count: frozen " + std::to_string(expected.events.size()) +
-           ", rust " + std::to_string(actual.events.size()) + "; next " +
-           Show(longer.events[count]);
+// A run's events, then ["error", outcome] unless it completed.
+gufo::json::Value Json(const Run& run) {
+  auto out = gufo::json::Value::array();
+  for (const auto& event : run.events)
+    out.push_back(Json(event));
+  if (run.outcome != Outcome::kComplete) {
+    auto error = gufo::json::Value::array();
+    error.push_back("error");
+    error.push_back(std::string(Name(run.outcome)));
+    out.push_back(std::move(error));
   }
-  return std::nullopt;
+  return out;
+}
+
+std::string Show(const Event& event) {
+  return Json(event).dump();
 }
 
 gufo::server::GenerationSetup Production(const Setup& setup) {
@@ -408,15 +487,16 @@ Outcome Unsatisfied(const gufo::server::TextGenerationError& error) {
              : Outcome::kNotProduced;
 }
 
-Run RustStream(const Setup& setup, const std::vector<std::string_view>& pieces,
-               bool interrupted,
-               std::vector<std::uint64_t>* piece_ns = nullptr) {
+// Streams `pieces` as the Chat, Responses and Messages handlers do, then
+// finishes with enforce_required = !interrupted.
+Run Stream(const Setup& setup, const std::vector<std::string_view>& pieces,
+           bool interrupted) {
   Run run;
   gufo::server::GenerationStream parser(Production(setup));
   const gufo::server::GenerationEventFn record =
       [&](const gufo::server::GenerationEvent& event) {
         run.events.push_back({
-            .kind = static_cast<EventKind>(event.kind),
+            .kind = event.kind,
             .text = std::string(event.text),
             .name = std::string(event.name),
             .arguments = std::string(event.arguments),
@@ -429,15 +509,8 @@ Run RustStream(const Setup& setup, const std::vector<std::string_view>& pieces,
         return true;
       };
   try {
-    for (const auto piece : pieces) {
-      const auto started = std::chrono::steady_clock::now();
+    for (const auto piece : pieces)
       Expect(parser.Feed(piece, record), "the parser streams every piece");
-      if (piece_ns)
-        piece_ns->push_back(static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - started)
-                .count()));
-    }
     Expect(parser.Finish(!interrupted, interrupted, record),
            "the parser finishes");
   } catch (const gufo::server::TextGenerationError& error) {
@@ -451,8 +524,9 @@ Run RustStream(const Setup& setup, const std::vector<std::string_view>& pieces,
   return run;
 }
 
-Run RustParse(const Setup& setup, std::string_view text,
-              bool enforce_required) {
+// Parses a whole response as the buffered Chat handler does, in the order
+// of a stream's final events.
+Run Parse(const Setup& setup, std::string_view text, bool enforce_required) {
   Run run;
   try {
     const auto parsed = gufo::server::ParseGeneratedText(
@@ -475,25 +549,6 @@ Run RustParse(const Setup& setup, std::string_view text,
   return run;
 }
 
-Run FrozenStream(const Setup& setup,
-                 const std::vector<std::string_view>& pieces, bool interrupted,
-                 std::vector<std::uint64_t>* piece_ns = nullptr) {
-  Run run;
-  run.outcome = gufo::server::frozen::Stream(setup, pieces, interrupted,
-                                             &run.events, piece_ns);
-  return run;
-}
-
-Run FrozenParse(const Setup& setup, std::string_view text,
-                bool enforce_required) {
-  Run run;
-  run.outcome =
-      gufo::server::frozen::Parse(setup, text, enforce_required, &run.events);
-  return run;
-}
-
-// What a client assembles from a stream: the joined deltas and the final
-// events. Equal across splits of one response.
 // What Assembled leaves out, for the explanations below.
 struct Leave {
   bool reasoning_whitespace{false};
@@ -510,6 +565,8 @@ std::string StreamedContent(const Run& run) {
   return content;
 }
 
+// What a client assembles from a stream: the joined deltas and the final
+// events. Equal across splits of one response.
 std::string Assembled(const Run& run, const Leave& leave = {}) {
   std::string reasoning;
   std::string content;
@@ -520,7 +577,7 @@ std::string Assembled(const Run& run, const Leave& leave = {}) {
   };
   std::map<std::size_t, Tool> tools;
   std::ostringstream out;
-  out << Show(run.outcome) << "\n";
+  out << Name(run.outcome) << "\n";
   for (const auto& event : run.events) {
     switch (event.kind) {
       case EventKind::kReasoningDelta:
@@ -546,14 +603,24 @@ std::string Assembled(const Run& run, const Leave& leave = {}) {
   }
   if (leave.reasoning_whitespace)
     reasoning.erase(reasoning.find_last_not_of(" \t\r\n") + 1);
-  out << "reasoning " << Show(reasoning) << "\n";
+  out << "reasoning " << Text(reasoning).dump() << "\n";
   if (!leave.content)
-    out << "content " << Show(content) << "\n";
+    out << "content " << Text(content).dump() << "\n";
   for (const auto& [index, tool] : tools)
     if (!leave.tools.contains(index))
-      out << "tool #" << index << " " << Show(tool.name) << " "
-          << Show(tool.arguments) << (tool.complete ? " complete" : "") << "\n";
+      out << "tool #" << index << " " << Text(tool.name).dump() << " "
+          << Text(tool.arguments).dump() << (tool.complete ? " complete" : "")
+          << "\n";
   return out.str();
+}
+
+// The final events of a stream, which must equal the whole-response parse.
+Run Finals(const Run& run) {
+  Run finals{.outcome = run.outcome};
+  for (const auto& event : run.events)
+    if (event.kind >= EventKind::kFinalReasoning)
+      finals.events.push_back(event);
+  return finals;
 }
 
 // Responses longer than this are split and truncated at every `Stride`-th
@@ -568,22 +635,8 @@ std::size_t Stride(std::size_t size) {
 struct Totals {
   std::size_t cases{0};
   std::size_t runs{0};
-  std::size_t mutations{0};
   std::vector<std::string> failures;
-  std::vector<std::string> split_dependent;
-  std::map<std::string, std::size_t> explained;
 };
-
-// The final events, without spans.
-std::string Finals(const Run& run) {
-  std::string out;
-  for (auto event : run.events)
-    if (event.kind >= EventKind::kFinalReasoning) {
-      event.spans.clear();
-      out += Show(event) + "\n";
-    }
-  return out;
-}
 
 // Why a stream assembles differently from the whole response, when that is
 // by design; nothing when it is unexplained.
@@ -668,65 +721,58 @@ std::string Joined(const std::vector<std::string>& pieces) {
   return text;
 }
 
-void Compare(const std::string& label, const Run& frozen, const Run& rust,
-             Totals& totals) {
+// A stream's final events equal the parse of the same bytes, unless the
+// stream retracted a call it had streamed.
+void SameFinals(const std::string& label, const Run& stream, const Run& parse,
+                Totals& totals) {
   ++totals.runs;
-  if (const auto difference = Difference(frozen, rust))
-    totals.failures.push_back(label + "\n    " + *difference);
+  if (stream.outcome == Outcome::kUnsafeStream)
+    return;
+  const auto finals = Json(Finals(stream)).dump();
+  const auto parsed = Json(parse).dump();
+  if (finals != parsed)
+    totals.failures.push_back(label + ": final events differ from the parse" +
+                              "\n    stream " + finals + "\n    parse  " +
+                              parsed);
 }
 
-// Streams `pieces` through both parsers and returns the frozen run.
-Run Streams(const Case& item, const std::string& variant,
-            const std::vector<std::string_view>& pieces, Totals& totals) {
-  auto frozen = FrozenStream(item.setup, pieces, item.interrupted);
-  const auto rust = RustStream(item.setup, pieces, item.interrupted);
-  Compare(item.name + " [" + variant + "]", frozen, rust, totals);
-  return frozen;
-}
+using Counts = std::map<std::string, std::size_t>;
 
-void Parses(const Case& item, const std::string& variant, std::string_view text,
-            Totals& totals) {
-  Compare(item.name + " [" + variant + "]",
-          FrozenParse(item.setup, text, !item.interrupted),
-          RustParse(item.setup, text, !item.interrupted), totals);
-}
-
-// Every split of one response: the parsers agree at each, and what a client
-// assembles does not depend on the split.
+// Every split of one response: what a client assembles does not depend on
+// the split except in the explained ways, counted in `explained`, and every
+// stream's final events equal the parse.
 void Splits(const Case& item, const std::string& prefix,
-            const std::string& text, const std::vector<std::string>* recorded,
-            Totals& totals) {
-  Parses(item, prefix + "buffered parse", text, totals);
+            const std::string& text, Counts& explained, Totals& totals) {
+  const auto parse = Parse(item.setup, text, !item.interrupted);
   const auto whole =
-      Streams(item, prefix + "whole", {std::string_view(text)}, totals);
+      Stream(item.setup, {std::string_view(text)}, item.interrupted);
+  SameFinals(item.name + " [" + prefix + "whole]", whole, parse, totals);
   const auto reference = Assembled(whole);
-  std::vector<std::pair<std::string, Run>> runs;
-  if (recorded)
-    runs.emplace_back(prefix + "recorded", Streams(item, prefix + "recorded",
-                                                   Views(*recorded), totals));
+  std::vector<std::pair<std::string, std::vector<std::string_view>>> splits;
+  if (prefix.empty())
+    splits.emplace_back("recorded", Views(item.pieces));
   std::vector<std::string_view> bytes;
   for (std::size_t i = 0; i < text.size(); ++i)
     bytes.push_back(std::string_view(text).substr(i, 1));
-  runs.emplace_back(prefix + "bytes",
-                    Streams(item, prefix + "bytes", bytes, totals));
+  splits.emplace_back("bytes", std::move(bytes));
   for (std::size_t at = 1; at < text.size(); at += Stride(text.size())) {
     const std::string_view view(text);
-    const auto label = prefix + "split " + std::to_string(at);
-    runs.emplace_back(
-        label,
-        Streams(item, label, {view.substr(0, at), view.substr(at)}, totals));
+    splits.emplace_back("split " + std::to_string(at),
+                        std::vector{view.substr(0, at), view.substr(at)});
   }
-  for (const auto& [label, run] : runs) {
+  for (const auto& [name, pieces] : splits) {
+    const auto label = item.name + " [" + prefix + name + "]";
+    const auto run = Stream(item.setup, pieces, item.interrupted);
+    SameFinals(label, run, parse, totals);
     const auto assembled = Assembled(run);
     if (assembled == reference)
       continue;
     if (const auto reason = Explained(item, prefix, whole, run)) {
-      ++totals.explained[*reason];
+      ++explained[*reason];
       continue;
     }
-    totals.split_dependent.push_back(item.name + " [" + label +
-                                     "]\n  whole:\n" + reference +
-                                     "  this split:\n" + assembled);
+    totals.failures.push_back(label + ": split-dependent\n  whole:\n" +
+                              reference + "  this split:\n" + assembled);
   }
 }
 
@@ -741,15 +787,15 @@ std::string Replaced(std::string text, std::string_view from,
 // Deterministic mutations of every case: truncation at every byte, the
 // response quoted inline and in a fence, malformed UTF-8 in the middle, and
 // Python literals for JSON ones.
-void Mutations(const Case& item, const std::string& text, Totals& totals) {
+void Mutations(const Case& item, const std::string& text, Counts& explained,
+               Totals& totals) {
   auto truncated = item;
   truncated.interrupted = true;
   for (std::size_t at = 0; at < text.size(); at += Stride(text.size())) {
     const std::string_view prefix = std::string_view(text).substr(0, at);
-    const auto label = "truncated " + std::to_string(at);
-    Parses(truncated, label, prefix, totals);
-    Streams(truncated, label, {prefix}, totals);
-    ++totals.mutations;
+    SameFinals(item.name + " [truncated " + std::to_string(at) + "]",
+               Stream(truncated.setup, {prefix}, true),
+               Parse(truncated.setup, prefix, false), totals);
   }
   const auto middle = text.size() / 2;
   const std::vector<std::pair<std::string, std::string>> variants{
@@ -762,21 +808,9 @@ void Mutations(const Case& item, const std::string& text, Totals& totals) {
        Replaced(Replaced(Replaced(text, "true", "True"), "false", "False"),
                 "null", "None")},
   };
-  for (const auto& [name, mutated] : variants) {
-    if (mutated == text)
-      continue;
-    ++totals.mutations;
-    if (exhaustive) {
-      Splits(item, name + " ", mutated, nullptr, totals);
-      continue;
-    }
-    Parses(item, name + " buffered parse", mutated, totals);
-    Streams(item, name + " whole", {std::string_view(mutated)}, totals);
-    std::vector<std::string_view> bytes;
-    for (std::size_t i = 0; i < mutated.size(); ++i)
-      bytes.push_back(std::string_view(mutated).substr(i, 1));
-    Streams(item, name + " bytes", bytes, totals);
-  }
+  for (const auto& [name, mutated] : variants)
+    if (mutated != text)
+      Splits(item, name + " ", mutated, explained, totals);
 }
 
 Initial ParseInitial(std::string_view name) {
@@ -803,15 +837,20 @@ std::string Piece(const gufo::json::Value& value) {
   return value.is_string() ? value.get_str() : Unhex(value.member_str("hex"));
 }
 
-std::vector<Case> Load(const std::filesystem::path& path) {
+gufo::json::Value ReadJson(const std::filesystem::path& path) {
   std::ifstream file(path, std::ios::binary);
+  Expect(file.good(), "readable " + path.string());
   std::stringstream text;
   text << file.rdbuf();
-  const auto corpus = gufo::json::parse(text.str());
+  return gufo::json::parse(text.str());
+}
+
+std::vector<Case> Load(const std::filesystem::path& path) {
+  const auto corpus = ReadJson(path);
   std::vector<Case> cases;
   for (const auto& entry : corpus.find("cases")->items()) {
     Case item;
-    item.name = path.stem().string() + "/" + entry.member_str("name");
+    item.name = entry.member_str("name");
     auto& setup = item.setup;
     if (const auto* dialect = entry.find("dialect");
         dialect && dialect->is_string())
@@ -839,52 +878,103 @@ std::vector<Case> Load(const std::filesystem::path& path) {
   return cases;
 }
 
-std::uint64_t Percentile(std::vector<std::uint64_t> values, double fraction) {
-  if (values.empty())
-    return 0;
-  std::ranges::sort(values);
-  const auto index = static_cast<std::size_t>(
-      fraction * static_cast<double>(values.size() - 1) + 0.5);
-  return values[index];
+// The expected results of one case. "stream": its events at the recorded
+// boundaries; "buffered": the same with the pieces only buffered, absent
+// for a buffered case; "parse": the whole-response parse; "split_dependence":
+// how many splits of it and its mutations assemble differently from the
+// whole response, by documented reason.
+gufo::json::Value Results(const Case& item, Totals& totals) {
+  ++totals.cases;
+  const auto text = Joined(item.pieces);
+  auto results = gufo::json::Value::object();
+  results["name"] = item.name;
+  results["stream"] =
+      Json(Stream(item.setup, Views(item.pieces), item.interrupted));
+  if (!item.setup.buffered) {
+    auto buffered = item.setup;
+    buffered.buffered = true;
+    results["buffered"] =
+        Json(Stream(buffered, Views(item.pieces), item.interrupted));
+  }
+  results["parse"] = Json(Parse(item.setup, text, !item.interrupted));
+  Counts explained;
+  Splits(item, "", text, explained, totals);
+  Mutations(item, text, explained, totals);
+  auto counts = gufo::json::Value::object();
+  for (const auto& [reason, count] : explained)
+    counts[reason] = count;
+  results["split_dependence"] = std::move(counts);
+  return results;
 }
 
-// Replays every case at its recorded boundaries, best of several rounds per
-// piece, and prints the cost per token of each parser.
-void Bench(const std::vector<Case>& cases) {
-  constexpr int kRounds = 7;
-  std::vector<std::uint64_t> frozen_ns;
-  std::vector<std::uint64_t> rust_ns;
-  for (const auto& item : cases) {
-    const auto pieces = Views(item.pieces);
-    std::vector<std::uint64_t> frozen_best(pieces.size(), UINT64_MAX);
-    std::vector<std::uint64_t> rust_best(pieces.size(), UINT64_MAX);
-    for (int round = 0; round < kRounds; ++round) {
-      std::vector<std::uint64_t> frozen;
-      std::vector<std::uint64_t> rust;
-      FrozenStream(item.setup, pieces, item.interrupted, &frozen);
-      RustStream(item.setup, pieces, item.interrupted, &rust);
-      for (std::size_t i = 0; i < pieces.size(); ++i) {
-        frozen_best[i] = std::min(frozen_best[i], frozen[i]);
-        rust_best[i] = std::min(rust_best[i], rust[i]);
-      }
+std::filesystem::path ExpectedPath(const std::filesystem::path& corpus) {
+  return corpus.parent_path() / "expected" / corpus.filename();
+}
+
+// One case per line, members in a fixed order.
+void WriteExpected(const std::filesystem::path& path,
+                   const std::vector<gufo::json::Value>& results) {
+  std::ofstream out(path, std::ios::binary);
+  out << "{\"cases\": [\n";
+  for (std::size_t i = 0; i < results.size(); ++i) {
+    out << (i ? ",\n " : " ") << "{";
+    bool first = true;
+    for (const auto& [key, value] : results[i].members()) {
+      out << (first ? "" : ",\n  ") << gufo::json::Value(key).dump() << ": "
+          << value.dump();
+      first = false;
     }
-    frozen_ns.insert(frozen_ns.end(), frozen_best.begin(), frozen_best.end());
-    rust_ns.insert(rust_ns.end(), rust_best.begin(), rust_best.end());
+    out << "}";
   }
-  std::cout << "tokens " << frozen_ns.size() << "\n"
-            << "frozen ns/token p50 " << Percentile(frozen_ns, 0.5) << " p99 "
-            << Percentile(frozen_ns, 0.99) << "\n"
-            << "rust   ns/token p50 " << Percentile(rust_ns, 0.5) << " p99 "
-            << Percentile(rust_ns, 0.99) << "\n";
+  out << "\n]}\n";
+  Expect(out.good(), "wrote " + path.string());
+}
+
+void Check(const gufo::json::Value& results, const gufo::json::Value* expected,
+           Totals& totals) {
+  const auto name = results.member_str("name");
+  if (!expected) {
+    totals.failures.push_back(name + ": no expected results");
+    return;
+  }
+  for (const auto& [key, value] : results.members()) {
+    if (exhaustive && key == "split_dependence")
+      continue;
+    const auto* stored = expected->find(key);
+    if (stored && stored->dump() == value.dump())
+      continue;
+    // The first differing event of a run, or the whole member.
+    std::string want = stored ? stored->dump() : "(absent)";
+    std::string got = value.dump();
+    std::string where;
+    if (stored && stored->is_array() && value.is_array()) {
+      const auto& a = stored->items();
+      const auto& b = value.items();
+      std::size_t i = 0;
+      while (i < a.size() && i < b.size() && a[i].dump() == b[i].dump())
+        ++i;
+      where = " event " + std::to_string(i);
+      want = i < a.size() ? a[i].dump() : "(end)";
+      got = i < b.size() ? b[i].dump() : "(end)";
+    }
+    totals.failures.push_back(name + " [" + key + "]" + where +
+                              "\n    expected " + want + "\n    actual   " +
+                              got);
+  }
+  if (expected->members().size() != results.members().size())
+    totals.failures.push_back(name + ": expected results have other members");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
   Expect(argc >= 2,
-         "usage: generation_parse_test CORPUS [--bench | --exhaustive]");
+         "usage: generation_parse_test CORPUS [--exhaustive | --write]");
   gufo::models::deepseek_v4_flash::RegisterToolDialect();
   RegisterLedgerToolDialect();
+  const std::string_view mode = argc > 2 ? argv[2] : "";
+  exhaustive = mode == "--exhaustive";
+  const bool write = mode == "--write";
   std::vector<std::filesystem::path> files;
   if (std::filesystem::is_directory(argv[1])) {
     for (const auto& entry : std::filesystem::directory_iterator(argv[1]))
@@ -894,39 +984,34 @@ int main(int argc, char** argv) {
     files.push_back(argv[1]);
   }
   std::ranges::sort(files);
-  std::vector<Case> cases;
-  for (const auto& file : files)
-    for (auto& item : Load(file))
-      cases.push_back(std::move(item));
-  Expect(!cases.empty(), "the corpus has cases");
-  if (argc > 2 && std::string_view(argv[2]) == "--bench") {
-    Bench(cases);
-    return 0;
-  }
-  exhaustive = argc > 2 && std::string_view(argv[2]) == "--exhaustive";
+  Expect(!files.empty(), "the corpus has files");
   Totals totals;
-  for (const auto& item : cases) {
-    ++totals.cases;
-    const auto text = Joined(item.pieces);
-    Splits(item, "", text, &item.pieces, totals);
-    auto buffered = item;
-    buffered.setup.buffered = true;
-    Streams(buffered, "buffered", Views(item.pieces), totals);
-    Mutations(item, text, totals);
+  for (const auto& file : files) {
+    const auto cases = Load(file);
+    Expect(!cases.empty(), "the corpus file has cases");
+    std::vector<gufo::json::Value> results;
+    for (const auto& item : cases)
+      results.push_back(Results(item, totals));
+    if (write) {
+      WriteExpected(ExpectedPath(file), results);
+      continue;
+    }
+    const auto expected = ReadJson(ExpectedPath(file));
+    std::map<std::string, const gufo::json::Value*> by_name;
+    for (const auto& entry : expected.find("cases")->items())
+      by_name[entry.member_str("name")] = &entry;
+    Expect(by_name.size() == cases.size(),
+           "one expected entry per case in " + file.string());
+    for (const auto& item : results) {
+      const auto found = by_name.find(item.member_str("name"));
+      Check(item, found == by_name.end() ? nullptr : found->second, totals);
+    }
   }
   std::cout << "generation_parse_test: " << totals.cases << " cases, "
-            << totals.mutations << " mutations, " << totals.runs
-            << " comparisons, " << totals.failures.size() << " differences, "
-            << totals.split_dependent.size()
-            << " unexplained split-dependent runs\n";
-  for (const auto& [reason, count] : totals.explained)
-    std::cout << "  explained split dependence: " << count << " " << reason
-              << "\n";
+            << totals.runs << " runs, " << totals.failures.size()
+            << " failures\n";
   for (std::size_t i = 0; i < std::min<std::size_t>(totals.failures.size(), 20);
        ++i)
-    std::cerr << "DIFFERENCE " << totals.failures[i] << "\n";
-  for (std::size_t i = 0;
-       i < std::min<std::size_t>(totals.split_dependent.size(), 20); ++i)
-    std::cerr << "SPLIT-DEPENDENT " << totals.split_dependent[i] << "\n";
-  return totals.failures.empty() && totals.split_dependent.empty() ? 0 : 1;
+    std::cerr << "FAILURE " << totals.failures[i] << "\n";
+  return totals.failures.empty() ? 0 : 1;
 }

@@ -1,17 +1,13 @@
-// Compares the Rust GGUF header parser, through GgufReader::OpenMemory, with
-// a frozen copy of the 0.35.0 C++ parser
-// (tests/core/gguf_header_reference.cpp). Generated headers cover every
-// metadata value and array item type, alignments, tensor ranks, known and
-// unknown storage types, unsized tensors and data layouts; deterministic
-// mutations truncate, flip, overwrite, insert and erase bytes. Further headers
-// hold arrays around the Rust parser's block size and fill the descriptor
-// budget to its edge. Each buffer must open with the same version, alignment,
-// metadata and tensors, whose strings and data point at the same bytes, or
-// fail with the same message, with and without allow_unsized_tensors. Only a
-// header over the descriptor budget fails with a message of its own, which
-// names the limit, as 0.35.0 took it for a malformed one. Every rejection
-// must be reached. GGUF files named on the command line are compared
-// too, and both parsers are timed on them.
+// The Rust GGUF header parser through its C++ caller, GgufReader::OpenMemory:
+// every metadata value type as the C++ variant holds it, with strings that
+// point into the parsed bytes; arrays of every item type around the parser's
+// blocks of 32768 items; versions, alignments and tensors; the exact message
+// of every rejection; the descriptor budget filled to its last byte and one
+// byte past it, which names the limit where 0.35.0 reported a malformed or
+// over-long entry; and truncations and byte changes that must fail with one of
+// those messages or open a header whose tensors lie inside the buffer. GGUF
+// files named on the command line must open, and are timed. The crate's Rust
+// tests cover the check order, the budget charges and the C ABI.
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -23,21 +19,18 @@
 #include <fstream>
 #include <initializer_list>
 #include <limits>
-#include <map>
+#include <memory>
 #include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/platform/mapped_file.hpp"
-#include "src/core/quant/ggml_dequant.hpp"
-#include "tests/core/gguf_header_reference.hpp"
 
 namespace {
 
@@ -47,30 +40,32 @@ using gufo::core::GgufOpenOptions;
 using gufo::core::GgufReader;
 using gufo::core::GgufTensorInfo;
 using Bytes = std::vector<std::uint8_t>;
-using Random = std::mt19937_64;
-namespace reference = gufo::gguf_header_reference;
 
+constexpr std::uint32_t kUint8 = 0;
+constexpr std::uint32_t kInt8 = 1;
+constexpr std::uint32_t kUint16 = 2;
+constexpr std::uint32_t kInt16 = 3;
+constexpr std::uint32_t kUint32 = 4;
+constexpr std::uint32_t kInt32 = 5;
+constexpr std::uint32_t kFloat32 = 6;
+constexpr std::uint32_t kBool = 7;
 constexpr std::uint32_t kString = 8;
 constexpr std::uint32_t kArray = 9;
+constexpr std::uint32_t kUint64 = 10;
+constexpr std::uint32_t kInt64 = 11;
+constexpr std::uint32_t kFloat64 = 12;
 // Bytes of a scalar of each value type; strings and arrays have their own.
 constexpr std::size_t kScalarBytes[] = {1, 1, 2, 2, 4, 4, 4, 1, 0, 0, 8, 8, 8};
-constexpr std::uint32_t kKnownTypes[] = {0,  1,  2,  3,  6,  7,  8,  9,  10,
-                                         11, 12, 13, 14, 15, 16, 17, 18, 19,
-                                         20, 21, 22, 23, 26, 29, 30};
-// Storage types core cannot size.
-constexpr std::uint32_t kOtherTypes[] = {4, 5, 24, 25, 27, 28, 31, 200, 65535};
-// What the Rust parser reports for a header over the descriptor budget,
-// wherever 0.35.0 reported it.
+constexpr std::string_view kMalformed = "Malformed or truncated GGUF";
 constexpr std::string_view kOverBudget =
     "GGUF metadata and tensor index exceed the header limit of 128 MiB";
-// Every outcome of 0.35.0's OpenMemory; names are cut off.
-constexpr std::string_view kOutcomes[] = {
-    "opened",
-    "opened with unsized tensors",
+// Every message OpenMemory fails with; names follow those ending in a space.
+constexpr std::string_view kMessages[] = {
     "Invalid memory buffer for GGUF",
     "Invalid GGUF magic header",
     "Unsupported GGUF version: ",
     "GGUF descriptor counts exceed file or memory limits",
+    kOverBudget,
     "Failed to read metadata key",
     "GGUF metadata key exceeds limits",
     "Failed to read metadata type for key ",
@@ -82,7 +77,7 @@ constexpr std::string_view kOutcomes[] = {
     "Duplicate GGUF tensor name",
     "GGUF data section is truncated before its alignment",
     "Tensor extent or alignment is invalid: ",
-    "Malformed or truncated GGUF",
+    kMalformed,
 };
 
 void Require(bool condition, const std::string& message) {
@@ -105,447 +100,544 @@ std::string Escape(std::string_view text) {
   return out;
 }
 
-bool SameDouble(double a, double b) {
-  return std::memcmp(&a, &b, sizeof(a)) == 0;
-}
-
-// The same bytes, not merely equal ones.
-bool SameView(std::string_view a, std::string_view b) {
-  return a.data() == b.data() && a.size() == b.size();
-}
-
-bool SameValue(const GgufMetadataValue& got, const GgufMetadataValue& want) {
-  if (got.type != want.type || got.value.index() != want.value.index())
-    return false;
-  return std::visit(
-      [&](const auto& expected) {
-        using T = std::decay_t<decltype(expected)>;
-        const auto& actual = std::get<T>(got.value);
-        if constexpr (std::is_same_v<T, double>) {
-          return SameDouble(actual, expected);
-        } else if constexpr (std::is_same_v<T, std::string_view>) {
-          return SameView(actual, expected);
-        } else if constexpr (std::is_same_v<T, std::vector<double>>) {
-          return std::ranges::equal(actual, expected, SameDouble);
-        } else if constexpr (std::is_same_v<T, std::vector<std::string_view>>) {
-          return std::ranges::equal(actual, expected, SameView);
-        } else {
-          return actual == expected;
-        }
-      },
-      want.value);
-}
-
-bool SameTensor(const GgufTensorInfo& a, const GgufTensorInfo& b) {
-  return SameView(a.name, b.name) && a.dimensions == b.dimensions &&
-         a.type == b.type && a.offset == b.offset && a.data == b.data &&
-         a.size_bytes == b.size_bytes && a.sized == b.sized;
-}
-
-std::string Outcome(const reference::Result& result) {
-  if (result.opened) {
-    const bool unsized = std::ranges::any_of(
-        result.tensors, [](const auto& tensor) { return !tensor.sized; });
-    return unsized ? "opened with unsized tensors" : "opened";
-  }
-  for (const auto prefix : kOutcomes) {
-    if (prefix.ends_with(' ') && result.error.starts_with(prefix))
-      return std::string(prefix);
-  }
-  return result.error;
-}
-
-struct Totals {
-  std::size_t compared = 0;
-  std::map<std::string, std::size_t> outcomes;
-};
-
-// `over_budget` marks a header that 0.35.0 rejects for its descriptor
-// budget.
-void Compare(Totals& totals, std::span<const std::uint8_t> bytes,
-             GgufOpenOptions options, const std::string& what,
-             bool over_budget) {
-  const auto expected =
-      reference::OpenMemory(bytes.data(), bytes.size(), options);
-  std::string error;
-  const auto reader =
-      GgufReader::OpenMemory(bytes.data(), bytes.size(), &error, options);
-  ++totals.compared;
-  ++totals.outcomes[Outcome(expected)];
-  const auto fail = [&](const std::string& detail) {
-    throw std::runtime_error(
-        what + " (" + std::to_string(bytes.size()) + " bytes" +
-        (options.allow_unsized_tensors ? ", unsized allowed" : "") +
-        "): " + detail);
-  };
-  if (over_budget && expected.opened)
-    fail("0.35.0 opened a header over the descriptor budget");
-  if (!expected.opened) {
-    if (reader)
-      fail("opens; 0.35.0 failed with " + Escape(expected.error));
-    const std::string want =
-        over_budget ? std::string(kOverBudget) : expected.error;
-    if (error != want)
-      fail("fails with " + Escape(error) + " instead of " + Escape(want));
-    return;
-  }
-  if (!reader)
-    fail("fails with " + Escape(error) + "; 0.35.0 opened it");
-  if (reader->GetVersion() != expected.version ||
-      reader->GetAlignment() != expected.alignment)
-    fail("version or alignment differs");
-  if (reader->GetMetadataCount() != expected.metadata.size())
-    fail("metadata count differs");
-  for (const auto& [key, value] : expected.metadata) {
-    const auto* got = reader->FindMetadata(key);
-    if (got == nullptr || !SameValue(*got, value))
-      fail("metadata " + Escape(key) + " differs");
-  }
-  const auto tensors = reader->GetTensors();
-  if (tensors.size() != expected.tensors.size())
-    fail("tensor count differs");
-  for (std::size_t i = 0; i < tensors.size(); ++i) {
-    if (!SameTensor(tensors[i], expected.tensors[i]) ||
-        reader->FindTensor(tensors[i].name) != &tensors[i])
-      fail("tensor " + Escape(expected.tensors[i].name) + " differs");
-  }
-}
-
-void CompareBoth(Totals& totals, std::span<const std::uint8_t> bytes,
-                 const std::string& what, bool over_budget = false) {
-  Compare(totals, bytes, {}, what, over_budget);
-  Compare(totals, bytes, {.allow_unsized_tensors = true}, what, over_budget);
-}
-
-std::uint64_t Below(Random& random, std::uint64_t bound) {
-  return std::uniform_int_distribution<std::uint64_t>(0, bound - 1)(random);
-}
-
-bool Chance(Random& random, std::uint64_t percent) {
-  return Below(random, 100) < percent;
-}
-
-template<class T>
-T Pick(Random& random, std::span<const T> items) {
-  return items[Below(random, items.size())];
-}
-
-template<class T>
-T Pick(Random& random, std::initializer_list<T> items) {
-  return Pick(random, std::span<const T>(items.begin(), items.size()));
+bool KnownMessage(std::string_view error) {
+  return std::ranges::any_of(kMessages, [&](std::string_view message) {
+    return message.ends_with(' ') ? error.starts_with(message)
+                                  : error == message;
+  });
 }
 
 class Writer {
 public:
+  // The fixed header of a version 3 file.
+  static Writer Header(std::uint64_t tensors, std::uint64_t metadata,
+                       std::uint32_t version = 3) {
+    Writer out;
+    out.bytes = {'G', 'G', 'U', 'F'};
+    out.Pod(version);
+    out.Pod(tensors);
+    out.Pod(metadata);
+    return out;
+  }
+
   template<class T>
-  void Pod(T value) {
+  Writer& Pod(T value) {
     const auto* data = reinterpret_cast<const std::uint8_t*>(&value);
     bytes.insert(bytes.end(), data, data + sizeof(value));
+    return *this;
   }
 
-  void String(std::string_view text) {
+  Writer& Zeros(std::size_t count) {
+    bytes.resize(bytes.size() + count, 0);
+    return *this;
+  }
+
+  Writer& String(std::string_view text) {
     Pod<std::uint64_t>(text.size());
     bytes.insert(bytes.end(), text.begin(), text.end());
+    return *this;
   }
 
-  void Noise(Random& random, std::size_t count) {
-    for (std::size_t i = 0; i < count; ++i)
-      bytes.push_back(static_cast<std::uint8_t>(Below(random, 256)));
+  Writer& Key(std::string_view key, std::uint32_t type) {
+    String(key);
+    return Pod(type);
+  }
+
+  Writer& Tensor(std::string_view name,
+                 std::initializer_list<std::uint64_t> dimensions,
+                 std::uint32_t type, std::uint64_t offset) {
+    String(name);
+    Pod(static_cast<std::uint32_t>(dimensions.size()));
+    for (const auto dimension : dimensions)
+      Pod(dimension);
+    Pod(type);
+    return Pod(offset);
+  }
+
+  // Pads to `alignment` and appends `data` bytes of 0xAB.
+  Writer& Data(std::size_t alignment, std::size_t data) {
+    bytes.resize((bytes.size() + alignment - 1) / alignment * alignment, 0);
+    bytes.resize(bytes.size() + data, 0xAB);
+    return *this;
   }
 
   Bytes bytes;
 };
 
-// Mostly name-like text, sometimes any bytes.
-std::string Text(Random& random, std::size_t most) {
-  constexpr std::string_view kNameBytes = "abcdefghijklmnopqrstuvwxyz._0123";
-  const bool raw = Chance(random, 10);
-  std::string text(Below(random, most + 1), '\0');
-  for (auto& c : text) {
-    c = raw ? static_cast<char>(Below(random, 256))
-            : kNameBytes[Below(random, kNameBytes.size())];
-  }
-  return text;
-}
-
-// Draws generated headers. A clean header has no errors injected, so that
-// it opens and every value and tensor in it is compared.
-struct Draw {
-  Random& random;
-  bool clean = false;
-
-  // An injected error, never in a clean header.
-  bool Odd(std::uint64_t percent) { return !clean && Chance(random, percent); }
+struct Opened {
+  std::unique_ptr<GgufReader> reader;
+  std::string error;
 };
 
-// A value of one type that is not an array; booleans are sometimes 2.
-void Scalar(Writer& out, Draw& draw, std::uint32_t type) {
-  if (type == kString) {
-    out.String(Text(draw.random, 24));
-  } else if (type == 7) {
-    out.Pod<std::uint8_t>(draw.Odd(5) ? 2 : Below(draw.random, 2));
-  } else if (type < std::size(kScalarBytes)) {
-    out.Noise(draw.random, kScalarBytes[type]);
-  } else {
-    out.Noise(draw.random, Below(draw.random, 9));
-  }
+Opened Open(std::span<const std::uint8_t> bytes, GgufOpenOptions options = {}) {
+  Opened opened;
+  opened.reader = GgufReader::OpenMemory(bytes.data(), bytes.size(),
+                                         &opened.error, options);
+  return opened;
 }
 
-void Value(Writer& out, Draw& draw, std::uint32_t type) {
-  out.Pod(type);
-  if (type != kArray) {
-    Scalar(out, draw, type);
-    return;
-  }
-  auto item = static_cast<std::uint32_t>(Below(draw.random, 13));
-  if (item == kArray || draw.Odd(4))
-    item = draw.clean ? kString : Pick(draw.random, {kArray, 13U, 0x108U});
-  const auto count = Chance(draw.random, 10) ? 0 : Below(draw.random, 12);
-  out.Pod(item);
-  out.Pod<std::uint64_t>(count);
-  for (std::uint64_t i = 0; i < count; ++i)
-    Scalar(out, draw, item);
-}
-
-// A general.alignment entry, valid when clean; sets the alignment it
-// declares.
-void Alignment(Writer& out, Draw& draw, std::uint64_t& alignment) {
-  out.String("general.alignment");
-  auto& random = draw.random;
-  const auto power = std::uint64_t{1} << Below(random, 9);
-  switch (draw.clean ? Pick<std::uint64_t>(random, {0, 1, 2, 9})
-                     : Below(random, 10)) {
-    case 0:
-      out.Pod<std::uint32_t>(0);
-      out.Pod(static_cast<std::uint8_t>(power));
-      alignment = power;
-      return;
-    case 1:
-      out.Pod<std::uint32_t>(2);
-      out.Pod(static_cast<std::uint16_t>(power));
-      alignment = power;
-      return;
-    case 2:
-      out.Pod<std::uint32_t>(10);
-      out.Pod<std::uint64_t>(4096);
-      alignment = 4096;
-      return;
-    case 3:
-      out.Pod<std::uint32_t>(4);
-      out.Pod(Pick<std::uint32_t>(random, {0, 3, 96, 0xFFFFFFFF}));
-      return;
-    case 4:
-      out.Pod<std::uint32_t>(10);
-      out.Pod(Pick<std::uint64_t>(
-          random, {std::uint64_t{1} << 32, std::uint64_t{1} << 63}));
-      return;
-    case 5:
-      Value(out, draw, Pick<std::uint32_t>(random, {1, 5, 6, 7, 8, 11}));
-      return;
-    case 6:
-      out.Pod<std::uint32_t>(kArray);
-      out.Pod<std::uint32_t>(4);
-      out.Pod<std::uint64_t>(1);
-      out.Pod<std::uint32_t>(32);
-      return;
-    default:
-      out.Pod<std::uint32_t>(4);
-      out.Pod(static_cast<std::uint32_t>(power));
-      alignment = power;
-      return;
-  }
-}
-
-struct Tensor {
-  std::string name;
-  std::vector<std::uint64_t> dimensions;
-  std::uint32_t type = 0;
-  std::uint64_t size = 0;
-  std::uint64_t offset = 0;
-};
-
-// Bytes as core sizes them, or a few for a layout it cannot size.
-std::uint64_t PayloadBytes(Draw& draw, const Tensor& tensor) {
-  std::uint64_t elements = 1;
-  for (const auto dimension : tensor.dimensions) {
-    if (dimension == 0 ||
-        elements > std::numeric_limits<std::uint64_t>::max() / dimension) {
-      elements = 0;
-      break;
-    }
-    elements *= dimension;
-  }
-  const auto type = static_cast<GgmlType>(tensor.type);
-  const auto block = gufo::quant::QuantizedBlockElements(type);
-  const auto bytes =
-      tensor.type > 0xFFFF || tensor.dimensions.empty() ||
-              (block != 0 && tensor.dimensions.front() % block != 0)
-          ? 0
-          : gufo::quant::EncodedSizeBytes(type, elements);
-  return bytes != 0 ? bytes : (draw.clean ? 1 : 0) + Below(draw.random, 80);
-}
-
-std::uint64_t AlignUp(std::uint64_t value, std::uint64_t alignment) {
-  return (value + alignment - 1) / alignment * alignment;
-}
-
-Bytes Generate(Random& random) {
-  Draw draw{random, Chance(random, 50)};
-  Writer out;
-  out.bytes = {'G', 'G', 'U', 'F'};
-  out.Pod(draw.Odd(3)          ? Pick<std::uint32_t>(random, {1, 4})
-          : Chance(random, 20) ? std::uint32_t{2}
-                               : std::uint32_t{3});
-  const auto metadata_count = Below(random, 10);
-  const auto tensor_count = Below(random, 7);
-  out.Pod(tensor_count);
-  out.Pod(metadata_count);
-
-  std::uint64_t alignment = 32;
-  bool aligned = false;
-  std::vector<std::string> keys;
-  constexpr std::string_view kKeys[] = {"general.architecture", "general.name",
-                                        "tokenizer.ggml.tokens",
-                                        "qwen35.block_count", "split.count"};
-  for (std::uint64_t i = 0; i < metadata_count; ++i) {
-    if (Chance(random, 15) && !(draw.clean && aligned)) {
-      Alignment(out, draw, alignment);
-      aligned = true;
+// Fails with `message`, also with unsized tensors allowed unless `strict`,
+// and without a message wanted.
+void Rejects(std::span<const std::uint8_t> bytes, std::string_view message,
+             const std::string& what, bool strict = false) {
+  for (const bool unsized : {false, true}) {
+    if (unsized && strict)
       continue;
-    }
-    std::string key =
-        std::string(Pick(random, std::span<const std::string_view>(kKeys))) +
-        "." + std::to_string(i);
-    if (draw.Odd(3) && !keys.empty())
-      key = keys[Below(random, keys.size())];
-    else if (draw.Odd(3))
-      key = "";
-    else if (draw.Odd(3))
-      key = Text(random, 12);
-    keys.push_back(key);
-    out.String(key);
-    const auto type = draw.Odd(2) ? Pick<std::uint32_t>(random, {13, 0x108})
-                      : Chance(random, 30)
-                          ? kArray
-                          : static_cast<std::uint32_t>(Below(random, 13));
-    Value(out, draw, type);
+    const auto opened = Open(bytes, {.allow_unsized_tensors = unsized});
+    Require(!opened.reader && opened.error == message,
+            what + ": fails with " + Escape(opened.error) + " instead of " +
+                Escape(message));
   }
-
-  std::vector<Tensor> tensors(tensor_count);
-  for (std::size_t i = 0; i < tensors.size(); ++i) {
-    auto& tensor = tensors[i];
-    tensor.name = "blk." + std::to_string(i) + ".weight";
-    if (draw.Odd(3))
-      tensor.name = "";
-    else if (draw.Odd(3))
-      tensor.name = Text(random, 10);
-    else if (i > 0 && draw.Odd(3))
-      tensor.name = tensors[i - 1].name;
-    tensor.type =
-        draw.Odd(3) ? Pick<std::uint32_t>(random, {65536, 0x10008})
-        : Chance(random, 12)
-            ? Pick(random, std::span<const std::uint32_t>(kOtherTypes))
-            : Pick(random, std::span<const std::uint32_t>(kKnownTypes));
-    const auto block =
-        gufo::quant::QuantizedBlockElements(static_cast<GgmlType>(tensor.type));
-    const auto rank = draw.Odd(3) ? Pick<std::size_t>(random, {0, 9, 12})
-                                  : 1 + Below(random, 4);
-    for (std::size_t d = 0; d < rank; ++d) {
-      tensor.dimensions.push_back(
-          draw.Odd(2) ? Pick<std::uint64_t>(
-                            random, {0, std::uint64_t{1} << 32,
-                                     std::uint64_t{1} << 63, ~std::uint64_t{0}})
-          : d != 0 ? 1 + Below(random, 3)
-          : block != 0 && Chance(random, 70)
-              ? block * (1 + Below(random, 2))
-              : Pick<std::uint64_t>(
-                    random, {1, 2, 3, 7, 8, 31, 32, 33, 64, 100, 256, 512}));
-    }
-    tensor.size = PayloadBytes(draw, tensor);
-  }
-  // Lay the data out in a random order, now and then unaligned, overlapping
-  // or far outside the file.
-  std::vector<std::size_t> order(tensors.size());
-  for (std::size_t i = 0; i < order.size(); ++i)
-    order[i] = i;
-  if (Chance(random, 30))
-    std::shuffle(order.begin(), order.end(), random);
-  std::uint64_t end = 0;
-  std::uint64_t previous = 0;
-  for (const auto index : order) {
-    auto& tensor = tensors[index];
-    tensor.offset = AlignUp(end, alignment);
-    if (draw.Odd(3))
-      tensor.offset += 1 + Below(random, 3);
-    if (draw.Odd(3))
-      tensor.offset = previous;
-    previous = tensor.offset;
-    if (draw.Odd(2)) {
-      tensor.offset = Pick<std::uint64_t>(
-          random, {std::uint64_t{1} << 40, ~std::uint64_t{0}});
-    } else if (tensor.size < (std::uint64_t{1} << 20)) {
-      end = std::max(end, tensor.offset + tensor.size);
-    }
-  }
-  for (const auto& tensor : tensors) {
-    out.String(tensor.name);
-    out.Pod(static_cast<std::uint32_t>(tensor.dimensions.size()));
-    for (const auto dimension : tensor.dimensions)
-      out.Pod(dimension);
-    out.Pod(tensor.type);
-    out.Pod(tensor.offset);
-  }
-  if (!draw.Odd(4))
-    out.bytes.resize(AlignUp(out.bytes.size(), alignment), 0);
-  auto payload = end;
-  if (Chance(random, 10))
-    payload += Below(random, 40);
-  else if (payload > 0 && draw.Odd(5))
-    payload -= 1 + Below(random, std::min<std::uint64_t>(payload, 8));
-  out.bytes.resize(out.bytes.size() + payload, 0xAB);
-  return std::move(out.bytes);
+  Require(
+      GgufReader::OpenMemory(bytes.data(), bytes.size(), nullptr) == nullptr,
+      what + ": opens without an error message");
 }
 
-Bytes Mutate(Random& random, Bytes bytes) {
-  if (bytes.empty())
-    return bytes;
-  const auto at = Below(random, bytes.size());
-  switch (Below(random, 5)) {
-    case 0:
-      bytes.resize(at);
-      break;
-    case 1:
-      for (auto flips = 1 + Below(random, 3); flips > 0; --flips) {
-        bytes[Below(random, bytes.size())] ^=
-            static_cast<std::uint8_t>(1U << Below(random, 8));
+std::unique_ptr<GgufReader> Opens(std::span<const std::uint8_t> bytes,
+                                  const std::string& what,
+                                  GgufOpenOptions options = {}) {
+  auto opened = Open(bytes, options);
+  Require(opened.reader != nullptr,
+          what + ": fails with " + Escape(opened.error));
+  return std::move(opened.reader);
+}
+
+template<class T>
+const T& Get(const GgufReader& reader, std::string_view key,
+             std::uint32_t type) {
+  const auto* value = reader.FindMetadata(key);
+  Require(value != nullptr && static_cast<std::uint32_t>(value->type) == type &&
+              std::holds_alternative<T>(value->value),
+          "metadata " + std::string(key) + " is missing or of another type");
+  return std::get<T>(value->value);
+}
+
+bool SameDouble(double a, double b) {
+  return std::memcmp(&a, &b, sizeof(a)) == 0;
+}
+
+// Points at `text` where it sits in `bytes`, after its 8-byte length.
+bool InPlace(std::string_view view, std::span<const std::uint8_t> bytes,
+             std::string_view text) {
+  const auto* start = reinterpret_cast<const char*>(bytes.data());
+  if (view != text || view.data() < start + 8 ||
+      view.data() + view.size() > start + bytes.size())
+    return false;
+  std::uint64_t length = 0;
+  std::memcpy(&length, view.data() - 8, sizeof(length));
+  return length == text.size();
+}
+
+void ValueTypes() {
+  const auto bytes = Writer::Header(0, 15)
+                         .Key("u8", kUint8)
+                         .Pod<std::uint8_t>(200)
+                         .Key("i8", kInt8)
+                         .Pod<std::int8_t>(-128)
+                         .Key("u16", kUint16)
+                         .Pod<std::uint16_t>(65535)
+                         .Key("i16", kInt16)
+                         .Pod<std::int16_t>(-2)
+                         .Key("u32", kUint32)
+                         .Pod<std::uint32_t>(7)
+                         .Key("i32", kInt32)
+                         .Pod<std::int32_t>(-3)
+                         .Key("f32", kFloat32)
+                         .Pod(1.5F)
+                         .Key("bool", kBool)
+                         .Pod<std::uint8_t>(1)
+                         .Key("str", kString)
+                         .String(std::string_view("\xFF\0x", 3))
+                         .Key("u64", kUint64)
+                         .Pod(~std::uint64_t{0})
+                         .Key("i64", kInt64)
+                         .Pod(std::numeric_limits<std::int64_t>::min())
+                         .Key("f64", kFloat64)
+                         .Pod(-0.25)
+                         .Key("strings", kArray)
+                         .Pod(kString)
+                         .Pod<std::uint64_t>(2)
+                         .String("a")
+                         .String("")
+                         .Key("flags", kArray)
+                         .Pod(kBool)
+                         .Pod<std::uint64_t>(2)
+                         .Pod<std::uint8_t>(0)
+                         .Pod<std::uint8_t>(1)
+                         .Key("empty", kArray)
+                         .Pod(kFloat32)
+                         .Pod<std::uint64_t>(0)
+                         .bytes;
+  const auto reader = Opens(bytes, "every value type");
+  Require(reader->GetVersion() == 3 && reader->GetAlignment() == 32 &&
+              reader->GetMetadataCount() == 15 && reader->GetTensors().empty(),
+          "every value type: header differs");
+  Require(
+      Get<std::uint64_t>(*reader, "u8", kUint8) == 200 &&
+          Get<std::int64_t>(*reader, "i8", kInt8) == -128 &&
+          Get<std::uint64_t>(*reader, "u16", kUint16) == 65535 &&
+          Get<std::int64_t>(*reader, "i16", kInt16) == -2 &&
+          Get<std::uint64_t>(*reader, "u32", kUint32) == 7 &&
+          Get<std::int64_t>(*reader, "i32", kInt32) == -3 &&
+          SameDouble(Get<double>(*reader, "f32", kFloat32), 1.5) &&
+          Get<bool>(*reader, "bool", kBool) &&
+          Get<std::uint64_t>(*reader, "u64", kUint64) == ~std::uint64_t{0} &&
+          Get<std::int64_t>(*reader, "i64", kInt64) ==
+              std::numeric_limits<std::int64_t>::min() &&
+          SameDouble(Get<double>(*reader, "f64", kFloat64), -0.25),
+      "a scalar differs");
+  const auto& text = Get<std::string_view>(*reader, "str", kString);
+  Require(InPlace(text, bytes, std::string_view("\xFF\0x", 3)),
+          "a string is not a view of the file");
+  const auto& strings =
+      Get<std::vector<std::string_view>>(*reader, "strings", kArray);
+  Require(strings.size() == 2 && InPlace(strings[0], bytes, "a") &&
+              strings[1].empty(),
+          "a string array differs");
+  // Boolean arrays read as numbers.
+  Require(Get<std::vector<std::uint64_t>>(*reader, "flags", kArray) ==
+              std::vector<std::uint64_t>{0, 1},
+          "a boolean array differs");
+  Require(Get<std::vector<double>>(*reader, "empty", kArray).empty(),
+          "an empty array differs");
+  Require(reader->FindMetadata("missing") == nullptr, "a missing key is found");
+}
+
+// Arrays of every item type around the parser's blocks of 32768 items,
+// whole and cut off in their second block.
+void LongArrays() {
+  constexpr std::size_t kBlock = 32768;
+  for (std::uint32_t item = 0; item < std::size(kScalarBytes); ++item) {
+    if (item == kArray)
+      continue;
+    for (const std::size_t count :
+         {kBlock - 1, kBlock, kBlock + 1, (3 * kBlock) + 5}) {
+      auto out = Writer::Header(0, 2);
+      out.Key("long", kArray).Pod(item).Pod<std::uint64_t>(count);
+      std::vector<std::uint64_t> unsigneds;
+      std::vector<std::int64_t> signeds;
+      std::vector<double> floats;
+      std::vector<std::string> strings;
+      std::size_t cut = 0;
+      for (std::size_t i = 0; i < count; ++i) {
+        if (i == kBlock + 1)
+          cut = out.bytes.size() + 1;
+        // Every bit pattern of the narrow types, signs and fractions.
+        const auto bits = i * 0x9E3779B97F4A7C15ULL;
+        switch (item) {
+          case kString:
+            strings.push_back(std::to_string(i));
+            out.String(strings.back());
+            break;
+          case kBool:
+            unsigneds.push_back(i % 2);
+            out.Pod<std::uint8_t>(i % 2);
+            break;
+          case kFloat32:
+            floats.push_back((static_cast<double>(i) * 0.25) - 4096.0);
+            out.Pod(static_cast<float>(floats.back()));
+            break;
+          case kFloat64:
+            floats.push_back((static_cast<double>(i) / 3.0) - 1.0);
+            out.Pod(floats.back());
+            break;
+          case kInt8:
+            signeds.push_back(static_cast<std::int8_t>(bits));
+            out.Pod(static_cast<std::int8_t>(bits));
+            break;
+          case kInt16:
+            signeds.push_back(static_cast<std::int16_t>(bits));
+            out.Pod(static_cast<std::int16_t>(bits));
+            break;
+          case kInt32:
+            signeds.push_back(static_cast<std::int32_t>(bits));
+            out.Pod(static_cast<std::int32_t>(bits));
+            break;
+          case kInt64:
+            signeds.push_back(static_cast<std::int64_t>(bits));
+            out.Pod(static_cast<std::int64_t>(bits));
+            break;
+          case kUint8:
+            unsigneds.push_back(static_cast<std::uint8_t>(bits));
+            out.Pod(static_cast<std::uint8_t>(bits));
+            break;
+          case kUint16:
+            unsigneds.push_back(static_cast<std::uint16_t>(bits));
+            out.Pod(static_cast<std::uint16_t>(bits));
+            break;
+          case kUint32:
+            unsigneds.push_back(static_cast<std::uint32_t>(bits));
+            out.Pod(static_cast<std::uint32_t>(bits));
+            break;
+          default:
+            unsigneds.push_back(bits);
+            out.Pod(bits);
+            break;
+        }
       }
-      break;
-    case 2: {
-      const auto value = Pick<std::uint64_t>(
-          random, {0, 1, 2, 8, 9, 13, 32, 0xFFFF, 0x10000,
-                   std::uint64_t{1} << 32, bytes.size(), bytes.size() / 13,
-                   bytes.size() / 32, ~std::uint64_t{0}});
-      std::memcpy(bytes.data() + at, &value,
-                  std::min<std::size_t>(sizeof(value), bytes.size() - at));
-      break;
-    }
-    case 3: {
-      Bytes noise(1 + Below(random, 4));
-      for (auto& byte : noise)
-        byte = static_cast<std::uint8_t>(Below(random, 256));
-      bytes.insert(bytes.begin() + static_cast<std::ptrdiff_t>(at),
-                   noise.begin(), noise.end());
-      break;
-    }
-    default: {
-      const auto count =
-          std::min<std::uint64_t>(1 + Below(random, 4), bytes.size() - at);
-      bytes.erase(bytes.begin() + static_cast<std::ptrdiff_t>(at),
-                  bytes.begin() + static_cast<std::ptrdiff_t>(at + count));
-      break;
+      out.Key("after", kUint32).Pod<std::uint32_t>(7);
+      const auto what = "array of " + std::to_string(count) +
+                        " items of type " + std::to_string(item);
+      const auto reader = Opens(out.bytes, what);
+      Require(Get<std::uint64_t>(*reader, "after", kUint32) == 7,
+              what + ": the entry after it differs");
+      bool same = false;
+      if (item == kString) {
+        const auto& got =
+            Get<std::vector<std::string_view>>(*reader, "long", kArray);
+        same = std::ranges::equal(got, strings);
+      } else if (item == kFloat32 || item == kFloat64) {
+        same = std::ranges::equal(
+            Get<std::vector<double>>(*reader, "long", kArray), floats,
+            SameDouble);
+      } else if (!signeds.empty()) {
+        same =
+            Get<std::vector<std::int64_t>>(*reader, "long", kArray) == signeds;
+      } else {
+        same = Get<std::vector<std::uint64_t>>(*reader, "long", kArray) ==
+               unsigneds;
+      }
+      Require(same, what + ": items differ");
+      if (cut == 0)
+        cut = out.bytes.size() / 2;
+      Rejects(std::span(out.bytes).first(cut), kMalformed, what + " cut off");
     }
   }
-  return bytes;
+}
+
+void VersionsAndAlignments() {
+  const auto v2 = Writer::Header(0, 0, 2).bytes;
+  Require(Opens(v2, "version 2")->GetVersion() == 2, "version 2 differs");
+  for (const std::uint32_t version : {0U, 1U, 4U}) {
+    Rejects(Writer::Header(0, 0, version).bytes,
+            "Unsupported GGUF version: " + std::to_string(version),
+            "version " + std::to_string(version));
+  }
+  // Any unsigned type holds a power of two.
+  const auto aligned = [](std::uint32_t type, std::uint64_t value) {
+    auto out = Writer::Header(1, 1);
+    out.Key("general.alignment", type);
+    out.bytes.insert(
+        out.bytes.end(), reinterpret_cast<const std::uint8_t*>(&value),
+        reinterpret_cast<const std::uint8_t*>(&value) + kScalarBytes[type]);
+    out.Tensor("t", {8}, 0, 0);
+    return out.Data(value, 32).bytes;
+  };
+  for (const auto& [type, value] :
+       {std::pair{kUint8, 1ULL}, std::pair{kUint16, 256ULL},
+        std::pair{kUint32, 64ULL}, std::pair{kUint64, 4096ULL}}) {
+    const auto bytes = aligned(type, value);
+    const auto reader = Opens(bytes, "alignment " + std::to_string(value));
+    const auto& tensor = reader->GetTensors().front();
+    Require(reader->GetAlignment() == value &&
+                tensor.data == bytes.data() + bytes.size() - 32,
+            "alignment " + std::to_string(value) + " differs");
+  }
+  for (const auto& [type, value] :
+       {std::pair{kUint32, 0ULL}, std::pair{kUint32, 3ULL},
+        std::pair{kUint32, 96ULL}, std::pair{kUint64, 1ULL << 32},
+        std::pair{kInt32, 32ULL}, std::pair{kBool, 1ULL},
+        std::pair{kFloat32, 0ULL}}) {
+    auto out = Writer::Header(0, 1);
+    out.Key("general.alignment", type);
+    out.bytes.insert(
+        out.bytes.end(), reinterpret_cast<const std::uint8_t*>(&value),
+        reinterpret_cast<const std::uint8_t*>(&value) + kScalarBytes[type]);
+    Rejects(out.bytes, "Invalid GGUF alignment",
+            "alignment type " + std::to_string(type) + " value " +
+                std::to_string(value));
+  }
+  auto array = Writer::Header(0, 1);
+  array.Key("general.alignment", kArray)
+      .Pod(kUint32)
+      .Pod<std::uint64_t>(1)
+      .Pod<std::uint32_t>(32);
+  Rejects(array.bytes, "Invalid GGUF alignment", "alignment array");
+}
+
+// Core sizes the tensors; their data and index point into the file.
+void Tensors() {
+  // Q8_0 blocks of 32 take 34 bytes, Q4_K blocks of 256 take 144.
+  const auto bytes = Writer::Header(3, 1)
+                         .Key("general.alignment", kUint32)
+                         .Pod<std::uint32_t>(64)
+                         .Tensor("blk.0.attn_q.weight", {32, 2}, 8, 0)
+                         .Tensor("b", {3}, 0, 128)
+                         .Tensor("c", {256, 1, 1, 2}, 12, 192)
+                         .Data(64, 192 + 288)
+                         .bytes;
+  const auto reader = Opens(bytes, "tensors");
+  const auto* data = bytes.data() + bytes.size() - 192 - 288;
+  const auto tensors = reader->GetTensors();
+  Require(tensors.size() == 3, "tensor count differs");
+  const struct {
+    std::string_view name;
+    std::vector<std::uint64_t> dimensions;
+    GgmlType type;
+    std::uint64_t offset;
+    std::size_t size;
+  } expected[] = {
+      {"blk.0.attn_q.weight", {32, 2}, GgmlType::kQ8_0, 0, 68},
+      {"b", {3}, GgmlType::kF32, 128, 12},
+      {"c", {256, 1, 1, 2}, GgmlType::kQ4_K, 192, 288},
+  };
+  for (std::size_t i = 0; i < tensors.size(); ++i) {
+    const auto& got = tensors[i];
+    const auto& want = expected[i];
+    Require(InPlace(got.name, bytes, want.name) &&
+                got.dimensions == want.dimensions && got.type == want.type &&
+                got.offset == want.offset && got.data == data + want.offset &&
+                got.size_bytes == want.size && got.sized &&
+                reader->FindTensor(want.name) == &got,
+            "tensor " + std::string(want.name) + " differs");
+  }
+  Require(reader->FindTensor("missing") == nullptr, "a missing tensor found");
+
+  // A storage type core cannot size spans the bytes up to the end, and opens
+  // only on request.
+  const auto unknown = Writer::Header(2, 0)
+                           .Tensor("plain", {8}, 0, 0)
+                           .Tensor("unknown", {64}, 200, 32)
+                           .Data(32, 32 + 96)
+                           .bytes;
+  Rejects(unknown,
+          "Invalid GGUF tensor shape or unsupported storage type: unknown",
+          "an unknown storage type", true);
+  const auto lenient = Opens(unknown, "an unknown storage type",
+                             {.allow_unsized_tensors = true});
+  const auto& unsized = lenient->GetTensors()[1];
+  Require(!unsized.sized && unsized.size_bytes == 96 &&
+              lenient->GetTensors()[0].sized,
+          "an unknown storage type differs");
+}
+
+void Rejections() {
+  Require(GgufReader::OpenMemory(nullptr, 64, nullptr) == nullptr,
+          "a null buffer opens");
+  std::string error;
+  Require(!GgufReader::OpenMemory(nullptr, 64, &error) &&
+              error == "Invalid memory buffer for GGUF",
+          "a null buffer fails with " + Escape(error));
+  // OpenMemory rejects a buffer shorter than the fixed header itself.
+  auto header = Writer::Header(0, 0).bytes;
+  Rejects(std::span(header).first(0), "Invalid memory buffer for GGUF",
+          "empty");
+  Rejects(std::span(header).first(23), "Invalid memory buffer for GGUF",
+          "23 bytes");
+  header[0] = 'g';
+  Rejects(header, "Invalid GGUF magic header", "magic");
+
+  const struct {
+    std::string_view what;
+    Bytes bytes;
+    std::string_view message;
+    // Opens with unsized tensors allowed.
+    bool strict = false;
+  } cases[] = {
+      {"counts", Writer::Header(0, 1).bytes,
+       "GGUF descriptor counts exceed file or memory limits"},
+      {"unreadable key",
+       Writer::Header(0, 1).Pod<std::uint64_t>(100).Zeros(5).bytes,
+       "Failed to read metadata key"},
+      {"empty key", Writer::Header(0, 1).String("").Zeros(5).bytes,
+       "GGUF metadata key exceeds limits"},
+      {"unreadable type", Writer::Header(0, 1).String("key").Zeros(2).bytes,
+       "Failed to read metadata type for key key"},
+      {"value type 13", Writer::Header(0, 1).Key("k", 13).Zeros(8).bytes,
+       kMalformed},
+      // Not narrowed to a string.
+      {"value type 0x108", Writer::Header(0, 1).Key("k", 0x108).Zeros(8).bytes,
+       kMalformed},
+      {"boolean 2",
+       Writer::Header(0, 1).Key("k", kBool).Pod<std::uint8_t>(2).Zeros(4).bytes,
+       kMalformed},
+      {"array of arrays",
+       Writer::Header(0, 1)
+           .Key("k", kArray)
+           .Pod(kArray)
+           .Pod<std::uint64_t>(0)
+           .bytes,
+       kMalformed},
+      {"short array",
+       Writer::Header(0, 1)
+           .Key("k", kArray)
+           .Pod(kUint32)
+           .Pod<std::uint64_t>(2)
+           .Pod<std::uint32_t>(0)
+           .bytes,
+       kMalformed},
+      {"duplicate key",
+       Writer::Header(0, 2)
+           .Key("k", kUint8)
+           .Pod<std::uint8_t>(0)
+           .Key("k", kUint8)
+           .Pod<std::uint8_t>(0)
+           .bytes,
+       "Duplicate GGUF metadata key"},
+      {"unreadable tensor name",
+       Writer::Header(1, 0).Pod<std::uint64_t>(1ULL << 40).Zeros(24).bytes,
+       "Failed to read tensor name"},
+      {"empty tensor name",
+       Writer::Header(1, 0).Tensor("", {32}, 0, 0).Data(32, 128).bytes,
+       kMalformed},
+      {"rank 0",
+       Writer::Header(1, 0).String("t").Pod<std::uint32_t>(0).Zeros(32).bytes,
+       "Invalid tensor dimensions count"},
+      {"rank 9",
+       Writer::Header(1, 0).String("t").Pod<std::uint32_t>(9).Zeros(80).bytes,
+       "Invalid tensor dimensions count"},
+      // Not narrowed to F32.
+      {"storage type 0x10000",
+       Writer::Header(1, 0).Tensor("t", {8}, 0x10000, 0).Data(32, 32).bytes,
+       kMalformed},
+      {"element overflow",
+       Writer::Header(1, 0).Tensor("t", {~0ULL, 2}, 0, 0).Data(32, 32).bytes,
+       "Invalid GGUF tensor shape or unsupported storage type: t"},
+      {"zero dimension",
+       Writer::Header(1, 0).Tensor("t", {8, 0}, 0, 0).Data(32, 32).bytes,
+       "Invalid GGUF tensor shape or unsupported storage type: t"},
+      // Q8_0 rows must be whole 32-element blocks.
+      {"partial block",
+       Writer::Header(1, 0).Tensor("t", {33}, 8, 0).Data(32, 64).bytes,
+       "Invalid GGUF tensor shape or unsupported storage type: t", true},
+      {"duplicate tensor",
+       Writer::Header(2, 0)
+           .Tensor("t", {8}, 0, 0)
+           .Tensor("t", {8}, 0, 32)
+           .Data(32, 64)
+           .bytes,
+       "Duplicate GGUF tensor name"},
+      {"unpadded", Writer::Header(1, 0).Tensor("t", {8}, 0, 0).bytes,
+       "GGUF data section is truncated before its alignment"},
+      {"unaligned offset",
+       Writer::Header(1, 0).Tensor("t", {8}, 0, 1).Data(32, 64).bytes,
+       "Tensor extent or alignment is invalid: t"},
+      {"past the end",
+       Writer::Header(1, 0).Tensor("t", {8}, 0, 32).Data(32, 32).bytes,
+       "Tensor extent or alignment is invalid: t"},
+      {"offset overflow",
+       Writer::Header(1, 0).Tensor("t", {8}, 0, ~0ULL).Data(32, 32).bytes,
+       "Tensor extent or alignment is invalid: t"},
+      {"one byte short",
+       Writer::Header(1, 0).Tensor("t", {8}, 0, 0).Data(32, 31).bytes,
+       "Tensor extent or alignment is invalid: t"},
+  };
+  for (const auto& test : cases)
+    Rejects(test.bytes, test.message, std::string(test.what), test.strict);
+  // Allowed, a shape core cannot size spans the data up to the end, but never
+  // without elements.
+  const auto partial =
+      Writer::Header(1, 0).Tensor("t", {33}, 8, 0).Data(32, 64);
+  const auto reader =
+      Opens(partial.bytes, "partial block", {.allow_unsized_tensors = true});
+  const auto& tensor = reader->GetTensors().front();
+  Require(!tensor.sized && tensor.size_bytes == 64 &&
+              reader->UnsizedTensorError() ==
+                  "Invalid GGUF tensor shape or unsupported storage type: t",
+          "an allowed partial block differs");
+  // A file without tensors needs no padding.
+  Opens(Writer::Header(0, 1).Key("k", kUint8).Pod<std::uint8_t>(1).bytes,
+        "unpadded without tensors");
 }
 
 // Headers whose counts take the descriptor budget to its last bytes, so that
@@ -553,13 +645,12 @@ Bytes Mutate(Random& random, Bytes bytes) {
 // array, a tensor name) fits exactly or overruns it by one byte. A metadata
 // entry is followed by the first tensor's one-byte name: the parse reaches
 // that tensor's dimension count, all zero bytes, only if both fit. 0.35.0
-// reported each overrun as a malformed or over-long entry; the Rust parser
-// names the budget.
-void Budget(Totals& totals) {
+// reported each overrun as a malformed or over-long entry, or as counts
+// beyond its limits; the Rust parser names the budget.
+void Budget() {
   constexpr std::size_t kBudget = std::size_t{128} << 20;
   constexpr std::size_t kNumberCharge = 8;
   constexpr std::string_view kFits = "Invalid tensor dimensions count";
-  constexpr std::string_view kOver = "Malformed or truncated GGUF";
   const auto metadata_charge = sizeof(GgufMetadataValue) + 64;
   const auto tensor_charge = sizeof(GgufTensorInfo) + 128;
   const auto string_charge = sizeof(std::string_view);
@@ -569,35 +660,24 @@ void Budget(Totals& totals) {
       kBudget - metadata_charge - ((most - 1) * tensor_charge);
   // The counts must also fit the file: 32 bytes per tensor at least.
   Bytes bytes(24 + ((most + 1) * 32), 0);
+  std::size_t cases = 0;
   const auto header = [&](std::uint64_t tensors, std::uint64_t metadata,
-                          const Bytes& entry, std::string_view outcome) {
-    Writer out;
-    out.bytes = {'G', 'G', 'U', 'F'};
-    out.Pod<std::uint32_t>(3);
-    out.Pod(tensors);
-    out.Pod(metadata);
+                          const Bytes& entry, bool fits) {
+    auto out = Writer::Header(tensors, metadata);
     out.bytes.insert(out.bytes.end(), entry.begin(), entry.end());
     std::ranges::fill(bytes, 0);
     std::ranges::copy(out.bytes, bytes.begin());
-    // The case must end at the edge it was built for.
-    const auto expected = reference::OpenMemory(bytes.data(), bytes.size(), {});
-    Require(Outcome(expected) == outcome,
-            "a budget case ends with " + Escape(Outcome(expected)) +
-                " instead of " + std::string(outcome));
-    CompareBoth(totals, bytes, "budget", outcome != kFits);
+    Rejects(bytes, fits ? kFits : kOverBudget,
+            "budget case " + std::to_string(cases++));
   };
   // A key of `length` bytes and its value type.
   const auto key = [](std::size_t length, std::uint32_t type) {
     Writer out;
-    out.String(std::string(length, 'k'));
-    out.Pod(type);
+    out.Key(std::string(length, 'k'), type);
     return out;
   };
   // Ends a metadata entry with the first tensor's one-byte name.
-  const auto named = [](Writer out) {
-    out.String("t");
-    return out.bytes;
-  };
+  const auto named = [](Writer out) { return out.String("t").bytes; };
   // A key of `length` bytes with an empty string.
   const auto keyed = [&](std::size_t length) {
     auto out = key(length, kString);
@@ -613,9 +693,7 @@ void Budget(Totals& totals) {
   // `count` strings, the first `first` bytes long and the others empty.
   const auto strings = [&](std::uint64_t count, std::size_t first) {
     auto out = key(1, kArray);
-    out.Pod(kString);
-    out.Pod(count);
-    out.String(std::string(first, 's'));
+    out.Pod(kString).Pod(count).String(std::string(first, 's'));
     for (std::uint64_t i = 1; i < count; ++i)
       out.String("");
     return named(out);
@@ -624,81 +702,131 @@ void Budget(Totals& totals) {
   // of kNumberCharge, so that the key takes up the rest.
   const auto numbers = [&](std::size_t key_bytes, std::uint64_t count) {
     auto out = key(key_bytes, kArray);
-    out.Pod<std::uint32_t>(0);  // uint8
-    out.Pod(count);
+    out.Pod(kUint8).Pod(count);
     out.bytes.resize(out.bytes.size() + count, 7);
     return named(out);
   };
-  header(most + 1, 1, string(0),
-         "GGUF descriptor counts exceed file or memory limits");
-  header(most - 1, 1, keyed(room - 1), kFits);
-  header(most - 1, 1, keyed(room), kOver);
-  header(most - 1, 1, keyed(room + 1), "GGUF metadata key exceeds limits");
-  header(most - 1, 1, string(room - 2), kFits);
-  header(most - 1, 1, string(room - 1), kOver);
-  header(most - 1, 1, strings(1, room - 2 - string_charge), kFits);
-  header(most - 1, 1, strings(1, room - 1 - string_charge), kOver);
+  // 0.35.0: descriptor counts exceed file or memory limits.
+  header(most + 1, 1, string(0), false);
+  header(most - 1, 1, keyed(room - 1), true);
+  // 0.35.0: malformed or truncated.
+  header(most - 1, 1, keyed(room), false);
+  // 0.35.0: metadata key exceeds limits.
+  header(most - 1, 1, keyed(room + 1), false);
+  header(most - 1, 1, string(room - 2), true);
+  header(most - 1, 1, string(room - 1), false);
+  header(most - 1, 1, strings(1, room - 2 - string_charge), true);
+  header(most - 1, 1, strings(1, room - 1 - string_charge), false);
   const auto count = (room - 2) / string_charge;
   const auto rest = (room - 2) % string_charge;
-  header(most - 1, 1, strings(count, rest), kFits);
-  header(most - 1, 1, strings(count, rest + 1), kOver);
+  header(most - 1, 1, strings(count, rest), true);
+  header(most - 1, 1, strings(count, rest + 1), false);
   const auto numbers_count = (room - 2) / kNumberCharge;
   const auto key_bytes = room - 1 - (numbers_count * kNumberCharge);
-  header(most - 1, 1, numbers(key_bytes, numbers_count), kFits);
-  header(most - 1, 1, numbers(key_bytes + 1, numbers_count), kOver);
+  header(most - 1, 1, numbers(key_bytes, numbers_count), true);
+  header(most - 1, 1, numbers(key_bytes + 1, numbers_count), false);
   // Without metadata, the most tensors leave room for one name.
   const auto name = [](std::size_t length) {
     Writer out;
-    out.String(std::string(length, 't'));
-    return out.bytes;
+    return out.String(std::string(length, 't')).bytes;
   };
   const auto name_room = kBudget - (most * tensor_charge);
-  header(most, 0, name(name_room), kFits);
-  header(most, 0, name(name_room + 1), kOver);
+  header(most, 0, name(name_room), true);
+  header(most, 0, name(name_room + 1), false);
 }
 
-// Arrays of every item type around the Rust parser's blocks of 32768 items,
-// whole and cut off in their second block.
-void LongArrays(Totals& totals) {
-  constexpr std::size_t kBlock = 32768;
-  for (std::uint32_t item = 0; item < std::size(kScalarBytes); ++item) {
-    if (item == kArray)
-      continue;
-    for (const std::size_t count :
-         {kBlock - 1, kBlock, kBlock + 1, (3 * kBlock) + 5}) {
-      Writer out;
-      out.bytes = {'G', 'G', 'U', 'F'};
-      out.Pod<std::uint32_t>(3);
-      out.Pod<std::uint64_t>(0);
-      out.Pod<std::uint64_t>(2);
-      out.String("long");
-      out.Pod(kArray);
-      out.Pod(item);
-      out.Pod<std::uint64_t>(count);
-      Random random(item);
-      std::size_t cut = 0;
-      for (std::size_t i = 0; i < count; ++i) {
-        if (i == kBlock + 1)
-          cut = out.bytes.size() + 1;
-        if (item == kString) {
-          out.String(std::to_string(i));
-        } else if (item == 7) {
-          out.Pod<std::uint8_t>(i % 2);
-        } else {
-          out.Noise(random, kScalarBytes[item]);
-        }
-      }
-      out.String("after");
-      out.Pod<std::uint32_t>(4);
-      out.Pod<std::uint32_t>(7);
-      const auto what = "array of " + std::to_string(count) +
-                        " items of type " + std::to_string(item);
-      CompareBoth(totals, out.bytes, what);
-      if (cut == 0)
-        cut = out.bytes.size() / 2;
-      CompareBoth(totals, std::span(out.bytes).first(cut), what + " cut off");
+// Every truncation of a header fails, until only the tail of a tensor core
+// cannot size is cut, which then spans what is left. Byte changes either fail
+// with a known message or open tensors that lie inside the buffer.
+void Damage() {
+  const auto bytes = Writer::Header(3, 4)
+                         .Key("general.architecture", kString)
+                         .String("qwen35")
+                         .Key("tokenizer.ggml.tokens", kArray)
+                         .Pod(kString)
+                         .Pod<std::uint64_t>(3)
+                         .String("a")
+                         .String("bc")
+                         .String("")
+                         .Key("general.alignment", kUint8)
+                         .Pod<std::uint8_t>(16)
+                         .Key("scores", kArray)
+                         .Pod(kFloat32)
+                         .Pod<std::uint64_t>(2)
+                         .Pod(0.5F)
+                         .Pod(-1.0F)
+                         .Tensor("a", {32}, 8, 0)
+                         .Tensor("b", {4}, 0, 48)
+                         .Tensor("c", {64}, 200, 64)
+                         .Data(16, 96)
+                         .bytes;
+  // The unsized tensor starts 64 bytes into the 96 bytes of data.
+  const auto unsized_start = bytes.size() - 32;
+  for (std::size_t len = 0; len <= bytes.size(); ++len) {
+    const auto opened =
+        Open(std::span(bytes).first(len), {.allow_unsized_tensors = true});
+    const auto what =
+        std::to_string(len) + " of " + std::to_string(bytes.size()) + " bytes";
+    if (len < unsized_start) {
+      Require(!opened.reader && KnownMessage(opened.error),
+              what + " fail with " + Escape(opened.error));
+    } else if (len > unsized_start) {
+      Require(
+          opened.reader != nullptr &&
+              opened.reader->GetTensors()[2].size_bytes == len - unsized_start,
+          what + " fail with " + Escape(opened.error));
     }
   }
+  std::mt19937_64 random(0x47475546);
+  const auto below = [&](std::size_t bound) {
+    return std::uniform_int_distribution<std::size_t>(0, bound - 1)(random);
+  };
+  std::size_t opened_count = 0;
+  for (int mutation = 0; mutation < 4000; ++mutation) {
+    auto changed = bytes;
+    const auto at = below(changed.size());
+    switch (below(4)) {
+      case 0:
+        changed[at] ^= static_cast<std::uint8_t>(1U << below(8));
+        break;
+      case 1: {
+        const std::uint64_t values[] = {0,       1,          9,    13,
+                                        0x10000, 1ULL << 32, ~0ULL};
+        const auto value = values[below(std::size(values))];
+        std::memcpy(changed.data() + at, &value,
+                    std::min(sizeof(value), changed.size() - at));
+        break;
+      }
+      case 2:
+        changed.insert(changed.begin() + static_cast<std::ptrdiff_t>(at),
+                       static_cast<std::uint8_t>(below(256)));
+        break;
+      default:
+        changed.erase(changed.begin() + static_cast<std::ptrdiff_t>(at));
+        break;
+    }
+    for (const bool unsized : {false, true}) {
+      const auto opened = Open(changed, {.allow_unsized_tensors = unsized});
+      const auto what = "mutation " + std::to_string(mutation);
+      if (!opened.reader) {
+        Require(KnownMessage(opened.error),
+                what + " fails with " + Escape(opened.error));
+        continue;
+      }
+      ++opened_count;
+      const auto* begin = changed.data();
+      for (const auto& tensor : opened.reader->GetTensors()) {
+        const auto* data = static_cast<const std::uint8_t*>(tensor.data);
+        Require(data >= begin && tensor.size_bytes <= changed.size() &&
+                    data - begin <= static_cast<std::ptrdiff_t>(
+                                        changed.size() - tensor.size_bytes) &&
+                    opened.reader->FindTensor(tensor.name) == &tensor &&
+                    (unsized || tensor.sized),
+                what + ": tensor " + Escape(tensor.name) + " is out of place");
+      }
+    }
+  }
+  Require(opened_count > 0, "no mutation opened");
 }
 
 // Only OpenFile parses a file shorter than the fixed header.
@@ -726,70 +854,36 @@ void FileTooSmall() {
           "a 10-byte file fails with: " + Escape(error));
 }
 
-template<class F>
-double BestMilliseconds(F&& open) {
-  double best = std::numeric_limits<double>::max();
-  for (int run = 0; run < 20; ++run) {
-    const auto start = std::chrono::steady_clock::now();
-    open();
-    const std::chrono::duration<double, std::milli> elapsed =
-        std::chrono::steady_clock::now() - start;
-    best = std::min(best, elapsed.count());
-  }
-  return best;
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
-    Totals totals;
-    Random random(0x47475546);
-    for (int file = 0; file < 1500; ++file) {
-      const auto bytes = Generate(random);
-      const auto what = "file " + std::to_string(file);
-      CompareBoth(totals, bytes, what);
-      if (file < 100) {
-        for (std::size_t len = 0; len < bytes.size(); ++len) {
-          CompareBoth(totals, std::span(bytes).first(len), what + " truncated");
-        }
-      }
-      for (int mutation = 0; mutation < 8; ++mutation)
-        CompareBoth(totals, Mutate(random, bytes), what + " mutated");
-    }
-    Budget(totals);
-    LongArrays(totals);
+    ValueTypes();
+    LongArrays();
+    VersionsAndAlignments();
+    Tensors();
+    Rejections();
+    Budget();
+    Damage();
     FileTooSmall();
-    for (const auto outcome : kOutcomes) {
-      Require(totals.outcomes.contains(std::string(outcome)),
-              "never reached: " + std::string(outcome));
-    }
 
     for (int i = 1; i < argc; ++i) {
       std::string error;
       const auto mapping =
           gufo::platform::ReadOnlyMappedFile::Open(argv[i], &error);
       Require(mapping.valid(), std::string(argv[i]) + ": " + error);
-      const std::span bytes(mapping.data(), mapping.size());
-      CompareBoth(totals, bytes, argv[i]);
-      const GgufOpenOptions unsized{.allow_unsized_tensors = true};
-      const auto rust = BestMilliseconds([&] {
-        Require(GgufReader::OpenMemory(bytes.data(), bytes.size(), nullptr,
-                                       unsized) != nullptr,
-                "open");
-      });
-      const auto frozen = BestMilliseconds([&] {
-        Require(
-            reference::OpenMemory(bytes.data(), bytes.size(), unsized).opened,
-            "open");
-      });
-      std::printf("%s: Rust %.3f ms, 0.35.0 %.3f ms\n", argv[i], rust, frozen);
+      double best = std::numeric_limits<double>::max();
+      for (int run = 0; run < 20; ++run) {
+        const auto start = std::chrono::steady_clock::now();
+        Opens(std::span(mapping.data(), mapping.size()), argv[i],
+              {.allow_unsized_tensors = true});
+        const std::chrono::duration<double, std::milli> elapsed =
+            std::chrono::steady_clock::now() - start;
+        best = std::min(best, elapsed.count());
+      }
+      std::printf("%s: %.3f ms\n", argv[i], best);
     }
-
-    std::printf("GGUF header checks passed: %zu comparisons;", totals.compared);
-    for (const auto& [outcome, count] : totals.outcomes)
-      std::printf(" %zu %s;", count, Escape(outcome).c_str());
-    std::printf("\n");
+    std::printf("GGUF header checks passed\n");
     return 0;
   } catch (const std::exception& failure) {
     std::fprintf(stderr, "gguf_header_test: %s\n", failure.what());

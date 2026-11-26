@@ -82,8 +82,7 @@ if (GUFO_BUILD_TOOLS)
   target_compile_options(cache_disk_bench PRIVATE -UNDEBUG)
 endif()
 
-add_executable(cache_disk_manifest_test disk_manifest_test.cpp
-  disk_manifest_reference.cpp)
+add_executable(cache_disk_manifest_test disk_manifest_test.cpp)
 target_link_libraries(cache_disk_manifest_test PRIVATE gufo_cache gufo_rust)
 add_test(NAME cache_disk_manifest_test COMMAND cache_disk_manifest_test)
 set_tests_properties(cache_disk_manifest_test PROPERTIES
