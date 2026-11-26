@@ -22,7 +22,7 @@
     "fingerprintId": "3fcf92f8dd18973504c217987816f8b05b87a86f30533006c31337b79a56978b",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-11-24",
+  "measuredOn": "2026-11-26",
   "mode": "dspark",
   "model": {
     "id": "Inkling-2-Mini",
@@ -35,8 +35,8 @@
   "referenceName": "llama.cpp",
   "rows": {
     "default": {
-      "command": "gufo serve --port 46099 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
-      "ready_s": 4.655,
+      "command": "gufo serve --port 57599 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative dspark --dspark-model dspark-Inkling-2-Mini-Q8_0.gguf",
+      "ready_s": 3.876,
       "ready_s_sd": null,
       "samples": 1
     }
@@ -47,7 +47,7 @@
       "gufo",
       "serve",
       "--port",
-      "46099",
+      "57599",
       "--sessions",
       "1",
       "llm",
@@ -69,8 +69,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "82645e0a4d96a474f26f6b04ee5df7b02c39b714"
+    "dirty": false,
+    "revision": "1d61903a2ba61deec0d8b529439e587b4a4d3130"
   },
   "table": "loading",
   "target": "gufo"

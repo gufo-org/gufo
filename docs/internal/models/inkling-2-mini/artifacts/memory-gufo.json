@@ -22,7 +22,7 @@
     "fingerprintId": "3fcf92f8dd18973504c217987816f8b05b87a86f30533006c31337b79a56978b",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-11-24",
+  "measuredOn": "2026-11-26",
   "mode": null,
   "model": {
     "id": "Inkling-2-Mini",
@@ -35,13 +35,13 @@
   "referenceName": "llama.cpp",
   "rows": {
     "16K prefix, pp4096 + tg128": {
-      "command": "gufo serve --port 35857 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 30.44,
+      "command": "gufo serve --port 41381 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 30.35,
       "idle_gib": 2.38
     },
     "pp2048 + tg128": {
-      "command": "gufo serve --port 35857 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 28.42,
+      "command": "gufo serve --port 41381 --sessions 1 llm --model Inkling-2-Mini-UD-Q4_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 28.57,
       "idle_gib": 2.38
     }
   },
@@ -51,7 +51,7 @@
       "gufo",
       "serve",
       "--port",
-      "35857",
+      "41381",
       "--sessions",
       "1",
       "llm",
@@ -69,8 +69,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "82645e0a4d96a474f26f6b04ee5df7b02c39b714"
+    "dirty": false,
+    "revision": "1d61903a2ba61deec0d8b529439e587b4a4d3130"
   },
   "table": "memory",
   "target": "gufo"

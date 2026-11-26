@@ -86,7 +86,7 @@ still think briefly; llama.cpp gets `--reasoning off`.
 
 | | Gufo | llama.cpp |
 | --- | --- | --- |
-| Build | `build/release/gufo` at `82645e0a` (SHA-256 `7affdcf4…`) | `4c92c5bfb` (master with #32694, #32704, #32799, #32833), ROCm 10.1 build, SHA-256 `be1e917f…` |
+| Build | `result/bin/gufo` (`nix build`) at `1d61903a` (`.gufo-wrapped` SHA-256 `49f10edb…`), November 26, 2026 | `4c92c5bfb` (master with #32694, #32704, #32799, #32833), ROCm 10.1 build, SHA-256 `be1e917f…`, November 24, 2026 |
 | Server | `serve llm --think off --max-pending-per-client 8`, DSpark `--speculative dspark --dspark-model` | `-ngl 999 -fa on --cache-reuse 0 --cache-ram 0 --jinja --reasoning off` |
 
 Model files: `Inkling-2-Mini-UD-Q4_K_XL.gguf` (SHA-256 `e6427665…`) and
@@ -103,7 +103,7 @@ llama.cpp #32218, is not merged). Its DSpark and loading cells are N/A
 
 ```sh
 FILES="--gguf Inkling-2-Mini-UD-Q4_K_XL.gguf --dspark dspark-Inkling-2-Mini-Q8_0.gguf"
-python3 tools/bench/model-bench.py --model inkling-2-mini --gufo build/release/gufo $FILES \
+python3 tools/bench/model-bench.py --model inkling-2-mini --gufo result/bin/gufo $FILES \
   run --target gufo --fresh --drop-caches "<POSIX_FADV_DONTNEED on both files>"
 python3 tools/bench/model-bench.py --model inkling-2-mini $FILES run --target reference \
   --reference-binary llama.cpp/build-rocm/bin/llama-server --table single-ar,multi-ar,memory --fresh
