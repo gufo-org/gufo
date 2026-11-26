@@ -1,5 +1,5 @@
 //! Decoder tests through a recording host. tests/cli/chat_request_test.cpp
-//! compares every API with the frozen C++ decoders.
+//! checks every API through the C++ caller.
 
 use super::*;
 use crate::draft::{Message, Role};

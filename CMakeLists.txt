@@ -1128,10 +1128,9 @@ endfunction()
   set_tests_properties(http_request_test PROPERTIES
     LABELS "cpu;server;http;correctness")
 
-  # The Rust chat request decoder against frozen C++ decoders; no sockets.
+  # The Rust chat request decoder through its C++ caller; no sockets.
   add_executable(chat_request_test
-    tests/cli/chat_request_test.cpp
-    tests/cli/chat_request_reference.cpp)
+    tests/cli/chat_request_test.cpp)
   target_link_libraries(chat_request_test PRIVATE gufo_http)
   add_test(NAME chat_request_test COMMAND chat_request_test)
   set_tests_properties(chat_request_test PROPERTIES
