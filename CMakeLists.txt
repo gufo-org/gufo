@@ -1227,9 +1227,12 @@ endfunction()
     FIXTURES_REQUIRED gufo_extension_inventory)
   set_tests_properties(check_extension_isolation_test PROPERTIES
     LABELS "cpu;repository" TIMEOUT 180)
-  set_tests_properties(extension_isolation_report
-    extension_core_model_includes_gate extension_family_graph_gate
-    extension_model_core_includes_gate
+  # The report scans the whole tree: 6 s on Linux, 15-30 s on Windows runners
+  # running four tests at once. The gates only read its inventory.
+  set_tests_properties(extension_isolation_report PROPERTIES
+    LABELS "cpu;repository" TIMEOUT 120)
+  set_tests_properties(extension_core_model_includes_gate
+    extension_family_graph_gate extension_model_core_includes_gate
     extension_serving_boundary_gate extension_target_ownership_gate
     PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
 
