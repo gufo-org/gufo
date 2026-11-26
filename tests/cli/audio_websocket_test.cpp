@@ -234,6 +234,7 @@ public:
       return {};
     return {"female", "male"};
   }
+  bool supports_response_options() const override { return deleted_; }
   bool DeleteUserTurn(std::string* error) override {
     if (!deleted_)
       return VoiceConversation::DeleteUserTurn(error);
@@ -709,6 +710,19 @@ void OpenWebUiVoiceCall() {
     client.Event("conversation.item.created");
     return item;
   };
+  // Chat snapshots: system items that replace each other.
+  const auto snapshot = [&](int n) {
+    client.Text(
+        R"({"type":"conversation.item.create","item":{"id":"chat_context_)" +
+        std::to_string(n) +
+        R"(","type":"message","role":"system","content":[{"type":"input_text","text":"Snapshot."}]}})");
+    client.Event("conversation.item.created");
+  };
+  snapshot(1);
+  snapshot(2);
+  client.Text(
+      R"({"type":"conversation.item.delete","item_id":"chat_context_1"})");
+  client.Event("conversation.item.deleted");
   auto item = turn();
   assert(client.Event("conversation.item.input_audio_transcription.delta")
              .member_str("delta") == "Hello there.");
@@ -719,13 +733,16 @@ void OpenWebUiVoiceCall() {
   // No reply starts by itself: the next event answers the next request.
   client.Text(R"({"type":"conversation.item.delete","item_id":"missing"})");
   client.Event("error");
-  client.Text(R"({"type":"response.create"})");
+  client.Text(
+      R"({"type":"response.create","response":{"metadata":{"input_item_id":")" +
+      item + R"("},"tools":[],"tool_choice":"none"}})");
+  assert(client.Event("response.created")["response"]["metadata"].member_str(
+             "input_item_id") == item);
   for (const auto* type :
-       {"response.created", "response.output_item.added",
-        "response.content_part.added", "response.output_audio_transcript.delta",
-        "response.output_audio.delta", "response.output_audio.done",
-        "response.output_audio_transcript.done", "response.content_part.done",
-        "response.output_item.done"})
+       {"response.output_item.added", "response.content_part.added",
+        "response.output_audio_transcript.delta", "response.output_audio.delta",
+        "response.output_audio.done", "response.output_audio_transcript.done",
+        "response.content_part.done", "response.output_item.done"})
     client.Event(type);
   assert(client.Event("response.done")["response"].member_str("status") ==
          "completed");
@@ -740,6 +757,15 @@ void OpenWebUiVoiceCall() {
   assert(client.Event("conversation.item.deleted").member_str("item_id") ==
          item);
   assert(deleted == 1);
+  // An out-of-band status line.
+  client.Text(
+      R"({"type":"response.create","response":{"conversation":"none","input":[],"tools":[],"tool_choice":"none","instructions":"Say: still working.","metadata":{"status":"working"}}})");
+  auto status = client.Event("response.created")["response"];
+  assert(status["metadata"].member_str("status") == "working" &&
+         status["conversation_id"].is_null());
+  std::string kind;
+  while ((kind = client.Next()) != "response.done") {
+  }
   // Voices are the conversation's; another model cannot transcribe.
   client.Text(
       R"({"type":"session.update","session":{"audio":{"output":{"voice":"robot"}}}})");

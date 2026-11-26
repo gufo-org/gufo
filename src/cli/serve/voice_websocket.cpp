@@ -74,6 +74,9 @@ VoiceConversation::Settings FromCSettings(
   settings.max_output_tokens = raw.max_output_tokens;
   settings.reasoning = raw.reasoning;
   settings.voice = std::string(View(raw.voice));
+  settings.response_instructions = std::string(View(raw.response_instructions));
+  settings.call_tools = raw.call_tools;
+  settings.out_of_band = raw.out_of_band;
   return settings;
 }
 
@@ -304,6 +307,7 @@ private:
         .serves_model = &HostServesModel,
         .transcribe_turn = &HostTranscribeTurn,
         .delete_user_turn = &HostDeleteUserTurn,
+        .supports_response_options = &HostSupportsResponseOptions,
     };
   }
 
@@ -568,6 +572,11 @@ private:
       SetError(set_error, error_ctx, "internal error");
       return false;
     }
+  }
+
+  static bool HostSupportsResponseOptions(void* ctx) noexcept {
+    return static_cast<Session*>(ctx)
+        ->conversation_->supports_response_options();
   }
 
   static bool HostDeleteUserTurn(void* ctx,

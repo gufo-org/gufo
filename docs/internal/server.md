@@ -681,9 +681,17 @@ buffer before any reply, sending
 messages are not transcribed. `output_modalities` with both `"audio"` and
 `"text"` speaks, as `["audio"]` does. A named `audio.output.voice` must be one
 the conversation lists (`VoiceConversation::voices()`), and
-`conversation.item.delete` removes the latest item, a user message that
-nothing followed, when the conversation implements `DeleteUserTurn`; other
-requests get an error event. The handshake selects the
+`conversation.item.delete` removes any system message item, or the latest
+item when it is a user message that nothing followed and the conversation
+implements `DeleteUserTurn`; other requests get an error event. System
+message items (`role: "system"`, `input_text` parts) join the session's
+instructions in order until deleted; while the user speaks they apply once
+the turn closes. `response.create` takes `metadata` (echoed in
+`response.created` and `response.done`) and, when the conversation supports
+response options, `instructions` for that reply, `tool_choice` `none` or
+`tools: []` (the session's tools may be repeated), and `conversation: "none"`
+with an empty `input` for an out-of-band reply that leaves the conversation
+unchanged. `tool_choice` `none` also applies to a session. The handshake selects the
 `realtime` subprotocol a client offers. `GET /voice`, served when the model
 holds conversations, is a browser client for it. Event-level behavior is
 documented by the model's provider (for example the LFM3-Audio extension).

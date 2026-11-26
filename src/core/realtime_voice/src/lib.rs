@@ -51,6 +51,9 @@ pub struct GufoRealtimeVoiceSettings {
     pub max_output_tokens: usize,
     pub reasoning: bool,
     pub voice: GufoRealtimeVoiceBytes,
+    pub response_instructions: GufoRealtimeVoiceBytes,
+    pub call_tools: bool,
+    pub out_of_band: bool,
 }
 
 #[repr(C)]
@@ -190,6 +193,7 @@ pub struct GufoRealtimeVoiceHost {
             error_ctx: *mut c_void,
         ) -> bool,
     >,
+    pub supports_response_options: Option<unsafe extern "C" fn(context: *mut c_void) -> bool>,
 }
 
 fn as_c_bytes(bytes: &[u8]) -> GufoRealtimeVoiceBytes {
@@ -221,6 +225,9 @@ fn with_c_settings<R>(settings: &Settings, f: impl FnOnce(&GufoRealtimeVoiceSett
         max_output_tokens: settings.max_output_tokens,
         reasoning: settings.reasoning,
         voice: as_c_bytes(settings.voice.as_bytes()),
+        response_instructions: as_c_bytes(settings.response_instructions.as_bytes()),
+        call_tools: settings.call_tools,
+        out_of_band: settings.out_of_band,
     };
     f(&c_settings)
 }
@@ -266,6 +273,7 @@ impl CHost {
             || raw.serves_model.is_none()
             || raw.transcribe_turn.is_none()
             || raw.delete_user_turn.is_none()
+            || raw.supports_response_options.is_none()
         {
             return None;
         }
@@ -458,6 +466,16 @@ impl Host for CHost {
             )
         };
         if ok { Ok(transcript) } else { Err(err) }
+    }
+
+    #[allow(unsafe_code)]
+    fn supports_response_options(&mut self) -> bool {
+        let cb = self
+            .raw
+            .supports_response_options
+            .expect("validated supports_response_options");
+        // SAFETY: caller guarantees `supports_response_options` and `context` are valid.
+        unsafe { cb(self.raw.context) }
     }
 
     #[allow(unsafe_code)]
