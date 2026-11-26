@@ -4,11 +4,14 @@
 Each arm starts one server, records its startup phases, sends a fixed three
 request history and stops it. Arms alternate base/PR on the same runner after
 the GPU cools, and every phase gets a paired verdict: a change counts only when
-each repeat moves by more than 5% and 10 ms in the same direction.
+each repeat moves by more than 5% and 10 ms in the same direction. A gated phase
+that is slower in every repeat gets more pairs, up to MAX_REPEATS: a runner
+stall in one PR arm then turns it inconclusive instead of failing the check.
 """
 
 import argparse
 import contextlib
+import fnmatch
 import hashlib
 import http.client
 import json
@@ -33,6 +36,12 @@ from run import SERVER_POPEN, interrupt_server  # noqa: E402
 GENERATED_TOKENS = 128
 CONTEXT = 32768
 COOL_TIMEOUT_S = 240
+# A suspected slowdown adds balanced pairs (one base-first, one PR-first) until
+# it clears or holds in all of them. A stall that slows a random 20-30% of arms,
+# as on Devlab's DeepSeek runners, then fails a no-op PR with probability
+# well below 1e-3 per phase instead of a few percent.
+CONFIRM_STEP = 2
+MAX_REPEATS = 6
 WORDS = ("river", "stone", "garden", "signal", "harbor", "window", "lantern", "meadow",
          "copper", "orbit", "violet", "canyon", "thunder", "pocket", "mirror", "basket",
          "forest", "engine", "silver", "candle", "planet", "ladder", "marble", "feather",
@@ -292,6 +301,39 @@ def verdict(pairs):
     return "noisy" if any(flag == 1 for flag in flags) else "same"
 
 
+def suspected(phases, patterns=None):
+    """Gated phases slower in every repeat so far; more pairs confirm or clear them."""
+    return [phase['key'] for phase in phases
+            if phase['verdict'] == 'slower' and phase.get('checked', True)
+            and phase.get('comparable_work', True)
+            and (patterns is None or any(fnmatch.fnmatchcase(phase['key'], pattern)
+                                         for pattern in patterns))]
+
+
+def repeat_paired(measure, repeats, max_repeats, evaluate, patterns):
+    """Run alternating pairs; extend while a gated phase looks slower.
+
+    `measure(repeat, revision)` runs one arm, `evaluate()` returns the phases of
+    the arms so far. Returns the repeats run and each confirmation round.
+    """
+    done, target, rounds = 0, repeats, []
+    while True:
+        for repeat in range(done, target):
+            # Alternate which revision goes first: an order effect (the page cache,
+            # memory the previous arm is still returning) then moves the repeats in
+            # opposite directions and reads as noise, never as a slowdown.
+            for revision in ("base", "head") if repeat % 2 == 0 else ("head", "base"):
+                measure(repeat, revision)
+        done = target
+        flagged = suspected(evaluate(), patterns)
+        if not flagged or done >= max_repeats:
+            return done, rounds
+        target = min(done + CONFIRM_STEP, max_repeats)
+        rounds.append({"after_repeats": done, "phases": flagged})
+        print(f"Suspected slower after {done} repeats: {', '.join(flagged)}; "
+              f"confirming with {target - done} more", flush=True)
+
+
 def summarize(arms):
     by = {revision: [arm for arm in arms if arm["revision"] == revision]
           for revision in ("base", "head")}
@@ -320,6 +362,23 @@ def summarize(arms):
     return phases, diverged
 
 
+def evaluate(arms):
+    """Paired verdicts; differing work or generated text leaves a phase inconclusive."""
+    phases, diverged = summarize(arms)
+    mismatched_work = set()
+    for label, *_ in REQUESTS:
+        work = {(arm['requests'][label]['prompt_tokens'], arm['requests'][label]['cached_tokens'],
+                 arm['requests'][label]['completion_tokens']) for arm in arms}
+        if len(work) != 1:
+            mismatched_work.add(label)
+    diverged = sorted(set(diverged) | mismatched_work)
+    for phase in phases:
+        if phase['group'] in mismatched_work or (
+                phase['group'] in diverged and phase['key'].endswith('predicted_ms')):
+            phase['verdict'] = 'noisy'
+    return phases, diverged
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-binary", type=Path, required=True)
@@ -332,10 +391,16 @@ def main():
     parser.add_argument("--output", type=Path, required=True, help="phases.json path")
     parser.add_argument("--logs", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=2)
+    parser.add_argument("--max-repeats", type=int, default=MAX_REPEATS,
+                        help="repeats a suspected slowdown may extend to")
+    parser.add_argument("--timing-checks", type=json.loads,
+                        help="JSON list of gated phase patterns; default: every phase")
     parser.add_argument("--startup-timeout", type=float, default=600)
     args = parser.parse_args()
     if args.repeats < 2:
         parser.error('at least two paired repeats are required')
+    if args.max_repeats < args.repeats:
+        parser.error('--max-repeats must be at least --repeats')
     if args.model_id and not args.assets:
         parser.error('--model-id requires --assets')
     if not args.model_id and not args.weights:
@@ -353,19 +418,19 @@ def main():
     target = None if idle is None else idle + 3
     started = time.perf_counter()
     arms = []
-    for repeat in range(args.repeats):
-        # Alternate which revision goes first: an order effect (the page cache,
-        # memory the previous arm is still returning) then moves the repeats in
-        # opposite directions and reads as noise, never as a slowdown.
-        for revision in ("base", "head") if repeat % 2 == 0 else ("head", "base"):
-            temperature = cool_down(target) if target is not None else None
-            print(f"Arm {revision} #{repeat + 1}: GPU {temperature} °C", flush=True)
-            arm_started = time.perf_counter()
-            arm = run_arm(revision, binaries[revision], weights, args.logs, repeat,
-                          args.startup_timeout, args.model_id, assets)
-            arms.append({"revision": revision, "repeat": repeat, "gpu_temp_c": temperature,
-                         "wall_s": time.perf_counter() - arm_started, **arm})
-    phases, diverged = summarize(arms)
+
+    def measure(repeat, revision):
+        temperature = cool_down(target) if target is not None else None
+        print(f"Arm {revision} #{repeat + 1}: GPU {temperature} °C", flush=True)
+        arm_started = time.perf_counter()
+        arm = run_arm(revision, binaries[revision], weights, args.logs, repeat,
+                      args.startup_timeout, args.model_id, assets)
+        arms.append({"revision": revision, "repeat": repeat, "gpu_temp_c": temperature,
+                     "wall_s": time.perf_counter() - arm_started, **arm})
+
+    repeats, confirmations = repeat_paired(measure, args.repeats, args.max_repeats,
+                                           lambda: evaluate(arms)[0], args.timing_checks)
+    phases, diverged = evaluate(arms)
     from devlab_models import registry
     mode = registry()['models'][args.model_id]['mode'] if args.model_id else 'mtp'
     for arm in arms:
@@ -374,26 +439,16 @@ def main():
                 raise ValueError('phase workload did not perform the expected token work')
             if mode != 'off' and request['draft_tokens'] <= 0:
                 raise ValueError('phase workload did not execute actual drafts')
-    mismatched_work = set()
-    for label, *_ in REQUESTS:
-        work = {(arm['requests'][label]['prompt_tokens'], arm['requests'][label]['cached_tokens'],
-                 arm['requests'][label]['completion_tokens']) for arm in arms}
-        if len(work) != 1:
-            mismatched_work.add(label)
-    diverged = sorted(set(diverged) | mismatched_work)
-    for phase in phases:
-        if phase['group'] in mismatched_work or (
-                phase['group'] in diverged and phase['key'].endswith('predicted_ms')):
-            phase['verdict'] = 'noisy'
     result = {
         "schema": 1,
         "revisions": {"base": args.base_revision, "head": args.head_revision},
-        "settings": {"repeats": args.repeats, "context": CONTEXT, "sessions": 1,
+        "settings": {"repeats": repeats, "initial_repeats": args.repeats,
+                     "max_repeats": args.max_repeats, "context": CONTEXT, "sessions": 1,
                      "speculative": mode, "generated_tokens": GENERATED_TOKENS,
                      "slowdown": SLOWDOWN, "noise_ms": NOISE_MS,
                      "idle_temp_c": idle, "requests": {key: label for key, label, *_ in REQUESTS}},
         "wall_s": time.perf_counter() - started,
-        "arms": arms, "phases": phases, "diverged": diverged,
+        "arms": arms, "phases": phases, "diverged": diverged, "confirmations": confirmations,
     }
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     if os.environ.get("GITHUB_STEP_SUMMARY"):

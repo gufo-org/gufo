@@ -145,6 +145,10 @@ def phases_section(data):
                  f"{settings['slowdown'] * 100:.0f}% and >{settings['noise_ms']} ms); 🟨 slower in "
                  "some repeats, inconclusive; ⬜ never slower. Observations, not qualified timing "
                  f"regressions. Measured in {data['wall_s'] / 60:.1f} min.</sub>")
+    for round_ in data.get("confirmations", []):
+        lines += ["", f"🔁 Slower in all {round_['after_repeats']} repeats: "
+                  + ", ".join(f"`{key}`" for key in round_["phases"])
+                  + "; ran more pairs to confirm or clear it."]
     reasons = sorted({phase['advisory_reason'] for phase in phases if phase.get('advisory_reason')})
     for reason in reasons:
         lines += ["", "⚠️ HTTP ready timing is advisory: server-side timestamps are unavailable in one or more arms."
