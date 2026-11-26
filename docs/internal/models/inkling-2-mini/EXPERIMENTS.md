@@ -34,6 +34,7 @@ changes are in Git history; current speeds are in [benchmarks](BENCHMARKS.md).
 | Variant | Result |
 | --- | --- |
 | Quantising each activation once (`k_quant`) instead of per GEMV block | tg −3%: about 240 more launches per token |
+| A block's first weight rows loaded before it quantises its input, in the expert gate/up and down GEMVs (Nov 26) | tg −1.6% (22.03 against 21.68 ms per token): the decode GEMVs already read their weights at 197 to 238 GB/s, so the prologue is not their bound |
 | Two row iterations per wave, or 16 waves per block, in the expert GEMVs | equal or −2% |
 | Expert weights held in registers, or MoE inputs read from L2 | 2% slower per token |
 | Predictive expert prefetch (60% top-1 reuse between tokens) | 0.5% slower: the reads compete with latency-bound kernels |
