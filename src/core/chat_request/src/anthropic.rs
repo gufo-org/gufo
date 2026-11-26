@@ -8,7 +8,7 @@ use crate::chat::{field, parse_body, thinking_argument};
 use crate::content::{anthropic_image, read_text_content};
 use crate::draft::{Draft, Message, Role, ToolChoice, Tools};
 use crate::error::{Failure, Outcome, bad_request, compatibility, invalid};
-use crate::fields::{body_view, copy, dump, member_str, member_str_or, push, string};
+use crate::fields::{append, body_view, copy, dump, member_str, member_str_or, push, string};
 use crate::host::{Host, HostField};
 use crate::message::{historical, role_from};
 use crate::reasoning;
@@ -227,7 +227,8 @@ fn read_text(part: &Value, message: &mut Message) -> Outcome<()> {
 
 /// A `tool_reference` block of a tool search result. Every declared tool is
 /// already in the prompt, so the reference reads as one line naming it.
-fn tool_reference(block: &Value, out: &mut String) -> Outcome<()> {
+/// It is one text part of `message`.
+fn tool_reference(block: &Value, message: &mut Message) -> Outcome<()> {
     let Some(name) = block
         .get("tool_name")
         .and_then(Value::as_str)
@@ -235,12 +236,14 @@ fn tool_reference(block: &Value, out: &mut String) -> Outcome<()> {
     else {
         return invalid("tool_reference blocks require a tool_name");
     };
-    if !out.is_empty() && !out.ends_with('\n') {
-        append(out, "\n")?;
+    let mut line = String::new();
+    if !message.content.is_empty() && !message.content.ends_with('\n') {
+        append(&mut line, "\n")?;
     }
-    append(out, "Tool loaded: ")?;
-    append(out, name)?;
-    append(out, "\n")
+    append(&mut line, "Tool loaded: ")?;
+    append(&mut line, name)?;
+    append(&mut line, "\n")?;
+    message.text_part(&line)
 }
 
 /// A user text, image or tool result block.
@@ -328,7 +331,7 @@ fn tool_message(item: &Value, messages: &mut Vec<Message>, host: &mut impl Host)
                     if matches!(block, Value::Object(_))
                         && member_str(block, "type") == "tool_reference"
                     {
-                        tool_reference(block, &mut result.content)?;
+                        tool_reference(block, &mut result)?;
                     } else {
                         read_part(block, &mut result, host)?;
                     }
