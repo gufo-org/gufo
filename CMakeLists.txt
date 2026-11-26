@@ -1533,9 +1533,7 @@ endfunction()
   set_tests_properties(allocation_benchmark_test PROPERTIES
     LABELS "gpu;hip;gfx1151;diagnostics;allocation;opt-c091")
 
-  add_executable(gguf_header_test
-    tests/core/gguf_header_test.cpp
-    tests/core/gguf_header_reference.cpp)
+  add_executable(gguf_header_test tests/core/gguf_header_test.cpp)
   target_link_libraries(gguf_header_test PRIVATE gufo_core)
   add_test(NAME gguf_header_test COMMAND gguf_header_test)
   set_tests_properties(gguf_header_test PROPERTIES

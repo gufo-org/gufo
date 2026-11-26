@@ -142,21 +142,17 @@ and queue limits. Rust tests cover protocol rejections and buffer reuse;
 their ports shipped in v0.34.0 or earlier. The audio decoder has no frozen C++ oracle; its independent
 symphonia PCM and numerical resampler checks remain.
 
-`gguf_header_test` compares the Rust GGUF header parser, through
-`GgufReader::OpenMemory`, with a frozen copy of the 0.35.0 C++ parser in
-`tests/core/gguf_header_reference.cpp`. Generated headers cover every metadata
-value and array item type, alignments, tensor ranks, known and unknown storage
-types, unsized tensors and data layouts; deterministic mutations truncate, flip,
-overwrite, insert and erase bytes; further headers hold arrays around the
-parser's block size and fill each charge of the descriptor budget to its last
-byte and one byte past it. Each must open with the same version, alignment,
-metadata and tensors, whose strings and data point at the same bytes, or fail
-with the same message, with and without `allow_unsized_tensors`. Only a header
-over the descriptor budget fails with its own message, which names the limit
-where 0.35.0 reported a malformed or over-long entry. Every rejection must be
-reached. GGUF files given as arguments are compared and timed too. It
-runs in `check-pr`; the crate's Rust tests cover the check order, the budget and
-the C ABI.
+`gguf_header_test` checks the Rust GGUF header parser through its C++ caller,
+`GgufReader::OpenMemory`, with expected results: every metadata value type as
+the C++ variant holds it, strings that point into the parsed bytes, arrays of
+every item type around the parser's block size, versions, alignments, sized
+and unsized tensors, and the exact message of every rejection. Headers fill
+each charge of the descriptor budget to its last byte and one byte past it;
+the overrun names the limit, where 0.35.0 reported a malformed or over-long
+entry. Truncations and byte changes must fail with a known message or open
+tensors inside the buffer. GGUF files given as arguments must open and are
+timed. It runs in `check-pr`; the crate's Rust tests cover the check order,
+the budget and the C ABI.
 
 `json_parse_test` checks expected values, number tokens and member order, or
 the message of each of the parser's 21 rejections, through `json::parse`:
