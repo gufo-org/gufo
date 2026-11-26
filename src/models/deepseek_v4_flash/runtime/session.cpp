@@ -737,12 +737,6 @@ static void session_dspark_update_adaptive_width(ds4_session* session,
     next = std::max(previous - 1u, 1u);
   }
   session->dspark_state.concurrent_width = next;
-  if (getenv("GUFO_DEEPSEEK_DSPARK_WIDTH_TRACE") != nullptr) {
-    fprintf(stderr,
-            "ds4: DSpark adaptive width previous=%u drafted=%u "
-            "accepted=%u next=%u maximum=%u\n",
-            previous, drafted, accepted, next, maximum);
-  }
 }
 
 /*
@@ -827,19 +821,6 @@ static int session_dspark_finish_verified(
     if (row_tops[i - 1u] == drafts[i])
       positional_accepted++;
   }
-  if (getenv("GUFO_DEEPSEEK_DSPARK_TRACE") != nullptr) {
-    fprintf(stderr, "ds4: DSpark %s cycle drafted=%u accepted=%u draft=",
-            sampled ? "sampled" : "greedy", drafted, accepted);
-    for (uint32_t i = 0; i < drafted; ++i) {
-      fprintf(stderr, "%s%d", i == 0 ? "" : ",", (int)drafts[i]);
-    }
-    fprintf(stderr, " tops=");
-    for (uint32_t i = 0; i < drafted; ++i) {
-      fprintf(stderr, "%s%d", i == 0 ? "" : ",", (int)row_tops[i]);
-    }
-    fputc('\n', stderr);
-  }
-
   if (accepted == drafted) {
     session->checkpoint.len = length + (int)drafted;
     if (row_logits != nullptr) {
@@ -946,12 +927,6 @@ static int session_dspark_finish_verified(
       return 1;
     }
     if (sequential_top != drafts[i]) {
-      if (getenv("GUFO_DEEPSEEK_DSPARK_TRACE") != nullptr) {
-        fprintf(stderr,
-                "ds4: DSpark replay shortened at row=%u "
-                "verify_accept=%d sequential=%d\n",
-                i, (int)drafts[i], sequential_top);
-      }
       break;
     }
     if (!session_commit_and_extend(session, drafts[i])) {
@@ -1280,9 +1255,6 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
   std::array<uint32_t, 8> drafted_counts{};
   std::array<uint32_t, 8> verify_counts{};
   std::array<uint32_t, 8> tail_drafted{};
-  const bool trace_timing =
-      getenv("GUFO_DEEPSEEK_DSPARK_TIMING") != nullptr;
-  const double draft_t0 = trace_timing ? ds4_now_seconds() : 0.0;
   std::array<ds4_rocm_dspark_draft_item, 8> draft_items{};
   size_t draft_item_count = 0;
   size_t single_draft_index = 0;
@@ -1313,8 +1285,6 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
         &tail_drafted[index], items[index].sampler, verify_tails[index],
         item_count);
   }
-  const double draft_ms =
-      trace_timing ? (ds4_now_seconds() - draft_t0) * 1000.0 : 0.0;
 
   for (size_t index = 0; index < item_count; ++index) {
     drafts[index][0] = target_first[index];
@@ -1393,11 +1363,8 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
     };
   }
 
-  const double verify_t0 = trace_timing ? ds4_now_seconds() : 0.0;
   const bool verified =
       ds4_rocm_graph_verify_batch(engine, verify_items.data(), item_count);
-  const double verify_ms =
-      trace_timing ? (ds4_now_seconds() - verify_t0) * 1000.0 : 0.0;
   for (size_t index = 0; index < item_count; ++index) {
     items[index].session->checkpoint.len = lengths[index];
   }
@@ -1409,11 +1376,7 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
     return 1;
   }
 
-  const double commit_t0 = trace_timing ? ds4_now_seconds() : 0.0;
-  uint32_t total_rows = 0u;
-  uint32_t total_emitted = 0u;
   for (size_t index = 0; index < item_count; ++index) {
-    total_rows += verify_counts[index];
     const int result = session_dspark_finish_verified(
         items[index].session, lengths[index], vocabulary_size, true,
         items[index].sampler, row_logits[index], drafts[index].data(),
@@ -1425,8 +1388,6 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
       }
       return result;
     }
-    total_emitted +=
-        static_cast<uint32_t>(*items[index].n_emitted);
     if (can_draft_items[index]) {
       const uint32_t maximum = std::min(
           {items[index].max_draft_tokens, block, DS4_DSPARK_MAX_BLOCK});
@@ -1443,15 +1404,6 @@ int ds4_sessions_dspark_step_batch(const ds4_session_dspark_batch_item* items,
                                            support_drafted, support_accepted,
                                            policy_maximum);
     }
-  }
-  if (trace_timing) {
-    const double commit_ms =
-        (ds4_now_seconds() - commit_t0) * 1000.0;
-    fprintf(stderr,
-            "ds4: DSpark batch timing c=%zu rows=%u emitted=%u "
-            "draft=%.3f ms verify=%.3f ms commit=%.3f ms\n",
-            item_count, total_rows, total_emitted, draft_ms, verify_ms,
-            commit_ms);
   }
   return 0;
 }

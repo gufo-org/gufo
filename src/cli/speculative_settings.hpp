@@ -33,13 +33,6 @@ struct SpeculativeSettings {
   std::string draft_policy;
 };
 
-/// Before a model is selected: throws std::invalid_argument when the flags
-/// cannot hold for any available provider (a policy without `backend`, or one
-/// no provider accepts for it; a minimum above an explicit maximum).
-void CheckSpeculativeFlags(const ext::Registry& registry,
-                           std::string_view backend,
-                           const SpeculativeFlags& flags);
-
 /// The settings `provider` runs `backend` with. Throws std::invalid_argument
 /// when it does not accept the given policy or the minimum exceeds the limit.
 /// An empty backend (no speculation) resolves to the host's values.

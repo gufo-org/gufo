@@ -4,8 +4,6 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <gufo/ext/sampling.hpp>
 #include <span>
 #include <stdexcept>
@@ -158,12 +156,6 @@ private:
                   std::span(proposal.ids).first(proposal.size),
                   std::span(proposal.probabilities).first(proposal.size),
                   self.working_.mutable_rng_state());
-    if (std::getenv("GUFO_DEEPSEEK_DSPARK_TRACE"))
-      std::fprintf(stderr,
-                   "ds4: DSpark sample row=%u confidence=%.6f accepted=%d "
-                   "p=%.6f q=%.6f\n",
-                   row, proposal.confidence, token == proposal.token,
-                   target.probability(proposal.token), proposal.probability);
     Observe(ctx, logits, vocabulary_size, token);
     self.working_.Accept(token);
     return static_cast<int>(token);

@@ -62,9 +62,6 @@ void UnembedForward(const CpuLayerContext& ctx,
                     std::span<const float> hidden,
                     std::span<float> logits_out) noexcept;
 
-std::uint32_t SampleForward(const CpuModuleContext& ctx,
-                            std::span<const float> logits) noexcept;
-
 }  // namespace gufo::models::qwen
 
 #endif  // GUFO_MODELS_QWEN_MODULES_FWD_HPP_

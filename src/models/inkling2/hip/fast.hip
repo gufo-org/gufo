@@ -1700,13 +1700,7 @@ __device__ __forceinline__ void ctl_apply_elem(const CtlJobs& j, int i, int s,
   j.out[s][(size_t)tk * j.os[s] + i] =
       cv - tanhf(fo) * cv + tanhf(ga) * j.msg[s][(size_t)tk * j.ms[s] + i];
 }
-template<bool H>
-__global__ void __launch_bounds__(256) k_ctl_apply(CtlJobs j) {
-  const int i = blockIdx.x * 256 + threadIdx.x;
-  if (i < 2304)
-    ctl_apply_elem<H>(j, i, blockIdx.y, blockIdx.z);
-}
-// k_ctl_apply, then (last block of a stream and token) k_rms of norm job s.
+// ctl_apply_elem, then (last block of a stream and token) k_rms of norm job s.
 template<bool H>
 __global__ void __launch_bounds__(256)
     k_ctl_apply_rms(CtlJobs j, NormJobs nj, unsigned* cnt, float eps) {
@@ -4648,13 +4642,6 @@ void CtlApplyRms(hipStream_t s, const CtlJobs& j, const NormJobs& nj,
   else
     k_ctl_apply_rms<false><<<dim3(9, j.n, nb), 256, 0, s>>>(j, nj, cnt, eps);
   Chk("ctl apply rms");
-}
-void CtlApply(hipStream_t s, const CtlJobs& j, int nb) {
-  if (j.half)
-    k_ctl_apply<true><<<dim3(9, j.n, nb), 256, 0, s>>>(j);
-  else
-    k_ctl_apply<false><<<dim3(9, j.n, nb), 256, 0, s>>>(j);
-  Chk("ctl_apply");
 }
 void Tiny(hipStream_t s, const TinyJobs& j, int nb) {
   int rows = 0;

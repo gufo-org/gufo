@@ -83,7 +83,7 @@ void Swiglu(hipStream_t s, const float* g, const float* u, _Float16* out16,
 
 /// One Markov RNN step of the chain (row `i` of the block):
 /// joint = W_j [state, w1[prev], h_i, f] + b; state = cand + sig(gate) (state -
-/// cand) with cand = tanh; lat = tanh, at joint + 3 * 256 (LrLogits).
+/// cand) with cand = tanh; lat = tanh, at joint + 3 * 256 (LrLogits8).
 struct MarkovArgs {
   const uint16_t* w1;  // BF16 [201024][256]
   const uint16_t* wj;  // BF16 [768][5120]
@@ -99,13 +99,9 @@ void MarkovStep(hipStream_t s, const MarkovArgs& a);
 
 /// The proposal logits of one Markov step without a head pass: W_U (h_i + W_o
 /// lat + b_o) = base + (W_U W_o) lat + W_U b_o, with base = W_U h_i (Gemv8 of
-/// the block, once per draft) and pt = (W_U W_o)^T [256][n] F16, cb = W_U b_o
-/// precomputed. logits[r] for r < n (n even).
-void LrLogits(hipStream_t s, const _Float16* pt, const float* cb,
-              const float* base, const float* lat, float* logits, int n);
-
-/// LrLogits from an int8 table pt [256][n] with one scale per row (n % 4 ==
-/// 0), as QuantPt makes from the F32 table.
+/// the block, once per draft), pt = (W_U W_o)^T [256][n] as an int8 table with
+/// one scale per row (n % 4 == 0, as QuantPt makes from the F32 table) and
+/// cb = W_U b_o precomputed.
 void LrLogits8(hipStream_t s, const int8_t* pt, const float* ps,
                const float* cb, const float* base, const float* lat,
                float* logits, int n);

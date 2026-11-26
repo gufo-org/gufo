@@ -380,28 +380,6 @@ __global__ void __launch_bounds__(256) k_state(MarkovArgs a, float* lat) {
 // A lane takes Q8 blocks lane, lane + 32, lane + 64 of the chunk, holds the 4
 // rows' 32 codes as F16 pairs and accumulates every input with fdot2.
 typedef _Float16 h2 __attribute__((ext_vector_type(2)));
-// logits[r] = base[r] + sum_j pt[j][r] lat[j] + cb[r]: two rows per thread
-// (the [256][n] F16 table read once, coalesced across the rows)
-__global__ void __launch_bounds__(256)
-    k_lr_logits(const _Float16* __restrict__ pt, const float* __restrict__ cb,
-                const float* __restrict__ base, const float* __restrict__ lat,
-                float* __restrict__ out, int n) {
-  __shared__ float sl[kRank];
-  sl[threadIdx.x] = lat[threadIdx.x];
-  __syncthreads();
-  const int r = (blockIdx.x * 256 + threadIdx.x) * 2;
-  if (r >= n)
-    return;
-  float a0 = 0.f, a1 = 0.f;
-#pragma unroll 16
-  for (int j = 0; j < kRank; ++j) {
-    const h2 p = *(const h2*)(pt + (size_t)j * n + r);
-    a0 += (float)p[0] * sl[j];
-    a1 += (float)p[1] * sl[j];
-  }
-  out[r] = base[r] + a0 + cb[r];
-  out[r + 1] = base[r + 1] + a1 + cb[r + 1];
-}
 struct Gemv8Set {  // up to three matrices of the same input, one launch
   const uint8_t* w[3];
   float* y[3];
@@ -460,8 +438,8 @@ __global__ void __launch_bounds__(256)
     q[(size_t)j * n + r] = (int8_t)__float2int_rn(src[(size_t)j * n + r] / sc);
   scale[r] = sc;
 }
-// k_lr_logits from the int8 table: four rows per thread, shared across NS
-// sessions so `pt` (16 MB) is read once per Markov step.
+// logits[r] = base[r] + sum_j pt[j][r] lat[j] + cb[r] from the int8 table:
+// four rows per thread, shared across NS sessions so `pt` (16 MB) is read once per Markov step.
 template<int NS>
 __global__ void __launch_bounds__(256)
     k_lr_logits8_batch(const int8_t* __restrict__ pt,
@@ -920,11 +898,6 @@ void MarkovStep(hipStream_t s, const MarkovArgs& a) {
   k_joint<<<3 * kRank / 8, 256, 0, s>>>(a);
   k_state<<<1, 256, 0, s>>>(a, lat);
   Chk("markov");
-}
-void LrLogits(hipStream_t s, const _Float16* pt, const float* cb,
-              const float* base, const float* lat, float* logits, int n) {
-  k_lr_logits<<<(n / 2 + 255) / 256, 256, 0, s>>>(pt, cb, base, lat, logits, n);
-  Chk("lr logits");
 }
 void QuantPt(hipStream_t s, const float* src, int n, int8_t* q, float* scale) {
   k_quant_pt<<<(n + 255) / 256, 256, 0, s>>>(src, n, q, scale);

@@ -44,10 +44,6 @@ public:
       const std::function<bool(tokenization::TokenId, std::string_view)>&
           on_token = nullptr);
 
-  /// Helper to generate from raw text prompt.
-  [[nodiscard]] std::string GenerateText(std::string_view prompt,
-                                         const GenerationOptions& options = {});
-
   [[nodiscard]] const tokenization::QwenTokenizer& GetTokenizer()
       const noexcept {
     return *tokenizer_;

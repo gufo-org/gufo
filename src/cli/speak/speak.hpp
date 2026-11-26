@@ -6,7 +6,6 @@
 
 namespace gufo::cli {
 
-void PrintSpeakHelp(std::string_view program_name);
 [[nodiscard]] int RunSpeak(std::span<const char* const> args);
 
 }  // namespace gufo::cli

@@ -1186,9 +1186,6 @@ struct VisionEncoder::Impl {
 
 VisionEncoder::VisionEncoder() : impl_(new Impl) {}
 VisionEncoder::~VisionEncoder() = default;
-void VisionEncoder::set_options(const Options& o) {
-  impl_->opt = o;
-}
 int VisionEncoder::embedding_dim() const {
   return impl_->proj_dim;
 }

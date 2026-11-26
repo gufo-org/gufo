@@ -9,7 +9,7 @@
 // SCOPE NOTE (module seam reality, recorded so this gate is honest):
 //   On the HIP module seam only NormForward / QuantGemm / ResidualAdd (and
 //   FfnForward, which is BF16/quantized-only on HIP) carry a HIP branch.
-//   EmbedForward / UnembedForward / SampleForward are CPU-only today, and
+//   EmbedForward / UnembedForward are CPU-only today, and
 //   Attention/SSM are fused or not yet moduleized. Consequently a pure-GPU
 //   decode that emits *real* logits through the module seam alone is not yet
 //   complete. This L2 test therefore drives the HIP-complete modules across a

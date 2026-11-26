@@ -45,7 +45,6 @@ struct GenerationGeometry {
 
 [[nodiscard]] int AlignFrameCount(int requested_frames) noexcept;
 [[nodiscard]] int VideoLatentFrameCount(int frame_count) noexcept;
-[[nodiscard]] int VideoEncoderLatentFrameCount(int frame_count) noexcept;
 [[nodiscard]] std::optional<GenerationGeometry> ResolveGenerationGeometry(
     int width, int height, int requested_frames, std::string* error = nullptr);
 

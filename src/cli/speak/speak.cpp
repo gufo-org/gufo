@@ -78,12 +78,6 @@ ArgParser MakeParser(ext::SpeakOptions* o,
 }
 }  // namespace
 
-void PrintSpeakHelp(std::string_view) {
-  ext::SpeakOptions options;
-  std::vector<std::string> positionals;
-  MakeParser(&options, &positionals).PrintHelp();
-}
-
 int RunSpeak(std::span<const char* const> args) {
   ext::SpeakOptions o;
   std::vector<std::string> positionals;

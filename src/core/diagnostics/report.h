@@ -21,7 +21,6 @@ enum class DiagnosticStatus : std::uint8_t {
 };
 
 [[nodiscard]] std::string_view ToString(DiagnosticStatus status);
-[[nodiscard]] DiagnosticStatus FromString(std::string_view str);
 
 struct DiagnosticCheck {
   std::string name;
@@ -34,10 +33,7 @@ class DiagnosticReport {
 public:
   DiagnosticReport();
 
-  void SetEngineRevision(std::string_view revision);
-  void SetTimestamp(std::string_view iso8601_utc);
   void AddCheck(DiagnosticCheck check);
-  void AddWarning(std::string_view warning);
   void AddError(std::string_view error);
   void SetInventory(SystemInventory inventory);
   void SetCompatibility(CompatibilityReport compatibility);

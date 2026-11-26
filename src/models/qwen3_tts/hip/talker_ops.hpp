@@ -69,10 +69,6 @@ void LaunchRoundBfloat16InPlace(float* values, std::size_t count,
 void LaunchBfloat16ToFloat(const void* input_bfloat16, float* output,
                            std::size_t count, hipStream_t stream);
 
-void LaunchBfloat16ResidualAdd(const float* residual, const float* update,
-                               float* output, std::size_t count,
-                               hipStream_t stream);
-
 void LaunchBfloat16SwiGlu(const float* gate, const float* up, float* output,
                           void* output_bfloat16, std::size_t count,
                           hipStream_t stream);

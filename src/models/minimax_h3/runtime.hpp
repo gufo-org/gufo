@@ -101,7 +101,6 @@ public:
       std::string_view name) const noexcept;
   [[nodiscard]] std::vector<const TensorDescriptor*> TensorsForPhase(
       Phase phase) const;
-  [[nodiscard]] std::uint64_t TensorBytesForPhase(Phase phase) const noexcept;
 
 private:
   std::filesystem::path model_root_;

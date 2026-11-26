@@ -105,17 +105,6 @@ std::size_t StateLayout::PrivateBytes() const {
   return b;
 }
 
-std::size_t StateLayout::CheckpointBytes(std::size_t position) const {
-  std::size_t b = PrivateBytes();
-  for (const auto& c : components_) {
-    if (c.descriptor.kind == cache::ComponentKind::kPrivateState)
-      continue;
-    const auto [first, end] = RestoreRange(c.descriptor, position);
-    b += (end - first) * c.descriptor.row_bytes;
-  }
-  return b;
-}
-
 std::size_t StateLayout::SessionBytes(std::uint32_t context) const {
   std::size_t b = kConvBytes + (drafter_ ? kDraftFBytes : 0);
   for (const auto& c : components_)
@@ -164,10 +153,6 @@ std::size_t SessionStateAccess::Position(const Session& s) {
 }
 bool SessionStateAccess::Global(const Session& s, std::uint32_t v) {
   return RowStream(s, v, false).global;
-}
-std::uint32_t SessionStateAccess::RingRows(const Session& s, std::uint32_t v) {
-  const auto st = RowStream(s, v, false);
-  return st.global ? 0 : static_cast<std::uint32_t>(st.rows);
 }
 bool SessionStateAccess::HasLogits(const Session& s) {
   return s.logits_stale_ || !s.logits_.empty();

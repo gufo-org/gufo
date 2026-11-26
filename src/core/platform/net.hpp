@@ -35,6 +35,8 @@
 
 namespace gufo::net {
 
+// Blocking TCP client sockets for the in-process HTTP and WebSocket tests.
+
 #if defined(_WIN32)
 using Socket = SOCKET;
 
@@ -54,19 +56,12 @@ inline constexpr Socket kInvalidSocket = INVALID_SOCKET;
 inline constexpr Socket kInvalidSocket = -1;
 #endif
 
-/// The one-time WinSock startup the HTTP server performs before opening its
-/// listener; a no-op on POSIX. Throws std::system_error on failure.
-void EnsureSocketRuntimeStarted();
-
 /// Close a socket: closesocket on Windows, close on POSIX.
 void CloseSocket(Socket socket) noexcept;
 
 /// Create a blocking TCP stream socket for the address family (AF_INET or
 /// AF_INET6). Returns kInvalidSocket on failure.
 Socket CreateStreamSocket(int address_family) noexcept;
-
-/// poll()/WSAPoll() with the platform's native timeout unit.
-int PollSocket(void* descriptors, std::uint32_t count, int timeout_ms);
 
 /// Send that never raises SIGPIPE (MSG_NOSIGNAL on POSIX; default on Winsock).
 std::intptr_t SendNoSignal(Socket socket, const void* data, std::size_t bytes);
@@ -83,69 +78,8 @@ enum class ShutdownHow { kRead, kWrite, kReadWrite };
 /// Half-close a connected socket; returns false on failure.
 bool ShutdownSocket(Socket socket, ShutdownHow how) noexcept;
 
-/// Accept a client socket from `listener`, ensuring the accepted socket is in
-/// blocking mode on platforms where non-blocking state is inherited.
-Socket AcceptClientSocket(Socket listener) noexcept;
-
-/// Poll a single socket for readability. Returns >0 if readable or
-/// closed/error, 0 on timeout, and <0 on poll error.
-int PollReadable(Socket socket, int timeout_ms) noexcept;
-
-/// Non-blocking check whether the remote peer has closed or reset the socket.
-bool IsPeerDisconnected(Socket socket) noexcept;
-
-/// Last socket error code on the calling thread (errno on POSIX,
-/// WSAGetLastError() on Windows).
-int LastSocketError() noexcept;
-
-/// Whether the last socket operation failed due to signal interruption.
-bool IsSocketInterrupted() noexcept;
-
-/// Whether the last socket operation timed out or would block.
-bool IsSocketWouldBlockOrTimeout() noexcept;
-
-/// Whether a failed accept() call is transient and the accept loop should
-/// retry.
-bool IsSocketAcceptRetryable() noexcept;
-
-/// Enable SO_REUSEADDR on `socket`.
-bool SetReuseAddr(Socket socket) noexcept;
-
-/// Configure address reuse for a listener (`SO_REUSEADDR` on POSIX, so a
-/// restart binds through TIME_WAIT; `SO_EXCLUSIVEADDRUSE` on Windows, so a
-/// second server cannot double-bind a port another instance still serves:
-/// its bind() fails with the address-in-use error instead). Used by the
-/// HTTP server and the loading responder alike.
-bool SetExclusiveListenerReuse(Socket socket) noexcept;
-
-/// True when `error` (from LastSocketError) says the address is in use.
-bool IsAddressInUseError(int error) noexcept;
-
-/// Disable IPV6_V6ONLY on an AF_INET6 socket so dual-stack binds work when
-/// supported by the OS.
-bool ClearIpv6Only(Socket socket) noexcept;
-
-/// Mark a socket non-blocking; returns false on failure.
-bool SetNonBlocking(Socket socket) noexcept;
-
-/// Mark a socket blocking; returns false on failure. Required for sockets
-/// accepted from a non-blocking listener on Windows, where they inherit the
-/// listener's mode (POSIX accepted sockets never inherit O_NONBLOCK).
-bool SetBlocking(Socket socket) noexcept;
-
-/// Disable Nagle on a connected stream socket; returns false on failure.
-bool SetNoDelay(Socket socket) noexcept;
-
 /// Set receive/send timeouts in milliseconds; returns false on failure.
 bool SetSocketTimeouts(Socket socket, int timeout_ms) noexcept;
-
-/// Set only the send timeout in milliseconds; the receive timeout stays at
-/// the caller's idle limit. Returns false on failure.
-bool SetSendTimeout(Socket socket, int timeout_ms) noexcept;
-
-/// Read the receive timeout back in milliseconds; 0 means no timeout is
-/// set, -1 means the query failed.
-long long SocketRecvTimeoutMs(Socket socket) noexcept;
 
 }  // namespace gufo::net
 
