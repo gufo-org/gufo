@@ -593,4 +593,31 @@ fn responses_later_thoughts_join_their_turn() {
         parts_of(&host),
         [(true, 1), (false, 1), (true, 2), (false, 2)]
     );
+
+    // An answer item that brings its own `reasoning_content` starts a turn,
+    // as before parts existed, instead of slicing its text by thought ends.
+    let mut host = Fake::default();
+    let draft = run_api(
+        Api::Responses,
+        r#"{"model":"m","input":[{"role":"user","content":"q"},
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"R"}]},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"A"}]},
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"T"}]},
+            {"type":"message","role":"assistant","reasoning_content":"long thought",
+             "content":[{"type":"output_text","text":"B"}]},
+            {"role":"user","content":"next"}]}"#,
+        &mut host,
+    )
+    .unwrap();
+    assert_eq!(draft.messages.len(), 4);
+    let turn = &draft.messages[1];
+    assert_eq!((turn.thought.as_str(), turn.content.as_str()), ("RT", "A"));
+    assert_eq!(
+        (
+            draft.messages[2].thought.as_str(),
+            draft.messages[2].content.as_str()
+        ),
+        ("long thought", "B")
+    );
+    draft.emit(&mut host).unwrap();
 }

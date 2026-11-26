@@ -264,16 +264,21 @@ fn input_messages(
                     && last.content.is_empty()
                     && !last.thought.is_empty() =>
             {
+                // The item's own thought is not kept here, so neither are its
+                // thought parts.
                 if !message.parts.is_empty() {
                     legacy_parts(last)?;
-                    last.parts.try_reserve(message.parts.len())?;
-                    last.parts.extend_from_slice(&message.parts);
+                    let text = message.parts.iter().filter(|part| !part.thought);
+                    last.parts.try_reserve(text.clone().count())?;
+                    last.parts.extend(text);
                 }
                 last.content = message.content;
             }
-            // The answer after a later thought of the same turn.
+            // The answer after a later thought of the same turn. An item that
+            // brings its own thought starts a turn instead.
             Some(last)
                 if message.role == Role::Assistant
+                    && message.thought.is_empty()
                     && last.role == Role::Assistant
                     && last.parts.last().is_some_and(|part| part.thought)
                     && !last.content.is_empty()
@@ -283,7 +288,7 @@ fn input_messages(
                     last.text_part(&message.content)?;
                 } else {
                     let mut begin = 0;
-                    for part in &message.parts {
+                    for part in message.parts.iter().filter(|part| !part.thought) {
                         last.text_part(&message.content[begin..part.end])?;
                         begin = part.end;
                     }
