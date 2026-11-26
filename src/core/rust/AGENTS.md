@@ -3,14 +3,31 @@
 These rules apply to every Rust component under `src/core/`, including crates
 outside this directory. Read them before adding or changing a crate.
 
-## Scope and layout
+## Scope
 
-- Use Rust for bounded byte parsing and conversion, or state behind an opaque
-  handle. HIP and kernels, model runtimes, the cache (including durability),
-  scheduling, HTTP loops and handlers, and extension API types stay C++.
-  Propose a new
-  component in [Discussion #864](https://github.com/gufo-org/gufo/discussions/864)
-  before starting it.
+- Use Rust for components with bytes in and values out (parsers, decoders,
+  encoders, compilers of user input), for state behind an opaque handle, and
+  for the network edge: transport and protocol decoding and encoding. `tokio`
+  and `hyper` are accepted for the HTTP server.
+- The engine stays C++: HIP and kernels, model runtimes, the cache (including
+  durability), the scheduler and the extension API types. HTTP handlers keep
+  running in C++ behind the Rust transport. When an extension API type such as
+  `ChatRequest` is the output, Rust builds the C++ value through callbacks and
+  the C++ interface stays as it is.
+- Refactor tangled engine code that shares GPU or cache state in C++, such as
+  `component_text_cache.cpp`, `text_generation_scheduler.cpp`, `src/cache/`,
+  the model drivers and `json_constraint.cpp`. A C ABI in the middle adds a
+  seam without untangling anything.
+- Candidates are GitHub issues; comment on one to be assigned. Propose a
+  component without an issue in
+  [Discussion #864](https://github.com/gufo-org/gufo/discussions/864) before
+  starting it. For a large port, agree on the module split in its issue before
+  writing code.
+
+## Layout
+
+- Build crates from small modules that are easy to read, review and update.
+  Do not port a tangled C++ file one to one into a single large Rust file.
 - Keep one crate per component in `src/core/<name>`. Register it in the root
   workspace and link it through `gufo-rust`, directly or through another
   component. Direct dependencies of `gufo-rust` need an `extern crate` in its
@@ -54,13 +71,19 @@ outside this directory. Read them before adding or changing a crate.
   to `THIRD_PARTY_NOTICES.md` and the name to `tools/ci/check-dependencies.py`.
 - Prefer std-only code when a dependency saves little or changes accepted
   input. Avoid unsafe-heavy dependencies on untrusted input.
+- Use released crate versions. Pin a Git revision or an unreleased upstream
+  pull request only when there is no alternative.
+- For a large dependency tree, such as `tokio` or `hyper`, also measure the
+  cold Nix build time it adds.
 
 ## Ports and verification
 
-- Prove a C++ port with a frozen independent decoder, generated grids and
-  deterministic mutations. Explain every difference; fail on unknown ones.
-  Behavior changes require `!` in the PR title and a list in its description.
-- Once the port ships, replace the frozen decoder and comparison loops with
+- Prove a C++ port against a frozen copy of the replaced C++, with generated
+  grids and deterministic mutations. When the C++ is hard to isolate, such
+  as a server endpoint, a golden output generated on unmodified `main` also
+  works. Explain every difference; fail on unknown ones. Behavior changes
+  require `!` in the PR title and a list in its description.
+- Once the port ships, replace the frozen copy and comparison loops with
   expected-result tests covering edge cases and documented differences.
   Keep C ABI and caller tests where integration matters.
 - Measure affected timing against main with the same toolchain and workload.
