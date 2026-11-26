@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <iterator>
 #include <map>
 #include <utility>
 
+#include "src/core/hip/remap_barrier_device.hpp"
 #include "src/core/hip/state_lendable_range.hpp"
 #include "src/core/hip/state_region.hpp"
 #include "src/core/hip/state_shared_page.hpp"
@@ -142,10 +144,7 @@ PagePool::PagePool(int device, std::function<bool(std::uint64_t)> may_create,
     SetSharedRowsFactory(&CreateParkedRows);
   }
   // Every demand-mapped region remaps addresses (RemapBarrier).
-  RemapBarrier::SetDeviceDrain(+[]() noexcept {
-    (void)hipDeviceSynchronize();
-    (void)hipGetLastError();
-  });
+  InstallRemapBarrierDevice();
   access_.location = prop_.location;
   access_.flags = hipMemAccessFlagsProtReadWrite;
   thread_ = std::thread([this] { Run(); });
@@ -394,6 +393,18 @@ void PagePool::QueueCopy(std::byte* destination, const std::byte* source,
   queued_.store(fixups_.size(), std::memory_order_release);
 }
 
+void PagePool::DropFixups(const std::byte* begin, const std::byte* end) {
+  if (queued_.load(std::memory_order_acquire) == 0)
+    return;
+  // Not while a SettleRemaps() runs the work it took.
+  const std::lock_guard settle_lock(settle_mutex_);
+  const std::lock_guard lock(fixup_mutex_);
+  std::erase_if(fixups_, [&](const Fixup& fixup) {
+    return fixup.destination < end && fixup.destination + fixup.bytes > begin;
+  });
+  queued_.store(fixups_.size(), std::memory_order_release);
+}
+
 void PagePool::QueueClear(std::byte* destination, std::size_t bytes) {
   const std::lock_guard lock(fixup_mutex_);
   fixups_.push_back({destination, nullptr, bytes, nullptr});
@@ -414,14 +425,27 @@ bool PagePool::SettleRemaps() {
     queued_.store(0, std::memory_order_release);
     aliases = scratch_used_;
   }
-  if (RemapBarrier::Pending() || !work.empty())
-    RemapBarrier::Settle();
   bool ok = true;
+  if (RemapBarrier::Pending() || !work.empty())
+    ok = RemapBarrier::Settle();
+  if (!ok) {
+    // The device may still reach the old pages: nothing runs through them.
+    // Other threads' regions queued some of this work, and their own call
+    // must still find it, so it waits, with the aliases its copies read, for
+    // the next barrier that succeeds. A region drops what targets the pages
+    // it unmaps meanwhile (DropFixups()).
+    const std::lock_guard lock(fixup_mutex_);
+    work.insert(work.end(), std::make_move_iterator(fixups_.begin()),
+                std::make_move_iterator(fixups_.end()));
+    fixups_ = std::move(work);
+    queued_.store(fixups_.size(), std::memory_order_release);
+    return false;
+  }
   // The copies read aliases this thread unmaps right after: other threads'
   // device work stays held back until both are done.
   if (!work.empty() || aliases != 0)
     RemapBarrier::Hold();
-  if (!work.empty()) {
+  if (ok && !work.empty()) {
     const hipStream_t stream = ZeroStream();
     ok = stream != nullptr;
     for (const auto& fixup : work) {

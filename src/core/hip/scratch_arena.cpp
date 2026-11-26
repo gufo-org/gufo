@@ -166,8 +166,12 @@ bool ScratchArena::MapTransient(std::string* error) {
   // the device goes on reaching those, which the driver has freed, until it
   // has been idle (RemapBarrier): wait for that before the pass uses the
   // rows. About 0.5 ms, once per wide pass.
-  if (!transient_runs_.empty() && !RemapBarrier::Clean(released_at_))
-    RemapBarrier::Settle();
+  if (!transient_runs_.empty() && !RemapBarrier::Clean(released_at_) &&
+      !RemapBarrier::Settle()) {
+    SetError(error, "scratch pages not settled: the remap barrier failed");
+    ReleaseTransient();
+    return false;
+  }
   return true;
 }
 

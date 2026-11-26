@@ -11,18 +11,21 @@
 #include <string>
 #include <vector>
 
+#include "src/core/hip/remap_barrier_device.hpp"
 #include "src/core/hip/state_memory.hpp"
 #include "src/core/hip/state_page_pool.hpp"
 #include "src/core/hip/state_region.hpp"
 #include "src/core/hip/state_shared_page.hpp"
 #include "src/mem/ledger.hpp"
 #include "src/mem/lendable.hpp"
+#include "src/mem/remap_barrier.hpp"
 
 namespace {
 
 using gufo::mem::kPageBytes;
 using gufo::mem::PagePool;
 using gufo::mem::Region;
+using gufo::mem::RemapBarrier;
 using gufo::mem::StateLedger;
 
 void Check(hipError_t status, const char* what) {
@@ -224,6 +227,92 @@ void SharedAccount() {
     ledger.SetPromiseCap(0);
   }
   assert(ledger.ChargedBytes() == charged_before);
+}
+
+// A remap barrier that cannot flush the device's translations fails what
+// needed it: growing a region over addresses that lost their pages, and
+// creating one where another gave its addresses back. Nothing of the failed
+// growth stays mapped, so the next call maps and settles it again.
+void FailedBarrier() {
+  auto& ledger = StateLedger::Process();
+  const auto reserved_before = ledger.Totals().reserved_bytes;
+  std::string error;
+  const std::size_t row_bytes = 4096, rows = 4 * kPageBytes / row_bytes;
+  const std::size_t words = row_bytes / 4;
+  auto region = Region::Create({.row_bytes = row_bytes, .rows = rows}, &error);
+  assert(region && region->Ensure(rows, &error));
+  FillRows<<<dim3(64, 1), 256>>>(static_cast<std::uint32_t*>(region->data()),
+                                 rows * words, words, rows, 21);
+  Check(hipDeviceSynchronize(), "fill");
+  // A region gives its addresses back, and the upper half of this one its
+  // pages: both are dirty, with no barrier since.
+  {
+    auto gone = Region::Create({.row_bytes = row_bytes, .rows = 16}, &error);
+  }
+  region->TrimTo(rows / 2);
+  assert(region->mapped_bytes() == 2 * kPageBytes);
+  RemapBarrier::SetTranslationFlush(+[]() noexcept { return false; });
+  const auto before = RemapBarrier::Stats();
+  assert(!region->Ensure(rows, &error));
+  assert(error.find("remap barrier") != std::string::npos);
+  assert(region->backed_rows() == rows / 2);
+  assert(region->mapped_bytes() == 2 * kPageBytes);
+  // The failed region leaves the ledger as it was.
+  const auto reserved = ledger.Totals().reserved_bytes;
+  assert(!Region::Create({.row_bytes = row_bytes, .rows = 16}, &error));
+  assert(error.find("remap barrier") != std::string::npos);
+  assert(ledger.Totals().reserved_bytes == reserved);
+  assert(RemapBarrier::Stats().unflushed >= before.unflushed + 2);
+  // With the flush back, both work; the new rows are zero, the kept ones the
+  // region's own.
+  gufo::mem::InstallRemapBarrierDevice();
+  assert(region->Ensure(rows, &error));
+  assert(WordsAre(
+      static_cast<std::uint8_t*>(region->data()) + rows / 2 * row_bytes,
+      rows / 2 * words, 0));
+  assert(RowsMatch(*region, rows / 2, 21));
+  assert(Region::Create({.row_bytes = row_bytes, .rows = 16}, &error));
+  region.reset();
+  assert(ledger.Totals().reserved_bytes == reserved_before);
+}
+
+// The copies one region queued survive a failed barrier in another
+// region's SettleRemaps(): the pool serves every region of the device, and
+// the next barrier that succeeds runs them.
+void SharedCopiesSurviveFailedBarrier() {
+  auto park = gufo::mem::PagePark::ForDevice(0);
+  if (!park)
+    return;
+  const std::size_t row_bytes = 1024, rows_per_page = kPageBytes / row_bytes;
+  const std::size_t rows = 3 * rows_per_page;
+  const std::size_t page_words = kPageBytes / 4;
+  std::string error;
+  auto a = Region::Create({.row_bytes = row_bytes, .rows = rows}, &error);
+  auto b = Region::Create({.row_bytes = row_bytes, .rows = rows}, &error);
+  assert(a && b && a->Ensure(rows, &error));
+  FillRows<<<dim3(64, 1), 256>>>(static_cast<std::uint32_t*>(a->data()), 0,
+                                 row_bytes / 4, rows, 0xbbu);
+  Check(hipDeviceSynchronize(), "fill a");
+  // b maps a's pages, as a restore does.
+  std::vector<std::shared_ptr<gufo::mem::ParkedPage>> parked;
+  std::vector<std::shared_ptr<gufo::mem::SharedPage>> plan(3);
+  for (std::size_t p = 0; p < 3; ++p) {
+    parked.push_back(park->Park(a->Share(p, (p + 1) * kPageBytes)));
+    plan[p] = parked.back()->page();
+  }
+  (void)b->Restore(plan, rows);
+  assert(b->SettleRemaps(&error) && b->shared_pages() == 3);
+  // b rewinds into page 1: it queues a copy of the page, whose first rows
+  // it keeps. a's call meets a failing flush and runs nothing.
+  const std::size_t rewind = rows_per_page + 100;
+  assert(b->PrepareWrite(rewind, 2 * rows_per_page, rewind, &error));
+  RemapBarrier::SetTranslationFlush(+[]() noexcept { return false; });
+  assert(!a->SettleRemaps(&error));
+  gufo::mem::InstallRemapBarrierDevice();
+  // b's own call still finds its copy.
+  assert(b->SettleRemaps(&error));
+  auto* b_page1 = static_cast<std::uint8_t*>(b->data()) + kPageBytes;
+  assert(WordsMatch(b_page1, 100 * row_bytes / 4, 0xbbu, page_words));
 }
 
 // The pool thread maps ahead; a writer then finds its rows backed.
@@ -638,6 +727,8 @@ int main() {
   }
   Accounting();
   SharedAccount();
+  FailedBarrier();
+  SharedCopiesSurviveFailedBarrier();
   MapAhead();
   GraphAcrossGrowth();
   SharedPages();

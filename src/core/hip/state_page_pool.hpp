@@ -159,12 +159,16 @@ public:
                  std::shared_ptr<void> keep);
   /// After the barrier: clear `bytes` at `destination`.
   void QueueClear(std::byte* destination, std::size_t bytes);
+  /// Forgets the queued copies and clears into [begin, end): a region calls
+  /// it for the pages it unmaps.
+  void DropFixups(const std::byte* begin, const std::byte* end);
   /// Runs the barrier when a remap waits for one (RemapBarrier::Pending())
-  /// or work is queued, then the queued work, and waits for it. False when a
-  /// copy or a clear failed. Call it after a batch of Region::PrepareWrite()
-  /// or Region::Restore() calls and before the device uses those rows, on
-  /// the thread that runs the model, between its launches. Without remaps
-  /// it costs two atomic reads.
+  /// or work is queued, then the queued work, and waits for it. False when
+  /// a copy or a clear failed, or the barrier did: then no queued work
+  /// runs, and it waits for the next call. Call it after a batch of
+  /// Region::PrepareWrite() or Region::Restore() calls and before the device
+  /// uses those rows, on the thread that runs the model, between its
+  /// launches. Without remaps it costs two atomic reads.
   [[nodiscard]] bool SettleRemaps();
   static constexpr std::size_t kScratchPages = 64;
 

@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "src/core/hip/managed_alloc.hpp"
+#include "src/core/hip/remap_barrier_device.hpp"
 #include "src/core/logging/logging.hpp"
 #include "src/core/platform/fs.hpp"
 #include "src/core/platform/mapped_file.hpp"
@@ -132,12 +133,13 @@ void UnmapPages(uint8_t* at, const hipMemGenericAllocationHandle_t* pages,
 }
 
 /* Maps `bytes` (a multiple of kPageBytes) of new device pages at the end of
- * `range`, reserving the range first; false, with nothing held, when any
- * step fails. Pages mapped where the range lost pages before are reached
- * only after RemapBarrier::Settle, which this runs when needed: call it on
- * the thread that runs the model, between its launches. */
-bool MapClassPages(int device, ClassRange& range, uint64_t bytes,
-                   Chunk& chunk) {
+ * `range`, reserving the range first; nothing stays held unless it returns
+ * kMapped. Pages mapped where the range lost pages before are reached only
+ * after RemapBarrier::Settle, which this runs when needed (kUnsettled when it
+ * fails): call it on the thread that runs the model, between its launches. */
+enum class MapResult { kMapped, kRefused, kUnsettled };
+MapResult MapClassPages(int device, ClassRange& range, uint64_t bytes,
+                        Chunk& chunk) {
   const hipMemAllocationProp prop = DeviceProp(device);
   if (!range.base) {
     const auto host = platform::QueryHostMemory();
@@ -148,13 +150,13 @@ bool MapClassPages(int device, ClassRange& range, uint64_t bytes,
     if (!reserved || hipMemAddressReserve(&base, reserved, kPageBytes, nullptr,
                                           0) != hipSuccess) {
       (void)hipGetLastError();
-      return false;
+      return MapResult::kRefused;
     }
     range.base = static_cast<uint8_t*>(base);
     range.reserved = reserved;
   }
   if (range.mapped + bytes > range.reserved)
-    return false;
+    return MapResult::kRefused;
   uint8_t* const at = range.base + range.mapped;
   std::vector<hipMemGenericAllocationHandle_t> pages;
   for (uint64_t offset = 0; offset < bytes; offset += kPageBytes) {
@@ -173,19 +175,23 @@ bool MapClassPages(int device, ClassRange& range, uint64_t bytes,
   if (pages.size() * kPageBytes != bytes ||
       hipMemSetAccess(at, bytes, &access, 1) != hipSuccess) {
     UnmapPages(at, pages.data(), pages.size());
-    return false;
+    return MapResult::kRefused;
+  }
+  // Until the device has been idle it reaches the pages these addresses
+  // had before (RemapBarrier): wait for that before any table points here.
+  if (range.mapped < range.high_water &&
+      !mem::RemapBarrier::Clean(range.released_at) &&
+      !mem::RemapBarrier::Settle()) {
+    UnmapPages(at, pages.data(), pages.size());
+    range.released_at = mem::RemapBarrier::Stamp();
+    return MapResult::kUnsettled;
   }
   chunk.base = at;
   chunk.bytes = bytes;
   chunk.pages = std::move(pages);
-  // Until the device has been idle it reaches the pages these addresses
-  // had before (RemapBarrier): wait for that before any table points here.
-  if (range.mapped < range.high_water &&
-      !mem::RemapBarrier::Clean(range.released_at))
-    mem::RemapBarrier::Settle();
   range.mapped += bytes;
   range.high_water = std::max(range.high_water, range.mapped);
-  return true;
+  return MapResult::kMapped;
 }
 
 /* A routing trace (Policy::trace_path) starts with kTraceMagic and the
@@ -877,17 +883,20 @@ struct Store::Impl {
     for (platform::PlatformFile file : owned_files)
       platform::CloseFile(file);
     (void)hipDeviceSynchronize();
-    const bool had_pages =
-        std::any_of(chunks.begin(), chunks.end(),
-                    [](const Chunk& chunk) { return !chunk.pages.empty(); });
     while (!chunks.empty())
       free_last_chunk();
     // The next owner of these addresses may map them at once: leave them
-    // clean (RemapBarrier). The device is already idle.
-    if (had_pages)
-      mem::RemapBarrier::Settle();
+    // clean (RemapBarrier), whether they lost their pages just now or in an
+    // earlier shrink. The device is already idle. Where the barrier fails
+    // the ranges stay reserved for the process's life, so nobody maps there:
+    // address space, not memory.
+    const bool dirty =
+        std::any_of(ranges.begin(), ranges.end(), [](const ClassRange& range) {
+          return range.base && !mem::RemapBarrier::Clean(range.released_at);
+        });
+    const bool clean = !dirty || mem::RemapBarrier::Settle();
     for (ClassRange& range : ranges)
-      if (range.base)
+      if (range.base && clean)
         (void)hipMemAddressFree(range.base, range.reserved);
     for (auto& set : stage)
       for (void* p : set)
@@ -995,7 +1004,17 @@ struct Store::Impl {
           end > range.mapped
               ? (end - range.mapped + kPageBytes - 1) / kPageBytes * kPageBytes
               : kPageBytes;
-      if (!MapClassPages(device, range, bytes, chunk)) {
+      const MapResult mapped = MapClassPages(device, range, bytes, chunk);
+      if (mapped == MapResult::kUnsettled) {
+        // Not the heap: a later growth tries again.
+        gufo::server::Logger::LogFormatted(
+            gufo::server::LogLevel::kWarn, policy.log_tag.c_str(),
+            "expert cache pages not settled at %.2f GiB: the remap barrier "
+            "failed",
+            static_cast<double>(stats.cache_bytes) / kGiB);
+        return false;
+      }
+      if (mapped != MapResult::kMapped) {
         gufo::server::Logger::LogFormatted(
             gufo::server::LogLevel::kWarn, policy.log_tag.c_str(),
             "the device heap refused expert cache pages at %.2f GiB",
@@ -1401,10 +1420,7 @@ std::unique_ptr<Store> Store::Create(const Layout& layout,
   // A cache that lost pages maps new ones at the same addresses, which must
   // wait for the device's work (RemapBarrier), as Gufo's page pool does.
   if (store->device_pages)
-    mem::RemapBarrier::SetDeviceDrain(+[]() noexcept {
-      (void)hipDeviceSynchronize();
-      (void)hipGetLastError();
-    });
+    mem::InstallRemapBarrierDevice();
   try {
     store->readers = std::make_unique<ReadPool>(store->read_buffers, device);
   } catch (const std::exception&) {

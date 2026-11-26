@@ -242,8 +242,8 @@ eight threads mapped no faster than one).
 `hipMemUnmap` followed by `hipMemMap` with another page returns at once, but
 the device keeps the translation it cached for an address it has used.
 Kernels, runtime copies and copy-engine copies through that address go on
-reading and writing the **old** page, with no error, until the process's
-device work has been idle for a moment. Measured on gfx1151 in November 2026
+reading and writing the **old** page, with no error, until the device has
+been idle for a moment. Measured on gfx1151 in November 2026
 (ROCm 10.1, Linux 7.3.3, `amdgpu` with the MES scheduler; probes and logs in
 [state-memory-shared-pages](state-memory-shared-pages.md)):
 
@@ -256,14 +256,41 @@ device work has been idle for a moment. Measured on gfx1151 in November 2026
 
 A second unmap, an access change, `hipDeviceSynchronize`, a busy kernel, or
 freeing and reserving the address change nothing. An idle moment between the
-last use and the unmap works as well as one after the remap. An address the
-device never used since its last idle moment can be mapped and used at once.
+last use and the unmap works as well as one after the remap.
+
+The cause is the kernel driver. Where the GPU sees all of its memory, as on
+Strix Halo, `amdgpu` updates compute page tables with the CPU and, before
+Linux commit `566ed98e48be` (7.4-rc3), invalidates no TLB after an unmap. So
+the idle moment helps only while no other process uses the GPU. Freeing or
+allocating a 4 MiB block goes through the driver and flushes the process's
+translations, quiet or beside a busy process. An address that never had a
+mapping can be mapped and used at once. The measurements are in
+[Another process keeps the GPU busy](state-memory-shared-pages.md#another-process-keeps-the-gpu-busy).
 
 So an address that loses a mapping is **dirty** until the device has been
-idle, and memory mapped at a dirty address needs the **remap barrier**
-(`mem::RemapBarrier::Settle`, `src/mem/remap_barrier.hpp`) before the device
-uses it: wait for the device's work, keep the device idle for 400 us. Every
+idle and its translations are flushed, and memory mapped at a dirty address
+needs the **remap barrier** (`mem::RemapBarrier::Settle`,
+`src/mem/remap_barrier.hpp`) before the device uses it: wait for the device's
+work, keep the device idle for 400 us, then flush the translations
+(`mem::FlushTranslations`, `src/core/hip/remap_barrier_device.hpp`: it frees
+the 4 MiB block it allocated last time and allocates the next). Every
 address unmapped before the barrier began is clean afterwards.
+
+When the flush fails three times, 1 ms apart, the barrier fails: nothing it
+covers becomes clean, and the next barrier tries again. What needed it fails
+too and leaves nothing the device could use:
+
+- `Region::Ensure` gives back the pages it mapped at dirty addresses and the
+  recycled pages it could not clear.
+- `Region::SettleRemaps` runs none of the queued copies and clears. They wait
+  for the next barrier that succeeds, since other regions' threads queue
+  some of them; a region drops those into pages it unmaps.
+- Creating a region, mapping pass scratch and growing the expert stream
+  store fail; a cache capture fails without evicting anything. At teardown
+  the expert stream store keeps its address ranges reserved.
+
+The model's write or restore then fails its request, and the scheduler drops
+that session's state.
 
 - Regions, the park and the cache's lendable range stamp each address when
   it loses a mapping (`RemapBarrier::Stamp`) and ask `RemapBarrier::Clean`
@@ -285,12 +312,14 @@ address unmapped before the barrier began is clean afterwards.
   `Leave`. A barrier waits for open brackets and holds new ones back, for at
   most 25 ms. Device work it cannot see (another model's thread in the same
   process) is detected only while it runs; `event=remap_barrier` at shutdown
-  counts the barriers that gave up as `unquiet`.
+  counts the barriers that gave up as `unquiet`, and those that failed on
+  their flush as `unflushed`.
 - The hold starts before the unmaps (`RemapBarrier::Hold`): an unmap waits
   for device work in flight, and a disk write's copies beside a request that
   replaced one page per buffer stalled that request for 290 ms.
 
-A barrier costs about 0.4 ms with every decoder paused. One runs per restore
+A barrier costs about 0.4 ms with every decoder paused, plus about 0.2 ms
+for the flush. One runs per restore
 that maps or drops pages, per write that replaces shared pages (the first
 pass of a request that takes over a session, then once per page the session
 crosses), per wide prefill pass and per `Ensure` over dirty addresses. The

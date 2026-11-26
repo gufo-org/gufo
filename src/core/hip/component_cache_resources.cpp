@@ -56,12 +56,14 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     std::function<void(std::string_view)> info;
     ~Backing() {
       // What the remap barrier cost this server; `unquiet` counts barriers
-      // that gave up waiting for a quiet device.
+      // that gave up waiting for a quiet device, `unflushed` those whose
+      // translation flush failed.
       const auto barrier = mem::RemapBarrier::Stats();
       if (info && barrier.settles != 0)
         info("schema=component-cache-v1 event=remap_barrier settles=" +
              std::to_string(barrier.settles) +
              " unquiet=" + std::to_string(barrier.unquiet) +
+             " unflushed=" + std::to_string(barrier.unflushed) +
              " total_us=" + std::to_string(barrier.micros));
     }
     // Bytes of payloads that share session pages, and the payload bytes the
@@ -448,8 +450,9 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
     auto block = backing->pool->TryAcquire(category, request.bytes);
     // Backing committed where a page was given back to the host reaches the
     // device only after the remap barrier; two atomic reads otherwise.
-    if (backing->shared)
-      (void)backing->shared->SettleRemaps();
+    // Without it the block cannot be used. That is no lack of room, so the
+    // capture fails without evicting anything.
+    const bool settled = !backing->shared || backing->shared->SettleRemaps();
     if (backing->pool->PageCommitAllocations() != segments)
       hooks.info(
           "schema=component-cache-v1 event=backing_grown committed_bytes=" +
@@ -463,6 +466,10 @@ CreateHipComponentCacheResources(std::unique_ptr<cache::Adapter> adapter,
                              .count()));
     if (!block)
       throw cache::ResourceExhausted();
+    if (!settled)
+      throw std::runtime_error(
+          "component backing not settled: the remap "
+          "barrier failed");
     // Do not start registration between a capture's allocations and copies.
     // Each prefill chunk prepares its own reserve before GPU work.
     auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));

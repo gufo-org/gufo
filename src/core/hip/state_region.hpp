@@ -120,8 +120,9 @@ public:
   /// After PrepareWrite() or Restore() remapped pages: lets the device reach
   /// them (mem::RemapBarrier, about 0.5 ms with the device idle), then fills
   /// or clears the replaced pages. One call serves every region of the
-  /// device; without remaps it costs two atomic reads. False when a page
-  /// copy failed. Same thread rule as PrepareWrite().
+  /// device; without remaps it costs two atomic reads. False when the
+  /// barrier or a page copy failed: then the rows of the write or restore
+  /// are not to be used. Same thread rule as PrepareWrite().
   [[nodiscard]] bool SettleRemaps(std::string* error = nullptr);
   /// Pages this region maps that another user shares.
   [[nodiscard]] std::size_t shared_pages() const;
