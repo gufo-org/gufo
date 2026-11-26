@@ -17,6 +17,7 @@ changes are in Git history; current speeds are in [benchmarks](BENCHMARKS.md).
 | Prefill attention with register-prefetched K/V tiles | spills; pp32768 −5% |
 | 32-query attention blocks | pp32768 −11% |
 | 128-query blocks on window visits too | equal within noise |
+| Accumulator rescale skipped in window and near attention steps too, as in the far tiles | equal within noise |
 | Message mixes as their own side-stream launch | pp512 −1.5%; folded into the message mix from 1,024-token ubatches |
 | Router and controller gates with smaller token tiles, or blocks reordered so jobs sharing x run together (Nov 25) | equal or up to 2.5× slower: the gates are LDS-bandwidth bound, not DRAM or occupancy bound |
 | Gate GEMMs with wave-uniform scalar weights, one token per lane (Nov 25) | 2 to 10× slower |

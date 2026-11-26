@@ -3961,7 +3961,84 @@ __global__ __launch_bounds__(NTT * 96) void attn_prefill_db(PfArgs a) {
   __syncthreads();
   if (ntiles > 1)
     gload(1);
-  for (int tile = 0; tile < ntiles; tile++) {
+  int tile = 0;
+  // Far tiles (global layers): every key is at least WIN before the block's
+  // first query, so no row masks a key or adds a bias, and the same steps run
+  // without that work. The accumulators are rescaled only in the steps where
+  // some row of the wave meets a new maximum: every other step's factor is
+  // exp(0) = 1 (l keeps the general step's expression, which the compiler
+  // would otherwise sum in another order).
+  const int nfar =
+      a.swa ? 0 : min(ntiles, max(0, (pfirst - WIN + 1 - kfirst) / PF_KT));
+  for (; tile < nfar; tile++) {
+    const int b = tile & 1;
+    __half(*sK)[PF_KS] = sK2[b];
+    __half(*sVt)[PF_VS] = sVt2[b];
+#pragma unroll
+    for (int kt = 0; kt < PF_KT / 16; kt++) {
+      v8f c = {0, 0, 0, 0, 0, 0, 0, 0};
+#pragma unroll
+      for (int s = 0; s < 8; s++)
+        c = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+            cat16(*(const uint4*)&sK[kt * 16 + q16][s * 16],
+                  *(const uint4*)&sK[kt * 16 + q16][s * 16 + 8]),
+            bq[s], c);
+      float mx = c[0];
+#pragma unroll
+      for (int i = 1; i < 8; i++)
+        mx = fmaxf(mx, c[i]);
+      mx = fmaxf(mx, xor16f(mx));
+      const float mn = fmaxf(m, mx);
+      const bool grew = __any(rowvalid && mn != m);
+      float p[8], ps = 0.f;
+#pragma unroll
+      for (int i = 0; i < 8; i++) {
+        p[i] = __expf(c[i] - mn);
+        ps += p[i];
+      }
+      const float alpha = __expf(m - mn);
+      l = l * alpha + ps;
+      m = mn;
+      if (grew) {
+#pragma unroll
+        for (int dt = 0; dt < 8; dt++)
+          acc[dt] *= alpha;
+      }
+      uint32_t mine[4], theirs[4];
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        v2h pr;
+        pr[0] = (h16)p[2 * i];
+        pr[1] = (h16)p[2 * i + 1];
+        mine[i] = as_u32(pr);
+        theirs[i] = xor16u(mine[i]);
+      }
+      v16h pf;
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        const v2h lo =
+            as_v2h(__builtin_amdgcn_perm(theirs[i], mine[i], sel_lo));
+        const v2h hi =
+            as_v2h(__builtin_amdgcn_perm(theirs[i], mine[i], sel_hi));
+        pf[4 * i + 0] = lo[0];
+        pf[4 * i + 1] = lo[1];
+        pf[4 * i + 2] = hi[0];
+        pf[4 * i + 3] = hi[1];
+      }
+#pragma unroll
+      for (int dt = 0; dt < 8; dt++) {
+        const __half* vp = &sVt[dt * 16 + q16][kt * 16];
+        acc[dt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+            cat16(*(const uint4*)vp, *(const uint4*)(vp + 8)), pf, acc[dt]);
+      }
+    }
+    if (tile + 1 < ntiles)
+      store(tile + 1, b ^ 1);
+    __syncthreads();
+    if (tile + 2 < ntiles)
+      gload(tile + 2);
+  }
+  for (; tile < ntiles; tile++) {
     const int b = tile & 1;
     const int kbase = kfirst + tile * PF_KT;
     const int d0 = pfirst - (kbase + PF_KT - 1);
