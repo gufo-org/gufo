@@ -302,7 +302,7 @@ struct Case {
   ChatApi api;
   Setting setting;
   std::string body;
-  const char* expected;
+  std::string expected;
 };
 
 Setting ThinkingServer() {
@@ -505,10 +505,13 @@ const std::vector<Case>& ChatCases() {
        ChatApi::kChat,
        {},
        User(R"([{"type":"image_url","image_url":{"url":"oom"}}])") + "}",
-       "rejected 400 Bad Request "
-       "{\"error\":{\"message\":\"std::bad_alloc\",\"type\":\"invalid_request_"
-       "error\",\"code\":\"invalid_messages\"}}\n"
-       "log: model:m image:oom"},
+       // The message is the standard library's what(), which differs
+       // between libstdc++ and the MSVC STL.
+       std::string("rejected 400 Bad Request {\"error\":{\"message\":\"") +
+           std::bad_alloc().what() +
+           "\",\"type\":\"invalid_request_error\",\"code\":\"invalid_"
+           "messages\"}}\n"
+           "log: model:m image:oom"},
       {"chat: text-only model", ChatApi::kChat, ThinkingServer(),
        User(R"([{"type":"image_url","image_url":{"url":"u"}}])") + "}",
        "rejected 400 Bad Request {\"error\":{\"message\":\"model does not "
