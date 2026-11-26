@@ -599,9 +599,7 @@ jobs:
           foreach ($dir in 'rocblas', 'hipblaslt') {
             if (Test-Path "$build\$dir") { Copy-Item "$build\$dir" $dist -Recurse }
           }
-          # libjpeg-turbo is installed only for jpeg_decode_test; gufo.exe
-          # decodes JPEG in Rust and the bundle does not ship it.
-          Get-ChildItem "$build\vcpkg_installed\x64-windows-release\bin\*.dll" -Exclude 'jpeg*.dll', 'turbojpeg*.dll' |
+          Get-ChildItem "$build\vcpkg_installed\x64-windows-release\bin\*.dll" |
             Copy-Item -Destination $dist -Force
           # cmake --install put the NPU designs in bin\npu, now npu\ beside gufo.exe.
           if (Test-Path "$build/npu-artifacts.txt") {

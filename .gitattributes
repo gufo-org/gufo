@@ -14,5 +14,6 @@ tests/fixtures/multipart/*.form binary
 # Numeric and image model fixtures are binary payloads.
 *.f32 binary
 *.png binary
+*.jpg binary
 # Model source manifests are hashed against a compiled SHA-256 at runtime.
 *.source-manifest.json text eol=lf

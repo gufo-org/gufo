@@ -1004,13 +1004,10 @@ endfunction()
   add_test(NAME png_test COMMAND png_test)
   set_tests_properties(png_test PROPERTIES LABELS "cpu;image;correctness")
 
-  # libjpeg-turbo writes the cases and is the frozen reference decoder; the
-  # shipped binary decodes JPEG in Rust.
-  find_package(JPEG REQUIRED)
-  add_executable(jpeg_decode_test
-    tests/core/jpeg_decode_test.cpp
-    tests/core/jpeg_reference.cpp)
-  target_link_libraries(jpeg_decode_test PRIVATE gufo_core JPEG::JPEG)
+  add_executable(jpeg_decode_test tests/core/jpeg_decode_test.cpp)
+  target_link_libraries(jpeg_decode_test PRIVATE gufo_core)
+  target_compile_definitions(jpeg_decode_test PRIVATE
+    GUFO_JPEG_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/jpeg")
   add_test(NAME jpeg_decode_test COMMAND jpeg_decode_test)
   set_tests_properties(jpeg_decode_test PROPERTIES LABELS "cpu;image;correctness")
 

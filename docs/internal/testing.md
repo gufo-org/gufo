@@ -79,18 +79,18 @@ stray IDAT after text are rejected. APNG metadata is ignored while decoding
 the default image. The test writes its own fixtures with stored deflate
 blocks; no frozen decoder remains.
 
-`jpeg_decode_test` compares the Rust JPEG decoder with the libjpeg-turbo path
-it replaced, frozen in `tests/core/jpeg_reference.cpp`. libjpeg-turbo writes
-every case: gray, YCbCr from 4:4:4 to 4:1:0, RGB, CMYK and YCCK, baseline,
-progressive, optimized, restart intervals and qualities from 1 to 100, at sizes
-that end inside an MCU, plus EXIF orientations, metadata, framing errors,
-truncations and bit flips. Pixels must stay within 6 of the reference and 1.0
-on average; the border of an image with subsampled chroma may differ by 40.
-Arithmetic coding, lossless JPEG, DNL markers, scans that end early and an AC
-run past coefficient 63 are listed deviations, each with the outcome the Rust
-decoder must return. A flipped entropy-coded or Huffman table bit that the
-reference rejects may decode. Only the test links libjpeg-turbo.
-`jpeg_decode_test --corpus DIR... [--repeat N]` compares and times real photos.
+`jpeg_decode_test` decodes the JPEG fixtures in `tests/fixtures/jpeg`, which
+libjpeg-turbo wrote once: gray, YCbCr from 4:4:4 to 4:1:0, RGB, CMYK and YCCK,
+baseline, progressive, optimized, restart intervals and qualities 1 and 100,
+at sizes that end inside an MCU. Each must decode to its recorded size and
+pixel digest, and stay within 6 of libjpeg-turbo's pixels at three recorded
+points; the border of an image with subsampled chroma may differ by 40. From
+the fixtures the test derives metadata segments and EXIF orientations, which
+must give the plain fixture's pixels, reoriented, and framing errors,
+truncations and bit flips, each with its recorded outcome. Arithmetic coding, lossless JPEG, DNL markers,
+scans that end early and an AC run past coefficient 63 are listed differences
+from libjpeg-turbo, each with the outcome the Rust decoder must return.
+`jpeg_decode_test --corpus DIR... [--repeat N]` decodes and times real photos.
 
 `wav_decode_test` checks PCM16 values, the strict caller's status mapping,
 truncation and limits, and propagation of C++ callback exceptions. Rust WAV
