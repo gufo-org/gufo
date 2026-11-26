@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <memory>
@@ -15,7 +16,9 @@
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
+#include "src/cli/serve/audio_buffer.hpp"
 #include "src/cli/serve/multipart.hpp"
 #include "src/core/json.hpp"
 #include "src/core/utf8.hpp"
@@ -185,7 +188,28 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
                  "invalid_max_tokens");
   }
 
-  const auto* wav_data = reinterpret_cast<const std::byte*>(file->body.data());
+  // Every provider gets 16 kHz mono PCM, whatever the client uploaded:
+  // Open WebUI sends MP3, browsers record WebM/Opus (#1418).
+  const auto decode_begin = std::chrono::steady_clock::now();
+  std::vector<float> pcm;
+  {
+    AudioBuffer audio;
+    std::string audio_error;
+    if (!DecodeTranscriptionAudio(
+            std::as_bytes(std::span(file->body.data(), file->body.size())),
+            request.is_cancelled, &audio, &audio_error)) {
+      if (request.is_cancelled && request.is_cancelled()) {
+        return Error(499, "Client Closed Request", "transcription cancelled",
+                     "cancelled");
+      }
+      return Error(400, "Bad Request", std::move(audio_error),
+                   "invalid_audio_input");
+    }
+    pcm = ResampleMono16k(audio);
+  }
+  const double decode_ms = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - decode_begin)
+                               .count();
   if (stream) {
     HttpResponse response;
     response.headers = {{"Content-Type", "text/event-stream"},
@@ -194,7 +218,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
                         {"X-Gufo-Schema", std::string(kAudioAsrApiSchema)}};
     response.stream_log = std::make_shared<HttpResponse::StreamLog>();
     response.streaming_body =
-        [&service, wav = file->body,
+        [&service, pcm = std::move(pcm),
          context = prompt == nullptr ? std::string{} : prompt->body,
          language = language == nullptr || language->body.empty()
                         ? std::optional<std::string>{}
@@ -225,11 +249,10 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
             return send(std::move(event));
           };
           ext::TranscriptionRequest input{
-              .wav = {reinterpret_cast<const std::byte*>(wav.data()),
-                      wav.size()},
               .context = context,
               .language = language,
               .max_new_tokens = maximum_tokens,
+              .pcm16k = pcm,
               .on_text = progress,
           };
           ext::TranscriptionResult result;
@@ -267,12 +290,12 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
   std::string error;
   if (!service.Transcribe(
           ext::TranscriptionRequest{
-              .wav = std::span<const std::byte>(wav_data, file->body.size()),
               .context = prompt == nullptr ? std::string{} : prompt->body,
               .language = language == nullptr || language->body.empty()
                               ? std::nullopt
                               : std::optional<std::string>(language->body),
               .max_new_tokens = maximum_tokens,
+              .pcm16k = pcm,
           },
           request.is_cancelled, &result, &error)) {
     if (request.is_cancelled && request.is_cancelled()) {
@@ -285,6 +308,7 @@ HttpResponse Transcribe(const HttpRequest& request, AsrService& service) {
     return Error(500, "Internal Server Error", std::move(error),
                  "transcription_failed");
   }
+  result.timings.decode_audio_ms += decode_ms;
 
   HttpResponse response;
   response.status = 200;

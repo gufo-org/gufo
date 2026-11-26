@@ -1,11 +1,15 @@
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <ranges>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "src/models/qwen3_asr/audio.hpp"
 #include "src/models/qwen3_asr/transcription.hpp"
@@ -38,6 +42,8 @@ public:
            qwen3_asr::TranscriptionResult* result, std::string* error) {
     ++calls;
     wav_bytes = request.wav.size();
+    pcm_samples = request.pcm16k.size();
+    pcm.assign(request.pcm16k.begin(), request.pcm16k.end());
     context = request.context;
     language = request.language;
     maximum_tokens = request.max_new_tokens;
@@ -66,6 +72,8 @@ public:
   bool invalid_audio{false};
   int calls{0};
   std::size_t wav_bytes{0};
+  std::size_t pcm_samples{0};
+  std::vector<float> pcm;
   std::string context;
   std::optional<std::string> language;
   std::size_t maximum_tokens{0};
@@ -85,9 +93,35 @@ AsrService MakeService(FakeRunner* runner) {
   });
 }
 
+// 0.1 s of PCM16 silence at 8 kHz: 1,600 samples once resampled to 16 kHz.
+std::string Wav() {
+  constexpr std::uint32_t kRate = 8000;
+  constexpr std::uint32_t kSamples = 800;
+  std::string wav;
+  const auto put = [&wav](std::uint32_t value, int bytes) {
+    for (int i = 0; i < bytes; ++i)
+      wav += static_cast<char>((value >> (8 * i)) & 0xFFU);
+  };
+  wav += "RIFF";
+  put(36 + 2 * kSamples, 4);
+  wav += "WAVEfmt ";
+  put(16, 4);
+  put(1, 2);
+  put(1, 2);
+  put(kRate, 4);
+  put(2 * kRate, 4);
+  put(2, 2);
+  put(16, 2);
+  wav += "data";
+  put(2 * kSamples, 4);
+  wav.append(2 * kSamples, '\0');
+  return wav;
+}
+
 std::string Multipart(std::string response_format = "json",
                       std::string_view extra_field = {},
-                      std::string_view stream = {}) {
+                      std::string_view stream = {},
+                      std::string_view file = {}) {
   constexpr std::string_view boundary = "gufo-test-boundary";
   std::string body;
   const auto append = [&](std::string_view name, std::string_view value,
@@ -106,7 +140,8 @@ std::string Multipart(std::string response_format = "json",
     body.append(value.data(), value.size());
     body += "\r\n";
   };
-  append("file", "RIFFfake", "sample.wav");
+  const std::string wav = Wav();
+  append("file", file.empty() ? std::string_view(wav) : file, "sample.wav");
   append("model", "qwen3-asr");
   append("language", "en");
   append("prompt", "Names: Gufo.");
@@ -154,8 +189,8 @@ void TestJsonRequest() {
             response.body.find("\"text\":\"A native transcript.\"") !=
                 std::string::npos,
         "valid multipart request returns OpenAI JSON");
-  Check(runner.calls == 1 && runner.wav_bytes == 8U &&
-            runner.context == "Names: Gufo." &&
+  Check(runner.calls == 1 && runner.wav_bytes == 0U &&
+            runner.pcm_samples == 1600U && runner.context == "Names: Gufo." &&
             runner.language == std::optional<std::string>("en") &&
             runner.maximum_tokens == 42U,
         "multipart fields reach the model contract");
@@ -195,6 +230,18 @@ void TestFormatsAndValidation() {
 void TestFailures() {
   FakeRunner runner;
   AsrService service = MakeService(&runner);
+  // Serve decodes the upload, so undecodable audio never reaches a provider.
+  const HttpResponse unreadable =
+      Send(service, Multipart("json", {}, {}, "RIFFfake"));
+  const HttpResponse unreadable_stream =
+      Send(service, Multipart("json", {}, "true", "not audio"));
+  Check(unreadable.status == 400 && unreadable_stream.status == 400 &&
+            unreadable.body.find("\"code\":\"invalid_audio_input\"") !=
+                std::string::npos &&
+            unreadable_stream.body.find("audio must be WAV, FLAC, MP3") !=
+                std::string::npos &&
+            runner.calls == 0,
+        "undecodable uploads are client errors before inference");
   runner.fail = true;
   runner.invalid_audio = true;
   const HttpResponse malformed = Send(service, Multipart());
@@ -279,9 +326,61 @@ void TestStreamingAndChunks() {
   }
 }
 
+std::string ReadFixture(const std::string& path) {
+  std::ifstream input(path, std::ios::binary);
+  Check(input.good(), "missing audio fixture: " + path);
+  return {std::istreambuf_iterator<char>(input), {}};
+}
+
+// Serve decodes uploads for every provider; Qwen3-ASR must see the samples
+// its own decoder and resampler made from the same file, bit for bit.
+void TestServeDecodeMatchesQwen3() {
+  std::string stereo = Wav();
+  // 44.1 kHz stereo PCM16 noise, so that the mono mix and resampler run.
+  std::string noise;
+  std::uint32_t state = 12345;
+  for (int i = 0; i < 2 * 4410; ++i) {
+    state = state * 1664525U + 1013904223U;
+    noise += static_cast<char>(state >> 24);
+    noise += static_cast<char>(state >> 16);
+  }
+  const auto put = [](std::string& wav, std::size_t at, std::uint32_t value) {
+    for (int i = 0; i < 4; ++i)
+      wav[at + i] = static_cast<char>((value >> (8 * i)) & 0xFFU);
+  };
+  stereo.resize(44);
+  stereo += noise;
+  put(stereo, 4, static_cast<std::uint32_t>(36 + noise.size()));
+  stereo[22] = 2;
+  put(stereo, 24, 44100);
+  put(stereo, 28, 44100 * 4);
+  stereo[32] = 4;
+  put(stereo, 40, static_cast<std::uint32_t>(noise.size()));
+  const std::vector<std::pair<std::string, std::string>> inputs = {
+      {"stereo 44.1 kHz WAV", stereo},
+      {"MP3", ReadFixture(std::string(GUFO_QWEN3_ASR_SPEECH_FIXTURES) +
+                          "/clear-english-voice.mp3")},
+      {"Ogg Vorbis", ReadFixture(std::string(GUFO_AUDIO_DECODE_FIXTURES) +
+                                 "/vorbis-first.ogg")},
+  };
+  FakeRunner runner;
+  AsrService service = MakeService(&runner);
+  for (const auto& [name, file] : inputs) {
+    const auto bytes = std::as_bytes(std::span(file.data(), file.size()));
+    qwen3_asr::AudioBuffer qwen;
+    std::string error;
+    Check(qwen3_asr::DecodeWav(bytes, &qwen, &error), name + ": " + error);
+    Check(Send(service, Multipart("json", {}, {}, file)).status == 200,
+          name + ": upload is transcribed");
+    Check(runner.pcm == qwen3_asr::ResampleMono16k(qwen),
+          name + ": serve and Qwen3-ASR decode the same samples");
+  }
+}
+
 }  // namespace
 
 int main() {
+  TestServeDecodeMatchesQwen3();
   TestJsonRequest();
   TestFormatsAndValidation();
   TestFailures();

@@ -11,12 +11,13 @@ gufo-ffi = { path = "../ffi" }
 gufo-resample = { path = "../resample" }
 gufo-wav-decode = { path = "../wav_decode" }
 # The containers and codecs libsndfile decoded for EmbeddingGemma 2, except
-# GSM 6.10 and G.72x, which symphonia does not decode. Ogg Opus packets go to
-# libopus (src/opus.rs).
+# GSM 6.10 and G.72x, which symphonia does not decode, plus WebM (mkv), which
+# browsers record. Ogg and WebM Opus packets go to libopus (src/opus.rs).
 symphonia = { version = "=0.6.1", default-features = false, features = [
   "adpcm",
   "flac",
   "id3v2",
+  "mkv",
   "mp1",
   "mp2",
   "mp3",

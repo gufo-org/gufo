@@ -1,7 +1,7 @@
 // Tests core::DecodeAudio, DownmixMono and Resample on generated audio:
 // libsndfile's float values for each WAV encoding, the strict PCM WAV path,
 // the channel mean, also while decoding, the resampler's response and output
-// length, and the status of each rejection. The Ogg Opus
+// length, and the status of each rejection. The Ogg Opus, WebM
 // and MP3 fixtures were made with FFmpeg 8 (libopus, LAME 3.101) and -fflags
 // +bitexact.
 #include <algorithm>
@@ -64,6 +64,25 @@ const Bytes kOpus =
         "3130300100000014000000656e636f6465723d4c617663206c69626f7075734f"
         "6767530004f804000000000000b1fbc8390200000095000f2e020d0c08836d82"
         "d01cfdea49fe013fc008066ed53019317066b99418");
+
+// kOpus's packets remuxed to WebM as a live stream, with an unknown-size
+// segment and clusters, as browsers' MediaRecorder writes them:
+//   ffmpeg -i opus.ogg -c copy -map_metadata -1 -fflags +bitexact -live 1 \
+//     -f webm opus.webm
+const Bytes kWebm =
+    Hex("1a45dfa39f4286810142f7810142f2810442f381084282847765626d42878104"
+        "428581021853806701ffffffffffffff114d9b749c4dbb8b53ab841549a96653"
+        "ac81a14dbb8b53ab841654ae6b53ac81bbec0100000000000077000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000001549a966952ad7b1830f42404d8084"
+        "4c6176665741844c6176661654ae6be5ae010000000000005cd7810173c58800"
+        "000000000000019c810022b59c83756e648881008686415f4f50555356aa8363"
+        "2ea056bb8404c4b400838102e1919f8101b58840e77000000000006264812063"
+        "a2934f707573486561640101380180bb00000000001f43b675b4e78100a39181"
+        "00008008836d82d01cfdea49fe013fc0a09ca1908100150008066ed530193170"
+        "66b994189b810775a28400cdfe60");
 
 // 1.66 s of a 440 Hz sine at 8 kHz, mono MP3 at 8 kbit/s without a
 // Xing/Info header.
@@ -524,6 +543,24 @@ void TestOpus() {
       [] { (void)Decode(kOpus, core::AudioLimits{}); }, Status::kUnrecognized);
 }
 
+// WebM Opus trims the pre-skip as Ogg Opus does, so the same packets give the
+// same samples. Symphonia does not read the last block's DiscardPadding, so
+// the encoder's end padding stays: 648 of the 1920 decoded samples here.
+// MediaRecorder writes none.
+void TestWebm() {
+  const auto webm = Decode(kWebm);
+  const auto ogg = Decode(kOpus);
+  Check(webm.sample_rate == ogg.sample_rate && webm.channels == ogg.channels &&
+            webm.samples.size() == ogg.samples.size() + 648 &&
+            std::equal(ogg.samples.begin(), ogg.samples.end(),
+                       webm.samples.begin()),
+        "WebM Opus: " + std::to_string(webm.samples.size()) + " samples at " +
+            std::to_string(webm.sample_rate) + " Hz");
+  ExpectStatus(
+      "WebM on the strict path",
+      [] { (void)Decode(kWebm, core::AudioLimits{}); }, Status::kUnrecognized);
+}
+
 // libsndfile returns only the first physical stream of a chained Ogg file.
 // Symphonia signals the next stream with ResetRequired, rather than EOF.
 void TestChainedVorbis() {
@@ -691,6 +728,7 @@ int main() {
     TestResampler();
     TestMp3();
     TestOpus();
+    TestWebm();
     TestChainedVorbis();
     TestRejections();
     TestPcmWavRejections();
