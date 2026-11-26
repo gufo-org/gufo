@@ -21,6 +21,11 @@ const MAX_OUTPUT_TOKENS: usize = 4_096;
 const MAX_PENDING_OUTPUTS: usize = 64;
 const MAX_TRANSCRIPTION_PROMPT_BYTES: usize = 16_384;
 const MAX_NAME_BYTES: usize = 64;
+/// System message items and the session's instructions, together.
+const MAX_SYSTEM_BYTES: usize = 256 << 10;
+const MAX_SYSTEM_ITEMS: usize = 64;
+const MAX_METADATA: usize = 16;
+const MAX_METADATA_VALUE_BYTES: usize = 512;
 const CLIENT_EVENT_LIMITS: Limits = Limits {
     bytes: 16 << 20,
     values: 65_536,
@@ -37,6 +42,12 @@ pub struct Settings {
     pub reasoning: bool,
     /// `audio.output.voice`; empty: the conversation's own voice.
     pub voice: String,
+    /// `response.instructions` of one reply.
+    pub response_instructions: String,
+    /// False with `tool_choice: "none"` (or a reply's `tools: []`).
+    pub call_tools: bool,
+    /// `response.conversation: "none"`: the reply leaves the context.
+    pub out_of_band: bool,
 }
 
 impl Default for Settings {
@@ -48,6 +59,9 @@ impl Default for Settings {
             max_output_tokens: MAX_OUTPUT_TOKENS,
             reasoning: false,
             voice: String::new(),
+            response_instructions: String::new(),
+            call_tools: true,
+            out_of_band: false,
         }
     }
 }
@@ -124,6 +138,19 @@ pub trait Host {
     fn transcribe_turn(&mut self, transcription: &Transcription) -> Result<String, String>;
     /// Removes the latest user turn, which nothing has followed.
     fn delete_user_turn(&mut self) -> Result<(), String>;
+    /// Whether replies honour `response_instructions`, `out_of_band` and
+    /// `call_tools`.
+    fn supports_response_options(&mut self) -> bool;
+}
+
+/// A `role: "system"` message item: its text joins the session's
+/// instructions, in order, until it is deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemItem {
+    id: String,
+    text: String,
+    /// The item before it, for `previous_item_id` after its deletion.
+    before: String,
 }
 
 struct Shared {
@@ -201,8 +228,14 @@ struct State {
     active_response: Option<ActiveResponse>,
     transcription: Option<Transcription>,
     /// The latest item when it is a user message, with the item before it:
-    /// the only item `conversation.item.delete` removes.
+    /// the only user item `conversation.item.delete` removes.
     deletable: Option<(String, String)>,
+    /// `session.instructions` as the client set them.
+    instructions: String,
+    system_items: Vec<SystemItem>,
+    /// System items changed while user audio was open: the host learns the
+    /// instructions once the turn closes.
+    reconfigure: bool,
 }
 
 pub struct Session {
@@ -235,6 +268,9 @@ impl Session {
                 active_response: None,
                 transcription: None,
                 deletable: None,
+                instructions: String::new(),
+                system_items: Vec::new(),
+                reconfigure: false,
             }),
         }
     }
@@ -440,10 +476,20 @@ impl Session {
         }
         state.turn_samples = 0;
         let ev = self.shared.simple_event("input_audio_buffer.cleared", None);
-        if host.send_event(&ev) {
-            Ok(())
-        } else {
-            Err(())
+        if !host.send_event(&ev) {
+            return Err(());
+        }
+        match self.sync_instructions(&mut state, false, host) {
+            Ok(()) => Ok(()),
+            Err(DispatchError::Closed) => Err(()),
+            Err(DispatchError::Protocol(msg)) => {
+                let err = self.shared.error_event(&msg, "", "invalid_request");
+                if host.send_event(&err) {
+                    Ok(())
+                } else {
+                    Err(())
+                }
+            }
         }
     }
 
@@ -460,7 +506,7 @@ impl Session {
             Ok(true) => {
                 if respond && !interrupt_active {
                     let settings = state.settings.clone();
-                    self.begin_response(&mut state, settings);
+                    self.begin_response(&mut state, settings, None);
                     Ok(true)
                 } else {
                     Ok(false)
@@ -698,8 +744,10 @@ impl Session {
             if !send(&self.shared.format_event(item_done)) {
                 return Err(());
             }
-            state.previous_item = active.item.clone();
-            state.last_reply_item = active.item.clone();
+            if !active.settings.out_of_band {
+                state.previous_item = active.item.clone();
+                state.last_reply_item = active.item.clone();
+            }
             output.push(message_val);
         }
 
@@ -792,7 +840,9 @@ impl Session {
             if !send(&self.shared.format_event(done)) {
                 return Err(());
             }
-            state.previous_item = call_item;
+            if !active.settings.out_of_band {
+                state.previous_item = call_item;
+            }
             output.push(entry_val);
         }
 
@@ -832,7 +882,7 @@ impl Session {
                 );
             }
         }
-        if active.item.is_empty() && outcome.calls.is_empty() {
+        if !active.settings.out_of_band && active.item.is_empty() && outcome.calls.is_empty() {
             state.deletable = active.deletable;
         }
         let ev = self.shared.simple_event(
@@ -878,6 +928,7 @@ impl Session {
                 let mut vad: Option<VadSettings> = None;
                 let mut vad_changed = false;
                 let mut transcription = state.transcription.clone();
+                let mut instructions = state.instructions.clone();
                 for (name, value) in session_obj.members() {
                     match name.as_str() {
                         "type" => {
@@ -898,7 +949,7 @@ impl Session {
                                     "instructions must be a string of at most 64 KiB".to_string(),
                                 ));
                             }
-                            settings.instructions = s.to_string();
+                            instructions = s.to_string();
                         }
                         "output_modalities" => {
                             settings.audio_output = parse_audio_modality(value)?;
@@ -920,11 +971,7 @@ impl Session {
                             }
                         }
                         "tool_choice" => {
-                            if value.as_str() != Some("auto") {
-                                return Err(DispatchError::Protocol(
-                                    "tool_choice must be auto".to_string(),
-                                ));
-                            }
+                            settings.call_tools = parse_tool_choice(value)?;
                         }
                         "max_output_tokens" => {
                             settings.max_output_tokens = parse_output_tokens(value)?;
@@ -1001,13 +1048,21 @@ impl Session {
                         "reasoning applies to text output_modalities".to_string(),
                     ));
                 }
+                if !settings.call_tools && !host.supports_response_options() {
+                    return Err(DispatchError::Protocol(
+                        "this conversation does not support tool_choice none".to_string(),
+                    ));
+                }
                 if audio_open {
                     return Err(DispatchError::Protocol(
                         "commit or clear the audio buffer before session.update".to_string(),
                     ));
                 }
+                settings.instructions = compose_instructions(&instructions, &state.system_items)?;
                 host.configure(&settings).map_err(DispatchError::Protocol)?;
                 state.settings = settings;
+                state.instructions = instructions;
+                state.reconfigure = false;
                 state.transcription = transcription;
                 if vad_changed {
                     if let Value::Object(next_obj) = &mut next
@@ -1079,6 +1134,21 @@ impl Session {
             "conversation.item.delete" => {
                 check_members(obj, &["type", "event_id", "item_id"], "event")?;
                 let item_id = member_str(obj, "item_id");
+                if let Some(index) = state
+                    .system_items
+                    .iter()
+                    .position(|item| !item_id.is_empty() && item.id == item_id)
+                {
+                    let item = state.system_items.remove(index);
+                    if let Err(e) = self.sync_instructions(state, audio_open, host) {
+                        state.system_items.insert(index, item);
+                        return Err(e);
+                    }
+                    if state.previous_item == item.id {
+                        state.previous_item = item.before;
+                    }
+                    return self.emit_deleted(item.id, host);
+                }
                 let Some((latest, before)) = state.deletable.clone() else {
                     return Err(DispatchError::Protocol(
                         "only the latest item, a user message, can be deleted".to_string(),
@@ -1097,17 +1167,7 @@ impl Session {
                 host.delete_user_turn().map_err(DispatchError::Protocol)?;
                 state.deletable = None;
                 state.previous_item = before;
-                let mut event = Object::new();
-                push_member(
-                    &mut event,
-                    "type",
-                    Value::String("conversation.item.deleted".to_string()),
-                );
-                push_member(&mut event, "item_id", Value::String(latest));
-                if !host.send_event(&self.shared.format_event(event)) {
-                    return Err(DispatchError::Closed);
-                }
-                Ok(false)
+                self.emit_deleted(latest, host)
             }
             "input_audio_buffer.append" => {
                 check_members(obj, &["type", "event_id", "audio"], "event")?;
@@ -1123,6 +1183,7 @@ impl Session {
                 if !host.send_event(&ev) {
                     return Err(DispatchError::Closed);
                 }
+                self.sync_instructions(state, false, host)?;
                 Ok(false)
             }
             "input_audio_buffer.commit" => {
@@ -1157,15 +1218,18 @@ impl Session {
                         "items can only be appended".to_string(),
                     ));
                 }
-                if audio_open {
-                    return Err(DispatchError::Protocol(
-                        "commit or clear the audio buffer before adding an item".to_string(),
-                    ));
-                }
                 let item_obj = item_val
                     .as_object()
                     .ok_or_else(|| DispatchError::Protocol("item must be an object".to_string()))?;
                 let item_kind = member_str(item_obj, "type");
+                // System items only change the instructions, so they may
+                // arrive while the user speaks.
+                if !audio_open || member_str(item_obj, "role") == "system" {
+                } else {
+                    return Err(DispatchError::Protocol(
+                        "commit or clear the audio buffer before adding an item".to_string(),
+                    ));
+                }
                 let mut echo = item_obj.clone();
                 if let Some(id) = item_obj.get("id")
                     && !id
@@ -1207,9 +1271,33 @@ impl Session {
                     self.emit_item_created(state, Value::Object(echo), host)?;
                     return Ok(false);
                 }
+                if item_kind == "message" && member_str(item_obj, "role") == "system" {
+                    check_members(item_obj, &["type", "id", "role", "content"], "item")?;
+                    let id = member_str(&echo, "id").to_string();
+                    if state.system_items.iter().any(|item| item.id == id) {
+                        return Err(DispatchError::Protocol(format!("item {id} already exists")));
+                    }
+                    if state.system_items.len() >= MAX_SYSTEM_ITEMS {
+                        return Err(DispatchError::Protocol(
+                            "at most 64 system items".to_string(),
+                        ));
+                    }
+                    let text = system_text(item_obj)?;
+                    state.system_items.push(SystemItem {
+                        id,
+                        text,
+                        before: state.previous_item.clone(),
+                    });
+                    if let Err(e) = self.sync_instructions(state, audio_open, host) {
+                        state.system_items.pop();
+                        return Err(e);
+                    }
+                    self.emit_item_created(state, Value::Object(echo), host)?;
+                    return Ok(false);
+                }
                 if item_kind != "message" || member_str(item_obj, "role") != "user" {
                     return Err(DispatchError::Protocol(
-                        "items are user messages or function_call_output".to_string(),
+                        "items are user, system or function_call_output messages".to_string(),
                     ));
                 }
                 check_members(item_obj, &["type", "id", "role", "content"], "item")?;
@@ -1274,10 +1362,20 @@ impl Session {
             "response.create" => {
                 check_members(obj, &["type", "event_id", "response"], "event")?;
                 let mut settings = state.settings.clone();
+                let mut metadata = None;
                 if let Some(response_val) = obj.get("response") {
                     let resp_obj = check_object_members(
                         response_val,
-                        &["output_modalities", "max_output_tokens"],
+                        &[
+                            "output_modalities",
+                            "max_output_tokens",
+                            "metadata",
+                            "instructions",
+                            "tools",
+                            "tool_choice",
+                            "conversation",
+                            "input",
+                        ],
                         "response",
                     )?;
                     if let Some(modalities) = resp_obj.get("output_modalities") {
@@ -1291,9 +1389,27 @@ impl Session {
                             "reasoning applies to text output_modalities".to_string(),
                         ));
                     }
+                    if let Some(value) = resp_obj.get("metadata")
+                        && !is_null(value)
+                    {
+                        metadata = Some(parse_metadata(value)?);
+                    }
+                    parse_response_options(resp_obj, &mut settings)?;
+                    let options = !settings.response_instructions.is_empty()
+                        || settings.out_of_band
+                        || !settings.call_tools;
+                    if options && !host.supports_response_options() {
+                        return Err(DispatchError::Protocol(
+                            "this conversation does not support response instructions, tool_choice none or conversation none"
+                                .to_string(),
+                        ));
+                    }
                 }
-                flush_outputs(state, host)?;
-                self.begin_response(state, settings);
+                if !settings.out_of_band {
+                    flush_outputs(state, host)?;
+                }
+                self.sync_instructions(state, false, host)?;
+                self.begin_response(state, settings, metadata);
                 Ok(true)
             }
             _ => Err(DispatchError::Protocol(format!(
@@ -1375,7 +1491,46 @@ impl Session {
         if let Some(transcription) = state.transcription.clone() {
             self.transcribe(item, &transcription, host)?;
         }
+        self.sync_instructions(state, false, host)?;
         Ok(true)
+    }
+
+    /// Gives the host the session's instructions with the system items, at
+    /// once or, while user audio is open, when the turn closes.
+    fn sync_instructions(
+        &self,
+        state: &mut State,
+        audio_open: bool,
+        host: &mut dyn Host,
+    ) -> Result<(), DispatchError> {
+        let instructions = compose_instructions(&state.instructions, &state.system_items)?;
+        if instructions == state.settings.instructions && !state.reconfigure {
+            return Ok(());
+        }
+        if audio_open {
+            state.reconfigure = true;
+            return Ok(());
+        }
+        let mut settings = state.settings.clone();
+        settings.instructions = instructions;
+        host.configure(&settings).map_err(DispatchError::Protocol)?;
+        state.settings = settings;
+        state.reconfigure = false;
+        Ok(())
+    }
+
+    fn emit_deleted(&self, item: String, host: &mut dyn Host) -> Result<bool, DispatchError> {
+        let mut event = Object::new();
+        push_member(
+            &mut event,
+            "type",
+            Value::String("conversation.item.deleted".to_string()),
+        );
+        push_member(&mut event, "item_id", Value::String(item));
+        if !host.send_event(&self.shared.format_event(event)) {
+            return Err(DispatchError::Closed);
+        }
+        Ok(false)
     }
 
     /// Sends the transcript of the committed turn `item` (one delta with the
@@ -1474,11 +1629,16 @@ impl Session {
         Ok(())
     }
 
-    fn begin_response(&self, state: &mut State, settings: Settings) {
+    fn begin_response(&self, state: &mut State, settings: Settings, metadata: Option<Value>) {
         state.responses += 1;
         let response_id = format!("resp_{}_{}", self.shared.id, state.responses);
-        state.last_reply_item.clear();
-        let deletable = state.deletable.take();
+        // An out-of-band reply leaves the conversation as it was.
+        let deletable = if settings.out_of_band {
+            None
+        } else {
+            state.last_reply_item.clear();
+            state.deletable.take()
+        };
         let mut response = Object::new();
         push_member(&mut response, "id", Value::String(response_id.clone()));
         push_member(
@@ -1504,6 +1664,16 @@ impl Session {
                 .to_string(),
             )]),
         );
+        push_member(
+            &mut response,
+            "conversation_id",
+            if settings.out_of_band {
+                Value::Null
+            } else {
+                Value::String(format!("conv_{}", self.shared.id))
+            },
+        );
+        push_member(&mut response, "metadata", metadata.unwrap_or(Value::Null));
         state.active_response = Some(ActiveResponse {
             response_id,
             settings,
@@ -1850,6 +2020,118 @@ fn parse_audio_modality(value: &Value) -> Result<bool, String> {
     }
 }
 
+fn parse_tool_choice(value: &Value) -> Result<bool, String> {
+    match value.as_str() {
+        Some("auto") => Ok(true),
+        Some("none") => Ok(false),
+        _ => Err("tool_choice must be auto or none".to_string()),
+    }
+}
+
+/// `response.metadata`: at most 16 string values, as OpenAI allows.
+fn parse_metadata(value: &Value) -> Result<Value, String> {
+    let err = || {
+        "response.metadata holds at most 16 strings of at most 512 bytes, under keys of at most 64"
+            .to_string()
+    };
+    let obj = value.as_object().ok_or_else(err)?;
+    if obj.members().len() > MAX_METADATA {
+        return Err(err());
+    }
+    for (key, field) in obj.members() {
+        let ok = key.len() <= MAX_NAME_BYTES
+            && field
+                .as_str()
+                .is_some_and(|v| v.len() <= MAX_METADATA_VALUE_BYTES);
+        if !ok {
+            return Err(err());
+        }
+    }
+    Ok(value.clone())
+}
+
+/// A reply's own `instructions`, `tools` (the session's, or none),
+/// `tool_choice`, `conversation` and `input` (empty).
+fn parse_response_options(resp: &Object, settings: &mut Settings) -> Result<(), String> {
+    if let Some(value) = resp.get("instructions") {
+        match value.as_str() {
+            Some(text) if text.len() <= MAX_INSTRUCTIONS_BYTES => {
+                settings.response_instructions = text.to_string();
+            }
+            _ => {
+                return Err("response.instructions must be a string of at most 64 KiB".to_string());
+            }
+        }
+    }
+    if let Some(value) = resp.get("tool_choice") {
+        settings.call_tools = parse_tool_choice(value)?;
+    }
+    if let Some(value) = resp.get("tools") {
+        let Some(items) = value.as_array() else {
+            return Err("response.tools must be an array".to_string());
+        };
+        let mut tools = Vec::new();
+        for tool in items {
+            tools.push(parse_tool(tool)?);
+        }
+        if tools.is_empty() {
+            settings.call_tools = false;
+        } else if tools != settings.tools {
+            return Err("response.tools must be the session's tools or empty".to_string());
+        }
+    }
+    if let Some(value) = resp.get("conversation") {
+        match value.as_str() {
+            Some("auto") => {}
+            Some("none") => settings.out_of_band = true,
+            _ => return Err("response.conversation must be auto or none".to_string()),
+        }
+    }
+    if let Some(value) = resp.get("input")
+        && !value.as_array().is_some_and(<[Value]>::is_empty)
+    {
+        return Err("response.input must be empty".to_string());
+    }
+    Ok(())
+}
+
+/// The text of a system message: its `input_text` parts.
+fn system_text(item: &Object) -> Result<String, String> {
+    let err = || "a system message has input_text content".to_string();
+    let content = item
+        .get("content")
+        .and_then(Value::as_array)
+        .filter(|parts| !parts.is_empty())
+        .ok_or_else(err)?;
+    let mut text = String::new();
+    for part in content {
+        let part = check_object_members(part, &["type", "text"], "content part")?;
+        if member_str(part, "type") != "input_text" {
+            return Err(err());
+        }
+        text.push_str(member_str(part, "text"));
+    }
+    Ok(text)
+}
+
+/// The session's instructions, then each system item, apart by blank lines.
+fn compose_instructions(instructions: &str, items: &[SystemItem]) -> Result<String, String> {
+    let mut out = instructions.to_string();
+    for item in items {
+        if item.text.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&item.text);
+    }
+    if out.len() > MAX_SYSTEM_BYTES {
+        return Err("instructions and system items hold at most 256 KiB".to_string());
+    }
+    Ok(out)
+}
+
 fn parse_transcription(
     value: &Value,
     host: &mut dyn Host,
@@ -2046,6 +2328,7 @@ mod tests {
         deleted_turns: usize,
         delete_fails: bool,
         recorded_bytes: usize,
+        no_response_options: bool,
     }
 
     impl Host for FakeHost {
@@ -2108,6 +2391,10 @@ mod tests {
             self.transcript
                 .clone()
                 .ok_or_else(|| "decoder failed".to_string())
+        }
+
+        fn supports_response_options(&mut self) -> bool {
+            !self.no_response_options
         }
 
         fn delete_user_turn(&mut self) -> Result<(), String> {
@@ -2257,6 +2544,187 @@ mod tests {
         assert_eq!(event_types(&host), vec!["error", "error"]);
         assert_eq!(host.deleted_turns, 1);
         assert_eq!(host.recorded_bytes, 9600);
+    }
+
+    // Open WebUI 0.13.3 during a call: chat snapshots as system items that
+    // replace each other, and replies with metadata, their own tools and
+    // instructions, or out of band.
+    #[test]
+    fn open_webui_call_context_and_reply_options() {
+        let session = Session::new("c".to_string(), "voice".to_string());
+        let mut host = FakeHost::default();
+        let send = |session: &Session, host: &mut FakeHost, event: &str, audio_open: bool| {
+            host.events.clear();
+            session
+                .handle_client_event(event.as_bytes(), audio_open, host)
+                .unwrap()
+        };
+        let tool = r#"{"type":"function","name":"generate_chat_completion","parameters":{"type":"object"}}"#;
+        send(
+            &session,
+            &mut host,
+            &format!(
+                r#"{{"type":"session.update","session":{{"instructions":"Keep replies short.","tools":[{tool}],"tool_choice":"auto"}}}}"#
+            ),
+            false,
+        );
+        assert_eq!(event_types(&host), vec!["session.updated"]);
+        let snapshot = |n: u32, text: &str| {
+            format!(
+                r#"{{"type":"conversation.item.create","item":{{"id":"chat_context_{n}","type":"message","role":"system","content":[{{"type":"input_text","text":"{text}"}}]}}}}"#
+            )
+        };
+        send(&session, &mut host, &snapshot(1, "Snapshot one."), false);
+        assert_eq!(event_types(&host), vec!["conversation.item.created"]);
+        assert_eq!(
+            host.configured.last().unwrap().instructions,
+            "Keep replies short.\n\nSnapshot one."
+        );
+        // A later item, then the snapshot is replaced while the user speaks:
+        // the host learns the instructions when the turn closes.
+        send(
+            &session,
+            &mut host,
+            r#"{"type":"conversation.item.create","item":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#,
+            false,
+        );
+        let configured = host.configured.len();
+        send(
+            &session,
+            &mut host,
+            r#"{"type":"conversation.item.delete","item_id":"chat_context_1"}"#,
+            true,
+        );
+        assert_eq!(event_types(&host), vec!["conversation.item.deleted"]);
+        send(&session, &mut host, &snapshot(2, "Snapshot two."), true);
+        assert_eq!(event_types(&host), vec!["conversation.item.created"]);
+        assert_eq!(host.configured.len(), configured);
+        send(&session, &mut host, &append_event(4800), false);
+        send(
+            &session,
+            &mut host,
+            r#"{"type":"input_audio_buffer.commit"}"#,
+            true,
+        );
+        assert_eq!(host.configured.len(), configured + 1);
+        assert_eq!(
+            host.configured.last().unwrap().instructions,
+            "Keep replies short.\n\nSnapshot two."
+        );
+        let turn = session.state.lock().unwrap().previous_item.clone();
+
+        // Metadata comes back; the session's tools or none, per reply.
+        let mut send_event = |_: &str| true;
+        send(
+            &session,
+            &mut host,
+            &format!(
+                r#"{{"type":"response.create","response":{{"metadata":{{"input_item_id":"{turn}"}},"tools":[{tool}],"tool_choice":"auto"}}}}"#
+            ),
+            false,
+        );
+        let mut events = Vec::new();
+        let mut collect = |e: &str| {
+            events.push(e.to_string());
+            true
+        };
+        let (settings, _) = session.response_start(&mut collect).unwrap();
+        assert!(settings.call_tools && !settings.out_of_band);
+        assert!(events[0].contains(&format!(r#""metadata":{{"input_item_id":"{turn}"}}"#)));
+        session.response_text("Paris.", &mut send_event).unwrap();
+        let outcome = ResponseOutcome {
+            ok: true,
+            cancelled: false,
+            incomplete: false,
+            input_tokens: 1,
+            output_tokens: 1,
+            calls: Vec::new(),
+            failure: String::new(),
+        };
+        let mut done = Vec::new();
+        session
+            .response_finish(&outcome, &mut |e: &str| {
+                done.push(e.to_string());
+                true
+            })
+            .unwrap();
+        assert!(done.last().unwrap().contains(r#""input_item_id""#));
+        let reply = session.state.lock().unwrap().previous_item.clone();
+        assert_ne!(reply, turn);
+
+        send(
+            &session,
+            &mut host,
+            r#"{"type":"response.create","response":{"tools":[],"tool_choice":"none","instructions":"The tool failed.","metadata":{"call_id":"call_1"}}}"#,
+            false,
+        );
+        let (settings, _) = session.response_start(&mut send_event).unwrap();
+        assert!(!settings.call_tools && settings.response_instructions == "The tool failed.");
+        session.response_finish(&outcome, &mut send_event).unwrap();
+
+        // An out-of-band status line leaves the conversation as it was.
+        let before = session.state.lock().unwrap().previous_item.clone();
+        let flushed = host.tool_outputs.len();
+        send(
+            &session,
+            &mut host,
+            r#"{"type":"response.create","response":{"conversation":"none","input":[],"tools":[],"tool_choice":"none","instructions":"Say: still working.","metadata":{"status":"working"}}}"#,
+            false,
+        );
+        let mut oob = Vec::new();
+        let (settings, _) = session
+            .response_start(&mut |e: &str| {
+                oob.push(e.to_string());
+                true
+            })
+            .unwrap();
+        assert!(settings.out_of_band);
+        assert!(oob[0].contains(r#""conversation_id":null"#));
+        session
+            .response_text("Still working.", &mut send_event)
+            .unwrap();
+        session.response_finish(&outcome, &mut send_event).unwrap();
+        assert_eq!(session.state.lock().unwrap().previous_item, before);
+        assert_eq!(host.tool_outputs.len(), flushed);
+
+        // Rejections: other tools, input items, a conversation without options.
+        for (event, message) in [
+            (
+                r#"{"type":"response.create","response":{"tools":[{"type":"function","name":"other"}]}}"#,
+                "session's tools",
+            ),
+            (
+                r#"{"type":"response.create","response":{"input":[{"type":"message"}]}}"#,
+                "input must be empty",
+            ),
+            (
+                r#"{"type":"response.create","response":{"metadata":{"k":7}}}"#,
+                "metadata",
+            ),
+            (
+                r#"{"type":"conversation.item.delete","item_id":"chat_context_1"}"#,
+                "only the latest item",
+            ),
+        ] {
+            send(&session, &mut host, event, false);
+            assert_eq!(event_types(&host), vec!["error"], "{event}");
+            assert!(host.events[0].contains(message), "{}", host.events[0]);
+        }
+        host.no_response_options = true;
+        send(
+            &session,
+            &mut host,
+            r#"{"type":"response.create","response":{"conversation":"none"}}"#,
+            false,
+        );
+        assert_eq!(event_types(&host), vec!["error"]);
+        send(
+            &session,
+            &mut host,
+            r#"{"type":"response.create","response":{"metadata":{"a":"b"}}}"#,
+            false,
+        );
+        assert!(session.state.lock().unwrap().active_response.is_some());
     }
 
     fn finish(session: &Session, ok: bool) {

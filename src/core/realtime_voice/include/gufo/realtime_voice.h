@@ -37,6 +37,9 @@ typedef struct GufoRealtimeVoiceSettings {
   size_t max_output_tokens;
   bool reasoning;
   GufoRealtimeVoiceBytes voice;
+  GufoRealtimeVoiceBytes response_instructions;
+  bool call_tools;
+  bool out_of_band;
 } GufoRealtimeVoiceSettings;
 
 typedef struct GufoRealtimeVoiceVadSettings {
@@ -110,6 +113,7 @@ typedef struct GufoRealtimeVoiceHost {
                           void* error_ctx);
   bool (*delete_user_turn)(void* context, GufoRealtimeVoiceErrorSetFn set_error,
                            void* error_ctx);
+  bool (*supports_response_options)(void* context);
 } GufoRealtimeVoiceHost;
 
 GufoRealtimeVoice* gufo_realtime_voice_new(const uint8_t* id, size_t id_len,
