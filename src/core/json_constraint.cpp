@@ -229,9 +229,36 @@ public:
           Invalid("root reference cycle");
         root = Reference(*reference);
       }
-      if (!root->is_object() || root->member_str("type") != "object" ||
-          root->contains("anyOf"))
-        Invalid("the root must have type object");
+      // An anyOf whose every branch is an object is an object too: agent
+      // frameworks send one branch per tool. A branch without a type takes
+      // the object type of the schema around it, as Visit conjoins them.
+      const auto object_root = [&](const auto& self, const json::Value& node,
+                                   bool inherited, std::size_t depth) -> bool {
+        const json::Value* schema = &node;
+        std::set<const json::Value*> seen;
+        while (schema->is_object()) {
+          const auto* reference = schema->find("$ref");
+          if (!reference)
+            break;
+          if (!seen.insert(schema).second)
+            Invalid("root reference cycle");
+          schema = Reference(*reference);
+        }
+        if (depth > 16 || !schema->is_object())
+          return false;
+        const auto* type = schema->find("type");
+        if (type && (!type->is_string() || type->str() != "object"))
+          return false;
+        const auto* any = schema->find("anyOf");
+        if (!any)
+          return type || inherited;
+        return any->is_array() && !any->empty() &&
+               std::ranges::all_of(any->items(), [&](const auto& branch) {
+                 return self(self, branch, type || inherited, depth + 1);
+               });
+      };
+      if (!object_root(object_root, *root, false, 0))
+        Invalid("the root must have type object, or be an anyOf of objects");
       grammar_->root_ = Seq({ws_, Visit(schema_, 0), ws_});
       grammar_->prompt_ =
           "Respond with a single JSON object matching this JSON Schema:\n" +
@@ -1745,6 +1772,36 @@ private:
         }
       }
       return Alt(branches);
+    }
+    // A const or enum without a type takes the types of its values, as JSON
+    // Schema allows: a branch per tool often names its tool {"const":"t3"}.
+    if (!schema.contains("type") &&
+        (schema.contains("const") || schema.contains("enum"))) {
+      json::Value inferred = json::Value::array();
+      const auto add = [&](const json::Value& value) {
+        const char* name = value.is_object()   ? "object"
+                           : value.is_array()  ? "array"
+                           : value.is_string() ? "string"
+                           : value.is_bool()   ? "boolean"
+                           : value.is_number() ? "number"
+                                               : "null";
+        if (!std::ranges::any_of(inferred.items(), [&](const auto& listed) {
+              return listed.str() == name;
+            }))
+          inferred.push_back(json::Value(name));
+      };
+      if (const auto* value = schema.find("const"))
+        add(*value);
+      if (const auto* values = schema.find("enum");
+          values && values->is_array())
+        for (const auto& value : values->items())
+          add(value);
+      if (!inferred.empty()) {
+        auto typed = schema;
+        typed["type"] = inferred.size() == 1 ? inferred.items().front()
+                                             : std::move(inferred);
+        return Visit(Store(std::move(typed)), depth);
+      }
     }
     const auto* type = schema.find("type");
     // An unconstrained leaf is a valid JSON Schema, not a reason to discard

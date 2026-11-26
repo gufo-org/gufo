@@ -1315,7 +1315,10 @@ IP addresses and UUID. Annotations that do not constrain values (`$schema`,
 `$comment`, `title`, `description`, `default`, `examples`, `deprecated`,
 `readOnly` and `writeOnly`) are accepted and ignored, including in strict schemas.
 
-The root must resolve to an object. As in llama.cpp, an object that declares
+The root must resolve to an object, or to an `anyOf` whose every branch is an
+object, as agent frameworks send one branch per tool; a branch without `type`
+takes the object type of the root. A `const` or `enum` without `type` takes the
+types of its values. As in llama.cpp, an object that declares
 `properties` admits no other keys unless `additionalProperties` is `true` or a
 schema for their values; extra keys then follow the declared properties. An
 object without `properties` admits any keys unless `additionalProperties` is

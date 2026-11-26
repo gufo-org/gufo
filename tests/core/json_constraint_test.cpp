@@ -420,6 +420,67 @@ void TestRejectedSchemas() {
   }
 }
 
+// A root anyOf of objects, one per tool as agent frameworks send it, up to 32
+// branches with each branch's arguments enforced; other roots stay refused.
+void TestRootAnyOfObjects() {
+  // As response_format compiles them: open objects unless strict.
+  for (const bool strict : {true, false}) {
+    std::string branches;
+    for (int i = 0; i < 32; ++i) {
+      branches += (i ? "," : "");
+      branches += R"({"type":"object","properties":{"tool":{"const":"t)" +
+                  std::to_string(i) +
+                  R"("},"arg":{"type":"string"}},"required":["tool","arg"])" +
+                  (strict ? R"(,"additionalProperties":false})" : "}");
+    }
+    const auto grammar = JsonConstraint::Compile(
+        parse(R"({"anyOf":[)" + branches + "]}"), strict, !strict);
+    assert(Accepts(*grammar, R"({"tool":"t3","arg":"hello"})"));
+    assert(Accepts(*grammar, R"( {"tool": "t31", "arg": ""} )"));
+    assert(!Accepts(*grammar, R"({"tool":"t3"})"));
+    assert(!Accepts(*grammar, R"({"tool":"t32","arg":"x"})"));
+    assert(!Accepts(*grammar, R"({"tool":"t3","arg":1})"));
+    assert(!Accepts(*grammar, R"(["t3"])"));
+  }
+  // A const or enum without a type takes the types of its values.
+  const auto mixed = JsonConstraint::Compile(
+      parse(R"({"type":"object","properties":{"x":{"enum":["a",1,null]}},
+                "required":["x"],"additionalProperties":false})"),
+      true);
+  for (const char* text : {R"({"x":"a"})", R"({"x":1})", R"({"x":null})"})
+    assert(Accepts(*mixed, text));
+  for (const char* text : {R"({"x":"b"})", R"({"x":2})", R"({"x":true})"})
+    assert(!Accepts(*mixed, text));
+  // Typeless branches inherit the root's object type; references resolve.
+  const auto inherited = JsonConstraint::Compile(parse(R"({
+    "type":"object","anyOf":[
+      {"properties":{"a":{"type":"integer"}},"required":["a"],
+       "additionalProperties":false},
+      {"$ref":"#/$defs/B"}],
+    "$defs":{"B":{"type":"object","properties":{"b":{"type":"string"}},
+                  "required":["b"],"additionalProperties":false}}})"),
+                                                 true);
+  assert(Accepts(*inherited, R"({"a":1})"));
+  assert(Accepts(*inherited, R"({"b":"x"})"));
+  assert(!Accepts(*inherited, R"({"a":"x"})"));
+  assert(!Accepts(*inherited, R"({"c":1})"));
+  for (
+      const char* input :
+      {R"({"anyOf":[{"type":"object","properties":{}},{"type":"string"}]})",
+       R"({"anyOf":[{"type":"object","properties":{}},{"properties":{}}]})",
+       R"({"anyOf":[]})", R"({"anyOf":{"type":"object"}})",
+       R"({"type":"string","anyOf":[{"type":"object"}]})",
+       R"({"anyOf":[{"$ref":"#/$defs/S"}],"$defs":{"S":{"type":"string"}}})"}) {
+    bool rejected = false;
+    try {
+      (void)JsonConstraint::Compile(parse(input), true);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    assert(rejected);
+  }
+}
+
 // Annotations describe a schema without constraining values, so even strict
 // schemas accept them and compile to the same language as without them
 // (#1057: the Vercel AI SDK always sends "$schema").
@@ -3438,6 +3499,7 @@ int main(int argc, char** argv) {
   TestAutomaticTools();
   TestRequiredTaggedCallLeadingSpace();
   TestNativeToolRequiredAlternatives();
+  TestRootAnyOfObjects();
   TestWideNativeArgumentOrder();
   TestNativeTools();
   TestOpenNativeTools();
