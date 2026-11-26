@@ -143,8 +143,14 @@ def check_reasoning_separator(client, model, checks, chat_result, server_log=Non
                 assert copied["text"] == "ALPHA\n\nBETA" and not copied["reasoning"], copied
 
 
-def check_disabled_tool_markers(client, model, checks, chat_result):
+# Without tools both markers are ordinary text (#373). With tools declared and
+# tool_choice "none", the grammar bans the selected dialect's call marker, so a
+# model that still reaches for a tool answers in text instead of returning raw
+# call markup as content; the prompt, and with it the cached prefix, is the
+# same as without tools.
+def check_disabled_tool_markers(client, model, checks, chat_result, deepseek=False):
     literal = "Example: <tool_call> and <｜DSML｜tool_calls> are literal text."
+    marker = "<｜DSML｜tool_calls>" if deepseek else "<tool_call>"
     prompt = "Copy exactly this one line, without quotes or code fences:\n" + literal
     function = {"name": "echo", "parameters": {"type": "object", "properties": {
         "text": {"type": "string"}}, "required": ["text"], "additionalProperties": False}}
@@ -167,9 +173,11 @@ def check_disabled_tool_markers(client, model, checks, chat_result):
             name = f"tool_markers_disabled_{endpoint}_{declared}"
             checks[name] = result
             print(f"CHECK {name}", file=sys.stderr, flush=True)
-            assert result["text"].strip() == literal and not result["tools"], result
-            assert not result["reasoning"] and result["finish"] == "stop", result
-            if declared:
+            assert not result["tools"] and not result["reasoning"], result
+            if not declared:
+                assert result["text"].strip() == literal and result["finish"] == "stop", result
+            else:
+                assert marker not in result["text"], result
                 usage = result["usage"]
                 details = usage.get("input_tokens_details", usage.get("prompt_tokens_details"))
                 assert details["cached_tokens"] > 0, result
@@ -859,8 +867,8 @@ def check_tool_reasoning(client, model, checks, chat_result, sampling_preset=Non
         record(f"tool_reasoning_stopped_{mode}_{label}", result)
         assert result["reasoning"].strip() == thought[:cut].strip(), result
         assert not result["text"] and not result["tools"] and result["finish"] == "stop", result
-    check_disabled_tool_markers(client, model, checks, chat_result)
     deepseek = sampling_preset == "deepseek4"
+    check_disabled_tool_markers(client, model, checks, chat_result, deepseek)
     check_envelope_closer_framing(client, model, checks, chat_result, deepseek)
     check_tail_lookalike_content(client, model, checks, chat_result)
     check_unfinished_lookalike(client, model, checks, chat_result)

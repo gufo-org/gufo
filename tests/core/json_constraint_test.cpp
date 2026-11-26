@@ -118,6 +118,53 @@ void TestNativeToolRequiredAlternatives() {
   }
 }
 
+// tool_choice "none" with tools declared: text, never the call marker, also
+// across tokens; reasoning may still mention it.
+void TestToolChoiceNoneForbidsCalls() {
+  using Format = JsonConstraint::ToolFormat;
+  for (const auto format : {Format::kJson, Format::kQwen, Format::kDeepSeek}) {
+    const auto grammar = JsonConstraint::WithoutTools(format);
+    const std::string marker =
+        format == Format::kDeepSeek ? "<｜DSML｜tool_calls>" : "<tool_call>";
+    assert(grammar == JsonConstraint::WithoutTools(format));
+    assert(Accepts(*grammar, ""));
+    assert(Accepts(*grammar, "It is sunny in Prague."));
+    assert(Accepts(*grammar, "<tool_resp> and <tool_cal are text."));
+    assert(Accepts(*grammar, marker.substr(0, marker.size() - 1)));
+    assert(!Accepts(*grammar, marker));
+    assert(!Accepts(*grammar, "Calling it:\n" + marker + "\n<function=f>"));
+    assert(!Accepts(*grammar, "<<" + marker));
+    const auto thinking = JsonConstraint::WithReasoning(grammar);
+    assert(Accepts(*thinking, "I would use " + marker + " here.</think>No."));
+    assert(!Accepts(*thinking, "Plan.</think>" + marker));
+  }
+  const auto syntax = JsonConstraint::Syntax(Format::kQwen);
+  assert(JsonConstraint::WithoutTools(syntax) ==
+         JsonConstraint::WithoutTools(syntax));
+  assert(!Accepts(*JsonConstraint::WithoutTools(syntax), "x<tool_call>"));
+
+  // 256 bytes, a stop token, the marker as one special token and an empty
+  // special token.
+  auto binding = std::make_shared<TokenConstraint>();
+  binding->grammar = JsonConstraint::WithoutTools(Format::kQwen);
+  binding->vocabulary =
+      std::make_shared<ConstraintVocabulary>(259, [](std::uint32_t i) {
+        return ConstraintVocabulary::Piece{
+            i < 256    ? std::string(1, static_cast<char>(i))
+            : i == 257 ? std::string("<tool_call>")
+                       : std::string(),
+            i == 256};
+      });
+  auto state = binding->grammar->Start();
+  auto mask = binding->Allowed(state);
+  assert((*mask)['a'] && (*mask)['<'] && (*mask)[256] && (*mask)[258]);
+  assert(!(*mask)[257]);
+  for (const unsigned char byte : std::string_view("<tool_call"))
+    state = binding->vocabulary->Accept(*binding->grammar, state, byte);
+  mask = binding->Allowed(state);
+  assert(!(*mask)['>'] && (*mask)['s'] && (*mask)[256]);
+}
+
 void TestWideNativeArgumentOrder() {
   using Format = JsonConstraint::ToolFormat;
   for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
@@ -3438,6 +3485,7 @@ int main(int argc, char** argv) {
   TestAutomaticTools();
   TestRequiredTaggedCallLeadingSpace();
   TestNativeToolRequiredAlternatives();
+  TestToolChoiceNoneForbidsCalls();
   TestWideNativeArgumentOrder();
   TestNativeTools();
   TestOpenNativeTools();

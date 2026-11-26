@@ -1342,8 +1342,16 @@ void TestProviderToolDialectSelection() {
     Expect(dialect == "ledger-runner" && !format,
            "the runner's identity selects the provider dialect");
     if (choice == ChatRequest::ToolChoice::kNone) {
-      Expect(!constrained && !sampling.constraint,
-             "tool_choice none leaves the output unconstrained");
+      Expect(constrained && sampling.constraint &&
+                 constrained->messages.size() == 1 &&
+                 constrained->messages.front().framing_suffix.empty(),
+             "tool_choice none keeps the prompt and constrains the output");
+      const auto& grammar = *sampling.constraint->grammar;
+      Expect(accepts(grammar, "Plain answer.") &&
+                 accepts(grammar, "A <<invoke is only text."),
+             "tool_choice none admits text");
+      Expect(!accepts(grammar, call) && !accepts(grammar, "See " + call),
+             "tool_choice none bans the dialect's call marker");
       continue;
     }
     Expect(constrained && sampling.constraint &&

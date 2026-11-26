@@ -65,7 +65,12 @@ std::optional<ChatRequest> ConstrainChatRequest(
     *tool_format = selected.format;
   if (tool_dialect)
     *tool_dialect = dialect_id;
-  if (!request.response_format &&
+  // tool_choice "none" with tools declared keeps the prompt but bans the
+  // call marker, so a model that still reaches for a tool answers in text.
+  const bool forbid_calls =
+      !request.response_format && !request.tools.empty() &&
+      request.tool_choice == ChatRequest::ToolChoice::kNone;
+  if (!request.response_format && !forbid_calls &&
       (request.tools.empty() ||
        request.tool_choice == ChatRequest::ToolChoice::kNone))
     return std::nullopt;
@@ -73,6 +78,14 @@ std::optional<ChatRequest> ConstrainChatRequest(
   auto instruction = request.response_format ? request.response_format->prompt()
                                              : std::string();
   auto grammar = request.response_format;
+  if (forbid_calls) {
+    const auto native_syntax = runner.ToolGrammarSyntax(request);
+    grammar =
+        native_syntax ? sampling::JsonConstraint::WithoutTools(*native_syntax)
+        : selected.format
+            ? sampling::JsonConstraint::WithoutTools(*selected.format)
+            : sampling::JsonConstraint::WithoutTools(*selected.dialect->syntax);
+  }
   if (!request.tools.empty() &&
       request.tool_choice != ChatRequest::ToolChoice::kNone) {
     std::vector<sampling::JsonConstraint::Tool> tools;

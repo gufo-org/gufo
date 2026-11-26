@@ -921,9 +921,9 @@ struct ScannedToolCall {
 ///
 /// Grammar: `syntax` describes the native call syntax (JsonConstraint::
 /// ToolSyntax), compiled from each tool's JSON schema for tool_choice
-/// required/auto, strict and best-effort tools; tool_choice none leaves the
-/// output unconstrained. Without `syntax`, the built-in grammar of `format`
-/// (kQwen or kDeepSeek) is used.
+/// required/auto, strict and best-effort tools; tool_choice none with tools
+/// declared admits text that never completes `syntax->open`. Without
+/// `syntax`, the built-in grammar of `format` (kQwen or kDeepSeek) is used.
 ///
 /// Parsing: `markers` open a call (each must contain '<' and `syntax->open`
 /// must be one of them); `reasoning_markers` are complete native call headers

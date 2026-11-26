@@ -1170,7 +1170,12 @@ the backend cannot constrain sampling, an unmet `required` choice still returns
 Stops and token limits terminate normally. Responses streams may retain a partial
 call with `status: "incomplete"`; clients must execute only completed calls.
 With no tools or `tool_choice:"none"`, tool markers are ordinary text and do
-not interrupt reasoning or delay streaming.
+not interrupt reasoning or delay streaming. With tools declared and
+`tool_choice:"none"`, the prompt is the same as without tools, but the grammar
+bans the selected dialect's call marker from the answer: a model that still
+reaches for a tool, for example after earlier calls in the history, answers in
+text instead of returning raw call markup as content. Reasoning may still
+mention the marker.
 
 Stop sequences match accepted output bytes, including reasoning and tool
 markup, before streaming or response parsing. Partial prefixes are buffered;
