@@ -66,7 +66,7 @@ bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
     tensor.name = name;
     tensor.dtype = ParseDType(entry.dtype);
     if (tensor.dtype == DType::kUnknown) {
-      *error = "unsupported dtype for " + name;
+      *error = path.string() + ": " + name + ": unsupported dtype";
       return false;
     }
     if (entry.begin == entry.end) {
@@ -77,7 +77,7 @@ bool LoadSafetensors(const std::filesystem::path& path, TensorStore* store,
     tensor.data = bytes + header.payload_offset + entry.begin;
     tensor.byte_count = entry.end - entry.begin;
     if (!store->Add(std::move(tensor))) {
-      *error = "duplicate tensor " + name;
+      *error = path.string() + ": " + name + ": duplicate tensor";
       return false;
     }
   }

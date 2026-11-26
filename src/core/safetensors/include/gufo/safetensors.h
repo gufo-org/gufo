@@ -134,6 +134,13 @@ typedef int (*GufoSafetensorsMetadataFn)(void* context,
 typedef int (*GufoSafetensorsTensorFn)(void* context,
                                        const GufoSafetensorsTensor* tensor);
 
+/* The spelling of the type whose value is dtype, such as "BF16"; empty for
+   a value that names no type. The bytes live as long as the program. */
+GufoSafetensorsSlice gufo_safetensors_dtype_name(uint32_t dtype);
+/* The size in bits of one element of the type whose value is dtype; 0 for a
+   value that names no type. */
+uint32_t gufo_safetensors_dtype_bits(uint32_t dtype);
+
 /* Reads the header length from the first len bytes of a file of file_size
    bytes and checks it against the file. reject may be null. */
 GufoSafetensorsParse gufo_safetensors_header_length(

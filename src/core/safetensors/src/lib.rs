@@ -150,6 +150,23 @@ fn report(reject: Option<GufoSafetensorsRejectFn>, context: *mut c_void, rejecti
     unsafe { reject(context, &rejection) };
 }
 
+/// The spelling of the type whose value is `dtype`, such as "BF16"; empty
+/// for a value that names no type. The bytes live as long as the program.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn gufo_safetensors_dtype_name(dtype: u32) -> GufoSafetensorsSlice {
+    GufoSafetensorsSlice::of(Dtype::from_value(dtype).map_or("", Dtype::name).as_bytes())
+}
+
+/// The size in bits of one element of the type whose value is `dtype`; 0
+/// for a value that names no type.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn gufo_safetensors_dtype_bits(dtype: u32) -> u32 {
+    // Every size is at most 64 bits.
+    Dtype::from_value(dtype).map_or(0, |dtype| dtype.bits() as u32)
+}
+
 /// Reads the header length from the first `len` bytes of a file of
 /// `file_size` bytes and checks it against the file. On `Rejected`,
 /// `reject` (which may be null) got the reason.

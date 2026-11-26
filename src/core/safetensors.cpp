@@ -2,7 +2,6 @@
 
 #include <gufo/safetensors.h>
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <new>
@@ -70,26 +69,6 @@ constexpr bool Mirrors() {
 }
 static_assert(Mirrors());
 
-struct Spelling {
-  std::string_view name;
-  unsigned bits{0};
-};
-
-constexpr std::array<Spelling, 22> kDtypes{{
-    {"BOOL", 8},        {"F4", 4},          {"F6_E2M3", 6}, {"F6_E3M2", 6},
-    {"U8", 8},          {"I8", 8},          {"F8_E5M2", 8}, {"F8_E4M3", 8},
-    {"F8_E8M0", 8},     {"I16", 16},        {"U16", 16},    {"F16", 16},
-    {"BF16", 16},       {"I32", 32},        {"U32", 32},    {"F32", 32},
-    {"C64", 64},        {"F64", 64},        {"I64", 64},    {"U64", 64},
-    {"F8_E4M3FNUZ", 8}, {"F8_E5M2FNUZ", 8},
-}};
-
-// The spelling of `dtype`, or none for a value that names no type.
-constexpr Spelling Spell(Dtype dtype) {
-  const auto index = static_cast<std::size_t>(dtype);
-  return index < kDtypes.size() ? kDtypes[index] : Spelling{};
-}
-
 std::string Message(Reason reason, const std::string& name,
                     std::string_view message) {
   std::string text = reason == Reason::kFile ? "invalid safetensors file: "
@@ -108,9 +87,10 @@ const std::uint8_t* Bytes(std::span<const std::byte> bytes) {
   return reinterpret_cast<const std::uint8_t*>(bytes.data());
 }
 
-/// What the callbacks fill; the rejection, once there is one.
+/// What the callbacks fill: the header, which only ParseHeader passes, and
+/// the rejection, once there is one.
 struct Context {
-  Header* header;
+  Header* header{nullptr};
   std::optional<Error> error;
   core::ffi::CallbackFailure failure;
 };
@@ -144,12 +124,15 @@ void Finish(GufoSafetensorsParse status, Context& context) {
 
 }  // namespace
 
+// The Rust reader holds the one table of names and sizes.
 std::string_view Name(Dtype dtype) noexcept {
-  return Spell(dtype).name;
+  const auto name =
+      gufo_safetensors_dtype_name(static_cast<std::uint32_t>(dtype));
+  return {reinterpret_cast<const char*>(name.data), name.len};
 }
 
 unsigned Bits(Dtype dtype) noexcept {
-  return Spell(dtype).bits;
+  return gufo_safetensors_dtype_bits(static_cast<std::uint32_t>(dtype));
 }
 
 Error::Error(Reason reason, std::string name, std::string_view message)
@@ -159,8 +142,7 @@ Error::Error(Reason reason, std::string name, std::string_view message)
 
 std::uint64_t HeaderLength(std::span<const std::byte> prefix,
                            std::uint64_t file_size) {
-  Header unused;
-  Context context{&unused, {}, {}};
+  Context context;
   std::uint64_t length = 0;
   const auto status = gufo_safetensors_header_length(
       Bytes(prefix), prefix.size(), file_size, Reject, &context, &length);

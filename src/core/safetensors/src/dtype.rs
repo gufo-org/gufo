@@ -65,6 +65,12 @@ impl Dtype {
             .map(|(dtype, _, _)| *dtype)
     }
 
+    /// The type whose value is `value`, if any.
+    pub fn from_value(value: u32) -> Option<Self> {
+        let index = usize::try_from(value).ok()?;
+        TYPES.get(index).map(|(dtype, _, _)| *dtype)
+    }
+
     pub fn name(self) -> &'static str {
         TYPES[self as usize].1
     }
@@ -84,7 +90,10 @@ mod tests {
             assert_eq!(*dtype as usize, index);
             assert_eq!(Dtype::parse(name), Some(*dtype));
             assert_eq!(dtype.name(), *name);
+            assert_eq!(Dtype::from_value(index as u32), Some(*dtype));
         }
+        assert_eq!(Dtype::from_value(TYPES.len() as u32), None);
+        assert_eq!(Dtype::from_value(u32::MAX), None);
     }
 
     #[test]
