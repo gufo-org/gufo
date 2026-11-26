@@ -18,6 +18,7 @@
 
 #include <gufo/ext/platform/mapped_file.hpp>
 #include <gufo/ext/platform/os_info.hpp>
+#include <gufo/ext/experimental/rocblas_gemm.hpp>
 #include "src/models/minimax_h3/audio_vae.hpp"
 #include "src/models/minimax_h3/audio_vae_ops.hip.hpp"
 #include "src/models/minimax_h3/json.hpp"
@@ -299,8 +300,9 @@ public:
         static_cast<rocblas_int>(reduction), &alpha, weight,
         rocblas_datatype_f32_r, static_cast<rocblas_int>(reduction), columns,
         rocblas_datatype_f32_r, static_cast<rocblas_int>(reduction), &beta,
-        output, rocblas_datatype_f32_r,
-        static_cast<rocblas_int>(output_channels), output,
+        gufo::hip::BetaZeroGemmC(output, output_channels, batch_rows),
+        rocblas_datatype_f32_r, static_cast<rocblas_int>(output_channels),
+        output,
         rocblas_datatype_f32_r, static_cast<rocblas_int>(output_channels),
         rocblas_datatype_f32_r, rocblas_gemm_algo_standard, 0, 0);
     if (status != rocblas_status_success) {

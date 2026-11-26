@@ -219,6 +219,15 @@ EmbeddingGemma 2, Qwen3-ASR, Qwen3-TTS and Qwen3.8-27B.
   configure could not find the XRT SDK's `xclbinutil.exe`.
 - After reinstalling or upgrading the SDK, rerun the patch in step 2 and
   rebuild into a fresh build directory so the runtime stages again.
+- TheRock's Windows `rocblas.dll` carries none of rocBLAS's own GPU kernels,
+  only the Tensile libraries in `rocblas\`. From ROCm 10.1, rocBLAS runs an
+  in-place GEMM (C == D) with one output row or column through its GEMV
+  kernel on gfx11, which then fails with `hipErrorInvalidKernelFile`
+  (status 6) and leaves the HIP context unusable. Beta-zero GEMMs pass
+  `BetaZeroGemmC` (`include/gufo/ext/experimental/rocblas_gemm.hpp`) as C,
+  which keeps them on Tensile with the bits TheRock 10.0 produced. hipBLAS
+  runs every GEMM in place, so a call that can have one output row or column
+  uses rocBLAS directly.
 
 ## NPU device test (developers)
 

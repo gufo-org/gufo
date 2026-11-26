@@ -84,6 +84,7 @@ gufo_extension_target(
     hip::host
     roc::hipblas
     roc::hipblaslt
+    roc::rocblas
 )
 
 if(TARGET gufo_embedding_gemma2_hip)

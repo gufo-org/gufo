@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <gufo/ext/experimental/rocblas_gemm.hpp>
 #include <gufo/ext/experimental/weight_upload.hpp>
 #include <gufo/ext/mapped_prefetch.hpp>
 #include <initializer_list>
@@ -279,7 +280,9 @@ public:
     // sum tree, changing audio when a stream or cached reference splits here.
     // A separate C disables that shortcut; beta=0 leaves C unread. Reserve it
     // with the weights so a streamed tail never allocates or synchronizes.
-    const float* accumulation = rows == 1 ? zero_beta_input_.get() : output;
+    const float* accumulation =
+        rows == 1 ? zero_beta_input_.get()
+                  : gufo::hip::BetaZeroGemmC(output, output_columns, rows);
     RequireRocblas(
         rocblas_gemm_ex(
             handle_, rocblas_operation_transpose, rocblas_operation_none,

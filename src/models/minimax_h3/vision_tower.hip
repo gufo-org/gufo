@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include <gufo/ext/experimental/rocblas_gemm.hpp>
 #include "src/models/minimax_h3/runtime.hpp"
 #include "src/models/minimax_h3/vision_tower.hpp"
 
@@ -550,7 +551,8 @@ public:
         static_cast<rocblas_int>(rows), static_cast<rocblas_int>(batch),
         static_cast<rocblas_int>(cols), &alpha, weight, rocblas_datatype_bf16_r,
         static_cast<rocblas_int>(cols), input, rocblas_datatype_bf16_r,
-        static_cast<rocblas_int>(cols), &beta, output, rocblas_datatype_f32_r,
+        static_cast<rocblas_int>(cols), &beta,
+        gufo::hip::BetaZeroGemmC(output, rows, batch), rocblas_datatype_f32_r,
         static_cast<rocblas_int>(rows), output, rocblas_datatype_f32_r,
         static_cast<rocblas_int>(rows), rocblas_datatype_f32_r,
         rocblas_gemm_algo_standard, 0, 0);
