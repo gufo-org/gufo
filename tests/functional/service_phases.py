@@ -11,7 +11,7 @@ import subprocess
 import time
 
 from devlab_models import HERE, registry, service_command
-from phases import Server, cool_down, gpu_temperature, verdict
+from phases import MAX_REPEATS, Server, cool_down, gpu_temperature, repeat_paired, verdict
 from metrics import NOISE_MS, SLOWDOWN
 
 
@@ -197,9 +197,15 @@ def main():
         parser.add_argument('--' + option, required=True)
     parser.add_argument('--audio-root', type=Path, default=HERE / 'fixtures/audio')
     parser.add_argument('--repeats', type=int, default=2)
+    parser.add_argument('--max-repeats', type=int, default=MAX_REPEATS,
+                        help='repeats a suspected slowdown may extend to')
+    parser.add_argument('--timing-checks', type=json.loads,
+                        help='JSON list of gated phase patterns; default: every phase')
     args = parser.parse_args()
     if args.repeats < 2:
         parser.error('at least two paired repeats are required')
+    if args.max_repeats < args.repeats:
+        parser.error('--max-repeats must be at least --repeats')
     assets = json.loads(args.assets.read_text())
     args.logs.mkdir(parents=True, exist_ok=False)
     model = registry()['models'][args.model_id]
@@ -214,26 +220,30 @@ def main():
     if idle is not None:
         time.sleep(30)
         idle = gpu_temperature()
-    for repeat in range(args.repeats):
-        # Alternate which revision goes first, as phases.py does.
-        for side in ('base', 'head') if repeat % 2 == 0 else ('head', 'base'):
-            if side == 'base' and unsupported:
-                arms.append({'revision': side, 'repeat': repeat, 'unsupported': unsupported})
-                continue
-            temperature = cool_down(idle + 3) if idle is not None else None
-            arm = measure_arm(args.model_id, getattr(args, side + '_binary').resolve(), assets,
-                              args.logs / f'{side}-{repeat}', args.audio_root.resolve())
-            arms.append({'revision': side, 'repeat': repeat, 'gpu_temp_c': temperature, **arm})
-            # Retain completed arms even if a later arm fails.
-            args.output.write_text(json.dumps({'status': 'incomplete', 'arms': arms}, indent=2) + '\n')
+
+    def measure(repeat, side):
+        if side == 'base' and unsupported:
+            arms.append({'revision': side, 'repeat': repeat, 'unsupported': unsupported})
+            return
+        temperature = cool_down(idle + 3) if idle is not None else None
+        arm = measure_arm(args.model_id, getattr(args, side + '_binary').resolve(), assets,
+                          args.logs / f'{side}-{repeat}', args.audio_root.resolve())
+        arms.append({'revision': side, 'repeat': repeat, 'gpu_temp_c': temperature, **arm})
+        # Retain completed arms even if a later arm fails.
+        args.output.write_text(json.dumps({'status': 'incomplete', 'arms': arms}, indent=2) + '\n')
+
+    # Alternating pairs, extended while a gated phase looks slower, as phases.py does.
+    repeats, confirmations = repeat_paired(measure, args.repeats, args.max_repeats,
+                                           lambda: summarize(arms)[0], args.timing_checks)
     phases, diverged = summarize(arms)
     image = registry()['models'][args.model_id]['category'] == 'image'
     result = {'schema': 1, 'status': 'passed', 'model': args.model_id,
               'revisions': {'base': args.base_revision, 'head': args.head_revision},
-              'settings': {'repeats': args.repeats, 'slowdown': SLOWDOWN, 'noise_ms': NOISE_MS,
+              'settings': {'repeats': repeats, 'initial_repeats': args.repeats,
+                           'max_repeats': args.max_repeats, 'slowdown': SLOWDOWN, 'noise_ms': NOISE_MS,
                            'requests': IMAGE_REQUESTS if image else REQUESTS, 'idle_temp_c': idle},
               'wall_s': time.perf_counter() - started, 'arms': arms,
-              'phases': phases, 'diverged': diverged}
+              'phases': phases, 'diverged': diverged, 'confirmations': confirmations}
     args.output.write_text(json.dumps(result, indent=2) + '\n')
 
 

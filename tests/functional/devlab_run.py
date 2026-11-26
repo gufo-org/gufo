@@ -190,9 +190,12 @@ def execute(plan, binary, baseline, assets_path, output, report, logs, shard_id=
             args = [sys.executable, str(HERE / script), '--model-id', key, '--assets', str(assets_path),
                     '--base-binary', str(baseline), '--head-binary', str(binary),
                     '--base-revision', plan['base'], '--head-revision', plan['head'],
-                    '--output', str(destination), '--logs', str(logs / key)]
+                    '--output', str(destination), '--logs', str(logs / key),
+                    # Only gated phases earn confirmation pairs.
+                    '--timing-checks', json.dumps(selection['timing_checks'])]
             with (output / (key + '.phases.log')).open('w') as log:
-                result = subprocess.run(args, stdout=log, stderr=subprocess.STDOUT, timeout=2400)
+                # Room for confirmation pairs: up to three times the two-pair run.
+                result = subprocess.run(args, stdout=log, stderr=subprocess.STDOUT, timeout=4800)
             observed = json.loads(destination.read_text()) if destination.exists() else {}
             repeats = observed.get('settings', {}).get('repeats', 0)
             passed = (result.returncode == 0 and bool(observed.get('phases')) and repeats >= 2

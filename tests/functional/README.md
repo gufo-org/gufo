@@ -500,7 +500,12 @@ models or their speed observations. Each LLM's `phases.py` arms exercise startup
 short, long and follow-up requests; `service_phases.py` measures bounded service
 histories. Both alternate main/candidate servers for two paired repeats,
 with GPU cool-down. Every request and phase retains all measurements; a slowdown
-requires both >5% and >10 ms in every repeat. A phase that is slower in only
+requires both >5% and >10 ms in every repeat. A gated phase that is slower in
+both repeats gets two more balanced pairs (one main-first, one candidate-first),
+up to six, until it clears or holds in all of them: Devlab arms stall at random
+(DeepSeek's prefill drops to a fraction of its rate in about a third of
+requests), and one stalled candidate arm per pair must not fail an unrelated PR.
+Only phases the plan gates earn confirmation pairs. A phase that is slower in only
 some repeats is inconclusive; one that is faster in some repeats and never
 slower counts as unchanged. Different output/work counters mark
 relevant comparisons incomparable and keep the status incomplete. The plan selects timing gates from production

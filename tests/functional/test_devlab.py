@@ -371,6 +371,7 @@ class ExecutionTest(unittest.TestCase):
         for args in phases:
             self.assertEqual(args[args.index('--head-binary')+1], '/head')
             self.assertEqual(args[args.index('--base-binary')+1], '/base')
+            self.assertIn('--timing-checks', args)
 
 
 class ShardTest(unittest.TestCase):
@@ -713,6 +714,35 @@ class TimingTest(unittest.TestCase):
         self.assertEqual([arm['revision'] for arm in arms],
                          ['base', 'head', 'head', 'base', 'base', 'head', 'head', 'base'])
         self.assertEqual([arm['repeat'] for arm in arms], [0, 0, 1, 1, 2, 2, 3, 3])
+
+    def confirm(self, verdicts, patterns=None, checked=True):
+        """Run repeat_paired with one phase whose verdict follows the repeats run."""
+        arms = []
+        def evaluate():
+            return [{'key': 'long.prompt_ms', 'verdict': verdicts(len(arms) // 2), 'checked': checked}]
+        with patch('builtins.print'):
+            repeats, rounds = phases.repeat_paired(lambda repeat, side: arms.append((repeat, side)),
+                                                   2, phases.MAX_REPEATS, evaluate, patterns)
+        return repeats, rounds, arms
+
+    def test_suspected_slowdown_confirms_with_balanced_pairs(self):
+        # One stalled PR arm per pair must not fail a no-op change (#1385, #1389).
+        repeats, rounds, arms = self.confirm(lambda done: 'slower' if done < 4 else 'noisy')
+        self.assertEqual(repeats, 4)
+        self.assertEqual(rounds, [{'after_repeats': 2, 'phases': ['long.prompt_ms']}])
+        self.assertEqual([side for _, side in arms], ['base', 'head', 'head', 'base'] * 2)
+
+    def test_persistent_slowdown_runs_every_confirmation_pair(self):
+        repeats, rounds, arms = self.confirm(lambda done: 'slower')
+        self.assertEqual(repeats, phases.MAX_REPEATS)
+        self.assertEqual(len(arms), 2 * phases.MAX_REPEATS)
+        self.assertEqual([round_['after_repeats'] for round_ in rounds], [2, 4])
+
+    def test_ungated_or_unchecked_slowdown_needs_no_confirmation(self):
+        self.assertEqual(self.confirm(lambda done: 'slower', patterns=['*.predicted_ms'])[:2], (2, []))
+        self.assertEqual(self.confirm(lambda done: 'slower', patterns=[])[:2], (2, []))
+        self.assertEqual(self.confirm(lambda done: 'slower', checked=False)[:2], (2, []))
+        self.assertEqual(self.confirm(lambda done: 'faster')[:2], (2, []))
 
     def arms(self):
         return [{'revision': side, 'startup': {'init': 1, 'weights': 100,
