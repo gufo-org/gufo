@@ -19,8 +19,10 @@ enum class AudioFormats : std::uint8_t {
   kPcmWav,
   // WAV (integer PCM, float, A-law, mu-law, IMA and Microsoft ADPCM), FLAC,
   // MPEG audio layers I to III, Ogg Vorbis and Ogg Opus, decoded to floats as
-  // libsndfile does. Ogg Opus decodes at the lowest Opus rate (8, 12, 16, 24
-  // or 48 kHz) that is at least the header's input rate.
+  // libsndfile does, and WebM (Matroska) Vorbis and Opus, which libsndfile
+  // does not read. Opus decodes at the lowest Opus rate (8, 12, 16, 24 or
+  // 48 kHz) that is at least the header's input rate. WebM keeps the
+  // encoder's end padding, which its DiscardPadding marks.
   kAll,
 };
 

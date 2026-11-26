@@ -30,9 +30,10 @@ heads are parsed in Rust by httparse as RFC 9112 defines
 them: a token method, single spaces in the request line, an origin-form target
 without control bytes in UTF-8, HTTP/1.0 or HTTP/1.1, and header fields without
 control bytes. A bare LF ends a line, and one empty line before the request line
-is ignored. Other heads, `Transfer-Encoding` (chunked bodies are not
-implemented), and `Content-Length` values that are not decimal digits or
-disagree get 400; more than 100 header fields, llama-server's limit too, get
+is ignored. Chunked bodies are decoded by hyper and held to the request size
+limit while they are read (413 past it). Other heads, transfer codings other
+than `chunked`, `Content-Length` beside `Transfer-Encoding`, and
+`Content-Length` values that are not decimal digits or disagree get 400; more than 100 header fields, llama-server's limit too, get
 431. Multipart form bodies, which the ASR, image-edit and video APIs take, are
 parsed in Rust as RFC 7578 defines them: a `boundary` of 1 to 70 RFC 2046
 characters, the last one not a space; parameters as RFC 9110 writes them
@@ -650,9 +651,12 @@ and supports `json`, `text`, and `verbose_json`. `stream=true` with JSON emits
 OpenAI transcript delta/done events. Long uploads are split within model
 capacity; `max_tokens` applies per chunk. Timestamp (`timestamp_granularities[]`)
 and logprobs (`include[]`) requests are rejected; unknown fields are ignored.
-A `file` the model cannot decode returns 400 `invalid_audio_input` (an
-`invalid_audio_input` error event when streaming); other failures return 500
-`transcription_failed`.
+Serve decodes the `file` (WAV, FLAC, MP3, Ogg Vorbis or Opus, WebM Vorbis or
+Opus; up to 8 channels, 192 kHz and 30 minutes) and passes every provider
+16 kHz mono PCM, so extensions take the same formats as Qwen3-ASR. A `file`
+that cannot be decoded returns 400 `invalid_audio_input` before the provider
+runs; a provider that rejects its audio does too (an `invalid_audio_input`
+error event when streaming). Other failures return 500 `transcription_failed`.
 
 `GET /v1/realtime?intent=transcription` upgrades to OpenAI's manual-commit
 transcription WebSocket interface. [ASR streaming examples](../models/qwen3-asr.md#streaming-a-file)

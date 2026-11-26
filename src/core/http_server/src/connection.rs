@@ -420,7 +420,8 @@ pub(crate) async fn serve_connection(
             let force_close = !options.keep_alive
                 || !client_wants_keep
                 || n >= options.max_requests_per_connection;
-            let has_body = req.headers().contains_key(http::header::CONTENT_LENGTH);
+            let has_body = req.headers().contains_key(http::header::CONTENT_LENGTH)
+                || req.headers().contains_key(http::header::TRANSFER_ENCODING);
             let resp = handle_hyper_request(
                 req,
                 &peer,
@@ -513,9 +514,24 @@ fn reject_head(req: &Request<Incoming>, options: &ConnectionOptions) -> Option<u
     if req.headers().len() > 100 {
         return Some(431);
     }
-    // Requests keep Content-Length framing only, as before.
-    if req.headers().contains_key(http::header::TRANSFER_ENCODING) {
-        return Some(400);
+    // A chunked body, as aiohttp streams an upload, is held to the same limit
+    // while it is read (413 past it). Other transfer codings, which handlers
+    // could not undo, are refused, and so is Content-Length beside
+    // Transfer-Encoding (RFC 9112 6.3). hyper drops a Content-Length that
+    // follows Transfer-Encoding and frames that request as chunked.
+    let mut codings = req
+        .headers()
+        .get_all(http::header::TRANSFER_ENCODING)
+        .iter();
+    if let Some(coding) = codings.next() {
+        let chunked_only = codings.next().is_none()
+            && coding
+                .as_bytes()
+                .trim_ascii()
+                .eq_ignore_ascii_case(b"chunked");
+        if !chunked_only || req.headers().contains_key(http::header::CONTENT_LENGTH) {
+            return Some(400);
+        }
     }
     if let Some(cl_val) = req.headers().get(http::header::CONTENT_LENGTH) {
         let Some(cl) = cl_val

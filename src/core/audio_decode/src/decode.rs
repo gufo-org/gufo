@@ -1,9 +1,10 @@
 //! Encoded audio to interleaved float samples. `Formats::PcmWav` reads WAV
 //! strictly through gufo-wav-decode; `Formats::All` reads WAV (integer PCM,
 //! float, A-law, µ-law, IMA and Microsoft ADPCM), FLAC, MPEG audio layers I
-//! to III and Ogg Vorbis through symphonia, which converts integer samples to
-//! floats with the same power-of-two scale as libsndfile, and Ogg Opus through
-//! symphonia's demuxer and libopus. WAV integer PCM, float, A-law and mu-law
+//! to III and Ogg or WebM Vorbis through symphonia, which converts integer
+//! samples to floats with the same power-of-two scale as libsndfile, and Ogg
+//! or WebM Opus through symphonia's demuxers and libopus. Symphonia does not
+//! read WebM's DiscardPadding, so WebM keeps the encoder's end padding. WAV integer PCM, float, A-law and mu-law
 //! packets are converted to symphonia's floats here, without its PCM decoder.
 
 use std::io::Cursor;

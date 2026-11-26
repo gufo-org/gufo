@@ -103,7 +103,8 @@ on generated audio: the float value of each WAV encoding (8- to 32-bit PCM,
 mu-law value and `WAVE_FORMAT_EXTENSIBLE` on `kAll`, the strict path's float
 clamping, the channel mean, also while decoding (`downmix_mono`), sines through the resampler from 8 to 192 kHz to 16 and 48 kHz
 (passband error below 1e-4, stopband rms below 1e-5, soxr's output length),
-small Ogg Opus and MP3 fixtures, and the status of each rejection. It runs in
+small Ogg Opus, live WebM Opus and MP3 fixtures, and the status of each
+rejection. It runs in
 `check-pr`. The resampler and audio decoder crates also have Rust unit tests
 covered by the workspace command above.
 The decoder's tests compare its direct WAV sample conversion with symphonia's

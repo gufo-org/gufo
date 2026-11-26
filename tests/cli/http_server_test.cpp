@@ -354,8 +354,11 @@ void TestFramingAndMetrics() {
   for (const std::string header :
        {"Content-Length: nope", "Content-Length: -1", "Content-Length: 4junk",
         "Content-Length: 18446744073709551616",
-        "Content-Length: 4\r\nContent-Length: 3", "Transfer-Encoding: chunked",
-        "broken-header", "Transfer-Encoding : chunked", "Content-Length\t: 5",
+        "Content-Length: 4\r\nContent-Length: 3", "Transfer-Encoding: gzip",
+        "Transfer-Encoding: gzip, chunked",
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked",
+        "Content-Length: 5\r\nTransfer-Encoding: chunked", "broken-header",
+        "Transfer-Encoding : chunked", "Content-Length\t: 5",
         "X-Test: one\r\n folded", "Bad Name: x"}) {
     ExpectStatus(server.Send("POST /echo HTTP/1.1\r\n" + header + "\r\n\r\n"),
                  400);
@@ -408,6 +411,19 @@ void TestFramingAndMetrics() {
   assert(lowercase_head(echo).find("\r\ncontent-length: 5000\r\n") !=
          std::string::npos);
   assert(echo.substr(echo.find("\r\n\r\n") + 4) == payload);
+  // Chunked bodies, as aiohttp streams an upload from a generator (#1418),
+  // are decoded and held to the same limit as Content-Length bodies.
+  const auto chunked = server.Send(
+      "POST /echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+      "3\r\nabc\r\n4;ext=1\r\ndefg\r\n0\r\n\r\n");
+  ExpectStatus(chunked, 200);
+  assert(chunked.substr(chunked.find("\r\n\r\n") + 4) == "abcdefg");
+  const auto chunked_too_large = server.Send(
+      "POST /echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+      "2001\r\n" +
+      std::string(8193, 'x') + "\r\n0\r\n\r\n");
+  ExpectStatus(chunked_too_large, 413);
+  assert(chunked_too_large.find("payload_too_large") != std::string::npos);
 
   const std::string body = R"({"prompt":"hi","n_predict":1})";
   const auto response =

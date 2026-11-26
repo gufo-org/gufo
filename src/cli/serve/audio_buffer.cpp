@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <numbers>
 #include <stdexcept>
@@ -113,7 +114,90 @@ AudioBuffer DecodeWavBytes(std::span<const std::byte> bytes) {
   }
 }
 
+// The strict reader Qwen3-ASR has always used for PCM and float WAV, so the
+// samples of those files, and therefore their transcripts, do not change.
+constexpr std::uint64_t kMaximumTranscriptionSeconds =
+    static_cast<std::uint64_t>(30U) * 60U;
+constexpr core::AudioLimits kTranscriptionWavLimits{
+    .max_channels = 8,
+    .max_sample_rate = 192000,
+    .max_seconds = kMaximumTranscriptionSeconds,
+    .max_pcm_bits = 32,
+};
+// Everything else the shared decoder reads. Transcription only needs mono,
+// so the channels are mixed down while decoding.
+constexpr core::AudioLimits kTranscriptionEncodedLimits{
+    .formats = core::AudioFormats::kAll,
+    .max_channels = kTranscriptionWavLimits.max_channels,
+    .max_sample_rate = kTranscriptionWavLimits.max_sample_rate,
+    .max_seconds = kTranscriptionWavLimits.max_seconds,
+    .downmix_mono = true,
+};
+
+std::string_view TranscriptionMessage(core::AudioStatus status) {
+  switch (status) {
+    case core::AudioStatus::kUnrecognized:
+    case core::AudioStatus::kUnsupportedCodec:
+    case core::AudioStatus::kUnsupportedLayout:
+      return "audio must be WAV, FLAC, MP3, Ogg Vorbis, Ogg Opus or WebM";
+    case core::AudioStatus::kMalformedHeader:
+      return "audio header is invalid";
+    case core::AudioStatus::kOutOfBounds:
+      return "audio must have 1 to 8 channels and at most 192 kHz";
+    case core::AudioStatus::kNoAudio:
+      return "audio contains no samples";
+    case core::AudioStatus::kTooLong:
+      return "audio must be at most 30 minutes";
+    case core::AudioStatus::kTruncated:
+      return "audio is truncated";
+    case core::AudioStatus::kNonFinite:
+      return "audio contains non-finite samples";
+    case core::AudioStatus::kStopped:
+      return "audio decoding was cancelled";
+  }
+  return "audio could not be decoded";
+}
+
+AudioBuffer ToBuffer(core::DecodedAudio audio) {
+  return AudioBuffer{
+      .sample_rate = audio.sample_rate,
+      .channels = audio.channels,
+      .samples = std::move(audio.samples),
+  };
+}
+
 }  // namespace
+
+bool DecodeTranscriptionAudio(std::span<const std::byte> bytes,
+                              const std::function<bool()>& should_stop,
+                              AudioBuffer* output, std::string* error) {
+  *output = {};
+  const auto fail = [&](core::AudioStatus status) {
+    SetError(error, std::string(TranscriptionMessage(status)));
+    return false;
+  };
+  try {
+    *output = ToBuffer(
+        core::DecodeAudio(bytes, kTranscriptionWavLimits, should_stop));
+    return true;
+  } catch (const core::AudioError& audio_error) {
+    // Only a container, codec or sample width the strict reader does not
+    // take goes on to the shared decoder; a WAV it rejected for any other
+    // reason, such as its length, would be rejected there too.
+    if (audio_error.status() != core::AudioStatus::kUnrecognized &&
+        audio_error.status() != core::AudioStatus::kUnsupportedCodec &&
+        audio_error.status() != core::AudioStatus::kUnsupportedLayout) {
+      return fail(audio_error.status());
+    }
+  }
+  try {
+    *output = ToBuffer(
+        core::DecodeAudio(bytes, kTranscriptionEncodedLimits, should_stop));
+    return true;
+  } catch (const core::AudioError& audio_error) {
+    return fail(audio_error.status());
+  }
+}
 
 bool DecodeWav(std::span<const std::byte> bytes, AudioBuffer* output,
                std::string* error) {

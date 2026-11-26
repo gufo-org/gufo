@@ -808,6 +808,9 @@ function(gufo_qwen3_asr_register_tests)
   add_executable(qwen3_asr_audio_api_test
     ${PROJECT_SOURCE_DIR}/src/models/qwen3_asr/tests/audio_api_test.cpp)
   target_link_libraries(qwen3_asr_audio_api_test PRIVATE gufo_qwen3_asr gufo_test_support)
+  target_compile_definitions(qwen3_asr_audio_api_test PRIVATE
+    GUFO_QWEN3_ASR_SPEECH_FIXTURES="${PROJECT_SOURCE_DIR}/tests/functional/fixtures/audio"
+    GUFO_AUDIO_DECODE_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/audio")
   add_test(NAME qwen3_asr_audio_api_test COMMAND qwen3_asr_audio_api_test)
   set_tests_properties(qwen3_asr_audio_api_test PROPERTIES
     LABELS "cpu;models;qwen3-asr;server;api;audio;quality")
