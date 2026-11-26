@@ -16,48 +16,153 @@ use crate::responses::compatible;
 use crate::tool_choice::parse_tool_controls;
 use gufo_json::{Object, Value};
 
+/// A `tool_addition` or `tool_removal` block of a Messages system turn.
+fn is_tool_change(block: &Value) -> bool {
+    matches!(block, Value::Object(_))
+        && matches!(member_str(block, "type"), "tool_addition" | "tool_removal")
+}
+
+/// The tool changes of the request's system turns, in order. Each names a
+/// declared tool (`tool_reference`) or, for an addition, defines one by
+/// value (`tool_definition`).
+fn tool_changes(body: &Value) -> Outcome<Vec<&Value>> {
+    let mut changes = Vec::new();
+    let Some(items) = body.get("messages").and_then(Value::as_array) else {
+        return Ok(changes);
+    };
+    for item in items {
+        let Some(content) = item.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for block in content.iter().filter(|block| is_tool_change(block)) {
+            if member_str(item, "role") != "system" {
+                return Err(bad_request(
+                    "invalid_tools",
+                    "tool_addition and tool_removal blocks are only allowed in messages with role \"system\"",
+                ));
+            }
+            let tool = block
+                .get("tool")
+                .filter(|tool| matches!(tool, Value::Object(_)));
+            let kind = tool.map_or("", |tool| member_str(tool, "type"));
+            let reference = kind == "tool_reference"
+                && tool
+                    .and_then(|tool| tool.get("name"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| !name.is_empty());
+            let definition = kind == "tool_definition"
+                && member_str(block, "type") == "tool_addition"
+                && tool
+                    .and_then(|tool| tool.get("definition"))
+                    .is_some_and(|definition| matches!(definition, Value::Object(_)));
+            if !reference && !definition {
+                return Err(bad_request(
+                    "invalid_tools",
+                    "a tool change needs a tool_reference with a name, or (tool_addition only) a tool_definition",
+                ));
+            }
+            push(&mut changes, block)?;
+        }
+    }
+    Ok(changes)
+}
+
+/// A Messages tool declaration as a Chat function tool, with its name.
+fn chat_tool(tool: &mut Value) -> Outcome<(String, Value)> {
+    let schema = tool.get("input_schema");
+    let (true, "custom", true) = (
+        matches!(tool, Value::Object(_)),
+        member_str_or(tool, "type", "custom"),
+        schema.is_some(),
+    ) else {
+        return Err(bad_request(
+            "invalid_tools",
+            "only custom tools with an input_schema are supported",
+        ));
+    };
+    let name = copy(member_str(tool, "name"))?;
+    let mut function = Object::new();
+    for key in ["name", "description"] {
+        if let Some(value) = tool.get_mut(key) {
+            function.push(copy(key)?, value.take())?;
+        }
+    }
+    let schema = tool.get_mut("input_schema").ok_or(Failure::Internal)?;
+    function.push(copy("parameters")?, schema.take())?;
+    let mut wrapped = Object::new();
+    wrapped.push(copy("type")?, string("function")?)?;
+    wrapped.push(copy("function")?, Value::Object(function))?;
+    Ok((name, Value::Object(wrapped)))
+}
+
 /// `ParseAnthropicToolControls`: the Messages declarations rewritten as
 /// Chat tools, so validation, schemas and framing stay on the Chat path. The
-/// declarations move out of `body`, which nothing reads after them.
+/// declarations move out of `body`, which nothing reads after them. Tool
+/// changes in system turns (Claude Code sends them when its tool list
+/// changes mid-session) apply in order: a removal withdraws a declared tool,
+/// an addition by reference restores it, and an addition by definition
+/// declares or replaces one.
 pub fn tool_controls(body: &mut Value, draft: &mut Draft, host: &mut impl Host) -> Outcome<()> {
-    if body.get("tools").is_none() && body.get("tool_choice").is_none() {
+    let tools = body.get_mut("tools").map(Value::take);
+    let mut choice = body.get_mut("tool_choice").map(Value::take);
+    let changes = tool_changes(body)?;
+    if tools.is_none() && choice.is_none() && changes.is_empty() {
         return Ok(());
     }
     let mut converted = Object::new();
-    if let Some(tools) = body.get_mut("tools") {
-        let Value::Array(items) = tools else {
-            return Err(bad_request("invalid_tools", "'tools' must be an array"));
+    if tools.is_some() || !changes.is_empty() {
+        let mut items = match tools {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items,
+            Some(_) => return Err(bad_request("invalid_tools", "'tools' must be an array")),
         };
-        let mut functions = Vec::new();
-        functions.try_reserve_exact(items.len())?;
-        for tool in items.iter_mut() {
-            let schema = tool.get("input_schema");
-            let (true, "custom", true) = (
-                matches!(tool, Value::Object(_)),
-                member_str_or(tool, "type", "custom"),
-                schema.is_some(),
-            ) else {
+        // Declared tools in declaration order; a removed tool keeps its slot,
+        // so adding it back restores its place.
+        let mut declared = Vec::new();
+        declared.try_reserve_exact(items.len())?;
+        for tool in &mut items {
+            let (name, wrapped) = chat_tool(tool)?;
+            declared.push((name, wrapped, true));
+        }
+        for change in changes {
+            let tool = change.get("tool").ok_or(Failure::Internal)?;
+            let addition = member_str(change, "type") == "tool_addition";
+            let name = if member_str(tool, "type") == "tool_definition" {
+                let mut definition = tool.get("definition").ok_or(Failure::Internal)?.clone();
+                let (name, wrapped) = chat_tool(&mut definition)?;
+                match declared.iter_mut().find(|(declared, ..)| *declared == name) {
+                    Some(slot) => {
+                        slot.1 = wrapped;
+                        slot.2 = true;
+                    }
+                    None => push(&mut declared, (name, wrapped, true))?,
+                }
+                continue;
+            } else {
+                member_str(tool, "name")
+            };
+            let Some(slot) = declared
+                .iter_mut()
+                .find(|(declared, ..)| declared.as_str() == name)
+            else {
                 return Err(bad_request(
                     "invalid_tools",
-                    "only custom tools with an input_schema are supported",
+                    format!("tool change references tool '{name}', which is not declared in tools"),
                 ));
             };
-            let mut function = Object::new();
-            for key in ["name", "description"] {
-                if let Some(value) = tool.get_mut(key) {
-                    function.push(copy(key)?, value.take())?;
-                }
-            }
-            let schema = tool.get_mut("input_schema").ok_or(Failure::Internal)?;
-            function.push(copy("parameters")?, schema.take())?;
-            let mut wrapped = Object::new();
-            wrapped.push(copy("type")?, string("function")?)?;
-            wrapped.push(copy("function")?, Value::Object(function))?;
-            functions.push(Value::Object(wrapped));
+            slot.2 = addition;
         }
+        let mut functions = Vec::new();
+        functions.try_reserve_exact(declared.len())?;
+        functions.extend(
+            declared
+                .into_iter()
+                .filter(|(_, _, active)| *active)
+                .map(|(_, wrapped, _)| wrapped),
+        );
         converted.push(copy("tools")?, Value::Array(functions))?;
     }
-    if let Some(choice) = body.get_mut("tool_choice") {
+    if let Some(choice) = choice.as_mut() {
         let kind = match choice {
             Value::Object(_) => member_str(choice, "type"),
             _ => "",
@@ -118,6 +223,24 @@ fn read_text(part: &Value, out: &mut String) -> Outcome<()> {
         Some(text) if member_str(part, "type") == "text" => append(out, text),
         _ => invalid("unsupported Messages content block"),
     }
+}
+
+/// A `tool_reference` block of a tool search result. Every declared tool is
+/// already in the prompt, so the reference reads as one line naming it.
+fn tool_reference(block: &Value, out: &mut String) -> Outcome<()> {
+    let Some(name) = block
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+    else {
+        return invalid("tool_reference blocks require a tool_name");
+    };
+    if !out.is_empty() && !out.ends_with('\n') {
+        append(out, "\n")?;
+    }
+    append(out, "Tool loaded: ")?;
+    append(out, name)?;
+    append(out, "\n")
 }
 
 /// A user text, image or tool result block.
@@ -202,7 +325,13 @@ fn tool_message(item: &Value, messages: &mut Vec<Message>, host: &mut impl Host)
             Some(Value::String(output)) => result.content = copy(output)?,
             Some(Value::Array(blocks)) => {
                 for block in blocks {
-                    read_part(block, &mut result, host)?;
+                    if matches!(block, Value::Object(_))
+                        && member_str(block, "type") == "tool_reference"
+                    {
+                        tool_reference(block, &mut result.content)?;
+                    } else {
+                        read_part(block, &mut result, host)?;
+                    }
                 }
             }
             Some(_) => {
@@ -253,6 +382,17 @@ fn messages(
             return invalid("");
         }
         let role = role_from(role);
+        if role == Role::System
+            && let Some(Value::Array(parts)) = item.get_mut("content")
+            && parts.iter().any(is_tool_change)
+        {
+            // The tool declarations applied these (`tool_controls`); a turn
+            // that held nothing else adds no message.
+            parts.retain(|part| !is_tool_change(part));
+            if parts.is_empty() {
+                continue;
+            }
+        }
         let mut message = Message::new(role);
         let thought = role == Role::Assistant;
         let images = role == Role::User;
