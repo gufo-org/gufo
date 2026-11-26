@@ -120,11 +120,16 @@ __launch_bounds__(WM * WN * 32) __global__
     __syncthreads();
     int count = min(C, cin - cbase) * 9;
     for (int k = 0; k < count; k += 16) {
-      Frag a[WR];
+      // A struct per fragment: clang 24 (ROCm 10.1) promotes a plain
+      // three-fragment array to one wide vector and rebuilds register high
+      // halves on every load, 29 extra instructions per inner iteration.
+      struct {
+        Frag v;
+      } a[WR];
 #pragma unroll
       for (int i = 0; i < WR; i++) {
         int r = min(cout - 1, channel0 + (wr * WR + i) * 16 + sl);
-        a[i] = Load(w + size_t((cbase * 9 + k) / 16) * cout * 16 + r * 16);
+        a[i].v = Load(w + size_t((cbase * 9 + k) / 16) * cout * 16 + r * 16);
       }
 #pragma unroll
       for (int j = 0; j < WT; j++) {
@@ -132,7 +137,7 @@ __launch_bounds__(WM * WN * 32) __global__
 #pragma unroll
         for (int i = 0; i < WR; i++)
           acc[i][j] =
-              __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a[i], b, acc[i][j]);
+              __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a[i].v, b, acc[i][j]);
       }
     }
     __syncthreads();
