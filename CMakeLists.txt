@@ -1138,8 +1138,7 @@ endfunction()
     LABELS "cpu;server;api;openai;correctness")
 
   add_executable(multipart_test
-    tests/cli/multipart_test.cpp
-    tests/cli/multipart_reference.cpp)
+    tests/cli/multipart_test.cpp)
   target_link_libraries(multipart_test PRIVATE gufo_http)
   target_compile_definitions(multipart_test PRIVATE
     GUFO_MULTIPART_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/multipart")

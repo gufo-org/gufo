@@ -125,25 +125,21 @@ no control bytes in targets or values, a 100-field limit, bare LF line ends
 and one leading empty line. Rust tests also check query parameters, header
 lists and caller errors. `http_server_test` checks parsing over a socket.
 
-`multipart_test` compares the Rust multipart parser, with each API's limits,
-with frozen copies of the three 0.33.0 parsers in
-`tests/cli/multipart_reference.cpp`. Forms as clients encode them must give
-every API the same fields, also when the API stops after one of the first
-fields; error messages may differ, and other forms, which RFC 7578 may read
-differently, are counted, not compared. The forms cover client-style
-boundaries, names, filenames and contents, up to 34 fields, forms with what
-clients do not send, and random mutations; the forms captured from curl,
-Python requests, Node.js and Go in `tests/fixtures/multipart` must be among
-the canonical ones and parse completely. Every rejection the parser has must be
-reached. It runs in `check-pr`; the parser's Rust unit tests check the RFC
-rules for the other forms.
+`multipart_test` checks `ParseMultipart` with each API's limits: the forms
+captured from curl, Python requests, Node.js and Go in
+`tests/fixtures/multipart` give their exact fields, also when the API stops
+after one of the first three, and unique names reject the repeated `image[]`.
+Every status and message the parser returns, each API's field limit and a
+field consumer's exception are checked too, and a comment lists where 0.33.0
+read forms differently. It runs in `check-pr`; the parser's Rust unit tests
+check the RFC rules and the C ABI.
 
 `websocket_frame_test` checks expected queued messages and reply frames through
 the C ABI: fragments, pings, close codes, UTF-8, length encodings, truncation
 and queue limits. Rust tests cover protocol rejections and buffer reuse;
 `audio_websocket_test` covers sockets. All three parser caller tests run in
-`check-pr`. The frozen C++ decoders were retired after their ports shipped in
-v0.34.0 or earlier. The audio decoder has no frozen C++ oracle; its independent
+`check-pr`. The frozen C++ decoders and multipart parsers were retired after
+their ports shipped in v0.34.0 or earlier. The audio decoder has no frozen C++ oracle; its independent
 symphonia PCM and numerical resampler checks remain.
 
 `gguf_header_test` compares the Rust GGUF header parser, through
