@@ -158,20 +158,17 @@ reached. GGUF files given as arguments are compared and timed too. It
 runs in `check-pr`; the crate's Rust tests cover the check order, the budget and
 the C ABI.
 
-`json_parse_test` compares the Rust JSON parser, through `json::parse`, with a
-frozen copy of the 0.35.0 C++ parser in `tests/core/json_reference.hpp`.
-Literals, number grids, every byte and escape in strings, surrogate pairs,
-nesting around the depth limit of 128 and generated documents with
-deterministic mutations, and every truncation of those under 600 bytes, must
-give the same values, number tokens and member order, or fail with the same
-message. Further texts hold a 1 MiB string with bad bytes inserted and objects
-of 5,000 keys, with and without a duplicate. Numbers whose 700,000-digit
-mantissa offsets an exponent beyond 65,535 must give fixed values, and with
-libstdc++ also those of the reference. Every rejection must be reached, and
-every allocation of the C++ builder is failed once, for a value and for a
-rejection: its exception must reach the caller. It runs in `check-pr`; the
-crate's Rust tests cover the integer fast path, the string scan, the switch to
-a key set, failed allocations and the C ABI.
+`json_parse_test` checks expected values, number tokens and member order, or
+the message of each of the parser's 21 rejections, through `json::parse`:
+whitespace and trailing input, NUL bytes, duplicate keys compared decoded,
+number spellings, ranges and rounding (subnormals, results that round to zero
+or overflow, halfway cases decided after 768 digits), escapes, surrogates and
+ill-formed UTF-8, the depth limit of 128, a 1 MiB string with bad bytes
+inserted and objects of 5,000 keys. Every allocation of the C++ builder is
+failed once, for a value and for a rejection: its exception must reach the
+caller. It runs in `check-pr`; the crate's Rust tests cover the integer fast
+path, the string scan, the switch to a key set, long mantissas that offset
+large exponents, failed allocations and the C ABI.
 
 `json_schema_test` compares the Rust JSON Schema compiler, through
 `JsonSchemaRegex` and the string and number lexemes, with a frozen copy of
