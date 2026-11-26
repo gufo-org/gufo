@@ -296,7 +296,7 @@ void PublishTerminal(const std::shared_ptr<ScheduledRequest>& request,
         request->sessions->requests[std::exchange(request->session, kNoSession)]
             .reset();
       }
-      detail::RequestsProcessing().fetch_sub(1, std::memory_order_relaxed);
+      Metrics().requests_processing.Add(-1);
     }
     request->phase.store(TextRequestPhase::kTerminal,
                          std::memory_order_release);
@@ -783,10 +783,8 @@ struct TextGenerationScheduler::Impl {
 
   /// Keeps the process-wide deferred gauge in step. Requires queue_mutex.
   void SetQueuedCountLocked(std::size_t count) {
-    detail::RequestsDeferred().fetch_add(
-        static_cast<std::int64_t>(count) -
-            static_cast<std::int64_t>(queued_count),
-        std::memory_order_relaxed);
+    Metrics().requests_deferred.Add(static_cast<std::int64_t>(count) -
+                                    static_cast<std::int64_t>(queued_count));
     queued_count = count;
   }
 
@@ -821,7 +819,7 @@ struct TextGenerationScheduler::Impl {
       }
     }
     request->counted_processing = true;
-    detail::RequestsProcessing().fetch_add(1, std::memory_order_relaxed);
+    Metrics().requests_processing.Add(1);
     SetQueuedCountLocked(queued_count - 1);
     if (!client.requests.empty()) {
       queued_clients.push_back(std::move(client));
@@ -957,7 +955,7 @@ struct TextGenerationScheduler::Impl {
   void MarkDeviceLost(std::string_view reason) noexcept {
     if (device_lost.exchange(true, std::memory_order_acq_rel))
       return;
-    detail::DeviceLostTotal().fetch_add(1, std::memory_order_relaxed);
+    Metrics().device_lost.Add(1);
     try {
       Logger::Error("scheduler", "event=device_lost remedy=restart reason=" +
                                      std::string(reason));
@@ -1700,8 +1698,7 @@ struct TextGenerationScheduler::Impl {
       publication_prefill.ObserveContext(step.consumed_tokens, depth, step_ms);
       request->live_prefill_tokens.store(request->result.prefill_tokens,
                                          std::memory_order_relaxed);
-      detail::TotalPromptTokens().fetch_add(step.consumed_tokens,
-                                            std::memory_order_relaxed);
+      Metrics().prompt_tokens.Add(step.consumed_tokens);
       ++request->result.prefill_chunks;
       request->result.max_prefill_chunk_tokens = std::max(
           request->result.max_prefill_chunk_tokens, step.consumed_tokens);
@@ -1837,7 +1834,7 @@ struct TextGenerationScheduler::Impl {
     }
     request->live_generated_tokens.store(request->result.tokens.size(),
                                          std::memory_order_relaxed);
-    detail::TotalGenTokens().fetch_add(1, std::memory_order_relaxed);
+    Metrics().gen_tokens.Add(1);
     const auto piece = request->stop_filter.enabled()
                            ? request->stop_filter.Push(selection.piece)
                            : selection.piece;

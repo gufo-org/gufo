@@ -1588,6 +1588,27 @@ a restart is the only recovery.
 
 ## Metrics
 
+`/metrics` renders a registry that lives in Rust (`src/core/metrics`, wrapped
+for C++ by `src/core/metrics.hpp`) in the Prometheus text format. The text
+server registers its families once, in `TextMetrics`
+(`src/cli/serve/generation_metrics.hpp`), and the scheduler and request paths
+update them through typed handles. An update neither locks nor allocates. A
+text scrape sets the process-global gauges and renders them under one mutex,
+so concurrent scrapes do not interleave.
+
+Families render in registration order, and `GET /metrics` answers with
+`Content-Type: text/plain; version=0.0.4`. Integer samples print as integers.
+Fractional samples print with 17 significant digits, as a C++ stream set to
+`max_digits10` does, so 0.1 reads `0.10000000000000001`. A non-finite sample
+reads `NaN`, `+Inf` or `-Inf`. A histogram has fixed upper bounds chosen at
+registration and renders as cumulative `_bucket{le="..."}` lines with `_sum`
+and `_count`. Its bounds and sum print in the shortest form that reads back
+exactly, so `le="0.1"` stays `0.1`. A histogram counts a non-finite observation
+in its `+Inf` bucket and in `_count` but leaves it out of `_sum`.
+`gufo_device_lost_total` counts confirmed GPU context losses.
+`tests/fixtures/metrics/text_server.golden` pins the text server's body byte
+for byte.
+
 `/metrics` exposes total prompt/generated tokens and the latest prompt/decode
 speeds. The token counters advance as each prefill chunk and generated token
 executes, so their rates show live throughput; prompt tokens exclude cache
@@ -1609,6 +1630,15 @@ even if the client disconnects before reading it; requests that fail in the
 scheduler, such as on a deadline or a runner error, add none of these.
 `llamacpp:kv_cache_usage_ratio` is the in-flight prompt and generated tokens
 over sessions times context; retained cache entries are not counted.
+Each scrape sets `llamacpp:kv_cache_usage_ratio` and the shared-state and
+prompt-state gauges from the backend. `gufo_shared_state_bytes`,
+`gufo_shared_state_charged_bytes`, `gufo_shared_state_reclaimable_bytes` and
+`gufo_shared_state_max_prompt_tokens` report the demand-mapped state the
+sessions share, and `gufo_shared_state_waits_total`,
+`gufo_shared_state_pauses_total` and `gufo_shared_state_preemptions_total`
+count requests that waited, decoding requests that paused, and requests
+stopped with `memory_pressure`. These families are absent from the text for
+backends that do not share session state.
 `gufo_prompt_state_budget_bytes` is the host RAM prompt state may claim before
 admission refuses, `gufo_prompt_state_reserved_bytes` the bytes charged to
 in-flight requests, and `gufo_prompt_state_available_bytes` the remainder.

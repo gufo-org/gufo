@@ -247,6 +247,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gufo-metrics"
+version = "0.0.0"
+dependencies = [
+ "gufo-ffi",
+]
+
+[[package]]
 name = "gufo-png"
 version = "0.0.0"
 dependencies = [
@@ -283,6 +290,7 @@ dependencies = [
  "gufo-jpeg-decode",
  "gufo-json",
  "gufo-json-schema",
+ "gufo-metrics",
  "gufo-png",
  "gufo-realtime-voice",
  "gufo-tokenizer-json",

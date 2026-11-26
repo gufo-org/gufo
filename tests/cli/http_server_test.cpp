@@ -31,6 +31,7 @@
 #include "src/core/platform/net.hpp"
 #include "src/core/platform/os_info.hpp"
 #include "tests/cli/http_server_test_support.hpp"
+#include "tests/cli/metrics_values.hpp"
 
 namespace {
 using gufo::server::Logger;
@@ -465,7 +466,7 @@ void TestExpectContinue() {
 }
 
 void TestFallbackBackendMetrics() {
-  namespace metrics = gufo::server::detail;
+  namespace metrics = gufo::server::testing;
   RunningServer server;
   struct Endpoint {
     const char* path;
@@ -478,14 +479,14 @@ void TestFallbackBackendMetrics() {
            Endpoint{"/v1/responses", R"({"input":"hi"})"},
        }) {
     for (const bool stream : {false, true}) {
-      const auto prompt_before = metrics::TotalPromptTokens().load();
-      const auto generated_before = metrics::TotalGenTokens().load();
-      const auto cached_before = metrics::TotalCachedPromptTokens().load();
-      const auto rounds_before = metrics::TotalDraftRounds().load();
-      const auto drafts_before = metrics::TotalDraftTokens().load();
-      const auto accepted_before = metrics::TotalDraftAcceptedTokens().load();
-      const auto prompt_seconds_before = metrics::TotalPromptSeconds().load();
-      const auto gen_seconds_before = metrics::TotalGenSeconds().load();
+      const auto prompt_before = metrics::TotalPromptTokens();
+      const auto generated_before = metrics::TotalGenTokens();
+      const auto cached_before = metrics::TotalCachedPromptTokens();
+      const auto rounds_before = metrics::TotalDraftRounds();
+      const auto drafts_before = metrics::TotalDraftTokens();
+      const auto accepted_before = metrics::TotalDraftAcceptedTokens();
+      const auto prompt_seconds_before = metrics::TotalPromptSeconds();
+      const auto gen_seconds_before = metrics::TotalGenSeconds();
       auto body = gufo::json::parse(endpoint.body);
       body["model"] = "test";
       body["stream"] = stream;
@@ -508,10 +509,9 @@ void TestFallbackBackendMetrics() {
       assert(response.find("llamacpp:spec_decode_num_accepted_tokens_total " +
                            std::to_string(accepted_before + 4) + "\n") !=
              std::string::npos);
-      assert(metrics::TotalPromptSeconds().load() - prompt_seconds_before >
-                 0.0039 &&
-             metrics::TotalGenSeconds().load() - gen_seconds_before > 0.0019);
-      assert(metrics::MaxSequenceTokens().load() >= 11);
+      assert(metrics::TotalPromptSeconds() - prompt_seconds_before > 0.0039 &&
+             metrics::TotalGenSeconds() - gen_seconds_before > 0.0019);
+      assert(metrics::MaxSequenceTokens() >= 11);
       assert(response.find("llamacpp:tokens_predicted_total " +
                            std::to_string(generated_before + 1) + "\n") !=
              std::string::npos);
@@ -530,8 +530,8 @@ void TestFallbackBackendMetrics() {
            Case{0, 0, true, 0},
            Case{3, 0, true, 3},
        }) {
-    const auto prompt_before = metrics::TotalPromptTokens().load();
-    const auto generated_before = metrics::TotalGenTokens().load();
+    const auto prompt_before = metrics::TotalPromptTokens();
+    const auto generated_before = metrics::TotalGenTokens();
     TextGenerationBackend::Result result;
     result.prompt_tokens = 10;
     result.cached_prompt_tokens = test.cached;
@@ -539,9 +539,9 @@ void TestFallbackBackendMetrics() {
     result.completion_tokens = 2;
     result.cancelled = test.cancelled;
     gufo::server::RecordServerMetrics(result);
-    assert(metrics::TotalPromptTokens().load() ==
+    assert(metrics::TotalPromptTokens() ==
            prompt_before + test.expected_prompt);
-    assert(metrics::TotalGenTokens().load() == generated_before + 2);
+    assert(metrics::TotalGenTokens() == generated_before + 2);
   }
 }
 

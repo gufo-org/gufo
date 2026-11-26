@@ -398,6 +398,7 @@ add_subdirectory(src/core/npu)
 
 add_library(gufo_core STATIC
   src/core/base64.cpp
+  src/core/metrics.cpp
   src/core/image.cpp
   src/core/png.cpp
   src/core/crypto/sha256.cpp
@@ -1109,6 +1110,11 @@ endfunction()
   add_test(NAME base64_test COMMAND base64_test)
   set_tests_properties(base64_test PROPERTIES LABELS "cpu;server;correctness")
 
+  add_executable(metrics_test tests/core/metrics_test.cpp)
+  target_link_libraries(metrics_test PRIVATE gufo_http)
+  add_test(NAME metrics_test COMMAND metrics_test)
+  set_tests_properties(metrics_test PROPERTIES LABELS "cpu;server;correctness")
+
   add_executable(websocket_frame_test
     tests/cli/websocket_frame_test.cpp)
   target_link_libraries(websocket_frame_test PRIVATE gufo_core)
@@ -1148,6 +1154,14 @@ endfunction()
   target_link_libraries(http_server_test PRIVATE gufo_http)
   add_test(NAME http_server_test COMMAND http_server_test)
   set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30)
+
+  add_executable(metrics_golden_test tests/cli/metrics_golden_test.cpp)
+  target_link_libraries(metrics_golden_test PRIVATE gufo_http)
+  target_compile_definitions(metrics_golden_test PRIVATE
+    GUFO_METRICS_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/metrics")
+  add_test(NAME metrics_golden_test COMMAND metrics_golden_test)
+  set_tests_properties(metrics_golden_test PROPERTIES
+    LABELS "cpu;server;http;correctness" TIMEOUT 30)
 
   add_executable(http_server_signals_test tests/cli/http_server_signals_test.cpp)
   target_link_libraries(http_server_signals_test PRIVATE gufo_http)
