@@ -169,7 +169,7 @@ constexpr std::size_t kArenaRowBytesBound = std::size_t{1} << 20;
 // mixers' up projections with the router measured no better.
 constexpr std::size_t kPrefetchOutputBytes = std::size_t{12} << 20;
 constexpr std::size_t kPrefetchMixerBytes = std::size_t{4} << 20;
-constexpr std::uint32_t kPrefetchBlocks = 40;
+constexpr std::uint32_t kPrefetchBlocks = 16;
 
 /// Memory a wide pass needs beyond its scratch set: its own K/V, indexer
 /// and checkpoint pages.
@@ -3359,7 +3359,7 @@ bool Executor::DefaultAttention(
     UnpackQGate(s_.qg, 2 * c.AttentionQDim(), s_.q, s_.attn_gate, nullptr,
                 nullptr, n_tokens, c.num_heads, c.head_dim, 0, stream_);
   }
-  if (project_output)
+  if (project_output && !sparse)
     Prefetch(n_tokens, &l.hc_ffn.down, kPrefetchMixerBytes, &l.attn_out,
              kPrefetchOutputBytes);
   if (!prepared) {
