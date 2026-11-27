@@ -313,6 +313,40 @@ void Registry::AddDecisionProvider(DecisionProvider provider) {
   RegisterDecisionProvider(std::move(provider));
 }
 
+static std::vector<RerankProvider> g_rerank_providers;
+
+void RegisterRerankProvider(RerankProvider provider) {
+  for (auto& existing : g_rerank_providers) {
+    if (existing.id == provider.id) {
+      existing = std::move(provider);
+      return;
+    }
+  }
+  g_rerank_providers.push_back(std::move(provider));
+}
+
+const RerankProvider* FindRerankProvider(std::string_view id) {
+  for (const auto& provider : g_rerank_providers) {
+    if (provider.id == id) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+const RerankProvider* ProbeRerankProvider(std::string_view model_root) {
+  for (const auto& provider : g_rerank_providers) {
+    if (provider.probe && provider.probe(model_root)) {
+      return &provider;
+    }
+  }
+  return nullptr;
+}
+
+void Registry::AddRerankProvider(RerankProvider provider) {
+  RegisterRerankProvider(std::move(provider));
+}
+
 static std::vector<ModelSource> g_model_sources;
 
 void Registry::AddModelSource(ModelSource source) {
