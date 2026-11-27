@@ -498,7 +498,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/v1/completions` | Optional legacy text completion adapter |
 | `GET` | `/health` | Process liveness and GPU context (aliases: `/v1/health`, `/healthz`, `/`) |
 | `GET` | `/ready` | Model and backend readiness (aliases: `/v1/ready`, `/readyz`) |
-| `GET` | `/metrics` | Prometheus-format operational metrics (text LLM serving only) |
+| `GET` | `/metrics` | Prometheus-format operational metrics (text LLM and embedding serving) |
 
 ### Other model services
 
@@ -1612,12 +1612,19 @@ a restart is the only recovery.
 ## Metrics
 
 `/metrics` renders a registry that lives in Rust (`src/core/metrics`, wrapped
-for C++ by `src/core/metrics.hpp`) in the Prometheus text format. The text
-server registers its families once, in `TextMetrics`
+for C++ by `src/core/metrics.hpp`) in the Prometheus text format. A process
+serves one model class, and `HttpServer` answers `GET /metrics` and
+`GET /v1/metrics` from that class's registry. `MetricsEndpoint` in
+`http_server.cpp` picks the registry once, from the text backend, then the
+embedding service. A server with neither of them, such as the ASR, TTS, image,
+video and decision servers, answers 404.
+
+The text server registers its families once, in `TextMetrics`
 (`src/cli/serve/generation_metrics.hpp`), and the scheduler and request paths
-update them through typed handles. An update neither locks nor allocates. A
-text scrape sets the process-global gauges and renders them under one mutex,
-so concurrent scrapes do not interleave.
+update them through typed handles. An embedding server never constructs
+`TextMetrics`, so no `llamacpp:*` family appears there. An update neither locks
+nor allocates. A text scrape sets the process-global gauges and renders them
+under one mutex, so concurrent scrapes do not interleave.
 
 Families render in registration order, and `GET /metrics` answers with
 `Content-Type: text/plain; version=0.0.4`. Integer samples print as integers.
@@ -1631,6 +1638,37 @@ in its `+Inf` bucket and in `_count` but leaves it out of `_sum`.
 `gufo_device_lost_total` counts confirmed GPU context losses.
 `tests/fixtures/metrics/text_server.golden` pins the text server's body byte
 for byte.
+
+The embedding service owns its own registry, built in
+`EmbeddingMetrics` (`src/cli/serve/embedding_metrics.hpp`) when the service is
+constructed, and records at `EmbeddingService::EmbedInputs`, so HTTP requests
+and extension callers count alike. The counters cover calls that reach the
+service. The readiness and device-lost gates (503) in `HttpServer` and the
+handler's 400 rejections of a malformed request body run before the service,
+so those answers count nowhere. A call counts once, as `ok`, `invalid`, `error`,
+`cancelled` or `device_lost`. `invalid` covers the 400-class statuses
+`kInputTooLong`, `kInvalidInput`, `kInvalidAudioInput` and
+`kInvalidVideoInput`. `error` covers `kFailed`, including a call to a service
+that is not ready.
+
+The service decides whether a result is usable before it ends the call, so the
+status matches the HTTP answer. After the runner reports `kOk` the service
+still returns `kCancelled` when the caller's cancellation check is true, and
+`kFailed` when the batch does not hold one non-empty finite embedding and one
+token count per input or when a requested `dimensions` prefix has no usable
+norm. Tokens count only for calls that end `ok`.
+
+| Family | Type | Meaning |
+|---|---|---|
+| `gufo_embedding_requests_total{status}` | counter | Requests by outcome (`ok`, `error`, `invalid`, `cancelled`, `device_lost`). |
+| `gufo_embedding_inputs_total{modality}` | counter | Input parts received by the service before the runner runs, by `text`, `image`, `audio` or `video`. Parts of a request that is then rejected still count. |
+| `gufo_embedding_input_tokens_total` | counter | Tokens embedded by successful requests, after truncation. |
+| `gufo_embedding_request_seconds` | histogram | Time from admission to the end of a request, in buckets from 5 ms to 30 s. |
+| `gufo_embedding_requests_in_flight` | gauge | Requests admitted and not yet finished. |
+| `gufo_device_lost_total` | counter | Confirmed GPU context losses, incremented when the service first reports a lost device. |
+
+Batching happens inside the extension's runner, so the service has no device
+batch to time and exports no per-batch histogram.
 
 `/metrics` exposes total prompt/generated tokens and the latest prompt/decode
 speeds. The token counters advance as each prefill chunk and generated token

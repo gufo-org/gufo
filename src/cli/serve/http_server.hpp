@@ -172,6 +172,7 @@ private:
   std::shared_ptr<EmbeddingService> embeddings_;
   std::shared_ptr<DecisionService> decisions_;
   HttpServerOptions options_;
+  std::function<HttpResponse()> metrics_;
   GufoHttpServer* server_ = nullptr;
   std::atomic<bool> stopped_{false};
   std::atomic<bool> device_lost_reported_{false};
