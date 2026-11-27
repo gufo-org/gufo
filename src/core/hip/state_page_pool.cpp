@@ -1,6 +1,7 @@
 #include "src/core/hip/state_page_pool.hpp"
 
 #include <algorithm>
+#include <bitset>
 #include <chrono>
 #include <cstdlib>
 #include <iterator>
@@ -367,30 +368,91 @@ std::byte* PagePool::AliasForCopy(hipMemGenericAllocationHandle_t handle) {
     }
     scratch_ = static_cast<std::byte*>(base);
   }
-  if (scratch_used_ == kScratchPages)
+  std::size_t slot = 0;
+  while (slot < kScratchPages && aliases_[slot].state != Alias::State::kFree)
+    ++slot;
+  if (slot == kScratchPages)
     return nullptr;
-  std::byte* const address = scratch_ + scratch_used_ * kPageBytes;
+  std::byte* const address = scratch_ + slot * kPageBytes;
   if (hipMemMap(address, kPageBytes, 0, handle, 0) != hipSuccess) {
     (void)hipGetLastError();
     return nullptr;
   }
-  ++scratch_used_;
   if (hipMemSetAccess(address, kPageBytes, &access_, 1) != hipSuccess) {
     (void)hipGetLastError();
-    // Unmapped with the others at the next SettleRemaps().
+    // Unmapped by the next SettleRemaps(), with the others.
+    AliasDone(aliases_[slot], nullptr);
+    CountFixups();
     return nullptr;
   }
-  // The scratch address had another page until the last SettleRemaps(): it
-  // reaches this one only after the next, which runs before the copy.
+  aliases_[slot].state = Alias::State::kHeld;
+  // The scratch address had another page until an earlier SettleRemaps():
+  // it reaches this one only after the next, which runs before the copy.
   RemapBarrier::NoteRemap();
   return address;
+}
+
+std::size_t PagePool::SlotOf(const std::byte* address) const {
+  if (scratch_ == nullptr || address < scratch_ ||
+      address >= scratch_ + kScratchPages * kPageBytes)
+    return kScratchPages;
+  return static_cast<std::size_t>(address - scratch_) / kPageBytes;
+}
+
+PagePool::Alias* PagePool::AliasAt(const std::byte* address) {
+  const std::size_t slot = SlotOf(address);
+  return slot < kScratchPages ? &aliases_[slot] : nullptr;
+}
+
+void PagePool::AliasDone(Alias& alias, std::shared_ptr<void> keep) {
+  alias.state = Alias::State::kDone;
+  alias.keep = std::move(keep);
 }
 
 void PagePool::QueueCopy(std::byte* destination, const std::byte* source,
                          std::shared_ptr<void> keep) {
   const std::lock_guard lock(fixup_mutex_);
   fixups_.push_back({destination, source, kPageBytes, std::move(keep)});
+  if (auto* const alias = AliasAt(source);
+      alias != nullptr && alias->state == Alias::State::kHeld)
+    alias->state = Alias::State::kQueued;
   CountFixups();
+}
+
+void PagePool::ReturnAlias(const std::byte* address,
+                           std::shared_ptr<void> keep) {
+  const std::lock_guard lock(fixup_mutex_);
+  auto* const alias = AliasAt(address);
+  if (alias == nullptr || alias->state != Alias::State::kHeld)
+    return;
+  AliasDone(*alias, std::move(keep));
+  CountFixups();
+}
+
+void PagePool::UnmapDoneAliases() {
+  // Released after the locks, as in SettleRemaps().
+  std::vector<std::shared_ptr<void>> sources;
+  const std::lock_guard settle_lock(settle_mutex_);
+  std::bitset<kScratchPages> unmap;
+  std::byte* scratch = nullptr;
+  {
+    const std::lock_guard lock(fixup_mutex_);
+    scratch = scratch_;
+    unmap = DoneAliases();
+  }
+  if (unmap.none())
+    return;
+  UnmapAliases(scratch, unmap);
+  const std::lock_guard lock(fixup_mutex_);
+  FreeAliases(unmap, sources);
+  CountFixups();
+}
+
+std::bitset<PagePool::kScratchPages> PagePool::DoneAliases() const {
+  std::bitset<kScratchPages> done;
+  for (std::size_t slot = 0; slot < kScratchPages; ++slot)
+    done[slot] = aliases_[slot].state == Alias::State::kDone;
+  return done;
 }
 
 bool PagePool::DropFixups(const std::byte* begin, const std::byte* end) {
@@ -401,15 +463,22 @@ bool PagePool::DropFixups(const std::byte* begin, const std::byte* end) {
   const auto into = [&](const Fixup& fixup) {
     return fixup.destination < end && fixup.destination + fixup.bytes > begin;
   };
+  // Released after the locks: the last reference to a page sends it back
+  // to the pool or to a lender.
+  std::vector<std::shared_ptr<void>> released;
   const auto drop = [&] {
     const auto dropped =
         std::stable_partition(fixups_.begin(), fixups_.end(),
                               [&](const Fixup& fixup) { return !into(fixup); });
     // A dropped copy's alias still maps its source page: the page stays
     // held until SettleRemaps() unmaps the alias.
-    for (auto it = dropped; it != fixups_.end(); ++it)
-      if (it->keep)
-        dropped_sources_.push_back(std::move(it->keep));
+    for (auto it = dropped; it != fixups_.end(); ++it) {
+      if (auto* const alias = AliasAt(it->source);
+          alias != nullptr && alias->state == Alias::State::kQueued)
+        AliasDone(*alias, std::move(it->keep));
+      else if (it->keep)
+        released.push_back(std::move(it->keep));
+    }
     fixups_.erase(dropped, fixups_.end());
     CountFixups();
   };
@@ -435,12 +504,19 @@ void PagePool::QueueClear(std::byte* destination, std::size_t bytes) {
 }
 
 void PagePool::CountFixups() {
-  unfinished_.store(fixups_.size() + taken_.size(), std::memory_order_release);
+  const auto done = std::count_if(
+      aliases_.begin(), aliases_.end(),
+      [](const Alias& alias) { return alias.state == Alias::State::kDone; });
+  unfinished_.store(
+      fixups_.size() + taken_.size() + static_cast<std::size_t>(done),
+      std::memory_order_release);
 }
 
 bool PagePool::SettleRemaps() {
   // Work another thread's call runs counts as unfinished: it may be this
-  // thread's, so this call waits for it below.
+  // thread's, so this call waits for it below. So does a done alias (its
+  // copy dropped, or given back): a barrier another caller runs directly
+  // unmaps none, and AliasForCopy() needs a free one.
   if (unfinished_.load(std::memory_order_acquire) == 0 &&
       !RemapBarrier::Pending())
     return true;
@@ -453,36 +529,50 @@ bool PagePool::SettleRemaps() {
   // this thread remapped after it began.
   const std::lock_guard settle_lock(settle_mutex_);
   bool any = false;
-  std::size_t aliases = 0;
+  // The aliases this call unmaps: those done now, and those its copies read
+  // once they ran. An alias handed out and not queued yet stays mapped: a
+  // ReplaceRun() between AliasForCopy() and QueueCopy() queues its copy
+  // later.
+  std::bitset<kScratchPages> unmap;
+  std::bitset<kScratchPages> copied;
+  std::byte* scratch = nullptr;
   {
     const std::lock_guard lock(fixup_mutex_);
     // Still unfinished, and visible to DropFixups(), until it ran or is
     // queued again. Only this call changes taken_, so it reads it unlocked.
     taken_.swap(fixups_);
-    sources.swap(dropped_sources_);
     any = !taken_.empty();
-    aliases = scratch_used_;
+    scratch = scratch_;
+    unmap = DoneAliases();
+    for (const auto& fixup : taken_)
+      if (const std::size_t slot = SlotOf(fixup.source); slot < kScratchPages)
+        copied.set(slot);
   }
   if ((RemapBarrier::Pending() || any) && !RemapBarrier::Settle()) {
     // The device may still reach the old pages: nothing runs through them.
     // Other threads' regions queued some of this work, and their own call
     // must still find it, so it waits, with the aliases its copies read, for
     // the next barrier that succeeds. A region drops what targets the pages
-    // it unmaps meanwhile (DropFixups()).
+    // it unmaps meanwhile (DropFixups()). The done aliases go now: the
+    // device never read them, and an unmap needs no barrier.
+    if (unmap.any()) {
+      RemapBarrier::Hold();
+      UnmapAliases(scratch, unmap);
+      RemapBarrier::Release();
+    }
     const std::lock_guard lock(fixup_mutex_);
     taken_.insert(taken_.end(), std::make_move_iterator(fixups_.begin()),
                   std::make_move_iterator(fixups_.end()));
     fixups_.swap(taken_);
     taken_.clear();
-    dropped_sources_.insert(dropped_sources_.end(),
-                            std::make_move_iterator(sources.begin()),
-                            std::make_move_iterator(sources.end()));
+    FreeAliases(unmap, sources);
     CountFixups();
     return false;
   }
+  unmap |= copied;
   // The copies read aliases this thread unmaps right after: other threads'
   // device work stays held back until both are done.
-  if (any || aliases != 0)
+  if (any || unmap.any())
     RemapBarrier::Hold();
   bool ok = true;
   if (any) {
@@ -503,25 +593,48 @@ bool PagePool::SettleRemaps() {
     if (!ok)
       (void)hipGetLastError();
   }
-  if (aliases != 0) {
-    // Idle here: nothing reads the aliases any more.
-    (void)hipMemUnmap(scratch_, aliases * kPageBytes);
-    (void)hipGetLastError();
-    const std::lock_guard lock(fixup_mutex_);
-    // An alias mapped meanwhile by another thread sits past `aliases`; it
-    // cannot be, under settle_mutex_'s callers' rule, but never reuse one.
-    if (scratch_used_ == aliases)
-      scratch_used_ = 0;
-  }
+  // Idle here: nothing reads these aliases any more.
+  UnmapAliases(scratch, unmap);
   {
     // Done, or a copy failed and the work is given up: callers waiting for
     // it may go on.
     const std::lock_guard lock(fixup_mutex_);
+    FreeAliases(unmap, sources);
     done.swap(taken_);
     CountFixups();
   }
   RemapBarrier::Release();
   return ok;
+}
+
+void PagePool::UnmapAliases(std::byte* scratch,
+                            const std::bitset<kScratchPages>& unmap) {
+  if (unmap.none())
+    return;
+  for (std::size_t slot = 0; slot < kScratchPages;) {
+    if (!unmap[slot]) {
+      ++slot;
+      continue;
+    }
+    std::size_t end = slot + 1;
+    while (end < kScratchPages && unmap[end])
+      ++end;
+    // One call per run: each waits for device work in flight.
+    (void)hipMemUnmap(scratch + slot * kPageBytes, (end - slot) * kPageBytes);
+    slot = end;
+  }
+  (void)hipGetLastError();
+}
+
+void PagePool::FreeAliases(const std::bitset<kScratchPages>& unmapped,
+                           std::vector<std::shared_ptr<void>>& sources) {
+  for (std::size_t slot = 0; slot < kScratchPages; ++slot) {
+    if (!unmapped[slot])
+      continue;
+    if (aliases_[slot].keep)
+      sources.push_back(std::move(aliases_[slot].keep));
+    aliases_[slot].state = Alias::State::kFree;
+  }
 }
 
 void PagePool::MapAhead(const std::shared_ptr<Region>& region,
@@ -569,15 +682,24 @@ std::size_t PagePool::TargetFreePages() {
 }
 
 PagePoolStats PagePool::Stats() const {
+  PagePoolStats stats;
+  {
+    const std::lock_guard lock(fixup_mutex_);
+    stats.fixups = fixups_.size() + taken_.size();
+    for (const auto& alias : aliases_) {
+      stats.aliases += alias.state != Alias::State::kFree;
+      stats.held_sources += alias.keep != nullptr;
+    }
+  }
   std::lock_guard lock(mutex_);
-  return {.free_pages = free_.size() + recycled_.size(),
-          .pages_in_use = in_use_,
-          .created_on_demand = created_on_demand_,
-          .created_ahead = created_ahead_,
-          .skipped_below_floor = skipped_below_floor_,
-          .lent = lent_,
-          .returned = returned_,
-          .fixups = unfinished_.load(std::memory_order_acquire)};
+  stats.free_pages = free_.size() + recycled_.size();
+  stats.pages_in_use = in_use_;
+  stats.created_on_demand = created_on_demand_;
+  stats.created_ahead = created_ahead_;
+  stats.skipped_below_floor = skipped_below_floor_;
+  stats.lent = lent_;
+  stats.returned = returned_;
+  return stats;
 }
 
 void PagePool::Run() {

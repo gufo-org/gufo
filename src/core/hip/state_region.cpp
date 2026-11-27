@@ -357,20 +357,27 @@ bool Region::ReplaceRun(std::size_t first, std::size_t count, bool copy,
   // shared pages.
   std::vector<std::byte*> aliases(count, nullptr);
   if (copy) {
-    for (int attempt = 0; attempt < 2; ++attempt) {
-      std::size_t k = 0;
+    std::size_t k = 0;
+    for (int attempt = 0;; ++attempt) {
       for (; k < count; ++k)
         if ((aliases[k] = pool_->AliasForCopy(pages_[first + k])) == nullptr)
           break;
-      if (k == count)
+      // No scratch address free: run what is queued, which unmaps the
+      // aliases of the copies it runs. These stay handed out.
+      if (k == count || attempt == 1 || !pool_->SettleRemaps())
         break;
-      // No scratch address left: run what is queued, which frees them all
-      // (these aliases too; nothing was queued on them yet).
-      if (attempt == 1 || !pool_->SettleRemaps()) {
-        give_back();
-        SetError(error, kNotSettled);
-        return false;
-      }
+    }
+    if (k != count) {
+      // Given back, they go at once, with any whose access failed: no copy
+      // read them, and this region holds their pages until then. As below,
+      // held until the caller's SettleRemaps().
+      for (std::size_t j = 0; j < k; ++j)
+        pool_->ReturnAlias(aliases[j], nullptr);
+      RemapBarrier::Hold();
+      pool_->UnmapDoneAliases();
+      give_back();
+      SetError(error, kNotSettled);
+      return false;
     }
   }
   // Until the caller's SettleRemaps(): an unmap waits for device work in
@@ -403,6 +410,9 @@ bool Region::ReplaceRun(std::size_t first, std::size_t count, bool copy,
     }
     // The page stays unmapped; the rows from here on are no longer backed.
     ok = false;
+    if (copy)
+      // Its alias still maps the old page.
+      pool_->ReturnAlias(aliases[k], std::move(old));
     pool_->Release(fresh[k]);
     mapped_[p] = false;
     mapped_bytes_.fetch_sub(kPageBytes, std::memory_order_relaxed);

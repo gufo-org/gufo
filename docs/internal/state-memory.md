@@ -202,7 +202,8 @@ Rules:
   there is nothing to map: it releases the pages the loads would overwrite.
 - After `PrepareWrite` or `Restore` on every region of the write or the
   restore, call `SettleRemaps` once, before the device uses those rows. It
-  costs two atomic reads when no page was remapped.
+  costs two atomic reads when no page was remapped and no copy, or alias of
+  one, is left to run or unmap.
 - All three unmap pages or wait for the device: call them on the thread that
   runs the model, between its launches. Mapping never waits.
 - A released park address keeps its mapping until `PagePark::Sweep`, which
