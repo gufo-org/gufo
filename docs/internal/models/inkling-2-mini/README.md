@@ -223,6 +223,16 @@ tokens the next turn's render writes; the host's grammar constrains the
 streamed call (`stream_dialect.hpp`). The template writes call arguments
 with sorted keys, so the model emits them alphabetically.
 
+The header's name and the JSON's name can differ: asked to call a tool named
+like one of its own actions, the model writes another verb in the header,
+`read` before `{"name":"edit"}` (also `Read` before `Edit`, `read_file`
+before `edit_file` and `write_file`, `shell` before `apply_patch`; #1436). The
+JSON names the call. With tools callable and no response format, the runner
+therefore holds a word of name characters (at most 64 bytes) after a header
+until the block shows what it is: the invoke token makes it a call, and any
+other token streams the held word as text. An invoke token after a text
+block's words still starts a call; those words stay content.
+
 The template differs from Thinking Machines' renderer (`tml-renderers`
 0.5.0, `renderers.Inkling2()`) in how it spells numbers, and Gufo follows the
 renderer, as vLLM and SGLang do. Floats are positional for decimal exponents
