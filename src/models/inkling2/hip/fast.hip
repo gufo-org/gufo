@@ -1575,7 +1575,7 @@ __device__ __forceinline__ void conv_resid_elem(const ConvResidArgs& a, int c,
     if (j < 3)
       for (int l = j + 1; l <= 3; ++l)
         xin[3 - l] = st[3 - l + j];
-    a.cap[((size_t)a.conv_off + c) * kVerifyRows + tok] = xc;
+    a.cap[(size_t)tok * 6656 + a.conv_off + c] = xc;
   }
   float y = 0.f;
 #pragma unroll
@@ -1637,7 +1637,7 @@ __device__ __forceinline__ void conv_resid_block(const ConvResidArgs& a,
         if (j < 3)
           for (int l = j + 1; l <= 3; ++l)
             xin[r][3 - l] = st[3 - l + j];
-        a.cap[((size_t)a.conv_off + c) * kVerifyRows + tok] = xc;
+        a.cap[(size_t)tok * 6656 + a.conv_off + c] = xc;
       }
 #pragma unroll
       for (int i = 0; i < 4; ++i)
@@ -1955,8 +1955,8 @@ __device__ __forceinline__ void kvprep_block(const KvPrepArgs& a, int kvh,
         kx[3 - l] = sk[3 - l + j];
         vx[3 - l] = sv[3 - l + j];
       }
-    a.cap[((size_t)a.conv_off_k + c) * kVerifyRows + tk] = kx[3];
-    a.cap[((size_t)a.conv_off_v + c) * kVerifyRows + tk] = vx[3];
+    a.cap[(size_t)tk * 6656 + a.conv_off_k + c] = kx[3];
+    a.cap[(size_t)tk * 6656 + a.conv_off_v + c] = vx[3];
   }
   float ky = 0.f, vy = 0.f;
 #pragma unroll
@@ -4976,12 +4976,13 @@ __global__ void __launch_bounds__(256)
   if (ch >= 6656)
     return;
   float* st = tbl[slot].conv + (size_t)ch * 3;
-  const float* cp = cap + ((size_t)slot * 6656 + ch) * kVerifyRows + row0;
+  // the slot's rows [kVerifyRows][6656], from step row row0
+  const float* cp = cap + ((size_t)slot * kVerifyRows + row0) * 6656 + ch;
   // the last three of [st[0..3), cp[0..keep)]
   float v[3];
   for (int i = 0; i < 3; ++i) {
     const int j = keep + i;
-    v[i] = j < 3 ? st[j] : cp[j - 3];
+    v[i] = j < 3 ? st[j] : cp[(size_t)(j - 3) * 6656];
   }
   for (int i = 0; i < 3; ++i)
     st[i] = v[i];

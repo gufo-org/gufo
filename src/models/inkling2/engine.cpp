@@ -322,7 +322,7 @@ struct Engine::Impl {
   // all rows of the verification are one session's (else several sessions'
   // rows, each run through the per-row attention kernel)
   bool verify_one_session = true;
-  float* d_vcap = nullptr;  // [48][6656][kVerifyRows] conv inputs of a step
+  float* d_vcap = nullptr;  // [48][kVerifyRows][6656] conv inputs of a step
   // device argmax and GPU linear sampler workspaces
   float* d_amax_ws = nullptr;
   int* d_amax = nullptr;

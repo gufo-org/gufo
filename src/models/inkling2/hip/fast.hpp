@@ -135,7 +135,7 @@ struct ConvResidArgs {
   // Verification (all nb rows are consecutive positions of one session): row
   // b's history is rows b-3..b-1 of this step (the stored history before
   // row 0), the history is not written, and each row's input goes to
-  // cap[(conv_off + c) * kVerifyRows + b] (CommitVerifyConv applies it).
+  // cap[b * 6656 + conv_off + c] (CommitVerifyConv applies it).
   float* cap = nullptr;
   // With `cap`: each row's index within its session's rows (a step may verify
   // several sessions, each one's rows consecutive); null: all rows one session.
@@ -148,7 +148,7 @@ void ConvResid(hipStream_t s, const ConvResidArgs& a, int nb = 1);
 /// After a verification step: every history of the session's 48 slots
 /// becomes the last 3 inputs of (history, the first `keep` of its captured
 /// rows, which start at step row `row0`).
-/// `cap` is [48][6656][kVerifyRows].
+/// `cap` is [48][kVerifyRows][6656].
 void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
                       int keep, int row0 = 0);
 /// out[r] = the first maximum of the finite values of row r of x [rows][n]
