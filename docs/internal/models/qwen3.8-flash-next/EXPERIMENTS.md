@@ -1,5 +1,15 @@
 # Qwen3.8 Flash-Next experiments
 
+## Decode prefetch and depth tuning (November 27, 2026)
+
+Main `f0733481`, ROCm 10.1, UD-Q4_K_XL, autoregressive, `gufo bench -p 2048 -n 64 -d 0,16384`.
+Every change below is exact (prefetch only warms MALL).
+
+| Experiment | Outcome |
+| --- | --- |
+| Skip `attn_out` + `hc_ffn.down` MALL prefetch during sparse attention (`!sparse`) | **Accepted**: avoids competing with sparse attention KV and Lightning Indexer DRAM reads at deep contexts (`tg64 @ d16384` 29.32 → 29.67 tok/s, relative depth drop −1.18 → −1.09 ms/tok). |
+| Reduce `kPrefetchBlocks` from 40 to 12 in `PrefetchRangesKernel` | **Rejected**: `tg64` at d=0 regressed 30.66 → 29.66 tok/s (−3.3%); 12 blocks cannot saturate DRAM before the output projection starts. |
+
 ## Sampled MTP decode (November 13, 2026)
 
 Main `6858788b`, default sampling (thinking on: temperature 1, top-k 20,
