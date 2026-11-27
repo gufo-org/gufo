@@ -1110,8 +1110,14 @@ impl Session {
                         "audio_end_ms must be a number".to_string(),
                     ));
                 }
-                let samples = (end * f64::from(SAMPLE_RATE) / 1000.0) as usize;
-                host.truncate_reply(samples)
+                let samples = end * f64::from(SAMPLE_RATE) / 1000.0;
+                // usize::MAX can round up as f64, so use the exclusive bound.
+                if !samples.is_finite() || samples >= 2.0_f64.powi(usize::BITS as i32) {
+                    return Err(DispatchError::Protocol(
+                        "audio_end_ms is out of range".to_string(),
+                    ));
+                }
+                host.truncate_reply(samples as usize)
                     .map_err(DispatchError::Protocol)?;
                 let mut event = Object::new();
                 push_member(
@@ -3156,15 +3162,30 @@ mod tests {
             .to_string();
 
         host.events.clear();
-        let truncate = format!(
-            r#"{{"type":"conversation.item.truncate","item_id":"{reply_item}","content_index":0,"audio_end_ms":40}}"#
-        );
+        let truncate = |end_ms: f64| {
+            format!(
+                r#"{{"type":"conversation.item.truncate","item_id":"{reply_item}","content_index":0,"audio_end_ms":{end_ms}}}"#
+            )
+        };
+        let limit = 2.0_f64.powi(usize::BITS as i32) / 24.0;
+        for end_ms in [limit, 1e18, f64::MAX] {
+            assert_eq!(
+                session.handle_client_event(truncate(end_ms).as_bytes(), false, &mut host),
+                Ok(false)
+            );
+            assert_eq!(host.truncated_samples, None);
+            assert_eq!(host.events.len(), 1);
+            assert_eq!(event_type(&host.events[0]), "error");
+            assert!(host.events[0].contains("audio_end_ms is out of range"));
+            host.events.clear();
+        }
         assert_eq!(
-            session.handle_client_event(truncate.as_bytes(), false, &mut host),
+            session.handle_client_event(truncate(40.0625).as_bytes(), false, &mut host),
             Ok(false)
         );
-        assert_eq!(host.truncated_samples, Some(960));
+        assert_eq!(host.truncated_samples, Some(961));
         assert_eq!(event_type(&host.events[0]), "conversation.item.truncated");
+        assert!(host.events[0].contains(r#""audio_end_ms":40"#));
 
         // Wrong item_id is rejected.
         host.events.clear();
