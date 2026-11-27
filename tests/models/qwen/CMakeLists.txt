@@ -17,6 +17,8 @@ add_qwen_cpu_test(qwen_vision_cache_test
 add_qwen_cpu_test(qwen_tokenizer_test
   tests/models/qwen/tokenization/tokenizer_test.cpp
   "cpu;tokenization;qwen")
+target_compile_definitions(qwen_tokenizer_test PRIVATE
+  GUFO_QWEN3_SPLIT_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/tokenization/qwen3_split_goldens.json")
 add_qwen_cpu_test(qwen_chat_template_test
   tests/models/qwen/tokenization/chat_template_test.cpp
   "cpu;tokenization;chat_template")

@@ -231,18 +231,26 @@ std::size_t Qwen35ContractionEnd(std::string_view text,
   return offset;
 }
 
-std::size_t Qwen35PieceEnd(std::string_view text, std::size_t offset) {
+// The split after NFC. Qwen3.5 words are `[\p{L}\p{M}]+`; Qwen3's are
+// `\p{L}+`, so with `marks_in_words` false a combining mark is no word
+// character and falls to the punctuation branch, as in the Qwen3 pattern.
+std::size_t Qwen35PieceEnd(std::string_view text, std::size_t offset,
+                           bool marks_in_words = true) {
+  const auto word = [marks_in_words](UChar32 value) noexcept {
+    return marks_in_words ? IsUnicodeLetterOrMark(value)
+                          : IsUnicodeLetter(value);
+  };
   if (const std::size_t contraction = Qwen35ContractionEnd(text, offset);
       contraction != offset) {
     return contraction;
   }
 
   const Utf8CodePoint first = DecodeUtf8(text, offset);
-  if (IsUnicodeLetterOrMark(first.value)) {
+  if (word(first.value)) {
     std::size_t end = offset + first.length;
     while (end < text.size()) {
       const Utf8CodePoint next = DecodeUtf8(text, end);
-      if (!IsUnicodeLetterOrMark(next.value)) {
+      if (!word(next.value)) {
         break;
       }
       end += next.length;
@@ -253,11 +261,11 @@ std::size_t Qwen35PieceEnd(std::string_view text, std::size_t offset) {
   if (!IsNewline(first.value) && !IsUnicodeLetter(first.value) &&
       !IsUnicodeNumber(first.value) && offset + first.length < text.size()) {
     const Utf8CodePoint next = DecodeUtf8(text, offset + first.length);
-    if (IsUnicodeLetterOrMark(next.value)) {
+    if (word(next.value)) {
       std::size_t end = offset + first.length + next.length;
       while (end < text.size()) {
         const Utf8CodePoint letter = DecodeUtf8(text, end);
-        if (!IsUnicodeLetterOrMark(letter.value)) {
+        if (!word(letter.value)) {
           break;
         }
         end += letter.length;
@@ -273,20 +281,19 @@ std::size_t Qwen35PieceEnd(std::string_view text, std::size_t offset) {
   std::size_t punctuation_start = offset;
   if (first.value == ' ' && offset + first.length < text.size()) {
     const Utf8CodePoint next = DecodeUtf8(text, offset + first.length);
-    if (!IsUnicodeWhitespace(next.value) &&
-        !IsUnicodeLetterOrMark(next.value) && !IsUnicodeNumber(next.value)) {
+    if (!IsUnicodeWhitespace(next.value) && !word(next.value) &&
+        !IsUnicodeNumber(next.value)) {
       punctuation_start += first.length;
     }
   }
   const Utf8CodePoint punctuation = DecodeUtf8(text, punctuation_start);
-  if (!IsUnicodeWhitespace(punctuation.value) &&
-      !IsUnicodeLetterOrMark(punctuation.value) &&
+  if (!IsUnicodeWhitespace(punctuation.value) && !word(punctuation.value) &&
       !IsUnicodeNumber(punctuation.value)) {
     std::size_t end = punctuation_start;
     while (end < text.size()) {
       const Utf8CodePoint next = DecodeUtf8(text, end);
-      if (IsUnicodeWhitespace(next.value) ||
-          IsUnicodeLetterOrMark(next.value) || IsUnicodeNumber(next.value)) {
+      if (IsUnicodeWhitespace(next.value) || word(next.value) ||
+          IsUnicodeNumber(next.value)) {
         break;
       }
       end += next.length;
@@ -344,6 +351,11 @@ bool IsSpecialTokenName(std::string_view t) noexcept {
 constexpr std::string_view kQwen35SplitRegex =
     R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
 
+// The Qwen3 split, as in Qwen3-Reranker-0.6B's tokenizer.json: words are
+// letters only, so Qwen35PieceEnd runs without marks in words.
+constexpr std::string_view kQwen3SplitRegex =
+    R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
+
 bool IsNullOr(const json::Value* value, auto&& accepted) {
   return value == nullptr || value->is_null() || accepted(*value);
 }
@@ -365,10 +377,10 @@ bool IsPlainByteLevel(const json::Value& value) {
          IsFalse(value.find("use_regex"));
 }
 
-// Only the Qwen3.5 normalization and split are implemented; any other would
-// encode differently from the reference tokenizer.
+// Only the NFC normalization and the Qwen3.5 or Qwen3 split are implemented;
+// any other would encode differently from the reference tokenizer.
 std::optional<std::string> UnsupportedTokenizerJsonPipeline(
-    const json::Value& root) {
+    const json::Value& root, bool* qwen3_split) {
   const json::Value* normalizer = root.find("normalizer");
   if (normalizer == nullptr || !HasType(*normalizer, "NFC") ||
       normalizer->size() != 1) {
@@ -388,11 +400,12 @@ std::optional<std::string> UnsupportedTokenizerJsonPipeline(
   const json::Value* regex =
       pattern != nullptr ? pattern->find("Regex") : nullptr;
   if (regex == nullptr || !regex->is_string() ||
-      regex->str() != kQwen35SplitRegex ||
+      (regex->str() != kQwen35SplitRegex && regex->str() != kQwen3SplitRegex) ||
       split.member_str("behavior") != "Isolated" ||
       !IsFalse(split.find("invert"))) {
-    return "tokenizer.json split is not the Qwen3.5 pattern";
+    return "tokenizer.json split is not the Qwen3.5 or Qwen3 pattern";
   }
+  *qwen3_split = regex->str() == kQwen3SplitRegex;
   if (!IsPlainByteLevel(stages->items()[1])) {
     return "tokenizer.json pre-tokenizer does not end in plain byte level";
   }
@@ -447,7 +460,8 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromTokenizerJson(
   if (added != nullptr && !added->is_array()) {
     return fail("tokenizer.json added_tokens is not an array");
   }
-  if (auto unsupported = UnsupportedTokenizerJsonPipeline(root)) {
+  bool qwen3_split = false;
+  if (auto unsupported = UnsupportedTokenizerJsonPipeline(root, &qwen3_split)) {
     return fail(std::move(*unsupported));
   }
   // Every id addresses an embedding row: below `vocab_size` when it is given,
@@ -564,7 +578,8 @@ std::unique_ptr<QwenTokenizer> QwenTokenizer::CreateFromTokenizerJson(
   if (tokenizer == nullptr) {
     return nullptr;
   }
-  tokenizer->pre_tokenizer_ = PreTokenizer::kQwen35;
+  tokenizer->pre_tokenizer_ =
+      qwen3_split ? PreTokenizer::kQwen3 : PreTokenizer::kQwen35;
   // As the official GGUF metadata: <|endoftext|> is both BOS and padding.
   if (tokenizer->endoftext_token_id_ != kInvalidTokenId) {
     tokenizer->bos_token_id_ = tokenizer->endoftext_token_id_;
@@ -862,7 +877,7 @@ std::vector<TokenId> QwenTokenizer::BpeMergeChunk(
 }
 
 std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
-  if (pre_tokenizer_ != PreTokenizer::kQwen35) {
+  if (pre_tokenizer_ == PreTokenizer::kNone) {
     return BpeMergeChunk(text);
   }
 
@@ -891,7 +906,8 @@ std::vector<TokenId> QwenTokenizer::BpeEncodeText(std::string_view text) const {
     pieces.reserve(128);
   std::size_t offset = 0;
   while (offset < text.size()) {
-    const std::size_t end = Qwen35PieceEnd(text, offset);
+    const std::size_t end =
+        Qwen35PieceEnd(text, offset, pre_tokenizer_ == PreTokenizer::kQwen35);
     const auto piece = text.substr(offset, end - offset);
     if (text.size() >= 1024 && piece.size() > 1 && piece.size() <= 64) {
       if (const auto found = pieces.find(piece); found != pieces.end()) {

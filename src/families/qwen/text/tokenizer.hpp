@@ -107,6 +107,7 @@ private:
   enum class PreTokenizer : std::uint8_t {
     kNone,
     kQwen35,
+    kQwen3,
   };
 
   struct PairHash {
