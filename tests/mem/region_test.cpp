@@ -4,25 +4,31 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "src/core/hip/remap_barrier_device.hpp"
 #include "src/core/hip/state_memory.hpp"
 #include "src/core/hip/state_page_pool.hpp"
 #include "src/core/hip/state_region.hpp"
 #include "src/core/hip/state_shared_page.hpp"
 #include "src/mem/ledger.hpp"
 #include "src/mem/lendable.hpp"
+#include "src/mem/remap_barrier.hpp"
 
 namespace {
 
 using gufo::mem::kPageBytes;
 using gufo::mem::PagePool;
 using gufo::mem::Region;
+using gufo::mem::RemapBarrier;
 using gufo::mem::StateLedger;
 
 void Check(hipError_t status, const char* what) {
@@ -224,6 +230,322 @@ void SharedAccount() {
     ledger.SetPromiseCap(0);
   }
   assert(ledger.ChargedBytes() == charged_before);
+}
+
+// A remap barrier that cannot flush the device's translations fails what
+// needed it: growing a region over addresses that lost their pages, and
+// creating one where another gave its addresses back. Nothing of the failed
+// growth stays mapped, so the next call maps and settles it again.
+void FailedBarrier() {
+  auto& ledger = StateLedger::Process();
+  const auto reserved_before = ledger.Totals().reserved_bytes;
+  std::string error;
+  const std::size_t row_bytes = 4096, rows = 4 * kPageBytes / row_bytes;
+  const std::size_t words = row_bytes / 4;
+  auto region = Region::Create({.row_bytes = row_bytes, .rows = rows}, &error);
+  assert(region && region->Ensure(rows, &error));
+  FillRows<<<dim3(64, 1), 256>>>(static_cast<std::uint32_t*>(region->data()),
+                                 rows * words, words, rows, 21);
+  Check(hipDeviceSynchronize(), "fill");
+  // A region gives its addresses back, and the upper half of this one its
+  // pages: both are dirty, with no barrier since.
+  {
+    auto gone = Region::Create({.row_bytes = row_bytes, .rows = 16}, &error);
+  }
+  region->TrimTo(rows / 2);
+  assert(region->mapped_bytes() == 2 * kPageBytes);
+  RemapBarrier::SetTranslationFlush(+[]() noexcept { return false; });
+  const auto before = RemapBarrier::Stats();
+  assert(!region->Ensure(rows, &error));
+  assert(error.find("remap barrier") != std::string::npos);
+  assert(region->backed_rows() == rows / 2);
+  assert(region->mapped_bytes() == 2 * kPageBytes);
+  // The failed region leaves the ledger as it was.
+  const auto reserved = ledger.Totals().reserved_bytes;
+  assert(!Region::Create({.row_bytes = row_bytes, .rows = 16}, &error));
+  assert(error.find("remap barrier") != std::string::npos);
+  assert(ledger.Totals().reserved_bytes == reserved);
+  assert(RemapBarrier::Stats().unflushed >= before.unflushed + 2);
+  // With the flush back, both work; the new rows are zero, the kept ones the
+  // region's own.
+  gufo::mem::InstallRemapBarrierDevice();
+  assert(region->Ensure(rows, &error));
+  assert(WordsAre(
+      static_cast<std::uint8_t*>(region->data()) + rows / 2 * row_bytes,
+      rows / 2 * words, 0));
+  assert(RowsMatch(*region, rows / 2, 21));
+  assert(Region::Create({.row_bytes = row_bytes, .rows = 16}, &error));
+  region.reset();
+  assert(ledger.Totals().reserved_bytes == reserved_before);
+}
+
+// Regions a and b over three pages: a holds rows with `salt`, b maps a's
+// pages, as a restore does, and then rewinds into page 1, which queues a
+// copy of the page whose first 100 rows b keeps.
+struct RewoundPair {
+  std::shared_ptr<Region> a, b;
+  std::vector<std::shared_ptr<gufo::mem::ParkedPage>> parked;
+  static constexpr std::size_t kRowBytes = 1024;
+  static constexpr std::size_t kRowsPerPage = kPageBytes / kRowBytes;
+  static constexpr std::size_t kRows = 3 * kRowsPerPage;
+};
+
+// The pair before b's rewind.
+RewoundPair Restored(gufo::mem::PagePark& park, std::uint32_t salt) {
+  RewoundPair pair;
+  constexpr auto row_bytes = RewoundPair::kRowBytes;
+  constexpr auto rows = RewoundPair::kRows;
+  std::string error;
+  pair.a = Region::Create({.row_bytes = row_bytes, .rows = rows}, &error);
+  pair.b = Region::Create({.row_bytes = row_bytes, .rows = rows}, &error);
+  assert(pair.a && pair.b && pair.a->Ensure(rows, &error));
+  FillRows<<<dim3(64, 1), 256>>>(static_cast<std::uint32_t*>(pair.a->data()), 0,
+                                 row_bytes / 4, rows, salt);
+  Check(hipDeviceSynchronize(), "fill a");
+  std::vector<std::shared_ptr<gufo::mem::SharedPage>> plan(3);
+  for (std::size_t p = 0; p < 3; ++p) {
+    pair.parked.push_back(park.Park(pair.a->Share(p, (p + 1) * kPageBytes)));
+    plan[p] = pair.parked.back()->page();
+  }
+  (void)pair.b->Restore(plan, rows);
+  assert(pair.b->SettleRemaps(&error) && pair.b->shared_pages() == 3);
+  return pair;
+}
+
+// b's rewind into page 1.
+bool Rewind(const RewoundPair& pair, std::string* error) {
+  const std::size_t rewind = RewoundPair::kRowsPerPage + 100;
+  return pair.b->PrepareWrite(rewind, 2 * RewoundPair::kRowsPerPage, rewind,
+                              error);
+}
+
+RewoundPair Rewound(gufo::mem::PagePark& park, std::uint32_t salt) {
+  auto pair = Restored(park, salt);
+  std::string error;
+  assert(Rewind(pair, &error));
+  return pair;
+}
+
+// b's page 1 holds its first 100 rows, copied from a's.
+bool KeptRowsMatch(const RewoundPair& pair, std::uint32_t salt) {
+  const auto* page1 = static_cast<std::uint8_t*>(pair.b->data()) + kPageBytes;
+  return WordsMatch(page1, 100 * RewoundPair::kRowBytes / 4, salt,
+                    kPageBytes / 4);
+}
+
+// The copies one region queued survive a failed barrier in another
+// region's SettleRemaps(): the pool serves every region of the device, and
+// the next barrier that succeeds runs them.
+void SharedCopiesSurviveFailedBarrier() {
+  auto park = gufo::mem::PagePark::ForDevice(0);
+  if (!park)
+    return;
+  std::string error;
+  const auto pair = Rewound(*park, 0xbbu);
+  // a's call meets a failing flush and runs nothing.
+  RemapBarrier::SetTranslationFlush(+[]() noexcept { return false; });
+  assert(!pair.a->SettleRemaps(&error));
+  gufo::mem::InstallRemapBarrierDevice();
+  // b's own call still finds its copy.
+  assert(pair.b->SettleRemaps(&error));
+  assert(KeptRowsMatch(pair, 0xbbu));
+}
+
+// The flush of TrimDuringFailedSettle(): its first call on the settling
+// thread lets the other thread trim and waits for the trim to end, for
+// `trim_window` at most, and notes whether it did. Every call fails.
+std::atomic<bool> flush_entered, trim_started, trim_done, trim_seen;
+std::chrono::milliseconds trim_window{0};
+std::thread::id settling_thread;
+
+void WaitFor(const std::atomic<bool>& flag, std::chrono::milliseconds limit) {
+  const auto end = std::chrono::steady_clock::now() + limit;
+  while (!flag.load() && std::chrono::steady_clock::now() < end)
+    std::this_thread::yield();
+}
+
+bool FlushAfterTrim() noexcept {
+  if (std::this_thread::get_id() == settling_thread &&
+      !flush_entered.exchange(true)) {
+    WaitFor(trim_started, std::chrono::seconds(5));
+    WaitFor(trim_done, trim_window);
+    trim_seen.store(trim_done.load());
+  }
+  return false;
+}
+
+// a's SettleRemaps() takes b's copy into its page 1, and its flush fails
+// while another thread trims b to `rows`. Returns whether the trim ended
+// while a's call ran.
+bool TrimDuringFailedSettle(const RewoundPair& pair, std::size_t rows,
+                            std::chrono::milliseconds window) {
+  for (auto* flag : {&flush_entered, &trim_started, &trim_done, &trim_seen})
+    flag->store(false);
+  trim_window = window;
+  settling_thread = std::this_thread::get_id();
+  std::string error;
+  RemapBarrier::SetTranslationFlush(&FlushAfterTrim);
+  std::thread trimmer([&] {
+    Check(hipSetDevice(0), "trim device");
+    WaitFor(flush_entered, std::chrono::seconds(5));
+    trim_started.store(true);
+    pair.b->TrimTo(rows);
+    trim_done.store(true);
+  });
+  assert(!pair.a->SettleRemaps(&error));
+  trimmer.join();
+  gufo::mem::InstallRemapBarrierDevice();
+  assert(flush_entered.load() && pair.b->backed_rows() == rows);
+  return trim_seen.load();
+}
+
+// A region that unmaps a page while another thread's SettleRemaps() holds
+// the copy queued into it waits for that call, and drops the copy its
+// failed barrier queued again: no later barrier copies into an address that
+// lost its page. A page that no running copy targets is unmapped at once.
+void UnmapWaitsForSettlingCopies() {
+  auto park = gufo::mem::PagePark::ForDevice(0);
+  if (!park)
+    return;
+  const auto pool = PagePool::ForDevice(0);
+  constexpr auto rows_per_page = RewoundPair::kRowsPerPage;
+  std::string error;
+  {
+    // Trims pages 1 and 2: the trim cannot end before a's call, which waits
+    // 100 ms for it.
+    const auto pair = Rewound(*park, 0xccu);
+    assert(pool->Stats().fixups == 1);
+    assert(!TrimDuringFailedSettle(pair, rows_per_page,
+                                   std::chrono::milliseconds(100)));
+    assert(pool->Stats().fixups == 0);
+    assert(pair.a->SettleRemaps(&error));
+    assert(WordsMatch(pair.b->data(),
+                      rows_per_page * RewoundPair::kRowBytes / 4, 0xccu));
+    assert(RowsMatch(*pair.a, RewoundPair::kRows, 0xccu));
+  }
+  // Trims page 2 alone: the trim ends while a's call waits for it, and the
+  // copy into page 1 runs at the next barrier.
+  const auto pair = Rewound(*park, 0xddu);
+  assert(
+      TrimDuringFailedSettle(pair, 2 * rows_per_page, std::chrono::seconds(5)));
+  assert(pool->Stats().fixups == 1);
+  assert(pair.b->SettleRemaps(&error));
+  assert(pool->Stats().fixups == 0 && KeptRowsMatch(pair, 0xddu));
+}
+
+// A copy dropped before its barrier leaves its alias mapped and its source
+// page held. A barrier another caller runs directly, as Region::Create()
+// does, answers the remaps but unmaps no alias: the next SettleRemaps()
+// still does and lets the page go. A copy after it runs as before.
+void DroppedCopyAfterDirectBarrier() {
+  auto park = gufo::mem::PagePark::ForDevice(0);
+  if (!park)
+    return;
+  const auto pool = PagePool::ForDevice(0);
+  std::string error;
+  {
+    const auto pair = Rewound(*park, 0xeeu);
+    auto stats = pool->Stats();
+    assert(stats.fixups == 1 && stats.aliases == 1 && stats.held_sources == 0);
+    pair.b->TrimTo(RewoundPair::kRowsPerPage);
+    stats = pool->Stats();
+    assert(stats.fixups == 0 && stats.aliases == 1 && stats.held_sources == 1);
+    // The dropped copy's source: page 1, which a and the park hold too.
+    const auto users = pair.parked[1]->page().use_count();
+    assert(RemapBarrier::Settle() && !RemapBarrier::Pending());
+    assert(pair.b->SettleRemaps(&error));
+    stats = pool->Stats();
+    assert(stats.aliases == 0 && stats.held_sources == 0);
+    assert(pair.parked[1]->page().use_count() == users - 1);
+  }
+  const auto pair = Rewound(*park, 0xefu);
+  assert(pair.b->SettleRemaps(&error) && KeptRowsMatch(pair, 0xefu));
+  assert(pool->Stats().aliases == 0);
+  // An alias given back unqueued, as by a ReplaceRun() that gave up.
+  auto* alias = pool->AliasForCopy(pair.parked[0]->page()->handle());
+  assert(alias != nullptr);
+  pool->ReturnAlias(alias, pair.parked[0]->page());
+  assert(pool->Stats().aliases == 1 && pool->Stats().held_sources == 1);
+  // It goes without a barrier.
+  const auto settles = RemapBarrier::Stats().settles;
+  RemapBarrier::Hold();
+  pool->UnmapDoneAliases();
+  RemapBarrier::Release();
+  assert(pool->Stats().aliases == 0 && pool->Stats().held_sources == 0);
+  assert(RemapBarrier::Stats().settles == settles);
+  // One given back with no page to hold counts the same.
+  alias = pool->AliasForCopy(pair.parked[0]->page()->handle());
+  assert(alias != nullptr);
+  pool->ReturnAlias(alias, nullptr);
+  assert(pool->Stats().aliases == 1 && pool->Stats().held_sources == 0);
+  assert(RemapBarrier::Settle() && pair.b->SettleRemaps(&error));
+  assert(pool->Stats().aliases == 0);
+  // A done alias goes even when the barrier fails: the device never read
+  // it.
+  {
+    const auto failing = Rewound(*park, 0xf5u);
+    failing.b->TrimTo(RewoundPair::kRowsPerPage);
+    RemapBarrier::SetTranslationFlush(+[]() noexcept { return false; });
+    const bool settled = failing.b->SettleRemaps(&error);
+    gufo::mem::InstallRemapBarrierDevice();
+    assert(!settled && pool->Stats().aliases == 0 &&
+           pool->Stats().held_sources == 0);
+    assert(failing.b->SettleRemaps(&error));
+  }
+}
+
+// An alias a ReplaceRun() holds before it queued its copy stays mapped
+// through every SettleRemaps(), after a barrier run directly too: its copy
+// reads it later. The alias of a copy that ran goes meanwhile, and the held
+// one once it came back.
+void UnqueuedAliasStaysMapped() {
+  auto park = gufo::mem::PagePark::ForDevice(0);
+  if (!park)
+    return;
+  const auto pool = PagePool::ForDevice(0);
+  std::string error;
+  const auto pair = Rewound(*park, 0xf1u);
+  auto* const alias = pool->AliasForCopy(pair.parked[0]->page()->handle());
+  assert(alias != nullptr && pool->Stats().aliases == 2);
+  // b's copy runs and its alias goes; the held one stays.
+  assert(pair.b->SettleRemaps(&error) && KeptRowsMatch(pair, 0xf1u));
+  auto stats = pool->Stats();
+  assert(stats.fixups == 0 && stats.aliases == 1 && stats.held_sources == 0);
+  assert(RemapBarrier::Settle() && pair.a->SettleRemaps(&error));
+  assert(pool->Stats().aliases == 1);
+  // The held alias still reaches its page: a's rows in page 0.
+  assert(WordsMatch(alias, kPageBytes / 4, 0xf1u));
+  pool->ReturnAlias(alias, pair.parked[0]->page());
+  assert(pair.a->SettleRemaps(&error));
+  stats = pool->Stats();
+  assert(stats.aliases == 0 && stats.held_sources == 0);
+}
+
+// A rewind that finds every scratch alias held fails, and takes none for
+// good. Once one comes back, the rewind's retry after its settle takes it.
+void FullScratch() {
+  auto park = gufo::mem::PagePark::ForDevice(0);
+  if (!park)
+    return;
+  const auto pool = PagePool::ForDevice(0);
+  std::string error;
+  const auto pair = Restored(*park, 0xf3u);
+  const auto handle = pair.parked[0]->page()->handle();
+  std::vector<std::byte*> held;
+  for (std::size_t i = 0; i < PagePool::kScratchPages; ++i) {
+    held.push_back(pool->AliasForCopy(handle));
+    assert(held.back() != nullptr);
+  }
+  assert(!Rewind(pair, &error) &&
+         error.find("not settled") != std::string::npos);
+  assert(pool->Stats().aliases == PagePool::kScratchPages);
+  pool->ReturnAlias(held.back(), nullptr);
+  held.pop_back();
+  assert(Rewind(pair, &error));
+  for (auto* const alias : held)
+    pool->ReturnAlias(alias, nullptr);
+  assert(pair.b->SettleRemaps(&error) && KeptRowsMatch(pair, 0xf3u));
+  assert(pool->Stats().aliases == 0);
 }
 
 // The pool thread maps ahead; a writer then finds its rows backed.
@@ -638,6 +960,12 @@ int main() {
   }
   Accounting();
   SharedAccount();
+  FailedBarrier();
+  SharedCopiesSurviveFailedBarrier();
+  UnmapWaitsForSettlingCopies();
+  DroppedCopyAfterDirectBarrier();
+  UnqueuedAliasStaysMapped();
+  FullScratch();
   MapAhead();
   GraphAcrossGrowth();
   SharedPages();

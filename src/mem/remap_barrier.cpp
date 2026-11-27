@@ -27,7 +27,8 @@ struct State {
   // Hold() nobody follows with a Settle() must not stop other threads.
   std::atomic<std::int64_t> gate_until{0};
   std::atomic<void (*)() noexcept> drain{nullptr};
-  std::atomic<std::uint64_t> settles{0}, unquiet{0}, micros{0};
+  std::atomic<bool (*)() noexcept> flush{nullptr};
+  std::atomic<std::uint64_t> settles{0}, unquiet{0}, micros{0}, unflushed{0};
   std::atomic<std::thread::id> settler{};
   // One Settle() at a time; `gate` wakes the threads Enter() held back.
   std::mutex settle_mutex;
@@ -149,14 +150,19 @@ void RemapBarrier::SetDeviceDrain(void (*drain)() noexcept) noexcept {
   Shared().drain.store(drain, std::memory_order_release);
 }
 
+void RemapBarrier::SetTranslationFlush(bool (*flush)() noexcept) noexcept {
+  Shared().flush.store(flush, std::memory_order_release);
+}
+
 RemapBarrier::Counts RemapBarrier::Stats() noexcept {
   const auto& s = Shared();
   return {s.settles.load(std::memory_order_relaxed),
           s.unquiet.load(std::memory_order_relaxed),
-          s.micros.load(std::memory_order_relaxed)};
+          s.micros.load(std::memory_order_relaxed),
+          s.unflushed.load(std::memory_order_relaxed)};
 }
 
-void RemapBarrier::Settle() noexcept {
+bool RemapBarrier::Settle() noexcept {
   using std::chrono::microseconds;
   auto& s = Shared();
   const std::lock_guard settle_lock(s.settle_mutex);
@@ -196,21 +202,38 @@ void RemapBarrier::Settle() noexcept {
     if (quiet || Clock::now() >= deadline)
       break;
   }
+  // After the snapshot above: every remap it covers is in the page tables,
+  // so translations the device caches after the flush are the new ones. The
+  // idle time alone does not drop them while another process keeps the
+  // device busy, so without the flush nothing it covers is clean.
+  bool flushed = true;
+  if (const auto flush = s.flush.load(std::memory_order_acquire)) {
+    flushed = flush();
+    for (int attempt = 1; !flushed && attempt < kFlushAttempts; ++attempt) {
+      SpinFor(std::chrono::milliseconds(1));
+      flushed = flush();
+    }
+  }
   s.settles.fetch_add(1, std::memory_order_relaxed);
   if (!quiet)
     s.unquiet.fetch_add(1, std::memory_order_relaxed);
+  if (!flushed)
+    s.unflushed.fetch_add(1, std::memory_order_relaxed);
   s.micros.fetch_add(
       static_cast<std::uint64_t>(
           std::chrono::duration_cast<microseconds>(Clock::now() - start)
               .count()),
       std::memory_order_relaxed);
-  s.clean.store(covered, std::memory_order_release);
-  s.answered.store(noted, std::memory_order_release);
+  if (flushed) {
+    s.clean.store(covered, std::memory_order_release);
+    s.answered.store(noted, std::memory_order_release);
+  }
   {
     const std::lock_guard lock(s.gate_mutex);
     s.settling.store(false, std::memory_order_release);
   }
   s.gate.notify_all();
+  return flushed;
 }
 
 }  // namespace gufo::mem

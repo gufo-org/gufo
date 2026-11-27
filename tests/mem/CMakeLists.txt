@@ -36,6 +36,19 @@ if (ENGINE_ENABLE_HIP)
   add_test(NAME mem_scratch_arena_test COMMAND mem_scratch_arena_test)
   set_tests_properties(mem_scratch_arena_test PROPERTIES
     LABELS "mem;hip;gpu;gfx1151" TIMEOUT 120)
+  if (NOT WIN32)
+    # Runs itself a second time (posix_spawn) to keep the GPU busy.
+    add_executable(mem_remap_barrier_device_test remap_barrier_device_test.cpp)
+    set_source_files_properties(remap_barrier_device_test.cpp PROPERTIES
+      LANGUAGE HIP)
+    target_link_libraries(mem_remap_barrier_device_test PRIVATE gufo_cache_hip
+      gufo_mem_hip)
+    target_compile_options(mem_remap_barrier_device_test PRIVATE -UNDEBUG)
+    add_test(NAME mem_remap_barrier_device_test
+      COMMAND mem_remap_barrier_device_test)
+    set_tests_properties(mem_remap_barrier_device_test PROPERTIES
+      LABELS "mem;hip;gpu;gfx1151" TIMEOUT 120)
+  endif()
 endif()
 
 if (NOT WIN32)

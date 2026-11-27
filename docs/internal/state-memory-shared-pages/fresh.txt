@@ -1,0 +1,24 @@
+== fresh 60 0 1 2, beside busy
+case 0: kernel all correct   2/60, copy all correct   2/60; wrong reads: 0 zero, 550 other; still wrong after 100 ms 56 (max wait of the others 129 us)
+case 1: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+case 2: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+busy: 515136 kernels in 30 s
+== fresh 60 0 1 2 3 4, beside busy
+case 0: kernel all correct   4/60, copy all correct   4/60; wrong reads: 0 zero, 525 other; still wrong after 100 ms 55 (max wait of the others 114 us)
+case 1: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+case 2: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+case 3: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+case 4: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+busy: 1086592 kernels in 40 s
+== fresh 60 0 1 2 3 4, GPU otherwise idle
+case 0: kernel all correct   1/60, copy all correct   1/60; wrong reads: 0 zero, 450 other; still wrong after 100 ms 0 (max wait of the others 209 us)
+case 1: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+case 2: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+case 3: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+case 4: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+== fresh 60 0 1 2 3 4, GPU otherwise idle
+case 0: kernel all correct  21/60, copy all correct  21/60; wrong reads: 0 zero, 395 other; still wrong after 100 ms 0 (max wait of the others 198 us)
+case 1: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+case 2: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+case 3: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)
+case 4: kernel all correct  60/60, copy all correct  60/60; wrong reads: 0 zero, 0 other; still wrong after 100 ms 0 (max wait of the others 0 us)

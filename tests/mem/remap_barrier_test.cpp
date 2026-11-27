@@ -1,7 +1,8 @@
 // CPU checks of the remap barrier's bookkeeping (src/mem/remap_barrier.hpp):
-// which addresses are clean, which remaps wait for a barrier, and how other
-// threads' device work is held back while one runs. Whether the device then
-// reaches the new memory is mem_region_test's part.
+// which addresses are clean, which remaps wait for a barrier, when it drains
+// the device and flushes its translations, and how other threads' device
+// work is held back while one runs. Whether the device then reaches the new
+// memory is the part of mem_region_test and mem_remap_barrier_device_test.
 #include "src/mem/remap_barrier.hpp"
 
 #include <atomic>
@@ -29,7 +30,7 @@ void Stamps() {
   assert(RemapBarrier::Pending());
   const auto before = RemapBarrier::Stats();
   const auto start = Clock::now();
-  RemapBarrier::Settle();
+  assert(RemapBarrier::Settle());
   // The barrier kept the device idle for its whole idle time.
   assert(Clock::now() - start >=
          std::chrono::microseconds(RemapBarrier::kIdleMicros));
@@ -40,7 +41,7 @@ void Stamps() {
   const auto after = RemapBarrier::Stats();
   assert(after.settles == before.settles + 1 &&
          after.micros >= before.micros + RemapBarrier::kIdleMicros);
-  RemapBarrier::Settle();
+  assert(RemapBarrier::Settle());
   assert(RemapBarrier::Clean(second));
 }
 
@@ -53,9 +54,59 @@ void Drain() {
     in_drain.store(false);
   });
   const int before = drains.load();
-  RemapBarrier::Settle();
+  assert(RemapBarrier::Settle());
   // Once before the idle time and once after it, to find work still running.
   assert(drains.load() >= before + 2);
+}
+
+std::atomic<int> flushes{0};
+std::atomic<int> drains_at_flush{0};
+// Attempts that fail before one works; negative: all fail.
+std::atomic<int> flush_failures{0};
+
+// The barrier flushes the device's translations once per call, after the
+// idle time. A flush that keeps failing fails the call: nothing it covers
+// is clean or answered until a later call flushes.
+void Flush() {
+  RemapBarrier::SetTranslationFlush(+[]() noexcept {
+    drains_at_flush.store(drains.load());
+    ++flushes;
+    const int failures = flush_failures.load();
+    if (failures == 0)
+      return true;
+    if (failures > 0)
+      flush_failures.store(failures - 1);
+    return false;
+  });
+  const int drained = drains.load();
+  const auto before = RemapBarrier::Stats();
+  assert(RemapBarrier::Settle());
+  assert(flushes.load() == 1 && drains_at_flush.load() >= drained + 2);
+  assert(RemapBarrier::Stats().unflushed == before.unflushed);
+  // One failed attempt: the next one flushes.
+  flush_failures.store(1);
+  const auto retried = RemapBarrier::Stamp();
+  assert(RemapBarrier::Settle());
+  assert(flushes.load() == 3 && RemapBarrier::Clean(retried));
+  assert(RemapBarrier::Stats().unflushed == before.unflushed);
+  // Every attempt fails: the address stays dirty, the remap waits.
+  flush_failures.store(-1);
+  const auto stamp = RemapBarrier::Stamp();
+  RemapBarrier::NoteRemap();
+  assert(!RemapBarrier::Settle());
+  assert(flushes.load() == 3 + RemapBarrier::kFlushAttempts);
+  assert(!RemapBarrier::Clean(stamp) && RemapBarrier::Pending());
+  assert(RemapBarrier::Stats().unflushed == before.unflushed + 1);
+  // The next call that flushes settles both.
+  flush_failures.store(0);
+  assert(RemapBarrier::Settle());
+  assert(RemapBarrier::Clean(stamp) && !RemapBarrier::Pending());
+  // Without a flush the barrier relies on the idle time alone.
+  RemapBarrier::SetTranslationFlush(nullptr);
+  const int flushed = flushes.load();
+  assert(RemapBarrier::Settle());
+  assert(flushes.load() == flushed);
+  assert(RemapBarrier::Stats().unflushed == before.unflushed + 1);
 }
 
 // Device work another thread brackets never starts inside a barrier, and a
@@ -80,7 +131,7 @@ void HoldsOthersBack() {
   for (int i = 0; i < 20; ++i) {
     const auto stamp = RemapBarrier::Stamp();
     RemapBarrier::NoteRemap();
-    RemapBarrier::Settle();
+    assert(RemapBarrier::Settle());
     assert(RemapBarrier::Clean(stamp) && !RemapBarrier::Pending());
     // The held worker resumes once the barrier ends. Barriers back to back
     // close the gate again before a waiter wakes, so give it the chance.
@@ -120,7 +171,7 @@ void HoldAndRelease() {
     const DeviceWorkScope work;
     entered.store(true);
   });
-  RemapBarrier::Settle();
+  assert(RemapBarrier::Settle());
   second.join();
   assert(entered.load());
   // Never released: the gate opens after kHoldLimit.
@@ -137,7 +188,7 @@ void HoldAndRelease() {
 void BoundedWait() {
   RemapBarrier::Enter();
   const auto before = RemapBarrier::Stats();
-  std::thread settler([] { RemapBarrier::Settle(); });
+  std::thread settler([] { assert(RemapBarrier::Settle()); });
   settler.join();
   assert(RemapBarrier::Stats().unquiet > before.unquiet);
   RemapBarrier::Leave();
@@ -148,6 +199,7 @@ void BoundedWait() {
 int main() {
   Stamps();
   Drain();
+  Flush();
   HoldsOthersBack();
   HoldAndRelease();
   BoundedWait();

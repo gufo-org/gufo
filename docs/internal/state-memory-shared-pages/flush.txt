@@ -1,0 +1,30 @@
+== idle2 mode 0, GPU otherwise idle
+mode 0 idle    0 us: all new    3/100; canary new    3; canary new while an address was old 0; settled by polling within 267 us max, never 0
+mode 0 idle  100 us: all new  100/100; canary new  100; canary new while an address was old 0; settled by polling within 0 us max, never 0
+mode 0 idle  400 us: all new  100/100; canary new  100; canary new while an address was old 0; settled by polling within 0 us max, never 0
+== idle2 mode 0, beside busy
+mode 0 idle    0 us: all new   20/100; canary new   20; canary new while an address was old 0; settled by polling within 0 us max, never 80
+mode 0 idle  100 us: all new   20/100; canary new   20; canary new while an address was old 0; settled by polling within 0 us max, never 80
+mode 0 idle  400 us: all new   20/100; canary new   20; canary new while an address was old 0; settled by polling within 0 us max, never 80
+== flush, GPU otherwise idle
+method 0: kernel all new  58/100, copy all new  58/100; settle cost mean 0 us max 0 us; not new after 200 ms of polling 0 (max wait of the others 199 us)
+method 1: kernel all new 100/100, copy all new 100/100; settle cost mean 400 us max 400 us; not new after 200 ms of polling 0 (max wait of the others 0 us)
+method 2: kernel all new 100/100, copy all new 100/100; settle cost mean 218 us max 444 us; not new after 200 ms of polling 0 (max wait of the others 0 us)
+method 3: kernel all new   9/100, copy all new   9/100; settle cost mean 1 us max 2 us; not new after 200 ms of polling 0 (max wait of the others 197 us)
+method 4: kernel all new 100/100, copy all new 100/100; settle cost mean 400 us max 405 us; not new after 200 ms of polling 0 (max wait of the others 0 us)
+== flush, beside busy
+method 0: kernel all new  20/100, copy all new  20/100; settle cost mean 0 us max 0 us; not new after 200 ms of polling 80 (max wait of the others 0 us)
+method 1: kernel all new  20/100, copy all new  20/100; settle cost mean 400 us max 401 us; not new after 200 ms of polling 80 (max wait of the others 0 us)
+method 2: kernel all new 100/100, copy all new 100/100; settle cost mean 187 us max 420 us; not new after 200 ms of polling 0 (max wait of the others 0 us)
+method 3: kernel all new  20/100, copy all new  20/100; settle cost mean 2 us max 7 us; not new after 200 ms of polling 80 (max wait of the others 0 us)
+method 4: kernel all new  20/100, copy all new  20/100; settle cost mean 400 us max 406 us; not new after 200 ms of polling 80 (max wait of the others 0 us)
+== flush 100 0 2 5 6 (5: free only, 6: allocate only), GPU otherwise idle
+method 0: kernel all new  29/100, copy all new  29/100; settle cost mean 0 us max 0 us; not new after 200 ms of polling 0 (max wait of the others 208 us)
+method 2: kernel all new 100/100, copy all new 100/100; settle cost mean 216 us max 354 us; not new after 200 ms of polling 0 (max wait of the others 0 us)
+method 5: kernel all new 100/100, copy all new 100/100; settle cost mean 82 us max 116 us; not new after 200 ms of polling 0 (max wait of the others 0 us)
+method 6: kernel all new 100/100, copy all new 100/100; settle cost mean 153 us max 229 us; not new after 200 ms of polling 0 (max wait of the others 0 us)
+== flush 100 0 2 5 6, beside busy
+method 0: kernel all new  20/100, copy all new  20/100; settle cost mean 0 us max 0 us; not new after 200 ms of polling 80 (max wait of the others 0 us)
+method 2: kernel all new 100/100, copy all new 100/100; settle cost mean 183 us max 398 us; not new after 200 ms of polling 0 (max wait of the others 0 us)
+method 5: kernel all new 100/100, copy all new 100/100; settle cost mean 66 us max 89 us; not new after 200 ms of polling 0 (max wait of the others 0 us)
+method 6: kernel all new 100/100, copy all new 100/100; settle cost mean 108 us max 137 us; not new after 200 ms of polling 0 (max wait of the others 0 us)

@@ -120,8 +120,9 @@ public:
   /// After PrepareWrite() or Restore() remapped pages: lets the device reach
   /// them (mem::RemapBarrier, about 0.5 ms with the device idle), then fills
   /// or clears the replaced pages. One call serves every region of the
-  /// device; without remaps it costs two atomic reads. False when a page
-  /// copy failed. Same thread rule as PrepareWrite().
+  /// device; without remaps it costs two atomic reads. False when the
+  /// barrier or a page copy failed: then the rows of the write or restore
+  /// are not to be used. Same thread rule as PrepareWrite().
   [[nodiscard]] bool SettleRemaps(std::string* error = nullptr);
   /// Pages this region maps that another user shares.
   [[nodiscard]] std::size_t shared_pages() const;
@@ -135,9 +136,10 @@ private:
   /// the remap barrier.
   [[nodiscard]] bool MapPages(std::size_t rows, std::string* error, bool ahead);
   /// Unmaps pages [first, end), all mapped, in one call; requires mutex_.
-  void UnmapRun(std::size_t first, std::size_t end);
+  /// `held`: within this thread's RemapBarrier::Hold().
+  void UnmapRun(std::size_t first, std::size_t end, bool held);
   /// Unmaps every page marked in `drop`, one call per run; requires mutex_.
-  void UnmapMarked(const std::vector<bool>& drop);
+  void UnmapMarked(const std::vector<bool>& drop, bool held);
   /// Gives up page `p` after its address was unmapped; requires mutex_.
   void ReleasePage(std::size_t p);
   [[nodiscard]] bool SharedWithOthers(std::size_t p) const noexcept;

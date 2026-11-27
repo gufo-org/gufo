@@ -12,6 +12,10 @@
 namespace gufo::mem {
 namespace {
 
+// SettleRemaps() failed: the remap barrier, or a page copy or clear.
+constexpr const char* kNotSettled =
+    "state pages not settled: the remap barrier or a page copy failed";
+
 void SetError(std::string* error, const char* message) {
   if (error)
     *error = message;
@@ -95,8 +99,17 @@ std::shared_ptr<Region> Region::Create(
       region->written_here_.resize(reserved / kPageBytes);
       region->unmapped_at_.resize(reserved / kPageBytes);
       // Sessions are created at load and between requests, never mid-pass.
-      if (!RemapBarrier::Clean(freed_at.load(std::memory_order_acquire)))
-        RemapBarrier::Settle();
+      if (!RemapBarrier::Clean(freed_at.load(std::memory_order_acquire)) &&
+          !RemapBarrier::Settle()) {
+        // Nothing of the region exists yet, the ledger included: give the
+        // range back so the destructor has nothing to undo.
+        (void)hipMemAddressFree(base, reserved);
+        region->base_ = nullptr;
+        SetError(error,
+                 "state region address not settled: the remap "
+                 "barrier failed");
+        return nullptr;
+      }
       // Pages belong to one segment each when segments start on a page.
       region->shareable_ =
           shape.segments == 1 || region->stride_ % kPageBytes == 0;
@@ -156,7 +169,7 @@ Region::~Region() {
   }
   // Unmapping waits for all in-flight GPU work on the device; regions end
   // with their sessions, at shutdown or between requests, never mid-pass.
-  UnmapMarked(mapped_);
+  UnmapMarked(mapped_, false);
   (void)hipGetLastError();
   freed_at.store(RemapBarrier::Stamp(), std::memory_order_release);
   StateLedger::Process().RemoveReserved(reserved_bytes_);
@@ -202,7 +215,14 @@ void Region::ReleasePage(std::size_t p) {
     account_->OnUnmap(kPageBytes);
 }
 
-void Region::UnmapRun(std::size_t first, std::size_t end) {
+void Region::UnmapRun(std::size_t first, std::size_t end, bool held) {
+  // Copies or clears still queued for these pages would land in whatever
+  // the addresses map next.
+  const auto* const begin = reinterpret_cast<const std::byte*>(base_);
+  if (pool_->DropFixups(begin + first * kPageBytes, begin + end * kPageBytes) &&
+      held)
+    // It waited for another thread's barrier, which ended the hold.
+    RemapBarrier::Hold();
   // One call for the run: each call waits for in-flight GPU work.
   (void)hipMemUnmap(base_ + first * kPageBytes, (end - first) * kPageBytes);
   // The device may go on reaching the old pages through these addresses
@@ -214,7 +234,7 @@ void Region::UnmapRun(std::size_t first, std::size_t end) {
   }
 }
 
-void Region::UnmapMarked(const std::vector<bool>& drop) {
+void Region::UnmapMarked(const std::vector<bool>& drop, bool held) {
   for (std::size_t p = 0; p < pages_.size();) {
     if (!drop[p] || !mapped_[p]) {
       ++p;
@@ -223,7 +243,7 @@ void Region::UnmapMarked(const std::vector<bool>& drop) {
     std::size_t end = p + 1;
     while (end < pages_.size() && drop[end] && mapped_[end])
       ++end;
-    UnmapRun(p, end);
+    UnmapRun(p, end, held);
     p = end;
   }
 }
@@ -337,20 +357,27 @@ bool Region::ReplaceRun(std::size_t first, std::size_t count, bool copy,
   // shared pages.
   std::vector<std::byte*> aliases(count, nullptr);
   if (copy) {
-    for (int attempt = 0; attempt < 2; ++attempt) {
-      std::size_t k = 0;
+    std::size_t k = 0;
+    for (int attempt = 0;; ++attempt) {
       for (; k < count; ++k)
         if ((aliases[k] = pool_->AliasForCopy(pages_[first + k])) == nullptr)
           break;
-      if (k == count)
+      // No scratch address free: run what is queued, which unmaps the
+      // aliases of the copies it runs. These stay handed out.
+      if (k == count || attempt == 1 || !pool_->SettleRemaps())
         break;
-      // No scratch address left: run what is queued, which frees them all
-      // (these aliases too; nothing was queued on them yet).
-      if (attempt == 1 || !pool_->SettleRemaps()) {
-        give_back();
-        SetError(error, "state page copy failed");
-        return false;
-      }
+    }
+    if (k != count) {
+      // Given back, they go at once, with any whose access failed: no copy
+      // read them, and this region holds their pages until then. As below,
+      // held until the caller's SettleRemaps().
+      for (std::size_t j = 0; j < k; ++j)
+        pool_->ReturnAlias(aliases[j], nullptr);
+      RemapBarrier::Hold();
+      pool_->UnmapDoneAliases();
+      give_back();
+      SetError(error, kNotSettled);
+      return false;
     }
   }
   // Until the caller's SettleRemaps(): an unmap waits for device work in
@@ -383,6 +410,9 @@ bool Region::ReplaceRun(std::size_t first, std::size_t count, bool copy,
     }
     // The page stays unmapped; the rows from here on are no longer backed.
     ok = false;
+    if (copy)
+      // Its alias still maps the old page.
+      pool_->ReturnAlias(aliases[k], std::move(old));
     pool_->Release(fresh[k]);
     mapped_[p] = false;
     mapped_bytes_.fetch_sub(kPageBytes, std::memory_order_relaxed);
@@ -407,7 +437,7 @@ bool Region::ReplaceRun(std::size_t first, std::size_t count, bool copy,
 bool Region::SettleRemaps(std::string* error) {
   if (!pool_ || pool_->SettleRemaps())
     return true;
-  SetError(error, "state page copy failed");
+  SetError(error, kNotSettled);
   return false;
 }
 
@@ -479,7 +509,7 @@ std::vector<bool> Region::Restore(
   if (dropped) {
     // As in ReplaceRun(): held until the caller's SettleRemaps().
     RemapBarrier::Hold();
-    UnmapMarked(drop);
+    UnmapMarked(drop, true);
   }
   const auto& access = pool_->access();
   // Dropped addresses get pages again as the restore's loads arrive: the
@@ -551,7 +581,7 @@ void Region::TrimTo(std::size_t rows) {
   if (!released)
     return;
   RemapBarrier::Hold();
-  UnmapMarked(drop);
+  UnmapMarked(drop, true);
   RemapBarrier::Release();
   (void)hipGetLastError();
   requested_rows_ = std::min(requested_rows_, rows);
@@ -573,6 +603,9 @@ bool Region::MapPages(std::size_t rows, std::string* error, bool ahead) {
     return ok;
   };
   std::vector<std::size_t> recycled;
+  // Pages of this call that need the barrier, or a clear after it, before
+  // the device may use them.
+  std::vector<bool> unsettled;
   std::size_t backed = shape_.rows;
   bool remapped = false;
   for (std::size_t s = 0; s < shape_.segments; ++s) {
@@ -588,7 +621,8 @@ bool Region::MapPages(std::size_t rows, std::string* error, bool ahead) {
       // its new page only after the barrier. The writer runs it below; the
       // pool's thread, beside running work, stops here and leaves the rest
       // to the writer.
-      if (!RemapBarrier::Clean(unmapped_at_[p])) {
+      const bool dirty = !RemapBarrier::Clean(unmapped_at_[p]);
+      if (dirty) {
         if (ahead) {
           end = p;
           break;
@@ -626,6 +660,10 @@ bool Region::MapPages(std::size_t rows, std::string* error, bool ahead) {
       shared_until_[p] = p * kPageBytes;
       if (reused)
         recycled.push_back(p);
+      if (dirty || reused) {
+        unsettled.resize(pages_.size());
+        unsettled[p] = true;
+      }
       ledger.AddMapped(kPageBytes);
       mapped_bytes_.fetch_add(kPageBytes, std::memory_order_relaxed);
       if (run_end != p && !flush()) {
@@ -648,7 +686,16 @@ bool Region::MapPages(std::size_t rows, std::string* error, bool ahead) {
   if (remapped) {
     RemapBarrier::NoteRemap();
     if (!pool_->SettleRemaps()) {
-      SetError(error, "state page copy failed");
+      // The device may still reach the old pages there. Give back what
+      // needed the barrier or the clear after it: the next call maps those
+      // pages again and settles them, instead of finding them mapped.
+      if (!unsettled.empty()) {
+        // As in TrimTo(): an unmap waits for other threads' work in flight.
+        RemapBarrier::Hold();
+        UnmapMarked(unsettled, true);
+        RemapBarrier::Release();
+      }
+      SetError(error, kNotSettled);
       return false;
     }
   }

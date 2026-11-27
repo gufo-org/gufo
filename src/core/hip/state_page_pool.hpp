@@ -3,7 +3,9 @@
 
 #include <hip/hip_runtime.h>
 
+#include <array>
 #include <atomic>
+#include <bitset>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -48,6 +50,13 @@ struct PagePoolStats {
   /// Pages the RAM cache lent to regions, and pages back with it.
   std::size_t lent{0};
   std::size_t returned{0};
+  /// Copies and clears queued, or taken by a SettleRemaps() that has not
+  /// finished them.
+  std::size_t fixups{0};
+  /// Scratch aliases mapped as copy sources, until a SettleRemaps() unmaps
+  /// them, and the source pages held until then.
+  std::size_t aliases{0};
+  std::size_t held_sources{0};
 };
 
 /// Physical 2 MiB pages of one device, created ahead of use and never freed
@@ -150,21 +159,40 @@ public:
   // runs the barrier once for everything queued, then the work.
 
   /// Maps `handle` a second time, at a scratch address, as the source of a
-  /// copy queued with QueueCopy(). Null when no scratch address is free
-  /// (SettleRemaps() frees them all) or the driver refuses.
+  /// copy queued with QueueCopy(), or given back with ReturnAlias(). Null
+  /// when no scratch address is free or the driver refuses. SettleRemaps()
+  /// unmaps an alias once its copy ran, was dropped or it came back; one
+  /// handed out and neither queued nor given back stays mapped.
   [[nodiscard]] std::byte* AliasForCopy(hipMemGenericAllocationHandle_t handle);
+  /// Gives back an alias no copy will read; `keep` holds the page it maps
+  /// until SettleRemaps() or UnmapDoneAliases() unmaps it. Ignored for an
+  /// address that is not a handed-out alias.
+  void ReturnAlias(const std::byte* alias, std::shared_ptr<void> keep);
+  /// Unmaps the aliases given back or of dropped copies now, without a
+  /// barrier: the device never read them. Call it within this thread's
+  /// RemapBarrier::Hold(): an unmap waits for device work in flight.
+  void UnmapDoneAliases();
   /// After the barrier: copy one page from `source` (an AliasForCopy()
   /// address; `keep` holds its page until then) to `destination`.
   void QueueCopy(std::byte* destination, const std::byte* source,
                  std::shared_ptr<void> keep);
   /// After the barrier: clear `bytes` at `destination`.
   void QueueClear(std::byte* destination, std::size_t bytes);
+  /// Forgets the queued copies and clears into [begin, end), after a
+  /// SettleRemaps() that runs some of them: a region calls it for the pages
+  /// it unmaps. True when it waited for that call, which may have ended the
+  /// caller's RemapBarrier::Hold().
+  [[nodiscard]] bool DropFixups(const std::byte* begin, const std::byte* end);
   /// Runs the barrier when a remap waits for one (RemapBarrier::Pending())
-  /// or work is queued, then the queued work, and waits for it. False when a
-  /// copy or a clear failed. Call it after a batch of Region::PrepareWrite()
-  /// or Region::Restore() calls and before the device uses those rows, on
-  /// the thread that runs the model, between its launches. Without remaps
-  /// it costs two atomic reads.
+  /// or work is queued, then the queued work, and waits for it, as for the
+  /// work another thread's call runs now, which may be this thread's. False
+  /// when the barrier failed, and then no queued work runs and it waits for
+  /// the next call, or when a copy or a clear it ran failed, and then that
+  /// work is given up. Call it after a batch of
+  /// Region::PrepareWrite() or Region::Restore() calls and before the device
+  /// uses those rows, on the thread that runs the model, between its
+  /// launches. With no remap pending, no work queued or running in any
+  /// thread and no alias left to unmap, it costs two atomic reads.
   [[nodiscard]] bool SettleRemaps();
   static constexpr std::size_t kScratchPages = 64;
 
@@ -181,6 +209,20 @@ private:
     std::weak_ptr<Region> region;
     std::size_t rows{0};
   };
+  struct Fixup {
+    std::byte* destination;
+    const std::byte* source;  // Null: clear.
+    std::size_t bytes;
+    std::shared_ptr<void> keep;
+  };
+  /// A scratch address: handed out by AliasForCopy(), read by a queued copy,
+  /// or done (its copy ran or was dropped, or it came back) and waiting for
+  /// SettleRemaps() to unmap it, with the page it maps held until then.
+  struct Alias {
+    enum class State : std::uint8_t { kFree, kHeld, kQueued, kDone };
+    State state{State::kFree};
+    std::shared_ptr<void> keep;
+  };
   void Run();
   [[nodiscard]] bool CreatePage(hipMemGenericAllocationHandle_t* handle);
   [[nodiscard]] std::size_t TargetFreePages();
@@ -189,6 +231,25 @@ private:
   void BorrowBelowFloor(std::size_t pages);
   /// Sends a page with a home back to it. Called without the pool lock.
   [[nodiscard]] bool ReturnHome(hipMemGenericAllocationHandle_t handle);
+  /// Stores unfinished_, under fixup_mutex_.
+  void CountFixups();
+  /// The scratch slot of `address`, kScratchPages for any other address.
+  [[nodiscard]] std::size_t SlotOf(const std::byte* address) const;
+  /// The alias at `address`, or null; under fixup_mutex_.
+  [[nodiscard]] Alias* AliasAt(const std::byte* address);
+  /// Marks an alias done, holding `keep`; under fixup_mutex_.
+  static void AliasDone(Alias& alias, std::shared_ptr<void> keep);
+  /// Unmaps the aliases marked in `unmap` at `scratch`, one call per run of
+  /// neighbours.
+  static void UnmapAliases(std::byte* scratch,
+                           const std::bitset<kScratchPages>& unmap);
+  /// The done aliases; under fixup_mutex_.
+  [[nodiscard]] std::bitset<kScratchPages> DoneAliases() const;
+  /// Frees the slots marked in `unmapped`, moving the pages they held into
+  /// `sources`; under fixup_mutex_. A failed unmap is ignored, as for every
+  /// other unmap of the pool, the regions and the park.
+  void FreeAliases(const std::bitset<kScratchPages>& unmapped,
+                   std::vector<std::shared_ptr<void>>& sources);
 
   int device_;
   std::function<bool(std::uint64_t)> may_create_;
@@ -204,19 +265,22 @@ private:
   /// Released by a region; handed out before new pages.
   std::vector<hipMemGenericAllocationHandle_t> recycled_;
   hipStream_t zero_stream_{nullptr};
-  struct Fixup {
-    std::byte* destination;
-    const std::byte* source;  // Null: clear.
-    std::size_t bytes;
-    std::shared_ptr<void> keep;
-  };
   /// One SettleRemaps() at a time; never held with mutex_.
   std::mutex settle_mutex_;
-  std::mutex fixup_mutex_;
+  mutable std::mutex fixup_mutex_;
   std::vector<Fixup> fixups_;
-  std::atomic<std::size_t> queued_{0};
+  /// The fixups a SettleRemaps() took from fixups_ and has neither finished
+  /// nor queued again. That call changes it under fixup_mutex_; others read
+  /// it under fixup_mutex_.
+  std::vector<Fixup> taken_;
+  /// fixups_, taken_ and the done aliases, stored under fixup_mutex_
+  /// (CountFixups()): zero only when SettleRemaps() has no copy or clear to
+  /// finish and no alias to unmap. The fast paths of SettleRemaps() and
+  /// DropFixups() read it.
+  std::atomic<std::size_t> unfinished_{0};
   std::byte* scratch_{nullptr};
-  std::size_t scratch_used_{0};
+  /// Under fixup_mutex_: the scratch addresses.
+  std::array<Alias, kScratchPages> aliases_;
   std::unordered_map<const Region*, Job> jobs_;
   bool exportable_{false};
   /// Lenders, and the lender each lent page belongs to. lender_mutex_ is

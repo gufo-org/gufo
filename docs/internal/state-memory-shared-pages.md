@@ -60,6 +60,56 @@ The barrier therefore waits for the device, keeps it idle for 400 us (twice
 the longest time any remap needed), and holds back the threads that submit
 device work on their own. It is no proof against device work it cannot see.
 
+## Another process keeps the GPU busy
+
+Measured later on a host with Linux 7.0 (GTT memory), ROCm 10.1, November
+2026. [`busy.hip`](state-memory-shared-pages/busy.hip) keeps the GPU busy
+from a second process with short kernels back to back. Beside it, the idle
+time drops no translation ([log](state-memory-shared-pages/flush.txt)):
+
+| Idle time after the remap (`idle2.hip`) | GPU otherwise idle | Beside `busy.hip` |
+| --- | --- | --- |
+| None | 3 of 100 | 20 of 100 |
+| 100 us | 100 of 100 | 20 of 100 |
+| 400 us | 100 of 100 | 20 of 100 |
+
+The 20 are the batches whose new handle is the one the addresses had first;
+the other 80 still read their old pages after 500 ms. The cause is the
+driver's missing TLB flush (see
+[remapped addresses](state-memory.md#remapped-addresses)).
+[`flush.hip`](state-memory-shared-pages/flush.hip) tries what drops the
+translations instead:
+
+| After the remap | GPU otherwise idle | Beside `busy.hip` |
+| --- | --- | --- |
+| Nothing | 58 of 100 | 20 of 100 |
+| `hipDeviceSynchronize` and 400 us idle, as the barrier waits | 100 of 100 | 20 of 100 |
+| `hipMalloc` of 4 MiB and `hipFree` | 100 of 100, 0.22 ms | 100 of 100, 0.19 ms |
+| `hipFree` of a 4 MiB block allocated before the remap | 100 of 100, 0.08 ms | 100 of 100, 0.07 ms |
+| `hipMalloc` of 4 MiB only | 100 of 100, 0.15 ms | 100 of 100, 0.11 ms |
+| `hipMalloc` of 64 KiB and `hipFree` | 9 of 100 | 20 of 100 |
+
+The kernel driver flushes the process's translations when it maps or frees
+a block, each on its own; a 64 KiB block comes from the HIP runtime's
+sub-allocator and never reaches the driver. The barrier therefore also
+flushes (`mem::FlushTranslations`): it frees the 4 MiB block its previous
+flush allocated and allocates the next, so it fails only when that block
+cannot be freed, or when it holds none and cannot allocate one.
+`mem_remap_barrier_device_test` checks it beside a busy process: after the
+idle time alone 25 of 50 batches read old pages, through kernels, `hipMemcpy`
+and the copy engine alike; with the flush, none.
+
+Addresses that never had a mapping are not affected.
+[`fresh.hip`](state-memory-shared-pages/fresh.hip) maps 9 pages per batch at
+such addresses and reads them at once, beside `busy.hip` and with the GPU
+otherwise idle, two runs each ([log](state-memory-shared-pages/fresh.txt)).
+Every batch read right, 60 of 60 per case: existing pages at a new
+reservation per batch or at the next unused slots of one, and new pages
+written by a kernel at once in both places. Remaps at one address in the
+same runs left 56 and 55 of 60 batches on old pages beside `busy.hip`; with
+the GPU idle, 59 and 39 of 60 read old pages at first and all new pages
+within 0.21 ms.
+
 ## What needed the barrier
 
 - **Page copies on a rewind.** The first design copied a shared page through

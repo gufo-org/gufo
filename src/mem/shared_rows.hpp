@@ -35,7 +35,8 @@ public:
   /// returns the bytes released. Same thread rule as Sweep().
   virtual std::size_t ReleaseFree(std::size_t bytes) = 0;
   /// Lets the device reach memory mapped where other memory was unmapped
-  /// (PagePool::SettleRemaps). Two atomic reads when nothing waits.
+  /// (PagePool::SettleRemaps); false when it could not. Two atomic reads
+  /// when nothing waits.
   virtual bool SettleRemaps() = 0;
 };
 

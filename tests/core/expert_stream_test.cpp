@@ -554,6 +554,34 @@ void InvalidLayouts() {
 
 }  // namespace
 
+// A store whose cache was released whole still settles the addresses it
+// gave back before it returns them to the runtime: their next owner maps
+// there at once.
+void TeardownSettlesReleasedRanges() {
+  Model m(16, 2, {{3000}, {3000}});
+  Check(m.ok, "teardown fixture");
+  if (!m.ok)
+    return;
+  Policy policy;
+  policy.cache_limit_bytes = 64 * m.Slot(0);
+  policy.log_tag = "expert_stream_test";
+  policy.ranking_source = "test ranking";
+  policy.ranking = {{0, 0, 2}, {0, 1, 1}};
+  auto store = Store::Create(m.layout, policy);
+  Check(store != nullptr, "teardown create");
+  if (!store)
+    return;
+  const uint64_t stage = uint64_t{3000} * policy.prefetch_stage_rows;
+  Check(store->Fit(stage + 2 * m.Slot(0)) && store->GetStats().cache_bytes > 0,
+        "teardown fit");
+  Check(store->Release(1) > 0 && store->GetStats().cache_bytes == 0,
+        "teardown release frees the cache");
+  const auto settles = gufo::mem::RemapBarrier::Stats().settles;
+  store.reset();
+  Check(!DevicePages() || gufo::mem::RemapBarrier::Stats().settles > settles,
+        "teardown settles the released ranges");
+}
+
 int main() {
   int devices = 0;
   if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0)
@@ -567,6 +595,7 @@ int main() {
   CallerStream(routes);
   FailedPrepareCachesNothing(routes);
   PrefetchWindowWraps(routes);
+  TeardownSettlesReleasedRanges();
   InvalidLayouts();
   (void)hipFree(routes);
   return ok ? 0 : 1;
