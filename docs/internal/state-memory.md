@@ -122,7 +122,9 @@ the floor for a whole run, and the cache must still grow as far as without
 state pages. Only state pages are lent. When a region needs pages and
 none can be made that way, the pool thread **lends** whole free cache pages to
 it instead: it evicts checkpoints by the cache's pressure order until enough
-2 MiB pages are free, then maps them into the region (cleared first). The
+2 MiB pages are free, then maps them into the region (cleared first). It
+skips the checkpoints an in-flight RAM restore found: the restore pins their
+pages, so evicting them frees nothing and costs the restore (#1432). The
 cache keeps its own mapping of a lent page, unused, and the page returns to it
 when the region releases it. Lending is a map: it never unmaps (which waits
 for the device), unregisters (about 100 ms per 128 MiB, with a device drain)

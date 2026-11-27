@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <new>
@@ -232,6 +233,23 @@ std::string HostReserveMessage(std::size_t sessions, std::size_t requested,
          ". Use fewer --sessions, a smaller --context, or --cache-ram-bytes "
          "off to serve without RAM checkpoints";
 }
+// A failed restore falls back to a shallower candidate or a cold prefill;
+// say why, or the miss is unexplained (#1432).
+void LogRestoreFailure(std::size_t tokens, std::exception_ptr error) noexcept {
+  try {
+    std::string reason = "unknown";
+    try {
+      std::rethrow_exception(error);
+    } catch (const std::exception& e) {
+      reason = e.what();
+    } catch (...) {
+    }
+    Logger::Info("cache",
+                 "schema=component-cache-v1 event=restore_failed tokens=" +
+                     std::to_string(tokens) + " reason=" + reason);
+  } catch (...) {
+  }
+}
 }  // namespace
 struct ComponentTextCache::Impl {
   struct Entry {
@@ -374,6 +392,10 @@ struct ComponentTextCache::Impl {
   std::size_t lender_grant{};
   // Checkpoints evicted so sessions could borrow their pages back.
   std::atomic<std::size_t> state_sheds{};
+  // Candidates of in-flight RAM restores, under `mutex`. Their restores pin
+  // the pages, so evicting them frees nothing, and the restored session needs
+  // their records (#1432). Sheds leave them alone.
+  std::vector<cache::CheckpointId> restoring;
   // A host-pressure episode was logged; cleared when the shortfall ends.
   bool host_pressure_reported{};
   cache::ResourceCharge metadata;
@@ -825,7 +847,9 @@ struct ComponentTextCache::Impl {
         bool reclaimed;
         {
           const std::lock_guard lock(mutex);
-          reclaimed = retention.Reclaim(cache::RetentionRequest{});
+          cache::RetentionRequest request;
+          request.protected_checkpoints = restoring;
+          reclaimed = retention.Reclaim(request);
         }
         DrainDemotion();
         if (reclaimed)
@@ -1781,6 +1805,31 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     // boundary instead (TextRunnerCapabilities::prefill_alignment).
     const std::size_t alignment = std::max<std::size_t>(
         1, impl_->runner->Descriptor().capabilities.prefill_alignment);
+    // A restore makes session pages, which at the host's free floor sheds
+    // checkpoints. Keep this lookup's candidates out of those sheds until
+    // the loop ends: they share the restored rows and free little.
+    struct Restoring {
+      ComponentTextCache::Impl& cache;
+      std::vector<cache::CheckpointId> ids;
+      ~Restoring() {
+        if (ids.empty())
+          return;
+        const std::lock_guard lock(cache.mutex);
+        // Other sessions' restores may hold the same ids: remove one each.
+        for (const auto id : ids)
+          if (const auto at = std::ranges::find(cache.restoring, id);
+              at != cache.restoring.end())
+            cache.restoring.erase(at);
+      }
+    } restoring{*impl_, {}};
+    if (!restored) {
+      for (const auto& candidate : found.candidates)
+        if (candidate.checkpoint)
+          restoring.ids.push_back(candidate.checkpoint->Id());
+      const std::lock_guard lock(impl_->mutex);
+      impl_->restoring.insert(impl_->restoring.end(), restoring.ids.begin(),
+                              restoring.ids.end());
+    }
     for (const auto& candidate : found.candidates) {
       if (restored || (cancelled && cancelled()))
         break;
@@ -1995,7 +2044,17 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           request.source = checkpoint.Id();
           {
             const std::lock_guard lock(impl_->mutex);
-            impl_->retention.Touch(checkpoint.Id());
+            // Another session's capture may have evicted the record while the
+            // copies ran. The pins kept its rows, and the restore validated:
+            // keep it rather than prefill the whole prompt again.
+            try {
+              impl_->retention.Touch(checkpoint.Id());
+            } catch (const std::invalid_argument&) {
+              Logger::Info("cache",
+                           "schema=component-cache-v1 "
+                           "event=restore_source_evicted tokens=" +
+                               std::to_string(candidate.boundary));
+            }
           }
           restored = true;
         } else if (candidate.durable && impl_->streaming) {
@@ -2079,6 +2138,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           entry->durable = candidate.durable;
         }
       } catch (...) {
+        LogRestoreFailure(candidate.boundary, std::current_exception());
         request.SettleCapture();
         if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
           throw;
