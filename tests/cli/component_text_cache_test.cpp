@@ -1072,6 +1072,65 @@ void RestoreFromBusyBorrowedSource() {
              cache::ResourceCategory::kBackingAssigned)] == 0);
   assert(runner->adapter->RecurrentHash(restored.slot) == hash);
 }
+// A restore makes session pages; at the host's free floor the state pool
+// sheds checkpoints for them. The shed must not evict the checkpoint being
+// restored, which frees nothing while the restore pins it, nor may the
+// restore be thrown away afterwards (#1432).
+void SessionShedKeepsTheRestoringCheckpoint() {
+  struct ShedAdapter final : FakeAdapter {
+    using FakeAdapter::FakeAdapter;
+    std::function<bool()> shed;
+    bool armed{};
+    std::optional<bool> shed_result;
+    cache::Completion CopyRowsIn(cache::Slot& slot, cache::ComponentId id,
+                                 cache::Rows first, cache::Rows end,
+                                 std::span<const std::byte> bytes,
+                                 cache::Stream& stream) override {
+      if (armed && shed) {
+        armed = false;
+        shed_result = shed();
+      }
+      return FakeAdapter::CopyRowsIn(slot, id, first, end, bytes, stream);
+    }
+  };
+  struct ShedRunner final : Runner {
+    mutable ShedAdapter* shedding{};
+    std::unique_ptr<ComponentCacheResources> CreateComponentCacheResources(
+        cache::ResourceLedger& ledger, std::size_t) const override {
+      auto owned = std::make_unique<ShedAdapter>(rows_per_chunk);
+      adapter = shedding = owned.get();
+      auto resources = server::testing::MakeFakeCacheResources(
+          ledger, std::move(owned), {.captures = &captures});
+      resources->set_shed = [this](std::function<bool()> shed) {
+        shedding->shed = std::move(shed);
+      };
+      return resources;
+    }
+  };
+  auto runner = std::make_shared<ShedRunner>();
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  std::vector<TextRunnerToken> prompt(40);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto source = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(source->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  const auto hash = runner->adapter->RecurrentHash(state.slot);
+  assert(source->TryReserveSnapshot(source->CaptureBytes(), prompt.size(),
+                                    false, SnapshotPurpose::kContinuation, {}));
+  assert(source->PublishSnapshot(prompt, source->Capture(), false));
+  assert(runner->shedding->shed);
+  runner->shedding->armed = true;
+  auto peer = cache.Acquire(prompt, {}, {}, true, 0, true);
+  // The only checkpoint was being restored: nothing to shed.
+  assert(runner->shedding->shed_result == false);
+  assert(peer->cached_tokens() == prompt.size());
+  auto& restored = dynamic_cast<State&>(peer->state());
+  assert(runner->adapter->RecurrentHash(restored.slot) == hash);
+  peer->Invalidate();
+  // The restore is over, so the checkpoint is evictable again, and kept
+  // until then.
+  assert(runner->shedding->shed());
+}
 // A provider that shares row storage instead of copying it: a checkpoint's
 // rows take no pool backing and no borrow, stay valid when their slot moves
 // on, and a restore takes them in place without a load.
@@ -4938,6 +4997,7 @@ int main() {
   ColdAssignmentKeepsOneDuplicateDeepFrontier();
   FailedRestoreResetsOnce();
   RestoreFromBusyBorrowedSource();
+  SessionShedKeepsTheRestoringCheckpoint();
   ImageAfterCachedTextPrefixCaptures();
   ColdAssignmentPrefersPreservedSlot();
   ColdAssignmentKeepsLiveFrontiers();
