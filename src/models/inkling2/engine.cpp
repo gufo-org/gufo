@@ -1489,8 +1489,8 @@ struct Engine::Impl {
         cj.x[j] = inp[j];
         cj.msg[j] = msg + j * kEmbd;
         cj.down[j] = HW(c.down);
-        cj.gain[j] = HW(c.gain);
-        cj.forget[j] = HW(c.forget);
+        cj.gain[j] = ctl_half ? HW4(c.gain) : HW(c.gain);
+        cj.forget[j] = ctl_half ? HW4(c.forget) : HW(c.forget);
         cj.half = ctl_half;
         cj.g64[j] = d_g64 + j * 64;
         cj.out[j] = d_ctl + j * kEmbd;
@@ -1615,8 +1615,12 @@ struct Engine::Impl {
       }
     }
 
-    if (F.oproj) {  // the output projection and the router, read during the
-                    // attention
+    if (F.oproj && (swa || bucket_ctx < 8192)) {  // the output projection and
+                                                  // the router, read during the
+                                                  // attention (skip on deep
+                                                  // global visits where KV
+                                                  // traffic saturates DRAM and
+                                                  // evicts MALL)
       fs::TouchList tl;
       tl.Add(D(L.attn_output), L.attn_output.size_bytes);
       if (ctl_half)
@@ -1743,8 +1747,8 @@ struct Engine::Impl {
         for (int j = 0; j < 3; ++j) {
           const LoopController& c = N.loop[kStreamQ + j];
           tl.Add(HW(c.down), c.down.size_bytes / 2);
-          tl.Add(HW(c.gain), c.gain.size_bytes / 2);
-          tl.Add(HW(c.forget), c.forget.size_bytes / 2);
+          tl.Add(HW4(c.gain), c.gain.size_bytes / 2);
+          tl.Add(HW4(c.forget), c.forget.size_bytes / 2);
         }
       Prefetch(tl);
     }
@@ -1760,8 +1764,8 @@ struct Engine::Impl {
       cj.x[0] = d_mixf;
       cj.msg[0] = msg + 3 * kEmbd;
       cj.down[0] = HW(c.down);
-      cj.gain[0] = HW(c.gain);
-      cj.forget[0] = HW(c.forget);
+      cj.gain[0] = ctl_half ? HW4(c.gain) : HW(c.gain);
+      cj.forget[0] = ctl_half ? HW4(c.forget) : HW(c.forget);
       cj.half = ctl_half;
       cj.g64[0] = d_g64;
       cj.out[0] = d_ctl;

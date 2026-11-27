@@ -1627,72 +1627,68 @@ __device__ __forceinline__ void conv_resid_elem(const ConvResidArgs& a, int c,
 // one dependent chain per element.
 __device__ __forceinline__ void conv_resid_block(const ConvResidArgs& a,
                                                  int tok) {
-  constexpr int R = 5;  // ceil(2304 / 512)
+  constexpr int R = 4;  // 2304 / 576 = 4 exact
   const size_t to = (size_t)tok * 2304;
   const SlotEntry* sl = a.slot + tok * 48;
   float xin[R][4], wv[R][4], cv[R];
 #pragma unroll
   for (int r = 0; r < R; ++r) {
-    const int c = threadIdx.x + r * 512;
-    if (c < 2304) {
-      const float* st = sl->conv + (size_t)a.conv_off * 3 + (size_t)c * 3;
-      xin[r][0] = st[0];
-      xin[r][1] = st[1];
-      xin[r][2] = st[2];
-      auto input = [&](int row) {
-        float xc;
-        if (a.nsum == 8) {
-          float v[8];
+    const int c = threadIdx.x + r * 576;
+    const float* st = sl->conv + (size_t)a.conv_off * 3 + (size_t)c * 3;
+    xin[r][0] = st[0];
+    xin[r][1] = st[1];
+    xin[r][2] = st[2];
+    auto input = [&](int row) {
+      float xc;
+      if (a.nsum == 8) {
+        float v[8];
 #pragma unroll
-          for (int e = 0; e < 8; ++e)
-            v[e] = a.x[((size_t)row * 8 + e) * 2304 + c];
-          xc = 0.f;
+        for (int e = 0; e < 8; ++e)
+          v[e] = a.x[((size_t)row * 8 + e) * 2304 + c];
+        xc = 0.f;
 #pragma unroll
-          for (int e = 0; e < 8; ++e)
-            xc += v[e];
-        } else {
-          xc = a.x[(size_t)row * 2304 + c];
-        }
-        return xc;
-      };
-      const float xc = input(tok);
-      xin[r][3] = xc;
-      if (a.cap) {
-        const int j = a.ri ? a.ri[tok] : tok;
-        for (int l = 1; l <= 3 && l <= j; ++l)
-          xin[r][3 - l] = input(tok - l);
-        if (j < 3)
-          for (int l = j + 1; l <= 3; ++l)
-            xin[r][3 - l] = st[3 - l + j];
-        a.cap[(size_t)tok * 6656 + a.conv_off + c] = xc;
+        for (int e = 0; e < 8; ++e)
+          xc += v[e];
+      } else {
+        xc = a.x[(size_t)row * 2304 + c];
       }
-#pragma unroll
-      for (int i = 0; i < 4; ++i)
-        wv[r][i] = a.w[(size_t)c * 4 + i];
-      cv[r] = a.cur[to + c];
+      return xc;
+    };
+    const float xc = input(tok);
+    xin[r][3] = xc;
+    if (a.cap) {
+      const int j = a.ri ? a.ri[tok] : tok;
+      for (int l = 1; l <= 3 && l <= j; ++l)
+        xin[r][3 - l] = input(tok - l);
+      if (j < 3)
+        for (int l = j + 1; l <= 3; ++l)
+          xin[r][3 - l] = st[3 - l + j];
+      a.cap[(size_t)tok * 6656 + a.conv_off + c] = xc;
     }
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      wv[r][i] = a.w[(size_t)c * 4 + i];
+    cv[r] = a.cur[to + c];
   }
 #pragma unroll
   for (int r = 0; r < R; ++r) {
-    const int c = threadIdx.x + r * 512;
-    if (c < 2304) {
-      float* st = sl->conv + (size_t)a.conv_off * 3 + (size_t)c * 3;
-      float y = 0.f;
+    const int c = threadIdx.x + r * 576;
+    float* st = sl->conv + (size_t)a.conv_off * 3 + (size_t)c * 3;
+    float y = 0.f;
 #pragma unroll
-      for (int i = 0; i < 4; ++i)
-        y += wv[r][i] * xin[r][i];
-      if (!a.cap) {
-        st[0] = xin[r][1];
-        st[1] = xin[r][2];
-        st[2] = xin[r][3];
-      }
-      const float o = (xin[r][3] + y) * a.scale;
-      if (a.blk) {
-        a.blk[to + c] = cv[r];
-        a.cur[to + c] = o;
-      } else {
-        a.cur[to + c] = cv[r] + o;
-      }
+    for (int i = 0; i < 4; ++i)
+      y += wv[r][i] * xin[r][i];
+    if (!a.cap) {
+      st[0] = xin[r][1];
+      st[1] = xin[r][2];
+      st[2] = xin[r][3];
+    }
+    const float o = (xin[r][3] + y) * a.scale;
+    if (a.blk) {
+      a.blk[to + c] = cv[r];
+      a.cur[to + c] = o;
+    } else {
+      a.cur[to + c] = cv[r] + o;
     }
   }
 }
@@ -1702,11 +1698,11 @@ __global__ void __launch_bounds__(256) k_conv_resid(ConvResidArgs a) {
     conv_resid_elem(a, c, blockIdx.z);
 }
 
-// Attention-residual mix, one block (16 waves) per query row. Optional
-// prologue: the previous op's post-conv + residual (single-row jobs); optional
-// epilogue: RMS norm with weights.
-__global__ void __launch_bounds__(512) k_mix(MixJob j, float eps) {
-  __shared__ float sc[8], coef[8], red[16];
+// Attention-residual mix, one block (18 waves = 576 threads = 2304/4) per query
+// row. Optional prologue: the previous op's post-conv + residual (single-row
+// jobs); optional epilogue: RMS norm with weights.
+__global__ void __launch_bounds__(576) k_mix(MixJob j, float eps) {
+  __shared__ float sc[8], coef[8], red[18];
   const int q = blockIdx.x, tok = blockIdx.y, wave = threadIdx.x / 32,
             lane = threadIdx.x % 32;
   const size_t toff = (size_t)tok * 2304;
@@ -1747,63 +1743,48 @@ __global__ void __launch_bounds__(512) k_mix(MixJob j, float eps) {
       sc[i] = sc[i] / z * coef[i];
   }
   __syncthreads();
-  float4 a[2];
-  float ssq = 0.f;
-#pragma unroll
-  for (int r = 0; r < 2; ++r) {
-    const int i = threadIdx.x + r * 512;
-    a[r] = make_float4(0.f, 0.f, 0.f, 0.f);
-    if (i < 576) {
-      for (int k = 0; k < j.n; ++k) {
-        const float4 x = ((const float4*)(j.st[k] + toff))[i];
-        a[r].x += sc[k] * x.x;
-        a[r].y += sc[k] * x.y;
-        a[r].z += sc[k] * x.z;
-        a[r].w += sc[k] * x.w;
-      }
-      ssq +=
-          a[r].x * a[r].x + a[r].y * a[r].y + a[r].z * a[r].z + a[r].w * a[r].w;
-    }
+  const int i = threadIdx.x;
+  float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
+  for (int k = 0; k < j.n; ++k) {
+    const float4 x = ((const float4*)(j.st[k] + toff))[i];
+    a.x += sc[k] * x.x;
+    a.y += sc[k] * x.y;
+    a.z += sc[k] * x.z;
+    a.w += sc[k] * x.w;
   }
   float scale = 1.0f;
   const float* nw = q < 4 ? j.nw[q] : nullptr;  // up to 4 normed queries
   if (nw) {
-    ssq = wsum(ssq);
+    float ssq = wsum(a.x * a.x + a.y * a.y + a.z * a.z + a.w * a.w);
     if (lane == 0)
       red[wave] = ssq;
     __syncthreads();
     float t = 0.f;
-    for (int k = 0; k < 16; ++k)
+    for (int k = 0; k < 18; ++k)
       t += red[k];
     scale = rsqrtf(t * (1.0f / 2304.0f) + eps);
   }
-#pragma unroll
-  for (int r = 0; r < 2; ++r) {
-    const int i = threadIdx.x + r * 512;
-    if (i < 576) {
-      float4 o = a[r];
-      if (nw) {
-        const float4 w = ((const float4*)nw)[i];
-        o.x *= scale * w.x;
-        o.y *= scale * w.y;
-        o.z *= scale * w.z;
-        o.w *= scale * w.w;
-      }
-      float* ob = q < 4 && j.outq[q]
-                      ? j.outq[q] + toff
-                      : j.out +
-                            (j.ostride ? (size_t)tok * j.ostride
-                                       : (size_t)tok * j.nq * 2304) +
-                            (size_t)q * 2304;
-      ((float4*)ob)[i] = o;
-      if (q < 4 && j.outh[q]) {
-        _Float16* hb = static_cast<_Float16*>(j.outh[q]) + toff + 4 * i;
-        hb[0] = (_Float16)o.x;
-        hb[1] = (_Float16)o.y;
-        hb[2] = (_Float16)o.z;
-        hb[3] = (_Float16)o.w;
-      }
-    }
+  float4 o = a;
+  if (nw) {
+    const float4 w = ((const float4*)nw)[i];
+    o.x *= scale * w.x;
+    o.y *= scale * w.y;
+    o.z *= scale * w.z;
+    o.w *= scale * w.w;
+  }
+  float* ob = q < 4 && j.outq[q]
+                  ? j.outq[q] + toff
+                  : j.out +
+                        (j.ostride ? (size_t)tok * j.ostride
+                                   : (size_t)tok * j.nq * 2304) +
+                        (size_t)q * 2304;
+  ((float4*)ob)[i] = o;
+  if (q < 4 && j.outh[q]) {
+    _Float16* hb = static_cast<_Float16*>(j.outh[q]) + toff + 4 * i;
+    hb[0] = (_Float16)o.x;
+    hb[1] = (_Float16)o.y;
+    hb[2] = (_Float16)o.z;
+    hb[3] = (_Float16)o.w;
   }
 }
 
@@ -1897,8 +1878,9 @@ __device__ __forceinline__ void ctl_apply_elem(const CtlJobs& j, int i, int s,
   float ga = 0.f, fo = 0.f;
 #pragma unroll
   for (int k = 0; k < 16; ++k) {
-    const float4 gv = g[k], a = ld4w(j.gain[s], (size_t)i * 16 + k, H),
-                 b = ld4w(j.forget[s], (size_t)i * 16 + k, H);
+    const size_t woff = H ? ((size_t)k * 2304 + i) : ((size_t)i * 16 + k);
+    const float4 gv = g[k], a = ld4w(j.gain[s], woff, H),
+                 b = ld4w(j.forget[s], woff, H);
     ga += a.x * gv.x + a.y * gv.y + a.z * gv.z + a.w * gv.w;
     fo += b.x * gv.x + b.y * gv.y + b.z * gv.z + b.w * gv.w;
   }
@@ -4935,7 +4917,7 @@ void TouchN(hipStream_t s, const TouchList& l, int blocks) {
 }
 
 void Mix(hipStream_t s, const MixJob& j, float eps) {
-  k_mix<<<dim3(j.nq, j.ntok), 512, 0, s>>>(j, eps);
+  k_mix<<<dim3(j.nq, j.ntok), 576, 0, s>>>(j, eps);
   Chk("mix");
 }
 void Rms(hipStream_t s, const NormJobs& j, float eps, int nb) {

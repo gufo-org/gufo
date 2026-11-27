@@ -28,6 +28,7 @@ changes are in Git history; current speeds are in [benchmarks](BENCHMARKS.md).
 | MoE gate/up waves of 64 tokens × 64 rows, or 64 tokens × 32 rows (Nov 26) | 64 × 64 fills all 256 VGPRs (full items 32.8 TFLOPS against 35.6); 64 × 32 doubles the activation loads (29.2) |
 | MoE gate/up with 32-k LDS slabs (10 KiB per block), another LDS row stride, activations loaded per 16 k, or the `iterative-ilp`, `max-ilp` and `iterative-minreg` schedulers (Nov 26) | 3 to 9% slower or equal; a 64-element row stride (no padding) is 2.4 times slower |
 | Expert items of at most 16 tokens in a kernel of their own, with or without LDS (Nov 26) | equal to 27% slower: an item's cost is its 18 LDS loads of the expert's weights, whatever its tokens |
+| Use 128-query `attn_prefill_db<8, 32>` on global visits from `pos0 == 0` when `n >= 1024` (Nov 27) | Rejected: neutral within noise (2048: 2318 vs 2319 tok/s, 16K: 2254 vs 2259 tok/s) |
 
 ## Decode and verification
 
@@ -44,6 +45,14 @@ changes are in Git history; current speeds are in [benchmarks](BENCHMARKS.md).
 | Dense int8 WMMA from 8 rows for one-input projections or the output projection | within noise |
 | Verification attention with the split reduction in its last block | +0.3 ms per step |
 | Controller gates of 2 to 8 tokens per block | verification +0.1 to +0.3 ms |
+| Eliminate `% cap` integer modulo on global visits and add far-tile fast path in `attn_decode_body`, `attn_decode_rows`, and `attn_prefill_db` (Nov 27) | Rejected: neutral within noise (±0.2% across 2K–32K prefill and decode); integer modulo is hidden behind DRAM/WMMA latency |
+| Stream K loads inside the WMMA loop and issue V loads after WMMA in `attn_decode_body` and `attn_decode_rows` to reduce VGPR pressure (Nov 27) | Rejected: neutral within noise (38.87 vs 38.91 tok/s at 32K); decode attention is DRAM-bandwidth bound, not occupancy bound |
+| Skip `attn_output` + router MALL prefetch during global attention when `bucket_ctx >= 8192` (Nov 27) | **Accepted**: decode at 32K 38.91 → 39.36 tok/s (+1.2%, −0.30 ms/tok), 16K 43.16 → 43.33 tok/s; avoids competing with KV reads and evicting prefetched weights from MALL |
+| Non-temporal (`__builtin_nontemporal_load`) K/V loads on global visits in `attn_decode_body` and `attn_decode_rows` (Nov 27) | Rejected: decode −0.6% to −1.0% across 64–32K (39.36 → 38.96 tok/s at 32K); both half-waves read the same K rows and rely on L1/L2 caching |
+| Halve global decode attention split chunk (`bucket_ctx / 64`, 64 splits at 32K) (Nov 27) | Rejected: decode at 32K 39.36 → 39.26 tok/s (−0.25%); extra split writeback and `decode_reduce` work outweigh finer load balance |
+| Shrink `k_mix` from 512 to 256 threads (8 waves, `R=9` in `conv_resid_block`) (Nov 27) | Rejected: decode at 64/2K regressed −0.76 ms/tok (50.95 → 49.05 tok/s at 64); fewer threads serialized `conv_resid_block` and the weighted sum |
+| Size `k_mix` to 576 threads (18 waves = 2304/4 exact: `R=4` in `conv_resid_block`, `R=1` in mix, branchless) (Nov 27) | **Accepted**: decode improved across all depths (64: 50.95 → 51.04, 2K: 48.17 → 48.24, 16K: 43.33 → 43.53, 32K: 39.36 → 39.49 tok/s; −0.08 to −0.11 ms/tok) |
+| Read k-interleaved `HW4` (`[16][2304][4]` BF16) controller `gain`/`forget` weights in `k_ctl_apply_rms` and prefetch `HW4` (Nov 27) | **Accepted**: coalesced loads across waves with exact arithmetic; decode 2K 48.24 → 48.35, 16K 43.53 → 43.55, 32K 39.49 → 39.55 tok/s (total +1.65% / −0.41 ms/tok at 32K vs baseline) |
 
 ## DSpark
 
