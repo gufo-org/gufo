@@ -102,6 +102,12 @@ public:
   bool call_required{false};
   std::vector<std::vector<g::TextRunnerToken>> call_names;
   std::vector<g::TextRunnerToken> call_prefix;
+  /// The request may call a tool and no response format constrains the
+  /// answer: a word after a header that is not a declared name may still head
+  /// a call (the model sometimes writes one of its own action verbs there,
+  /// "read" before {"name":"edit"}), so it is held back until the block shows
+  /// whether it is a call or text (see ContinuesName()).
+  bool header_names{false};
   /// The request's images (set by SetPromptContext; null for a text-only
   /// prompt).
   std::shared_ptr<const Inkling2PromptContext> prompt;
@@ -276,6 +282,8 @@ struct ImageEntry {
 struct Inkling2PromptContext final : g::TextPromptContext {
   bool call_required{false};
   std::vector<std::vector<g::TextRunnerToken>> call_names;
+  /// Any word after a header may name a call (see Inkling2State).
+  bool header_names{false};
   std::vector<std::unique_ptr<ImageEntry>> images;
   /// The prompt's tokens, for copy drafts (a request whose whole prompt is
   /// restored from the cache never prefills).
@@ -424,13 +432,45 @@ public:
   // A grammar sees each token's own bytes, so it never allows <|content_text|>:
   // under a response format the model writes its answer right after the header
   // (unless a thought came first). An ordinary token after a header is
-  // therefore a function name only when it starts a declared one; otherwise it
-  // opens a text block.
-  [[nodiscard]] bool StartsName(const Inkling2State& st,
-                                g::TextRunnerToken token) const {
-    return std::any_of(
-        st.call_names.begin(), st.call_names.end(),
-        [&](const auto& name) { return !name.empty() && name[0] == token; });
+  // therefore a function name only when it continues a declared one, or, with
+  // `header_names`, while it is a word a name could be (ContinuesName());
+  // otherwise it opens a text block. A held word that turns out to be text is
+  // streamed with the token that shows it. A call written after a text block's
+  // words (the invoke token) still ends that block as a call.
+  /// Function names are short identifiers (OpenAI allows [A-Za-z0-9_-], 64
+  /// bytes; MCP clients add '.' and ':').
+  static constexpr std::size_t kMaxHeaderName = 64;
+  static bool IsNameByte(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
+           c == ':';
+  }
+  /// Whether `token`, after the name tokens written since the header
+  /// (`call_prefix`), still reads as a function name: it continues a declared
+  /// one, or (`header_names`) it is a word of name characters short enough.
+  [[nodiscard]] bool ContinuesName(const Inkling2State& st,
+                                   g::TextRunnerToken token) const {
+    const auto& prefix = st.call_prefix;
+    for (const auto& name : st.call_names)
+      if (name.size() > prefix.size() &&
+          std::equal(prefix.begin(), prefix.end(), name.begin()) &&
+          name[prefix.size()] == token)
+        return true;
+    if (!st.header_names)
+      return false;
+    const std::string_view bytes = tok_->TokenBytes(token);
+    if (bytes.empty() || !std::all_of(bytes.begin(), bytes.end(), IsNameByte))
+      return false;
+    return HeldName(st).size() + bytes.size() <= kMaxHeaderName;
+  }
+  /// The name tokens held back since the header, as text (a block opener
+  /// among them is not text).
+  [[nodiscard]] std::string HeldName(const Inkling2State& st) const {
+    std::string out;
+    for (const auto t : st.call_prefix)
+      if (t != t_text_ && t != t_thinking_)
+        out += tok_->TokenBytes(t);
+    return out;
   }
   [[nodiscard]] std::string Piece(const Inkling2State& st,
                                   g::TextRunnerToken token) const {
@@ -448,12 +488,20 @@ public:
         // function name is written again inside the JSON.
         if (token == t_invoke_)
           return std::string(tok_->TokenBytes(token));
-        if (token == t_end_message_ || StartsName(st, token))
+        if (token == t_end_message_ || ContinuesName(st, token))
           return {};  // an empty block, or a name
         break;
       case Block::kTool:
-        return token == t_invoke_ ? std::string(tok_->TokenBytes(token))
-                                  : std::string{};
+        if (token == t_invoke_)
+          return std::string(tok_->TokenBytes(token));
+        if (token == t_text_ || token == t_thinking_ ||
+            ContinuesName(st, token))
+          return {};
+        // Not a name after all: the held words are text. A block that ends
+        // here was the answer (a response written right after the header).
+        return token == t_end_message_
+                   ? HeldName(st)
+                   : HeldName(st) + std::string(tok_->TokenBytes(token));
       case Block::kText:
         if (token == t_end_message_)
           return {};
@@ -477,9 +525,20 @@ public:
           return Block::kToolBody;
         if (token == t_end_message_)
           return Block::kIdle;
-        return StartsName(st, token) ? Block::kTool : Block::kText;
+        return ContinuesName(st, token) ? Block::kTool : Block::kText;
       case Block::kTool:
         if (token == t_invoke_)
+          return Block::kToolBody;
+        if (token == t_end_message_)
+          return Block::kIdle;
+        if (token == t_text_ || token == t_thinking_ ||
+            ContinuesName(st, token))
+          return st.block;
+        return Block::kText;
+      case Block::kText:
+        // The invoke token ends the block's words as a call's header
+        // (streamed as content), and the call itself follows.
+        if (token == t_invoke_ && !st.call_names.empty())
           return Block::kToolBody;
         return token == t_end_message_ ? Block::kIdle : st.block;
       default:
@@ -623,6 +682,7 @@ public:
         tok_->EncodeOrdinary(tool.name, &ids);
         context->call_names.emplace_back(ids.begin(), ids.end());
       }
+      context->header_names = request.response_format == nullptr;
     }
     if (!images.empty()) {
       // The placeholders of image k are the next images[k]->count entries of
@@ -688,6 +748,7 @@ public:
     st.thought_closed = false;
     st.call_required = c != nullptr && c->call_required;
     st.call_names = c != nullptr ? c->call_names : decltype(st.call_names){};
+    st.header_names = c != nullptr && c->header_names;
     st.call_prefix.clear();
     st.pending.reset();
     st.backoff = {};
