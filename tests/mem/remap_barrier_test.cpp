@@ -5,6 +5,7 @@
 // memory is the part of mem_region_test and mem_remap_barrier_device_test.
 #include "src/mem/remap_barrier.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -64,20 +65,22 @@ std::atomic<int> drains_at_flush{0};
 // Attempts that fail before one works; negative: all fail.
 std::atomic<int> flush_failures{0};
 
-// The barrier flushes the device's translations once per call, after the
-// idle time. A flush that keeps failing fails the call: nothing it covers
-// is clean or answered until a later call flushes.
+bool CountingFlush() noexcept {
+  drains_at_flush.store(drains.load());
+  ++flushes;
+  const int failures = flush_failures.load();
+  if (failures == 0)
+    return true;
+  if (failures > 0)
+    flush_failures.store(failures - 1);
+  return false;
+}
+
+// The barrier flushes the device's translations once per call, after its
+// drains, and then keeps no idle time. A flush that keeps failing fails the
+// call: nothing it covers is clean or answered until a later call flushes.
 void Flush() {
-  RemapBarrier::SetTranslationFlush(+[]() noexcept {
-    drains_at_flush.store(drains.load());
-    ++flushes;
-    const int failures = flush_failures.load();
-    if (failures == 0)
-      return true;
-    if (failures > 0)
-      flush_failures.store(failures - 1);
-    return false;
-  });
+  RemapBarrier::SetTranslationFlush(&CountingFlush);
   const int drained = drains.load();
   const auto before = RemapBarrier::Stats();
   assert(RemapBarrier::Settle());
@@ -101,12 +104,26 @@ void Flush() {
   flush_failures.store(0);
   assert(RemapBarrier::Settle());
   assert(RemapBarrier::Clean(stamp) && !RemapBarrier::Pending());
+  // With a flush the barrier keeps no idle time. The fastest of many
+  // calls, so a preempted one does not count.
+  auto fastest = Clock::duration::max();
+  for (int i = 0; i < 50; ++i) {
+    const auto start = Clock::now();
+    assert(RemapBarrier::Settle());
+    fastest = std::min(fastest, Clock::now() - start);
+  }
+  assert(fastest < std::chrono::microseconds(RemapBarrier::kIdleMicros));
   // Without a flush the barrier relies on the idle time alone.
   RemapBarrier::SetTranslationFlush(nullptr);
   const int flushed = flushes.load();
+  const auto start = Clock::now();
   assert(RemapBarrier::Settle());
+  assert(Clock::now() - start >=
+         std::chrono::microseconds(RemapBarrier::kIdleMicros));
   assert(flushes.load() == flushed);
   assert(RemapBarrier::Stats().unflushed == before.unflushed + 1);
+  // The checks below run as the HIP backend does: with a flush.
+  RemapBarrier::SetTranslationFlush(&CountingFlush);
 }
 
 // Device work another thread brackets never starts inside a barrier, and a

@@ -1,0 +1,9 @@
+== settle 1000, base and new alternating, GPU otherwise idle
+base1 n=1000 p50=601.5 p99=633.3 mean=597.4 stats=596.8 unquiet=0 unflushed=0
+new1 n=1000 p50=165.9 p99=240.0 mean=158.3 stats=157.7 unquiet=0 unflushed=0
+base2 n=1000 p50=601.4 p99=633.1 mean=598.0 stats=597.4 unquiet=0 unflushed=0
+new2 n=1000 p50=166.2 p99=186.1 mean=157.6 stats=157.1 unquiet=0 unflushed=0
+base3 n=1000 p50=590.3 p99=638.5 mean=594.0 stats=593.4 unquiet=0 unflushed=0
+new3 n=1000 p50=166.6 p99=189.3 mean=161.3 stats=160.7 unquiet=0 unflushed=0
+base4 n=1000 p50=601.7 p99=627.3 mean=597.7 stats=597.0 unquiet=0 unflushed=0
+new4 n=1000 p50=151.2 p99=176.4 mean=151.7 stats=151.1 unquiet=0 unflushed=0

@@ -168,7 +168,7 @@ public:
       (void)hipGetLastError();
       handles_[p] = {};
       state_[p] = State::kAbsent;
-      // The device may still reach the old page here until it has been idle.
+      // The device may still reach the old page here until a barrier runs.
       unmapped_at_[p] = RemapBarrier::Stamp();
       ledger.RemoveLendable(kPageBytes);
       result.released.push_back(p);

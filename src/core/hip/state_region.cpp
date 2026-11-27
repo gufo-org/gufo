@@ -38,7 +38,7 @@ void SetError(std::string* error, const char* message) {
 // RemapBarrier::Stamp() of the last region that gave its address range
 // back. The driver may hand the same range to the next region, whose pages
 // would then be mapped where others were unmapped: a region created before
-// the device has been idle since runs the barrier first.
+// a barrier has run since runs the barrier first.
 std::atomic<std::uint64_t> freed_at{0};
 
 // Demand-mapped regions by base address, for Region::Find().
@@ -226,7 +226,7 @@ void Region::UnmapRun(std::size_t first, std::size_t end, bool held) {
   // One call for the run: each call waits for in-flight GPU work.
   (void)hipMemUnmap(base_ + first * kPageBytes, (end - first) * kPageBytes);
   // The device may go on reaching the old pages through these addresses
-  // until it has been idle (RemapBarrier).
+  // until a barrier flushed its translations (RemapBarrier).
   const auto stamp = RemapBarrier::Stamp();
   for (std::size_t p = first; p < end; ++p) {
     unmapped_at_[p] = stamp;
@@ -617,8 +617,8 @@ bool Region::MapPages(std::size_t rows, std::string* error, bool ahead) {
     for (std::size_t p = first; p < end; ++p) {
       if (mapped_[p])
         continue;
-      // An address that lost a page since the device was last idle reaches
-      // its new page only after the barrier. The writer runs it below; the
+      // An address that lost a page since the last barrier began reaches
+      // its new page only after the next one. The writer runs it below; the
       // pool's thread, beside running work, stops here and leaves the rest
       // to the writer.
       const bool dirty = !RemapBarrier::Clean(unmapped_at_[p]);

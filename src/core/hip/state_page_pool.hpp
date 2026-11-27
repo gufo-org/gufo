@@ -153,10 +153,10 @@ public:
   std::size_t ReleaseFree(std::size_t bytes);
 
   // Remaps and what must follow them. Memory mapped at an address that
-  // just lost a mapping is not reachable there until the device has been
-  // idle (RemapBarrier): a page that replaces another is filled or cleared
-  // only after the barrier. Regions queue that work here; SettleRemaps()
-  // runs the barrier once for everything queued, then the work.
+  // just lost a mapping is not reachable there until a barrier flushed the
+  // translations (RemapBarrier): a page that replaces another is filled or
+  // cleared only after the barrier. Regions queue that work here;
+  // SettleRemaps() runs the barrier once for everything queued, then the work.
 
   /// Maps `handle` a second time, at a scratch address, as the source of a
   /// copy queued with QueueCopy(), or given back with ReturnAlias(). Null

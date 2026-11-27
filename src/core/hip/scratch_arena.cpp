@@ -163,9 +163,9 @@ bool ScratchArena::MapTransient(std::string* error) {
   }
   transient_mapped_ = true;
   // The addresses had other pages until the last pass released them, and
-  // the device goes on reaching those, which the driver has freed, until it
-  // has been idle (RemapBarrier): wait for that before the pass uses the
-  // rows. About 0.5 ms, once per wide pass.
+  // the device goes on reaching those, which the driver has freed, until
+  // its translations are flushed (RemapBarrier): settle before the pass uses
+  // the rows. About 0.16 ms, once per wide pass.
   if (!transient_runs_.empty() && !RemapBarrier::Clean(released_at_) &&
       !RemapBarrier::Settle()) {
     SetError(error, "scratch pages not settled: the remap barrier failed");
@@ -176,10 +176,12 @@ bool ScratchArena::MapTransient(std::string* error) {
 }
 
 void ScratchArena::ReleaseTransient() noexcept {
-  if (!transient_runs_.empty())
-    released_at_ = RemapBarrier::Stamp();
   for (const Run& run : transient_runs_)
     UnmapRun(run);
+  // After the unmaps: a barrier that began before them may have flushed
+  // before the page tables changed.
+  if (!transient_runs_.empty())
+    released_at_ = RemapBarrier::Stamp();
   transient_runs_.clear();
   transient_mapped_ = false;
 }

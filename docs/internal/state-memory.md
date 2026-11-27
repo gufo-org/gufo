@@ -270,13 +270,14 @@ translations, quiet or beside a busy process. An address that never had a
 mapping can be mapped and used at once. The measurements are in
 [Another process keeps the GPU busy](state-memory-shared-pages.md#another-process-keeps-the-gpu-busy).
 
-So an address that loses a mapping is **dirty** until the device has been
-idle and its translations are flushed, and memory mapped at a dirty address
-needs the **remap barrier** (`mem::RemapBarrier::Settle`,
-`src/mem/remap_barrier.hpp`) before the device uses it: wait for the device's
-work, keep the device idle for 400 us, then flush the translations
+So an address that loses a mapping is **dirty** until its translations are
+flushed, and memory mapped at a dirty address needs the **remap barrier**
+(`mem::RemapBarrier::Settle`, `src/mem/remap_barrier.hpp`) before the device
+uses it: wait for the device's work, then flush the translations
 (`mem::FlushTranslations`, `src/core/hip/remap_barrier_device.hpp`: it frees
-the 4 MiB block it allocated last time and allocates the next). Every
+the 4 MiB block it allocated last time and allocates the next). The flush
+needs no idle time before it, so the barrier keeps none; without a flush
+installed (the CPU tests) it keeps the device idle for 400 us instead. Every
 address unmapped before the barrier began is clean afterwards.
 
 When the flush fails three times, 1 ms apart, the barrier fails: nothing it
@@ -296,9 +297,11 @@ too and leaves nothing the device could use:
 The model's write or restore then fails its request, and the scheduler drops
 that session's state.
 
-- Regions, the park and the cache's lendable range stamp each address when
-  it loses a mapping (`RemapBarrier::Stamp`) and ask `RemapBarrier::Clean`
-  before mapping there again. A clean address costs nothing.
+- Regions, the park and the cache's lendable range stamp each address once
+  its unmap has returned (`RemapBarrier::Stamp`; a barrier that began before
+  may have flushed before the page tables changed) and ask
+  `RemapBarrier::Clean` before mapping there again. A clean address costs
+  nothing.
 - `Region::Ensure` runs the barrier itself when it maps a dirty address (a
   session that was trimmed and grows again). The page pool's thread never
   maps a dirty address: it leaves it to the writer.
@@ -309,25 +312,27 @@ that session's state.
   readable as soon as it is parked.
 - Pass scratch (`ScratchArena::MapTransient`) and a region created where
   another gave its address range back run the barrier themselves. Releasing
-  the old page does not help: without the idle moment, 50 of 50 writes
+  the old page does not help: without the barrier, 50 of 50 writes
   through the address reached the page the driver had already freed.
 - Threads that submit device work on their own (transfer streams, the copy
   engine, the page pool's clears) bracket it with `RemapBarrier::Enter` and
   `Leave`. A barrier waits for open brackets and holds new ones back, for at
   most 25 ms. Device work it cannot see (another model's thread in the same
-  process) is detected only while it runs; `event=remap_barrier` at shutdown
-  counts the barriers that gave up as `unquiet`, and those that failed on
-  their flush as `unflushed`.
+  process) is detected only while it still runs at the barrier's second wait
+  for the device; `event=remap_barrier` at shutdown counts the barriers that
+  gave up as `unquiet`, and those that failed on their flush as `unflushed`.
 - The hold starts before the unmaps (`RemapBarrier::Hold`): an unmap waits
   for device work in flight, and a disk write's copies beside a request that
   replaced one page per buffer stalled that request for 290 ms.
 
-A barrier costs about 0.4 ms with every decoder paused, plus about 0.2 ms
-for the flush. One runs per restore
-that maps or drops pages, per write that replaces shared pages (the first
-pass of a request that takes over a session, then once per page the session
-crosses), per wide prefill pass and per `Ensure` over dirty addresses. The
-rotation run of the evidence page ran 29 in 12 requests, 11.7 ms in all.
+As of November 2026, a barrier takes about 0.16 ms on gfx1151 with every
+decoder paused, most of it the flush
+([measured](state-memory-shared-pages.md#another-process-keeps-the-gpu-busy)).
+One runs per restore that maps or drops pages, per write that replaces shared
+pages (the first pass of a request that takes over a session, then once per
+page the session crosses), per wide prefill pass and per `Ensure` over dirty
+addresses. The rotation run of the evidence page, with the idle time alone,
+ran 29 in 12 requests, 11.7 ms in all.
 
 > **Warning:** check a remapped address with a kernel. A `hipMemcpy` read
 > can disagree with what kernels see through the same address.

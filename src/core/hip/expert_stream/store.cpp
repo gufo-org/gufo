@@ -177,8 +177,9 @@ MapResult MapClassPages(int device, ClassRange& range, uint64_t bytes,
     UnmapPages(at, pages.data(), pages.size());
     return MapResult::kRefused;
   }
-  // Until the device has been idle it reaches the pages these addresses
-  // had before (RemapBarrier): wait for that before any table points here.
+  // The device reaches the pages these addresses had before until a barrier
+  // flushed its translations (RemapBarrier): settle before any table points
+  // here.
   if (range.mapped < range.high_water &&
       !mem::RemapBarrier::Clean(range.released_at) &&
       !mem::RemapBarrier::Settle()) {
@@ -948,8 +949,10 @@ struct Store::Impl {
       (void)hipGetLastError();
     } else {
       ClassRange& range = ranges[chunk.size_class];
-      range.released_at = mem::RemapBarrier::Stamp();
       UnmapPages(chunk.base, chunk.pages.data(), chunk.pages.size());
+      // After the unmap: a barrier that began before it may have flushed
+      // before the page tables changed.
+      range.released_at = mem::RemapBarrier::Stamp();
       range.mapped = static_cast<uint64_t>(chunk.base - range.base);
       range.used = chunk.class_used;
     }

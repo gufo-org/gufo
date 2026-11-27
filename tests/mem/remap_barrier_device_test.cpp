@@ -1,11 +1,12 @@
 // GPU check of the remap barrier with the HIP backend
-// (src/core/hip/remap_barrier_device.*): addresses remapped while another
-// process keeps the GPU busy reach their new pages once
-// RemapBarrier::Settle() returns. Before Linux 7.4 the driver flushes no
-// translations after an unmap, and beside a busy process the idle time
-// alone left most addresses on their old pages; the translation flush must
-// settle every one, for kernels, runtime copies and the copy engine. The
-// busy process is this binary run with --busy.
+// (src/core/hip/remap_barrier_device.*): remapped addresses reach their new
+// pages once RemapBarrier::Settle() returns, on an otherwise idle GPU and
+// while another process keeps it busy. Before Linux 7.4 the driver flushes
+// no translations after an unmap, and beside a busy process the idle time
+// alone left most addresses on their old pages; the translation flush,
+// which the barrier runs without idle time, must settle every one, for
+// kernels, runtime copies and the copy engine. The busy process is this
+// binary run with --busy.
 #include "src/core/hip/remap_barrier_device.hpp"
 
 #include <hip/hip_runtime.h>
@@ -265,6 +266,9 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "the first mapping reads wrong\n");
     return 1;
   }
+  const auto before = RemapBarrier::Stats();
+  // The flush alone, with no idle time before it.
+  const Old quiet = pages.Remaps(kBatches, set);
   const pid_t busy = StartBusy("/proc/self/exe");
   // Without the flush the idle time decides; on a driver with the gap most
   // batches stay old beside the busy process. Reported, not checked: a
@@ -272,11 +276,10 @@ int main(int argc, char** argv) {
   RemapBarrier::SetTranslationFlush(nullptr);
   const Old idle_only = pages.Remaps(kBatches, set);
   gufo::mem::InstallRemapBarrierDevice();
-  const auto before = RemapBarrier::Stats();
   const Old flushed = pages.Remaps(kBatches, set);
   const auto after = RemapBarrier::Stats();
-  // Without it both phases ran on an otherwise idle GPU. A child that ended
-  // is reaped here, and its PID is not signalled.
+  // Without it the idle-only and flushed phases ran on an otherwise idle
+  // GPU. A child that ended is reaped here, and its PID is not signalled.
   pid_t reaped = 0;
   while ((reaped = waitpid(busy, nullptr, WNOHANG)) == -1 && errno == EINTR) {
   }
@@ -290,13 +293,15 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::printf(
-      "mem_remap_barrier_device_test: beside a busy process, %d of %d "
-      "batches old after the idle time alone (copy engine: %d), %d of %d "
-      "with the flush (copy engine: %d)%s\n",
-      idle_only.batches, kBatches, idle_only.engine, flushed.batches, kBatches,
-      flushed.engine, pages.engine ? "" : "; no copy engine");
+      "mem_remap_barrier_device_test: GPU otherwise idle, %d of %d batches "
+      "old with the flush (copy engine: %d); beside a busy process, %d of %d "
+      "old after the idle time alone (copy engine: %d), %d of %d with the "
+      "flush (copy engine: %d)%s\n",
+      quiet.batches, kBatches, quiet.engine, idle_only.batches, kBatches,
+      idle_only.engine, flushed.batches, kBatches, flushed.engine,
+      pages.engine ? "" : "; no copy engine");
   assert(after.unflushed == before.unflushed);
-  assert(flushed.batches == 0);
+  assert(quiet.batches == 0 && flushed.batches == 0);
   std::puts("mem_remap_barrier_device_test: ok");
   return 0;
 }

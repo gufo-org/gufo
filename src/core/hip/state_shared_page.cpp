@@ -98,7 +98,7 @@ std::shared_ptr<ParkedPage> PagePark::Park(
     if (auto parked = parked_[it->second].lock())
       return parked;
   std::size_t slot = 0;
-  // The address unmapped longest ago, if the device has been idle since;
+  // The address unmapped longest ago, if a barrier has run since;
   // else a new one, while the range has any.
   const bool room =
       next_ != chunks_.size() * kChunkPages || chunks_.size() != kMaxChunks;
@@ -132,7 +132,7 @@ std::shared_ptr<ParkedPage> PagePark::Park(
   std::byte* const address = Address(slot);
   if (hipMemMap(address, kPageBytes, 0, page->handle(), 0) != hipSuccess) {
     (void)hipGetLastError();
-    // First in line again, once the device has been idle.
+    // First in line again, once a barrier has run.
     clean_.emplace_front(slot, RemapBarrier::Stamp());
     return nullptr;
   }
@@ -195,7 +195,6 @@ std::size_t PagePark::Sweep() {
   const std::size_t swept = stale_.size();
   // An unmap waits for device work in flight: hold other threads' back.
   RemapBarrier::Hold();
-  const auto stamp = RemapBarrier::Stamp();
   // One call per run of neighbours: every call waits for the device.
   for (std::size_t i = 0; i < stale_.size();) {
     std::size_t j = i + 1;
@@ -203,6 +202,9 @@ std::size_t PagePark::Sweep() {
            stale_[j] / kChunkPages == stale_[i] / kChunkPages)
       ++j;
     (void)hipMemUnmap(Address(stale_[i]), (j - i) * kPageBytes);
+    // After the unmap: a barrier that began before it may have flushed
+    // before the page tables changed.
+    const auto stamp = RemapBarrier::Stamp();
     for (; i < j; ++i) {
       slots_[stale_[i]] = Slot::kClean;
       clean_.emplace_back(stale_[i], stamp);
