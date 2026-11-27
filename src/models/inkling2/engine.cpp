@@ -369,7 +369,7 @@ struct Engine::Impl {
   static constexpr int kMmaHeadRows = kChunk;
   // verification steps from this many rows group the MoE pairs by expert
   // (consecutive rows of a session share most of their experts)
-  static constexpr int kGroupedVerifyRows = 6;
+  static constexpr int kGroupedVerifyRows = 4;
   static constexpr int kMsgInvTokens = 1024;
   // A visit of a longer ubatch also checks for cancellation between its
   // attention and expert halves: a pass then stops as soon as one of this
@@ -1783,7 +1783,7 @@ struct Engine::Impl {
     fs::Router(ds, HW(L.ffn_gate_inp), DS(L.exp_probs_b), d_h, d_rlog,
                d_counter, d_ids8, d_wts8, cfg->expert_weights_scale, nb,
                ctl_half);
-    // Many rows, a full chunk, or six or more consecutive rows of one session
+    // Many rows, a full chunk, or four or more consecutive rows of one session
     // (which share most experts): each used expert's weights read once for all
     // its pairs. Fewer rows, and other sessions' rows (which share fewer
     // experts), run per pair.

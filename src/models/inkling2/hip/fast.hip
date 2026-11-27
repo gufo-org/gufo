@@ -268,6 +268,31 @@ __device__ __forceinline__ void row_load(const uint8_t* row, int lir,
     }
   }
 }
+// row_load with the row at byte `roff` of the resource r (DLC reads).
+template<int FMT, int K, int LPR, bool TS = false>
+__device__ __forceinline__ void row_load_dl(__amdgpu_buffer_rsrc_t rs, int roff,
+                                            int lir, RowRegs<FMT, K, LPR>& r) {
+  using R = RowRegs<FMT, K, LPR>;
+  constexpr int BY = Fm<FMT>::BYTES, T = R::NU % LPR;
+#pragma unroll
+  for (int i = 0; i < R::NI; ++i) {
+    const int u = (TS && T > 0 && i == R::NI - 1)
+                      ? (R::NU / LPR) * LPR + lir % (T > 0 ? T : 1)
+                      : i * LPR + lir;
+    if (TS || (R::NU % LPR == 0) || u < R::NU) {
+      const int off = roff + u * BY;
+      if (FMT == FMT_Q8) {
+        r.h[i] = __builtin_amdgcn_raw_buffer_load_b16(rs, off, 0, kDlc);
+        r.q0[i] = wld16(rs, off + 2);
+        r.q1[i] = wld16(rs, off + 18);
+      } else {
+        r.h[i] = __builtin_amdgcn_raw_buffer_load_b32(rs, off, 0, kDlc);
+        r.q0[i] = wld16(rs, off + 4);
+        r.q1[i] = wld16(rs, off + 20);
+      }
+    }
+  }
+}
 // NVFP4 rows decoded once, for all the pairs that read them.
 template<int K, int LPR>
 struct RowDec {
@@ -1423,7 +1448,8 @@ __global__ void __launch_bounds__(BW* WS)
     const int j = (rbk * BW + wave) * RPP + pg;
     const int jj = j < FF ? j : FF - 1;
     RowRegs<FMT, K, LPR> wr;
-    row_load<FMT, K, LPR, true>(We + rb * (isup ? FF + jj : jj), lir, wr);
+    row_load_dl<FMT, K, LPR, true>(wrsrc(We), (int)(rb * (isup ? FF + jj : jj)),
+                                   lir, wr);
     [[maybe_unused]] RowDec<K, LPR> wd;
     if constexpr (FMT == FMT_NVFP4)
       row_decode<K, LPR, true>(wr, lir, wd);
@@ -1489,7 +1515,8 @@ __global__ void __launch_bounds__(BW* WS)
     const int row = (rbk * BW + wave) * RPW + g;
     const int rr = row < D ? row : D - 1;
     RowRegs<FMT, K, LPR> wr;
-    row_load<FMT, K, LPR, true>(W + ((size_t)e * D + rr) * rb, lir, wr);
+    row_load_dl<FMT, K, LPR, true>(wrsrc(W + (size_t)e * D * rb), (int)(rr * rb),
+                                   lir, wr);
     [[maybe_unused]] RowDec<K, LPR> wd;
     if constexpr (FMT == FMT_NVFP4)
       row_decode<K, LPR, true>(wr, lir, wd);
