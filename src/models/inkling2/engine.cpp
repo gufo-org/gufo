@@ -164,25 +164,29 @@ struct Engine::Impl {
   hipEvent_t ev_fork = nullptr, ev_join = nullptr, ev_bank = nullptr;
   // Cancellable passes: the last two visits' ends (see MaybeYield).
   hipEvent_t ev_visit[2] = {};
-  // Decode steps: a visit's q and output-projection weights are read on a
-  // side stream while the latency-bound mixes and attention run (the DRAM is
-  // mostly idle then), so their GEMVs find them in the last-level cache.
-  // Twenty blocks: more take CUs from the main chain. Only where
-  // Engine::Create measured it to pay: on Windows/TheRock 10.0 the side
-  // stream's cross-queue waits in the replayed graph cost more than the
+  // Decode steps: dense weights are read on a side stream while the
+  // latency-bound mixes, controllers, router and attention run (the DRAM is
+  // mostly idle then), so their GEMVs find them in the last-level cache: the
+  // next visit's q projection (and its loop controllers) beside the expert
+  // input and router, the gate projection beside the attention inputs, the
+  // output projection and the router beside the attention. The expert GEMVs
+  // between a prefetch and its use stream with DLC loads, which do not
+  // allocate in that cache. Eight blocks (four loads in flight per thread)
+  // reach the DRAM rate; more take CUs and bandwidth from the main chain.
+  // Only where Engine::Create measured it to pay: on Windows/TheRock 10.0 the
+  // side stream's cross-queue waits in the replayed graph cost more than the
   // prefetch saves (decode 39.4 tok/s with it, 46.0 without at C = 1).
-  static constexpr int kPrefetchBlocks = 20;
+  static constexpr int kPrefetchBlocks = 8;
   bool decode_prefetch = false;
   hipStream_t dps = nullptr;
   hipEvent_t ev_pf = nullptr, ev_pfj = nullptr;
   bool pf_open = false;
-  void Prefetch(const void* p, std::size_t bytes, const void* p2 = nullptr,
-                std::size_t bytes2 = 0) {
-    if (!decode_prefetch || bytes + bytes2 == 0)
+  void Prefetch(const fs::TouchList& l) {
+    if (!decode_prefetch || l.n == 0)
       return;
     Check(hipEventRecord(ev_pf, ds), "prefetch fork");
     Check(hipStreamWaitEvent(dps, ev_pf, 0), "prefetch fork");
-    fs::Touch(dps, p, bytes, kPrefetchBlocks, p2, bytes2);
+    fs::TouchN(dps, l, kPrefetchBlocks);
     pf_open = true;
   }
   void PrefetchJoin() {
@@ -319,7 +323,7 @@ struct Engine::Impl {
   // all rows of the verification are one session's (else several sessions'
   // rows, each run through the per-row attention kernel)
   bool verify_one_session = true;
-  float* d_vcap = nullptr;  // [48][6656][kVerifyRows] conv inputs of a step
+  float* d_vcap = nullptr;  // [48][kVerifyRows][6656] conv inputs of a step
   // device argmax and GPU linear sampler workspaces
   float* d_amax_ws = nullptr;
   int* d_amax = nullptr;
@@ -365,8 +369,10 @@ struct Engine::Impl {
   // one-input projections and the output matrix stay faster per row)
   static constexpr int kMmaHeadRows = kChunk;
   // verification steps from this many rows group the MoE pairs by expert
-  // (consecutive rows of a session share most of their experts)
-  static constexpr int kGroupedVerifyRows = 6;
+  // (consecutive rows of a session share most of their experts; several
+  // sessions' rows share fewer)
+  static constexpr int kGroupedVerifyRows = 4;
+  static constexpr int kGroupedBatchVerifyRows = 6;
   static constexpr int kMsgInvTokens = 1024;
   // A visit of a longer ubatch also checks for cancellation between its
   // attention and expert halves: a pass then stops as soon as one of this
@@ -386,13 +392,20 @@ struct Engine::Impl {
   int nb = 1;  // tokens of the decode step being built
   float* d_blk[16];
   int nblk_alloc = 0;
+  struct Visit {
+    int ip;    // physical layer
+    bool msg;  // a later pass's core visit (loop controllers on its inputs)
+  };
+  std::vector<Visit> d_visits;  // the decode step's visits (BuildDecode)
+  int d_visit = 0;              // index of the visit DLayer builds
   int* d_ids8;
   fs::MoeGroups d_groups{};  // wide steps: pairs grouped by expert
   void* d_qa = nullptr;      // wide steps: quantized GEMV inputs
   float* d_qs = nullptr;
   int* d_step;  // {token, position, row within its session}
   unsigned* d_counter;
-  unsigned* d_ccnt;  // fused controller apply + norm: [kMaxB][4]
+  unsigned* d_ccnt;     // fused controller apply + norm: [kMaxB][4]
+  unsigned* d_moe_cnt;  // fused expert gate/up + down: [2][kMaxB * 8]
   fs::SlotEntry* d_tbl;
   const float* d_states[16];
   int d_ns = 0;
@@ -823,6 +836,8 @@ struct Engine::Impl {
     Check(hipMemset(d_counter, 0, B * 4), "counter");
     d_ccnt = reinterpret_cast<unsigned*>(NewInts(B * 4));
     Check(hipMemset(d_ccnt, 0, B * 4 * 4), "controller counters");
+    d_moe_cnt = reinterpret_cast<unsigned*>(NewInts(2 * B * 8));
+    Check(hipMemset(d_moe_cnt, 0, 2 * B * 8 * 4), "expert counters");
     d_tbl = static_cast<fs::SlotEntry*>(
         AllocDevice(B * 48 * sizeof(fs::SlotEntry), "slot table"));
     scratch_allocs.push_back(d_tbl);
@@ -1429,8 +1444,15 @@ struct Engine::Impl {
     const fs::SlotEntry* slot = d_tbl + slot_idx;
     const int* pos = d_step + kMaxB;
 
-    if (F.proj)  // q, read while the inputs are mixed
-      Prefetch(D(L.attn_q), L.attn_q.size_bytes);
+    // The visit before this one read q (and the controllers) beside its
+    // expert input; the first one reads q now.
+    const int vi = d_visit++;
+    if (F.proj) {
+      fs::TouchList tl;
+      tl.Add(vi == 0 ? D(L.attn_q) : D(L.attn_gate),
+             vi == 0 ? L.attn_q.size_bytes : L.attn_gate.size_bytes);
+      Prefetch(tl);
+    }
     // A. attention inputs
     const float* inp[3] = {cur, cur, cur};
     const bool three = msg || !swa;  // separate q / k / v inputs
@@ -1593,11 +1615,14 @@ struct Engine::Impl {
       }
     }
 
-    if (F.oproj)  // the output projection and the router, read during the
-                  // attention
-      Prefetch(D(L.attn_output), L.attn_output.size_bytes,
-               ctl_half ? HW(L.ffn_gate_inp) : nullptr,
-               ctl_half ? L.ffn_gate_inp.size_bytes / 2 : 0);
+    if (F.oproj) {  // the output projection and the router, read during the
+                    // attention
+      fs::TouchList tl;
+      tl.Add(D(L.attn_output), L.attn_output.size_bytes);
+      if (ctl_half)
+        tl.Add(HW(L.ffn_gate_inp), L.ffn_gate_inp.size_bytes / 2);
+      Prefetch(tl);
+    }
     // C. conv + clip + KV write (in the attention launch for distinct
     // sessions' rows)
     fs::KvPrepArgs ka{};
@@ -1707,6 +1732,22 @@ struct Engine::Impl {
       pend.a = ca;
     }
 
+    // The next visit's q projection and attention-input controllers, read
+    // while this visit's expert input and router run.
+    if (vi + 1 < static_cast<int>(d_visits.size()) &&
+        lf[d_visits[vi + 1].ip].proj) {
+      const LayerWeights& N = w->layers[d_visits[vi + 1].ip];
+      fs::TouchList tl;
+      tl.Add(D(N.attn_q), N.attn_q.size_bytes);
+      if (ctl_half && d_visits[vi + 1].msg)
+        for (int j = 0; j < 3; ++j) {
+          const LoopController& c = N.loop[kStreamQ + j];
+          tl.Add(HW(c.down), c.down.size_bytes / 2);
+          tl.Add(HW(c.gain), c.gain.size_bytes / 2);
+          tl.Add(HW(c.forget), c.forget.size_bytes / 2);
+        }
+      Prefetch(tl);
+    }
     // F. MoE input
     if (!msg) {
       const float* nwp[1] = {DS(L.ffn_norm)};
@@ -1745,12 +1786,15 @@ struct Engine::Impl {
     fs::Router(ds, HW(L.ffn_gate_inp), DS(L.exp_probs_b), d_h, d_rlog,
                d_counter, d_ids8, d_wts8, cfg->expert_weights_scale, nb,
                ctl_half);
-    // Many rows, a full chunk, or six or more consecutive rows of one session
-    // (which share most experts): each used expert's weights read once for all
-    // its pairs. Fewer rows, and other sessions' rows (which share fewer
-    // experts), run per pair.
+    // Many rows, a full chunk, or four or more consecutive rows of one session
+    // (which share most experts; six of several sessions): each used expert's
+    // weights read once for all its pairs. Fewer rows, and other sessions'
+    // decode rows (which share fewer experts), run per pair.
     if (F.moe >= 0 &&
-        (nb >= kChunk || (verify_mode && nb >= kGroupedVerifyRows))) {
+        (nb >= kChunk ||
+         (verify_mode &&
+          nb >= (verify_one_session ? kGroupedVerifyRows
+                                    : kGroupedBatchVerifyRows)))) {
       const int slots = std::min(E, 8 * nb);
       fs::MoeRouteGroup(ds, d_ids8, 8 * nb, d_groups);
       fs::MoeQuantGrouped(ds, F.moe, d_h, nb, kEmbd, d_groups);
@@ -1762,6 +1806,15 @@ struct Engine::Impl {
       fs::MoeDownGrouped(ds, F.moe, D(L.ffn_down_exps),
                          L.ffn_down_scale ? DS(L.ffn_down_scale) : nullptr,
                          d_groups, slots, d_wts8, d_moe_part, kEmbd);
+    } else if (F.moe >= 0 &&
+               fs::MoeGuDown(
+                   ds, F.moe, D(L.ffn_gate_up_exps),
+                   L.ffn_gate_up_scale ? DS(L.ffn_gate_up_scale) : nullptr,
+                   D(L.ffn_down_exps),
+                   L.ffn_down_scale ? DS(L.ffn_down_scale) : nullptr, d_h,
+                   d_ids8, d_wts8, d_act8, d_moe_part, d_moe_cnt, nff, kEmbd,
+                   cfg->situ_beta, cfg->situ_linear_beta, nb)) {
+      // gate/up and down in one launch
     } else if (F.moe >= 0) {
       fs::MoeGu(ds, F.moe, D(L.ffn_gate_up_exps),
                 L.ffn_gate_up_scale ? DS(L.ffn_gate_up_scale) : nullptr, d_h,
@@ -1803,6 +1856,18 @@ struct Engine::Impl {
   void BuildDecode(int bucket_ctx) {
     float* cur = d_cur;
     pend.on = false;
+    // the visits in order (DLayer prefetches the next one's weights)
+    d_visits.clear();
+    d_visit = 0;
+    const int cs = static_cast<int>(cfg->core_start),
+              ce = static_cast<int>(cfg->core_end);
+    for (int ip = 0; ip < cs; ++ip)
+      d_visits.push_back({ip, false});
+    for (int pass = 0; pass < static_cast<int>(cfg->n_passes); ++pass)
+      for (int ip = cs; ip < ce; ++ip)
+        d_visits.push_back({ip, pass > 0});
+    for (int ip = ce; ip < static_cast<int>(cfg->n_phys); ++ip)
+      d_visits.push_back({ip, false});
     kk::EmbedRows(ds, static_cast<int>(w->token_embd.type), D(w->token_embd),
                   kEmbd, d_step, nb, cur, kEmbd);
     kk::RmsNorm(ds, cur, kEmbd, DS(w->token_embd_norm), cur, kEmbd, kEmbd, nb,

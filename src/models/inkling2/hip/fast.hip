@@ -201,6 +201,39 @@ __device__ __forceinline__ void nv_unit(const uint8_t* p, const v4u* aq,
   nv_unit_c<B, K, VS>(sw, q0, q1, aq, asc, u, vb, acc);
 }
 
+// Streamed weight reads that bypass last-level-cache (MALL) allocation: buffer
+// loads with DLC. They run at the same rate as plain loads, but do not evict
+// what the decode prefetch placed in the cache. The resource is wave-uniform
+// (an expert's or a matrix's base); offsets stay below 2^31.
+__device__ __forceinline__ __amdgpu_buffer_rsrc_t wrsrc(const void* base) {
+  return __builtin_amdgcn_make_buffer_rsrc(const_cast<void*>(base), (short)0,
+                                           0x7FFFFFFF, 0x31004000);
+}
+constexpr int kDlc = 4;  // cache policy: DLC (no MALL allocation)
+__device__ __forceinline__ v4u wld16(__amdgpu_buffer_rsrc_t r, int off) {
+  return __builtin_bit_cast(
+      v4u, __builtin_amdgcn_raw_buffer_load_b128(r, off, 0, kDlc));
+}
+template<int B, int K, int VS = 1>
+__device__ __forceinline__ void q8_unit_dl(__amdgpu_buffer_rsrc_t r, int off,
+                                           const v4u* aq, const float* asc,
+                                           int u, int vb, float (&acc)[B]) {
+  v4u w0 = wld16(r, off + 2);
+  v4u w1 = wld16(r, off + 18);
+  float d = __half2float(
+      __ushort_as_half(__builtin_amdgcn_raw_buffer_load_b16(r, off, 0, kDlc)));
+  q8_unit_c<B, K, VS>(w0, w1, d, aq, asc, u, vb, acc);
+}
+template<int B, int K, int VS = 1>
+__device__ __forceinline__ void nv_unit_dl(__amdgpu_buffer_rsrc_t r, int off,
+                                           const v4u* aq, const float* asc,
+                                           int u, int vb, float (&acc)[B]) {
+  uint32_t sw = __builtin_amdgcn_raw_buffer_load_b32(r, off, 0, kDlc);
+  v4u q0 = wld16(r, off + 4);
+  v4u q1 = wld16(r, off + 20);
+  nv_unit_c<B, K, VS>(sw, q0, q1, aq, asc, u, vb, acc);
+}
+
 // A lane's units of one weight row, loaded ahead of the products (the same
 // units, products and order as row_dot).
 template<int FMT, int K, int LPR>
@@ -231,6 +264,31 @@ __device__ __forceinline__ void row_load(const uint8_t* row, int lir,
         r.h[i] = *(const uint32_t*)p;
         r.q0[i] = *(const v4u_a4*)(p + 4);
         r.q1[i] = *(const v4u_a4*)(p + 20);
+      }
+    }
+  }
+}
+// row_load with the row at byte `roff` of the resource r (DLC reads).
+template<int FMT, int K, int LPR, bool TS = false>
+__device__ __forceinline__ void row_load_dl(__amdgpu_buffer_rsrc_t rs, int roff,
+                                            int lir, RowRegs<FMT, K, LPR>& r) {
+  using R = RowRegs<FMT, K, LPR>;
+  constexpr int BY = Fm<FMT>::BYTES, T = R::NU % LPR;
+#pragma unroll
+  for (int i = 0; i < R::NI; ++i) {
+    const int u = (TS && T > 0 && i == R::NI - 1)
+                      ? (R::NU / LPR) * LPR + lir % (T > 0 ? T : 1)
+                      : i * LPR + lir;
+    if (TS || (R::NU % LPR == 0) || u < R::NU) {
+      const int off = roff + u * BY;
+      if (FMT == FMT_Q8) {
+        r.h[i] = __builtin_amdgcn_raw_buffer_load_b16(rs, off, 0, kDlc);
+        r.q0[i] = wld16(rs, off + 2);
+        r.q1[i] = wld16(rs, off + 18);
+      } else {
+        r.h[i] = __builtin_amdgcn_raw_buffer_load_b32(rs, off, 0, kDlc);
+        r.q0[i] = wld16(rs, off + 4);
+        r.q1[i] = wld16(rs, off + 20);
       }
     }
   }
@@ -274,6 +332,39 @@ __device__ __forceinline__ void row_dot(const uint8_t* row, const v4u* aq,
         if (res)
           nv_unit<B, K, VS>(row + (size_t)u * BY, aq + plq, asc + pls, u, vb,
                             acc);
+      }
+    }
+  }
+#pragma unroll
+  for (int b = 0; b < B; b++)
+#pragma unroll
+    for (int off = LPR / 2; off > 0; off >>= 1)
+      acc[b] += __shfl_xor(acc[b], off, WS);
+}
+
+// row_dot with the row at byte `roff` of the resource r (DLC reads).
+template<int FMT, int K, int LPR, int B, int VS = 1>
+__device__ __forceinline__ void row_dot_dl(__amdgpu_buffer_rsrc_t r, int roff,
+                                           const v4u* aq, const float* asc,
+                                           int plq, int pls, int res, int vb,
+                                           int lir, float (&acc)[B]) {
+  constexpr int NU = K / Fm<FMT>::UEL, BY = Fm<FMT>::BYTES;
+#pragma unroll
+  for (int b = 0; b < B; b++)
+    acc[b] = 0.f;
+#pragma unroll
+  for (int u0 = 0; u0 < NU; u0 += LPR) {
+    int u = u0 + lir;
+    if ((NU % LPR == 0) || u < NU) {
+      const int off = roff + u * BY;
+      if (FMT == FMT_Q8) {
+        q8_unit_dl<B, K, VS>(r, off, aq, asc, u, vb, acc);
+        if (res)
+          q8_unit_dl<B, K, VS>(r, off, aq + plq, asc + pls, u, vb, acc);
+      } else {
+        nv_unit_dl<B, K, VS>(r, off, aq, asc, u, vb, acc);
+        if (res)
+          nv_unit_dl<B, K, VS>(r, off, aq + plq, asc + pls, u, vb, acc);
       }
     }
   }
@@ -851,6 +942,7 @@ __global__ void __launch_bounds__(BW* WS)
   float sc = escale ? escale[e] : 1.f;
   size_t rb = (size_t)NU * Fm<FMT>::BYTES;
   const uint8_t* We = W + (size_t)e * 2 * FF * rb;
+  const __amdgpu_buffer_rsrc_t wr = wrsrc(We);
   int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
       lir = lane % LPR, isup = g & 1, pg = g >> 1;
   int base = (rbk * BW + wave) * RPP * NIT;
@@ -859,8 +951,8 @@ __global__ void __launch_bounds__(BW* WS)
     int j = base + it * RPP + pg;
     int jj = j < FF ? j : FF - 1;
     float acc[1];
-    row_dot<FMT, K, LPR, 1>(We + rb * (isup ? FF + jj : jj), aq, asc, CPU * NU,
-                            K / 16, res, 0, lir, acc);
+    row_dot_dl<FMT, K, LPR, 1>(wr, (int)(rb * (isup ? FF + jj : jj)), aq, asc,
+                               CPU * NU, K / 16, res, 0, lir, acc);
     float other = __shfl_xor(acc[0], LPR, WS);
     if (!isup && lir == 0 && j < FF)
       a[(size_t)p * FF + j] = situ(acc[0] * sc, other * sc);
@@ -887,6 +979,7 @@ __global__ void __launch_bounds__(BW* WS)
   const int e = ids[p];
   const float ew = wts[p] * (escale ? escale[e] : 1.f);
   size_t rb = (size_t)NU * Fm<FMT>::BYTES;
+  const __amdgpu_buffer_rsrc_t wr = wrsrc(W + (size_t)e * D * rb);
   int wave = threadIdx.x / WS, lane = threadIdx.x % WS, g = lane / LPR,
       lir = lane % LPR;
   int base = (rbk * BW + wave) * RPW * NIT;
@@ -895,10 +988,121 @@ __global__ void __launch_bounds__(BW* WS)
     int row = base + it * RPW + g;
     int rr = row < D ? row : D - 1;
     float acc[1];
-    row_dot<FMT, K, LPR, 1>(W + ((size_t)e * D + rr) * rb, aq, asc, CPU * NU,
-                            K / 16, res, 0, lir, acc);
+    row_dot_dl<FMT, K, LPR, 1>(wr, (int)(rr * rb), aq, asc, CPU * NU, K / 16,
+                               res, 0, lir, acc);
     if (row < D && lir == 0)
       yp[(size_t)p * D + row] = ew * acc[0];
+  }
+}
+
+// ---------------- MoE gate/up + SITU and down in one launch ----------------
+// NVFP4 experts, per pair: the first `ngu` blocks are k_moe_gu's (same pair and
+// row block order, same products), the rest k_moe_down_e's. A down block loads
+// its weight units before it waits for the gate/up blocks of its pair (their
+// count in cnt[p]), so its weight stream starts while the gate/up tail runs
+// instead of after a kernel boundary. Blocks dispatch in index order, so every
+// gate/up block is resident or done once a down block waits. The last down
+// block of a pair resets both counters for the next launch.
+template<int K1, int K2, int LPR1, int LPR2, int BW>
+__global__ void __launch_bounds__(BW* WS)
+    k_moe_gu_down(const uint8_t* __restrict__ Wgu,
+                  const float* __restrict__ gscale,
+                  const uint8_t* __restrict__ Wd,
+                  const float* __restrict__ dscale, const float* __restrict__ x,
+                  const int* __restrict__ ids, const float* __restrict__ wts,
+                  float* __restrict__ a, float* __restrict__ yp,
+                  unsigned* __restrict__ cnt, int FF, int D, int npair,
+                  int gu_rb, int dn_rb, int rows_first, int res) {
+  using F = Fm<FMT_NVFP4>;
+  constexpr int UEL = F::UEL, BY = F::BYTES, CPU = UEL / 16;
+  constexpr int NU1 = K1 / UEL, NU2 = K2 / UEL;
+  constexpr int RPP = WS / LPR1 / 2, RPW = WS / LPR2;
+  __shared__ v4u aq[2 * CPU * NU1];
+  __shared__ float asc[2 * (K1 / 16)];
+  const int ngu = npair * gu_rb;
+  const int wave = threadIdx.x / WS, lane = threadIdx.x % WS;
+  if ((int)blockIdx.x < ngu) {
+    const int b = blockIdx.x;
+    const int p = rows_first ? b / gu_rb : b % npair,
+              rbk = rows_first ? b % gu_rb : b / npair;
+    quant_act<K1, 1, UEL>(x + (size_t)(p >> 3) * K1, aq, asc, res);
+    const int e = ids[p];
+    const float sc = gscale ? gscale[e] : 1.f;
+    const size_t rb = (size_t)NU1 * BY;
+    const uint8_t* We = Wgu + (size_t)e * 2 * FF * rb;
+    const __amdgpu_buffer_rsrc_t wr = wrsrc(We);
+    const int g = lane / LPR1, lir = lane % LPR1, isup = g & 1, pg = g >> 1;
+    const int j = (rbk * BW + wave) * RPP + pg;
+    const int jj = j < FF ? j : FF - 1;
+    float acc[1];
+    row_dot_dl<FMT_NVFP4, K1, LPR1, 1>(wr, (int)(rb * (isup ? FF + jj : jj)),
+                                       aq, asc, CPU * NU1, K1 / 16, res, 0, lir,
+                                       acc);
+    const float other = __shfl_xor(acc[0], LPR1, WS);
+    if (!isup && lir == 0 && j < FF)
+      a[(size_t)p * FF + j] = situ(acc[0] * sc, other * sc);
+    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
+    __syncthreads();
+    if (threadIdx.x == 0)
+      __hip_atomic_fetch_add(&cnt[p], 1u, __ATOMIC_RELAXED,
+                             __HIP_MEMORY_SCOPE_AGENT);
+    return;
+  }
+  const int b = blockIdx.x - ngu;
+  const int p = rows_first ? b / dn_rb : b % npair,
+            rbk = rows_first ? b % dn_rb : b / npair;
+  const int e = ids[p];
+  const size_t rb = (size_t)NU2 * BY;
+  const __amdgpu_buffer_rsrc_t wr = wrsrc(Wd + (size_t)e * D * rb);
+  const int g = lane / LPR2, lir = lane % LPR2;
+  const int row = (rbk * BW + wave) * RPW + g;
+  const int rr = row < D ? row : D - 1;
+  // this lane's weight units (row_dot's units and order), loaded first
+  constexpr int NI = (NU2 + LPR2 - 1) / LPR2;
+  uint32_t sw[NI];
+  v4u q0[NI], q1[NI];
+#pragma unroll
+  for (int i = 0; i < NI; ++i) {
+    const int u = i * LPR2 + lir;
+    if ((NU2 % LPR2 == 0) || u < NU2) {
+      const int off = (int)(rr * rb) + u * BY;
+      sw[i] = __builtin_amdgcn_raw_buffer_load_b32(wr, off, 0, kDlc);
+      q0[i] = wld16(wr, off + 4);
+      q1[i] = wld16(wr, off + 20);
+    }
+  }
+  if (threadIdx.x == 0)
+    while (__hip_atomic_load(&cnt[p], __ATOMIC_RELAXED,
+                             __HIP_MEMORY_SCOPE_AGENT) < (unsigned)gu_rb)
+      __builtin_amdgcn_s_sleep(1);
+  __syncthreads();
+  __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
+  quant_act<K2, 1, UEL>(a + (size_t)p * K2, aq, asc, res);
+  const float ew = wts[p] * (dscale ? dscale[e] : 1.f);
+  float acc[1] = {0.f};
+#pragma unroll
+  for (int i = 0; i < NI; ++i) {
+    const int u = i * LPR2 + lir;
+    if ((NU2 % LPR2 == 0) || u < NU2) {
+      nv_unit_c<1, K2>(sw[i], q0[i], q1[i], aq, asc, u, 0, acc);
+      if (res)
+        nv_unit_c<1, K2>(sw[i], q0[i], q1[i], aq + CPU * NU2, asc + K2 / 16, u,
+                         0, acc);
+    }
+  }
+#pragma unroll
+  for (int off = LPR2 / 2; off > 0; off >>= 1)
+    acc[0] += __shfl_xor(acc[0], off, WS);
+  if (row < D && lir == 0)
+    yp[(size_t)p * D + row] = ew * acc[0];
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    const unsigned done = __hip_atomic_fetch_add(
+        &cnt[npair + p], 1u, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+    if (done == (unsigned)dn_rb - 1) {
+      cnt[p] = 0;
+      cnt[npair + p] = 0;
+    }
   }
 }
 
@@ -1244,7 +1448,8 @@ __global__ void __launch_bounds__(BW* WS)
     const int j = (rbk * BW + wave) * RPP + pg;
     const int jj = j < FF ? j : FF - 1;
     RowRegs<FMT, K, LPR> wr;
-    row_load<FMT, K, LPR, true>(We + rb * (isup ? FF + jj : jj), lir, wr);
+    row_load_dl<FMT, K, LPR, true>(wrsrc(We), (int)(rb * (isup ? FF + jj : jj)),
+                                   lir, wr);
     [[maybe_unused]] RowDec<K, LPR> wd;
     if constexpr (FMT == FMT_NVFP4)
       row_decode<K, LPR, true>(wr, lir, wd);
@@ -1310,7 +1515,8 @@ __global__ void __launch_bounds__(BW* WS)
     const int row = (rbk * BW + wave) * RPW + g;
     const int rr = row < D ? row : D - 1;
     RowRegs<FMT, K, LPR> wr;
-    row_load<FMT, K, LPR, true>(W + ((size_t)e * D + rr) * rb, lir, wr);
+    row_load_dl<FMT, K, LPR, true>(wrsrc(W + (size_t)e * D * rb),
+                                   (int)(rr * rb), lir, wr);
     [[maybe_unused]] RowDec<K, LPR> wd;
     if constexpr (FMT == FMT_NVFP4)
       row_decode<K, LPR, true>(wr, lir, wd);
@@ -1396,7 +1602,7 @@ __device__ __forceinline__ void conv_resid_elem(const ConvResidArgs& a, int c,
     if (j < 3)
       for (int l = j + 1; l <= 3; ++l)
         xin[3 - l] = st[3 - l + j];
-    a.cap[((size_t)a.conv_off + c) * kVerifyRows + tok] = xc;
+    a.cap[(size_t)tok * 6656 + a.conv_off + c] = xc;
   }
   float y = 0.f;
 #pragma unroll
@@ -1458,7 +1664,7 @@ __device__ __forceinline__ void conv_resid_block(const ConvResidArgs& a,
         if (j < 3)
           for (int l = j + 1; l <= 3; ++l)
             xin[r][3 - l] = st[3 - l + j];
-        a.cap[((size_t)a.conv_off + c) * kVerifyRows + tok] = xc;
+        a.cap[(size_t)tok * 6656 + a.conv_off + c] = xc;
       }
 #pragma unroll
       for (int i = 0; i < 4; ++i)
@@ -1776,8 +1982,8 @@ __device__ __forceinline__ void kvprep_block(const KvPrepArgs& a, int kvh,
         kx[3 - l] = sk[3 - l + j];
         vx[3 - l] = sv[3 - l + j];
       }
-    a.cap[((size_t)a.conv_off_k + c) * kVerifyRows + tk] = kx[3];
-    a.cap[((size_t)a.conv_off_v + c) * kVerifyRows + tk] = vx[3];
+    a.cap[(size_t)tk * 6656 + a.conv_off_k + c] = kx[3];
+    a.cap[(size_t)tk * 6656 + a.conv_off_v + c] = vx[3];
   }
   float ky = 0.f, vy = 0.f;
 #pragma unroll
@@ -1867,10 +2073,9 @@ __device__ __forceinline__ float4 load_w4(const void* W, size_t off, int half) {
   if (!half)
     return *(const float4*)(static_cast<const float*>(W) + off);
   const uint2 u = *(const uint2*)(static_cast<const uint16_t*>(W) + off);
-  return make_float4(__uint_as_float(u.x << 16),
-                     __uint_as_float(u.x & 0xFFFF0000u),
-                     __uint_as_float(u.y << 16),
-                     __uint_as_float(u.y & 0xFFFF0000u));
+  return make_float4(
+      __uint_as_float(u.x << 16), __uint_as_float(u.x & 0xFFFF0000u),
+      __uint_as_float(u.y << 16), __uint_as_float(u.y & 0xFFFF0000u));
 }
 
 // Register-tiled: a block computes 64 tokens x 64 rows, each thread 4 x 4 of
@@ -2177,14 +2382,12 @@ __global__ void __launch_bounds__(256) k_ctl_apply_v4(CtlPJobs jobs, int T) {
         if constexpr (H) {
           const uint2 ug = *(const uint2*)&wg[(tr + 16 * i) * LS + k4];
           const uint2 uf = *(const uint2*)&wf[(tr + 16 * i) * LS + k4];
-          a[i] = make_float4(__uint_as_float(ug.x << 16),
-                             __uint_as_float(ug.x & 0xFFFF0000u),
-                             __uint_as_float(ug.y << 16),
-                             __uint_as_float(ug.y & 0xFFFF0000u));
-          b[i] = make_float4(__uint_as_float(uf.x << 16),
-                             __uint_as_float(uf.x & 0xFFFF0000u),
-                             __uint_as_float(uf.y << 16),
-                             __uint_as_float(uf.y & 0xFFFF0000u));
+          a[i] = make_float4(
+              __uint_as_float(ug.x << 16), __uint_as_float(ug.x & 0xFFFF0000u),
+              __uint_as_float(ug.y << 16), __uint_as_float(ug.y & 0xFFFF0000u));
+          b[i] = make_float4(
+              __uint_as_float(uf.x << 16), __uint_as_float(uf.x & 0xFFFF0000u),
+              __uint_as_float(uf.y << 16), __uint_as_float(uf.y & 0xFFFF0000u));
         } else {
           a[i] = *(const float4*)&wg[(tr + 16 * i) * LS + k4];
           b[i] = *(const float4*)&wf[(tr + 16 * i) * LS + k4];
@@ -4680,26 +4883,55 @@ void MoeDownE(hipStream_t s, int fmt, const void* w, const float* escale,
   Chk("moe_down_e");
 }
 
-// Reads [p, p + n16 * 16) so that a later kernel finds it in the last-level
-// cache; the loaded values only feed a store that never happens.
-__global__ void __launch_bounds__(256)
-    k_touch(const uint4* __restrict__ p, size_t n16,
-            const uint4* __restrict__ p2, size_t n2, unsigned* sink) {
+bool MoeGuDown(hipStream_t s, int fmt, const void* wgu, const float* gscale,
+               const void* wd, const float* dscale, const float* x,
+               const int* ids, const float* wts, float* a, float* yp,
+               unsigned* cnt, int ff, int d, float beta, float lb, int nb) {
+  if (fmt != kFmtNvfp4 || ff != 1152 || d != 2304)
+    return false;
+  CheckSitu(beta, lb);
+  constexpr int BW = 8, LPR1 = 16, LPR2 = 8;
+  const int gu_rb = ff / (BW * (WS / LPR1 / 2)), dn_rb = d / (BW * (WS / LPR2));
+  const int npair = 8 * nb;
+  k_moe_gu_down<2304, 1152, LPR1, LPR2, BW>
+      <<<npair*(gu_rb + dn_rb), BW * WS, 0, s>>>(
+          static_cast<const uint8_t*>(wgu), gscale,
+          static_cast<const uint8_t*>(wd), dscale, x, ids, wts, a, yp, cnt, ff,
+          d, npair, gu_rb, dn_rb, nb == 1 ? 1 : 0, g_res);
+  Chk("moe_gu_down");
+  return true;
+}
+
+// Reads every range of the list so that a later kernel finds it in the
+// last-level cache; the loaded values only feed a store that never happens.
+__global__ void __launch_bounds__(256) k_touchn(TouchList l, unsigned* sink) {
+  // four loads in flight per thread: a few blocks reach the DRAM rate
+  constexpr int U = 4;
   uint32_t acc = 0;
-  for (size_t i = (size_t)blockIdx.x * 256 + threadIdx.x; i < n16 + n2;
-       i += (size_t)gridDim.x * 256) {
-    const uint4 v = i < n16 ? p[i] : p2[i - n16];
-    acc ^= v.x ^ v.y ^ v.z ^ v.w;
+  for (int r = 0; r < l.n; ++r) {
+    const uint4* p = static_cast<const uint4*>(l.p[r]);
+    const size_t n16 = l.bytes[r] / 16;
+    size_t i = (size_t)blockIdx.x * 256 * U + threadIdx.x;
+    for (; i + 256 * (U - 1) < n16; i += (size_t)gridDim.x * 256 * U) {
+      uint4 v[U];
+#pragma unroll
+      for (int u = 0; u < U; ++u)
+        v[u] = p[i + 256 * u];
+#pragma unroll
+      for (int u = 0; u < U; ++u)
+        acc ^= v[u].x ^ v[u].y ^ v[u].z ^ v[u].w;
+    }
+    for (; i < n16; i += 256)
+      acc ^= p[i].x;
   }
   if (acc == 0x9e3779b9u && sink)
     *sink = acc;
 }
-void Touch(hipStream_t s, const void* p, size_t bytes, int blocks,
-           const void* p2, size_t bytes2) {
-  k_touch<<<blocks, 256, 0, s>>>(static_cast<const uint4*>(p), bytes / 16,
-                                 static_cast<const uint4*>(p2), bytes2 / 16,
-                                 nullptr);
-  Chk("touch");
+void TouchN(hipStream_t s, const TouchList& l, int blocks) {
+  if (l.n == 0)
+    return;
+  k_touchn<<<blocks, 256, 0, s>>>(l, nullptr);
+  Chk("touchn");
 }
 
 void Mix(hipStream_t s, const MixJob& j, float eps) {
@@ -4781,12 +5013,13 @@ __global__ void __launch_bounds__(256)
   if (ch >= 6656)
     return;
   float* st = tbl[slot].conv + (size_t)ch * 3;
-  const float* cp = cap + ((size_t)slot * 6656 + ch) * kVerifyRows + row0;
+  // the slot's rows [kVerifyRows][6656], from step row row0
+  const float* cp = cap + ((size_t)slot * kVerifyRows + row0) * 6656 + ch;
   // the last three of [st[0..3), cp[0..keep)]
   float v[3];
   for (int i = 0; i < 3; ++i) {
     const int j = keep + i;
-    v[i] = j < 3 ? st[j] : cp[j - 3];
+    v[i] = j < 3 ? st[j] : cp[(size_t)(j - 3) * 6656];
   }
   for (int i = 0; i < 3; ++i)
     st[i] = v[i];
@@ -5352,8 +5585,8 @@ void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
   GateJobs g{};
   for (int i = 0; i < jobs.n; ++i) {
     const CtlPJob& c = jobs.j[i];
-    g.j[i] = {c.x,    c.ldx, c.msg,  c.ldm,  c.down, 4608, 2304, 2304,
-              1,      c.g64, 64,     0,      c.minv, c.xinv, c.half};
+    g.j[i] = {c.x, c.ldx, c.msg, c.ldm, c.down, 4608,   2304,  2304,
+              1,   c.g64, 64,    0,     c.minv, c.xinv, c.half};
   }
   // One job has too few token blocks for k_gate_p64's serial chunks; three
   // jobs keep the GPU busy and k_gate_p64 moves fewer bytes.
@@ -5370,16 +5603,16 @@ void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
     k_ctl_apply_v4<true>
         <<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs, t);
   else
-    k_ctl_apply_v4<false><<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs,
-                                                                          t);
+    k_ctl_apply_v4<false>
+        <<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs, t);
   Chk("ctl_prefill");
 }
 
 void RouterPrefill(hipStream_t s, const void* w, const float* x, float* logits,
                    int t, bool half) {
   GateJobs g{};
-  g.j[0] = {x, 2304, nullptr, 0,       w,       2304,        2304, 0,
-            0, logits, 128,   0, nullptr, nullptr, half ? 1 : 0};
+  g.j[0] = {x, 2304,   nullptr, 0, w,       2304,    2304,        0,
+            0, logits, 128,     0, nullptr, nullptr, half ? 1 : 0};
   k_gate_p64<<<dim3((t + 63) / 64, 2, 1), 256, 0, s>>>(g, t, 0.f);
   Chk("router_prefill");
 }

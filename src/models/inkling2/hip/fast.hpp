@@ -107,6 +107,13 @@ void MoeGuGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
 /// yp [pair][d]: weighted outputs, inputs from MoeQuantGrouped(k = 1152).
 void MoeDownGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
                     MoeGroups g, int slots, const float* wts, float* yp, int d);
+/// MoeGu then MoeDownE (same outputs) in one launch for NVFP4 experts; cnt
+/// [2][nb * 8] (zero, self-resetting). False (nothing launched) for other
+/// formats.
+bool MoeGuDown(hipStream_t s, int fmt, const void* wgu, const float* gscale,
+               const void* wd, const float* dscale, const float* x,
+               const int* ids, const float* wts, float* a, float* yp,
+               unsigned* cnt, int ff, int d, float beta, float lb, int nb);
 void MoeDownE(hipStream_t s, int fmt, const void* w, const float* escale,
               const float* a, const int* ids, const float* wts, float* yp,
               int d, int nb = 1);
@@ -128,7 +135,7 @@ struct ConvResidArgs {
   // Verification (all nb rows are consecutive positions of one session): row
   // b's history is rows b-3..b-1 of this step (the stored history before
   // row 0), the history is not written, and each row's input goes to
-  // cap[(conv_off + c) * kVerifyRows + b] (CommitVerifyConv applies it).
+  // cap[b * 6656 + conv_off + c] (CommitVerifyConv applies it).
   float* cap = nullptr;
   // With `cap`: each row's index within its session's rows (a step may verify
   // several sessions, each one's rows consecutive); null: all rows one session.
@@ -141,7 +148,7 @@ void ConvResid(hipStream_t s, const ConvResidArgs& a, int nb = 1);
 /// After a verification step: every history of the session's 48 slots
 /// becomes the last 3 inputs of (history, the first `keep` of its captured
 /// rows, which start at step row `row0`).
-/// `cap` is [48][6656][kVerifyRows].
+/// `cap` is [48][kVerifyRows][6656].
 void CommitVerifyConv(hipStream_t s, const SlotEntry* tbl, const float* cap,
                       int keep, int row0 = 0);
 /// out[r] = the first maximum of the finite values of row r of x [rows][n]
@@ -184,10 +191,22 @@ struct MixJob {
   ConvResidArgs cr;
   int ostride = 0;  // token stride of `out` (0: nq * 2304); decode batches
 };
-/// Reads `bytes` from p, then `bytes2` from p2 (a cache prefetch: nothing is
+/// Reads every range of the list, in order (a cache prefetch: nothing is
 /// written).
-void Touch(hipStream_t s, const void* p, size_t bytes, int blocks,
-           const void* p2 = nullptr, size_t bytes2 = 0);
+struct TouchList {
+  static constexpr int kMax = 16;
+  const void* p[kMax];
+  size_t bytes[kMax];
+  int n = 0;
+  void Add(const void* q, size_t b) {
+    if (b > 0 && q != nullptr && n < kMax) {
+      p[n] = q;
+      bytes[n] = b;
+      ++n;
+    }
+  }
+};
+void TouchN(hipStream_t s, const TouchList& l, int blocks);
 void Mix(hipStream_t s, const MixJob& j, float eps);
 
 /// Several RMS norms of 2304 rows in one launch.
