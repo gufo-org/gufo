@@ -1011,7 +1011,11 @@ candidates. Streamed Messages send Anthropic SSE events: `message_start`,
 (`input_json_delta`) blocks, then `message_delta` with `stop_reason` and the
 complete usage, and `message_stop`. `message_start` reports zero usage because
 prompt accounting is final only at the end. A failure after the headers sends
-an `error` event. Responses and Messages honor the server's thinking defaults.
+an `error` event. A prompt that does not fit the context is refused with 400
+`context_length_exceeded`; Messages words it as Anthropic does, `prompt is too
+long: N tokens > M maximum`, where M is the context minus the one position
+generation needs; clients such as Claude Code answer that message by
+compacting the conversation. Responses and Messages honor the server's thinking defaults.
 Messages accepts `thinking.type` (`enabled`, `adaptive` or `disabled`);
 `adaptive` keeps the server's thinking default. With `enabled`,
 `budget_tokens` caps the reasoning (see Reasoning controls), and the answer

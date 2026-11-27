@@ -38,6 +38,7 @@
 #include "src/core/json.hpp"
 #include "src/core/platform/env.hpp"
 #include "src/core/platform/os_info.hpp"
+#include "src/core/prompt_too_long.hpp"
 #include "src/mem/account.hpp"
 #include "src/mem/ledger.hpp"
 #include "tests/cache/fake_adapter.hpp"
@@ -4489,13 +4490,15 @@ int main() {
                  stopped.finish_reason ==
                      gufo::server::TextGenerationBackend::FinishReason::kStop,
              "unlimited default passes 128 tokens and still respects EOS");
-      for (const auto size : {256, 257}) {
+      for (const std::size_t size : {256, 257}) {
         bool rejected = false;
         try {
           (void)scheduler->Submit(std::vector<TextRunnerToken>(size, 1), 0,
                                   0.0F);
-        } catch (const std::length_error&) {
+        } catch (const gufo::core::PromptTooLong& error) {
           rejected = true;
+          Expect(error.tokens() == size && error.maximum() == 255,
+                 "the rejection reports the prompt and accepted sizes");
         }
         Expect(rejected, "full context is rejected before generation");
       }

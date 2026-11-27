@@ -24,6 +24,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/trace.hpp"
 #include "src/core/platform/net.hpp"
+#include "src/core/prompt_too_long.hpp"
 
 namespace {
 namespace net = gufo::net;
@@ -197,6 +198,9 @@ public:
       throw std::length_error("context exceeded");
     if (failure == 2)
       throw std::invalid_argument("invalid prompt");
+    if (failure == 9)
+      throw gufo::core::PromptTooLong(300000, 262143,
+                                      "prompt exceeds the context");
     // A failed probe: the scheduler reports device loss from then on.
     if (failure == 3) {
       lost = true;
