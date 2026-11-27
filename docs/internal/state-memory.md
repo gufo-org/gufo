@@ -284,7 +284,8 @@ too and leaves nothing the device could use:
   recycled pages it could not clear.
 - `Region::SettleRemaps` runs none of the queued copies and clears. They wait
   for the next barrier that succeeds, since other regions' threads queue
-  some of them; a region drops those into pages it unmaps.
+  some of them. A region that unmaps pages waits for a barrier that is
+  running their copies and clears, then drops what is still queued.
 - Creating a region, mapping pass scratch and growing the expert stream
   store fail; a cache capture fails without evicting anything. At teardown
   the expert stream store keeps its address ranges reserved.

@@ -48,6 +48,9 @@ struct PagePoolStats {
   /// Pages the RAM cache lent to regions, and pages back with it.
   std::size_t lent{0};
   std::size_t returned{0};
+  /// Copies and clears queued, or taken by a SettleRemaps() that has not
+  /// finished them.
+  std::size_t fixups{0};
 };
 
 /// Physical 2 MiB pages of one device, created ahead of use and never freed
@@ -159,16 +162,21 @@ public:
                  std::shared_ptr<void> keep);
   /// After the barrier: clear `bytes` at `destination`.
   void QueueClear(std::byte* destination, std::size_t bytes);
-  /// Forgets the queued copies and clears into [begin, end): a region calls
-  /// it for the pages it unmaps.
-  void DropFixups(const std::byte* begin, const std::byte* end);
+  /// Forgets the queued copies and clears into [begin, end), after a
+  /// SettleRemaps() that runs some of them: a region calls it for the pages
+  /// it unmaps. True when it waited for that call, which may have ended the
+  /// caller's RemapBarrier::Hold().
+  [[nodiscard]] bool DropFixups(const std::byte* begin, const std::byte* end);
   /// Runs the barrier when a remap waits for one (RemapBarrier::Pending())
-  /// or work is queued, then the queued work, and waits for it. False when
-  /// a copy or a clear failed, or the barrier did: then no queued work
-  /// runs, and it waits for the next call. Call it after a batch of
+  /// or work is queued, then the queued work, and waits for it, as for the
+  /// work another thread's call runs now, which may be this thread's. False
+  /// when the barrier failed, and then no queued work runs and it waits for
+  /// the next call, or when a copy or a clear it ran failed, and then that
+  /// work is given up. Call it after a batch of
   /// Region::PrepareWrite() or Region::Restore() calls and before the device
   /// uses those rows, on the thread that runs the model, between its
-  /// launches. Without remaps it costs two atomic reads.
+  /// launches. With no remap pending and no work queued or running in any
+  /// thread it costs two atomic reads.
   [[nodiscard]] bool SettleRemaps();
   static constexpr std::size_t kScratchPages = 64;
 
@@ -185,6 +193,12 @@ private:
     std::weak_ptr<Region> region;
     std::size_t rows{0};
   };
+  struct Fixup {
+    std::byte* destination;
+    const std::byte* source;  // Null: clear.
+    std::size_t bytes;
+    std::shared_ptr<void> keep;
+  };
   void Run();
   [[nodiscard]] bool CreatePage(hipMemGenericAllocationHandle_t* handle);
   [[nodiscard]] std::size_t TargetFreePages();
@@ -193,6 +207,8 @@ private:
   void BorrowBelowFloor(std::size_t pages);
   /// Sends a page with a home back to it. Called without the pool lock.
   [[nodiscard]] bool ReturnHome(hipMemGenericAllocationHandle_t handle);
+  /// Stores unfinished_, under fixup_mutex_.
+  void CountFixups();
 
   int device_;
   std::function<bool(std::uint64_t)> may_create_;
@@ -208,17 +224,21 @@ private:
   /// Released by a region; handed out before new pages.
   std::vector<hipMemGenericAllocationHandle_t> recycled_;
   hipStream_t zero_stream_{nullptr};
-  struct Fixup {
-    std::byte* destination;
-    const std::byte* source;  // Null: clear.
-    std::size_t bytes;
-    std::shared_ptr<void> keep;
-  };
   /// One SettleRemaps() at a time; never held with mutex_.
   std::mutex settle_mutex_;
   std::mutex fixup_mutex_;
   std::vector<Fixup> fixups_;
-  std::atomic<std::size_t> queued_{0};
+  /// The fixups a SettleRemaps() took from fixups_ and has neither finished
+  /// nor queued again. That call changes it under fixup_mutex_; others read
+  /// it under fixup_mutex_.
+  std::vector<Fixup> taken_;
+  /// fixups_ plus taken_, stored under fixup_mutex_ (CountFixups()): zero
+  /// only when no copy or clear is unfinished, for the fast paths of
+  /// SettleRemaps() and DropFixups().
+  std::atomic<std::size_t> unfinished_{0};
+  /// Under fixup_mutex_: the source pages of copies DropFixups() dropped,
+  /// held until SettleRemaps() unmaps the aliases that map them.
+  std::vector<std::shared_ptr<void>> dropped_sources_;
   std::byte* scratch_{nullptr};
   std::size_t scratch_used_{0};
   std::unordered_map<const Region*, Job> jobs_;

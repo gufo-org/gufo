@@ -169,7 +169,7 @@ Region::~Region() {
   }
   // Unmapping waits for all in-flight GPU work on the device; regions end
   // with their sessions, at shutdown or between requests, never mid-pass.
-  UnmapMarked(mapped_);
+  UnmapMarked(mapped_, false);
   (void)hipGetLastError();
   freed_at.store(RemapBarrier::Stamp(), std::memory_order_release);
   StateLedger::Process().RemoveReserved(reserved_bytes_);
@@ -215,11 +215,14 @@ void Region::ReleasePage(std::size_t p) {
     account_->OnUnmap(kPageBytes);
 }
 
-void Region::UnmapRun(std::size_t first, std::size_t end) {
+void Region::UnmapRun(std::size_t first, std::size_t end, bool held) {
   // Copies or clears still queued for these pages would land in whatever
   // the addresses map next.
   const auto* const begin = reinterpret_cast<const std::byte*>(base_);
-  pool_->DropFixups(begin + first * kPageBytes, begin + end * kPageBytes);
+  if (pool_->DropFixups(begin + first * kPageBytes, begin + end * kPageBytes) &&
+      held)
+    // It waited for another thread's barrier, which ended the hold.
+    RemapBarrier::Hold();
   // One call for the run: each call waits for in-flight GPU work.
   (void)hipMemUnmap(base_ + first * kPageBytes, (end - first) * kPageBytes);
   // The device may go on reaching the old pages through these addresses
@@ -231,7 +234,7 @@ void Region::UnmapRun(std::size_t first, std::size_t end) {
   }
 }
 
-void Region::UnmapMarked(const std::vector<bool>& drop) {
+void Region::UnmapMarked(const std::vector<bool>& drop, bool held) {
   for (std::size_t p = 0; p < pages_.size();) {
     if (!drop[p] || !mapped_[p]) {
       ++p;
@@ -240,7 +243,7 @@ void Region::UnmapMarked(const std::vector<bool>& drop) {
     std::size_t end = p + 1;
     while (end < pages_.size() && drop[end] && mapped_[end])
       ++end;
-    UnmapRun(p, end);
+    UnmapRun(p, end, held);
     p = end;
   }
 }
@@ -496,7 +499,7 @@ std::vector<bool> Region::Restore(
   if (dropped) {
     // As in ReplaceRun(): held until the caller's SettleRemaps().
     RemapBarrier::Hold();
-    UnmapMarked(drop);
+    UnmapMarked(drop, true);
   }
   const auto& access = pool_->access();
   // Dropped addresses get pages again as the restore's loads arrive: the
@@ -568,7 +571,7 @@ void Region::TrimTo(std::size_t rows) {
   if (!released)
     return;
   RemapBarrier::Hold();
-  UnmapMarked(drop);
+  UnmapMarked(drop, true);
   RemapBarrier::Release();
   (void)hipGetLastError();
   requested_rows_ = std::min(requested_rows_, rows);
@@ -679,7 +682,7 @@ bool Region::MapPages(std::size_t rows, std::string* error, bool ahead) {
       if (!unsettled.empty()) {
         // As in TrimTo(): an unmap waits for other threads' work in flight.
         RemapBarrier::Hold();
-        UnmapMarked(unsettled);
+        UnmapMarked(unsettled, true);
         RemapBarrier::Release();
       }
       SetError(error, kNotSettled);

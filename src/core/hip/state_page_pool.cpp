@@ -390,65 +390,105 @@ void PagePool::QueueCopy(std::byte* destination, const std::byte* source,
                          std::shared_ptr<void> keep) {
   const std::lock_guard lock(fixup_mutex_);
   fixups_.push_back({destination, source, kPageBytes, std::move(keep)});
-  queued_.store(fixups_.size(), std::memory_order_release);
+  CountFixups();
 }
 
-void PagePool::DropFixups(const std::byte* begin, const std::byte* end) {
-  if (queued_.load(std::memory_order_acquire) == 0)
-    return;
-  // Not while a SettleRemaps() runs the work it took.
+bool PagePool::DropFixups(const std::byte* begin, const std::byte* end) {
+  // Zero only when no SettleRemaps() runs work it took either: such a call
+  // finishes that work or queues it again.
+  if (unfinished_.load(std::memory_order_acquire) == 0)
+    return false;
+  const auto into = [&](const Fixup& fixup) {
+    return fixup.destination < end && fixup.destination + fixup.bytes > begin;
+  };
+  const auto drop = [&] {
+    const auto dropped =
+        std::stable_partition(fixups_.begin(), fixups_.end(),
+                              [&](const Fixup& fixup) { return !into(fixup); });
+    // A dropped copy's alias still maps its source page: the page stays
+    // held until SettleRemaps() unmaps the alias.
+    for (auto it = dropped; it != fixups_.end(); ++it)
+      if (it->keep)
+        dropped_sources_.push_back(std::move(it->keep));
+    fixups_.erase(dropped, fixups_.end());
+    CountFixups();
+  };
+  {
+    const std::lock_guard lock(fixup_mutex_);
+    if (std::none_of(taken_.begin(), taken_.end(), into)) {
+      drop();
+      return false;
+    }
+  }
+  // A SettleRemaps() runs work into these pages: wait for it, since a call
+  // whose barrier fails queues that work again, for this one to drop.
   const std::lock_guard settle_lock(settle_mutex_);
   const std::lock_guard lock(fixup_mutex_);
-  std::erase_if(fixups_, [&](const Fixup& fixup) {
-    return fixup.destination < end && fixup.destination + fixup.bytes > begin;
-  });
-  queued_.store(fixups_.size(), std::memory_order_release);
+  drop();
+  return true;
 }
 
 void PagePool::QueueClear(std::byte* destination, std::size_t bytes) {
   const std::lock_guard lock(fixup_mutex_);
   fixups_.push_back({destination, nullptr, bytes, nullptr});
-  queued_.store(fixups_.size(), std::memory_order_release);
+  CountFixups();
+}
+
+void PagePool::CountFixups() {
+  unfinished_.store(fixups_.size() + taken_.size(), std::memory_order_release);
 }
 
 bool PagePool::SettleRemaps() {
-  if (queued_.load(std::memory_order_acquire) == 0 && !RemapBarrier::Pending())
+  // Work another thread's call runs counts as unfinished: it may be this
+  // thread's, so this call waits for it below.
+  if (unfinished_.load(std::memory_order_acquire) == 0 &&
+      !RemapBarrier::Pending())
     return true;
+  // Released after the lock and the aliases: a copy may hold the last
+  // reference to its source page, which goes back to the pool or to a
+  // lender.
+  std::vector<Fixup> done;
+  std::vector<std::shared_ptr<void>> sources;
   // Another model's thread may be settling: its barrier does not cover what
   // this thread remapped after it began.
   const std::lock_guard settle_lock(settle_mutex_);
-  std::vector<Fixup> work;
+  bool any = false;
   std::size_t aliases = 0;
   {
     const std::lock_guard lock(fixup_mutex_);
-    work.swap(fixups_);
-    queued_.store(0, std::memory_order_release);
+    // Still unfinished, and visible to DropFixups(), until it ran or is
+    // queued again. Only this call changes taken_, so it reads it unlocked.
+    taken_.swap(fixups_);
+    sources.swap(dropped_sources_);
+    any = !taken_.empty();
     aliases = scratch_used_;
   }
-  bool ok = true;
-  if (RemapBarrier::Pending() || !work.empty())
-    ok = RemapBarrier::Settle();
-  if (!ok) {
+  if ((RemapBarrier::Pending() || any) && !RemapBarrier::Settle()) {
     // The device may still reach the old pages: nothing runs through them.
     // Other threads' regions queued some of this work, and their own call
     // must still find it, so it waits, with the aliases its copies read, for
     // the next barrier that succeeds. A region drops what targets the pages
     // it unmaps meanwhile (DropFixups()).
     const std::lock_guard lock(fixup_mutex_);
-    work.insert(work.end(), std::make_move_iterator(fixups_.begin()),
-                std::make_move_iterator(fixups_.end()));
-    fixups_ = std::move(work);
-    queued_.store(fixups_.size(), std::memory_order_release);
+    taken_.insert(taken_.end(), std::make_move_iterator(fixups_.begin()),
+                  std::make_move_iterator(fixups_.end()));
+    fixups_.swap(taken_);
+    taken_.clear();
+    dropped_sources_.insert(dropped_sources_.end(),
+                            std::make_move_iterator(sources.begin()),
+                            std::make_move_iterator(sources.end()));
+    CountFixups();
     return false;
   }
   // The copies read aliases this thread unmaps right after: other threads'
   // device work stays held back until both are done.
-  if (!work.empty() || aliases != 0)
+  if (any || aliases != 0)
     RemapBarrier::Hold();
-  if (ok && !work.empty()) {
+  bool ok = true;
+  if (any) {
     const hipStream_t stream = ZeroStream();
     ok = stream != nullptr;
-    for (const auto& fixup : work) {
+    for (const auto& fixup : taken_) {
       if (!ok)
         break;
       ok = (fixup.source != nullptr
@@ -472,6 +512,13 @@ bool PagePool::SettleRemaps() {
     // cannot be, under settle_mutex_'s callers' rule, but never reuse one.
     if (scratch_used_ == aliases)
       scratch_used_ = 0;
+  }
+  {
+    // Done, or a copy failed and the work is given up: callers waiting for
+    // it may go on.
+    const std::lock_guard lock(fixup_mutex_);
+    done.swap(taken_);
+    CountFixups();
   }
   RemapBarrier::Release();
   return ok;
@@ -529,7 +576,8 @@ PagePoolStats PagePool::Stats() const {
           .created_ahead = created_ahead_,
           .skipped_below_floor = skipped_below_floor_,
           .lent = lent_,
-          .returned = returned_};
+          .returned = returned_,
+          .fixups = unfinished_.load(std::memory_order_acquire)};
 }
 
 void PagePool::Run() {

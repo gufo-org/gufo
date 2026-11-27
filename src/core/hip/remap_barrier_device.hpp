@@ -16,8 +16,9 @@ void InstallRemapBarrierDevice() noexcept;
 /// reaches the driver and flushes nothing (gfx1151, ROCm 10.1).
 ///
 /// It frees the block the previous call allocated, then allocates the next
-/// one, so it fails only when it holds no block and cannot allocate one: a
-/// flush does not depend on memory being free at that moment. The process
+/// one, so a flush does not depend on memory being free at that moment. It
+/// fails when the held block cannot be freed (it stays held, and nothing is
+/// allocated), or when it holds none and cannot allocate one. The process
 /// keeps one 4 MiB block.
 ///
 /// hipMemUnmap alone does not: see mem::RemapBarrier for the driver gap and

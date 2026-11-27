@@ -93,11 +93,11 @@ The kernel driver flushes the process's translations when it maps or frees
 a block, each on its own; a 64 KiB block comes from the HIP runtime's
 sub-allocator and never reaches the driver. The barrier therefore also
 flushes (`mem::FlushTranslations`): it frees the 4 MiB block its previous
-flush allocated and allocates the next, so it fails only when it holds no
-block and cannot allocate one. `mem_remap_barrier_device_test` checks it
-beside a busy process: after the idle time alone 25 of 50 batches read old
-pages, through kernels, `hipMemcpy` and the copy engine alike; with the
-flush, none.
+flush allocated and allocates the next, so it fails only when that block
+cannot be freed, or when it holds none and cannot allocate one.
+`mem_remap_barrier_device_test` checks it beside a busy process: after the
+idle time alone 25 of 50 batches read old pages, through kernels, `hipMemcpy`
+and the copy engine alike; with the flush, none.
 
 Addresses that never had a mapping are not affected.
 [`fresh.hip`](state-memory-shared-pages/fresh.hip) maps 9 pages per batch at

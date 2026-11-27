@@ -4,11 +4,14 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "src/core/hip/remap_barrier_device.hpp"
@@ -276,6 +279,48 @@ void FailedBarrier() {
   assert(ledger.Totals().reserved_bytes == reserved_before);
 }
 
+// Regions a and b over three pages: a holds rows with `salt`, b maps a's
+// pages, as a restore does, and then rewinds into page 1, which queues a
+// copy of the page whose first 100 rows b keeps.
+struct RewoundPair {
+  std::shared_ptr<Region> a, b;
+  std::vector<std::shared_ptr<gufo::mem::ParkedPage>> parked;
+  static constexpr std::size_t kRowBytes = 1024;
+  static constexpr std::size_t kRowsPerPage = kPageBytes / kRowBytes;
+  static constexpr std::size_t kRows = 3 * kRowsPerPage;
+};
+
+RewoundPair Rewound(gufo::mem::PagePark& park, std::uint32_t salt) {
+  RewoundPair pair;
+  constexpr auto row_bytes = RewoundPair::kRowBytes;
+  constexpr auto rows = RewoundPair::kRows;
+  std::string error;
+  pair.a = Region::Create({.row_bytes = row_bytes, .rows = rows}, &error);
+  pair.b = Region::Create({.row_bytes = row_bytes, .rows = rows}, &error);
+  assert(pair.a && pair.b && pair.a->Ensure(rows, &error));
+  FillRows<<<dim3(64, 1), 256>>>(static_cast<std::uint32_t*>(pair.a->data()), 0,
+                                 row_bytes / 4, rows, salt);
+  Check(hipDeviceSynchronize(), "fill a");
+  std::vector<std::shared_ptr<gufo::mem::SharedPage>> plan(3);
+  for (std::size_t p = 0; p < 3; ++p) {
+    pair.parked.push_back(park.Park(pair.a->Share(p, (p + 1) * kPageBytes)));
+    plan[p] = pair.parked.back()->page();
+  }
+  (void)pair.b->Restore(plan, rows);
+  assert(pair.b->SettleRemaps(&error) && pair.b->shared_pages() == 3);
+  const std::size_t rewind = RewoundPair::kRowsPerPage + 100;
+  assert(pair.b->PrepareWrite(rewind, 2 * RewoundPair::kRowsPerPage, rewind,
+                              &error));
+  return pair;
+}
+
+// b's page 1 holds its first 100 rows, copied from a's.
+bool KeptRowsMatch(const RewoundPair& pair, std::uint32_t salt) {
+  const auto* page1 = static_cast<std::uint8_t*>(pair.b->data()) + kPageBytes;
+  return WordsMatch(page1, 100 * RewoundPair::kRowBytes / 4, salt,
+                    kPageBytes / 4);
+}
+
 // The copies one region queued survive a failed barrier in another
 // region's SettleRemaps(): the pool serves every region of the device, and
 // the next barrier that succeeds runs them.
@@ -283,36 +328,97 @@ void SharedCopiesSurviveFailedBarrier() {
   auto park = gufo::mem::PagePark::ForDevice(0);
   if (!park)
     return;
-  const std::size_t row_bytes = 1024, rows_per_page = kPageBytes / row_bytes;
-  const std::size_t rows = 3 * rows_per_page;
-  const std::size_t page_words = kPageBytes / 4;
   std::string error;
-  auto a = Region::Create({.row_bytes = row_bytes, .rows = rows}, &error);
-  auto b = Region::Create({.row_bytes = row_bytes, .rows = rows}, &error);
-  assert(a && b && a->Ensure(rows, &error));
-  FillRows<<<dim3(64, 1), 256>>>(static_cast<std::uint32_t*>(a->data()), 0,
-                                 row_bytes / 4, rows, 0xbbu);
-  Check(hipDeviceSynchronize(), "fill a");
-  // b maps a's pages, as a restore does.
-  std::vector<std::shared_ptr<gufo::mem::ParkedPage>> parked;
-  std::vector<std::shared_ptr<gufo::mem::SharedPage>> plan(3);
-  for (std::size_t p = 0; p < 3; ++p) {
-    parked.push_back(park->Park(a->Share(p, (p + 1) * kPageBytes)));
-    plan[p] = parked.back()->page();
-  }
-  (void)b->Restore(plan, rows);
-  assert(b->SettleRemaps(&error) && b->shared_pages() == 3);
-  // b rewinds into page 1: it queues a copy of the page, whose first rows
-  // it keeps. a's call meets a failing flush and runs nothing.
-  const std::size_t rewind = rows_per_page + 100;
-  assert(b->PrepareWrite(rewind, 2 * rows_per_page, rewind, &error));
+  const auto pair = Rewound(*park, 0xbbu);
+  // a's call meets a failing flush and runs nothing.
   RemapBarrier::SetTranslationFlush(+[]() noexcept { return false; });
-  assert(!a->SettleRemaps(&error));
+  assert(!pair.a->SettleRemaps(&error));
   gufo::mem::InstallRemapBarrierDevice();
   // b's own call still finds its copy.
-  assert(b->SettleRemaps(&error));
-  auto* b_page1 = static_cast<std::uint8_t*>(b->data()) + kPageBytes;
-  assert(WordsMatch(b_page1, 100 * row_bytes / 4, 0xbbu, page_words));
+  assert(pair.b->SettleRemaps(&error));
+  assert(KeptRowsMatch(pair, 0xbbu));
+}
+
+// The flush of TrimDuringFailedSettle(): its first call on the settling
+// thread lets the other thread trim and waits for the trim to end, for
+// `trim_window` at most, and notes whether it did. Every call fails.
+std::atomic<bool> flush_entered, trim_started, trim_done, trim_seen;
+std::chrono::milliseconds trim_window{0};
+std::thread::id settling_thread;
+
+void WaitFor(const std::atomic<bool>& flag, std::chrono::milliseconds limit) {
+  const auto end = std::chrono::steady_clock::now() + limit;
+  while (!flag.load() && std::chrono::steady_clock::now() < end)
+    std::this_thread::yield();
+}
+
+bool FlushAfterTrim() noexcept {
+  if (std::this_thread::get_id() == settling_thread &&
+      !flush_entered.exchange(true)) {
+    WaitFor(trim_started, std::chrono::seconds(5));
+    WaitFor(trim_done, trim_window);
+    trim_seen.store(trim_done.load());
+  }
+  return false;
+}
+
+// a's SettleRemaps() takes b's copy into its page 1, and its flush fails
+// while another thread trims b to `rows`. Returns whether the trim ended
+// while a's call ran.
+bool TrimDuringFailedSettle(const RewoundPair& pair, std::size_t rows,
+                            std::chrono::milliseconds window) {
+  for (auto* flag : {&flush_entered, &trim_started, &trim_done, &trim_seen})
+    flag->store(false);
+  trim_window = window;
+  settling_thread = std::this_thread::get_id();
+  std::string error;
+  RemapBarrier::SetTranslationFlush(&FlushAfterTrim);
+  std::thread trimmer([&] {
+    Check(hipSetDevice(0), "trim device");
+    WaitFor(flush_entered, std::chrono::seconds(5));
+    trim_started.store(true);
+    pair.b->TrimTo(rows);
+    trim_done.store(true);
+  });
+  assert(!pair.a->SettleRemaps(&error));
+  trimmer.join();
+  gufo::mem::InstallRemapBarrierDevice();
+  assert(flush_entered.load() && pair.b->backed_rows() == rows);
+  return trim_seen.load();
+}
+
+// A region that unmaps a page while another thread's SettleRemaps() holds
+// the copy queued into it waits for that call, and drops the copy its
+// failed barrier queued again: no later barrier copies into an address that
+// lost its page. A page that no running copy targets is unmapped at once.
+void UnmapWaitsForSettlingCopies() {
+  auto park = gufo::mem::PagePark::ForDevice(0);
+  if (!park)
+    return;
+  const auto pool = PagePool::ForDevice(0);
+  constexpr auto rows_per_page = RewoundPair::kRowsPerPage;
+  std::string error;
+  {
+    // Trims pages 1 and 2: the trim cannot end before a's call, which waits
+    // 100 ms for it.
+    const auto pair = Rewound(*park, 0xccu);
+    assert(pool->Stats().fixups == 1);
+    assert(!TrimDuringFailedSettle(pair, rows_per_page,
+                                   std::chrono::milliseconds(100)));
+    assert(pool->Stats().fixups == 0);
+    assert(pair.a->SettleRemaps(&error));
+    assert(WordsMatch(pair.b->data(),
+                      rows_per_page * RewoundPair::kRowBytes / 4, 0xccu));
+    assert(RowsMatch(*pair.a, RewoundPair::kRows, 0xccu));
+  }
+  // Trims page 2 alone: the trim ends while a's call waits for it, and the
+  // copy into page 1 runs at the next barrier.
+  const auto pair = Rewound(*park, 0xddu);
+  assert(
+      TrimDuringFailedSettle(pair, 2 * rows_per_page, std::chrono::seconds(5)));
+  assert(pool->Stats().fixups == 1);
+  assert(pair.b->SettleRemaps(&error));
+  assert(pool->Stats().fixups == 0 && KeptRowsMatch(pair, 0xddu));
 }
 
 // The pool thread maps ahead; a writer then finds its rows backed.
@@ -729,6 +835,7 @@ int main() {
   SharedAccount();
   FailedBarrier();
   SharedCopiesSurviveFailedBarrier();
+  UnmapWaitsForSettlingCopies();
   MapAhead();
   GraphAcrossGrowth();
   SharedPages();

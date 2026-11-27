@@ -136,9 +136,10 @@ private:
   /// the remap barrier.
   [[nodiscard]] bool MapPages(std::size_t rows, std::string* error, bool ahead);
   /// Unmaps pages [first, end), all mapped, in one call; requires mutex_.
-  void UnmapRun(std::size_t first, std::size_t end);
+  /// `held`: within this thread's RemapBarrier::Hold().
+  void UnmapRun(std::size_t first, std::size_t end, bool held);
   /// Unmaps every page marked in `drop`, one call per run; requires mutex_.
-  void UnmapMarked(const std::vector<bool>& drop);
+  void UnmapMarked(const std::vector<bool>& drop, bool held);
   /// Gives up page `p` after its address was unmapped; requires mutex_.
   void ReleasePage(std::size_t p);
   [[nodiscard]] bool SharedWithOthers(std::size_t p) const noexcept;
