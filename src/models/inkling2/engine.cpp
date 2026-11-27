@@ -402,6 +402,7 @@ struct Engine::Impl {
   int* d_step;  // {token, position, row within its session}
   unsigned* d_counter;
   unsigned* d_ccnt;  // fused controller apply + norm: [kMaxB][4]
+  unsigned* d_moe_cnt;  // fused expert gate/up + down: [2][kMaxB * 8]
   fs::SlotEntry* d_tbl;
   const float* d_states[16];
   int d_ns = 0;
@@ -832,6 +833,8 @@ struct Engine::Impl {
     Check(hipMemset(d_counter, 0, B * 4), "counter");
     d_ccnt = reinterpret_cast<unsigned*>(NewInts(B * 4));
     Check(hipMemset(d_ccnt, 0, B * 4 * 4), "controller counters");
+    d_moe_cnt = reinterpret_cast<unsigned*>(NewInts(2 * B * 8));
+    Check(hipMemset(d_moe_cnt, 0, 2 * B * 8 * 4), "expert counters");
     d_tbl = static_cast<fs::SlotEntry*>(
         AllocDevice(B * 48 * sizeof(fs::SlotEntry), "slot table"));
     scratch_allocs.push_back(d_tbl);
@@ -1797,6 +1800,15 @@ struct Engine::Impl {
       fs::MoeDownGrouped(ds, F.moe, D(L.ffn_down_exps),
                          L.ffn_down_scale ? DS(L.ffn_down_scale) : nullptr,
                          d_groups, slots, d_wts8, d_moe_part, kEmbd);
+    } else if (F.moe >= 0 &&
+               fs::MoeGuDown(
+                   ds, F.moe, D(L.ffn_gate_up_exps),
+                   L.ffn_gate_up_scale ? DS(L.ffn_gate_up_scale) : nullptr,
+                   D(L.ffn_down_exps),
+                   L.ffn_down_scale ? DS(L.ffn_down_scale) : nullptr, d_h,
+                   d_ids8, d_wts8, d_act8, d_moe_part, d_moe_cnt, nff, kEmbd,
+                   cfg->situ_beta, cfg->situ_linear_beta, nb)) {
+      // gate/up and down in one launch
     } else if (F.moe >= 0) {
       fs::MoeGu(ds, F.moe, D(L.ffn_gate_up_exps),
                 L.ffn_gate_up_scale ? DS(L.ffn_gate_up_scale) : nullptr, d_h,

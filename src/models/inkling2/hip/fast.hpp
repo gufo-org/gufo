@@ -107,6 +107,13 @@ void MoeGuGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
 /// yp [pair][d]: weighted outputs, inputs from MoeQuantGrouped(k = 1152).
 void MoeDownGrouped(hipStream_t s, int fmt, const void* w, const float* escale,
                     MoeGroups g, int slots, const float* wts, float* yp, int d);
+/// MoeGu then MoeDownE (same outputs) in one launch for NVFP4 experts; cnt
+/// [2][nb * 8] (zero, self-resetting). False (nothing launched) for other
+/// formats.
+bool MoeGuDown(hipStream_t s, int fmt, const void* wgu, const float* gscale,
+               const void* wd, const float* dscale, const float* x,
+               const int* ids, const float* wts, float* a, float* yp,
+               unsigned* cnt, int ff, int d, float beta, float lb, int nb);
 void MoeDownE(hipStream_t s, int fmt, const void* w, const float* escale,
               const float* a, const int* ids, const float* wts, float* yp,
               int d, int nb = 1);

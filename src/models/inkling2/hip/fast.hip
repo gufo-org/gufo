@@ -970,6 +970,117 @@ __global__ void __launch_bounds__(BW* WS)
   }
 }
 
+// ---------------- MoE gate/up + SITU and down in one launch ----------------
+// NVFP4 experts, per pair: the first `ngu` blocks are k_moe_gu's (same pair and
+// row block order, same products), the rest k_moe_down_e's. A down block loads
+// its weight units before it waits for the gate/up blocks of its pair (their
+// count in cnt[p]), so its weight stream starts while the gate/up tail runs
+// instead of after a kernel boundary. Blocks dispatch in index order, so every
+// gate/up block is resident or done once a down block waits. The last down
+// block of a pair resets both counters for the next launch.
+template<int K1, int K2, int LPR1, int LPR2, int BW>
+__global__ void __launch_bounds__(BW* WS)
+    k_moe_gu_down(const uint8_t* __restrict__ Wgu,
+                  const float* __restrict__ gscale,
+                  const uint8_t* __restrict__ Wd,
+                  const float* __restrict__ dscale, const float* __restrict__ x,
+                  const int* __restrict__ ids, const float* __restrict__ wts,
+                  float* __restrict__ a, float* __restrict__ yp,
+                  unsigned* __restrict__ cnt, int FF, int D, int npair,
+                  int gu_rb, int dn_rb, int rows_first, int res) {
+  using F = Fm<FMT_NVFP4>;
+  constexpr int UEL = F::UEL, BY = F::BYTES, CPU = UEL / 16;
+  constexpr int NU1 = K1 / UEL, NU2 = K2 / UEL;
+  constexpr int RPP = WS / LPR1 / 2, RPW = WS / LPR2;
+  __shared__ v4u aq[2 * CPU * NU1];
+  __shared__ float asc[2 * (K1 / 16)];
+  const int ngu = npair * gu_rb;
+  const int wave = threadIdx.x / WS, lane = threadIdx.x % WS;
+  if ((int)blockIdx.x < ngu) {
+    const int b = blockIdx.x;
+    const int p = rows_first ? b / gu_rb : b % npair,
+              rbk = rows_first ? b % gu_rb : b / npair;
+    quant_act<K1, 1, UEL>(x + (size_t)(p >> 3) * K1, aq, asc, res);
+    const int e = ids[p];
+    const float sc = gscale ? gscale[e] : 1.f;
+    const size_t rb = (size_t)NU1 * BY;
+    const uint8_t* We = Wgu + (size_t)e * 2 * FF * rb;
+    const __amdgpu_buffer_rsrc_t wr = wrsrc(We);
+    const int g = lane / LPR1, lir = lane % LPR1, isup = g & 1, pg = g >> 1;
+    const int j = (rbk * BW + wave) * RPP + pg;
+    const int jj = j < FF ? j : FF - 1;
+    float acc[1];
+    row_dot_dl<FMT_NVFP4, K1, LPR1, 1>(wr, (int)(rb * (isup ? FF + jj : jj)),
+                                       aq, asc, CPU * NU1, K1 / 16, res, 0,
+                                       lir, acc);
+    const float other = __shfl_xor(acc[0], LPR1, WS);
+    if (!isup && lir == 0 && j < FF)
+      a[(size_t)p * FF + j] = situ(acc[0] * sc, other * sc);
+    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
+    __syncthreads();
+    if (threadIdx.x == 0)
+      __hip_atomic_fetch_add(&cnt[p], 1u, __ATOMIC_RELAXED,
+                             __HIP_MEMORY_SCOPE_AGENT);
+    return;
+  }
+  const int b = blockIdx.x - ngu;
+  const int p = rows_first ? b / dn_rb : b % npair,
+            rbk = rows_first ? b % dn_rb : b / npair;
+  const int e = ids[p];
+  const size_t rb = (size_t)NU2 * BY;
+  const __amdgpu_buffer_rsrc_t wr = wrsrc(Wd + (size_t)e * D * rb);
+  const int g = lane / LPR2, lir = lane % LPR2;
+  const int row = (rbk * BW + wave) * RPW + g;
+  const int rr = row < D ? row : D - 1;
+  // this lane's weight units (row_dot's units and order), loaded first
+  constexpr int NI = (NU2 + LPR2 - 1) / LPR2;
+  uint32_t sw[NI];
+  v4u q0[NI], q1[NI];
+#pragma unroll
+  for (int i = 0; i < NI; ++i) {
+    const int u = i * LPR2 + lir;
+    if ((NU2 % LPR2 == 0) || u < NU2) {
+      const int off = (int)(rr * rb) + u * BY;
+      sw[i] = __builtin_amdgcn_raw_buffer_load_b32(wr, off, 0, kDlc);
+      q0[i] = wld16(wr, off + 4);
+      q1[i] = wld16(wr, off + 20);
+    }
+  }
+  if (threadIdx.x == 0)
+    while (__hip_atomic_load(&cnt[p], __ATOMIC_RELAXED,
+                             __HIP_MEMORY_SCOPE_AGENT) < (unsigned)gu_rb)
+      __builtin_amdgcn_s_sleep(1);
+  __syncthreads();
+  __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
+  quant_act<K2, 1, UEL>(a + (size_t)p * K2, aq, asc, res);
+  const float ew = wts[p] * (dscale ? dscale[e] : 1.f);
+  float acc[1] = {0.f};
+#pragma unroll
+  for (int i = 0; i < NI; ++i) {
+    const int u = i * LPR2 + lir;
+    if ((NU2 % LPR2 == 0) || u < NU2) {
+      nv_unit_c<1, K2>(sw[i], q0[i], q1[i], aq, asc, u, 0, acc);
+      if (res)
+        nv_unit_c<1, K2>(sw[i], q0[i], q1[i], aq + CPU * NU2, asc + K2 / 16,
+                         u, 0, acc);
+    }
+  }
+#pragma unroll
+  for (int off = LPR2 / 2; off > 0; off >>= 1)
+    acc[0] += __shfl_xor(acc[0], off, WS);
+  if (row < D && lir == 0)
+    yp[(size_t)p * D + row] = ew * acc[0];
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    const unsigned done = __hip_atomic_fetch_add(
+        &cnt[npair + p], 1u, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+    if (done == (unsigned)dn_rb - 1) {
+      cnt[p] = 0;
+      cnt[npair + p] = 0;
+    }
+  }
+}
+
 // ---------------- MoE of many rows, grouped by expert ----------------
 // Verification steps of 8 (one session) to 64 rows: the (row, slot) pairs
 // that chose the same expert are processed by one block row, whose lanes keep
@@ -4741,6 +4852,26 @@ void MoeDownE(hipStream_t s, int fmt, const void* w, const float* escale,
     run(I<FMT_Q8>{}, I<8>{}, I<4>{}, I<4>{});
   }
   Chk("moe_down_e");
+}
+
+bool MoeGuDown(hipStream_t s, int fmt, const void* wgu, const float* gscale,
+               const void* wd, const float* dscale, const float* x,
+               const int* ids, const float* wts, float* a, float* yp,
+               unsigned* cnt, int ff, int d, float beta, float lb, int nb) {
+  if (fmt != kFmtNvfp4 || ff != 1152 || d != 2304)
+    return false;
+  CheckSitu(beta, lb);
+  constexpr int BW = 8, LPR1 = 16, LPR2 = 8;
+  const int gu_rb = ff / (BW * (WS / LPR1 / 2)),
+            dn_rb = d / (BW * (WS / LPR2));
+  const int npair = 8 * nb;
+  k_moe_gu_down<2304, 1152, LPR1, LPR2, BW>
+      <<<npair * (gu_rb + dn_rb), BW * WS, 0, s>>>(
+          static_cast<const uint8_t*>(wgu), gscale,
+          static_cast<const uint8_t*>(wd), dscale, x, ids, wts, a, yp, cnt, ff, d, npair, gu_rb, dn_rb, nb == 1 ? 1 : 0,
+          g_res);
+  Chk("moe_gu_down");
+  return true;
 }
 
 // Reads every range of the list so that a later kernel finds it in the
