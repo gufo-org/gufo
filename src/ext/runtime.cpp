@@ -45,26 +45,32 @@ void Registry::AddProvider(ProviderInfo provider) {
     throw std::invalid_argument("duplicate or empty provider ID: " +
                                 provider.id);
   }
-  for (const auto& option : provider.options) {
+  const auto check_conflict = [](const OptionSpec& option,
+                                 const OptionSpec& other) {
+    if (option.name != other.name || option.type == other.type)
+      return;
+    // Bare 'serve' overlaps each 'serve <modality>' in either direction.
+    if (std::ranges::any_of(option.commands,
+                            [&](const auto& command) {
+                              return OptionApplies(other, command);
+                            }) ||
+        std::ranges::any_of(other.commands, [&](const auto& command) {
+          return OptionApplies(option, command);
+        })) {
+      throw std::invalid_argument("conflicting option types: " + option.name);
+    }
+  };
+  for (std::size_t i = 0; i < provider.options.size(); ++i) {
+    const auto& option = provider.options[i];
     if (IsCoreOption(option.name)) {
       throw std::invalid_argument("core-owned option: " + option.name);
     }
     for (const auto& existing : providers_) {
-      for (const auto& other : existing.options) {
-        for (const auto& command : option.commands) {
-          // Compare through OptionApplies so bare `serve` overlaps every
-          // `serve <modality>` declaration in either direction.
-          if (option.name == other.name && option.type != other.type &&
-              (OptionApplies(other, command) ||
-               std::ranges::any_of(other.commands, [&](const auto& theirs) {
-                 return OptionApplies(option, theirs);
-               }))) {
-            throw std::invalid_argument("conflicting option types: " +
-                                        option.name);
-          }
-        }
-      }
+      for (const auto& other : existing.options)
+        check_conflict(option, other);
     }
+    for (std::size_t j = 0; j < i; ++j)
+      check_conflict(option, provider.options[j]);
   }
   provider.extension = current_extension_;
   providers_.push_back(std::move(provider));

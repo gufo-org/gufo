@@ -4,6 +4,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include "gufo/ext/generated/alpha_constants.hpp"
 #include "gufo/ext/host.hpp"
@@ -130,6 +131,23 @@ void TestRegistryAndParser() {
   Reject([&] { registry.AddProvider(invalid); }, "core-owned");
   invalid.options = {{"--draft-tokens", OptionType::kString, {"prompt"}, ""}};
   Reject([&] { registry.AddProvider(invalid); }, "conflicting");
+  invalid.options = {
+      {"--test-value", OptionType::kString, {"serve text"}, ""},
+      {"--test-value", OptionType::kInteger, {"serve"}, ""},
+  };
+  Reject([&] { registry.AddProvider(invalid); },
+         "conflicting option types: --test-value");
+  std::swap(invalid.options[0], invalid.options[1]);
+  Reject([&] { registry.AddProvider(invalid); },
+         "conflicting option types: --test-value");
+  Require(registry.Providers().size() == 3, "failed registration is atomic");
+
+  invalid.options[0].commands = {"serve image"};
+  registry.AddProvider(invalid);
+  Require(
+      std::get<std::int64_t>(Parse(registry, {"--test-value=2"}, "serve image")
+                                 .at("--test-value")) == 2,
+      "disjoint commands can reuse an option name with a different type");
 }
 void TestHost() {
   std::string observed;
