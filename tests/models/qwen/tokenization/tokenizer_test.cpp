@@ -3,12 +3,16 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/core/json.hpp"
 #include "src/families/qwen/control_tokens/control_tokens.hpp"
 
 using gufo::tokenization::kEndOfText;
@@ -417,6 +421,33 @@ void TestTokenizerJsonMatchesGguf() {
   Expect(from_json->Encode("11") == std::vector<TokenId>({16, 16}),
          "the Qwen3.5 split keeps digits apart");
 
+  // The Qwen3 split (Qwen3-Embedding, Qwen3-Reranker) loads too. Its words
+  // are letters only, so the mark leaves its letter's piece: "a" and the two
+  // bytes of U+0361 are separate pieces, and no merge joins them.
+  std::string qwen3_json(kQwen35TokenizerJson);
+  for (const auto& [from, to] :
+       {std::pair<std::string_view, std::string_view>{R"([\\p{L}\\p{M}]+)",
+                                                      R"(\\p{L}+)"},
+        {R"([^\\s\\p{L}\\p{M}\\p{N}]+)", R"([^\\s\\p{L}\\p{N}]+)"}}) {
+    const auto at = qwen3_json.find(from);
+    Expect(at != std::string::npos, "fixture holds " + std::string(from));
+    qwen3_json.replace(at, from.size(), to);
+  }
+  auto qwen3 = QwenTokenizer::CreateFromTokenizerJson(
+      qwen3_json, kTokenizerJsonVocabSize, &err);
+  Expect(qwen3 != nullptr, "the Qwen3 split loads: " + err);
+  Expect(qwen3->Encode("a\u0361") == std::vector<TokenId>({0, 5, 6}),
+         "the Qwen3 split separates a combining mark from its letter");
+  Expect(qwen3->Encode("hi hi") == from_json->Encode("hi hi") &&
+             qwen3->Encode("11") == from_json->Encode("11") &&
+             qwen3->Encode("ba hi") == from_json->Encode("ba hi"),
+         "the two splits agree without marks");
+  Expect(QwenTokenizer::CreateFromTokenizerJson(
+             TokenizerJsonWith(R"(\\p{N}|)", R"(\\p{N}\\p{N}|)"),
+             kTokenizerJsonVocabSize, &err) == nullptr &&
+             err.find("Qwen3.5 or Qwen3 pattern") != std::string::npos,
+         "another split is still refused: " + err);
+
   // Without `vocab_size` the table ends at the last entry.
   auto unpadded = QwenTokenizer::CreateFromTokenizerJson(
       std::string(kQwen35TokenizerJson), 0, &err);
@@ -581,6 +612,57 @@ void TestCorpusConformance() {
 
 }  // namespace
 
+// Ids from Hugging Face tokenizers for the Qwen3-Reranker tokenizer.json, with
+// its own split ("qwen3") and with the Qwen3.5 split swapped in ("qwen35").
+// Set GUFO_QWEN3_TOKENIZER_JSON to that file to check both; without it the
+// check is skipped, as the file is 11 MB and not part of the tree.
+void TestQwen3SplitGoldens() {
+  const char* path = std::getenv("GUFO_QWEN3_TOKENIZER_JSON");
+  if (path == nullptr) {
+    std::cout << "SKIP Qwen3 split goldens: GUFO_QWEN3_TOKENIZER_JSON unset\n";
+    return;
+  }
+  const auto read = [](const char* file) {
+    std::ifstream in(file, std::ios::binary);
+    Expect(in.good(), std::string("opens ") + file);
+    return std::string(std::istreambuf_iterator<char>(in), {});
+  };
+  const std::string qwen3_json = read(path);
+  std::string qwen35_json = qwen3_json;
+  const auto swap = [&](std::string_view from, std::string_view to) {
+    const auto at = qwen35_json.find(from);
+    Expect(at != std::string::npos,
+           "tokenizer.json holds " + std::string(from));
+    qwen35_json.replace(at, from.size(), to);
+  };
+  swap(R"(?\\p{L}+|)", R"(?[\\p{L}\\p{M}]+|)");
+  swap(R"( ?[^\\s\\p{L}\\p{N}]+)", R"( ?[^\\s\\p{L}\\p{M}\\p{N}]+)");
+  std::string err;
+  auto qwen3 = gufo::tokenization::QwenTokenizer::CreateFromTokenizerJson(
+      qwen3_json, 0, &err);
+  Expect(qwen3 != nullptr, "the Qwen3 tokenizer.json loads: " + err);
+  auto qwen35 = gufo::tokenization::QwenTokenizer::CreateFromTokenizerJson(
+      qwen35_json, 0, &err);
+  Expect(qwen35 != nullptr, "the Qwen3.5-split variant loads: " + err);
+  const auto golden = gufo::json::parse(read(GUFO_QWEN3_SPLIT_GOLDENS));
+  const auto ids = [](const gufo::json::Value& value) {
+    std::vector<gufo::tokenization::TokenId> out;
+    for (const auto& id : value.items())
+      out.push_back(static_cast<gufo::tokenization::TokenId>(id.as_size(0)));
+    return out;
+  };
+  std::size_t differing = 0;
+  for (const auto& entry : golden.find("cases")->items()) {
+    const std::string text = entry.member_str("text");
+    const auto want3 = ids(*entry.find("qwen3"));
+    const auto want35 = ids(*entry.find("qwen35"));
+    Expect(qwen3->Encode(text) == want3, "Qwen3 split matches HF: " + text);
+    Expect(qwen35->Encode(text) == want35, "Qwen3.5 split matches HF: " + text);
+    differing += want3 != want35;
+  }
+  Expect(differing >= 5, "the goldens include cases the two splits tell apart");
+}
+
 int main() {
   std::cout << "Running QwenTokenizer unit tests...\n";
   TestDirectVocabularyTokenizer();
@@ -588,6 +670,7 @@ int main() {
   TestStopTokensFollowVocabulary();
   TestUnicodeContractionBoundary();
   TestTokenizerJsonMatchesGguf();
+  TestQwen3SplitGoldens();
   TestTokenizerJsonRejectsUnsupported();
   TestEmptyAndSpecialEdgeCases();
   TestCorpusConformance();
