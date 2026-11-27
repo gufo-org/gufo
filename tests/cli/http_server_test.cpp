@@ -26,6 +26,7 @@
 #include "src/cli/serve/decision_service.hpp"
 #include "src/cli/serve/embedding_service.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/rerank_service.hpp"
 #include "src/cli/serve/trace.hpp"
 #include "src/core/platform/env.hpp"
 #include "src/core/platform/net.hpp"
@@ -3923,6 +3924,196 @@ void TestDecisionService() {
   server.stop();
 }
 
+// A server with only a rerank service and no text backend answers the three
+// rerank routes, lists the model, and reports readiness. With a text backend
+// but no rerank service, the llama-server stubs keep answering.
+gufo::server::RerankServiceOptions::Runner SizeScoringRunner() {
+  return [](const gufo::server::RerankInput&,
+            std::span<const gufo::server::RerankInput> documents,
+            const gufo::server::RerankRequestOptions&,
+            const std::function<bool()>&, gufo::server::RerankScores* out,
+            std::string*) {
+    for (const auto& document : documents) {
+      const std::size_t size = document.content.front().value.size();
+      out->scores.push_back(static_cast<float>(size));
+      out->token_counts.push_back(size + 2);
+    }
+    return gufo::server::RerankStatus::kOk;
+  };
+}
+
+std::shared_ptr<gufo::server::RerankService> MakeRerankService(bool ready) {
+  return std::make_shared<gufo::server::RerankService>(
+      gufo::server::RerankServiceOptions{
+          .model_root = "/nonexistent/reranker",
+          .validate_model = !ready,  // Validation fails without a checkpoint.
+          .model_id = "rerank-test",
+          .model_aliases = {"rerank-alias"},
+          .runner = SizeScoringRunner(),
+      });
+}
+
+void TestRerankService() {
+  const std::string request =
+      R"({"model":"rerank-test","query":"q","documents":["a","abc"]})";
+  const std::string ranked =
+      R"("results":[{"index":1,"relevance_score":3},{"index":0,"relevance_score":1}])";
+  {
+    auto service = MakeRerankService(true);
+    assert(service->ready());
+    HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, nullptr,
+                      gufo::server::HttpServerOptions{}, nullptr, nullptr,
+                      nullptr, service);
+    std::string error;
+    assert(server.start(&error));
+    std::jthread worker([&] { server.run(false); });
+    const int port = server.port();
+    for (const char* path : {"/v1/rerank", "/v1/reranking", "/rerank"}) {
+      const auto response = EmbeddingPost(port, request, {}, path);
+      ExpectStatus(response, 200);
+      assert(response.find(ranked) != std::string::npos);
+      assert(response.find("\"model\":\"rerank-test\"") != std::string::npos);
+      assert(response.find("\"prompt_tokens\":8") != std::string::npos);
+    }
+    const auto tei = EmbeddingPost(
+        port, R"({"query":"q","texts":["a","abc"],"return_text":true})", {},
+        "/rerank");
+    ExpectStatus(tei, 200);
+    assert(tei.find("\r\n\r\n[{\"index\":1,\"score\":3,\"text\":\"abc\"},"
+                    "{\"index\":0,\"score\":1,\"text\":\"a\"}]") !=
+           std::string::npos);
+    const auto missing_model = EmbeddingPost(
+        port, R"({"model":"other","query":"q","documents":["a"]})", {},
+        "/v1/rerank");
+    ExpectStatus(missing_model, 404);
+    assert(missing_model.find("\"code\":\"model_not_found\"") !=
+           std::string::npos);
+    ExpectStatus(
+        EmbeddingPost(
+            port, R"({"model":"rerank-alias","query":"q","documents":["a"]})",
+            {}, "/v1/rerank"),
+        200);
+    ExpectStatus(EmbeddingPost(port, R"({"query":"q"})", {}, "/v1/rerank"),
+                 400);
+    ExpectStatus(
+        SendParts("127.0.0.1", port, {"GET /v1/rerank HTTP/1.1\r\n\r\n"}), 405);
+    const auto models =
+        SendParts("127.0.0.1", port, {"GET /v1/models HTTP/1.1\r\n\r\n"});
+    ExpectStatus(models, 200);
+    assert(models.find("\"id\":\"rerank-test\"") != std::string::npos);
+    assert(models.find("\"id\":\"rerank-alias\"") != std::string::npos);
+    assert(models.find("\"capability\":\"rerank\"") != std::string::npos);
+    const auto ready =
+        SendParts("127.0.0.1", port, {"GET /ready HTTP/1.1\r\n\r\n"});
+    ExpectStatus(ready, 200);
+    assert(ready.find("\"model\":\"rerank-test\"") != std::string::npos);
+    const auto metrics =
+        SendParts("127.0.0.1", port, {"GET /metrics HTTP/1.1\r\n\r\n"});
+    ExpectStatus(metrics, 200);
+    assert(metrics.find("gufo_rerank_requests_total{status=\"ok\"}") !=
+           std::string::npos);
+    // Routes of other modalities stay absent.
+    ExpectStatus(SendParts("127.0.0.1", port,
+                           {"POST /v1/chat/completions HTTP/1.1\r\n"
+                            "Content-Length: 2\r\n\r\n{}"}),
+                 404);
+    server.stop();
+  }
+  {
+    // A text backend beside the service: the service answers, not the stubs.
+    HttpServer server("127.0.0.1", 0, std::make_shared<FakeBackend>(), nullptr,
+                      nullptr, nullptr, gufo::server::HttpServerOptions{},
+                      nullptr, nullptr, nullptr, MakeRerankService(true));
+    std::string error;
+    assert(server.start(&error));
+    std::jthread worker([&] { server.run(false); });
+    for (const char* path : {"/v1/rerank", "/v1/reranking", "/rerank"}) {
+      const auto response = EmbeddingPost(server.port(), request, {}, path);
+      ExpectStatus(response, 200);
+      assert(response.find(ranked) != std::string::npos);
+    }
+    server.stop();
+  }
+  {
+    // A service that failed to start is not ready and answers 503.
+    auto service = MakeRerankService(false);
+    assert(!service->ready());
+    HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, nullptr, {},
+                      nullptr, nullptr, nullptr, service);
+    std::string error;
+    assert(server.start(&error));
+    std::jthread worker([&] { server.run(false); });
+    const int port = server.port();
+    const auto response = EmbeddingPost(port, request, {}, "/v1/rerank");
+    ExpectStatus(response, 503);
+    assert(response.find("\"code\":\"rerank_service_unavailable\"") !=
+           std::string::npos);
+    ExpectStatus(SendParts("127.0.0.1", port, {"GET /ready HTTP/1.1\r\n\r\n"}),
+                 503);
+    const auto models =
+        SendParts("127.0.0.1", port, {"GET /v1/models HTTP/1.1\r\n\r\n"});
+    assert(models.find("rerank-test") == std::string::npos);
+    server.stop();
+  }
+  {
+    // Without a rerank service, a server with no text backend does not serve
+    // the routes, and one with a backend keeps its llama-server stubs.
+    HttpServer server("127.0.0.1", 0, nullptr);
+    std::string error;
+    assert(server.start(&error));
+    std::jthread worker([&] { server.run(false); });
+    for (const char* path : {"/v1/rerank", "/v1/reranking", "/rerank"})
+      ExpectStatus(EmbeddingPost(server.port(), request, {}, path), 404);
+    server.stop();
+  }
+  {
+    RunningServer text;
+    for (const char* path : {"/v1/rerank", "/v1/reranking", "/rerank"}) {
+      const auto response = text.Post(path, request);
+      ExpectStatus(response, 501);
+      assert(response.find("\"code\":\"not_implemented\"") !=
+             std::string::npos);
+    }
+  }
+  {
+    // A lost device answers 503, runs the shutdown hook once, and fails the
+    // health probe from then on.
+    auto service = std::make_shared<gufo::server::RerankService>(
+        gufo::server::RerankServiceOptions{
+            .model_root = "/nonexistent/reranker",
+            .validate_model = false,
+            .model_id = "rerank-test",
+            .runner =
+                [](const gufo::server::RerankInput&,
+                   std::span<const gufo::server::RerankInput>,
+                   const gufo::server::RerankRequestOptions&,
+                   const std::function<bool()>&, gufo::server::RerankScores*,
+                   std::string*) {
+                  return gufo::server::RerankStatus::kDeviceLost;
+                },
+        });
+    std::atomic<int> hook_calls{0};
+    HttpServer server("127.0.0.1", 0, nullptr, nullptr, nullptr, nullptr,
+                      {.on_device_lost = [&] { ++hook_calls; }}, nullptr,
+                      nullptr, nullptr, service);
+    std::string error;
+    assert(server.start(&error));
+    std::jthread worker([&] { server.run(false); });
+    const int port = server.port();
+    ExpectStatus(SendParts("127.0.0.1", port, {"GET /health HTTP/1.1\r\n\r\n"}),
+                 200);
+    const auto lost = EmbeddingPost(port, request, {}, "/v1/rerank");
+    ExpectStatus(lost, 503);
+    assert(lost.find("\"code\":\"device_lost\"") != std::string::npos);
+    assert(hook_calls.load() == 1);
+    ExpectStatus(SendParts("127.0.0.1", port, {"GET /health HTTP/1.1\r\n\r\n"}),
+                 503);
+    ExpectStatus(EmbeddingPost(port, request, {}, "/rerank"), 503);
+    assert(hook_calls.load() == 1);
+    server.stop();
+  }
+}
+
 void TestEmbeddingService() {
   const std::string request = R"({"model":"embedding-test","input":"hi"})";
   {
@@ -4131,6 +4322,7 @@ int main() {
   TestDeferredStreamHeaders();
   TestAdmittedStreamHeaders();
   TestEmbeddingService();
+  TestRerankService();
   TestDecisionService();
   std::cout << "HTTP transport checks passed.\n";
 }

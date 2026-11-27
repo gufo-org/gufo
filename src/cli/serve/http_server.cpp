@@ -41,6 +41,8 @@
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/openai_chat.hpp"
+#include "src/cli/serve/rerank_api.hpp"
+#include "src/cli/serve/rerank_service.hpp"
 #include "src/cli/serve/responses_logprobs.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/cli/serve/sdapi.hpp"
@@ -408,7 +410,8 @@ HttpResponse ListModels(TextGenerationBackend* backend,
                         const TtsService* tts, const AsrService* asr,
                         const ImageService* images,
                         const EmbeddingService* embeddings,
-                        const DecisionService* decisions) {
+                        const DecisionService* decisions,
+                        const RerankService* rerank) {
   json::Value resp = json::Value::object();
   resp["object"] = "list";
   json::Value data = json::Value::array();
@@ -506,6 +509,18 @@ HttpResponse ListModels(TextGenerationBackend* backend,
       model["created"] = Now();
       model["owned_by"] = "operator-supplied-gemma";
       model["capability"] = "embedding";
+      data.push_back(std::move(model));
+    }
+  }
+  if (rerank != nullptr && rerank->ready()) {
+    for (const auto& id :
+         ServedIds(rerank->model_id(), rerank->model_aliases())) {
+      json::Value model = json::Value::object();
+      model["id"] = id;
+      model["object"] = "model";
+      model["created"] = Now();
+      model["owned_by"] = "gufo";
+      model["capability"] = "rerank";
       data.push_back(std::move(model));
     }
   }
@@ -1172,11 +1187,14 @@ HttpResponse LlamaMetrics(TextGenerationBackend& b) {
 
 std::function<HttpResponse()> MetricsEndpoint(
     const std::shared_ptr<TextGenerationBackend>& text,
-    const std::shared_ptr<EmbeddingService>& embeddings) {
+    const std::shared_ptr<EmbeddingService>& embeddings,
+    const std::shared_ptr<RerankService>& rerank) {
   if (text != nullptr)
     return [text] { return LlamaMetrics(*text); };
   if (embeddings != nullptr)
     return [embeddings] { return PrometheusText(embeddings->RenderMetrics()); };
+  if (rerank != nullptr)
+    return [rerank] { return PrometheusText(rerank->RenderMetrics()); };
   return {};
 }
 
@@ -1261,7 +1279,8 @@ HttpServer::HttpServer(std::string host, int port,
                        HttpServerOptions options,
                        std::shared_ptr<ImageService> images,
                        std::shared_ptr<EmbeddingService> embeddings,
-                       std::shared_ptr<DecisionService> decisions)
+                       std::shared_ptr<DecisionService> decisions,
+                       std::shared_ptr<RerankService> rerank)
     : host_(std::move(host)),
       port_(port),
       backend_(std::move(backend)),
@@ -1271,8 +1290,9 @@ HttpServer::HttpServer(std::string host, int port,
       images_(std::move(images)),
       embeddings_(std::move(embeddings)),
       decisions_(std::move(decisions)),
+      rerank_(std::move(rerank)),
       options_(std::move(options)),
-      metrics_(MetricsEndpoint(backend_, embeddings_)) {
+      metrics_(MetricsEndpoint(backend_, embeddings_, rerank_)) {
   if (options_.max_request_body_bytes == 0 || options_.max_connections == 0) {
     throw std::invalid_argument("HTTP server limits must be positive");
   }
@@ -1478,6 +1498,7 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                        (tts_ != nullptr && tts_->ready()) ||
                        (asr_ != nullptr && asr_->ready()) ||
                        (embeddings_ != nullptr && embeddings_->ready()) ||
+                       (rerank_ != nullptr && rerank_->ready()) ||
                        images_ != nullptr || decisions_ != nullptr;
     if (!ready) {
       return Err(503, "Service Unavailable", "model service is not ready",
@@ -1493,6 +1514,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
       body["model"] = tts_->model_id();
     } else if (embeddings_ != nullptr && embeddings_->ready()) {
       body["model"] = embeddings_->model_id();
+    } else if (rerank_ != nullptr && rerank_->ready()) {
+      body["model"] = rerank_->model_id();
     } else if (decisions_ != nullptr) {
       body["model"] = decisions_->model_id;
     } else if (images_ != nullptr) {
@@ -1505,7 +1528,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   if (req.method == "GET" &&
       (req.path == "/v1/models" || req.path == "/models")) {
     return ListModels(backend_.get(), video_jobs_.get(), tts_.get(), asr_.get(),
-                      images_.get(), embeddings_.get(), decisions_.get());
+                      images_.get(), embeddings_.get(), decisions_.get(),
+                      rerank_.get());
   }
   if (req.path == "/v1/systemone") {
     if (req.method != "POST")
@@ -1602,6 +1626,20 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
       return DeviceLost();
     return response;
   }
+  // Likewise: without a rerank service the llama-server stubs below answer.
+  if (rerank_ != nullptr && IsRerankApiPath(req.path)) {
+    if (device_lost())
+      return DeviceLost();
+    if (!rerank_->ready()) {
+      return Err(503, "Service Unavailable", "rerank service is not ready",
+                 "server_error", "rerank_service_unavailable");
+    }
+    auto response = HandleRerankApiRequest(req, *rerank_);
+    // The request that finds the device lost runs the shutdown hook.
+    if (device_lost())
+      return DeviceLost();
+    return response;
+  }
   if (metrics_ && req.method == "GET" &&
       (req.path == "/metrics" || req.path == "/v1/metrics")) {
     return metrics_();
@@ -1620,6 +1658,7 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
 bool HttpServer::device_lost() {
   const bool lost = (backend_ != nullptr && backend_->device_lost()) ||
                     (embeddings_ != nullptr && embeddings_->device_lost()) ||
+                    (rerank_ != nullptr && rerank_->device_lost()) ||
                     (images_ != nullptr && images_->device_lost());
   if (!lost)
     return false;

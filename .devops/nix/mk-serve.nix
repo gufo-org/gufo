@@ -93,6 +93,7 @@ let
         text_generation = "llm";
         embeddings = "embedding";
         decision = "decision";
+        rerank = "rerank";
         image_generation = "image";
         video_generation = "video";
         speech_synthesis = "tts";
@@ -272,6 +273,7 @@ let
                 "asr"
                 "embedding"
                 "decision"
+                "rerank"
               ]
             )
             [
@@ -496,6 +498,7 @@ let
         "asr"
         "embedding"
         "decision"
+        "rerank"
       ]
       || sessions == null
     ) "gufo.mkServe: image and speech requests are queued; 'sessions' is an LLM/video option";
