@@ -160,6 +160,17 @@ std::size_t RoutedTileCapacity(std::size_t slots, const Config& c) {
 /// Address space reserved per row of the widest pass for its scratch set
 /// (about 0.35 MiB per row today, plus 2 MiB alignment per buffer).
 constexpr std::size_t kArenaRowBytesBound = std::size_t{1} << 20;
+
+// Decode weight prefetch (Executor::Prefetch), ROCm 10.1, Flash-Next UD-Q4:
+// 12 MiB of each attention output projection (16.5 MiB) during the
+// recurrence or attention, with the FFN mixer's down projection (3.5 MiB),
+// and the next attention mixer's down projection after the MoE (tg128
+// 30.5 -> 31.2 tok/s). 24 or 60 blocks, the input projections, and the
+// mixers' up projections with the router measured no better.
+constexpr std::size_t kPrefetchOutputBytes = std::size_t{12} << 20;
+constexpr std::size_t kPrefetchMixerBytes = std::size_t{4} << 20;
+constexpr std::uint32_t kPrefetchBlocks = 40;
+
 /// Memory a wide pass needs beyond its scratch set: its own K/V, indexer
 /// and checkpoint pages.
 constexpr std::size_t kWidePassSpare = std::size_t{1} << 30;
@@ -985,12 +996,15 @@ Executor::~Executor() {
   if (counts_ready_ != nullptr) {
     (void)hipEventDestroy(counts_ready_);
   }
-  for (hipEvent_t event : {side_start_, side_done_}) {
+  for (hipEvent_t event :
+       {side_start_, side_done_, prefetch_fork_, prefetch_done_}) {
     if (event != nullptr)
       (void)hipEventDestroy(event);
   }
   if (side_stream_ != nullptr)
     (void)hipStreamDestroy(side_stream_);
+  if (prefetch_stream_ != nullptr)
+    (void)hipStreamDestroy(prefetch_stream_);
   if (stream_ != nullptr) {
     qfn_mmq_release_stream(stream_);
     (void)hipStreamDestroy(stream_);
@@ -1041,7 +1055,13 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       !Check(hipEventCreateWithFlags(&e->side_start_, hipEventDisableTiming),
              "side stream fork event", error_msg) ||
       !Check(hipEventCreateWithFlags(&e->side_done_, hipEventDisableTiming),
-             "side stream join event", error_msg)) {
+             "side stream join event", error_msg) ||
+      !Check(hipStreamCreate(&e->prefetch_stream_), "prefetch stream",
+             error_msg) ||
+      !Check(hipEventCreateWithFlags(&e->prefetch_fork_, hipEventDisableTiming),
+             "prefetch fork event", error_msg) ||
+      !Check(hipEventCreateWithFlags(&e->prefetch_done_, hipEventDisableTiming),
+             "prefetch join event", error_msg)) {
     return nullptr;
   }
   if (hipblasCreate(&e->blas_) != HIPBLAS_STATUS_SUCCESS ||
@@ -1311,6 +1331,10 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   }
   if (!e->CalibrateDecodeOverlap(error_msg))
     return nullptr;
+  // The weight prefetch adds cross-stream dependencies of the same kind as
+  // the shared-expert overlap; where those cost more than the overlap saves
+  // (issue #1107), the prefetch would too.
+  e->decode_prefetch_ = e->decode_overlap_;
   return e;
 }
 
@@ -3172,6 +3196,9 @@ bool Executor::DefaultLinearAttention(const DeviceLayer& l,
       }
     }
   }
+  if (project_output)
+    Prefetch(n_tokens, &l.hc_ffn.down, kPrefetchMixerBytes, &l.ssm_out,
+             kPrefetchOutputBytes);
   if (!projections_ready &&
       !Dense(l.ssm_alpha_beta, x, s_.alpha_beta, n_tokens, error_msg)) {
     return false;
@@ -3332,6 +3359,9 @@ bool Executor::DefaultAttention(
     UnpackQGate(s_.qg, 2 * c.AttentionQDim(), s_.q, s_.attn_gate, nullptr,
                 nullptr, n_tokens, c.num_heads, c.head_dim, 0, stream_);
   }
+  if (project_output)
+    Prefetch(n_tokens, &l.hc_ffn.down, kPrefetchMixerBytes, &l.attn_out,
+             kPrefetchOutputBytes);
   if (!prepared) {
     RmsNormRows(s_.q, l.attn_q_norm.f32(), s_.q, n_tokens * c.num_heads,
                 c.head_dim, 1, c.rms_eps, stream_);
@@ -3668,6 +3698,60 @@ bool Executor::DefaultMoeFfn(const DeviceLayer& l,
   return MoeExperts(l, x, out, n_tokens, error_msg) && JoinSide(error_msg);
 }
 
+namespace {
+
+/// Bytes of a weight in its stored layout (0 for an unhandled type).
+std::size_t WeightBytes(const DeviceTensor& w) {
+  const std::size_t n = std::size_t{w.rows} * w.cols * w.experts;
+  switch (w.type) {
+    case GgmlType::kQ8_0:
+      return n / 32 * 34;
+    case GgmlType::kF16:
+    case GgmlType::kBF16:
+      return n * 2;
+    case GgmlType::kF32:
+      return n * 4;
+    default:
+      return 0;
+  }
+}
+
+}  // namespace
+
+void Executor::Prefetch(std::uint32_t n_tokens, const DeviceTensor* a,
+                        std::size_t a_bytes, const DeviceTensor* b,
+                        std::size_t b_bytes) const {
+  if (!decode_prefetch_ || prefill_phase || n_tokens > kVecBatch)
+    return;
+  PrefetchRanges ranges;
+  for (auto [w, bytes] : {std::pair{a, a_bytes}, std::pair{b, b_bytes}}) {
+    if (w == nullptr || w->empty() || bytes == 0)
+      continue;
+    const std::size_t total = WeightBytes(*w);
+    bytes = std::min(bytes, total) / 16 * 16;
+    if (bytes == 0)
+      continue;
+    ranges.data[ranges.count] = w->data;
+    ranges.bytes[ranges.count++] = bytes;
+  }
+  if (ranges.count == 0)
+    return;
+  if (hipEventRecord(prefetch_fork_, stream_) != hipSuccess ||
+      hipStreamWaitEvent(prefetch_stream_, prefetch_fork_, 0) != hipSuccess)
+    return;
+  PrefetchRangesKernelLaunch(ranges, kPrefetchBlocks, prefetch_stream_);
+  prefetch_pending_ = true;
+}
+
+void Executor::JoinPrefetch() const {
+  if (!prefetch_pending_)
+    return;
+  prefetch_pending_ = false;
+  if (hipEventRecord(prefetch_done_, prefetch_stream_) != hipSuccess ||
+      hipStreamWaitEvent(stream_, prefetch_done_, 0) != hipSuccess)
+    (void)hipStreamSynchronize(prefetch_stream_);
+}
+
 bool Executor::JoinSide(std::string* error_msg) const {
   if (!side_pending_)
     return true;
@@ -3903,8 +3987,16 @@ bool Executor::DefaultMtpHead(const DeviceMixer& head, const float* res,
 }
 
 bool Executor::Run(Session& session, std::uint64_t key, bool graph,
-                   const std::function<bool()>& body, std::string* error_msg,
+                   const std::function<bool()>& pass, std::string* error_msg,
                    bool synchronize) const {
+  // Every pass (and so every capture) ends with its weight prefetches joined.
+  const auto body = [&] {
+    struct Join {
+      const Executor* executor;
+      ~Join() { executor->JoinPrefetch(); }
+    } join{this};
+    return pass();
+  };
   // A batch shape runs eagerly once before it is captured: the first pass
   // grows the GEMM tier's arena, which capture forbids.
   if (graph && session.warmed_.contains(key)) {
@@ -4451,6 +4543,9 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                  false, no_f32) ||
           !Moe(l, s_.mixed, s_.block_out, rows, error_msg))
         return false;
+      // The next layer's attention mixer follows the MoE epilogue.
+      if (il + 1 < end_layer)
+        Prefetch(rows, &layers[il + 1].hc_attn.down, kPrefetchMixerBytes);
       // The next layer's mixer follows in this pass (without a PLE step:
       // next_norm is null before a PLE layer).
       Combine(s_.res, next_norm, rows, next_inject,
@@ -4620,7 +4715,33 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
     const WideSegment* rows =
         !whole && segment != 0 ? &wide_segments_[segment - 1] : nullptr;
     const std::size_t slot = local - 1;
-    for (std::size_t il = 0; il < session.linear_.size(); ++il) {
+    // One launch restores every layer's state and history when it can.
+    bool batched = false;
+    if (start == nullptr) {
+      GdnRestoreLayers batch;
+      bool fits = true;
+      for (std::size_t il = 0; il < session.linear_.size() && fits; ++il) {
+        auto& l = session.linear_[il];
+        if (l.state == nullptr)
+          continue;
+        if (batch.count == GdnRestoreLayers::kMax) {
+          fits = false;
+          break;
+        }
+        const auto& conv_rows = rows ? rows->conv[il] : l.conv_snapshots;
+        batch.state[batch.count] = l.state;
+        batch.rows[batch.count] = rows ? rows->state[il] : l.state_snapshots;
+        batch.conv[batch.count] = l.conv_state;
+        batch.conv_src[batch.count++] = conv_rows.rows[slot];
+      }
+      batched =
+          fits && conv_elems <= UINT32_MAX &&
+          RestoreGdnLayers(batch, local, c.ssm_num_k_heads, c.ssm_num_v_heads,
+                           static_cast<std::uint32_t>(conv_elems), stream_);
+      if (batched && !Check(hipGetLastError(), "state rollback", error_msg))
+        return false;
+    }
+    for (std::size_t il = 0; il < session.linear_.size() && !batched; ++il) {
       auto& l = session.linear_[il];
       if (l.state == nullptr) {
         continue;

@@ -618,11 +618,12 @@ static void launch_moe_grouped(const void* gate, const void* up,
                                hipStream_t stream) {
   if (n_tokens == tokens) {
     // Q4_K splits groups across two launches from three tokens on, so most
-    // of a block row per slot would only read a group header and exit. Two
-    // block rows walk each launch's anchor list instead. Two tokens keep one
-    // block row per slot.
+    // of a block row per slot would only read a group header and exit. Block
+    // rows walk each launch's anchor list instead: forty, since each walks its
+    // groups in turn (with two, ~20 each; 8-row verification gate/up 468 ->
+    // 443 us). Two tokens keep one block row per slot.
     constexpr bool split = type == GGML_TYPE_Q4_K && tokens >= 3;
-    constexpr int kListRows = 2;
+    constexpr int kListRows = 40;
     const int anchors = tokens * experts_used;
     const int32_t* lists = split ? groups + anchors * (tokens + 1) : nullptr;
     const dim3 grid((rows + 1) / 2,

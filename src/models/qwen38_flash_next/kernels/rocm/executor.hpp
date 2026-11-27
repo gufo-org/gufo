@@ -783,6 +783,13 @@ private:
                         std::string* error_msg, bool last_only,
                         bool projections_ready, bool project_output,
                         PassCheckpoints checkpoints) const;
+  /// Queues reads of the first `bytes` of each weight on prefetch_stream_
+  /// once the main stream reaches this point (decode passes only).
+  void Prefetch(std::uint32_t n_tokens, const DeviceTensor* a,
+                std::size_t a_bytes, const DeviceTensor* b = nullptr,
+                std::size_t b_bytes = 0) const;
+  /// Orders the main stream after the queued prefetches.
+  void JoinPrefetch() const;
   /// Orders the main stream after the work queued on side_stream_.
   bool JoinSide(std::string* error_msg) const;
   /// Routing, then the MoeFfn stage (stages_).
@@ -915,6 +922,16 @@ private:
   hipEvent_t side_start_{nullptr};
   hipEvent_t side_done_{nullptr};
   mutable bool side_pending_{false};  ///< side_done_ not yet waited on
+  /// Decode weight prefetch (Prefetch): a read-only side stream that warms
+  /// the last-level cache with the weights a later kernel of the pass reads,
+  /// while short latency-bound kernels leave DRAM idle.
+  hipStream_t prefetch_stream_{nullptr};
+  hipEvent_t prefetch_fork_{nullptr};
+  hipEvent_t prefetch_done_{nullptr};
+  mutable bool prefetch_pending_{false};
+  /// Set with decode_overlap_ (Create): both depend on cheap cross-stream
+  /// dependencies inside decode graphs.
+  bool decode_prefetch_{false};
   /// Whether 1-8-row decode passes run the shared expert on side_stream_.
   /// Their graphs then fork and join once per MoE layer, and what those two
   /// cross-stream dependencies cost depends on the runtime. On Linux/ROCm

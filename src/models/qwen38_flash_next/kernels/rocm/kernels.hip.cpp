@@ -1773,6 +1773,59 @@ __global__ void GdnKernel(const float* conv_out, const float* qn,
   }
 }
 
+/// RestoreGdnStateKernel's arithmetic for the four consecutive state
+/// elements from `i` (a multiple of four); the loads and stores are 16 bytes.
+__device__ __forceinline__ void RestoreGdnState4(
+    float* state, const RollbackRows& snapshots, std::uint32_t keep,
+    std::uint32_t k_heads, std::uint32_t v_heads, std::size_t i) {
+  constexpr std::uint32_t d = kGdnDim;
+  const auto h = i / (d * d);
+  const auto j = (i / d) % d;
+  const auto k0 = i % d;
+  const float4 base = *reinterpret_cast<const float4*>(snapshots.rows[0] + i);
+  float value[4] = {base.x, base.y, base.z, base.w};
+  for (std::uint32_t t = 1; t < keep; ++t) {
+    const auto* update = snapshots.rows[t];
+    const float decay = update[k_heads * d + h];
+    const float beta = update[k_heads * d + v_heads + h];
+    const float error = update[k_heads * d + 2 * v_heads + h * d + j];
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+      const auto k = k0 + e;
+      const float key = update[(h % k_heads) * d + k];
+      const float correction = __fmul_rn(error, key);
+      value[e] = (k + 1) % (d / kGdnLanes) == 0
+                     ? GdnLastUpdate(value[e], decay, error, key, beta)
+                     : __fmaf_rn(beta, correction, __fmul_rn(value[e], decay));
+    }
+  }
+  *reinterpret_cast<float4*>(state + i) =
+      make_float4(value[0], value[1], value[2], value[3]);
+}
+
+/// Every layer's RestoreGdnState and convolution history copy in one launch:
+/// grid row y is layer y; its threads cover the state, then the history, four
+/// floats each.
+__global__ void RestoreGdnLayersKernel(GdnRestoreLayers layers,
+                                       std::uint32_t keep,
+                                       std::uint32_t k_heads,
+                                       std::uint32_t v_heads,
+                                       std::uint32_t conv_elems) {
+  const std::size_t state4 = std::size_t{v_heads} * kGdnDim * kGdnDim / 4;
+  const std::size_t i = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+  const std::uint32_t l = blockIdx.y;
+  if (i < state4) {
+    RestoreGdnState4(layers.state[l], layers.rows[l], keep, k_heads, v_heads,
+                     i * 4);
+    return;
+  }
+  const std::size_t c = i - state4;
+  if (c < conv_elems / 4) {
+    reinterpret_cast<float4*>(layers.conv[l])[c] =
+        reinterpret_cast<const float4*>(layers.conv_src[l])[c];
+  }
+}
+
 __global__ void RestoreGdnStateKernel(float* state, RollbackRows snapshots,
                                       std::uint32_t keep, std::uint32_t k_heads,
                                       std::uint32_t v_heads) {
@@ -6983,6 +7036,35 @@ __launch_bounds__(kThreads) __global__
 
 }  // namespace
 
+namespace {
+
+__global__ __launch_bounds__(256) void PrefetchRangesKernel(
+    PrefetchRanges ranges, unsigned* sink) {
+  unsigned acc = 0;
+  for (int r = 0; r < ranges.count; ++r) {
+    const auto* p = static_cast<const uint4*>(ranges.data[r]);
+    const std::size_t n = ranges.bytes[r] / sizeof(uint4);
+    for (std::size_t i = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+         i < n; i += std::size_t{gridDim.x} * blockDim.x) {
+      const uint4 v = p[i];
+      acc ^= v.x ^ v.y ^ v.z ^ v.w;
+    }
+  }
+  // Keeps the loads; never true in practice, and sink is null.
+  if (acc == 0x9e3779b9u && sink != nullptr)
+    *sink = acc;
+}
+
+}  // namespace
+
+void PrefetchRangesKernelLaunch(const PrefetchRanges& ranges,
+                                std::uint32_t blocks, hipStream_t stream) {
+  if (ranges.count == 0 || blocks == 0)
+    return;
+  hipLaunchKernelGGL(PrefetchRangesKernel, dim3(blocks), dim3(256), 0, stream,
+                     ranges, nullptr);
+}
+
 void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
                  float* res, std::uint32_t n_tokens, std::uint32_t hidden,
                  std::uint32_t streams, hipStream_t stream) {
@@ -8616,6 +8698,30 @@ void RestoreGdnState(float* state, RollbackRows snapshots, std::uint32_t keep,
   const auto count = std::size_t{v_heads} * kGdnDim * kGdnDim;
   RestoreGdnStateKernel<<<(count + 255) / 256, 256, 0, stream>>>(
       state, snapshots, keep, k_heads, v_heads);
+}
+
+bool RestoreGdnLayers(const GdnRestoreLayers& layers, std::uint32_t keep,
+                      std::uint32_t k_heads, std::uint32_t v_heads,
+                      std::uint32_t conv_elems, hipStream_t stream) {
+  if (layers.count == 0)
+    return true;
+  if (conv_elems % 4 != 0 || layers.count > GdnRestoreLayers::kMax)
+    return false;
+  for (int l = 0; l < layers.count; ++l) {
+    for (const void* p : {static_cast<const void*>(layers.state[l]),
+                          static_cast<const void*>(layers.rows[l].rows[0]),
+                          static_cast<const void*>(layers.conv[l]),
+                          static_cast<const void*>(layers.conv_src[l])}) {
+      if (reinterpret_cast<std::uintptr_t>(p) % 16 != 0)
+        return false;
+    }
+  }
+  const std::size_t items =
+      std::size_t{v_heads} * kGdnDim * kGdnDim / 4 + conv_elems / 4;
+  RestoreGdnLayersKernel<<<dim3((items + 255) / 256, layers.count), 256, 0,
+                           stream>>>(layers, keep, k_heads, v_heads,
+                                     conv_elems);
+  return true;
 }
 
 void HistoryPrefix(const float* in, std::uint32_t stride, const float* history,
