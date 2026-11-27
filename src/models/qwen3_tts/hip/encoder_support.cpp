@@ -7,6 +7,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <gufo/ext/experimental/rocblas_gemm.hpp>
 #include <limits>
 #include <ranges>
 #include <stdexcept>
@@ -155,7 +156,8 @@ void EncoderF32Gemm::Run(const float* weight, const float* input, float* output,
           static_cast<rocblas_int>(rows), static_cast<rocblas_int>(reduction),
           &alpha, weight, rocblas_datatype_f32_r,
           static_cast<rocblas_int>(reduction), input, rocblas_datatype_f32_r,
-          static_cast<rocblas_int>(reduction), &beta, output,
+          static_cast<rocblas_int>(reduction), &beta,
+          gufo::hip::BetaZeroGemmC(output, output_columns, rows),
           rocblas_datatype_f32_r, static_cast<rocblas_int>(output_columns),
           output, rocblas_datatype_f32_r,
           static_cast<rocblas_int>(output_columns), rocblas_datatype_f32_r,

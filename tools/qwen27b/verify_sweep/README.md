@@ -7,7 +7,7 @@ is split over waves (waves per block, rows per wave, 16- or 32-lane groups,
 staging tiles) decides how close the GPU gets to its memory bandwidth.
 `src/families/qwen/kernels/verify_gemm_27b.hip` holds the shapes measured
 faster on gfx1151 for Qwen3.8-27B UD-Q4_K_XL and its Q4_K_M DFlash2 draft, one
-table for Linux (ROCm 10.1) and one for Windows (`_WIN32`, TheRock 10.0.0); any
+table for Linux (ROCm 10.1) and one for Windows (`_WIN32`, TheRock 10.1.0); any
 projection the build's table does not list keeps the generic
 `LaunchBatchedQuantGEMMFp32` dispatch.
 
@@ -83,8 +83,7 @@ A shape is listed where the first sweep's best candidate saves at least
 `--min-gain` percent over `generic`, summed over target and draft weighted by
 their layer counts, and saves that much in the second sweep too. `--skip`
 leaves out a candidate that spills with your compiler. The Windows table was
-generated this way, less IQ4_XS joined ffn_gate+ffn_up (34816x5120) at four
-rows, which saved under 1% in a later sweep.
+generated this way.
 
 ## Limits
 
@@ -93,8 +92,8 @@ rows, which saved under 1% in a later sweep.
 - The candidate set is the neighbourhood of shapes picked so far, not an
   exhaustive search.
 - The Linux shapes were measured on gfx1151 with ROCm 10.1, the Windows
-  shapes on gfx1151 with TheRock 10.0.0. The two toolchains favour different
-  shapes: shapes picked under Windows were up to 29% slower than `generic` on
-  Linux (16-lane groups at six to eight rows), and Linux shapes up to 14%
-  slower than `generic` on Windows (IQ4_XS FFN projections at five rows). A
-  new toolchain needs a new sweep.
+  shapes on gfx1151 with TheRock 10.1.0. The two platforms favour different
+  shapes even with the same ROCm release, so each keeps its own table. A new
+  toolchain needs a new sweep: with the Windows table picked under TheRock
+  10.0.0, a 10.1.0 build ran seven of its shapes slower than `generic`, by up
+  to 11.7% (Q5_K attn_gate at five rows).

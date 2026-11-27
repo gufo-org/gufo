@@ -1,4 +1,4 @@
-#include <hipblas/hipblas.h>
+#include <rocblas/rocblas.h>
 
 #include <algorithm>
 #include <bit>
@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <gufo/ext/experimental/hip_utils.hpp>
+#include <gufo/ext/experimental/rocblas_gemm.hpp>
 #include "audio_runtime.hpp"
 #include "loader.hpp"
 
@@ -184,16 +185,16 @@ __global__ void Bias(float* x, const float* bias, int rows) {
   if (i < rows * 1536)
     x[i] += bias[i % 1536];
 }
-void BlasCheck(hipblasStatus_t status) {
-  if (status != HIPBLAS_STATUS_SUCCESS)
-    throw std::runtime_error("embedding_gemma2: audio hipBLAS failed: " +
+void BlasCheck(rocblas_status status) {
+  if (status != rocblas_status_success)
+    throw std::runtime_error("embedding_gemma2: audio rocBLAS failed: " +
                              std::to_string(status));
 }
 }  // namespace
 
 struct AudioRuntime::Impl {
   hipStream_t stream;
-  hipblasHandle_t blas{nullptr};
+  rocblas_handle blas{nullptr};
   std::map<std::string, Buffer> weights;
   std::map<std::string, float> scalars;
   Buffer input{kMaxFrames * 128}, conv0{1500 * 64 * 128},
@@ -206,7 +207,7 @@ struct AudioRuntime::Impl {
   Buffer projected{kMaxTokens * 1536}, features{kMaxTokens * 512};
   ~Impl() {
     if (blas)
-      gufo::hip::LogCleanupError(hipblasDestroy(blas));
+      (void)rocblas_destroy_handle(blas);
   }
   explicit Impl(hipStream_t supplied) : stream(supplied) {}
   const float* W(const std::string& name) const {
@@ -214,9 +215,16 @@ struct AudioRuntime::Impl {
   }
   void Gemm(const std::string& name, const float* x, float* y, int n, int m,
             int width) {
+    // rocBLAS rather than hipBLAS, whose GEMMs always run in place: a
+    // one-token clip needs a separate C (BetaZeroGemmC) on Windows.
     constexpr float alpha = 1, beta = 0;
-    BlasCheck(hipblasSgemm(blas, HIPBLAS_OP_T, HIPBLAS_OP_N, m, n, width,
-                           &alpha, W(name), width, x, width, &beta, y, m));
+    BlasCheck(rocblas_gemm_ex(
+        blas, rocblas_operation_transpose, rocblas_operation_none, m, n, width,
+        &alpha, W(name), rocblas_datatype_f32_r, width, x,
+        rocblas_datatype_f32_r, width, &beta,
+        gufo::hip::BetaZeroGemmC<float>(y, m, n), rocblas_datatype_f32_r, m, y,
+        rocblas_datatype_f32_r, m, rocblas_datatype_f32_r,
+        rocblas_gemm_algo_standard, 0, 0));
   }
   void Linear(const std::string& name, const float* x, float* y, int n, int m,
               int width) {
@@ -255,8 +263,8 @@ AudioRuntime::AudioRuntime(const std::string& model_dir, hipStream_t stream)
   if (!loaded.ok)
     throw std::runtime_error(loaded.error);
   auto& a = *impl_;
-  BlasCheck(hipblasCreate(&a.blas));
-  BlasCheck(hipblasSetStream(a.blas, stream));
+  BlasCheck(rocblas_create_handle(&a.blas));
+  BlasCheck(rocblas_set_stream(a.blas, stream));
   for (const auto& expected : ExpectedAudioTensors()) {
     const auto* tensor = loaded.store->Find(expected.name);
     const auto count = *tensor->NumElements();

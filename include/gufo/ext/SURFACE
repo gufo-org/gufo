@@ -26,6 +26,7 @@ include/gufo/ext/experimental/host_allocations.hpp
 include/gufo/ext/experimental/lora_adapter.hpp
 include/gufo/ext/experimental/managed_alloc.hpp
 include/gufo/ext/experimental/npu.hpp
+include/gufo/ext/experimental/rocblas_gemm.hpp
 include/gufo/ext/experimental/snapshot_transfer.hpp
 include/gufo/ext/experimental/state_memory.hpp
 include/gufo/ext/experimental/weight_upload.hpp
@@ -115,6 +116,7 @@ src/core/hip/heap_placement.hpp
 src/core/hip/hip_utils.hpp
 src/core/hip/host_allocations.hpp
 src/core/hip/managed_alloc.hpp
+src/core/hip/rocblas_gemm.hpp
 src/core/hip/scratch_arena.hpp
 src/core/hip/session_state.hpp
 src/core/hip/snapshot_copy.hpp
@@ -147,6 +149,7 @@ src/core/platform/pages.hpp
 src/core/platform/prefault.hpp
 src/core/platform/process.hpp
 src/core/platform/publish.hpp
+src/core/platform/rocblas_kernels.hpp
 src/core/quant/ggml_dequant.hpp
 src/core/quant/ggml_gemm.hpp
 src/core/reasoning.hpp

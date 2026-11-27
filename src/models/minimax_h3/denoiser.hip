@@ -21,6 +21,7 @@
 
 #include <gufo/ext/platform/mapped_file.hpp>
 #include <gufo/ext/platform/os_info.hpp>
+#include <gufo/ext/experimental/rocblas_gemm.hpp>
 #include "src/models/minimax_h3/denoiser.hpp"
 #include "src/models/minimax_h3/dit.hpp"
 #include "src/models/minimax_h3/dit_ops.hip.hpp"
@@ -509,9 +510,10 @@ public:
         static_cast<rocblas_int>(columns), &alpha, weight,
         rocblas_datatype_f32_r, static_cast<rocblas_int>(columns), input,
         rocblas_datatype_f32_r, static_cast<rocblas_int>(columns), &beta,
-        output, rocblas_datatype_f32_r, static_cast<rocblas_int>(rows), output,
-        rocblas_datatype_f32_r, static_cast<rocblas_int>(rows),
-        rocblas_datatype_f32_r, rocblas_gemm_algo_standard, 0, 0);
+        gufo::hip::BetaZeroGemmC(output, rows, batch), rocblas_datatype_f32_r,
+        static_cast<rocblas_int>(rows), output, rocblas_datatype_f32_r,
+        static_cast<rocblas_int>(rows), rocblas_datatype_f32_r,
+        rocblas_gemm_algo_standard, 0, 0);
     if (status != rocblas_status_success) {
       SetError(error, "MiniMax H3 F32 projection GEMM failed: " +
                           std::to_string(static_cast<int>(status)));

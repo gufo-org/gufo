@@ -509,10 +509,15 @@ __launch_bounds__(WM * WN * 32) __global__
       fetch(ks0 + BK);
 #pragma unroll
     for (int ks = 0; ks < BK; ++ks) {
-      v16bf a[WRS];
+      // A struct per fragment: clang 24 (ROCm 10.1) promotes a plain v16bf
+      // array to one <32 x half> vector and extracts each fragment through
+      // i256, which costs 16 extra VALU instructions per fragment load.
+      struct Fragment {
+        v16bf v;
+      } a[WRS];
 #pragma unroll
       for (int i = 0; i < WRS; ++i) {
-        a[i] = LoadSwizzled(&s_a[ks][(wr * WRS) + i][sl ^ (ks & 3)][0]);
+        a[i].v = LoadSwizzled(&s_a[ks][(wr * WRS) + i][sl ^ (ks & 3)][0]);
       }
 #pragma unroll
       for (int j = 0; j < WTS; ++j) {
@@ -521,9 +526,9 @@ __launch_bounds__(WM * WN * 32) __global__
 #pragma unroll
         for (int i = 0; i < WRS; ++i) {
           if constexpr (Type == gufo::core::GgmlType::kIQ3_S)
-            acc[i][j] = WmmaHalf(a[i], b, acc[i][j]);
+            acc[i][j] = WmmaHalf(a[i].v, b, acc[i][j]);
           else
-            acc[i][j] = WmmaHalf(b, a[i], acc[i][j]);
+            acc[i][j] = WmmaHalf(b, a[i].v, acc[i][j]);
         }
       }
     }

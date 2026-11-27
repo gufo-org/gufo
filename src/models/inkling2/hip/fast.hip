@@ -3135,34 +3135,39 @@ __global__ void __launch_bounds__(64 * RG) k_gemm4(GP3 p, int rgn) {
     __syncthreads();
     for (int kb = 0; kb < NK; kb++) {
       int cur = kb & 1;
-      v16h av[GA ? TTW : 1][4];
+      // A struct per fragment: clang 24 (ROCm 10.1) promotes small plain
+      // fragment arrays to one wide vector and extracts each fragment through
+      // an integer, 16 extra VALU instructions per fragment.
+      struct Fragment {
+        v16h v;
+      } av[GA ? TTW : 1][4];
       if constexpr (GA) {
 #pragma unroll
         for (int t = 0; t < TTW; t++)
 #pragma unroll
           for (int ks = 0; ks < 4; ks++)
-            av[t][ks] = *(const v16h_a16*)(garow[t] + kb * 64 + ks * 16);
+            av[t][ks].v = *(const v16h_a16*)(garow[t] + kb * 64 + ks * 16);
       }
       if (kb + 1 < NK)
         gload(kb + 1);
 #pragma unroll
       for (int ks = 0; ks < 4; ks++) {
-        v16h bf[2];
+        Fragment bf[2];
 #pragma unroll
         for (int r = 0; r < 2; r++)
-          bf[r] = *(
+          bf[r].v = *(
               const v16h_a16*)&Ws[cur][(rg * 32 + 16 * r + ln) * STR + ks * 16];
 #pragma unroll
         for (int t = 0; t < TTW; t++) {
           v16h a;
           if constexpr (GA)
-            a = av[t][ks];
+            a = av[t][ks].v;
           else
             a = *(const v16h_a16*)&As[cur][(th * (BN / 2) + 16 * t + ln) * STR +
                                            ks * 16];
 #pragma unroll
           for (int r = 0; r < 2; r++)
-            facc[t][r] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, bf[r],
+            facc[t][r] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, bf[r].v,
                                                                     facc[t][r]);
         }
       }

@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include <gufo/ext/experimental/rocblas_gemm.hpp>
 #include "src/models/minimax_h3/runtime.hpp"
 #include "src/models/minimax_h3/video_vae_encoder.hpp"
 #include "src/models/minimax_h3/video_vae_encoder_ops.hip.hpp"
@@ -516,8 +517,9 @@ struct VideoVaeEncoder::Impl {
         static_cast<rocblas_int>(conv.columns), &alpha, conv.weight.As<float>(),
         rocblas_datatype_f32_r, static_cast<rocblas_int>(conv.columns), input,
         rocblas_datatype_f32_r, static_cast<rocblas_int>(conv.columns), &beta,
-        output, rocblas_datatype_f32_r,
-        static_cast<rocblas_int>(conv.out_channels), output,
+        gufo::hip::BetaZeroGemmC(output, conv.out_channels, batch),
+        rocblas_datatype_f32_r, static_cast<rocblas_int>(conv.out_channels),
+        output,
         rocblas_datatype_f32_r, static_cast<rocblas_int>(conv.out_channels),
         rocblas_datatype_f32_r, rocblas_gemm_algo_standard, 0, 0);
     if (status != rocblas_status_success) {
