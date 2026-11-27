@@ -1095,12 +1095,15 @@ public:
       st.history.push_back(static_cast<std::int32_t>(token));
     if (st.block == Block::kThinking && token == t_end_message_)
       st.thought_closed = true;
+    // NextBlock() reads `call_prefix` as Piece() did: the name tokens before
+    // `token`.
+    const Block next = NextBlock(st, token);
     if (token == t_header_)
       st.call_prefix.clear();
     else if ((st.block == Block::kAfterHeader || st.block == Block::kTool) &&
              token != t_invoke_)
       st.call_prefix.push_back(token);
-    st.block = NextBlock(st, token);
+    st.block = next;
   }
   /// One token for each of several sessions in a single weight pass
   /// (Engine::DecodeBatch).

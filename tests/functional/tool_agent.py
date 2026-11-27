@@ -635,6 +635,27 @@ def check_action_verb_tool_names(client, model, checks, chat_result):
             assert call["name"] == name, result
             assert json.loads(call["arguments"]) == {
                 "path": "/tmp/app.py", "oldText": "TIMEOUT = 30", "newText": "TIMEOUT = 90"}, result
+    # A response format leaves header words to the declared names: a name of
+    # several tokens stays a call.
+    weather = {"type": "function", "function": {"name": "get_current_weather", "parameters": {
+        "type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}
+    request = dict(model=model, tools=[weather], tool_choice="required", temperature=0, seed=41,
+                   max_completion_tokens=answer_room(256), extra_body={"cache_prompt": False},
+                   messages=[{"role": "user", "content": "What is the weather in Paris right now?"}],
+                   response_format={"type": "json_schema", "json_schema": {
+                       "name": "answer", "strict": True, "schema": {
+                           "type": "object", "properties": {"answer": {"type": "string"}},
+                           "required": ["answer"], "additionalProperties": False}}})
+    for streaming in (False, True):
+        label = f"schema_edges_required_response_format_{'stream' if streaming else 'buffered'}"
+        result = chat_result(client, request, streaming)
+        checks[label] = result
+        print("CHECK " + label, file=sys.stderr, flush=True)
+        assert "<|" not in result["text"], result
+        assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+        call = result["tools"][0]["function"]
+        assert call["name"] == "get_current_weather", result
+        assert json.loads(call["arguments"]) == {"city": "Paris"}, result
 
 
 def check_tool_agent(client, model, checks, chat_result, vision, image_content):
