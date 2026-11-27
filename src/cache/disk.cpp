@@ -1019,25 +1019,6 @@ struct DiskStore::Impl {
   void Verify(const platform::Directory& directory, const DiskPayload& payload,
               std::span<std::uint8_t> staging = {},
               const DiskStagingAccess* access = nullptr) {
-    // Reject a caller's conflicting claim without poisoning existing owners.
-    // Only a failure against the store's attested checksum/length quarantines.
-    {
-      std::lock_guard guard(index_mutex);
-      for (const auto& entry : entries)
-        for (const auto& component : entry.manifest_->components) {
-          if (&directory == &private_files) {
-            for (const auto& existing :
-                 {component.tail, component.private_state})
-              if (existing && existing->file == payload.file &&
-                  *existing != payload)
-                Invalid();
-          } else {
-            for (const auto& existing : component.chunks)
-              if (existing.file == payload.file && existing != payload)
-                Invalid();
-          }
-        }
-    }
     std::error_code ec;
     platform::PlatformFile descriptor;
     {
@@ -1145,60 +1126,100 @@ struct DiskStore::Impl {
     auto name = DiskFileName(file);
     if (Exists(manifests, name) || Exists(temporary, name))
       Invalid();
-    std::map<std::pair<bool, DiskFileId>, DiskPayload> dependencies;
+    struct Dependency {
+      DiskPayload payload;
+      const DiskWriteBuffer* buffer{};
+      const DiskWriteSource* source{};
+      std::optional<DiskPayload> attested{};
+      bool conflicting{};
+      bool inherited_checksum{};
+    };
+    std::map<std::pair<bool, DiskFileId>, Dependency> dependencies;
     for (const auto& c : m.components) {
       for (const auto& p : c.chunks)
-        dependencies.emplace(std::make_pair(false, p.file), p);
+        dependencies.try_emplace({false, p.file}, Dependency{p});
       for (auto p : {c.tail, c.private_state})
         if (p)
-          dependencies.emplace(std::make_pair(true, p->file), *p);
+          dependencies.try_emplace({true, p->file}, Dependency{*p});
     }
     // Reject surplus/duplicate buffers; a reused chunk may have a supplied
     // buffer, but its existing immutable file is still independently verified.
-    for (std::size_t i = 0; i < buffers.size(); ++i) {
-      auto& b = buffers[i];
+    for (const auto& b : buffers) {
       auto it = dependencies.find({b.private_file, b.file});
-      if (it == dependencies.end() || b.bytes.size() != it->second.bytes ||
-          DiskChecksum(b.bytes) != it->second.checksum)
+      if (it == dependencies.end() || it->second.buffer ||
+          b.bytes.size() != it->second.payload.bytes ||
+          DiskChecksum(b.bytes) != it->second.payload.checksum)
         Invalid();
-      for (std::size_t j = 0; j < i; ++j)
-        if (buffers[j].file == b.file &&
-            buffers[j].private_file == b.private_file)
-          Invalid();
+      it->second.buffer = &b;
     }
-    for (std::size_t i = 0; i < sources.size(); ++i) {
-      const auto& source = sources[i];
+    for (const auto& source : sources) {
       auto it = dependencies.find({source.private_file, source.file});
-      if (it == dependencies.end() || source.bytes != it->second.bytes ||
-          !source.read || !source.alignment ||
-          staging.size() < source.alignment || source.bytes % source.alignment)
+      if (it == dependencies.end() || it->second.source ||
+          source.bytes != it->second.payload.bytes || !source.read ||
+          !source.alignment || staging.size() < source.alignment ||
+          source.bytes % source.alignment)
         Invalid();
-      for (std::size_t j = 0; j < i; ++j)
-        if (sources[j].file == source.file &&
-            sources[j].private_file == source.private_file)
-          Invalid();
+      it->second.source = &source;
     }
-    // Most writes fit even if every payload were new. Only inspect stored
-    // ownership when that upper bound exceeds the remaining capacity.
+    // Collect only this publication's claims in one pass over retained
+    // manifests. The I/O lock keeps ownership stable until publication ends.
+    if (!dependencies.empty()) {
+      std::lock_guard guard(index_mutex);
+      const auto attest = [&](bool is_private, const DiskPayload& payload) {
+        auto it = dependencies.find({is_private, payload.file});
+        if (it == dependencies.end())
+          return;
+        auto& dependency = it->second;
+        if (!dependency.attested)
+          dependency.attested = payload;
+        else if (*dependency.attested != payload)
+          dependency.conflicting = true;
+      };
+      for (const auto& entry : entries)
+        for (const auto& component : entry.manifest_->components) {
+          for (const auto& payload : component.chunks)
+            attest(false, payload);
+          for (const auto& payload : {component.tail, component.private_state})
+            if (payload)
+              attest(true, *payload);
+        }
+    }
+    const auto apply_checksums = [&](DiskManifest& manifest,
+                                     bool inherited_only) {
+      const auto apply = [&](bool is_private, DiskPayload& payload) {
+        const auto& dependency = dependencies.at({is_private, payload.file});
+        if (!inherited_only || dependency.inherited_checksum)
+          payload.checksum = dependency.payload.checksum;
+      };
+      for (auto& component : manifest.components) {
+        for (auto& payload : component.chunks)
+          apply(false, payload);
+        for (auto* payload : {&component.tail, &component.private_state})
+          if (*payload)
+            apply(true, **payload);
+      }
+    };
+    // Most writes fit even if every payload were new. Use that upper bound
+    // to skip calculating the exact new bytes when capacity is sufficient.
     auto remaining = stats.managed_bytes > budget_bytes
                          ? 0
                          : budget_bytes - stats.managed_bytes;
     bool check_capacity = bytes.size() > remaining;
     if (!check_capacity) {
       remaining -= bytes.size();
-      for (const auto& [key, payload] : dependencies) {
-        if (payload.bytes > remaining) {
+      for (const auto& [key, dependency] : dependencies) {
+        if (dependency.payload.bytes > remaining) {
           check_capacity = true;
           break;
         }
-        remaining -= payload.bytes;
+        remaining -= dependency.payload.bytes;
       }
     }
     if (check_capacity) {
       std::uint64_t required = bytes.size();
-      for (const auto& [key, payload] : dependencies)
-        if (!Referenced(key.first ? private_files : chunks, payload.file))
-          required = Add(required, payload.bytes);
+      for (const auto& [key, dependency] : dependencies)
+        if (!dependency.attested)
+          required = Add(required, dependency.payload.bytes);
       // Eviction can retry this publication many times. Refuse it before
       // reading and checksumming the shared prefix on every failed attempt.
       if (stats.managed_bytes > budget_bytes ||
@@ -1206,49 +1227,21 @@ struct DiskStore::Impl {
         throw DiskCapacityExhausted();
     }
     std::uint64_t additional = bytes.size();
-    for (auto& [key, p] : dependencies) {
+    for (auto& [key, dependency] : dependencies) {
+      auto& p = dependency.payload;
       const platform::Directory& dir = key.first ? private_files : chunks;
-      if (Referenced(dir, p.file)) {
+      if (dependency.attested) {
         // Streamed captures do not hash their immutable sources up front.
         // A queued continuation may reuse a chunk published by an earlier
         // job. Resolve its unspecified checksum from the store's attestation,
         // then verify the file against that attestation before reusing it.
-        if (!p.checksum &&
-            std::ranges::any_of(sources, [&](const auto& source) {
-              return source.private_file == key.first && source.file == p.file;
-            })) {
-          std::lock_guard guard(index_mutex);
-          const auto resolve = [&](const DiskPayload& existing) {
-            if (existing.file != p.file)
-              return;
-            if (existing.bytes != p.bytes)
-              Invalid();
-            p.checksum = existing.checksum;
-          };
-          for (const auto& entry : entries)
-            for (const auto& component : entry.manifest_->components) {
-              if (key.first) {
-                for (const auto& payload :
-                     {component.tail, component.private_state})
-                  if (payload)
-                    resolve(*payload);
-              } else {
-                for (const auto& payload : component.chunks)
-                  resolve(payload);
-              }
-            }
-          for (auto& component : candidate.manifest_->components) {
-            if (key.first) {
-              for (auto* payload : {&component.tail, &component.private_state})
-                if (*payload && (*payload)->file == p.file)
-                  **payload = p;
-            } else {
-              for (auto& payload : component.chunks)
-                if (payload.file == p.file)
-                  payload = p;
-            }
-          }
+        if (!p.checksum && dependency.source) {
+          p.checksum = dependency.attested->checksum;
+          dependency.inherited_checksum = true;
         }
+        // Reject conflicting claims before I/O can quarantine valid owners.
+        if (dependency.conflicting || p != *dependency.attested)
+          Invalid();
         Verify(dir, p, staging, access);
         continue;
       }
@@ -1257,14 +1250,7 @@ struct DiskStore::Impl {
         Invalid();
       if (p.file == file)
         Invalid();  // temporary namespace is shared
-      auto it =
-          std::find_if(buffers.begin(), buffers.end(), [&](const auto& b) {
-            return b.private_file == key.first && b.file == p.file;
-          });
-      if (it == buffers.end() &&
-          std::none_of(sources.begin(), sources.end(), [&](const auto& s) {
-            return s.private_file == key.first && s.file == p.file;
-          }))
+      if (!dependency.buffer && !dependency.source)
         Invalid();
       additional = Add(additional, p.bytes);
     }
@@ -1273,6 +1259,8 @@ struct DiskStore::Impl {
     if (stats.managed_bytes > budget_bytes ||
         additional > budget_bytes - stats.managed_bytes)
       throw DiskCapacityExhausted();
+    if (!sources.empty())
+      apply_checksums(*candidate.manifest_, true);
     std::unique_lock index_guard(index_mutex, std::defer_lock);
     {
       CostTimer timer(publication_stats.metadata_lock_ns);
@@ -1356,23 +1344,17 @@ struct DiskStore::Impl {
         if (!syncing.empty())
           sync.emplace(syncing_files, kPayloadSyncThreads);
       };
-      for (auto& [key, p] : dependencies) {
+      for (auto& [key, dependency] : dependencies) {
+        auto& p = dependency.payload;
         const platform::Directory& dir = key.first ? private_files : chunks;
         auto payload_name = DiskFileName(p.file);
         if (Exists(dir, payload_name))
           continue;
-        auto it =
-            std::find_if(buffers.begin(), buffers.end(), [&](const auto& b) {
-              return b.private_file == key.first && b.file == p.file;
-            });
         auto fd = Create(payload_name);
-        if (it != buffers.end()) {
-          WriteFile(fd.Get(), it->bytes);
+        if (dependency.buffer) {
+          WriteFile(fd.Get(), dependency.buffer->bytes);
         } else {
-          auto source =
-              std::find_if(sources.begin(), sources.end(), [&](const auto& s) {
-                return s.private_file == key.first && s.file == p.file;
-              });
+          auto* source = dependency.source;
           std::uint64_t offset{}, crc{};
           const auto piece_bytes =
               staging.size() / source->alignment * source->alignment;
@@ -1396,17 +1378,6 @@ struct DiskStore::Impl {
           if (p.checksum && p.checksum != crc)
             Invalid();
           p.checksum = crc;
-          for (auto& c : entries.back().manifest_->components) {
-            if (!key.first) {
-              for (auto& chunk : c.chunks)
-                if (chunk.file == p.file)
-                  chunk.checksum = crc;
-            } else {
-              for (auto* private_payload : {&c.tail, &c.private_state})
-                if (*private_payload && (*private_payload)->file == p.file)
-                  (*private_payload)->checksum = crc;
-            }
-          }
         }
         DISK_STEP(kPayloadWritten);
         written.push_back({std::move(fd), &dir, std::move(payload_name)});
@@ -1424,6 +1395,8 @@ struct DiskStore::Impl {
       index_guard.lock();
       if (!entries.back().available_)
         throw std::runtime_error("checkpoint dependency quarantined");
+      if (!sources.empty())
+        apply_checksums(*entries.back().manifest_, false);
       index_guard.unlock();
       if (!sources.empty()) {
         // Free the provisional encoding before allocating the final one.
