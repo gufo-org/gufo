@@ -1676,6 +1676,13 @@ executes, so their rates show live throughput; prompt tokens exclude cache
 hits. `llamacpp:requests_processing` counts admitted requests, including cache
 preparation and cleanup; `llamacpp:requests_deferred` counts requests waiting
 for a session. The speed gauges retain the latest nonzero request rates.
+`gufo_request_queue_seconds` and `gufo_time_to_first_token_seconds`
+are histograms with buckets from 1 ms to 1,200 s. Both start at `request_start`,
+set when the HTTP handler hands the request to the backend. The scheduler
+observes queue time once at admission by a session, including cache preparation
+(state wait and cache restore), which is the `queue_ms` value in the request
+log, and time to first token at the first generated token. Requests that end
+before admission or before a token are not observed.
 When the scheduler finishes or cancels a request, whether or not the client
 reads the result, it adds the request's cached prompt tokens
 (`llamacpp:prompt_tokens_cached_total`), prefill and decode seconds

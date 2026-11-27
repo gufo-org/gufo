@@ -50,6 +50,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 0
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === one request, 0.1 s of prefill ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -102,6 +144,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 0
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === speculative and lookup counters ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -154,6 +238,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 0
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === speeds of 1e-9 tokens per second ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -206,6 +332,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 0
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === speeds of 1234.5678 tokens per second ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -258,6 +426,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 0
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === speeds of 0.1 tokens per second ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -310,6 +520,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 0
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === speeds of 1.23456789012e14 tokens per second ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -362,6 +614,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 0
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === speeds of 1e17 tokens per second ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -414,6 +708,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 0
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === speeds of 1e20 tokens per second ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -466,6 +802,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 0
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === an empty request keeps the last speeds ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -518,6 +896,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 0
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === scheduler counters ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -570,6 +990,48 @@ llamacpp:requests_deferred 2
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 0
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === a negative request gauge ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -622,6 +1084,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 0
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === kv ratio 13 over two sessions of 65536 ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -674,6 +1178,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 9.918212890625e-05
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === kv ratio 1 over three sessions of 65536 ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -726,6 +1272,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 5.0862630208333331e-06
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === kv ratio exactly 1 ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -778,6 +1366,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 1
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 === shared state only ===
 # HELP gufo_device_lost_total Confirmed GPU context losses
 # TYPE gufo_device_lost_total counter
@@ -830,6 +1460,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 1
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 # HELP gufo_shared_state_bytes Session state the configured sessions share when they do not all fit at full context
 # TYPE gufo_shared_state_bytes gauge
 gufo_shared_state_bytes 8589934592
@@ -903,6 +1575,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 1
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 # HELP gufo_shared_state_bytes Session state the configured sessions share when they do not all fit at full context
 # TYPE gufo_shared_state_bytes gauge
 gufo_shared_state_bytes 8589934592
@@ -985,6 +1699,48 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 1
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0
 # HELP gufo_prompt_state_budget_bytes Host RAM prompt state may claim before admission refuses
 # TYPE gufo_prompt_state_budget_bytes gauge
 gufo_prompt_state_budget_bytes 4096
@@ -1046,3 +1802,45 @@ llamacpp:requests_deferred 0
 # HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated tokens over sessions times context; excludes retained cache
 # TYPE llamacpp:kv_cache_usage_ratio gauge
 llamacpp:kv_cache_usage_ratio 1
+# HELP gufo_request_queue_seconds Time from request arrival until a session admits it, including cache preparation; requests that end before admission are not counted
+# TYPE gufo_request_queue_seconds histogram
+gufo_request_queue_seconds_bucket{le="0.001"} 0
+gufo_request_queue_seconds_bucket{le="0.01"} 0
+gufo_request_queue_seconds_bucket{le="0.05"} 0
+gufo_request_queue_seconds_bucket{le="0.1"} 0
+gufo_request_queue_seconds_bucket{le="0.25"} 0
+gufo_request_queue_seconds_bucket{le="0.5"} 0
+gufo_request_queue_seconds_bucket{le="1"} 0
+gufo_request_queue_seconds_bucket{le="2.5"} 0
+gufo_request_queue_seconds_bucket{le="5"} 0
+gufo_request_queue_seconds_bucket{le="10"} 0
+gufo_request_queue_seconds_bucket{le="30"} 0
+gufo_request_queue_seconds_bucket{le="60"} 0
+gufo_request_queue_seconds_bucket{le="120"} 0
+gufo_request_queue_seconds_bucket{le="300"} 0
+gufo_request_queue_seconds_bucket{le="600"} 0
+gufo_request_queue_seconds_bucket{le="1200"} 0
+gufo_request_queue_seconds_bucket{le="+Inf"} 0
+gufo_request_queue_seconds_sum 0
+gufo_request_queue_seconds_count 0
+# HELP gufo_time_to_first_token_seconds Time from request arrival until the first generated token; requests that end before one are not counted
+# TYPE gufo_time_to_first_token_seconds histogram
+gufo_time_to_first_token_seconds_bucket{le="0.001"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.01"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.05"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.1"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.25"} 0
+gufo_time_to_first_token_seconds_bucket{le="0.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="1"} 0
+gufo_time_to_first_token_seconds_bucket{le="2.5"} 0
+gufo_time_to_first_token_seconds_bucket{le="5"} 0
+gufo_time_to_first_token_seconds_bucket{le="10"} 0
+gufo_time_to_first_token_seconds_bucket{le="30"} 0
+gufo_time_to_first_token_seconds_bucket{le="60"} 0
+gufo_time_to_first_token_seconds_bucket{le="120"} 0
+gufo_time_to_first_token_seconds_bucket{le="300"} 0
+gufo_time_to_first_token_seconds_bucket{le="600"} 0
+gufo_time_to_first_token_seconds_bucket{le="1200"} 0
+gufo_time_to_first_token_seconds_bucket{le="+Inf"} 0
+gufo_time_to_first_token_seconds_sum 0
+gufo_time_to_first_token_seconds_count 0

@@ -2,6 +2,7 @@
 #define GUFO_SERVER_GENERATION_METRICS_HPP_
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
@@ -39,6 +40,8 @@ struct TextMetrics {
   core::metrics::IntGauge requests_processing;
   core::metrics::IntGauge requests_deferred;
   core::metrics::Gauge kv_cache_usage_ratio;
+  core::metrics::Histogram queue_seconds;
+  core::metrics::Histogram first_token_seconds;
 
   struct SharedState {
     core::metrics::UintGauge bytes;
@@ -113,6 +116,20 @@ inline TextMetrics::TextMetrics() {
       "llamacpp:kv_cache_usage_ratio",
       "In-flight prompt and generated tokens over sessions times context; "
       "excludes retained cache");
+  // Prompts can wait or prefill for minutes, so the range reaches 20 minutes.
+  static constexpr std::array<double, 16> kRequestLatencySeconds = {
+      0.001, 0.01, 0.05, 0.1,  0.25,  0.5,   1.0,   2.5,
+      5.0,   10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0};
+  queue_seconds = registry.Add<Histogram>(
+      "gufo_request_queue_seconds",
+      "Time from request arrival until a session admits it, including cache "
+      "preparation; requests that end before admission are not counted",
+      kRequestLatencySeconds);
+  first_token_seconds = registry.Add<Histogram>(
+      "gufo_time_to_first_token_seconds",
+      "Time from request arrival until the first generated token; requests "
+      "that end before one are not counted",
+      kRequestLatencySeconds);
 
   const auto optional = [this](std::vector<Visibility>& group, auto& metric,
                                std::string_view name, std::string_view help) {
