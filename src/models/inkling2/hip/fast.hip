@@ -4900,15 +4900,24 @@ bool MoeGuDown(hipStream_t s, int fmt, const void* wgu, const float* gscale,
 // Reads every range of the list so that a later kernel finds it in the
 // last-level cache; the loaded values only feed a store that never happens.
 __global__ void __launch_bounds__(256) k_touchn(TouchList l, unsigned* sink) {
+  // four loads in flight per thread: a few blocks reach the DRAM rate
+  constexpr int U = 4;
   uint32_t acc = 0;
   for (int r = 0; r < l.n; ++r) {
     const uint4* p = static_cast<const uint4*>(l.p[r]);
     const size_t n16 = l.bytes[r] / 16;
-    for (size_t i = (size_t)blockIdx.x * 256 + threadIdx.x; i < n16;
-         i += (size_t)gridDim.x * 256) {
-      const uint4 v = p[i];
-      acc ^= v.x ^ v.y ^ v.z ^ v.w;
+    size_t i = (size_t)blockIdx.x * 256 * U + threadIdx.x;
+    for (; i + 256 * (U - 1) < n16; i += (size_t)gridDim.x * 256 * U) {
+      uint4 v[U];
+#pragma unroll
+      for (int u = 0; u < U; ++u)
+        v[u] = p[i + 256 * u];
+#pragma unroll
+      for (int u = 0; u < U; ++u)
+        acc ^= v[u].x ^ v[u].y ^ v[u].z ^ v[u].w;
     }
+    for (; i < n16; i += 256)
+      acc ^= p[i].x;
   }
   if (acc == 0x9e3779b9u && sink)
     *sink = acc;

@@ -171,11 +171,12 @@ struct Engine::Impl {
   // input and router, the gate projection beside the attention inputs, the
   // output projection and the router beside the attention. The expert GEMVs
   // between a prefetch and its use stream with DLC loads, which do not
-  // allocate in that cache. Twenty blocks: more take CUs from the main chain.
+  // allocate in that cache. Eight blocks (four loads in flight per thread)
+  // reach the DRAM rate; more take CUs and bandwidth from the main chain.
   // Only where Engine::Create measured it to pay: on Windows/TheRock 10.0 the
   // side stream's cross-queue waits in the replayed graph cost more than the
   // prefetch saves (decode 39.4 tok/s with it, 46.0 without at C = 1).
-  static constexpr int kPrefetchBlocks = 20;
+  static constexpr int kPrefetchBlocks = 8;
   bool decode_prefetch = false;
   hipStream_t dps = nullptr;
   hipEvent_t ev_pf = nullptr, ev_pfj = nullptr;
