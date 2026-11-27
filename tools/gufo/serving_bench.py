@@ -637,6 +637,24 @@ def _round_from_samples(
     )
 
 
+def _run_workers(
+    execute: Callable[[int], RequestObservation],
+    concurrency: int,
+    start_gate: threading.Barrier,
+) -> tuple[RequestObservation, ...]:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=concurrency
+    ) as executor:
+        try:
+            futures = [executor.submit(execute, index) for index in range(concurrency)]
+            start_gate.wait()
+        except BaseException:
+            # Release any workers already waiting before the executor joins them.
+            start_gate.abort()
+            raise
+        return tuple(future.result() for future in futures)
+
+
 def _run_round(
     *,
     base_url: str,
@@ -674,12 +692,7 @@ def _run_round(
             cache_prompt=cache_prompt,
         )
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=concurrency
-    ) as executor:
-        futures = [executor.submit(execute, index) for index in range(concurrency)]
-        start_gate.wait()
-        samples = tuple(future.result() for future in futures)
+    samples = _run_workers(execute, concurrency, start_gate)
     return _round_from_samples(concurrency, repetition, samples)
 
 
@@ -726,12 +739,7 @@ def _run_corpus_round(
             extra_body={"id_slot": index} if pin_slots else None,
         )
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=concurrency
-    ) as executor:
-        futures = [executor.submit(execute, index) for index in range(concurrency)]
-        start_gate.wait()
-        samples = tuple(future.result() for future in futures)
+    samples = _run_workers(execute, concurrency, start_gate)
     return _round_from_samples(concurrency, repetition, samples)
 
 

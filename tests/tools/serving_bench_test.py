@@ -3,6 +3,7 @@
 import json
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -24,6 +25,55 @@ from gufo.model_bench.servers import HipMemory, Server
 def check(condition, message):
     if not condition:
         raise AssertionError(message)
+
+# A subprocess keeps the suite bounded if executor shutdown ever deadlocks.
+subprocess.run(
+    [sys.executable, "-c", """
+import sys
+import threading
+from unittest.mock import patch
+
+sys.path.insert(0, sys.argv[1])
+from gufo import serving_bench
+
+def check_partial_launch(run, **kwargs):
+    original_start = threading.Thread.start
+    started = False
+    passed_gate = threading.Event()
+    error = RuntimeError("worker creation failed")
+
+    def wait_for_start(*, start_gate, **kwargs):
+        start_gate.wait()
+        passed_gate.set()
+
+    def start(thread):
+        nonlocal started
+        if started:
+            raise error
+        original_start(thread)
+        started = True
+
+    with patch.object(threading.Thread, "start", start), \\
+         patch.object(serving_bench, "run_request", wait_for_start):
+        try:
+            run(base_url="http://localhost", model="test", max_tokens=1,
+                temperature=0, timeout_seconds=1, concurrency=2,
+                repetition=0, **kwargs)
+        except RuntimeError as caught:
+            assert caught is error
+        else:
+            raise AssertionError("the original launch failure must propagate")
+        assert not passed_gate.is_set()
+
+check_partial_launch(serving_bench._run_round, prompt="test", run_nonce="test")
+check_partial_launch(
+    serving_bench._run_corpus_round, group_index=0,
+    cases=[serving_bench.PromptCase("id", "test", "test")] * 2,
+)
+""", str(ROOT / "tools")],
+    check=True,
+    timeout=10,
+)
 
 
 with tempfile.TemporaryDirectory() as temporary:
