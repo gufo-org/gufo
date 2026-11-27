@@ -100,8 +100,8 @@ struct PageParkStats {
 /// rewinds (it then copies the page it writes) or is given to another
 /// conversation, so a checkpoint's rows cost no copy and no second page.
 ///
-/// An address is used for another page only after the device has been idle
-/// since its unmap (mem::RemapBarrier): until then the device would still
+/// An address is used for another page only after a barrier has run since
+/// its unmap (mem::RemapBarrier): until then the device would still
 /// reach the page that left. Mapping never waits for the device; unmapping
 /// does. A parked page that
 /// is released keeps its mapping until Sweep(), which the owner calls only

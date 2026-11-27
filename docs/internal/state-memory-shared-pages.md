@@ -56,9 +56,11 @@ looks new ([log](state-memory-shared-pages/idle2.txt)):
   The region test caught the first failure only once its checks used
   kernels.
 
-The barrier therefore waits for the device, keeps it idle for 400 us (twice
-the longest time any remap needed), and holds back the threads that submit
-device work on their own. It is no proof against device work it cannot see.
+The barrier therefore waits for the device and holds back the threads that
+submit device work on their own. It kept the device idle for 400 us (twice
+the longest time any remap needed), which was no proof against device work it
+cannot see. The next section shows why a flush of the translations replaced
+the idle time.
 
 ## Another process keeps the GPU busy
 
@@ -97,7 +99,12 @@ flush allocated and allocates the next, so it fails only when that block
 cannot be freed, or when it holds none and cannot allocate one.
 `mem_remap_barrier_device_test` checks it beside a busy process: after the
 idle time alone 25 of 50 batches read old pages, through kernels, `hipMemcpy`
-and the copy engine alike; with the flush, none.
+and the copy engine alike; with the flush, none, quiet or beside the busy
+process. The barrier keeps no idle time before the flush, which needs none
+(the table above). [`settle.hip`](state-memory-shared-pages/settle.hip)
+times the barrier after a short kernel, with nothing else on the GPU: 152 to
+161 us on average, against 594 to 598 us with the idle time before the flush
+(4 runs of 1,000 calls each, [log](state-memory-shared-pages/settle.txt)).
 
 Addresses that never had a mapping are not affected.
 [`fresh.hip`](state-memory-shared-pages/fresh.hip) maps 9 pages per batch at

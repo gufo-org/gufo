@@ -26,13 +26,13 @@ namespace gufo::mem {
 /// handling v4", 7.4-rc3), invalidates no TLB after an unmap. While another
 /// process keeps the GPU busy the idle time does not drop the translations
 /// either (gfx1151, Linux 7.0: 20 of 100 batches new after 400 us idle, the
-/// other 80 still old after 500 ms). So Settle() also has the device backend
+/// other 80 still old after 500 ms). So Settle() has the device backend
 /// flush the process's translations (SetTranslationFlush(): an allocation
 /// and free through the driver, which flushes them; 100 of 100 new, quiet
-/// or beside that process), and fails when it cannot.
+/// or beside that process, with no idle time), and fails when it cannot.
 ///
-/// An address that lost a mapping is therefore *dirty* until the device has
-/// been idle and its translations are flushed, and mapping memory at a dirty
+/// An address that lost a mapping is therefore *dirty* until its old
+/// translation is dropped (see Settle()), and mapping memory at a dirty
 /// address needs Settle() before the device uses the address again. An
 /// address keeps the stamp of the moment it lost its mapping; a Settle()
 /// that began after that moment makes it clean, and a clean address can be
@@ -41,7 +41,9 @@ namespace gufo::mem {
 /// once, with existing or new handles).
 class RemapBarrier {
 public:
-  /// The stamp for an address that loses its mapping now; never 0.
+  /// The stamp for an address that lost its mapping; never 0. Take it after
+  /// the unmap returns: a Settle() that began before may have flushed before
+  /// the page tables changed.
   [[nodiscard]] static std::uint64_t Stamp() noexcept;
   /// Whether an address with this stamp (0: never mapped) can be mapped and
   /// used without a Settle().
@@ -51,9 +53,9 @@ public:
   static void NoteRemap() noexcept;
   /// Whether a NoteRemap() still waits for its Settle().
   [[nodiscard]] static bool Pending() noexcept;
-  /// Waits for the device's work, keeps the device idle for kIdleMicros and
-  /// flushes the process's translations where the backend installed a
-  /// flush: every address stamped before the call is clean afterwards, and
+  /// Waits for the device's work and flushes the process's translations
+  /// where the backend installed a flush, or else keeps the device idle for
+  /// kIdleMicros: every address stamped before the call is clean after it, and
   /// every NoteRemap() before it is answered. False, with neither, when the
   /// flush failed kFlushAttempts times: the device may still reach the old
   /// pages there, so the caller lets it use none of the remapped addresses
@@ -63,7 +65,7 @@ public:
   /// on their own bracket it with Enter() and Leave(); Settle() waits for
   /// them and holds new ones back, for a bounded time. Device work this
   /// cannot see (another model's thread in the same process) is detected
-  /// only when it is still running at the end of the idle time.
+  /// only when it is still running at its second wait for the device.
   [[nodiscard]] static bool Settle() noexcept;
   /// Before a batch of unmaps on the thread that will Settle(): holds other
   /// threads' device work back from now on, after a short wait for what
@@ -91,18 +93,20 @@ public:
   [[nodiscard]] static Counts Stats() noexcept;
 
   /// The device backend installs how to wait for all device work
-  /// (hipDeviceSynchronize). Without one Settle() only keeps the idle time:
+  /// (hipDeviceSynchronize). Without one Settle() does not wait for it:
   /// HIP-free, like the rest of this library.
   static void SetDeviceDrain(void (*drain)() noexcept) noexcept;
   /// The device backend installs how to drop the translations the device
   /// cached for this process (false when it could not); Settle() runs it
-  /// after the idle time, on its own thread, up to kFlushAttempts times.
-  /// Without one Settle() relies on the idle time alone.
+  /// after waiting for the device, on its own thread, up to kFlushAttempts
+  /// times, and keeps no idle time. Without one Settle() relies on the idle
+  /// time alone.
   static void SetTranslationFlush(bool (*flush)() noexcept) noexcept;
 
-  /// Idle time that drops the cached translations: the largest time any
-  /// remap needed was under 200 us (copy engine: 2 of 30 old at 100 us, 0 of
-  /// 400 at 200 us).
+  /// Idle time that drops the cached translations where no flush is
+  /// installed, on a GPU no other process uses: the largest time any remap
+  /// needed was under 200 us (copy engine: 2 of 30 old at 100 us, 0 of 400
+  /// at 200 us).
   static constexpr int kIdleMicros = 400;
   /// The longest a Hold() or a Settle() keeps other threads waiting.
   static constexpr std::chrono::milliseconds kHoldLimit{25};

@@ -175,10 +175,13 @@ bool RemapBarrier::Settle() noexcept {
   // loads run before the other thread's store is visible.
   std::atomic_thread_fence(std::memory_order_seq_cst);
   // What this call covers: addresses stamped and remaps noted before it. A
-  // thread that unmaps or maps during the idle time gets the next stamp and
+  // thread that unmaps or maps during the call gets the next stamp and
   // waits for the next call.
   const auto covered = s.epoch.fetch_add(1, std::memory_order_acq_rel);
   const auto noted = s.notes.load(std::memory_order_acquire);
+  // The flush drops the old translations whatever else runs on the device,
+  // so where there is one the idle time would only add its cost.
+  const auto flush = s.flush.load(std::memory_order_acquire);
   // Bounded: a scope this thread opened itself, or one that never closes,
   // must not hang the model. The drain below still covers their kernels.
   const auto start = Clock::now();
@@ -190,7 +193,8 @@ bool RemapBarrier::Settle() noexcept {
     const auto drain = s.drain.load(std::memory_order_acquire);
     if (drain)
       drain();
-    SpinFor(microseconds(kIdleMicros));
+    if (!flush)
+      SpinFor(microseconds(kIdleMicros));
     // Work nobody bracketed shows only while it runs: a wait that does not
     // return at once found some.
     const auto before = Clock::now();
@@ -207,7 +211,7 @@ bool RemapBarrier::Settle() noexcept {
   // idle time alone does not drop them while another process keeps the
   // device busy, so without the flush nothing it covers is clean.
   bool flushed = true;
-  if (const auto flush = s.flush.load(std::memory_order_acquire)) {
+  if (flush) {
     flushed = flush();
     for (int attempt = 1; !flushed && attempt < kFlushAttempts; ++attempt) {
       SpinFor(std::chrono::milliseconds(1));

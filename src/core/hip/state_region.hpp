@@ -118,7 +118,7 @@ public:
   [[nodiscard]] std::vector<bool> Restore(
       std::span<const std::shared_ptr<SharedPage>> plan, std::size_t rows);
   /// After PrepareWrite() or Restore() remapped pages: lets the device reach
-  /// them (mem::RemapBarrier, about 0.5 ms with the device idle), then fills
+  /// them (mem::RemapBarrier, about 0.16 ms with the device idle), then fills
   /// or clears the replaced pages. One call serves every region of the
   /// device; without remaps it costs two atomic reads. False when the
   /// barrier or a page copy failed: then the rows of the write or restore
