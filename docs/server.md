@@ -93,6 +93,15 @@ Chat Completions, `reasoning` items in Responses and `thinking` blocks in
 Messages. Keep the effort the same across a conversation: it's part of the
 prompt, so changing it means processing the whole conversation again.
 
+A model that writes its turn as blocks (Inkling 2 Mini) can think again after
+part of its answer. Chat Completions joins the turn's thoughts in
+`reasoning_content` and its answer text in `content`. Responses returns one
+`reasoning` or `message` item per block, and Messages one `thinking` or `text`
+block, in order. Send them back in that order to keep the conversation cached.
+In Chat Completions, an assistant message can carry the order as
+`{"type": "thinking", "thinking": "..."}` content parts between its text
+parts; models without blocks read the thoughts joined.
+
 ## Tools and structured output
 
 Function tools follow the Chat Completions or Responses shape. With

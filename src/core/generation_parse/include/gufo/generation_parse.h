@@ -141,6 +141,8 @@ typedef enum GufoGenerationToolChoice {
 #define GUFO_GENERATION_TRACK_SPANS 8u
 /* Fed pieces are only buffered: tool deltas come from the final parse. */
 #define GUFO_GENERATION_BUFFERED 16u
+/* Unconstrained output may open further thoughts after content. */
+#define GUFO_GENERATION_REASONING_REPEATS 32u
 
 /* Every pointer is read during gufo_generation_new or gufo_generation_parse
    only; the callbacks and context stay in use until the handle is freed. */

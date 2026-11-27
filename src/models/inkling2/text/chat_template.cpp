@@ -78,11 +78,24 @@ bool EffortValue(const RenderOptions& o, double* num, std::string* error) {
   return true;
 }
 
+// The reference renderer (tml-renderers) quantizes the effort to integer
+// milli-effort, then to hundredths, rounding halves to even both times, and
+// writes the shortest decimal: 0.125 -> "0.12", 0.0015 -> "0". The named
+// levels are unchanged.
+std::string EffortText(double num) {
+  const double milli = std::nearbyint(num * 1000.0);
+  const double hundredths = std::nearbyint(milli / 1000.0 * 100.0) / 100.0;
+  if (hundredths == 0.0)
+    return "0";
+  if (hundredths == 1.0)
+    return "1";
+  return json::PythonFloatRepr(hundredths);
+}
+
 void EmitEffort(Builder& b, double num) {
   b.Control(kMsgSystem);
   b.Control(kText);
-  b.Text(std::string("Thinking effort level: ") +
-         (num == 0.0 ? std::string("0") : json::PythonFloatRepr(num)));
+  b.Text("Thinking effort level: " + EffortText(num));
   b.Control(kEnd);
 }
 
@@ -187,6 +200,7 @@ bool RenderChat(const std::vector<Message>& messages,
     d.sort_keys = true;
     d.item_separator = ",";
     d.key_separator = ":";
+    d.floats = json::FloatStyle::kTml;
     b.Text(json::Dump(specs, d));
     b.Control(kEnd);
   }
@@ -202,6 +216,7 @@ bool RenderChat(const std::vector<Message>& messages,
   json::DumpOptions compact;
   compact.item_separator = ",";
   compact.key_separator = ":";
+  compact.floats = json::FloatStyle::kTmlUnsigned;
 
   std::size_t image_index = 0;
   for (std::size_t mi = 0; mi < messages.size(); ++mi) {
@@ -240,12 +255,20 @@ bool RenderChat(const std::vector<Message>& messages,
 
     const bool assistant = m.role == "assistant";
     const bool has_calls = assistant && !m.tool_calls.empty();
-    const bool show_thought = assistant && !m.reasoning_content.empty() &&
-                              !(drop_old_thinking && mi < last_user);
+    const bool drop_thoughts = drop_old_thinking && mi < last_user;
+    const bool show_thought =
+        assistant && !m.reasoning_content.empty() && !drop_thoughts;
     const bool has_thought =
         show_thought;  // a dropped thought behaves as if absent
+    // Thoughts among the parts, in their place (a turn written as blocks).
+    const bool part_thought =
+        assistant && !drop_thoughts &&
+        std::any_of(m.parts.begin(), m.parts.end(), [](const ContentPart& p) {
+          return p.kind == ContentPart::Kind::kThinking;
+        });
 
-    if (!show_thought && assistant && options.empty_thought_for_assistants) {
+    if (!show_thought && !part_thought && assistant &&
+        options.empty_thought_for_assistants) {
       header();
       b.Control(kThinking);
       b.Control(kEnd);
@@ -270,6 +293,20 @@ bool RenderChat(const std::vector<Message>& messages,
           case ContentPart::Kind::kText:
             header();
             b.Control(kText);
+            b.Text(part.text);
+            b.Control(kEnd);
+            break;
+          case ContentPart::Kind::kThinking:
+            if (!assistant) {
+              *error =
+                  "Thinking content is only supported for assistant "
+                  "messages";
+              return false;
+            }
+            if (drop_thoughts)
+              break;
+            header();
+            b.Control(kThinking);
             b.Text(part.text);
             b.Control(kEnd);
             break;

@@ -158,6 +158,10 @@ typedef enum GufoChatOp {
   /* Appends a ToolArgument to the newest call. */
   GUFO_CHAT_OP_ARGUMENT = 49,       /* [text] name */
   GUFO_CHAT_OP_ARGUMENT_VALUE = 50, /* [text] value; [int] is_string */
+  /* Appends a ChatMessage::Part to the newest message: a thought part when
+     [index] is 1, else text, ending at [int] bytes of the thought or the
+     content. */
+  GUFO_CHAT_OP_PART = 51,
 } GufoChatOp;
 
 typedef struct GufoChatEvent {

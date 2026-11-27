@@ -175,9 +175,7 @@ impl Filter {
             return append(&mut self.hidden, piece);
         }
         append(&mut self.pending, piece)?;
-        let markup = &config.markup;
         let open = &config.reasoning.open;
-        let close = &config.reasoning.close;
         if self.reasoning_start {
             // A prompt-opened reasoning phase may still emit its opening tag.
             // Match the buffered parser without exposing a split opener as
@@ -190,10 +188,18 @@ impl Filter {
             }
             self.reasoning_start = false;
         }
-        if self.raw_content && self.state == State::Content && !self.trim_reasoning_separator {
-            return self.structured_content(config, sink);
-        }
+        // Content can open a later thought (`Reasoning::repeats`), which then
+        // runs through the thinking state again.
+        while self.process(config, sink)? {}
+        Ok(())
+    }
 
+    /// One pass over the states; true when content opened a later thought
+    /// and the rest of `pending` is reasoning to process.
+    fn process(&mut self, config: &Config, sink: &mut dyn Sink) -> Result<bool, Error> {
+        let markup = &config.markup;
+        let open = &config.reasoning.open;
+        let close = &config.reasoning.close;
         if self.state == State::Initial {
             let skipped = self
                 .pending
@@ -202,14 +208,14 @@ impl Filter {
                 .count();
             let view = &self.pending[skipped..];
             if view.is_empty() {
-                return Ok(());
+                return Ok(false);
             }
             if !open.is_empty() && open.starts_with(view) {
                 if view == open.as_slice() {
                     self.state = State::Thinking;
                     self.pending.clear();
                 }
-                return Ok(());
+                return Ok(false);
             }
             if !open.is_empty() && view.starts_with(open) {
                 // A buffered result arrives as one piece: the opening tag
@@ -251,7 +257,7 @@ impl Filter {
                 append(&mut self.hidden, &self.pending[marker..])?;
                 self.pending.clear();
                 self.tool_mode = true;
-                return Ok(());
+                return Ok(false);
             }
             if end_pos != NPOS {
                 if end_pos > 0 {
@@ -281,7 +287,7 @@ impl Filter {
                         .emit(sink, &self.pending[..ready], true, None)?;
                 }
                 self.pending.drain(..ready);
-                return Ok(());
+                return Ok(false);
             }
         }
 
@@ -290,7 +296,7 @@ impl Filter {
                 let content = after_separator(&self.pending, &markup.reasoning_separator).len();
                 if content == 0 {
                     self.pending.clear();
-                    return Ok(());
+                    return Ok(false);
                 }
                 self.pending.drain(..self.pending.len() - content);
                 self.trim_reasoning_separator = false;
@@ -305,6 +311,36 @@ impl Filter {
                 NPOS
             };
             let marker = if found == NPOS { NPOS } else { found - offset };
+            let repeats = config.reasoning.repeats && !open.is_empty();
+            let thought = if repeats {
+                find(&self.pending, open, 0)
+            } else {
+                NPOS
+            };
+            if thought != NPOS && (marker == NPOS || thought < marker) {
+                // A later thought: the content before it, then reasoning.
+                let prose = if self.recognize_tools {
+                    content_before(
+                        &self.raw,
+                        offset,
+                        offset + thought,
+                        &markup.closers,
+                        &markup.envelope,
+                        &self.quotes,
+                        &config.tools,
+                        false,
+                    )
+                } else {
+                    &self.pending[..thought]
+                };
+                if !prose.is_empty() {
+                    self.emitted
+                        .emit(sink, prose, false, Some(offset_in(&self.raw, prose)))?;
+                }
+                self.pending.drain(..thought + open.len());
+                self.state = State::Thinking;
+                return Ok(true);
+            }
             if marker != NPOS {
                 let prose = if self.recognize_tools {
                     content_before(
@@ -328,7 +364,7 @@ impl Filter {
                 append(&mut self.hidden, &self.pending[marker..])?;
                 self.pending.clear();
                 self.tool_mode = true;
-                return Ok(());
+                return Ok(false);
             }
             let held = if self.recognize_tools {
                 held_prefix(&self.raw, self.raw.len(), &markup.markers, &self.quotes)
@@ -345,6 +381,16 @@ impl Filter {
             } else {
                 0
             };
+            // Hold an unfinished opener of a later thought.
+            let mut held = held;
+            if repeats {
+                for len in (1..=self.pending.len().min(open.len() - 1)).rev() {
+                    if open.starts_with(&self.pending[self.pending.len() - len..]) {
+                        held = held.max(len);
+                        break;
+                    }
+                }
+            }
             let ready = self.pending.len() - held;
             if ready > 0 {
                 self.emitted
@@ -352,16 +398,45 @@ impl Filter {
             }
             self.pending.drain(..ready);
         }
-        Ok(())
+        Ok(false)
     }
 
-    fn structured_content(&mut self, config: &Config, sink: &mut dyn Sink) -> Result<(), Error> {
+    /// Content under a response format or the tool grammar; true when it
+    /// opened a later thought (`Reasoning::repeats`).
+    fn structured_content(&mut self, config: &Config, sink: &mut dyn Sink) -> Result<bool, Error> {
         let markup = &config.markup;
         let markers = &markup.markers;
         if self.tool_only {
             let offset = self.pending_offset();
             let found = earliest(&self.raw, markers, &self.quotes, offset);
             let start = if found == NPOS { NPOS } else { found - offset };
+            let open = &config.reasoning.open;
+            let repeats = config.reasoning.repeats && !open.is_empty();
+            let thought = if repeats {
+                find(&self.pending, open, 0)
+            } else {
+                NPOS
+            };
+            if thought != NPOS && (start == NPOS || thought < start) {
+                let prose = content_before(
+                    &self.raw,
+                    offset,
+                    offset + thought,
+                    &markup.closers,
+                    &markup.envelope,
+                    &self.quotes,
+                    &config.tools,
+                    false,
+                );
+                if !prose.is_empty() {
+                    self.emitted
+                        .emit(sink, prose, false, Some(offset_in(&self.raw, prose)))?;
+                }
+                self.emitted.content += prose.len();
+                self.pending.drain(..thought + open.len());
+                self.state = State::Thinking;
+                return Ok(true);
+            }
             if start != NPOS {
                 let prose = content_before(
                     &self.raw,
@@ -382,7 +457,7 @@ impl Filter {
                 append(&mut self.hidden, &self.pending[start..])?;
                 self.pending.clear();
                 self.tool_mode = true;
-                return Ok(());
+                return Ok(false);
             }
             let held = held_prefix(&self.raw, self.raw.len(), markers, &self.quotes)
                 .max(hold(
@@ -395,6 +470,15 @@ impl Filter {
                     &config.tools,
                 ))
                 .min(self.pending.len());
+            let mut held = held;
+            if repeats {
+                for len in (1..=self.pending.len().min(open.len() - 1)).rev() {
+                    if open.starts_with(&self.pending[self.pending.len() - len..]) {
+                        held = held.max(len);
+                        break;
+                    }
+                }
+            }
             let ready = self.pending.len() - held;
             if ready > 0 {
                 let text = content_before(
@@ -414,7 +498,7 @@ impl Filter {
                 self.emitted.content += text.len();
             }
             self.pending.drain(..ready);
-            return Ok(());
+            return Ok(false);
         }
         if !self.structured_started {
             let content = trim(&self.pending);
@@ -423,21 +507,22 @@ impl Filter {
             if content.is_empty()
                 || (is_prefix(content, markers) && earliest(content, markers, &self.quotes, 0) != 0)
             {
-                return Ok(());
+                return Ok(false);
             }
             self.structured_started = true;
             if earliest(content, markers, &self.quotes, 0) == 0 {
                 self.tool_mode = true;
                 self.hidden = std::mem::take(&mut self.pending);
-                return Ok(());
+                return Ok(false);
             }
         }
         let offset = self.pending_offset();
         let text = std::mem::take(&mut self.pending);
         if text.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
-        self.emitted.emit(sink, &text, false, Some(offset))
+        self.emitted.emit(sink, &text, false, Some(offset))?;
+        Ok(false)
     }
 
     /// Streams the tail the final parse decided: `content`, `reasoning` and

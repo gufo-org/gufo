@@ -148,6 +148,7 @@ pub const GUFO_GENERATION_NATIVE: u32 = 2;
 pub const GUFO_GENERATION_DIALECT: u32 = 4;
 pub const GUFO_GENERATION_TRACK_SPANS: u32 = 8;
 pub const GUFO_GENERATION_BUFFERED: u32 = 16;
+pub const GUFO_GENERATION_REASONING_REPEATS: u32 = 32;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -265,7 +266,8 @@ unsafe fn decode(raw: &GufoGenerationConfig) -> Result<Config, Error> {
         | GUFO_GENERATION_NATIVE
         | GUFO_GENERATION_DIALECT
         | GUFO_GENERATION_TRACK_SPANS
-        | GUFO_GENERATION_BUFFERED;
+        | GUFO_GENERATION_BUFFERED
+        | GUFO_GENERATION_REASONING_REPEATS;
     if raw.flags & !known != 0 {
         return Err(Error::Internal);
     }
@@ -290,6 +292,7 @@ unsafe fn decode(raw: &GufoGenerationConfig) -> Result<Config, Error> {
             Reasoning {
                 open: raw.reasoning_open.to_vec()?,
                 close: raw.reasoning_close.to_vec()?,
+                repeats: raw.flags & GUFO_GENERATION_REASONING_REPEATS != 0,
             },
             gufo_ffi::input(raw.tools, raw.tool_count).ok_or(Error::Internal)?,
         )

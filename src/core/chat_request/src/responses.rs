@@ -5,7 +5,7 @@
 use crate::Defaults;
 use crate::chat::{field, parse_body, thinking_argument};
 use crate::content::responses_parts;
-use crate::draft::{Draft, Message, Role, ToolChoice, Tools};
+use crate::draft::{Draft, Message, Part, Role, ToolChoice, Tools};
 use crate::error::{Failure, Outcome, bad_request, compatibility, invalid};
 use crate::fields::{
     append, body_view, concat, copy, member_str, member_str_or, non_null, push, take_text,
@@ -150,6 +150,28 @@ fn rewritten_message(converted: &mut Value, host: &mut impl Host) -> Outcome<Mes
     message(converted, content, host)
 }
 
+/// Gives `message` the parts of its legacy shape (its thought, then its
+/// text) unless it records them already.
+fn legacy_parts(message: &mut Message) -> Outcome<()> {
+    if !message.parts.is_empty() {
+        return Ok(());
+    }
+    message.parts.try_reserve(2)?;
+    if !message.thought.is_empty() {
+        message.parts.push(Part {
+            thought: true,
+            end: message.thought.len(),
+        });
+    }
+    if !message.content.is_empty() {
+        message.parts.push(Part {
+            thought: false,
+            end: message.content.len(),
+        });
+    }
+    Ok(())
+}
+
 /// The Responses branch of `ReadTextMessages`; `Failure::Invalid` with an
 /// empty message where it returned false without one.
 fn input_messages(
@@ -203,7 +225,20 @@ fn input_messages(
                     _ => return invalid(""),
                 }
             }
-            flush(messages, &mut deferred, reasoning)?;
+            match messages.last_mut() {
+                // A thought after the answer of the same turn, as a model that
+                // writes its turn as blocks returns it: one item each.
+                Some(last)
+                    if deferred.is_empty()
+                        && last.role == Role::Assistant
+                        && !last.content.is_empty()
+                        && last.calls.is_empty() =>
+                {
+                    legacy_parts(last)?;
+                    last.thought_part(&reasoning.thought)?;
+                }
+                _ => flush(messages, &mut deferred, reasoning)?,
+            }
             continue;
         }
         let role = member_str(value, "role");
@@ -229,7 +264,35 @@ fn input_messages(
                     && last.content.is_empty()
                     && !last.thought.is_empty() =>
             {
+                // The item's own thought is not kept here, so neither are its
+                // thought parts.
+                if !message.parts.is_empty() {
+                    legacy_parts(last)?;
+                    let text = message.parts.iter().filter(|part| !part.thought);
+                    last.parts.try_reserve(text.clone().count())?;
+                    last.parts.extend(text);
+                }
                 last.content = message.content;
+            }
+            // The answer after a later thought of the same turn. An item that
+            // brings its own thought starts a turn instead.
+            Some(last)
+                if message.role == Role::Assistant
+                    && message.thought.is_empty()
+                    && last.role == Role::Assistant
+                    && last.parts.last().is_some_and(|part| part.thought)
+                    && !last.content.is_empty()
+                    && last.calls.is_empty() =>
+            {
+                if message.parts.is_empty() {
+                    last.text_part(&message.content)?;
+                } else {
+                    let mut begin = 0;
+                    for part in message.parts.iter().filter(|part| !part.thought) {
+                        last.text_part(&message.content[begin..part.end])?;
+                        begin = part.end;
+                    }
+                }
             }
             _ => flush(messages, &mut deferred, message)?,
         }

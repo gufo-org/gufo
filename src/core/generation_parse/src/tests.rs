@@ -129,6 +129,7 @@ fn config(initial: Initial, choice: ToolChoice, dialect: bool) -> Config {
         reasoning: Reasoning {
             open: b"<think>".to_vec(),
             close: b"</think>".to_vec(),
+            repeats: false,
         },
         markup: Markup {
             markers: bytes(if dialect {
@@ -268,6 +269,78 @@ fn reasoning_and_content_split_the_same_one_byte_at_a_time() {
     assert_eq!(error, None);
     assert_eq!(out[0], r#"reasoning "Plan the €.""#);
     assert_eq!(out[1], r#"content "The answer is 3 < 5.""#);
+}
+
+fn repeating(initial: Initial) -> Config {
+    let mut config = config(initial, ToolChoice::Auto, false);
+    config.reasoning.repeats = true;
+    config
+}
+
+// A model that writes its turn as blocks (Inkling 2) can think again after
+// answering. Its later thoughts join the reasoning and never reach the
+// content, streamed or final, as llama.cpp, vLLM and SGLang return them.
+#[test]
+fn repeating_reasoning_moves_later_thoughts_out_of_the_content() {
+    let (out, error) = check(
+        &repeating(Initial::Auto),
+        "<think>Plan.</think>\r\nAnswer.<think>Again.</think>\r\nMore.",
+    );
+    assert_eq!(error, None);
+    assert_eq!(out[0], r#"reasoning "Plan.Again.""#);
+    assert_eq!(out[1], r#"content "Answer.More.""#);
+    assert!(out.contains(&r#"final reasoning "Plan.Again.""#.to_string()));
+    assert!(out.contains(&r#"final content "Answer.More.""#.to_string()));
+}
+
+#[test]
+fn repeating_reasoning_ends_before_a_call_and_at_the_end() {
+    let (out, error) = check(
+        &repeating(Initial::Content),
+        r#"Checking.<think>Need the city.</think><tool_call>{"name":"weather","arguments":{"city":"Paris"}}</tool_call>"#,
+    );
+    assert_eq!(error, None);
+    assert_eq!(out[0], r#"reasoning "Need the city.""#);
+    assert_eq!(out[1], r#"content "Checking.""#);
+    assert!(out.contains(&r#"final call 0 weather {"city":"Paris"}"#.to_string()));
+
+    let (out, error) = check(&repeating(Initial::Content), "Done.<think>Unfinished");
+    assert_eq!(error, None);
+    assert_eq!(out[0], r#"reasoning "Unfinished""#);
+    assert_eq!(out[1], r#"content "Done.""#);
+}
+
+// Requests with tools parse under the tool grammar (`Mode::ToolOnly`), where
+// the same turns occur.
+#[test]
+fn repeating_reasoning_under_the_tool_grammar() {
+    let mut config = repeating(Initial::Auto);
+    config.mode = Mode::ToolOnly;
+    let (out, error) = check(&config, "Answer.<think>Again.</think>\r\nMore.");
+    assert_eq!(error, None);
+    assert_eq!(out[0], r#"reasoning "Again.""#);
+    assert_eq!(out[1], r#"content "Answer.More.""#);
+    assert!(out.contains(&r#"final content "Answer.More.""#.to_string()));
+
+    let (out, error) = check(
+        &config,
+        r#"<think>Plan.</think>Checking.<think>Need the city.</think><tool_call>{"name":"weather","arguments":{"city":"Paris"}}</tool_call>"#,
+    );
+    assert_eq!(error, None);
+    assert_eq!(out[0], r#"reasoning "Plan.Need the city.""#);
+    assert_eq!(out[1], r#"content "Checking.""#);
+    assert!(out.contains(&r#"final call 0 weather {"city":"Paris"}"#.to_string()));
+}
+
+#[test]
+fn without_repeating_reasoning_a_later_opener_stays_content() {
+    let (out, error) = check(
+        &config(Initial::Auto, ToolChoice::Auto, false),
+        "<think>Plan.</think>\r\nAnswer.<think>Again.</think>More.",
+    );
+    assert_eq!(error, None);
+    assert_eq!(out[0], r#"reasoning "Plan.""#);
+    assert_eq!(out[1], r#"content "Answer.<think>Again.</think>More.""#);
 }
 
 #[test]

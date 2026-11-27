@@ -217,17 +217,18 @@ pub fn tool_controls(body: &mut Value, draft: &mut Draft, host: &mut impl Host) 
     )
 }
 
-/// A text block of a tool turn.
-fn read_text(part: &Value, out: &mut String) -> Outcome<()> {
+/// A text block of a tool turn, one part of `message`.
+fn read_text(part: &Value, message: &mut Message) -> Outcome<()> {
     match part.get("text").and_then(Value::as_str) {
-        Some(text) if member_str(part, "type") == "text" => append(out, text),
+        Some(text) if member_str(part, "type") == "text" => message.text_part(text),
         _ => invalid("unsupported Messages content block"),
     }
 }
 
 /// A `tool_reference` block of a tool search result. Every declared tool is
 /// already in the prompt, so the reference reads as one line naming it.
-fn tool_reference(block: &Value, out: &mut String) -> Outcome<()> {
+/// It is one text part of `message`.
+fn tool_reference(block: &Value, message: &mut Message) -> Outcome<()> {
     let Some(name) = block
         .get("tool_name")
         .and_then(Value::as_str)
@@ -235,12 +236,14 @@ fn tool_reference(block: &Value, out: &mut String) -> Outcome<()> {
     else {
         return invalid("tool_reference blocks require a tool_name");
     };
-    if !out.is_empty() && !out.ends_with('\n') {
-        append(out, "\n")?;
+    let mut line = String::new();
+    if !message.content.is_empty() && !message.content.ends_with('\n') {
+        append(&mut line, "\n")?;
     }
-    append(out, "Tool loaded: ")?;
-    append(out, name)?;
-    append(out, "\n")
+    append(&mut line, "Tool loaded: ")?;
+    append(&mut line, name)?;
+    append(&mut line, "\n")?;
+    message.text_part(&line)
 }
 
 /// A user text, image or tool result block.
@@ -248,7 +251,7 @@ fn read_part(part: &Value, target: &mut Message, host: &mut impl Host) -> Outcom
     if matches!(part, Value::Object(_)) && member_str(part, "type") == "image" {
         return anthropic_image(part, target, host);
     }
-    read_text(part, &mut target.content)
+    read_text(part, target)
 }
 
 /// `ParseAnthropicToolMessage`: each tool_result becomes a tool message,
@@ -274,7 +277,7 @@ fn tool_message(item: &Value, messages: &mut Vec<Message>, host: &mut impl Host)
                     let Some(thinking) = part.get("thinking").and_then(Value::as_str) else {
                         return invalid("thinking blocks require thinking text");
                     };
-                    append(&mut message.thought, thinking)?;
+                    message.thought_part(thinking)?;
                 }
                 "tool_use" => {
                     let id = part
@@ -293,7 +296,7 @@ fn tool_message(item: &Value, messages: &mut Vec<Message>, host: &mut impl Host)
                     let call = historical(copy(id)?, part.get("name"), Some(&arguments))?;
                     push(&mut message.calls, call)?;
                 }
-                _ => read_text(part, &mut message.content)?,
+                _ => read_text(part, &mut message)?,
             }
         }
         return push(messages, message);
@@ -328,7 +331,7 @@ fn tool_message(item: &Value, messages: &mut Vec<Message>, host: &mut impl Host)
                     if matches!(block, Value::Object(_))
                         && member_str(block, "type") == "tool_reference"
                     {
-                        tool_reference(block, &mut result.content)?;
+                        tool_reference(block, &mut result)?;
                     } else {
                         read_part(block, &mut result, host)?;
                     }

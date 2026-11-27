@@ -243,6 +243,7 @@ struct FakeControl {
   bool supports_batched_advance{false};
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
+  bool accepts_prompt_context{false};
   bool multi_token_decode{false};
   bool batched_multi_token_decode{false};
   std::size_t actual_batch_width{4};
@@ -520,6 +521,13 @@ public:
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
       const ChatRequest&) const override {
     return std::nullopt;
+  }
+
+  void SetPromptContext(TextRunnerState& state,
+                        std::shared_ptr<const gufo::server::TextPromptContext>
+                            context) const override {
+    if (!control_->accepts_prompt_context)
+      TextModelRunner::SetPromptContext(state, std::move(context));
   }
 
   [[nodiscard]] std::string Decode(
@@ -3941,6 +3949,46 @@ void TestRetryDuringCancelledStreamAlignsToItsFrontier() {
   }
 }
 
+// A runner may attach a prompt context to every request (Inkling 2 passes its
+// tool names). A context that declares itself independent of the
+// tokenization, and carries no cache inputs, keeps the replayed answer
+// aligned to its frontier (#1154); any other context keeps the rendered
+// tokens.
+void TestPromptContextAllowsFrontierAlignment() {
+  struct Context final : gufo::server::TextPromptContext {
+    bool independent{false};
+    [[nodiscard]] bool TokenizationIndependent() const override {
+      return independent;
+    }
+  };
+  for (const int kind : {0, 1, 2}) {
+    auto control = std::make_shared<FakeControl>();
+    control->snapshots = true;
+    control->incremental_text_is_exact = true;
+    control->accepts_prompt_context = true;
+    auto scheduler = MakeScheduler(control, 1);
+    const auto first = scheduler->Submit({1, 10}, 1, 0.0F).Wait();
+    Expect(first.tokens == ExpectedTokens(1, 1), "the answer samples 100");
+    auto context = std::make_shared<Context>();
+    context->independent = kind != 0;
+    if (kind == 2)
+      context->cache_identity = {1};
+    TextRequestMetadata metadata;
+    metadata.prompt_context = context;
+    // Pieces "10" and "0" replay the text of the sampled token 100.
+    const auto replay =
+        scheduler->Submit({1, 10, 10, 0, 7}, 1, 0.0F, {}, false, metadata)
+            .Wait();
+    const bool aligned = kind == 1;
+    Expect(replay.prompt_tokens == (aligned ? 4U : 5U) &&
+               (!aligned || replay.cached_prompt_tokens == 3),
+           "context kind " + std::to_string(kind) +
+               (aligned ? " continues" : " keeps") + " the frontier (prompt " +
+               std::to_string(replay.prompt_tokens) + ", cached " +
+               std::to_string(replay.cached_prompt_tokens) + ")");
+  }
+}
+
 void TestIgnoreEosIsRequestScoped() {
   auto control = std::make_shared<FakeControl>();
   control->eos_after = 0;
@@ -4392,6 +4440,7 @@ int main() {
   TestBackendRejectsInvalidSamplingDefaults();
 #endif
   TestRetryDuringCancelledStreamAlignsToItsFrontier();
+  TestPromptContextAllowsFrontierAlignment();
   TestTokenLogprobs();
   TestReasoningTokenCount();
   TestPublicationWaitUsesRecentSubstantialPrefill();

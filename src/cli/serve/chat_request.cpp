@@ -458,6 +458,11 @@ struct Decoder {
         arguments.back().is_string = on;
         return;
       }
+      case GUFO_CHAT_OP_PART:
+        Message().parts.push_back(
+            {.thought = event.index != 0,
+             .end = static_cast<std::size_t>(event.integer)});
+        return;
     }
     throw std::logic_error("unknown chat builder step");
   }

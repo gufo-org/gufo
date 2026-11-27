@@ -25,7 +25,9 @@ struct ToolCall {
 };
 
 struct ContentPart {
-  enum class Kind { kText, kImage, kAudio };
+  /// kThinking: an assistant thought in its place among the text parts, as
+  /// the reference renderer reads {"type": "thinking", "thinking": ...}.
+  enum class Kind { kText, kImage, kAudio, kThinking };
   Kind kind{Kind::kText};
   std::string text;
 };

@@ -75,6 +75,9 @@ model think first, then force the call or the JSON.
 A required call gets one thought: a model that decided against the call would
 otherwise keep reopening thoughts until the token limit.
 
+The prompt matches Thinking Machines' renderer (`tml-renderers`). Thoughts
+after part of an answer come back [in order](../server.md#reasoning-controls).
+
 ## Tools and structured output
 
 Tool arguments are generated with their keys in sorted order, the order the

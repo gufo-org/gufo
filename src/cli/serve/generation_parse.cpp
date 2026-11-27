@@ -134,6 +134,8 @@ struct GenerationStream::Host {
       flags |= GUFO_GENERATION_TRACK_SPANS;
     if (setup.buffered)
       flags |= GUFO_GENERATION_BUFFERED;
+    if (reasoning.repeats && !reasoning.open.empty())
+      flags |= GUFO_GENERATION_REASONING_REPEATS;
     std::uint32_t mode = GUFO_GENERATION_MODE_PLAIN;
     if (setup.response_format)
       mode = GUFO_GENERATION_MODE_STRUCTURED;
