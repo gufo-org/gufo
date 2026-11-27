@@ -1,6 +1,6 @@
 # Inkling 2 Mini experiments
 
-Rejected or neutral changes, measured November 22–26, 2026 on Strix Halo
+Rejected or neutral changes, measured November 22–27, 2026 on Strix Halo
 against the build they modified. Every variant is exact unless noted. Kept
 changes are in Git history; current speeds are in [benchmarks](BENCHMARKS.md).
 
@@ -67,6 +67,10 @@ changes are in Git history; current speeds are in [benchmarks](BENCHMARKS.md).
 | Back-off tolerance 0 for a lone request | greedy −4% |
 | Verification MoE grouped by expert at 4 rows | slower: L2 already dedups shared experts |
 | No drafter injection at eight sessions (not exact for later proposals) | +0.6%, within noise |
+| Acceptance calibration with its own table for a block's first proposal, and bins up to 0.99999 (Nov 27) | same speed as the bins by distance from 1 alone (greedy +0.8% both), although it predicts acceptance better (log-loss 0.421 against 0.435; ten bins 0.485) |
+| A second candidate for the same position as a verification row (Nov 27) | not built: it shares more experts than an unrelated row but still costs about 3.5 ms, and pays only when the drafter's second choice is right more than 20% of the time |
+| Dropping verification rows early from a readout of the anchor row's residual (Nov 27) | not built: the readout agrees with the final token 11% of the time after the third loop pass and 33% mid-postlude |
+| A proposal head of the first token ids, as the Qwen draft vocabulary (Nov 27) | not built: ids are not in frequency order here (the first 65,536 cover 25% of prose tokens, the 65,536 largest `markov_w1` rows 98.8%, the 32,768 largest 90.6%) |
 
 ## Host
 

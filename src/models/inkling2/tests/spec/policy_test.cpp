@@ -17,7 +17,7 @@ bool DraftsOne(const DsparkCalibration& cal, const DsparkCosts& costs,
   return ChooseDsparkWidth(&p, 1, cal, costs) == 1;
 }
 
-// Cycles at the top confidence bin with the true costs (2-row 26.2 ms, plain
+// Cycles at a confident draft (0.95) with the true costs (2-row 26.2 ms, plain
 // 20.2 ms scaled by `depth`) after one slow 2-row sample; returns how many
 // drafted.
 int TwoRowSteps(double slow_ms, double depth, int cycles) {
