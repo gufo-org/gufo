@@ -226,12 +226,16 @@ with sorted keys, so the model emits them alphabetically.
 The header's name and the JSON's name can differ: asked to call a tool named
 like one of its own actions, the model writes another verb in the header,
 `read` before `{"name":"edit"}` (also `Read` before `Edit`, `read_file`
-before `edit_file` and `write_file`, `shell` before `apply_patch`; #1436). The
-JSON names the call. With tools callable and no response format, the runner
-therefore holds a word of name characters (at most 64 bytes) after a header
-until the block shows what it is: the invoke token makes it a call, and any
-other token streams the held word as text. An invoke token after a text
-block's words still starts a call; those words stay content.
+before `edit_file` and `write_file`, `shell` before `apply_patch`), and
+sampled runs sometimes write a command, `cat /tmp/app.py` (#1436). The JSON
+names the call. With tools callable and no response format, the runner
+therefore holds back whatever follows a header until the block shows what it
+is, as llama.cpp, vLLM and SGLang read it: the invoke token makes it a call's
+header, which is dropped, and so does `<|content_text|>` or
+`<|content_thinking|>`; `<|end_message|>`, another header or the end of
+generation (the end-of-turn token or the token limit; the scheduler asks
+`TextModelRunner::HeldText()`) shows it was the block's text. An invoke token
+after a text block's words still starts a call; those words stay content.
 
 The template differs from Thinking Machines' renderer (`tml-renderers`
 0.5.0, `renderers.Inkling2()`) in how it spells numbers, and Gufo follows the

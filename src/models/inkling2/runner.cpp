@@ -103,10 +103,11 @@ public:
   std::vector<std::vector<g::TextRunnerToken>> call_names;
   std::vector<g::TextRunnerToken> call_prefix;
   /// The request may call a tool and no response format constrains the
-  /// answer: a word after a header that is not a declared name may still head
-  /// a call (the model sometimes writes one of its own action verbs there,
-  /// "read" before {"name":"edit"}), so it is held back until the block shows
-  /// whether it is a call or text (see ContinuesName()).
+  /// answer: text after a header that is not a declared name may still head a
+  /// call (the model sometimes writes one of its own action verbs there,
+  /// "read" before {"name":"edit"}, or a command, "cat /tmp/app.py"), so it is
+  /// held back until the block shows whether it is a call or text (see
+  /// ContinuesName()).
   bool header_names{false};
   /// The request's images (set by SetPromptContext; null for a text-only
   /// prompt).
@@ -282,7 +283,7 @@ struct ImageEntry {
 struct Inkling2PromptContext final : g::TextPromptContext {
   bool call_required{false};
   std::vector<std::vector<g::TextRunnerToken>> call_names;
-  /// Any word after a header may name a call (see Inkling2State).
+  /// Any text after a header may head a call (see Inkling2State).
   bool header_names{false};
   std::vector<std::unique_ptr<ImageEntry>> images;
   /// The prompt's tokens, for copy drafts (a request whose whole prompt is
@@ -433,21 +434,20 @@ public:
   // under a response format the model writes its answer right after the header
   // (unless a thought came first). An ordinary token after a header is
   // therefore a function name only when it continues a declared one, or, with
-  // `header_names`, while it is a word a name could be (ContinuesName());
-  // otherwise it opens a text block. A held word that turns out to be text is
-  // streamed with the token that shows it. A call written after a text block's
-  // words (the invoke token) still ends that block as a call.
-  /// Function names are short identifiers (OpenAI allows [A-Za-z0-9_-], 64
-  /// bytes; MCP clients add '.' and ':').
-  static constexpr std::size_t kMaxHeaderName = 64;
-  static bool IsNameByte(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
-           c == ':';
+  // `header_names`, any text at all (ContinuesName()); otherwise it opens a
+  // text block. A held header ends as llama.cpp, vLLM and SGLang read it: the
+  // invoke token makes it a call's header, which is dropped (the JSON names
+  // the call), and so does a block opener; <|end_message|>, another header or
+  // the end of generation (HeldText()) shows it was the block's text. A call
+  // written after a text block's words (the invoke token) still ends that
+  // block as a call.
+  [[nodiscard]] bool IsFraming(g::TextRunnerToken token) const {
+    return token == t_header_ || token == t_text_ || token == t_thinking_ ||
+           token == t_invoke_ || token == t_end_message_;
   }
-  /// Whether `token`, after the name tokens written since the header
-  /// (`call_prefix`), still reads as a function name: it continues a declared
-  /// one, or (`header_names`) it is a word of name characters short enough.
+  /// Whether `token`, after the tokens written since the header
+  /// (`call_prefix`), still belongs to the header: it continues a declared
+  /// name, or (`header_names`) it is not framing.
   [[nodiscard]] bool ContinuesName(const Inkling2State& st,
                                    g::TextRunnerToken token) const {
     const auto& prefix = st.call_prefix;
@@ -456,47 +456,38 @@ public:
           std::equal(prefix.begin(), prefix.end(), name.begin()) &&
           name[prefix.size()] == token)
         return true;
-    if (!st.header_names)
-      return false;
-    const std::string_view bytes = tok_->TokenBytes(token);
-    if (bytes.empty() || !std::all_of(bytes.begin(), bytes.end(), IsNameByte))
-      return false;
-    return HeldName(st).size() + bytes.size() <= kMaxHeaderName;
+    return st.header_names && !IsFraming(token);
   }
-  /// The name tokens held back since the header, as text (a block opener
-  /// among them is not text).
+  /// The header tokens held back since the last header, as text.
   [[nodiscard]] std::string HeldName(const Inkling2State& st) const {
     std::string out;
     for (const auto t : st.call_prefix)
-      if (t != t_text_ && t != t_thinking_)
-        out += tok_->TokenBytes(t);
+      out += tok_->TokenBytes(t);
     return out;
   }
   [[nodiscard]] std::string Piece(const Inkling2State& st,
                                   g::TextRunnerToken token) const {
     if (token == t_header_)
-      return {};
+      return st.block == Block::kTool ? HeldName(st) : std::string{};
     switch (st.block) {
       case Block::kAfterHeader:
+      case Block::kTool:
+        // A block opener drops held header text (vLLM and SGLang read it as
+        // the header's metadata).
         if (token == t_text_)
           return {};
         if (token == t_thinking_)
           return std::string(::inkling2::text::dialect::kHeader) +
                  std::string(tok_->TokenBytes(token));
-        // The invoke token right after a header (a call written without the
-        // first function name): the call starts here. The first token of a
-        // function name is written again inside the JSON.
+        // The invoke token after a header, with or without a function name
+        // before it: the call starts here, and the JSON names it.
         if (token == t_invoke_)
           return std::string(tok_->TokenBytes(token));
-        if (token == t_end_message_ || ContinuesName(st, token))
-          return {};  // an empty block, or a name
-        break;
-      case Block::kTool:
-        if (token == t_invoke_)
-          return std::string(tok_->TokenBytes(token));
-        if (token == t_text_ || token == t_thinking_ ||
-            ContinuesName(st, token))
-          return {};
+        if (ContinuesName(st, token))
+          return {};  // a name, or header text held back
+        if (st.block == Block::kAfterHeader)
+          return token == t_end_message_ ? std::string{}  // an empty block
+                                         : std::string(tok_->TokenBytes(token));
         // Not a name after all: the held words are text. A block that ends
         // here was the answer (a response written right after the header).
         return token == t_end_message_
@@ -517,6 +508,7 @@ public:
       return Block::kAfterHeader;
     switch (st.block) {
       case Block::kAfterHeader:
+      case Block::kTool:
         if (token == t_text_)
           return Block::kText;
         if (token == t_thinking_)
@@ -526,15 +518,6 @@ public:
         if (token == t_end_message_)
           return Block::kIdle;
         return ContinuesName(st, token) ? Block::kTool : Block::kText;
-      case Block::kTool:
-        if (token == t_invoke_)
-          return Block::kToolBody;
-        if (token == t_end_message_)
-          return Block::kIdle;
-        if (token == t_text_ || token == t_thinking_ ||
-            ContinuesName(st, token))
-          return st.block;
-        return Block::kText;
       case Block::kText:
         // The invoke token ends the block's words as a call's header
         // (streamed as content), and the call itself follows.
@@ -544,6 +527,20 @@ public:
       default:
         return token == t_end_message_ ? Block::kIdle : st.block;
     }
+  }
+  /// The header text Piece() holds back after the committed tokens and
+  /// `unadvanced` (a selected token not committed yet).
+  [[nodiscard]] std::string HeldText(
+      const g::TextRunnerState& state,
+      std::optional<g::TextRunnerToken> unadvanced) const override {
+    const auto& st = Require(state);
+    if (!unadvanced)
+      return st.block == Block::kTool ? HeldName(st) : std::string{};
+    // Otherwise the token's own piece settled the header.
+    if ((st.block != Block::kAfterHeader && st.block != Block::kTool) ||
+        *unadvanced == t_header_ || NextBlock(st, *unadvanced) != Block::kTool)
+      return {};
+    return HeldName(st) + std::string(tok_->TokenBytes(*unadvanced));
   }
 
   // ---- text front-end (src/text) ----
@@ -992,7 +989,8 @@ public:
   /// allow `tok` in the current block state.
   [[nodiscard]] bool RunnerAllowsToken(const Inkling2State& st,
                                        g::TextRunnerToken tok) const {
-    if (st.budget_closed && st.block == Block::kAfterHeader &&
+    if (st.budget_closed &&
+        (st.block == Block::kAfterHeader || st.block == Block::kTool) &&
         tok == t_thinking_)
       return false;
     if (st.call_required &&
@@ -1032,7 +1030,8 @@ public:
       const Inkling2State& st, std::span<const float> raw,
       std::vector<float>& masked) const {
     masked.clear();
-    if (st.budget_closed && st.block == Block::kAfterHeader) {
+    if (st.budget_closed &&
+        (st.block == Block::kAfterHeader || st.block == Block::kTool)) {
       masked.assign(raw.begin(), raw.end());
       if (t_thinking_ < masked.size())
         masked[t_thinking_] = -std::numeric_limits<float>::infinity();

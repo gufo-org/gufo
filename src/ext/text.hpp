@@ -738,6 +738,16 @@ public:
   [[nodiscard]] virtual std::vector<TextDecodeStep> DecodeBatch(
       std::span<const TextRunnerDecode> decodes) const;
   virtual void AdvanceBatch(std::span<const TextRunnerAdvance> advances) const;
+  /// Text the selections' pieces have held back so far (a runner that lets
+  /// later tokens decide what earlier ones mean, such as Inkling's block
+  /// headers), as of the advanced tokens plus `unadvanced`, a selected token
+  /// not advanced yet. Generation that ends on a stop token or the token
+  /// limit publishes it as the reply's last text.
+  [[nodiscard]] virtual std::string HeldText(
+      const TextRunnerState&, std::optional<TextRunnerToken> unadvanced) const {
+    (void)unadvanced;
+    return {};
+  }
   [[nodiscard]] virtual std::size_t CheckpointPosition(
       const TextRunnerState& state) const = 0;
   virtual void PrepareCancellation(TextRunnerState&) const {}

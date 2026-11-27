@@ -269,6 +269,9 @@ struct FakeControl {
   bool restore_beside_decode{true};
   std::atomic<bool> yielding{false};
   std::vector<std::string> output_pieces;
+  // Text the fake's pieces hold back (HeldText); "*" marks a selected token
+  // not advanced yet.
+  std::string held_text;
   std::uint32_t max_context{128};
   std::optional<std::size_t> stop_after;
   std::optional<std::size_t> eos_after;
@@ -671,6 +674,14 @@ public:
         .piece = std::to_string(*fake.frontier),
         .logprobs = probabilities,
     };
+  }
+
+  [[nodiscard]] std::string HeldText(
+      const TextRunnerState&,
+      std::optional<TextRunnerToken> unadvanced) const override {
+    if (control_->held_text.empty())
+      return {};
+    return control_->held_text + (unadvanced ? "*" : "");
   }
 
   [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
@@ -3152,6 +3163,67 @@ void TestStopPrefixFlushAndBatchIsolation() {
   }
 }
 
+// Text a runner holds back until a later token shows what it is (Inkling's
+// call headers) ends the reply when generation stops first: on a stop token
+// or the token limit, counting a final token that was never advanced, and
+// through the stop-sequence filter.
+void TestHeldTextEndsTheReply() {
+  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  for (const bool multi : {false, true}) {
+    for (const bool final_advance : {true, false}) {
+      const auto make = [&] {
+        auto control = std::make_shared<FakeControl>();
+        control->incremental_text_is_exact = true;
+        control->multi_token_decode = multi;
+        control->final_token_advance_required = final_advance;
+        control->output_pieces = {"a", "", ""};
+        control->held_text = "HELD";
+        return control;
+      };
+      const auto run = [](const std::shared_ptr<FakeControl>& control,
+                          std::size_t limit,
+                          std::vector<std::string> stops = {}) {
+        auto scheduler = MakeScheduler(control, 1);
+        TextGenerationScheduler::RequestMetadata metadata;
+        metadata.stop_sequences = std::move(stops);
+        std::string streamed;
+        auto result = scheduler->Submit({1}, limit, 0.0F, {}, true, metadata)
+                          .Wait([&](std::string_view piece) {
+                            streamed += piece;
+                            return true;
+                          });
+        Expect(streamed == result.text, "held text streams as it ends");
+        return result;
+      };
+
+      const auto stopped = run(make(), 8);
+      Expect(stopped.finish_reason == Finish::kStop &&
+                 stopped.text == "aHELD" && stopped.tokens.size() == 3 &&
+                 !stopped.piece_ends.empty() &&
+                 stopped.piece_ends.back() == stopped.text.size(),
+             "a stop token publishes the held text after the last piece");
+
+      const auto capped = run(make(), 2);
+      const bool unadvanced = !multi && !final_advance;
+      Expect(capped.finish_reason == Finish::kLength &&
+                 capped.text == (unadvanced ? "aHELD*" : "aHELD"),
+             "the token limit publishes the held text, counting a final "
+             "token that was not advanced");
+
+      const auto matched = run(make(), 8, {"EL"});
+      Expect(matched.finish_reason == Finish::kStopSequence &&
+                 matched.stop_sequence == "EL" && matched.text == "aH",
+             "held text passes the stop-sequence filter");
+
+      auto control = make();
+      control->held_text.clear();
+      const auto plain = run(control, 8);
+      Expect(plain.finish_reason == Finish::kStop && plain.text == "a",
+             "nothing held adds nothing");
+    }
+  }
+}
+
 void TestCancellationWithBufferedStopPrefix() {
   for (const bool multi : {false, true}) {
     auto control = std::make_shared<FakeControl>();
@@ -4522,6 +4594,7 @@ int main() {
   TestRunnerCanSkipUnusedFinalAdvance();
   TestRetainedCappedReplyExecutesFinalToken();
   TestRunnerCanReuseExactIncrementalText();
+  TestHeldTextEndsTheReply();
   TestGenerationTraceRecordsPromptAndOutput();
   TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();
   TestRequestTotalsDoNotNeedAConsumer();

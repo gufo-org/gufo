@@ -1068,8 +1068,41 @@ struct TextGenerationScheduler::Impl {
     }
   }
 
+  /// Generation ended before a token showed what the runner's held-back text
+  /// is (TextModelRunner::HeldText): it is the reply's last text, after the
+  /// last token's piece.
+  void PublishHeldText(const std::shared_ptr<ScheduledRequest>& request,
+                       TextGenerationBackend::FinishReason& finish_reason) {
+    auto held = request->runner_request.HeldText();
+    if (held.empty())
+      return;
+    if (held.size() >
+        request->max_output_bytes - request->generated_output_bytes)
+      throw TextGenerationError(TextGenerationErrorCode::kOutputLimit,
+                                "text generation output byte limit exceeded");
+    request->generated_output_bytes += held.size();
+    if (incremental_text_is_exact && !request->result.piece_ends.empty())
+      request->result.piece_ends.back() += held.size();
+    auto piece = request->stop_filter.enabled()
+                     ? request->stop_filter.Push(held)
+                     : std::move(held);
+    if (incremental_text_is_exact)
+      request->result.text += piece;
+    if (!piece.empty() && !PublishPiece(request, std::move(piece)))
+      throw TextGenerationError(
+          TextGenerationErrorCode::kOutputBackpressure,
+          "text generation buffered output limit exceeded");
+    if (request->stop_filter.stopped()) {
+      request->result.stop_sequence = request->stop_filter.matched_sequence();
+      finish_reason = TextGenerationBackend::FinishReason::kStopSequence;
+    }
+  }
+
   void CompleteSuccess(const std::shared_ptr<ScheduledRequest>& request,
                        TextGenerationBackend::FinishReason finish_reason) {
+    if (finish_reason == TextGenerationBackend::FinishReason::kStop ||
+        finish_reason == TextGenerationBackend::FinishReason::kLength)
+      PublishHeldText(request, finish_reason);
     if (request->stop_filter.enabled()) {
       auto tail = request->stop_filter.Finish();
       request->result.text += tail;
