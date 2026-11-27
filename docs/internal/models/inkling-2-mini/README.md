@@ -288,7 +288,7 @@ single-session decode.
 | `inkling2_oracle` | Teacher-forced dumps; `tests/oracle/compare_dumps.py` scores KL and top-1 against a reference dump |
 | `tests/oracle/llama_dump.cpp` | The llama.cpp side of the same dump (CPU backend, or `NGL` layers on the GPU) |
 | `inkling2_spec_test --model GGUF [--dspark DRAFT]` | GPU: decoding inside a layered prefill's yields (batches of 2 to 7, batched verification) and verification rows of 2 to 64 tokens byte-identical to one-token decoding; with a drafter, greedy DSpark on a real chat prompt equal to plain decoding with at least 20% of proposals kept (26% measured) |
-| `inkling2_bench` | Prefill and decode speed, batched decode, `--verify`; `--spec R` verification timing, `--dspark` speculative speed, acceptance and calibration |
+| `inkling2_bench` | Prefill and decode speed, `--tails N,...` follow-up turns of N tokens at each depth (with a logits hash), batched decode, `--verify`; `--spec R` verification timing, `--dspark` speculative speed, acceptance and calibration |
 
 The GPU tests need the model and run by hand; hosted CI builds the model
 (Linux and Windows) and runs the two CPU tests.

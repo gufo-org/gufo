@@ -3318,8 +3318,20 @@ __global__ void __launch_bounds__(64 * RG) k_gemm4(GP3 p, int rgn) {
     gload(0);
     sstore(0);
     __syncthreads();
+    // A wave whose 16-token tiles all lie past the item's end computes only
+    // padding: it keeps loading and dequantising its weights but skips the
+    // products (one straight-line body per case).
+    const bool dead = TTW == 1 && th * (BN / 2) >= n;
     for (int kb = 0; kb < NK; kb++) {
       int cur = kb & 1;
+      if (dead) {
+        if (kb + 1 < NK) {
+          gload(kb + 1);
+          sstore(cur ^ 1);
+        }
+        __syncthreads();
+        continue;
+      }
       // A struct per fragment: clang 24 (ROCm 10.1) promotes small plain
       // fragment arrays to one wide vector and extracts each fragment through
       // an integer, 16 extra VALU instructions per fragment.
@@ -4152,6 +4164,19 @@ __global__ __launch_bounds__(NTT * 96) void attn_prefill_db(PfArgs a) {
   if (ntiles > 1)
     gload(1);
   int tile = 0;
+  // A wave whose 16 queries all lie past the ubatch (a short last block) only
+  // helps to move the tiles: the other waves' steps do not wait for its
+  // products.
+  if (tb >= a.U) {
+    for (; tile < ntiles; tile++) {
+      if (tile + 1 < ntiles)
+        store(tile + 1, (tile & 1) ^ 1);
+      __syncthreads();
+      if (tile + 2 < ntiles)
+        gload(tile + 2);
+    }
+    return;
+  }
   // Far tiles (global layers): every key is at least WIN before the block's
   // first query, so no row masks a key or adds a bias, and the same steps run
   // without that work. The accumulators are rescaled only in the steps where
@@ -5563,6 +5588,25 @@ void AttnPrefill(hipStream_t s, const PrefillAttn& a) {
   Chk("attn_prefill");
 }
 
+// Short ubatches leave most of the GPU idle behind a few 64-token gate blocks
+// that are bound by their own instruction stream: smaller blocks spread the
+// same products (ascending k per output) over more compute units. 16-token
+// tiles: 16 tokens 99 -> 82 ms, 256 tokens 233 -> 217 ms; 32-token tiles:
+// 512 tokens 350 -> 343 ms; equal or slower from about 900 tokens.
+static bool GateSmall(hipStream_t s, const GateJobs& g, int t, int rows,
+                      int jobs, float eps) {
+  constexpr int kGate16Tokens = 320, kGate32Tokens = 768;
+  if (t <= kGate16Tokens)
+    k_gate_v2<16, 32>
+        <<<dim3((t + 15) / 16, rows / 32, jobs), 256, 0, s>>>(g, t, eps);
+  else if (t <= kGate32Tokens)
+    k_gate_v2<32, 32>
+        <<<dim3((t + 31) / 32, rows / 32, jobs), 256, 0, s>>>(g, t, eps);
+  else
+    return false;
+  return true;
+}
+
 void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
   GateJobs g{};
   for (int i = 0; i < jobs.n; ++i) {
@@ -5572,10 +5616,12 @@ void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
   }
   // One job has too few token blocks for k_gate_p64's serial chunks; three
   // jobs keep the GPU busy and k_gate_p64 moves fewer bytes.
-  if (jobs.n == 1)
-    k_gate_v2<64, 64><<<dim3((t + 63) / 64, 1, 1), 256, 0, s>>>(g, t, eps);
-  else
-    k_gate_p64<<<dim3((t + 63) / 64, 1, jobs.n), 256, 0, s>>>(g, t, eps);
+  if (!GateSmall(s, g, t, 64, jobs.n, eps)) {
+    if (jobs.n == 1)
+      k_gate_v2<64, 64><<<dim3((t + 63) / 64, 1, 1), 256, 0, s>>>(g, t, eps);
+    else
+      k_gate_p64<<<dim3((t + 63) / 64, 1, jobs.n), 256, 0, s>>>(g, t, eps);
+  }
   if (jobs.n > 0 && jobs.j[0].nw) {
     // 4 tokens per block (2 and 8 measured slower)
     constexpr int R = 4;
@@ -5595,7 +5641,8 @@ void RouterPrefill(hipStream_t s, const void* w, const float* x, float* logits,
   GateJobs g{};
   g.j[0] = {x, 2304,   nullptr, 0, w,       2304,    2304,        0,
             0, logits, 128,     0, nullptr, nullptr, half ? 1 : 0};
-  k_gate_p64<<<dim3((t + 63) / 64, 2, 1), 256, 0, s>>>(g, t, 0.f);
+  if (!GateSmall(s, g, t, 128, 1, 0.f))
+    k_gate_p64<<<dim3((t + 63) / 64, 2, 1), 256, 0, s>>>(g, t, 0.f);
   Chk("router_prefill");
 }
 
@@ -5609,7 +5656,8 @@ void SkinnyPrefill(hipStream_t s, const float* x, int ldx, const float* w,
                    int rows, float* out, int ldo, int t) {
   GateJobs g{};
   g.j[0] = {x, ldx, nullptr, 0, w, 2304, 2304, 0, 0, out, ldo, rows};
-  k_gate_v2<64, 32><<<dim3((t + 63) / 64, 1, 1), 256, 0, s>>>(g, t, 0.f);
+  if (!GateSmall(s, g, t, 32, 1, 0.f))
+    k_gate_v2<64, 32><<<dim3((t + 63) / 64, 1, 1), 256, 0, s>>>(g, t, 0.f);
   Chk("skinny_prefill");
 }
 

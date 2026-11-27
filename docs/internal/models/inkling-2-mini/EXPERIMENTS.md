@@ -30,6 +30,12 @@ changes are in Git history; current speeds are in [benchmarks](BENCHMARKS.md).
 | Expert items of at most 16 tokens in a kernel of their own, with or without LDS (Nov 26) | equal to 27% slower: an item's cost is its 18 LDS loads of the expert's weights, whatever its tokens |
 | Use 128-query `attn_prefill_db<8, 32>` on global visits from `pos0 == 0` when `n >= 1024` (Nov 27) | Rejected: neutral within noise (2048: 2318 vs 2319 tok/s, 16K: 2254 vs 2259 tok/s) |
 
+| Short ubatches: 32-token dense GEMM tiles up to 32 tokens, gate tiles with 64 or 128 k per barrier, or 64-thread MoE blocks for 32-token items (Nov 27) | within 1%: the dense and MoE kernels follow their weight reads, the gate tiles their LDS loads per product |
+| MoE items of 64 tokens below 512-token ubatches, or 128-token items from 64, 128 or 256 tokens (Nov 27) | 64-token items 12 to 30% slower (64 to 448 tokens); 128-token items 7 to 12% slower below 512 tokens |
+| Padding tiles of `k_gemm4` skipped by checks inside its product loop (Nov 27) | 16 tokens 82 → 88 ms, 64 tokens 126 → 138 ms: the checks break the straight-line body; a separate body for waves that hold only padding is kept (1 to 2% faster) |
+| Short ubatches at 32K: attention blocks of one or two query tiles, or one head per block (Nov 27) | 16 tokens 111 → 138 ms (one tile or one head), 118 ms (two tiles); 256 tokens 243 → 368 ms: fewer threads move each K/V tile |
+| Attention K/V rows touched 2 to 16 tiles ahead on short ubatches at 32K (Nov 27) | 16 tokens −2%, 256 tokens 243 → 270 ms |
+
 ## Decode and verification
 
 | Variant | Result |

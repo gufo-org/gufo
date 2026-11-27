@@ -1,7 +1,7 @@
 // Speed bench for the Inkling 2 Mini HIP engine.
 //
 //   inkling2_bench --model GGUF --text FILE --ctxs 64,4096,16384,32000
-//   [--decode 64] [--ctx 32768]
+//   [--decode 64] [--ctx 32768] [--tails 64,64,256]
 //                  [--batch 2,3,4] [--verify] [--spec 2,3,4]
 //
 // --batch B...: after the single-session lines, for each B: B sessions
@@ -17,6 +17,10 @@
 // random so that a prefix is kept (CommitVerify). Every kept row's logits are
 // compared byte for byte with the reference; prints the mismatches and the
 // verification step time.
+//
+// --tails N...: after each context's prefill, further Forward calls of N
+// tokens each on the same session (follow-up turns at that depth), timed, with
+// a hash of the last logits.
 //
 // For every context length C: fresh session, timed prefill of C tokens (one
 // Forward call, only the last logits are read back), then --decode greedy
@@ -39,7 +43,8 @@
 #include "src/models/inkling2/text/tokenizer.hpp"
 
 int main(int argc, char** argv) {
-  std::string model, text, ids_in, ctxs = "64,4096", batches, specs, dspark;
+  std::string model, text, ids_in, ctxs = "64,4096", batches, specs, dspark,
+                                   tails;
   int depth = 3;
   bool verify = false, same = false;
   int decode = 64;
@@ -59,6 +64,8 @@ int main(int argc, char** argv) {
       decode = std::atoi(next().c_str());
     else if (k == "--batch")
       batches = next();
+    else if (k == "--tails")
+      tails = next();
     else if (k == "--verify")
       verify = true;
     else if (k == "--spec")
@@ -245,6 +252,37 @@ int main(int argc, char** argv) {
                                   ids.data(), static_cast<std::size_t>(C)));
     const auto t1 = std::chrono::steady_clock::now();
     const double pf = std::chrono::duration<double>(t1 - t0).count();
+    auto hash = [&]() {
+      std::uint64_t h = 1469598103934665603ull;
+      const auto& l = session->logits();
+      const auto* b = reinterpret_cast<const unsigned char*>(l.data());
+      for (std::size_t i = 0; i < l.size() * 4; ++i)
+        h = (h ^ b[i]) * 1099511628211ull;
+      return h;
+    };
+    std::printf("ctx %6d  logits %016llx\n", C,
+                static_cast<unsigned long long>(hash()));
+    {
+      // Follow-up turns: N more tokens on top of the prefilled context.
+      std::stringstream ts(tails);
+      std::string t;
+      std::size_t at = static_cast<std::size_t>(C);
+      while (std::getline(ts, t, ',')) {
+        const std::size_t n = static_cast<std::size_t>(std::atoi(t.c_str()));
+        if (n == 0 || at + n > ids.size())
+          break;
+        const auto a0 = std::chrono::steady_clock::now();
+        engine->Forward(*session,
+                        std::span<const std::int32_t>(ids.data() + at, n));
+        const double dt =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - a0)
+                .count();
+        std::printf(
+            "  tail %5zu at %6zu  %8.2f ms  %8.1f tok/s  logits %016llx\n", n,
+            at, dt * 1e3, n / dt, static_cast<unsigned long long>(hash()));
+        at += n;
+      }
+    }
     std::int32_t next = static_cast<std::int32_t>(
         std::max_element(session->logits().begin(), session->logits().end()) -
         session->logits().begin());
