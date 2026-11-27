@@ -18,14 +18,17 @@
 
 namespace gufo::models::inkling2 {
 
-/// P(accepted | the drafter's probability), in ten bins, as running counts
-/// that start from a measured prior (wikitext, contexts 64 to 12K).
+/// P(accepted | the drafter's probability), as running counts that start from
+/// a measured prior (16 chat prompts, greedy and sampled). The drafter is
+/// over-confident and most of its proposals sit above 0.9, where acceptance
+/// still spans 0.6 to 0.95: tenths below 0.9, then bins by how close to 1.
 class DsparkCalibration {
 public:
   DsparkCalibration() {
-    constexpr std::array<double, 10> prior{0.03, 0.08, 0.1,  0.15, 0.25,
-                                           0.3,  0.32, 0.38, 0.5,  0.88};
-    for (std::size_t b = 0; b < 10; ++b) {
+    constexpr std::array<double, kBins> prior{0.03, 0.08, 0.1,  0.15, 0.25,
+                                              0.3,  0.36, 0.48, 0.5,  0.65,
+                                              0.66, 0.82, 0.84, 0.95};
+    for (std::size_t b = 0; b < kBins; ++b) {
       seen_[b] = kPriorWeight;
       hit_[b] = kPriorWeight * prior[b];
     }
@@ -45,11 +48,18 @@ public:
   }
 
 private:
+  static constexpr std::size_t kBins = 14;
   static constexpr double kPriorWeight = 16, kWindow = 1024;
   static std::size_t Bin(float p) {
-    return static_cast<std::size_t>(std::clamp(p * 10.f, 0.f, 9.f));
+    if (p < 0.9f)
+      return static_cast<std::size_t>(std::clamp(p * 10.f, 0.f, 8.f));
+    constexpr std::array<float, 4> edge{0.95f, 0.98f, 0.99f, 0.998f};
+    std::size_t b = 9;
+    for (const float e : edge)
+      b += p >= e ? 1 : 0;
+    return b;
   }
-  std::array<double, 10> seen_{}, hit_{};
+  std::array<double, kBins> seen_{}, hit_{};
 };
 
 /// Cycle costs in milliseconds, as running averages of the measured times.
