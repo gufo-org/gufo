@@ -90,6 +90,7 @@ struct PrefixIndex::Impl {
     ResourceCharge metadata;
     std::vector<ComponentDescriptor> descriptors;
     std::optional<CompatibilityDigest> digest;
+    std::shared_ptr<const CandidateAvailability> disk_availability;
     std::unique_ptr<Node> root;
     std::size_t bytes{};
   };
@@ -415,7 +416,8 @@ struct PrefixIndex::Impl {
     }
     if (use_ram)
       result.checkpoint = r.checkpoint;
-    result.availability = r.availability;
+    result.availability =
+        need_disk && !use_ram ? tree.disk_availability : r.availability;
     if (resolve_plan && use_ram) {
       auto admission =
           ledger->Reserve(ResourceCategory::kMetadata,
@@ -565,14 +567,19 @@ IndexEntryId PrefixIndex::Insert(Identity compatibility,
       !impl_->DurableCoherent(tree, *durable) || !durable->Pin())
     throw std::invalid_argument("invalid durable checkpoint description");
   Impl::Record record;
-  record.availability = impl_->DurableAvailability(tree);
+  auto disk_availability = tree.disk_availability
+                               ? tree.disk_availability
+                               : impl_->DurableAvailability(tree);
+  record.availability = disk_availability;
   record.durable = std::move(durable);
   record.tree = &tree;
   record.stable = stable;
   record.bytes = impl_->RecordBytes(record);
   record.metadata = impl_->Charge(record.bytes);
   auto tokens = std::span<const Token>(record.durable->Manifest().tokens);
-  return impl_->Publish(tree, tokens, std::move(record));
+  auto id = impl_->Publish(tree, tokens, std::move(record));
+  tree.disk_availability = std::move(disk_availability);
+  return id;
 }
 void PrefixIndex::AttachDurable(
     IndexEntryId id, std::shared_ptr<const DiskDescription> durable) {
@@ -603,8 +610,14 @@ void PrefixIndex::AttachDurable(
              record.durable->Manifest().checkpoint != manifest.checkpoint) {
     throw std::invalid_argument("durable publication identity mismatch");
   }
-  auto admitted =
-      impl_->DurableAvailability(*record.tree, record.availability.get());
+  auto& tree = *record.tree;
+  auto disk_availability = tree.disk_availability
+                               ? tree.disk_availability
+                               : impl_->DurableAvailability(tree);
+  auto admitted = record.checkpoint ? impl_->DurableAvailability(
+                                          tree, record.availability.get())
+                                    : disk_availability;
+  tree.disk_availability = std::move(disk_availability);
   record.availability = std::move(admitted);
   record.durable = std::move(durable);
 }
@@ -664,6 +677,9 @@ void PrefixIndex::DropResident(IndexEntryId id) {
     Erase(id);
     return;
   }
+  // Demotion runs under memory pressure. Reuse the immutable disk plan
+  // retained at attachment so lookups can keep their old plans.
+  record.availability = record.tree->disk_availability;
   record.checkpoint.reset();
 }
 void PrefixIndex::RemoveDurable(const DiskDescription& description,

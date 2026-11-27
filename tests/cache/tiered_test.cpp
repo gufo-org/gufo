@@ -97,6 +97,33 @@ void DeeperDiskAndRAMEviction() {
   assert(f.adapter.RecurrentHash(*destination) ==
          f.adapter.RecurrentHash(*f.slot));
 }
+void DemotionKeepsIndependentSourcePlans() {
+  TieredFixture f;
+  f.Append(16, 12);
+  auto checkpoint = f.Capture();
+  auto durable = f.Publish(*checkpoint);
+  const auto entry = f.index.Insert(checkpoint, f.Resident());
+  f.index.AttachDurable(entry, durable);
+  auto resident = f.index.Lookup(f.Query());
+  assert(resident.selected && resident.selected->checkpoint == checkpoint);
+
+  // Reclaim must work even if the ledger refuses another plan allocation.
+  f.ledger.FailAfter(LedgerStep::kReserve, 0);
+  f.index.DropResident(entry);
+  f.ledger.ClearFaults();
+  auto disk = f.index.Lookup(f.Query());
+  assert(disk.selected && disk.selected->entry == entry);
+  assert(!disk.selected->checkpoint && disk.selected->durable == durable);
+  assert(disk.selected->disk_pin);
+  for (const auto& component : disk.selected->availability->components) {
+    assert(!component.resident && component.durable);
+    assert(disk.selected->UsesDisk(component.id));
+  }
+  assert(disk.selected->availability->components.size() ==
+         f.adapter.Components().size());
+  for (const auto& component : resident.selected->availability->components)
+    assert(component.resident && !resident.selected->UsesDisk(component.id));
+}
 void CorruptionInvalidatesAllDependents() {
   TieredFixture f;
   f.Append(3, 0);
@@ -951,6 +978,7 @@ void DurableCheckpointEvictedAheadOfNonDurableUnderPressure() {
 }  // namespace
 int main() {
   DeeperDiskAndRAMEviction();
+  DemotionKeepsIndependentSourcePlans();
   CorruptionInvalidatesAllDependents();
   GlobalLRUAndSharedFiles();
   SupersededDiskTurnsLeaveBeforeAnotherConversation();
