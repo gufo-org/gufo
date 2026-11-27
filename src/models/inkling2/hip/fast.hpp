@@ -184,10 +184,22 @@ struct MixJob {
   ConvResidArgs cr;
   int ostride = 0;  // token stride of `out` (0: nq * 2304); decode batches
 };
-/// Reads `bytes` from p, then `bytes2` from p2 (a cache prefetch: nothing is
+/// Reads every range of the list, in order (a cache prefetch: nothing is
 /// written).
-void Touch(hipStream_t s, const void* p, size_t bytes, int blocks,
-           const void* p2 = nullptr, size_t bytes2 = 0);
+struct TouchList {
+  static constexpr int kMax = 16;
+  const void* p[kMax];
+  size_t bytes[kMax];
+  int n = 0;
+  void Add(const void* q, size_t b) {
+    if (b > 0 && q != nullptr && n < kMax) {
+      p[n] = q;
+      bytes[n] = b;
+      ++n;
+    }
+  }
+};
+void TouchN(hipStream_t s, const TouchList& l, int blocks);
 void Mix(hipStream_t s, const MixJob& j, float eps);
 
 /// Several RMS norms of 2304 rows in one launch.

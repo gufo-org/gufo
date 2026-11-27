@@ -164,25 +164,28 @@ struct Engine::Impl {
   hipEvent_t ev_fork = nullptr, ev_join = nullptr, ev_bank = nullptr;
   // Cancellable passes: the last two visits' ends (see MaybeYield).
   hipEvent_t ev_visit[2] = {};
-  // Decode steps: a visit's q and output-projection weights are read on a
-  // side stream while the latency-bound mixes and attention run (the DRAM is
-  // mostly idle then), so their GEMVs find them in the last-level cache.
-  // Twenty blocks: more take CUs from the main chain. Only where
-  // Engine::Create measured it to pay: on Windows/TheRock 10.0 the side
-  // stream's cross-queue waits in the replayed graph cost more than the
+  // Decode steps: dense weights are read on a side stream while the
+  // latency-bound mixes, controllers, router and attention run (the DRAM is
+  // mostly idle then), so their GEMVs find them in the last-level cache: the
+  // next visit's q projection (and its loop controllers) beside the expert
+  // input and router, the gate projection beside the attention inputs, the
+  // output projection and the router beside the attention. The expert GEMVs
+  // between a prefetch and its use stream with DLC loads, which do not
+  // allocate in that cache. Twenty blocks: more take CUs from the main chain.
+  // Only where Engine::Create measured it to pay: on Windows/TheRock 10.0 the
+  // side stream's cross-queue waits in the replayed graph cost more than the
   // prefetch saves (decode 39.4 tok/s with it, 46.0 without at C = 1).
   static constexpr int kPrefetchBlocks = 20;
   bool decode_prefetch = false;
   hipStream_t dps = nullptr;
   hipEvent_t ev_pf = nullptr, ev_pfj = nullptr;
   bool pf_open = false;
-  void Prefetch(const void* p, std::size_t bytes, const void* p2 = nullptr,
-                std::size_t bytes2 = 0) {
-    if (!decode_prefetch || bytes + bytes2 == 0)
+  void Prefetch(const fs::TouchList& l) {
+    if (!decode_prefetch || l.n == 0)
       return;
     Check(hipEventRecord(ev_pf, ds), "prefetch fork");
     Check(hipStreamWaitEvent(dps, ev_pf, 0), "prefetch fork");
-    fs::Touch(dps, p, bytes, kPrefetchBlocks, p2, bytes2);
+    fs::TouchN(dps, l, kPrefetchBlocks);
     pf_open = true;
   }
   void PrefetchJoin() {
@@ -386,6 +389,12 @@ struct Engine::Impl {
   int nb = 1;  // tokens of the decode step being built
   float* d_blk[16];
   int nblk_alloc = 0;
+  struct Visit {
+    int ip;    // physical layer
+    bool msg;  // a later pass's core visit (loop controllers on its inputs)
+  };
+  std::vector<Visit> d_visits;  // the decode step's visits (BuildDecode)
+  int d_visit = 0;              // index of the visit DLayer builds
   int* d_ids8;
   fs::MoeGroups d_groups{};  // wide steps: pairs grouped by expert
   void* d_qa = nullptr;      // wide steps: quantized GEMV inputs
@@ -1429,8 +1438,15 @@ struct Engine::Impl {
     const fs::SlotEntry* slot = d_tbl + slot_idx;
     const int* pos = d_step + kMaxB;
 
-    if (F.proj)  // q, read while the inputs are mixed
-      Prefetch(D(L.attn_q), L.attn_q.size_bytes);
+    // The visit before this one read q (and the controllers) beside its
+    // expert input; the first one reads q now.
+    const int vi = d_visit++;
+    if (F.proj) {
+      fs::TouchList tl;
+      tl.Add(vi == 0 ? D(L.attn_q) : D(L.attn_gate),
+             vi == 0 ? L.attn_q.size_bytes : L.attn_gate.size_bytes);
+      Prefetch(tl);
+    }
     // A. attention inputs
     const float* inp[3] = {cur, cur, cur};
     const bool three = msg || !swa;  // separate q / k / v inputs
@@ -1593,11 +1609,14 @@ struct Engine::Impl {
       }
     }
 
-    if (F.oproj)  // the output projection and the router, read during the
-                  // attention
-      Prefetch(D(L.attn_output), L.attn_output.size_bytes,
-               ctl_half ? HW(L.ffn_gate_inp) : nullptr,
-               ctl_half ? L.ffn_gate_inp.size_bytes / 2 : 0);
+    if (F.oproj) {  // the output projection and the router, read during the
+                    // attention
+      fs::TouchList tl;
+      tl.Add(D(L.attn_output), L.attn_output.size_bytes);
+      if (ctl_half)
+        tl.Add(HW(L.ffn_gate_inp), L.ffn_gate_inp.size_bytes / 2);
+      Prefetch(tl);
+    }
     // C. conv + clip + KV write (in the attention launch for distinct
     // sessions' rows)
     fs::KvPrepArgs ka{};
@@ -1707,6 +1726,22 @@ struct Engine::Impl {
       pend.a = ca;
     }
 
+    // The next visit's q projection and attention-input controllers, read
+    // while this visit's expert input and router run.
+    if (vi + 1 < static_cast<int>(d_visits.size()) &&
+        lf[d_visits[vi + 1].ip].proj) {
+      const LayerWeights& N = w->layers[d_visits[vi + 1].ip];
+      fs::TouchList tl;
+      tl.Add(D(N.attn_q), N.attn_q.size_bytes);
+      if (ctl_half && d_visits[vi + 1].msg)
+        for (int j = 0; j < 3; ++j) {
+          const LoopController& c = N.loop[kStreamQ + j];
+          tl.Add(HW(c.down), c.down.size_bytes / 2);
+          tl.Add(HW(c.gain), c.gain.size_bytes / 2);
+          tl.Add(HW(c.forget), c.forget.size_bytes / 2);
+        }
+      Prefetch(tl);
+    }
     // F. MoE input
     if (!msg) {
       const float* nwp[1] = {DS(L.ffn_norm)};
@@ -1803,6 +1838,18 @@ struct Engine::Impl {
   void BuildDecode(int bucket_ctx) {
     float* cur = d_cur;
     pend.on = false;
+    // the visits in order (DLayer prefetches the next one's weights)
+    d_visits.clear();
+    d_visit = 0;
+    const int cs = static_cast<int>(cfg->core_start),
+              ce = static_cast<int>(cfg->core_end);
+    for (int ip = 0; ip < cs; ++ip)
+      d_visits.push_back({ip, false});
+    for (int pass = 0; pass < static_cast<int>(cfg->n_passes); ++pass)
+      for (int ip = cs; ip < ce; ++ip)
+        d_visits.push_back({ip, pass > 0});
+    for (int ip = ce; ip < static_cast<int>(cfg->n_phys); ++ip)
+      d_visits.push_back({ip, false});
     kk::EmbedRows(ds, static_cast<int>(w->token_embd.type), D(w->token_embd),
                   kEmbd, d_step, nb, cur, kEmbd);
     kk::RmsNorm(ds, cur, kEmbd, DS(w->token_embd_norm), cur, kEmbd, kEmbd, nb,
