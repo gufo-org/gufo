@@ -511,6 +511,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `GET` | `/v1/realtime` | `serve asr`: transcription sessions, and spoken conversations for models that hear and speak |
 | `GET` | `/voice` | `serve asr` with a conversational model: a browser client of `/v1/realtime` |
 | `POST` | `/v1/systemone` | A decision model is configured with `gufo serve decision` |
+| `POST` | `/v1/rerank`, `/v1/reranking`, `/rerank` | A reranking model is configured with `gufo serve rerank`. A text server answers 501, and other servers answer 404 |
 | `POST` | `/v1/images/generations` | Qwen-Image-2.1 image serving is configured |
 | `POST` | `/v1/images/edits` | Qwen-Image-2.1 image serving is configured |
 | `POST` | `/sdapi/v1/txt2img`, `/sdapi/v1/img2img` | Image serving is configured; the [A1111 image API](#a1111-image-api). A text server answers 501 |
@@ -1613,15 +1614,74 @@ Run the server under a supervisor that restarts on failure, such as systemd
 `Restart=on-failure` or a container `restart: always`/`on-failure` policy;
 a restart is the only recovery.
 
+## Reranking
+
+`gufo serve rerank` scores documents against a query. `POST /v1/rerank`,
+`/v1/reranking` and `/rerank` share one handler, `HandleRerankApiRequest`,
+which the server calls before the route table so that a rerank-only server
+needs no text backend and the llama-server stubs do not shadow it. Without a
+rerank service, a text server keeps the stubs and answers 501, and other
+servers answer 404. Gufo ships no reranking model; an extension registers a
+`RerankProvider` (`gufo/ext/rerank.hpp`).
+
+```sh
+curl http://localhost:8080/v1/rerank -d '{
+  "query": "capital of France",
+  "documents": ["Paris is the capital of France.", "Bananas are yellow."],
+  "top_n": 1
+}'
+```
+
+```json
+{"model": "my-reranker", "object": "list",
+ "usage": {"prompt_tokens": 61, "total_tokens": 61},
+ "results": [{"index": 0, "relevance_score": 0.99}]}
+```
+
+The response format is llama-server's (`format_response_rerank` in its
+`server-common.cpp`); requests are checked more strictly (see the table).
+A body with `texts` is the TEI form and is answered with a bare array of
+`{"index", "score"}` objects, plus `text` when `return_text` is true. Any other
+body is the Jina form and is answered as above. Both are sorted by descending
+score, with equal scores in input order, and cut to `top_n`. `usage` sums the
+tokens of every document scored, not only the ones returned. Scores are the model's own and comparable only within one request.
+
+| Field | Rule |
+| --- | --- |
+| `query` | Required. A string, `{"text": ...}` or `{"content": [...]}`; empty is a 400 `empty_query`. |
+| `documents`, else `texts` | A non-empty array of strings, `{"text": ...}` or `{"content": [...]}` objects, at most `RerankService::kMaxDocuments` (2,048). |
+| `content` | The typed parts of [embeddings](#embeddings), in order: `text`, `image_url` and `input_video` (`data` or `url`). Another type, `input_audio` among them, is a 400 `unsupported_input`; only empty text is a 400 `empty_input`. |
+| `top_n` | An integer from 0; defaults to the document count and is clamped to it. Negative is a 400 `invalid_top_n`. |
+| `return_text` | Read in the TEI form only. |
+| `instruction`, `truncate` | Gufo members passed to the runner in `RerankRequestOptions`. |
+| `model` | Optional; a served ID or alias, else 404 `model_not_found`. The response carries the primary ID. |
+| Any member other than `text` or `content` (such as `image` or `video`) in a query or document | 400 `unsupported_input`. Null members are ignored; `text` with `content` is a 400. |
+
+The service hands the whole request to the runner in one call, the query and
+each document as a `RerankInput` of `EmbeddingPart`s. The host reads no media;
+the runner fetches and decodes it and owns its limits. TEI's `return_text`
+returns a document's text parts. Runner statuses map to 499 `cancelled`, 400
+`context_length_exceeded` (naming `failed_index`), 400 `invalid_input`, 400
+`unsupported_input` (a part kind the model cannot score, such as an image for a
+text-only model), 500 `rerank_failed` and 503 `device_lost`; a runner that returns the wrong number of scores, or a
+non-finite one, is a 500. `tests/cli/rerank_api_test.cpp` covers the handler
+and service without a socket, and `TestRerankService` in
+`tests/cli/http_server_test.cpp` covers the server.
+
 ## Metrics
+
+A rerank server exports `gufo_rerank_requests_total` by status,
+`gufo_rerank_documents_total`, `gufo_rerank_input_tokens_total`,
+`gufo_rerank_request_seconds` and `gufo_rerank_requests_in_flight`, from
+`rerank_metrics.hpp`.
 
 `/metrics` renders a registry that lives in Rust (`src/core/metrics`, wrapped
 for C++ by `src/core/metrics.hpp`) in the Prometheus text format. A process
 serves one model class, and `HttpServer` answers `GET /metrics` and
 `GET /v1/metrics` from that class's registry. `MetricsEndpoint` in
 `http_server.cpp` picks the registry once, from the text backend, then the
-embedding service. A server with neither of them, such as the ASR, TTS, image,
-video and decision servers, answers 404.
+embedding service, then the rerank service. A server with none of them, such as
+the ASR, TTS, image, video and decision servers, answers 404.
 
 The text server registers its families once, in `TextMetrics`
 (`src/cli/serve/generation_metrics.hpp`), and the scheduler and request paths

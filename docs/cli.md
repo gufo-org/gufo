@@ -39,6 +39,7 @@ gufo serve [server options] <modality> [model options]
 | `image` | Image generation and editing | `/v1/images/generations`, `/v1/images/edits` |
 | `video` | Video generation | `/v1/videos` |
 | `decision` | Decision models | `/v1/systemone` |
+| `rerank` | Reranking models | `/v1/rerank`, `/v1/reranking`, `/rerank` |
 
 One process serves one model. To offer several models under one URL, put
 them behind [llama-swap](server.md#llama-swap).
@@ -150,6 +151,9 @@ broken output, then delete the file: it holds whole conversations.
   ([LoRA adapters](models/qwen-image-2.1.md#lora-adapters)).
 - **Video:** `gufo serve video` and `gufo video`; see
   [MiniMax H3](models/minimax-h3.md).
+- **Reranking:** `gufo serve rerank --model DIR` scores documents against a
+  query; see [Reranking](internal/server.md#reranking). The model comes from an
+  extension, which may add its own options.
 - **Decisions:** `gufo serve decision --model PATH` answers at
   `POST /v1/systemone`, and `gufo decide --model PATH --request request.json`
   (or `--jsonl` on standard input) answers without HTTP. `--context` limits
