@@ -75,8 +75,12 @@ model think first, then force the call or the JSON.
 A required call gets one thought: a model that decided against the call would
 otherwise keep reopening thoughts until the token limit.
 
-The prompt matches Thinking Machines' renderer (`tml-renderers`). Thoughts
-after part of an answer come back [in order](../server.md#reasoning-controls).
+The prompt matches Thinking Machines' renderer (`tml-renderers`). The model can
+think again after part of its answer. Responses and Messages return one item or
+block per thought and answer text, in order; Chat Completions joins the
+thoughts in `reasoning_content`. Send them back in order to keep the
+conversation cached: in Chat Completions, as `{"type": "thinking", "thinking":
+"..."}` content parts between the text parts (other models read them joined).
 
 ## Tools and structured output
 
