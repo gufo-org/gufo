@@ -56,21 +56,17 @@ pub fn parse_head(buffer: &[u8], known_partial: usize) -> Parsed<'_> {
         return Parsed::Malformed;
     }
     // An empty line ends the head: CRLF CRLF, or a bare LF on either line.
-    let ends = |from: usize| {
-        buffer[from.min(buffer.len())..]
-            .windows(2)
-            .position(|pair| pair == b"\n\n" || pair == b"\n\r")
-            .map(|at| from + at)
-    };
-    if ends(known_partial.saturating_sub(3)).is_none() {
+    let from = known_partial.saturating_sub(3).max(start).min(buffer.len());
+    let Some(at) = buffer[from..]
+        .windows(2)
+        .position(|pair| pair == b"\n\n" || pair == b"\n\r")
+    else {
         return Parsed::Partial;
-    }
+    };
+    let end = from + at;
     // A slot per line of the head: every line after the request line is a
     // field or makes the head malformed. Too many are rejected before any
     // allocation, and a failing allocation is reported, not aborted on.
-    let Some(end) = ends(start) else {
-        return Parsed::Partial;
-    };
     let lines = buffer[start..=end]
         .iter()
         .filter(|&&byte| byte == b'\n')
@@ -314,6 +310,24 @@ mod tests {
             parse_head(text, text.len() - 2),
             Parsed::Complete(_)
         ));
+    }
+
+    #[test]
+    fn incremental_heads_match_single_read() {
+        for text in [
+            &b"POST /x?a=b HTTP/1.1\r\nContent-Length: 4\r\nX: y\r\n\r\n"[..],
+            b"\r\nGET / HTTP/1.0\r\nX: y\n\n",
+            b"\nGET / HTTP/1.1\nX: y\n\r\n",
+        ] {
+            let expected = head(text);
+            for split in 0..text.len() {
+                assert_eq!(parse_head(&text[..split], 0), Parsed::Partial);
+                let Parsed::Complete(actual) = parse_head(text, split) else {
+                    panic!("head split at byte {split} did not complete");
+                };
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     #[test]
