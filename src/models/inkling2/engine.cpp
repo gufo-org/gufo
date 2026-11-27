@@ -368,8 +368,10 @@ struct Engine::Impl {
   // one-input projections and the output matrix stay faster per row)
   static constexpr int kMmaHeadRows = kChunk;
   // verification steps from this many rows group the MoE pairs by expert
-  // (consecutive rows of a session share most of their experts)
+  // (consecutive rows of a session share most of their experts; several
+  // sessions' rows share fewer)
   static constexpr int kGroupedVerifyRows = 4;
+  static constexpr int kGroupedBatchVerifyRows = 6;
   static constexpr int kMsgInvTokens = 1024;
   // A visit of a longer ubatch also checks for cancellation between its
   // attention and expert halves: a pass then stops as soon as one of this
@@ -401,7 +403,7 @@ struct Engine::Impl {
   float* d_qs = nullptr;
   int* d_step;  // {token, position, row within its session}
   unsigned* d_counter;
-  unsigned* d_ccnt;  // fused controller apply + norm: [kMaxB][4]
+  unsigned* d_ccnt;     // fused controller apply + norm: [kMaxB][4]
   unsigned* d_moe_cnt;  // fused expert gate/up + down: [2][kMaxB * 8]
   fs::SlotEntry* d_tbl;
   const float* d_states[16];
@@ -1784,11 +1786,14 @@ struct Engine::Impl {
                d_counter, d_ids8, d_wts8, cfg->expert_weights_scale, nb,
                ctl_half);
     // Many rows, a full chunk, or four or more consecutive rows of one session
-    // (which share most experts): each used expert's weights read once for all
-    // its pairs. Fewer rows, and other sessions' rows (which share fewer
-    // experts), run per pair.
+    // (which share most experts; six of several sessions): each used expert's
+    // weights read once for all its pairs. Fewer rows, and other sessions'
+    // decode rows (which share fewer experts), run per pair.
     if (F.moe >= 0 &&
-        (nb >= kChunk || (verify_mode && nb >= kGroupedVerifyRows))) {
+        (nb >= kChunk ||
+         (verify_mode &&
+          nb >= (verify_one_session ? kGroupedVerifyRows
+                                    : kGroupedBatchVerifyRows)))) {
       const int slots = std::min(E, 8 * nb);
       fs::MoeRouteGroup(ds, d_ids8, 8 * nb, d_groups);
       fs::MoeQuantGrouped(ds, F.moe, d_h, nb, kEmbd, d_groups);

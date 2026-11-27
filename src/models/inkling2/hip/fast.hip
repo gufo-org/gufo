@@ -220,8 +220,8 @@ __device__ __forceinline__ void q8_unit_dl(__amdgpu_buffer_rsrc_t r, int off,
                                            int u, int vb, float (&acc)[B]) {
   v4u w0 = wld16(r, off + 2);
   v4u w1 = wld16(r, off + 18);
-  float d = __half2float(__ushort_as_half(
-      __builtin_amdgcn_raw_buffer_load_b16(r, off, 0, kDlc)));
+  float d = __half2float(
+      __ushort_as_half(__builtin_amdgcn_raw_buffer_load_b16(r, off, 0, kDlc)));
   q8_unit_c<B, K, VS>(w0, w1, d, aq, asc, u, vb, acc);
 }
 template<int B, int K, int VS = 1>
@@ -1036,8 +1036,8 @@ __global__ void __launch_bounds__(BW* WS)
     const int jj = j < FF ? j : FF - 1;
     float acc[1];
     row_dot_dl<FMT_NVFP4, K1, LPR1, 1>(wr, (int)(rb * (isup ? FF + jj : jj)),
-                                       aq, asc, CPU * NU1, K1 / 16, res, 0,
-                                       lir, acc);
+                                       aq, asc, CPU * NU1, K1 / 16, res, 0, lir,
+                                       acc);
     const float other = __shfl_xor(acc[0], LPR1, WS);
     if (!isup && lir == 0 && j < FF)
       a[(size_t)p * FF + j] = situ(acc[0] * sc, other * sc);
@@ -1086,8 +1086,8 @@ __global__ void __launch_bounds__(BW* WS)
     if ((NU2 % LPR2 == 0) || u < NU2) {
       nv_unit_c<1, K2>(sw[i], q0[i], q1[i], aq, asc, u, 0, acc);
       if (res)
-        nv_unit_c<1, K2>(sw[i], q0[i], q1[i], aq + CPU * NU2, asc + K2 / 16,
-                         u, 0, acc);
+        nv_unit_c<1, K2>(sw[i], q0[i], q1[i], aq + CPU * NU2, asc + K2 / 16, u,
+                         0, acc);
     }
   }
 #pragma unroll
@@ -1515,8 +1515,8 @@ __global__ void __launch_bounds__(BW* WS)
     const int row = (rbk * BW + wave) * RPW + g;
     const int rr = row < D ? row : D - 1;
     RowRegs<FMT, K, LPR> wr;
-    row_load_dl<FMT, K, LPR, true>(wrsrc(W + (size_t)e * D * rb), (int)(rr * rb),
-                                   lir, wr);
+    row_load_dl<FMT, K, LPR, true>(wrsrc(W + (size_t)e * D * rb),
+                                   (int)(rr * rb), lir, wr);
     [[maybe_unused]] RowDec<K, LPR> wd;
     if constexpr (FMT == FMT_NVFP4)
       row_decode<K, LPR, true>(wr, lir, wd);
@@ -2073,10 +2073,9 @@ __device__ __forceinline__ float4 load_w4(const void* W, size_t off, int half) {
   if (!half)
     return *(const float4*)(static_cast<const float*>(W) + off);
   const uint2 u = *(const uint2*)(static_cast<const uint16_t*>(W) + off);
-  return make_float4(__uint_as_float(u.x << 16),
-                     __uint_as_float(u.x & 0xFFFF0000u),
-                     __uint_as_float(u.y << 16),
-                     __uint_as_float(u.y & 0xFFFF0000u));
+  return make_float4(
+      __uint_as_float(u.x << 16), __uint_as_float(u.x & 0xFFFF0000u),
+      __uint_as_float(u.y << 16), __uint_as_float(u.y & 0xFFFF0000u));
 }
 
 // Register-tiled: a block computes 64 tokens x 64 rows, each thread 4 x 4 of
@@ -2383,14 +2382,12 @@ __global__ void __launch_bounds__(256) k_ctl_apply_v4(CtlPJobs jobs, int T) {
         if constexpr (H) {
           const uint2 ug = *(const uint2*)&wg[(tr + 16 * i) * LS + k4];
           const uint2 uf = *(const uint2*)&wf[(tr + 16 * i) * LS + k4];
-          a[i] = make_float4(__uint_as_float(ug.x << 16),
-                             __uint_as_float(ug.x & 0xFFFF0000u),
-                             __uint_as_float(ug.y << 16),
-                             __uint_as_float(ug.y & 0xFFFF0000u));
-          b[i] = make_float4(__uint_as_float(uf.x << 16),
-                             __uint_as_float(uf.x & 0xFFFF0000u),
-                             __uint_as_float(uf.y << 16),
-                             __uint_as_float(uf.y & 0xFFFF0000u));
+          a[i] = make_float4(
+              __uint_as_float(ug.x << 16), __uint_as_float(ug.x & 0xFFFF0000u),
+              __uint_as_float(ug.y << 16), __uint_as_float(ug.y & 0xFFFF0000u));
+          b[i] = make_float4(
+              __uint_as_float(uf.x << 16), __uint_as_float(uf.x & 0xFFFF0000u),
+              __uint_as_float(uf.y << 16), __uint_as_float(uf.y & 0xFFFF0000u));
         } else {
           a[i] = *(const float4*)&wg[(tr + 16 * i) * LS + k4];
           b[i] = *(const float4*)&wf[(tr + 16 * i) * LS + k4];
@@ -4889,14 +4886,13 @@ bool MoeGuDown(hipStream_t s, int fmt, const void* wgu, const float* gscale,
     return false;
   CheckSitu(beta, lb);
   constexpr int BW = 8, LPR1 = 16, LPR2 = 8;
-  const int gu_rb = ff / (BW * (WS / LPR1 / 2)),
-            dn_rb = d / (BW * (WS / LPR2));
+  const int gu_rb = ff / (BW * (WS / LPR1 / 2)), dn_rb = d / (BW * (WS / LPR2));
   const int npair = 8 * nb;
   k_moe_gu_down<2304, 1152, LPR1, LPR2, BW>
-      <<<npair * (gu_rb + dn_rb), BW * WS, 0, s>>>(
+      <<<npair*(gu_rb + dn_rb), BW * WS, 0, s>>>(
           static_cast<const uint8_t*>(wgu), gscale,
-          static_cast<const uint8_t*>(wd), dscale, x, ids, wts, a, yp, cnt, ff, d, npair, gu_rb, dn_rb, nb == 1 ? 1 : 0,
-          g_res);
+          static_cast<const uint8_t*>(wd), dscale, x, ids, wts, a, yp, cnt, ff,
+          d, npair, gu_rb, dn_rb, nb == 1 ? 1 : 0, g_res);
   Chk("moe_gu_down");
   return true;
 }
@@ -5575,8 +5571,8 @@ void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
   GateJobs g{};
   for (int i = 0; i < jobs.n; ++i) {
     const CtlPJob& c = jobs.j[i];
-    g.j[i] = {c.x,    c.ldx, c.msg,  c.ldm,  c.down, 4608, 2304, 2304,
-              1,      c.g64, 64,     0,      c.minv, c.xinv, c.half};
+    g.j[i] = {c.x, c.ldx, c.msg, c.ldm, c.down, 4608,   2304,  2304,
+              1,   c.g64, 64,    0,     c.minv, c.xinv, c.half};
   }
   // One job has too few token blocks for k_gate_p64's serial chunks; three
   // jobs keep the GPU busy and k_gate_p64 moves fewer bytes.
@@ -5593,16 +5589,16 @@ void CtlPrefill(hipStream_t s, const CtlPJobs& jobs, int t, float eps) {
     k_ctl_apply_v4<true>
         <<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs, t);
   else
-    k_ctl_apply_v4<false><<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs,
-                                                                          t);
+    k_ctl_apply_v4<false>
+        <<<dim3(36, (t + 63) / 64, jobs.n), 256, 0, s>>>(jobs, t);
   Chk("ctl_prefill");
 }
 
 void RouterPrefill(hipStream_t s, const void* w, const float* x, float* logits,
                    int t, bool half) {
   GateJobs g{};
-  g.j[0] = {x, 2304, nullptr, 0,       w,       2304,        2304, 0,
-            0, logits, 128,   0, nullptr, nullptr, half ? 1 : 0};
+  g.j[0] = {x, 2304,   nullptr, 0, w,       2304,    2304,        0,
+            0, logits, 128,     0, nullptr, nullptr, half ? 1 : 0};
   k_gate_p64<<<dim3((t + 63) / 64, 2, 1), 256, 0, s>>>(g, t, 0.f);
   Chk("router_prefill");
 }
