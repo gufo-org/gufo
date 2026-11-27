@@ -32,6 +32,24 @@ constexpr std::size_t GdnRollbackRowFloats(std::uint32_t row,
   return row == 0 ? std::size_t{v_heads} * dim * dim
                   : std::size_t{k_heads} * dim + v_heads * (dim + 2);
 }
+/// Rollback inputs of every linear-attention layer (RestoreGdnLayers).
+struct GdnRestoreLayers {
+  static constexpr int kMax = 40;
+  float* state[kMax]{};
+  RollbackRows rows[kMax]{};
+  float* conv[kMax]{};
+  const float* conv_src[kMax]{};
+  int count{0};
+};
+
+/// RestoreGdnState of every layer plus its convolution history copy
+/// (conv_src to conv, conv_elems floats) in one launch. False, with nothing
+/// queued, when an address is not 16-byte aligned or there are too many
+/// layers; the caller then restores the layers one by one.
+bool RestoreGdnLayers(const GdnRestoreLayers& layers, std::uint32_t keep,
+                      std::uint32_t k_heads, std::uint32_t v_heads,
+                      std::uint32_t conv_elems, hipStream_t stream);
+
 void RestoreGdnState(float* state, RollbackRows snapshots, std::uint32_t keep,
                      std::uint32_t k_heads, std::uint32_t v_heads,
                      hipStream_t stream);
@@ -46,6 +64,20 @@ enum class WeightType : std::uint32_t {
   kQ5_K = 13,
   kBF16 = 30,
 };
+
+/// Byte ranges a decode pass reads soon (weights): PrefetchRanges reads them
+/// so that their later reads hit the last-level cache (MALL).
+struct PrefetchRanges {
+  static constexpr int kMax = 4;
+  const void* data[kMax]{};
+  std::size_t bytes[kMax]{};
+  int count{0};
+};
+
+/// Reads every range of `ranges` with `blocks` blocks; the values are
+/// discarded. Only the cache state changes.
+void PrefetchRangesKernelLaunch(const PrefetchRanges& ranges,
+                                std::uint32_t blocks, hipStream_t stream);
 
 /// res[t][s][hidden] = table[tokens[t]] for every stream s (Q8_0 rows).
 void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
