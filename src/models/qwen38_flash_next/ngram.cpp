@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <bit>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <gufo/ext/platform/fs.hpp>
@@ -28,6 +29,15 @@ constexpr std::size_t kWorkers = 128;
 constexpr std::size_t kReadBatch = 8;
 constexpr std::size_t kBatchJobs = 1024;
 constexpr std::size_t kCacheBytes = 128 * 1024 * 1024;
+// An idle SSD leaves its active power state: on a WD SN7100 a 4 KiB direct
+// read took 0.15 ms up to 24 ms after the previous one and 0.95 ms from
+// 33 ms on. A decode step is longer than that, so every token's gather paid
+// the wake-up while the GPU had already finished the layers before the PLE
+// (about 0.4 ms idle per token). While decode-sized gathers keep arriving,
+// one page is read at this interval; the reads stop kWarmWindow after the
+// last gather.
+constexpr auto kWarmInterval = std::chrono::milliseconds(10);
+constexpr auto kWarmWindow = std::chrono::milliseconds(250);
 
 #if defined(__GNUC__) && defined(__x86_64__)
 // bf16 -> f32 is a 16-bit shift of the raw bits, so the widening needs no
@@ -107,8 +117,12 @@ NgramTable::~NgramTable() {
     stop_ = true;
   }
   wake_.notify_all();
+  warm_.notify_all();
   for (auto& w : workers_) {
     w.join();
+  }
+  if (warmer_.joinable()) {
+    warmer_.join();
   }
   if (file_ != platform::kInvalidFile) {
     platform::CloseFile(file_);
@@ -182,6 +196,10 @@ std::unique_ptr<NgramTable> NgramTable::OpenRows(
   }
   for (std::size_t i = 0; i < kWorkers; ++i) {
     t->workers_.emplace_back([raw = t.get()] { raw->Worker(); });
+  }
+  // Buffered rows come from the page cache, which has no wake-up to hide.
+  if (t->direct_) {
+    t->warmer_ = std::thread([raw = t.get()] { raw->KeepWarm(); });
   }
   return t;
 }
@@ -321,6 +339,35 @@ void NgramTable::Worker() {
   }
 }
 
+void NgramTable::KeepWarm() {
+  std::vector<std::uint8_t> buf(2 * kPage);
+  auto* page =
+      buf.data() +
+      (kPage - reinterpret_cast<std::uintptr_t>(buf.data()) % kPage) % kPage;
+  const std::uint64_t offset = base_offset_ & ~(kPage - 1);
+  std::unique_lock<std::mutex> lock(mutex_);
+  for (;;) {
+    warm_.wait(lock, [&] { return stop_ || warm_armed_; });
+    while (!stop_ && warm_armed_) {
+      if (warm_.wait_for(lock, kWarmInterval, [&] { return stop_; }))
+        break;
+      if (std::chrono::steady_clock::now() >= warm_until_) {
+        warm_armed_ = false;
+        break;
+      }
+      // A gather in flight already keeps the device busy.
+      if (active_ && pending_ != 0)
+        continue;
+      lock.unlock();
+      std::error_code ec;
+      (void)platform::ReadAt(file_, offset, page, kPage, ec);
+      lock.lock();
+    }
+    if (stop_)
+      return;
+  }
+}
+
 bool NgramTable::Read(std::span<const std::uint32_t> rows,
                       std::span<float> out) {
   return StartRead(rows, out) && WaitRead();
@@ -417,6 +464,13 @@ bool NgramTable::StartRead(std::span<const std::uint32_t> rows,
   pending_ = jobs_.size();
   failed_ = false;
   active_ = true;
+  if (direct_ && rows.size() < kBatchJobs) {
+    warm_until_ = std::chrono::steady_clock::now() + kWarmWindow;
+    if (!warm_armed_) {
+      warm_armed_ = true;
+      warm_.notify_one();
+    }
+  }
   // A decode gather has a handful of reads: wake one reader per read, not
   // the whole pool. Readers keep taking jobs until the queue is empty.
   if (pending_ >= workers_.size()) {

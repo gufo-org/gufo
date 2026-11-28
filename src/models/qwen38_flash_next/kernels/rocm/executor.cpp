@@ -1134,6 +1134,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   s.ctx_q8_1 = q8_1(c.AttentionQDim());
   e->hc_fused_state_ =
       Alloc<std::uint8_t>(a, HcMixQ8FusedStateBytes(), error_msg);
+  e->gdn_fused_state_ = Alloc<std::uint8_t>(a, GdnFusedStateBytes(), error_msg);
   e->mask_words_ = c.SparseMaskWords(e->context_capacity_);
   // Keep score/selection traffic near the device cache size. Captured
   // verification still needs all its rows at the maximum context.
@@ -3233,7 +3234,8 @@ bool Executor::DefaultLinearAttention(const DeviceLayer& l,
                      c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim,
                      c.ssm_conv_kernel, MatrixRows(n_tokens) && !speculative,
                      convolved, c.rms_eps, stream_, out_half, checkpoint,
-                     half_stride, out_q8_1 ? s_.gdn_q8_1 : nullptr, z_ready)) {
+                     half_stride, out_q8_1 ? s_.gdn_q8_1 : nullptr, z_ready,
+                     n_tokens <= kVecBatch ? gdn_fused_state_ : nullptr)) {
     AssignError(error_msg, "DeltaNet launch failed");
     return false;
   }

@@ -1,5 +1,20 @@
 # Qwen3.8 Flash-Next experiments
 
+## Decode launch fusion and n-gram read latency (November 28, 2026)
+
+Main `b41b259e`, ROCm 10.1, UD-Q4_K_XL, single user, `gufo bench -p 128 -n 256 -r 1`
+(one fresh process per run, so every n-gram row comes from the SSD), three
+main/candidate pairs at depth 0 and two at depth. Greedy output hashes and
+208 matched-token decode logit rows are byte-identical to main.
+
+| Experiment | Outcome |
+| --- | --- |
+| Keep the SSD awake between decode gathers (`NgramTable::KeepWarm`) | **Retained**: on a WD SN7100 behind dm-crypt a 4 KiB direct read takes 0.15 ms up to 24 ms after the previous read and 0.95 ms from 33 ms on (kernel-default NVMe power states). A decode step is longer, so each token's 16-row gather took 1.03 ms while layer 0, the only work queued before the PLE layer, takes 0.65 ms: the GPU idled on 63 of 64 first-pass steps. One 4 KiB read every 10 ms while decode-sized gathers arrive (stopping 250 ms after the last) brings the wait to 0.22 ms and the idle steps to 0; first-pass step 32.77 → 32.35 ms. Text whose rows are in the 128 MiB row cache is unchanged. |
+| One launch for a decode pass's Gated DeltaNet (`GdnDecodeFusedKernel`) | **Retained**: convolution, q/k norms, recurrence and epilogue of one to eight rows as consecutive block ranges of one grid, each waiting for the previous range, with the recurrence blocks reading their state rows meanwhile. 108 fewer launches per token; AR tg128 30.49 → 30.67 tok/s with warm rows (two pairs, `-r 3`), about 1.9 µs per removed launch. `gdn_ops_test` compares every output, state and rollback byte with the separate launches for 1–8 rows. |
+| Both changes | AR tg256 30.45 → 30.87 tok/s at depth 0 (+1.4%), 29.62 → 30.12 at d4096 (+1.7%), 29.83 → 30.00 at d32768 (+0.6%); MTP 69.70 → 70.25 (+0.8%), 58.49 → 59.04 at d4096 (+0.9%), d32768 (repetitive, rows cached) within run-to-run spread. |
+| Native AIO for the decode gather (`io_submit` from the scheduling thread, polled) | Rejected: the wait stayed at 0.98 ms. The latency is the drive leaving its idle state, not the reader threads' wake-up. |
+| Reuse `GdnPrefillKernel` for one-row decode | Not exact: it normalizes q and k inside the recurrence, with different rounding from the decode kernels. |
+
 ## Decode prefetch and depth tuning (November 27, 2026)
 
 Main `f0733481`, ROCm 10.1, UD-Q4_K_XL, autoregressive, `gufo bench -p 2048 -n 64 -d 0,16384`.

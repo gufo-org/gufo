@@ -854,6 +854,104 @@ void CheckSplitPasses(std::uint32_t tokens, SplitOutput mode,
             << "): exact\n";
 }
 
+/// A decode pass as one launch (GdnDecodeFusedKernel) against the separate
+/// convolution, norm, recurrence and epilogue launches: every byte of the
+/// outputs, their Q8_1 rows, both states and all rollback rows.
+void CheckFusedDecode(std::uint32_t tokens, bool rollback) {
+  const std::size_t qkv_count = std::size_t{tokens} * kChannels;
+  const std::size_t state_count = std::size_t{kVHeads} * kDim * kDim;
+  const std::size_t conv_count = std::size_t{kKernel - 1} * kChannels;
+  const std::size_t out_count = std::size_t{tokens} * kZ;
+  const std::size_t q8_bytes = out_count / 32 * 36;
+  const auto qkv = MakeValues(qkv_count, 0x51F0A11DU + tokens, 1.0F);
+  const auto z = MakeValues(out_count, 0x0DDBA11U, 2.0F);
+  const auto alpha_beta =
+      MakeValues(std::size_t{tokens} * 2 * kVHeads, 0xA1FABE7AU, 2.0F);
+  const auto conv_w =
+      MakeValues(std::size_t{kChannels} * kKernel, 0xC0471234U, 0.5F);
+  const auto a = MakeValues(kVHeads, 0xC0FFEE11U, 1.0F, -1.5F);
+  const auto dt = MakeValues(kVHeads, 0xFEEDFACEU, 1.0F);
+  const auto norm_w = MakeValues(kDim, 0x600DCAFEU, 0.5F, 1.0F);
+  const auto conv_state = MakeValues(conv_count, 0x13579BDFU, 1.0F);
+  const auto state = MakeValues(state_count, 0x2468ACE0U, 0.1F);
+  HipBuffer<float> d_qkv(qkv_count), d_z(out_count);
+  HipBuffer<float> d_alpha_beta(alpha_beta.size()), d_conv_w(conv_w.size());
+  HipBuffer<float> d_a(kVHeads), d_dt(kVHeads), d_norm_w(kDim);
+  Upload(&d_qkv, qkv);
+  Upload(&d_z, z);
+  Upload(&d_alpha_beta, alpha_beta);
+  Upload(&d_conv_w, conv_w);
+  Upload(&d_a, a);
+  Upload(&d_dt, dt);
+  Upload(&d_norm_w, norm_w);
+  HipBuffer<std::uint8_t> fused(q::GdnFusedStateBytes());
+  CheckHip(hipMemset(fused.get(), 0, fused.bytes()), "fused state");
+  std::vector<std::vector<float>> reference;
+  std::vector<std::uint8_t> reference_q8;
+  // Route 0 is the separate launches; the fused launch runs twice, the
+  // second on the counters the first one left.
+  for (int route = 0; route < 3; ++route) {
+    HipBuffer<float> d_conv_state(conv_count), d_state(state_count);
+    HipBuffer<float> d_out(out_count);
+    HipBuffer<float> d_scratch(std::size_t{tokens + kKernel} * kChannels);
+    HipBuffer<float> d_qn(std::size_t{tokens} * kKHeads * kDim);
+    HipBuffer<float> d_kn(std::size_t{tokens} * kKHeads * kDim);
+    HipBuffer<float> d_raw(std::size_t{tokens} * kVHeads * kDim);
+    HipBuffer<std::uint8_t> d_q8(q8_bytes);
+    CheckHip(hipMemset(d_q8.get(), 0, q8_bytes), "Q8_1 rows");
+    Upload(&d_conv_state, conv_state);
+    Upload(&d_state, state);
+    std::vector<std::unique_ptr<HipBuffer<float>>> state_rows, conv_rows;
+    q::RollbackRows state_snapshots, conv_snapshots;
+    for (std::uint32_t t = 0; rollback && t + 1 < tokens; ++t) {
+      state_rows.push_back(std::make_unique<HipBuffer<float>>(
+          q::GdnRollbackRowFloats(t, kKHeads, kVHeads, kDim)));
+      conv_rows.push_back(std::make_unique<HipBuffer<float>>(conv_count));
+      CheckHip(
+          hipMemset(state_rows.back()->get(), 0, state_rows.back()->bytes()),
+          "rollback rows");
+      state_snapshots.rows[t] = state_rows.back()->get();
+      conv_snapshots.rows[t] = conv_rows.back()->get();
+    }
+    if (!q::GatedDeltaNet(
+            d_qkv.get(), kChannels, d_z.get(), kZ, d_alpha_beta.get(),
+            d_conv_w.get(), d_a.get(), d_dt.get(), d_norm_w.get(),
+            d_conv_state.get(), d_scratch.get(), d_qn.get(), d_kn.get(),
+            d_raw.get(), d_state.get(), d_out.get(), nullptr, state_snapshots,
+            conv_snapshots, tokens, kKHeads, kVHeads, kDim, kKernel, false,
+            false, kEps, nullptr, nullptr, {}, 0, d_q8.get(), nullptr,
+            route == 0 ? nullptr : fused.get()))
+      throw std::runtime_error("fused GDN decode launch failed");
+    CheckHip(hipDeviceSynchronize(), "fused GDN synchronization");
+    std::vector<std::vector<float>> results;
+    results.push_back(Download(&d_out, out_count));
+    results.push_back(Download(&d_state, state_count));
+    results.push_back(Download(&d_conv_state, conv_count));
+    results.push_back(Download(&d_raw, d_raw.bytes() / sizeof(float)));
+    for (std::size_t t = 0; t < state_rows.size(); ++t) {
+      results.push_back(Download(state_rows[t].get(),
+                                 state_rows[t]->bytes() / sizeof(float)));
+      results.push_back(Download(conv_rows[t].get(), conv_count));
+    }
+    std::vector<std::uint8_t> q8(q8_bytes);
+    CheckHip(hipMemcpy(q8.data(), d_q8.get(), q8_bytes, hipMemcpyDeviceToHost),
+             "Q8_1 rows download");
+    if (route == 0) {
+      reference = std::move(results);
+      reference_q8 = std::move(q8);
+      continue;
+    }
+    for (std::size_t i = 0; i < results.size(); ++i)
+      if (std::memcmp(results[i].data(), reference[i].data(),
+                      results[i].size() * sizeof(float)) != 0)
+        throw std::runtime_error("fused GDN decode changed result " +
+                                 std::to_string(i) + " at " +
+                                 std::to_string(tokens) + " rows");
+    if (q8 != reference_q8)
+      throw std::runtime_error("fused GDN decode changed the Q8_1 rows");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -868,6 +966,10 @@ int main() {
     }
     if (RunCase(1, true) != 0 || RunCase(8, true) != 0)
       return 1;
+    for (std::uint32_t n = 1; n <= 8; ++n) {
+      CheckFusedDecode(n, false);
+      CheckFusedDecode(n, true);
+    }
     for (const auto mode :
          {SplitOutput::kF32, SplitOutput::kHalf, SplitOutput::kQ8})
       CheckSplitPasses(99, mode, {1U, 7U, 8U, 9U, 40U});

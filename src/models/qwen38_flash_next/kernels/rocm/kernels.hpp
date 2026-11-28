@@ -466,7 +466,12 @@ bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    bool convolved, float eps, hipStream_t stream,
                    __half* out_half = nullptr, GdnCheckpoint checkpoint = {},
                    std::uint32_t out_half_stride = 0, void* out_q8_1 = nullptr,
-                   hipEvent_t z_ready = nullptr);
+                   hipEvent_t z_ready = nullptr, void* fused_state = nullptr);
+
+/// Bytes of the zeroed device state GatedDeltaNet's `fused_state` points to.
+/// With it, a pass of one to eight rows that keeps its convolution history
+/// (128-wide heads, F32 output, no in-pass checkpoint) runs as one launch.
+std::size_t GdnFusedStateBytes();
 
 /// Private rows for one request in a decode batch. Scratch regions and all
 /// recurrent/history/rollback buffers must be disjoint between requests.

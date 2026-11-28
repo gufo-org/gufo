@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -148,6 +149,8 @@ private:
   bool ReadOne(std::uint32_t row, float* dst, std::vector<std::uint8_t>& buf,
                NgramCounters* owner);
   void Worker();
+  /// Reads one table page at a short interval while decode gathers arrive.
+  void KeepWarm();
 
   struct CacheEntry {
     std::atomic_flag busy = ATOMIC_FLAG_INIT;
@@ -181,6 +184,10 @@ private:
   bool active_{false};
   bool failed_{false};
   bool stop_{false};
+  std::thread warmer_;
+  std::condition_variable warm_;
+  std::chrono::steady_clock::time_point warm_until_{};
+  bool warm_armed_{false};
 };
 
 }  // namespace gufo::models::qwen38_flash_next
