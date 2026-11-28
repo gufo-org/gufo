@@ -1,9 +1,12 @@
 #ifndef GUFO_CACHE_DISK_CATALOG_HPP_
 #define GUFO_CACHE_DISK_CATALOG_HPP_
 
+#include <array>
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <vector>
 
 #include "src/cache/prefix_index.hpp"
 
@@ -16,6 +19,18 @@ struct DiskEviction {
   explicit operator bool() const { return description != nullptr; }
 };
 using DiskEvictionVisitor = std::function<void(const DiskEviction&)>;
+#ifdef GUFO_CACHE_TESTING
+// One record's ranking inputs and results, for tests that check the ranking
+// against an independent model.
+struct DiskCatalogRankForTesting {
+  std::uint64_t id{}, used{}, published{};
+  std::optional<std::uint64_t> reused_at;
+  bool invalid{};
+  std::size_t branch{};
+  std::array<std::uint64_t, 5> order{};
+  std::uint64_t unique_bytes{};
+};
+#endif
 // The allowance for the RAM that tracked disk checkpoints' metadata holds in
 // a RAM cache budget of `ram_budget` bytes; 0 (RAM cache off, no aggregate
 // limit) gives no allowance. Each checkpoint keeps its whole token list in
@@ -88,6 +103,19 @@ public:
   [[nodiscard]] std::size_t MetadataBytes() const;
   [[nodiscard]] std::size_t MetadataAllowance() const;
   [[nodiscard]] std::size_t Size() const;
+#ifdef GUFO_CACHE_TESTING
+  // Ranks every record as EvictOne does and returns them in checkpoint order.
+  // Like EvictOne it reconciles first: records the store quarantined become
+  // invalid and leave the index. It also replaces the ranking a retirement
+  // pass walks, which clears the marks of candidates that pass tried.
+  [[nodiscard]] std::vector<DiskCatalogRankForTesting> RankForTesting();
+  // The same records without ranking or reconciling: branch and order are
+  // what the last ranking left, and invalid holds only what the catalog has
+  // already seen.
+  [[nodiscard]] std::vector<DiskCatalogRankForTesting> RecordsForTesting()
+      const;
+  [[nodiscard]] std::uint64_t AdmittedBytesForTesting() const;
+#endif
 
 private:
   struct Impl;
