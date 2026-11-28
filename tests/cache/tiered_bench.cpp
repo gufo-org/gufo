@@ -152,7 +152,8 @@ int main(int argc, char** argv) {
     ResourceLedger nested_ledger{
         {std::size_t{1} << 36, std::size_t{1} << 35, 1 << 20, 1 << 24}};
     Directory nested_directory(directory.path);
-    DiskStore nested_disk(nested_ledger, nested_directory.path, 1 << 30);
+    DiskStore nested_disk(nested_ledger, nested_directory.path, 1 << 30,
+                          DiskTokenStorage::kSeparate);
     PrefixIndex nested_index(nested_ledger);
     std::vector<Token> conversation(turns * turn_tokens);
     for (std::size_t n = 0; n < conversation.size(); ++n)
@@ -184,6 +185,8 @@ int main(int argc, char** argv) {
                        recovered + turn_tokens * sizeof(Token));
     std::cout << "nested_load,0," << nested.Size() << ',' << Milliseconds(load)
               << ",0\n";
+    // Serving keeps the tokens only in the tries once tracked.
+    nested_disk.ReleaseTokens();
     // RAM the recovered conversation holds: the ledger's metadata, which
     // includes the store's decoded manifests, and what the catalog counts.
     std::cout << "nested_metadata," << nested.Size() << ','
@@ -199,6 +202,7 @@ int main(int argc, char** argv) {
       std::size_t retired{};
       const auto start = Clock::now();
       nested.Track({turns}, [&](const DiskEviction&) { ++retired; });
+      nested_disk.ReleaseTokens({turns});
       const auto elapsed = Milliseconds(start);
       const auto after = nested_disk.PublicationStats();
       if (!retired || !nested.Find({turns}))
@@ -231,7 +235,8 @@ int main(int argc, char** argv) {
       ResourceLedger steady_ledger{
           {std::size_t{1} << 36, std::size_t{1} << 35, 1 << 20, 1 << 24}};
       Directory steady_directory(directory.path);
-      DiskStore steady_disk(steady_ledger, steady_directory.path, 1 << 30);
+      DiskStore steady_disk(steady_ledger, steady_directory.path, 1 << 30,
+                            DiskTokenStorage::kSeparate);
       PrefixIndex steady_index(steady_ledger);
       const auto allowance = DiskMetadataAllowance(gib << 30);
       DiskCatalog steady(steady_ledger, steady_disk, steady_index, UINT64_MAX,
@@ -259,6 +264,7 @@ int main(int argc, char** argv) {
         std::size_t retired{};
         const auto start = Clock::now();
         steady.Track({n}, [&](const DiskEviction&) { ++retired; });
+        steady_disk.ReleaseTokens({n});
         const auto elapsed = Milliseconds(start);
         if (!steady.Find({n}))
           throw std::runtime_error("steady publication was not tracked");

@@ -106,17 +106,30 @@ public:
                                     std::vector<ComponentAvailability>,
                                     Rows established_stable_prefix = 0);
   [[nodiscard]] IndexEntryId Insert(LiveFrontier);
+  // Indexes the description at its store's tokens, which must not be
+  // released yet (DiskStore::ReleaseTokens).
   [[nodiscard]] IndexEntryId Insert(Identity,
                                     std::shared_ptr<const DiskDescription>,
                                     Rows established_stable_prefix = 0);
+  // The same at `tokens`, which the caller attests are the publication's,
+  // for one whose store no longer holds them; TokenCount() must match.
+  [[nodiscard]] IndexEntryId Insert(Identity,
+                                    std::shared_ptr<const DiskDescription>,
+                                    std::span<const Token> tokens,
+                                    Rows established_stable_prefix = 0);
+  // A RAM checkpoint's record compares the store's tokens, so attach it
+  // before DiskStore::ReleaseTokens; a durable record needs none.
   void AttachDurable(IndexEntryId, std::shared_ptr<const DiskDescription>);
   // RAM retention drops only its payload ownership when a durable copy exists.
   // A checkpoint without a usable durable description is erased instead.
   void DropResident(IndexEntryId);
   // True only while a complete published copy can still be pinned.
   [[nodiscard]] bool IsDurable(IndexEntryId) const;
-  // Visit usable generated frontiers with no non-text input identity. Spans
-  // remain valid until the next mutation; the visitor must not reenter.
+  // Visit usable generated frontiers with no non-text input identity, in
+  // entry order. Spans are valid only during the callback; copy to retain.
+  // The visitor may call const members but must not mutate the index.
+  // Durable-only frontiers are rebuilt from the tree into a charged buffer
+  // and skipped when the ledger cannot admit it.
   void VisitGenerated(Identity compatibility,
                       const std::function<void(std::span<const Token>)>&) const;
   // Applies to every index entry bound to this publication. Corruption erases

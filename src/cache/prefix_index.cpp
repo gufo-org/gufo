@@ -67,7 +67,7 @@ struct PrefixIndex::Impl {
       if (live)
         return live->tokens.size();
       if (durable)
-        return durable->Manifest().tokens.size();
+        return durable->TokenCount();
       throw std::logic_error("empty prefix index record");
     }
     [[nodiscard]] const Identity& Input() const {
@@ -220,7 +220,7 @@ struct PrefixIndex::Impl {
       if (std::ranges::none_of(manifest.components, [&](const auto& component) {
             return Same(descriptor, component.descriptor) &&
                    (descriptor.kind != ComponentKind::kPrivateState ||
-                    component.position.valid_rows == manifest.tokens.size());
+                    component.position.valid_rows == description.TokenCount());
           }))
         return false;
     return true;
@@ -437,8 +437,17 @@ IndexEntryId PrefixIndex::Insert(LiveFrontier frontier) {
 IndexEntryId PrefixIndex::Insert(Identity compatibility,
                                  std::shared_ptr<const DiskDescription> durable,
                                  Rows stable) {
+  const auto tokens = durable ? durable->Tokens() : std::span<const Token>{};
+  if (durable && tokens.size() != durable->TokenCount())
+    throw std::invalid_argument("durable checkpoint tokens released");
+  return Insert(std::move(compatibility), std::move(durable), tokens, stable);
+}
+IndexEntryId PrefixIndex::Insert(Identity compatibility,
+                                 std::shared_ptr<const DiskDescription> durable,
+                                 std::span<const Token> tokens, Rows stable) {
   auto& tree = impl_->Get(compatibility);
-  if (!durable || stable > durable->Manifest().tokens.size() ||
+  if (!durable || tokens.size() != durable->TokenCount() ||
+      stable > durable->TokenCount() ||
       !impl_->DurableCoherent(tree, *durable) || !durable->Pin())
     throw std::invalid_argument("invalid durable checkpoint description");
   Impl::Record record;
@@ -451,7 +460,6 @@ IndexEntryId PrefixIndex::Insert(Identity compatibility,
   record.stable = stable;
   record.bytes = impl_->RecordBytes(record);
   record.metadata = impl_->Charge(record.bytes);
-  auto tokens = std::span<const Token>(record.durable->Manifest().tokens);
   auto id = impl_->Publish(tree, tokens, std::move(record));
   tree.disk_availability = std::move(disk_availability);
   return id;
@@ -465,10 +473,14 @@ void PrefixIndex::AttachDurable(
   const auto& manifest = durable->Manifest();
   if (record.checkpoint) {
     const auto& checkpoint = *record.checkpoint;
+    // A RAM checkpoint attaches before the store releases the tokens.
+    const auto tokens = durable->Tokens();
+    if (tokens.size() != durable->TokenCount())
+      throw std::invalid_argument("durable checkpoint tokens released");
     if (checkpoint.Id() != manifest.checkpoint ||
         checkpoint.Lineage() != manifest.lineage ||
         checkpoint.Input() != manifest.input ||
-        !std::ranges::equal(checkpoint.Tokens(), manifest.tokens) ||
+        !std::ranges::equal(checkpoint.Tokens(), tokens) ||
         checkpoint.Components().size() != manifest.components.size())
       throw std::invalid_argument("durable checkpoint identity mismatch");
     for (const auto& component : checkpoint.Components()) {
@@ -502,18 +514,54 @@ void PrefixIndex::VisitGenerated(
   const auto tree = impl_->trees.find(compatibility);
   if (tree == impl_->trees.end())
     return;
+  const auto resident = [&](const Impl::Record& record) {
+    return record.checkpoint && record.checkpoint->IsValid() &&
+           record.checkpoint->Purpose() == CheckpointPurpose::kGenerated;
+  };
+  const auto durable_only = [&](const Impl::Record& record) {
+    return !resident(record) && record.durable &&
+           record.durable->Manifest().purpose ==
+               CheckpointPurpose::kGenerated &&
+           record.durable->Pin();
+  };
+  // Durable-only records keep their tokens only in this tree: rebuild each
+  // path into one local buffer (the visitor may reenter const lookups),
+  // charged for the deepest one. Alignment is best effort, so a full ledger
+  // skips them.
+  std::size_t deepest{};
+  bool any{};
   for (const auto& [id, node] : impl_->directory) {
     (void)node;
     const auto& record = impl_->Get(IndexEntryId{id});
+    if (record.tree == &tree->second && record.Input().empty() &&
+        durable_only(record)) {
+      any = true;
+      deepest = std::max(deepest, static_cast<std::size_t>(record.Boundary()));
+    }
+  }
+  ResourceCharge charge;
+  std::vector<Token> scratch;
+  if (any && deepest) {
+    try {
+      auto admission = impl_->ledger->Reserve(ResourceCategory::kMetadata,
+                                              Bytes(deepest, sizeof(Token)));
+      scratch.reserve(deepest);
+      charge = admission.Convert();
+    } catch (const std::bad_alloc&) {
+      any = false;
+    }
+  }
+  for (const auto& [id, node] : impl_->directory) {
+    const auto& record = impl_->Get(IndexEntryId{id});
     if (record.tree != &tree->second || !record.Input().empty())
       continue;
-    if (record.checkpoint && record.checkpoint->IsValid() &&
-        record.checkpoint->Purpose() == CheckpointPurpose::kGenerated)
+    if (resident(record)) {
       visit(record.checkpoint->Tokens());
-    else if (record.durable && record.durable->Pin() &&
-             record.durable->Manifest().purpose ==
-                 CheckpointPurpose::kGenerated)
-      visit(record.durable->Manifest().tokens);
+    } else if (any && durable_only(record)) {
+      scratch.resize(static_cast<std::size_t>(record.Boundary()));
+      Impl::Trie::CopyPath(*node, scratch);
+      visit(scratch);
+    }
   }
 }
 bool PrefixIndex::IsDurable(IndexEntryId id) const {
