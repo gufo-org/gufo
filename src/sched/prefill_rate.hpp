@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <numeric>
 #include <optional>
 
 namespace gufo::sched {
@@ -54,8 +55,10 @@ public:
 
   /// Time any pass spends on a context `depth` tokens deep before its own
   /// tokens count: a fixed part plus a part per token of depth. Empty until
-  /// a few-token pass was measured. It is the median line through the recent
-  /// ones (Theil-Sen), which a stalled pass cannot tilt. Passes at one depth
+  /// a few-token pass was measured. Fit a slope using the repeated median:
+  /// take the median slope from each sample, then the median of those slopes.
+  /// A stalled pass cannot dominate each sample's vote when enough depths
+  /// are well separated. Passes at one depth
   /// give no slope: their median then holds at that depth and deeper and
   /// shrinks with the depth below it, so no estimate exceeds what was
   /// measured without a slope to support it.
@@ -64,35 +67,47 @@ public:
     if (context_count_ == 0)
       return std::nullopt;
     std::array<double, kContextSamples> rest{};
-    std::array<double, kContextSamples*(kContextSamples - 1) / 2> slopes{};
-    std::size_t pairs = 0;
+    std::array<double, kContextSamples> slopes{};
+    std::size_t slope_count = 0;
     double deepest = 0;
+    const auto upper_middle = [](auto first, auto last) {
+      const auto middle = first + (last - first) / 2;
+      std::nth_element(first, middle, last);
+      return middle;
+    };
+    const auto slope_median = [&](auto first, auto last) {
+      const auto middle = upper_middle(first, last);
+      return (last - first) % 2
+                 ? *middle
+                 : std::midpoint(*std::max_element(first, middle), *middle);
+    };
     for (std::size_t i = 0; i < context_count_; ++i) {
       rest[i] = context_[i].milliseconds;
       deepest = std::max(deepest, context_[i].depth);
-      for (std::size_t j = i + 1; j < context_count_; ++j)
+      std::array<double, kContextSamples - 1> from_sample;
+      std::size_t pairs = 0;
+      for (std::size_t j = 0; j < context_count_; ++j)
         if (const double apart = context_[i].depth - context_[j].depth;
             std::abs(apart) >= kSlopeDepth)
-          slopes[pairs++] =
+          from_sample[pairs++] =
               (context_[i].milliseconds - context_[j].milliseconds) / apart;
+      if (pairs != 0)
+        slopes[slope_count++] =
+            slope_median(from_sample.begin(), from_sample.begin() + pairs);
     }
-    const auto median = [](auto first, auto last) {
-      const auto middle = first + (last - first) / 2;
-      std::nth_element(first, middle, last);
-      return *middle;
-    };
     const double at = static_cast<double>(depth);
-    if (pairs == 0) {
+    if (slope_count == 0) {
       const double measured =
-          median(rest.begin(), rest.begin() + context_count_);
+          *upper_middle(rest.begin(), rest.begin() + context_count_);
       return Milliseconds(at < deepest ? measured * at / deepest : measured);
     }
-    const double slope =
-        std::max(0.0, median(slopes.begin(), slopes.begin() + pairs));
+    const double slope = std::max(
+        0.0, slope_median(slopes.begin(), slopes.begin() + slope_count));
     for (std::size_t i = 0; i < context_count_; ++i)
       rest[i] = std::max(0.0, rest[i] - slope * context_[i].depth);
-    return Milliseconds(median(rest.begin(), rest.begin() + context_count_) +
-                        slope * at);
+    return Milliseconds(
+        *upper_middle(rest.begin(), rest.begin() + context_count_) +
+        slope * at);
   }
 
 private:

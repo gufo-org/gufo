@@ -216,6 +216,13 @@ void ShortPassesFollowTheirContext() {
   line.ObserveContext(7, 114000, 460);
   line.ObserveContext(7, 60000, 5000);
   assert(std::abs(line.EstimateContext(152000)->count() - 570) < 1);
+  for (std::size_t stalled = 0; stalled < 4; ++stalled) {
+    PrefillRate few;
+    for (std::size_t i = 0; i < 4; ++i)
+      few.ObserveContext(7, i * 10000, i == stalled ? 5000 : 100 + 20 * i);
+    assert(std::abs(few.EstimateContext(10000)->count() - 120) < 1e-6);
+    assert(std::abs(few.EstimateContext(20000)->count() - 140) < 1e-6);
+  }
   // A falling line is no slope.
   PrefillRate falling;
   falling.ObserveContext(7, 0, 300);
