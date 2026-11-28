@@ -1115,6 +1115,11 @@ void TestCompatibilityRequests() {
     auto body = parse(endpoint.body);
     response_body(server.Post(endpoint.path, body.dump()));
     assert(server.backend->LastCall().max_tokens == 0);
+    auto unset = body;
+    for (const auto* field : {"stream", "echo", "store", "background"})
+      unset[field] = nullptr;
+    response_body(server.Post(endpoint.path, unset.dump()));
+    assert(server.backend->LastCall().max_tokens == 0);
     server.backend->defaults.provider = gufo::sampling::PresetDefaults(
         gufo::sampling::TextModelPreset::kQwen38);
     server.backend->defaults.supplied = {};
