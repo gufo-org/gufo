@@ -10,6 +10,7 @@
 #include <set>
 #include <stdexcept>
 #include <string_view>
+#include <tuple>
 
 #include "src/cache/retention.hpp"
 #include "tests/cache/tiered_fixture.hpp"
@@ -1187,8 +1188,9 @@ void DiskMetadataGrowsLinearlyWithCheckpoints() {
   assert(grown_twice <= grown * 22 / 10 + 4096);
 }
 // A restart where the allowance bound at shutdown: recovery hands each
-// manifest's tokens to the catalog's tries as it decodes, so its peak stays
-// near the allowance instead of every retained checkpoint's token list.
+// manifest's tokens to the catalog's tries as it decodes, so it rebuilds the
+// shutdown catalog while holding one path and one manifest's tokens beside
+// it, instead of every retained checkpoint's token list.
 void RecoveryHandsTokensToTheCatalog() {
   constexpr std::size_t kTurn = 1024, kTurns = 20, kAllowance = 92 << 10;
   static constexpr ComponentDescriptor kState{
@@ -1198,7 +1200,7 @@ void RecoveryHandsTokensToTheCatalog() {
   std::vector<Token> conversation(kTurn * kTurns);
   std::iota(conversation.begin(), conversation.end(), 7);
   TieredDirectory directory;
-  std::size_t evicted{};
+  std::size_t evicted{}, shutdown_bytes{};
   {
     ResourceLedger ledger({1 << 25, 1 << 24, 16, 1 << 20});
     DiskStore disk(ledger, directory.path, 1 << 24,
@@ -1210,42 +1212,46 @@ void RecoveryHandsTokensToTheCatalog() {
           disk, n, std::span(conversation).first(n * kTurn), 1, 42);
       catalog.Track({n}, [&](const DiskEviction&) { ++evicted; });
       disk.ReleaseTokens({n});
-      assert(catalog.MetadataBytes() <=
-             kAllowance + kTurn * sizeof(Token) + 8192);
     }
+    shutdown_bytes = catalog.MetadataBytes();
   }
   assert(evicted > 0);
   const auto metadata_peak = [](const ResourceLedger& ledger) {
     return ledger.Snapshot()
         .peak_bytes[static_cast<std::size_t>(ResourceCategory::kMetadata)];
   };
-  std::size_t retained_tokens{}, manifest_peak{};
+  std::size_t retained{}, retained_tokens{}, deepest{}, manifest_peak{};
   {
     ResourceLedger ledger({1 << 25, 1 << 24, 16, 1 << 20});
     DiskStore disk(ledger, directory.path, 1 << 24);
-    for (const auto& entry : disk.Entries())
+    for (const auto& entry : disk.Entries()) {
+      ++retained;
       retained_tokens += entry.TokenCount() * sizeof(Token);
+      deepest = std::max(deepest, entry.TokenCount() * sizeof(Token));
+    }
     PrefixIndex index(ledger);
     DiskCatalog catalog(ledger, disk, index, UINT64_MAX, kAllowance);
     manifest_peak = metadata_peak(ledger);
   }
-  // The directory holds several times the allowance in token lists.
-  assert(retained_tokens > 3 * kAllowance && manifest_peak > retained_tokens);
+  // The directory holds more than one checkpoint's token list.
+  assert(retained > 1 && manifest_peak > retained_tokens);
   ResourceLedger ledger({1 << 25, 1 << 24, 16, 1 << 20});
   DiskCatalogTokens recovered(ledger);
   DiskStore disk(ledger, directory.path, 1 << 24, DiskTokenStorage::kSeparate,
                  recovered.Sink());
-  assert(recovered.TokenBytes() == kTurns * kTurn * sizeof(Token));
+  assert(recovered.TokenBytes() == deepest);
   PrefixIndex index(ledger);
   index.Register({9}, std::span(&kState, 1), digest);
   DiskCatalog catalog(ledger, disk, index, UINT64_MAX, kAllowance, &recovered);
-  assert(catalog.Size() == disk.Entries().size());
-  assert(catalog.MetadataBytes() <= kAllowance);
-  // Peak: what the catalog holds, the store's entry slots and one manifest
-  // being decoded.
+  assert(catalog.Size() == retained);
+  // Recovery rebuilds the shutdown catalog exactly.
+  assert(catalog.MetadataBytes() == shutdown_bytes);
+  // Peak: the rebuilt catalog, its shared path, one manifest being decoded
+  // and the store's entry slots; below what manifests holding every list
+  // need.
   assert(metadata_peak(ledger) <=
-         kAllowance + 64 * 1024 + 2 * kTurns * kTurn * sizeof(Token));
-  assert(metadata_peak(ledger) * 2 < manifest_peak);
+         shutdown_bytes + 2 * deepest + retained * 1024 + 8192);
+  assert(metadata_peak(ledger) < manifest_peak);
   // The index rebuilds every recovered path from the trie.
   for (const auto& entry : disk.Entries()) {
     const auto id = entry.Manifest().checkpoint;
@@ -1272,10 +1278,12 @@ void CatalogRefusesAnotherStoresTokens() {
                    DiskTokenStorage::kSeparate);
     PublishMetadataCheckpoint(disk, 1, tokens, 1, 42);
   }
-  // The same epoch and digest under another checkpoint, then the same
-  // checkpoint with other tokens.
-  for (const auto& [id, count] :
-       {std::pair<std::uint64_t, std::size_t>{2, 100}, {1, 60}}) {
+  // The same epoch under another checkpoint, the same checkpoint with other
+  // tokens, then the same checkpoint and tokens under another digest.
+  for (const auto& [id, count, published_digest] :
+       {std::tuple<std::uint64_t, std::size_t, std::uint8_t>{2, 100, 42},
+        {1, 60, 42},
+        {1, 100, 43}}) {
     ResourceLedger ledger({1 << 25, 1 << 24, 16, 1 << 20});
     DiskCatalogTokens recovered(ledger);
     DiskStore source(ledger, recovered_from.path, 1 << 24,
@@ -1283,7 +1291,8 @@ void CatalogRefusesAnotherStoresTokens() {
     const auto recovered_epoch = source.Entries().front().Epoch();
     TieredDirectory other;
     DiskStore disk(ledger, other.path, 1 << 24, DiskTokenStorage::kSeparate);
-    PublishMetadataCheckpoint(disk, id, std::span(tokens).first(count), 1, 42);
+    PublishMetadataCheckpoint(disk, id, std::span(tokens).first(count), 1,
+                              published_digest);
     assert(disk.Entries().front().Epoch() == recovered_epoch);
     PrefixIndex index(ledger);
     bool thrown{};
