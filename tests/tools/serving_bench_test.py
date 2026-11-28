@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+from contextlib import redirect_stdout
 import io
 import os
 import subprocess
@@ -781,6 +782,15 @@ check(
     and "hashes" not in diverging_report["reference"],
     "external reference identity is recorded without hashes",
 )
+
+# Empty completions have no draft-per-output rate, even within a report that
+# also contains measured categories.
+summary = diverging_report["results"]["c1"]["categories"]["code"]
+with patch.dict(summary, {"draftedPerOutputToken": None}):
+    printed = io.StringIO()
+    with redirect_stdout(printed):
+        serving_bench.print_human(diverging_report)
+    check("draft/output=-" in printed.getvalue(), "missing category rate renders as '-'")
 
 # Suite category filters.
 with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:

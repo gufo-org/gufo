@@ -1533,12 +1533,15 @@ def print_human(report: dict[str, Any]) -> None:
             for category, summary in categories.items():
                 acceptance = summary["acceptance"]
                 rendered = "-" if acceptance is None else f"{acceptance * 100:.1f}%"
+                drafted_per_output = summary["draftedPerOutputToken"]
+                drafted_rate = (
+                    "-" if drafted_per_output is None else f"{drafted_per_output:.2f}"
+                )
                 print(
                     f"   {category}: {rendered} "
                     f"({summary['acceptedTokens']}/"
                     f"{summary['draftedTokens']}), "
-                    f"draft/output="
-                    f"{summary['draftedPerOutputToken']:.2f}, "
+                    f"draft/output={drafted_rate}, "
                     f"decode p50={_median(summary['decode_tokens_per_second'])}"
                 )
     reference = report.get("reference")
