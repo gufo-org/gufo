@@ -10,6 +10,7 @@
 #include "src/families/qwen/kernels/ops.hpp"
 #include "src/families/qwen/kernels/ops/prefill_fp16.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/lora_side_path.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -424,10 +425,15 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             layer.attn_output.type, layer.attn_output.data,
             arena_.d_scratch_bf16, output_hidden, output_rows, hidden_size,
             attention_size, arena_.stream);
+        // After the fused residual on purpose: FP32 rounding order only.
+        AddLoraSidePathFp16(layer.output_lora, arena_.d_scratch_bf16,
+                            output_hidden, output_rows, arena_.stream);
       } else {
         gemm_weight(layer.attn_output, arena_.d_scratch_bf16, arena_.d_ssm_out,
                     arena_.d_attn_out, hidden_size, attention_size,
                     arena_.d_scratch_q8_act);
+        AddLoraSidePath(layer.output_lora, arena_.d_ssm_out, arena_.d_attn_out,
+                        batch_size, arena_.stream);
       }
     } else {
       if (!half_prefill && !norm_feeds_q8_only) {
@@ -456,7 +462,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
 
       // The row-split recurrence parallelizes independent state rows. Its
       // epilogue emits the activation consumed by ssm_out directly.
+      // A side-path update reads the FP32 activation, so a patched layer
+      // keeps the FP32 epilogue and quantizes from it.
       const bool ssm_epilogue_q8 = reads_q8_act(layer.ssm_out) &&
+                                   layer.output_lora.empty() &&
                                    IsFusedSSMEpilogueQuantizeQ8_1Supported(
                                        config.SsmValueSize(), ssm_inner_size);
       const bool ssm_row_split = detail::ShouldUseSsmRowSplitRecurrence(
@@ -515,10 +524,15 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             layer.ssm_out.type, layer.ssm_out.data, arena_.d_scratch_bf16,
             arena_.d_hidden, batch_size, hidden_size, ssm_inner_size,
             arena_.stream);
+        // After the fused residual on purpose: FP32 rounding order only.
+        AddLoraSidePathFp16(layer.output_lora, arena_.d_scratch_bf16,
+                            arena_.d_hidden, batch_size, arena_.stream);
       } else {
         gemm_weight(layer.ssm_out, arena_.d_scratch_bf16, arena_.d_ssm_out,
                     arena_.d_attn_out, hidden_size, ssm_inner_size,
                     arena_.d_scratch_q8_act);
+        AddLoraSidePath(layer.output_lora, arena_.d_ssm_out, arena_.d_attn_out,
+                        batch_size, arena_.stream);
       }
     }
 
@@ -566,8 +580,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       // is where the Q8_1 result goes -- reusing it keeps resident memory flat
       // and avoids writing the [batch, k] activation the same kernel is
       // reading.
+      // A side-path update on ffn_down reads the FP32 SwiGLU output, which
+      // the fused epilogue never writes.
+      const bool ffn_down_side_path = !layer.ffn_down_lora.empty();
       const bool fused_dual_swiglu =
-          reads_q8_act(layer.ffn_gate) && reads_q8_act(layer.ffn_up) &&
+          !ffn_down_side_path && reads_q8_act(layer.ffn_gate) &&
+          reads_q8_act(layer.ffn_up) &&
           layer.ffn_gate.type == layer.ffn_up.type &&
           reads_q8_act(layer.ffn_down) &&
           IsFusedSwiGluGemmEpilogueSupported(
@@ -620,9 +638,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       if (half_prefill || fused_dual_swiglu) {
         // The up projection's epilogue already wrote the quantized activation.
       } else if (reads_q8_act(layer.ffn_down)) {
+        // The side path reads the FP32 activation the quantizer stores.
         LaunchBatchedFusedSwiGLUQuantizeQ8_1(
             arena_.d_ffn_gate, arena_.d_ffn_up, arena_.d_scratch_q8_act,
-            batch_size, intermediate_size, arena_.stream);
+            batch_size, intermediate_size, arena_.stream,
+            ffn_down_side_path ? arena_.d_ffn_act : nullptr);
       } else {
         LaunchBatchedSwiGLUActivation(arena_.d_ffn_gate, arena_.d_ffn_up,
                                       arena_.d_ffn_act, arena_.d_scratch_bf16,
@@ -639,10 +659,15 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
           layer.ffn_down.type, layer.ffn_down.data, ffn_down_input,
           output_hidden, output_rows, hidden_size, intermediate_size,
           arena_.stream);
+      // After the fused residual on purpose: FP32 rounding order only.
+      AddLoraSidePathFp16(layer.ffn_down_lora, ffn_down_input, output_hidden,
+                          output_rows, arena_.stream);
     } else {
       gemm_weight(layer.ffn_down, ffn_down_input, arena_.d_ffn_act,
                   arena_.d_ffn_out, hidden_size, intermediate_size,
                   ffn_down_q8_act);
+      AddLoraSidePath(layer.ffn_down_lora, arena_.d_ffn_act, arena_.d_ffn_out,
+                      batch_size, arena_.stream);
       LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_ffn_out,
                                arena_.d_hidden, batch_size, hidden_size,
                                arena_.stream);

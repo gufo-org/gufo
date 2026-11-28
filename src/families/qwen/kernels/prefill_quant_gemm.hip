@@ -236,7 +236,8 @@ __global__ void ZeroQ8ActTailKernel(void* __restrict__ y, std::size_t batch,
 template<bool StoreActivationSum>
 __global__ void BatchedFusedSwiGLUQuantizeQ8_1Kernel(
     const float* __restrict__ gate, const float* __restrict__ up,
-    void* __restrict__ y, std::size_t batch, std::size_t k) {
+    void* __restrict__ y, std::size_t batch, std::size_t k,
+    float* __restrict__ activation_out) {
   const std::size_t num_blocks = k / 32;
   const std::size_t b_idx =
       (blockIdx.x * (blockDim.x >> 5u)) + (threadIdx.x >> 5u);
@@ -255,6 +256,9 @@ __global__ void BatchedFusedSwiGLUQuantizeQ8_1Kernel(
   const float u = up[elem_idx];
   const float silu_g = g / (1.0F + expf(-g));
   const float val = silu_g * u;
+  if (activation_out != nullptr) {
+    activation_out[elem_idx] = val;
+  }
 
   float max_abs = fabsf(val);
   for (int off = 16; off > 0; off >>= 1) {
@@ -1028,7 +1032,8 @@ void LaunchQuantizeActivationQ8_1FromFp32(const float* fp32_x, void* q8_1_out,
 
 void LaunchBatchedFusedSwiGLUQuantizeQ8_1(const float* gate, const float* up,
                                           void* q8_1_out, std::size_t batch,
-                                          std::size_t k, hipStream_t stream) {
+                                          std::size_t k, hipStream_t stream,
+                                          float* activation_out) {
   if (batch == 0 || k == 0) {
     return;
   }
@@ -1040,7 +1045,7 @@ void LaunchBatchedFusedSwiGLUQuantizeQ8_1(const float* gate, const float* up,
       (total_x_blocks + warps_per_tb - 1) / warps_per_tb;
   BatchedFusedSwiGLUQuantizeQ8_1Kernel<true>
       <<<static_cast<unsigned int>(quant_grid), quant_threads, 0, stream>>>(
-          gate, up, q8_1_out, batch, k);
+          gate, up, q8_1_out, batch, k, activation_out);
   LaunchZeroQ8ActTail<true>(q8_1_out, batch, k, stream);
 }
 

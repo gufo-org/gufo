@@ -92,6 +92,34 @@
         "flash-next-q4"
       ],
       "help": "MTP draft model path for speculative decoding"
+    },
+    {
+      "name": "--lora",
+      "type": "path",
+      "commands": [
+        "serve",
+        "bench",
+        "prompt",
+        "chat"
+      ],
+      "providers": [
+        "flash-next-q4"
+      ],
+      "help": "llama.cpp GGUF LoRA adapter merged into the weights at load"
+    },
+    {
+      "name": "--lora-scale",
+      "type": "number",
+      "commands": [
+        "serve",
+        "bench",
+        "prompt",
+        "chat"
+      ],
+      "providers": [
+        "flash-next-q4"
+      ],
+      "help": "Multiplier of the --lora update (default 1)"
     }
   ],
   "targets": {
@@ -162,6 +190,18 @@
     {
       "target": "qwen38_flash_next_rope_scaling_test",
       "ctest": "qwen38_flash_next\\.rope_scaling",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen38_flash_next_lora_test",
+      "ctest": "qwen38_flash_next\\.lora",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen_lora_test",
+      "ctest": "qwen_lora_test",
       "check_pr": true,
       "windows_build": true
     },

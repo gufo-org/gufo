@@ -35,6 +35,7 @@ implementations are model-private.
 | [`../families/qwen/text/tokenizer.*`](../../families/qwen/text/tokenizer.hpp), [`../families/qwen/text/chat_template.*`](../../families/qwen/text/chat_template.hpp) | BPE vocabulary/merge handling and bounded deterministic Qwen ChatML formatting. |
 | [`../families/qwen/config/qwen_config.*`](../../families/qwen/config/qwen_config.hpp) | CPU-only Qwen GGUF configuration extraction used by the shape check, weight binding, the MTP reference and `prompt`. |
 | [`../families/qwen/vision/`](../../families/qwen/vision/) | Vision encoder, device image input, image prompt expansion and image cache. |
+| [`lora.hpp`](lora.hpp), [`lora.cpp`](lora.cpp), [`../families/qwen/lora/`](../../families/qwen/lora/) | `--lora` targets (bound `ssm_out`, `attn_output` and `ffn_down` of each trunk layer, shaped from their GGUF dimensions) over the shared GGUF LoRA reader, the choice between the Q8_0 merge and the side path, and the side path's factor layout; [`hip/model_loader.cpp`](hip/model_loader.cpp) writes merged rows into each weight region's final placement or uploads the side path's factors, and [`hip/lora_side_path.hpp`](hip/lora_side_path.hpp) adds the update in decode, verification and prefill. |
 | [`oracles.*`](oracles.hpp) | Independent reference helpers used for correctness comparison. |
 | [`extension.cmake`](extension.cmake) | Explicit Qwen production source registration and HIP source ownership. |
 

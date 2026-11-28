@@ -25,7 +25,7 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
     std::string_view draft_artifact_fingerprint, std::uint32_t max_context,
     const hip::QwenExecutionPolicy& execution_policy, bool speculative,
     const speculative::SpeculativeOptions& speculative_options,
-    speculative::DFlashDraftPolicy draft_policy) {
+    speculative::DFlashDraftPolicy draft_policy, std::string_view adapters) {
   if (!IsSha256Hex(artifact_fingerprint)) {
     throw std::invalid_argument(
         "Qwen disk cache requires an artifact fingerprint");
@@ -33,6 +33,10 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
   if (speculative && !IsSha256Hex(draft_artifact_fingerprint)) {
     throw std::invalid_argument(
         "Qwen DFlash disk cache requires a draft artifact fingerprint");
+  }
+  if (adapters.empty() || adapters.find('\n') != std::string_view::npos) {
+    throw std::invalid_argument(
+        "Qwen disk cache requires a one-line adapter identity");
   }
   const std::string_view state_abi =
       QwenStateAbi(speculative, execution_policy.UsesFp16AttentionKv(),
@@ -64,7 +68,7 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << "context_tokens=" << max_context << '\n'
            << "position_policy=absolute-v1\n"
            << "rope_window_policy=qwen-gguf-config-v1\n"
-           << "adapters=none\n";
+           << "adapters=" << adapters << '\n';
   if (speculative) {
     identity
         << "draft_backend=dflash2-gfx1151-v1\n"

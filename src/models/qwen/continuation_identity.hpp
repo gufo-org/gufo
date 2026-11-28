@@ -37,12 +37,14 @@ inline constexpr std::string_view QwenStateAbi(
 
 bool IsSha256Hex(std::string_view value) noexcept;
 
+/// `adapters` is "none" or the loaded LoRA's `LoraAdapterIdentity()`.
 std::vector<std::uint8_t> QwenCompatibilityIdentity(
     std::string_view artifact_fingerprint,
     std::string_view draft_artifact_fingerprint, std::uint32_t max_context,
     const hip::QwenExecutionPolicy& execution_policy, bool speculative,
     const speculative::SpeculativeOptions& speculative_options,
-    speculative::DFlashDraftPolicy draft_policy);
+    speculative::DFlashDraftPolicy draft_policy,
+    std::string_view adapters = "none");
 
 std::vector<std::uint8_t> QwenProcessIdentity(const void* model,
                                               const void* draft,

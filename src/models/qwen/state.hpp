@@ -122,6 +122,20 @@ struct QwenTensorRef {
   }
 };
 
+/// A LoRA update applied beside a stock projection at inference:
+/// y[row] += multiplier * B * (A * x[row]). Device FP32 factors, A as
+/// [rank][in] and B as [out][rank]; empty when the projection has no update.
+struct QwenLowRankUpdate {
+  const float* a{nullptr};
+  const float* b{nullptr};
+  std::uint32_t in{0};
+  std::uint32_t out{0};
+  std::uint32_t rank{0};
+  float multiplier{0.0F};
+
+  [[nodiscard]] bool empty() const noexcept { return a == nullptr; }
+};
+
 /// Tensor weight references for a single transformer layer block (Linear SSM or
 /// Full Attention).
 struct QwenLayerWeights {
@@ -154,6 +168,10 @@ struct QwenLayerWeights {
   QwenTensorRef ffn_gate;
   QwenTensorRef ffn_up;
   QwenTensorRef ffn_down;
+
+  // LoRA side path: beside attn_output or ssm_out, and beside ffn_down.
+  QwenLowRankUpdate output_lora;
+  QwenLowRankUpdate ffn_down_lora;
 };
 
 /// Full model tensor references mapped directly from GGUF storage.

@@ -1,22 +1,28 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <gufo/ext/experimental/heap_placement.hpp>
 #include <gufo/ext/experimental/state_memory.hpp>
 #include <gufo/ext/experimental/weight_upload.hpp>
 #include <gufo/ext/families/qwen/text/chat_template.hpp>
+#include <gufo/ext/host.hpp>
 #include <gufo/ext/platform/pages.hpp>
 #include <gufo/ext/platform/prefault.hpp>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "src/families/qwen/kernels/ops/gemm.hpp"
+#include "src/families/qwen/kernels/ops/low_rank.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/lora.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -33,9 +39,141 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
   }
 }
 
+/// Where merged LoRA rows go. Each patch belongs to the source region that
+/// maps its whole tensor and is written, in its stock Q8_0 size, into that
+/// region's final placement: the writable host clone before registration, or
+/// device memory after the region's stock copy has finished. The merge reads
+/// the stock rows from the read-only mapping and drops those pages from the
+/// process afterwards, as the stock upload does; no extra copy stays resident.
+struct LoraPlacement {
+  struct Patch {
+    const models::qwen::lora::LoraPatch* patch{nullptr};
+    std::size_t offset{0};  ///< Byte offset of the tensor in its region.
+  };
+  const models::qwen::lora::LoraAdapter* adapter{nullptr};
+  std::vector<std::vector<Patch>> regions;  ///< Patches per source region.
+  std::size_t applied{0};  ///< Patches written to their final placement.
+  std::chrono::steady_clock::duration time{};
+  std::string error;
+
+  /// Assigns every patch to its source region.
+  bool Assign(std::span<const core::GgufMappedRegion> sources) {
+    regions.assign(sources.size(), {});
+    if (adapter == nullptr)
+      return true;
+    for (const auto& [name, patch] : adapter->patches()) {
+      const auto address = reinterpret_cast<std::uintptr_t>(patch.target.data);
+      bool found = false;
+      for (std::size_t i = 0; i < sources.size() && !found; ++i) {
+        const auto base = reinterpret_cast<std::uintptr_t>(sources[i].data);
+        const std::size_t bytes = patch.target.SizeBytes();
+        if (address >= base && address - base < sources[i].size && bytes != 0 &&
+            bytes <= sources[i].size - (address - base)) {
+          // The upload drops source pages it has copied, which empties a
+          // memory image; the merge reads the stock rows after that.
+          if (sources[i].file_descriptor == platform::kInvalidFile) {
+            error = "a LoRA adapter needs a model opened from a file";
+            return false;
+          }
+          regions[i].push_back({&patch, address - base});
+          found = true;
+        }
+      }
+      if (!found) {
+        error = "LoRA target " + name + " is outside the mapped GGUF regions";
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// Merges region `index`'s patches into its host clone at `base`.
+  bool ToHost(std::size_t index, std::uint8_t* base) {
+    const auto start = std::chrono::steady_clock::now();
+    for (const auto& p : regions[index]) {
+      const auto& target = p.patch->target;
+      if (!adapter->MergeRows(*p.patch, 0, target.rows, base + p.offset,
+                              &error))
+        return false;
+      platform::ReleaseMappedPages(target.data, target.SizeBytes());
+    }
+    time += std::chrono::steady_clock::now() - start;
+    return true;
+  }
+
+  /// Overwrites region `index`'s patched tensors in device memory at `base`,
+  /// a few MiB of whole rows at a time. Call after the stock copy finished.
+  bool ToDevice(std::size_t index, void* base) {
+    if (regions[index].empty())
+      return true;
+    const auto start = std::chrono::steady_clock::now();
+    std::vector<std::uint8_t> host;
+    for (const auto& p : regions[index]) {
+      const auto& target = p.patch->target;
+      const std::size_t row_bytes = target.RowBytes();
+      const std::uint64_t chunk =
+          std::max<std::uint64_t>(1, (std::size_t{4} << 20) / row_bytes);
+      host.resize(std::min<std::uint64_t>(chunk, target.rows) * row_bytes);
+      for (std::uint64_t row = 0; row < target.rows; row += chunk) {
+        const std::uint64_t count = std::min(chunk, target.rows - row);
+        if (!adapter->MergeRows(*p.patch, row, count, host.data(), &error))
+          return false;
+        const auto status = hipMemcpy(
+            static_cast<std::uint8_t*>(base) + p.offset + row * row_bytes,
+            host.data(), count * row_bytes, hipMemcpyHostToDevice);
+        if (status != hipSuccess) {
+          error = "upload failed for LoRA-merged " + std::string(target.name) +
+                  ": " + hipGetErrorString(status);
+          return false;
+        }
+      }
+      platform::ReleaseMappedPages(target.data, target.SizeBytes());
+    }
+    applied += regions[index].size();
+    time += std::chrono::steady_clock::now() - start;
+    return true;
+  }
+};
+
+/// Uploads the side path's factors into one device allocation and points
+/// each patched layer's descriptor at them.
+[[nodiscard]] bool UploadLoraSidePath(const models::qwen::LoraSidePath& path,
+                                      models::QwenModelWeights& weights,
+                                      QwenGpuWeightRegion& factors,
+                                      std::string* error_msg) {
+  static_assert(models::qwen::kLoraSidePathMaxRank == kLowRankMaxRank);
+  const std::size_t bytes = path.factors.size() * sizeof(float);
+  void* device = nullptr;
+  auto status = hipMalloc(&device, bytes);
+  if (status == hipSuccess) {
+    factors = {
+        .device_data = device, .size = bytes, .owns_device_allocation = true};
+    status =
+        hipMemcpy(device, path.factors.data(), bytes, hipMemcpyHostToDevice);
+  }
+  if (status != hipSuccess) {
+    if (error_msg != nullptr)
+      *error_msg = std::string("LoRA side-path factor upload failed: ") +
+                   hipGetErrorString(status);
+    return false;
+  }
+  const auto* base = static_cast<const float*>(device);
+  for (const auto& slot : path.slots) {
+    auto& layer = weights.layers[slot.layer];
+    (slot.ffn_down ? layer.ffn_down_lora : layer.output_lora) = {
+        .a = base + slot.a,
+        .b = base + slot.b,
+        .in = slot.in,
+        .out = slot.out,
+        .rank = slot.rank,
+        .multiplier = slot.multiplier};
+  }
+  return true;
+}
+
 [[nodiscard]] hipError_t MapRegisteredRegion(
     const core::GgufMappedRegion& source, QwenGpuWeightRegion& destination,
-    bool& source_was_read) {
+    bool& source_was_read, LoraPlacement& lora, std::size_t index) {
   source_was_read = false;
   void* host_copy =
       platform::CloneMappedWeightsToAnonymousPages(source.data, source.size);
@@ -46,6 +184,10 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
     platform::ReleaseCommittedPages(pointer, source.size);
   };
   std::unique_ptr<void, decltype(unmap)> owned_copy(host_copy, unmap);
+  // The device reads these pages only after registration, so merged rows
+  // written into the clone now are what it sees.
+  if (!lora.ToHost(index, static_cast<std::uint8_t*>(host_copy)))
+    return hipErrorInvalidValue;
   const auto register_error = hipHostRegister(
       host_copy, source.size, hipHostRegisterMapped | hipHostRegisterReadOnly);
   if (register_error != hipSuccess)
@@ -63,6 +205,7 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
                  .device_data = device_data,
                  .host_copy = owned_copy.release(),
                  .size = source.size};
+  lora.applied += lora.regions[index].size();
   return hipSuccess;
 }
 
@@ -190,12 +333,18 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
 
 [[nodiscard]] bool CreateWeightRegions(
     const core::GgufReader& reader,
-    std::vector<QwenGpuWeightRegion>& weight_regions, std::string* error_msg) {
+    std::vector<QwenGpuWeightRegion>& weight_regions, LoraPlacement& lora,
+    std::string* error_msg) {
   const auto source_regions = reader.GetMappedRegions();
   if (source_regions.empty()) {
     if (error_msg != nullptr) {
       *error_msg = "GGUF reader has no mapped weight regions";
     }
+    return false;
+  }
+  if (!lora.Assign(source_regions)) {
+    if (error_msg != nullptr)
+      *error_msg = lora.error;
     return false;
   }
 
@@ -218,9 +367,12 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
       if (mem::MemGetInfo(&free_bytes, &total_bytes) == hipSuccess &&
           HeapFitsAboveReserve(free_bytes, source.size) &&
           AllocateDeviceRegion(source, destination) == hipSuccess) {
-        if (platform::CanVisitMappedChunks())
+        if (platform::CanVisitMappedChunks()) {
           map_error = CopyMappedRegion(source, destination.device_data);
-        else {
+          if (map_error == hipSuccess &&
+              !lora.ToDevice(i, destination.device_data))
+            map_error = hipErrorInvalidValue;
+        } else {
           map_error = hipSuccess;
           device_regions.push_back(i);
         }
@@ -228,8 +380,9 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
         (void)hipGetLastError();
         destination = {};
         bool source_was_read = false;
-        map_error = MapRegisteredRegion(source, destination, source_was_read);
-        if (map_error != hipSuccess) {
+        map_error =
+            MapRegisteredRegion(source, destination, source_was_read, lora, i);
+        if (map_error != hipSuccess && lora.error.empty()) {
           // The device-resident upload preserves single-copy residency
           // wherever registration is refused.
           destination = {};
@@ -241,6 +394,9 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
               // shard with direct I/O. When cloning is unavailable (Windows),
               // keep the bounded file pipeline without touching the mapping.
               map_error = CopyMappedRegion(source, destination.device_data);
+              if (map_error == hipSuccess &&
+                  !lora.ToDevice(i, destination.device_data))
+                map_error = hipErrorInvalidValue;
             } else {
               device_regions.push_back(i);
             }
@@ -256,8 +412,10 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
     if (map_error != hipSuccess || destination.device_data == nullptr) {
       ReleaseWeightRegions(weight_regions);
       if (error_msg != nullptr) {
-        *error_msg = "Failed to make GGUF shard " + std::to_string(i) +
-                     " GPU-visible: " + hipGetErrorString(map_error);
+        *error_msg = !lora.error.empty()
+                         ? lora.error
+                         : "Failed to make GGUF shard " + std::to_string(i) +
+                               " GPU-visible: " + hipGetErrorString(map_error);
       }
       return false;
     }
@@ -266,6 +424,23 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
       !FillDeviceRegions(source_regions, weight_regions, device_regions,
                          error_msg)) {
     ReleaseWeightRegions(weight_regions);
+    return false;
+  }
+  // FillDeviceRegions has waited for every queued copy.
+  for (const auto index : device_regions) {
+    if (!lora.ToDevice(index, weight_regions[index].device_data)) {
+      ReleaseWeightRegions(weight_regions);
+      if (error_msg != nullptr)
+        *error_msg = lora.error;
+      return false;
+    }
+  }
+  if (lora.adapter != nullptr && lora.applied != lora.adapter->size()) {
+    ReleaseWeightRegions(weight_regions);
+    if (error_msg != nullptr)
+      *error_msg = "LoRA adapter patched " + std::to_string(lora.applied) +
+                   " of its " + std::to_string(lora.adapter->size()) +
+                   " tensors";
     return false;
   }
   return true;
@@ -303,19 +478,25 @@ QwenGpuModel::QwenGpuModel(
     models::QwenModelWeights weights,
     std::shared_ptr<const tokenization::QwenTokenizer> tokenizer,
     std::vector<QwenGpuWeightRegion> weight_regions,
-    std::shared_ptr<models::qwen::vision::Encoder> vision)
+    std::shared_ptr<models::qwen::vision::Encoder> vision,
+    std::string adapter_identity, QwenGpuWeightRegion lora_factors)
     : reader_(std::move(reader)),
       weights_(std::move(weights)),
       tokenizer_(std::move(tokenizer)),
       weight_regions_(std::move(weight_regions)),
-      vision_(std::move(vision)) {}
+      vision_(std::move(vision)),
+      adapter_identity_(std::move(adapter_identity)),
+      lora_factors_(lora_factors) {}
 
 QwenGpuModel::~QwenGpuModel() {
   ReleaseWeightRegions(weight_regions_);
+  if (lora_factors_.device_data != nullptr)
+    (void)hipFree(lora_factors_.device_data);
 }
 
 std::size_t QwenGpuModel::GetResidentBytes() const noexcept {
-  std::size_t total = vision_ ? vision_->ResidentBytes() : 0;
+  std::size_t total =
+      (vision_ ? vision_->ResidentBytes() : 0) + lora_factors_.size;
   for (const auto& region : weight_regions_) {
     if (region.size > std::numeric_limits<std::size_t>::max() - total) {
       return std::numeric_limits<std::size_t>::max();
@@ -327,7 +508,8 @@ std::size_t QwenGpuModel::GetResidentBytes() const noexcept {
 
 std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
     std::shared_ptr<const core::GgufReader> reader, std::string* error_msg,
-    std::shared_ptr<models::qwen::vision::Encoder> vision) {
+    std::shared_ptr<models::qwen::vision::Encoder> vision,
+    const models::qwen::lora::LoraSelection& lora) {
   if (reader == nullptr) {
     if (error_msg != nullptr) {
       *error_msg = "GGUF reader must not be null";
@@ -350,10 +532,53 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
   if (!tokenizer)
     return nullptr;
 
-  std::vector<QwenGpuWeightRegion> weight_regions;
-  if (!CreateWeightRegions(*reader, weight_regions, error_msg)) {
+  // Validate the adapter against the bound trunk before any device work.
+  std::unique_ptr<models::qwen::lora::LoraAdapter> adapter;
+  if (!lora.path.empty()) {
+    adapter =
+        models::qwen::OpenLoraAdapter(*reader, *weights_opt, lora, error_msg);
+    if (!adapter)
+      return nullptr;
+  } else if (lora.scale != 1.0F) {
+    if (error_msg != nullptr)
+      *error_msg = "a LoRA scale requires a LoRA adapter";
     return nullptr;
   }
+  // An adapter whose patched tensors are all Q8_0 is merged; any other
+  // keeps the stock weights and applies the side path to every target.
+  const bool merge = adapter && models::qwen::LoraMergesInPlace(*adapter);
+  std::optional<models::qwen::LoraSidePath> side_path;
+  if (adapter && !merge) {
+    side_path = models::qwen::PlanLoraSidePath(*reader, *adapter, *weights_opt,
+                                               error_msg);
+    if (!side_path)
+      return nullptr;
+  }
+  LoraPlacement placement;
+  placement.adapter = merge ? adapter.get() : nullptr;
+  std::vector<QwenGpuWeightRegion> weight_regions;
+  // Releases the regions on every exit until the model owns them; released
+  // and moved-from regions are empty.
+  struct RegionGuard {
+    std::vector<QwenGpuWeightRegion>& regions;
+    ~RegionGuard() { ReleaseWeightRegions(regions); }
+  } region_guard{weight_regions};
+  if (!CreateWeightRegions(*reader, weight_regions, placement, error_msg)) {
+    return nullptr;
+  }
+  QwenGpuWeightRegion lora_factors;
+  struct FactorGuard {
+    QwenGpuWeightRegion& factors;
+    ~FactorGuard() {
+      if (factors.device_data != nullptr)
+        (void)hipFree(factors.device_data);
+    }
+  } factor_guard{lora_factors};
+  if (side_path &&
+      !UploadLoraSidePath(*side_path, *weights_opt, lora_factors, error_msg)) {
+    return nullptr;
+  }
+  side_path.reset();
 
   const auto remap = [&](models::QwenTensorRef& tensor) {
     return RemapTensor(tensor, weight_regions);
@@ -380,11 +605,32 @@ std::shared_ptr<const QwenGpuModel> QwenGpuModel::CreateFromGguf(
     return nullptr;
   }
 
+  std::string adapter_identity = "none";
+  if (adapter) {
+    adapter_identity = models::qwen::LoraAdapterIdentity(*adapter);
+    char numbers[64];
+    if (merge)
+      std::snprintf(numbers, sizeof(numbers),
+                    " scale=%.9g tensors=%zu merge=%.2fs",
+                    static_cast<double>(adapter->scale()), adapter->size(),
+                    std::chrono::duration<double>(placement.time).count());
+    else
+      std::snprintf(numbers, sizeof(numbers),
+                    " scale=%.9g tensors=%zu side_path_bytes=%zu",
+                    static_cast<double>(adapter->scale()), adapter->size(),
+                    lora_factors.size);
+    server::Logger::Info("model", "LoRA adapter " + adapter->label() +
+                                      " sha256=" + adapter->sha256() + numbers);
+  }
   std::shared_ptr<const tokenization::QwenTokenizer> shared_tokenizer(
       std::move(tokenizer));
-  return std::make_shared<const QwenGpuModel>(
+  auto model = std::make_shared<const QwenGpuModel>(
       std::move(reader), std::move(*weights_opt), std::move(shared_tokenizer),
-      std::move(weight_regions), std::move(vision));
+      std::move(weight_regions), std::move(vision), std::move(adapter_identity),
+      lora_factors);
+  // The model owns the factors now; until here the guard did.
+  lora_factors = {};
+  return model;
 }
 
 std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::Create(
@@ -413,8 +659,10 @@ std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::Create(
 
 std::unique_ptr<QwenGpuExecutor> QwenGpuExecutor::CreateFromGguf(
     std::shared_ptr<const core::GgufReader> reader, std::string* error_msg,
-    std::uint32_t max_context, QwenExecutionPolicy policy) {
-  auto model = QwenGpuModel::CreateFromGguf(std::move(reader), error_msg);
+    std::uint32_t max_context, QwenExecutionPolicy policy,
+    const models::qwen::lora::LoraSelection& lora) {
+  auto model =
+      QwenGpuModel::CreateFromGguf(std::move(reader), error_msg, {}, lora);
   if (model == nullptr) {
     return nullptr;
   }

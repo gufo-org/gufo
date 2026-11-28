@@ -125,10 +125,53 @@ void Validation() {
           "process contexts alias");
 }
 
+// A merged LoRA adapter changes only the adapters= line, and every adapter
+// file and scale gets its own identity; stock bytes are the goldens above.
+void Adapters() {
+  const std::string lora_a =
+      "lora;merge=q8-requant-v1;sha256=" + std::string(64, 'c') +
+      ";scale_f32=0x3f800000";
+  const std::string lora_half =
+      "lora;merge=q8-requant-v1;sha256=" + std::string(64, 'c') +
+      ";scale_f32=0x3f000000";
+  const std::string lora_b =
+      "lora;merge=q8-requant-v1;sha256=" + std::string(64, 'd') +
+      ";scale_f32=0x3f800000";
+  const auto p = hip::QwenExecutionPolicy::Production();
+  for (bool spec : {false, true}) {
+    const auto identity = [&](std::string_view adapters) {
+      return Text(QwenCompatibilityIdentity(
+          artifact, draft, 4096, p, spec, {},
+          speculative::DFlashDraftPolicy::kAdaptive, adapters));
+    };
+    const std::string stock = identity("none");
+    Require(stock == Text(QwenCompatibilityIdentity(
+                         artifact, draft, 4096, p, spec, {},
+                         speculative::DFlashDraftPolicy::kAdaptive)),
+            "explicit adapters=none differs from the default");
+    for (const auto& lora : {lora_a, lora_half, lora_b}) {
+      const std::string adapted = identity(lora);
+      Require(adapted != stock, "adapter aliases stock");
+      std::string expected = stock;
+      expected.replace(expected.find("\nadapters=none\n"),
+                       std::string_view("\nadapters=none\n").size(),
+                       "\nadapters=" + lora + "\n");
+      Require(adapted == expected, "adapter changed more than adapters=");
+    }
+    Require(identity(lora_a) != identity(lora_half), "LoRA scales alias");
+    Require(identity(lora_a) != identity(lora_b), "LoRA adapters alias");
+    for (const std::string& bad : {std::string{}, std::string("a\nb")}) {
+      Reject([&] { identity(bad); },
+             "Qwen disk cache requires a one-line adapter identity");
+    }
+  }
+}
+
 }  // namespace identity_test
 int main() {
   return identity_test::Run([] {
     identity_test::QwenCases();
     identity_test::Validation();
+    identity_test::Adapters();
   });
 }

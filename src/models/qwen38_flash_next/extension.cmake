@@ -11,10 +11,12 @@ gufo_extension_target(
     bench_yarn.cpp
     probe.cpp
     continuation_identity.cpp
+    lora.cpp
     extension.cpp
   LINK_LIBRARIES
     gufo_ext_runtime
     gufo_core
+    gufo_qwen_lora
     Threads::Threads
 )
 

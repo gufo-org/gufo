@@ -8,12 +8,17 @@
 #include <iostream>
 
 #include "src/models/qwen/generator.hpp"
+#include "src/models/qwen/lora.hpp"
 
 namespace gufo::models::qwen {
 int RunQwenPromptCpu(const ext::TextPromptOptions& opt,
                      const core::GgufReader& reader,
                      std::chrono::steady_clock::time_point model_load_start) {
   std::string err;
+  if (!ValidateCpuLoraOptions(opt.provider_options, &err)) {
+    std::cerr << "Error: " << err << "\n";
+    return 1;
+  }
   auto generator = models::QwenGenerator::CreateFromGguf(reader, &err);
   if (!generator) {
     std::cerr << "Error creating Qwen generator: " << err << "\n";

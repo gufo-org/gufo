@@ -135,6 +135,34 @@
         "qwen27-q4"
       ],
       "help": "DFlash2 draft model path for speculative decoding"
+    },
+    {
+      "name": "--lora",
+      "type": "path",
+      "commands": [
+        "serve",
+        "bench",
+        "prompt",
+        "chat"
+      ],
+      "providers": [
+        "qwen27-q4"
+      ],
+      "help": "llama.cpp GGUF LoRA adapter applied to the weights at load"
+    },
+    {
+      "name": "--lora-scale",
+      "type": "number",
+      "commands": [
+        "serve",
+        "bench",
+        "prompt",
+        "chat"
+      ],
+      "providers": [
+        "qwen27-q4"
+      ],
+      "help": "Multiplier of the --lora update (default 1)"
     }
   ],
   "targets": {
@@ -196,6 +224,12 @@
     {
       "target": "qwen27b_prefill_groups_test",
       "ctest": "qwen27b_prefill_groups_test",
+      "check_pr": true,
+      "windows_build": true
+    },
+    {
+      "target": "qwen27b_lora_test",
+      "ctest": "qwen27b_lora_test",
       "check_pr": true,
       "windows_build": true
     }

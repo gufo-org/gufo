@@ -50,6 +50,23 @@ both modes follow the same distribution, but the same seed gives different
 text. Thinking and sampling defaults are set per request; see
 [reasoning controls](../server.md#reasoning-controls).
 
+## LoRA adapter
+
+Gufo can apply a llama.cpp GGUF **LoRA adapter**, a small file of low-rank weight updates, while it loads either target. You serve a fine-tune from the stock files and the adapter, with no merged copy of the model on disk:
+
+```sh
+gufo serve llm --model qwen27-q4 --lora adapter.gguf
+```
+
+- The adapter may update the `ssm_out`, `attn_output` and `ffn_down` weights of the 64 trunk layers. Gufo checks every adapter tensor before it allocates GPU memory. The MTP block stays unchanged.
+- The adapter's factors may be F32, F16 or BF16. The update of each weight is `--lora-scale` × alpha / rank × B·A; `--lora-scale` defaults to 1, and 0 and negative scales are accepted.
+- When every weight the adapter updates is Q8_0, as in the Q8 target, Gufo **merges** it: each such weight becomes the stock weight plus the update, computed in float32 and stored as Q8_0 in its place, so memory, kernels and speed match the stock model.
+- Otherwise, as in the Q4 target, Gufo uses the **side path**: the stock weights stay untouched, the factors stay on the GPU in float32, and every updated projection adds `--lora-scale` × alpha / rank × B·(A·x) to its output, in decoding, draft verification and prompt processing alike. The adapter's rank must be at most 64. As of November 2026, a rank-3 adapter that updates all 128 weights of the Q4 target took 26 MiB more GPU memory than the stock model, decoded about 1.5 % slower and processed prompts 2 to 3 % slower.
+- `serve llm`, `chat`, `prompt` and `bench` accept both options. One adapter applies to every request. The CPU generator (`--cpu`) refuses an adapter.
+- DFlash2 drafts for the adapted model: the draft model shares only the target's token embedding and output head, which an adapter never updates, and the adapted target checks every draft, so greedy DFlash2 output still equals greedy AR output. The share of drafts accepted, and with it the decode speed, can differ from the stock model's.
+- The log names the adapter, its SHA-256, the scale, the number of updated weights, and the merge time or the side path's factor bytes.
+- The [disk cache](../cache.md) keeps entries per adapter file contents, scale and way of applying it: a server never restores prompts cached with another adapter, another scale or none.
+
 ## Images
 
 Gufo finds `mmproj-BF16.gguf` next to the target; pass `--mmproj PATH` to use

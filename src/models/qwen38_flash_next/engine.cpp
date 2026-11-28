@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <gufo/ext/families/qwen/draft_vocab/draft_vocab.hpp>
 #include <gufo/ext/gguf_reader.hpp>
@@ -11,10 +12,12 @@
 #include <optional>
 #include <type_traits>
 
+#include "gufo/ext/host.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+#include "src/models/qwen38_flash_next/lora.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
 #include "src/models/qwen38_flash_next/stages.hpp"
@@ -110,6 +113,10 @@ std::shared_ptr<Model> Model::Load(
                 "Flash-Next MTP supports at most seven draft tokens");
     return nullptr;
   }
+  if (weights && !options.lora_path.empty()) {
+    AssignError(error_msg, "LoRA requires the default GGUF weight source");
+    return nullptr;
+  }
   m->options_ = options;
   m->source_ = weights ? std::move(weights)
                        : ext::qwen::flash_next::CreateGgufWeightSource();
@@ -141,6 +148,20 @@ std::shared_ptr<Model> Model::Load(
                                " tokens");
     return nullptr;
   }
+  // Validate the adapter against the bound trunk before any device work.
+  std::unique_ptr<LoraAdapter> lora;
+  if (!options.lora_path.empty()) {
+    lora = OpenLoraAdapter(options.lora_path, options.lora_scale,
+                           Config::kArchitecture, LoraTargets(*m->weights_),
+                           error_msg);
+    if (!lora) {
+      return nullptr;
+    }
+    m->adapter_identity_ = lora->CacheIdentity();
+  } else if (options.lora_scale != 1.0F) {
+    AssignError(error_msg, "a LoRA scale requires a LoRA adapter");
+    return nullptr;
+  }
   try {
     m->vision_ =
         qwen::vision::Encoder::Open(m->source_->VisionPath(model_path),
@@ -166,9 +187,19 @@ std::shared_ptr<Model> Model::Load(
     }
   }
   m->device_ = rocm::DeviceModel::Upload(*m->weights_, m->mtp_weights_.get(),
-                                         *m->source_, error_msg);
+                                         *m->source_, error_msg, lora.get());
   if (!m->device_) {
     return nullptr;
+  }
+  if (lora) {
+    char numbers[64];
+    std::snprintf(numbers, sizeof(numbers),
+                  " scale=%.9g tensors=%zu merge=%.2fs",
+                  static_cast<double>(lora->scale()), lora->size(),
+                  m->device_->lora_seconds());
+    server::Logger::Info("model", "LoRA adapter " + lora->label() +
+                                      " sha256=" + lora->sha256() + numbers);
+    lora.reset();
   }
   if (m->mtp_weights_ && m->device_->output().format_state != nullptr) {
     // Draft tables copy head rows, which only a GGUF matrix addresses.
