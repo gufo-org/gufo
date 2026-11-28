@@ -134,6 +134,9 @@ public:
     [[nodiscard]] TextDecodeSelection SelectNext();
     void Advance();
     [[nodiscard]] TextDecodeStep DecodeStep(std::size_t max_tokens);
+    /// The text the runner's pieces hold back (TextModelRunner::HeldText),
+    /// counting a selected token not advanced yet.
+    [[nodiscard]] std::string HeldText() const;
 
     /// Publishes a reusable continuation boundary.
     ///

@@ -603,6 +603,59 @@ def check_tool_schema_edges(client, model, checks, chat_result, vision, image_co
                 peers = list(pool.map(lambda _: chat_result(client, sampled, True), range(2)))
             for i, result in enumerate(peers):
                 save(f"sampled_peer_{i}", result, arguments)
+    check_action_verb_tool_names(client, model, checks, chat_result)
+
+
+def check_action_verb_tool_names(client, model, checks, chat_result):
+    """A tool named like one of the model's own actions is still a call (#1436).
+
+    Inkling 2 heads such a call with another verb of its own ("read" before
+    {"name":"edit"}); the call must not reach the client as text.
+    """
+    for index, name in enumerate(("edit", "Edit")):
+        tool = {"type": "function", "function": {"name": name, "parameters": {
+            "type": "object", "properties": {"path": {"type": "string"},
+                                             "oldText": {"type": "string"},
+                                             "newText": {"type": "string"}},
+            "required": ["path", "oldText", "newText"]}}}
+        request = dict(model=model, tools=[tool], temperature=0, seed=41,
+                       max_completion_tokens=answer_room(512),
+                       extra_body={"cache_prompt": False}, messages=[
+            {"role": "system", "content": "You are a coding agent. Use the tools when a change is requested."},
+            {"role": "user", "content": "In /tmp/app.py line 4 says TIMEOUT = 30. "
+                                        f"Change it to TIMEOUT = 90. Use the {name} tool."}])
+        for streaming in (bool(index % 2), not index % 2):
+            label = f"schema_edges_verb_{name}_{'stream' if streaming else 'buffered'}"
+            result = chat_result(client, request, streaming)
+            checks[label] = result
+            print("CHECK " + label, file=sys.stderr, flush=True)
+            assert "<|" not in result["text"] and not result["text"].strip(), result
+            assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+            call = result["tools"][0]["function"]
+            assert call["name"] == name, result
+            assert json.loads(call["arguments"]) == {
+                "path": "/tmp/app.py", "oldText": "TIMEOUT = 30", "newText": "TIMEOUT = 90"}, result
+    # A response format leaves header words to the declared names: a name of
+    # several tokens stays a call.
+    weather = {"type": "function", "function": {"name": "get_current_weather", "parameters": {
+        "type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}
+    request = dict(model=model, tools=[weather], tool_choice="required", temperature=0, seed=41,
+                   max_completion_tokens=answer_room(256), extra_body={"cache_prompt": False},
+                   messages=[{"role": "user", "content": "What is the weather in Paris right now?"}],
+                   response_format={"type": "json_schema", "json_schema": {
+                       "name": "answer", "strict": True, "schema": {
+                           "type": "object", "properties": {"answer": {"type": "string"}},
+                           "required": ["answer"], "additionalProperties": False}}})
+    for streaming in (False, True):
+        label = f"schema_edges_required_response_format_{'stream' if streaming else 'buffered'}"
+        result = chat_result(client, request, streaming)
+        checks[label] = result
+        print("CHECK " + label, file=sys.stderr, flush=True)
+        assert "<|" not in result["text"], result
+        assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+        call = result["tools"][0]["function"]
+        assert call["name"] == "get_current_weather", result
+        assert json.loads(call["arguments"]) == {"city": "Paris"}, result
 
 
 def check_tool_agent(client, model, checks, chat_result, vision, image_content):

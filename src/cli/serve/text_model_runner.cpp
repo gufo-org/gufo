@@ -1050,6 +1050,15 @@ TextRunnerNgramRows TextRunnerPool::Request::ngram_rows() const {
           now.cache_hits - base.cache_hits, now.disk_reads - base.disk_reads};
 }
 
+std::string TextRunnerPool::Request::HeldText() const {
+  if (impl_ == nullptr)
+    return {};
+  return impl_->runner->HeldText(
+      dynamic_cast<const TextRunnerState&>(impl_->lease->state()),
+      impl_->pending_selection ? std::optional(impl_->pending_selection->token)
+                               : std::nullopt);
+}
+
 bool TextRunnerPool::Request::cache_disk_hit() const noexcept {
   return impl_ != nullptr && impl_->lease->restored_from_disk();
 }
