@@ -1342,16 +1342,9 @@ void TestProviderToolDialectSelection() {
     Expect(dialect == "ledger-runner" && !format,
            "the runner's identity selects the provider dialect");
     if (choice == ChatRequest::ToolChoice::kNone) {
-      Expect(constrained && sampling.constraint &&
-                 constrained->messages.size() == 1 &&
-                 constrained->messages.front().framing_suffix.empty(),
-             "tool_choice none keeps the prompt and constrains the output");
-      const auto& grammar = *sampling.constraint->grammar;
-      Expect(accepts(grammar, "Plain answer.") &&
-                 accepts(grammar, "A <<invoke is only text."),
-             "tool_choice none admits text");
-      Expect(!accepts(grammar, call) && !accepts(grammar, "See " + call),
-             "tool_choice none bans the dialect's call marker");
+      Expect(!constrained && !sampling.constraint,
+             "tool_choice none without earlier calls leaves the output "
+             "unconstrained");
       continue;
     }
     Expect(constrained && sampling.constraint &&
@@ -1370,6 +1363,39 @@ void TestProviderToolDialectSelection() {
     Expect(accepts(grammar, "Plain answer.") ==
                (choice == ChatRequest::ToolChoice::kAuto),
            "only automatic tool choice admits a plain answer");
+  }
+  // A request that allows no calls after earlier ones (Open WebUI ends tool
+  // loops with tools [] and tool_choice "none") keeps its prompt and bans the
+  // dialect's call marker.
+  for (const bool declared : {true, false}) {
+    ChatRequest request;
+    request.messages.emplace_back(gufo::tokenization::ChatRole::kUser, "go");
+    auto& assistant = request.messages.emplace_back(
+        gufo::tokenization::ChatRole::kAssistant, "");
+    assistant.tool_calls.push_back({.id = "c1", .name = "record"});
+    request.messages.emplace_back(gufo::tokenization::ChatRole::kTool, "error");
+    if (declared) {
+      request.tool_choice = ChatRequest::ToolChoice::kNone;
+      request.tools = {
+          {.name = "record", .parameters_json = R"({"type":"object"})"}};
+    }
+    gufo::sampling::SamplingConfig sampling;
+    std::optional<Constraint::ToolFormat> format;
+    const auto constrained =
+        gufo::server::ConstrainChatRequest(request, runner, &sampling, &format);
+    Expect(constrained && sampling.constraint &&
+               constrained->messages.size() == request.messages.size() &&
+               std::ranges::all_of(constrained->messages,
+                                   [](const auto& message) {
+                                     return message.framing_suffix.empty();
+                                   }),
+           "a history with calls keeps the prompt and constrains the output");
+    const auto& grammar = *sampling.constraint->grammar;
+    Expect(accepts(grammar, "Plain answer.") &&
+               accepts(grammar, "A <<invoke is only text."),
+           "a request without calls admits text");
+    Expect(!accepts(grammar, call) && !accepts(grammar, "See " + call),
+           "a request without calls bans the dialect's call marker");
   }
   // ToolGrammarSyntax and ReasoningGrammarMarkers select the grammar's
   // spelling; parsing stays canonical.

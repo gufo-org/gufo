@@ -1446,22 +1446,38 @@ TokenId SamplerState::SampleConstrainedGreedy(
         "JSON constraint vocabulary differs from logits");
   // Read the mask directly: greedy constraints need neither a copied vocabulary
   // of masked logits nor a cloned sampler/history. Preserve token-ID tie order.
+  // As in SampleGreedy, skip unpenalized blocks that cannot beat the best
+  // allowed value (the mask only removes candidates) and walk the sorted
+  // penalties alongside the vocabulary.
   double best_logit = -std::numeric_limits<double>::infinity();
   TokenId best_token = 0;
   bool found = false;
-  for (std::size_t index = 0; index < logits.size(); ++index) {
-    if (!(*mask)[index] || !std::isfinite(logits[index]))
+  auto penalty = penalty_counts_.begin();
+  for (std::size_t begin = 0; begin < logits.size(); begin += kSkipBlock) {
+    const std::size_t end = std::min(begin + kSkipBlock, logits.size());
+    while (penalty != penalty_counts_.end() && penalty->token < begin)
+      ++penalty;
+    if (found && (penalty == penalty_counts_.end() || penalty->token >= end) &&
+        static_cast<double>(BlockMaximum(logits.subspan(begin, end - begin))) <=
+            best_logit)
       continue;
-    const double value = penalty_counts_.empty()
-                             ? static_cast<double>(logits[index])
-                             : AdjustedLogit(index, logits[index]);
-    if (!std::isfinite(value))
-      throw std::runtime_error(
-          "sampling penalties produced a non-finite logit");
-    if (value > best_logit) {
-      best_logit = value;
-      best_token = static_cast<TokenId>(index);
-      found = true;
+    for (std::size_t index = begin; index < end; ++index) {
+      if (!(*mask)[index] || !std::isfinite(logits[index]))
+        continue;
+      while (penalty != penalty_counts_.end() && penalty->token < index)
+        ++penalty;
+      const double value =
+          penalty != penalty_counts_.end() && penalty->token == index
+              ? Penalize(logits[index], config_, *penalty)
+              : static_cast<double>(logits[index]);
+      if (!std::isfinite(value))
+        throw std::runtime_error(
+            "sampling penalties produced a non-finite logit");
+      if (!found || value > best_logit) {
+        best_logit = value;
+        best_token = static_cast<TokenId>(index);
+        found = true;
+      }
     }
   }
   if (!found)

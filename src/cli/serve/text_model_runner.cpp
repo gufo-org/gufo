@@ -65,11 +65,18 @@ std::optional<ChatRequest> ConstrainChatRequest(
     *tool_format = selected.format;
   if (tool_dialect)
     *tool_dialect = dialect_id;
-  // tool_choice "none" with tools declared keeps the prompt but bans the
-  // call marker, so a model that still reaches for a tool answers in text.
+  // A request that allows no calls (no tools, or tool_choice "none") after
+  // earlier calls keeps the prompt but bans the call marker: a model primed by
+  // the history still reaches for a tool, and must answer in text instead
+  // (#1232; Open WebUI ends tool loops with tools [] and tool_choice "none").
+  // Without calls in the history the marker stays ordinary text (#373).
   const bool forbid_calls =
-      !request.response_format && !request.tools.empty() &&
-      request.tool_choice == ChatRequest::ToolChoice::kNone;
+      !request.response_format &&
+      (request.tools.empty() ||
+       request.tool_choice == ChatRequest::ToolChoice::kNone) &&
+      std::ranges::any_of(request.messages, [](const auto& message) {
+        return !message.tool_calls.empty();
+      });
   if (!request.response_format && !forbid_calls &&
       (request.tools.empty() ||
        request.tool_choice == ChatRequest::ToolChoice::kNone))
