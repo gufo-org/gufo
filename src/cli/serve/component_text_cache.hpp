@@ -104,7 +104,9 @@ public:
                      const std::optional<TextRunnerDiskCacheOptions>&,
                      bool automatic_ram = false, std::size_t ceiling_bytes = 0,
                      bool ram_enabled = true,
-                     TextRunnerExpertCacheClaim experts = {});
+                     TextRunnerExpertCacheClaim experts = {},
+                     // Tests only: replaces cache::DiskMetadataAllowance.
+                     std::optional<std::size_t> disk_metadata_allowance = {});
   ~ComponentTextCache();
   // With `state_tokens`, the session the prompt lands on claims them from
   // the shared state budget (StateAccount::Claim), drawing on

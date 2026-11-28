@@ -1,6 +1,8 @@
 #ifndef GUFO_CACHE_DISK_CATALOG_HPP_
 #define GUFO_CACHE_DISK_CATALOG_HPP_
 
+#include <cstddef>
+#include <functional>
 #include <memory>
 
 #include "src/cache/prefix_index.hpp"
@@ -13,19 +15,45 @@ struct DiskEviction {
   bool superseded{}, reused{};
   explicit operator bool() const { return description != nullptr; }
 };
+using DiskEvictionVisitor = std::function<void(const DiskEviction&)>;
+// The allowance for the RAM that tracked disk checkpoints' metadata holds in
+// a RAM cache budget of `ram_budget` bytes; 0 (RAM cache off, no aggregate
+// limit) gives no allowance. Each checkpoint keeps its whole token list in
+// RAM, so one conversation's checkpoints grow quadratically with its length
+// and would otherwise fill the ledger until RAM captures are refused (#1329).
+// Backing takes about 90% of the budget. The allowance takes 1/32 of it; the
+// rest of the metadata room covers RAM-tier metadata, index nodes and the
+// in-flight persistence manifests the allowance does not count (up to 16
+// queued captures, each holding its tokens twice: 32 MiB at 262144 tokens).
+// A 16 MiB floor leaves small budgets to the ledger's own refusals. Typical
+// automatic budgets give hundreds of MiB, which a full default disk of the
+// measured agent workload (about 62 MB) does not reach.
+[[nodiscard]] std::size_t DiskMetadataAllowance(std::size_t ram_budget);
 // One lineage-aware catalog per store, including identities not currently
 // loaded. Construct at quiescence after startup discovery; Track every
 // successful new publication before exposing it through lookup. Operations are
 // caller serialized. Store, index and ledger outlive the catalog. Touch records
 // a successful use; startup ties and untouched publications use checkpoint ID.
+// The metadata allowance bounds MetadataBytes by retiring entries in
+// EvictOne's order. Recovery tracks every entry; call FitMetadata after it.
 class DiskCatalog {
 public:
+  // Retirements one publication may spend on the metadata allowance. Ranking
+  // compares token lists pairwise under the serving lock, so a pass ranks
+  // once and retires along that order. More than one keeps a growing
+  // conversation converging: its new leaf outweighs the prefix retired.
+  static constexpr std::size_t kMetadataEvictions = 4;
   DiskCatalog(ResourceLedger&, DiskStore&, PrefixIndex&,
-              std::uint64_t turnover_bytes = UINT64_MAX);
+              std::uint64_t turnover_bytes = UINT64_MAX,
+              std::size_t metadata_allowance_bytes = SIZE_MAX);
   ~DiskCatalog();
   DiskCatalog(const DiskCatalog&) = delete;
   DiskCatalog& operator=(const DiskCatalog&) = delete;
-  void Track(CheckpointId);
+  // When tracking a new publication would exceed the metadata allowance,
+  // first retire up to kMetadataEvictions other entries until it fits;
+  // `retired` sees each. The checkpoint being tracked is never a candidate.
+  // A failed retirement ends the pass, never the tracking; the next retries.
+  void Track(CheckpointId, const DiskEvictionVisitor& retired = {});
   [[nodiscard]] std::shared_ptr<const DiskDescription> Find(CheckpointId) const;
   void Touch(CheckpointId);
   // Quiescent maintenance/shutdown only: persist dirty advisory access history.
@@ -43,6 +71,16 @@ public:
   // Lookup rejects quarantined descriptions immediately, even before this.
   void Reconcile();
   std::size_t ReclaimInvalid();
+  // Retire entries in EvictOne's order until MetadataBytes fits the allowance
+  // or nothing more retires. Returns the number retired.
+  std::size_t FitMetadata(const DiskEvictionVisitor& retired = {});
+  // RAM held for tracked checkpoints: the store's decoded manifests and pins,
+  // catalog records, their descriptions and dependency maps. It excludes the
+  // store's entry slots (a high-water vector), its verified-file cache, index
+  // records and nodes, and transient persistence. A session's description can
+  // hold a retired manifest's charge until the session publishes again.
+  [[nodiscard]] std::size_t MetadataBytes() const;
+  [[nodiscard]] std::size_t MetadataAllowance() const;
   [[nodiscard]] std::size_t Size() const;
 
 private:
