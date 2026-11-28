@@ -41,6 +41,7 @@ a conformance run; the extension's own documentation carries this evidence.
 | Speech synthesis | `qwen3_tts_audio_api_test`, voice and stream contracts | `tests/functional/model_services.py tts`: pinned independent ASR evaluator, audio validity, replay, streaming, concurrency, cancellation and recovery |
 | Image generation | `qwen_image_21_test`, image API contracts | `tools/models/qwen_image_21/check_server.py` for generation, editing, replay and isolation, plus independent image quality and the standard speed benchmark |
 | Video generation | `video_api_test`, job scheduling and cancellation contracts | Job submission, status, result, invalid input, cancellation and independent video and audio quality; `tools/h3/` is H3-specific, not an oracle for other models |
+| Reranking | `rerank_api_test`, rerank registry and runner contracts, the provider's template and tokenizer fixtures | `/v1/rerank` requests in both wire forms, scores and ranking against an independent reference, packed-versus-alone agreement, over-long input, cancellation reaching the device, device-loss recovery |
 | Decisions | Decision registry and runner contracts, the provider's framing and calibration fixtures | `gufo decide` and `/v1/systemone` requests, advertised multimodal input, invalid-input recovery and independent score references; LFM3's `tests/functional/d1.py` is an example |
 
 These suites cover the in-tree models. An external provider needs equivalent

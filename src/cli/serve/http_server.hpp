@@ -30,6 +30,7 @@ class AsrService;
 class ImageService;
 class EmbeddingService;
 struct DecisionService;
+class RerankService;
 class WebSocket;
 
 /// Whether a comma-separated header value lists the lowercase token.
@@ -134,7 +135,8 @@ public:
              HttpServerOptions options = {},
              std::shared_ptr<ImageService> images = nullptr,
              std::shared_ptr<EmbeddingService> embeddings = nullptr,
-             std::shared_ptr<DecisionService> decisions = nullptr);
+             std::shared_ptr<DecisionService> decisions = nullptr,
+             std::shared_ptr<RerankService> rerank = nullptr);
   ~HttpServer();
 
   HttpServer(const HttpServer&) = delete;
@@ -171,6 +173,7 @@ private:
   std::shared_ptr<ImageService> images_;
   std::shared_ptr<EmbeddingService> embeddings_;
   std::shared_ptr<DecisionService> decisions_;
+  std::shared_ptr<RerankService> rerank_;
   HttpServerOptions options_;
   std::function<HttpResponse()> metrics_;
   GufoHttpServer* server_ = nullptr;

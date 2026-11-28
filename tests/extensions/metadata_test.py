@@ -66,6 +66,11 @@ class ConfigureTests(unittest.TestCase):
         manifests[0]["providers"][0]["capability"] = "decision"
         self.configure(manifests)
 
+    def test_rerank_capability(self):
+        manifests = copy.deepcopy(BASE)
+        manifests[0]["providers"][0]["capability"] = "rerank"
+        self.configure(manifests)
+
     def test_serving_metadata(self):
         manifests = copy.deepcopy(BASE)
         provider = manifests[0]["providers"][0]
@@ -337,6 +342,13 @@ class SchemaTests(unittest.TestCase):
         decision["providers"][0]["capability"] = "decision"
         schema = json.loads((ROOT / "schemas/extension.schema.json").read_text())
         jsonschema.Draft202012Validator(schema).validate(decision)
+
+    def test_rerank_capability(self):
+        import jsonschema
+        rerank = copy.deepcopy(BASE[0])
+        rerank["providers"][0]["capability"] = "rerank"
+        schema = json.loads((ROOT / "schemas/extension.schema.json").read_text())
+        jsonschema.Draft202012Validator(schema).validate(rerank)
 
     def test_full_schema(self):
         import jsonschema

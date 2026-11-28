@@ -168,6 +168,7 @@ Pick the interface for your capability:
 | Images | [`image.hpp`](../include/gufo/ext/image.hpp) |
 | Video | [`video.hpp`](../include/gufo/ext/video.hpp) |
 | Decisions | [`decision.hpp`](../include/gufo/ext/decision.hpp) |
+| Reranking | [`rerank.hpp`](../include/gufo/ext/rerank.hpp) |
 
 Read the interface and an existing provider of the same capability first.
 Include only `<gufo/ext/...>` headers and link `gufo_ext_runtime`; the build
@@ -182,8 +183,7 @@ must support continuation through the component cache. Declare only the inputs,
 batching and state features you implement, and keep sampler and cache identity
 consistent across rollback. Wire the `prompt`, `chat` and `bench` drivers as
 well as the server runner. The [extension API](extension-api.md) covers the
-cache adapter, sampling defaults, reasoning markers, tool dialects and
-options.
+cache adapter, sampling defaults, reasoning markers, tool dialects and options.
 
 **Image models** declare startup options for `serve image` in their manifest.
 Declare which request features you support and apply background conditioning

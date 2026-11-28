@@ -43,6 +43,8 @@ std::string_view CapabilityName(ext::Capability capability) {
       return "video_generation";
     case ext::Capability::kDecision:
       return "decision";
+    case ext::Capability::kRerank:
+      return "rerank";
   }
   return "unknown";
 }

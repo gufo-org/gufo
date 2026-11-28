@@ -41,6 +41,7 @@ ext::Capability ParseCapability(const std::string& name) {
           {"image_generation", ext::Capability::kImageGeneration},
           {"video_generation", ext::Capability::kVideoGeneration},
           {"decision", ext::Capability::kDecision},
+          {"rerank", ext::Capability::kRerank},
       };
   const auto found = kCapabilities.find(name);
   if (found == kCapabilities.end())

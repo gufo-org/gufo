@@ -45,7 +45,7 @@ def main():
     # Repeated --served-model-name is accepted by every naming modality, with
     # duplicates refused at parse time (#957).
     for modality in ("llm", "tts", "asr", "image", "embedding", "decision",
-                     "video"):
+                     "rerank", "video"):
         check(["serve", modality, "--help"], 0, "repeatable")
         check(["serve", modality, "--served-model-name", "dup",
                "--served-model-name", "dup", "--model", "missing.gguf"], 2,

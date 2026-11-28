@@ -12,6 +12,7 @@
 #include "gufo/ext/image.hpp"
 #include "gufo/ext/model_source.hpp"
 #include "gufo/ext/options.hpp"
+#include "gufo/ext/rerank.hpp"
 #include "gufo/ext/text.hpp"
 #include "gufo/ext/tts.hpp"
 #include "gufo/ext/video.hpp"
@@ -26,6 +27,7 @@ enum class Capability {
   kImageGeneration,
   kVideoGeneration,
   kDecision,
+  kRerank,
 };
 struct ExtensionInfo {
   std::string name;
@@ -78,6 +80,7 @@ public:
   void AddImageProvider(ImageProvider provider);
   void AddVideoProvider(VideoProvider provider);
   void AddDecisionProvider(DecisionProvider provider);
+  void AddRerankProvider(RerankProvider provider);
   void AddTextProvider(TextProvider provider);
   /// Registers the source of one Hugging Face owner's models; a later source
   /// for the same owner replaces it.

@@ -152,6 +152,7 @@ Request fields and limits are on the [MiniMax H3](models/minimax-h3.md) page.
 | `gufo serve tts` | `POST /v1/audio/speech`, `GET /v1/audio/voices`, WebSocket `/v1/audio/speech/stream` | [Qwen3-TTS](models/qwen3-tts.md) |
 | `gufo serve image` | `POST /v1/images/generations`, `POST /v1/images/edits`, A1111 `/sdapi/v1/txt2img` and `/sdapi/v1/img2img` | [Qwen-Image-2.1](models/qwen-image-2.1.md) |
 | `gufo serve decision` | `POST /v1/systemone` | Defined by the model |
+| `gufo serve rerank` | `POST /v1/rerank`, `/v1/reranking`, `/rerank` | [Reranking](internal/server.md#reranking); the model comes from an extension |
 
 ## Model names
 
@@ -205,10 +206,10 @@ buckets run from 1 ms to 1,200 s. `/slots` shows what each session is doing,
 `POST /apply-template` the prompt a chat request becomes.
 [Troubleshooting](troubleshooting.md) covers the logs.
 
-`gufo serve embedding` also answers `/metrics`, with `gufo_embedding_*`
-families instead of the llama-server ones: requests by outcome, input parts by
-modality, tokens embedded, request latency and requests in flight. Requests
-rejected as too long or malformed by the service count as `invalid`.
+`gufo serve embedding` and `gufo serve rerank` also answer `/metrics`, with
+`gufo_embedding_*` or `gufo_rerank_*` families instead of the llama-server
+ones: requests by outcome, inputs (parts or documents), tokens, latency and
+requests in flight. Requests rejected as too long or malformed are `invalid`.
 
 ## llama-swap
 

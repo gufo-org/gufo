@@ -35,6 +35,7 @@
 #include "src/cli/serve/image_service.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/rerank_service.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/cli/speculative_settings.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
@@ -635,6 +636,13 @@ void AddEmbeddingOptions(ArgParser& parser, std::filesystem::path* model,
                    "Model", default_prompt_name);
 }
 
+void AddRerankOptions(ArgParser& parser, std::filesystem::path* model,
+                      std::vector<std::string>* served_model_names) {
+  parser.AddOption("-m", "--model", "DIR", "Reranking model directory", "Model",
+                   model);
+  AddServedModelNamesOption(parser, served_model_names);
+}
+
 void AddDecisionOptions(ArgParser& parser, std::filesystem::path* model,
                         std::filesystem::path* mmproj,
                         std::vector<std::string>* names, std::size_t* context) {
@@ -666,6 +674,23 @@ void PrintServeHelp(std::string_view program_name,
     ext::RegisterBuiltExtensions(registry);
     ProviderOptions provider_options(registry, "serve decision",
                                      ext::Capability::kDecision);
+    provider_options.Register(parser);
+    parser.PrintHelp();
+    return;
+  }
+  if (subcommand == "rerank") {
+    std::filesystem::path model;
+    std::vector<std::string> names;
+    ArgParser parser(std::string(program_name) + " serve rerank",
+                     "Serve reranking models (/v1/rerank, /v1/reranking, "
+                     "/rerank).");
+    AddRerankOptions(parser, &model, &names);
+    ServerOptionHelpTargets server_help;
+    AddServerOptionsForHelp(parser, &server_help, false);
+    ext::Registry registry;
+    ext::RegisterBuiltExtensions(registry);
+    ProviderOptions provider_options(registry, "serve rerank",
+                                     ext::Capability::kRerank);
     provider_options.Register(parser);
     parser.PrintHelp();
     return;
@@ -946,7 +971,9 @@ void PrintServeHelp(std::string_view program_name,
          "(/v1/audio/transcriptions)\n"
       << "  embedding Serve EmbeddingGemma 2 text, image and audio embeddings "
          "(/v1/embeddings)\n"
-      << "  decision  Serve decision models (/v1/systemone)\n\n"
+      << "  decision  Serve decision models (/v1/systemone)\n"
+      << "  rerank    Serve reranking models (/v1/rerank, /v1/reranking, "
+         "/rerank)\n\n"
       << "Server:\n"
       << "  -i, --host <IP>        Bind address (default: 127.0.0.1)\n"
       << "  -p, --port <N>         Port to listen on (default: 8080)\n"
@@ -1029,7 +1056,8 @@ int RunServe(std::span<const char* const> args) {
       continue;
     }
     if (arg == "llm" || arg == "video" || (arg == "tts" || arg == "asr") ||
-        arg == "image" || arg == "embedding" || arg == "decision") {
+        arg == "image" || arg == "embedding" || arg == "decision" ||
+        arg == "rerank") {
       subcommand = arg;
       sub_args.erase(sub_args.begin() + static_cast<std::ptrdiff_t>(i));
     } else if (arg == "--help" || arg == "-h" || arg == "help") {
@@ -1037,7 +1065,7 @@ int RunServe(std::span<const char* const> args) {
           arg == "help" && i + 1 < args.size() ? args[i + 1] : "";
       if (!topic.empty() && topic != "llm" && topic != "video" &&
           topic != "tts" && topic != "asr" && topic != "image" &&
-          topic != "embedding" && topic != "decision") {
+          topic != "embedding" && topic != "decision" && topic != "rerank") {
         std::cerr << "Error: unknown serve command '" << topic << "'\n";
         return 2;
       }
@@ -1125,8 +1153,62 @@ int RunServe(std::span<const char* const> args) {
   std::shared_ptr<server::ImageService> images;
   std::shared_ptr<server::EmbeddingService> embeddings;
   std::shared_ptr<server::DecisionService> decisions;
+  std::shared_ptr<server::RerankService> rerank;
 
-  if (subcommand == "decision") {
+  if (subcommand == "rerank") {
+    std::filesystem::path model;
+    std::vector<std::string> names;
+    ArgParser parser("gufo serve rerank",
+                     "Serve reranking models (/v1/rerank, /v1/reranking, "
+                     "/rerank).");
+    AddRerankOptions(parser, &model, &names);
+    add_server_options(parser, false);
+    ProviderOptions declared_options(registry, "serve rerank",
+                                     ext::Capability::kRerank);
+    declared_options.Register(parser);
+    if (!parser.Parse(sub_args, &parse_err)) {
+      std::cerr << "Error: " << parse_err << '\n';
+      return 2;
+    }
+    if (parser.IsHelpRequested()) {
+      PrintServeHelp("gufo", "rerank");
+      return 0;
+    }
+    ext::ParsedOptions provider_options;
+    try {
+      provider_options = declared_options.Parse();
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error: " << error.what() << '\n';
+      return 2;
+    }
+    if (!prepare_server_options())
+      return 2;
+    if (model.empty()) {
+      std::cerr << "Error: --model <DIR> is required for rerank server\n";
+      return 2;
+    }
+    ModelLoadLog load_log("rerank", model);
+    try {
+      rerank =
+          std::make_shared<server::RerankService>(server::RerankServiceOptions{
+              .model_root = model,
+              .provider_options = std::move(provider_options),
+              .validate_model = true,
+              .model_id = names.empty() ? std::string() : names.front(),
+              .model_aliases = ModelAliases(names),
+              .runner = {},
+          });
+    } catch (const std::exception& error) {
+      std::cerr << "Error loading rerank model: " << error.what() << '\n';
+      return 1;
+    }
+    if (!rerank->ready()) {
+      std::cerr << "Error enabling rerank service: "
+                << rerank->initialization_error() << '\n';
+      return 1;
+    }
+    load_log.Complete("model=" + rerank->model_id());
+  } else if (subcommand == "decision") {
     std::filesystem::path model, mmproj;
     std::vector<std::string> names;
     std::size_t context = 8192;
@@ -1951,7 +2033,7 @@ int RunServe(std::span<const char* const> args) {
                 ShutdownAfterDeviceLoss();
               },
       },
-      images, embeddings, decisions);
+      images, embeddings, decisions, rerank);
   std::string err;
   if (!server.start(&err)) {
     std::cerr << "Error starting HTTP server: " << err << "\n";

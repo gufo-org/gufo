@@ -537,6 +537,8 @@ add_library(gufo_http STATIC
   src/cli/serve/asr_service.cpp
   src/cli/serve/embeddings_api.cpp
   src/cli/serve/embedding_service.cpp
+  src/cli/serve/rerank_api.cpp
+  src/cli/serve/rerank_service.cpp
   src/cli/serve/audio_tts_api.cpp
   src/cli/serve/tts_service.cpp
   src/cli/serve/video_api.cpp
@@ -951,6 +953,9 @@ endfunction()
   add_test(NAME gufo_serve_tts_help COMMAND gufo serve tts --help)
   set_tests_properties(gufo_serve_tts_help PROPERTIES
     LABELS "cpu;server;cli;qwen3-tts")
+  add_test(NAME gufo_serve_rerank_help COMMAND gufo serve rerank --help)
+  set_tests_properties(gufo_serve_rerank_help PROPERTIES
+    LABELS "cpu;server;cli;rerank")
   add_test(NAME gufo_serve_embedding_help COMMAND gufo serve embedding --help)
   set_tests_properties(gufo_serve_embedding_help PROPERTIES
     LABELS "cpu;server;cli;embedding-gemma2")
@@ -1146,6 +1151,12 @@ endfunction()
   add_test(NAME multipart_test COMMAND multipart_test)
   set_tests_properties(multipart_test PROPERTIES
     LABELS "cpu;server;http;correctness")
+
+  add_executable(rerank_api_test tests/cli/rerank_api_test.cpp)
+  target_link_libraries(rerank_api_test PRIVATE gufo_http)
+  add_test(NAME rerank_api_test COMMAND rerank_api_test)
+  set_tests_properties(rerank_api_test PROPERTIES
+    LABELS "cpu;server;http;api;correctness" TIMEOUT 30)
 
   # These HTTP/WebSocket suites drive raw POSIX sockets or fork() directly.
   if (NOT WIN32)
