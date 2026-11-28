@@ -59,6 +59,8 @@ public:
   [[nodiscard]] const std::vector<std::string>& model_aliases() const;
   [[nodiscard]] std::string backend_name() const;
 
+  [[nodiscard]] std::string RenderMetrics() const;
+
   [[nodiscard]] bool Transcribe(const ext::TranscriptionRequest& request,
                                 const ext::CancellationCheck& is_cancelled,
                                 ext::TranscriptionResult* result,
@@ -75,6 +77,10 @@ public:
 
 private:
   struct Impl;
+  [[nodiscard]] bool TranscribeAdmitted(
+      const ext::TranscriptionRequest& request,
+      const ext::CancellationCheck& is_cancelled,
+      ext::TranscriptionResult* result, std::string* error);
   std::unique_ptr<Impl> impl_;
 };
 

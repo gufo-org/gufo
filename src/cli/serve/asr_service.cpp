@@ -3,13 +3,96 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/asr_metrics.hpp"
 #include "src/core/cancellable_gate.hpp"
 
 namespace gufo::server {
+
+namespace {
+
+class MeteredLiveTranscription final : public LiveTranscription {
+public:
+  MeteredLiveTranscription(std::unique_ptr<LiveTranscription> inner,
+                           const std::shared_ptr<AsrMetrics>& metrics,
+                           std::uint32_t rate)
+      : scope_(metrics, metrics->live_sessions),
+        audio_seconds_(metrics->live_audio_seconds),
+        rate_(rate),
+        inner_(std::move(inner)) {}
+
+  bool Push(std::span<const float> samples, const Text& on_text,
+            std::string* error) override {
+    const bool ok = inner_->Push(samples, on_text, error);
+    if (ok && rate_ != 0)
+      audio_seconds_.Add(static_cast<double>(samples.size()) /
+                         static_cast<double>(rate_));
+    return ok;
+  }
+  bool Finish(const Text& on_text, std::string* error) override {
+    return inner_->Finish(on_text, error);
+  }
+  const std::string& text() const override { return inner_->text(); }
+
+private:
+  AsrSessionScope scope_;
+  core::metrics::FloatCounter audio_seconds_;
+  std::uint32_t rate_;
+  std::unique_ptr<LiveTranscription> inner_;
+};
+
+class MeteredVoiceConversation final : public VoiceConversation {
+public:
+  MeteredVoiceConversation(std::unique_ptr<VoiceConversation> inner,
+                           const std::shared_ptr<AsrMetrics>& metrics)
+      : scope_(metrics, metrics->voice_sessions), inner_(std::move(inner)) {}
+
+  bool Configure(const Settings& settings, std::string* error) override {
+    return inner_->Configure(settings, error);
+  }
+  bool AppendAudio(std::span<const float> samples,
+                   std::string* error) override {
+    return inner_->AppendAudio(samples, error);
+  }
+  bool CommitAudio(std::size_t* samples, std::string* error) override {
+    return inner_->CommitAudio(samples, error);
+  }
+  bool ClearAudio(std::string* error) override {
+    return inner_->ClearAudio(error);
+  }
+  bool audio_open() const override { return inner_->audio_open(); }
+  bool AddUserText(std::string_view text, std::string* error) override {
+    return inner_->AddUserText(text, error);
+  }
+  bool AddToolOutputs(std::span<const std::string> outputs,
+                      std::string* error) override {
+    return inner_->AddToolOutputs(outputs, error);
+  }
+  bool Respond(const Settings& settings, const Callbacks& callbacks,
+               Reply* reply, std::string* error) override {
+    return inner_->Respond(settings, callbacks, reply, error);
+  }
+  bool TruncateReply(std::size_t samples, std::string* error) override {
+    return inner_->TruncateReply(samples, error);
+  }
+  std::vector<std::string> voices() const override { return inner_->voices(); }
+  bool supports_response_options() const override {
+    return inner_->supports_response_options();
+  }
+  bool DeleteUserTurn(std::string* error) override {
+    return inner_->DeleteUserTurn(error);
+  }
+
+private:
+  AsrSessionScope scope_;
+  std::unique_ptr<VoiceConversation> inner_;
+};
+
+}  // namespace
 
 struct AsrService::Impl {
   explicit Impl(AsrServiceOptions supplied) : options(std::move(supplied)) {
@@ -87,6 +170,7 @@ struct AsrService::Impl {
   std::unique_ptr<ext::AsrRunner> native_runtime;
   std::string initialization_error;
   core::CancellableGate transcription_gate;
+  std::shared_ptr<AsrMetrics> metrics{std::make_shared<AsrMetrics>()};
   bool ready{false};
 };
 
@@ -123,10 +207,29 @@ std::string AsrService::backend_name() const {
   return "native-hip";
 }
 
+std::string AsrService::RenderMetrics() const {
+  return impl_->metrics->registry.Render();
+}
+
 bool AsrService::Transcribe(const ext::TranscriptionRequest& request,
                             const ext::CancellationCheck& is_cancelled,
                             ext::TranscriptionResult* result,
                             std::string* error) {
+  AsrRequestScope scope(*impl_->metrics);
+  const bool ok = TranscribeAdmitted(request, is_cancelled, result, error);
+  if (ok)
+    scope.Succeeded(result);
+  else if (is_cancelled && is_cancelled())
+    scope.Cancelled();
+  else if (result != nullptr && result->invalid_audio)
+    scope.InvalidAudio();
+  return ok;
+}
+
+bool AsrService::TranscribeAdmitted(const ext::TranscriptionRequest& request,
+                                    const ext::CancellationCheck& is_cancelled,
+                                    ext::TranscriptionResult* result,
+                                    std::string* error) {
   if (!impl_->ready) {
     if (error != nullptr) {
       *error = impl_->initialization_error;
@@ -156,7 +259,11 @@ std::unique_ptr<LiveTranscription> AsrService::CreateLiveTranscription(
     *error = "live transcription is not supported by this model";
     return nullptr;
   }
-  return impl_->options.live(rate, error);
+  auto live = impl_->options.live(rate, error);
+  if (live == nullptr)
+    return nullptr;
+  return std::make_unique<MeteredLiveTranscription>(std::move(live),
+                                                    impl_->metrics, rate);
 }
 
 bool AsrService::supports_voice() const noexcept {
@@ -169,7 +276,11 @@ std::unique_ptr<VoiceConversation> AsrService::CreateVoiceConversation(
     *error = "spoken conversations are not supported by this model";
     return nullptr;
   }
-  return impl_->options.voice(rate, error);
+  auto voice = impl_->options.voice(rate, error);
+  if (voice == nullptr)
+    return nullptr;
+  return std::make_unique<MeteredVoiceConversation>(std::move(voice),
+                                                    impl_->metrics);
 }
 
 }  // namespace gufo::server
