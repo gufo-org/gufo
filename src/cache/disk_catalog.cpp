@@ -523,4 +523,21 @@ std::size_t DiskCatalog::MetadataAllowance() const {
 std::size_t DiskCatalog::Size() const {
   return impl_->records.size();
 }
+#ifdef GUFO_CACHE_TESTING
+std::vector<DiskCatalogRankForTesting> DiskCatalog::RankForTesting() {
+  impl_->Rank();
+  return RecordsForTesting();
+}
+std::vector<DiskCatalogRankForTesting> DiskCatalog::RecordsForTesting() const {
+  std::vector<DiskCatalogRankForTesting> ranks;
+  for (const auto& [id, record] : impl_->records)
+    ranks.push_back({id, record.used, record.published, record.reused_at,
+                     record.invalid, record.branch, record.eviction_order,
+                     impl_->UniqueBytes(record.description->Manifest())});
+  return ranks;
+}
+std::uint64_t DiskCatalog::AdmittedBytesForTesting() const {
+  return impl_->admitted_bytes;
+}
+#endif
 }  // namespace gufo::cache

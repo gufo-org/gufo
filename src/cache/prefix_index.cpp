@@ -7,6 +7,8 @@
 #include <tuple>
 #include <utility>
 
+#include "src/cache/token_trie.hpp"
+
 namespace gufo::cache {
 namespace {
 std::size_t Add(std::size_t a, std::size_t b) {
@@ -78,14 +80,8 @@ struct PrefixIndex::Impl {
       throw std::logic_error("empty prefix index record");
     }
   };
-  struct Node {
-    ResourceCharge metadata;
-    Node* parent{};
-    std::vector<Token> edge;
-    std::map<Token, std::unique_ptr<Node>> children;
-    std::map<std::uint64_t, Record> records;
-    std::size_t bytes{};
-  };
+  using Trie = TokenTrie<std::map<std::uint64_t, Record>>;
+  using Node = Trie::Node;
   struct Tree {
     ResourceCharge metadata;
     std::vector<ComponentDescriptor> descriptors;
@@ -104,18 +100,7 @@ struct PrefixIndex::Impl {
   ~Impl() {
     for (auto& [identity, tree] : trees) {
       (void)identity;
-      auto* node = tree.root.get();
-      while (true) {
-        if (!node->children.empty()) {
-          node = node->children.begin()->second.get();
-          continue;
-        }
-        if (node == tree.root.get())
-          break;
-        auto* parent = node->parent;
-        parent->children.erase(node->edge.front());
-        node = parent;
-      }
+      Trie::Clear(*tree.root);
     }
   }
   Impl(const Impl&) = delete;
@@ -124,28 +109,6 @@ struct PrefixIndex::Impl {
   Impl& operator=(Impl&&) = delete;
   ResourceCharge Charge(std::size_t size) {
     return ledger->Reserve(ResourceCategory::kMetadata, size).Convert();
-  }
-  static std::size_t NodeBytes(std::size_t token_capacity) {
-    return Add(sizeof(Node) + sizeof(decltype(Node::children)::value_type),
-               Bytes(token_capacity, sizeof(Token)));
-  }
-  static std::vector<Token> Edge(std::span<const Token> tokens) {
-    std::vector<Token> edge(tokens.begin(), tokens.end());
-    // The pinned standard library creates exact-capacity range vectors. Fail
-    // closed if a different implementation adds unadmitted spare capacity.
-    if (edge.capacity() != tokens.size())
-      throw std::logic_error("unexpected prefix edge capacity");
-    return edge;
-  }
-  std::unique_ptr<Node> MakeNode(std::span<const Token> tokens, Node* parent) {
-    const auto bytes = NodeBytes(tokens.size());
-    auto reservation = ledger->Reserve(ResourceCategory::kMetadata, bytes);
-    auto node = std::make_unique<Node>();
-    node->parent = parent;
-    node->edge = Edge(tokens);
-    node->bytes = bytes;
-    node->metadata = reservation.Convert();
-    return node;
   }
   Tree& Get(const Identity& identity) {
     auto it = trees.find(identity);
@@ -158,94 +121,6 @@ struct PrefixIndex::Impl {
     if (it == directory.end())
       throw std::invalid_argument("unknown prefix index entry");
     return it->second->records.at(id.value);
-  }
-  // All allocation/admission happens before changing an existing edge.
-  Node* Place(Tree& tree, std::span<const Token> tokens) {
-    auto* node = tree.root.get();
-    while (!tokens.empty()) {
-      auto child = node->children.find(tokens.front());
-      if (child == node->children.end()) {
-        auto fresh = MakeNode(tokens, node);
-        auto* result = fresh.get();
-        node->children.emplace(tokens.front(), std::move(fresh));
-        return result;
-      }
-      auto& old = child->second;
-      const auto common = static_cast<std::size_t>(
-          std::ranges::mismatch(old->edge, tokens).in1 - old->edge.begin());
-      if (common == old->edge.size()) {
-        tokens = tokens.subspan(common);
-        node = old.get();
-        continue;
-      }
-      auto split = MakeNode(tokens.first(common), node);
-      const auto remainder = std::span<const Token>(old->edge).subspan(common);
-      const auto narrowed_bytes = NodeBytes(remainder.size());
-      auto narrowed_reservation =
-          ledger->Reserve(ResourceCategory::kMetadata, narrowed_bytes);
-      ResourceCharge narrowed_charge;
-      auto suffix = Edge(remainder);
-      narrowed_charge = narrowed_reservation.Convert();
-      const auto old_key = suffix.front();
-      // Preallocate the map entry, so linking the old subtree cannot fail.
-      split->children.emplace(old_key, nullptr);
-      Node* result = split.get();  // NOLINT(misc-const-correctness): returned
-                                   // for record insertion
-      if (common < tokens.size()) {
-        auto fresh = MakeNode(tokens.subspan(common), split.get());
-        result = fresh.get();
-        split->children.emplace(tokens[common], std::move(fresh));
-      }
-      // Release the former edge before its charge. Shrinking capacity matters
-      // when long histories are inserted before their shorter checkpoints.
-      // Existing directory pointers remain valid throughout the split.
-      old->edge = std::move(suffix);
-      old->metadata = std::move(narrowed_charge);
-      old->bytes = narrowed_bytes;
-      old->parent = split.get();
-      split->children.at(old_key) = std::move(old);
-      child->second = std::move(split);
-      return result;
-    }
-    return node;
-  }
-  void Prune(Node* node) {
-    while (node->parent && node->records.empty()) {
-      auto* parent = node->parent;
-      if (node->children.empty()) {
-        parent->children.erase(node->edge.front());
-      } else if (node->children.size() == 1) {
-        // Compact the edge without replacing the surviving record's node.
-        // Erasure must still succeed when headroom cannot fund this temporary
-        // replacement; a later erasure can retry the harmless unary path.
-        auto& child = node->children.begin()->second;
-        const auto count = Add(node->edge.size(), child->edge.size());
-        const auto bytes = NodeBytes(count);
-        try {
-          auto reservation =
-              ledger->Reserve(ResourceCategory::kMetadata, bytes);
-          std::vector<Token> merged(count);
-          if (merged.capacity() != count)
-            throw std::logic_error("unexpected prefix edge capacity");
-          std::ranges::copy(node->edge, merged.begin());
-          std::ranges::copy(
-              child->edge,
-              merged.begin() + static_cast<std::ptrdiff_t>(node->edge.size()));
-          auto charge = reservation.Convert();
-          child->edge = std::move(merged);
-          child->bytes = bytes;
-          child->metadata = std::move(charge);
-          child->parent = parent;
-          auto promoted = std::move(child);
-          parent->children.at(node->edge.front()) = std::move(promoted);
-        } catch (const std::bad_alloc&) {
-          return;
-        }
-      } else {
-        return;
-      }
-      node = parent;
-    }
   }
   IndexEntryId Publish(Tree& tree, std::span<const Token> tokens,
                        Record record) {
@@ -260,7 +135,7 @@ struct PrefixIndex::Impl {
     directory.emplace(next, nullptr);
     Node* node = nullptr;
     try {
-      node = Place(tree, tokens);
+      node = Trie::Place(*ledger, *tree.root, tokens);
     } catch (...) {
       directory.erase(next);
       throw;
@@ -528,7 +403,7 @@ void PrefixIndex::Register(Identity identity,
   if (tree.descriptors.capacity() != descriptors.size())
     throw std::logic_error("unexpected prefix inventory capacity");
   tree.bytes = bytes;
-  tree.root = impl_->MakeNode({}, nullptr);
+  tree.root = Impl::Trie::MakeNode(*impl_->ledger, {}, nullptr);
   tree.metadata = reservation.Convert();
   impl_->trees.emplace(std::move(identity), std::move(tree));
 }
@@ -721,7 +596,7 @@ void PrefixIndex::Erase(IndexEntryId id) {
   auto* node = it->second;
   node->records.erase(id.value);
   impl_->directory.erase(it);
-  impl_->Prune(node);
+  Impl::Trie::Prune(*impl_->ledger, node);
 }
 PrefixLookup PrefixIndex::Lookup(const PrefixQuery& query) const {
   if (query.stable_prefix_tokens > query.tokens.size() ||

@@ -184,6 +184,12 @@ int main(int argc, char** argv) {
                        recovered + turn_tokens * sizeof(Token));
     std::cout << "nested_load,0," << nested.Size() << ',' << Milliseconds(load)
               << ",0\n";
+    // RAM the recovered conversation holds: the ledger's metadata, which
+    // includes the store's decoded manifests, and what the catalog counts.
+    std::cout << "nested_metadata," << nested.Size() << ','
+              << nested_ledger.Snapshot().bytes[static_cast<std::size_t>(
+                     ResourceCategory::kMetadata)]
+              << ',' << nested.MetadataBytes() << '\n';
     if (nested.MetadataBytes() > nested.MetadataAllowance())
       throw std::runtime_error("nested metadata exceeds its allowance");
     nested_publish(turns);

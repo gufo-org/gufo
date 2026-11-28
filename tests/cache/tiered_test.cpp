@@ -1,9 +1,13 @@
 #include <cstdlib>
 #include <fstream>
 #include <future>
+#include <map>
 #include <new>
 #include <numeric>
+#include <random>
+#include <set>
 #include <stdexcept>
+#include <string_view>
 
 #include "src/cache/retention.hpp"
 #include "tests/cache/tiered_fixture.hpp"
@@ -798,37 +802,44 @@ void CatalogAdmissionFailures() {
     assert(f.catalog.Size() == 0 && f.catalog.MetadataBytes() == 0);
   }
 }
-// A store whose checkpoints hold only token lists and one private file each,
-// so metadata dominates the way a long conversation's does (#1329).
+// Publishes a checkpoint that holds only its token list and one private file
+// of its own, TieredFile(3, id), so metadata dominates the way a long
+// conversation's does (#1329).
+constexpr ComponentDescriptor kMetadataState{
+    {1}, 1, ComponentKind::kPrivateState, 0, 0, 32};
+void PublishMetadataCheckpoint(
+    DiskStore& disk, std::uint64_t id, std::span<const Token> tokens,
+    std::uint64_t lineage, std::uint8_t digest,
+    CheckpointPurpose purpose = CheckpointPurpose::kPrompt,
+    Identity input = {}) {
+  static constexpr std::array<std::uint8_t, 32> kBytes{};
+  DiskManifest manifest;
+  manifest.checkpoint = {id};
+  manifest.lineage = {lineage};
+  manifest.compatibility[0] = digest;
+  manifest.input = std::move(input);
+  manifest.purpose = purpose;
+  manifest.tokens.assign(tokens.begin(), tokens.end());
+  const auto file = TieredFile(3, id);
+  manifest.components.push_back(
+      {kMetadataState,
+       {{1}, tokens.size()},
+       {},
+       {},
+       DiskPayload{file, kBytes.size(), DiskChecksum(kBytes)}});
+  const std::array<DiskWriteBuffer, 1> buffers{{{true, file, kBytes}}};
+  disk.Publish(TieredFile(4, id), manifest, buffers);
+}
 struct MetadataStore {
-  static constexpr ComponentDescriptor kState{
-      {1}, 1, ComponentKind::kPrivateState, 0, 0, 32};
   ResourceLedger ledger;
   TieredDirectory directory;
   DiskStore disk{ledger, directory.path, 1 << 24};
   PrefixIndex index{ledger};
-  CompatibilityDigest digest{};
-  std::array<std::uint8_t, 32> state{};
   explicit MetadataStore(std::size_t ram_bytes)
-      : ledger({ram_bytes * 2, ram_bytes, 16, 1 << 20}) {
-    digest[0] = 42;
-  }
+      : ledger({ram_bytes * 2, ram_bytes, 16, 1 << 20}) {}
   void Publish(std::uint64_t id, std::span<const Token> tokens,
                std::uint64_t lineage = 1) {
-    DiskManifest manifest;
-    manifest.checkpoint = {id};
-    manifest.lineage = {lineage};
-    manifest.compatibility = digest;
-    manifest.tokens.assign(tokens.begin(), tokens.end());
-    const auto file = TieredFile(3, id);
-    manifest.components.push_back(
-        {kState,
-         {{1}, tokens.size()},
-         {},
-         {},
-         DiskPayload{file, state.size(), DiskChecksum(state)}});
-    const std::array<DiskWriteBuffer, 1> buffers{{{true, file, state}}};
-    disk.Publish(TieredFile(4, id), manifest, buffers);
+    PublishMetadataCheckpoint(disk, id, tokens, lineage, 42);
   }
   std::size_t Metadata() const {
     return ledger.Snapshot()
@@ -1032,6 +1043,466 @@ void StartupFitsRecoveredMetadata() {
   assert(catalog.MetadataBytes() <= allowance);
   assert(catalog.FitMetadata() == 0);
 }
+// What the token-list ranking reads from one checkpoint's manifest, and
+// whether the test quarantined it since the store last opened.
+struct OracleCheckpoint {
+  std::vector<Token> tokens;
+  std::uint64_t lineage{};
+  Identity input;
+  std::uint8_t digest{};
+  CheckpointPurpose purpose{};
+  bool invalid{};
+};
+using OracleModel = std::map<std::uint64_t, OracleCheckpoint>;
+// Verbatim copy of DiskCatalog's token-list ranking (Below, branch counting
+// and Order) as #1471 left it, over the model. Clocks and unique payload
+// bytes come from the catalog's records; they read no tokens. Returns the
+// records with the model's validity and the oracle's branch and order.
+bool OracleBelow(const OracleCheckpoint& a, const OracleCheckpoint& b) {
+  return a.digest == b.digest &&
+         (a.input == b.input || a.lineage == b.lineage) &&
+         a.tokens.size() < b.tokens.size() &&
+         std::equal(a.tokens.begin(), a.tokens.end(), b.tokens.begin());
+}
+std::vector<DiskCatalogRankForTesting> OracleRank(
+    std::vector<DiskCatalogRankForTesting> ranks, const OracleModel& model,
+    std::uint64_t admitted, std::uint64_t turnover) {
+  assert(ranks.size() == model.size());
+  std::vector<const OracleCheckpoint*> checkpoints;
+  for (auto& rank : ranks) {
+    checkpoints.push_back(&model.at(rank.id));
+    rank.invalid = checkpoints.back()->invalid;
+    rank.branch = 0;
+  }
+  for (std::size_t i = 0; i < ranks.size(); ++i) {
+    if (ranks[i].invalid)
+      continue;
+    const auto& manifest = *checkpoints[i];
+    for (std::size_t j = 0; j < i; ++j) {
+      if (ranks[j].invalid)
+        continue;
+      const auto& peer_manifest = *checkpoints[j];
+      const auto size = manifest.tokens.size(),
+                 peer_size = peer_manifest.tokens.size();
+      if (size == peer_size ? peer_manifest.digest == manifest.digest &&
+                                  peer_manifest.tokens == manifest.tokens
+          : size < peer_size ? OracleBelow(manifest, peer_manifest)
+                             : OracleBelow(peer_manifest, manifest)) {
+        ++ranks[i].branch;
+        ++ranks[j].branch;
+      }
+    }
+  }
+  for (std::size_t i = 0; i < ranks.size(); ++i) {
+    auto& record = ranks[i];
+    const auto& manifest = *checkpoints[i];
+    auto recency = record.used;
+    bool reused = record.reused_at && admitted - *record.reused_at < turnover;
+    bool covered = false, rooted = false,
+         fork = manifest.purpose == CheckpointPurpose::kLearned;
+    std::optional<Token> next;
+    std::size_t newer = 0;
+    for (std::size_t j = 0; j < ranks.size(); ++j) {
+      const auto& peer = ranks[j];
+      if (peer.invalid)
+        continue;
+      const auto& peer_manifest = *checkpoints[j];
+      if (OracleBelow(peer_manifest, manifest)) {
+        rooted = true;
+        if (peer_manifest.purpose != CheckpointPurpose::kLearned &&
+            peer.branch == record.branch)
+          recency = std::max(recency, peer.published);
+      }
+      if (!OracleBelow(manifest, peer_manifest))
+        continue;
+      covered = true;
+      recency = std::max(recency, peer.used);
+      reused |= peer.reused_at && admitted - *peer.reused_at < turnover;
+      const auto token = peer_manifest.tokens[manifest.tokens.size()];
+      fork |= next && *next != token;
+      next = token;
+      newer += peer_manifest.lineage == manifest.lineage &&
+               peer_manifest.purpose == CheckpointPurpose::kGenerated;
+    }
+    const bool superseded = manifest.purpose == CheckpointPurpose::kGenerated &&
+                            !fork && newer >= 3;
+    const bool shared = fork || (covered && !rooted);
+    record.order = {
+        superseded ? 0U
+        : reused   ? 2U
+                   : 1U,
+        superseded ? 0 : recency,
+        shared    ? 2U
+        : covered ? 0U
+                  : 1U,
+        std::numeric_limits<std::uint64_t>::max() - record.unique_bytes,
+        record.id};
+  }
+  return ranks;
+}
+// Ranked records, best candidate first.
+std::vector<const DiskCatalogRankForTesting*> Sorted(
+    const std::vector<DiskCatalogRankForTesting>& ranks) {
+  std::vector<const DiskCatalogRankForTesting*> sorted;
+  for (const auto& rank : ranks)
+    sorted.push_back(&rank);
+  std::ranges::sort(sorted, {}, &DiskCatalogRankForTesting::order);
+  return sorted;
+}
+// A restartable store of metadata checkpoints, each with a private file of
+// its own, and the token lists the catalog ranks them by. Its prefix index
+// holds what the server's would: every durable checkpoint, inserted on
+// publication and on startup, and index-only live frontiers that split and
+// extend the catalog's token paths.
+struct OracleStore {
+  struct Live {
+    std::uint8_t digest{};
+    std::vector<Token> tokens;
+    IndexEntryId entry;
+  };
+  ResourceLedger ledger{{1 << 26, 1 << 25, 16, 1 << 20}};
+  TieredDirectory directory;
+  std::uint64_t turnover;
+  std::size_t allowance{SIZE_MAX};
+  std::unique_ptr<DiskStore> disk;
+  std::unique_ptr<PrefixIndex> index;
+  std::unique_ptr<DiskCatalog> catalog;
+  OracleModel model;
+  std::vector<Live> live;
+  std::size_t index_baseline{};
+  std::uint64_t next_id{1};
+  // Full-ledger retirements whose index record leaves a record-less unary
+  // node, which the index cannot merge without headroom.
+  std::size_t unmerged{};
+  explicit OracleStore(std::uint64_t turnover_bytes)
+      : turnover(turnover_bytes) {
+    Open();
+  }
+  void Open() {
+    disk = std::make_unique<DiskStore>(ledger, directory.path, 1 << 24);
+    index = std::make_unique<PrefixIndex>(ledger);
+    for (const std::uint8_t digest : {42, 43}) {
+      CompatibilityDigest compatibility{};
+      compatibility[0] = digest;
+      index->Register(Identity{digest}, std::span(&kMetadataState, 1),
+                      compatibility);
+    }
+    index_baseline = index->MetadataBytes();
+    catalog = std::make_unique<DiskCatalog>(ledger, *disk, *index, turnover,
+                                            allowance);
+    // As the server starts: fit the allowance with one ranking, then index
+    // what remains.
+    const auto ranks = Check();
+    std::vector<std::uint64_t> retired;
+    (void)catalog->FitMetadata([&](const DiskEviction& eviction) {
+      retired.push_back(eviction.description->Manifest().checkpoint.value);
+    });
+    Retired(ranks, retired);
+    for (const auto& [id, checkpoint] : model)
+      (void)index->Insert(Identity{checkpoint.digest}, catalog->Find({id}));
+    Check();
+  }
+  // Flushes use history and reopens every layer over the same directory,
+  // under a new metadata allowance.
+  void Restart(std::size_t metadata_allowance = SIZE_MAX) {
+    catalog.reset();
+    live.clear();
+    index.reset();
+    disk.reset();
+    for (auto& [id, checkpoint] : model) {
+      (void)id;
+      checkpoint.invalid = false;
+    }
+    allowance = metadata_allowance;
+    Open();
+  }
+  // Ranks and reconciles, and checks every record against the oracle.
+  std::vector<DiskCatalogRankForTesting> Check() {
+    auto ranks = catalog->RankForTesting();
+    const auto expected =
+        OracleRank(ranks, model, catalog->AdmittedBytesForTesting(), turnover);
+    for (std::size_t i = 0; i < ranks.size(); ++i) {
+      assert(ranks[i].invalid == expected[i].invalid);
+      assert(ranks[i].branch == expected[i].branch);
+      assert(ranks[i].order == expected[i].order);
+    }
+    return ranks;
+  }
+  // The oracle's ranking of the records as they stand, without ranking or
+  // reconciling them in the catalog first.
+  std::vector<DiskCatalogRankForTesting> Predict() const {
+    return OracleRank(catalog->RecordsForTesting(), model,
+                      catalog->AdmittedBytesForTesting(), turnover);
+  }
+  // A metadata pass ranks once, then retires along that ranking.
+  void Retired(const std::vector<DiskCatalogRankForTesting>& ranks,
+               const std::vector<std::uint64_t>& retired) {
+    const auto sorted = Sorted(ranks);
+    assert(retired.size() <= sorted.size());
+    for (std::size_t i = 0; i < retired.size(); ++i) {
+      assert(retired[i] == sorted[i]->id);
+      model.erase(retired[i]);
+    }
+  }
+  std::uint64_t Publish(OracleCheckpoint checkpoint) {
+    const auto id = next_id++;
+    PublishMetadataCheckpoint(*disk, id, checkpoint.tokens, checkpoint.lineage,
+                              checkpoint.digest, checkpoint.purpose,
+                              checkpoint.input);
+    const auto ranks = Check();
+    std::vector<std::uint64_t> retired;
+    catalog->Track({id}, [&](const DiskEviction& eviction) {
+      retired.push_back(eviction.description->Manifest().checkpoint.value);
+    });
+    Retired(ranks, retired);
+    // As the server does once a publication with no RAM copy completes.
+    (void)index->Insert(Identity{checkpoint.digest}, catalog->Find({id}));
+    model.emplace(id, std::move(checkpoint));
+    Check();
+    return id;
+  }
+  void AddLive(std::uint8_t digest, std::vector<Token> tokens) {
+    const auto count = tokens.size();
+    const auto entry = index->Insert(LiveFrontier{{SlotId{live.size() + 1}, 1},
+                                                  tokens,
+                                                  Identity{digest},
+                                                  {},
+                                                  {{{1}, count}},
+                                                  true});
+    live.push_back({digest, std::move(tokens), entry});
+  }
+  void Touch(std::uint64_t id) {
+    catalog->Touch({id});
+    Check();
+  }
+  // Quarantines through the catalog, or in the store alone, which the
+  // catalog learns of only when it next ranks.
+  void Quarantine(std::uint64_t id, bool store_only = false) {
+    if (store_only)
+      disk->Invalidate({id}, disk->Describe({id})->Epoch());
+    else
+      catalog->Invalidate(true, TieredFile(3, id));
+    model.at(id).invalid = true;
+  }
+  // Whether erasing `id`'s index record leaves a record-less node with a
+  // single child: the index's other records, at `id`'s tokens, continue
+  // with one next token and none ends there.
+  bool LeavesUnaryNode(std::uint64_t id) const {
+    const auto& retired = model.at(id);
+    if (retired.invalid || retired.tokens.empty())
+      return false;
+    std::set<Token> next;
+    const auto ends = [&](std::uint8_t digest,
+                          const std::vector<Token>& tokens) {
+      if (digest != retired.digest || tokens.size() < retired.tokens.size() ||
+          !std::equal(retired.tokens.begin(), retired.tokens.end(),
+                      tokens.begin()))
+        return false;
+      if (tokens.size() == retired.tokens.size())
+        return true;
+      next.insert(tokens[retired.tokens.size()]);
+      return false;
+    };
+    for (const auto& [peer_id, peer] : model)
+      if (peer_id != id && !peer.invalid && ends(peer.digest, peer.tokens))
+        return false;
+    for (const auto& frontier : live)
+      if (ends(frontier.digest, frontier.tokens))
+        return false;
+    return next.size() == 1;
+  }
+  // Retires the oracle's best candidate, or the next one while a reader pins
+  // it. A full ledger must not change what retires. Unless `rank_first` checks
+  // the ranking first, the catalog's own retirement is the first to rank and
+  // reconcile.
+  void Evict(bool pin_first = false, bool full_ledger = false,
+             bool rank_first = true) {
+    const auto ranks = rank_first ? Check() : Predict();
+    const auto sorted = Sorted(ranks);
+    assert(!sorted.empty());
+    DiskReadPin pin;
+    auto expected = sorted.front();
+    if (pin_first) {
+      auto pinned = std::ranges::find_if(
+          sorted, [](const auto* rank) { return !rank->invalid; });
+      assert(pinned != sorted.end() && sorted.size() > 1);
+      pin = catalog->Find({(*pinned)->id})->Pin();
+      assert(pin);
+      expected = pinned == sorted.begin() ? sorted[1] : sorted.front();
+    }
+    ResourceCharge occupied;
+    if (full_ledger) {
+      unmerged += LeavesUnaryNode(expected->id);
+      const auto spare =
+          ledger.Limits().ram_bytes - ledger.Snapshot().ram_bytes;
+      occupied = ledger.Reserve(ResourceCategory::kMetadata, spare).Convert();
+    }
+    const auto eviction = catalog->EvictOne();
+    occupied = {};
+    assert(eviction);
+    assert(eviction.description->Manifest().checkpoint.value == expected->id);
+    assert(eviction.superseded == (expected->order[0] == 0));
+    assert(eviction.reused == (expected->order[0] == 2));
+    model.erase(expected->id);
+    Check();
+  }
+};
+// Disk eviction ranks by token prefixes. Compare every record's branch count
+// and full order, and every retirement, with a token-list model across forks,
+// equal tokens under other ids, inputs, lineages and digests, every purpose,
+// quarantine in the catalog and in the store alone, reuse within and past a
+// turnover, pins, a full ledger, metadata passes along one ranking and a
+// restart over a reopened store, while the prefix index holds the same
+// checkpoints and live frontiers.
+void EvictionOrderMatchesTokenOracle() {
+  // Each checkpoint adds 32 unique payload bytes: reuse lasts six of them.
+  OracleStore s(6 * 32);
+  std::mt19937_64 random(1329);
+  const auto turn = [&](std::vector<Token> tokens) {
+    const auto count = 8 + random() % 24;
+    for (std::uint64_t i = 0; i < count; ++i)
+      tokens.push_back(static_cast<Token>(random() % 50000));
+    return tokens;
+  };
+  using P = CheckpointPurpose;
+  const auto purpose = [&] {
+    return std::array{P::kPrompt, P::kGenerated, P::kLearned,
+                      P::kGrid}[random() % 4];
+  };
+  const auto system = turn({});
+  // Conversation 1: a learned system prompt, then four generated turns, so
+  // early turns are superseded, and a prompt leaf.
+  std::vector<std::vector<Token>> one{system};
+  std::vector<std::uint64_t> one_ids{
+      s.Publish({system, 1, {1}, 42, P::kLearned})};
+  for (int i = 0; i < 5; ++i) {
+    one.push_back(turn(one.back()));
+    one_ids.push_back(s.Publish(
+        {one.back(), 1, {1}, 42, i < 4 ? P::kGenerated : P::kPrompt}));
+  }
+  s.Touch(one_ids[2]);
+  // Conversation 2 forks conversation 1 after its second turn.
+  auto two = turn(one[2]);
+  const auto two_first = s.Publish({two, 2, {2}, 42, P::kGenerated});
+  two = turn(two);
+  (void)s.Publish({two, 2, {2}, 42, P::kPrompt});
+  // The same tokens under another digest are a separate conversation.
+  (void)s.Publish({one[1], 3, {1}, 43, P::kPrompt});
+  (void)s.Publish({one[2], 3, {1}, 43, P::kGenerated});
+  (void)s.Publish({system, 3, {1}, 43, P::kPrompt});
+  // Equal tokens under other ids: same input, same lineage, neither.
+  (void)s.Publish({one[3], 4, {1}, 42, P::kGenerated});
+  (void)s.Publish({one[3], 1, {9}, 42, P::kPrompt});
+  const auto unrelated = s.Publish({one[3], 5, {7}, 42, P::kGenerated});
+  // An empty checkpoint sits below every same-input or same-lineage one.
+  (void)s.Publish({{}, 6, {1}, 42, P::kPrompt});
+  s.Touch(two_first);
+  // Conversation 4 publishes its prefix after its leaf.
+  const auto four_prefix = turn(system);
+  const auto four_leaf = turn(four_prefix);
+  (void)s.Publish({four_leaf, 7, {3}, 42, P::kPrompt});
+  (void)s.Publish({four_prefix, 7, {3}, 42, P::kPrompt});
+  // A learned prefix published after its leaf lends the leaf nothing.
+  const auto five_prefix = turn(system);
+  (void)s.Publish({turn(five_prefix), 13, {5}, 42, P::kPrompt});
+  (void)s.Publish({five_prefix, 13, {5}, 42, P::kLearned});
+  // A quarantined leaf, used last, neither covers nor renews its prefix.
+  const auto six_prefix = turn(system);
+  (void)s.Publish({six_prefix, 14, {6}, 42, P::kPrompt});
+  const auto six_leaf = s.Publish({turn(six_prefix), 14, {6}, 42, P::kPrompt});
+  // Conversation 7 sits below a prefix quarantined later, published last. A
+  // grid leaf on a branch of its own takes nothing from it; a prompt whose
+  // only prefix it is stays a shared anchor, and outlasts three generated
+  // turns without a fork, as a prompt; the first of those turns has two
+  // valid generated successors and a quarantined one that forks elsewhere,
+  // so it is neither superseded nor a fork.
+  const auto seven_prefix = turn({});
+  const auto seven_prompt = turn(seven_prefix);
+  const auto seven_turn = turn(seven_prompt);
+  const auto seven_next = turn(seven_turn), seven_fork = turn(seven_turn);
+  assert(seven_next[seven_turn.size()] != seven_fork[seven_turn.size()]);
+  (void)s.Publish({turn(seven_prefix), 15, {8}, 42, P::kGrid});
+  (void)s.Publish({seven_prompt, 15, {8}, 42, P::kPrompt});
+  (void)s.Publish({seven_turn, 15, {8}, 42, P::kGenerated});
+  (void)s.Publish({seven_next, 15, {8}, 42, P::kGenerated});
+  (void)s.Publish({turn(seven_next), 15, {8}, 42, P::kGenerated});
+  const auto seven_invalid =
+      s.Publish({seven_fork, 15, {8}, 42, P::kGenerated});
+  const auto seven_root = s.Publish({seven_prefix, 15, {8}, 42, P::kPrompt});
+  // Live frontiers inside a catalog edge, past a leaf and on the other
+  // digest exist only in the index.
+  s.AddLive(42, {seven_next.begin(),
+                 seven_next.begin() +
+                     static_cast<std::ptrdiff_t>(seven_turn.size() + 3)});
+  s.AddLive(42, turn(four_leaf));
+  s.AddLive(43, {one[2].begin(), one[2].end() - 2});
+  // Quarantine conversation 2's first checkpoint, conversation 6's leaf, in
+  // reuse, and conversation 7's prefix and forked turn.
+  s.Touch(six_leaf);
+  for (const auto id : {two_first, six_leaf, seven_root, seven_invalid})
+    s.Quarantine(id);
+  s.Check();
+  // Random conversations over both digests, with forks of earlier ones.
+  std::vector<std::vector<Token>> heads{system, one[1], two, four_prefix};
+  for (std::uint64_t lineage = 8; lineage < 10; ++lineage) {
+    auto tokens = heads[random() % heads.size()];
+    const std::uint8_t digest = random() % 4 ? 42 : 43;
+    const Identity input{static_cast<std::uint8_t>(random() % 3)};
+    for (int i = 0; i < 3; ++i) {
+      tokens = turn(tokens);
+      (void)s.Publish({tokens, lineage, input, digest, purpose()});
+    }
+    heads.push_back(tokens);
+    s.Touch(one_ids[random() % one_ids.size()]);
+  }
+  s.Touch(unrelated);
+  s.Evict();
+  s.Evict(true);
+  s.Evict(false, true);
+  // A store-side quarantine that changes the best candidate reaches the
+  // catalog only through its own retirement's ranking.
+  {
+    const auto ranks = s.Predict();
+    const auto best = Sorted(ranks).front()->id;
+    const auto changes = std::ranges::find_if(ranks, [&](const auto& rank) {
+      if (rank.invalid)
+        return false;
+      auto model = s.model;
+      model.at(rank.id).invalid = true;
+      const auto other =
+          OracleRank(s.catalog->RecordsForTesting(), model,
+                     s.catalog->AdmittedBytesForTesting(), s.turnover);
+      return Sorted(other).front()->id != best;
+    });
+    assert(changes != ranks.end());
+    s.Quarantine(changes->id, true);
+  }
+  s.Evict(false, false, false);
+  // A reopened store recovers the use history the catalog flushed; the
+  // quarantine was in memory only. A smaller allowance retires several
+  // checkpoints along one ranking at startup.
+  assert(std::ranges::any_of(s.Check(), &DiskCatalogRankForTesting::invalid));
+  const auto before = s.model.size();
+  s.Restart(s.catalog->MetadataBytes() / 2);
+  assert(before - s.model.size() >= 2);
+  // The pass stops an eighth of the allowance below it.
+  assert(s.catalog->MetadataBytes() <= s.allowance - s.allowance / 8);
+  assert(std::ranges::none_of(s.Check(), &DiskCatalogRankForTesting::invalid));
+  for (int i = 0; i < 2; ++i)
+    (void)s.Publish(
+        {turn(heads[random() % heads.size()]), 12, {0}, 42, purpose()});
+  s.AddLive(42, turn(heads[random() % heads.size()]));
+  s.Touch(s.model.begin()->first);
+  for (std::size_t evictions = 0; !s.model.empty(); ++evictions)
+    s.Evict(evictions == 3 && s.model.size() > 1, evictions % 2 == 1);
+  assert(s.catalog->Size() == 0 && s.catalog->MetadataBytes() == 0);
+  // Some full-ledger retirement left an unmerged node; later erasures and
+  // the live frontiers' own leave the index as registration left it.
+  assert(s.unmerged > 0);
+  for (const auto& frontier : s.live)
+    s.index->Erase(frontier.entry);
+  assert(s.index->MetadataBytes() == s.index_baseline);
+}
 void EvictionDoesNotWaitForYieldingWriter() {
   TieredFixture f;
   f.Append(8, 4);
@@ -1212,7 +1683,14 @@ void DurableCheckpointEvictedAheadOfNonDurableUnderPressure() {
   assert(log.events.back().checkpoint == non_durable_id);
 }
 }  // namespace
-int main() {
+// `oracle` runs only the token oracle, which CTest runs as a test of its own
+// beside the rest.
+int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "oracle") {
+    EvictionOrderMatchesTokenOracle();
+    return 0;
+  }
+  assert(argc == 1);
   DeeperDiskAndRAMEviction();
   DemotionKeepsIndependentSourcePlans();
   CorruptionInvalidatesAllDependents();

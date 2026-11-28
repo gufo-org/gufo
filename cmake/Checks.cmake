@@ -71,7 +71,7 @@ list(APPEND gufo_pr_tests
 # END GENERATED MODEL CTEST OVERRIDES
 list(APPEND gufo_pr_tests
   gufo_version gufo_help serve_cli_test eval_http_test functional_runner_test
-  cache_workloads_test cache_disk_faults_test
+  cache_workloads_test cache_disk_faults_test cache_tiered_oracle_test
   cache_boundary_test sched_boundary_test
   npu_decoder_plan_test npu_prefill_plan_test kernel_resources_parser_test check_docs_test check_pr_title_test
   cache_growth_test prune_caches_test
@@ -95,7 +95,8 @@ if (WIN32)
     component_text_cache_test eval_http_client_test cache_disk_faults_test
     cache_boundary_test sched_boundary_test cache_adapter_test cache_slot_test
     cache_disk_test
-    cache_streaming_test cache_tiered_test cache_disk_publication_test)
+    cache_streaming_test cache_tiered_test cache_tiered_oracle_test
+    cache_disk_publication_test)
   list(REMOVE_ITEM gufo_pr_targets ${gufo_pr_linux_only})
   list(REMOVE_ITEM gufo_pr_tests ${gufo_pr_linux_only})
 endif()
