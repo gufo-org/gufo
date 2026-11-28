@@ -310,6 +310,7 @@ void ListeningClientIsNotIdle() {
     const auto [opcode, payload] = client.Receive();
     assert(opcode == 2 && payload == "audio");
   }
+  assert(client.Receive().first == 8);
   server.stop();
 }
 
