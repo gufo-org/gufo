@@ -284,9 +284,12 @@ std::vector<std::uint8_t> Bytes(HipBuffer<T>* buffer) {
 // across repeated launches and graph replays (the counters reset).
 enum class MixerReference { Scalar, Batch };
 
+// With `with_moe`, the fused launch also runs the MoE epilogue that writes
+// block_out (reference: MoeEpilogue, then the mixer reading it).
 void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject,
                            float input_scale = 1.0F,
-                           MixerReference reference = MixerReference::Scalar) {
+                           MixerReference reference = MixerReference::Scalar,
+                           bool with_moe = false) {
   constexpr std::uint32_t kRank = 320;
   constexpr std::size_t kDim = std::size_t{kStreams} * kHidden;
   constexpr float kEps = 1e-6F;
@@ -317,6 +320,33 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject,
   HipBuffer<float> d_block_out(mixed_count), d_inject(inject_count);
   HipBuffer<float> d_gamma(kDim), d_inject_w(kStreams * kDim);
   Upload(&d_block_out, block_out);
+  // The MoE epilogue's operands: ten slot rows per token, their weights, the
+  // shared expert's rows and its gate logit, one of 513 router columns.
+  constexpr std::uint32_t kSlots = 10;
+  constexpr std::uint32_t kGateStride = 513;
+  const std::size_t slot_count = mixed_count * kSlots;
+  HipBuffer<float> d_moe_rows(slot_count),
+      d_moe_w(std::size_t{tokens} * kSlots);
+  HipBuffer<float> d_moe_shared(mixed_count);
+  HipBuffer<float> d_moe_gate(std::size_t{tokens} * kGateStride);
+  HipBuffer<float> d_moe_out(mixed_count);
+  if (with_moe) {
+    Upload(&d_moe_rows,
+           MakeValues(slot_count, 0x0E0E0000U + tokens, 0.5F * input_scale));
+    auto w =
+        MakeValues(std::size_t{tokens} * kSlots, 0x0E0E1000U + tokens, 0.05F);
+    for (float& v : w)
+      v += 0.1F;
+    Upload(&d_moe_w, w);
+    Upload(&d_moe_shared,
+           MakeValues(mixed_count, 0x0E0E2000U + tokens, 0.25F * input_scale));
+    Upload(&d_moe_gate, MakeValues(std::size_t{tokens} * kGateStride,
+                                   0x0E0E3000U + tokens, 2.0F));
+    q::MoeEpilogue(d_moe_rows.get(), d_moe_w.get(), d_moe_shared.get(),
+                   d_moe_gate.get() + kGateStride - 1, kGateStride,
+                   d_block_out.get(), tokens, kSlots, kHidden, nullptr);
+    CheckHip(hipDeviceSynchronize(), "MoE epilogue reference");
+  }
   Upload(&d_inject, inject);
   Upload(&d_gamma, gamma);
   Upload(&d_inject_w, inject_w);
@@ -353,6 +383,8 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject,
              "poison");
     CheckHip(hipMemset(o->inject.get(), poison, o->inject.bytes()), "poison");
     Upload(&o->res, res);
+    if (with_moe)
+      CheckHip(hipMemset(d_moe_out.get(), poison, d_moe_out.bytes()), "poison");
   };
   const float* w_inject = with_inject ? d_inject_w.get() : nullptr;
   Outputs ref(tokens, lo_cols), out(tokens, lo_cols);
@@ -425,6 +457,18 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject,
                           kRank,
                           kEps,
                           1.0F / kStreams};
+  q::HcFusedMix moe_mix = mix;
+  if (with_moe) {
+    moe_mix.block_out = d_moe_out.get();
+    moe_mix.moe_out = d_moe_rows.get();
+    moe_mix.moe_block_out = d_moe_out.get();
+    moe_mix.moe_weights = d_moe_w.get();
+    moe_mix.moe_shared = d_moe_shared.get();
+    moe_mix.moe_gate = d_moe_gate.get() + kGateStride - 1;
+    moe_mix.moe_gate_stride = kGateStride;
+    moe_mix.moe_k = kSlots;
+  }
+  const q::HcFusedMix& launched = with_moe ? moe_mix : mix;
   const auto compare = [&](const char* when) {
     const auto check = [&](auto& a, auto& b, const char* name) {
       if (Bytes(&a) != Bytes(&b)) {
@@ -452,6 +496,9 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject,
     }
     check(ref.mixed, out.mixed, "mixed");
     check(ref.mixed_q8, out.mixed_q8, "mixed Q8_1");
+    if (with_moe) {
+      check(d_block_out, d_moe_out, "MoE epilogue block_out");
+    }
     if (with_inject) {
       check(ref.inject, out.inject, "inject partials");
     }
@@ -459,7 +506,7 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject,
   // Eager launches, then a captured graph replayed from poisoned outputs.
   for (int launch = 0; launch < 3; ++launch) {
     reset(&out, static_cast<unsigned char>(0xA5 + launch));
-    if (!q::HcMixQ8Fused(d_state.get(), mix, tokens, nullptr)) {
+    if (!q::HcMixQ8Fused(d_state.get(), launched, tokens, nullptr)) {
       throw std::runtime_error("fused decode mixer rejected");
     }
     CheckHip(hipDeviceSynchronize(), "fused decode mixer");
@@ -469,7 +516,7 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject,
     // Decode reads and rewrites one inject buffer (s_.inject).
     reset(&out, 0x77);
     Upload(&out.inject, inject);
-    q::HcFusedMix aliased = mix;
+    q::HcFusedMix aliased = launched;
     aliased.inject = out.inject.get();
     if (!q::HcMixQ8Fused(d_state.get(), aliased, tokens, nullptr)) {
       throw std::runtime_error("fused decode mixer rejected");
@@ -483,7 +530,8 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject,
   hipGraphExec_t exec = nullptr;
   CheckHip(hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal),
            "capture");
-  const bool captured = q::HcMixQ8Fused(d_state.get(), mix, tokens, stream);
+  const bool captured =
+      q::HcMixQ8Fused(d_state.get(), launched, tokens, stream);
   CheckHip(hipStreamEndCapture(stream, &graph), "capture end");
   if (!captured) {
     throw std::runtime_error("fused decode mixer capture rejected");
@@ -518,7 +566,8 @@ void CheckFusedDecodeMixer(std::uint32_t tokens, bool with_inject,
     }
   }
   std::cout << "HC fused decode mixer exact at " << tokens << " tokens"
-            << (with_inject ? " with" : " without") << " inject\n";
+            << (with_inject ? " with" : " without") << " inject"
+            << (with_moe ? " and the MoE epilogue" : "") << "\n";
 }
 
 }  // namespace
@@ -588,6 +637,10 @@ int main() {
           CheckBatchedReadyQ8(rows, inject, scale);
     CheckFusedDecodeMixer(1, false);
     CheckFusedDecodeMixer(5, false);
+    for (std::uint32_t n = 1; n <= 8; ++n)
+      for (float scale : {0.0001F, 1.0F, 10000.0F})
+        CheckFusedDecodeMixer(n, n % 2 == 1, scale, MixerReference::Scalar,
+                              true);
     // Target-batch routing changes must also match the separately launched
     // CombineBatch/HcMixBatch arithmetic, with small unsaturated inputs.
     for (std::uint32_t n = 1; n <= 8; ++n)

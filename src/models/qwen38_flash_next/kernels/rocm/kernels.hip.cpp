@@ -1341,20 +1341,12 @@ __global__ void ExpandQ8_0Kernel(const std::uint8_t* q8, float* out,
 /// once (four consecutive elements per lane per step) while up to eight
 /// tokens accumulate in registers, then a wave reduction per token.
 constexpr unsigned kSmallGemmRows = 4;
-template<WeightType type, unsigned tokens, bool grouped = false,
-         bool kWhole = false>
-__global__ void SmallGemmKernel(const void* w, const float* x, float* out,
-                                std::uint32_t m, std::uint32_t k) {
-  if constexpr (grouped) {
-    x += std::size_t{blockIdx.y} * tokens * k;
-    out += std::size_t{blockIdx.y} * tokens * m;
-  }
-  const std::uint32_t lane = threadIdx.x % warpSize;
-  const std::uint32_t row =
-      blockIdx.x * (blockDim.x / warpSize) + threadIdx.x / warpSize;
-  if (row >= m) {
-    return;
-  }
+/// One weight row of SmallGemmKernel on the calling wave.
+template<WeightType type, unsigned tokens, bool kWhole>
+__device__ __forceinline__ void SmallGemmRow(const void* w, const float* x,
+                                             float* out, std::uint32_t m,
+                                             std::uint32_t k, std::uint32_t row,
+                                             std::uint32_t lane) {
   const auto* wrow =
       static_cast<const std::uint8_t*>(w) + RowBytes(type, k) * row;
   // A lane's steps are loaded kSteps at a time so their reads overlap (one
@@ -1455,6 +1447,23 @@ __global__ void SmallGemmKernel(const void* w, const float* x, float* out,
       out[static_cast<std::size_t>(j) * m + row] = total;
     }
   }
+}
+
+template<WeightType type, unsigned tokens, bool grouped = false,
+         bool kWhole = false>
+__global__ void SmallGemmKernel(const void* w, const float* x, float* out,
+                                std::uint32_t m, std::uint32_t k) {
+  if constexpr (grouped) {
+    x += std::size_t{blockIdx.y} * tokens * k;
+    out += std::size_t{blockIdx.y} * tokens * m;
+  }
+  const std::uint32_t lane = threadIdx.x % warpSize;
+  const std::uint32_t row =
+      blockIdx.x * (blockDim.x / warpSize) + threadIdx.x / warpSize;
+  if (row >= m) {
+    return;
+  }
+  SmallGemmRow<type, tokens, kWhole>(w, x, out, m, k, row, lane);
 }
 
 __global__ void PleGateKernel(const float* key_n, const float* query_n,
@@ -1799,8 +1808,9 @@ __device__ __forceinline__ void RestoreGdnState4(
                      : __fmaf_rn(beta, correction, __fmul_rn(value[e], decay));
     }
   }
-  *reinterpret_cast<float4*>(state + i) =
-      make_float4(value[0], value[1], value[2], value[3]);
+  using Native4 = float __attribute__((ext_vector_type(4)));
+  __builtin_nontemporal_store(Native4{value[0], value[1], value[2], value[3]},
+                              reinterpret_cast<Native4*>(state + i));
 }
 
 /// Every layer's RestoreGdnState and convolution history copy in one launch:
@@ -3628,14 +3638,10 @@ __global__ void AttentionMergeKernel(const float* partials, float* out,
 // Keep the original block-wide softmax reduction. Selection then stays in
 // one wave's registers, retaining probability ordering and lowest-index ties.
 template<unsigned MaxExperts>
-__global__ void RouterTopKKernel(const float* logits, std::uint32_t stride,
-                                 std::int32_t* ids, float* weights,
-                                 std::uint32_t n_experts, std::uint32_t k) {
-  __shared__ float probs[1024];
-  __shared__ float shared[32];
-  __shared__ std::uint32_t chosen[32];
-  __shared__ float chosen_p[32];
-  const std::uint32_t t = blockIdx.x;
+__device__ __forceinline__ void RouterTopKToken(
+    const float* logits, std::uint32_t stride, std::int32_t* ids,
+    float* weights, std::uint32_t n_experts, std::uint32_t k, std::uint32_t t,
+    float* probs, float* shared, std::uint32_t* chosen, float* chosen_p) {
   const float* src = logits + static_cast<std::size_t>(t) * stride;
   float local_max = -INFINITY;
   for (std::uint32_t e = threadIdx.x; e < n_experts; e += blockDim.x) {
@@ -3703,6 +3709,18 @@ __global__ void RouterTopKKernel(const float* logits, std::uint32_t stride,
       weights[t * k + slot] = chosen_p[slot] / sum;
     }
   }
+}
+
+template<unsigned MaxExperts>
+__global__ void RouterTopKKernel(const float* logits, std::uint32_t stride,
+                                 std::int32_t* ids, float* weights,
+                                 std::uint32_t n_experts, std::uint32_t k) {
+  __shared__ float probs[1024];
+  __shared__ float shared[32];
+  __shared__ std::uint32_t chosen[32];
+  __shared__ float chosen_p[32];
+  RouterTopKToken<MaxExperts>(logits, stride, ids, weights, n_experts, k,
+                              blockIdx.x, probs, shared, chosen, chosen_p);
 }
 
 /// grid (tokens, dim chunks of kThreads). Up to kMaxSlots slots, every read
@@ -6607,10 +6625,15 @@ constexpr std::uint32_t kFusedDownTiles = kFusedRank / kFusedWaves;
 constexpr std::uint32_t kFusedUnits = kFusedHidden / 32;
 constexpr std::uint32_t kFusedParts = kFusedHidden / kThreads;
 constexpr std::uint32_t kFusedMaxTokens = 8;
+/// Most routed slots the fused MoE epilogue sums (MoeEpilogueKernel's
+/// unrolled route).
+constexpr std::uint32_t kFusedMoeSlots = 16;
 
 struct HcFusedState {
-  unsigned taken[3];  ///< items taken: combine rows, down tiles, mix units
-  unsigned done[2];   ///< combine rows and down tiles finished
+  unsigned taken[5];  ///< items taken: combine rows, down tiles, mix units,
+                      ///< next-weight chunks, MoE epilogue chunks
+  unsigned done[3];   ///< combine rows, down tiles and MoE epilogue chunks
+                      ///< finished
   unsigned exited;    ///< blocks finished
   unsigned parts[kFusedParts];  ///< mix units finished per inject part
   float down[kFusedMaxTokens * kFusedRank];  ///< down projection outputs
@@ -6720,8 +6743,45 @@ __launch_bounds__(kThreads) __global__
   const unsigned wave = threadIdx.x / 32;
   constexpr unsigned kRows = kTokens * kFusedStreams;
 
+  // MoeEpilogueKernel, grid (t, hidden / kThreads), its k <= 16 route: the
+  // block_out rows the combine reads.
+  constexpr unsigned kMoeChunks = kFusedHidden / kThreads;
+  if (a.moe_out != nullptr) {
+    for (unsigned e;
+         (e = FusedTake(&st->taken[4], &item)) < kTokens * kMoeChunks;) {
+      const std::uint32_t t = e / kMoeChunks;
+      const std::uint32_t i = (e % kMoeChunks) * kThreads + threadIdx.x;
+      const std::uint32_t k = a.moe_k;
+      const std::uint32_t dim = kFusedHidden;
+      constexpr std::uint32_t kMaxSlots = 16;
+      const float* rows = a.moe_out + static_cast<std::size_t>(t) * k * dim + i;
+      float w[kMaxSlots];
+      float v[kMaxSlots];
+#pragma unroll
+      for (std::uint32_t s = 0; s < kMaxSlots; ++s) {
+        w[s] = s < k ? a.moe_weights[t * k + s] : 0.0f;
+        v[s] = s < k ? rows[static_cast<std::size_t>(s) * dim] : 0.0f;
+      }
+      const std::size_t idx = static_cast<std::size_t>(t) * dim + i;
+      const float sh = a.moe_shared[idx];
+      const float g =
+          a.moe_gate[static_cast<std::size_t>(t) * a.moe_gate_stride];
+      float acc = Materialize(0.0f);
+#pragma unroll
+      for (std::uint32_t s = 0; s < kMaxSlots; ++s) {
+        if (s < k) {
+          acc = Materialize(acc + w[s] * v[s]);
+        }
+      }
+      a.moe_block_out[idx] = acc + SigmoidF(g) * sh;
+      FusedDone(&st->done[2]);
+    }
+  }
+
   // HcCombineKernel, grid (t, s), for rows of up to kHeld * kThreads.
   for (unsigned u; (u = FusedTake(&st->taken[0], &item)) < kRows;) {
+    if (a.moe_out != nullptr)
+      FusedWait(&st->done[2], kTokens * kMoeChunks);
     const std::uint32_t hidden = a.hidden;
     const std::uint32_t streams = a.streams;
     const std::uint32_t t = u / kFusedStreams;
@@ -6772,12 +6832,14 @@ __launch_bounds__(kThreads) __global__
     FusedDone(&st->done[0]);
   }
 
-  // qfn_q8_hc_down_kernel<kTokens>: one row per wave, two iterations of
-  // loads ahead, the MMVQ products and FMA chain.
+  // qfn_q8_hc_down_kernel<kTokens>: one row per wave, iterations of loads
+  // ahead, the MMVQ products and FMA chain.
   for (unsigned tile;
        (tile = FusedTake(&st->taken[1], &item)) < kFusedDownTiles;) {
     FusedWait(&st->done[0], kRows);
-    constexpr int kPrefetch = 2;
+    // One row keeps four iterations of loads in flight: its down tiles
+    // are latency bound (320 waves). Wider batches hold more registers.
+    constexpr int kPrefetch = kTokens == 1 ? 4 : 2;
     const unsigned row = tile * kFusedWaves + wave;
     const auto* input = static_cast<const Q8_1Block*>(a.xn_q8);
     const int part = (lane & 3) * 2;
@@ -6809,10 +6871,13 @@ __launch_bounds__(kThreads) __global__
           dot = __builtin_amdgcn_sudot4(true, v[j][1], true, u[j][t][1], dot,
                                         false);
           if constexpr (kTokens == 1) {
-            const float scale =
-                __fmul_rn(__half2float(dw[j]), __half2float(dx[j][t]));
-            const float product = __fmul_rn(scale, static_cast<float>(dot));
-            sum[t] = __fadd_rn(sum[t], product);
+            // What fast-math compiles qfn_q8_hc_down_kernel<1>'s
+            // sum + (dw * dx) * dot to, spelled out: one accumulator,
+            // fma(dw * dot, dx, sum) in block order.
+            const float product =
+                __fmul_rn(__half2float(dw[j]), static_cast<float>(dot));
+            sum[t] = __fmaf_rn(product, __half2float(dx[j][t]), sum[t]);
+            asm volatile("" : "+v"(sum[t]));
           } else {
             const float product =
                 __fmul_rn(__half2float(dw[j]), static_cast<float>(dot));
@@ -6838,7 +6903,9 @@ __launch_bounds__(kThreads) __global__
   // run (not before: the combine's few reads would queue behind them).
   constexpr int kAhead = kTokens <= 4 ? 16 : 8;
   bool lo_ready = false;
+  bool took_unit = false;
   for (unsigned unit; (unit = FusedTake(&st->taken[2], &item)) < kFusedUnits;) {
+    took_unit = true;
     // Four lanes per Q8 block; lanes 0-7 also take the row's last two.
     const int kb0 = lane / 4;
     const int kqs = (lane % 4) * 2;
@@ -7020,6 +7087,28 @@ __launch_bounds__(kThreads) __global__
     }
   }
 
+  // Blocks without a mix unit idle through the SiLU, up products and
+  // epilogue, which read nothing from DRAM: once the down tiles are done
+  // they warm the cache with the head of the weights the next kernel reads.
+  if (!took_unit && a.next_bytes != 0) {
+    FusedWait(&st->done[1], kFusedDownTiles);
+    constexpr unsigned kChunk = kThreads * 16 * 4;
+    const auto* next = static_cast<const uint4*>(a.next);
+    unsigned acc = 0;
+    for (unsigned chunk;
+         (chunk = FusedTake(&st->taken[3], &item)) * kChunk < a.next_bytes;) {
+      const std::size_t base = std::size_t{chunk} * (kChunk / 16);
+#pragma unroll
+      for (unsigned j = 0; j < 4; ++j) {
+        const std::size_t i = base + j * kThreads + threadIdx.x;
+        if (i * 16 < a.next_bytes) {
+          const uint4 v = next[i];
+          acc ^= v.x ^ v.y ^ v.z ^ v.w;
+        }
+      }
+    }
+    asm volatile("" : : "v"(acc));  // keeps the loads
+  }
   __syncthreads();
   if (threadIdx.x == 0 &&
       __hip_atomic_fetch_add(&st->exited, 1u, __ATOMIC_ACQ_REL,
@@ -7193,6 +7282,551 @@ bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
   return true;
 }
 
+/// Counters of GdnDecodeFusedKernel, zero between launches.
+struct GdnFusedState {
+  unsigned done[3];  ///< convolution, norm and recurrence blocks finished
+  unsigned exited;   ///< epilogue blocks finished
+  unsigned ab_done;  ///< alpha/beta projection blocks finished
+};
+
+/// A decode pass's Gated DeltaNet (one to eight rows, with or without
+/// rollback rows) in one launch: SsmConv4Kernel<true, false>, GdnPrepKernel,
+/// GdnKernel and GdnEpilogueKernel as consecutive block ranges of the grid,
+/// each range waiting for the one before it. Four dependent launches cost
+/// three ~1.9 us gaps and three kernel start-ups per layer; here the
+/// recurrence blocks also read their state rows while the convolution and
+/// the norms run. Blocks are dispatched in index order, so a waiting range
+/// never holds wave slots a range it waits for still needs. Every value
+/// keeps its kernel's lane mapping, products, FMA operands and reductions
+/// (the recurrence maps two of GdnKernel's 128-thread blocks to one block).
+/// With `ab_tokens` rows, the launch starts with SmallGemmKernel's whole-pass
+/// rows of the alpha/beta projection (eight per block), which the recurrence
+/// waits for as well.
+template<WeightType ab_type, unsigned ab_tokens>
+__launch_bounds__(kThreads) __global__ void GdnDecodeFusedKernel(
+    const void* ab_w, const float* ab_x, std::uint32_t ab_k, float* ab_out,
+    const float* qkv, std::uint32_t qkv_stride, const float* z,
+    std::uint32_t z_stride, const float* alpha_beta, const float* conv_w,
+    const float* a, const float* dt, const float* norm_w, float* conv_state,
+    float* conv_out, float* qn, float* kn, float* raw, float* state, float* out,
+    void* out_q8_1, RollbackRows state_snapshots, RollbackRows conv_snapshots,
+    std::uint32_t n_tokens, std::uint32_t k_heads, std::uint32_t v_heads,
+    float eps, GdnFusedState* st) {
+  constexpr std::uint32_t d = kGdnDim;
+  constexpr std::uint32_t kWaves = kThreads / 32;
+  constexpr std::uint32_t kGdnBlocksPerHead = d * kGdnLanes / kThreads;
+  const std::uint32_t channels = 2 * k_heads * d + v_heads * d;
+  const std::uint32_t conv_blocks = channels / kThreads;
+  const std::uint32_t prep_blocks = (n_tokens * k_heads + kWaves - 1) / kWaves;
+  const std::uint32_t gdn_blocks = v_heads * kGdnBlocksPerHead;
+  const std::uint32_t epilogue_blocks =
+      (n_tokens * v_heads + kWaves - 1) / kWaves;
+  std::uint32_t block = blockIdx.x;
+  const std::uint32_t ab_blocks =
+      ab_tokens != 0 ? (2 * v_heads + kWaves - 1) / kWaves : 0;
+
+  if constexpr (ab_tokens != 0) {
+    if (block < ab_blocks) {
+      const std::uint32_t row = block * kWaves + threadIdx.x / warpSize;
+      if (row < 2 * v_heads) {
+        SmallGemmRow<ab_type, ab_tokens, true>(
+            ab_w, ab_x, ab_out, 2 * v_heads, ab_k, row, threadIdx.x % warpSize);
+      }
+      FusedDone(&st->ab_done);
+      return;
+    }
+    block -= ab_blocks;
+  }
+
+  if (block < conv_blocks) {
+    // SsmConv4Kernel<true, false>, token tile 0.
+    const std::uint32_t c = block * kThreads + threadIdx.x;
+    const float4 taps =
+        *reinterpret_cast<const float4*>(conv_w + c * kSsmConvTaps);
+    float window[kSsmConvTaps - 1];
+#pragma unroll
+    for (std::uint32_t i = 0; i < kSsmConvTaps - 1; ++i) {
+      window[i] = conv_state[static_cast<std::size_t>(i) * channels + c];
+    }
+#pragma unroll
+    for (std::uint32_t t = 0; t < kSsmConvTokensPerThread; ++t) {
+      if (t >= n_tokens) {
+        break;
+      }
+      const float v = qkv[static_cast<std::size_t>(t) * qkv_stride + c];
+      conv_out[static_cast<std::size_t>(t) * channels + c] =
+          SsmConv4Value(taps, window[0], window[1], window[2], v);
+      window[0] = window[1];
+      window[1] = window[2];
+      window[2] = v;
+      if (conv_snapshots.rows[0] != nullptr && t + 1 < n_tokens) {
+        float* snapshot = conv_snapshots.rows[t];
+#pragma unroll
+        for (std::uint32_t j = 0; j < kSsmConvTaps - 1; ++j)
+          snapshot[std::size_t{j} * channels + c] = window[j];
+      }
+    }
+#pragma unroll
+    for (std::uint32_t j = 0; j < kSsmConvTaps - 1; ++j)
+      conv_state[std::size_t{j} * channels + c] = window[j];
+    FusedDone(&st->done[0]);
+    return;
+  }
+  block -= conv_blocks;
+
+  if (block < prep_blocks) {
+    // GdnPrepKernel<false>.
+    FusedWait(&st->done[0], conv_blocks);
+    const std::uint32_t lane = threadIdx.x % warpSize;
+    const std::uint32_t row = block * kWaves + threadIdx.x / warpSize;
+    if (row < n_tokens * k_heads) {
+      const std::uint32_t t = row / k_heads;
+      const std::uint32_t kh = row % k_heads;
+      const float* conv = conv_out + static_cast<std::size_t>(t) * channels;
+      const std::uint32_t per_lane = d / warpSize;
+      float qv[d / 32];
+      float kv[d / 32];
+      float qs = 0.0f;
+      float ks = 0.0f;
+#pragma unroll
+      for (std::uint32_t r = 0; r < per_lane; ++r) {
+        const std::uint32_t i = r * warpSize + lane;
+        qv[r] = conv[kh * d + i];
+        kv[r] = conv[k_heads * d + kh * d + i];
+        qs += qv[r] * qv[r];
+        ks += kv[r] * kv[r];
+      }
+      qs = rsqrtf(WaveSum(qs) + eps);
+      ks = rsqrtf(WaveSum(ks) + eps);
+      float* q_out = qn + static_cast<std::size_t>(row) * d;
+      float* k_out = kn + static_cast<std::size_t>(row) * d;
+#pragma unroll
+      for (std::uint32_t r = 0; r < per_lane; ++r) {
+        const std::uint32_t i = r * warpSize + lane;
+        q_out[i] = qv[r] * qs;
+        k_out[i] = kv[r] * ks;
+      }
+    }
+    FusedDone(&st->done[1]);
+    return;
+  }
+  block -= prep_blocks;
+
+  if (block < gdn_blocks) {
+    // GdnKernel<false> without in-pass checkpoints.
+    constexpr std::uint32_t slice = d / kGdnLanes;
+    const std::uint32_t h = block / kGdnBlocksPerHead;
+    const std::uint32_t kh = h % k_heads;
+    const std::uint32_t j =
+        (block % kGdnBlocksPerHead) * (kThreads / kGdnLanes) +
+        threadIdx.x / kGdnLanes;
+    const std::uint32_t lane = threadIdx.x % kGdnLanes;
+    const std::uint32_t i0 = lane * slice;
+    const float a_h = a[h];
+    const float dt_h = dt[h];
+    float* S = state + static_cast<std::size_t>(h) * d * d + j * d + i0;
+    float row[slice];
+#pragma unroll
+    for (std::uint32_t i = 0; i < slice; ++i) {
+      row[i] = S[i];
+    }
+    FusedWait(&st->done[1], prep_blocks);
+    // The gates are uniform per block: a per-lane index keeps their loads
+    // off the scalar path, which need not see this launch's writes.
+    std::uint32_t ab_lane = 0;
+    if constexpr (ab_tokens != 0) {
+      FusedWait(&st->ab_done, ab_blocks);
+      asm volatile("" : "+v"(ab_lane));
+    }
+    const float q_scale = rsqrtf(static_cast<float>(d));
+    for (std::uint32_t t = 0; t < n_tokens; ++t) {
+      const float* q =
+          qn + (static_cast<std::size_t>(t) * k_heads + kh) * d + i0;
+      const float* k =
+          kn + (static_cast<std::size_t>(t) * k_heads + kh) * d + i0;
+      const float vv = conv_out[static_cast<std::size_t>(t) * channels +
+                                2 * k_heads * d + h * d + j];
+      const float alpha = alpha_beta[t * 2 * v_heads + h + ab_lane];
+      const float beta = alpha_beta[t * 2 * v_heads + v_heads + h + ab_lane];
+      const float decay = __expf(a_h * SoftplusF(alpha + dt_h));
+      const float b = SigmoidF(beta);
+      float kr[slice];
+      float u = 0.0f;
+      const float last = row[slice - 1];
+#pragma unroll
+      for (std::uint32_t i = 0; i < slice; ++i) {
+        kr[i] = k[i];
+        row[i] *= decay;
+        u += row[i] * kr[i];
+      }
+#pragma unroll
+      for (unsigned off = kGdnLanes / 2; off > 0; off >>= 1) {
+        u += XorLane(u, off);
+      }
+      const float error = vv - u;
+      float acc = 0.0f;
+#pragma unroll
+      for (std::uint32_t i = 0; i < slice; ++i) {
+        const float correction = __fmul_rn(error, kr[i]);
+        row[i] = i + 1 == slice ? GdnLastUpdate(last, decay, error, kr[i], b)
+                                : __fmaf_rn(b, correction, row[i]);
+        acc += row[i] * q[i];
+      }
+#pragma unroll
+      for (unsigned off = kGdnLanes / 2; off > 0; off >>= 1) {
+        acc += XorLane(acc, off);
+      }
+      if (lane == 0) {
+        raw[static_cast<std::size_t>(t) * v_heads * d + h * d + j] =
+            acc * q_scale;
+      }
+      if (state_snapshots.rows[0] != nullptr && t + 1 < n_tokens) {
+        float* snap = state_snapshots.rows[t];
+        if (t == 0) {
+          snap += static_cast<std::size_t>(h) * d * d + j * d + i0;
+#pragma unroll
+          for (std::uint32_t i = 0; i < slice; ++i)
+            __builtin_nontemporal_store(row[i], snap + i);
+        } else {
+          if (j == 0 && h < k_heads) {
+#pragma unroll
+            for (std::uint32_t i = 0; i < slice; ++i)
+              snap[h * d + i0 + i] = kr[i];
+          }
+          if (lane == 0) {
+            if (j == 0) {
+              snap[k_heads * d + h] = decay;
+              snap[k_heads * d + v_heads + h] = b;
+            }
+            snap[k_heads * d + 2 * v_heads + h * d + j] = error;
+          }
+        }
+      }
+    }
+    // The epilogue reads only the raw rows: publish them first, so it runs
+    // while this block's state rows drain to memory.
+    FusedDone(&st->done[2]);
+#pragma unroll
+    for (std::uint32_t i = 0; i < slice; ++i) {
+      __builtin_nontemporal_store(row[i], S + i);
+    }
+    return;
+  }
+  block -= gdn_blocks;
+
+  // GdnEpilogueKernel<false>, F32 rows (and their Q8_1 rows).
+  FusedWait(&st->done[2], gdn_blocks);
+  const std::uint32_t lane = threadIdx.x % warpSize;
+  const std::size_t row = block * kWaves + threadIdx.x / warpSize;
+  if (row < n_tokens * v_heads) {
+    const float* zrow = z + (row / v_heads) * z_stride + (row % v_heads) * d;
+    const float* src = raw + row * d;
+    float v[d / 32];
+    float zv[d / 32];
+    float nw[d / 32];
+#pragma unroll
+    for (std::uint32_t r = 0; r < d / 32; ++r) {
+      v[r] = src[r * warpSize + lane];
+      zv[r] = zrow[r * warpSize + lane];
+      nw[r] = norm_w[r * warpSize + lane];
+    }
+    GdnEpilogueRow(v, zv, nw, row, lane, v_heads, eps, out, nullptr, nullptr,
+                   out_q8_1, 0);
+  }
+  __syncthreads();
+  if (threadIdx.x == 0 &&
+      __hip_atomic_fetch_add(&st->exited, 1u, __ATOMIC_ACQ_REL,
+                             __HIP_MEMORY_SCOPE_AGENT) == epilogue_blocks - 1) {
+    FusedClear(&st->done[0]);
+    FusedClear(&st->done[1]);
+    FusedClear(&st->done[2]);
+    FusedClear(&st->exited);
+    FusedClear(&st->ab_done);
+  }
+}
+
+/// Counters of RouterFusedKernel, zero between launches.
+struct RouterFusedState {
+  unsigned done;    ///< projection blocks finished
+  unsigned exited;  ///< selection blocks finished
+};
+
+/// A decode pass's router in one launch: SmallGemmKernel's whole-pass rows
+/// (eight per block) and then RouterTopKKernel's block per token, which waits
+/// for every logit row. Each wave and block keeps its kernel's arithmetic.
+template<WeightType type, unsigned tokens, unsigned MaxExperts>
+__launch_bounds__(kThreads) __global__
+    void RouterFusedKernel(const void* w, const float* x, float* logits,
+                           std::uint32_t m, std::uint32_t k, std::int32_t* ids,
+                           float* weights, std::uint32_t n_experts,
+                           std::uint32_t top_k, RouterFusedState* st) {
+  __shared__ float probs[1024];
+  __shared__ float shared[32];
+  __shared__ std::uint32_t chosen[32];
+  __shared__ float chosen_p[32];
+  constexpr std::uint32_t kRows = kThreads / 32;
+  const std::uint32_t gemm_blocks = (m + kRows - 1) / kRows;
+  if (blockIdx.x < gemm_blocks) {
+    const std::uint32_t row = blockIdx.x * kRows + threadIdx.x / warpSize;
+    if (row < m) {
+      SmallGemmRow<type, tokens, true>(w, x, logits, m, k, row,
+                                       threadIdx.x % warpSize);
+    }
+    FusedDone(&st->done);
+    return;
+  }
+  FusedWait(&st->done, gemm_blocks);
+  RouterTopKToken<MaxExperts>(logits, m, ids, weights, n_experts, top_k,
+                              blockIdx.x - gemm_blocks, probs, shared, chosen,
+                              chosen_p);
+  __syncthreads();
+  if (threadIdx.x == 0 &&
+      __hip_atomic_fetch_add(&st->exited, 1u, __ATOMIC_ACQ_REL,
+                             __HIP_MEMORY_SCOPE_AGENT) == tokens - 1) {
+    FusedClear(&st->done);
+    FusedClear(&st->exited);
+  }
+}
+
+std::size_t RouterFusedStateBytes() {
+  return sizeof(RouterFusedState);
+}
+
+/// Counters of IndexerDecodeFusedKernel, zero between launches.
+struct IndexerFusedState {
+  unsigned k_done;  ///< key projection blocks finished
+  unsigned q_done;  ///< query projection blocks finished
+  unsigned stored;  ///< raw key rows stored
+  unsigned exited;  ///< blocks finished
+};
+
+constexpr std::uint32_t kIndexerHeads = 4;
+constexpr std::uint32_t kIndexerDim = 128;
+
+/// A sparse decode pass's indexer (one to eight rows) in one launch, as
+/// consecutive block ranges: SmallGemmKernel's whole-pass rows of the key
+/// and then the query projection (eight rows per block); StoreRowsKernel's
+/// block per token once its key rows exist, and RmsNormKernel's block per
+/// (token, head) of the queries followed by RopeKernel's pairs of that head;
+/// then PoolBlocksKernel's blocks once every raw key row is stored. Every
+/// wave, block and element keeps its kernel's arithmetic.
+template<WeightType type, unsigned tokens, bool kYarn>
+__launch_bounds__(kThreads) __global__ void IndexerDecodeFusedKernel(
+    const void* wk, const void* wq, const float* x, std::uint32_t k, float* ik,
+    float* iq, float* ring, const float* q_gamma, const float* k_gamma,
+    __half* blocks, const std::uint32_t* first_block,
+    const std::uint32_t* start_pos, std::uint32_t ratio,
+    std::uint32_t rotary_dim, float theta, float eps, std::uint32_t capacity,
+    std::uint32_t pool_blocks, const qwen::vision::DeviceRope* rope,
+    [[maybe_unused]] YarnRope yarn, IndexerFusedState* st) {
+  __shared__ float shared[32];
+  __shared__ float v[256];
+  constexpr std::uint32_t kRows = kThreads / 32;
+  constexpr std::uint32_t d = kIndexerDim;
+  constexpr std::uint32_t k_blocks = d / kRows;
+  constexpr std::uint32_t q_blocks = kIndexerHeads * d / kRows;
+  constexpr std::uint32_t norm_blocks = tokens * kIndexerHeads;
+  const std::uint32_t total =
+      k_blocks + q_blocks + tokens + norm_blocks + pool_blocks;
+  std::uint32_t block = blockIdx.x;
+  const std::uint32_t lane = threadIdx.x % warpSize;
+  if (block < k_blocks + q_blocks) {
+    // SmallGemmKernel<type, tokens, false, true>.
+    const bool key = block < k_blocks;
+    const std::uint32_t row =
+        (key ? block : block - k_blocks) * kRows + threadIdx.x / warpSize;
+    if (key)
+      SmallGemmRow<type, tokens, true>(wk, x, ik, d, k, row, lane);
+    else
+      SmallGemmRow<type, tokens, true>(wq, x, iq, kIndexerHeads * d, k, row,
+                                       lane);
+    FusedDone(key ? &st->k_done : &st->q_done);
+  } else if ((block -= k_blocks + q_blocks) < tokens) {
+    // StoreRowsKernel.
+    FusedWait(&st->k_done, k_blocks);
+    const std::uint32_t t = block;
+    const std::uint32_t row = (*start_pos + t) & (capacity - 1);
+    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
+      ring[static_cast<std::size_t>(row) * d + i] =
+          ik[static_cast<std::size_t>(t) * d + i];
+    }
+    FusedDone(&st->stored);
+  } else if ((block -= tokens) < norm_blocks) {
+    // RmsNormKernel (groups 1), then RopeKernel's pairs of this head.
+    FusedWait(&st->q_done, q_blocks);
+    const std::uint32_t t = block / kIndexerHeads;
+    const std::uint32_t h = block % kIndexerHeads;
+    float* row = iq + static_cast<std::size_t>(block) * d;
+    float ss = 0.0f;
+    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
+      ss += row[i] * row[i];
+    }
+    ss = BlockSum(ss, shared);
+    const float scale = rsqrtf(ss / static_cast<float>(d) + eps);
+    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
+      row[i] = row[i] * scale * q_gamma[i];
+    }
+    __syncthreads();
+    const std::uint32_t half = rotary_dim / 2;
+    for (std::uint32_t i = threadIdx.x; i < half; i += blockDim.x) {
+      float freq = powf(theta, -2.0f * static_cast<float>(i) /
+                                   static_cast<float>(rotary_dim));
+      if constexpr (kYarn)
+        freq = YarnFrequency(freq, i, yarn);
+      float sn = 0.0f;
+      float cs = 0.0f;
+      sincosf(qwen::vision::RopePosition(rope, *start_pos + t, i) * freq, &sn,
+              &cs);
+      if constexpr (kYarn)
+        YarnScale(sn, cs, yarn);
+      const float a = row[i];
+      const float b = row[i + half];
+      if constexpr (kYarn) {
+        row[i] = __fmaf_rn(a, cs, -__fmul_rn(b, sn));
+        row[i + half] = __fmaf_rn(a, sn, __fmul_rn(b, cs));
+      } else {
+        row[i] = a * cs - b * sn;
+        row[i + half] = a * sn + b * cs;
+      }
+    }
+    (void)h;
+  } else {
+    // PoolBlocksKernel.
+    block -= norm_blocks;
+    FusedWait(&st->stored, tokens);
+    const std::uint32_t b = *first_block + block;
+    if (b < (*start_pos + tokens) / ratio) {
+      const std::uint32_t i = threadIdx.x;
+      float mean = 0.0f;
+      if (i < d) {
+        for (std::uint32_t r = 0; r < ratio; ++r) {
+          const std::uint32_t row = (b * ratio + r) & (capacity - 1);
+          mean += ring[static_cast<std::size_t>(row) * d + i];
+        }
+        mean /= static_cast<float>(ratio);
+      }
+      const float ss = BlockSum(i < d ? mean * mean : 0.0f, shared);
+      const float scale = rsqrtf(ss / static_cast<float>(d) + eps);
+      if (i < d) {
+        v[i] = mean * scale * k_gamma[i];
+      }
+      __syncthreads();
+      const std::uint32_t half = rotary_dim / 2;
+      float outv = i < d ? v[i] : 0.0f;
+      if (i < rotary_dim) {
+        const std::uint32_t p = i < half ? i : i - half;
+        float freq = powf(theta, -2.0f * static_cast<float>(p) /
+                                     static_cast<float>(rotary_dim));
+        if constexpr (kYarn)
+          freq = YarnFrequency(freq, p, yarn);
+        float sn = 0.0f;
+        float cs = 0.0f;
+        sincosf(qwen::vision::RopePosition(rope, b * ratio, p) * freq, &sn,
+                &cs);
+        if constexpr (kYarn)
+          YarnScale(sn, cs, yarn);
+        const float a = v[p];
+        const float bb = v[p + half];
+        outv = i < half ? a * cs - bb * sn : a * sn + bb * cs;
+      }
+      if (i < d) {
+        blocks[static_cast<std::size_t>(b) * d + i] = __float2half_rn(outv);
+      }
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0 &&
+      __hip_atomic_fetch_add(&st->exited, 1u, __ATOMIC_ACQ_REL,
+                             __HIP_MEMORY_SCOPE_AGENT) == total - 1) {
+    FusedClear(&st->k_done);
+    FusedClear(&st->q_done);
+    FusedClear(&st->stored);
+    FusedClear(&st->exited);
+  }
+}
+
+std::size_t IndexerFusedStateBytes() {
+  return sizeof(IndexerFusedState);
+}
+
+namespace {
+
+template<WeightType type, unsigned tokens>
+void LaunchIndexerFused(const IndexerFusedArgs& a, hipStream_t stream) {
+  constexpr std::uint32_t kRows = kThreads / 32;
+  const std::uint32_t grid =
+      (kIndexerDim + kIndexerHeads * kIndexerDim) / kRows +
+      tokens * (1 + kIndexerHeads) + a.pool_blocks;
+  auto* st = static_cast<IndexerFusedState*>(a.state);
+  if (a.yarn.enabled != 0)
+    hipLaunchKernelGGL((IndexerDecodeFusedKernel<type, tokens, true>),
+                       dim3(grid), dim3(kThreads), 0, stream, a.wk, a.wq, a.x,
+                       a.k, a.ik, a.iq, a.ring, a.q_gamma, a.k_gamma, a.blocks,
+                       a.first_block, a.start_pos, a.ratio, a.rotary_dim,
+                       a.theta, a.eps, a.capacity, a.pool_blocks, a.rope,
+                       a.yarn, st);
+  else
+    hipLaunchKernelGGL((IndexerDecodeFusedKernel<type, tokens, false>),
+                       dim3(grid), dim3(kThreads), 0, stream, a.wk, a.wq, a.x,
+                       a.k, a.ik, a.iq, a.ring, a.q_gamma, a.k_gamma, a.blocks,
+                       a.first_block, a.start_pos, a.ratio, a.rotary_dim,
+                       a.theta, a.eps, a.capacity, a.pool_blocks, a.rope,
+                       a.yarn, st);
+}
+
+template<WeightType type>
+void IndexerFusedForType(const IndexerFusedArgs& a, hipStream_t stream) {
+  switch (a.n_tokens) {
+#define GUFO_INDEXER_FUSED(n) \
+  case n:                     \
+    return LaunchIndexerFused<type, n>(a, stream)
+    GUFO_INDEXER_FUSED(1);
+    GUFO_INDEXER_FUSED(2);
+    GUFO_INDEXER_FUSED(3);
+    GUFO_INDEXER_FUSED(4);
+    GUFO_INDEXER_FUSED(5);
+    GUFO_INDEXER_FUSED(6);
+    GUFO_INDEXER_FUSED(7);
+    GUFO_INDEXER_FUSED(8);
+#undef GUFO_INDEXER_FUSED
+    default:
+      throw std::logic_error("fused indexer requires 1-8 token rows");
+  }
+}
+
+}  // namespace
+
+bool IndexerDecodeFused(const IndexerFusedArgs& a, hipStream_t stream) {
+  // SmallGemmKernel's whole-pass rows need 16-byte rows of whole passes.
+  const bool aligned = (reinterpret_cast<std::uintptr_t>(a.wk) |
+                        reinterpret_cast<std::uintptr_t>(a.wq) |
+                        reinterpret_cast<std::uintptr_t>(a.x)) %
+                           16 ==
+                       0;
+  if (a.state == nullptr || !aligned || a.k % (32 * 4 * 4) != 0 ||
+      a.heads != kIndexerHeads || a.dim != kIndexerDim ||
+      a.rotary_dim > kIndexerDim || a.n_tokens == 0 || a.n_tokens > 8 ||
+      (a.capacity & (a.capacity - 1)) != 0)
+    return false;
+  switch (a.type) {
+    case WeightType::kBF16:
+      IndexerFusedForType<WeightType::kBF16>(a, stream);
+      return true;
+    case WeightType::kF16:
+      IndexerFusedForType<WeightType::kF16>(a, stream);
+      return true;
+    case WeightType::kF32:
+      IndexerFusedForType<WeightType::kF32>(a, stream);
+      return true;
+    default:
+      return false;
+  }
+}
+
+std::size_t GdnFusedStateBytes() {
+  return sizeof(GdnFusedState);
+}
+
 std::size_t HcMixQ8FusedStateBytes() {
   return sizeof(HcFusedState);
 }
@@ -7217,7 +7851,9 @@ bool HcMixQ8Fused(void* state, const HcFusedMix& mix, std::uint32_t n_tokens,
       mix.hidden != kFusedHidden || mix.streams != kFusedStreams ||
       mix.rank != kFusedRank || mix.gamma == nullptr ||
       mix.lo_q8_cols < kFusedRank || mix.lo_q8_cols % 32 != 0 ||
-      (mix.inject_w != nullptr && mix.inject_out == nullptr)) {
+      (mix.inject_w != nullptr && mix.inject_out == nullptr) ||
+      (mix.moe_out != nullptr &&
+       (mix.moe_k > kFusedMoeSlots || mix.moe_block_out != mix.block_out))) {
     return false;
   }
   LaunchHcMixQ8Fused<1>(mix, static_cast<HcFusedState*>(state), n_tokens,
@@ -8746,7 +9382,8 @@ bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    bool convolved, float eps, hipStream_t stream,
                    __half* out_half, GdnCheckpoint checkpoint,
                    std::uint32_t out_half_stride, void* out_q8_1,
-                   hipEvent_t z_ready) {
+                   hipEvent_t z_ready, void* fused_state,
+                   GdnAlphaBeta projection) {
   const std::uint32_t channels = 2 * k_heads * d + v_heads * d;
   const std::size_t count = static_cast<std::size_t>(n_tokens) * channels;
   const bool saved_history = !convolved && kernel == kSsmConvTaps &&
@@ -8755,7 +9392,26 @@ bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
     if (checkpoint.history[i] != nullptr)
       HistoryPrefix(qkv, qkv_stride, conv_state, checkpoint.history[i],
                     checkpoint.tokens[i], channels, kernel - 1, stream);
-  if (!convolved) {
+  // One launch for a decode pass (see GdnDecodeFusedKernel).
+  const bool fused_decode = fused_state != nullptr && saved_history &&
+                            d == kGdnDim && channels % kThreads == 0 &&
+                            out_q8 == nullptr && out_half == nullptr &&
+                            checkpoint.count == 0 && z_ready == nullptr &&
+                            !(row_split && state_snapshots.rows[0] == nullptr);
+  // The fused launch projects alpha/beta too, for the shapes LaunchSmallGemm
+  // gives its whole-pass rows.
+  const bool fused_projection =
+      fused_decode && projection.w != nullptr && n_tokens <= 8 &&
+      projection.type != WeightType::kQ8_0 &&
+      projection.k % (32 * 4 * 4) == 0 &&
+      (reinterpret_cast<std::uintptr_t>(projection.w) |
+       reinterpret_cast<std::uintptr_t>(projection.x)) %
+              16 ==
+          0;
+  if (projection.w != nullptr && !fused_projection)
+    SmallGemm(projection.w, projection.type, projection.x, projection.out,
+              n_tokens, 2 * v_heads, projection.k, stream);
+  if (!convolved && !fused_decode) {
     if (saved_history) {
       hipLaunchKernelGGL((SsmConv4Kernel<true, false>), dim3(Blocks(channels)),
                          dim3(kThreads), 0, stream, qkv, qkv_stride, conv_w,
@@ -8819,6 +9475,51 @@ bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
     return true;
   }
   const unsigned waves = kThreads / 32;
+  if (fused_decode) {
+    const std::uint32_t blocks = channels / kThreads +
+                                 (n_tokens * k_heads + waves - 1) / waves +
+                                 v_heads * (kGdnDim * kGdnLanes / kThreads) +
+                                 (n_tokens * v_heads + waves - 1) / waves;
+    const auto launch = [&]<WeightType type, unsigned tokens>() {
+      hipLaunchKernelGGL(
+          (GdnDecodeFusedKernel<type, tokens>),
+          dim3(blocks + (tokens != 0 ? (2 * v_heads + waves - 1) / waves : 0)),
+          dim3(kThreads), 0, stream, projection.w, projection.x, projection.k,
+          projection.out, qkv, qkv_stride, z, z_stride, alpha_beta, conv_w, a,
+          dt, norm_w, conv_state, conv_scratch, qn, kn, raw, state, out,
+          out_q8_1_rows, state_snapshots, conv_snapshots, n_tokens, k_heads,
+          v_heads, eps, static_cast<GdnFusedState*>(fused_state));
+    };
+    const auto launch_type = [&]<WeightType type>() {
+      switch (n_tokens) {
+        case 1:
+          return launch.template operator()<type, 1>();
+        case 2:
+          return launch.template operator()<type, 2>();
+        case 3:
+          return launch.template operator()<type, 3>();
+        case 4:
+          return launch.template operator()<type, 4>();
+        case 5:
+          return launch.template operator()<type, 5>();
+        case 6:
+          return launch.template operator()<type, 6>();
+        case 7:
+          return launch.template operator()<type, 7>();
+        default:
+          return launch.template operator()<type, 8>();
+      }
+    };
+    if (!fused_projection)
+      launch.template operator()<WeightType::kF32, 0>();
+    else if (projection.type == WeightType::kF32)
+      launch_type.template operator()<WeightType::kF32>();
+    else if (projection.type == WeightType::kF16)
+      launch_type.template operator()<WeightType::kF16>();
+    else
+      launch_type.template operator()<WeightType::kBF16>();
+    return true;
+  }
   hipLaunchKernelGGL(GdnPrepKernel<false>,
                      dim3((n_tokens * k_heads + waves - 1) / waves),
                      dim3(kThreads), 0, stream, conv_scratch, qn, kn,
@@ -9155,6 +9856,81 @@ void RouterTopK(const float* logits, std::uint32_t stride, std::int32_t* ids,
   } else {
     hipLaunchKernelGGL((RouterTopKKernel<1024>), dim3(n_tokens), dim3(kThreads),
                        0, stream, logits, stride, ids, weights, n_experts, k);
+  }
+}
+
+namespace {
+
+template<WeightType type, unsigned tokens>
+void LaunchRouterFused(const void* w, const float* x, float* logits,
+                       std::uint32_t m, std::uint32_t k, std::int32_t* ids,
+                       float* weights, std::uint32_t n_experts,
+                       std::uint32_t top_k, void* state, hipStream_t stream) {
+  constexpr std::uint32_t kRows = kThreads / 32;
+  hipLaunchKernelGGL((RouterFusedKernel<type, tokens, 512>),
+                     dim3((m + kRows - 1) / kRows + tokens), dim3(kThreads), 0,
+                     stream, w, x, logits, m, k, ids, weights, n_experts, top_k,
+                     static_cast<RouterFusedState*>(state));
+}
+
+template<WeightType type>
+void RouterFusedForType(const void* w, const float* x, float* logits,
+                        std::uint32_t tokens, std::uint32_t m, std::uint32_t k,
+                        std::int32_t* ids, float* weights,
+                        std::uint32_t n_experts, std::uint32_t top_k,
+                        void* state, hipStream_t stream) {
+  switch (tokens) {
+#define GUFO_ROUTER_FUSED(n)                                            \
+  case n:                                                               \
+    return LaunchRouterFused<type, n>(w, x, logits, m, k, ids, weights, \
+                                      n_experts, top_k, state, stream)
+    GUFO_ROUTER_FUSED(1);
+    GUFO_ROUTER_FUSED(2);
+    GUFO_ROUTER_FUSED(3);
+    GUFO_ROUTER_FUSED(4);
+    GUFO_ROUTER_FUSED(5);
+    GUFO_ROUTER_FUSED(6);
+    GUFO_ROUTER_FUSED(7);
+    GUFO_ROUTER_FUSED(8);
+#undef GUFO_ROUTER_FUSED
+    default:
+      throw std::logic_error("fused router requires 1-8 token rows");
+  }
+}
+
+}  // namespace
+
+bool RouterFused(const void* w, WeightType type, const float* x, float* logits,
+                 std::int32_t* ids, float* weights, std::uint32_t n_tokens,
+                 std::uint32_t m, std::uint32_t k, std::uint32_t n_experts,
+                 std::uint32_t top_k, void* state, hipStream_t stream) {
+  // The shapes LaunchSmallGemm gives its whole-pass rows, at the widths
+  // RouterTopKKernel<512> selects from.
+  const bool aligned = (reinterpret_cast<std::uintptr_t>(w) |
+                        reinterpret_cast<std::uintptr_t>(x)) %
+                           16 ==
+                       0;
+  if (state == nullptr || n_tokens == 0 || n_tokens > 8 || !aligned ||
+      k % (32 * 4 * 4) != 0 || n_experts > 512 || n_experts > m || top_k > 32)
+    return false;
+  switch (type) {
+    case WeightType::kF32:
+      RouterFusedForType<WeightType::kF32>(w, x, logits, n_tokens, m, k, ids,
+                                           weights, n_experts, top_k, state,
+                                           stream);
+      return true;
+    case WeightType::kBF16:
+      RouterFusedForType<WeightType::kBF16>(w, x, logits, n_tokens, m, k, ids,
+                                            weights, n_experts, top_k, state,
+                                            stream);
+      return true;
+    case WeightType::kF16:
+      RouterFusedForType<WeightType::kF16>(w, x, logits, n_tokens, m, k, ids,
+                                           weights, n_experts, top_k, state,
+                                           stream);
+      return true;
+    default:
+      return false;
   }
 }
 

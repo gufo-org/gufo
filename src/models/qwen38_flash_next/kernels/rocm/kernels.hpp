@@ -164,6 +164,20 @@ struct HcFusedMix {
   std::uint32_t rank;
   float eps;
   float scale;  ///< the SiLU input scale, 1 / streams
+  /// Optional: the first `next_bytes` (a multiple of 16) of the weights the
+  /// next kernel reads, loaded into the cache by blocks left idle.
+  const void* next{nullptr};
+  std::size_t next_bytes{0};
+  /// Optional: MoeEpilogue's operands. With `moe_out`, the launch first runs
+  /// MoeEpilogueKernel (at most 16 slots) into `moe_block_out`, which must be
+  /// `block_out`, and the combine waits for it.
+  const float* moe_out{nullptr};  ///< F32 slot rows [t][k][hidden]
+  float* moe_block_out{nullptr};
+  const float* moe_weights{nullptr};
+  const float* moe_shared{nullptr};
+  const float* moe_gate{nullptr};  ///< per token, at moe_gate_stride
+  std::uint32_t moe_gate_stride{0};
+  std::uint32_t moe_k{0};
 };
 /// Device bytes of HcMixQ8Fused's counters and intermediates. Allocate them
 /// zeroed once; every launch leaves its counters zero again, so captured
@@ -429,6 +443,17 @@ struct GdnCheckpoint {
   std::uint32_t count = 0;
 };
 
+/// The alpha/beta projection GatedDeltaNet runs before its recurrence:
+/// out[t][2 * v_heads] = SmallGemm(w [2 * v_heads][k], x [t][k]). `out` is the
+/// `alpha_beta` argument. A fused decode pass computes it in the same launch.
+struct GdnAlphaBeta {
+  const void* w{nullptr};
+  WeightType type{WeightType::kF32};
+  const float* x{nullptr};
+  float* out{nullptr};
+  std::uint32_t k{0};
+};
+
 /// Gated DeltaNet over a chunk of tokens for one layer. Runs the causal
 /// conv (with rolling `conv_state`, [kernel-1][channels]) and the recurrence
 /// on `state` ([v_heads][d][d]) sequentially over tokens, parallel over heads
@@ -466,7 +491,13 @@ bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    bool convolved, float eps, hipStream_t stream,
                    __half* out_half = nullptr, GdnCheckpoint checkpoint = {},
                    std::uint32_t out_half_stride = 0, void* out_q8_1 = nullptr,
-                   hipEvent_t z_ready = nullptr);
+                   hipEvent_t z_ready = nullptr, void* fused_state = nullptr,
+                   GdnAlphaBeta projection = {});
+
+/// Bytes of the zeroed device state GatedDeltaNet's `fused_state` points to.
+/// With it, a pass of one to eight rows that keeps its convolution history
+/// (128-wide heads, F32 output, no in-pass checkpoint) runs as one launch.
+std::size_t GdnFusedStateBytes();
 
 /// Private rows for one request in a decode batch. Scratch regions and all
 /// recurrent/history/rollback buffers must be disjoint between requests.
@@ -646,6 +677,49 @@ void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,
 void RouterTopK(const float* logits, std::uint32_t stride, std::int32_t* ids,
                 float* weights, std::uint32_t n_tokens, std::uint32_t n_experts,
                 std::uint32_t k, hipStream_t stream);
+
+/// Bytes of the zeroed device state IndexerDecodeFused takes.
+std::size_t IndexerFusedStateBytes();
+
+struct IndexerFusedArgs {
+  const void* wk;  ///< key projection [dim][k]
+  const void* wq;  ///< query projection [heads * dim][k], same type
+  WeightType type;
+  const float* x;  ///< [n_tokens][k]
+  std::uint32_t k;
+  float* ik;    ///< raw keys [n_tokens][dim]
+  float* iq;    ///< normalized, rotated queries [n_tokens][heads][dim]
+  float* ring;  ///< raw key ring [capacity][dim]
+  const float* q_gamma;
+  const float* k_gamma;
+  __half* blocks;  ///< pooled block keys
+  const std::uint32_t* first_block;
+  const std::uint32_t* start_pos;
+  std::uint32_t n_tokens, heads, dim, ratio, rotary_dim;
+  float theta, eps;
+  std::uint32_t capacity;     ///< ring rows, a power of two
+  std::uint32_t pool_blocks;  ///< PoolIndexerBlocks' grid_blocks
+  const qwen::vision::DeviceRope* rope;
+  YarnRope yarn;
+  void* state;  ///< IndexerFusedStateBytes() of zeroed device memory
+};
+
+/// One launch for a sparse decode pass's indexer: the key and query
+/// projections (SmallGemm), StoreRows of the keys, RmsNormRows and Rope of
+/// the queries and PoolIndexerBlocks, with the same values. Returns false
+/// without launching for a shape it does not cover.
+bool IndexerDecodeFused(const IndexerFusedArgs& args, hipStream_t stream);
+
+/// Bytes of the zeroed device state RouterFused takes.
+std::size_t RouterFusedStateBytes();
+
+/// SmallGemm of the router rows (logits [t][m], rows `m` apart) and RouterTopK
+/// over their first `n_experts` columns in one launch, with the same values.
+/// Returns false without launching for a shape it does not cover.
+bool RouterFused(const void* w, WeightType type, const float* x, float* logits,
+                 std::int32_t* ids, float* weights, std::uint32_t n_tokens,
+                 std::uint32_t m, std::uint32_t k, std::uint32_t n_experts,
+                 std::uint32_t top_k, void* state, hipStream_t stream);
 
 /// out[t][i] = sum_s weights[t][s] * expert_out[t*k + s][i]
 ///           + sigmoid(gate[t * gate_stride]) * shared[t][i].

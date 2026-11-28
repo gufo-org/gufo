@@ -1,5 +1,83 @@
 # Qwen3.8 Flash-Next experiments
 
+## Decode launch fusion and n-gram read latency (November 28, 2026)
+
+Main `b41b259e`, ROCm 10.1, UD-Q4_K_XL, single user, `gufo bench -p 128 -n 256 -r 1`
+(one fresh process per run, so every n-gram row comes from the SSD), three
+main/candidate pairs at depth 0 and two at depth. Greedy output hashes and
+208 matched-token decode logit rows are byte-identical to main.
+
+| Experiment | Outcome |
+| --- | --- |
+| Keep the SSD awake between decode gathers (`NgramTable::KeepWarm`) | **Retained**: on a WD SN7100 behind dm-crypt a 4 KiB direct read takes 0.15 ms up to 24 ms after the previous read and 0.95 ms from 33 ms on (kernel-default NVMe power states). A decode step is longer, so each token's 16-row gather took 1.03 ms while layer 0, the only work queued before the PLE layer, takes 0.65 ms: the GPU idled on 63 of 64 first-pass steps. One 4 KiB read every 10 ms while decode-sized gathers arrive (stopping 250 ms after the last) brings the wait to 0.22 ms and the idle steps to 0; first-pass step 32.77 → 32.35 ms. Text whose rows are in the 128 MiB row cache is unchanged. |
+| One launch for a decode pass's Gated DeltaNet (`GdnDecodeFusedKernel`) | **Retained**: convolution, q/k norms, recurrence and epilogue of one to eight rows as consecutive block ranges of one grid, each waiting for the previous range, with the recurrence blocks reading their state rows meanwhile. 108 fewer launches per token; AR tg128 30.49 → 30.67 tok/s with warm rows (two pairs, `-r 3`), about 1.9 µs per removed launch. `gdn_ops_test` compares every output, state and rollback byte with the separate launches for 1–8 rows. |
+| Both changes | AR tg256 30.45 → 30.87 tok/s at depth 0 (+1.4%), 29.62 → 30.12 at d4096 (+1.7%), 29.83 → 30.00 at d32768 (+0.6%); MTP 69.70 → 70.25 (+0.8%), 58.49 → 59.04 at d4096 (+0.9%), d32768 (repetitive, rows cached) within run-to-run spread. |
+| Native AIO for the decode gather (`io_submit` from the scheduling thread, polled) | Rejected: the wait stayed at 0.98 ms. The latency is the drive leaving its idle state, not the reader threads' wake-up. |
+| Reuse `GdnPrefillKernel` for one-row decode | Not exact: it normalizes q and k inside the recurrence, with different rounding from the decode kernels. |
+
+A second pass on `b0c21ca2` (the two changes above), same commands, three
+alternating AR pairs and two MTP pairs at depth 0, one pair at depth. Hashes
+and the 208 logit rows stay byte-identical to main.
+
+| Experiment | Outcome |
+| --- | --- |
+| Router projection and top-k in one launch (`RouterFusedKernel`), alpha/beta projection inside `GdnDecodeFusedKernel` | **Retained**: 802 → 718 launches per token; 3.2 µs and 3.7 µs less per layer in a kernel trace without side streams. End to end AR 30.89 → 30.96 tok/s (+0.2%), 30.12 → 30.18 at d4096; MTP 70.22 → 70.42 (+0.3%), 59.05 → 59.21 at d4096. The gain is smaller than the trace's because the weight prefetch already overlapped part of those gaps. |
+| Routed gate/up, by-expert quantization and down projection in one launch | Rejected: 158 µs against 153 µs for the three launches (standalone, cold weights, byte-identical). The grid needs 256-thread blocks, and block barriers over eight waves cost more than the two launch gaps. Counting per wave instead: 167 µs. Waiting down waves reading their rows ahead: 166 µs. |
+| Prefetch the routed down rows on the prefetch stream once the router has chosen | Rejected: AR 15.8, 21.4, 28.6, 30.85 and 30.54 tok/s with 1, 2, 8, 24 and 64 blocks against 30.97 without. |
+| Dependent launches on two alternating streams, ordered by in-kernel counters instead of stream order | Rejected: the counters cost 1.9 µs per pair of launches and hide 2.6 µs of gaps. |
+| Four rows per wave in the gated Q4_K expert kernel; reading 16 blocks ahead inside it | Rejected: 94.5 µs unchanged; 101 µs. With its weights cached the kernel takes 27 µs, so it waits on DRAM. |
+
+The routed expert kernels take 95 and 64 µs in Gated DeltaNet layers and 85
+and 60 µs in attention layers: the recurrence's 3.1 MB of written state leaves
+the 32 MiB cache about 30 MB of weight streaming later, during the experts.
+
+A third pass on `9d6341fa`, `gufo bench -p 128 -n 256 -r 1` in fresh
+processes, alternating pairs. Greedy hashes at depth 0, 4,096 and 32,768
+and the 208 matched-token logit rows after 406- and 3,198-token prompts stay
+byte-identical.
+
+| Experiment | Outcome |
+| --- | --- |
+| Non-temporal stores of the Gated DeltaNet state, its rollback snapshot and the restored state | **Retained**: the lines leave the cache while the recurrence writes them (32.9 instead of 27.7 µs, with read bandwidth to spare) rather than as dirty evictions during the experts, which drop from 94.3/63.5 to 87.7/61.8 µs (85/60 in attention layers). AR 30.97 → 31.10 tok/s, MTP 70.49 → 70.65. Non-temporal state loads: no change. |
+| One-row HC down tiles with four iterations of loads in flight | **Retained** for one row: AR +0.4%, invisible in a trace without the weight prefetch, so the gain is on rows already in the cache. Fast-math had compiled the down sum to `fma(dw * dot, dx, sum)` in one accumulator; the deeper unroll split it into two (different output), so the product, FMA and a register barrier are now written out. Two to eight rows keep two iterations: four cost MTP 0.1%. |
+| `mul_mat_vec_q8_ahead` for one-row dense GEMVs (five iterations ahead at K 2560, four at K 6144) | **Retained**: AR +0.3%; the output head 2.98 → 2.90 ms per token, `ssm_out`/`attn_out` faster with their prefetched rows. Eight and ten steps, or twelve at K 6144: no better. |
+| One launch for a sparse decode pass's indexer (`IndexerDecodeFusedKernel`): key and query projections, raw-key store, query norm and RoPE, block pooling | **Retained**: six launches become one per attention layer past 2,048 tokens. AR 30.45 → 30.54 at d4096, 30.33 → 30.43 at d32768; MTP 59.40 → 59.55 at d4096. |
+| Read-ahead variant of the two-to-eight-row dense GEMV | Rejected: not exact (MTP output changed), and slower. |
+| Five or ten steps ahead in the K 2560 F16/BF16 `SmallGemmRow` (router, alpha/beta) | Rejected: within noise. |
+| Pricing a lone greedy request's MTP cycles with the small-head curve | Rejected: no change at depth 0 or 4,096; the confidence gate, not the cost cap, ends these chains. The cost audit's full-head mode drafts through the 248K-row Q8 head (3.9 ms per proposal) while production greedy drafts through the Q4_K prefix (1.52 ms per proposal in a trace). |
+
+A fourth pass on `54d24f1f`, same commands. Greedy hashes and the 208
+matched-token logit rows after 406- and 3,198-token prompts stay
+byte-identical.
+
+| Experiment | Outcome |
+| --- | --- |
+| Idle blocks of the fused decode mixer load the first 1 MiB of the next projection (the attention or recurrence input projection after the attention mixer, the router after the FFN mixer) once the down tiles are done | **Retained**: AR 31.20 → 31.39 tok/s; MTP unchanged. In a trace the router drops from 19.2 to 14.1 µs and the input projections by 3.4 µs, while the mixer grows 3.5 µs. 512 KiB, 2 MiB and starting at three quarters of the down tiles measured the same; 3 MiB slower. |
+| Fork the shared expert before the router instead of after it | Rejected: AR unchanged, MTP 70.6 → 68.3–70.6. |
+| The router's projection blocks load the shared expert's first gate/up rows during the top-k | Rejected: AR 30.6 and 27.1 tok/s against 31.4. |
+| Mixer units taken before the down tiles, their up rows loaded first or after the combine | Rejected: 41.2 and 42.8 µs against 40.6 (one row, cold weights). At 157 VGPRs only 80 of the 120 blocks are resident, so 44 units start when the down tiles end; but a barrier or fence after a block issues its up loads waits for them, which stalls the down tiles. |
+| Late units' up rows touched into the cache by the early units; `amdgpu_waves_per_eu(12)` (120 VGPRs, spills); eight up rows in registers (still 142 VGPRs) | Rejected: 44.3 and 53.5 µs; no residency change. |
+| Down weights loaded before the combine finishes, double-buffered | Rejected: 40.8 µs against 40.6. |
+| Draft vocabulary prefix of 65,536 or 49,152 rows | Rejected: MTP 70.6 → 70.2 and 69.0 tok/s, 59.5 → 57.8 at d4096; the lost acceptance outweighs the cheaper head. |
+| Entropy coding of the Q8_0 weights | Not tried: the codes carry 7.45–7.65 bits each, at most 8% of the dense bytes. |
+
+A fifth pass on `4a1db4b3`, same commands, three alternating pairs at depth
+0 and one at depth. Greedy hashes at depth 0, 4,096 and 32,768 and the 208
+matched-token logit rows after 406- and 3,198-token prompts stay
+byte-identical.
+
+| Experiment | Outcome |
+| --- | --- |
+| The MoE epilogue as the first phase of the next layer's fused mixer (`HcFusedMix::moe_out`): blocks take `MoeEpilogueKernel`'s (token, 256-element) items, and the combine waits for them | **Retained**: one main-stream launch fewer per layer for one to eight rows. AR 31.35–31.38 → 31.53–31.56 tok/s (+0.5%), 30.65 → 30.80 at d4096, 30.59 → 30.67 at d32768; MTP 70.50–70.55 → 70.58–70.60, 59.55 → 59.63 at d4096. Computing the epilogue inside the combine items instead (ten elements per thread, ten slot reads each) took the mixer to 256 VGPRs with spills (AR 23.6 tok/s); five elements at a time, 184 VGPRs. |
+| The Gated DeltaNet recurrence publishes its raw rows before its state stores | **Retained** with the above: the epilogue no longer waits for the 3.1 MB state drain. AR +0.2%, MTP +0.1% alone (one pair each). Holding the first row's rollback snapshot in registers until then as well: MTP neutral. |
+| `quantize_q8_1_by_expert` as leading blocks of the routed down launch, the projection blocks waiting on a counter | Rejected: exact, but AR 31.56 → 31.24 and MTP 70.61 → 70.50. 1,290 blocks spinning on one counter and an exit atomic each cost more than the launch gap. |
+| The router projection and top-k as the FFN mixer's last phases, each row loaded whole before waiting for the mix units | Rejected: exact; AR 31.52 → 31.54/31.57, MTP 70.75 → 69.89. The separate launch with its first 1 MiB warmed by idle mixer blocks is as fast for one row and faster for verification rows. |
+
+A trace at d32768 puts the sparse chain at 113 µs per attention layer on 13
+launches against 43 µs on 6 below 2,048 tokens; the indexer fusion removes
+five of the launches. MTP host gaps at cycle boundaries take 0.6% of MTP time
+and `RestoreGdnLayersKernel` 1.0% (19 restores per 128 tokens, 1.03 ms each).
+
 ## Decode prefetch and depth tuning (November 27, 2026)
 
 Main `f0733481`, ROCm 10.1, UD-Q4_K_XL, autoregressive, `gufo bench -p 2048 -n 64 -d 0,16384`.

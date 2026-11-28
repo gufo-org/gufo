@@ -170,6 +170,13 @@ constexpr std::size_t kArenaRowBytesBound = std::size_t{1} << 20;
 constexpr std::size_t kPrefetchOutputBytes = std::size_t{12} << 20;
 constexpr std::size_t kPrefetchMixerBytes = std::size_t{4} << 20;
 constexpr std::uint32_t kPrefetchBlocks = 16;
+/// Head of the next projection that a fused decode mixer's idle blocks load
+/// into the cache once its down tiles are done (HcFusedMix::next).
+/// 512 KiB and 2 MiB measured the same, 3 MiB slower.
+constexpr std::size_t kMixNextBytes = std::size_t{1} << 20;
+/// Most routed slots HcMixQ8Fused sums as the MoE epilogue (kFusedMoeSlots).
+constexpr std::uint32_t kFusedMoeEpilogueSlots = 16;
+std::size_t WeightBytes(const DeviceTensor& w);
 
 /// Memory a wide pass needs beyond its scratch set: its own K/V, indexer
 /// and checkpoint pages.
@@ -1134,6 +1141,11 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   s.ctx_q8_1 = q8_1(c.AttentionQDim());
   e->hc_fused_state_ =
       Alloc<std::uint8_t>(a, HcMixQ8FusedStateBytes(), error_msg);
+  e->gdn_fused_state_ = Alloc<std::uint8_t>(a, GdnFusedStateBytes(), error_msg);
+  e->router_fused_state_ =
+      Alloc<std::uint8_t>(a, RouterFusedStateBytes(), error_msg);
+  e->indexer_fused_state_ =
+      Alloc<std::uint8_t>(a, IndexerFusedStateBytes(), error_msg);
   e->mask_words_ = c.SparseMaskWords(e->context_capacity_);
   // Keep score/selection traffic near the device cache size. Captured
   // verification still needs all its rows at the maximum context.
@@ -2649,6 +2661,11 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
                        const float* inject_w, const DeviceMixer* next) const {
   const Config& c = config();
   inject_fused_ = nullptr;
+  const bool moe_vec = std::exchange(moe_vec_pending_, false);
+  const bool fuse_next = next != nullptr && gamma != nullptr &&
+                         !MatrixRows(n_tokens) && FusedMixer(*next, n_tokens);
+  if (moe_vec && !fuse_next)
+    PendingMoeEpilogue(n_tokens);
   // Wide batches hand the next mixer an F16 norm for its epilogue and the
   // same norm quantized into the tiled Q8 layout for its W8A8 down
   // projection: half the bytes for the combine and the epilogue, and no
@@ -2708,10 +2725,10 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
   }
   // A decode batch's next mixer quantizes xn for its down projection: the
   // combine writes those rows as well, or joins that mixer's single launch.
-  if (next != nullptr && gamma != nullptr && FusedMixer(*next, n_tokens)) {
-    pending_combine_ = {next,         res,        gamma,
-                        s_.block_out, s_.inject,  inject_parts_,
-                        s_.xn,        s_.xn_q8_1, n_tokens};
+  if (fuse_next) {
+    pending_combine_ = {next,      res,           gamma, s_.block_out,
+                        s_.inject, inject_parts_, s_.xn, s_.xn_q8_1,
+                        n_tokens,  moe_vec};
     xn_q8_ready_ = {s_.xn, s_.xn_q8_1, n_tokens, c.HcDim()};
     return;
   }
@@ -2741,7 +2758,7 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
         !half_only && !no_f32) {
       // The combine, both projections, SiLU and the epilogue in one launch,
       // with the outputs and producer-written Q8_1 rows of the kernels below.
-      const HcFusedMix mix{
+      HcFusedMix mix{
           m.down.data,
           m.up.data,
           p.res,
@@ -2764,6 +2781,20 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
           c.hc_low_rank,
           c.rms_eps,
           1.0F / static_cast<float>(c.hc_count)};
+      if (mix_next_ != nullptr && !mix_next_->empty()) {
+        mix.next = mix_next_->data;
+        mix.next_bytes =
+            std::min(kMixNextBytes, WeightBytes(*mix_next_)) / 16 * 16;
+      }
+      if (p.moe) {
+        mix.moe_out = s_.down_e;
+        mix.moe_weights = s_.weights;
+        mix.moe_shared = s_.shexp_out;
+        mix.moe_gate = s_.router + c.num_experts;
+        mix.moe_gate_stride = c.num_experts + 1;
+        mix.moe_k = c.num_experts_used;
+        mix.moe_block_out = s_.block_out;
+      }
       if (!HcMixQ8Fused(hc_fused_state_, mix, n_tokens, stream_)) {
         AssignError(error_msg, "fused HC mixer failed");
         return false;
@@ -2777,6 +2808,8 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
              Dense(m.inject, s_.xn, inject, n_tokens, error_msg);
     }
     // Another mixer follows after all: run the combine Combine left.
+    if (p.moe)
+      PendingMoeEpilogue(p.n);
     HcCombineQ8_1(p.res, p.block_out, p.inject, p.inject_parts, p.gamma, p.xn,
                   p.xn_q8, p.n, c.hidden_size, c.hc_count, c.rms_eps, stream_);
   }
@@ -3199,9 +3232,19 @@ bool Executor::DefaultLinearAttention(const DeviceLayer& l,
   if (project_output)
     Prefetch(n_tokens, &l.hc_ffn.down, kPrefetchMixerBytes, &l.ssm_out,
              kPrefetchOutputBytes);
-  if (!projections_ready &&
-      !Dense(l.ssm_alpha_beta, x, s_.alpha_beta, n_tokens, error_msg)) {
-    return false;
+  // GatedDeltaNet runs a decode pass's alpha/beta projection itself, inside
+  // its fused launch where it has one.
+  GdnAlphaBeta alpha_beta;
+  if (!projections_ready) {
+    const auto& w = l.ssm_alpha_beta;
+    if (w.format_state == nullptr && !MatrixRows(n_tokens) &&
+        w.rows == 2 * c.ssm_num_v_heads &&
+        (w.type == GgmlType::kF32 || w.type == GgmlType::kF16 ||
+         w.type == GgmlType::kBF16)) {
+      alpha_beta = {w.data, SmallType(w.type), x, s_.alpha_beta, w.cols};
+    } else if (!Dense(w, x, s_.alpha_beta, n_tokens, error_msg)) {
+      return false;
+    }
   }
   // Keep the same activation precision across prefill chunk boundaries.
   // The F16 epilogue reuses the F32 output allocation. Switching this
@@ -3223,17 +3266,18 @@ bool Executor::DefaultLinearAttention(const DeviceLayer& l,
                         c.ssm_head_dim == 128 &&
                         l.ssm_out.type == GgmlType::kQ8_0 &&
                         l.ssm_out.cols == value_dim && UnpaddedQ8(value_dim);
-  if (!GatedDeltaNet(qkv, qkv_stride, z, z_stride, s_.alpha_beta,
-                     l.ssm_conv1d.f32(), l.ssm_a.f32(), l.ssm_dt.f32(),
-                     l.ssm_norm.f32(), s.conv_state, s_.conv_scratch, s_.qn,
-                     s_.kn, s_.gdn_raw, s.state, s_.gdn_out,
-                     tiled && !half_output ? s_.x_q8t : nullptr,
-                     speculative ? s.state_snapshots : RollbackRows{},
-                     speculative ? s.conv_snapshots : RollbackRows{}, n_tokens,
-                     c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim,
-                     c.ssm_conv_kernel, MatrixRows(n_tokens) && !speculative,
-                     convolved, c.rms_eps, stream_, out_half, checkpoint,
-                     half_stride, out_q8_1 ? s_.gdn_q8_1 : nullptr, z_ready)) {
+  if (!GatedDeltaNet(
+          qkv, qkv_stride, z, z_stride, s_.alpha_beta, l.ssm_conv1d.f32(),
+          l.ssm_a.f32(), l.ssm_dt.f32(), l.ssm_norm.f32(), s.conv_state,
+          s_.conv_scratch, s_.qn, s_.kn, s_.gdn_raw, s.state, s_.gdn_out,
+          tiled && !half_output ? s_.x_q8t : nullptr,
+          speculative ? s.state_snapshots : RollbackRows{},
+          speculative ? s.conv_snapshots : RollbackRows{}, n_tokens,
+          c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim,
+          c.ssm_conv_kernel, MatrixRows(n_tokens) && !speculative, convolved,
+          c.rms_eps, stream_, out_half, checkpoint, half_stride,
+          out_q8_1 ? s_.gdn_q8_1 : nullptr, z_ready,
+          n_tokens <= kVecBatch ? gdn_fused_state_ : nullptr, alpha_beta)) {
     AssignError(error_msg, "DeltaNet launch failed");
     return false;
   }
@@ -3375,9 +3419,49 @@ bool Executor::DefaultAttention(
     StoreKv(s_.v, s.v_cache, n_tokens, kv_row, pos, stream_);
   }
 
+  // A sparse decode pass runs its whole indexer in one launch (see
+  // IndexerDecodeFusedKernel); other passes take the separate launches.
+  const auto small = [](const DeviceTensor& w) {
+    return w.format_state == nullptr &&
+           (w.type == GgmlType::kF32 || w.type == GgmlType::kF16 ||
+            w.type == GgmlType::kBF16);
+  };
+  const bool indexed =
+      sparse && s.index_k != nullptr && !projections_ready &&
+      !MatrixRows(n_tokens) && small(l.indexer_k) && small(l.indexer_q) &&
+      l.indexer_k.type == l.indexer_q.type &&
+      l.indexer_k.rows == c.indexer_head_dim &&
+      l.indexer_q.rows == c.indexer_heads * c.indexer_head_dim &&
+      l.indexer_k.cols == l.indexer_q.cols &&
+      IndexerDecodeFused({.wk = l.indexer_k.data,
+                          .wq = l.indexer_q.data,
+                          .type = SmallType(l.indexer_k.type),
+                          .x = x,
+                          .k = l.indexer_k.cols,
+                          .ik = s_.ik,
+                          .iq = s_.iq,
+                          .ring = s.index_k,
+                          .q_gamma = l.indexer_q_norm.f32(),
+                          .k_gamma = l.indexer_k_norm.f32(),
+                          .blocks = s.block_k,
+                          .first_block = first_block,
+                          .start_pos = pos,
+                          .n_tokens = n_tokens,
+                          .heads = c.indexer_heads,
+                          .dim = c.indexer_head_dim,
+                          .ratio = c.compress_ratio,
+                          .rotary_dim = c.rotary_dim,
+                          .theta = c.rope_theta,
+                          .eps = c.rms_eps,
+                          .capacity = index_capacity,
+                          .pool_blocks = pool_grid,
+                          .rope = s.rope,
+                          .yarn = yarn_,
+                          .state = indexer_fused_state_},
+                         stream_);
   // Raw keys survive only until pooling. The ring holds the initial
   // pre-budget backlog and a batch, independently for trunk and predictor.
-  if (s.index_k != nullptr) {
+  if (s.index_k != nullptr && !indexed) {
     if (!(projections_ready
               ? DenseBatch(l.indexer_k, x, s_.ik, n_tokens, error_msg)
               : Dense(l.indexer_k, x, s_.ik, n_tokens, error_msg))) {
@@ -3388,18 +3472,20 @@ bool Executor::DefaultAttention(
   }
   const std::uint32_t* mask = nullptr;
   if (sparse) {
-    if (!Dense(l.indexer_q, x, s_.iq, n_tokens, error_msg)) {
-      return false;
+    if (!indexed) {
+      if (!Dense(l.indexer_q, x, s_.iq, n_tokens, error_msg)) {
+        return false;
+      }
+      RmsNormRows(s_.iq, l.indexer_q_norm.f32(), s_.iq,
+                  n_tokens * c.indexer_heads, c.indexer_head_dim, 1, c.rms_eps,
+                  stream_);
+      Rope(s_.iq, n_tokens, c.indexer_heads, c.indexer_head_dim, c.rotary_dim,
+           pos, c.rope_theta, stream_, s.rope, yarn_);
+      PoolIndexerBlocks(s.index_k, l.indexer_k_norm.f32(), s.block_k,
+                        first_block, pos, n_tokens, pool_grid, c.compress_ratio,
+                        c.indexer_head_dim, c.rotary_dim, c.rope_theta,
+                        c.rms_eps, index_capacity, stream_, s.rope, yarn_);
     }
-    RmsNormRows(s_.iq, l.indexer_q_norm.f32(), s_.iq,
-                n_tokens * c.indexer_heads, c.indexer_head_dim, 1, c.rms_eps,
-                stream_);
-    Rope(s_.iq, n_tokens, c.indexer_heads, c.indexer_head_dim, c.rotary_dim,
-         pos, c.rope_theta, stream_, s.rope, yarn_);
-    PoolIndexerBlocks(s.index_k, l.indexer_k_norm.f32(), s.block_k, first_block,
-                      pos, n_tokens, pool_grid, c.compress_ratio,
-                      c.indexer_head_dim, c.rotary_dim, c.rope_theta, c.rms_eps,
-                      index_capacity, stream_, s.rope, yarn_);
     // Align score rows to full cache lines. The selector still considers
     // only complete causal blocks, so padding cannot change the ranking.
     // Wide prefill is never captured: compact score rows to the populated
@@ -3522,11 +3608,22 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   const Config& c = config();
   const std::uint32_t used = c.num_experts_used;
   // Router logits and the shared-expert gate come out of one GEMM.
-  if (!Dense(l.router, x, s_.router, n_tokens, error_msg)) {
-    return false;
+  // A decode pass projects and selects in one launch (see RouterFusedKernel).
+  const bool fused =
+      l.router.format_state == nullptr && !MatrixRows(n_tokens) &&
+      l.router.rows == c.num_experts + 1 &&
+      (l.router.type == GgmlType::kF32 || l.router.type == GgmlType::kF16 ||
+       l.router.type == GgmlType::kBF16) &&
+      RouterFused(l.router.data, SmallType(l.router.type), x, s_.router, s_.ids,
+                  s_.weights, n_tokens, l.router.rows, l.router.cols,
+                  c.num_experts, used, router_fused_state_, stream_);
+  if (!fused) {
+    if (!Dense(l.router, x, s_.router, n_tokens, error_msg)) {
+      return false;
+    }
+    RouterTopK(s_.router, c.num_experts + 1, s_.ids, s_.weights, n_tokens,
+               c.num_experts, used, stream_);
   }
-  RouterTopK(s_.router, c.num_experts + 1, s_.ids, s_.weights, n_tokens,
-             c.num_experts, used, stream_);
   if (ExpertMatrixRows(n_tokens)) {
     ExpertCounts(s_.ids, s_.expert_counts, n_tokens, c.num_experts, used,
                  stream_);
@@ -3889,10 +3986,22 @@ void Executor::MoeEpilogueRows(float* out, std::uint32_t n_tokens,
     MoeEpilogueVec4(s_.down_e, s_.weights, s_.shexp_out,
                     s_.router + c.num_experts, c.num_experts + 1, out, n_tokens,
                     used, c.hidden_size, stream_);
+  } else if (moe_defer_ok_ && out == s_.block_out &&
+             used <= kFusedMoeEpilogueSlots) {
+    // The combine that follows computes it inside the next fused mixer
+    // (Combine), or launches it there.
+    moe_vec_pending_ = true;
   } else {
     MoeEpilogue(s_.down_e, s_.weights, s_.shexp_out, s_.router + c.num_experts,
                 c.num_experts + 1, out, n_tokens, used, c.hidden_size, stream_);
   }
+}
+
+void Executor::PendingMoeEpilogue(std::uint32_t n_tokens) const {
+  const Config& c = config();
+  MoeEpilogue(s_.down_e, s_.weights, s_.shexp_out, s_.router + c.num_experts,
+              c.num_experts + 1, s_.block_out, n_tokens, c.num_experts_used,
+              c.hidden_size, stream_);
 }
 
 bool Executor::KeepHiddenRow(Session& session, std::uint32_t row,
@@ -4483,10 +4592,12 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                            l.linear && DenseF16Route(l.ssm_in, n) &&
                            l.ssm_alpha_beta.type == GgmlType::kF16 &&
                            l.ssm_alpha_beta.cols == l.ssm_in.cols;
-    if (!HcMix(l.hc_attn, s_.res, normed, s_.mixed, s_.inject, n, error_msg,
-               half_only)) {
+    mix_next_ = l.linear ? &l.ssm_in : &l.attn_qkv;
+    const bool mixed_ok = HcMix(l.hc_attn, s_.res, normed, s_.mixed, s_.inject,
+                                n, error_msg, half_only);
+    mix_next_ = nullptr;
+    if (!mixed_ok)
       return false;
-    }
     // The last target layer's query outputs have no later cache consumer.
     // Preserve all K/V/indexer rows and the final query's original tile.
     const bool last_attention = WidePrefill(n) && !session.mtp_enabled_ &&
@@ -4539,10 +4650,22 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                           l.shexp_up.type == GgmlType::kQ8_0;
       Combine(s_.res, l.hc_ffn.norm.f32(), rows, InjectWeights(l.hc_ffn),
               &l.hc_ffn);
-      if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, rows, error_msg,
-                 false, no_f32) ||
-          !Moe(l, s_.mixed, s_.block_out, rows, error_msg))
+      mix_next_ = &l.router;
+      const bool mixed_ok = HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject,
+                                  rows, error_msg, false, no_f32);
+      mix_next_ = nullptr;
+      // A decode pass's MoE epilogue runs in the next layer's fused mixer
+      // when the combine below joins it.
+      moe_defer_ok_ = !prefill_phase && next_norm != nullptr &&
+                      il + 1 < end_layer &&
+                      FusedMixer(layers[il + 1].hc_attn, rows);
+      const bool moe_ok =
+          mixed_ok && Moe(l, s_.mixed, s_.block_out, rows, error_msg);
+      moe_defer_ok_ = false;
+      if (!moe_ok) {
+        moe_vec_pending_ = false;
         return false;
+      }
       // The next layer's attention mixer follows the MoE epilogue.
       if (il + 1 < end_layer)
         Prefetch(rows, &layers[il + 1].hc_attn.down, kPrefetchMixerBytes);

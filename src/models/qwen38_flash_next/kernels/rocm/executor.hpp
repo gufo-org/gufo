@@ -809,6 +809,8 @@ private:
   /// to the following combine when `out` is s_.block_out.
   void MoeEpilogueRows(float* out, std::uint32_t n_tokens,
                        bool half_down) const;
+  /// The F32 epilogue MoeEpilogueRows left to the combine, into s_.block_out.
+  void PendingMoeEpilogue(std::uint32_t n_tokens) const;
   /// Whether MoeExperts takes the routed F16 WMMA route, whose epilogue the
   /// following combine absorbs (see Moe).
   bool WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const;
@@ -922,6 +924,8 @@ private:
   hipEvent_t side_start_{nullptr};
   hipEvent_t side_done_{nullptr};
   mutable bool side_pending_{false};  ///< side_done_ not yet waited on
+  /// The weights the kernel after the next fused decode mixer reads.
+  mutable const DeviceTensor* mix_next_{nullptr};
   /// Decode weight prefetch (Prefetch): a read-only side stream that warms
   /// the last-level cache with the weights a later kernel of the pass reads,
   /// while short latency-bound kernels leave DRAM idle.
@@ -1183,6 +1187,11 @@ private:
   bool wide_mixer_{false};
   /// Set by Moe when its epilogue is left for the combine that follows.
   mutable bool moe_pending_{false};
+  /// Set around a decode pass's Moe whose combine joins the next fused
+  /// mixer (see ForwardBody): its F32 epilogue may then run in that launch.
+  mutable bool moe_defer_ok_{false};
+  /// Set by MoeEpilogueRows when it left the F32 epilogue to Combine.
+  mutable bool moe_vec_pending_{false};
   /// Set before an attention-side combine whose FFN combine fuses the MoE
   /// epilogue: that combine may then leave its residual update to the next
   /// one (res_deferred_), which reads s_.block_out and s_.hc_defer_w.
@@ -1230,6 +1239,9 @@ private:
     float* xn{nullptr};
     void* xn_q8{nullptr};
     std::uint32_t n{0};
+    /// block_out is the MoE epilogue's, still to be computed from its slot
+    /// rows (see MoeEpilogueRows).
+    bool moe{false};
   };
   mutable PendingCombine pending_combine_;
   mutable std::vector<std::uint32_t> hook_layers_;
@@ -1241,7 +1253,10 @@ private:
   /// The next chunk's n-gram prefetch waits for this pass's first yield.
   mutable bool prefetch_deferred_{false};
   bool RunLayerHook(Session& session, std::string* error_msg) const;
-  void* hc_fused_state_{nullptr};  ///< HcMixQ8Fused's counters (zeroed)
+  void* hc_fused_state_{nullptr};       ///< HcMixQ8Fused's counters (zeroed)
+  void* gdn_fused_state_{nullptr};      ///< GatedDeltaNet's fused-pass counters
+  void* router_fused_state_{nullptr};   ///< RouterFused's counters
+  void* indexer_fused_state_{nullptr};  ///< IndexerDecodeFused's counters
 };
 
 }  // namespace gufo::models::qwen38_flash_next::rocm
