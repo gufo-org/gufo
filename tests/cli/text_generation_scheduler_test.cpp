@@ -216,6 +216,7 @@ struct FakeControl {
   std::optional<TextRunnerToken> block_advance_label;
   std::optional<TextRunnerToken> block_prefill_label;
   std::optional<TextRunnerToken> throw_advance_label;
+  std::optional<TextRunnerToken> throw_held_text_label;
   std::atomic<bool> device_usable{true};
   std::atomic<std::size_t> device_probes{0};
   std::atomic<std::size_t> idle_probes{0};
@@ -677,8 +678,10 @@ public:
   }
 
   [[nodiscard]] std::string HeldText(
-      const TextRunnerState&,
+      const TextRunnerState& state,
       std::optional<TextRunnerToken> unadvanced) const override {
+    if (control_->throw_held_text_label == RequireFakeState(state).label)
+      throw std::runtime_error("injected held text failure");
     if (control_->held_text.empty())
       return {};
     return control_->held_text + (unadvanced ? "*" : "");
@@ -1408,6 +1411,29 @@ void TestBatchFailureIsolation() {
     Expect(result.tokens == ExpectedTokens(2, 12),
            "a failing batch member must not fail or corrupt a healthy peer");
   }
+}
+
+void TestBatchCompletionFailureIsolation() {
+  auto control = std::make_shared<FakeControl>();
+  control->supports_batched_advance = true;
+  control->block_prefill_label = 1;
+  control->throw_held_text_label = 1;
+  auto scheduler = MakeScheduler(control, 2);
+  auto failed = scheduler->Submit({1}, 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto healthy = scheduler->Submit({2}, 4, 0.0F);
+  control->ReleasePrefill();
+  bool reported = false;
+  try {
+    (void)failed.Wait();
+  } catch (const std::runtime_error& error) {
+    reported = std::string_view(error.what()) == "injected held text failure";
+  }
+  Expect(reported, "a batch reports its own completion error");
+  const auto result = healthy.Wait();
+  Expect(result.tokens == ExpectedTokens(2, 4) &&
+             result.execution_plan == "batched-w2",
+         "a batch peer finishes after another lane's completion error");
 }
 
 void TestBatchDeviceLossFailsSuccessfulPeers() {
@@ -4602,6 +4628,7 @@ int main() {
   TestModelOwnedBatchMetrics();
   TestRequestLatencyMetrics();
   TestBatchFailureIsolation();
+  TestBatchCompletionFailureIsolation();
   TestBatchDeviceLossFailsSuccessfulPeers();
   TestMultiResidentPrefillUsesBoundedWorkUnits();
   TestArrivalDoesNotWaitForAnotherLongChunk();
