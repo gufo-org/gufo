@@ -176,6 +176,13 @@ public:
   static std::shared_ptr<const JsonConstraint> WithTools(
       std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,
       bool required, bool parallel, const ToolSyntax& syntax);
+  // Free text that never writes the call marker: a request that allows no
+  // calls after earlier ones, where a model that still reaches for a tool must
+  // answer in text instead of returning raw call markup as content.
+  static std::shared_ptr<const JsonConstraint> WithoutTools(
+      ToolFormat format = ToolFormat::kJson);
+  static std::shared_ptr<const JsonConstraint> WithoutTools(
+      const ToolSyntax& syntax);
 
   [[nodiscard]] State Start() const;
   [[nodiscard]] State Advance(const State& state, unsigned char byte) const;
@@ -190,7 +197,8 @@ private:
   friend struct TokenConstraint;
   static std::shared_ptr<const JsonConstraint> BuildTools(
       std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,
-      bool required, bool parallel, const ToolSyntax* syntax);
+      bool required, bool parallel, const ToolSyntax* syntax,
+      bool forbid_calls = false);
   State CanonicalMaskState(const State& state, std::size_t token_bytes) const;
   State Expand(State state) const;
   // Whether `state` is still in the WithReasoning phase, or its opener.

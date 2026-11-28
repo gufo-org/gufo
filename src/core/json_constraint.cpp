@@ -2498,20 +2498,38 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
                     &syntax);
 }
 
+std::shared_ptr<const JsonConstraint> JsonConstraint::WithoutTools(
+    ToolFormat format) {
+  return BuildTools(nullptr, {}, false, false,
+                    format == ToolFormat::kJson ? nullptr : &Syntax(format),
+                    /*forbid_calls=*/true);
+}
+
+std::shared_ptr<const JsonConstraint> JsonConstraint::WithoutTools(
+    const ToolSyntax& syntax) {
+  if (syntax.open.empty())
+    Invalid("a tool syntax needs an open literal");
+  return BuildTools(nullptr, {}, false, false, &syntax, /*forbid_calls=*/true);
+}
+
 // Without a syntax, calls use the JSON envelope a non-native model is
 // instructed to write.
 std::shared_ptr<const JsonConstraint> JsonConstraint::BuildTools(
     std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,
-    bool required, bool parallel, const ToolSyntax* syntax) {
-  if (tools.empty())
+    bool required, bool parallel, const ToolSyntax* syntax, bool forbid_calls) {
+  if (tools.empty() && !forbid_calls)
     return answer;
   using Key =
       std::tuple<std::shared_ptr<const JsonConstraint>, std::vector<Tool>, bool,
-                 bool, std::optional<ToolSyntax>>;
+                 bool, std::optional<ToolSyntax>, bool>;
   static std::mutex mutex;
   static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
-  const Key key{answer, tools, required, parallel,
-                syntax ? std::optional<ToolSyntax>(*syntax) : std::nullopt};
+  const Key key{answer,
+                tools,
+                required,
+                parallel,
+                syntax ? std::optional<ToolSyntax>(*syntax) : std::nullopt,
+                forbid_calls};
   {
     const std::lock_guard lock(mutex);
     if (const auto found = cache.find(key); found != cache.end())
@@ -2615,7 +2633,17 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::BuildTools(
     }
     return base;
   };
-  const auto prose = plain_answer ? text(calls) : UINT32_MAX;
+  const auto prose = plain_answer && !forbid_calls ? text(calls) : UINT32_MAX;
+  if (forbid_calls) {
+    // Text whose marker automaton never completes the marker.
+    grammar->root_ = text(UINT32_MAX);
+    const std::lock_guard lock(mutex);
+    if (const auto found = cache.find(key); found != cache.end())
+      return found->second;
+    if (cache.size() >= 16)
+      cache.erase(cache.begin());
+    return cache.emplace(key, std::move(grammar)).first->second;
+  }
   // As in llama.cpp's DeepSeek V4 and Qwen3-Coder parsers, calls end the
   // output: parallel calls share one DeepSeek block, Qwen calls may follow
   // each other, and no text may follow them. Text after a call is where

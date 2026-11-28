@@ -65,7 +65,19 @@ std::optional<ChatRequest> ConstrainChatRequest(
     *tool_format = selected.format;
   if (tool_dialect)
     *tool_dialect = dialect_id;
-  if (!request.response_format &&
+  // A request that allows no calls (no tools, or tool_choice "none") after
+  // earlier calls keeps the prompt but bans the call marker: a model primed by
+  // the history still reaches for a tool, and must answer in text instead
+  // (#1232; Open WebUI ends tool loops with tools [] and tool_choice "none").
+  // Without calls in the history the marker stays ordinary text (#373).
+  const bool forbid_calls =
+      !request.response_format &&
+      (request.tools.empty() ||
+       request.tool_choice == ChatRequest::ToolChoice::kNone) &&
+      std::ranges::any_of(request.messages, [](const auto& message) {
+        return !message.tool_calls.empty();
+      });
+  if (!request.response_format && !forbid_calls &&
       (request.tools.empty() ||
        request.tool_choice == ChatRequest::ToolChoice::kNone))
     return std::nullopt;
@@ -73,6 +85,14 @@ std::optional<ChatRequest> ConstrainChatRequest(
   auto instruction = request.response_format ? request.response_format->prompt()
                                              : std::string();
   auto grammar = request.response_format;
+  if (forbid_calls) {
+    const auto native_syntax = runner.ToolGrammarSyntax(request);
+    grammar =
+        native_syntax ? sampling::JsonConstraint::WithoutTools(*native_syntax)
+        : selected.format
+            ? sampling::JsonConstraint::WithoutTools(*selected.format)
+            : sampling::JsonConstraint::WithoutTools(*selected.dialect->syntax);
+  }
   if (!request.tools.empty() &&
       request.tool_choice != ChatRequest::ToolChoice::kNone) {
     std::vector<sampling::JsonConstraint::Tool> tools;

@@ -175,6 +175,32 @@ def check_disabled_tool_markers(client, model, checks, chat_result):
                 assert details["cached_tokens"] > 0, result
 
 
+# A request that allows no calls after earlier ones answers in text: Open WebUI
+# ends a tool loop with tools [] and tool_choice "none", and a model primed by
+# the history otherwise writes the next call as raw markup (#1232). The grammar
+# bans the dialect's call marker, so this holds for any model.
+def check_no_calls_after_history(client, model, checks, chat_result, deepseek=False):
+    marker = "<｜DSML｜tool_calls>" if deepseek else "<tool_call>"
+    function = {"name": "get_weather", "description": "Get the weather for a city",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                               "required": ["city"]}}
+    messages = [
+        {"role": "user", "content": "What's the weather in Paris and in Rome?"},
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "error: weather service unavailable"}]
+    for declared in (False, True):
+        request = dict(model=model, temperature=0, extra_body={"seed": 41}, messages=messages,
+                       reasoning_effort="none", max_completion_tokens=200, tool_choice="none",
+                       tools=[{"type": "function", "function": function}] if declared else [])
+        result = chat_result(client, request, True)
+        name = f"no_calls_after_history_{declared}"
+        checks[name] = result
+        print(f"CHECK {name}", file=sys.stderr, flush=True)
+        assert marker not in result["text"] and not result["tools"], result
+
+
 # The client's envelope is framing under every dialect the server admits, and a
 # closing tag with no head above it is a fragment of that markup: the turn whose
 # call parsed may not hand the client the halves the parser already consumed.
@@ -861,6 +887,7 @@ def check_tool_reasoning(client, model, checks, chat_result, sampling_preset=Non
         assert not result["text"] and not result["tools"] and result["finish"] == "stop", result
     check_disabled_tool_markers(client, model, checks, chat_result)
     deepseek = sampling_preset == "deepseek4"
+    check_no_calls_after_history(client, model, checks, chat_result, deepseek)
     check_envelope_closer_framing(client, model, checks, chat_result, deepseek)
     check_tail_lookalike_content(client, model, checks, chat_result)
     check_unfinished_lookalike(client, model, checks, chat_result)

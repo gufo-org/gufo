@@ -672,6 +672,85 @@ void TestConstrainedTopKMatchesMaskedRow() {
   Expect(compared > 300 && compact > 50, "fuzz covered both paths");
 }
 
+// Greedy sampling under a grammar equals the unconstrained greedy argmax of
+// the masked row (same penalties, lowest token ID on ties), including rows
+// long enough for skipped blocks and grammars that mask only a few tokens.
+void TestConstrainedGreedyMatchesMaskedRow() {
+  std::uint64_t rng = 0x9E3779B97F4A7C15ULL;
+  const auto next = [&] {
+    rng ^= rng << 13;
+    rng ^= rng >> 7;
+    rng ^= rng << 17;
+    return rng;
+  };
+  const std::vector<std::string> fragments{
+      "{",     "}", "\"x\"",       ":",          "1", "true",
+      ",",     " ", "a",           "prose",      "<", "tool",
+      "_call", ">", "<tool_call>", "<tool_call", "\n"};
+  std::size_t compared = 0, penalized = 0;
+  for (int trial = 0; trial < 120; ++trial) {
+    const std::size_t vocab =
+        trial % 10 == 0 ? 150000 + next() % 2000 : 64 + next() % 6000;
+    std::vector<std::string> pieces(vocab);
+    for (std::size_t i = 0; i + 1 < vocab; ++i)
+      pieces[i] = fragments[next() % fragments.size()];
+    auto binding = std::make_shared<TokenConstraint>();
+    binding->grammar =
+        trial % 2 == 0
+            ? JsonConstraint::WithoutTools(JsonConstraint::ToolFormat::kQwen)
+            : JsonConstraint::Object();
+    binding->vocabulary =
+        std::make_shared<ConstraintVocabulary>(vocab, [&](std::uint32_t i) {
+          return ConstraintVocabulary::Piece{pieces[i], i + 1 == vocab};
+        });
+    SamplingConfig plain;
+    if (next() % 3 != 0)
+      plain.presence_penalty = static_cast<float>(next() % 41) / 10.0F - 2.0F;
+    if (next() % 2)
+      plain.frequency_penalty = static_cast<float>(next() % 41) / 10.0F - 2.0F;
+    if (next() % 3 == 0)
+      plain.repeat_penalty = 1.0F + static_cast<float>(next() % 5) / 10.0F;
+    auto config = plain;
+    config.constraint = binding;
+    std::vector<TokenId> prompt(next() % 200);
+    for (auto& token : prompt)
+      token = static_cast<TokenId>(next() % vocab);
+    SamplerState sampler(config, prompt), reference(plain, prompt);
+    for (int step = 0; step < 4; ++step) {
+      std::vector<float> logits(vocab);
+      const bool ties = next() % 2;
+      for (auto& v : logits)
+        v = ties ? static_cast<float>(next() % 16) / 4.0F - 2.0F
+                 : static_cast<float>(
+                       static_cast<double>(next() % 100000) / 10000.0 - 5.0);
+      if (next() % 2)  // the best raw logit is often a masked token
+        for (TokenId t = 0; t < vocab; ++t)
+          if (!sampler.AllowsToken(t))
+            logits[t] = 50.0F;
+      std::vector<float> masked(logits);
+      bool any = false;
+      for (TokenId t = 0; t < vocab; ++t) {
+        if (!sampler.AllowsToken(t))
+          masked[t] = -std::numeric_limits<float>::infinity();
+        else
+          any = true;
+      }
+      if (!any || sampler.ForcedToken())
+        break;
+      const TokenId expected = reference.Sample(masked);
+      const TokenId token = sampler.Sample(logits);
+      Expect(token == expected,
+             "constrained greedy differs from the masked argmax");
+      ++compared;
+      penalized += !sampler.penalties().empty();
+      sampler.Accept(token);
+      reference.Accept(token);
+    }
+  }
+  std::cout << "constrained greedy: " << compared << " rows\n";
+  Expect(compared > 200 && penalized > 100, "constrained greedy not covered");
+}
+
 // Sample() draws the whole-row (temperature and min-p only) case without
 // building the distribution: token and RNG state must equal
 // Distribution(logits).Sample() for every row, including rows with one
@@ -738,6 +817,7 @@ void TestLinearSampleMatchesDistribution() {
 int main() {
   TestLinearSampleMatchesDistribution();
   TestConstrainedTopKMatchesMaskedRow();
+  TestConstrainedGreedyMatchesMaskedRow();
   TestBlockMaximum();
   TestRawLogprobs();
   TestReasoningBudgetForcesTheEnd();
