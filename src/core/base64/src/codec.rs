@@ -1,6 +1,8 @@
 //! Standard base64 (RFC 4648, section 4): the alphabet `A-Z a-z 0-9 + /`
 //! with `=` padding.
 
+use std::mem::MaybeUninit;
+
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Not a digit; `=` included.
@@ -42,15 +44,23 @@ pub fn encoded_len(len: usize) -> Option<usize> {
 
 /// Encodes `bytes` into `out`, which holds exactly `encoded_len` characters.
 pub fn encode(bytes: &[u8], out: &mut [u8]) {
+    encode_into(bytes, out, std::convert::identity);
+}
+
+pub(crate) fn encode_uninit(bytes: &[u8], out: &mut [MaybeUninit<u8>]) {
+    encode_into(bytes, out, MaybeUninit::new);
+}
+
+fn encode_into<T>(bytes: &[u8], out: &mut [T], byte: impl Fn(u8) -> T) {
     let mut quads = out.chunks_exact_mut(4);
     for (group, quad) in bytes.chunks(3).zip(&mut quads) {
         let at = |i: usize| group.get(i).copied().map_or(0, u32::from);
         let word = at(0) << 16 | at(1) << 8 | at(2);
         let digit = |shift: u32| ALPHABET[(word >> shift) as usize & 63];
-        quad[0] = digit(18);
-        quad[1] = digit(12);
-        quad[2] = if group.len() > 1 { digit(6) } else { b'=' };
-        quad[3] = if group.len() > 2 { digit(0) } else { b'=' };
+        quad[0] = byte(digit(18));
+        quad[1] = byte(digit(12));
+        quad[2] = byte(if group.len() > 1 { digit(6) } else { b'=' });
+        quad[3] = byte(if group.len() > 2 { digit(0) } else { b'=' });
     }
 }
 
