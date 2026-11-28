@@ -1135,6 +1135,8 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   e->hc_fused_state_ =
       Alloc<std::uint8_t>(a, HcMixQ8FusedStateBytes(), error_msg);
   e->gdn_fused_state_ = Alloc<std::uint8_t>(a, GdnFusedStateBytes(), error_msg);
+  e->router_fused_state_ =
+      Alloc<std::uint8_t>(a, RouterFusedStateBytes(), error_msg);
   e->mask_words_ = c.SparseMaskWords(e->context_capacity_);
   // Keep score/selection traffic near the device cache size. Captured
   // verification still needs all its rows at the maximum context.
@@ -3200,9 +3202,19 @@ bool Executor::DefaultLinearAttention(const DeviceLayer& l,
   if (project_output)
     Prefetch(n_tokens, &l.hc_ffn.down, kPrefetchMixerBytes, &l.ssm_out,
              kPrefetchOutputBytes);
-  if (!projections_ready &&
-      !Dense(l.ssm_alpha_beta, x, s_.alpha_beta, n_tokens, error_msg)) {
-    return false;
+  // GatedDeltaNet runs a decode pass's alpha/beta projection itself, inside
+  // its fused launch where it has one.
+  GdnAlphaBeta alpha_beta;
+  if (!projections_ready) {
+    const auto& w = l.ssm_alpha_beta;
+    if (w.format_state == nullptr && !MatrixRows(n_tokens) &&
+        w.rows == 2 * c.ssm_num_v_heads &&
+        (w.type == GgmlType::kF32 || w.type == GgmlType::kF16 ||
+         w.type == GgmlType::kBF16)) {
+      alpha_beta = {w.data, SmallType(w.type), x, s_.alpha_beta, w.cols};
+    } else if (!Dense(w, x, s_.alpha_beta, n_tokens, error_msg)) {
+      return false;
+    }
   }
   // Keep the same activation precision across prefill chunk boundaries.
   // The F16 epilogue reuses the F32 output allocation. Switching this
@@ -3224,18 +3236,18 @@ bool Executor::DefaultLinearAttention(const DeviceLayer& l,
                         c.ssm_head_dim == 128 &&
                         l.ssm_out.type == GgmlType::kQ8_0 &&
                         l.ssm_out.cols == value_dim && UnpaddedQ8(value_dim);
-  if (!GatedDeltaNet(qkv, qkv_stride, z, z_stride, s_.alpha_beta,
-                     l.ssm_conv1d.f32(), l.ssm_a.f32(), l.ssm_dt.f32(),
-                     l.ssm_norm.f32(), s.conv_state, s_.conv_scratch, s_.qn,
-                     s_.kn, s_.gdn_raw, s.state, s_.gdn_out,
-                     tiled && !half_output ? s_.x_q8t : nullptr,
-                     speculative ? s.state_snapshots : RollbackRows{},
-                     speculative ? s.conv_snapshots : RollbackRows{}, n_tokens,
-                     c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim,
-                     c.ssm_conv_kernel, MatrixRows(n_tokens) && !speculative,
-                     convolved, c.rms_eps, stream_, out_half, checkpoint,
-                     half_stride, out_q8_1 ? s_.gdn_q8_1 : nullptr, z_ready,
-                     n_tokens <= kVecBatch ? gdn_fused_state_ : nullptr)) {
+  if (!GatedDeltaNet(
+          qkv, qkv_stride, z, z_stride, s_.alpha_beta, l.ssm_conv1d.f32(),
+          l.ssm_a.f32(), l.ssm_dt.f32(), l.ssm_norm.f32(), s.conv_state,
+          s_.conv_scratch, s_.qn, s_.kn, s_.gdn_raw, s.state, s_.gdn_out,
+          tiled && !half_output ? s_.x_q8t : nullptr,
+          speculative ? s.state_snapshots : RollbackRows{},
+          speculative ? s.conv_snapshots : RollbackRows{}, n_tokens,
+          c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim,
+          c.ssm_conv_kernel, MatrixRows(n_tokens) && !speculative, convolved,
+          c.rms_eps, stream_, out_half, checkpoint, half_stride,
+          out_q8_1 ? s_.gdn_q8_1 : nullptr, z_ready,
+          n_tokens <= kVecBatch ? gdn_fused_state_ : nullptr, alpha_beta)) {
     AssignError(error_msg, "DeltaNet launch failed");
     return false;
   }
@@ -3524,11 +3536,22 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   const Config& c = config();
   const std::uint32_t used = c.num_experts_used;
   // Router logits and the shared-expert gate come out of one GEMM.
-  if (!Dense(l.router, x, s_.router, n_tokens, error_msg)) {
-    return false;
+  // A decode pass projects and selects in one launch (see RouterFusedKernel).
+  const bool fused =
+      l.router.format_state == nullptr && !MatrixRows(n_tokens) &&
+      l.router.rows == c.num_experts + 1 &&
+      (l.router.type == GgmlType::kF32 || l.router.type == GgmlType::kF16 ||
+       l.router.type == GgmlType::kBF16) &&
+      RouterFused(l.router.data, SmallType(l.router.type), x, s_.router, s_.ids,
+                  s_.weights, n_tokens, l.router.rows, l.router.cols,
+                  c.num_experts, used, router_fused_state_, stream_);
+  if (!fused) {
+    if (!Dense(l.router, x, s_.router, n_tokens, error_msg)) {
+      return false;
+    }
+    RouterTopK(s_.router, c.num_experts + 1, s_.ids, s_.weights, n_tokens,
+               c.num_experts, used, stream_);
   }
-  RouterTopK(s_.router, c.num_experts + 1, s_.ids, s_.weights, n_tokens,
-             c.num_experts, used, stream_);
   if (ExpertMatrixRows(n_tokens)) {
     ExpertCounts(s_.ids, s_.expert_counts, n_tokens, c.num_experts, used,
                  stream_);

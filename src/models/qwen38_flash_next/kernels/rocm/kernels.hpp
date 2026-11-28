@@ -429,6 +429,17 @@ struct GdnCheckpoint {
   std::uint32_t count = 0;
 };
 
+/// The alpha/beta projection GatedDeltaNet runs before its recurrence:
+/// out[t][2 * v_heads] = SmallGemm(w [2 * v_heads][k], x [t][k]). `out` is the
+/// `alpha_beta` argument. A fused decode pass computes it in the same launch.
+struct GdnAlphaBeta {
+  const void* w{nullptr};
+  WeightType type{WeightType::kF32};
+  const float* x{nullptr};
+  float* out{nullptr};
+  std::uint32_t k{0};
+};
+
 /// Gated DeltaNet over a chunk of tokens for one layer. Runs the causal
 /// conv (with rolling `conv_state`, [kernel-1][channels]) and the recurrence
 /// on `state` ([v_heads][d][d]) sequentially over tokens, parallel over heads
@@ -466,7 +477,8 @@ bool GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    bool convolved, float eps, hipStream_t stream,
                    __half* out_half = nullptr, GdnCheckpoint checkpoint = {},
                    std::uint32_t out_half_stride = 0, void* out_q8_1 = nullptr,
-                   hipEvent_t z_ready = nullptr, void* fused_state = nullptr);
+                   hipEvent_t z_ready = nullptr, void* fused_state = nullptr,
+                   GdnAlphaBeta projection = {});
 
 /// Bytes of the zeroed device state GatedDeltaNet's `fused_state` points to.
 /// With it, a pass of one to eight rows that keeps its convolution history
@@ -651,6 +663,17 @@ void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,
 void RouterTopK(const float* logits, std::uint32_t stride, std::int32_t* ids,
                 float* weights, std::uint32_t n_tokens, std::uint32_t n_experts,
                 std::uint32_t k, hipStream_t stream);
+
+/// Bytes of the zeroed device state RouterFused takes.
+std::size_t RouterFusedStateBytes();
+
+/// SmallGemm of the router rows (logits [t][m], rows `m` apart) and RouterTopK
+/// over their first `n_experts` columns in one launch, with the same values.
+/// Returns false without launching for a shape it does not cover.
+bool RouterFused(const void* w, WeightType type, const float* x, float* logits,
+                 std::int32_t* ids, float* weights, std::uint32_t n_tokens,
+                 std::uint32_t m, std::uint32_t k, std::uint32_t n_experts,
+                 std::uint32_t top_k, void* state, hipStream_t stream);
 
 /// out[t][i] = sum_s weights[t][s] * expert_out[t*k + s][i]
 ///           + sigmoid(gate[t * gate_stride]) * shared[t][i].

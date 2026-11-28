@@ -286,10 +286,104 @@ void CheckRouter(int tokens, int experts, int used, int pattern) {
   (void)hipFree(d_ids);
 }
 
+/// A decode pass's router as one launch (RouterFusedKernel) against SmallGemm
+/// and RouterTopK: every logit, id and weight byte, twice on the same counters.
+template<typename Weight>
+void CheckRouterFused(gufo::models::qwen38_flash_next::rocm::WeightType type,
+                      std::uint32_t tokens) {
+  namespace q = gufo::models::qwen38_flash_next::rocm;
+  constexpr std::uint32_t kRows = 513;
+  constexpr std::uint32_t kCols = 2560;
+  constexpr std::uint32_t kExperts = 512;
+  constexpr std::uint32_t kTop = 10;
+  std::uint32_t seed = 0x70C7E400U + tokens;
+  const auto next = [&] {
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    return static_cast<float>(static_cast<int>(seed & 0xFFFFU) - 32768) /
+           32768.0F;
+  };
+  std::vector<Weight> w(std::size_t{kRows} * kCols);
+  for (auto& value : w)
+    value = static_cast<Weight>(0.05F * next());
+  std::vector<float> x(std::size_t{tokens} * kCols);
+  for (auto& value : x)
+    value = 2.0F * next();
+  void* d_w = nullptr;
+  float* d_x = nullptr;
+  float* d_logits[2] = {};
+  float* d_weights[2] = {};
+  std::int32_t* d_ids[2] = {};
+  void* state = nullptr;
+  const std::size_t logit_bytes = std::size_t{tokens} * kRows * sizeof(float);
+  const std::size_t slot_count = std::size_t{tokens} * kTop;
+  CheckHip(hipMalloc(&d_w, w.size() * sizeof(Weight)), "router weights");
+  CheckHip(hipMalloc(&d_x, x.size() * sizeof(float)), "router input");
+  CheckHip(hipMalloc(&state, q::RouterFusedStateBytes()), "router state");
+  CheckHip(hipMemset(state, 0, q::RouterFusedStateBytes()), "router state");
+  for (int route = 0; route < 2; ++route) {
+    CheckHip(hipMalloc(&d_logits[route], logit_bytes), "router logits");
+    CheckHip(hipMalloc(&d_weights[route], slot_count * sizeof(float)),
+             "router weights");
+    CheckHip(hipMalloc(&d_ids[route], slot_count * sizeof(std::int32_t)),
+             "router ids");
+  }
+  CheckHip(hipMemcpy(d_w, w.data(), w.size() * sizeof(Weight),
+                     hipMemcpyHostToDevice),
+           "upload router weights");
+  CheckHip(
+      hipMemcpy(d_x, x.data(), x.size() * sizeof(float), hipMemcpyHostToDevice),
+      "upload router input");
+  q::SmallGemm(d_w, type, d_x, d_logits[0], tokens, kRows, kCols, nullptr);
+  q::RouterTopK(d_logits[0], kRows, d_ids[0], d_weights[0], tokens, kExperts,
+                kTop, nullptr);
+  CheckHip(hipDeviceSynchronize(), "separate router");
+  const auto download = [&](int route) {
+    std::vector<std::uint8_t> bytes(logit_bytes + slot_count * 8);
+    CheckHip(hipMemcpy(bytes.data(), d_logits[route], logit_bytes,
+                       hipMemcpyDeviceToHost),
+             "download logits");
+    CheckHip(hipMemcpy(bytes.data() + logit_bytes, d_weights[route],
+                       slot_count * 4, hipMemcpyDeviceToHost),
+             "download weights");
+    CheckHip(hipMemcpy(bytes.data() + logit_bytes + slot_count * 4,
+                       d_ids[route], slot_count * 4, hipMemcpyDeviceToHost),
+             "download ids");
+    return bytes;
+  };
+  const auto reference = download(0);
+  for (int replay = 0; replay < 2; ++replay) {
+    CheckHip(hipMemset(d_logits[1], 0xFF, logit_bytes), "clear logits");
+    CheckHip(hipMemset(d_ids[1], 0xFF, slot_count * 4), "clear ids");
+    if (!q::RouterFused(d_w, type, d_x, d_logits[1], d_ids[1], d_weights[1],
+                        tokens, kRows, kCols, kExperts, kTop, state, nullptr))
+      throw std::runtime_error("fused router declined a decode shape");
+    CheckHip(hipDeviceSynchronize(), "fused router");
+    if (download(1) != reference)
+      throw std::runtime_error("fused router differs at " +
+                               std::to_string(tokens) + " rows");
+  }
+  for (int route = 0; route < 2; ++route) {
+    (void)hipFree(d_logits[route]);
+    (void)hipFree(d_weights[route]);
+    (void)hipFree(d_ids[route]);
+  }
+  (void)hipFree(state);
+  (void)hipFree(d_x);
+  (void)hipFree(d_w);
+}
+
 }  // namespace
 
 int main() {
   try {
+    for (std::uint32_t tokens = 1; tokens <= 8; ++tokens) {
+      namespace q = gufo::models::qwen38_flash_next::rocm;
+      CheckRouterFused<float>(q::WeightType::kF32, tokens);
+      CheckRouterFused<_Float16>(q::WeightType::kF16, tokens);
+    }
+    std::cout << "Fused router against separate launches: passed\n";
     for (int pattern : {0, 1, 2, 3}) {
       CheckRouter(1, 512, 10, pattern);
       CheckRouter(8, 512, 10, pattern);

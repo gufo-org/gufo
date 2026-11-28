@@ -15,6 +15,22 @@ main/candidate pairs at depth 0 and two at depth. Greedy output hashes and
 | Native AIO for the decode gather (`io_submit` from the scheduling thread, polled) | Rejected: the wait stayed at 0.98 ms. The latency is the drive leaving its idle state, not the reader threads' wake-up. |
 | Reuse `GdnPrefillKernel` for one-row decode | Not exact: it normalizes q and k inside the recurrence, with different rounding from the decode kernels. |
 
+A second pass on `b0c21ca2` (the two changes above), same commands, three
+alternating AR pairs and two MTP pairs at depth 0, one pair at depth. Hashes
+and the 208 logit rows stay byte-identical to main.
+
+| Experiment | Outcome |
+| --- | --- |
+| Router projection and top-k in one launch (`RouterFusedKernel`), alpha/beta projection inside `GdnDecodeFusedKernel` | **Retained**: 802 → 718 launches per token; 3.2 µs and 3.7 µs less per layer in a kernel trace without side streams. End to end AR 30.89 → 30.96 tok/s (+0.2%), 30.12 → 30.18 at d4096; MTP 70.22 → 70.42 (+0.3%), 59.05 → 59.21 at d4096. The gain is smaller than the trace's because the weight prefetch already overlapped part of those gaps. |
+| Routed gate/up, by-expert quantization and down projection in one launch | Rejected: 158 µs against 153 µs for the three launches (standalone, cold weights, byte-identical). The grid needs 256-thread blocks, and block barriers over eight waves cost more than the two launch gaps. Counting per wave instead: 167 µs. Waiting down waves reading their rows ahead: 166 µs. |
+| Prefetch the routed down rows on the prefetch stream once the router has chosen | Rejected: AR 15.8, 21.4, 28.6, 30.85 and 30.54 tok/s with 1, 2, 8, 24 and 64 blocks against 30.97 without. |
+| Dependent launches on two alternating streams, ordered by in-kernel counters instead of stream order | Rejected: the counters cost 1.9 µs per pair of launches and hide 2.6 µs of gaps. |
+| Four rows per wave in the gated Q4_K expert kernel; reading 16 blocks ahead inside it | Rejected: 94.5 µs unchanged; 101 µs. With its weights cached the kernel takes 27 µs, so it waits on DRAM. |
+
+The routed expert kernels take 95 and 64 µs in Gated DeltaNet layers and 85
+and 60 µs in attention layers: the recurrence's 3.1 MB of written state leaves
+the 32 MiB cache about 30 MB of weight streaming later, during the experts.
+
 ## Decode prefetch and depth tuning (November 27, 2026)
 
 Main `f0733481`, ROCm 10.1, UD-Q4_K_XL, autoregressive, `gufo bench -p 2048 -n 64 -d 0,16384`.

@@ -886,11 +886,48 @@ void CheckFusedDecode(std::uint32_t tokens, bool rollback) {
   Upload(&d_norm_w, norm_w);
   HipBuffer<std::uint8_t> fused(q::GdnFusedStateBytes());
   CheckHip(hipMemset(fused.get(), 0, fused.bytes()), "fused state");
+  // Routes 3 to 6 also project alpha/beta inside the launch (F32, then F16
+  // weights): their gates come from SmallGemm for the reference.
+  constexpr std::uint32_t kHidden = 2560;
+  const auto ab_x = MakeValues(std::size_t{tokens} * kHidden, 0xAB0001U, 1.0F);
+  const auto ab_w =
+      MakeValues(std::size_t{2} * kVHeads * kHidden, 0xAB0002U, 0.03F);
+  std::vector<_Float16> ab_w_half(ab_w.size());
+  for (std::size_t i = 0; i < ab_w.size(); ++i)
+    ab_w_half[i] = static_cast<_Float16>(ab_w[i]);
+  HipBuffer<float> d_ab_x(ab_x.size()), d_ab_w(ab_w.size());
+  HipBuffer<_Float16> d_ab_w_half(ab_w.size());
+  HipBuffer<float> d_ab_out(alpha_beta.size());
+  Upload(&d_ab_x, ab_x);
+  Upload(&d_ab_w, ab_w);
+  CheckHip(hipMemcpy(d_ab_w_half.get(), ab_w_half.data(), d_ab_w_half.bytes(),
+                     hipMemcpyHostToDevice),
+           "upload F16 alpha/beta weights");
   std::vector<std::vector<float>> reference;
   std::vector<std::uint8_t> reference_q8;
   // Route 0 is the separate launches; the fused launch runs twice, the
   // second on the counters the first one left.
-  for (int route = 0; route < 3; ++route) {
+  int reference_format = -1;
+  for (int route = 0; route < 7; ++route) {
+    const bool project = route >= 3;
+    const bool half = route >= 5;
+    q::GdnAlphaBeta projection;
+    if (project) {
+      projection = {
+          half ? static_cast<const void*>(d_ab_w_half.get()) : d_ab_w.get(),
+          half ? q::WeightType::kF16 : q::WeightType::kF32, d_ab_x.get(),
+          d_ab_out.get(), kHidden};
+      // A new reference for each weight format, from the separate launches.
+      if (reference_format != static_cast<int>(half)) {
+        reference_format = static_cast<int>(half);
+        q::SmallGemm(projection.w, projection.type, d_ab_x.get(),
+                     d_alpha_beta.get(), tokens, 2 * kVHeads, kHidden, nullptr);
+        CheckHip(hipDeviceSynchronize(), "alpha/beta reference");
+        reference.clear();
+      }
+      CheckHip(hipMemset(d_ab_out.get(), 0xFF, d_ab_out.bytes()),
+               "clear alpha/beta");
+    }
     HipBuffer<float> d_conv_state(conv_count), d_state(state_count);
     HipBuffer<float> d_out(out_count);
     HipBuffer<float> d_scratch(std::size_t{tokens + kKernel} * kChannels);
@@ -913,17 +950,25 @@ void CheckFusedDecode(std::uint32_t tokens, bool rollback) {
       state_snapshots.rows[t] = state_rows.back()->get();
       conv_snapshots.rows[t] = conv_rows.back()->get();
     }
+    // The reference of a projecting route is the fused launch on SmallGemm's
+    // gates; the route itself reads the gates it projects.
+    const bool reference_pass = reference.empty();
     if (!q::GatedDeltaNet(
-            d_qkv.get(), kChannels, d_z.get(), kZ, d_alpha_beta.get(),
+            d_qkv.get(), kChannels, d_z.get(), kZ,
+            project && !reference_pass ? d_ab_out.get() : d_alpha_beta.get(),
             d_conv_w.get(), d_a.get(), d_dt.get(), d_norm_w.get(),
             d_conv_state.get(), d_scratch.get(), d_qn.get(), d_kn.get(),
             d_raw.get(), d_state.get(), d_out.get(), nullptr, state_snapshots,
             conv_snapshots, tokens, kKHeads, kVHeads, kDim, kKernel, false,
             false, kEps, nullptr, nullptr, {}, 0, d_q8.get(), nullptr,
-            route == 0 ? nullptr : fused.get()))
+            route == 0 ? nullptr : fused.get(),
+            project && !reference_pass ? projection : q::GdnAlphaBeta{}))
       throw std::runtime_error("fused GDN decode launch failed");
     CheckHip(hipDeviceSynchronize(), "fused GDN synchronization");
     std::vector<std::vector<float>> results;
+    if (project)
+      results.push_back(Download(reference_pass ? &d_alpha_beta : &d_ab_out,
+                                 alpha_beta.size()));
     results.push_back(Download(&d_out, out_count));
     results.push_back(Download(&d_state, state_count));
     results.push_back(Download(&d_conv_state, conv_count));
@@ -936,9 +981,12 @@ void CheckFusedDecode(std::uint32_t tokens, bool rollback) {
     std::vector<std::uint8_t> q8(q8_bytes);
     CheckHip(hipMemcpy(q8.data(), d_q8.get(), q8_bytes, hipMemcpyDeviceToHost),
              "Q8_1 rows download");
-    if (route == 0) {
+    if (reference_pass) {
       reference = std::move(results);
       reference_q8 = std::move(q8);
+      // Run the projecting route itself next.
+      if (project)
+        --route;
       continue;
     }
     for (std::size_t i = 0; i < results.size(); ++i)

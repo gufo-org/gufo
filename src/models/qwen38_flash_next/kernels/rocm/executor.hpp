@@ -1241,8 +1241,9 @@ private:
   /// The next chunk's n-gram prefetch waits for this pass's first yield.
   mutable bool prefetch_deferred_{false};
   bool RunLayerHook(Session& session, std::string* error_msg) const;
-  void* hc_fused_state_{nullptr};   ///< HcMixQ8Fused's counters (zeroed)
-  void* gdn_fused_state_{nullptr};  ///< GatedDeltaNet's fused-pass counters
+  void* hc_fused_state_{nullptr};      ///< HcMixQ8Fused's counters (zeroed)
+  void* gdn_fused_state_{nullptr};     ///< GatedDeltaNet's fused-pass counters
+  void* router_fused_state_{nullptr};  ///< RouterFused's counters
 };
 
 }  // namespace gufo::models::qwen38_flash_next::rocm
