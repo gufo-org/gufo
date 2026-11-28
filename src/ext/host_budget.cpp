@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <ranges>
 #include <sstream>
 #include <string>
 
@@ -19,8 +20,8 @@ std::uint64_t CgroupAvailableBytes(const std::filesystem::path& root,
   std::uint64_t available = host_available;
   // A cgroup limit can be much smaller than the host's available memory.
   // Walk parents too: a child may say "max" beneath a limited ancestor.
-  std::istringstream membership{std::string(membership_text)};
-  for (std::string line; std::getline(membership, line);) {
+  for (const auto record : membership_text | std::views::split('\n')) {
+    const std::string_view line(record.begin(), record.end());
     if (!line.starts_with("0::/"))
       continue;
     const auto relative = std::filesystem::path(line.substr(4));
@@ -75,9 +76,12 @@ struct MeminfoKiB {
 
 MeminfoKiB ParseMeminfoKiB(std::string_view meminfo) {
   MeminfoKiB result;
-  std::istringstream lines{std::string(meminfo)};
-  for (std::string line; std::getline(lines, line);) {
-    std::istringstream fields(line);
+  for (const auto record : meminfo | std::views::split('\n')) {
+    const std::string_view line(record.begin(), record.end());
+    if (line.find("MemAvailable:") == std::string_view::npos &&
+        line.find("CmaFree:") == std::string_view::npos)
+      continue;
+    std::istringstream fields{std::string(line)};
     std::string key;
     std::uint64_t kib = 0;
     if (!(fields >> key >> kib))
@@ -118,17 +122,18 @@ std::optional<HostMemorySample> MeminfoSample(std::string_view meminfo) {
 }
 
 HostMemorySample SampleHostMemory() {
-  HostMemorySample sample{.available = platform::AvailableMemoryBytes()};
   std::ifstream meminfo("/proc/meminfo");
   std::ostringstream meminfo_text;
   meminfo_text << meminfo.rdbuf();
-  if (const auto parsed = MeminfoSample(meminfo_text.str()))
-    sample = *parsed;
+  const auto parsed = MeminfoSample(meminfo_text.view());
+  HostMemorySample sample =
+      parsed ? *parsed
+             : HostMemorySample{.available = platform::AvailableMemoryBytes()};
   std::ifstream membership("/proc/self/cgroup");
   std::ostringstream membership_text;
   membership_text << membership.rdbuf();
   sample.cgroup_available =
-      CgroupAvailableBytes("/sys/fs/cgroup", membership_text.str(),
+      CgroupAvailableBytes("/sys/fs/cgroup", membership_text.view(),
                            std::numeric_limits<std::uint64_t>::max());
   sample.outstanding = mem::StateLedger::Process().OutstandingBytes();
   return sample;
