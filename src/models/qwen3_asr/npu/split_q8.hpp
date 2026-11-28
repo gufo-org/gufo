@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <thread>
