@@ -25,7 +25,8 @@ typedef enum GufoBase64Status {
 } GufoBase64Status;
 
 /* Encodes len bytes into out_len characters; out_len must be
-   ceil(len / 3) * 4. */
+   ceil(len / 3) * 4. Output may be uninitialized and is completely written
+   on success. */
 GufoBase64Status gufo_base64_encode(const uint8_t* bytes, size_t len,
                                     uint8_t* out, size_t out_len);
 

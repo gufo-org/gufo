@@ -6,6 +6,7 @@ mod codec;
 pub use codec::{Error, decode, decoded_capacity, encode, encoded_len};
 
 use gufo_ffi::guard;
+use std::mem::MaybeUninit;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +38,7 @@ fn status(error: Error) -> GufoBase64Status {
 /// # Safety
 /// `bytes` points to `len` readable bytes, or `len` is 0. `out` points to
 /// `out_len` writable bytes that do not overlap them, or `out_len` is 0.
+/// The output can be uninitialized. On success, every output byte is written.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gufo_base64_encode(
@@ -53,12 +55,13 @@ pub unsafe extern "C" fn gufo_base64_encode(
         let Some(bytes) = (unsafe { gufo_ffi::input(bytes, len) }) else {
             return GufoBase64Status::Internal;
         };
-        // SAFETY: the caller guarantees `out_len` writable bytes apart from
-        // `bytes`.
-        let Some(out) = (unsafe { gufo_ffi::output(out, out_len) }) else {
+        // SAFETY: the caller guarantees writable bytes apart from `bytes`.
+        // MaybeUninit<u8> has the same layout and accepts uninitialized bytes.
+        let Some(out) = (unsafe { gufo_ffi::output(out.cast::<MaybeUninit<u8>>(), out_len) })
+        else {
             return GufoBase64Status::Internal;
         };
-        codec::encode(bytes, out);
+        codec::encode_uninit(bytes, out);
         GufoBase64Status::Ok
     })
 }
