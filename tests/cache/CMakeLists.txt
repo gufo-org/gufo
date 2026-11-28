@@ -126,9 +126,13 @@ if (NOT WIN32)
   add_executable(cache_tiered_test tiered_test.cpp)
   target_link_libraries(cache_tiered_test PRIVATE gufo_cache_fake)
   add_test(NAME cache_tiered_test COMMAND cache_tiered_test)
-  # The token oracle is fsync bound; on its own it overlaps the rest.
+  # The token oracle is fsync bound; on its own it overlaps the rest. It runs
+  # once per store token mode.
   add_test(NAME cache_tiered_oracle_test COMMAND cache_tiered_test oracle)
-  set_tests_properties(cache_tiered_test cache_tiered_oracle_test PROPERTIES
+  add_test(NAME cache_tiered_oracle_separate_test
+    COMMAND cache_tiered_test oracle-separate)
+  set_tests_properties(cache_tiered_test cache_tiered_oracle_test
+    cache_tiered_oracle_separate_test PROPERTIES
     LABELS "cpu;cache" TIMEOUT 30)
 
   add_executable(cache_disk_publication_test disk_publication_test.cpp)

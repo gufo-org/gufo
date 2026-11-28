@@ -12,7 +12,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <new>
+#include <numeric>
+#include <span>
 
 using namespace gufo::cache;
 namespace fs = std::filesystem;
@@ -416,6 +419,7 @@ void ManifestChargedOnce() {
   }
   // The description keeps the retired manifest, and its charge, alive.
   assert(description->Manifest().tokens == m.tokens);
+  assert(description->TokenCount() == m.tokens.size());
   assert(metadata() >= ManifestStorage(m) + sizeof(DiskDescription) + 64);
   description.reset();
   // The last holder releases the shared charge.
@@ -1239,6 +1243,178 @@ void ValidationIndependentOfStoredReferences() {
   }
   assert(full.Snapshot().total_bytes == 0);
 }
+// A checkpoint of `count` tokens whose only payload is its own private state.
+constexpr std::array<std::uint8_t, 16> kTokenState{5, 6, 7};
+DiskManifest TokenManifest(std::uint64_t id, std::size_t count) {
+  DiskManifest m;
+  m.checkpoint = {id};
+  m.lineage = {3};
+  m.compatibility.fill(0x42);
+  m.tokens.resize(count);
+  std::iota(m.tokens.begin(), m.tokens.end(), static_cast<Token>(id * 1000));
+  m.components.push_back(
+      {{{2}, 5, ComponentKind::kPrivateState, 0, 0, kTokenState.size()},
+       {{2}, count},
+       {},
+       {},
+       DiskPayload{Id(100 + id), kTokenState.size(),
+                   DiskChecksum(kTokenState)}});
+  return m;
+}
+// Publishes through host buffers, or streamed with a checksum the store
+// computes and re-encodes into the final manifest.
+void PublishTokens(DiskStore& store, const DiskManifest& m, bool stream) {
+  const auto file = m.components[0].private_state->file;
+  if (!stream) {
+    const std::array<DiskWriteBuffer, 1> buffers{{{true, file, kTokenState}}};
+    store.Publish(Id(m.checkpoint.value), m, buffers);
+    return;
+  }
+  auto streamed = m;
+  streamed.components[0].private_state->checksum = 0;
+  const std::array<DiskWriteSource, 1> sources{
+      {{true, file, kTokenState.size(), [](auto offset, auto destination) {
+          std::copy_n(kTokenState.begin() + offset, destination.size(),
+                      destination.begin());
+        }}}};
+  std::array<std::uint8_t, 4096> staging{};
+  (void)store.PublishStream(Id(m.checkpoint.value), streamed, sources, staging);
+}
+std::vector<std::uint8_t> ManifestFile(const fs::path& root, std::uint64_t id) {
+  std::ifstream f(root / "v2/manifests" / DiskFileName(Id(id)),
+                  std::ios::binary);
+  return {std::istreambuf_iterator<char>(f), {}};
+}
+std::size_t MetadataCharge() {
+  return ledger.Snapshot()
+      .bytes[static_cast<std::size_t>(ResourceCategory::kMetadata)];
+}
+bool SameTokens(std::span<const Token> a, std::span<const Token> b) {
+  return std::ranges::equal(a, b);
+}
+// Separate token storage changes what RAM holds, never what is written: both
+// modes write byte-identical manifests, buffered or streamed, and each reads
+// the other's directory.
+void SeparateTokenStorageRoundTrip() {
+  const auto m = TokenManifest(7, 300);
+  for (const bool stream : {false, true}) {
+    Directory manifest_dir, separate_dir;
+    {
+      DiskStore manifest_store(ledger, manifest_dir.path, UINT64_MAX);
+      DiskStore separate(ledger, separate_dir.path, UINT64_MAX,
+                         DiskTokenStorage::kSeparate);
+      PublishTokens(manifest_store, m, stream);
+      PublishTokens(separate, m, stream);
+      assert(separate.TokenStorage() == DiskTokenStorage::kSeparate);
+      const auto& entry = separate.Entries()[0];
+      assert(entry.Manifest().tokens.empty() && entry.TokenCount() == 300);
+      assert(SameTokens(separate.Tokens({7}), m.tokens));
+      assert(SameTokens(separate.Describe({7})->Tokens(), m.tokens));
+      assert(separate.Open({7})->Manifest().tokens.empty() &&
+             separate.Open({7})->TokenCount() == 300);
+    }
+    const auto bytes = ManifestFile(manifest_dir.path, 7);
+    assert(!bytes.empty() && bytes == ManifestFile(separate_dir.path, 7));
+    assert(DecodeManifest(bytes).tokens == m.tokens);
+    // Each directory reopens in the other mode.
+    {
+      DiskStore separate(ledger, manifest_dir.path, UINT64_MAX,
+                         DiskTokenStorage::kSeparate);
+      assert(separate.Entries()[0].Manifest().tokens.empty());
+      assert(separate.Entries()[0].TokenCount() == 300);
+      assert(SameTokens(separate.Tokens({7}), m.tokens));
+      DiskStore manifest_store(ledger, separate_dir.path, UINT64_MAX);
+      assert(manifest_store.Entries()[0].Manifest().tokens == m.tokens);
+      assert(manifest_store.Entries()[0].TokenCount() == 300);
+      assert(SameTokens(manifest_store.Tokens({7}), m.tokens));
+    }
+    // Recovery hands the tokens off and holds none of them.
+    std::vector<Token> handed;
+    std::uint64_t epoch{};
+    DiskStore recovered(ledger, separate_dir.path, UINT64_MAX,
+                        DiskTokenStorage::kSeparate,
+                        [&](const DurableEntry& entry, auto tokens) {
+                          handed.assign(tokens.begin(), tokens.end());
+                          epoch = entry.Epoch();
+                        });
+    assert(handed == m.tokens && epoch == recovered.Entries()[0].Epoch());
+    assert(recovered.Tokens({7}).empty());
+    assert(recovered.Entries()[0].TokenCount() == 300);
+    assert(recovered.OwnedManifestBytes() ==
+           ManifestStorage(m) - m.tokens.size() * sizeof(Token));
+  }
+  Directory directory;
+  Reject([&] {
+    DiskStore store(ledger, directory.path, UINT64_MAX,
+                    DiskTokenStorage::kManifest,
+                    [](const DurableEntry&, auto) {});
+  });
+}
+// Released tokens leave empty spans and keep their count; release is
+// idempotent, exact in its charge, and a no-op for a kManifest store.
+void ReleasedTokensAreEmptyNotDangling() {
+  Directory directory;
+  const auto m = TokenManifest(7, 1000);
+  {
+    DiskStore store(ledger, directory.path, UINT64_MAX,
+                    DiskTokenStorage::kSeparate);
+    PublishTokens(store, m, false);
+    PublishTokens(store, TokenManifest(8, 10), false);
+    const auto description = store.Describe({7});
+    assert(store.OwnedManifestBytes() ==
+           ManifestStorage(m) + ManifestStorage(TokenManifest(8, 10)));
+    const auto before = MetadataCharge();
+    store.ReleaseTokens({7});
+    assert(MetadataCharge() == before - 1000 * sizeof(Token));
+    assert(store.Tokens({7}).empty() && description->Tokens().empty());
+    assert(description->TokenCount() == 1000 &&
+           store.Entries()[0].TokenCount() == 1000);
+    assert(store.Open({7})->TokenCount() == 1000);
+    store.ReleaseTokens({7});
+    assert(MetadataCharge() == before - 1000 * sizeof(Token));
+    assert(store.OwnedManifestBytes() ==
+           ManifestStorage(m) - 1000 * sizeof(Token) +
+               ManifestStorage(TokenManifest(8, 10)));
+    // The other entry keeps its tokens; retirement drops them.
+    assert(store.Tokens({8}).size() == 10);
+    assert(store.Retire({8}) && store.Tokens({8}).empty());
+    const auto retired = MetadataCharge();
+    store.ReleaseTokens();
+    assert(MetadataCharge() == retired);
+  }
+  DiskStore store(ledger, directory.path, UINT64_MAX);
+  const auto before = MetadataCharge();
+  store.ReleaseTokens({7});
+  store.ReleaseTokens();
+  assert(MetadataCharge() == before && SameTokens(store.Tokens({7}), m.tokens));
+  assert(store.Entries()[0].Manifest().tokens == m.tokens);
+}
+// A publication is in flight until durable: releasing every entry's tokens
+// meanwhile must not empty the manifest it still has to encode.
+void InFlightPublicationKeepsItsTokens() {
+  const auto m = TokenManifest(7, 200);
+  Directory reference_dir, directory;
+  {
+    DiskStore reference(ledger, reference_dir.path, UINT64_MAX);
+    PublishTokens(reference, m, true);
+  }
+  DiskStore store(ledger, directory.path, UINT64_MAX,
+                  DiskTokenStorage::kSeparate);
+  bool released{};
+  store.SetCrashHook([&](DiskPublicationStep step) {
+    if (step == DiskPublicationStep::kDependenciesSynced) {
+      store.ReleaseTokens();
+      store.ReleaseTokens({7});
+      released = true;
+    }
+  });
+  PublishTokens(store, m, true);
+  store.SetCrashHook({});
+  assert(released);
+  assert(ManifestFile(directory.path, 7) ==
+         ManifestFile(reference_dir.path, 7));
+  assert(SameTokens(store.Tokens({7}), m.tokens));
+}
 int main() {
   Format();
   ChecksumReference();
@@ -1260,6 +1436,9 @@ int main() {
   MetadataAdmission();
   ValidationIndependentOfStoredReferences();
   WindowFormat();
+  SeparateTokenStorageRoundTrip();
+  ReleasedTokensAreEmptyNotDangling();
+  InFlightPublicationKeepsItsTokens();
   assert(ledger.Snapshot().total_bytes == 0);
   std::cout << "disk format, ownership and metadata index passed\n";
 }

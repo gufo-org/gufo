@@ -61,6 +61,13 @@ struct DiskManifest {
 namespace detail {
 struct DiskAvailability;
 }
+// Where a store keeps the tokens of the checkpoints it decodes. kManifest
+// keeps them in Manifest().tokens for the entry's lifetime. kSeparate keeps
+// every entry's, description's and snapshot's Manifest().tokens empty from the
+// start: the tokens are held beside the manifest, charged to the ledger
+// separately, until DiskStore::ReleaseTokens, or are handed to the recovery
+// sink at startup and never held. TokenCount() reports them in both modes.
+enum class DiskTokenStorage : std::uint8_t { kManifest, kSeparate };
 class DurableEntry {
 public:
   DurableEntry() = default;
@@ -76,6 +83,7 @@ public:
   [[nodiscard]] bool Durable() const { return durable_; }
   [[nodiscard]] bool PayloadVerified() const { return payload_verified_; }
   [[nodiscard]] std::uint64_t Epoch() const { return epoch_; }
+  [[nodiscard]] std::uint64_t TokenCount() const { return token_count_; }
 
 private:
   friend class DiskStore;
@@ -90,7 +98,19 @@ private:
   bool available_{true};
   std::shared_ptr<detail::DiskAvailability> availability_;
   std::uint64_t epoch_{};
+  // kSeparate only: the tokens until released, and their charge. Moving an
+  // entry moves the buffer, so spans into it survive the entries vector
+  // growing and other entries retiring.
+  std::vector<Token> tokens_;
+  ResourceCharge tokens_metadata_;
+  std::uint64_t token_count_{};
 };
+// Receives each recovered entry's tokens once while a kSeparate store opens,
+// right after its manifest is decoded; the span is valid only during the
+// call, and the store holds none of these tokens afterwards. Entries that
+// recovery rejects later are passed too: keep only what Entries() lists.
+using DiskRecoveredTokens =
+    std::function<void(const DurableEntry&, std::span<const Token>)>;
 struct DiskStartupStats {
   std::uint64_t manifest_bytes_read{};
   std::uint64_t dependency_stats{}, rejected_manifests{};
@@ -152,6 +172,10 @@ class DiskDescription {
 public:
   [[nodiscard]] const DiskManifest& Manifest() const { return *manifest_; }
   [[nodiscard]] std::uint64_t Epoch() const { return epoch_; }
+  [[nodiscard]] std::uint64_t TokenCount() const { return token_count_; }
+  // DiskStore::Tokens for this publication's ID and epoch, with the same
+  // lifetime.
+  [[nodiscard]] std::span<const Token> Tokens() const;
   [[nodiscard]] DiskStore& Store() const { return *store_; }
   [[nodiscard]] DiskReadPin Pin() const;
   // Quarantine survives physical retirement; ordinary eviction does not poison
@@ -167,6 +191,7 @@ private:
   std::shared_ptr<detail::DiskAvailability> availability_;
   DiskStore* store_{};
   std::uint64_t epoch_{};
+  std::uint64_t token_count_{};
 };
 class DiskDependencyError : public std::runtime_error {
 public:
@@ -187,6 +212,7 @@ public:
   DiskSnapshot& operator=(DiskSnapshot&&) = delete;
   DiskSnapshot(const DiskSnapshot&) = delete;
   [[nodiscard]] const DiskManifest& Manifest() const { return *manifest_; }
+  [[nodiscard]] std::uint64_t TokenCount() const { return token_count_; }
 
 private:
   friend class DiskStore;
@@ -195,6 +221,7 @@ private:
   DiskReadPin pin_;
   std::shared_ptr<const DiskManifest> manifest_;
   const void* store_{};
+  std::uint64_t token_count_{};
 };
 #ifdef GUFO_CACHE_TESTING
 enum class DiskPublicationStep {
@@ -228,17 +255,27 @@ struct DiskUseHistory {
   std::uint64_t last_used{}, admitted_bytes{};
   std::optional<std::uint64_t> reused_at;
 };
+// Under kSeparate, a span from Tokens or DiskDescription::Tokens is valid
+// until ReleaseTokens for that checkpoint, its retirement or the store's
+// destruction, whichever comes first; the caller serializes those against its
+// use of the span. Afterwards Tokens returns an empty span, never a dangling
+// one, and TokenCount() is unchanged.
 class DiskStore {
 public:
+  // `recovered` requires kSeparate: recovered entries then hand their tokens
+  // to it instead of holding them.
   DiskStore(ResourceLedger&, const std::filesystem::path& directory,
-            std::uint64_t budget_bytes);
+            std::uint64_t budget_bytes,
+            DiskTokenStorage = DiskTokenStorage::kManifest,
+            const DiskRecoveredTokens& recovered = {});
   ~DiskStore();
   DiskStore(const DiskStore&) = delete;
   DiskStore& operator=(const DiskStore&) = delete;
   DiskStore(DiskStore&&) = delete;
   DiskStore& operator=(DiskStore&&) = delete;
   [[nodiscard]] std::span<const DurableEntry> Entries() const;
-  // Initialized, retained manifest vector storage included in the RAM ledger.
+  // Initialized, retained manifest vector storage included in the RAM ledger,
+  // including tokens a kSeparate store holds beside its manifests.
   // For startup remaining-allocation accounting, not an RSS measurement.
   // Excludes spare capacity, owner/index estimates, temporary validation,
   // payloads and reservations. Use at quiescence with the host observation.
@@ -255,6 +292,18 @@ public:
       const DiskStagingAccess* access = nullptr, std::stop_token stop = {});
   [[nodiscard]] std::optional<DiskSnapshot> Open(CheckpointId) const;
   [[nodiscard]] std::shared_ptr<const DiskDescription> Describe(CheckpointId);
+  [[nodiscard]] DiskTokenStorage TokenStorage() const;
+  // The tokens of the durable publication with this ID (and this epoch when
+  // nonzero): its Manifest().tokens under kManifest, the held tokens under
+  // kSeparate. Empty when missing, retired, in flight or released. A linear
+  // scan of the entries under a short lock, like Describe.
+  [[nodiscard]] std::span<const Token> Tokens(CheckpointId,
+                                              std::uint64_t epoch = 0) const;
+  // kSeparate: free the held tokens of that durable publication, or of every
+  // durable one. Idempotent; an in-flight publication keeps its tokens until
+  // it is durable. A no-op under kManifest.
+  void ReleaseTokens(CheckpointId) noexcept;
+  void ReleaseTokens() noexcept;
   // Optional bounded page-cache hint for an owned dependency. Does not attest
   // bytes or identity; ReadPayload must still validate the actual read.
   void PrefetchPayload(const DiskSnapshot&, bool private_file,

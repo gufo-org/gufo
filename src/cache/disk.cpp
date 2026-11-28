@@ -133,7 +133,8 @@ std::optional<DiskPayload> OptionalPayload(int present,
   return FromCodec(c);
 }
 struct MetadataPlan {
-  std::size_t retained{}, references{};
+  // `retained` includes the token bytes, `tokens` counts them.
+  std::size_t retained{}, references{}, tokens{};
 };
 // The metadata DecodeManifest retains, which reserves exactly these
 // capacities, and the payload references it validates.
@@ -143,7 +144,7 @@ MetadataPlan PlanMetadata(std::span<const std::uint8_t> bytes) {
   auto retained = Add(plan.input_bytes, plan.tokens * sizeof(Token));
   retained = Add(retained, plan.components * sizeof(DiskComponent));
   retained = Add(retained, plan.chunks * sizeof(DiskPayload));
-  return {retained, plan.references};
+  return {retained, plan.references, plan.tokens};
 }
 class Fd {
 public:
@@ -286,7 +287,11 @@ std::uint64_t DiskChecksum(std::span<const std::uint8_t> bytes,
   Check(gufo_cache_checksum(bytes.data(), bytes.size(), crc, &crc));
   return crc;
 }
-std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {
+namespace {
+// Encodes `m` with `tokens` in place of m.tokens, so a store that holds an
+// entry's tokens beside its manifest writes the same bytes.
+std::vector<std::uint8_t> Encode(const DiskManifest& m,
+                                 std::span<const Token> tokens) {
   // Oversized manifests are rejected before their C view is built.
   if (m.components.size() > GUFO_CACHE_MAX_COMPONENTS)
     Invalid();
@@ -332,8 +337,8 @@ std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {
       .rank = m.rank,
       .input = m.input.data(),
       .input_len = m.input.size(),
-      .tokens = m.tokens.data(),
-      .token_count = m.tokens.size(),
+      .tokens = tokens.data(),
+      .token_count = tokens.size(),
       .components = components.data(),
       .component_count = components.size(),
   };
@@ -354,6 +359,10 @@ std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {
       &out);
   Check(status, &out.failure);
   return std::move(out.bytes);
+}
+}  // namespace
+std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {
+  return Encode(m, m.tokens);
 }
 DiskManifest DecodeManifest(std::span<const std::uint8_t> bytes) {
   // Reserves the exact capacities PlanMetadata accounts for.
@@ -454,6 +463,7 @@ struct DiskStore::Impl {
   DiskPublicationStats publication_stats;
   bool recovery_required{};
   std::uint64_t next_epoch{1};
+  DiskTokenStorage token_storage;
   DiskRetireResult Retire(CheckpointId, std::uint64_t);
   mutable std::timed_mutex mutex;
   mutable std::mutex index_mutex;
@@ -522,7 +532,8 @@ struct DiskStore::Impl {
   std::future<void> reclamation;
 
   Impl(ResourceLedger& l, const std::filesystem::path& path,
-       std::uint64_t budget, ResourceReservation reservation)
+       std::uint64_t budget, ResourceReservation reservation,
+       DiskTokenStorage storage, const DiskRecoveredTokens& recovered)
       : ledger(&l),
         metadata(reservation.Convert()),
         root(OpenRoot(path)),
@@ -533,7 +544,8 @@ struct DiskStore::Impl {
         private_files(DirectoryAt(version, "private")),
         temporary(DirectoryAt(version, "tmp")),
         uses(DirectoryAt(version, "uses")),
-        budget_bytes(budget) {
+        budget_bytes(budget),
+        token_storage(storage) {
     // Persist the layout, including a newly created root and ancestors, before
     // any checkpoint can rely on these directory entries.
     SyncDirectoryFd(version);
@@ -571,14 +583,23 @@ struct DiskStore::Impl {
       auto id = ParseName(name);
       if (!id)
         return;
+      DurableEntry entry;
       try {
-        auto entry = ReadManifest(name, st);
-        entry.file_ = *id;
-        entry.epoch_ = next_epoch++;
-        entries.push_back(std::move(entry));
+        entry = ReadManifest(name, st);
       } catch (const std::invalid_argument&) {
         ++stats.rejected_manifests;
+        return;
       }
+      entry.file_ = *id;
+      entry.epoch_ = next_epoch++;
+      if (recovered) {
+        // Hand the tokens off now, so recovery holds one manifest's tokens
+        // at a time rather than every checkpoint's. The sink's failures are
+        // its own, never a rejected manifest.
+        recovered(entry, entry.tokens_);
+        ReleaseTokens(entry);
+      }
+      entries.push_back(std::move(entry));
     });
     ValidateReferences();
     // Rejected manifests still own on-disk claims until durably reclaimed. A
@@ -602,6 +623,40 @@ struct DiskStore::Impl {
       auto charge = std::move(node.mapped().charge);
       node = {};
     }
+  }
+  // The charge a decoded manifest of `plan` keeps beside its tokens, and the
+  // tokens' own, which kSeparate holds apart: retained = manifest + tokens.
+  std::pair<ResourceReservation, ResourceReservation> ReserveRetained(
+      const MetadataPlan& plan) {
+    const auto tokens = token_storage == DiskTokenStorage::kSeparate
+                            ? Multiply(plan.tokens, sizeof(Token))
+                            : 0;
+    auto manifest =
+        ledger->Reserve(ResourceCategory::kMetadata, plan.retained - tokens);
+    auto separate = tokens
+                        ? ledger->Reserve(ResourceCategory::kMetadata, tokens)
+                        : ResourceReservation{};
+    return {std::move(manifest), std::move(separate)};
+  }
+  // Records the token count and, under kSeparate, moves the decoded tokens
+  // out of the not yet shared manifest, under their own charge.
+  void SeparateTokens(DurableEntry& entry, ResourceReservation& tokens) {
+    entry.token_count_ = entry.manifest_->tokens.size();
+    if (token_storage != DiskTokenStorage::kSeparate)
+      return;
+    entry.tokens_ = std::move(entry.manifest_->tokens);
+    if (tokens)
+      entry.tokens_metadata_ = tokens.Convert();
+  }
+  std::span<const Token> Held(const DurableEntry& entry) const {
+    return token_storage == DiskTokenStorage::kSeparate
+               ? std::span<const Token>(entry.tokens_)
+               : std::span<const Token>(entry.manifest_->tokens);
+  }
+  // Frees the vector before its charge.
+  static void ReleaseTokens(DurableEntry& entry) noexcept {
+    std::vector<Token>().swap(entry.tokens_);
+    entry.tokens_metadata_ = {};
   }
   void ValidateReferences() {
     if (entries.empty())
@@ -1112,9 +1167,10 @@ struct DiskStore::Impl {
                         Add(Multiply(estimate, 2), Multiply(references, 256)));
     auto bytes = EncodeManifest(m);
     auto plan = PlanMetadata(bytes);
-    auto retained = ledger->Reserve(ResourceCategory::kMetadata, plan.retained);
+    auto [retained, tokens] = ReserveRetained(plan);
     DurableEntry candidate;
     candidate.manifest_ = std::make_shared<DiskManifest>(DecodeManifest(bytes));
+    SeparateTokens(candidate, tokens);
     candidate.file_ = file;
     candidate.durable_ = false;
     candidate.availability_ = NewAvailability();
@@ -1401,7 +1457,8 @@ struct DiskStore::Impl {
       if (!sources.empty()) {
         // Free the provisional encoding before allocating the final one.
         std::vector<std::uint8_t>().swap(bytes);
-        bytes = EncodeManifest(*entries.back().manifest_);
+        // ReleaseTokens skips the candidate until it is durable.
+        bytes = Encode(*entries.back().manifest_, Held(entries.back()));
       }
       auto fd = Create(name);
       WriteFile(fd.Get(), bytes);
@@ -1493,7 +1550,7 @@ struct DiskStore::Impl {
       stats.manifest_bytes_read += n;
     }
     const auto plan = PlanMetadata(bytes);
-    auto retained = ledger->Reserve(ResourceCategory::kMetadata, plan.retained);
+    auto [retained, tokens] = ReserveRetained(plan);
     auto validation =
         plan.references
             ? ledger->Reserve(ResourceCategory::kMetadata,
@@ -1518,6 +1575,7 @@ struct DiskStore::Impl {
         std::make_shared<const ResourceCharge>(pin_reservation.Convert());
     if (retained)
       entry.metadata_ = retained.Convert();
+    SeparateTokens(entry, tokens);
     return entry;
   }
 };
@@ -1525,7 +1583,11 @@ DurableEntry& DurableEntry::operator=(DurableEntry&& other) noexcept {
   if (this != &other) {
     // Free the replaced vectors while their previous accounting is live.
     auto previous = std::move(metadata_);
+    auto previous_tokens = std::move(tokens_metadata_);
     manifest_ = std::move(other.manifest_);
+    tokens_ = std::move(other.tokens_);
+    tokens_metadata_ = std::move(other.tokens_metadata_);
+    token_count_ = other.token_count_;
     file_ = other.file_;
     durable_ = other.durable_;
     payload_verified_ = other.payload_verified_;
@@ -1537,12 +1599,26 @@ DurableEntry& DurableEntry::operator=(DurableEntry&& other) noexcept {
   }
   return *this;
 }
+// Spans into an entry's tokens rely on moves keeping the buffer, including
+// when the entries vector grows.
+static_assert(std::is_nothrow_move_constructible_v<DurableEntry>);
+namespace {
+DiskTokenStorage CheckRecoveredTokens(DiskTokenStorage storage,
+                                      const DiskRecoveredTokens& recovered) {
+  if (recovered && storage != DiskTokenStorage::kSeparate)
+    throw std::invalid_argument(
+        "recovered disk tokens require separate token storage");
+  return storage;
+}
+}  // namespace
 DiskStore::DiskStore(ResourceLedger& ledger,
                      const std::filesystem::path& directory,
-                     std::uint64_t budget)
+                     std::uint64_t budget, DiskTokenStorage storage,
+                     const DiskRecoveredTokens& recovered)
     : impl_(std::make_unique<Impl>(
           ledger, directory, budget,
-          ledger.Reserve(ResourceCategory::kMetadata, sizeof(Impl)))) {}
+          ledger.Reserve(ResourceCategory::kMetadata, sizeof(Impl)),
+          CheckRecoveredTokens(storage, recovered), recovered)) {}
 DiskStore::~DiskStore() = default;
 std::span<const DurableEntry> DiskStore::Entries() const {
   return impl_->entries;
@@ -1563,6 +1639,12 @@ std::size_t DiskStore::OwnedManifestBytes() const {
     // A converted estimate elsewhere in the ledger proves no such backing.
     if (!entry.metadata_ || bytes > entry.metadata_.Info().bytes)
       throw std::logic_error("manifest storage exceeds retained charge");
+    if (!entry.tokens_.empty()) {
+      const auto held = Multiply(entry.tokens_.size(), sizeof(Token));
+      if (!entry.tokens_metadata_ || held > entry.tokens_metadata_.Info().bytes)
+        throw std::logic_error("held tokens exceed their retained charge");
+      bytes = Add(bytes, held);
+    }
     if (bytes > std::numeric_limits<std::size_t>::max() - owned)
       throw std::overflow_error("owned manifest storage overflows");
     owned += bytes;
@@ -1630,6 +1712,7 @@ std::optional<DiskSnapshot> DiskStore::Open(CheckpointId id) const {
     snapshot.pin_.token_ = entry.pin_;
     snapshot.pin_.epoch_ = entry.epoch_;
     snapshot.store_ = impl_.get();
+    snapshot.token_count_ = entry.token_count_;
     return snapshot;
   }
   return {};
@@ -1956,11 +2039,40 @@ std::shared_ptr<const DiskDescription> DiskStore::Describe(CheckpointId id) {
     description->manifest_ = entry.manifest_;
     description->store_ = this;
     description->epoch_ = entry.epoch_;
+    description->token_count_ = entry.token_count_;
     description->availability_ = entry.availability_;
     description->metadata_ = reservation.Convert();
     return description;
   }
   return {};
+}
+DiskTokenStorage DiskStore::TokenStorage() const {
+  return impl_->token_storage;
+}
+std::span<const Token> DiskStore::Tokens(CheckpointId id,
+                                         std::uint64_t epoch) const {
+  std::lock_guard guard(impl_->index_mutex);
+  for (const auto& entry : impl_->entries)
+    if (entry.durable_ && entry.manifest_->checkpoint == id &&
+        (!epoch || epoch == entry.epoch_))
+      return impl_->Held(entry);
+  return {};
+}
+void DiskStore::ReleaseTokens(CheckpointId id) noexcept {
+  std::lock_guard guard(impl_->index_mutex);
+  // An in-flight publication still encodes its tokens into its manifest.
+  for (auto& entry : impl_->entries)
+    if (entry.durable_ && entry.manifest_->checkpoint == id)
+      Impl::ReleaseTokens(entry);
+}
+void DiskStore::ReleaseTokens() noexcept {
+  std::lock_guard guard(impl_->index_mutex);
+  for (auto& entry : impl_->entries)
+    if (entry.durable_)
+      Impl::ReleaseTokens(entry);
+}
+std::span<const Token> DiskDescription::Tokens() const {
+  return store_->Tokens(manifest_->checkpoint, epoch_);
 }
 bool DiskDescription::Quarantined() const {
   return availability_->quarantined.load();

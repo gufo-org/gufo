@@ -46,12 +46,13 @@ struct TieredFixture {
   ExecutionHistory history{ExecutionHistory::Cold(
       ledger, adapter.Components(), adapter.CompatibilityIdentity())};
   CompatibilityDigest digest{};
-  DiskStore disk{ledger, directory.path, 1 << 24};
+  DiskStore disk;
   PrefixIndex index{ledger};
   DiskCatalog catalog{ledger, disk, index};
   StreamedStore streams{ledger, disk, 16, TieredStaging,
                         [] { return std::make_unique<FakeStream>(true); }};
-  TieredFixture() {
+  explicit TieredFixture(DiskTokenStorage storage = DiskTokenStorage::kManifest)
+      : disk(ledger, directory.path, 1 << 24, storage) {
     digest[0] = 42;
     index.Register(adapter.CompatibilityIdentity(), adapter.Components(),
                    digest);

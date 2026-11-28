@@ -492,12 +492,24 @@ other GPU servers share the machine, such as an image or speech server, set an
 explicit `--cache-ram-bytes` that leaves room for their peak use; starting
 them first only accounts for what they hold at that moment.
 The RAM cache budget includes the cache's own metadata, including disk-tier
-metadata: the in-RAM manifests (with their token lists), catalog records and
-dependency maps of every disk checkpoint, including checkpoints recovered at
-startup. The **disk metadata allowance** bounds that disk share at
+metadata: the in-RAM manifests, catalog records, dependency maps and token
+tries of every disk checkpoint, including checkpoints recovered at startup.
+The **disk metadata allowance** bounds that disk share at
 `max(budget / 32, 16 MiB)`, so a 1 GiB budget allows 32 MiB and a 16 GiB
-budget 512 MiB. Each disk checkpoint keeps its whole token list, so one long
-conversation's checkpoints grow quadratically with its length. When a
+budget 512 MiB.
+Disk checkpoint tokens live only in **token tries**, compressed prefix trees
+that store a shared prefix once: the catalog keeps one per compatibility
+digest, and the prefix index keeps one for the loaded model. The serving
+store's manifests hold no tokens (`DiskTokenStorage::kSeparate`): recovery
+hands each manifest's tokens to the catalog's trie as it decodes it, and a
+new publication's store copy is released once it is tracked and indexed. A
+conversation's tokens therefore grow linearly with its checkpoints, and the
+allowance counts the trie bytes. The catalog keeps its own trie rather than
+ranking on the index's, because it tracks digests the index has not loaded,
+tracks publications before they are indexed and keeps records the index drops;
+the loaded digest's tokens are held twice, both linear and charged. What still
+grows with each checkpoint is its chunk references: manifest chunks and the
+dependency map. Manifests on disk keep their full token lists. When a
 publication would take the tracked metadata over the allowance, the catalog
 first retires other disk checkpoints in the same order as eviction for bytes,
 until the publication fits with an eighth of the allowance to spare, and at
@@ -507,15 +519,19 @@ same mark. The allowance leaves the rest of the roughly 10% metadata room for
 RAM-tier metadata, index nodes and in-flight persistence, which it does not
 count: up to 16 captures held for the persistence queue (twice its depth),
 each holding its tokens in its capture and in its write job, or 32 MiB at
-262144 tokens. One ranking compares token lists pairwise and runs under the
-serving lock, so a pass ranks once and retires along that order; the spare
+262144 tokens. One ranking compares every pair of records under the serving
+lock, each pair without comparing tokens, from a depth-first numbering of
+the tries, so a pass ranks once and retires along that order; the spare
 eighth lets several later publications fit without ranking. As of November
-2026 on Strix Halo, one conversation of 500 turns of 500 tokens under the
-64 MiB allowance of a 2 GiB budget ranks on 29 of its publications, each
-pass taking up to 0.52 s, and stays within 0.3% of the allowance
-(`cache_tiered_bench`). Disk checkpoints
-restored within one `--cache-disk-bytes` turnover rank above every unrestored
-one, so a new or RAM-served conversation's disk checkpoints retire first.
+2026 on Strix Halo (`cache_tiered_bench`), 299 recovered checkpoints of one
+conversation of 500-token turns hold 1.0 MB of metadata instead of 90 MB, one
+eviction among them takes 6 ms instead of 0.69 s, and one conversation of 500
+such turns stays under 5% of the 32 MiB allowance of a 1 GiB budget, so it
+never ranks.
+Disk checkpoints restored within one `--cache-disk-bytes` turnover rank above
+every unrestored one, so a new or RAM-served conversation's disk checkpoints
+retire first; the allowance now binds only on chunk-reference growth, so this
+matters only for many or very long conversations.
 With the RAM cache off there is no allowance; see above.
 The RAM cache budget excludes weights, execution states, request token
 metadata, disk staging and Qwen's separate CPU image-preprocessing cache (up to 128 MiB

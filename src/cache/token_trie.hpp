@@ -63,8 +63,10 @@ public:
   // The node where `tokens` ends below `root`, creating and splitting nodes
   // as needed. All allocation/admission happens before changing an existing
   // edge.
+  // `charged`, when given, follows the node bytes this adds.
   static Node* Place(ResourceLedger& ledger, Node& root,
-                     std::span<const Token> tokens) {
+                     std::span<const Token> tokens,
+                     std::size_t* charged = nullptr) {
     auto* node = &root;
     while (!tokens.empty()) {
       auto child = node->children.find(tokens.front());
@@ -72,6 +74,8 @@ public:
         auto fresh = MakeNode(ledger, tokens, node);
         auto* result = fresh.get();
         node->children.emplace(tokens.front(), std::move(fresh));
+        if (charged)
+          *charged += result->bytes;
         return result;
       }
       auto& old = child->second;
@@ -95,11 +99,15 @@ public:
       split->children.emplace(old_key, nullptr);
       Node* result = split.get();  // NOLINT(misc-const-correctness): returned
                                    // for record insertion
+      std::size_t added = split->bytes + narrowed_bytes;
       if (common < tokens.size()) {
         auto fresh = MakeNode(ledger, tokens.subspan(common), split.get());
         result = fresh.get();
+        added += fresh->bytes;
         split->children.emplace(tokens[common], std::move(fresh));
       }
+      if (charged)
+        *charged = *charged + added - old->bytes;
       // Release the former edge before its charge. Shrinking capacity matters
       // when long histories are inserted before their shorter checkpoints.
       // Existing node pointers remain valid throughout the split.
@@ -113,11 +121,15 @@ public:
     }
     return node;
   }
-  // Remove record-less nodes from `node` toward the root.
-  static void Prune(ResourceLedger& ledger, Node* node) {
+  // Remove record-less nodes from `node` toward the root. `charged`, when
+  // given, follows the node bytes this releases.
+  static void Prune(ResourceLedger& ledger, Node* node,
+                    std::size_t* charged = nullptr) {
     while (node->parent && node->records.empty()) {
       auto* parent = node->parent;
       if (node->children.empty()) {
+        if (charged)
+          *charged -= node->bytes;
         parent->children.erase(node->edge.front());
       } else if (node->children.size() == 1) {
         // Compact the edge without replacing the surviving record's node.
@@ -136,6 +148,8 @@ public:
               child->edge,
               merged.begin() + static_cast<std::ptrdiff_t>(node->edge.size()));
           auto charge = reservation.Convert();
+          if (charged)
+            *charged = *charged + bytes - child->bytes - node->bytes;
           child->edge = std::move(merged);
           child->bytes = bytes;
           child->metadata = std::move(charge);
@@ -150,6 +164,60 @@ public:
       }
       node = parent;
     }
+  }
+  // The node bytes Place(root, tokens) would add, changing nothing.
+  static std::size_t Preview(const Node& root, std::span<const Token> tokens) {
+    const auto* node = &root;
+    while (!tokens.empty()) {
+      auto child = node->children.find(tokens.front());
+      if (child == node->children.end())
+        return NodeBytes(tokens.size());
+      const auto& old = *child->second;
+      const auto common = static_cast<std::size_t>(
+          std::ranges::mismatch(old.edge, tokens).in1 - old.edge.begin());
+      if (common == old.edge.size()) {
+        tokens = tokens.subspan(common);
+        node = &old;
+        continue;
+      }
+      auto bytes = Add(NodeBytes(common), NodeBytes(old.edge.size() - common)) -
+                   old.bytes;
+      if (common < tokens.size())
+        bytes = Add(bytes, NodeBytes(tokens.size() - common));
+      return bytes;
+    }
+    return 0;
+  }
+  // Whether the path from the root to `node`, `depth` tokens long, is a
+  // prefix of `tokens`. No allocation.
+  static bool PathIsPrefix(const Node& node, std::size_t depth,
+                           std::span<const Token> tokens) {
+    if (depth > tokens.size())
+      return false;
+    for (const auto* at = &node; at->parent; at = at->parent) {
+      if (at->edge.size() > depth)
+        throw std::logic_error("token trie path shorter than its depth");
+      depth -= at->edge.size();
+      if (!std::ranges::equal(at->edge, tokens.subspan(depth, at->edge.size())))
+        return false;
+    }
+    if (depth)
+      throw std::logic_error("token trie path longer than its depth");
+    return true;
+  }
+  // Writes the path from the root to `node` into `out`, which must be
+  // exactly as long as that path.
+  static void CopyPath(const Node& node, std::span<Token> out) {
+    auto end = out.size();
+    for (const auto* at = &node; at->parent; at = at->parent) {
+      if (at->edge.size() > end)
+        throw std::logic_error("token trie path shorter than its depth");
+      end -= at->edge.size();
+      std::ranges::copy(at->edge,
+                        out.begin() + static_cast<std::ptrdiff_t>(end));
+    }
+    if (end)
+      throw std::logic_error("token trie path longer than its depth");
   }
   // Destroy every node below `root` without recursion, deepest first.
   static void Clear(Node& root) noexcept {

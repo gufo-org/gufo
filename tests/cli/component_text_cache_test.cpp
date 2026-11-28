@@ -4249,6 +4249,31 @@ void RetokenizedAnswerContinuesTheLiveFrontier() {
     assert(!cache.AlignToLiveFrontier(edited, stable, 4096, false));
   }
   {
+    // After a restart the frontier is durable only, and its tokens live only
+    // in the index tree: alignment rebuilds them for one callback and must
+    // keep its own copy of the selection (#1329).
+    const TemporaryDirectory temp("gufo-durable-frontier");
+    const TextRunnerDiskCacheOptions disk{.directory = temp.path().string(),
+                                          .capacity_bytes = 1 << 20,
+                                          .min_checkpoint_step_tokens = 2048};
+    const Tokens frontier{1, 2, 20, 21, 50};
+    {
+      ComponentTextCache cache(runner, 1, 1 << 22, disk);
+      commit(cache, frontier, 2);
+      auto peer = cache.Acquire(Tokens{90, 91}, {}, {}, true, 0, true);
+      peer->Invalidate();
+    }
+    ComponentTextCache cache(runner, 1, 1 << 22, disk);
+    Tokens prompt{1, 2, 22, 50, 6};
+    std::size_t stable = 0;
+    assert(cache.AlignToLiveFrontier(prompt, stable, 4096, false));
+    assert((prompt == Tokens{1, 2, 20, 21, 50, 6}));
+    auto resumed = cache.Acquire(prompt, {}, {}, true, 0, true);
+    assert(resumed->restored_from_disk());
+    assert(resumed->cached_tokens() == frontier.size());
+    resumed->Invalidate();
+  }
+  {
     // An unchanged retry after the interrupted turn's continuation: the
     // prompt's own tokens begin the newer frontier. Rewriting it to the
     // interrupted frontier's tokens would change the identical request's

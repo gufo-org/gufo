@@ -1,13 +1,16 @@
+#include <array>
 #include <cstdlib>
 #include <fstream>
 #include <future>
 #include <map>
 #include <new>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <set>
 #include <stdexcept>
 #include <string_view>
+#include <tuple>
 
 #include "src/cache/retention.hpp"
 #include "tests/cache/tiered_fixture.hpp"
@@ -830,16 +833,27 @@ void PublishMetadataCheckpoint(
   const std::array<DiskWriteBuffer, 1> buffers{{{true, file, kBytes}}};
   disk.Publish(TieredFile(4, id), manifest, buffers);
 }
+// Serving keeps a checkpoint's tokens only in the catalog's and the index's
+// tries: kSeparate, released once tracked. kManifest keeps every token list
+// in the store, which grows quadratically with a conversation.
 struct MetadataStore {
   ResourceLedger ledger;
   TieredDirectory directory;
-  DiskStore disk{ledger, directory.path, 1 << 24};
+  DiskStore disk;
   PrefixIndex index{ledger};
-  explicit MetadataStore(std::size_t ram_bytes)
-      : ledger({ram_bytes * 2, ram_bytes, 16, 1 << 20}) {}
+  explicit MetadataStore(std::size_t ram_bytes,
+                         DiskTokenStorage storage = DiskTokenStorage::kSeparate)
+      : ledger({ram_bytes * 2, ram_bytes, 16, 1 << 20}),
+        disk(ledger, directory.path, 1 << 24, storage) {}
   void Publish(std::uint64_t id, std::span<const Token> tokens,
                std::uint64_t lineage = 1) {
     PublishMetadataCheckpoint(disk, id, tokens, lineage, 42);
+  }
+  // Tracks a publication and releases the store's tokens, as serving does.
+  void Track(DiskCatalog& catalog, std::uint64_t id,
+             const DiskEvictionVisitor& retired = {}) {
+    catalog.Track({id}, retired);
+    disk.ReleaseTokens({id});
   }
   std::size_t Metadata() const {
     return ledger.Snapshot()
@@ -862,11 +876,12 @@ void CatalogMetadataTracksAdmissionAndRetirement() {
   for (std::uint64_t id = 1; id <= 4; ++id)
     s.Publish(id, std::span(tokens).first(id * 512));
   DiskCatalog catalog(s.ledger, s.disk, s.index);
-  std::size_t tokens_held{};
-  for (std::uint64_t id = 1; id <= 4; ++id)
-    tokens_held += id * 512 * sizeof(Token);
-  assert(catalog.MetadataBytes() > tokens_held);
-  assert(catalog.MetadataBytes() < tokens_held + 4 * 2048);
+  s.disk.ReleaseTokens();
+  // The four nested token lists share one trie path: their unique tokens
+  // count once, not 1 + 2 + 3 + 4 times.
+  const std::size_t unique = 4 * 512 * sizeof(Token);
+  assert(catalog.MetadataBytes() > unique);
+  assert(catalog.MetadataBytes() < unique + 4 * 2048 + 1024);
   // Retirement releases what the catalog counted for the entry, apart from
   // the store's entry slot, which stays as vector capacity, within the bound
   // the catalog assumes for the store's private availability record.
@@ -882,13 +897,15 @@ void CatalogMetadataTracksAdmissionAndRetirement() {
 }
 void MetadataAllowanceEvictsInsteadOfFillingTheLedger() {
   // Checkpoint n holds n turns, each a prefix of the next; without the
-  // allowance their token lists outgrow the ledger's metadata room.
+  // allowance a store that keeps every token list (quadratic in the
+  // conversation, as chunk references still are) outgrows the ledger's
+  // metadata room.
   constexpr std::size_t kTurn = 2048, kTurns = 8, kRam = std::size_t{384} << 10,
                         kAllowance = 64 << 10, kCapture = 192 << 10;
   std::vector<Token> conversation(kTurn * kTurns);
   std::iota(conversation.begin(), conversation.end(), 7);
   for (const bool bounded : {false, true}) {
-    MetadataStore s(kRam);
+    MetadataStore s(kRam, DiskTokenStorage::kManifest);
     DiskCatalog catalog(s.ledger, s.disk, s.index, UINT64_MAX,
                         bounded ? kAllowance : SIZE_MAX);
     std::vector<std::uint64_t> evicted;
@@ -951,6 +968,7 @@ void MetadataAllowanceKeepsTheNewPublication() {
   MetadataStore s(1 << 24);
   const auto allowance = PublishConversations(s, 4);
   DiskCatalog catalog(s.ledger, s.disk, s.index, UINT64_MAX, allowance);
+  s.disk.ReleaseTokens();
   assert(catalog.Size() == 4 && catalog.MetadataBytes() <= allowance);
   for (std::uint64_t id = 1; id <= 4; ++id)
     catalog.Touch({id});
@@ -960,7 +978,7 @@ void MetadataAllowanceKeepsTheNewPublication() {
   };
   // The pass retires to an eighth of the allowance below it: two entries.
   PublishConversation(s, 5);
-  catalog.Track({5}, [&](const DiskEviction& eviction) {
+  s.Track(catalog, 5, [&](const DiskEviction& eviction) {
     assert(eviction.reused);
     record(eviction);
   });
@@ -969,13 +987,13 @@ void MetadataAllowanceKeepsTheNewPublication() {
   assert(catalog.MetadataBytes() <= allowance);
   // That slack admits the next publication without a pass.
   PublishConversation(s, 6);
-  catalog.Track({6}, record);
+  s.Track(catalog, 6, record);
   assert(evicted.size() == 2 && catalog.Size() == 4);
   // Known limitation: conversations restored within one disk turnover rank
   // above every unrestored one, so the next pass retires the two fresh
   // conversations before the restored ones.
   PublishConversation(s, 7);
-  catalog.Track({7}, record);
+  s.Track(catalog, 7, record);
   assert((evicted == std::vector<std::uint64_t>{1, 2, 5, 6}));
   assert(catalog.Find({3}) && catalog.Find({4}) && catalog.Find({7}));
 }
@@ -983,6 +1001,7 @@ void MetadataAllowancePassFailures() {
   MetadataStore s(1 << 24);
   const auto allowance = PublishConversations(s, 4);
   DiskCatalog catalog(s.ledger, s.disk, s.index, UINT64_MAX, allowance);
+  s.disk.ReleaseTokens();
   std::vector<std::uint64_t> evicted;
   const auto record = [&](const DiskEviction& eviction) {
     evicted.push_back(eviction.description->Manifest().checkpoint.value);
@@ -1001,7 +1020,7 @@ void MetadataAllowancePassFailures() {
     auto writer =
         std::async(std::launch::async, [&] { PublishConversation(s, 6); });
     entered.get_future().wait();
-    catalog.Track({5}, record);
+    s.Track(catalog, 5, record);
     release.set_value();
     writer.get();
     s.disk.SetCrashHook({});
@@ -1010,7 +1029,7 @@ void MetadataAllowancePassFailures() {
   assert(catalog.MetadataBytes() > allowance);
   // A failure during the pass ends it; the publication is still tracked.
   bool thrown{};
-  catalog.Track({6}, [&](const DiskEviction& eviction) {
+  s.Track(catalog, 6, [&](const DiskEviction& eviction) {
     record(eviction);
     thrown = true;
     throw std::runtime_error("visitor failed");
@@ -1034,6 +1053,7 @@ void StartupFitsRecoveredMetadata() {
   MetadataStore s(1 << 24);
   const auto allowance = (PublishConversations(s, 4) - 256) / 2;
   DiskCatalog catalog(s.ledger, s.disk, s.index, UINT64_MAX, allowance);
+  s.disk.ReleaseTokens();
   assert(catalog.Size() == 4 && catalog.MetadataBytes() > allowance);
   std::size_t seen{};
   const auto retired =
@@ -1042,6 +1062,332 @@ void StartupFitsRecoveredMetadata() {
   assert(retired == 3 && seen == retired && catalog.Size() == 1);
   assert(catalog.MetadataBytes() <= allowance);
   assert(catalog.FitMetadata() == 0);
+}
+// Tracking released tokens fails loudly, before the allowance pass retires
+// anything, and leaves the catalog as it was.
+void CatalogTrackRequiresTokens() {
+  MetadataStore s(1 << 24);
+  std::vector<Token> tokens(64);
+  std::iota(tokens.begin(), tokens.end(), 7);
+  s.Publish(1, tokens);
+  const auto allowance = DiskCatalog(s.ledger, s.disk, s.index).MetadataBytes();
+  DiskCatalog catalog(s.ledger, s.disk, s.index, UINT64_MAX, allowance + 16);
+  s.disk.ReleaseTokens();
+  tokens[0] = 99;
+  s.Publish(2, tokens, 2);
+  s.disk.ReleaseTokens({2});
+  const auto before = catalog.MetadataBytes();
+  bool thrown{};
+  try {
+    catalog.Track({2});
+  } catch (const std::logic_error&) {
+    thrown = true;
+  }
+  assert(thrown && catalog.Size() == 1 && catalog.Find({1}));
+  assert(catalog.MetadataBytes() == before);
+  // A catalog over released tokens cannot be built either.
+  thrown = false;
+  try {
+    DiskCatalog reopened(s.ledger, s.disk, s.index);
+  } catch (const std::logic_error&) {
+    thrown = true;
+  }
+  assert(thrown);
+}
+// The trie answers prefix questions about tracked publications without the
+// store's tokens: equal and strict prefixes, never longer, diverged,
+// untracked, retired or re-published ones. Quarantine is Pin's business.
+void CatalogIsPrefixOf() {
+  MetadataStore s(1 << 24);
+  std::vector<Token> b(150);
+  std::iota(b.begin(), b.end(), 7);
+  const auto a = std::span<const Token>(b).first(100);
+  auto c = std::vector<Token>(b.begin(), b.begin() + 120);
+  c[60] = 1;  // diverges inside a's range
+  auto d = std::vector<Token>(b.begin(), b.begin() + 100);
+  d.push_back(2);  // diverges right after a
+  s.Publish(1, a);
+  s.Publish(2, b);
+  s.Publish(3, c, 2);
+  s.Publish(4, d, 3);
+  DiskCatalog catalog(s.ledger, s.disk, s.index);
+  s.disk.ReleaseTokens();
+  const auto epoch = [&](std::uint64_t id) {
+    return catalog.Find({id})->Epoch();
+  };
+  assert(catalog.IsPrefixOf({1}, epoch(1), a));
+  assert(catalog.IsPrefixOf({1}, epoch(1), b));
+  assert(catalog.IsPrefixOf({1}, epoch(1), d));
+  assert(!catalog.IsPrefixOf({1}, epoch(1), c));
+  assert(!catalog.IsPrefixOf({2}, epoch(2), a));
+  assert(!catalog.IsPrefixOf({2}, epoch(2), c));
+  assert(!catalog.IsPrefixOf({4}, epoch(4), b));
+  assert(catalog.IsPrefixOf({3}, epoch(3), c));
+  assert(!catalog.IsPrefixOf({1}, epoch(1) + 100, b));
+  assert(!catalog.IsPrefixOf({9}, 1, b));
+  assert(catalog.IsPrefixOf({1}, epoch(1), std::span(b).first(100)));
+  assert(!catalog.IsPrefixOf({1}, epoch(1), std::span(b).first(99)));
+  // A quarantined record still answers; its Pin fails instead.
+  const auto quarantined = epoch(3);
+  catalog.Invalidate(true, TieredFile(3, 3));
+  assert(catalog.IsPrefixOf({3}, quarantined, c) && !catalog.Find({3}));
+  // Re-published under the same ID: only the new epoch and tokens answer.
+  const auto old = epoch(1);
+  assert(s.disk.Retire({1}));
+  std::vector<Token> other(80, 5);
+  s.Publish(1, other);
+  s.Track(catalog, 1);
+  assert(epoch(1) != old && !catalog.IsPrefixOf({1}, old, b));
+  assert(catalog.IsPrefixOf({1}, epoch(1), other));
+  assert(!catalog.IsPrefixOf({1}, epoch(1), b));
+  // Retired: no longer tracked. Each record answers its own epoch and tokens
+  // until it leaves, so only retirement can turn the answer.
+  const std::array<std::span<const Token>, 4> own{other, b, c, d};
+  const std::array<std::uint64_t, 4> epochs{epoch(1), epoch(2), quarantined,
+                                            epoch(4)};
+  for (std::uint64_t id = 1; id <= 4; ++id)
+    assert(catalog.IsPrefixOf({id}, epochs[id - 1], own[id - 1]));
+  while (catalog.Size() > 1)
+    (void)catalog.EvictOne();
+  const auto survivor = catalog.RankForTesting().front().id;
+  for (std::uint64_t id = 1; id <= 4; ++id)
+    assert(catalog.IsPrefixOf({id}, epochs[id - 1], own[id - 1]) ==
+           (id == survivor));
+}
+// Token lists live once per digest, so a conversation's disk metadata grows
+// linearly with its checkpoints. A store that keeps every list grows
+// quadratically, as MetadataAllowanceEvictsInsteadOfFillingTheLedger shows.
+void DiskMetadataGrowsLinearlyWithCheckpoints() {
+  constexpr std::size_t kTurn = 512;
+  static constexpr ComponentDescriptor kState{
+      {1}, 1, ComponentKind::kPrivateState, 0, 0, 32};
+  CompatibilityDigest digest{};
+  digest[0] = 42;
+  const auto measure = [&](std::size_t turns) {
+    MetadataStore s(1 << 24, DiskTokenStorage::kSeparate);
+    s.index.Register({9}, std::span(&kState, 1), digest);
+    DiskCatalog catalog(s.ledger, s.disk, s.index);
+    std::vector<Token> conversation(turns * kTurn);
+    std::iota(conversation.begin(), conversation.end(), 7);
+    const auto before = s.Metadata();
+    std::vector<IndexEntryId> entries;
+    for (std::uint64_t n = 1; n <= turns; ++n) {
+      s.Publish(n, std::span(conversation).first(n * kTurn));
+      catalog.Track({n});
+      entries.push_back(s.index.Insert({9}, catalog.Find({n})));
+      s.disk.ReleaseTokens({n});
+    }
+    const auto grown = s.Metadata() - before;
+    assert(catalog.MetadataBytes() <=
+           turns * 2048 + conversation.size() * sizeof(Token));
+    for (const auto entry : entries)
+      s.index.Erase(entry);
+    return grown;
+  };
+  const auto grown = measure(4), grown_twice = measure(8);
+  assert(grown_twice <= grown * 22 / 10 + 4096);
+}
+// A restart where the allowance bound at shutdown: recovery hands each
+// manifest's tokens to the catalog's tries as it decodes, so it rebuilds the
+// shutdown catalog while holding one path and one manifest's tokens beside
+// it, instead of every retained checkpoint's token list.
+void RecoveryHandsTokensToTheCatalog() {
+  constexpr std::size_t kTurn = 1024, kTurns = 20, kAllowance = 92 << 10;
+  static constexpr ComponentDescriptor kState{
+      {1}, 1, ComponentKind::kPrivateState, 0, 0, 32};
+  CompatibilityDigest digest{};
+  digest[0] = 42;
+  std::vector<Token> conversation(kTurn * kTurns);
+  std::iota(conversation.begin(), conversation.end(), 7);
+  TieredDirectory directory;
+  std::size_t evicted{}, shutdown_bytes{};
+  {
+    ResourceLedger ledger({1 << 25, 1 << 24, 16, 1 << 20});
+    DiskStore disk(ledger, directory.path, 1 << 24,
+                   DiskTokenStorage::kSeparate);
+    PrefixIndex index(ledger);
+    DiskCatalog catalog(ledger, disk, index, UINT64_MAX, kAllowance);
+    for (std::uint64_t n = 1; n <= kTurns; ++n) {
+      PublishMetadataCheckpoint(
+          disk, n, std::span(conversation).first(n * kTurn), 1, 42);
+      catalog.Track({n}, [&](const DiskEviction&) { ++evicted; });
+      disk.ReleaseTokens({n});
+    }
+    shutdown_bytes = catalog.MetadataBytes();
+  }
+  assert(evicted > 0);
+  const auto metadata_peak = [](const ResourceLedger& ledger) {
+    return ledger.Snapshot()
+        .peak_bytes[static_cast<std::size_t>(ResourceCategory::kMetadata)];
+  };
+  std::size_t retained{}, retained_tokens{}, deepest{}, manifest_peak{};
+  {
+    ResourceLedger ledger({1 << 25, 1 << 24, 16, 1 << 20});
+    DiskStore disk(ledger, directory.path, 1 << 24);
+    for (const auto& entry : disk.Entries()) {
+      ++retained;
+      retained_tokens += entry.TokenCount() * sizeof(Token);
+      deepest = std::max(deepest, entry.TokenCount() * sizeof(Token));
+    }
+    PrefixIndex index(ledger);
+    DiskCatalog catalog(ledger, disk, index, UINT64_MAX, kAllowance);
+    manifest_peak = metadata_peak(ledger);
+  }
+  // The directory holds more than one checkpoint's token list.
+  assert(retained > 1 && manifest_peak > retained_tokens);
+  ResourceLedger ledger({1 << 25, 1 << 24, 16, 1 << 20});
+  DiskCatalogTokens recovered(ledger);
+  DiskStore disk(ledger, directory.path, 1 << 24, DiskTokenStorage::kSeparate,
+                 recovered.Sink());
+  assert(recovered.TokenBytes() == deepest);
+  PrefixIndex index(ledger);
+  index.Register({9}, std::span(&kState, 1), digest);
+  DiskCatalog catalog(ledger, disk, index, UINT64_MAX, kAllowance, &recovered);
+  assert(catalog.Size() == retained);
+  // Recovery rebuilds the shutdown catalog exactly.
+  assert(catalog.MetadataBytes() == shutdown_bytes);
+  // Peak: the rebuilt catalog, its shared path, one manifest being decoded
+  // and the store's entry slots; below what manifests holding every list
+  // need.
+  assert(metadata_peak(ledger) <=
+         shutdown_bytes + 2 * deepest + retained * 1024 + 8192);
+  assert(metadata_peak(ledger) < manifest_peak);
+  // The index rebuilds every recovered path from the trie.
+  for (const auto& entry : disk.Entries()) {
+    const auto id = entry.Manifest().checkpoint;
+    assert(disk.Tokens(id).empty());
+    assert(catalog.VisitTokens(id, [&](std::span<const Token> tokens) {
+      assert(std::ranges::equal(
+          tokens, std::span(conversation).first(entry.TokenCount())));
+      (void)index.Insert({9}, catalog.Find(id), tokens);
+    }));
+  }
+  const auto lookup =
+      index.Lookup({{9}, conversation, InputIdentity(conversation.size()), 0});
+  assert(lookup.selected && lookup.selected->boundary == conversation.size());
+}
+// Recovered tokens attach by store epoch, which another store reuses: a
+// catalog over another store refuses them rather than track a wrong path.
+void CatalogRefusesAnotherStoresTokens() {
+  std::vector<Token> tokens(100);
+  std::iota(tokens.begin(), tokens.end(), 7);
+  TieredDirectory recovered_from;
+  {
+    ResourceLedger ledger({1 << 25, 1 << 24, 16, 1 << 20});
+    DiskStore disk(ledger, recovered_from.path, 1 << 24,
+                   DiskTokenStorage::kSeparate);
+    PublishMetadataCheckpoint(disk, 1, tokens, 1, 42);
+  }
+  // The same epoch under another checkpoint, the same checkpoint with other
+  // tokens, then the same checkpoint and tokens under another digest.
+  for (const auto& [id, count, published_digest] :
+       {std::tuple<std::uint64_t, std::size_t, std::uint8_t>{2, 100, 42},
+        {1, 60, 42},
+        {1, 100, 43}}) {
+    ResourceLedger ledger({1 << 25, 1 << 24, 16, 1 << 20});
+    DiskCatalogTokens recovered(ledger);
+    DiskStore source(ledger, recovered_from.path, 1 << 24,
+                     DiskTokenStorage::kSeparate, recovered.Sink());
+    const auto recovered_epoch = source.Entries().front().Epoch();
+    TieredDirectory other;
+    DiskStore disk(ledger, other.path, 1 << 24, DiskTokenStorage::kSeparate);
+    PublishMetadataCheckpoint(disk, id, std::span(tokens).first(count), 1,
+                              published_digest);
+    assert(disk.Entries().front().Epoch() == recovered_epoch);
+    PrefixIndex index(ledger);
+    bool thrown{};
+    try {
+      DiskCatalog catalog(ledger, disk, index, UINT64_MAX, SIZE_MAX,
+                          &recovered);
+    } catch (const std::logic_error&) {
+      thrown = true;
+    }
+    assert(thrown);
+  }
+}
+// Durable-only generated frontiers keep their tokens only in the index tree;
+// the visit rebuilds them, in entry order, across edge splits and merges.
+void VisitGeneratedRebuildsDurableOnlyPaths() {
+  TieredFixture f(DiskTokenStorage::kSeparate);
+  const auto identity = f.adapter.CompatibilityIdentity();
+  std::vector<std::shared_ptr<const Checkpoint>> checkpoints;
+  std::vector<IndexEntryId> entries;
+  for (unsigned turn = 0; turn < 2; ++turn) {
+    f.Append(16, 12);
+    checkpoints.push_back(f.Capture(CheckpointPurpose::kGenerated));
+    const auto durable = f.Publish(*checkpoints.back());
+    entries.push_back(f.index.Insert(checkpoints.back(), f.Resident()));
+    f.index.AttachDurable(entries.back(), durable);
+  }
+  f.disk.ReleaseTokens();
+  for (const auto entry : entries)
+    f.index.DropResident(entry);
+  const auto visit = [&] {
+    std::vector<std::vector<Token>> seen;
+    f.index.VisitGenerated(identity, [&](std::span<const Token> tokens) {
+      // Reentrant const lookups stay valid.
+      (void)f.index.CachedPrefixTokens(
+          {identity, tokens, InputIdentity(tokens.size()), 0});
+      seen.emplace_back(tokens.begin(), tokens.end());
+    });
+    return seen;
+  };
+  const std::vector<std::vector<Token>> expected{
+      {checkpoints[0]->Tokens().begin(), checkpoints[0]->Tokens().end()},
+      {checkpoints[1]->Tokens().begin(), checkpoints[1]->Tokens().end()}};
+  assert(visit() == expected);
+  // A frontier diverging inside the first path splits its edge.
+  std::vector<Token> fork(checkpoints[0]->Tokens().begin(),
+                          checkpoints[0]->Tokens().begin() + 10);
+  fork.push_back(1);
+  const auto live = f.index.Insert(LiveFrontier{{}, fork, identity, {}, {}});
+  assert(visit() == expected);
+  // Erasing it merges the edge back.
+  f.index.Erase(live);
+  assert(visit() == expected);
+  // Alignment is best effort: a full ledger skips rebuilt paths.
+  f.ledger.FailAfter(LedgerStep::kReserve, 0);
+  assert(visit().empty());
+  f.ledger.ClearFaults();
+  assert(visit() == expected);
+}
+// A RAM checkpoint attaches its durable copy by comparing tokens, so it
+// fails loudly once the store released them; a durable record needs none.
+void AttachDurableRejectsReleasedTokens() {
+  TieredFixture f(DiskTokenStorage::kSeparate);
+  const auto identity = f.adapter.CompatibilityIdentity();
+  f.Append(16, 12);
+  const auto checkpoint = f.Capture();
+  const auto durable = f.Publish(*checkpoint);
+  const auto entry = f.index.Insert(checkpoint, f.Resident());
+  f.disk.ReleaseTokens();
+  bool thrown{};
+  try {
+    f.index.AttachDurable(entry, durable);
+  } catch (const std::invalid_argument&) {
+    thrown = true;
+  }
+  assert(thrown && !f.index.IsDurable(entry));
+  thrown = false;
+  try {
+    (void)f.index.Insert(identity, durable);
+  } catch (const std::invalid_argument&) {
+    thrown = true;
+  }
+  assert(thrown);
+  // With the tokens attested, the durable record indexes and re-attaches.
+  const auto durable_entry = f.index.Insert(identity, durable, f.tokens);
+  f.index.AttachDurable(durable_entry, durable);
+  assert(f.index.IsDurable(durable_entry));
+  // Attested tokens must match the publication's count.
+  thrown = false;
+  try {
+    (void)f.index.Insert(identity, durable,
+                         std::span<const Token>(f.tokens).first(3));
+  } catch (const std::invalid_argument&) {
+    thrown = true;
+  }
+  assert(thrown);
 }
 // What the token-list ranking reads from one checkpoint's manifest, and
 // whether the test quarantined it since the store last opened.
@@ -1174,12 +1520,21 @@ struct OracleStore {
   // Full-ledger retirements whose index record leaves a record-less unary
   // node, which the index cannot merge without headroom.
   std::size_t unmerged{};
-  explicit OracleStore(std::uint64_t turnover_bytes)
-      : turnover(turnover_bytes) {
+  // kSeparate runs as serving does: recovery hands its tokens to the
+  // catalog, and each publication releases the store's copy once indexed.
+  DiskTokenStorage storage;
+  explicit OracleStore(std::uint64_t turnover_bytes,
+                       DiskTokenStorage token_storage)
+      : turnover(turnover_bytes), storage(token_storage) {
     Open();
   }
   void Open() {
-    disk = std::make_unique<DiskStore>(ledger, directory.path, 1 << 24);
+    std::optional<DiskCatalogTokens> recovered;
+    if (storage == DiskTokenStorage::kSeparate)
+      recovered.emplace(ledger);
+    disk = std::make_unique<DiskStore>(
+        ledger, directory.path, 1 << 24, storage,
+        recovered ? recovered->Sink() : DiskRecoveredTokens{});
     index = std::make_unique<PrefixIndex>(ledger);
     for (const std::uint8_t digest : {42, 43}) {
       CompatibilityDigest compatibility{};
@@ -1189,17 +1544,25 @@ struct OracleStore {
     }
     index_baseline = index->MetadataBytes();
     catalog = std::make_unique<DiskCatalog>(ledger, *disk, *index, turnover,
-                                            allowance);
+                                            allowance,
+                                            recovered ? &*recovered : nullptr);
     // As the server starts: fit the allowance with one ranking, then index
-    // what remains.
+    // what remains, from the catalog's trie once the store holds no tokens.
     const auto ranks = Check();
     std::vector<std::uint64_t> retired;
     (void)catalog->FitMetadata([&](const DiskEviction& eviction) {
       retired.push_back(eviction.description->Manifest().checkpoint.value);
     });
     Retired(ranks, retired);
-    for (const auto& [id, checkpoint] : model)
-      (void)index->Insert(Identity{checkpoint.digest}, catalog->Find({id}));
+    for (const auto& [id, checkpoint] : model) {
+      const Identity identity{checkpoint.digest};
+      if (storage == DiskTokenStorage::kManifest)
+        (void)index->Insert(identity, catalog->Find({id}));
+      else if (!catalog->VisitTokens({id}, [&](std::span<const Token> tokens) {
+                 (void)index->Insert(identity, catalog->Find({id}), tokens);
+               }))
+        std::abort();
+    }
     Check();
   }
   // Flushes use history and reopens every layer over the same directory,
@@ -1257,6 +1620,7 @@ struct OracleStore {
     Retired(ranks, retired);
     // As the server does once a publication with no RAM copy completes.
     (void)index->Insert(Identity{checkpoint.digest}, catalog->Find({id}));
+    disk->ReleaseTokens({id});
     model.emplace(id, std::move(checkpoint));
     Check();
     return id;
@@ -1353,10 +1717,11 @@ struct OracleStore {
 // quarantine in the catalog and in the store alone, reuse within and past a
 // turnover, pins, a full ledger, metadata passes along one ranking and a
 // restart over a reopened store, while the prefix index holds the same
-// checkpoints and live frontiers.
-void EvictionOrderMatchesTokenOracle() {
+// checkpoints and live frontiers. Each store mode runs it: kSeparate holds
+// tokens only in the tries, as serving does.
+void EvictionOrderMatchesTokenOracle(DiskTokenStorage storage) {
   // Each checkpoint adds 32 unique payload bytes: reuse lasts six of them.
-  OracleStore s(6 * 32);
+  OracleStore s(6 * 32, storage);
   std::mt19937_64 random(1329);
   const auto turn = [&](std::vector<Token> tokens) {
     const auto count = 8 + random() % 24;
@@ -1502,6 +1867,48 @@ void EvictionOrderMatchesTokenOracle() {
   for (const auto& frontier : s.live)
     s.index->Erase(frontier.entry);
   assert(s.index->MetadataBytes() == s.index_baseline);
+}
+// Retiring a covered intermediate when the ledger admits nothing cannot fund
+// the catalog trie's merge, which leaves a record-less unary node on the
+// path. The ranking must read through it exactly as the token lists do.
+void RankingReadsThroughAnUnmergedTrieNode() {
+  const std::vector<Token> prefix(40, 3);
+  auto middle = prefix;
+  middle.resize(80, 4);
+  auto leaf = middle;
+  leaf.resize(120, 5);
+  OracleStore s(UINT64_MAX, DiskTokenStorage::kSeparate);
+  // The learned prefix ranks as a shared fork and the leaf as the frontier,
+  // so the covered middle retires first.
+  (void)s.Publish({prefix, 1, {1}, 42, CheckpointPurpose::kLearned});
+  (void)s.Publish({middle, 1, {1}, 42, CheckpointPurpose::kPrompt});
+  (void)s.Publish({leaf, 1, {1}, 42, CheckpointPurpose::kPrompt});
+  // A retirement with headroom merges the middle node away.
+  s.Evict();
+  assert(!s.model.contains(2));
+  const auto merged = s.catalog->MetadataBytes();
+  // The middle again, retired when the ledger admits nothing. Drop the index
+  // record first, so the refused admission is the catalog trie's merge
+  // rather than the index's.
+  const auto again =
+      s.Publish({middle, 1, {1}, 42, CheckpointPurpose::kPrompt});
+  s.index->RemoveDurable(*s.catalog->Find({again}));
+  s.ledger.FailAfter(LedgerStep::kReserve, 0);
+  const auto eviction = s.catalog->EvictOne();
+  s.ledger.ClearFaults();
+  assert(eviction &&
+         eviction.description->Manifest().checkpoint.value == again);
+  s.model.erase(again);
+  s.Check();
+  // The refused merge left the middle node and its header apart.
+  assert(s.catalog->MetadataBytes() > merged);
+  // A sibling forks the prefix through the unary node.
+  auto sibling = prefix;
+  sibling.resize(90, 6);
+  (void)s.Publish({sibling, 1, {1}, 42, CheckpointPurpose::kPrompt});
+  while (!s.model.empty())
+    s.Evict();
+  assert(s.catalog->MetadataBytes() == 0);
 }
 void EvictionDoesNotWaitForYieldingWriter() {
   TieredFixture f;
@@ -1687,7 +2094,12 @@ void DurableCheckpointEvictedAheadOfNonDurableUnderPressure() {
 // beside the rest.
 int main(int argc, char** argv) {
   if (argc == 2 && std::string_view(argv[1]) == "oracle") {
-    EvictionOrderMatchesTokenOracle();
+    EvictionOrderMatchesTokenOracle(DiskTokenStorage::kManifest);
+    return 0;
+  }
+  if (argc == 2 && std::string_view(argv[1]) == "oracle-separate") {
+    EvictionOrderMatchesTokenOracle(DiskTokenStorage::kSeparate);
+    RankingReadsThroughAnUnmergedTrieNode();
     return 0;
   }
   assert(argc == 1);
@@ -1716,6 +2128,13 @@ int main(int argc, char** argv) {
   MetadataAllowanceKeepsTheNewPublication();
   MetadataAllowancePassFailures();
   StartupFitsRecoveredMetadata();
+  CatalogTrackRequiresTokens();
+  CatalogIsPrefixOf();
+  DiskMetadataGrowsLinearlyWithCheckpoints();
+  RecoveryHandsTokensToTheCatalog();
+  CatalogRefusesAnotherStoresTokens();
+  VisitGeneratedRebuildsDurableOnlyPaths();
+  AttachDurableRejectsReleasedTokens();
   EvictionDoesNotWaitForYieldingWriter();
   QuarantineRacingPublication();
   DurableCheckpointEvictedAheadOfNonDurableUnderPressure();

@@ -88,15 +88,17 @@ bool LogDiskEviction(const cache::DiskEviction& eviction,
   if (!eviction)
     return false;
   const auto& manifest = eviction.description->Manifest();
-  Logger::Info("cache",
-               "schema=component-cache-v1 event=disk_entry_evicted reason=" +
-                   std::string(reason) + " tokens=" +
-                   std::to_string(manifest.tokens.size()) + " checkpoint_id=" +
-                   std::to_string(manifest.checkpoint.value) + " purpose=" +
-                   std::to_string(static_cast<unsigned>(manifest.purpose)) +
-                   " superseded=" + std::to_string(eviction.superseded) +
-                   " reused=" + std::to_string(eviction.reused) +
-                   " payload_bytes=" + std::to_string(PayloadBytes(manifest)));
+  Logger::Info(
+      "cache",
+      "schema=component-cache-v1 event=disk_entry_evicted reason=" +
+          std::string(reason) +
+          " tokens=" + std::to_string(eviction.description->TokenCount()) +
+          " checkpoint_id=" + std::to_string(manifest.checkpoint.value) +
+          " purpose=" +
+          std::to_string(static_cast<unsigned>(manifest.purpose)) +
+          " superseded=" + std::to_string(eviction.superseded) +
+          " reused=" + std::to_string(eviction.reused) +
+          " payload_bytes=" + std::to_string(PayloadBytes(manifest)));
   return true;
 }
 thread_local const ComponentTextCache::DiskMetadataTesting*
@@ -498,6 +500,9 @@ struct ComponentTextCache::Impl {
     if (!platform::FillRandomBytes(nonce))
       throw std::runtime_error("cannot obtain cache publication nonce");
     index.Register(identity, resources->adapter->Components(), digest);
+    // Recovered checkpoints hand their tokens straight to the catalog's
+    // tries as the store decodes them; the catalog takes them over below.
+    std::optional<cache::DiskCatalogTokens> recovered_tokens;
     if (options) {
       const auto row_bytes =
           cache::MinimumStagingBytes(resources->adapter->Components());
@@ -516,8 +521,12 @@ struct ComponentTextCache::Impl {
                          std::to_string(ledger.Limits().staging_bytes));
       // Take directory ownership before slots and backing commit, so a
       // second server fails without claiming its RAM budget first.
-      disk = std::make_unique<cache::DiskStore>(ledger, options->directory,
-                                                options->capacity_bytes);
+      // Disk checkpoint tokens live only in the catalog's and the index's
+      // tries; publications release the store's copy once indexed (#1329).
+      recovered_tokens.emplace(ledger);
+      disk = std::make_unique<cache::DiskStore>(
+          ledger, options->directory, options->capacity_bytes,
+          cache::DiskTokenStorage::kSeparate, recovered_tokens->Sink());
     }
     for (std::size_t i = 0; i < count; ++i) {
       auto entry = std::make_unique<Entry>();
@@ -559,7 +568,11 @@ struct ComponentTextCache::Impl {
       // with remaining host headroom. Neither ledger reservations nor its
       // converted overhead estimates establish materialized storage.
       pinned = resources->pinned_bytes ? resources->pinned_bytes() : 0;
-      owned_manifest_bytes = disk ? disk->OwnedManifestBytes() : 0;
+      // Recovered tokens sit in the catalog's tries instead of manifests.
+      owned_manifest_bytes = disk
+                                 ? SaturatingAdd(disk->OwnedManifestBytes(),
+                                                 recovered_tokens->TokenBytes())
+                                 : 0;
       const auto measured = AutomaticRetainedBytes(claim, count);
       const auto owned = SaturatingAdd(pinned, owned_manifest_bytes);
       // Promised but unwritten session state the cache may borrow; its
@@ -683,9 +696,10 @@ struct ComponentTextCache::Impl {
       const auto* testing = disk_metadata_testing;
       disk_metadata_allowance = testing ? testing->allowance_bytes
                                         : cache::DiskMetadataAllowance(budget);
-      catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index,
-                                                     options->capacity_bytes,
-                                                     disk_metadata_allowance);
+      catalog = std::make_unique<cache::DiskCatalog>(
+          ledger, *disk, index, options->capacity_bytes,
+          disk_metadata_allowance, &*recovered_tokens);
+      recovered_tokens.reset();
       if (testing && testing->recovered)
         testing->recovered(*disk);
       // Recovered checkpoints over the allowance retire before indexing, so
@@ -712,9 +726,14 @@ struct ComponentTextCache::Impl {
       for (const auto& durable : disk->Entries()) {
         cache::ExecutionHistory::ObserveDurableId(
             durable.Manifest().checkpoint);
-        if (durable.Manifest().compatibility == digest)
-          (void)index.Insert(identity,
-                             catalog->Find(durable.Manifest().checkpoint));
+        if (durable.Manifest().compatibility != digest)
+          continue;
+        // The store holds no recovered tokens: rebuild each from the
+        // catalog's trie, one checkpoint at a time.
+        const auto id = durable.Manifest().checkpoint;
+        (void)catalog->VisitTokens(id, [&](std::span<const cache::Token> t) {
+          (void)index.Insert(identity, catalog->Find(id), t);
+        });
       }
       streaming = std::make_unique<cache::StreamedStore>(
           ledger, *disk, ledger.Limits().staging_bytes, resources->staging,
@@ -770,6 +789,14 @@ struct ComponentTextCache::Impl {
                 completed = capture;
                 capture.reset();
               }
+            // Once tracked and indexed, the publication's tokens live only
+            // in the catalog's and the index's tries; release the store's
+            // copy on every exit, including a failed Track.
+            struct ReleaseTokens {
+              cache::DiskStore& store;
+              cache::CheckpointId id;
+              ~ReleaseTokens() { store.ReleaseTokens(id); }
+            } const release{*disk, id};
             if (!success) {
               Logger::Info(
                   "cache",
@@ -783,17 +810,15 @@ struct ComponentTextCache::Impl {
               (void)LogDiskEviction(eviction, "metadata");
             });
             if (const auto description = catalog->Find(id)) {
+              const auto count = description->TokenCount();
               if (completed)
                 for (auto& entry : entries)
                   if (entry->branch == completed->branch &&
-                      (!entry->durable ||
-                       entry->durable->Manifest().tokens.size() <
-                           description->Manifest().tokens.size()))
+                      (!entry->durable || entry->durable->TokenCount() < count))
                     entry->durable = description;
               auto found = index.Lookup(
-                  {identity, description->Manifest().tokens,
-                   cache::InputIdentity(description->Manifest().tokens.size(),
-                                        description->Manifest().input)});
+                  {identity, description->Tokens(),
+                   cache::InputIdentity(count, description->Manifest().input)});
               bool attached = false;
               for (const auto& candidate : found.candidates) {
                 if (candidate.checkpoint && candidate.checkpoint->Id() == id) {
@@ -805,9 +830,8 @@ struct ComponentTextCache::Impl {
                 (void)index.Insert(identity, description);
               std::size_t prior = 0;
               for (const auto& candidate : found.candidates)
-                if (candidate.boundary <
-                        description->Manifest().tokens.size() &&
-                    Published(candidate) && SpacedCheckpoint(candidate))
+                if (candidate.boundary < count && Published(candidate) &&
+                    SpacedCheckpoint(candidate))
                   prior = std::max(
                       prior, static_cast<std::size_t>(candidate.boundary));
               const bool spacing_exempt =
@@ -815,14 +839,12 @@ struct ComponentTextCache::Impl {
                       cache::CheckpointPurpose::kGenerated ||
                   description->Manifest().purpose ==
                       cache::CheckpointPurpose::kLearned ||
-                  (was_demoted && prior &&
-                   description->Manifest().tokens.size() - prior < disk_step);
+                  (was_demoted && prior && count - prior < disk_step);
               Logger::Info(
                   "cache",
                   "schema=component-cache-v1 event=published tokens=" +
-                      std::to_string(description->Manifest().tokens.size()) +
-                      " checkpoint_id=" + std::to_string(id.value) +
-                      " purpose=" +
+                      std::to_string(count) + " checkpoint_id=" +
+                      std::to_string(id.value) + " purpose=" +
                       std::to_string(static_cast<unsigned>(
                           description->Manifest().purpose)) +
                       " spacing_exempt=" + std::to_string(spacing_exempt) +
@@ -1378,13 +1400,16 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
     const std::lock_guard lock(cache->mutex);
     durable->branch = entry->branch;
     ancestor = entry->durable;
+    // The store no longer holds the ancestor's tokens; its catalog trie path
+    // does while it is tracked at this epoch. An untracked ancestor inherits
+    // nothing, which costs a full write, never a wrong chunk.
+    if (ancestor && !(cache->catalog && cache->catalog->IsPrefixOf(
+                                            ancestor->Manifest().checkpoint,
+                                            ancestor->Epoch(), capture_tokens)))
+      ancestor.reset();
   }
   if (ancestor) {
-    const auto& previous = ancestor->Manifest();
-    if (previous.tokens.size() > capture_tokens.size() ||
-        !std::equal(previous.tokens.begin(), previous.tokens.end(),
-                    capture_tokens.begin()) ||
-        previous.input != At(input, previous.tokens.size()))
+    if (ancestor->Manifest().input != At(input, ancestor->TokenCount()))
       ancestor.reset();
     else {
       durable->ancestor_pin = ancestor->Pin();
@@ -2579,7 +2604,8 @@ bool ComponentTextCache::AlignToLiveFrontier(
     std::vector<ContinuationToken>& prompt, std::size_t& stable,
     std::size_t max_tokens, bool trimmed) const {
   const std::lock_guard lock(impl_->mutex);
-  std::span<const ContinuationToken> selected;
+  // A copy: VisitGenerated's spans end with each callback.
+  std::vector<ContinuationToken> selected;
   std::size_t seam = 0, exact_depth = 0, aligned_stable = 0;
   // The prompt's own tokens already begin a frontier, as an unchanged retry
   // does. Rewriting it to an older frontier's tokens would only change what
@@ -2650,7 +2676,7 @@ bool ComponentTextCache::AlignToLiveFrontier(
     if (frontier.size() + tail.size() + (prompt.size() - end->prompt) >=
         max_tokens)
       return;
-    selected = frontier;
+    selected.assign(frontier.begin(), frontier.end());
     seam = end->prompt;
     aligned_stable = stable != 0 ? mapped + tail.size() : 0;
     rest = std::move(tail);
