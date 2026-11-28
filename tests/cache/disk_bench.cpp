@@ -66,6 +66,16 @@ DiskManifest WideManifest() {
   }
   return m;
 }
+// A manifest whose chunk ids belong to its checkpoint alone, as a real cache's
+// do. Manifest() reuses the same ids for every checkpoint, which lets a
+// per-file reference scan match on the first manifest and hides its cost.
+DiskManifest DistinctManifest(std::size_t tokens, std::uint64_t checkpoint) {
+  auto m = Manifest(tokens, checkpoint);
+  std::uint64_t id = (checkpoint + 1) * 1000000;
+  for (auto& p : m.components[0].chunks)
+    p.file = Id(++id);
+  return m;
+}
 // The fastest of `runs` timed calls, in microseconds.
 template<class F>
 double Best(unsigned runs, F&& call) {
@@ -121,6 +131,64 @@ void Checksum() {
               << " ns_per_call=" << us * 1e3 / pieces << " crc=" << crc % 2
               << '\n';
   }
+}
+// Orphan reclamation sweeps every cached file, so its cost grows with files x
+// references unless the live ids are indexed first. Chunk ids belong to one
+// checkpoint each here, as they do in a real cache: Manifest() reuses them
+// across checkpoints, which lets a per-file scan match on the first manifest
+// and hides its cost.
+void Reclaim(ResourceLedger& ledger, unsigned count) {
+  char name[] = "/tmp/gufo-disk-bench-XXXXXX";
+  fs::path root = mkdtemp(name);
+  try {
+    {
+      DiskStore init(ledger, root, UINT64_MAX);
+    }
+    for (unsigned i = 1; i <= count; ++i) {
+      auto m = DistinctManifest(100000, i);
+      Write(root / "v2/manifests" / DiskFileName(Id(i)), EncodeManifest(m));
+      for (const auto& c : m.components) {
+        for (const auto& p : c.chunks) {
+          auto path = root / "v2/chunks" / DiskFileName(p.file);
+          Write(path, {});
+          fs::resize_file(path, p.bytes);
+        }
+        for (auto p : {c.tail, c.private_state}) {
+          if (p) {
+            auto path = root / "v2/private" / DiskFileName(p->file);
+            Write(path, {});
+            fs::resize_file(path, p->bytes);
+          }
+        }
+      }
+    }
+    // Orphans must exist before the store opens, because that is when it
+    // charges them.
+    for (unsigned i = 0; i < count; ++i) {
+      Write(root / "v2/tmp" / DiskFileName(Id(3000000000 + i)), {});
+      auto path = root / "v2/chunks" / DiskFileName(Id(3100000000 + i));
+      Write(path, {});
+      fs::resize_file(path, 8192);
+    }
+    DiskStore store(ledger, root, UINT64_MAX);
+    assert(store.Entries().size() == count);
+    const auto before = store.Stats().managed_bytes;
+    const auto begin = std::chrono::steady_clock::now();
+    store.ReclaimOrphans();
+    store.WaitForReclamation();
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - begin)
+                             .count();
+    assert(store.Stats().managed_bytes == before - count * 8192);
+    assert(!fs::exists(root / "v2/chunks" / DiskFileName(Id(3100000000))));
+    std::cout << "manifests=" << count << " reclaim_ms=" << elapsed
+              << " orphan_files=" << count
+              << " managed_bytes=" << store.Stats().managed_bytes << '\n';
+  } catch (...) {
+    fs::remove_all(root);
+    throw;
+  }
+  fs::remove_all(root);
 }
 }  // namespace
 int main(int argc, char** argv) {
@@ -178,4 +246,6 @@ int main(int argc, char** argv) {
     }
     fs::remove_all(root);
   }
+  for (unsigned count : {100, 1000})
+    Reclaim(ledger, count);
 }
