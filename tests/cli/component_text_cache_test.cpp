@@ -3070,9 +3070,9 @@ void DiskMetadataAllowanceRetiresOlderConversations() {
     return output.str();
   };
   const auto published = logged([&] {
+    const ComponentTextCache::DiskMetadataTesting allowance(1);
     auto runner = std::make_shared<Runner>();
-    ComponentTextCache cache(runner, 1, 1 << 22, disk, false, 0, true, {},
-                             std::size_t{1});
+    ComponentTextCache cache(runner, 1, 1 << 22, disk);
     for (const auto& prompt : {first, second}) {
       auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
       auto& state = dynamic_cast<State&>(lease->state());
@@ -3101,11 +3101,29 @@ void DiskMetadataAllowanceRetiresOlderConversations() {
     assert(!evicted.cache_hit());
     evicted.Invalidate();
   }
-  // Recovered checkpoints over the allowance retire at startup.
-  const auto recovered = logged([&] {
+  // Recovered checkpoints that are pinned stay over the allowance and warn.
+  const auto pinned = logged([&] {
+    std::vector<cache::DiskReadPin> pins;
+    const ComponentTextCache::DiskMetadataTesting allowance(
+        1, [&](cache::DiskStore& store) {
+          for (const auto& entry : store.Entries())
+            pins.push_back(store.Pin(entry.Manifest().checkpoint));
+        });
     auto runner = std::make_shared<Runner>();
-    ComponentTextCache cache(runner, 1, 1 << 22, disk, false, 0, true, {},
-                             std::size_t{1});
+    ComponentTextCache cache(runner, 1, 1 << 22, disk);
+    assert(pins.size() == 1 && pins.front());
+    pins.clear();
+  });
+  assert(pinned.find("event=disk_evicted reason=metadata") ==
+         std::string::npos);
+  assert(pinned.find("event=disk_over_metadata_allowance metadata_bytes=") !=
+         std::string::npos);
+  assert(pinned.find(" allowance_bytes=1") != std::string::npos);
+  // Unpinned, recovered checkpoints over the allowance retire at startup.
+  const auto recovered = logged([&] {
+    const ComponentTextCache::DiskMetadataTesting allowance(1);
+    auto runner = std::make_shared<Runner>();
+    ComponentTextCache cache(runner, 1, 1 << 22, disk);
   });
   assert(recovered.find("event=disk_evicted reason=metadata entries=1 "
                         "metadata_bytes=0 allowance_bytes=1") !=

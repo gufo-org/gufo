@@ -3,6 +3,7 @@
 #include <future>
 #include <new>
 #include <numeric>
+#include <stdexcept>
 
 #include "src/cache/retention.hpp"
 #include "tests/cache/tiered_fixture.hpp"
@@ -871,9 +872,8 @@ void CatalogMetadataTracksAdmissionAndRetirement() {
 void MetadataAllowanceEvictsInsteadOfFillingTheLedger() {
   // Checkpoint n holds n turns, each a prefix of the next; without the
   // allowance their token lists outgrow the ledger's metadata room.
-  constexpr std::size_t kTurn = 2048, kTurns = 12,
-                        kRam = std::size_t{512} << 10, kAllowance = 64 << 10,
-                        kCapture = 192 << 10;
+  constexpr std::size_t kTurn = 2048, kTurns = 8, kRam = std::size_t{384} << 10,
+                        kAllowance = 64 << 10, kCapture = 192 << 10;
   std::vector<Token> conversation(kTurn * kTurns);
   std::iota(conversation.begin(), conversation.end(), 7);
   for (const bool bounded : {false, true}) {
@@ -917,55 +917,118 @@ void MetadataAllowanceEvictsInsteadOfFillingTheLedger() {
     assert(catalog.Size() + evicted.size() == kTurns);
   }
 }
+// Publishes `count` single-checkpoint conversations of 1024 tokens and
+// returns an allowance that holds them with 256 bytes to spare.
+std::size_t PublishConversations(MetadataStore& s, std::uint64_t count) {
+  std::vector<Token> tokens(1024);
+  std::iota(tokens.begin(), tokens.end(), 7);
+  for (std::uint64_t id = 1; id <= count; ++id) {
+    tokens[0] = static_cast<Token>(id);
+    s.Publish(id, tokens, id);
+  }
+  return DiskCatalog(s.ledger, s.disk, s.index).MetadataBytes() + 256;
+}
+void PublishConversation(MetadataStore& s, std::uint64_t id) {
+  std::vector<Token> tokens(1024);
+  std::iota(tokens.begin(), tokens.end(), 7);
+  tokens[0] = static_cast<Token>(id);
+  s.Publish(id, tokens, id);
+}
 void MetadataAllowanceKeepsTheNewPublication() {
   // Restored conversations rank above a fresh publication, so retiring after
   // tracking would delete the checkpoint just written.
   MetadataStore s(1 << 24);
-  std::vector<Token> tokens(1024);
-  std::iota(tokens.begin(), tokens.end(), 7);
-  for (std::uint64_t id = 1; id <= 4; ++id) {
-    tokens[0] = static_cast<Token>(id);
-    s.Publish(id, tokens, id);
-  }
-  std::size_t allowance{};
-  {
-    DiskCatalog probe(s.ledger, s.disk, s.index);
-    allowance = probe.MetadataBytes() + 256;
-  }
+  const auto allowance = PublishConversations(s, 4);
   DiskCatalog catalog(s.ledger, s.disk, s.index, UINT64_MAX, allowance);
   assert(catalog.Size() == 4 && catalog.MetadataBytes() <= allowance);
   for (std::uint64_t id = 1; id <= 4; ++id)
     catalog.Touch({id});
-  tokens[0] = 5;
-  s.Publish(5, tokens, 5);
   std::vector<std::uint64_t> evicted;
+  const auto record = [&](const DiskEviction& eviction) {
+    evicted.push_back(eviction.description->Manifest().checkpoint.value);
+  };
+  // The pass retires to an eighth of the allowance below it: two entries.
+  PublishConversation(s, 5);
   catalog.Track({5}, [&](const DiskEviction& eviction) {
     assert(eviction.reused);
-    evicted.push_back(eviction.description->Manifest().checkpoint.value);
+    record(eviction);
   });
-  assert(evicted == std::vector<std::uint64_t>{1});
+  assert((evicted == std::vector<std::uint64_t>{1, 2}));
   assert(catalog.Find({5}) && s.disk.Open({5}));
   assert(catalog.MetadataBytes() <= allowance);
+  // That slack admits the next publication without a pass.
+  PublishConversation(s, 6);
+  catalog.Track({6}, record);
+  assert(evicted.size() == 2 && catalog.Size() == 4);
+  // Known limitation: conversations restored within one disk turnover rank
+  // above every unrestored one, so the next pass retires the two fresh
+  // conversations before the restored ones.
+  PublishConversation(s, 7);
+  catalog.Track({7}, record);
+  assert((evicted == std::vector<std::uint64_t>{1, 2, 5, 6}));
+  assert(catalog.Find({3}) && catalog.Find({4}) && catalog.Find({7}));
+}
+void MetadataAllowancePassFailures() {
+  MetadataStore s(1 << 24);
+  const auto allowance = PublishConversations(s, 4);
+  DiskCatalog catalog(s.ledger, s.disk, s.index, UINT64_MAX, allowance);
+  std::vector<std::uint64_t> evicted;
+  const auto record = [&](const DiskEviction& eviction) {
+    evicted.push_back(eviction.description->Manifest().checkpoint.value);
+  };
+  // A busy store ends the pass; the publication is still tracked.
+  PublishConversation(s, 5);
+  {
+    std::promise<void> entered, release;
+    auto released = release.get_future().share();
+    s.disk.SetCrashHook([&](DiskPublicationStep step) {
+      if (step == DiskPublicationStep::kPayloadWritten) {
+        entered.set_value();
+        released.wait();
+      }
+    });
+    auto writer =
+        std::async(std::launch::async, [&] { PublishConversation(s, 6); });
+    entered.get_future().wait();
+    catalog.Track({5}, record);
+    release.set_value();
+    writer.get();
+    s.disk.SetCrashHook({});
+  }
+  assert(evicted.empty() && catalog.Find({5}) && catalog.Size() == 5);
+  assert(catalog.MetadataBytes() > allowance);
+  // A failure during the pass ends it; the publication is still tracked.
+  bool thrown{};
+  catalog.Track({6}, [&](const DiskEviction& eviction) {
+    record(eviction);
+    thrown = true;
+    throw std::runtime_error("visitor failed");
+  });
+  assert(thrown && (evicted == std::vector<std::uint64_t>{1}));
+  assert(catalog.Find({6}) && catalog.Size() == 5);
+  // A reader-pinned candidate is skipped and the next one retires.
+  {
+    const auto pin = catalog.Find({2})->Pin();
+    assert(pin);
+    assert(catalog.FitMetadata(record) == 2);
+  }
+  assert((evicted == std::vector<std::uint64_t>{1, 3, 4}));
+  assert(catalog.Find({2}) && catalog.MetadataBytes() <= allowance);
+  // Accounting stayed consistent through every failure.
+  while (catalog.EvictOne()) {
+  }
+  assert(catalog.Size() == 0 && catalog.MetadataBytes() == 0);
 }
 void StartupFitsRecoveredMetadata() {
   MetadataStore s(1 << 24);
-  std::vector<Token> tokens(1024);
-  std::iota(tokens.begin(), tokens.end(), 7);
-  for (std::uint64_t id = 1; id <= 4; ++id) {
-    tokens[0] = static_cast<Token>(id);
-    s.Publish(id, tokens, id);
-  }
-  std::size_t allowance{};
-  {
-    DiskCatalog probe(s.ledger, s.disk, s.index);
-    allowance = probe.MetadataBytes() / 2;
-  }
+  const auto allowance = (PublishConversations(s, 4) - 256) / 2;
   DiskCatalog catalog(s.ledger, s.disk, s.index, UINT64_MAX, allowance);
   assert(catalog.Size() == 4 && catalog.MetadataBytes() > allowance);
   std::size_t seen{};
   const auto retired =
       catalog.FitMetadata([&](const DiskEviction&) { ++seen; });
-  assert(retired == 2 && seen == retired && catalog.Size() == 2);
+  // Two entries fit the allowance; the slack below it retires a third.
+  assert(retired == 3 && seen == retired && catalog.Size() == 1);
   assert(catalog.MetadataBytes() <= allowance);
   assert(catalog.FitMetadata() == 0);
 }
@@ -1173,6 +1236,7 @@ int main() {
   CatalogMetadataTracksAdmissionAndRetirement();
   MetadataAllowanceEvictsInsteadOfFillingTheLedger();
   MetadataAllowanceKeepsTheNewPublication();
+  MetadataAllowancePassFailures();
   StartupFitsRecoveredMetadata();
   EvictionDoesNotWaitForYieldingWriter();
   QuarantineRacingPublication();

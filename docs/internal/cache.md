@@ -491,26 +491,33 @@ Memory that another process claims after startup is not subtracted. When
 other GPU servers share the machine, such as an image or speech server, set an
 explicit `--cache-ram-bytes` that leaves room for their peak use; starting
 them first only accounts for what they hold at that moment.
-The RAM cache budget includes all cache metadata. That covers the in-RAM
-manifests (with their token lists), catalog records and dependency maps of
-every disk checkpoint, including checkpoints recovered at startup. The
-**disk metadata allowance** bounds that disk share at `max(budget / 32,
-16 MiB)`, so a 1 GiB budget allows 32 MiB and a 16 GiB budget 512 MiB. Each
-disk checkpoint keeps its whole token list, so one long conversation's
-checkpoints grow quadratically with its length. When a publication would take
-the tracked metadata over the allowance, the catalog first retires up to four
-other disk checkpoints in the same order as eviction for bytes. The new
-checkpoint is never a candidate. Startup retires recovered checkpoints over
-the allowance before indexing them. The allowance leaves the rest of the
-roughly 10% metadata room for RAM-tier metadata, index nodes and in-flight
-persistence, which it does not count: up to 16 queued captures, each holding
-its tokens twice, or 32 MiB at 262144 tokens. One ranking compares token
-lists pairwise. As of November 2026, a pass over 300 nested checkpoints of up
-to 150,000 tokens takes about 0.7 s on Strix Halo, so a pass ranks once and
-retires along that order. Retiring four per publication keeps one growing
-conversation within about 7% of the allowance. With the RAM cache off there
-is no allowance; see above.
-The RAM payload budget excludes weights, execution states, request token
+The RAM cache budget includes the cache's own metadata, including disk-tier
+metadata: the in-RAM manifests (with their token lists), catalog records and
+dependency maps of every disk checkpoint, including checkpoints recovered at
+startup. The **disk metadata allowance** bounds that disk share at
+`max(budget / 32, 16 MiB)`, so a 1 GiB budget allows 32 MiB and a 16 GiB
+budget 512 MiB. Each disk checkpoint keeps its whole token list, so one long
+conversation's checkpoints grow quadratically with its length. When a
+publication would take the tracked metadata over the allowance, the catalog
+first retires other disk checkpoints in the same order as eviction for bytes,
+until the publication fits with an eighth of the allowance to spare, and at
+most 16 per publication. The new checkpoint is never a candidate. Startup
+retires recovered checkpoints over the allowance before indexing them, to the
+same mark. The allowance leaves the rest of the roughly 10% metadata room for
+RAM-tier metadata, index nodes and in-flight persistence, which it does not
+count: up to 16 captures held for the persistence queue (twice its depth),
+each holding its tokens in its capture and in its write job, or 32 MiB at
+262144 tokens. One ranking compares token lists pairwise and runs under the
+serving lock, so a pass ranks once and retires along that order; the spare
+eighth lets several later publications fit without ranking. As of November
+2026 on Strix Halo, one conversation of 500 turns of 500 tokens under the
+64 MiB allowance of a 2 GiB budget ranks on 29 of its publications, each
+pass taking up to 0.52 s, and stays within 0.3% of the allowance
+(`cache_tiered_bench`). Disk checkpoints
+restored within one `--cache-disk-bytes` turnover rank above every unrestored
+one, so a new or RAM-served conversation's disk checkpoints retire first.
+With the RAM cache off there is no allowance; see above.
+The RAM cache budget excludes weights, execution states, request token
 metadata, disk staging and Qwen's separate CPU image-preprocessing cache (up to 128 MiB
 of retained encoded/RGB vectors plus bounded metadata). It also excludes temporary
 host buffers used to save checkpoints to disk; this is not a limit on total

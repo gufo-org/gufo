@@ -23,8 +23,10 @@ using DiskEvictionVisitor = std::function<void(const DiskEviction&)>;
 // and would otherwise fill the ledger until RAM captures are refused (#1329).
 // Backing takes about 90% of the budget. The allowance takes 1/32 of it; the
 // rest of the metadata room covers RAM-tier metadata, index nodes and the
-// in-flight persistence manifests the allowance does not count (up to 16
-// queued captures, each holding its tokens twice: 32 MiB at 262144 tokens).
+// in-flight persistence manifests the allowance does not count: up to 16
+// captures held for the persistence queue (twice its depth), each holding its
+// tokens twice, in DurableCapture::manifest and the PersistenceJob's copy
+// (32 MiB at 262144 tokens).
 // A 16 MiB floor leaves small budgets to the ledger's own refusals. Typical
 // automatic budgets give hundreds of MiB, which a full default disk of the
 // measured agent workload (about 62 MB) does not reach.
@@ -40,9 +42,11 @@ class DiskCatalog {
 public:
   // Retirements one publication may spend on the metadata allowance. Ranking
   // compares token lists pairwise under the serving lock, so a pass ranks
-  // once and retires along that order. More than one keeps a growing
-  // conversation converging: its new leaf outweighs the prefix retired.
-  static constexpr std::size_t kMetadataEvictions = 4;
+  // once and retires along that order down to an eighth of the allowance
+  // below it; later publications then fit without ranking. More than one
+  // also keeps a growing conversation converging: its new leaf outweighs
+  // the prefix retired.
+  static constexpr std::size_t kMetadataEvictions = 16;
   DiskCatalog(ResourceLedger&, DiskStore&, PrefixIndex&,
               std::uint64_t turnover_bytes = UINT64_MAX,
               std::size_t metadata_allowance_bytes = SIZE_MAX);
@@ -50,9 +54,10 @@ public:
   DiskCatalog(const DiskCatalog&) = delete;
   DiskCatalog& operator=(const DiskCatalog&) = delete;
   // When tracking a new publication would exceed the metadata allowance,
-  // first retire up to kMetadataEvictions other entries until it fits;
-  // `retired` sees each. The checkpoint being tracked is never a candidate.
-  // A failed retirement ends the pass, never the tracking; the next retries.
+  // first retire up to kMetadataEvictions other entries until it fits with
+  // an eighth of the allowance to spare; `retired` sees each. The checkpoint
+  // being tracked is never a candidate. A failed retirement ends the pass,
+  // never the tracking; the next retries.
   void Track(CheckpointId, const DiskEvictionVisitor& retired = {});
   [[nodiscard]] std::shared_ptr<const DiskDescription> Find(CheckpointId) const;
   void Touch(CheckpointId);
@@ -71,8 +76,9 @@ public:
   // Lookup rejects quarantined descriptions immediately, even before this.
   void Reconcile();
   std::size_t ReclaimInvalid();
-  // Retire entries in EvictOne's order until MetadataBytes fits the allowance
-  // or nothing more retires. Returns the number retired.
+  // When MetadataBytes exceeds the allowance, retire entries in EvictOne's
+  // order until it fits with an eighth of the allowance to spare or nothing
+  // more retires. Returns the number retired.
   std::size_t FitMetadata(const DiskEvictionVisitor& retired = {});
   // RAM held for tracked checkpoints: the store's decoded manifests and pins,
   // catalog records, their descriptions and dependency maps. It excludes the

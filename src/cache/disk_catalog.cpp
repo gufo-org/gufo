@@ -131,23 +131,15 @@ struct DiskCatalog::Impl {
     auto& references = bucket->second.checkpoints;
     if (references.contains(id))
       return;
+    // A bucket left empty by a failure here is released by the caller's
+    // Erase, which RemoveDependency handles for a missing reference.
+    auto admission =
+        ledger->Reserve(ResourceCategory::kMetadata, kReferenceBytes);
+    auto reference = references.emplace(id, ResourceCharge{}).first;
     try {
-      auto admission =
-          ledger->Reserve(ResourceCategory::kMetadata, kReferenceBytes);
-      auto reference = references.emplace(id, ResourceCharge{}).first;
-      try {
-        reference->second = admission.Convert();
-      } catch (...) {
-        references.erase(reference);
-        throw;
-      }
+      reference->second = admission.Convert();
     } catch (...) {
-      // A bucket created for this reference must not outlive its failure.
-      if (references.empty()) {
-        auto charge = std::move(bucket->second.metadata);
-        reverse.erase(bucket);
-        metadata_bytes -= kBucketBytes;
-      }
+      references.erase(reference);
       throw;
     }
     metadata_bytes += kReferenceBytes;
@@ -345,14 +337,19 @@ struct DiskCatalog::Impl {
     return metadata_bytes <= metadata_allowance &&
            incoming <= metadata_allowance - metadata_bytes;
   }
-  // One ranking, then retirements along it until `incoming` fits.
+  // A pass starts when `incoming` does not fit. It ranks once and retires
+  // along that order until `incoming` fits an eighth of the allowance below
+  // it, so one ranking serves several later publications.
   std::size_t Fit(std::size_t incoming, std::size_t limit,
                   const DiskEvictionVisitor& retired) {
     if (!limit || Fits(incoming))
       return 0;
+    const auto slack = metadata_allowance / 8;
+    const auto target =
+        incoming > SIZE_MAX - slack ? SIZE_MAX : incoming + slack;
     Rank();
     std::size_t count{};
-    while (count < limit && !Fits(incoming)) {
+    while (count < limit && !Fits(target)) {
       auto eviction = RetireRanked();
       if (!eviction)
         break;

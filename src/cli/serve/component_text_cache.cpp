@@ -99,6 +99,8 @@ bool LogDiskEviction(const cache::DiskEviction& eviction,
                    " payload_bytes=" + std::to_string(PayloadBytes(manifest)));
   return true;
 }
+thread_local const ComponentTextCache::DiskMetadataTesting*
+    disk_metadata_testing{};
 class FrontierHeadroomRefused final : public std::runtime_error {
 public:
   FrontierHeadroomRefused() : std::runtime_error("frontier capture headroom") {}
@@ -466,8 +468,7 @@ struct ComponentTextCache::Impl {
   Impl(std::shared_ptr<TextModelRunner> runner, std::size_t count,
        std::size_t ram, std::size_t slot_ceiling,
        const std::optional<TextRunnerDiskCacheOptions>& options,
-       bool automatic_ram, bool ram_on, TextRunnerExpertCacheClaim experts,
-       std::optional<std::size_t> metadata_allowance)
+       bool automatic_ram, bool ram_on, TextRunnerExpertCacheClaim experts)
       : runner(std::move(runner)),
         // Disk transfers lease one fixed pinned staging buffer: one piece for
         // writes, whose speed a larger piece does not change (#562), and
@@ -679,11 +680,14 @@ struct ComponentTextCache::Impl {
     budget = ram_enabled ? ram : 0;
     FitExpertCache(experts, ram);
     if (options) {
-      disk_metadata_allowance =
-          metadata_allowance.value_or(cache::DiskMetadataAllowance(budget));
+      const auto* testing = disk_metadata_testing;
+      disk_metadata_allowance = testing ? testing->allowance_bytes
+                                        : cache::DiskMetadataAllowance(budget);
       catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index,
                                                      options->capacity_bytes,
                                                      disk_metadata_allowance);
+      if (testing && testing->recovered)
+        testing->recovered(*disk);
       // Recovered checkpoints over the allowance retire before indexing, so
       // their index records are never charged; orphan reclamation has not
       // started yet, so no wait is needed.
@@ -1632,11 +1636,20 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
 ComponentTextCache::ComponentTextCache(
     std::shared_ptr<TextModelRunner> runner, std::size_t count, std::size_t ram,
     const std::optional<TextRunnerDiskCacheOptions>& disk, bool automatic_ram,
-    std::size_t ceiling, bool ram_enabled, TextRunnerExpertCacheClaim experts,
-    std::optional<std::size_t> disk_metadata_allowance)
-    : impl_(std::make_unique<Impl>(
-          std::move(runner), count, ram, std::max(ram, ceiling), disk,
-          automatic_ram, ram_enabled, experts, disk_metadata_allowance)) {}
+    std::size_t ceiling, bool ram_enabled, TextRunnerExpertCacheClaim experts)
+    : impl_(std::make_unique<Impl>(std::move(runner), count, ram,
+                                   std::max(ram, ceiling), disk, automatic_ram,
+                                   ram_enabled, experts)) {}
+ComponentTextCache::DiskMetadataTesting::DiskMetadataTesting(
+    std::size_t allowance, std::function<void(cache::DiskStore&)> hook)
+    : allowance_bytes(allowance),
+      recovered(std::move(hook)),
+      previous_(disk_metadata_testing) {
+  disk_metadata_testing = this;
+}
+ComponentTextCache::DiskMetadataTesting::~DiskMetadataTesting() {
+  disk_metadata_testing = previous_;
+}
 ComponentTextCache::~ComponentTextCache() = default;
 std::size_t ComponentTextCache::capacity() const noexcept {
   return impl_->entries.size();
