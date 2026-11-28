@@ -876,23 +876,43 @@ struct DiskStore::Impl {
     }
     return true;
   }
-  bool Referenced(const platform::Directory& directory, DiskFileId id) const {
-    for (const auto& entry : entries) {
-      if ((&directory == &manifests || &directory == &uses) &&
-          entry.file_ == id)
-        return true;
+  // The live ids of one directory, sorted for lookup. Reclaim() builds these
+  // once: asking the question per file, as Referenced() did, costs
+  // O(files x references) and a full cache held the store lock for hours.
+  using LiveIds = std::vector<DiskFileId>;
+  // A descendant component inherits its ancestor's chunk ids, so the same id
+  // can appear in several manifests. Duplicates do not change a lookup, they
+  // only waste the vector.
+  static void SortUnique(LiveIds& ids) {
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+  }
+  void IndexLiveIds(LiveIds& live_manifests, LiveIds& live_chunks,
+                    LiveIds& live_private) const {
+    std::size_t chunk_refs{}, private_refs{};
+    for (const auto& entry : entries)
       for (const auto& c : entry.manifest_->components) {
-        if (&directory == &chunks)
-          for (const auto& p : c.chunks)
-            if (p.file == id)
-              return true;
-        if (&directory == &private_files)
-          for (auto p : {c.tail, c.private_state})
-            if (p && p->file == id)
-              return true;
+        chunk_refs = Add(chunk_refs, c.chunks.size());
+        private_refs =
+            Add(private_refs, (c.tail ? 1 : 0) + (c.private_state ? 1 : 0));
+      }
+    live_manifests.reserve(entries.size());
+    live_chunks.reserve(chunk_refs);
+    live_private.reserve(private_refs);
+    for (const auto& entry : entries) {
+      live_manifests.push_back(entry.file_);
+      for (const auto& c : entry.manifest_->components) {
+        for (const auto& p : c.chunks)
+          live_chunks.push_back(p.file);
+        if (c.tail)
+          live_private.push_back(c.tail->file);
+        if (c.private_state)
+          live_private.push_back(c.private_state->file);
       }
     }
-    return false;
+    SortUnique(live_manifests);
+    SortUnique(live_chunks);
+    SortUnique(live_private);
   }
   void RequireRecovered() const {
     if (recovery_required)
@@ -904,23 +924,35 @@ struct DiskStore::Impl {
     // Any incomplete cleanup must establish deletion durability before its
     // released byte capacity can fund another publication.
     recovery_required = true;
+    // One pass over the manifests, then every directory sweep below is a
+    // lookup. The per-file query was O(entries x references): a 700k-file
+    // cache over 1.8k manifests spent ~5e11 comparisons and was still running
+    // after 15 minutes, holding the store lock the publisher waits for.
+    LiveIds live_manifests, live_chunks, live_private;
+    IndexLiveIds(live_manifests, live_chunks, live_private);
+    const auto sweep = [&](const platform::Directory& directory,
+                           const LiveIds& live) {
+      Scan(directory, [&](const auto& name, const auto&) {
+        auto id = ParseName(name);
+        if (id && !std::binary_search(live.begin(), live.end(), *id))
+          Remove(directory, name);
+      });
+      Sync(directory);
+    };
     // Even invalid manifests are removed and that removal made durable before
     // dependencies: a crash must never resurrect a manifest with deleted bytes.
-    Scan(manifests, [&](const auto& name, const auto&) {
-      auto id = ParseName(name);
-      if (id && !Referenced(manifests, *id))
-        Remove(manifests, name);
+    sweep(manifests, live_manifests);
+    sweep(chunks, live_chunks);
+    sweep(private_files, live_private);
+    // uses/ is keyed by the manifest file id.
+    sweep(uses, live_manifests);
+    // No manifest references a temporary: each is a publication that never
+    // renamed, so every one is an orphan and needs no lookup.
+    Scan(temporary, [&](const auto& name, const auto&) {
+      if (ParseName(name))
+        Remove(temporary, name);
     });
-    Sync(manifests);
-    for (const platform::Directory* directory :
-         {&chunks, &private_files, &temporary, &uses}) {
-      Scan(*directory, [&](const auto& name, const auto&) {
-        auto id = ParseName(name);
-        if (id && !Referenced(*directory, *id))
-          Remove(*directory, name);
-      });
-      Sync(*directory);
-    }
+    Sync(temporary);
     // A failed unlink syscall can leave its outcome uncertain. Reconcile the
     // conservative charge with the actual namespace after successful cleanup.
     std::uint64_t managed{};
@@ -1901,14 +1933,42 @@ DiskRetireResult DiskStore::Impl::Retire(CheckpointId id, std::uint64_t epoch) {
   try {
     Remove(manifests, DiskFileName(retired.file_));
     Sync(manifests);
+    // The retired manifest's payload ids, and which of them a manifest that
+    // remains still references (a descendant inherits its ancestor's chunks).
+    // One pass marks all of them: asking every manifest per file is
+    // O(retired files x references), seconds per eviction on a full cache.
+    std::vector<DiskFileId> chunk_ids, private_ids;
     for (const auto& c : retired.manifest_->components) {
       for (const auto& p : c.chunks)
-        if (!Referenced(chunks, p.file))
-          Remove(chunks, DiskFileName(p.file));
+        chunk_ids.push_back(p.file);
       for (auto p : {c.tail, c.private_state})
-        if (p && !Referenced(private_files, p->file))
-          Remove(private_files, DiskFileName(p->file));
+        if (p)
+          private_ids.push_back(p->file);
     }
+    SortUnique(chunk_ids);
+    SortUnique(private_ids);
+    std::vector<bool> chunk_referenced(chunk_ids.size());
+    std::vector<bool> private_referenced(private_ids.size());
+    const auto mark = [](const std::vector<DiskFileId>& ids,
+                         std::vector<bool>& referenced, DiskFileId id) {
+      const auto it = std::lower_bound(ids.begin(), ids.end(), id);
+      if (it != ids.end() && *it == id)
+        referenced[static_cast<std::size_t>(it - ids.begin())] = true;
+    };
+    for (const auto& entry : entries)
+      for (const auto& c : entry.manifest_->components) {
+        for (const auto& p : c.chunks)
+          mark(chunk_ids, chunk_referenced, p.file);
+        for (auto p : {c.tail, c.private_state})
+          if (p)
+            mark(private_ids, private_referenced, p->file);
+      }
+    for (std::size_t i = 0; i < chunk_ids.size(); ++i)
+      if (!chunk_referenced[i])
+        Remove(chunks, DiskFileName(chunk_ids[i]));
+    for (std::size_t i = 0; i < private_ids.size(); ++i)
+      if (!private_referenced[i])
+        Remove(private_files, DiskFileName(private_ids[i]));
     if (Remove(uses, DiskFileName(retired.file_)))
       Sync(uses);
     Sync(chunks);

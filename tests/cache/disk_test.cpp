@@ -1093,6 +1093,43 @@ void VerifiedDependencies() {
   assert(rejected);
   assert(retire() == settled);
 }
+// A descendant inherits its ancestor's chunk id, so one payload file has two
+// owners. Retiring either owner must keep the file, and retiring the last must
+// remove it.
+void RetireKeepsInheritedPayload() {
+  Directory directory;
+  DiskStore store(ledger, directory.path, 1ULL << 30);
+  std::vector<std::uint8_t> chunk(8, 42);
+  std::array<std::uint8_t, 16> state{};
+  auto publish = [&](unsigned checkpoint, bool write_chunk) {
+    auto m = Manifest();
+    m.checkpoint = {checkpoint};
+    m.tokens.resize(2);
+    m.components[0].chunks[0] = {Id(20), chunk.size(), DiskChecksum(chunk)};
+    m.components[0].tail.reset();
+    m.components[0].position.valid_rows = 2;
+    m.components[1].position.valid_rows = 2;
+    state[0] = checkpoint;
+    m.components[1].private_state =
+        DiskPayload{Id(checkpoint + 100), state.size(), DiskChecksum(state)};
+    const std::array<DiskWriteBuffer, 2> buffers{
+        {{false, Id(20), chunk}, {true, Id(checkpoint + 100), state}}};
+    store.Publish(Id(checkpoint), m,
+                  std::span(buffers).subspan(write_chunk ? 0 : 1));
+  };
+  const auto chunk_path = directory.path / "v2/chunks" / DiskFileName(Id(20));
+  const auto private_path = [&](unsigned checkpoint) {
+    return directory.path / "v2/private" / DiskFileName(Id(checkpoint + 100));
+  };
+  publish(7, true);
+  publish(8, false);
+  assert(store.TryRetire({7}, 0) == DiskRetireResult::kRetired);
+  assert(fs::exists(chunk_path) && fs::exists(private_path(8)));
+  assert(!fs::exists(private_path(7)));
+  assert(store.TryRetire({8}, 0) == DiskRetireResult::kRetired);
+  assert(!fs::exists(chunk_path) && !fs::exists(private_path(8)));
+  assert(store.Stats().managed_bytes == 0);
+}
 }  // namespace
 // A window manifest lists the chunks from its window's first row, uses the
 // window format version and size, and shares chunk files with other
@@ -1255,6 +1292,7 @@ int main() {
   ManagedUsageRequiresPayloadMetadata();
   CapacityBeforePayloadReads();
   VerifiedDependencies();
+  RetireKeepsInheritedPayload();
   RootSymlinks();
   ParentPathResolution();
   MetadataAdmission();
