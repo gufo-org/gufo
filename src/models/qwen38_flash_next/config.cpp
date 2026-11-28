@@ -10,8 +10,6 @@
 namespace gufo::models::qwen38_flash_next {
 namespace {
 
-constexpr std::string_view kArchitecture = "qwen4exp";
-
 /// Reports the first failure of Config::Validated.
 struct Failure {
   std::string* error;

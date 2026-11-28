@@ -47,6 +47,20 @@ object in a response reports copies as `lookup_n` and `lookup_n_accepted`.
 With greedy decoding, MTP produces exactly the AR output. With sampling, both
 modes follow the same distribution, but the same seed gives different text.
 
+## LoRA adapter
+
+Gufo can merge a llama.cpp GGUF **LoRA adapter**, a small file of low-rank weight updates, into the model while it loads. You serve a fine-tune from the stock files and the adapter, with no merged copy of the model on disk:
+
+```sh
+gufo serve llm --model flash-next-q4 --lora adapter.gguf
+```
+
+- The adapter may update the `ssm_out`, `attn_output` and `ffn_down_shexp` weights of the 48 trunk layers, which the Q4 GGUF stores as Q8_0. Its factors may be F32, F16 or BF16. Gufo checks every adapter tensor against the model before it allocates GPU memory and refuses an adapter it can't apply. The MTP head stays unchanged.
+- Each updated weight is the stock weight plus `--lora-scale` × alpha / rank × B·A, computed in float32 and stored as Q8_0 again, so speed and memory match the stock model. `--lora-scale` defaults to 1.
+- `serve llm`, `chat`, `prompt` and `bench` accept both options. One adapter applies to every request.
+- The log names the adapter, its SHA-256, the scale and the merge time.
+- The [disk cache](../cache.md) keeps entries per adapter file contents and scale: a server never restores prompts cached with another adapter, another scale or none.
+
 ## Thinking
 
 Thinking is on by default, with `xhigh` effort, and earlier reasoning is kept

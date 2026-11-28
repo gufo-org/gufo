@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstring>
 #include <gufo/ext/experimental/managed_alloc.hpp>
 #include <gufo/ext/experimental/weight_upload.hpp>
+#include <gufo/ext/platform/prefault.hpp>
 #include <initializer_list>
 #include <iomanip>
 #include <sstream>
@@ -16,6 +18,7 @@
 
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
+#include "src/models/qwen38_flash_next/lora.hpp"
 #include "src/models/qwen38_flash_next/weight_source.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
@@ -68,6 +71,10 @@ struct Uploader {
   flash_next::WeightSource* source{nullptr};
   /// Bytes the measuring walk requested: the whole upload.
   std::uint64_t measured{0};
+  /// Patches trunk tensors; cleared before the MTP block.
+  const LoraAdapter* lora{nullptr};
+  std::size_t merged{0};
+  std::chrono::steady_clock::duration merge_time{};
 
   [[nodiscard]] bool Measuring() const noexcept { return weights == nullptr; }
 
@@ -212,7 +219,12 @@ struct Uploader {
     }
     allocations.push_back(ptr);
     bytes += size + kTailMargin;
-    if (!Source(t, size, ptr)) {
+    const LoraPatch* patch = lora != nullptr ? lora->Find(t.name) : nullptr;
+    if (patch != nullptr) {
+      if (!UploadMerged(*patch, ptr)) {
+        return d;
+      }
+    } else if (!Source(t, size, ptr)) {
       Fail("upload failed for " + std::string(t.name) +
            (error != nullptr ? ": " + *error : std::string()));
       return d;
@@ -231,6 +243,36 @@ struct Uploader {
       max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     }
     return d;
+  }
+
+  /// Merges a LoRA patch into its stock rows on the host and copies the
+  /// result to `ptr`, a few MiB of rows at a time.
+  bool UploadMerged(const LoraPatch& patch, void* ptr) {
+    const auto start = std::chrono::steady_clock::now();
+    const std::size_t row_bytes = patch.target.RowBytes();
+    const std::uint64_t chunk =
+        std::max<std::uint64_t>(1, (std::size_t{4} << 20) / row_bytes);
+    std::vector<std::uint8_t> host(
+        std::min<std::uint64_t>(chunk, patch.target.rows) * row_bytes);
+    for (std::uint64_t row = 0; row < patch.target.rows; row += chunk) {
+      const std::uint64_t count = std::min(chunk, patch.target.rows - row);
+      if (!lora->MergeRows(patch, row, count, host.data(), error)) {
+        Fail(error != nullptr ? *error : "LoRA merge failed");
+        return false;
+      }
+      if (hipMemcpy(static_cast<std::uint8_t*>(ptr) + row * row_bytes,
+                    host.data(), count * row_bytes,
+                    hipMemcpyHostToDevice) != hipSuccess) {
+        Fail("upload failed for LoRA-merged " + std::string(patch.target.name));
+        return false;
+      }
+    }
+    // The merge read the stock rows through the mapping; drop those pages
+    // from the process, as the stock tensors never enter it.
+    platform::ReleaseMappedPages(patch.target.data, patch.target.SizeBytes());
+    ++merged;
+    merge_time += std::chrono::steady_clock::now() - start;
+    return true;
   }
 
   /// Uploads a narrow projection the quantized tier does not cover (the
@@ -537,6 +579,7 @@ struct Uploader {
     }
     if (mtp != nullptr) {
       shard_base = trunk_shards;
+      lora = nullptr;
       u.mtp = Layer(mtp->block);
     }
     return u;
@@ -624,7 +667,8 @@ void WidenBF16(const std::uint16_t* src, float* dst,
 
 std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const MtpWeights* mtp,
-    flash_next::WeightSource& source, std::string* error_msg) {
+    flash_next::WeightSource& source, std::string* error_msg,
+    const LoraAdapter* lora) {
   const auto trunk = source.Regions(false);
   std::vector<core::GgufMappedRegion> shards(trunk.begin(), trunk.end());
   const auto shard_count = static_cast<std::uint32_t>(shards.size());
@@ -633,13 +677,13 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     shards.insert(shards.end(), extra.begin(), extra.end());
   }
   return UploadShards(w, mtp, std::move(shards), shard_count, &source,
-                      error_msg);
+                      error_msg, lora);
 }
 
 std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const core::GgufReader& reader,
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
-    std::string* error_msg) {
+    std::string* error_msg, const LoraAdapter* lora) {
   const auto regions = reader.GetMappedRegions();
   std::vector<core::GgufMappedRegion> shards(regions.begin(), regions.end());
   const auto shard_count = static_cast<std::uint32_t>(shards.size());
@@ -653,13 +697,14 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     shards.insert(shards.end(), extra.begin(), extra.end());
   }
   return UploadShards(w, mtp, std::move(shards), shard_count, nullptr,
-                      error_msg);
+                      error_msg, lora);
 }
 
 std::unique_ptr<DeviceModel> DeviceModel::UploadShards(
     const ModelWeights& w, const MtpWeights* mtp,
     std::vector<core::GgufMappedRegion> shards, std::uint32_t shard_count,
-    flash_next::WeightSource* source, std::string* error_msg) {
+    flash_next::WeightSource* source, std::string* error_msg,
+    const LoraAdapter* lora) {
   // The CPU reference also reads Q6_K, but the production embedding, dense
   // and routed kernels do not. Reject it before allocating device weights.
   const auto supported = [&](const TensorRef& t) {
@@ -710,6 +755,7 @@ std::unique_ptr<DeviceModel> DeviceModel::UploadShards(
               m->bytes_, m->max_half_cols_, m->max_q8_cols_, error_msg};
   up.measured = measured;
   up.source = source;
+  up.lora = lora;
   Uploaded uploaded = up.Model(w, mtp, shard_count);
   // The source hears of the walk's end only once its queued region reads
   // have landed, so it may free what they read into.
@@ -724,6 +770,13 @@ std::unique_ptr<DeviceModel> DeviceModel::UploadShards(
     return nullptr;
   }
   assert(up.requested == measured);
+  if (lora != nullptr && up.merged != lora->size()) {
+    if (error_msg != nullptr)
+      *error_msg = "LoRA adapter patched " + std::to_string(up.merged) +
+                   " of its " + std::to_string(lora->size()) + " tensors";
+    return nullptr;
+  }
+  m->lora_seconds_ = std::chrono::duration<double>(up.merge_time).count();
   m->token_embd_ = uploaded.token_embd;
   m->output_ = uploaded.output;
   m->output_bytes_ = w.output.SizeBytes();

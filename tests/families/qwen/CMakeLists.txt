@@ -13,3 +13,10 @@ target_link_libraries(qwen_draft_vocab_test PRIVATE gufo_qwen_draft_vocab)
 add_test(NAME qwen_draft_vocab_test COMMAND qwen_draft_vocab_test)
 set_tests_properties(qwen_draft_vocab_test PROPERTIES
   LABELS "cpu;families;qwen;speculative;correctness")
+
+add_executable(qwen_lora_test lora_test.cpp)
+target_include_directories(qwen_lora_test PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(qwen_lora_test PRIVATE gufo_core gufo_qwen_lora)
+add_test(NAME qwen_lora_test COMMAND qwen_lora_test)
+set_tests_properties(qwen_lora_test PROPERTIES
+  LABELS "cpu;families;qwen;lora;correctness")

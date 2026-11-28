@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "lora",
+  "target": "gufo_qwen_lora",
+  "kind": "static",
+  "purpose": "CPU-only llama.cpp GGUF LoRA adapter reader and load-time Q8_0 merge (requantization) shared by the Qwen text extensions.",
+  "depends": []
+}
