@@ -106,6 +106,23 @@ public:
                      bool ram_enabled = true,
                      TextRunnerExpertCacheClaim experts = {});
   ~ComponentTextCache();
+  // Tests only. While one is alive, caches constructed on its thread use
+  // `allowance_bytes` in place of cache::DiskMetadataAllowance and pass their
+  // disk store to `recovered` before fitting recovered checkpoints to it.
+  class DiskMetadataTesting {
+  public:
+    explicit DiskMetadataTesting(
+        std::size_t allowance_bytes,
+        std::function<void(cache::DiskStore&)> recovered = {});
+    ~DiskMetadataTesting();
+    DiskMetadataTesting(const DiskMetadataTesting&) = delete;
+    DiskMetadataTesting& operator=(const DiskMetadataTesting&) = delete;
+    std::size_t allowance_bytes;
+    std::function<void(cache::DiskStore&)> recovered;
+
+  private:
+    const DiskMetadataTesting* previous_;
+  };
   // With `state_tokens`, the session the prompt lands on claims them from
   // the shared state budget (StateAccount::Claim), drawing on
   // `reservation` first. Throws StateMemoryShort when the budget cannot

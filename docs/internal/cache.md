@@ -435,7 +435,8 @@ RAM, no shared-prefix or branch checkpoint, and no retained history. With
 bounded 512 MiB backing, so `backing_prepared` appears in that case only. The
 startup line reports `ram_cache=off capacity_bytes=0`. Disk-only serving also
 needs metadata for its retained disk index and in-flight publications. Its
-metadata remains accounted without an aggregate RAM admission limit; allocation
+metadata remains accounted without an aggregate RAM admission limit or a disk
+metadata allowance (`disk_metadata_allowance_bytes=0`); allocation
 can still fail if host memory is exhausted. This does not enable RAM checkpoints
 or enlarge the fixed capture backing and disk staging buffer. Persistence pins
 remain capped at the 512 MiB disk-capture backing capacity.
@@ -490,8 +491,34 @@ Memory that another process claims after startup is not subtracted. When
 other GPU servers share the machine, such as an image or speech server, set an
 explicit `--cache-ram-bytes` that leaves room for their peak use; starting
 them first only accounts for what they hold at that moment.
-The RAM payload budget excludes weights, execution states, token metadata,
-disk staging and Qwen's separate CPU image-preprocessing cache (up to 128 MiB
+The RAM cache budget includes the cache's own metadata, including disk-tier
+metadata: the in-RAM manifests (with their token lists), catalog records and
+dependency maps of every disk checkpoint, including checkpoints recovered at
+startup. The **disk metadata allowance** bounds that disk share at
+`max(budget / 32, 16 MiB)`, so a 1 GiB budget allows 32 MiB and a 16 GiB
+budget 512 MiB. Each disk checkpoint keeps its whole token list, so one long
+conversation's checkpoints grow quadratically with its length. When a
+publication would take the tracked metadata over the allowance, the catalog
+first retires other disk checkpoints in the same order as eviction for bytes,
+until the publication fits with an eighth of the allowance to spare, and at
+most 16 per publication. The new checkpoint is never a candidate. Startup
+retires recovered checkpoints over the allowance before indexing them, to the
+same mark. The allowance leaves the rest of the roughly 10% metadata room for
+RAM-tier metadata, index nodes and in-flight persistence, which it does not
+count: up to 16 captures held for the persistence queue (twice its depth),
+each holding its tokens in its capture and in its write job, or 32 MiB at
+262144 tokens. One ranking compares token lists pairwise and runs under the
+serving lock, so a pass ranks once and retires along that order; the spare
+eighth lets several later publications fit without ranking. As of November
+2026 on Strix Halo, one conversation of 500 turns of 500 tokens under the
+64 MiB allowance of a 2 GiB budget ranks on 29 of its publications, each
+pass taking up to 0.52 s, and stays within 0.3% of the allowance
+(`cache_tiered_bench`). Disk checkpoints
+restored within one `--cache-disk-bytes` turnover rank above every unrestored
+one, so a new or RAM-served conversation's disk checkpoints retire first.
+With the RAM cache off there is no allowance; see above.
+The RAM cache budget excludes weights, execution states, request token
+metadata, disk staging and Qwen's separate CPU image-preprocessing cache (up to 128 MiB
 of retained encoded/RGB vectors plus bounded metadata). It also excludes temporary
 host buffers used to save checkpoints to disk; this is not a limit on total
 server memory.
@@ -811,6 +838,10 @@ a top-level `cache_persist`; see [the server guide](../server.md).
 | `schema=component-cache-v1 event=backing_limited reason=device_heap_reserve` | Flash-Next: the cache stopped growing because registering a segment's pages took the device heap below its 4 GiB dispatch reserve, which would push session and scratch allocations onto managed memory. Hosts that do not charge registered pages to the heap log it only when other allocations shrink the heap during the registration |
 | `schema=component-cache-v1 event=option_ignored option=--cache-disk-staging-bytes` | Flash-Next: the staging option is ignored; disk transfers use the internal buffer |
 | `schema=component-cache-v1 event=disk_evicted reason=budget` | Startup applied lineage and persisted access ordering to fit a lowered `--cache-disk-bytes` |
+| `schema=component-cache-v1 event=disk_evicted reason=metadata` | Startup retired `entries` recovered disk checkpoints to fit the disk metadata allowance; reports `metadata_bytes` and `allowance_bytes` |
+| `schema=component-cache-v1 event=disk_over_metadata_allowance` | Warning: recovered disk metadata still exceeds the allowance after startup eviction, for example because entries are pinned |
+| `schema=component-cache-v1 event=disk_entry_evicted reason=admission` | A disk checkpoint was retired to make room for a write within `--cache-disk-bytes`; reports `tokens`, `checkpoint_id`, `purpose`, `superseded`, `reused` and `payload_bytes` |
+| `schema=component-cache-v1 event=disk_entry_evicted reason=metadata` | A disk checkpoint was retired so a publication or recovered entries fit the disk metadata allowance; same fields as `reason=admission` |
 | `schema=component-cache-v1 event=disk_over_budget` | Flash-Next: the directory still exceeds `--cache-disk-bytes` after startup reclamation and eviction; publication is refused until it fits |
 | `schema=component-cache-v1 event=staging_waited` | `--cache-ram-bytes off`: a disk capture waited `waited_ms` for queued writes to release the capture backing |
 | `schema=component-cache-v1 event=staging_exhausted` | `--cache-ram-bytes off`: a disk capture found no room in the capture backing; reports `staged_bytes`, `held_bytes` by other captures, `backing_bytes`, `waited_ms` and whether it was an exact `frontier` |

@@ -3048,6 +3048,88 @@ void UnpersistedOverRamCaptureIsRefused() {
   assert(ManagedBytes(directory) == 0);
   std::filesystem::remove_all(directory);
 }
+void DiskMetadataAllowanceRetiresOlderConversations() {
+  // Over the allowance, each publication retires older disk checkpoints
+  // instead of filling the ledger, and never itself (#1329).
+  const TemporaryDirectory temp("gufo-component-metadata-allowance-test");
+  const std::filesystem::path directory = temp.path();
+  const TextRunnerDiskCacheOptions disk{.directory = directory.string(),
+                                        .capacity_bytes = 1 << 20,
+                                        .min_checkpoint_step_tokens = 1};
+  const std::vector<TextRunnerToken> first{10, 11, 12, 13, 14, 15, 16, 17, 18};
+  auto second = first;
+  second.front() = 999;
+  const auto logged = [](const auto& run) {
+    const auto previous_level = Logger::Level();
+    Logger::SetLevel(LogLevel::kInfo);
+    std::ostringstream output;
+    auto* previous_sink = std::clog.rdbuf(output.rdbuf());
+    run();
+    std::clog.rdbuf(previous_sink);
+    Logger::SetLevel(previous_level);
+    return output.str();
+  };
+  const auto published = logged([&] {
+    const ComponentTextCache::DiskMetadataTesting allowance(1);
+    auto runner = std::make_shared<Runner>();
+    ComponentTextCache cache(runner, 1, 1 << 22, disk);
+    for (const auto& prompt : {first, second}) {
+      auto lease = cache.Acquire(prompt, {}, {}, true, 0, true);
+      auto& state = dynamic_cast<State&>(lease->state());
+      runner->adapter->Append(state.slot, prompt, prompt);
+      assert(lease->TryReserveSnapshot(lease->CaptureBytes(), prompt.size(),
+                                       false, SnapshotPurpose::kContinuation,
+                                       prompt));
+      auto snapshot = lease->Capture();
+      assert(snapshot);
+      (void)lease->Commit(prompt, std::move(snapshot), prompt);
+      lease.reset();
+    }
+  });
+  assert(published.find("disk_metadata_allowance_bytes=1 ") !=
+         std::string::npos);
+  assert(published.find("event=disk_entry_evicted reason=metadata tokens=9") !=
+         std::string::npos);
+  assert(published.find("event=capture_refused") == std::string::npos);
+  {
+    auto runner = std::make_shared<Runner>();
+    TextRunnerPool pool(runner, 1, disk);
+    auto retained = pool.Acquire(second);
+    assert(retained.cache_disk_hit());
+    retained.Invalidate();
+    auto evicted = pool.Acquire(first);
+    assert(!evicted.cache_hit());
+    evicted.Invalidate();
+  }
+  // Recovered checkpoints that are pinned stay over the allowance and warn.
+  const auto pinned = logged([&] {
+    std::vector<cache::DiskReadPin> pins;
+    const ComponentTextCache::DiskMetadataTesting allowance(
+        1, [&](cache::DiskStore& store) {
+          for (const auto& entry : store.Entries())
+            pins.push_back(store.Pin(entry.Manifest().checkpoint));
+        });
+    auto runner = std::make_shared<Runner>();
+    ComponentTextCache cache(runner, 1, 1 << 22, disk);
+    assert(pins.size() == 1 && pins.front());
+    pins.clear();
+  });
+  assert(pinned.find("event=disk_evicted reason=metadata") ==
+         std::string::npos);
+  assert(pinned.find("event=disk_over_metadata_allowance metadata_bytes=") !=
+         std::string::npos);
+  assert(pinned.find(" allowance_bytes=1") != std::string::npos);
+  // Unpinned, recovered checkpoints over the allowance retire at startup.
+  const auto recovered = logged([&] {
+    const ComponentTextCache::DiskMetadataTesting allowance(1);
+    auto runner = std::make_shared<Runner>();
+    ComponentTextCache cache(runner, 1, 1 << 22, disk);
+  });
+  assert(recovered.find("event=disk_evicted reason=metadata entries=1 "
+                        "metadata_bytes=0 allowance_bytes=1") !=
+         std::string::npos);
+  assert(ManagedBytes(directory) == 0);
+}
 void LoweredDiskBudgetEvictsOldestAtStartup() {
   const TemporaryDirectory temp("gufo-component-lowered-budget-test");
   const std::filesystem::path directory = temp.path();
@@ -5013,6 +5095,7 @@ int main() {
   BackingPressureKeepsSharedPrefix(true);
   FragmentedBackingKeepsCompletePrompt();
   DiskBudgetEvictsAnUnpinnedConversation();
+  DiskMetadataAllowanceRetiresOlderConversations();
   LoweredDiskBudgetEvictsOldestAtStartup();
   UnpersistedRequestStaysOffDisk();
   UnpersistedOverRamCaptureIsRefused();

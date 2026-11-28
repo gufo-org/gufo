@@ -1,7 +1,10 @@
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "src/cache/disk_catalog.hpp"
 
@@ -142,6 +145,137 @@ int main(int argc, char** argv) {
     if (disk.Open({2003}) ||
         fs::exists(directory.path / "v2/chunks" / DiskFileName(unshared)))
       throw std::runtime_error("unshared dependency eviction failed");
+    // One agent conversation: checkpoint n holds n turns of tokens, a prefix
+    // of every later one, as a long conversation publishes them (#1329).
+    const std::size_t turns = argc > 2 ? std::stoul(argv[2]) : 300,
+                      turn_tokens = argc > 3 ? std::stoul(argv[3]) : 500;
+    ResourceLedger nested_ledger{
+        {std::size_t{1} << 36, std::size_t{1} << 35, 1 << 20, 1 << 24}};
+    Directory nested_directory(directory.path);
+    DiskStore nested_disk(nested_ledger, nested_directory.path, 1 << 30);
+    PrefixIndex nested_index(nested_ledger);
+    std::vector<Token> conversation(turns * turn_tokens);
+    for (std::size_t n = 0; n < conversation.size(); ++n)
+      conversation[n] = static_cast<Token>(n % 50000);
+    auto nested_publish = [&](std::size_t n) {
+      DiskManifest manifest;
+      manifest.checkpoint = {n};
+      manifest.lineage = {3};
+      manifest.compatibility = digest;
+      manifest.tokens.assign(conversation.begin(),
+                             conversation.begin() + n * turn_tokens);
+      manifest.components.push_back(
+          {inventory[0],
+           {{1}, n * turn_tokens},
+           {},
+           {},
+           DiskPayload{Id(4, n), source.size(), DiskChecksum(source)}});
+      const std::array<DiskWriteBuffer, 1> buffers{{{true, Id(4, n), source}}};
+      nested_disk.Publish(Id(5, n), manifest, buffers);
+    };
+    for (std::size_t n = 1; n < turns; ++n)
+      nested_publish(n);
+    // Recovered metadata sits just under the allowance: the next turn's
+    // publication must retire older checkpoints before it is tracked.
+    const auto recovered =
+        DiskCatalog(nested_ledger, nested_disk, nested_index).MetadataBytes();
+    const auto load = Clock::now();
+    DiskCatalog nested(nested_ledger, nested_disk, nested_index, UINT64_MAX,
+                       recovered + turn_tokens * sizeof(Token));
+    std::cout << "nested_load,0," << nested.Size() << ',' << Milliseconds(load)
+              << ",0\n";
+    if (nested.MetadataBytes() > nested.MetadataAllowance())
+      throw std::runtime_error("nested metadata exceeds its allowance");
+    nested_publish(turns);
+    {
+      const auto before = nested_disk.PublicationStats();
+      const auto count = nested.Size();
+      std::size_t retired{};
+      const auto start = Clock::now();
+      nested.Track({turns}, [&](const DiskEviction&) { ++retired; });
+      const auto elapsed = Milliseconds(start);
+      const auto after = nested_disk.PublicationStats();
+      if (!retired || !nested.Find({turns}))
+        throw std::runtime_error("metadata eviction did not make room");
+      std::cout << "track_metadata_evictions_" << retired << ",0," << count
+                << ',' << elapsed << ','
+                << after.fsync_calls - before.fsync_calls << '\n';
+    }
+    for (unsigned n = 0; n < 3; ++n) {
+      const auto before = nested_disk.PublicationStats();
+      const auto count = nested.Size();
+      const auto start = Clock::now();
+      if (!nested.EvictOne())
+        throw std::runtime_error("nested eviction refused");
+      const auto elapsed = Milliseconds(start);
+      const auto after = nested_disk.PublicationStats();
+      std::cout << "evict_nested," << n << ',' << count << ',' << elapsed << ','
+                << after.fsync_calls - before.fsync_calls << '\n';
+    }
+    // The same conversation published from an empty store under the
+    // allowance of a 1 GiB and a 2 GiB RAM budget: every publication, with the
+    // passes the allowance starts once it binds.
+    const std::size_t steady_turns = argc > 4 ? std::stoul(argv[4]) : 500;
+    std::vector<Token> steady_conversation(steady_turns * turn_tokens);
+    for (std::size_t n = 0; n < steady_conversation.size(); ++n)
+      steady_conversation[n] = static_cast<Token>(n % 50000);
+    std::cout << "steady,budget_gib,allowance_bytes,turns,passes,retired,"
+                 "worst_ms,pass_median_ms,bound_mean_ms,total_ms,peak_ratio\n";
+    for (const std::size_t gib : {1, 2}) {
+      ResourceLedger steady_ledger{
+          {std::size_t{1} << 36, std::size_t{1} << 35, 1 << 20, 1 << 24}};
+      Directory steady_directory(directory.path);
+      DiskStore steady_disk(steady_ledger, steady_directory.path, 1 << 30);
+      PrefixIndex steady_index(steady_ledger);
+      const auto allowance = DiskMetadataAllowance(gib << 30);
+      DiskCatalog steady(steady_ledger, steady_disk, steady_index, UINT64_MAX,
+                         allowance);
+      std::vector<double> passes;
+      double worst{}, total{}, bound{};
+      std::size_t retired_total{}, bound_turns{};
+      double peak{};
+      for (std::size_t n = 1; n <= steady_turns; ++n) {
+        DiskManifest manifest;
+        manifest.checkpoint = {n};
+        manifest.lineage = {4};
+        manifest.compatibility = digest;
+        manifest.tokens.assign(steady_conversation.begin(),
+                               steady_conversation.begin() + n * turn_tokens);
+        manifest.components.push_back(
+            {inventory[0],
+             {{1}, n * turn_tokens},
+             {},
+             {},
+             DiskPayload{Id(6, n), source.size(), DiskChecksum(source)}});
+        const std::array<DiskWriteBuffer, 1> buffers{
+            {{true, Id(6, n), source}}};
+        steady_disk.Publish(Id(7, n), manifest, buffers);
+        std::size_t retired{};
+        const auto start = Clock::now();
+        steady.Track({n}, [&](const DiskEviction&) { ++retired; });
+        const auto elapsed = Milliseconds(start);
+        if (!steady.Find({n}))
+          throw std::runtime_error("steady publication was not tracked");
+        worst = std::max(worst, elapsed);
+        total += elapsed;
+        if (retired) {
+          passes.push_back(elapsed);
+          retired_total += retired;
+        }
+        if (!passes.empty()) {
+          bound += elapsed;
+          ++bound_turns;
+        }
+        peak = std::max(peak, static_cast<double>(steady.MetadataBytes()) /
+                                  static_cast<double>(allowance));
+      }
+      std::ranges::sort(passes);
+      std::cout << "steady," << gib << ',' << allowance << ',' << steady_turns
+                << ',' << passes.size() << ',' << retired_total << ',' << worst
+                << ',' << (passes.empty() ? 0.0 : passes[passes.size() / 2])
+                << ',' << (bound_turns ? bound / bound_turns : 0.0) << ','
+                << total << ',' << peak << '\n';
+    }
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;
