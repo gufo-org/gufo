@@ -1,6 +1,7 @@
 #include "src/mem/state_declaration.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace gufo::mem {
@@ -8,12 +9,23 @@ namespace gufo::mem {
 namespace {
 
 void CheckShape(const RegionShape& shape) {
+  constexpr std::size_t kMax = std::numeric_limits<std::size_t>::max();
   if (shape.row_bytes == 0 || shape.rows == 0 || shape.segments == 0)
     throw std::invalid_argument("state buffer without rows");
   // Compare in rows to avoid overflowing rows * row_bytes.
   if (shape.segment_stride != 0 &&
       shape.rows > shape.segment_stride / shape.row_bytes)
     throw std::invalid_argument("state buffer segments overlap");
+  // A span that does not fit in a size_t is not declarable: sessions
+  // refuse it (CheckedShape, src/core/hip/state_region.cpp), and the
+  // declared bytes a runner claims would wrap instead of spanning.
+  if (shape.rows > kMax / shape.row_bytes)
+    throw std::invalid_argument("state buffer bytes overflow");
+  const std::size_t run = shape.rows * shape.row_bytes;
+  const std::size_t stride =
+      shape.segment_stride != 0 ? shape.segment_stride : run;
+  if (shape.segments - 1 > (kMax - run) / stride)
+    throw std::invalid_argument("state buffer span overflow");
 }
 
 }  // namespace

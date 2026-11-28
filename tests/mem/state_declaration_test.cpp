@@ -133,6 +133,18 @@ void TestInvalidShapes() {
     assert(Throws([&] { (void)state.Context(shape); }));
     assert(Throws([&] { (void)state.Whole(shape); }));
   }
+  for (const auto shape : {
+           RegionShape{.row_bytes = 2, .rows = first_overflow},
+           RegionShape{.row_bytes = first_overflow, .rows = 1, .segments = 2},
+           RegionShape{
+               .row_bytes = 1,
+               .rows = 1,
+               .segments = 2,
+               .segment_stride = std::numeric_limits<std::size_t>::max()},
+       }) {
+    assert(Throws([&] { (void)state.Context(shape); }));
+    assert(Throws([&] { (void)state.Whole(shape); }));
+  }
   assert(state.buffers().empty());
 
   const auto adjacent = state.Whole(
