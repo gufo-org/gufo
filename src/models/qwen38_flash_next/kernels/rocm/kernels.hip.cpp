@@ -1808,8 +1808,9 @@ __device__ __forceinline__ void RestoreGdnState4(
                      : __fmaf_rn(beta, correction, __fmul_rn(value[e], decay));
     }
   }
-  *reinterpret_cast<float4*>(state + i) =
-      make_float4(value[0], value[1], value[2], value[3]);
+  using Native4 = float __attribute__((ext_vector_type(4)));
+  __builtin_nontemporal_store(Native4{value[0], value[1], value[2], value[3]},
+                              reinterpret_cast<Native4*>(state + i));
 }
 
 /// Every layer's RestoreGdnState and convolution history copy in one launch:
@@ -6789,12 +6790,14 @@ __launch_bounds__(kThreads) __global__
     FusedDone(&st->done[0]);
   }
 
-  // qfn_q8_hc_down_kernel<kTokens>: one row per wave, two iterations of
-  // loads ahead, the MMVQ products and FMA chain.
+  // qfn_q8_hc_down_kernel<kTokens>: one row per wave, iterations of loads
+  // ahead, the MMVQ products and FMA chain.
   for (unsigned tile;
        (tile = FusedTake(&st->taken[1], &item)) < kFusedDownTiles;) {
     FusedWait(&st->done[0], kRows);
-    constexpr int kPrefetch = 2;
+    // One row keeps four iterations of loads in flight: its down tiles
+    // are latency bound (320 waves). Wider batches hold more registers.
+    constexpr int kPrefetch = kTokens == 1 ? 4 : 2;
     const unsigned row = tile * kFusedWaves + wave;
     const auto* input = static_cast<const Q8_1Block*>(a.xn_q8);
     const int part = (lane & 3) * 2;
@@ -6826,10 +6829,13 @@ __launch_bounds__(kThreads) __global__
           dot = __builtin_amdgcn_sudot4(true, v[j][1], true, u[j][t][1], dot,
                                         false);
           if constexpr (kTokens == 1) {
-            const float scale =
-                __fmul_rn(__half2float(dw[j]), __half2float(dx[j][t]));
-            const float product = __fmul_rn(scale, static_cast<float>(dot));
-            sum[t] = __fadd_rn(sum[t], product);
+            // What fast-math compiles qfn_q8_hc_down_kernel<1>'s
+            // sum + (dw * dx) * dot to, spelled out: one accumulator,
+            // fma(dw * dot, dx, sum) in block order.
+            const float product =
+                __fmul_rn(__half2float(dw[j]), static_cast<float>(dot));
+            sum[t] = __fmaf_rn(product, __half2float(dx[j][t]), sum[t]);
+            asm volatile("" : "+v"(sum[t]));
           } else {
             const float product =
                 __fmul_rn(__half2float(dw[j]), static_cast<float>(dot));
@@ -7414,7 +7420,7 @@ __launch_bounds__(kThreads) __global__ void GdnDecodeFusedKernel(
           snap += static_cast<std::size_t>(h) * d * d + j * d + i0;
 #pragma unroll
           for (std::uint32_t i = 0; i < slice; ++i)
-            snap[i] = row[i];
+            __builtin_nontemporal_store(row[i], snap + i);
         } else {
           if (j == 0 && h < k_heads) {
 #pragma unroll
@@ -7433,7 +7439,7 @@ __launch_bounds__(kThreads) __global__ void GdnDecodeFusedKernel(
     }
 #pragma unroll
     for (std::uint32_t i = 0; i < slice; ++i) {
-      S[i] = row[i];
+      __builtin_nontemporal_store(row[i], S + i);
     }
     FusedDone(&st->done[2]);
     return;
@@ -7516,6 +7522,237 @@ __launch_bounds__(kThreads) __global__
 
 std::size_t RouterFusedStateBytes() {
   return sizeof(RouterFusedState);
+}
+
+/// Counters of IndexerDecodeFusedKernel, zero between launches.
+struct IndexerFusedState {
+  unsigned k_done;  ///< key projection blocks finished
+  unsigned q_done;  ///< query projection blocks finished
+  unsigned stored;  ///< raw key rows stored
+  unsigned exited;  ///< blocks finished
+};
+
+constexpr std::uint32_t kIndexerHeads = 4;
+constexpr std::uint32_t kIndexerDim = 128;
+
+/// A sparse decode pass's indexer (one to eight rows) in one launch, as
+/// consecutive block ranges: SmallGemmKernel's whole-pass rows of the key
+/// and then the query projection (eight rows per block); StoreRowsKernel's
+/// block per token once its key rows exist, and RmsNormKernel's block per
+/// (token, head) of the queries followed by RopeKernel's pairs of that head;
+/// then PoolBlocksKernel's blocks once every raw key row is stored. Every
+/// wave, block and element keeps its kernel's arithmetic.
+template<WeightType type, unsigned tokens, bool kYarn>
+__launch_bounds__(kThreads) __global__ void IndexerDecodeFusedKernel(
+    const void* wk, const void* wq, const float* x, std::uint32_t k, float* ik,
+    float* iq, float* ring, const float* q_gamma, const float* k_gamma,
+    __half* blocks, const std::uint32_t* first_block,
+    const std::uint32_t* start_pos, std::uint32_t ratio,
+    std::uint32_t rotary_dim, float theta, float eps, std::uint32_t capacity,
+    std::uint32_t pool_blocks, const qwen::vision::DeviceRope* rope,
+    [[maybe_unused]] YarnRope yarn, IndexerFusedState* st) {
+  __shared__ float shared[32];
+  __shared__ float v[256];
+  constexpr std::uint32_t kRows = kThreads / 32;
+  constexpr std::uint32_t d = kIndexerDim;
+  constexpr std::uint32_t k_blocks = d / kRows;
+  constexpr std::uint32_t q_blocks = kIndexerHeads * d / kRows;
+  constexpr std::uint32_t norm_blocks = tokens * kIndexerHeads;
+  const std::uint32_t total =
+      k_blocks + q_blocks + tokens + norm_blocks + pool_blocks;
+  std::uint32_t block = blockIdx.x;
+  const std::uint32_t lane = threadIdx.x % warpSize;
+  if (block < k_blocks + q_blocks) {
+    // SmallGemmKernel<type, tokens, false, true>.
+    const bool key = block < k_blocks;
+    const std::uint32_t row =
+        (key ? block : block - k_blocks) * kRows + threadIdx.x / warpSize;
+    if (key)
+      SmallGemmRow<type, tokens, true>(wk, x, ik, d, k, row, lane);
+    else
+      SmallGemmRow<type, tokens, true>(wq, x, iq, kIndexerHeads * d, k, row,
+                                       lane);
+    FusedDone(key ? &st->k_done : &st->q_done);
+  } else if ((block -= k_blocks + q_blocks) < tokens) {
+    // StoreRowsKernel.
+    FusedWait(&st->k_done, k_blocks);
+    const std::uint32_t t = block;
+    const std::uint32_t row = (*start_pos + t) & (capacity - 1);
+    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
+      ring[static_cast<std::size_t>(row) * d + i] =
+          ik[static_cast<std::size_t>(t) * d + i];
+    }
+    FusedDone(&st->stored);
+  } else if ((block -= tokens) < norm_blocks) {
+    // RmsNormKernel (groups 1), then RopeKernel's pairs of this head.
+    FusedWait(&st->q_done, q_blocks);
+    const std::uint32_t t = block / kIndexerHeads;
+    const std::uint32_t h = block % kIndexerHeads;
+    float* row = iq + static_cast<std::size_t>(block) * d;
+    float ss = 0.0f;
+    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
+      ss += row[i] * row[i];
+    }
+    ss = BlockSum(ss, shared);
+    const float scale = rsqrtf(ss / static_cast<float>(d) + eps);
+    for (std::uint32_t i = threadIdx.x; i < d; i += blockDim.x) {
+      row[i] = row[i] * scale * q_gamma[i];
+    }
+    __syncthreads();
+    const std::uint32_t half = rotary_dim / 2;
+    for (std::uint32_t i = threadIdx.x; i < half; i += blockDim.x) {
+      float freq = powf(theta, -2.0f * static_cast<float>(i) /
+                                   static_cast<float>(rotary_dim));
+      if constexpr (kYarn)
+        freq = YarnFrequency(freq, i, yarn);
+      float sn = 0.0f;
+      float cs = 0.0f;
+      sincosf(qwen::vision::RopePosition(rope, *start_pos + t, i) * freq, &sn,
+              &cs);
+      if constexpr (kYarn)
+        YarnScale(sn, cs, yarn);
+      const float a = row[i];
+      const float b = row[i + half];
+      if constexpr (kYarn) {
+        row[i] = __fmaf_rn(a, cs, -__fmul_rn(b, sn));
+        row[i + half] = __fmaf_rn(a, sn, __fmul_rn(b, cs));
+      } else {
+        row[i] = a * cs - b * sn;
+        row[i + half] = a * sn + b * cs;
+      }
+    }
+    (void)h;
+  } else {
+    // PoolBlocksKernel.
+    block -= norm_blocks;
+    FusedWait(&st->stored, tokens);
+    const std::uint32_t b = *first_block + block;
+    if (b < (*start_pos + tokens) / ratio) {
+      const std::uint32_t i = threadIdx.x;
+      float mean = 0.0f;
+      if (i < d) {
+        for (std::uint32_t r = 0; r < ratio; ++r) {
+          const std::uint32_t row = (b * ratio + r) & (capacity - 1);
+          mean += ring[static_cast<std::size_t>(row) * d + i];
+        }
+        mean /= static_cast<float>(ratio);
+      }
+      const float ss = BlockSum(i < d ? mean * mean : 0.0f, shared);
+      const float scale = rsqrtf(ss / static_cast<float>(d) + eps);
+      if (i < d) {
+        v[i] = mean * scale * k_gamma[i];
+      }
+      __syncthreads();
+      const std::uint32_t half = rotary_dim / 2;
+      float outv = i < d ? v[i] : 0.0f;
+      if (i < rotary_dim) {
+        const std::uint32_t p = i < half ? i : i - half;
+        float freq = powf(theta, -2.0f * static_cast<float>(p) /
+                                     static_cast<float>(rotary_dim));
+        if constexpr (kYarn)
+          freq = YarnFrequency(freq, p, yarn);
+        float sn = 0.0f;
+        float cs = 0.0f;
+        sincosf(qwen::vision::RopePosition(rope, b * ratio, p) * freq, &sn,
+                &cs);
+        if constexpr (kYarn)
+          YarnScale(sn, cs, yarn);
+        const float a = v[p];
+        const float bb = v[p + half];
+        outv = i < half ? a * cs - bb * sn : a * sn + bb * cs;
+      }
+      if (i < d) {
+        blocks[static_cast<std::size_t>(b) * d + i] = __float2half_rn(outv);
+      }
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0 &&
+      __hip_atomic_fetch_add(&st->exited, 1u, __ATOMIC_ACQ_REL,
+                             __HIP_MEMORY_SCOPE_AGENT) == total - 1) {
+    FusedClear(&st->k_done);
+    FusedClear(&st->q_done);
+    FusedClear(&st->stored);
+    FusedClear(&st->exited);
+  }
+}
+
+std::size_t IndexerFusedStateBytes() {
+  return sizeof(IndexerFusedState);
+}
+
+namespace {
+
+template<WeightType type, unsigned tokens>
+void LaunchIndexerFused(const IndexerFusedArgs& a, hipStream_t stream) {
+  constexpr std::uint32_t kRows = kThreads / 32;
+  const std::uint32_t grid =
+      (kIndexerDim + kIndexerHeads * kIndexerDim) / kRows +
+      tokens * (1 + kIndexerHeads) + a.pool_blocks;
+  auto* st = static_cast<IndexerFusedState*>(a.state);
+  if (a.yarn.enabled != 0)
+    hipLaunchKernelGGL((IndexerDecodeFusedKernel<type, tokens, true>),
+                       dim3(grid), dim3(kThreads), 0, stream, a.wk, a.wq, a.x,
+                       a.k, a.ik, a.iq, a.ring, a.q_gamma, a.k_gamma, a.blocks,
+                       a.first_block, a.start_pos, a.ratio, a.rotary_dim,
+                       a.theta, a.eps, a.capacity, a.pool_blocks, a.rope,
+                       a.yarn, st);
+  else
+    hipLaunchKernelGGL((IndexerDecodeFusedKernel<type, tokens, false>),
+                       dim3(grid), dim3(kThreads), 0, stream, a.wk, a.wq, a.x,
+                       a.k, a.ik, a.iq, a.ring, a.q_gamma, a.k_gamma, a.blocks,
+                       a.first_block, a.start_pos, a.ratio, a.rotary_dim,
+                       a.theta, a.eps, a.capacity, a.pool_blocks, a.rope,
+                       a.yarn, st);
+}
+
+template<WeightType type>
+void IndexerFusedForType(const IndexerFusedArgs& a, hipStream_t stream) {
+  switch (a.n_tokens) {
+#define GUFO_INDEXER_FUSED(n) \
+  case n:                     \
+    return LaunchIndexerFused<type, n>(a, stream)
+    GUFO_INDEXER_FUSED(1);
+    GUFO_INDEXER_FUSED(2);
+    GUFO_INDEXER_FUSED(3);
+    GUFO_INDEXER_FUSED(4);
+    GUFO_INDEXER_FUSED(5);
+    GUFO_INDEXER_FUSED(6);
+    GUFO_INDEXER_FUSED(7);
+    GUFO_INDEXER_FUSED(8);
+#undef GUFO_INDEXER_FUSED
+    default:
+      throw std::logic_error("fused indexer requires 1-8 token rows");
+  }
+}
+
+}  // namespace
+
+bool IndexerDecodeFused(const IndexerFusedArgs& a, hipStream_t stream) {
+  // SmallGemmKernel's whole-pass rows need 16-byte rows of whole passes.
+  const bool aligned = (reinterpret_cast<std::uintptr_t>(a.wk) |
+                        reinterpret_cast<std::uintptr_t>(a.wq) |
+                        reinterpret_cast<std::uintptr_t>(a.x)) %
+                           16 ==
+                       0;
+  if (a.state == nullptr || !aligned || a.k % (32 * 4 * 4) != 0 ||
+      a.heads != kIndexerHeads || a.dim != kIndexerDim ||
+      a.rotary_dim > kIndexerDim || a.n_tokens == 0 || a.n_tokens > 8 ||
+      (a.capacity & (a.capacity - 1)) != 0)
+    return false;
+  switch (a.type) {
+    case WeightType::kBF16:
+      IndexerFusedForType<WeightType::kBF16>(a, stream);
+      return true;
+    case WeightType::kF16:
+      IndexerFusedForType<WeightType::kF16>(a, stream);
+      return true;
+    case WeightType::kF32:
+      IndexerFusedForType<WeightType::kF32>(a, stream);
+      return true;
+    default:
+      return false;
+  }
 }
 
 std::size_t GdnFusedStateBytes() {

@@ -79,9 +79,9 @@ __device__ __forceinline__ float Q8Materialize(float v) {
   return v;
 }
 
-// mul_mat_vec_q8 for one input over a few long rows (the draft block's
-// 4-row HC inject, K 10240): a wave is a row's whole latency chain, so each
-// lane loads `steps` of its blocks before the first product. The lane's
+// mul_mat_vec_q8 for one input (the draft block's 4-row HC inject at K 10240,
+// and decode rows): a wave is a row's whole latency chain, so each lane
+// loads `steps` of its blocks before the first product. The lane's
 // blocks, products and order are the one-row kernel's, spelled out as it
 // compiles them: d0 * sumi, then one fma with d1 into the sum.
 template<int steps>
@@ -658,6 +658,15 @@ static void launch_q8(const void* weights, const void* gate, const block_q8_1* i
         // Few rows cannot hide a lane's load latency behind other waves.
         mul_mat_vec_q8_ahead<20><<<rows, 32, 0, stream>>>(weights, input,
                                                           output, k);
+    } else if (tokens == 1 && k % (32 * 8 * 5) == 0) {
+        // One decode row: five (K 2560) or four (K 6144) of a lane's
+        // iterations in flight. The plain loop leaves these row counts
+        // waiting on single loads, also from the MALL prefetch.
+        mul_mat_vec_q8_ahead<5><<<rows, 32, 0, stream>>>(weights, input,
+                                                         output, k);
+    } else if (tokens == 1 && k % (32 * 8 * 4) == 0) {
+        mul_mat_vec_q8_ahead<4><<<rows, 32, 0, stream>>>(weights, input,
+                                                         output, k);
     } else if (tokens > 1) {
         mul_mat_vec_q8<tokens, false, 1, false, true><<<rows, 32, 0, stream>>>(
             weights, nullptr, input, output, k, rows, input_stride);

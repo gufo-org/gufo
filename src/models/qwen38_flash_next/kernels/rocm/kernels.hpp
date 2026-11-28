@@ -664,6 +664,38 @@ void RouterTopK(const float* logits, std::uint32_t stride, std::int32_t* ids,
                 float* weights, std::uint32_t n_tokens, std::uint32_t n_experts,
                 std::uint32_t k, hipStream_t stream);
 
+/// Bytes of the zeroed device state IndexerDecodeFused takes.
+std::size_t IndexerFusedStateBytes();
+
+struct IndexerFusedArgs {
+  const void* wk;  ///< key projection [dim][k]
+  const void* wq;  ///< query projection [heads * dim][k], same type
+  WeightType type;
+  const float* x;  ///< [n_tokens][k]
+  std::uint32_t k;
+  float* ik;    ///< raw keys [n_tokens][dim]
+  float* iq;    ///< normalized, rotated queries [n_tokens][heads][dim]
+  float* ring;  ///< raw key ring [capacity][dim]
+  const float* q_gamma;
+  const float* k_gamma;
+  __half* blocks;  ///< pooled block keys
+  const std::uint32_t* first_block;
+  const std::uint32_t* start_pos;
+  std::uint32_t n_tokens, heads, dim, ratio, rotary_dim;
+  float theta, eps;
+  std::uint32_t capacity;     ///< ring rows, a power of two
+  std::uint32_t pool_blocks;  ///< PoolIndexerBlocks' grid_blocks
+  const qwen::vision::DeviceRope* rope;
+  YarnRope yarn;
+  void* state;  ///< IndexerFusedStateBytes() of zeroed device memory
+};
+
+/// One launch for a sparse decode pass's indexer: the key and query
+/// projections (SmallGemm), StoreRows of the keys, RmsNormRows and Rope of
+/// the queries and PoolIndexerBlocks, with the same values. Returns false
+/// without launching for a shape it does not cover.
+bool IndexerDecodeFused(const IndexerFusedArgs& args, hipStream_t stream);
+
 /// Bytes of the zeroed device state RouterFused takes.
 std::size_t RouterFusedStateBytes();
 

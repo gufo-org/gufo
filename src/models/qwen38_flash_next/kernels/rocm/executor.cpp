@@ -1137,6 +1137,8 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   e->gdn_fused_state_ = Alloc<std::uint8_t>(a, GdnFusedStateBytes(), error_msg);
   e->router_fused_state_ =
       Alloc<std::uint8_t>(a, RouterFusedStateBytes(), error_msg);
+  e->indexer_fused_state_ =
+      Alloc<std::uint8_t>(a, IndexerFusedStateBytes(), error_msg);
   e->mask_words_ = c.SparseMaskWords(e->context_capacity_);
   // Keep score/selection traffic near the device cache size. Captured
   // verification still needs all its rows at the maximum context.
@@ -3389,9 +3391,49 @@ bool Executor::DefaultAttention(
     StoreKv(s_.v, s.v_cache, n_tokens, kv_row, pos, stream_);
   }
 
+  // A sparse decode pass runs its whole indexer in one launch (see
+  // IndexerDecodeFusedKernel); other passes take the separate launches.
+  const auto small = [](const DeviceTensor& w) {
+    return w.format_state == nullptr &&
+           (w.type == GgmlType::kF32 || w.type == GgmlType::kF16 ||
+            w.type == GgmlType::kBF16);
+  };
+  const bool indexed =
+      sparse && s.index_k != nullptr && !projections_ready &&
+      !MatrixRows(n_tokens) && small(l.indexer_k) && small(l.indexer_q) &&
+      l.indexer_k.type == l.indexer_q.type &&
+      l.indexer_k.rows == c.indexer_head_dim &&
+      l.indexer_q.rows == c.indexer_heads * c.indexer_head_dim &&
+      l.indexer_k.cols == l.indexer_q.cols &&
+      IndexerDecodeFused({.wk = l.indexer_k.data,
+                          .wq = l.indexer_q.data,
+                          .type = SmallType(l.indexer_k.type),
+                          .x = x,
+                          .k = l.indexer_k.cols,
+                          .ik = s_.ik,
+                          .iq = s_.iq,
+                          .ring = s.index_k,
+                          .q_gamma = l.indexer_q_norm.f32(),
+                          .k_gamma = l.indexer_k_norm.f32(),
+                          .blocks = s.block_k,
+                          .first_block = first_block,
+                          .start_pos = pos,
+                          .n_tokens = n_tokens,
+                          .heads = c.indexer_heads,
+                          .dim = c.indexer_head_dim,
+                          .ratio = c.compress_ratio,
+                          .rotary_dim = c.rotary_dim,
+                          .theta = c.rope_theta,
+                          .eps = c.rms_eps,
+                          .capacity = index_capacity,
+                          .pool_blocks = pool_grid,
+                          .rope = s.rope,
+                          .yarn = yarn_,
+                          .state = indexer_fused_state_},
+                         stream_);
   // Raw keys survive only until pooling. The ring holds the initial
   // pre-budget backlog and a batch, independently for trunk and predictor.
-  if (s.index_k != nullptr) {
+  if (s.index_k != nullptr && !indexed) {
     if (!(projections_ready
               ? DenseBatch(l.indexer_k, x, s_.ik, n_tokens, error_msg)
               : Dense(l.indexer_k, x, s_.ik, n_tokens, error_msg))) {
@@ -3402,18 +3444,20 @@ bool Executor::DefaultAttention(
   }
   const std::uint32_t* mask = nullptr;
   if (sparse) {
-    if (!Dense(l.indexer_q, x, s_.iq, n_tokens, error_msg)) {
-      return false;
+    if (!indexed) {
+      if (!Dense(l.indexer_q, x, s_.iq, n_tokens, error_msg)) {
+        return false;
+      }
+      RmsNormRows(s_.iq, l.indexer_q_norm.f32(), s_.iq,
+                  n_tokens * c.indexer_heads, c.indexer_head_dim, 1, c.rms_eps,
+                  stream_);
+      Rope(s_.iq, n_tokens, c.indexer_heads, c.indexer_head_dim, c.rotary_dim,
+           pos, c.rope_theta, stream_, s.rope, yarn_);
+      PoolIndexerBlocks(s.index_k, l.indexer_k_norm.f32(), s.block_k,
+                        first_block, pos, n_tokens, pool_grid, c.compress_ratio,
+                        c.indexer_head_dim, c.rotary_dim, c.rope_theta,
+                        c.rms_eps, index_capacity, stream_, s.rope, yarn_);
     }
-    RmsNormRows(s_.iq, l.indexer_q_norm.f32(), s_.iq,
-                n_tokens * c.indexer_heads, c.indexer_head_dim, 1, c.rms_eps,
-                stream_);
-    Rope(s_.iq, n_tokens, c.indexer_heads, c.indexer_head_dim, c.rotary_dim,
-         pos, c.rope_theta, stream_, s.rope, yarn_);
-    PoolIndexerBlocks(s.index_k, l.indexer_k_norm.f32(), s.block_k, first_block,
-                      pos, n_tokens, pool_grid, c.compress_ratio,
-                      c.indexer_head_dim, c.rotary_dim, c.rope_theta, c.rms_eps,
-                      index_capacity, stream_, s.rope, yarn_);
     // Align score rows to full cache lines. The selector still considers
     // only complete causal blocks, so padding cannot change the ranking.
     // Wide prefill is never captured: compact score rows to the populated

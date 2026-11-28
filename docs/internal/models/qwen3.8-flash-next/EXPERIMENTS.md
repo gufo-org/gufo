@@ -31,6 +31,26 @@ The routed expert kernels take 95 and 64 µs in Gated DeltaNet layers and 85
 and 60 µs in attention layers: the recurrence's 3.1 MB of written state leaves
 the 32 MiB cache about 30 MB of weight streaming later, during the experts.
 
+A third pass on `9d6341fa`, `gufo bench -p 128 -n 256 -r 1` in fresh
+processes, alternating pairs. Greedy hashes at depth 0, 4,096 and 32,768
+and the 208 matched-token logit rows after 406- and 3,198-token prompts stay
+byte-identical.
+
+| Experiment | Outcome |
+| --- | --- |
+| Non-temporal stores of the Gated DeltaNet state, its rollback snapshot and the restored state | **Retained**: the lines leave the cache while the recurrence writes them (32.9 instead of 27.7 µs, with read bandwidth to spare) rather than as dirty evictions during the experts, which drop from 94.3/63.5 to 87.7/61.8 µs (85/60 in attention layers). AR 30.97 → 31.10 tok/s, MTP 70.49 → 70.65. Non-temporal state loads: no change. |
+| One-row HC down tiles with four iterations of loads in flight | **Retained** for one row: AR +0.4%, invisible in a trace without the weight prefetch, so the gain is on rows already in the cache. Fast-math had compiled the down sum to `fma(dw * dot, dx, sum)` in one accumulator; the deeper unroll split it into two (different output), so the product, FMA and a register barrier are now written out. Two to eight rows keep two iterations: four cost MTP 0.1%. |
+| `mul_mat_vec_q8_ahead` for one-row dense GEMVs (five iterations ahead at K 2560, four at K 6144) | **Retained**: AR +0.3%; the output head 2.98 → 2.90 ms per token, `ssm_out`/`attn_out` faster with their prefetched rows. Eight and ten steps, or twelve at K 6144: no better. |
+| One launch for a sparse decode pass's indexer (`IndexerDecodeFusedKernel`): key and query projections, raw-key store, query norm and RoPE, block pooling | **Retained**: six launches become one per attention layer past 2,048 tokens. AR 30.45 → 30.54 at d4096, 30.33 → 30.43 at d32768; MTP 59.40 → 59.55 at d4096. |
+| Read-ahead variant of the two-to-eight-row dense GEMV | Rejected: not exact (MTP output changed), and slower. |
+| Five or ten steps ahead in the K 2560 F16/BF16 `SmallGemmRow` (router, alpha/beta) | Rejected: within noise. |
+| Pricing a lone greedy request's MTP cycles with the small-head curve | Rejected: no change at depth 0 or 4,096; the confidence gate, not the cost cap, ends these chains. The cost audit's full-head mode drafts through the 248K-row Q8 head (3.9 ms per proposal) while production greedy drafts through the Q4_K prefix (1.52 ms per proposal in a trace). |
+
+A trace at d32768 puts the sparse chain at 113 µs per attention layer on 13
+launches against 43 µs on 6 below 2,048 tokens; the indexer fusion removes
+five of the launches. MTP host gaps at cycle boundaries take 0.6% of MTP time
+and `RestoreGdnLayersKernel` 1.0% (19 restores per 128 tokens, 1.03 ms each).
+
 ## Decode prefetch and depth tuning (November 27, 2026)
 
 Main `f0733481`, ROCm 10.1, UD-Q4_K_XL, autoregressive, `gufo bench -p 2048 -n 64 -d 0,16384`.
