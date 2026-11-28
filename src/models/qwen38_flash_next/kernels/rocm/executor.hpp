@@ -809,6 +809,8 @@ private:
   /// to the following combine when `out` is s_.block_out.
   void MoeEpilogueRows(float* out, std::uint32_t n_tokens,
                        bool half_down) const;
+  /// The F32 epilogue MoeEpilogueRows left to the combine, into s_.block_out.
+  void PendingMoeEpilogue(std::uint32_t n_tokens) const;
   /// Whether MoeExperts takes the routed F16 WMMA route, whose epilogue the
   /// following combine absorbs (see Moe).
   bool WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const;
@@ -1185,6 +1187,11 @@ private:
   bool wide_mixer_{false};
   /// Set by Moe when its epilogue is left for the combine that follows.
   mutable bool moe_pending_{false};
+  /// Set around a decode pass's Moe whose combine joins the next fused
+  /// mixer (see ForwardBody): its F32 epilogue may then run in that launch.
+  mutable bool moe_defer_ok_{false};
+  /// Set by MoeEpilogueRows when it left the F32 epilogue to Combine.
+  mutable bool moe_vec_pending_{false};
   /// Set before an attention-side combine whose FFN combine fuses the MoE
   /// epilogue: that combine may then leave its residual update to the next
   /// one (res_deferred_), which reads s_.block_out and s_.hc_defer_w.
@@ -1232,6 +1239,9 @@ private:
     float* xn{nullptr};
     void* xn_q8{nullptr};
     std::uint32_t n{0};
+    /// block_out is the MoE epilogue's, still to be computed from its slot
+    /// rows (see MoeEpilogueRows).
+    bool moe{false};
   };
   mutable PendingCombine pending_combine_;
   mutable std::vector<std::uint32_t> hook_layers_;

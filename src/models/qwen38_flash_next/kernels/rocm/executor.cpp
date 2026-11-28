@@ -174,6 +174,8 @@ constexpr std::uint32_t kPrefetchBlocks = 16;
 /// into the cache once its down tiles are done (HcFusedMix::next).
 /// 512 KiB and 2 MiB measured the same, 3 MiB slower.
 constexpr std::size_t kMixNextBytes = std::size_t{1} << 20;
+/// Most routed slots HcMixQ8Fused sums as the MoE epilogue (kFusedMoeSlots).
+constexpr std::uint32_t kFusedMoeEpilogueSlots = 16;
 std::size_t WeightBytes(const DeviceTensor& w);
 
 /// Memory a wide pass needs beyond its scratch set: its own K/V, indexer
@@ -2659,6 +2661,11 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
                        const float* inject_w, const DeviceMixer* next) const {
   const Config& c = config();
   inject_fused_ = nullptr;
+  const bool moe_vec = std::exchange(moe_vec_pending_, false);
+  const bool fuse_next = next != nullptr && gamma != nullptr &&
+                         !MatrixRows(n_tokens) && FusedMixer(*next, n_tokens);
+  if (moe_vec && !fuse_next)
+    PendingMoeEpilogue(n_tokens);
   // Wide batches hand the next mixer an F16 norm for its epilogue and the
   // same norm quantized into the tiled Q8 layout for its W8A8 down
   // projection: half the bytes for the combine and the epilogue, and no
@@ -2718,10 +2725,10 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
   }
   // A decode batch's next mixer quantizes xn for its down projection: the
   // combine writes those rows as well, or joins that mixer's single launch.
-  if (next != nullptr && gamma != nullptr && FusedMixer(*next, n_tokens)) {
-    pending_combine_ = {next,         res,        gamma,
-                        s_.block_out, s_.inject,  inject_parts_,
-                        s_.xn,        s_.xn_q8_1, n_tokens};
+  if (fuse_next) {
+    pending_combine_ = {next,      res,           gamma, s_.block_out,
+                        s_.inject, inject_parts_, s_.xn, s_.xn_q8_1,
+                        n_tokens,  moe_vec};
     xn_q8_ready_ = {s_.xn, s_.xn_q8_1, n_tokens, c.HcDim()};
     return;
   }
@@ -2779,6 +2786,15 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
         mix.next_bytes =
             std::min(kMixNextBytes, WeightBytes(*mix_next_)) / 16 * 16;
       }
+      if (p.moe) {
+        mix.moe_out = s_.down_e;
+        mix.moe_weights = s_.weights;
+        mix.moe_shared = s_.shexp_out;
+        mix.moe_gate = s_.router + c.num_experts;
+        mix.moe_gate_stride = c.num_experts + 1;
+        mix.moe_k = c.num_experts_used;
+        mix.moe_block_out = s_.block_out;
+      }
       if (!HcMixQ8Fused(hc_fused_state_, mix, n_tokens, stream_)) {
         AssignError(error_msg, "fused HC mixer failed");
         return false;
@@ -2792,6 +2808,8 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
              Dense(m.inject, s_.xn, inject, n_tokens, error_msg);
     }
     // Another mixer follows after all: run the combine Combine left.
+    if (p.moe)
+      PendingMoeEpilogue(p.n);
     HcCombineQ8_1(p.res, p.block_out, p.inject, p.inject_parts, p.gamma, p.xn,
                   p.xn_q8, p.n, c.hidden_size, c.hc_count, c.rms_eps, stream_);
   }
@@ -3968,10 +3986,22 @@ void Executor::MoeEpilogueRows(float* out, std::uint32_t n_tokens,
     MoeEpilogueVec4(s_.down_e, s_.weights, s_.shexp_out,
                     s_.router + c.num_experts, c.num_experts + 1, out, n_tokens,
                     used, c.hidden_size, stream_);
+  } else if (moe_defer_ok_ && out == s_.block_out &&
+             used <= kFusedMoeEpilogueSlots) {
+    // The combine that follows computes it inside the next fused mixer
+    // (Combine), or launches it there.
+    moe_vec_pending_ = true;
   } else {
     MoeEpilogue(s_.down_e, s_.weights, s_.shexp_out, s_.router + c.num_experts,
                 c.num_experts + 1, out, n_tokens, used, c.hidden_size, stream_);
   }
+}
+
+void Executor::PendingMoeEpilogue(std::uint32_t n_tokens) const {
+  const Config& c = config();
+  MoeEpilogue(s_.down_e, s_.weights, s_.shexp_out, s_.router + c.num_experts,
+              c.num_experts + 1, s_.block_out, n_tokens, c.num_experts_used,
+              c.hidden_size, stream_);
 }
 
 bool Executor::KeepHiddenRow(Session& session, std::uint32_t row,
@@ -4624,8 +4654,18 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
       const bool mixed_ok = HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject,
                                   rows, error_msg, false, no_f32);
       mix_next_ = nullptr;
-      if (!mixed_ok || !Moe(l, s_.mixed, s_.block_out, rows, error_msg))
+      // A decode pass's MoE epilogue runs in the next layer's fused mixer
+      // when the combine below joins it.
+      moe_defer_ok_ = !prefill_phase && next_norm != nullptr &&
+                      il + 1 < end_layer &&
+                      FusedMixer(layers[il + 1].hc_attn, rows);
+      const bool moe_ok =
+          mixed_ok && Moe(l, s_.mixed, s_.block_out, rows, error_msg);
+      moe_defer_ok_ = false;
+      if (!moe_ok) {
+        moe_vec_pending_ = false;
         return false;
+      }
       // The next layer's attention mixer follows the MoE epilogue.
       if (il + 1 < end_layer)
         Prefetch(rows, &layers[il + 1].hc_attn.down, kPrefetchMixerBytes);

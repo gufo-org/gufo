@@ -6625,11 +6625,15 @@ constexpr std::uint32_t kFusedDownTiles = kFusedRank / kFusedWaves;
 constexpr std::uint32_t kFusedUnits = kFusedHidden / 32;
 constexpr std::uint32_t kFusedParts = kFusedHidden / kThreads;
 constexpr std::uint32_t kFusedMaxTokens = 8;
+/// Most routed slots the fused MoE epilogue sums (MoeEpilogueKernel's
+/// unrolled route).
+constexpr std::uint32_t kFusedMoeSlots = 16;
 
 struct HcFusedState {
-  unsigned taken[4];  ///< items taken: combine rows, down tiles, mix units,
-                      ///< next-weight chunks
-  unsigned done[2];   ///< combine rows and down tiles finished
+  unsigned taken[5];  ///< items taken: combine rows, down tiles, mix units,
+                      ///< next-weight chunks, MoE epilogue chunks
+  unsigned done[3];   ///< combine rows, down tiles and MoE epilogue chunks
+                      ///< finished
   unsigned exited;    ///< blocks finished
   unsigned parts[kFusedParts];  ///< mix units finished per inject part
   float down[kFusedMaxTokens * kFusedRank];  ///< down projection outputs
@@ -6739,8 +6743,45 @@ __launch_bounds__(kThreads) __global__
   const unsigned wave = threadIdx.x / 32;
   constexpr unsigned kRows = kTokens * kFusedStreams;
 
+  // MoeEpilogueKernel, grid (t, hidden / kThreads), its k <= 16 route: the
+  // block_out rows the combine reads.
+  constexpr unsigned kMoeChunks = kFusedHidden / kThreads;
+  if (a.moe_out != nullptr) {
+    for (unsigned e;
+         (e = FusedTake(&st->taken[4], &item)) < kTokens * kMoeChunks;) {
+      const std::uint32_t t = e / kMoeChunks;
+      const std::uint32_t i = (e % kMoeChunks) * kThreads + threadIdx.x;
+      const std::uint32_t k = a.moe_k;
+      const std::uint32_t dim = kFusedHidden;
+      constexpr std::uint32_t kMaxSlots = 16;
+      const float* rows = a.moe_out + static_cast<std::size_t>(t) * k * dim + i;
+      float w[kMaxSlots];
+      float v[kMaxSlots];
+#pragma unroll
+      for (std::uint32_t s = 0; s < kMaxSlots; ++s) {
+        w[s] = s < k ? a.moe_weights[t * k + s] : 0.0f;
+        v[s] = s < k ? rows[static_cast<std::size_t>(s) * dim] : 0.0f;
+      }
+      const std::size_t idx = static_cast<std::size_t>(t) * dim + i;
+      const float sh = a.moe_shared[idx];
+      const float g =
+          a.moe_gate[static_cast<std::size_t>(t) * a.moe_gate_stride];
+      float acc = Materialize(0.0f);
+#pragma unroll
+      for (std::uint32_t s = 0; s < kMaxSlots; ++s) {
+        if (s < k) {
+          acc = Materialize(acc + w[s] * v[s]);
+        }
+      }
+      a.moe_block_out[idx] = acc + SigmoidF(g) * sh;
+      FusedDone(&st->done[2]);
+    }
+  }
+
   // HcCombineKernel, grid (t, s), for rows of up to kHeld * kThreads.
   for (unsigned u; (u = FusedTake(&st->taken[0], &item)) < kRows;) {
+    if (a.moe_out != nullptr)
+      FusedWait(&st->done[2], kTokens * kMoeChunks);
     const std::uint32_t hidden = a.hidden;
     const std::uint32_t streams = a.streams;
     const std::uint32_t t = u / kFusedStreams;
@@ -7462,11 +7503,13 @@ __launch_bounds__(kThreads) __global__ void GdnDecodeFusedKernel(
         }
       }
     }
+    // The epilogue reads only the raw rows: publish them first, so it runs
+    // while this block's state rows drain to memory.
+    FusedDone(&st->done[2]);
 #pragma unroll
     for (std::uint32_t i = 0; i < slice; ++i) {
       __builtin_nontemporal_store(row[i], S + i);
     }
-    FusedDone(&st->done[2]);
     return;
   }
   block -= gdn_blocks;
@@ -7808,7 +7851,9 @@ bool HcMixQ8Fused(void* state, const HcFusedMix& mix, std::uint32_t n_tokens,
       mix.hidden != kFusedHidden || mix.streams != kFusedStreams ||
       mix.rank != kFusedRank || mix.gamma == nullptr ||
       mix.lo_q8_cols < kFusedRank || mix.lo_q8_cols % 32 != 0 ||
-      (mix.inject_w != nullptr && mix.inject_out == nullptr)) {
+      (mix.inject_w != nullptr && mix.inject_out == nullptr) ||
+      (mix.moe_out != nullptr &&
+       (mix.moe_k > kFusedMoeSlots || mix.moe_block_out != mix.block_out))) {
     return false;
   }
   LaunchHcMixQ8Fused<1>(mix, static_cast<HcFusedState*>(state), n_tokens,

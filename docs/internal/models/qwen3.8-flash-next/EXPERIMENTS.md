@@ -61,6 +61,18 @@ byte-identical.
 | Draft vocabulary prefix of 65,536 or 49,152 rows | Rejected: MTP 70.6 → 70.2 and 69.0 tok/s, 59.5 → 57.8 at d4096; the lost acceptance outweighs the cheaper head. |
 | Entropy coding of the Q8_0 weights | Not tried: the codes carry 7.45–7.65 bits each, at most 8% of the dense bytes. |
 
+A fifth pass on `4a1db4b3`, same commands, three alternating pairs at depth
+0 and one at depth. Greedy hashes at depth 0, 4,096 and 32,768 and the 208
+matched-token logit rows after 406- and 3,198-token prompts stay
+byte-identical.
+
+| Experiment | Outcome |
+| --- | --- |
+| The MoE epilogue as the first phase of the next layer's fused mixer (`HcFusedMix::moe_out`): blocks take `MoeEpilogueKernel`'s (token, 256-element) items, and the combine waits for them | **Retained**: one main-stream launch fewer per layer for one to eight rows. AR 31.35–31.38 → 31.53–31.56 tok/s (+0.5%), 30.65 → 30.80 at d4096, 30.59 → 30.67 at d32768; MTP 70.50–70.55 → 70.58–70.60, 59.55 → 59.63 at d4096. Computing the epilogue inside the combine items instead (ten elements per thread, ten slot reads each) took the mixer to 256 VGPRs with spills (AR 23.6 tok/s); five elements at a time, 184 VGPRs. |
+| The Gated DeltaNet recurrence publishes its raw rows before its state stores | **Retained** with the above: the epilogue no longer waits for the 3.1 MB state drain. AR +0.2%, MTP +0.1% alone (one pair each). Holding the first row's rollback snapshot in registers until then as well: MTP neutral. |
+| `quantize_q8_1_by_expert` as leading blocks of the routed down launch, the projection blocks waiting on a counter | Rejected: exact, but AR 31.56 → 31.24 and MTP 70.61 → 70.50. 1,290 blocks spinning on one counter and an exit atomic each cost more than the launch gap. |
+| The router projection and top-k as the FFN mixer's last phases, each row loaded whole before waiting for the mix units | Rejected: exact; AR 31.52 → 31.54/31.57, MTP 70.75 → 69.89. The separate launch with its first 1 MiB warmed by idle mixer blocks is as fast for one row and faster for verification rows. |
+
 A trace at d32768 puts the sparse chain at 113 µs per attention layer on 13
 launches against 43 µs on 6 below 2,048 tokens; the indexer fusion removes
 five of the launches. MTP host gaps at cycle boundaries take 0.6% of MTP time

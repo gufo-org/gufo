@@ -168,6 +168,16 @@ struct HcFusedMix {
   /// next kernel reads, loaded into the cache by blocks left idle.
   const void* next{nullptr};
   std::size_t next_bytes{0};
+  /// Optional: MoeEpilogue's operands. With `moe_out`, the launch first runs
+  /// MoeEpilogueKernel (at most 16 slots) into `moe_block_out`, which must be
+  /// `block_out`, and the combine waits for it.
+  const float* moe_out{nullptr};  ///< F32 slot rows [t][k][hidden]
+  float* moe_block_out{nullptr};
+  const float* moe_weights{nullptr};
+  const float* moe_shared{nullptr};
+  const float* moe_gate{nullptr};  ///< per token, at moe_gate_stride
+  std::uint32_t moe_gate_stride{0};
+  std::uint32_t moe_k{0};
 };
 /// Device bytes of HcMixQ8Fused's counters and intermediates. Allocate them
 /// zeroed once; every launch leaves its counters zero again, so captured
