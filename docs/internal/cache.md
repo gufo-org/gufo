@@ -520,13 +520,14 @@ RAM-tier metadata, index nodes and in-flight persistence, which it does not
 count: up to 16 captures held for the persistence queue (twice its depth),
 each holding its tokens in its capture and in its write job, or 32 MiB at
 262144 tokens. One ranking compares every pair of records under the serving
-lock, each pair in constant time from a depth-first numbering of the tries,
-so a pass ranks once and retires along that order; the spare eighth lets
-several later publications fit without ranking. As of November 2026 on Strix
-Halo (`cache_tiered_bench`), 299 recovered checkpoints of one conversation of
-500-token turns hold 1.0 MB of metadata instead of 90 MB, one eviction among
-them takes 6 ms instead of 0.69 s, and one conversation of 500 such turns
-stays under 5% of the 32 MiB allowance of a 1 GiB budget, so it never ranks.
+lock, each pair without comparing tokens, from a depth-first numbering of
+the tries, so a pass ranks once and retires along that order; the spare
+eighth lets several later publications fit without ranking. As of November
+2026 on Strix Halo (`cache_tiered_bench`), 299 recovered checkpoints of one
+conversation of 500-token turns hold 1.0 MB of metadata instead of 90 MB, one
+eviction among them takes 6 ms instead of 0.69 s, and one conversation of 500
+such turns stays under 5% of the 32 MiB allowance of a 1 GiB budget, so it
+never ranks.
 Disk checkpoints restored within one `--cache-disk-bytes` turnover rank above
 every unrestored one, so a new or RAM-served conversation's disk checkpoints
 retire first; the allowance now binds only on chunk-reference growth, so this

@@ -551,13 +551,16 @@ void PrefixIndex::VisitGenerated(
       any = false;
     }
   }
+  // RAM validity and pins can change on other threads between the passes, so
+  // a record can turn durable-only here without having been measured: skip
+  // any path deeper than the charged buffer rather than grow it.
   for (const auto& [id, node] : impl_->directory) {
     const auto& record = impl_->Get(IndexEntryId{id});
     if (record.tree != &tree->second || !record.Input().empty())
       continue;
     if (resident(record)) {
       visit(record.checkpoint->Tokens());
-    } else if (any && durable_only(record)) {
+    } else if (any && record.Boundary() <= deepest && durable_only(record)) {
       scratch.resize(static_cast<std::size_t>(record.Boundary()));
       Impl::Trie::CopyPath(*node, scratch);
       visit(scratch);

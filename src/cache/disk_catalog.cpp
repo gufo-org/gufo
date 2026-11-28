@@ -184,10 +184,14 @@ Token NextToken(const TrieNode& record, const TrieNode& peer) {
   throw std::logic_error("disk catalog peer is not a descendant");
 }
 // A recovered entry's place in the tries before its catalog record exists.
+// The entry's checkpoint, token count and digest let Track refuse tokens
+// recovered from another store whose epoch happens to match.
 struct PendingTokens {
   ResourceCharge metadata;
   TrieNode* node{};
   CompatibilityDigest digest{};
+  std::uint64_t checkpoint{};
+  std::size_t tokens{};
 };
 using Pending = std::map<std::uint64_t, PendingTokens>;
 constexpr std::size_t kPendingBytes = sizeof(Pending::value_type) + 64;
@@ -594,8 +598,10 @@ struct DiskCatalogTokens::Impl {
         tries.ledger->Reserve(ResourceCategory::kMetadata, kPendingBytes);
     auto* node = tries.Place(digest, tokens);
     try {
-      pending.emplace(entry.Epoch(),
-                      PendingTokens{admission.Convert(), node, digest});
+      pending.emplace(
+          entry.Epoch(),
+          PendingTokens{admission.Convert(), node, digest,
+                        entry.Manifest().checkpoint.value, tokens.size()});
     } catch (...) {
       tries.Release(digest, node);
       throw;
@@ -657,8 +663,11 @@ void DiskCatalog::Track(CheckpointId id, const DiskEvictionVisitor& retired) {
   const auto& digest = description->Manifest().compatibility;
   auto recovered = impl_->loading ? impl_->pending.find(description->Epoch())
                                   : impl_->pending.end();
-  if (recovered != impl_->pending.end() && recovered->second.digest != digest)
-    throw std::logic_error("recovered disk tokens of another digest");
+  if (recovered != impl_->pending.end() &&
+      (recovered->second.digest != digest ||
+       recovered->second.checkpoint != id.value ||
+       recovered->second.tokens != description->TokenCount()))
+    throw std::logic_error("recovered disk tokens of another checkpoint");
   std::span<const Token> tokens;
   if (recovered == impl_->pending.end()) {
     tokens = description->Tokens();

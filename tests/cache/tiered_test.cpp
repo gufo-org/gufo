@@ -1,3 +1,4 @@
+#include <array>
 #include <cstdlib>
 #include <fstream>
 #include <future>
@@ -1138,26 +1139,31 @@ void CatalogIsPrefixOf() {
   assert(epoch(1) != old && !catalog.IsPrefixOf({1}, old, b));
   assert(catalog.IsPrefixOf({1}, epoch(1), other));
   assert(!catalog.IsPrefixOf({1}, epoch(1), b));
-  // Retired: no longer tracked.
+  // Retired: no longer tracked. Each record answers its own epoch and tokens
+  // until it leaves, so only retirement can turn the answer.
+  const std::array<std::span<const Token>, 4> own{other, b, c, d};
+  const std::array<std::uint64_t, 4> epochs{epoch(1), epoch(2), quarantined,
+                                            epoch(4)};
+  for (std::uint64_t id = 1; id <= 4; ++id)
+    assert(catalog.IsPrefixOf({id}, epochs[id - 1], own[id - 1]));
   while (catalog.Size() > 1)
     (void)catalog.EvictOne();
   const auto survivor = catalog.RankForTesting().front().id;
   for (std::uint64_t id = 1; id <= 4; ++id)
-    if (id != survivor)
-      assert(!catalog.IsPrefixOf({id}, 1, b) &&
-             !catalog.IsPrefixOf({id}, 1, other));
+    assert(catalog.IsPrefixOf({id}, epochs[id - 1], own[id - 1]) ==
+           (id == survivor));
 }
 // Token lists live once per digest, so a conversation's disk metadata grows
-// linearly with its checkpoints; a store that keeps every list grows
-// quadratically.
+// linearly with its checkpoints. A store that keeps every list grows
+// quadratically, as MetadataAllowanceEvictsInsteadOfFillingTheLedger shows.
 void DiskMetadataGrowsLinearlyWithCheckpoints() {
   constexpr std::size_t kTurn = 512;
   static constexpr ComponentDescriptor kState{
       {1}, 1, ComponentKind::kPrivateState, 0, 0, 32};
   CompatibilityDigest digest{};
   digest[0] = 42;
-  const auto measure = [&](DiskTokenStorage storage, std::size_t turns) {
-    MetadataStore s(1 << 24, storage);
+  const auto measure = [&](std::size_t turns) {
+    MetadataStore s(1 << 24, DiskTokenStorage::kSeparate);
     s.index.Register({9}, std::span(&kState, 1), digest);
     DiskCatalog catalog(s.ledger, s.disk, s.index);
     std::vector<Token> conversation(turns * kTurn);
@@ -1171,25 +1177,20 @@ void DiskMetadataGrowsLinearlyWithCheckpoints() {
       s.disk.ReleaseTokens({n});
     }
     const auto grown = s.Metadata() - before;
-    if (storage == DiskTokenStorage::kSeparate)
-      assert(catalog.MetadataBytes() <=
-             turns * 2048 + conversation.size() * sizeof(Token));
+    assert(catalog.MetadataBytes() <=
+           turns * 2048 + conversation.size() * sizeof(Token));
     for (const auto entry : entries)
       s.index.Erase(entry);
     return grown;
   };
-  const auto separate = measure(DiskTokenStorage::kSeparate, 4),
-             separate_twice = measure(DiskTokenStorage::kSeparate, 8);
-  assert(separate_twice <= separate * 22 / 10 + 4096);
-  const auto manifest = measure(DiskTokenStorage::kManifest, 4),
-             manifest_twice = measure(DiskTokenStorage::kManifest, 8);
-  assert(manifest_twice > manifest * 5 / 2);
+  const auto grown = measure(4), grown_twice = measure(8);
+  assert(grown_twice <= grown * 22 / 10 + 4096);
 }
 // A restart where the allowance bound at shutdown: recovery hands each
 // manifest's tokens to the catalog's tries as it decodes, so its peak stays
 // near the allowance instead of every retained checkpoint's token list.
 void RecoveryHandsTokensToTheCatalog() {
-  constexpr std::size_t kTurn = 1024, kTurns = 24, kAllowance = 112 << 10;
+  constexpr std::size_t kTurn = 1024, kTurns = 20, kAllowance = 92 << 10;
   static constexpr ComponentDescriptor kState{
       {1}, 1, ComponentKind::kPrivateState, 0, 0, 32};
   CompatibilityDigest digest{};
@@ -1258,6 +1259,42 @@ void RecoveryHandsTokensToTheCatalog() {
   const auto lookup =
       index.Lookup({{9}, conversation, InputIdentity(conversation.size()), 0});
   assert(lookup.selected && lookup.selected->boundary == conversation.size());
+}
+// Recovered tokens attach by store epoch, which another store reuses: a
+// catalog over another store refuses them rather than track a wrong path.
+void CatalogRefusesAnotherStoresTokens() {
+  std::vector<Token> tokens(100);
+  std::iota(tokens.begin(), tokens.end(), 7);
+  TieredDirectory recovered_from;
+  {
+    ResourceLedger ledger({1 << 25, 1 << 24, 16, 1 << 20});
+    DiskStore disk(ledger, recovered_from.path, 1 << 24,
+                   DiskTokenStorage::kSeparate);
+    PublishMetadataCheckpoint(disk, 1, tokens, 1, 42);
+  }
+  // The same epoch and digest under another checkpoint, then the same
+  // checkpoint with other tokens.
+  for (const auto& [id, count] :
+       {std::pair<std::uint64_t, std::size_t>{2, 100}, {1, 60}}) {
+    ResourceLedger ledger({1 << 25, 1 << 24, 16, 1 << 20});
+    DiskCatalogTokens recovered(ledger);
+    DiskStore source(ledger, recovered_from.path, 1 << 24,
+                     DiskTokenStorage::kSeparate, recovered.Sink());
+    const auto recovered_epoch = source.Entries().front().Epoch();
+    TieredDirectory other;
+    DiskStore disk(ledger, other.path, 1 << 24, DiskTokenStorage::kSeparate);
+    PublishMetadataCheckpoint(disk, id, std::span(tokens).first(count), 1, 42);
+    assert(disk.Entries().front().Epoch() == recovered_epoch);
+    PrefixIndex index(ledger);
+    bool thrown{};
+    try {
+      DiskCatalog catalog(ledger, disk, index, UINT64_MAX, SIZE_MAX,
+                          &recovered);
+    } catch (const std::logic_error&) {
+      thrown = true;
+    }
+    assert(thrown);
+  }
 }
 // Durable-only generated frontiers keep their tokens only in the index tree;
 // the visit rebuilds them, in entry order, across edge splits and merges.
@@ -1831,31 +1868,31 @@ void RankingReadsThroughAnUnmergedTrieNode() {
   middle.resize(80, 4);
   auto leaf = middle;
   leaf.resize(120, 5);
-  const auto build = [&](OracleStore& s) {
-    // The learned prefix ranks as a shared fork and the leaf as the
-    // frontier, so the covered middle retires first.
-    (void)s.Publish({prefix, 1, {1}, 42, CheckpointPurpose::kLearned});
-    (void)s.Publish({middle, 1, {1}, 42, CheckpointPurpose::kPrompt});
-    (void)s.Publish({leaf, 1, {1}, 42, CheckpointPurpose::kPrompt});
-  };
-  OracleStore merged(UINT64_MAX, DiskTokenStorage::kSeparate),
-      s(UINT64_MAX, DiskTokenStorage::kSeparate);
-  build(merged);
-  build(s);
-  merged.Evict();
-  assert(!merged.model.contains(2));
-  s.Check();
-  // Drop the index record first, so the refused admission is the catalog
-  // trie's merge rather than the index's.
-  s.index->RemoveDurable(*s.catalog->Find({2}));
+  OracleStore s(UINT64_MAX, DiskTokenStorage::kSeparate);
+  // The learned prefix ranks as a shared fork and the leaf as the frontier,
+  // so the covered middle retires first.
+  (void)s.Publish({prefix, 1, {1}, 42, CheckpointPurpose::kLearned});
+  (void)s.Publish({middle, 1, {1}, 42, CheckpointPurpose::kPrompt});
+  (void)s.Publish({leaf, 1, {1}, 42, CheckpointPurpose::kPrompt});
+  // A retirement with headroom merges the middle node away.
+  s.Evict();
+  assert(!s.model.contains(2));
+  const auto merged = s.catalog->MetadataBytes();
+  // The middle again, retired when the ledger admits nothing. Drop the index
+  // record first, so the refused admission is the catalog trie's merge
+  // rather than the index's.
+  const auto again =
+      s.Publish({middle, 1, {1}, 42, CheckpointPurpose::kPrompt});
+  s.index->RemoveDurable(*s.catalog->Find({again}));
   s.ledger.FailAfter(LedgerStep::kReserve, 0);
   const auto eviction = s.catalog->EvictOne();
   s.ledger.ClearFaults();
-  assert(eviction && eviction.description->Manifest().checkpoint.value == 2);
-  s.model.erase(2);
+  assert(eviction &&
+         eviction.description->Manifest().checkpoint.value == again);
+  s.model.erase(again);
   s.Check();
   // The refused merge left the middle node and its header apart.
-  assert(s.catalog->MetadataBytes() > merged.catalog->MetadataBytes());
+  assert(s.catalog->MetadataBytes() > merged);
   // A sibling forks the prefix through the unary node.
   auto sibling = prefix;
   sibling.resize(90, 6);
@@ -2086,6 +2123,7 @@ int main(int argc, char** argv) {
   CatalogIsPrefixOf();
   DiskMetadataGrowsLinearlyWithCheckpoints();
   RecoveryHandsTokensToTheCatalog();
+  CatalogRefusesAnotherStoresTokens();
   VisitGeneratedRebuildsDurableOnlyPaths();
   AttachDurableRejectsReleasedTokens();
   EvictionDoesNotWaitForYieldingWriter();

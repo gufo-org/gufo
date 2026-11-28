@@ -52,8 +52,9 @@ struct DiskCatalogRankForTesting {
 // Tokens a kSeparate DiskStore recovers, placed straight into the catalog's
 // tries as the store decodes each manifest, so startup never holds every
 // checkpoint's token list. Pass Sink() to the store's constructor, then this
-// object to the DiskCatalog constructor, which takes its contents. Charged
-// to the ledger like the catalog's own tries.
+// object to the constructor of a DiskCatalog over that store, which takes its
+// contents; tokens whose checkpoint, count or digest differ from the entry of
+// the same epoch throw. Charged to the ledger like the catalog's own tries.
 class DiskCatalogTokens {
 public:
   explicit DiskCatalogTokens(ResourceLedger&);
@@ -145,10 +146,10 @@ public:
   // catalog records, their descriptions and dependency maps, and the
   // catalog's token tries. A kManifest store's manifests also count their
   // tokens; tokens a kSeparate store holds until ReleaseTokens do not count.
-  // It excludes the
-  // store's entry slots (a high-water vector), its verified-file cache, index
-  // records and nodes, and transient persistence. A session's description can
-  // hold a retired manifest's charge until the session publishes again.
+  // It excludes the store's entry slots (a high-water vector), its
+  // verified-file cache, index records and nodes, and transient persistence.
+  // A session's description can hold a retired manifest's charge until the
+  // session publishes again.
   [[nodiscard]] std::size_t MetadataBytes() const;
   [[nodiscard]] std::size_t MetadataAllowance() const;
   [[nodiscard]] std::size_t Size() const;
