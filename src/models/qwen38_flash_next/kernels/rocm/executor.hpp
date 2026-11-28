@@ -922,6 +922,8 @@ private:
   hipEvent_t side_start_{nullptr};
   hipEvent_t side_done_{nullptr};
   mutable bool side_pending_{false};  ///< side_done_ not yet waited on
+  /// The weights the kernel after the next fused decode mixer reads.
+  mutable const DeviceTensor* mix_next_{nullptr};
   /// Decode weight prefetch (Prefetch): a read-only side stream that warms
   /// the last-level cache with the weights a later kernel of the pass reads,
   /// while short latency-bound kernels leave DRAM idle.

@@ -170,6 +170,11 @@ constexpr std::size_t kArenaRowBytesBound = std::size_t{1} << 20;
 constexpr std::size_t kPrefetchOutputBytes = std::size_t{12} << 20;
 constexpr std::size_t kPrefetchMixerBytes = std::size_t{4} << 20;
 constexpr std::uint32_t kPrefetchBlocks = 16;
+/// Head of the next projection that a fused decode mixer's idle blocks load
+/// into the cache once its down tiles are done (HcFusedMix::next).
+/// 512 KiB and 2 MiB measured the same, 3 MiB slower.
+constexpr std::size_t kMixNextBytes = std::size_t{1} << 20;
+std::size_t WeightBytes(const DeviceTensor& w);
 
 /// Memory a wide pass needs beyond its scratch set: its own K/V, indexer
 /// and checkpoint pages.
@@ -2746,7 +2751,7 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
         !half_only && !no_f32) {
       // The combine, both projections, SiLU and the epilogue in one launch,
       // with the outputs and producer-written Q8_1 rows of the kernels below.
-      const HcFusedMix mix{
+      HcFusedMix mix{
           m.down.data,
           m.up.data,
           p.res,
@@ -2769,6 +2774,11 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
           c.hc_low_rank,
           c.rms_eps,
           1.0F / static_cast<float>(c.hc_count)};
+      if (mix_next_ != nullptr && !mix_next_->empty()) {
+        mix.next = mix_next_->data;
+        mix.next_bytes =
+            std::min(kMixNextBytes, WeightBytes(*mix_next_)) / 16 * 16;
+      }
       if (!HcMixQ8Fused(hc_fused_state_, mix, n_tokens, stream_)) {
         AssignError(error_msg, "fused HC mixer failed");
         return false;
@@ -4552,10 +4562,12 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                            l.linear && DenseF16Route(l.ssm_in, n) &&
                            l.ssm_alpha_beta.type == GgmlType::kF16 &&
                            l.ssm_alpha_beta.cols == l.ssm_in.cols;
-    if (!HcMix(l.hc_attn, s_.res, normed, s_.mixed, s_.inject, n, error_msg,
-               half_only)) {
+    mix_next_ = l.linear ? &l.ssm_in : &l.attn_qkv;
+    const bool mixed_ok = HcMix(l.hc_attn, s_.res, normed, s_.mixed, s_.inject,
+                                n, error_msg, half_only);
+    mix_next_ = nullptr;
+    if (!mixed_ok)
       return false;
-    }
     // The last target layer's query outputs have no later cache consumer.
     // Preserve all K/V/indexer rows and the final query's original tile.
     const bool last_attention = WidePrefill(n) && !session.mtp_enabled_ &&
@@ -4608,9 +4620,11 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                           l.shexp_up.type == GgmlType::kQ8_0;
       Combine(s_.res, l.hc_ffn.norm.f32(), rows, InjectWeights(l.hc_ffn),
               &l.hc_ffn);
-      if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, rows, error_msg,
-                 false, no_f32) ||
-          !Moe(l, s_.mixed, s_.block_out, rows, error_msg))
+      mix_next_ = &l.router;
+      const bool mixed_ok = HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject,
+                                  rows, error_msg, false, no_f32);
+      mix_next_ = nullptr;
+      if (!mixed_ok || !Moe(l, s_.mixed, s_.block_out, rows, error_msg))
         return false;
       // The next layer's attention mixer follows the MoE epilogue.
       if (il + 1 < end_layer)

@@ -46,6 +46,21 @@ byte-identical.
 | Five or ten steps ahead in the K 2560 F16/BF16 `SmallGemmRow` (router, alpha/beta) | Rejected: within noise. |
 | Pricing a lone greedy request's MTP cycles with the small-head curve | Rejected: no change at depth 0 or 4,096; the confidence gate, not the cost cap, ends these chains. The cost audit's full-head mode drafts through the 248K-row Q8 head (3.9 ms per proposal) while production greedy drafts through the Q4_K prefix (1.52 ms per proposal in a trace). |
 
+A fourth pass on `54d24f1f`, same commands. Greedy hashes and the 208
+matched-token logit rows after 406- and 3,198-token prompts stay
+byte-identical.
+
+| Experiment | Outcome |
+| --- | --- |
+| Idle blocks of the fused decode mixer load the first 1 MiB of the next projection (the attention or recurrence input projection after the attention mixer, the router after the FFN mixer) once the down tiles are done | **Retained**: AR 31.20 → 31.39 tok/s; MTP unchanged. In a trace the router drops from 19.2 to 14.1 µs and the input projections by 3.4 µs, while the mixer grows 3.5 µs. 512 KiB, 2 MiB and starting at three quarters of the down tiles measured the same; 3 MiB slower. |
+| Fork the shared expert before the router instead of after it | Rejected: AR unchanged, MTP 70.6 → 68.3–70.6. |
+| The router's projection blocks load the shared expert's first gate/up rows during the top-k | Rejected: AR 30.6 and 27.1 tok/s against 31.4. |
+| Mixer units taken before the down tiles, their up rows loaded first or after the combine | Rejected: 41.2 and 42.8 µs against 40.6 (one row, cold weights). At 157 VGPRs only 80 of the 120 blocks are resident, so 44 units start when the down tiles end; but a barrier or fence after a block issues its up loads waits for them, which stalls the down tiles. |
+| Late units' up rows touched into the cache by the early units; `amdgpu_waves_per_eu(12)` (120 VGPRs, spills); eight up rows in registers (still 142 VGPRs) | Rejected: 44.3 and 53.5 µs; no residency change. |
+| Down weights loaded before the combine finishes, double-buffered | Rejected: 40.8 µs against 40.6. |
+| Draft vocabulary prefix of 65,536 or 49,152 rows | Rejected: MTP 70.6 → 70.2 and 69.0 tok/s, 59.5 → 57.8 at d4096; the lost acceptance outweighs the cheaper head. |
+| Entropy coding of the Q8_0 weights | Not tried: the codes carry 7.45–7.65 bits each, at most 8% of the dense bytes. |
+
 A trace at d32768 puts the sparse chain at 113 µs per attention layer on 13
 launches against 43 µs on 6 below 2,048 tokens; the indexer fusion removes
 five of the launches. MTP host gaps at cycle boundaries take 0.6% of MTP time

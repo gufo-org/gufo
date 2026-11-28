@@ -164,6 +164,10 @@ struct HcFusedMix {
   std::uint32_t rank;
   float eps;
   float scale;  ///< the SiLU input scale, 1 / streams
+  /// Optional: the first `next_bytes` (a multiple of 16) of the weights the
+  /// next kernel reads, loaded into the cache by blocks left idle.
+  const void* next{nullptr};
+  std::size_t next_bytes{0};
 };
 /// Device bytes of HcMixQ8Fused's counters and intermediates. Allocate them
 /// zeroed once; every launch leaves its counters zero again, so captured

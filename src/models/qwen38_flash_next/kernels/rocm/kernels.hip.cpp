@@ -6627,7 +6627,8 @@ constexpr std::uint32_t kFusedParts = kFusedHidden / kThreads;
 constexpr std::uint32_t kFusedMaxTokens = 8;
 
 struct HcFusedState {
-  unsigned taken[3];  ///< items taken: combine rows, down tiles, mix units
+  unsigned taken[4];  ///< items taken: combine rows, down tiles, mix units,
+                      ///< next-weight chunks
   unsigned done[2];   ///< combine rows and down tiles finished
   unsigned exited;    ///< blocks finished
   unsigned parts[kFusedParts];  ///< mix units finished per inject part
@@ -6861,7 +6862,9 @@ __launch_bounds__(kThreads) __global__
   // run (not before: the combine's few reads would queue behind them).
   constexpr int kAhead = kTokens <= 4 ? 16 : 8;
   bool lo_ready = false;
+  bool took_unit = false;
   for (unsigned unit; (unit = FusedTake(&st->taken[2], &item)) < kFusedUnits;) {
+    took_unit = true;
     // Four lanes per Q8 block; lanes 0-7 also take the row's last two.
     const int kb0 = lane / 4;
     const int kqs = (lane % 4) * 2;
@@ -7043,6 +7046,28 @@ __launch_bounds__(kThreads) __global__
     }
   }
 
+  // Blocks without a mix unit idle through the SiLU, up products and
+  // epilogue, which read nothing from DRAM: once the down tiles are done
+  // they warm the cache with the head of the weights the next kernel reads.
+  if (!took_unit && a.next_bytes != 0) {
+    FusedWait(&st->done[1], kFusedDownTiles);
+    constexpr unsigned kChunk = kThreads * 16 * 4;
+    const auto* next = static_cast<const uint4*>(a.next);
+    unsigned acc = 0;
+    for (unsigned chunk;
+         (chunk = FusedTake(&st->taken[3], &item)) * kChunk < a.next_bytes;) {
+      const std::size_t base = std::size_t{chunk} * (kChunk / 16);
+#pragma unroll
+      for (unsigned j = 0; j < 4; ++j) {
+        const std::size_t i = base + j * kThreads + threadIdx.x;
+        if (i * 16 < a.next_bytes) {
+          const uint4 v = next[i];
+          acc ^= v.x ^ v.y ^ v.z ^ v.w;
+        }
+      }
+    }
+    asm volatile("" : : "v"(acc));  // keeps the loads
+  }
   __syncthreads();
   if (threadIdx.x == 0 &&
       __hip_atomic_fetch_add(&st->exited, 1u, __ATOMIC_ACQ_REL,
