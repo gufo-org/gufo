@@ -2,6 +2,7 @@
 #include <cctype>
 #include <memory>
 #include <optional>
+#include <span>
 
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/audio_buffer.hpp"
@@ -103,8 +104,10 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
       return send(std::move(event));
     };
     // Text arrives while audio is pushed when the session transcribes live;
-    // otherwise the audio waits for the commit.
-    const auto push = [&](const std::string& bytes) -> bool {
+    // otherwise the audio waits for the commit. The turn detector can pass
+    // its decoded samples directly to the live consumer.
+    const auto push = [&](std::string_view bytes,
+                          std::span<const float> samples = {}) -> bool {
       if (bytes.empty())
         return true;
       if (!live && audio_bytes.empty() && service.supports_live() &&
@@ -120,8 +123,13 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
         live_bytes += bytes.size();
         std::string failure;
         bool sent = true;
+        std::vector<float> decoded;
+        if (samples.empty()) {
+          decoded = Pcm16(bytes);
+          samples = decoded;
+        }
         if (!live->Push(
-                Pcm16(bytes),
+                samples,
                 [&](std::string_view text) {
                   auto delta = json::Value::object();
                   delta["type"] =
@@ -364,7 +372,10 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
               return;
             continue;
           }
-          const auto events = vad->Push(Pcm16(bytes));
+          // Decode the arrival once; the turn detector and the live consumer
+          // share this buffer through span slices over the same samples.
+          const std::vector<float> arrival = Pcm16(bytes);
+          const auto events = vad->Push(arrival);
           std::size_t cursor = 0;
           for (const auto& event : events) {
             const auto at = std::min(bytes.size(), event.offset * 2);
@@ -381,7 +392,9 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
                 return;
               ring.clear();
             } else {
-              if (!push(bytes.substr(cursor, at - cursor)))
+              if (!push(std::string_view(bytes).substr(cursor, at - cursor),
+                        std::span<const float>(arrival).subspan(
+                            cursor / 2, (at - cursor) / 2)))
                 return;
               out["type"] = "input_audio_buffer.speech_stopped";
               out["audio_end_ms"] = std::int64_t(event.sample * 1000 / 24000);
@@ -403,7 +416,8 @@ HttpResponse HandleAsrWebSocket(const HttpRequest& request,
             cursor = at;
           }
           if (vad->speaking()) {
-            if (!push(bytes.substr(cursor)))
+            if (!push(std::string_view(bytes).substr(cursor),
+                      std::span<const float>(arrival).subspan(cursor / 2)))
               return;
           } else {
             // Prefix padding plus the 60 ms that confirm a start.
