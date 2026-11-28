@@ -2163,10 +2163,14 @@ struct TextGenerationScheduler::Impl {
           CompleteFailure(item.request, failures[i], true);
         continue;
       }
-      item.request->result.physical_execution_width = std::max(
-          item.request->result.physical_execution_width, plan.physical_width);
-      item.request->result.execution_plan = execution_plan;
-      FinishAdvanced(item.request, item.decode_start);
+      try {
+        item.request->result.physical_execution_width = std::max(
+            item.request->result.physical_execution_width, plan.physical_width);
+        item.request->result.execution_plan = execution_plan;
+        FinishAdvanced(item.request, item.decode_start);
+      } catch (...) {
+        CompleteFailure(item.request, std::current_exception());
+      }
     }
   }
 
@@ -2369,7 +2373,13 @@ struct TextGenerationScheduler::Impl {
       batch.push_back(std::move(request));
     }
     const auto start = Clock::now();
-    StepDecodeBatch(batch);
+    try {
+      StepDecodeBatch(batch);
+    } catch (...) {
+      const auto failure = std::current_exception();
+      for (const auto& request : batch)
+        CompleteFailure(request, failure);
+    }
     last_decode_unit = {std::chrono::duration_cast<std::chrono::microseconds>(
                             Clock::now() - start),
                         batch_size};
