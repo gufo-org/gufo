@@ -80,10 +80,8 @@ public:
   [[nodiscard]] static std::shared_ptr<PagePool> ForDevice(int device);
 
   /// `may_create(bytes)`: pages can be made from free 2 MiB blocks without
-  /// reclaim. `host_available` reads MemAvailable.
-  PagePool(int device, std::function<bool(std::uint64_t)> may_create,
-           std::function<std::uint64_t()> host_available,
-           std::uint64_t floor_bytes);
+  /// reclaim.
+  PagePool(int device, std::function<bool(std::uint64_t)> may_create);
   ~PagePool();
   PagePool(const PagePool&) = delete;
   PagePool& operator=(const PagePool&) = delete;
@@ -114,9 +112,8 @@ public:
   /// (mem::HeapCoversHost), so the cache may borrow them.
   [[nodiscard]] bool exportable() const noexcept { return exportable_; }
   /// A new page for a lender, never one of the free pages (the regions'
-  /// working set). Made only from free 2 MiB blocks above the free floor,
-  /// or, with `may_reclaim` (while loading, when a compaction stall costs
-  /// nothing), while MemAvailable stays above the background floor.
+  /// working set). Made only from free 2 MiB blocks above the free floor;
+  /// `may_reclaim` (while loading) no longer makes them by reclaim.
   [[nodiscard]] bool AcquireForLender(hipMemGenericAllocationHandle_t* handle,
                                       bool may_reclaim);
   /// Takes back a page that is mapped nowhere (any more) and was not
@@ -199,7 +196,9 @@ public:
   /// Free pages kept for map-ahead and first writes.
   static constexpr std::size_t kLowPages = 256;
   static constexpr std::size_t kHighPages = 512;
-  /// The working set created at load: 8 GiB, about 200 ms.
+  /// The working set created at load: 8 GiB, about 200 ms. Pages beyond the
+  /// high watermark are made only while the host keeps twice its free floor:
+  /// a 100+ GiB model on a 128 GiB host leaves too little.
   static constexpr std::size_t kWarmCapBytes = std::size_t{8} << 30;
   /// Pages taken from lenders per pass: 128 MiB, a bounded eviction.
   static constexpr std::size_t kBorrowBatchPages = 64;
@@ -253,8 +252,6 @@ private:
 
   int device_;
   std::function<bool(std::uint64_t)> may_create_;
-  std::function<std::uint64_t()> host_available_;
-  std::uint64_t floor_bytes_;
   hipMemAllocationProp prop_{};
   hipMemAccessDesc access_{};
 
