@@ -314,9 +314,12 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
     const auto* value = body.find(field);
     if (value == nullptr)
       continue;
+    // As on Chat Completions, an explicit null leaves the flag unset, which
+    // these endpoints serve as false.
+    if (value->is_null())
+      continue;
     if (field == "stream" && allowances.stream) {
-      // As on Chat Completions, null leaves streaming off.
-      if (!value->is_null() && !value->is_bool())
+      if (!value->is_bool())
         return InvalidCompatibilityRequest("'stream' must be a boolean");
       continue;
     }
